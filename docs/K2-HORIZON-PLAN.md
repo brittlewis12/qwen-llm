@@ -8,8 +8,9 @@ Bounded request benchmarking and raw-string serving are implemented. Long-contex
 CLI interventions, and checkpoint-specific chat/tool serving remain outstanding.
 The old 256-token oracle extension still fails its original strict bounds; that
 history is preserved. A separately frozen v2 holdout passes all 4096 row checks
-with exact top-1 agreement, and run/bench/plain+imported lens/serve now share a
-guarded 256-forward application ceiling after boundary checks. Evidence is scoped
+with exact top-1 agreement. Run/bench/plain+imported lens/serve now use checkpoint
+context, explicit request capacity, and actual device/memory admission, not the
+historical 256-forward application or 7168-position planner caps. Evidence is scoped
 to the pinned final Q8_0-weight checkpoint with F16 KV on M4 Max, not all artifacts.
 A separate bounded-scratch H128/GQA4 online-attention candidate passes primitive
 tests through 257 positions and a test-only full-model integration comparison:
@@ -28,9 +29,11 @@ compact Q8 cache now allocates 78336 bytes/token (46.875% less logical KV) with
 byte-safe inline attention and passing primitive/transaction/lens controls. Its
 256-token native-F16 comparison fails unchanged v2 quality gates on 808/1088 rows
 and 8/16 captures; all 64 trajectory predictors agree, but seven teacher-forced
-top-1 choices differ. No Q8 promotion or gate relaxation follows. The next bounded
-product packet is CLI forward interventions on the existing graph, not quantizer
-tuning. Longer-context qualification remains outstanding. See review packets 17-33
+top-1 choices differ. No Q8 promotion or gate relaxation follows. The user's current
+priority is main integration, followed by checkpoint-appropriate templating (high
+priority, nonblocking for the raw lane) and CLI forward interventions. Cross-family
+dispatch/serve-driver/profile refactors belong to the concurrent maintenance lane.
+Full-context quality qualification remains outstanding. See review packets 17-34
 for evidence and limits.
 Cache/backend controls and a separately frozen guarded-256 holdout now show small
 probability/residual drift, but the v1 holdout fails on two distinct near-tied

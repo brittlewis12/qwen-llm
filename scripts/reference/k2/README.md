@@ -1,5 +1,13 @@
 # K2 checkpoint oracle
 
+Current capacity policy: native applications use checkpoint-declared context and
+real device/memory admission, not the historical 256-forward or 7168-position
+planner gates. The numerical evidence below remains scoped to its measured lengths;
+removing a product cap does not convert short-context tests into full-context proof.
+The materialized test backend alone retains its 7168-position score-scratch limit.
+F16 remains the application cache. Checkpoint-specific templating is high-priority
+follow-up; raw mode deliberately does not guess a chat/tool contract.
+
 This standalone test harness links the IFM llama.cpp fork at
 `42adf019f76013dac873b5b43950d54d5ab27216`. It is not a production dependency,
 tokenizer implementation, converter, or HF BF16 oracle. CMake rejects a different
@@ -109,8 +117,8 @@ The separate K2 H128/GQA4 online primitive retains all F16 K/V and uses constant
 size working state instead of materializing one score per visible position. It
 is now selected by the guarded runtime after independent-reference and surface
 checks. It does not change KV bytes/token or public caps.
-The typed plan retains its existing 7168-position source ceiling; that ceiling
-is not numerical qualification. Synthetic coverage currently reaches 257:
+The materialized test backend retains its 7168-position score-scratch limit; the
+online plan uses declared context. Synthetic coverage now reaches 8192:
 
 ```sh
 MTL_DEBUG_LAYER=1 cargo test -p qwen-llm --lib \
@@ -336,10 +344,10 @@ The host-only optimization is optional and does not alter Metal kernels. The
 manifest binds the native test binary as well as source/kernel identities. Passing
 the holdout does not itself promote public limits; surface checks remain separate.
 
-## Guarded application boundary checks
+## Request capacity and long-history checks
 
-After the independent holdout, this separate check exercises the shared 256-forward
-guard through run, request bench, and plain/imported lens. Rebuild after any tracked
+This separate check exercises 1024-forward requests and 257-token response budgets
+through run, request bench, and plain/imported lens. Rebuild after any tracked
 source changes: `--allow-dirty` does not bypass benchmark binary/source identity.
 
 ```sh
@@ -349,23 +357,42 @@ cargo --config 'profile.dev.package.blake3.opt-level=3' \
 uv run scripts/reference/k2/check_guarded_capacity.py \
   --qwen target/debug/qwen --bench target/debug/qwen-bench \
   --lens target/debug/qwen-lens --model "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
-  --output target/profiles/k2-guarded-256-new-run
+  --capacity 1024 --output target/profiles/k2-context-1024-new-run
 MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
-  K2_BOUNDARY_EVIDENCE="$PWD/target/profiles/k2-guarded-256-new-run" \
+  K2_BOUNDARY_EVIDENCE="$PWD/target/profiles/k2-context-1024-new-run" \
   cargo test -p qwen-cli --bin qwen \
-  serve::backend_k2::tests::gpu_guarded_256_json_sse_match_run_bench_and_reject_257 \
+  serve::backend_k2::tests::gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one \
   -- --ignored --exact --nocapture --test-threads=1
 ```
 
-The first command chain checks 256-token prefill and a generation transition that
-reaches 256, output fingerprints, full-logit identity transport, strict asset
-binding, explicit transfer, and pre-Metal 257 refusals. The serving follow-up reads
+The first command chain checks the selected capacity, generation transitions,
+output fingerprints, full-logit identity transport, strict asset binding, explicit
+transfer, invalid positions, and requested-capacity/context refusals. The serving follow-up reads
 its benchmark evidence, checks direct/JSON/SSE parity and explicit startup defaults,
 and verifies fresh state after a late prefill abort. Nonstream overbudget requests
 return HTTP 400; SSE sends `response.failed` after HTTP 200 with no generated text.
 Every GPU child/probe owns its production lease and real wired-memory gate with API
 validation; do not acquire an outer lease. Evidence is pinned final Q8_0 weights
 with F16 KV on M4 Max, not a speed, other-checkpoint, or long-context qualification.
+
+The synthetic online attention test listed earlier now covers 7168/7169/8192
+visible rows, flat/sharp scores, and separated block maxima against F64 using
+unchanged 2e-5 bounds. Histories above 256 use 256-row online summaries merged in
+registers; the shorter kernel stays unchanged. No history is dropped or expanded.
+Runtime self-controls at 257/1024 rows and high absolute positions are separate:
+
+```sh
+MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+cargo --config 'profile.test.package.qwen-llm.opt-level=1' \
+  --config 'profile.test.package.sha2.opt-level=3' test -p qwen-llm --lib \
+  k2_horizon_runtime::context_tests::gpu_checkpoint_context_boundaries_and_memory_admission \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+This test prices (but never allocates) the full declared-context cache. It checks
+1024-token singleton/split/whole cache/capture/readout/continuation equality at
+base zero and near the declared end. High absolute position is not long retained
+history, and self-consistency is not independent full-context numerical evidence.
 
 ## Native lens CLI checks
 
@@ -440,7 +467,7 @@ uv run scripts/reference/k2/check_request_bench.py \
 
 This is an API-validated correctness smoke of the benchmark's accounting, not a
 speed measurement. The dedicated `k2-request` lane uses raw native input, greedy
-sampling, exact EOS 1, and at most 256 forwards. It reports host-wall request phases
+sampling and exact EOS 1, within configured capacity and checkpoint context. It reports host-wall request phases
 with guard/readback overhead, not GPU-command timings or llama-bench pp/tg results.
 The checker records its explicit dirty-build override, tests warmup/repeat identity,
 raw-run fingerprint parity, BOS/literal input, zero-transition rates, timing/prefix

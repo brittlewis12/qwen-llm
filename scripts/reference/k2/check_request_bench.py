@@ -173,8 +173,8 @@ def main():
     assert literal["samples"][0]["outcome"]["sampled_token_ids"] == [11511]
     run(
         "reject-capacity",
-        ["--token-ids", "0", "--tokens", "1", "--capacity", "257"],
-        "must fit both 256",
+        ["--token-ids", "0", "--tokens", "1", "--capacity", "524289"],
+        "must fit checkpoint context 524288",
     )
     run("reject-id", ["--token-ids", "0,250624", "--tokens", "1"], "outside vocabulary")
 

@@ -140,12 +140,6 @@ impl K2HorizonConfig {
         if self.context_length == 0 {
             return Err(invalid("k2-horizon.context_length", "must be positive"));
         }
-        if self.context_length > 524_288 {
-            return Err(unsupported(
-                "k2-horizon.context_length",
-                "exceeds initial 7B profile ceiling",
-            ));
-        }
         if !self.rope_theta.is_finite() || self.rope_theta <= 0.0 {
             return Err(invalid(
                 "k2-horizon.rope.freq_base",

@@ -9,8 +9,6 @@ use qwen_llm::tokenizer::NativeTokenizer;
 mod imported;
 pub(crate) use imported::read as read_transport;
 
-use qwen_llm::k2_horizon_runtime::GUARDED_APPLICATION_FORWARD_CEILING as MAX_FORWARDS;
-
 pub(super) struct Prepared {
     config: K2HorizonConfig,
     tokenizer: NativeTokenizer,
@@ -45,10 +43,6 @@ fn preflight_mode(
         config.vocab_size,
         config.context_length as usize,
     )?;
-    ensure!(
-        position < MAX_FORWARDS,
-        "K2 lens readout is bounded to {MAX_FORWARDS} executed tokens; selected position must be below {MAX_FORWARDS}"
-    );
     let layers = layers(&args.layers, config.layer_count)?;
     capture_budget(layers.len(), config.hidden_size as usize)?;
     metadata_budget(
@@ -105,7 +99,7 @@ impl Prepared {
     ) -> Result<(Vec<i32>, usize, Value, Vec<Value>, Option<Bundle>)> {
         crate::shutdown::checkpoint()?;
         let context = MetalContext::new()?;
-        let model = K2LoadedModel::load_unqualified(&context, gguf, (self.position + 1) as u32)?;
+        let model = K2LoadedModel::load(&context, gguf, u32::try_from(self.position + 1)?)?;
         let prefill = model.prefill_info(self.position + 1);
         let mut session = model.create_session(0)?;
         let executed = self.tokens[..=self.position]
@@ -260,8 +254,11 @@ mod tests {
             255
         );
         args.token_ids.push(42);
-        assert!(preflight(&args, &config(), None).is_err());
-        assert!(preflight_mode(&args, &config(), None, false).is_err());
+        assert_eq!(preflight(&args, &config(), None).unwrap().1, 256);
+        assert_eq!(
+            preflight_mode(&args, &config(), None, false).unwrap().1,
+            256
+        );
         args.position = Some(5);
         let (tokens, position, _, _) = preflight(&args, &config(), None).unwrap();
         assert_eq!(

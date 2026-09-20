@@ -1180,3 +1180,93 @@ remain explicitly unfinished.
 Final read-only adversarial closure: **commit-ready; no remaining concrete blocker**.
 The inspector's three CPU tests pass, and the retained evidence passes its read-only
 integrity/count audit while retaining the failed quality verdict.
+
+## Packet 34 main readiness and principled capacity admission
+
+The user requested removal of arbitrary forward/position/context/response limits,
+warning-free readiness and integration into main, with checkpoint-specific templating
+high priority but nonblocking. The out-of-band review's eight-warning count, private
+packed default and uncommitted compact state were stale: all-target checking was
+already warning-free, packed prefill was already selected automatically, and the
+failed compact diagnostic was committed. Its positive conclusions about explicit
+serve-family admission, early family request parsing and literal RawText output
+remain applicable. Dispatch-spine, serial-driver and family-profile consolidation
+are intentionally left to the concurrent maintenance lane. Exact imported lens
+artifact/deployment identities are already implemented; snapshots remain disabled.
+
+Application run/bench/plain+imported lens/serve no longer enforce 256 forwards or
+response tokens. Cache planning no longer inherits the materialized kernel's 7168
+score limit. The initial profile-specific 524288 metadata ceiling and hardcoded
+8 GiB buffer cap are removed: positive u32 checkpoint context, checked absolute
+extents, configured request budgets, actual device buffer size and memory admission
+are authoritative. Backend-local materialized guards remain before encoding or
+loading. Q8 KV is not promoted. A normal `load` entry point supersedes the old name,
+with a nondeprecated compatibility delegate for existing callers. The raw startup
+research warning is gone; numerical evidence remains in docs and metadata. Run
+accepts its normal token default; serve retains explicit memory capacity and response
+default. Run/bench prefill now checks cancellation between bounded chunks.
+
+CPU tests cover 257/7169, stage contexts, declared-context end, context+1, overflow
+and u32 metadata limits, without allocating hypothetical caches. An initial expanded
+primitive run FAILED the unchanged 2e-5 F64 bound at 7168 rows: error 2.469399e-5.
+Rather than relax the gate, an adversarial numerical jam reviewed a stable merge
+of fixed 256-row online summaries. The original shader remains selected through
+256; a separate longer-history entry merges independent local/global summaries in
+registers with max-shifted exponentials. Loop ends and byte offsets cannot wrap.
+This keeps all history, constant scratch and no full-history dequantization.
+
+The revised synthetic corpus passes unchanged bounds through 8192 retained rows,
+including flat/sharp distributions, separated block maxima, boundary spikes, all
+heads and immutable poisoned future/guard storage. Worst F64 error is 8.096181e-6
+(the 512-row adversarial case); ordinary 7168 error falls to 1.018474e-6. This is
+improved observed behavior, not proof that accumulation order was the only source
+of the original discrepancy. Materialized comparisons stop at 7168; larger calls
+are explicitly rejected. No kernel outside K2 dispatch changes behavior.
+
+The new actual-checkpoint runtime test passes serial/split/whole bitwise logits,
+complete cache, captures, final readout and continuation at lengths 257/1024 and
+bases 0/523263, with capacity 1025. An initial harness call incorrectly requested
+an empty capture list through the nonempty-only capture API; it was corrected to
+the existing empty-intervention path, without changing runtime semantics. Device
+price-only inspection reports 77309411328 cache bytes at full declared context;
+the test never allocates that cache or infers residency from its price. CPU device-
+buffer refusals leave GPU allocation unchanged. This is not a 512K-history test.
+
+Strict independent 42-row regression passes unchanged with the same prior metrics:
+`target/profiles/k2-oracle-767-1789926412803888000`. Retained independent v2 replay
+passes all 4096 singleton rows, 16 sites, 64 predictors and 192 partition checks:
+`target/profiles/k2-BatchQ8-retained-v2-1378-1789926541377783000`. These short tests
+do not independently qualify the new long-history arithmetic.
+
+Surface evidence in `target/profiles/k2-context-1024-surfaces-v1` passes run/bench
+fingerprint and byte parity, a 257-token generated response budget, 1024 forwards,
+plain/imported full-logit identity, exact binding/explicit transfer, serial fallback
+and pre-Metal request/context refusals. The ephemeral HTTP test also passes direct,
+JSON and SSE parity against those rows, defaults, request-capacity+1 rejection and
+fresh state after prefill cancellation (`serve-context-result.json`). All GPU tests
+use the production lease, real wired gate and API validation; no shared service
+was stopped or restarted. Current CPU counts are 77 engine and 24 CLI tests under
+the K2 filters, and all-target checking emits no warnings.
+
+Main integration will retain unrelated user work. The user explicitly approved
+replacing the colliding untracked historical K2 plan with this evolved plan.
+Remaining product work is checkpoint-appropriate templating and CLI intervention
+plans; broader quality/latency and compact-cache research stay separately scoped.
+
+Pre-commit review found no runtime blocker, but caught stale CLI/help and benchmark
+README cap text, now corrected. Its repeated serve-conversion observation was stale:
+the K2 call already used `u32::try_from`, verified in the diff rather than blindly
+carried forward. Conditional commit/merge approval requires only those text fixes
+and preservation of unrelated main work.
+
+Final local accounting audit also tightened benchmark reporting: its reported
+retained-window plan now uses the actual device buffer limit after a CPU-only
+structural preflight, and the method labels explicitly record that cancellable
+chunk appends compute intermediate head rows (only the final prompt row is sampled).
+This is not described as unchanged prefill throughput or a speed improvement.
+
+Final adversarial closure: **no remaining commit blocker; commit and authorized
+main integration ready**. The final benchmark smoke passes in
+`target/profiles/k2-main-ready-bench-v1`, including warmup/repeat identity, raw-run
+fingerprints, native BOS, literal IDs, phase/prefix accounting and host-only refusal.
+All-target checking remains warning-free.

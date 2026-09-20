@@ -122,7 +122,7 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
 # Muse Glimmer and Qwen3.8-Flash-Next require both --max-context-tokens and
 # --max-tokens (resident session capacity is fixed at load); admitted capacity
 # may extend through the model's declared context.
-# K2 requires explicit --max-context-tokens (1..=256), --max-tokens, and
+# K2 requires explicit --max-context-tokens (within checkpoint context), --max-tokens, and
 # --snapshot-cache-mib 0; only raw string input is supported.
 ```
 
@@ -241,8 +241,10 @@ qwen serve -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
   --snapshot-cache-mib 0
 ```
 
-Both limits must be explicit. Capacity is 1..=256 and must fit the checkpoint's
-declared context; the default output limit is 1..=capacity. Nonzero snapshot
+Both limits must be explicit for resident memory planning and the response default.
+Capacity must be positive and fit the checkpoint's declared context and actual
+device/memory admission; the default output limit is 1..=capacity. There is no
+K2-specific 256-forward/response or 7168-context cap. Nonzero snapshot
 budgets and drafters fail startup. K2 config, runtime storage plan, native
 tokenizer, and EOS metadata are checked before listener binding or Metal setup.
 The normal production lease and memory gate apply; listener binding still
@@ -299,14 +301,18 @@ model storage. `x_qwen.stats` is opt-in with cached/matched tokens always zero;
 the response echo has no tools/reasoning and disables parallel tool calls.
 
 Validation covers CPU wire/UTF-8/EOS controls and actual-Q8 borrowed-backend
-JSON/SSE, BOS, abort isolation, and 256/257 boundary checks on ephemeral sockets.
-The shared guarded application limit is distinct from the kernel's source bound.
+JSON/SSE, BOS, abort isolation, and requested-capacity boundaries on ephemeral sockets.
+Admission bounds are distinct from the lengths covered by numerical fixtures.
 Numerical evidence covers the pinned final Q8_0-weight checkpoint with F16 KV on
 M4 Max, including the frozen v2 holdout; it does not qualify F16 weights or every
 compatible intermediate checkpoint. Serial online attention retains the full
 history without a context-sized score buffer. Serving deliberately keeps singleton
 appends for per-token cancellation, even when local run/bench/lens use eligible
-32-row Q8 packed prefill. Stored F16 KV is unchanged; compact KV is not enabled.
+32-row Q8 packed prefill. Beyond 256 visible positions, attention merges fixed-size
+online summaries in registers to reduce accumulation error without dropping history.
+Stored F16 KV is unchanged; compact KV is not enabled. At 524288 positions the
+logical cache alone is 72 GiB; declared context does not promise that it fits a
+particular device or is economical to run.
 This is not sustained-service, full-context, chat/tool, or cross-checkpoint
 numerical qualification. Test reproduction is in
 [`scripts/reference/k2/README.md`](../scripts/reference/k2/README.md); development

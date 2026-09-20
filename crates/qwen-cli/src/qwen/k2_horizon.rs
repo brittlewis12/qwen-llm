@@ -1,25 +1,23 @@
-//! Bounded raw-text K2 lane; never falls through to Qwen prompt/output protocols.
+//! Raw-text K2 lane; never falls through to Qwen prompt/output protocols.
 
 use super::*;
 use qwen_llm::k2_horizon::K2HorizonConfig;
 use qwen_llm::k2_horizon_runtime::K2LoadedModel;
 use qwen_llm::tokenizer::NativeTokenizer;
 
-pub(crate) use qwen_llm::k2_horizon_runtime::GUARDED_APPLICATION_FORWARD_CEILING as CLI_FORWARD_CEILING;
-
 pub(crate) fn execution_capabilities() -> serde_json::Value {
     serde_json::json!({
-        "run": {"status": "supported", "scope": "research_raw_single_turn", "requires_profile": "dense_7b",
-            "max_forward_tokens": CLI_FORWARD_CEILING, "native_tokenizer": true, "kv_storage": "f16"},
+        "run": {"status": "supported", "scope": "raw_single_turn", "requires_profile": "dense_7b",
+            "capacity_policy": "checkpoint_context_and_device_memory", "native_tokenizer": true, "kv_storage": "f16"},
         "serve": {"status": "partial", "endpoint": "/v1/responses", "input": "raw_string_only",
-            "max_forward_tokens": CLI_FORWARD_CEILING, "snapshot_cache": false, "tools": false,
+            "capacity_policy": "checkpoint_context_and_device_memory", "snapshot_cache": false, "tools": false,
             "chat": false, "special_token_control": "x_k2.add_special_tokens"},
         "bench": {"status": "partial", "command": "qwen-bench k2-request",
-            "scope": "guarded_raw_greedy_request_wall", "max_forward_tokens": CLI_FORWARD_CEILING,
+            "scope": "raw_greedy_request_wall", "capacity_policy": "checkpoint_context_and_device_memory",
             "llama_bench_comparable": false},
         "lens": {"status": "partial", "command": "qwen-lens read-full --logit-lens",
             "transport_command": "qwen-lens read-full --full-lens",
-            "scope": "research_raw_plain_or_data_only_linear_readout", "max_forward_tokens": CLI_FORWARD_CEILING,
+            "scope": "raw_plain_or_data_only_linear_readout", "capacity_policy": "checkpoint_context_and_device_memory",
             "imported_assets": "llm.lens.linear_transport_v1_target_layer_35", "cli_interventions": false},
         "local_fitting": {"status": "unsupported"},
     })
@@ -63,24 +61,20 @@ fn prepare_raw(
 
 fn capacity(
     args: &Args,
-    explicit: ExplicitCliOptions,
+    _explicit: ExplicitCliOptions,
     prompt_tokens: usize,
     declared: u32,
 ) -> Result<usize> {
-    ensure!(
-        explicit.tokens,
-        "K2 Horizon's guarded raw lane requires an explicit --max-tokens (-n) budget; prompt plus sampled tokens minus one must fit {CLI_FORWARD_CEILING} forwards"
-    );
     let required = required_forwards(
         "K2 Horizon",
         prompt_tokens,
         args.tokens,
-        Some(CLI_FORWARD_CEILING),
+        Some(declared as usize),
     )?;
     let capacity = args.max_context_tokens.unwrap_or(required);
     ensure!(
-        capacity >= required && capacity <= CLI_FORWARD_CEILING && capacity <= declared as usize,
-        "K2 Horizon requires {required} forwards; requested capacity {capacity} must fit both the guarded {CLI_FORWARD_CEILING}-forward lane and checkpoint context {declared}"
+        capacity >= required && capacity <= declared as usize,
+        "K2 Horizon requires {required} forwards; requested capacity {capacity} must fit checkpoint context {declared}"
     );
     Ok(capacity)
 }
@@ -122,13 +116,9 @@ pub(crate) fn run_raw(
     }
     let mut sampler = Sampler::new(sampling)?;
     shutdown::checkpoint()?;
-    eprintln!(
-        "k2_horizon: guarded raw research lane; native tokenizer; F16 KV; capacity={capacity}; checkpoint_context={}; guarded numerical evidence covers the pinned final Q8_0 weights/F16 KV on M4 Max, not every compatible checkpoint",
-        config.context_length
-    );
     let load_t0 = Instant::now();
     let ctx = MetalContext::new().context("initialize Metal for K2")?;
-    let model = K2LoadedModel::load_unqualified(&ctx, gguf, capacity as u32)?;
+    let model = K2LoadedModel::load(&ctx, gguf, u32::try_from(capacity)?)?;
     let prefill = model.prefill_info(tokens.len());
     eprintln!(
         "k2_horizon: prefill={} chunk_tokens={} commands={} temporary_activation_bytes={}",
@@ -137,7 +127,11 @@ pub(crate) fn run_raw(
     let mut session = model.create_session(0)?;
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     let prefill_t0 = Instant::now();
-    let logits = session.append(&tokens)?;
+    let mut logits = Vec::new();
+    for chunk in tokens.chunks(prefill.chunk_tokens) {
+        shutdown::checkpoint()?;
+        logits = session.append(chunk)?;
+    }
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
@@ -250,9 +244,9 @@ mod tests {
     }
 
     #[test]
-    fn k2_budget_is_explicit_exact_and_never_truncated() {
+    fn k2_budget_uses_declared_context_and_never_truncates() {
         let (args, explicit, _) = parse(&["qwen", "run", "-m", "unused", "--raw-prompt", "raw"]);
-        assert!(capacity(&args, explicit, 1, 8192).is_err());
+        assert!(capacity(&args, explicit, 1, 8192).is_ok());
         let (args, explicit, invocation) = parse(&[
             "qwen",
             "run",
@@ -266,7 +260,10 @@ mod tests {
         assert_eq!(prepare_raw(invocation, &args, explicit).unwrap().0, "raw");
         assert_eq!(capacity(&args, explicit, 25, 8192).unwrap(), 32);
         assert_eq!(capacity(&args, explicit, 249, 8192).unwrap(), 256);
-        assert!(capacity(&args, explicit, 250, 8192).is_err());
+        assert_eq!(capacity(&args, explicit, 250, 8192).unwrap(), 257);
+        assert_eq!(capacity(&args, explicit, 8185, 8192).unwrap(), 8192);
+        assert!(capacity(&args, explicit, 8186, 8192).is_err());
+        assert!(capacity(&args, explicit, usize::MAX, 8192).is_err());
         assert!(capacity(&args, explicit, 0, 8192).is_err());
         assert!(capacity(&args, explicit, 25, 31).is_err());
     }
@@ -295,7 +292,11 @@ mod tests {
     fn k2_capabilities_do_not_advertise_other_lanes_or_fitting() {
         let capabilities = execution_capabilities();
         for lane in ["run", "serve", "bench", "lens"] {
-            assert_eq!(capabilities[lane]["max_forward_tokens"], 256);
+            assert_eq!(
+                capabilities[lane]["capacity_policy"],
+                "checkpoint_context_and_device_memory"
+            );
+            assert!(capabilities[lane].get("max_forward_tokens").is_none());
         }
         assert_eq!(capabilities["local_fitting"]["status"], "unsupported");
         assert_eq!(capabilities["serve"]["status"], "partial");

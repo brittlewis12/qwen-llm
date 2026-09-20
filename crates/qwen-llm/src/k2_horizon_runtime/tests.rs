@@ -21,7 +21,6 @@ fn config() -> K2HorizonConfig {
 #[test]
 fn application_default_is_online_without_capacity_or_cache_layout_change() {
     assert_eq!(DEFAULT_ATTENTION_BACKEND, AttentionBackend::Online);
-    assert_eq!(GUARDED_APPLICATION_FORWARD_CEILING, 256);
     let plan = SessionMemoryPlan::new(&config(), 256, K2KvStorage::F16).unwrap();
     assert_eq!(plan.cache_bytes, 147456 * 256);
     assert_eq!(
@@ -52,7 +51,7 @@ fn compact_session_replaces_the_arena_without_hidden_float_history() {
 
 #[test]
 fn session_memory_is_capacity_shaped_with_one_logits_row() {
-    for capacity in [1, 17, 7168] {
+    for capacity in [1, 17, 7168, 7169, 8192, 524288] {
         let plan = SessionMemoryPlan::new(&config(), capacity, K2KvStorage::F16).unwrap();
         assert_eq!(plan.specs().len(), 13);
         assert_eq!(
@@ -65,7 +64,7 @@ fn session_memory_is_capacity_shaped_with_one_logits_row() {
             (GgmlType::F16, vec![plan.cache_bytes / 2])
         );
     }
-    assert!(SessionMemoryPlan::new(&config(), 7169, K2KvStorage::F16).is_err());
+    assert!(SessionMemoryPlan::new(&config(), 524289, K2KvStorage::F16).is_err());
 }
 
 #[test]

@@ -20,7 +20,7 @@ fn config() -> K2HorizonConfig {
 
 #[test]
 fn q8_byte_plans_preserve_causal_coordinates_without_f16_reinterpretation() {
-    for capacity in [1, 32, 33, 256, 257, 7168] {
+    for capacity in [1, 32, 33, 256, 257, 7168, 7169, 8192, 131072] {
         let plan =
             K2ShortContextPlan::with_storage(config(), 8191, capacity, K2KvStorage::Q8_0).unwrap();
         assert_eq!(plan.storage(), K2KvStorage::Q8_0);
@@ -52,7 +52,7 @@ fn q8_byte_plans_preserve_causal_coordinates_without_f16_reinterpretation() {
         assert_eq!(cursor, plan.arena_bytes());
         assert!(plan.append(capacity, 8191 + capacity, 1).is_err());
     }
-    for capacity in [0, 7169, u32::MAX] {
+    for capacity in [0, 524289, u32::MAX] {
         assert!(
             K2ShortContextPlan::with_storage(config(), 0, capacity, K2KvStorage::Q8_0).is_err()
         );
@@ -66,7 +66,7 @@ fn request_capacity_is_not_declared_context_or_qualification() {
     assert_eq!(plan.capacity(), 7168);
     assert_eq!(plan.row_bytes(), 2048);
     assert_eq!(plan.arena_bytes(), 147456 * 7168);
-    assert!(K2ShortContextPlan::new(config(), 0, 7169).is_err());
+    assert!(K2ShortContextPlan::new(config(), 0, 7169).is_ok());
     assert!(K2ShortContextPlan::new(config(), 0, 0).is_err());
     assert!(K2ShortContextPlan::new(config(), u32::MAX, 1).is_err());
     assert!(K2ShortContextPlan::new(config(), 524287, 1).is_ok());
@@ -80,7 +80,7 @@ fn request_capacity_is_not_declared_context_or_qualification() {
 
 #[test]
 fn arena_planes_are_disjoint_complete_and_f16_aligned() {
-    for capacity in [1, 17, 7168] {
+    for capacity in [1, 17, 7168, 7169, 8192, 524288] {
         let plan = K2ShortContextPlan::new(config(), 0, capacity).unwrap();
         let mut cursor = 0;
         for layer in 0..36 {
@@ -94,6 +94,26 @@ fn arena_planes_are_disjoint_complete_and_f16_aligned() {
         }
         assert_eq!(cursor, plan.arena_bytes());
         assert!(plan.layer_planes(36).is_err());
+    }
+}
+
+#[test]
+fn declared_context_and_position_arithmetic_are_the_only_logical_capacity_bounds() {
+    for context in [8192, 32768, 131072, 524288, 1048576, u32::MAX] {
+        let mut c = config();
+        c.context_length = context;
+        let plan = K2ShortContextPlan::new(c.clone(), 0, context).unwrap();
+        assert_eq!(plan.arena_bytes(), 147456 * u64::from(context));
+        let append = plan.append(context - 1, context - 1, 1).unwrap();
+        let token = append.token(0).unwrap();
+        assert_eq!(token.absolute_position(), context - 1);
+        assert_eq!(token.visible_positions(), context);
+        assert_eq!(token.read_ranges(35).unwrap().value.end, plan.arena_bytes());
+        assert!(token.score_scratch_bytes() >= u64::from(context) * 4);
+        assert!(plan.append(context, context, 1).is_err());
+        assert!(K2ShortContextPlan::new(c.clone(), 1, context).is_err());
+        assert!(K2ShortContextPlan::new(c.clone(), context - 1, 1).is_ok());
+        assert!(K2ShortContextPlan::new(c, context - 1, 2).is_err());
     }
 }
 

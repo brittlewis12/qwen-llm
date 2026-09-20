@@ -167,7 +167,7 @@ fn malformed_sizes_positions_and_vocabulary_fail() {
     for (key, value) in [
         ("k2-horizon.block_count", json!(u64::MAX)),
         ("k2-horizon.context_length", json!(0)),
-        ("k2-horizon.context_length", json!(524289)),
+        ("k2-horizon.context_length", json!(u64::from(u32::MAX) + 1)),
         ("k2-horizon.context_length", json!(-1)),
         ("k2-horizon.rope.freq_base", json!(0)),
         ("k2-horizon.rope.freq_base", json!(-1)),

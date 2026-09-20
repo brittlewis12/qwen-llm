@@ -133,8 +133,16 @@ def main():
     )
     run(
         "reject-position",
-        plain + ["--token-ids", ",".join(["0"] * 257), "--max-tokens", "257"],
-        "selected position must be below 256",
+        plain
+        + [
+            "--token-ids",
+            ",".join(["0"] * 257),
+            "--max-tokens",
+            "257",
+            "--position",
+            "257",
+        ],
+        "selected position exceeds input or context",
     )
     run(
         "reject-missing-asset",

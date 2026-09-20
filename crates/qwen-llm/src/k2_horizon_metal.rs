@@ -6,8 +6,8 @@
 //! value finiteness, or a complete forward graph. Primitive checks do not qualify
 //! a checkpoint or promote a runtime dispatch path.
 
-use crate::k2_horizon_plan::{FullNeoxRope, K2ShortContextPlan, TokenPlan};
 use crate::k2_horizon::K2KvStorage;
+use crate::k2_horizon_plan::{FullNeoxRope, K2ShortContextPlan, TokenPlan};
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, encode_attn_decode_f16kv_f32,
     encode_rms_norm_mul_f32, encode_rope_neox_pair_f32, encode_scatter_offset_f32_to_f16,
@@ -314,6 +314,11 @@ pub fn encode_short_attention(
     query: &MetalTensor,
     out: &MetalTensor,
 ) -> Result<()> {
+    if token.visible_positions() > crate::k2_horizon_plan::MATERIALIZED_POSITION_CEILING {
+        return Err(invalid(
+            "materialized K2 attention exceeds 7168-position score scratch",
+        ));
+    }
     let (k, v) = attention_views(enc, token, layer, arena, query, out)?;
     encode_attn_decode_f16kv_f32(
         ctx,
@@ -369,8 +374,7 @@ fn online_alignment(query: u64, key: u64, value: u64, output: u64) -> Result<()>
     Ok(())
 }
 
-/// Register-only H128/GQA4 attention selected by the guarded K2 runtime.
-/// Retains the plan's visibility/extent ceiling without allocating score scratch.
+/// Register-only H128/GQA4 attention; no history-sized score scratch.
 pub fn encode_online_attention(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -382,7 +386,11 @@ pub fn encode_online_attention(
 ) -> Result<()> {
     let (key, value) = attention_views(enc, token, layer, arena, query, out)?;
     online_alignment(query.offset, key.offset, value.offset, out.offset)?;
-    let pipeline = ctx.pipeline("kernel_k2_attn_online_f16kv_h128")?;
+    let pipeline = ctx.pipeline(if token.visible_positions() <= 256 {
+        "kernel_k2_attn_online_f16kv_h128"
+    } else {
+        "kernel_k2_attn_online_blocked_f16kv_h128"
+    })?;
     if pipeline.threadExecutionWidth() != 32 || pipeline.maxTotalThreadsPerThreadgroup() < 32 {
         return Err(invalid("online attention requires a 32-thread SIMDgroup"));
     }

@@ -5,7 +5,6 @@ use super::output_partition::OutputProtocol;
 use super::render_k2;
 use anyhow::{Context, Result, ensure};
 use qwen_llm::gguf::GgufFile;
-use qwen_llm::k2_horizon_runtime::GUARDED_APPLICATION_FORWARD_CEILING as MAX_FORWARDS;
 use qwen_llm::k2_horizon_runtime::{K2LoadedModel, K2RuntimePlan};
 use qwen_llm::metal::host_page_size_bytes;
 use qwen_llm::sampling::Sampler;
@@ -29,13 +28,12 @@ fn limits(
         snapshots == 0,
         "K2 serve requires --snapshot-cache-mib 0; snapshots are unsupported"
     );
-    let capacity = capacity.with_context(|| {
-        format!("K2 serve requires explicit --max-context-tokens in 1..={MAX_FORWARDS}")
-    })?;
+    let capacity = capacity
+        .context("K2 serve requires explicit --max-context-tokens for resident memory planning")?;
     let maximum = maximum.context("K2 serve requires explicit --max-tokens")?;
     ensure!(
-        capacity > 0 && capacity <= MAX_FORWARDS && capacity <= context as usize,
-        "K2 serve capacity must fit 1..={MAX_FORWARDS} and declared context"
+        capacity > 0 && capacity <= context as usize,
+        "K2 serve capacity must fit declared context {context}"
     );
     ensure!(
         maximum > 0 && maximum <= capacity,
@@ -60,9 +58,9 @@ impl Prepared {
         );
         K2RuntimePlan::inspect(
             gguf,
-            capacity as u32,
+            u32::try_from(capacity)?,
             host_page_size_bytes()?,
-            8 * 1024 * 1024 * 1024,
+            usize::MAX,
         )?;
         let tokenizer = NativeTokenizer::from_gguf(gguf)?;
         Ok(Self {

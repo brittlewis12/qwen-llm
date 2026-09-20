@@ -1,4 +1,4 @@
-//! Research dense K2 forward path, shared by raw run and forward-only lens.
+//! Dense K2 forward path, shared by raw run and forward-only lens.
 //!
 //! Weights remain native and read-only; sessions borrow the exact loaded model
 //! and context. One synchronous command is in flight at a time. A whole append commits
@@ -25,6 +25,8 @@ use objc2_metal::{
 };
 use std::cell::Cell;
 
+#[cfg(test)]
+mod context_tests;
 mod intervention;
 mod lens;
 mod packed;
@@ -43,9 +45,6 @@ use state::Ledger;
 pub use transport::{K2LinearF16, K2LinearReadout};
 
 const RESERVE_BYTES: u64 = 256 * 1024 * 1024;
-/// Shared application budget, not the kernel ceiling or an artifact whitelist.
-/// Numerical evidence is scoped to the pinned final Q8_0 weights with F16 KV.
-pub const GUARDED_APPLICATION_FORWARD_CEILING: usize = 256;
 type Result<T> = std::result::Result<T, K2RuntimeError>;
 
 #[derive(Debug, thiserror::Error)]
@@ -91,13 +90,10 @@ pub struct K2LoadedModel<'a> {
 }
 
 impl<'a> K2LoadedModel<'a> {
-    /// Explicit research entry point; no claim of checkpoint numerical parity.
     /// Prices weights AND one session before allocating any weight buffers.
-    pub fn load_unqualified(
-        ctx: &'a MetalContext,
-        source: &'a GgufFile,
-        capacity: u32,
-    ) -> Result<Self> {
+    /// Capacity is bounded by checkpoint context and actual device/memory admission,
+    /// not the lengths covered by numerical regression fixtures.
+    pub fn load(ctx: &'a MetalContext, source: &'a GgufFile, capacity: u32) -> Result<Self> {
         let mut model = Self::load_with_attention_unqualified(
             ctx,
             source,
@@ -106,6 +102,16 @@ impl<'a> K2LoadedModel<'a> {
         )?;
         model.prefill = PrefillMode::for_weights(&model.weights);
         Ok(model)
+    }
+
+    /// Compatibility entry point for existing research callers. Uses the same
+    /// F16 cache and online attention as `load`, with no relaxed admission checks.
+    pub fn load_unqualified(
+        ctx: &'a MetalContext,
+        source: &'a GgufFile,
+        capacity: u32,
+    ) -> Result<Self> {
+        Self::load(ctx, source, capacity)
     }
 
     fn load_with_attention_unqualified(
@@ -127,11 +133,17 @@ impl<'a> K2LoadedModel<'a> {
         if storage == K2KvStorage::Q8_0 && attention != AttentionBackend::Online {
             return Err(invalid("compact KV requires the K2 online attention path"));
         }
+        #[cfg(test)]
+        if attention == AttentionBackend::Materialized
+            && capacity > crate::k2_horizon_plan::MATERIALIZED_POSITION_CEILING
+        {
+            return Err(invalid("materialized K2 attention capacity exceeds 7168"));
+        }
         let plan = K2RuntimePlan::inspect_with_storage(
             source,
             capacity,
             host_page_size_bytes()?,
-            ctx.max_buffer_length().min(8 * 1024 * 1024 * 1024),
+            ctx.max_buffer_length(),
             storage,
         )?;
         let weight_price = price_buffers(ctx, &plan.weight_buffer_bytes()?)?;
@@ -269,11 +281,14 @@ impl K2Session<'_, '_> {
         };
         self.buffers.validate_cache_contract(&self.request)?;
         let prefix = transaction.old_prefix();
-        let absolute = self.request.append(
-            prefix,
-            self.request.start_position() + prefix,
-            tokens.len() as u32,
-        )?;
+        let count =
+            u32::try_from(tokens.len()).map_err(|_| invalid("append length exceeds u32"))?;
+        let position = self
+            .request
+            .start_position()
+            .checked_add(prefix)
+            .ok_or_else(|| invalid("absolute append position overflow"))?;
+        let absolute = self.request.append(prefix, position, count)?;
         let ctx = self.model.ctx;
         let captures = CaptureArena::allocate(ctx, layers)?;
         let interventions = InterventionArena::allocate(ctx, interventions)?;
@@ -352,7 +367,7 @@ impl K2Session<'_, '_> {
             .transpose()?
             .unwrap_or_default();
         let result = K2CapturedForward {
-            absolute_position: self.request.start_position() + prefix + tokens.len() as u32 - 1,
+            absolute_position: absolute.token(count - 1)?.absolute_position(),
             post_block_layers: layers.to_vec(),
             residuals,
             logits,

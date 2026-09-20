@@ -171,18 +171,10 @@ fn host_online_vector_alignment_is_stricter_than_scalar_alignment() {
 #[test]
 #[ignore = "GPU primitive correctness; production lease and real wired-memory gate"]
 fn gpu_online_attention_matches_f64_and_materialized_with_future_poison() {
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
     let ctx = MetalContext::new().unwrap();
-    let plan = request(260, 37);
     let prefix = 16u64;
-    let arena_elements = plan.arena_bytes() / 2;
-    let buffer_bytes = (arena_elements + prefix + 16) * 2;
-    let prices = [buffer_bytes, 4096 * 4, 4096 * 4, 4096 * 4].map(|bytes| {
-        ctx.price_shared_buffer_upper(bytes)
-            .unwrap()
-            .priced_upper_bytes
-    });
-    let price = prices.iter().sum::<u64>();
     for (count, gain) in [
         (1, 1.),
         (32, 1.),
@@ -192,7 +184,30 @@ fn gpu_online_attention_matches_f64_and_materialized_with_future_poison() {
         (257, 1.),
         (257, 0.),
         (257, 16.),
+        (512, 1.),
+        (512, -1.),
+        (7168, 0.),
+        (7168, 1.),
+        (7168, 16.),
+        (7169, 0.),
+        (7169, 1.),
+        (7169, 16.),
+        (8192, 0.),
+        (8192, 1.),
+        (8192, 16.),
+        (8192, -1.),
     ] {
+        let plan = request(count as u32 + 3, 524288 - count as u32 - 3);
+        let arena_elements = plan.arena_bytes() / 2;
+        let buffer_bytes = (arena_elements + prefix + 16) * 2;
+        let price = [buffer_bytes, 4096 * 4, 4096 * 4, 4096 * 4]
+            .map(|bytes| {
+                ctx.price_shared_buffer_upper(bytes)
+                    .unwrap()
+                    .priced_upper_bytes
+            })
+            .iter()
+            .sum::<u64>();
         let q = (0..4096)
             .map(|i| ((i * 13 % 113) as f32 - 56.) * 0.037 * gain)
             .collect::<Vec<_>>();
@@ -210,7 +225,19 @@ fn gpu_online_attention_matches_f64_and_materialized_with_future_poison() {
         let mut values = Vec::new();
         for p in 0..count {
             for i in 0..1024 {
-                let k = half::f16::from_f32((((i * 17 + p * 23) % 127) as f32 - 63.) * 0.041);
+                let k = half::f16::from_f32(if gain < 0. {
+                    // Separated block maxima and spikes on either side of a merge.
+                    q[(i / 128 * 4) * 128 + i % 128]
+                        * if p == 255 || p == 256 || p == 511 || p == count - 1 {
+                            8.
+                        } else if (p / 256) % 2 == 0 {
+                            -8.
+                        } else {
+                            0.
+                        }
+                } else {
+                    (((i * 17 + p * 23) % 127) as f32 - 63.) * 0.041
+                });
                 let v = half::f16::from_f32(
                     (i / 128) as f32 * 0.31 + ((i * 11 + p * 7) % 37) as f32 * 0.017 - 0.4,
                 );
@@ -234,11 +261,18 @@ fn gpu_online_attention_matches_f64_and_materialized_with_future_poison() {
         let online = MetalTensor::zeros_f32(&ctx, vec![128, 32]).unwrap();
         let materialized = MetalTensor::zeros_f32(&ctx, vec![128, 32]).unwrap();
         assert!(ctx.current_allocated_size().saturating_sub(before) <= price);
-        let append = plan.append(0, 37, count as u32).unwrap();
+        let append = plan.append(0, plan.start_position(), count as u32).unwrap();
         let token = append.token(count as u32 - 1).unwrap();
         execute(&ctx, |encoder| {
             encode_online_attention(&ctx, encoder, &token, 35, &arena, &query, &online)?;
-            encode_short_attention(&ctx, encoder, &token, 35, &arena, &query, &materialized)
+            let control =
+                encode_short_attention(&ctx, encoder, &token, 35, &arena, &query, &materialized);
+            if count <= 7168 {
+                control
+            } else {
+                assert!(control.unwrap_err().to_string().contains("7168-position"));
+                Ok(())
+            }
         });
         let actual = read(&online);
         let control = read(&materialized);
@@ -272,12 +306,15 @@ fn gpu_online_attention_matches_f64_and_materialized_with_future_poison() {
                 let index = head * 128 + d;
                 assert!(actual[index].is_finite() && control[index].is_finite());
                 max_error = max_error.max((f64::from(actual[index]) - expected).abs());
-                max_control =
-                    max_control.max((f64::from(actual[index]) - f64::from(control[index])).abs());
+                if count <= 7168 {
+                    max_control = max_control
+                        .max((f64::from(actual[index]) - f64::from(control[index])).abs());
+                }
             }
         }
         eprintln!(
-            "online positions={count} gain={gain} max_f64={max_error} max_materialized={max_control}"
+            "online positions={count} gain={gain} max_f64={max_error} max_materialized={:?}",
+            (count <= 7168).then_some(max_control)
         );
         assert!(max_error < 2e-5, "positions={count} max_f64={max_error}");
         assert!(

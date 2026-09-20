@@ -1,4 +1,4 @@
-//! Short-context guarded request wall measurements, not GPU-only pp/tg timings.
+//! Request wall measurements, not GPU-only pp/tg timings.
 use anyhow::{Context, Result, ensure};
 use clap::{ArgGroup, Parser};
 use qwen_llm::gguf::GgufFile;
@@ -14,8 +14,6 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use qwen_llm::k2_horizon_runtime::GUARDED_APPLICATION_FORWARD_CEILING as MAX_FORWARDS;
-
 #[derive(Parser, Debug)]
 #[command(group(ArgGroup::new("input").required(true).multiple(false).args(["raw_prompt", "token_ids"])))]
 pub struct K2RequestArgs {
@@ -30,10 +28,10 @@ pub struct K2RequestArgs {
     token_ids: Option<Vec<i32>>,
     #[arg(long, requires = "raw_prompt", conflicts_with = "token_ids")]
     no_special_tokens: bool,
-    /// Maximum sampled tokens, including EOS. Explicit; prompt+tokens-1 <= 256.
+    /// Maximum sampled tokens, including EOS; prompt+tokens-1 must fit model context.
     #[arg(long)]
     tokens: usize,
-    /// Fresh session capacity; defaults to prompt+tokens-1, at most 256.
+    /// Fresh session capacity; defaults to prompt+tokens-1, subject to memory admission.
     #[arg(long)]
     capacity: Option<usize>,
     /// Timed repetitions; each creates fresh KV and a fresh greedy sampler.
@@ -48,16 +46,16 @@ pub struct K2RequestArgs {
 
 fn budget(prompt: usize, sampled: usize, capacity: Option<usize>, context: u32) -> Result<usize> {
     ensure!(
-        prompt > 0 && (1..=MAX_FORWARDS).contains(&sampled),
-        "K2 requires nonempty input and --tokens in 1..={MAX_FORWARDS}"
+        prompt > 0 && sampled > 0,
+        "K2 requires nonempty input and positive --tokens"
     );
     let required = prompt
         .checked_add(sampled - 1)
         .context("K2 forward budget overflow")?;
     let capacity = capacity.unwrap_or(required);
     ensure!(
-        required <= capacity && capacity <= MAX_FORWARDS && capacity <= context as usize,
-        "K2 requires {required} forwards; capacity {capacity} must fit both {MAX_FORWARDS} and checkpoint context {context}"
+        required <= capacity && capacity <= context as usize,
+        "K2 requires {required} forwards; capacity {capacity} must fit checkpoint context {context}"
     );
     Ok(capacity)
 }
@@ -104,10 +102,7 @@ fn generate(
     mut emit: impl FnMut(i32) -> Result<()>,
     mut checkpoint: impl FnMut() -> Result<()>,
 ) -> Result<Generation> {
-    ensure!(
-        (1..=MAX_FORWARDS).contains(&limit),
-        "invalid K2 sample limit"
-    );
+    ensure!(limit > 0, "invalid K2 sample limit");
     let started = Instant::now();
     let mut sampled = Vec::with_capacity(limit);
     let mut emitted = Vec::with_capacity(limit);
@@ -190,7 +185,11 @@ fn iteration(
     let allocation_delta = ctx.current_allocated_size().saturating_sub(before);
     let session_ns = elapsed(started);
     let started = Instant::now();
-    let logits = session.append(prompt)?;
+    let mut logits = Vec::new();
+    for chunk in prompt.chunks(model.prefill_info(prompt.len()).chunk_tokens) {
+        super::shutdown::checkpoint()?;
+        logits = session.append(chunk)?;
+    }
     let prefill_ns = elapsed(started);
     let started = Instant::now();
     let mut sampler = Sampler::new(SamplingConfig::default())?;
@@ -269,11 +268,8 @@ fn aggregate(warmup: Option<&Sample>, samples: &[Sample]) -> (bool, Option<Value
 }
 
 pub fn run(args: K2RequestArgs) -> Result<()> {
-    ensure!((1..=10).contains(&args.runs), "--runs must be in 1..=10");
-    ensure!(
-        (1..=MAX_FORWARDS).contains(&args.tokens),
-        "--tokens must be in 1..={MAX_FORWARDS}"
-    );
+    ensure!(args.runs > 0, "--runs must be positive");
+    ensure!(args.tokens > 0, "--tokens must be positive");
     let started = Instant::now();
     let gguf = GgufFile::open(&args.model)?;
     let open_ns = elapsed(started);
@@ -313,13 +309,13 @@ pub fn run(args: K2RequestArgs) -> Result<()> {
         config.context_length,
     )?;
     let started = Instant::now();
-    let plan = K2RuntimePlan::inspect(
+    K2RuntimePlan::inspect(
         &gguf,
-        capacity as u32,
+        u32::try_from(capacity)?,
         host_page_size_bytes()?,
-        8 * 1024 * 1024 * 1024,
+        usize::MAX,
     )?;
-    let plan_ns = elapsed(started);
+    let preflight_plan_ns = elapsed(started);
     let head = gguf
         .tensors
         .iter()
@@ -334,8 +330,16 @@ pub fn run(args: K2RequestArgs) -> Result<()> {
     let ctx = MetalContext::new()?;
     let context_ns = elapsed(started);
     let started = Instant::now();
+    let plan = K2RuntimePlan::inspect(
+        &gguf,
+        u32::try_from(capacity)?,
+        host_page_size_bytes()?,
+        ctx.max_buffer_length(),
+    )?;
+    let plan_ns = preflight_plan_ns.saturating_add(elapsed(started));
+    let started = Instant::now();
     let before = ctx.current_allocated_size();
-    let model = K2LoadedModel::load_unqualified(&ctx, &gguf, capacity as u32)?;
+    let model = K2LoadedModel::load(&ctx, &gguf, u32::try_from(capacity)?)?;
     let load_ns = elapsed(started);
     let weight_delta = ctx.current_allocated_size().saturating_sub(before);
     let warmup = if args.no_warmup {
@@ -376,23 +380,23 @@ pub fn run(args: K2RequestArgs) -> Result<()> {
         "setup":{"gguf_open_ns":open_ns,"profile_bind_ns":bind_ns,"tokenizer_open_ns":tokenizer_ns,"tokenization_ns":tokenization_ns,
             "runtime_plan_ns":plan_ns,"metal_context_ns":context_ns,"resident_model_load_ns":load_ns},
         "method":{"clock":"host_monotonic_wall_ns","session_scope":"fresh_allocation_each_repetition",
-            "prefill":"bounded_append_final_prompt_logits_only","prefill_execution":model.prefill_info(prompt.len()),
-            "readout":"final_prompt_logits_only",
+            "prefill":"bounded_cancellable_chunk_appends","prefill_execution":model.prefill_info(prompt.len()),
+            "readout":"each_chunk_logits_computed_only_final_prompt_used_for_sampling",
             "warmup_repetitions":usize::from(warmup.is_some()),"timed_repetitions":args.runs,
             "append_includes":"encoding_submission_wait_finite_checks_source_checks_logits_readback",
             "request_boundary":"before_session_allocation_to_after_generation_before_cleanup_hashes_serialization",
             "generation_includes":"sampling_native_piece_decoding_transition_appends_checkpoint_checks",
             "first_sample_ready":"direct_request_clock_after_first_selection_not_network_ttft",
             "transition_rate":"actual_transition_appends_per_transition_append_wall_second_excludes_first_sample",
-            "prompt_rate":"prompt_positions_per_guarded_append_wall_second"},
+            "prompt_rate":"prompt_positions_per_append_wall_second"},
         "qualification":{"all_repetitions_identical":consistent,"steady_state_qualified":false,"llama_bench_comparable":false,"kernel_only":false,
-            "runtime_scope":"k2_dense_guarded_request_wall_256","performance_claim":false},
+            "runtime_scope":"k2_dense_request_wall","capacity_policy":"checkpoint_context_and_device_memory","performance_claim":false},
         "warmup":warmup,"samples":samples,"aggregate":aggregates});
     match args.output {
         super::OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
         super::OutputFormat::Text => {
             println!(
-                "K2 guarded request wall: prompt={} max_sampled={} capacity={} runs={} identical={consistent}",
+                "K2 request wall: prompt={} max_sampled={} capacity={} runs={} identical={consistent}",
                 prompt.len(),
                 args.tokens,
                 capacity,

@@ -2,7 +2,7 @@
 # requires-python = ">=3.11"
 # dependencies = []
 # ///
-"""Opt-in guarded-256 CLI correctness; serial children own production leases. No speed claim."""
+"""Opt-in declared-context CLI checks; serial children own production leases. No speed claim."""
 
 import argparse
 import hashlib
@@ -17,7 +17,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("qwen", "bench", "lens", "model", "output"):
         parser.add_argument(f"--{name}", type=Path, required=True)
+    parser.add_argument("--capacity", type=int, default=1024)
     args = parser.parse_args()
+    capacity = args.capacity
+    assert 258 <= capacity <= 524288
     model = args.model.resolve(strict=True)
     qwen, bench, lens = [
         getattr(args, n).resolve(strict=True) for n in ("qwen", "bench", "lens")
@@ -84,29 +87,30 @@ def main():
         "--top-k",
         "1",
     ]
-    prompt = " ".join(["a"] * 255)
+    prompt = " ".join(["a"] * (capacity - 1))
     reference = None
     for name, text, sampled, count in [
-        ("256", prompt, 1, 256),
-        ("transition", " ".join(["a"] * 254), 2, 255),
+        ("boundary", prompt, 1, capacity),
+        ("transition", " ".join(["a"] * (capacity - 2)), 2, capacity - 1),
+        ("response", " ".join(["a"] * (capacity - 257)), 257, capacity - 256),
     ]:
         doc = json.loads(
             run(
                 f"bench-{name}",
                 bbase
-                + ["--raw-prompt", text, "--tokens", sampled, "--capacity", "256"],
+                + ["--raw-prompt", text, "--tokens", sampled, "--capacity", capacity],
             ).stdout
         )
         assert len(doc["request"]["prompt_token_ids"]) == count
         sample = doc["samples"][0]
-        assert sample["committed_positions"] == 256
+        assert sample["committed_positions"] == capacity
         assert sample["prompt_forwards"] == count
         assert sample["outcome"]["transition_forwards"] == sampled - 1
         assert doc["qualification"]["performance_claim"] is False
         assert doc["method"]["prefill_execution"] == {
             "mode": "q8_lcpp_token_batch",
             "chunk_tokens": 32,
-            "commands": 8,
+            "commands": (count + 31) // 32,
             "temporary_activation_bytes": 7602304,
         }
         ids = sample["outcome"]["sampled_token_ids"]
@@ -122,7 +126,7 @@ def main():
                 "-n",
                 sampled,
                 "--max-context-tokens",
-                "256",
+                capacity,
                 "--request-stats-jsonl",
                 stats_path,
             ],
@@ -140,22 +144,33 @@ def main():
             + struct.pack(f"<{len(ids)}i", *ids)
         ).hexdigest()
         assert stats["output_fingerprint"]["value"] == fingerprint
-        if name == "256":
+        if name == "boundary":
             reference = doc
 
-    run("reject-run-257", rbase + ["--raw-prompt", prompt, "-n", "2"], "257")
+    run(
+        "reject-run-capacity-plus-one",
+        rbase + ["--raw-prompt", prompt, "-n", "2", "--max-context-tokens", capacity],
+        f"requires {capacity + 1} forwards",
+    )
     run(
         "reject-run-capacity",
-        rbase + ["--raw-prompt", "a", "-n", "1", "--max-context-tokens", "257"],
-        "capacity 257",
+        rbase + ["--raw-prompt", "a", "-n", "1", "--max-context-tokens", "524289"],
+        "capacity 524289",
     )
-    run("reject-run-implicit", rbase + ["--raw-prompt", "a"], "explicit --max-tokens")
     for name, options in [
-        ("capacity", ["--tokens", "1", "--capacity", "257"]),
-        ("sampled", ["--tokens", "257"]),
+        ("capacity", ["--tokens", "1", "--capacity", "524289"]),
+        ("sampled", ["--tokens", "524289"]),
     ]:
-        run(f"reject-bench-{name}", bbase + ["--token-ids", "0"] + options, "256")
-    run("reject-bench-prompt", bbase + ["--raw-prompt", prompt, "--tokens", "2"], "257")
+        run(
+            f"reject-bench-{name}",
+            bbase + ["--token-ids", "0"] + options,
+            "checkpoint context 524288",
+        )
+    run(
+        "reject-bench-prompt",
+        bbase + ["--raw-prompt", prompt, "--tokens", "2", "--capacity", capacity],
+        f"requires {capacity + 1} forwards",
+    )
 
     fallback = json.loads(
         run(
@@ -182,19 +197,26 @@ def main():
         == fallback["method"]["prefill_execution"]
     )
     ids = reference["request"]["prompt_token_ids"]
-    assert len(ids) == 256 and ids[0] == 0
+    assert len(ids) == capacity and ids[0] == 0
     tokens = ",".join(map(str, ids))
-    long_input = ["--token-ids", tokens, "--position", "255", "--max-tokens", "256"]
+    long_input = [
+        "--token-ids",
+        tokens,
+        "--position",
+        capacity - 1,
+        "--max-tokens",
+        capacity,
+    ]
     plain = json.loads(
         run(
-            "plain-256",
+            "plain-boundary",
             lbase
             + long_input
             + ["--logit-lens", "--full-output", output / "plain-bundle"],
         ).stdout
     )
-    assert plain["input"]["executed_token_count"] == 256
-    assert plain["deployed_model"]["executed_capacity"] == 256
+    assert plain["input"]["executed_token_count"] == capacity
+    assert plain["deployed_model"]["executed_capacity"] == capacity
     assert (
         plain["deployed_model"]["prefill"] == reference["method"]["prefill_execution"]
     )
@@ -254,14 +276,14 @@ def main():
     (asset / "lens.json").write_text(json.dumps(manifest))
     imported = json.loads(
         run(
-            "imported-256",
+            "imported-boundary",
             lbase
             + long_input
             + ["--full-lens", asset, "--full-output", output / "imported-bundle"],
         ).stdout
     )
     assert imported["transfer"]["status"] == "exact_deployment_binding_matched"
-    assert imported["deployed_model"]["executed_capacity"] == 256
+    assert imported["deployed_model"]["executed_capacity"] == capacity
     assert imported["deployed_model"]["prefill"] == plain["deployed_model"]["prefill"]
     assert (output / "plain-bundle/logits.f32le").read_bytes() == (
         output / "imported-bundle/logits.f32le"
@@ -270,18 +292,18 @@ def main():
         "--token-ids",
         tokens + ",42",
         "--position",
-        "256",
+        capacity + 1,
         "--max-tokens",
-        "257",
+        capacity + 1,
     ]
     for name, mode in [
         ("plain", ["--logit-lens"]),
         ("imported", ["--full-lens", asset]),
     ]:
         run(
-            f"reject-{name}-257",
+            f"reject-{name}-invalid-position",
             lbase + invalid_input + mode,
-            "selected position must be below 256",
+            "selected position exceeds input or context",
         )
     manifest["model"]["exact_binding"]["gguf_content_blake3"] = "0" * 64
     (asset / "lens.json").write_text(json.dumps(manifest))
@@ -299,7 +321,7 @@ def main():
     )
     transfer = json.loads(
         run(
-            "explicit-transfer-256",
+            "explicit-transfer-boundary",
             lbase + long_input + ["--full-lens", asset, "--allow-unvalidated-transfer"],
         ).stdout
     )
@@ -307,7 +329,7 @@ def main():
     assert transfer["results"][0]["top_k"] == plain["results"][0]["top_k"]
     report = {
         "status": "passed",
-        "capacity": 256,
+        "capacity": capacity,
         "performance_claim": False,
         "artifact_directory": str(output),
         "serve_followup": "K2_BOUNDARY_EVIDENCE points to this directory for the leased ephemeral HTTP test",

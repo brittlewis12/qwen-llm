@@ -1,9 +1,5 @@
-//! Host-only plans for bounded K2 cache storage and causal visibility.
-//!
-//! These plans allocate no buffers and admit no runtime. The materialized-score
-//! ceiling is a source constraint of the candidate attention kernel, NOT a
-//! numerically qualified K2 capacity. An eventual encoder must additionally check
-//! physical buffer ranges, dtype, writability, aliasing, and actual cache state.
+//! Host-only K2 cache storage and causal visibility, bounded by checkpoint context.
+//! Physical allocation and backend-specific limits are checked by the runtime.
 
 use crate::k2_horizon::{K2HorizonConfig, K2HorizonError, K2KvStorage};
 use std::ops::Range;
@@ -16,7 +12,7 @@ pub(crate) const PACKED_CHUNK_TOKENS: usize = 32;
 pub enum PlanError {
     #[error(transparent)]
     Profile(#[from] K2HorizonError),
-    #[error("invalid K2 short-context plan: {0}")]
+    #[error("invalid K2 cache plan: {0}")]
     Invalid(&'static str),
 }
 
@@ -48,10 +44,8 @@ impl K2ShortContextPlan {
         storage: K2KvStorage,
     ) -> Result<Self> {
         config.validate_7b()?;
-        if capacity == 0 || capacity > MATERIALIZED_POSITION_CEILING {
-            return Err(PlanError::Invalid(
-                "capacity exceeds candidate materialized-score limit",
-            ));
+        if capacity == 0 {
+            return Err(PlanError::Invalid("capacity must be positive"));
         }
         if start_position
             .checked_add(capacity)
@@ -247,8 +241,8 @@ impl TokenPlan<'_> {
     /// Dynamic threadgroup scores, rounded to Metal's 16-byte requirement.
     /// The candidate's separate reduction allocation is at most 128 bytes
     /// (1024 threads / 32 lanes * sizeof(float)). Neither is retained KV.
-    pub fn score_scratch_bytes(&self) -> u32 {
-        (self.visible_positions() * 4).next_multiple_of(16)
+    pub fn score_scratch_bytes(&self) -> u64 {
+        (u64::from(self.visible_positions()) * 4).next_multiple_of(16)
     }
 }
 

@@ -4,17 +4,23 @@ use serde_json::json;
 use std::io;
 
 #[test]
-fn startup_limits_require_explicit_short_capacity_no_cache_or_drafter() {
+fn startup_limits_use_declared_context_and_explicit_residency_no_cache_or_drafter() {
     assert_eq!(limits(8192, Some(32), Some(8), 0, false).unwrap(), (32, 8));
     assert_eq!(
         limits(8192, Some(256), Some(256), 0, false).unwrap(),
         (256, 256)
     );
+    for size in [257, 1024, 7169, 8192, 524288] {
+        assert_eq!(
+            limits(524288, Some(size), Some(size), 0, false).unwrap(),
+            (size, size)
+        );
+    }
     for (context, capacity, maximum, snapshots, drafter) in [
         (8192, None, Some(8), 0, false),
         (8192, Some(32), None, 0, false),
         (8192, Some(0), Some(1), 0, false),
-        (8192, Some(257), Some(1), 0, false),
+        (8192, Some(8193), Some(1), 0, false),
         (8192, Some(32), Some(0), 0, false),
         (8192, Some(32), Some(33), 0, false),
         (1, Some(2), Some(1), 0, false),
@@ -38,7 +44,7 @@ struct Sink {
 fn cpu_downloaded_startup_rejects_options_before_listener_or_metal() {
     let path = std::env::var("K2_GGUF").expect("K2_GGUF");
     for (capacity, maximum, snapshots, drafter, expected) in [
-        (Some(257), Some(8), 0, None, "capacity must fit"),
+        (Some(usize::MAX), Some(8), 0, None, "capacity must fit"),
         (None, Some(8), 0, None, "explicit --max-context-tokens"),
         (Some(32), None, 0, None, "explicit --max-tokens"),
         (Some(32), Some(8), 1, None, "--snapshot-cache-mib 0"),
@@ -293,24 +299,34 @@ fn gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests() {
 
 #[test]
 #[ignore = "K2_GGUF and K2_BOUNDARY_EVIDENCE; production CLI lease/gate; ephemeral JSON/SSE boundary correctness"]
-fn gpu_guarded_256_json_sse_match_run_bench_and_reject_257() {
+fn gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one() {
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     let path = std::env::var("K2_GGUF").expect("K2_GGUF");
     let evidence = std::path::PathBuf::from(
         std::env::var("K2_BOUNDARY_EVIDENCE").expect("K2_BOUNDARY_EVIDENCE"),
     );
     let source = GgufFile::open(&path).unwrap();
+    let summary: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(evidence.join("summary.json")).unwrap()).unwrap();
+    let capacity = summary["capacity"].as_u64().unwrap() as usize;
+    assert_eq!(summary["status"], "passed");
+    assert!(capacity >= 258);
     let invocation = crate::cli::ServeInvocation {
         model: path.into(),
         addr: "127.0.0.1:0".into(),
         max_tokens: Some(1),
-        max_context_tokens: Some(256),
+        max_context_tokens: Some(capacity),
         snapshot_cache_mib: 0,
         drafter: None,
         trace_sse: None,
     };
     let prepared = Prepared::new(&source, &invocation).unwrap();
     let mut cases = Vec::new();
-    for (name, words, sampled, count) in [("256", 255, 1, 256), ("transition", 254, 2, 255)] {
+    for (name, words, sampled, count) in [
+        ("boundary", capacity - 1, 1, capacity),
+        ("transition", capacity - 2, 2, capacity - 1),
+        ("response", capacity - 257, 257, capacity - 256),
+    ] {
         let reference: serde_json::Value = serde_json::from_slice(
             &std::fs::read(evidence.join(format!("bench-{name}.stdout"))).unwrap(),
         )
@@ -319,8 +335,8 @@ fn gpu_guarded_256_json_sse_match_run_bench_and_reject_257() {
         let ids = prepared.tokenizer.encode(&text, true).unwrap();
         assert_eq!(ids.len(), count);
         assert_eq!(json!(ids), reference["request"]["prompt_token_ids"]);
-        assert_eq!(reference["request"]["capacity"], 256);
-        assert_eq!(reference["samples"][0]["committed_positions"], 256);
+        assert_eq!(reference["request"]["capacity"], capacity);
+        assert_eq!(reference["samples"][0]["committed_positions"], capacity);
         let hex = reference["samples"][0]["outcome"]["emitted_bytes_hex"]
             .as_str()
             .unwrap();
@@ -333,7 +349,7 @@ fn gpu_guarded_256_json_sse_match_run_bench_and_reject_257() {
     }
     // This binary links the production library: its context owns the lease.
     let ctx = MetalContext::new().unwrap();
-    let model = K2LoadedModel::load_unqualified(&ctx, &source, 256).unwrap();
+    let model = K2LoadedModel::load(&ctx, &source, u32::try_from(capacity).unwrap()).unwrap();
     let mut backend = K2Backend::new(&model, prepared, "k2-boundary".into());
     for (text, sampled, count, expected) in &cases {
         let (req, prompt) = request(
@@ -349,7 +365,7 @@ fn gpu_guarded_256_json_sse_match_run_bench_and_reject_257() {
         for stream in [false, true] {
             let mut body =
                 json!({"model":"k2-boundary","input":text,"stream":stream,"x_qwen":{"stats":true}});
-            // Exercise the explicit startup default at the 256-token boundary.
+            // Exercise the startup default at the configured request boundary.
             if *sampled != 1 {
                 body["max_output_tokens"] = json!(sampled);
             }
@@ -418,7 +434,7 @@ fn gpu_guarded_256_json_sse_match_run_bench_and_reject_257() {
                 failed["response"]["error"]["message"]
                     .as_str()
                     .unwrap()
-                    .contains("257 K2 forwards")
+                    .contains(&format!("{} K2 forwards", capacity + 1))
             );
             assert_eq!(failed["response"]["output"], json!([]));
             assert!(!body.contains("event: response.output_text.delta"));
@@ -445,8 +461,8 @@ fn gpu_guarded_256_json_sse_match_run_bench_and_reject_257() {
         0
     );
     assert_eq!(fresh.bytes, cases[0].3);
-    std::fs::write(evidence.join("serve-256-result.json"),serde_json::to_vec_pretty(&json!({
-        "status":"passed","capacity":256,"json_sse_run_bench_parity":true,"default_output_boundary":true,
-        "reject_257_before_session":true,"fresh_after_late_prefill_abort":true,"performance_claim":false,
+    std::fs::write(evidence.join("serve-context-result.json"),serde_json::to_vec_pretty(&json!({
+        "status":"passed","capacity":capacity,"json_sse_run_bench_parity":true,"default_output_boundary":true,
+        "reject_capacity_plus_one_before_session":true,"fresh_after_late_prefill_abort":true,"response_budget_257":true,"performance_claim":false,
     })).unwrap()).unwrap();
 }

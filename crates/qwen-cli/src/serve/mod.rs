@@ -159,10 +159,10 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         crate::shutdown::checkpoint()?;
         let ctx = qwen_llm::metal::MetalContext::new()?;
         let started = Instant::now();
-        let model = qwen_llm::k2_horizon_runtime::K2LoadedModel::load_unqualified(
+        let model = qwen_llm::k2_horizon_runtime::K2LoadedModel::load(
             &ctx,
             &gguf,
-            prepared.capacity as u32,
+            u32::try_from(prepared.capacity)?,
         )?;
         let load_ms = started.elapsed().as_secs_f64() * 1e3;
         tracing::info!(target: "qwen_diag", "serve limits: family=k2_horizon raw_input_string_only capacity={} snapshot_cache_bytes=0", prepared.capacity);

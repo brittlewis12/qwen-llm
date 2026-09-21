@@ -357,6 +357,18 @@ returns an error, never a partial identity or a raw-only server fallback. This i
 cooperative cancellation: it does not interrupt an in-progress filesystem read.
 Text `qwen info` remains metadata inspection without exhaustive chat verification.
 
+K2 JSON inspection reports `capabilities.execution` in three layers:
+`implementation_status` describes the family implementation; per-lane
+`artifact_admission` reflects the same CPU preparation used by run/serve/bench/lens;
+`request_device.status` remains `not_evaluated`. An admitted lane is `conditional`,
+not a promise that the request fits memory or has been numerically qualified.
+Core preparation binds complete geometry/tensors, native embedding storage,
+retained ranges and tokenizer. Stable rejection codes identify those stages.
+Run/serve/bench additionally require raw generation EOS metadata `[1]`; lens does
+not sample, so an otherwise valid extra stop set alone does not disable it. Chat
+verification is never attempted after failed core/generation admission. The
+`execution.serve.chat` boolean describes this artifact's verified eligibility.
+
 ## Validation gate
 
 - Pin modern and legacy parser behavior, conflicts, help, and explicit-default

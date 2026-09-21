@@ -25,9 +25,13 @@ use objc2_metal::{
 };
 use std::cell::Cell;
 
+mod admission;
 #[cfg(test)]
 mod context_tests;
 mod intervention;
+pub use admission::{
+    K2AdmissionError, K2ArtifactLayout, K2PreparedArtifact, validate_generation_stops,
+};
 mod lens;
 mod packed;
 mod residency;

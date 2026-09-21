@@ -1,8 +1,8 @@
 //! Native plain/data-only readout. No Qwen runtime, local fitting, or chat rendering.
 use super::*;
 use qwen_llm::checkpoint_identity::CheckpointContentReport;
-use qwen_llm::k2_horizon::{K2HorizonConfig, K2HorizonModel};
-use qwen_llm::k2_horizon_runtime::K2LoadedModel;
+use qwen_llm::k2_horizon::K2HorizonConfig;
+use qwen_llm::k2_horizon_runtime::{K2LoadedModel, K2PreparedArtifact};
 use qwen_llm::metal::MetalContext;
 use qwen_llm::tokenizer::NativeTokenizer;
 
@@ -67,26 +67,28 @@ impl Prepared {
             !plain || !args.allow_unvalidated_transfer,
             "K2 plain observations do not accept --allow-unvalidated-transfer"
         );
-        let bound = K2HorizonModel::from_gguf(gguf)?;
-        let tokenizer = NativeTokenizer::from_gguf(gguf)?;
+        let artifact = K2PreparedArtifact::inspect(gguf)?;
+        let config = artifact.config().clone();
+        let head_dtype = format!("{:?}", artifact.output_dtype());
+        let tokenizer = artifact.into_tokenizer();
         let encoded = args
             .prompt
             .as_ref()
             .map(|p| tokenizer.encode(p, !args.no_special_tokens))
             .transpose()?;
         let (tokens, position, layers, capture_layers) = if plain {
-            preflight(args, &bound.config, encoded)?
+            preflight(args, &config, encoded)?
         } else {
-            preflight_mode(args, &bound.config, encoded, false)?
+            preflight_mode(args, &config, encoded, false)?
         };
         Ok(Self {
-            config: bound.config.clone(),
+            config,
             tokenizer,
             tokens,
             position,
             layers,
             capture_layers,
-            head_dtype: format!("{:?}", bound.output.dtype),
+            head_dtype,
         })
     }
 

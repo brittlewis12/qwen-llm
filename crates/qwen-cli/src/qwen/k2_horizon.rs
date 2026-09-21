@@ -1,12 +1,17 @@
 //! Raw and verified no-tools K2 chat; never falls through to Qwen protocols.
 
 use super::*;
-use qwen_llm::k2_horizon::K2HorizonConfig;
 use qwen_llm::k2_horizon_chat as chat;
-use qwen_llm::k2_horizon_runtime::K2LoadedModel;
-use qwen_llm::tokenizer::NativeTokenizer;
+#[cfg(test)]
+use qwen_llm::k2_horizon_runtime::validate_generation_stops as validate_stops;
+use qwen_llm::k2_horizon_runtime::{K2LoadedModel, K2PreparedArtifact};
 
-pub(crate) fn execution_capabilities() -> serde_json::Value {
+#[path = "k2_horizon/capabilities.rs"]
+mod capabilities;
+pub(crate) use capabilities::project as capability_projection;
+
+// Family implementation facts only. Publish artifact decisions through capability_projection.
+fn family_implementation() -> serde_json::Value {
     serde_json::json!({
         "run": {"status": "supported", "scope": "raw_or_verified_no_tools_chat", "requires_profile": "dense_7b",
             "chat_profile": "verified_final_artifact", "output": "raw_literal_or_chat_reasoning_stderr_answer_stdout",
@@ -156,14 +161,6 @@ fn capacity(
     Ok(capacity)
 }
 
-fn validate_stops(stops: &[i32]) -> Result<()> {
-    ensure!(
-        stops == [1],
-        "K2 Horizon raw generation requires EOS 1 only; extra stop metadata is unsupported"
-    );
-    Ok(())
-}
-
 pub(crate) fn run_raw(
     gguf: &GgufFile,
     args: &Args,
@@ -171,10 +168,12 @@ pub(crate) fn run_raw(
     invocation: cli::Invocation,
 ) -> Result<()> {
     let request_t0 = Instant::now();
+    let artifact = K2PreparedArtifact::inspect(gguf)?;
+    let raw_stops = artifact.generation_stops()?;
+    let config = artifact.config().clone();
+    let tokenizer = artifact.into_tokenizer();
     let (text, source, mut chat_record) = prepare_input(gguf, invocation, args, explicit)?;
     let sampling = cli_sampling_config(args)?;
-    let config = K2HorizonConfig::from_gguf(gguf).context("bind K2 dense 7B profile")?;
-    let tokenizer = NativeTokenizer::from_gguf(gguf).context("bind native K2 tokenizer")?;
     let encode_t0 = Instant::now();
     // Native single-sequence policy inserts BOS once per encoding call. An
     // already serialized BOS requires explicit --no-special-tokens, not guessing.
@@ -193,9 +192,7 @@ pub(crate) fn run_raw(
     let stops = if chat_record.is_some() {
         chat::CHAT_STOPS.to_vec()
     } else {
-        let stops = gguf.stop_token_ids()?;
-        validate_stops(&stops)?;
-        stops
+        raw_stops
     };
     for &stop in &stops {
         checked_token_id(stop, config.vocab_size, "stop")?;
@@ -477,7 +474,7 @@ mod tests {
 
     #[test]
     fn k2_capabilities_do_not_advertise_other_lanes_or_fitting() {
-        let capabilities = execution_capabilities();
+        let capabilities = family_implementation();
         for lane in ["run", "serve", "bench", "lens"] {
             assert_eq!(
                 capabilities[lane]["capacity_policy"],

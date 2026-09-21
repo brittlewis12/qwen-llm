@@ -110,7 +110,7 @@ fn check_stamps(expected: &[GgufShardStamp], actual: &[GgufShardStamp]) -> Resul
     Ok(())
 }
 
-fn validate_embedding(dtype: GgmlType) -> Result<()> {
+pub(super) fn validate_embedding(dtype: GgmlType) -> Result<()> {
     if !matches!(
         dtype,
         GgmlType::F32

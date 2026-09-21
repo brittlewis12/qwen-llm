@@ -51,10 +51,14 @@ def main():
     info = json.loads(run("info", ["info", "--json", "-m", model], gpu=False).stdout)
     assert info["capabilities"]["template"]["status"] == "identified"
     assert info["capabilities"]["reasoning"]["levels"] == ["high", "medium", "low"]
-    assert (
-        info["capabilities"]["execution"]["serve"]["chat"]
-        == "verified_final_artifact_only"
-    )
+    execution = info["capabilities"]["execution"]
+    assert execution["serve"]["chat"] is True
+    assert execution["artifact"]["core"]["status"] == "passed"
+    assert execution["artifact"]["generation"]["status"] == "passed"
+    assert execution["request_device"]["status"] == "not_evaluated"
+    for lane in ["run", "serve", "bench", "lens"]:
+        assert execution[lane]["status"] == "conditional"
+        assert execution[lane]["artifact_admission"]["status"] == "passed"
     profile = info["capabilities"]["template"]["profile"]
     assert profile["template_sha256"] == fixture["template_sha256"]
     assert profile["generation_config_sha256"] == fixture["generation_config_sha256"]

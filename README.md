@@ -21,10 +21,18 @@ Current model paths include:
 - DeepSeek V4 Flash-0731 `deepseek4` profiles.
 - The released Muse Glimmer 30B profile with its supported chat template and
   uniform Q8_0 or BF16 matrix storage.
+- K2 Horizon dense 7B (`k2-horizon`): native raw execution, forward-only lens,
+  and verified final-artifact no-tools CLI/HTTP chat. Numerical evidence is scoped
+  to the documented final Q8_0/F16-KV corpus, not every admitted checkpoint/context.
 
 Model-family and request capabilities are intentionally strict. Unsupported
 architectures, templates, and execution combinations fail closed rather than
 silently selecting a fallback contract.
+
+K2 `qwen info --json` separates family implementation from artifact CPU admission;
+admitted lanes are `conditional` until actual request/device/memory checks pass.
+Verified chat inspection hashes retained checkpoint bytes on the CPU, with
+cooperative cancellation. See [current K2 scope](docs/K2-HORIZON-PLAN.md).
 
 ## Build
 

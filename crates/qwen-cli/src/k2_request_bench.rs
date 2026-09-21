@@ -2,8 +2,7 @@
 use anyhow::{Context, Result, ensure};
 use clap::{ArgGroup, Parser};
 use qwen_llm::gguf::GgufFile;
-use qwen_llm::k2_horizon::K2HorizonConfig;
-use qwen_llm::k2_horizon_runtime::{K2LoadedModel, K2RuntimePlan};
+use qwen_llm::k2_horizon_runtime::{K2ArtifactLayout, K2LoadedModel, K2RuntimePlan};
 use qwen_llm::metal::{MetalContext, host_page_size_bytes};
 use qwen_llm::model_family::ModelFamily;
 use qwen_llm::sampling::{SAMPLER_ALGORITHM_VERSION, Sampler, SamplingConfig};
@@ -68,13 +67,8 @@ fn checked_id(id: i32, vocab: u32) -> Result<u32> {
     Ok(id as u32)
 }
 
-fn stops(ids: &[i32]) -> Result<()> {
-    ensure!(
-        ids == [1],
-        "K2 benchmark requires EOS 1 only, no alternate stop set"
-    );
-    Ok(())
-}
+#[cfg(test)]
+use qwen_llm::k2_horizon_runtime::validate_generation_stops as stops;
 
 fn elapsed(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)
@@ -285,11 +279,13 @@ pub fn run(args: K2RequestArgs) -> Result<()> {
         "k2-request requires a dense K2 Horizon model"
     );
     let started = Instant::now();
-    let config = K2HorizonConfig::from_gguf(&gguf)?;
-    stops(&gguf.stop_token_ids()?)?;
+    let layout = K2ArtifactLayout::inspect(&gguf)?;
     let bind_ns = elapsed(started);
     let started = Instant::now();
-    let tokenizer = NativeTokenizer::from_gguf(&gguf)?;
+    let artifact = layout.prepare_tokenizer()?;
+    artifact.generation_stops()?;
+    let config = artifact.config().clone();
+    let tokenizer = artifact.into_tokenizer();
     let tokenizer_ns = elapsed(started);
     let started = Instant::now();
     let ids = if let Some(text) = &args.raw_prompt {

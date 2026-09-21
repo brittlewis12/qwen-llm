@@ -1519,3 +1519,47 @@ reader test is the deterministic proof of between-chunk cancellation.
 Closure adversarial verdict: **commit-ready, no concrete blocker**. Ten CLI parser/
 help tests, nineteen K2 frontend tests, final all-target compilation and diff
 whitespace checks pass. No compiler warnings remain.
+
+## Packet 40 artifact-derived capability contracts
+
+The unconditional execution-capability finding is confirmed. K2 JSON info used to
+advertise the family run implementation independently of rejected configuration,
+tensor/storage admission, tokenizer, or generation stop policy. It now reports
+private family implementation facts separately from shared artifact CPU preparation
+and request/device admission. Per-lane status is `conditional` after artifact
+admission or `unsupported` on rejection; `request_device` is explicitly
+`not_evaluated`. No device allocation or numerical qualification is implied.
+
+Library `K2ArtifactLayout` and `K2PreparedArtifact` perform the same config/full
+inventory/range/native-embedding/retained-layout/tokenizer checks consumed by CLI,
+serve, benchmark and lens. Layout and tokenizer stages remain separable for honest
+benchmark setup timing. The retained one-position plan is only a CPU artifact
+layout probe; execution still replans the requested capacity on the actual device
+and live memory signals. Stable codes distinguish configuration, tensor inventory,
+embedding storage, retained storage, tokenizer and generation-stop failures.
+
+Generation stops are a separate check used by run/serve/bench. Lens does not sample,
+so an otherwise tokenizer-valid extra EOS set does not disable its core lane.
+Failed core or generation admission prevents any chat-profile verification attempt.
+The final artifact still needs the same opaque, full-byte verified chat proof;
+`execution.serve.chat` now reflects that artifact-specific decision as a boolean.
+CLI CPU admission precedes prompt-file/stdin acquisition and Metal initialization.
+No cross-family driver/profile refactor is introduced.
+
+Model-free CPU fixtures use real GGUF headers and sparse, nonoverlapping tensor
+extents. They write no payload, perform no payload hashing or GPU execution, and
+are not trained models. Tests cover compatible 8192-context raw preparation,
+generation-only extra stops, bad geometry, missing/extra tensors, norm storage,
+unsupported Q5_K embedding gather, malformed tokenizer, out-of-range descriptors
+and overlapping retained ranges. Pure projection tests cover rejected/conditional
+lanes and the absence of device or numerical admission claims.
+
+Design and pre-execution adversarial reviews found no blockers. Actual pinned-Q8
+info/chat, request benchmark and plain-lens checks pass in
+`target/profiles/k2-admission-chat-v1`, `k2-admission-bench-v1`, and
+`k2-admission-lens-v1`; they retain template/token IDs, all 36 lens sites, raw/chat
+controls, benchmark accounting and host-only refusal evidence. Actual borrowed
+HTTP JSON/SSE/stop/abort checks also pass (`target/profiles/k2-admission-http-v1.json`).
+GPU children use production-exclusive leases, the wired-memory gate and API
+validation. These are preparation/surface regressions, not new quality or speed
+claims. Compiler checking remains warning-free.

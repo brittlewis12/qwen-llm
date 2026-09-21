@@ -824,12 +824,13 @@ pub(crate) fn input_capability_for(
         }
         Some(ModelFamily::DeepSeek4 | ModelFamily::MuseGlimmer) => InputCapability::all_supported(),
         Some(ModelFamily::K2Horizon) => {
-            match qwen_llm::k2_horizon::K2HorizonConfig::from_gguf(gguf) {
+            match qwen_llm::k2_horizon_runtime::K2PreparedArtifact::inspect(gguf)
+                .and_then(|artifact| artifact.generation_stops()) {
                 Ok(_) => InputCapability::raw_only(
                     "chat_profile_unverified",
                     "K2 chat requires a verified final-artifact profile; compatible checkpoints retain raw input".into(),
                 ),
-                Err(error) => InputCapability::none("k2_profile_unsupported", error.to_string()),
+                Err(error) => InputCapability::none(error.code(), error.to_string()),
             }
         }
         None => InputCapability::none(
@@ -972,7 +973,8 @@ use telemetry::*;
 /// `qwen info`: text mode is header inspection; K2 JSON chat eligibility also
 /// verifies retained checkpoint bytes with cancellation. Text mode is the legacy model
 /// summary; `--json` projects the decisions the binary would make for this
-/// model before loading it. Only drafter admission is projected today; the
+/// model before loading it. Artifact preparation is distinct from device/request
+/// admission; the
 /// shape grows one consumed decision at a time, never as a hand-maintained
 /// capability table.
 fn run_info(info: cli::InfoInvocation) -> Result<()> {
@@ -1100,13 +1102,12 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
         "prompt_lookup": { "run": prompt_lookup },
         "capabilities": {
             "reasoning": reasoning,
-            "input": input_capability_for(family, &gguf),
+            "input": if family == Some(ModelFamily::K2Horizon) { serde_json::Value::Null } else { serde_json::to_value(input_capability_for(family, &gguf))? },
             "template": template_projection(family, &gguf),
         },
     });
     if family == Some(ModelFamily::K2Horizon) {
-        projection["capabilities"]["execution"] = k2_horizon::execution_capabilities();
-        for (key, value) in k2_horizon::chat_projection(&gguf)?
+        for (key, value) in k2_horizon::capability_projection(&gguf)?
             .as_object()
             .expect("K2 capability projection")
         {

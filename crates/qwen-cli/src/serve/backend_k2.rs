@@ -5,7 +5,7 @@ use super::output_partition::OutputProtocol;
 use super::render_k2;
 use anyhow::{Context, Result, ensure};
 use qwen_llm::gguf::GgufFile;
-use qwen_llm::k2_horizon_runtime::{K2LoadedModel, K2RuntimePlan};
+use qwen_llm::k2_horizon_runtime::{K2LoadedModel, K2PreparedArtifact, K2RuntimePlan};
 use qwen_llm::metal::host_page_size_bytes;
 use qwen_llm::sampling::Sampler;
 use qwen_llm::tokenizer::NativeTokenizer;
@@ -53,17 +53,15 @@ impl Prepared {
             invocation.snapshot_cache_mib,
             invocation.drafter.is_some(),
         )?;
-        ensure!(
-            gguf.stop_token_ids()? == [1],
-            "K2 serve requires exact EOS 1 only"
-        );
+        let artifact = K2PreparedArtifact::inspect(gguf)?;
+        artifact.generation_stops()?;
         K2RuntimePlan::inspect(
             gguf,
             u32::try_from(capacity)?,
             host_page_size_bytes()?,
             usize::MAX,
         )?;
-        let tokenizer = NativeTokenizer::from_gguf(gguf)?;
+        let tokenizer = artifact.into_tokenizer();
         let chat_profile = render_k2::ChatCapability::verify(gguf);
         // A termination request must not become a raw-only server fallback.
         crate::shutdown::checkpoint()?;

@@ -2,7 +2,7 @@
 
 This is the current implementation map, not the superseded chronological plan.
 Historical decisions, failed experiments, review findings and qualification
-evidence remain in `K2-HORIZON-REVIEW.md` (packets 1-37). User-facing contracts
+evidence remain in `K2-HORIZON-REVIEW.md` (packets 1-38). User-facing contracts
 live in `CLI-UX.md` and `SERVE.md`; reproduction is in
 `scripts/reference/k2/README.md`.
 
@@ -56,8 +56,9 @@ Packet 37 removes unpriced tensor-sized host staging from K2 owned allocations;
 the admitted 32K-capacity allocation/high-water check passes without claiming a
 paired speedup. Immediate follow-ups, ahead of additional architectural work:
 
-- Separate cache advancement from output readouts, preserving cancellation and
-  poison semantics; reuse admitted packed scratch where useful, then measure pairs.
+- Packet 38 separates cache advancement from readouts and preserves cancellation
+  and poison semantics. Bitwise state/continuation tests and paired scheduling
+  diagnostics pass; lazy admitted packed-scratch reuse remains a separate step.
 - Derive artifact capability reporting from admission; correct request/setup
   timing; add cooperative cancellation to exhaustive identity checks and truthful
   inspection I/O/help/README descriptions.

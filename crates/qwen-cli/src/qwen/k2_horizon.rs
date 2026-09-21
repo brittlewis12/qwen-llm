@@ -212,9 +212,14 @@ pub(crate) fn run_raw(
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     let prefill_t0 = Instant::now();
     let mut logits = Vec::new();
-    for chunk in tokens.chunks(prefill.chunk_tokens) {
+    let mut chunks = tokens.chunks(prefill.chunk_tokens).peekable();
+    while let Some(chunk) = chunks.next() {
         shutdown::checkpoint()?;
-        logits = session.append(chunk)?;
+        if chunks.peek().is_none() {
+            logits = session.append(chunk)?;
+        } else {
+            session.advance(chunk)?;
+        }
     }
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
     let stdout = std::io::stdout();

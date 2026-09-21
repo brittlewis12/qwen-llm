@@ -27,6 +27,31 @@ capacity allocates 4.5 GiB logical KV (no weights); normal production lease and
 memory gates apply. `K2_ALLOCATION_CAPACITY` can lower the probe size. Results do
 not qualify model history length or establish a paired performance improvement.
 
+## Prefill readout scheduling
+
+Nonfinal frontend prefill chunks use `K2Session::advance`, preserving residual/KV
+finite checks and transaction semantics while skipping the output head and host
+logits download. Final prompt chunks and generation transitions still use append.
+HTTP retains singleton cancellation points; CLI/bench/lens retain packed chunk
+boundaries. Packed scratch remains per-append, not a retained session workspace.
+
+```sh
+K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" MTL_DEBUG_LAYER=1 \
+cargo test -p qwen-llm --lib \
+  k2_horizon_runtime::readout_tests::gpu_k2_advance_skips_readouts_preserves_state_and_poisoning \
+  -- --ignored --exact --nocapture --test-threads=1
+K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" MTL_DEBUG_LAYER=1 \
+K2_READOUT_EVIDENCE="$PWD/target/profiles/k2-readout-pairs-new.json" \
+cargo test -p qwen-llm --lib \
+  k2_horizon_runtime::readout_tests::gpu_k2_readout_schedule_paired_wall_probe \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+The paired probe counts real head encodes and host downloads separately, requires
+bitwise final-logit agreement, and alternates old/new order after warmup. Its
+loaded-model synthetic prefill timings exclude setup and session allocation; they
+are diagnostic, not end-to-end product performance or independent quality evidence.
+
 ## No-tools template checks
 
 The CPU oracle downloads only immutable template/tokenizer/generation metadata,

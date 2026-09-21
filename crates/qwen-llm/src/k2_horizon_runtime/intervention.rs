@@ -52,7 +52,12 @@ impl K2Session<'_, '_> {
             capture_bytes(post_block_layers)?;
         }
         validate(interventions)?;
-        self.append_impl(tokens, post_block_layers, interventions)
+        self.append_impl(
+            tokens,
+            post_block_layers,
+            interventions,
+            AppendReadout::FinalLogits,
+        )
     }
 }
 

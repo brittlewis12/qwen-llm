@@ -29,7 +29,7 @@ impl K2Session<'_, '_> {
         post_block_layers: &[u32],
     ) -> Result<K2CapturedForward> {
         capture_bytes(post_block_layers)?;
-        self.append_impl(tokens, post_block_layers, &[])
+        self.append_impl(tokens, post_block_layers, &[], AppendReadout::FinalLogits)
     }
 
     /// Apply this model's final grouped norm and untied head to one arbitrary
@@ -111,6 +111,8 @@ impl K2Session<'_, '_> {
         } else {
             Vec::new()
         };
+        #[cfg(test)]
+        readout_tests::record_download();
         let logits = logits.to_vec();
         transaction.checked()?;
         transaction.commit()?;

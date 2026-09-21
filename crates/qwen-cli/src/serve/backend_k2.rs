@@ -176,11 +176,17 @@ impl GenerationBackend for K2Backend<'_, '_> {
         let mut logits = Vec::new();
         // Genuine per-token cancellation boundaries. Every append is synchronous;
         // no staged prefix survives an aborted request's session drop.
-        for token in &tokens {
+        for (index, token) in tokens.iter().enumerate() {
             sink.tick().map_err(BackendFailure::Aborted)?;
-            logits = session
-                .append(&[*token])
-                .map_err(|e| ServeError::server_error(format!("K2 prefill: {e}")))?;
+            if index + 1 == tokens.len() {
+                logits = session
+                    .append(&[*token])
+                    .map_err(|e| ServeError::server_error(format!("K2 prefill: {e}")))?;
+            } else {
+                session
+                    .advance(&[*token])
+                    .map_err(|e| ServeError::server_error(format!("K2 prefill: {e}")))?;
+            }
         }
         sink.tick().map_err(BackendFailure::Aborted)?;
         let mut abort = None;

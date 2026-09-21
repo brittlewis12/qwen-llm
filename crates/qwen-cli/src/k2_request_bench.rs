@@ -186,9 +186,16 @@ fn iteration(
     let session_ns = elapsed(started);
     let started = Instant::now();
     let mut logits = Vec::new();
-    for chunk in prompt.chunks(model.prefill_info(prompt.len()).chunk_tokens) {
+    let mut chunks = prompt
+        .chunks(model.prefill_info(prompt.len()).chunk_tokens)
+        .peekable();
+    while let Some(chunk) = chunks.next() {
         super::shutdown::checkpoint()?;
-        logits = session.append(chunk)?;
+        if chunks.peek().is_none() {
+            logits = session.append(chunk)?;
+        } else {
+            session.advance(chunk)?;
+        }
     }
     let prefill_ns = elapsed(started);
     let started = Instant::now();
@@ -381,9 +388,9 @@ pub fn run(args: K2RequestArgs) -> Result<()> {
             "runtime_plan_ns":plan_ns,"metal_context_ns":context_ns,"resident_model_load_ns":load_ns},
         "method":{"clock":"host_monotonic_wall_ns","session_scope":"fresh_allocation_each_repetition",
             "prefill":"bounded_cancellable_chunk_appends","prefill_execution":model.prefill_info(prompt.len()),
-            "readout":"each_chunk_logits_computed_only_final_prompt_used_for_sampling",
+            "readout":"final_prompt_only_one_head_and_logits_download",
             "warmup_repetitions":usize::from(warmup.is_some()),"timed_repetitions":args.runs,
-            "append_includes":"encoding_submission_wait_finite_checks_source_checks_logits_readback",
+            "append_includes":"encoding_submission_wait_residual_kv_finite_checks_source_checks_optional_final_logits_readback",
             "request_boundary":"before_session_allocation_to_after_generation_before_cleanup_hashes_serialization",
             "generation_includes":"sampling_native_piece_decoding_transition_appends_checkpoint_checks",
             "first_sample_ready":"direct_request_clock_after_first_selection_not_network_ttft",

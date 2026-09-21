@@ -206,6 +206,8 @@ impl<'a> K2LoadedModel<'a> {
             request,
             buffers,
             ledger: Ledger::default(),
+            #[cfg(test)]
+            fail_next_append_check: false,
             _permit: permit,
         })
     }
@@ -216,10 +218,18 @@ pub struct K2Session<'model, 'ctx> {
     request: K2ShortContextPlan,
     buffers: SessionBuffers,
     ledger: Ledger,
+    #[cfg(test)]
+    fail_next_append_check: bool,
     _permit: SessionPermit<'model>,
 }
 
 struct SessionPermit<'a>(&'a Cell<bool>);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AppendReadout {
+    FinalLogits,
+    None,
+}
 
 impl<'a> SessionPermit<'a> {
     fn acquire(active: &'a Cell<bool>) -> Result<Self> {
@@ -248,7 +258,21 @@ impl K2Session<'_, '_> {
     /// Validates ALL IDs before I32 upload. Successful earlier commands
     /// remain staged until the entire append completes; errors expose no prefix.
     pub fn append(&mut self, tokens: &[u32]) -> Result<Vec<f32>> {
-        Ok(self.append_impl(tokens, &[], &[])?.logits)
+        Ok(self
+            .append_impl(tokens, &[], &[], AppendReadout::FinalLogits)?
+            .logits)
+    }
+
+    /// Advance the full causal state without evaluating or downloading logits.
+    /// Useful for nonfinal prefill chunks: cancellation boundaries need not
+    /// coincide with output-head evaluations. Transaction/poison rules match append.
+    /// Residual/KV finite checks still run; packed scratch is still per-append.
+    pub fn advance(&mut self, tokens: &[u32]) -> Result<()> {
+        if tokens.is_empty() {
+            return Err(invalid("advance requires nonempty tokens"));
+        }
+        self.append_impl(tokens, &[], &[], AppendReadout::None)?;
+        Ok(())
     }
 
     fn append_impl(
@@ -256,7 +280,11 @@ impl K2Session<'_, '_> {
         tokens: &[u32],
         layers: &[u32],
         interventions: &[K2Intervention<'_>],
+        readout: AppendReadout,
     ) -> Result<K2CapturedForward> {
+        if readout == AppendReadout::None && (!layers.is_empty() || !interventions.is_empty()) {
+            return Err(invalid("captures and interventions require final logits"));
+        }
         if let Err(error) = self.model.plan.revalidate_source() {
             self.ledger.poison();
             return Err(error);
@@ -304,6 +332,8 @@ impl K2Session<'_, '_> {
                 .map(|index| absolute.token(index as u32))
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             let last = end == tokens.len();
+            // Final residual/hook placement is independent of requesting logits.
+            let logits = last && readout == AppendReadout::FinalLogits;
             let buffers = packed
                 .as_ref()
                 .map_or(&self.buffers, |packed| &packed.buffers)
@@ -322,7 +352,7 @@ impl K2Session<'_, '_> {
                 &self.request,
                 &plans,
                 &buffers,
-                last,
+                logits,
                 captures.as_ref().filter(|_| last),
                 interventions.as_ref().filter(|_| last),
             )
@@ -352,15 +382,33 @@ impl K2Session<'_, '_> {
                     command.error()
                 )));
             }
+            #[cfg(test)]
+            if std::mem::take(&mut self.fail_next_append_check) {
+                unsafe {
+                    buffers
+                        .residual
+                        .buffer
+                        .contents()
+                        .as_ptr()
+                        .cast::<f32>()
+                        .write(f32::NAN)
+                };
+            }
             for (index, token) in plans.iter().enumerate() {
                 buffers
                     .rows(index, 1)?
-                    .check_completed(token, last && index + 1 == plans.len())?;
+                    .check_completed(token, logits && index + 1 == plans.len())?;
             }
             transaction.checked()?;
         }
         self.model.plan.revalidate_source()?;
-        let logits = read_f32(&self.buffers.logits).to_vec();
+        let logits = if readout == AppendReadout::FinalLogits {
+            #[cfg(test)]
+            readout_tests::record_download();
+            read_f32(&self.buffers.logits).to_vec()
+        } else {
+            Vec::new()
+        };
         let residuals = captures
             .as_ref()
             .map(CaptureArena::read)
@@ -538,6 +586,8 @@ fn encode_readout(
         &b.norm,
     )?;
     encode_mat_vec_dispatch(ctx, enc, &weights.output, &b.norm, &b.logits, 4096, 250624)?;
+    #[cfg(test)]
+    readout_tests::record_head();
     Ok(())
 }
 
@@ -768,10 +818,12 @@ fn reconcile(ctx: &MetalContext, before: u64, price: u64) -> Result<()> {
 }
 
 #[cfg(test)]
-mod compact_tests;
-#[cfg(test)]
 mod allocation_tests;
 #[cfg(test)]
+mod compact_tests;
+#[cfg(test)]
 mod oracle_tests;
+#[cfg(test)]
+mod readout_tests;
 #[cfg(test)]
 mod tests;

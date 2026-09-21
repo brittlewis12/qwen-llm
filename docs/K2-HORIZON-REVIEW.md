@@ -1429,3 +1429,56 @@ RSS is a cumulative process high-water diagnostic, not exact allocation/physical
 residency attribution. This is a synthetic allocation check without model weights
 or full-context inference; there is no paired speedup claim. No giant unsafe old
 staging control was run merely to restate the source-grounded defect.
+
+Closure adversarial review found no commit blocker. All-target compilation is
+warning-free; twelve runtime host tests pass, in addition to the two explicitly
+executed allocation probes.
+
+## Packet 38 separate prefill advancement from output readout
+
+The discarded-readout finding is confirmed. The runtime already skips heads on
+intermediate tokens within an append, but frontends split prompts for cancellation;
+every append previously evaluated/scanned/downloaded logits that most chunks threw
+away. `K2Session::advance` now runs the same causal graph and append transaction
+without a head, logits finite scan, or logits download. The internal explicit
+readout policy is separate from last-chunk residual mirroring and hook placement.
+Residual and newly written KV finite checks, source checks, transaction publication,
+and poison semantics remain. Empty advancement rejects before any work, and
+no-readout mode cannot be combined with captures/interventions.
+
+CLI, actual singleton HTTP, request benchmark, and lens prefill use advancement
+for nonfinal chunks and ordinary append/capture for the final chunk. Existing
+shutdown/checkpoint/tick locations and generation-transition appends are unchanged.
+Benchmark method metadata names final-prompt-only readout. Per-append packed scratch
+still exists; lazy retention is deliberately deferred because it changes admitted
+storage lifetimes, independently of this head-scheduling correction.
+
+Design/pre-execution adversarial review approved the bounded change. Leased,
+API-validated actual-Q8 tests compare the old append-per-chunk control with the
+new policy at singleton, 32-row and 17-row boundaries. All final logits, three
+capture sites, full cache bytes, and genuine fixed-token continuation agree
+bitwise. Test-only counters at actual head encoding and host logits copying prove
+exactly one of each for optimized prompt execution; no command-count inference.
+Stale NaN logits are ignored during advance; invalid/empty inputs remain retryable.
+An injected nonfinite residual after command submission poisons without publishing
+a prefix; the entire session drops cleanly and a fresh session is available.
+
+A separate paired diagnostic uses the same loaded artifact and 128 synthetic
+tokens, fresh sessions, warmups, then three alternating-order pairs for each policy.
+Every final logit row agrees exactly. Singleton head/download counts fall 128->1;
+packed counts fall 4->1. Warm singleton prefill wall ranges 5062-5095 ms for the old
+control versus 4690-4711 ms for advance (roughly 7% lower). Packed ranges 2758-2761 ms
+versus 2734-2745 ms (under 1%). These include debug/API-validation and per-append
+scratch costs, exclude session allocation/model loading, and are not end-to-end
+CLI/HTTP throughput claims. Retained evidence:
+`target/profiles/k2-readout-schedule-pairs-v1.json`.
+
+Actual HTTP chat JSON/SSE and raw/BOS/abort-isolation regressions pass after the
+change (`target/profiles/k2-chat-http-readout-v1.json`). The 1024-capacity surface
+checker passes raw run/benchmark fingerprints, 257-output budgeting, plain/imported
+lens readouts, packed/serial controls and pre-GPU refusals in
+`target/profiles/k2-readout-1024-surfaces-v1`. This is application consistency and
+readout-scheduling evidence, not new independent >256-history qualification.
+
+Closure adversarial verdict: **commit-ready, no concrete blocker**. Final
+all-target checking is warning-free and all 127 serving CPU regressions pass.

@@ -113,7 +113,7 @@ impl Prepared {
             if chunks.peek().is_none() {
                 capture = Some(session.append_with_captures(tokens, &self.capture_layers)?);
             } else {
-                session.append(tokens)?;
+                session.advance(tokens)?;
             }
         }
         let capture = capture.context("K2 executed prefix has no final capture")?;

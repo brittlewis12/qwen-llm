@@ -107,6 +107,9 @@ def main():
         assert sample["prompt_forwards"] == count
         assert sample["outcome"]["transition_forwards"] == sampled - 1
         assert doc["qualification"]["performance_claim"] is False
+        assert (
+            doc["method"]["readout"] == "final_prompt_only_one_head_and_logits_download"
+        )
         assert doc["method"]["prefill_execution"] == {
             "mode": "q8_lcpp_token_batch",
             "chunk_tokens": 32,

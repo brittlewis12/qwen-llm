@@ -1563,3 +1563,44 @@ HTTP JSON/SSE/stop/abort checks also pass (`target/profiles/k2-admission-http-v1
 GPU children use production-exclusive leases, the wired-memory gate and API
 validation. These are preparation/surface regressions, not new quality or speed
 claims. Compiler checking remains warning-free.
+
+Closure adversarial review found no concrete commit blocker; final K2 CPU tests,
+all-target compilation and whitespace checks pass.
+
+## Packet 41 separate loaded-request timing from setup and waiting
+
+The telemetry mismatch is confirmed: K2's old request timer included artifact
+verification, tokenizer construction and input waits, subtracting only the later
+Metal/model/session interval. New namespaced timing phases distinguish artifact
+layout, tokenizer construction, profile verification, acquisition, rendering,
+request preparation, encoding, model/context loading, session setup and resident
+execution. Encoding wraps only `tokenizer.encode`; prompt token fingerprinting is
+not mislabeled as tokenization.
+
+Because encoding must precede capacity-shaped allocation, K2 core `timing_ms.total`
+is the explicit reconstructed sum of encoding, request preparation and resident
+execution. Its policy string states that it is not a continuous interval. The
+continuous `end_to_end_lane_ms` preserves all waiting/verification/setup from K2
+lane entry through generator return, with its exclusions named: initial dispatcher
+GGUF opening, final formatting and stats serialization. Unclassified host overhead
+is an explicit residual, not silently assigned to inference. Durations use monotonic
+clocks and checked addition/subtraction; overlapping/overflowed accounting rejects.
+Other families' telemetry and generation behavior are unchanged.
+
+Design review approved the segmented/continuous distinction. Pre-execution review
+caught potential `load_ms` semantic drift: the first implementation also added
+artifact/tokenizer setup there. It now retains model/context plus session meaning;
+the other setup costs remain in their named phases. Injected-duration tests prove
+that waiting, verification, rendering and setup affect their own fields and lane
+wall without contaminating the loaded-request total or encoding. They also cover
+raw zero phases, explicit residual, overlaps, overflow and the preserved load scope.
+
+The leased/API-validated actual CLI checker passes in
+`target/profiles/k2-timing-chat-v1`: all effort levels, history/Unicode, raw controls,
+completed answer/HTTP parity, unchanged token fingerprints, complete timing phase
+inventory, finite nonnegative values, core/diagnostic total agreement and full
+phase-plus-residual reconciliation. These are attribution/behavior checks, not
+new latency or throughput qualification. All-target checking is warning-free.
+
+Closure adversarial verdict: **commit-ready, no concrete blocker**. All twenty-two
+K2 frontend CPU tests and final all-target/whitespace checks pass.

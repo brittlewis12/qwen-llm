@@ -1433,6 +1433,8 @@ pub(crate) struct RequestStatsK2Diagnostics {
     pub(crate) prefill: qwen_llm::k2_horizon_runtime::K2PrefillInfo,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) chat: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) timing: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1469,6 +1471,10 @@ pub(crate) fn parse_build_dirty(raw: &str) -> bool {
 /// - `total_ms` (record `timing_ms.total`): request wall from after the
 ///   model is resident to the last token; model load is excluded and
 ///   reported separately by lanes that measure it.
+/// K2 explicitly reconstructs `total_ms` from encoding, request preparation and
+/// resident execution spans (encoding precedes capacity-shaped loading). Its
+/// namespaced timing diagnostic reports the separate continuous lane wall and
+/// all setup phases; this does not change other families' measurements.
 pub(crate) struct RequestStatsMeasured {
     pub input_tokens: u64,
     pub output_tokens: u64,

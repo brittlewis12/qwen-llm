@@ -4,11 +4,14 @@ use super::*;
 use qwen_llm::k2_horizon_chat as chat;
 #[cfg(test)]
 use qwen_llm::k2_horizon_runtime::validate_generation_stops as validate_stops;
-use qwen_llm::k2_horizon_runtime::{K2LoadedModel, K2PreparedArtifact};
+use qwen_llm::k2_horizon_runtime::{K2ArtifactLayout, K2LoadedModel, K2PreparedArtifact};
 
 #[path = "k2_horizon/capabilities.rs"]
 mod capabilities;
 pub(crate) use capabilities::project as capability_projection;
+#[path = "k2_horizon/timing.rs"]
+mod timing;
+use timing::{Phase, Timing};
 
 // Family implementation facts only. Publish artifact decisions through capability_projection.
 fn family_implementation() -> serde_json::Value {
@@ -72,55 +75,76 @@ fn prepare_input(
     invocation: cli::Invocation,
     args: &Args,
     explicit: ExplicitCliOptions,
+    timing: &mut Timing,
 ) -> Result<(String, PromptSource, Option<serde_json::Value>)> {
     if let cli::Invocation::Run(run) = &invocation
         && !matches!(run.input, cli::RunInput::RawPrompt(_))
     {
+        let effort = timing.measure(Phase::RequestPreparation, || {
+            admission::K2_RAW_SINGLE_TURN.admit(&admission::supplied(args, explicit))?;
+            ensure!(
+                args.drafter.is_none(),
+                "K2 Horizon does not support --drafter"
+            );
+            ensure!(
+                !run.no_thinking,
+                "K2 chat has no released --no-thinking transition"
+            );
+            ensure!(
+                !args.no_special_tokens,
+                "K2 chat requires native BOS insertion"
+            );
+            Ok(chat::Effort::parse(run.reasoning_effort.as_deref())?)
+        })?;
+        // Bind the exact artifact before reading an input file or waiting on stdin.
+        shutdown::checkpoint()?;
+        let profile = timing.measure(Phase::ArtifactVerification, || {
+            Ok(chat::verify_profile_with_cancel(gguf, || {
+                shutdown::checkpoint().is_err()
+            })?)
+        })?;
+        let cli::Invocation::Run(run) = invocation else {
+            unreachable!()
+        };
+        let input = timing.measure(Phase::InputAcquisition, || run.acquire_input())?;
+        let text = timing.measure(Phase::Rendering, || render_chat_input(input, effort))?;
+        let record = serde_json::json!({"profile":profile,"reasoning_effort":effort,"stops":chat::CHAT_STOPS,
+            "bos_owner":"native_tokenizer","output":"reasoning_stderr_answer_stdout"});
+        return Ok((text, PromptSource::Messages, Some(record)));
+    }
+    let (text, source) = prepare_raw_timed(invocation, args, explicit, timing)?;
+    Ok((text, source, None))
+}
+
+#[cfg(test)]
+fn prepare_raw(
+    invocation: cli::Invocation,
+    args: &Args,
+    explicit: ExplicitCliOptions,
+) -> Result<(String, PromptSource)> {
+    prepare_raw_timed(invocation, args, explicit, &mut Timing::default())
+}
+
+fn prepare_raw_timed(
+    invocation: cli::Invocation,
+    args: &Args,
+    explicit: ExplicitCliOptions,
+    timing: &mut Timing,
+) -> Result<(String, PromptSource)> {
+    timing.measure(Phase::RequestPreparation, || {
         admission::K2_RAW_SINGLE_TURN.admit(&admission::supplied(args, explicit))?;
         ensure!(
             args.drafter.is_none(),
             "K2 Horizon does not support --drafter"
         );
         ensure!(
-            !run.no_thinking,
-            "K2 chat has no released --no-thinking transition"
+            args.messages.is_none(),
+            "legacy K2 input is raw-only; use qwen run --messages for verified chat"
         );
-        ensure!(
-            !args.no_special_tokens,
-            "K2 chat requires native BOS insertion"
-        );
-        let effort = chat::Effort::parse(run.reasoning_effort.as_deref())?;
-        // Bind the exact artifact before reading an input file or waiting on stdin.
-        shutdown::checkpoint()?;
-        let profile = chat::verify_profile_with_cancel(gguf, || shutdown::checkpoint().is_err())?;
-        let cli::Invocation::Run(run) = invocation else {
-            unreachable!()
-        };
-        let text = render_chat_input(run.acquire_input()?, effort)?;
-        let record = serde_json::json!({"profile":profile,"reasoning_effort":effort,"stops":chat::CHAT_STOPS,
-            "bos_owner":"native_tokenizer","output":"reasoning_stderr_answer_stdout"});
-        return Ok((text, PromptSource::Messages, Some(record)));
-    }
-    let (text, source) = prepare_raw(invocation, args, explicit)?;
-    Ok((text, source, None))
-}
-
-fn prepare_raw(
-    invocation: cli::Invocation,
-    args: &Args,
-    explicit: ExplicitCliOptions,
-) -> Result<(String, PromptSource)> {
-    admission::K2_RAW_SINGLE_TURN.admit(&admission::supplied(args, explicit))?;
-    ensure!(
-        args.drafter.is_none(),
-        "K2 Horizon does not support --drafter"
-    );
-    ensure!(
-        args.messages.is_none(),
-        "legacy K2 input is raw-only; use qwen run --messages for verified chat"
-    );
+        Ok(())
+    })?;
     match invocation {
-        cli::Invocation::Run(run) => {
+        cli::Invocation::Run(run) => timing.measure(Phase::RequestPreparation, || {
             ensure!(
                 !run.no_thinking && run.reasoning_effort.is_none(),
                 "K2 Horizon raw input does not accept reasoning controls"
@@ -132,9 +156,10 @@ fn prepare_raw(
                     "K2 raw preparation requires --raw-prompt; chat uses separate verified preparation"
                 ),
             }
-        }
+        }),
         cli::Invocation::Legacy => {
-            let (text, source, _) = prompt_text(args)?;
+            let (text, source, _) =
+                timing.measure(Phase::InputAcquisition, || prompt_text(args))?;
             Ok((text, source))
         }
         _ => bail!("K2 raw preparation is a single-turn generation path"),
@@ -168,47 +193,60 @@ pub(crate) fn run_raw(
     invocation: cli::Invocation,
 ) -> Result<()> {
     let request_t0 = Instant::now();
-    let artifact = K2PreparedArtifact::inspect(gguf)?;
-    let raw_stops = artifact.generation_stops()?;
+    let mut timing = Timing::default();
+    let layout = timing.measure(Phase::ArtifactLayout, || {
+        Ok(K2ArtifactLayout::inspect(gguf)?)
+    })?;
+    let artifact = timing.measure(Phase::TokenizerConstruction, || {
+        Ok(layout.prepare_tokenizer()?)
+    })?;
+    let raw_stops = timing.measure(Phase::RequestPreparation, || {
+        Ok(artifact.generation_stops()?)
+    })?;
     let config = artifact.config().clone();
     let tokenizer = artifact.into_tokenizer();
-    let (text, source, mut chat_record) = prepare_input(gguf, invocation, args, explicit)?;
-    let sampling = cli_sampling_config(args)?;
-    let encode_t0 = Instant::now();
+    let (text, source, mut chat_record) =
+        prepare_input(gguf, invocation, args, explicit, &mut timing)?;
+    let sampling = timing.measure(Phase::RequestPreparation, || cli_sampling_config(args))?;
     // Native single-sequence policy inserts BOS once per encoding call. An
     // already serialized BOS requires explicit --no-special-tokens, not guessing.
-    let ids = tokenizer.encode(&text, !args.no_special_tokens)?;
+    let ids = timing.measure(Phase::Encoding, || {
+        Ok(tokenizer.encode(&text, !args.no_special_tokens)?)
+    })?;
     if let Some(record) = &mut chat_record {
         record["prompt_token_ids_sha256_i32le"] =
             serde_json::json!(qwen_llm::tokenizer::token_ids_sha256_i32le(&ids));
     }
-    let encode_ms = encode_t0.elapsed().as_secs_f64() * 1e3;
-    let tokens = ids
-        .into_iter()
-        .enumerate()
-        .map(|(i, id)| checked_token_id(id, config.vocab_size, &format!("prompt[{i}]")))
-        .collect::<Result<Vec<_>>>()?;
-    let capacity = capacity(args, explicit, tokens.len(), config.context_length)?;
-    let stops = if chat_record.is_some() {
-        chat::CHAT_STOPS.to_vec()
-    } else {
-        raw_stops
-    };
-    for &stop in &stops {
-        checked_token_id(stop, config.vocab_size, "stop")?;
-    }
-    let mut sampler = Sampler::new(sampling)?;
+    let (tokens, capacity, stops, mut sampler) =
+        timing.measure(Phase::RequestPreparation, || {
+            let tokens = ids
+                .into_iter()
+                .enumerate()
+                .map(|(i, id)| checked_token_id(id, config.vocab_size, &format!("prompt[{i}]")))
+                .collect::<Result<Vec<_>>>()?;
+            let capacity = capacity(args, explicit, tokens.len(), config.context_length)?;
+            let stops = if chat_record.is_some() {
+                chat::CHAT_STOPS.to_vec()
+            } else {
+                raw_stops
+            };
+            for &stop in &stops {
+                checked_token_id(stop, config.vocab_size, "stop")?;
+            }
+            let sampler = Sampler::new(sampling)?;
+            Ok((tokens, capacity, stops, sampler))
+        })?;
     shutdown::checkpoint()?;
     let load_t0 = Instant::now();
     let ctx = MetalContext::new().context("initialize Metal for K2")?;
     let model = K2LoadedModel::load(&ctx, gguf, u32::try_from(capacity)?)?;
+    timing.record(Phase::ModelLoad, load_t0.elapsed())?;
     let prefill = model.prefill_info(tokens.len());
     eprintln!(
         "k2_horizon: prefill={} chunk_tokens={} commands={} temporary_activation_bytes={}",
         prefill.mode, prefill.chunk_tokens, prefill.commands, prefill.temporary_activation_bytes
     );
-    let mut session = model.create_session(0)?;
-    let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
+    let mut session = timing.measure(Phase::SessionSetup, || Ok(model.create_session(0)?))?;
     let prefill_t0 = Instant::now();
     let mut logits = Vec::new();
     let mut chunks = tokens.chunks(prefill.chunk_tokens).peekable();
@@ -254,6 +292,13 @@ pub(crate) fn run_raw(
             session.append(&[token]).map_err(anyhow::Error::from)
         },
     )?;
+    let execution_end = Instant::now();
+    timing.record(
+        Phase::ResidentExecution,
+        execution_end.duration_since(prefill_t0),
+    )?;
+    let timing = timing.finish(execution_end.duration_since(request_t0))?;
+    let load_ms = timing.load_ms;
     if let Some(partition) = partition {
         let mut events = Vec::new();
         let reasoning_closed = partition.closed();
@@ -294,7 +339,7 @@ pub(crate) fn run_raw(
             output_tokens: generation.tokens.len() as u64,
             transitions: generation.transitions as u64,
             stop_reason: generation.stop_reason,
-            tokenizer_ms: encode_ms,
+            tokenizer_ms: timing.encoding_ms,
             load_ms,
             prefill_ms,
             prefill_tps,
@@ -302,7 +347,7 @@ pub(crate) fn run_raw(
             decode_tps,
             transition_tps: generation.transitions as f64
                 / (generation.transition_ms / 1e3).max(f64::MIN_POSITIVE),
-            total_ms: request_t0.elapsed().as_secs_f64() * 1e3 - load_ms,
+            total_ms: timing.loaded_request_ms,
             output_fingerprint: GeneratedTokenSha256Digest::of(&generation.tokens),
         };
         append_single_turn_stats_record(
@@ -316,6 +361,7 @@ pub(crate) fn run_raw(
                 k2_horizon: Some(RequestStatsK2Diagnostics {
                     prefill,
                     chat: chat_record,
+                    timing: Some(timing.json),
                 }),
             }),
         )?;
@@ -396,6 +442,7 @@ mod tests {
             deepseek_v4: None,
             k2_horizon: Some(RequestStatsK2Diagnostics {
                 chat: None,
+                timing: None,
                 prefill: qwen_llm::k2_horizon_runtime::K2PrefillInfo {
                     mode: "q8_lcpp_token_batch",
                     chunk_tokens: 32,

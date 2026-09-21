@@ -7,6 +7,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import struct
@@ -30,6 +31,47 @@ def main():
         ).read_bytes()
     )
     env = {**os.environ, "MTL_DEBUG_LAYER": "1"}
+
+    def check_timing(document, chat):
+        timing = document["diagnostics"]["k2_horizon"]["timing"]
+        assert timing["schema_version"] == 1
+        assert (
+            timing["loaded_request_policy"]
+            == "sum_encoding_request_preparation_resident_execution_not_continuous_wall"
+        )
+        phases = timing["phases_ms"]
+        assert set(phases) == {
+            "artifact_layout",
+            "tokenizer_construction",
+            "artifact_verification",
+            "input_acquisition",
+            "rendering",
+            "request_preparation",
+            "encoding",
+            "model_load",
+            "session_setup",
+            "resident_execution",
+        }
+        for value in [
+            *phases.values(),
+            timing["unclassified_host_overhead_ms"],
+            timing["end_to_end_lane_ms"],
+        ]:
+            assert math.isfinite(value) and value >= 0
+        loaded = sum(
+            phases[name]
+            for name in ["encoding", "request_preparation", "resident_execution"]
+        )
+        assert math.isclose(document["timing_ms"]["total"], loaded, abs_tol=1e-8)
+        assert document["timing_ms"]["total"] == timing["loaded_request_ms"]
+        assert document["timing_ms"]["tokenization"] == phases["encoding"]
+        assert math.isclose(
+            sum(phases.values()) + timing["unclassified_host_overhead_ms"],
+            timing["end_to_end_lane_ms"],
+            abs_tol=1e-8,
+        )
+        assert (phases["artifact_verification"] > 0) == chat
+        assert (phases["rendering"] > 0) == chat
 
     def run(name, options, *, failure=None, gpu=True):
         command = [str(binary), *map(str, options)]
@@ -87,6 +129,7 @@ def main():
             ],
         )
         document = json.loads(stats.read_bytes())
+        check_timing(document, chat=True)
         diagnostic = document["diagnostics"]["k2_horizon"]["chat"]
         assert diagnostic["profile"] == profile
         assert diagnostic["stops"] == [1, 250019]
@@ -110,6 +153,7 @@ def main():
             ],
         )
         raw_doc = json.loads(raw_stats.read_bytes())
+        check_timing(raw_doc, chat=False)
         # The short corpus must not reach chat's extra stop; otherwise this is not
         # a like-for-like output control and the script must report that fact.
         tag = {
@@ -154,6 +198,7 @@ def main():
         ],
     )
     completed_doc = json.loads(completed_stats.read_bytes())
+    check_timing(completed_doc, chat=True)
     assert (
         completed_doc["diagnostics"]["k2_horizon"]["chat"]["reasoning_closed"] is True
     )

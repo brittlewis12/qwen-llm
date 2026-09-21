@@ -2,7 +2,7 @@
 
 This is the current implementation map, not the superseded chronological plan.
 Historical decisions, failed experiments, review findings and qualification
-evidence remain in `K2-HORIZON-REVIEW.md` (packets 1-40). User-facing contracts
+evidence remain in `K2-HORIZON-REVIEW.md` (packets 1-41). User-facing contracts
 live in `CLI-UX.md` and `SERVE.md`; reproduction is in
 `scripts/reference/k2/README.md`.
 
@@ -61,7 +61,8 @@ paired speedup. Immediate follow-ups, ahead of additional architectural work:
   diagnostics pass; lazy admitted packed-scratch reuse remains a separate step.
 - Packet 40 derives artifact capabilities from shared CPU preparation used by
   product lanes, separately from request/device admission, and updates the README.
-  Correct request/setup timing next. Packet 39 supplies cooperative exhaustive
+  Packet 41 separates request/setup timing while retaining continuous lane wall.
+  Packet 39 supplies cooperative exhaustive
   verification cancellation and accurate inspection I/O/help without weaker identity.
 - Reject overflowing externally supplied RMS inputs without silently changing
   ordinary arithmetic; tighten the fixed-token continuation wording.

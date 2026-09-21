@@ -369,6 +369,27 @@ not sample, so an otherwise valid extra stop set alone does not disable it. Chat
 verification is never attempted after failed core/generation admission. The
 `execution.serve.chat` boolean describes this artifact's verified eligibility.
 
+### K2 Request Timing
+
+Optional request stats now include `diagnostics.k2_horizon.timing` (version 1,
+milliseconds). Its phases distinguish artifact layout, tokenizer construction,
+full chat-profile verification, input acquisition, rendering, request preparation,
+encoding, Metal/model loading, session setup and resident execution. Raw requests
+have zero chat-verification/rendering phases. `timing_ms.tokenization` measures
+only native encoding, not tokenizer construction or input-token fingerprinting.
+
+K2 must encode before allocating a capacity-shaped session. Consequently
+`timing_ms.total` is explicitly reconstructed as encoding + request preparation +
+resident execution, not a continuous wall interval. Verification, stdin/file waits,
+rendering and all model/tokenizer/session setup are excluded from this loaded-request
+metric, not hidden: `end_to_end_lane_ms` retains continuous wall time from entering
+the K2 run lane through generator return. Its named boundary excludes initial GGUF
+opening in the dispatcher, final output formatting and stats serialization.
+`unclassified_host_overhead_ms` makes the remaining nonoverlapping wall time visible.
+Resident execution includes sampling/output callbacks; it is not GPU-only time.
+The existing `load_ms` diagnostic retains model/session setup meaning. Other
+families' telemetry is unchanged; these records are not steady-state benchmarks.
+
 ## Validation gate
 
 - Pin modern and legacy parser behavior, conflicts, help, and explicit-default

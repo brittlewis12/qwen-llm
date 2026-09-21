@@ -969,7 +969,8 @@ use run_options::*;
 use single_turn::*;
 use telemetry::*;
 
-/// `qwen info`: header-only inspection. Text mode is the legacy model
+/// `qwen info`: text mode is header inspection; K2 JSON chat eligibility also
+/// verifies retained checkpoint bytes with cancellation. Text mode is the legacy model
 /// summary; `--json` projects the decisions the binary would make for this
 /// model before loading it. Only drafter admission is projected today; the
 /// shape grows one consumed decision at a time, never as a hand-maintained
@@ -1105,7 +1106,7 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
     });
     if family == Some(ModelFamily::K2Horizon) {
         projection["capabilities"]["execution"] = k2_horizon::execution_capabilities();
-        for (key, value) in k2_horizon::chat_projection(&gguf)
+        for (key, value) in k2_horizon::chat_projection(&gguf)?
             .as_object()
             .expect("K2 capability projection")
         {

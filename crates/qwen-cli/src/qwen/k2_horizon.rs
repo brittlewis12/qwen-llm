@@ -25,8 +25,10 @@ pub(crate) fn execution_capabilities() -> serde_json::Value {
     })
 }
 
-pub(crate) fn chat_projection(gguf: &GgufFile) -> serde_json::Value {
-    match chat::verify_profile(gguf) {
+pub(crate) fn chat_projection(gguf: &GgufFile) -> Result<serde_json::Value> {
+    let profile = chat::verify_profile_with_cancel(gguf, || shutdown::checkpoint().is_err());
+    shutdown::checkpoint()?;
+    Ok(match profile {
         Ok(profile) => serde_json::json!({
             "input": {"raw":{"status":"supported"},"user":{"status":"supported"},"messages":{"status":"supported"},
                 "tools":{"status":"unsupported","code":"k2_tools_unimplemented","message":"K2 tool rendering and parsing are not enabled"}},
@@ -37,7 +39,7 @@ pub(crate) fn chat_projection(gguf: &GgufFile) -> serde_json::Value {
         }),
         Err(error) => serde_json::json!({"template":{"status":"unverified","rendered_as":null,
             "code":"chat_profile_unverified","message":error.to_string()}}),
-    }
+    })
 }
 
 fn render_chat_input(input: cli::AcquiredRunInput, effort: chat::Effort) -> Result<String> {
@@ -85,7 +87,7 @@ fn prepare_input(
         let effort = chat::Effort::parse(run.reasoning_effort.as_deref())?;
         // Bind the exact artifact before reading an input file or waiting on stdin.
         shutdown::checkpoint()?;
-        let profile = chat::verify_profile(gguf)?;
+        let profile = chat::verify_profile_with_cancel(gguf, || shutdown::checkpoint().is_err())?;
         let cli::Invocation::Run(run) = invocation else {
             unreachable!()
         };

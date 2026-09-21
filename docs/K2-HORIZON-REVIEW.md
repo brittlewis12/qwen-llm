@@ -1482,3 +1482,40 @@ readout-scheduling evidence, not new independent >256-history qualification.
 
 Closure adversarial verdict: **commit-ready, no concrete blocker**. Final
 all-target checking is warning-free and all 127 serving CPU regressions pass.
+
+## Packet 39 cooperative exhaustive-identity cancellation
+
+The verification responsiveness finding is confirmed. The retained-file scan used
+1 MiB chunks but did not observe CLI shutdown while hashing. A new cancellable
+entry point checks before source work, before each bounded read, after each shard
+and before publishing the content report. The existing uncancellable API wraps it
+with a never-cancel callback; content-root domains, source-stamp validation and
+the no-cache/no-downloader verification policy are unchanged.
+
+K2 profile verification propagates cancellation and checks before profile publication.
+CLI run, JSON info and server preparation use the shutdown checkpoint. Info checks
+again before emitting JSON; serving checks again before handling an unverified
+profile, so a signal cannot silently start a raw-only fallback. Text inspection
+still does not perform exhaustive chat verification. Help and comments now describe
+CPU retained-byte inspection accurately. Cancellation is cooperative, not an
+interruptible-filesystem-read guarantee.
+
+Adversarial review found no blocker before the CPU checks. Fifteen identity tests
+pass, including synthetic-reader cancellation before the first read, between
+chunks, and after the final partial read. Subsequent reads stop and no root returns;
+successful chunked hashing matches the whole-input root. Three chat CPU tests and
+all-target checking pass without warnings. The opt-in actual-artifact CPU test
+also passes: an injected mid-scan cancellation returns no verified profile, followed
+by unchanged content identity and all native template token-ID fixtures. No GPU
+execution or new weights are needed for this packet.
+
+Owned-process SIGINT checks also pass for JSON info, chat run (stdin input), and
+serve startup with an ephemeral address: each exits 130 with no JSON/stdout, no
+Metal initialization under `MTL_DEBUG_LAYER=1`, and no raw-only fallback diagnostic.
+Only the exact spawned child receives the signal. Observed teardown after signal
+is 48-95 ms in this smoke, not a cancellation-latency guarantee; the synthetic
+reader test is the deterministic proof of between-chunk cancellation.
+
+Closure adversarial verdict: **commit-ready, no concrete blocker**. Ten CLI parser/
+help tests, nineteen K2 frontend tests, final all-target compilation and diff
+whitespace checks pass. No compiler warnings remain.

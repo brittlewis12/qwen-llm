@@ -16,9 +16,9 @@ pub(crate) enum Command {
         after_help = "Examples:\n  qwen serve -m MODEL\n  qwen serve -m MODEL --addr 127.0.0.1:8737 --max-tokens 65536\n  qwen serve -m Muse-Glimmer.gguf --max-context-tokens 7168 --max-tokens 2048\n  qwen serve -m MODEL --trace-sse /tmp/qwen.sse.jsonl\n\nEndpoints: POST /v1/responses (stream and non-stream), GET /v1/models.\nSerial: one request in flight; stateless (store:false only)."
     )]
     Serve(ServeArgs),
-    /// Inspect a GGUF header without loading weights or touching the GPU.
+    /// Inspect model metadata and capabilities without using the GPU.
     #[command(
-        after_help = "Examples:\n  qwen info -m MODEL\n  qwen info -m MODEL --json\n\n--json reports the detected family and whether --drafter would be admitted per lane (run, serve), with a stable reason code when refused."
+        after_help = "Examples:\n  qwen info -m MODEL\n  qwen info -m MODEL --json\n\n--json reports the detected family and whether --drafter would be admitted per lane (run, serve), with a stable reason code when refused. Eligible K2 JSON inspection also hashes retained checkpoint bytes on the CPU to verify chat identity; it checks cancellation between bounded reads. Text inspection does not perform that chat verification."
     )]
     Info(InfoArgs),
 }

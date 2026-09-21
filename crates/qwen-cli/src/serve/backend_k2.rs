@@ -64,11 +64,14 @@ impl Prepared {
             usize::MAX,
         )?;
         let tokenizer = NativeTokenizer::from_gguf(gguf)?;
+        let chat_profile = render_k2::ChatCapability::verify(gguf);
+        // A termination request must not become a raw-only server fallback.
+        crate::shutdown::checkpoint()?;
         Ok(Self {
             tokenizer,
             capacity,
             default_max,
-            chat_profile: match render_k2::ChatCapability::verify(gguf) {
+            chat_profile: match chat_profile {
                 Ok(profile) => Some(profile),
                 Err(error) => {
                     eprintln!("K2 serve chat unavailable; raw requests remain supported: {error}");

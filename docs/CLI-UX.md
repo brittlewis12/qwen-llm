@@ -351,6 +351,12 @@ The conversion's source revision remains a publisher declaration, not proof of
 BF16-to-quantized fidelity. Request stats record the verified profile, selected
 effort, stops, BOS ownership, rendered-input token digest and `reasoning_closed`.
 
+CLI run, JSON inspection and server startup check termination between verification
+reads (at most 1 MiB per read) and before publishing a verified profile. Cancellation
+returns an error, never a partial identity or a raw-only server fallback. This is
+cooperative cancellation: it does not interrupt an in-progress filesystem read.
+Text `qwen info` remains metadata inspection without exhaustive chat verification.
+
 ## Validation gate
 
 - Pin modern and legacy parser behavior, conflicts, help, and explicit-default

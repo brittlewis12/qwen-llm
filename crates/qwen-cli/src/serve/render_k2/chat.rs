@@ -9,7 +9,9 @@ pub(crate) struct ChatCapability {
 impl ChatCapability {
     pub(crate) fn verify(source: &qwen_llm::gguf::GgufFile) -> Result<Self, k2::ChatError> {
         Ok(Self {
-            _profile: Some(k2::verify_profile(source)?),
+            _profile: Some(k2::verify_profile_with_cancel(source, || {
+                crate::shutdown::checkpoint().is_err()
+            })?),
         })
     }
 

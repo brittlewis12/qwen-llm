@@ -1,5 +1,5 @@
 //! Pinned IFM final-checkpoint no-tools template. Raw checkpoints remain separate.
-use crate::checkpoint_identity::verified_checkpoint_content_identity;
+use crate::checkpoint_identity::verified_checkpoint_content_identity_with_cancel;
 use crate::gguf::GgufFile;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
@@ -211,6 +211,17 @@ pub struct VerifiedChatProfile {
 /// Chat eligibility is exact artifact provenance, not architecture/name/template
 /// heuristics. Other compatible checkpoints can always use native raw input.
 pub fn verify_profile(source: &GgufFile) -> Result<VerifiedChatProfile> {
+    verify_profile_with_cancel(source, || false)
+}
+
+/// Cancellation cannot produce a verified profile or substitute a cached identity.
+pub fn verify_profile_with_cancel(
+    source: &GgufFile,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<VerifiedChatProfile> {
+    if should_cancel() {
+        return Err(error("verification cancelled"));
+    }
     crate::k2_horizon::K2HorizonModel::from_gguf(source).map_err(|e| error(e.to_string()))?;
     let tokenizer = format!(
         "{:016x}",
@@ -230,7 +241,8 @@ pub fn verify_profile(source: &GgufFile) -> Result<VerifiedChatProfile> {
             "chat_profile_unverified: template differs from pinned release",
         ));
     }
-    let report = verified_checkpoint_content_identity(source).map_err(|e| error(e.to_string()))?;
+    let report = verified_checkpoint_content_identity_with_cancel(source, &mut should_cancel)
+        .map_err(|e| error(e.to_string()))?;
     let content: String = report
         .content_id
         .iter()
@@ -240,6 +252,9 @@ pub fn verify_profile(source: &GgufFile) -> Result<VerifiedChatProfile> {
         return Err(error(
             "chat_profile_unverified: checkpoint bytes; use raw input",
         ));
+    }
+    if should_cancel() {
+        return Err(error("verification cancelled"));
     }
     Ok(VerifiedChatProfile {
         renderer: RENDERER,
@@ -337,8 +352,16 @@ mod tests {
     #[ignore = "CPU only: K2_GGUF metadata/content identity and native token-ID oracle, never Metal"]
     fn cpu_k2_chat_artifact_identity_and_native_tokens() {
         let source = GgufFile::open(std::env::var("K2_GGUF").unwrap()).unwrap();
+        let mut checkpoints = 0;
+        let cancelled = verify_profile_with_cancel(&source, || {
+            checkpoints += 1;
+            checkpoints == 4
+        });
+        assert!(cancelled.unwrap_err().to_string().contains("cancelled"));
+        assert_eq!(checkpoints, 4);
         let template = source.get_str("tokenizer.chat_template").unwrap_or("");
-        let content = verified_checkpoint_content_identity(&source).unwrap();
+        let content =
+            crate::checkpoint_identity::verified_checkpoint_content_identity(&source).unwrap();
         eprintln!(
             "template SHA256={:x}; content={}; tokenizer={:016x}; template_bytes={}",
             Sha256::digest(template.as_bytes()),

@@ -291,6 +291,105 @@ the chat-template re-implementation from `scripts/bench/text_capability_eval.py`
 (packet schema v2). Conversation-history rows remain deferred until a named
 consumer migrates.
 
+## K2 Horizon Verified Chat
+
+K2's native raw lane remains available for compatible dense 7B checkpoints. The
+first templated CLI profile is deliberately narrower: the verified final Q8_0
+artifact documented in `K2-HORIZON-PLAN.md`, not filename-based detection or a
+claim that every intermediate checkpoint was trained for chat.
+
+```sh
+qwen run -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+  --user 'Explain why long-context evaluation is difficult.' \
+  --reasoning-effort high -n 32768 --temp 1 --top-p 0.95
+qwen run -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" --messages conversation.json -n 1024
+```
+
+`--user` optionally accepts `--system`; stdin forms work as usual. `--messages`
+accepts a bare array or an object containing only `messages`. Content must be
+strings, with at most one leading system turn and a final user turn. Assistant
+history requires an explicit string thinking field, including the empty string:
+
+```json
+[
+  {"role":"user","content":"What is 2 + 2?"},
+  {"role":"assistant","think":"","content":"4."},
+  {"role":"user","content":"And 3 + 3?"}
+]
+```
+
+The pinned IFM field priority is `think`, `think_fast`, `think_faster`,
+`reasoning_content`, then `reasoning`; the first supplied string wins even when
+empty. This adapter rejects null/non-string fields, unknown/duplicate fields,
+tools, developer roles and multimodal content rather than silently dropping them.
+Reasoning effort accepts `high` (default), `medium`, or `low`. IFM publishes no
+non-thinking transition, so `--no-thinking` and effort `none` fail explicitly.
+
+The native tokenizer inserts BOS once; the renderer omits upstream's leading BOS
+and does not deduplicate authored marker-like text. Chat stops on EOS 1 or IFM
+end-of-message 250019, as specified by the pinned upstream generation config.
+Raw completion still stops on EOS 1 only and keeps `--no-special-tokens` semantics.
+No history is stripped or summarized.
+
+Chat sends reasoning to stderr and the final answer to stdout, removing the first
+matching effort-specific closing marker and an optional opener at byte zero.
+Later marker-like text remains literal; tools are never executed. Exhausting the
+budget inside reasoning leaves stdout empty and prints an explicit incomplete
+diagnostic (normal token-budget exit status, not a completed-answer claim).
+EOS before the reasoning close is a protocol error. Raw CLI output is unchanged.
+HTTP chat uses the same partitioner (see `SERVE.md#k2-horizon-verified-chat`).
+Benchmarks and lens inputs remain raw-only. Upstream sampling recommendations
+shown above are explicit options, not a change to the existing CLI defaults.
+
+Chat preparation and `qwen info --json` hash retained checkpoint bytes to verify
+the profile. This is read-only CPU work but can be expensive, especially in a debug
+build; no filename, cached identity or downloader declaration substitutes for that
+read. The embedded GGUF template and upstream template have separate digests:
+the native renderer follows upstream byte fixtures, never executes embedded Jinja.
+The upstream generation-config digest is reference provenance, not a GGUF field.
+The conversion's source revision remains a publisher declaration, not proof of
+BF16-to-quantized fidelity. Request stats record the verified profile, selected
+effort, stops, BOS ownership, rendered-input token digest and `reasoning_closed`.
+
+CLI run, JSON inspection and server startup check termination between verification
+reads (at most 1 MiB per read) and before publishing a verified profile. Cancellation
+returns an error, never a partial identity or a raw-only server fallback. This is
+cooperative cancellation: it does not interrupt an in-progress filesystem read.
+Text `qwen info` remains metadata inspection without exhaustive chat verification.
+
+K2 JSON inspection reports `capabilities.execution` in three layers:
+`implementation_status` describes the family implementation; per-lane
+`artifact_admission` reflects the same CPU preparation used by run/serve/bench/lens;
+`request_device.status` remains `not_evaluated`. An admitted lane is `conditional`,
+not a promise that the request fits memory or has been numerically qualified.
+Core preparation binds complete geometry/tensors, native embedding storage,
+retained ranges and tokenizer. Stable rejection codes identify those stages.
+Run/serve/bench additionally require raw generation EOS metadata `[1]`; lens does
+not sample, so an otherwise valid extra stop set alone does not disable it. Chat
+verification is never attempted after failed core/generation admission. The
+`execution.serve.chat` boolean describes this artifact's verified eligibility.
+
+### K2 Request Timing
+
+Optional request stats now include `diagnostics.k2_horizon.timing` (version 1,
+milliseconds). Its phases distinguish artifact layout, tokenizer construction,
+full chat-profile verification, input acquisition, rendering, request preparation,
+encoding, Metal/model loading, session setup and resident execution. Raw requests
+have zero chat-verification/rendering phases. `timing_ms.tokenization` measures
+only native encoding, not tokenizer construction or input-token fingerprinting.
+
+K2 must encode before allocating a capacity-shaped session. Consequently
+`timing_ms.total` is explicitly reconstructed as encoding + request preparation +
+resident execution, not a continuous wall interval. Verification, stdin/file waits,
+rendering and all model/tokenizer/session setup are excluded from this loaded-request
+metric, not hidden: `end_to_end_lane_ms` retains continuous wall time from entering
+the K2 run lane through generator return. Its named boundary excludes initial GGUF
+opening in the dispatcher, final output formatting and stats serialization.
+`unclassified_host_overhead_ms` makes the remaining nonoverlapping wall time visible.
+Resident execution includes sampling/output callbacks; it is not GPU-only time.
+The existing `load_ms` diagnostic retains model/session setup meaning. Other
+families' telemetry is unchanged; these records are not steady-state benchmarks.
+
 ## Validation gate
 
 - Pin modern and legacy parser behavior, conflicts, help, and explicit-default

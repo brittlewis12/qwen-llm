@@ -835,10 +835,13 @@ impl Drop for LlamaCppTokenizer {
 
 pub type Tokenizer = NativeTokenizer;
 
+mod k2;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PretokenizerKind {
     Qwen35,
     JoyAi,
+    K2Horizon,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -922,6 +925,7 @@ impl NativeTokenizer {
                 PretokenizerKind::Qwen35
             }
             (Some("deepseek4"), "gpt2", "joyai-llm") => PretokenizerKind::JoyAi,
+            (Some("k2-horizon"), "gpt2", "k2-horizon") => PretokenizerKind::K2Horizon,
             _ => {
                 return Err(TokError::UnsupportedNativeTokenizer {
                     model: model.to_string(),
@@ -1014,7 +1018,7 @@ impl NativeTokenizer {
 
         let default_special = match pretokenizer {
             PretokenizerKind::Qwen35 => Some(11),
-            PretokenizerKind::JoyAi => None,
+            PretokenizerKind::JoyAi | PretokenizerKind::K2Horizon => None,
         };
         let bos = optional_token_id(g, "tokenizer.ggml.bos_token_id")?.or(default_special);
         // The tokenizer interface has one canonical EOS while GGUF generation
@@ -1026,6 +1030,14 @@ impl NativeTokenizer {
         let add_bos = optional_bool(g, "tokenizer.ggml.add_bos_token")?.unwrap_or(false);
         let add_eos = optional_bool(g, "tokenizer.ggml.add_eos_token")?.unwrap_or(false);
         validate_special_addition_config(pretokenizer, bos, eos, add_bos, add_eos)?;
+        if pretokenizer == PretokenizerKind::K2Horizon {
+            // GGUF spells this wire key "seperator". Our encode API is single
+            // sequence: this separator must never become a trailing EOS.
+            k2::validate_pair_config(
+                optional_bool(g, "tokenizer.ggml.add_sep_token")?,
+                optional_token_id(g, "tokenizer.ggml.seperator_token_id")?,
+            )?;
+        }
 
         let mut special_tokens = Vec::new();
         for (id, token) in id_to_token.iter().enumerate() {
@@ -1088,9 +1100,24 @@ impl NativeTokenizer {
             out.push(self.bos.expect("validated bos id"));
         }
 
+        let mut normalized_bytes = 0usize;
         for fragment in self.partition_special(text) {
             match fragment {
-                Fragment::Token(id) => out.push(id),
+                Fragment::Token(id) => {
+                    if self.pretokenizer == PretokenizerKind::K2Horizon {
+                        normalized_bytes += self.id_to_token[id as usize].text.len();
+                        validate_native_input_len(normalized_bytes)?;
+                    }
+                    out.push(id);
+                }
+                Fragment::Text(s) if self.pretokenizer == PretokenizerKind::K2Horizon => {
+                    // Added tokens match before NFC and are never rematched
+                    // against the normalized ordinary fragments.
+                    let normalized = k2::normalize(s)?;
+                    normalized_bytes += normalized.len();
+                    validate_native_input_len(normalized_bytes)?;
+                    self.encode_raw(&normalized, &mut out)?;
+                }
                 Fragment::Text(s) => self.encode_raw(s, &mut out)?,
             }
         }
@@ -1109,6 +1136,7 @@ impl NativeTokenizer {
         let pieces = match self.pretokenizer {
             PretokenizerKind::Qwen35 => qwen35_pretokenize(text),
             PretokenizerKind::JoyAi => joyai_pretokenize(text),
+            PretokenizerKind::K2Horizon => k2::pretokenize(text),
         };
         for piece in pieces {
             self.encode_bpe_piece(piece.as_bytes(), out);
@@ -1987,6 +2015,13 @@ fn validate_special_addition_config(
     add_bos: bool,
     add_eos: bool,
 ) -> Result<(), TokError> {
+    if pretokenizer == PretokenizerKind::K2Horizon
+        && (bos != Some(0) || eos != Some(1) || !add_bos || add_eos)
+    {
+        return Err(TokError::BadMetadata(
+            "K2 single-sequence encoding requires BOS=0, EOS=1, add_bos=true, add_eos=false; paired SEP is not a trailing EOS".into(),
+        ));
+    }
     if pretokenizer == PretokenizerKind::JoyAi && (bos.is_none() || eos.is_none()) {
         return Err(TokError::BadMetadata(
             "JoyAI tokenizer requires explicit BOS and EOS token ids".into(),

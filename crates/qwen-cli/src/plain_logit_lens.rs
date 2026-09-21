@@ -8,6 +8,9 @@ use qwen_llm::runtime::{LoadedModelConfig, ModelLoadIntent, Runtime, SequenceCon
 use qwen_llm::tokenizer::{LlamaCppTokenizer, Tokenizer};
 use serde_json::{Value, json};
 
+mod k2;
+pub(crate) use k2::read_transport as read_k2_transport;
+
 fn layers(requested: &[u32], count: u32) -> Result<Vec<u32>> {
     ensure!(
         count > 0 && count <= 4096,
@@ -114,10 +117,17 @@ pub(super) fn read(args: ReadFullArgs) -> Result<()> {
         "invalid top-k or max-tokens"
     );
     let gguf = GgufFile::open(&args.model)?;
+    let family = ModelFamily::detect(&gguf);
+    let k2 = if family == Some(ModelFamily::K2Horizon) {
+        Some(k2::Prepared::new(&args, &gguf)?)
+    } else {
+        None
+    };
     let content =
         checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(&args.identity_cache))?;
-    let family = ModelFamily::detect(&gguf);
-    let (tokens, position, model, results, bundle) = if family == Some(ModelFamily::MuseGlimmer) {
+    let (tokens, position, model, results, bundle) = if let Some(prepared) = k2 {
+        prepared.execute(&args, &gguf, &content, None)?
+    } else if family == Some(ModelFamily::MuseGlimmer) {
         use qwen_llm::metal::MetalContext;
         use qwen_llm::muse_glimmer::MuseGlimmerModel;
         use qwen_llm::muse_glimmer_runtime::MuseGlimmerLoadedModel;
@@ -276,7 +286,7 @@ pub(super) fn read(args: ReadFullArgs) -> Result<()> {
             bundle,
         )
     };
-    let input = json!({"source": if args.prompt.is_some() { "prompt" } else { "token_ids" }, "add_special_tokens": args.prompt.as_ref().map(|_| !args.no_special_tokens), "token_ids": tokens, "selected_position": position, "captured_token_id": tokens[position], "predicts_position": position + 1});
+    let input = input_metadata(&args, &tokens, position, family);
     let observer = json!({"method": "plain_logit_lens", "transport": "identity", "source_site": "native_post_block_residual", "fitted_artifact": null, "transfer_acknowledgement_required": false});
     let mut document = json!({"schema": "llm.lens.readout", "schema_version": 1, "readout": "native_plain_logit_lens", "score_semantics": "deployed_pre_softmax_logits_after_architectural_output_norm_scaling_and_softcap", "ranking_scope": "full_vocabulary", "input_blake3": super::digest_json(&input)?, "input": input, "observer_blake3": super::digest_json(&observer)?, "observer": observer, "deployed_model": model, "reader": {"build_commit": env!("QWEN_BUILD_COMMIT"), "build_dirty": env!("QWEN_BUILD_DIRTY"), "build_source_state": env!("QWEN_BUILD_SOURCE_STATE"), "build_stamp_source": env!("QWEN_BUILD_STAMP_SOURCE"), "build_stamp_error": env!("QWEN_BUILD_STAMP_ERROR")}});
     document["results"] = Value::Array(results);
@@ -289,6 +299,22 @@ pub(super) fn read(args: ReadFullArgs) -> Result<()> {
     }
     println!("{}", String::from_utf8(bytes)?);
     Ok(())
+}
+
+fn input_metadata(
+    args: &ReadFullArgs,
+    tokens: &[i32],
+    position: usize,
+    family: Option<ModelFamily>,
+) -> Value {
+    let mut input = json!({"source": if args.prompt.is_some() { "prompt" } else { "token_ids" }, "add_special_tokens": args.prompt.as_ref().map(|_| !args.no_special_tokens), "token_ids": tokens, "selected_position": position, "captured_token_id": tokens[position], "predicts_position": position + 1});
+    // Existing families' input objects are digest contracts; do not extend them
+    // as a side effect of adding K2 provenance.
+    if family == Some(ModelFamily::K2Horizon) {
+        input["input_token_count"] = json!(tokens.len());
+        input["executed_token_count"] = json!(position + 1);
+    }
+    input
 }
 
 fn capture_budget(layers: usize, hidden: usize) -> Result<()> {
@@ -404,6 +430,28 @@ mod tests {
         );
         assert_eq!(result["transported_vector"]["values"], json!([0.25, -0.5]));
         assert_eq!(result["top_k"][0]["token_id"], 1);
+    }
+
+    #[test]
+    fn k2_input_counts_do_not_change_existing_family_digest_contracts() {
+        let args = parse(&["--logit-lens"]).unwrap().args;
+        let original = json!({"source":"token_ids", "add_special_tokens":null, "token_ids":[1,2],
+            "selected_position":0, "captured_token_id":1, "predicts_position":1});
+        for family in [
+            ModelFamily::Qwen35,
+            ModelFamily::Qwen35Moe,
+            ModelFamily::MuseGlimmer,
+        ] {
+            let input = input_metadata(&args, &[1, 2], 0, Some(family));
+            assert_eq!(input, original);
+            assert_eq!(
+                crate::digest_json(&input).unwrap(),
+                crate::digest_json(&original).unwrap()
+            );
+        }
+        let k2 = input_metadata(&args, &[1, 2], 0, Some(ModelFamily::K2Horizon));
+        assert_eq!(k2["input_token_count"], 2);
+        assert_eq!(k2["executed_token_count"], 1);
     }
 
     #[test]

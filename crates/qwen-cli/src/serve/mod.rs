@@ -15,6 +15,7 @@
 
 pub(crate) mod backend;
 pub(crate) mod backend_ds4;
+pub(crate) mod backend_k2;
 pub(crate) mod backend_muse;
 pub(crate) mod backend_qwen4exp;
 pub(crate) mod decode_loop;
@@ -23,8 +24,10 @@ pub(crate) mod http;
 pub(crate) mod outcome;
 pub(crate) mod output_partition;
 pub(crate) mod partition;
+pub(crate) mod partition_k2;
 pub(crate) mod partition_muse;
 pub(crate) mod render_ds4;
+pub(crate) mod render_k2;
 pub(crate) mod render_muse;
 pub(crate) mod utf8;
 
@@ -102,7 +105,8 @@ fn supports_serve_family(family: Option<ModelFamily>) -> bool {
             | ModelFamily::Qwen35Moe
             | ModelFamily::Qwen4Exp
             | ModelFamily::DeepSeek4
-            | ModelFamily::MuseGlimmer,
+            | ModelFamily::MuseGlimmer
+            | ModelFamily::K2Horizon,
         ) => true,
         None => false,
     }
@@ -155,6 +159,44 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         "qwen serve has no backend for {} (docs/SERVE.md)",
         family.architecture_name()
     );
+    // Keep K2 out of the generic serve admission and listener setup. Its
+    // resident plan and raw request contract are owned by the K2 lane.
+    match family {
+        ModelFamily::K2Horizon => {
+            let prepared = backend_k2::Prepared::new(&gguf, &invocation)?;
+            // Fail cheap on a busy/invalid loopback address, after K2-only admission
+            // but before taking the GPU lease or loading weights.
+            let listener = bind_loopback(&invocation.addr)?;
+            let mut trace = invocation
+                .trace_sse
+                .as_deref()
+                .map(http::TraceLog::open)
+                .transpose()?;
+            let model_id = invocation
+                .model
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .context("model path has no printable file stem")?
+                .to_owned();
+            crate::shutdown::checkpoint()?;
+            let ctx = qwen_llm::metal::MetalContext::new()?;
+            let started = Instant::now();
+            let model = qwen_llm::k2_horizon_runtime::K2LoadedModel::load(
+                &ctx,
+                &gguf,
+                u32::try_from(prepared.capacity)?,
+            )?;
+            let load_ms = started.elapsed().as_secs_f64() * 1e3;
+            tracing::info!(target: "qwen_diag", "serve limits: family=k2_horizon raw_input_string_only capacity={} snapshot_cache_bytes=0", prepared.capacity);
+            let mut backend = backend_k2::K2Backend::new(&model, prepared, model_id.clone());
+            return accept_loop(listener, &model_id, load_ms, &mut backend, &mut trace);
+        }
+        ModelFamily::Qwen35
+        | ModelFamily::Qwen35Moe
+        | ModelFamily::Qwen4Exp
+        | ModelFamily::DeepSeek4
+        | ModelFamily::MuseGlimmer => {}
+    }
     // Drafter admission is a header-level decision: refuse unsupported
     // family/shape combinations and bind the drafter's metadata before the
     // target's weights are loaded. `EngineBackend::new` still performs the
@@ -186,6 +228,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         .to_owned();
 
     match family {
+        ModelFamily::K2Horizon => unreachable!("K2 Horizon returned above"),
         ModelFamily::MuseGlimmer => {
             let math_options = backend_muse::read_math_options()?;
             let config = qwen_llm::muse_glimmer::MuseGlimmerConfig::from_gguf(&gguf)
@@ -526,6 +569,7 @@ mod tests {
             ModelFamily::Qwen4Exp,
             ModelFamily::DeepSeek4,
             ModelFamily::MuseGlimmer,
+            ModelFamily::K2Horizon,
         ] {
             assert!(supports_serve_family(Some(family)), "{family:?}");
         }

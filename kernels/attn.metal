@@ -364,3 +364,86 @@ kernel void kernel_attn_decode_f16kv(
         out_h[d] = acc * inv_sum;
     }
 }
+
+// K2-only H128/GQA4. One SIMDgroup owns one head; online softmax
+// retains the complete history while keeping all working state in registers.
+[[max_total_threads_per_threadgroup(32)]]
+kernel void kernel_k2_attn_online_f16kv_h128(
+        constant attn_decode_args & args [[buffer(0)]],
+        device const float * query [[buffer(1)]],
+        device const half * keys [[buffer(2)]],
+        device const half * values [[buffer(3)]],
+        device float * output [[buffer(4)]],
+        uint head [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    if (head >= 32u) return;
+    const uint kv_head = head / 4u;
+    const float4 q = ((device const float4 *)(query + (ulong)head * 128u))[lane];
+    ulong offset = (ulong)kv_head * 128u + (ulong)lane * 4u;
+    float maximum = simd_sum(dot(q, float4(*((device const half4 *)(keys + offset))))) * args.scale;
+    float denominator = 1.0f;
+    float4 accumulator = float4(*((device const half4 *)(values + offset)));
+    for (uint position = 1; position < args.n_pos; ++position) {
+        offset = (ulong)position * 1024u + (ulong)kv_head * 128u + (ulong)lane * 4u;
+        const float score = simd_sum(dot(q, float4(*((device const half4 *)(keys + offset))))) * args.scale;
+        const float next_maximum = max(maximum, score);
+        const float previous_weight = exp(maximum - next_maximum);
+        const float current_weight = exp(score - next_maximum);
+        accumulator = accumulator * previous_weight
+            + float4(*((device const half4 *)(values + offset))) * current_weight;
+        denominator = denominator * previous_weight + current_weight;
+        maximum = next_maximum;
+    }
+    ((device float4 *)(output + (ulong)head * 128u))[lane] = accumulator / denominator;
+}
+
+// Longer histories merge bounded online summaries rather than extending one
+// recurrent F32 sum across the entire prefix. Both summaries live in registers.
+[[max_total_threads_per_threadgroup(32)]]
+kernel void kernel_k2_attn_online_blocked_f16kv_h128(
+        constant attn_decode_args & args [[buffer(0)]],
+        device const float * query [[buffer(1)]],
+        device const half * keys [[buffer(2)]],
+        device const half * values [[buffer(3)]],
+        device float * output [[buffer(4)]],
+        uint head [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    if (head >= 32u || args.n_pos == 0u) return;
+    const ulong channel = (ulong)(head / 4u) * 128u + (ulong)lane * 4u;
+    const float4 q = ((device const float4 *)(query + (ulong)head * 128u))[lane];
+    float total_maximum = 0.0f;
+    float total_denominator = 0.0f;
+    float4 total_accumulator = 0.0f;
+    for (uint start = 0u; start < args.n_pos;) {
+        const uint end = start + min(args.n_pos - start, 256u);
+        ulong offset = (ulong)start * 1024u + channel;
+        float maximum = simd_sum(dot(q, float4(*((device const half4 *)(keys + offset))))) * args.scale;
+        float denominator = 1.0f;
+        float4 accumulator = float4(*((device const half4 *)(values + offset)));
+        for (uint position = start + 1u; position < end; ++position) {
+            offset = (ulong)position * 1024u + channel;
+            const float score = simd_sum(dot(q, float4(*((device const half4 *)(keys + offset))))) * args.scale;
+            const float next_maximum = max(maximum, score);
+            const float previous_weight = exp(maximum - next_maximum);
+            const float current_weight = exp(score - next_maximum);
+            accumulator = accumulator * previous_weight
+                + float4(*((device const half4 *)(values + offset))) * current_weight;
+            denominator = denominator * previous_weight + current_weight;
+            maximum = next_maximum;
+        }
+        if (start == 0u) {
+            total_maximum = maximum;
+            total_denominator = denominator;
+            total_accumulator = accumulator;
+        } else {
+            const float merged_maximum = max(total_maximum, maximum);
+            const float previous_weight = exp(total_maximum - merged_maximum);
+            const float current_weight = exp(maximum - merged_maximum);
+            total_accumulator = total_accumulator * previous_weight + accumulator * current_weight;
+            total_denominator = total_denominator * previous_weight + denominator * current_weight;
+            total_maximum = merged_maximum;
+        }
+        start = end;
+    }
+    ((device float4 *)(output + (ulong)head * 128u))[lane] = total_accumulator / total_denominator;
+}

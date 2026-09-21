@@ -22,6 +22,8 @@ mod execution_selector;
 mod fixed_cohort_jsonl;
 #[path = "qwen/jsonl.rs"]
 mod jsonl;
+#[path = "qwen/k2_horizon.rs"]
+mod k2_horizon;
 mod messages;
 mod model_request;
 #[path = "qwen/muse_glimmer.rs"]
@@ -267,6 +269,27 @@ fn run() -> Result<()> {
         );
     };
     let model_family = Some(family);
+    // One exhaustive dispatch keeps each family out of the wrong admission
+    // lane. K2 and Muse own their request shapes and skip the Qwen batch and
+    // DeepSeek selector validators below.
+    match family {
+        ModelFamily::K2Horizon => {
+            return k2_horizon::run_raw(&gguf, &args, explicit_options, invocation);
+        }
+        ModelFamily::MuseGlimmer => {
+            return run_muse_glimmer_single_turn(
+                &model_path,
+                &gguf,
+                &args,
+                explicit_options,
+                invocation,
+            );
+        }
+        ModelFamily::Qwen35
+        | ModelFamily::Qwen35Moe
+        | ModelFamily::Qwen4Exp
+        | ModelFamily::DeepSeek4 => {}
+    }
     // Drafter admission is a header-level decision; settle it (and bind the
     // drafter's metadata) before any family lane allocates on the GPU.
     let drafter = drafter_policy::PreparedDrafter::prepare(
@@ -288,19 +311,8 @@ fn run() -> Result<()> {
         qwen_llm::metal_dflash::ensure_prompt_lookup_n8_supported_for_gguf(&model)
             .map_err(anyhow::Error::msg)?;
     }
-    // One exhaustive dispatch; a new family cannot fall into another's lane.
-    // Muse binds its own request shape and skips the Qwen batch and DS4
-    // selector validators; DS4 is the only consumer of its snapshot and
-    // reasoning flags, which the remaining lanes refuse.
-    if family == ModelFamily::MuseGlimmer {
-        return run_muse_glimmer_single_turn(
-            &model_path,
-            &gguf,
-            &args,
-            explicit_options,
-            invocation,
-        );
-    }
+    // DS4 is the only consumer of its snapshot and reasoning flags, which
+    // the remaining lanes refuse.
     fixed_cohort_jsonl::validate_model_family(args.batch_size, model_family)?;
     concurrent_jsonl::validate_model_family(&args, model_family)?;
     validate_deepseek_v4_multigroup_selector_family(
@@ -321,6 +333,7 @@ fn run() -> Result<()> {
         );
     }
     match family {
+        ModelFamily::K2Horizon => unreachable!("K2 Horizon returned above"),
         ModelFamily::MuseGlimmer => unreachable!("Muse Glimmer returned above"),
         ModelFamily::DeepSeek4 if args.requests_jsonl.is_some() => {
             run_deepseek_v4_requests_jsonl(&model_path, gguf, &args, explicit_options)
@@ -713,6 +726,7 @@ fn prepare_modern_run_prompt(
                     deepseek_v4_options,
                 )
                 .context("render DeepSeek V4 0731 user request")?,
+                ModelFamily::K2Horizon => bail!("K2 Horizon currently supports raw input only"),
                 ModelFamily::MuseGlimmer => {
                     bail!("Muse Glimmer requests are prepared by prepare_muse_glimmer_prompt")
                 }
@@ -785,6 +799,7 @@ fn prepare_modern_run_prompt(
                     deepseek_v4_options,
                 )
                 .context("render strict DeepSeek V4 0731 messages")?,
+                ModelFamily::K2Horizon => bail!("K2 Horizon currently supports raw input only"),
                 ModelFamily::MuseGlimmer => {
                     bail!("Muse Glimmer requests are prepared by prepare_muse_glimmer_prompt")
                 }
@@ -834,6 +849,16 @@ pub(crate) fn input_capability_for(
             }
         }
         Some(ModelFamily::DeepSeek4 | ModelFamily::MuseGlimmer) => InputCapability::all_supported(),
+        Some(ModelFamily::K2Horizon) => {
+            match qwen_llm::k2_horizon_runtime::K2PreparedArtifact::inspect(gguf)
+                .and_then(|artifact| artifact.generation_stops()) {
+                Ok(_) => InputCapability::raw_only(
+                    "chat_profile_unverified",
+                    "K2 chat requires a verified final-artifact profile; compatible checkpoints retain raw input".into(),
+                ),
+                Err(error) => InputCapability::none(error.code(), error.to_string()),
+            }
+        }
         None => InputCapability::none(
             "unknown_family",
             "templated input requires a recognised architecture".into(),
@@ -870,6 +895,10 @@ fn template_projection(family: Option<ModelFamily>, gguf: &GgufFile) -> serde_js
             "version": "muse_glimmer",
             "source": "general.architecture",
             "rendered_as": "muse_glimmer",
+        }),
+        Some(ModelFamily::K2Horizon) => serde_json::json!({
+            "status": "unsupported", "rendered_as": null,
+            "message": "K2 Horizon raw input has no template renderer",
         }),
         None => serde_json::json!({
             "status": "unresolved",
@@ -967,9 +996,11 @@ use run_options::*;
 use single_turn::*;
 use telemetry::*;
 
-/// `qwen info`: header-only inspection. Text mode is the legacy model
+/// `qwen info`: text mode is header inspection; K2 JSON chat eligibility also
+/// verifies retained checkpoint bytes with cancellation. Text mode is the legacy model
 /// summary; `--json` projects the decisions the binary would make for this
-/// model before loading it. Only drafter admission is projected today; the
+/// model before loading it. Artifact preparation is distinct from device/request
+/// admission; the
 /// shape grows one consumed decision at a time, never as a hand-maintained
 /// capability table.
 fn run_info(info: cli::InfoInvocation) -> Result<()> {
@@ -1076,13 +1107,16 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
             },
         })?,
         Some(ModelFamily::MuseGlimmer) => serde_json::to_value(muse_glimmer_reasoning_capability())?,
+        Some(ModelFamily::K2Horizon) => serde_json::json!({
+            "status": "unsupported", "code": "chat_profile_unverified", "message": "K2 chat reasoning requires a verified final-artifact profile",
+        }),
         None => serde_json::json!({
             "status": "unsupported",
             "code": "unknown_family",
             "message": "reasoning controls require a recognised architecture",
         }),
     };
-    let projection = serde_json::json!({
+    let mut projection = serde_json::json!({
         "version": "qwen_info_v1",
         "model": info.model.display().to_string(),
         "architecture": gguf.architecture(),
@@ -1094,10 +1128,18 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
         "prompt_lookup": { "run": prompt_lookup },
         "capabilities": {
             "reasoning": reasoning,
-            "input": input_capability_for(family, &gguf),
+            "input": if family == Some(ModelFamily::K2Horizon) { serde_json::Value::Null } else { serde_json::to_value(input_capability_for(family, &gguf))? },
             "template": template_projection(family, &gguf),
         },
     });
+    if family == Some(ModelFamily::K2Horizon) {
+        for (key, value) in k2_horizon::capability_projection(&gguf)?
+            .as_object()
+            .expect("K2 capability projection")
+        {
+            projection["capabilities"][key] = value.clone();
+        }
+    }
     println!("{}", serde_json::to_string_pretty(&projection)?);
     Ok(())
 }

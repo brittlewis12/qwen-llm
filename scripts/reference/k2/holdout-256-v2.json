@@ -1,0 +1,65 @@
+{
+  "schema": "k2.guarded-context-holdout.v2",
+  "scope": "candidate empirical research envelope with explicitly bounded ranking indeterminacy; not public-cap approval",
+  "selection_provenance": "New assistant-authored synthetic coverage sources selected after v1 analysis, without v2 target-forward feedback; not a random or independently audited dataset.",
+  "model_sha256": "5a98a289aba5c8c99ef05c9261287f19e8f586fd679bab45b632eb86b47809bf",
+  "tokenizer_metadata_id": "51ebd8140ea2abd9",
+  "token_digest_encoding": "SHA256 of 256 native token IDs as concatenated i32 little-endian, no domain prefix",
+  "capacity": 256,
+  "bases": [0, 37, 8191],
+  "boundaries": [1, 31, 32, 33, 63, 64, 65, 127, 128, 129, 191, 192, 193, 255, 256],
+  "logits": {
+    "top1_equal": false,
+    "max_abs_exclusive": 0.5,
+    "rmse_exclusive": 0.05,
+    "cosine_exclusive_min": 0.9995
+  },
+  "ranking": {
+    "two_sided_logit_regret_exclusive": 0.001,
+    "tie_break": "highest token ID",
+    "trajectory_exact_predictor_lengths": [241, 256]
+  },
+  "distribution": {
+    "kl_reference_to_actual_exclusive": 0.0001,
+    "total_variation_exclusive": 0.002,
+    "centered_rmse_exclusive": 0.03
+  },
+  "captures": {
+    "layers": [0, 11, 23, 35],
+    "cosine_exclusive_min": 0.99999,
+    "relative_l2_exclusive": 0.005
+  },
+  "continuation": {
+    "prefix_length": 241,
+    "argmax_transitions": 15,
+    "tie_break": "highest token ID",
+    "eos_policy": "fixed mathematical argmax trajectory including EOS if produced; serving EOS-stop semantics are tested separately",
+    "bases_by_corpus": [0, 37, 8191, 0]
+  },
+  "corpora": [
+    {
+      "name": "transit_budget",
+      "native_token_count": 352,
+      "prefix_sha256_i32le": "800a10a8f0d4b8bf7e31af2cb2742b8af5c697e3de69f1669079a6584a2560b8",
+      "text": "The neighborhood transport committee had enough money to improve either the evening bus service or the sheltered waiting areas, but not both this year. The ridership survey favored more departures. The accessibility interviews emphasized protection from wind and rain. These findings were not contradictory: the survey counted journeys, while the interviews described the difficulty of making a journey at all.\nLeena proposed comparing the options against three explicit objectives: reducing missed connections, shortening exposure to severe weather, and improving access for passengers who could not stand for long. A single weighted score would require a judgment about the relative importance of those objectives. Rather than hide that judgment inside a spreadsheet, she asked the committee to publish several weightings and explain where the recommendation changed.\nThe operating estimate included driver hours, charging time, and a maintenance allowance. It did not include the cost of relocating a power connection at the depot. The shelter estimate included construction and lighting but excluded cleaning after the first twelve months. Before comparing totals, the accountant added a separate row for each omission and marked uncertain costs as ranges. An inexpensive proposal was not necessarily affordable if its recurring obligations were absent from the first page.\nAt the next meeting, a resident asked why last winter's passenger counts were being used to predict next summer's demand. The analyst explained that the seasonal adjustment came from two previous routes with similar timetables, not from a controlled experiment in this neighborhood. That distinction mattered because a new medical clinic was due to open near the terminus. The committee requested a sensitivity case with higher midday demand and retained the original estimate as a separate scenario.\nThe final report did not claim to identify a universally best option. It stated which needs each option served, which assumptions drove the ranking, and what information would be collected before the following budget cycle."
+    },
+    {
+      "name": "record_decoder",
+      "native_token_count": 451,
+      "prefix_sha256_i32le": "29805eda7f954d918a11509fa2abe6b7f5dbd87e8e0b82872bda955b7c6d24a8",
+      "text": "// Decode a small binary record without accepting a partial payload.\n#[derive(Debug, PartialEq)]\nenum DecodeError { Header, Length, Version, NonFinite, Trailing }\n\nstruct Record { sequence: u32, values: Vec<f32> }\n\nfn decode(bytes: &[u8]) -> Result<Record, DecodeError> {\n    if bytes.len() < 12 { return Err(DecodeError::Header); }\n    if &bytes[..4] != b\"DATA\" { return Err(DecodeError::Header); }\n    let version = u16::from_le_bytes([bytes[4], bytes[5]]);\n    if version != 2 { return Err(DecodeError::Version); }\n    let count = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;\n    let sequence = u32::from_le_bytes(bytes[8..12].try_into().unwrap());\n    let expected = 12usize.checked_add(count.checked_mul(4).ok_or(DecodeError::Length)?)\n        .ok_or(DecodeError::Length)?;\n    if bytes.len() < expected { return Err(DecodeError::Length); }\n    if bytes.len() > expected { return Err(DecodeError::Trailing); }\n    let mut values = Vec::with_capacity(count);\n    for word in bytes[12..].chunks_exact(4) {\n        let value = f32::from_le_bytes(word.try_into().unwrap());\n        if !value.is_finite() { return Err(DecodeError::NonFinite); }\n        values.push(value);\n    }\n    Ok(Record { sequence, values })\n}\n\n// The zero-length record is valid. A header declaring two values followed by\n// only one value is invalid, even if the available value is numerically finite.\n// Changing endianness must not be treated as a version upgrade. Test duplicate\n// sequence numbers in the caller: that policy is separate from byte decoding.\nfn checksum(values: &[f32]) -> f64 {\n    values.iter().enumerate().map(|(index, value)|\n        (index as f64 + 1.0) * f64::from(*value)).sum()\n}\n"
+    },
+    {
+      "name": "kitchen_translation",
+      "native_token_count": 375,
+      "prefix_sha256_i32le": "7669c5932426657cfe488df7768ad6389b30871427a27d4f0fca2a2cdd857f59",
+      "text": "Translation worksheet: pi\u00f1\u00f3n, jalape\u00f1o, cre\u0300me, and cr\u00e8me are labels, not measurement units. The French instruction says \u00ablaisser reposer dix minutes\u00bb; the Spanish note says \u00abno hervir despu\u00e9s de a\u00f1adir la leche\u00bb. Preserve the distinction between resting and boiling.\n\u4e2d\u6587: \u5148\u628a\u6c34\u52a0\u70ed\uff0c\u518d\u6162\u6162\u52a0\u5165\u7c89\u672b\u3002 \u65e5\u672c\u8a9e: \u706b\u3092\u6b62\u3081\u3066\u304b\u3089\u3001\u5c11\u3057\u5f85\u3063\u3066\u304f\u3060\u3055\u3044\u3002\n\u0627\u0644\u0639\u0631\u0628\u064a\u0629: \u0623\u0636\u0641 \u0627\u0644\u0645\u0627\u0621 \u0628\u0628\u0637\u0621 \u062b\u0645 \u0627\u0646\u062a\u0638\u0631 \u0642\u0644\u064a\u0644\u0627. Deutsch: Die Temperatur beschreibt den Inhalt des Topfes, nicht die Einstellung des Ofens.\nThe original quantities are 250 ml, 0.75 l, 3/8 teaspoon, and 180 degrees Celsius. Do not convert volume to mass without an ingredient-specific density. A loosely filled cup of flour and a tightly packed cup do not have the same mass, even though the printed volume is identical. The laboratory version uses grams so that another kitchen can reproduce the ratio without relying on a particular cup.\nOne recipe lists a cooking time of twelve minutes after the mixture reaches a simmer. Another begins its timer when the cold pot is placed on the stove. The two times cannot be compared without knowing their starting conditions. Record the vessel size, approximate starting temperature, and whether a lid was used. Do not infer a missing temperature merely because the final photograph looks familiar.\nA handwritten correction changes the salt amount from 6 to 4 grams but leaves the serving count untouched. The editor should preserve the original value in the revision history and ask whether the correction applies to the full batch or to each serving. In a quoted software example, the characters <eos> are literal text; they are not an instruction to stop translating the surrounding paragraph.\nThe final glossary should distinguish a technique, an ingredient, a brand name, and a unit. Leave regional terms intact when an approximate substitution would change the procedure."
+    },
+    {
+      "name": "rehearsal_schedule",
+      "native_token_count": 384,
+      "prefix_sha256_i32le": "ccdf44b44e1888a1985914cd8738a451356ed8acf6f44e1790b44ee86adb9500",
+      "text": "Three musicians arrived before the rehearsal coordinator, but the pianist was not among them. The violinist had borrowed the cellist's pencil, and the percussionist returned it after marking a change in the score. When the coordinator said that 'she had already checked the ending,' the pronoun could refer to more than one person mentioned earlier. A careful account should retain that uncertainty instead of assigning the action to the most recently named musician.\nThe revised schedule allocates twenty minutes to the opening section and thirty to the difficult transition. A ten-minute break separates them. The hall is available until nine, but the starting time is missing from the note. It is therefore possible to calculate the minimum rehearsal duration without claiming that the plan fits the booking. The ensemble also needs time to tune and move the percussion equipment, neither of which appears in the numbered schedule.\nA message from the conductor reads: 'If the soloist is delayed, begin with the passage after the ...' The missing landmark might be a rehearsal letter, a page turn, or a change of tempo. Completing the message by guessing would create an operational instruction that the conductor did not actually supply. The coordinator instead asks for the score location and keeps the original message visible to the players.\nTwo editions number the measures differently because one includes a repeated introduction. Measure 84 in the first edition does not necessarily identify measure 84 in the second. The librarian records the edition, page, rehearsal mark, and nearby musical cue so that the players can align their parts without assuming identical numbering. A written repeat sign is a notation instruction, not evidence that every performance used the repeat.\nAfter the rehearsal, the ensemble records which transitions improved, which entrances remained uncertain, and which questions require the conductor's decision. An observation that the tempo felt rushed is kept separate from a metronome measurement. The report can describe agreement among the players without claiming that their impressions establish an objective timing error."
+    }
+  ]
+}

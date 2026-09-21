@@ -7,6 +7,7 @@ pub enum ModelFamily {
     Qwen4Exp,
     DeepSeek4,
     MuseGlimmer,
+    K2Horizon,
 }
 
 impl ModelFamily {
@@ -18,6 +19,7 @@ impl ModelFamily {
         Self::Qwen4Exp,
         Self::DeepSeek4,
         Self::MuseGlimmer,
+        Self::K2Horizon,
     ];
 
     pub fn from_architecture_name(name: &str) -> Option<Self> {
@@ -43,6 +45,7 @@ impl ModelFamily {
             Self::Qwen4Exp => "qwen4exp",
             Self::DeepSeek4 => "deepseek_v4",
             Self::MuseGlimmer => "muse_glimmer",
+            Self::K2Horizon => "k2_horizon",
         }
     }
 
@@ -53,6 +56,7 @@ impl ModelFamily {
             Self::Qwen4Exp => "qwen4exp",
             Self::DeepSeek4 => "deepseek4",
             Self::MuseGlimmer => crate::muse_glimmer::ARCHITECTURE_NAME,
+            Self::K2Horizon => crate::k2_horizon::ARCHITECTURE_NAME,
         }
     }
 }
@@ -78,6 +82,11 @@ mod tests {
             Some(ModelFamily::MuseGlimmer)
         );
         assert_eq!(ModelFamily::from_architecture_name("deepseek2"), None);
+        assert_eq!(
+            ModelFamily::from_architecture_name("k2-horizon"),
+            Some(ModelFamily::K2Horizon)
+        );
+        assert_eq!(ModelFamily::K2Horizon.record_label(), "k2_horizon");
     }
 
     /// `ALL` is the closedness witness: every variant round-trips through
@@ -104,7 +113,8 @@ mod tests {
                 | ModelFamily::Qwen35Moe
                 | ModelFamily::Qwen4Exp
                 | ModelFamily::DeepSeek4
-                | ModelFamily::MuseGlimmer => {}
+                | ModelFamily::MuseGlimmer
+                | ModelFamily::K2Horizon => {}
             }
         }
     }

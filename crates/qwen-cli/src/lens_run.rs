@@ -390,6 +390,9 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         ModelFamily::DeepSeek4 => bail!(
             "qwen-lens run supports ordinary Qwen, Muse Glimmer, or Flash-Next; DeepSeek V4 has no lens runtime"
         ),
+        ModelFamily::K2Horizon => bail!(
+            "qwen-lens run supports ordinary Qwen, Muse Glimmer, or Flash-Next; K2 Horizon has no lens runtime"
+        ),
         ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {}
     }
     validate_ordinary_plan(&plan)?;

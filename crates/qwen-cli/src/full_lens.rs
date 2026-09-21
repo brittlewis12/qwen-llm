@@ -82,7 +82,7 @@ const COPY_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Args)]
 pub(crate) struct ReadFullArgs {
-    /// Ordinary Qwen dense/MoE or Muse Glimmer GGUF used for capture and output.
+    /// Qwen dense/MoE, Muse Glimmer, or dense K2 GGUF (K2: native/data-only readout).
     #[arg(short = 'm', long)]
     pub(crate) model: PathBuf,
 
@@ -120,7 +120,7 @@ pub(crate) struct ReadFullArgs {
     #[arg(long)]
     pub(crate) no_special_tokens: bool,
 
-    /// Input position to inspect; defaults to the final prompt token.
+    /// Input position to inspect; defaults to the final prompt token (K2: below 256).
     #[arg(long)]
     pub(crate) position: Option<usize>,
 

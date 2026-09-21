@@ -591,7 +591,9 @@ fn main() -> std::process::ExitCode {
 fn run() -> Result<()> {
     shutdown::install()?;
     tracing_init::install_default_subscriber();
-    match Cli::parse().command {
+    let command = Cli::parse().command;
+    validate_k2_command(&command)?;
+    match command {
         Command::Compare(args) => lens_compare::run(args),
         Command::Inspect(args) => lens_inspect::run(args),
         Command::InspectSweep(args) => lens_compare::inspect_sweep(args),
@@ -609,9 +611,34 @@ fn run() -> Result<()> {
     }
 }
 
+fn validate_k2_command(command: &Command) -> Result<()> {
+    let path = match command {
+        Command::TraceFull(args) => Some(&args.model),
+        Command::LensRun(args) => Some(&args.model),
+        Command::CoefficientSweep(args) => Some(&args.model),
+        Command::CompareTransfer(args) => Some(&args.model),
+        Command::FitRows(args) => Some(&args.model),
+        Command::FitTokens(args) => Some(&args.model),
+        _ => None,
+    };
+    if let Some(path) = path {
+        let gguf = qwen_llm::gguf::GgufFile::open(path)?;
+        ensure!(
+            qwen_llm::model_family::ModelFamily::detect(&gguf)
+                != Some(qwen_llm::model_family::ModelFamily::K2Horizon),
+            "K2 Horizon supports only read-full here; local fitting, trace, run, and sweep are not implemented"
+        );
+    }
+    Ok(())
+}
+
 fn fit_rows(args: FitRowsArgs) -> Result<()> {
     let gguf = qwen_llm::gguf::GgufFile::open(&args.model)
         .with_context(|| format!("open model {}", args.model.display()))?;
+    ensure!(
+        gguf.architecture().as_deref() != Some(qwen_llm::k2_horizon::ARCHITECTURE_NAME),
+        "K2 Horizon is forward-only; local lens fitting is not supported"
+    );
     if muse_lens_artifact::is_muse_architecture(gguf.architecture().as_deref()) {
         return muse_lens_rows_fit::fit_rows(args, gguf);
     }
@@ -631,6 +658,13 @@ fn read_full(args: ReadFullArgs) -> Result<()> {
     if args.logit_lens {
         return plain_logit_lens::read(args);
     }
+    let gguf = qwen_llm::gguf::GgufFile::open(&args.model)?;
+    if qwen_llm::model_family::ModelFamily::detect(&gguf)
+        == Some(qwen_llm::model_family::ModelFamily::K2Horizon)
+    {
+        return plain_logit_lens::read_k2_transport(args, gguf);
+    }
+    drop(gguf);
     if muse_full_lens::is_artifact_for_model(
         args.full_lens
             .as_deref()
@@ -941,6 +975,10 @@ fn fit_qwen_rows(mut args: FitRowsArgs) -> Result<()> {
 fn fit_tokens(mut args: FitTokensArgs) -> Result<()> {
     let gguf = qwen_llm::gguf::GgufFile::open(&args.model)
         .with_context(|| format!("open model {}", args.model.display()))?;
+    ensure!(
+        gguf.architecture().as_deref() != Some(qwen_llm::k2_horizon::ARCHITECTURE_NAME),
+        "K2 Horizon is forward-only; local lens fitting is not supported"
+    );
     if muse_lens_artifact::is_muse_architecture(gguf.architecture().as_deref()) {
         return muse_lens_fit::fit_tokens(args, gguf);
     }

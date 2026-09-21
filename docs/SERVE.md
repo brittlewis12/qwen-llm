@@ -15,6 +15,11 @@ gate records under `docs/bench/`, the successful real OpenCode session
 
 Private, single-box engine serving local clients over loopback.
 
+K2 Horizon dense 7B has separate raw-string and verified no-tools chat
+`/v1/responses` subsets: see [K2 Horizon Raw Profile](#k2-horizon-raw-profile)
+and [K2 Horizon Verified Chat](#k2-horizon-verified-chat). It does not inherit the
+Qwen/DeepSeek chat, reasoning, tools, snapshots, or long-context capabilities.
+
 Operating goals, in order:
 
 1. **Foundations that hold** — durable continuity across restarts,
@@ -118,6 +123,8 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
 # Muse Glimmer and Qwen3.8-Flash-Next require both --max-context-tokens and
 # --max-tokens (resident session capacity is fixed at load); admitted capacity
 # may extend through the model's declared context.
+# K2 requires explicit --max-context-tokens (within checkpoint context), --max-tokens, and
+# --snapshot-cache-mib 0; only raw string input is supported.
 ```
 
 The listener rejects every resolved non-loopback address and is bound before
@@ -195,8 +202,8 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   `Retry-After: 1`. HTTP/1.1 with
   `Connection: close`; hand-rolled request parse (loopback threat model;
   request bodies are `Content-Length` JSON).
-- **Every recognised family: Qwen3.5/3.6/3.8, Qwen3.8-Flash-Next, DeepSeek
-  V4, and Muse Glimmer.** DS4 runs its own session and snapshot stack
+- **Implemented families: Qwen3.5/3.6/3.8, Qwen3.8-Flash-Next, DeepSeek
+  V4, Muse Glimmer, and K2 Horizon raw/verified no-tools chat.** DS4 runs its own session and snapshot stack
   (`serve/backend_ds4.rs`) with a startup-fixed forward budget and a
   serve-owned byte-bounded snapshot LRU (DS4 has no engine-side RAM prefix
   cache). Flash-Next (`serve/backend_qwen4exp.rs`, since 2026-09-17) holds
@@ -205,6 +212,9 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   prefix reuse, no snapshots. `--snapshot-cache-mib` configures the Qwen and
   DS4 cache implementations and defaults to 4096 MiB. Muse does not claim
   snapshot reuse yet.
+  K2 uses fresh per-request sessions, requires a zero snapshot budget, and has
+  no prefix reuse, drafter, or tool protocol. Its verified chat profile separates
+  reasoning and final answers without inheriting another family's parser.
 - **Stdout is never written.** All diagnostics via the existing stderr
   tracing surface; per-request `qwen_diag` stats line retained and
   extended with `matched_tokens` and `restore_ms` (the S2/S3 gates are
@@ -222,7 +232,156 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   filesystem cannot hold process exit; queued trace events may be lost in that
   case.
 
+## K2 Horizon Raw Profile
+
+K2 dense 7B supports completion-style raw text on `POST /v1/responses`, not a
+new `/v1/completions` endpoint. Choose an unused loopback address:
+
+The verified final artifact also supports [no-tools HTTP chat](#k2-horizon-verified-chat)
+and local `qwen run --user/--messages`. Raw strings never opt into templating:
+their EOS-only stop set and literal output contract below are unchanged.
+
+```sh
+qwen serve -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+  --addr 127.0.0.1:8795 --max-context-tokens 256 --max-tokens 8 \
+  --snapshot-cache-mib 0
+```
+
+Both limits must be explicit for resident memory planning and the response default.
+Capacity must be positive and fit the checkpoint's declared context and actual
+device/memory admission; the default output limit is 1..=capacity. There is no
+K2-specific 256-forward/response or 7168-context cap. Nonzero snapshot
+budgets and drafters fail startup. K2 config, runtime storage plan, native
+tokenizer, and EOS metadata are checked before listener binding or Metal setup.
+The normal production lease and memory gate apply; listener binding still
+precedes weight loading so busy addresses fail cheaply.
+
+```json
+{
+  "model": "K2-Horizon-7B-Q8_0",
+  "input": "The capital of France is",
+  "max_output_tokens": 8,
+  "stream": false
+}
+```
+
+The model ID is the filename stem, as returned by `GET /v1/models`. Input must be
+a nonempty string. The family parser retains it explicitly and applies no chat
+template; native tokenizer NFC normalization and special-token recognition still
+apply. Native BOS insertion defaults on. For already serialized input, use
+`"x_k2":{"add_special_tokens":false}`; there is no authored-token deduplication.
+For example, that option with input
+`"<|ifm|begin_of_text|>The capital of France is"` matches the plain example's IDs.
+
+Accepted fields are `model`, `input`, `stream`, `max_output_tokens`, `temperature`,
+`top_p`, `store`, `truncation`, `x_qwen`, and `x_k2` only:
+
+- Omitted `max_output_tokens` uses the explicit startup default. The full
+  `prompt_tokens + max_output_tokens - 1` budget must fit capacity; no truncation.
+- Sampling defaults are temperature 0, top-p 1, top-k 0, min-p 0, seed 0.
+  `x_qwen` accepts only `seed`, `top_k`, `min_p`, and `stats`.
+- `x_k2` accepts only boolean `add_special_tokens`; other families reject that
+  extension. If supplied, `store` must be false and `truncation` must be `"disabled"`.
+- In raw mode, message/item arrays, token-ID arrays, instructions, tools, reasoning/history,
+  previous-response controls, and unknown fields fail, including null-valued
+  unsupported fields. Accepted fields cannot be null either. The whitelist uses
+  the existing parsed JSON representation; it adds no duplicate-key guarantee.
+
+EOS 1 is the only stopping token: sampled/countable, but never emitted or forwarded.
+The final non-EOS budget token is emitted without an extra forward. JSON and SSE
+both emit literal protocol text: think/tool/IFM marker strings are not stripped,
+partitioned, or executed. Incremental UTF-8 assembly preserves split characters;
+invalid bytes or a final incomplete sequence use replacement characters. This is
+not a byte-preserving binary HTTP format. Budget exhaustion uses the ordinary
+incomplete-response terminal semantics, not an EOS success.
+An over-budget nonstream request returns HTTP 400. If SSE headers have already
+been sent before backend tokenization, the same refusal is a `response.failed`
+event after HTTP 200, with no generated text or request-session allocation.
+
+The model remains resident, but each request owns fresh KV and a fresh sampler.
+There are no snapshots, resets, prefix reuse, or hidden conversation history.
+Synchronous per-token prefill appends provide real cancellation boundaries; abort
+drops the entire session, so the next request cannot inherit partial KV. The
+borrowing backend stays on the accept-loop thread without self-referential/leaked
+model storage. `x_qwen.stats` is opt-in with cached/matched tokens always zero;
+the response echo has no tools/reasoning and disables parallel tool calls.
+
+Validation covers CPU wire/UTF-8/EOS controls and actual-Q8 borrowed-backend
+JSON/SSE, BOS, abort isolation, and requested-capacity boundaries on ephemeral sockets.
+Admission bounds are distinct from the lengths covered by numerical fixtures.
+Numerical evidence covers the pinned final Q8_0-weight checkpoint with F16 KV on
+M4 Max, including the frozen v2 holdout; it does not qualify F16 weights or every
+compatible intermediate checkpoint. Serial online attention retains the full
+history without a context-sized score buffer. Serving deliberately keeps singleton
+appends for per-token cancellation, even when local run/bench/lens use eligible
+32-row Q8 packed prefill. Beyond 256 visible positions, attention merges fixed-size
+online summaries in registers to reduce accumulation error without dropping history.
+Stored F16 KV is unchanged; compact KV is not enabled. At 524288 positions the
+logical cache alone is 72 GiB; declared context does not promise that it fits a
+particular device or is economical to run.
+This is not sustained-service, full-context, tool, or cross-checkpoint
+numerical qualification. Test reproduction is in
+[`scripts/reference/k2/README.md`](../scripts/reference/k2/README.md); development
+evidence remains in `K2-HORIZON-PLAN.md` and `K2-HORIZON-REVIEW.md`.
+
+## K2 Horizon Verified Chat
+
+For the verified final Q8 artifact, array `input` selects the pinned IFM no-tools
+renderer; string `input` always remains raw. Startup verifies retained checkpoint
+bytes once, before accepting requests, and owns an opaque chat capability. An
+unverified artifact or verification failure emits a diagnostic and remains raw-only.
+No request field can authorize chat or trigger rehashing. Profile details and
+provenance limits are documented in `CLI-UX.md#k2-horizon-verified-chat`.
+
+```json
+{
+  "model": "K2-Horizon-7B-Q8_0",
+  "input": [{"role":"user","content":"What is 2+2? Answer briefly."}],
+  "reasoning": {"effort":"low"},
+  "max_output_tokens": 128,
+  "stream": true
+}
+```
+
+Use adequate server capacity and output defaults for reasoning workloads. The raw
+profile's residency, sampling, cancellation, and no-truncation policies also apply.
+Chat additionally accepts string `instructions` and `reasoning` containing only
+`effort` (`high` default, `medium`, or `low`). Native BOS is mandatory; false
+`x_k2.add_special_tokens` is rejected. Chat stops at EOS 1 or `im_end` 250019.
+
+History permits one leading system (or `instructions`, not both), user and
+assistant messages, and must end in a user turn. Message content is a string or
+`input_text`/`output_text` parts matching the role. Every assistant needs a directly
+preceding reasoning item with string content or `reasoning_text` parts; empty
+reasoning is valid. Generic replayed reasoning uses IFM's canonical `reasoning`
+alias (high/base history tag); the request effort controls only the new suffix.
+Completed response items can be replayed verbatim, including string IDs, completed
+status, empty reasoning `summary`, and empty output-text `annotations`. Nonempty
+summaries/annotations and incomplete history are rejected rather than discarded.
+Tools, developer roles, multimodal data, unsupported fields and nulls are rejected
+before transcript normalization. Existing JSON duplicate-key behavior is unchanged.
+
+JSON and SSE separate `reasoning` and final `message` items. Generation begins in
+preopened reasoning; only the matching effort's first close switches to final text.
+An optional matching opener at byte zero is removed. Wrong-effort, tool-looking,
+Qwen and later IFM markers remain literal. Empty reasoning still emits a completed
+reasoning item so history can be replayed. Budget exhaustion inside reasoning is
+incomplete, never an answer; EOS before its close is a protocol failure. Abort
+discards ambiguous buffered delimiter/UTF-8 bytes and never synthesizes completion.
+Unlike vLLM's K2 parser, this no-tools subset does not use tool-call markers as
+fallback boundaries or reinterpret unterminated reasoning as visible text.
+
+Leased actual-Q8 checks cover all efforts, short incomplete reasoning, completed
+low-effort answers, stop-aware raw-prefix parity, JSON/SSE equality, CLI answer
+parity, and fresh sessions after cancellation. These are wiring/termination checks,
+not reasoning-quality, sustained-service, tool, or full-context qualification.
+Total output-token usage includes stop tokens; the existing shared
+`reasoning_tokens: 0` detail is not a measured per-channel token count.
+
 ## Wire subset (Open Responses)
+
+This section describes the Qwen/DeepSeek/Muse chat profiles; K2's narrower raw and
+verified-chat contracts are specified separately above.
 
 The parser, Qwen capability binding, and prompt renderer are one shared pure
 module. `qwen-lens --open-responses FILE|-` uses that same path for offline

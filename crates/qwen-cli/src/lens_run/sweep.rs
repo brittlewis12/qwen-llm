@@ -52,7 +52,7 @@ pub(crate) struct CoefficientSweepArgs {
     pub(super) identity_cache: Option<PathBuf>,
     /// Ordinary dense or MoE Qwen GGUF model, loaded once for every arm.
     #[arg(short = 'm', long)]
-    pub(super) model: PathBuf,
+    pub(crate) model: PathBuf,
 
     /// Strict Lens plan JSON file whose authored coefficients remain unchanged.
     #[arg(long)]

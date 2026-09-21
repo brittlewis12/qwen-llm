@@ -122,6 +122,16 @@ pub struct VerifiedTransport {
     matrix_bytes: u64,
     payload_blake3: String,
 }
+
+/// Runtime-owned geometry/site policy, checked before opening or scanning payloads.
+pub struct ExpectedProfile<'a> {
+    pub architecture: &'a str,
+    pub n_layers: u32,
+    pub hidden_size: u32,
+    pub vocab_size: u32,
+    pub target_layer: u32,
+}
+
 impl VerifiedTransport {
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
@@ -133,6 +143,17 @@ impl VerifiedTransport {
         &self.payload_blake3
     }
     pub fn open(directory: &Path) -> Result<Self> {
+        Self::open_inner(directory, None)
+    }
+
+    pub fn open_with_expected_profile(
+        directory: &Path,
+        profile: ExpectedProfile<'_>,
+    ) -> Result<Self> {
+        Self::open_inner(directory, Some(profile))
+    }
+
+    fn open_inner(directory: &Path, profile: Option<ExpectedProfile<'_>>) -> Result<Self> {
         for component in directory.ancestors().filter(|p| !p.as_os_str().is_empty()) {
             ensure!(
                 !std::fs::symlink_metadata(component)?
@@ -185,6 +206,16 @@ impl VerifiedTransport {
                 && (1..=4194304).contains(&m.model.vocab_size),
             "model dimensions exceed bounds"
         );
+        if let Some(profile) = profile {
+            ensure!(
+                m.model.architecture == profile.architecture
+                    && m.model.n_layers == profile.n_layers
+                    && m.model.hidden_size == profile.hidden_size
+                    && m.model.vocab_size == profile.vocab_size
+                    && t.target_layer == profile.target_layer,
+                "transport manifest does not match expected runtime profile/target layer"
+            );
+        }
         let sources: BTreeSet<_> = t.source_layers.iter().copied().collect();
         ensure!(
             !sources.is_empty()
@@ -409,6 +440,51 @@ pub(crate) mod tests {
         edit(&mut value);
         std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
     }
+    #[test]
+    fn expected_runtime_profile_rejects_before_payload_access() {
+        let f = fixture("profile", 2, 123);
+        let profile = || ExpectedProfile {
+            architecture: "qwen35",
+            n_layers: 3,
+            hidden_size: 2,
+            vocab_size: 32,
+            target_layer: 1,
+        };
+        assert!(VerifiedTransport::open_with_expected_profile(&f.0, profile()).is_ok());
+        std::fs::remove_file(f.0.join("transport.f16le")).unwrap();
+        for wrong in [
+            ExpectedProfile {
+                architecture: "k2-horizon",
+                ..profile()
+            },
+            ExpectedProfile {
+                n_layers: 36,
+                ..profile()
+            },
+            ExpectedProfile {
+                hidden_size: 4096,
+                ..profile()
+            },
+            ExpectedProfile {
+                vocab_size: 250624,
+                ..profile()
+            },
+            ExpectedProfile {
+                target_layer: 2,
+                ..profile()
+            },
+        ] {
+            let error = VerifiedTransport::open_with_expected_profile(&f.0, wrong)
+                .err()
+                .unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("expected runtime profile/target layer")
+            );
+        }
+    }
+
     #[test]
     fn unknown_methods_dynamic_geometry_and_claims() {
         for (method, h, seed) in [("independent-recipe-a", 2, 123), ("future-fit-b", 5, 512)] {

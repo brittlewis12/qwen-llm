@@ -156,6 +156,8 @@ pub enum CheckpointIdentityError {
         "checkpoint content identity has no matching cache entry or fresh declared shard digests; refusing to hash model bytes"
     )]
     HashingRequired,
+    #[error("checkpoint identity verification cancelled")]
+    Cancelled,
     #[error("checkpoint identity I/O: {0}")]
     Io(#[from] io::Error),
 }
@@ -213,27 +215,65 @@ pub fn checkpoint_content_identity(
 pub fn verified_checkpoint_content_identity(
     gguf: &GgufFile,
 ) -> Result<CheckpointContentReport, CheckpointIdentityError> {
+    verified_checkpoint_content_identity_with_cancel(gguf, || false)
+}
+
+/// Exhaustive retained-byte verification with cooperative cancellation before
+/// each bounded read and before publication. Cancellation never yields a root.
+pub fn verified_checkpoint_content_identity_with_cancel(
+    gguf: &GgufFile,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<CheckpointContentReport, CheckpointIdentityError> {
     use std::os::unix::fs::FileExt;
+    check_verification_cancel(&mut should_cancel)?;
     let sources = source_views(gguf);
     validate_sources(&sources, false)?;
     let mut buffer = vec![0u8; 1024 * 1024];
     let (content_id, bytes_hashed) = hash_ordered_content_with(&sources, |source, hash| {
-        let length = source.bytes.len() as u64;
-        let mut offset = 0;
-        while offset < length {
-            let n = (length - offset).min(buffer.len() as u64) as usize;
-            source.file.read_exact_at(&mut buffer[..n], offset)?;
-            hash.update(&buffer[..n]);
-            offset += n as u64;
-        }
-        Ok(())
+        hash_retained_reader(
+            source.bytes.len() as u64,
+            &mut buffer,
+            hash,
+            |bytes, offset| source.file.read_exact_at(bytes, offset),
+            &mut should_cancel,
+        )
     })?;
     validate_sources(&sources, true)?;
+    check_verification_cancel(&mut should_cancel)?;
     Ok(CheckpointContentReport {
         content_id,
         bytes_hashed,
         outcome: IdentityCacheOutcome::ComputedUncached,
     })
+}
+
+fn check_verification_cancel(
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<(), CheckpointIdentityError> {
+    if should_cancel() {
+        Err(CheckpointIdentityError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn hash_retained_reader(
+    length: u64,
+    buffer: &mut [u8],
+    hash: &mut blake3::Hasher,
+    mut read_exact_at: impl FnMut(&mut [u8], u64) -> io::Result<()>,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<(), CheckpointIdentityError> {
+    assert!(!buffer.is_empty());
+    let mut offset = 0;
+    while offset < length {
+        check_verification_cancel(should_cancel)?;
+        let n = (length - offset).min(buffer.len() as u64) as usize;
+        read_exact_at(&mut buffer[..n], offset)?;
+        hash.update(&buffer[..n]);
+        offset += n as u64;
+    }
+    check_verification_cancel(should_cancel)
 }
 
 /// Resolve a strong cached or downloader-declared content root without ever
@@ -762,6 +802,55 @@ mod tests {
     use std::os::unix::fs::FileExt;
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn verified_reader_cancellation_stops_reads_and_never_returns_a_root() {
+        use std::cell::Cell;
+        let data = vec![0x5a; 2 * 1024 * 1024 + 17];
+        let dir = TestDir::new("cancel");
+        let source = TestSource::create(&dir.0, "source", &data);
+        let sources = [source.view()];
+        for allowed_reads in [0, 1, 2, 3] {
+            let reads = Cell::new(0);
+            let mut buffer = vec![0; 1024 * 1024];
+            let result = hash_ordered_content_with(&sources, |_, hash| {
+                hash_retained_reader(
+                    data.len() as u64,
+                    &mut buffer,
+                    hash,
+                    |bytes, offset| {
+                        reads.set(reads.get() + 1);
+                        bytes
+                            .copy_from_slice(&data[offset as usize..offset as usize + bytes.len()]);
+                        Ok(())
+                    },
+                    &mut || reads.get() >= allowed_reads,
+                )
+            });
+            assert!(matches!(result, Err(CheckpointIdentityError::Cancelled)));
+            assert_eq!(reads.get(), allowed_reads, "read after cancellation");
+        }
+        let mut buffer = vec![0; 1024 * 1024];
+        let streamed = hash_ordered_content_with(&sources, |_, hash| {
+            hash_retained_reader(
+                data.len() as u64,
+                &mut buffer,
+                hash,
+                |bytes, offset| {
+                    bytes.copy_from_slice(&data[offset as usize..offset as usize + bytes.len()]);
+                    Ok(())
+                },
+                &mut || false,
+            )
+        })
+        .unwrap();
+        let whole = hash_ordered_content_with(&sources, |_, hash| {
+            hash.update(&data);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(streamed, whole);
+    }
 
     struct TestDir(PathBuf);
 

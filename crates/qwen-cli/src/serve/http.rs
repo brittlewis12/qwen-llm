@@ -46,6 +46,10 @@ pub(crate) struct GenerationOutcome {
 
 pub(crate) trait GenerationBackend {
     fn model_id(&self) -> &str;
+    /// Family-specific wire admission before transcript normalization loses origin.
+    fn parse_request(&self, body: &Value) -> Result<ServeRequest, ServeError> {
+        parse_request(body)
+    }
     /// Resolve family defaults before prompt rendering and response echoes.
     fn normalize_request(&self, _request: &mut ServeRequest) -> Result<(), ServeError> {
         Ok(())
@@ -751,7 +755,7 @@ fn handle_responses(
             );
         }
     };
-    let mut request = match parse_request(&parsed) {
+    let mut request = match backend.parse_request(&parsed) {
         Ok(request) => request,
         Err(error) => return write_serve_error(&mut writer, &error),
     };
@@ -912,6 +916,27 @@ mod tests {
         fn model_id(&self) -> &str {
             &self.model
         }
+        fn parse_request(&self, body: &Value) -> Result<ServeRequest, ServeError> {
+            if self.protocol == OutputProtocol::RawText {
+                super::super::render_k2::parse_request(body)
+            } else {
+                parse_request(body)
+            }
+        }
+        fn normalize_request(&self, request: &mut ServeRequest) -> Result<(), ServeError> {
+            if self.protocol == OutputProtocol::RawText {
+                super::super::render_k2::normalize(request, 8, 32)
+            } else {
+                Ok(())
+            }
+        }
+        fn render_prompt(&self, request: &ServeRequest) -> Result<String, ServeError> {
+            if self.protocol == OutputProtocol::RawText {
+                super::super::render_k2::render(request)
+            } else {
+                Ok(render_qwen_serve_prompt(request))
+            }
+        }
         fn output_protocol(&self, _request: &ServeRequest) -> OutputProtocol {
             self.protocol.clone()
         }
@@ -923,6 +948,9 @@ mod tests {
         ) -> Result<GenerationOutcome, BackendFailure> {
             if let Some(error) = self.fail_with.clone() {
                 return Err(error.into());
+            }
+            if self.protocol == OutputProtocol::RawText {
+                assert_eq!(Some(_prompt), _request.k2_raw_input.as_deref());
             }
             sink.tick().map_err(BackendFailure::Aborted)?;
             for piece in &self.pieces {
@@ -988,7 +1016,7 @@ mod tests {
         assert_eq!(request.path, "/v1/models");
     }
 
-    fn roundtrip(mut backend: MockBackend, request: &str) -> String {
+    fn roundtrip(mut backend: impl GenerationBackend + Send + 'static, request: &str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
@@ -1025,6 +1053,53 @@ mod tests {
             .expect("SSE event has data");
         serde_json::from_str(data).expect("SSE event data is JSON")
     }
+
+    #[test]
+    fn k2_raw_nonstream_and_sse_never_parse_reasoning_or_tools() {
+        let pieces = [
+            "<thi",
+            "nk>literal</think>",
+            "<tool_call>{\"name\":\"x\"}</tool_call>",
+            "<|ifm|end_of_text|>",
+        ];
+        for streaming in [false, true] {
+            let mut backend = MockBackend::new(&pieces, StopReason::Eos);
+            backend.protocol = OutputProtocol::RawText;
+            backend.end = GenerationEnd::StopToken(1);
+            let body = json!({"model":"qwen-test","input":"exact raw input","stream":streaming,"x_k2":{"add_special_tokens":false}});
+            let response = roundtrip(backend, &post("/v1/responses", &body.to_string()));
+            assert!(response.starts_with("HTTP/1.1 200"));
+            let envelope = if streaming {
+                sse_payload(&response, "response.completed")["response"].clone()
+            } else {
+                serde_json::from_str::<Value>(body_of(&response)).unwrap()
+            };
+            let output = envelope["output"].as_array().unwrap();
+            assert_eq!(output.len(), 1);
+            assert_eq!(output[0]["type"], "message");
+            assert_eq!(output[0]["content"][0]["text"], pieces.concat());
+            assert!(envelope["reasoning"].is_null());
+            assert_eq!(envelope["tools"], json!([]));
+            assert_eq!(envelope["parallel_tool_calls"], false);
+            assert_eq!(envelope["tool_choice"], "none");
+            assert!(envelope.get("x_qwen").is_none());
+        }
+    }
+
+    #[test]
+    fn k2_family_parser_refuses_chat_before_backend_generation() {
+        let mut backend = MockBackend::new(&[], StopReason::Eos);
+        backend.protocol = OutputProtocol::RawText;
+        backend.fail_with = Some(ServeError::server_error("must not generate"));
+        let body = json!({"model":"qwen-test","input":[{"role":"user","content":"chat"}]});
+        let response = roundtrip(backend, &post("/v1/responses", &body.to_string()));
+        assert!(response.starts_with("HTTP/1.1 400"));
+        assert!(body_of(&response).contains("raw input string"));
+        assert!(!body_of(&response).contains("must not generate"));
+    }
+
+    #[path = "k2_chat_tests.rs"]
+    mod k2_chat;
 
     #[test]
     fn muse_non_stream_partitions_reasoning_visible_and_calls() {

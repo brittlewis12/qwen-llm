@@ -16,9 +16,9 @@ pub(crate) enum Command {
         after_help = "Examples:\n  qwen serve -m MODEL\n  qwen serve -m MODEL --addr 127.0.0.1:8737 --max-tokens 65536\n  qwen serve -m Muse-Glimmer.gguf --max-context-tokens 7168 --max-tokens 2048\n  qwen serve -m MODEL --trace-sse /tmp/qwen.sse.jsonl\n\nEndpoints: POST /v1/responses (stream and non-stream), GET /v1/models.\nSerial: one request in flight; stateless (store:false only)."
     )]
     Serve(ServeArgs),
-    /// Inspect a GGUF header without loading weights or touching the GPU.
+    /// Inspect model metadata and capabilities without using the GPU.
     #[command(
-        after_help = "Examples:\n  qwen info -m MODEL\n  qwen info -m MODEL --json\n\n--json reports the detected family and whether --drafter would be admitted per lane (run, serve), with a stable reason code when refused."
+        after_help = "Examples:\n  qwen info -m MODEL\n  qwen info -m MODEL --json\n\n--json reports the detected family and whether --drafter would be admitted per lane (run, serve), with a stable reason code when refused. Eligible K2 JSON inspection also hashes retained checkpoint bytes on the CPU to verify chat identity; it checks cancellation between bounded reads. Text inspection does not perform that chat verification."
     )]
     Info(InfoArgs),
 }
@@ -36,7 +36,7 @@ pub(crate) struct InfoArgs {
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct ServeArgs {
-    /// Path to a supported Qwen, DeepSeek V4, or Muse Glimmer GGUF file.
+    /// Supported Qwen, DeepSeek V4, Muse Glimmer, or dense K2 GGUF (K2: raw only).
     #[arg(short = 'm', long)]
     model: PathBuf,
 
@@ -44,15 +44,15 @@ pub(crate) struct ServeArgs {
     #[arg(long, default_value = "127.0.0.1:8737")]
     addr: String,
 
-    /// Default max_output_tokens when a request omits it; required for Muse.
+    /// Default max_output_tokens; required for fixed-capacity families including K2.
     #[arg(long = "max-tokens", value_parser = parse_positive_usize)]
     max_tokens: Option<usize>,
 
-    /// Fixed sequence capacity; required for DS4 and Muse, request-shaped for Qwen.
+    /// Fixed capacity for DS4/Muse/K2 within model context and device memory; Qwen is request-shaped.
     #[arg(long, value_parser = parse_positive_usize)]
     max_context_tokens: Option<usize>,
 
-    /// Qwen/DS4 RAM snapshot-cache budget in MiB; Muse currently reports no cache.
+    /// Qwen/DS4 RAM snapshot-cache MiB; K2 requires explicit 0 (no snapshots).
     #[arg(long, default_value_t = crate::serve::DEFAULT_SNAPSHOT_CACHE_MIB)]
     snapshot_cache_mib: u64,
 
@@ -162,7 +162,7 @@ pub(crate) enum DocumentSource {
         .args(["user", "messages", "raw_prompt"])
 ))]
 pub(crate) struct RunArgs {
-    /// Path to a Qwen, DeepSeek V4, or Muse Glimmer GGUF file.
+    /// Path to a Qwen, DeepSeek V4, Muse Glimmer, or K2 Horizon GGUF file.
     #[arg(short = 'm', long)]
     model: PathBuf,
 
@@ -198,7 +198,8 @@ pub(crate) struct RunArgs {
     /// Reasoning depth, bound against the detected model's own levels (see
     /// `qwen info --json` capabilities.reasoning). Qwen3.8: none/low/medium/xhigh,
     /// default xhigh; DeepSeek V4: none/low/high/max, default none (ordinary
-    /// chat); Muse: low/medium/high/xhigh, default high.
+    /// chat); Muse: low/medium/high/xhigh, default high; verified K2 chat:
+    /// high/medium/low, default high (no non-thinking transition).
     #[arg(
         long,
         value_name = "LEVEL",
@@ -212,7 +213,10 @@ pub(crate) struct RunArgs {
 
 #[derive(Debug, Default, ClapArgs)]
 struct GenerationOverrides {
-    /// Maximum number of tokens to generate (default: 64).
+    /// Do not insert tokenizer BOS for raw input; retain any explicitly supplied special tokens.
+    #[arg(long, requires = "raw_prompt")]
+    no_special_tokens: bool,
+    /// Maximum generated tokens (default: 64); prompt plus generation must fit sequence capacity.
     #[arg(short = 'n', long = "max-tokens", visible_alias = "tokens")]
     tokens: Option<usize>,
 
@@ -236,7 +240,7 @@ struct GenerationOverrides {
     #[arg(long)]
     seed: Option<u64>,
 
-    /// Override Qwen or Muse sequence capacity; Muse cannot exceed model context.
+    /// Override family-specific sequence capacity (bounded by model context and memory).
     #[arg(long)]
     max_context_tokens: Option<usize>,
 
@@ -285,6 +289,9 @@ impl RunInvocation {
 
 impl GenerationOverrides {
     fn apply(&self, args: &mut Args) {
+        if self.no_special_tokens {
+            args.no_special_tokens = true;
+        }
         if let Some(value) = self.tokens {
             args.tokens = value;
         }
@@ -533,8 +540,16 @@ mod tests {
         let explicit = super::super::ExplicitCliOptions::from_matches(run_matches);
         assert_eq!(
             explicit,
-            super::super::Args::parse_with_explicit(["qwen", "-m", "model.gguf", "--prompt", "x"])
-                .1
+            super::super::Args::parse_with_explicit([
+                "qwen",
+                "-m",
+                "model.gguf",
+                "--prompt",
+                "x",
+                "-n",
+                "512"
+            ])
+            .1
         );
     }
 

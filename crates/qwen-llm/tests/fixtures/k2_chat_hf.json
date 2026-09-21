@@ -1,0 +1,830 @@
+{
+  "schema": "k2.no_tools_template_oracle.v1",
+  "revision": "2c9659a84c4eea6f9f60462221fe762c8c84d75c",
+  "template_url": "https://huggingface.co/IFM/K2-Horizon-7B/resolve/2c9659a84c4eea6f9f60462221fe762c8c84d75c/chat_template.jinja",
+  "template_sha256": "a892cd0b0195599f283a8c706787520d9a6747640efb2f4dec4144b0abb62590",
+  "engine": "jinja2 3.1.6 ImmutableSandboxedEnvironment; generation blocks are output-preserving",
+  "tokenizer": "tokenizers 0.22.2; pinned tokenizer metadata from generate_k2_tokenizer_fixtures.py",
+  "bos": "<|ifm|begin_of_text|>",
+  "generation_config": {
+    "bos_token_id": 0,
+    "eos_token_id": [
+      1,
+      250019
+    ]
+  },
+  "generation_config_sha256": "2da7d47641f4509da4ae47711e31d8b5f0f3f801ee08d87e7e9f07f814bdc4a3",
+  "cases": [
+    {
+      "name": "effort-high",
+      "messages": [
+        {
+          "role": "user",
+          "content": "What is 2 + 2?"
+        }
+      ],
+      "reasoning_effort": "high",
+      "add_generation_prompt": true,
+      "rendered": "<|ifm|begin_of_text|><|ifm|im_start|>user\nWhat is 2 + 2?<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n",
+      "body": "<|ifm|im_start|>user\nWhat is 2 + 2?<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n",
+      "token_ids": [
+        0,
+        250018,
+        2672,
+        200,
+        3749,
+        395,
+        222,
+        19,
+        994,
+        222,
+        19,
+        32,
+        250019,
+        250018,
+        142036,
+        200,
+        250029,
+        200
+      ]
+    },
+    {
+      "name": "effort-medium",
+      "messages": [
+        {
+          "role": "user",
+          "content": "What is 2 + 2?"
+        }
+      ],
+      "reasoning_effort": "medium",
+      "add_generation_prompt": true,
+      "rendered": "<|ifm|begin_of_text|><|ifm|im_start|>user\nWhat is 2 + 2?<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "body": "<|ifm|im_start|>user\nWhat is 2 + 2?<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "token_ids": [
+        0,
+        250018,
+        2672,
+        200,
+        3749,
+        395,
+        222,
+        19,
+        994,
+        222,
+        19,
+        32,
+        250019,
+        250018,
+        142036,
+        200,
+        250050,
+        200
+      ]
+    },
+    {
+      "name": "effort-low",
+      "messages": [
+        {
+          "role": "user",
+          "content": "What is 2 + 2?"
+        }
+      ],
+      "reasoning_effort": "low",
+      "add_generation_prompt": true,
+      "rendered": "<|ifm|begin_of_text|><|ifm|im_start|>user\nWhat is 2 + 2?<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_faster>\n",
+      "body": "<|ifm|im_start|>user\nWhat is 2 + 2?<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_faster>\n",
+      "token_ids": [
+        0,
+        250018,
+        2672,
+        200,
+        3749,
+        395,
+        222,
+        19,
+        994,
+        222,
+        19,
+        32,
+        250019,
+        250018,
+        142036,
+        200,
+        250052,
+        200
+      ]
+    },
+    {
+      "name": "effort-none",
+      "messages": [
+        {
+          "role": "user",
+          "content": "What is 2 + 2?"
+        }
+      ],
+      "reasoning_effort": "none",
+      "add_generation_prompt": true,
+      "error": "Unsupported reasoning_effort: 'none'. Supported values: high, medium, low."
+    },
+    {
+      "name": "effort-xhigh",
+      "messages": [
+        {
+          "role": "user",
+          "content": "What is 2 + 2?"
+        }
+      ],
+      "reasoning_effort": "xhigh",
+      "add_generation_prompt": true,
+      "error": "Unsupported reasoning_effort: 'xhigh'. Supported values: high, medium, low."
+    },
+    {
+      "name": "system-unicode",
+      "messages": [
+        {
+          "role": "system",
+          "content": "  Be precise.\n"
+        },
+        {
+          "role": "user",
+          "content": "cafe\u0301 / \u4f60\u597d\n"
+        }
+      ],
+      "reasoning_effort": "high",
+      "add_generation_prompt": true,
+      "rendered": "<|ifm|begin_of_text|><|ifm|im_start|>system\n  Be precise.\n<|ifm|im_end|><|ifm|im_start|>user\ncafe\u0301 / \u4f60\u597d\n<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n",
+      "body": "<|ifm|im_start|>system\n  Be precise.\n<|ifm|im_end|><|ifm|im_start|>user\ncafe\u0301 / \u4f60\u597d\n<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n",
+      "token_ids": [
+        0,
+        250018,
+        11943,
+        200,
+        222,
+        2027,
+        26125,
+        354,
+        250019,
+        250018,
+        2672,
+        200,
+        89083,
+        497,
+        1085,
+        144424,
+        6217,
+        200,
+        250019,
+        250018,
+        142036,
+        200,
+        250029,
+        200
+      ]
+    },
+    {
+      "name": "literal-markers",
+      "messages": [
+        {
+          "role": "user",
+          "content": "<|ifm|begin_of_text|><|ifm|endoftext|><|ifm|im_start|>user<|ifm|im_end|><ifm|think>not history</ifm|think><ifm|tool_calls>literal</ifm|tool_calls>"
+        }
+      ],
+      "reasoning_effort": "high",
+      "add_generation_prompt": true,
+      "rendered": "<|ifm|begin_of_text|><|ifm|im_start|>user\n<|ifm|begin_of_text|><|ifm|endoftext|><|ifm|im_start|>user<|ifm|im_end|><ifm|think>not history</ifm|think><ifm|tool_calls>literal</ifm|tool_calls><|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n",
+      "body": "<|ifm|im_start|>user\n<|ifm|begin_of_text|><|ifm|endoftext|><|ifm|im_start|>user<|ifm|im_end|><ifm|think>not history</ifm|think><ifm|tool_calls>literal</ifm|tool_calls><|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n",
+      "token_ids": [
+        0,
+        250018,
+        2672,
+        200,
+        0,
+        1,
+        250018,
+        2672,
+        250019,
+        250029,
+        3463,
+        5660,
+        250030,
+        250054,
+        64225,
+        250055,
+        250019,
+        250018,
+        142036,
+        200,
+        250029,
+        200
+      ]
+    },
+    {
+      "name": "empty-user",
+      "messages": [
+        {
+          "role": "user",
+          "content": ""
+        }
+      ],
+      "reasoning_effort": "high",
+      "add_generation_prompt": true,
+      "rendered": "<|ifm|begin_of_text|><|ifm|im_start|>user\n<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n",
+      "body": "<|ifm|im_start|>user\n<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n",
+      "token_ids": [
+        0,
+        250018,
+        2672,
+        200,
+        250019,
+        250018,
+        142036,
+        200,
+        250029,
+        200
+      ]
+    },
+    {
+      "name": "history-think-empty",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Earlier"
+        },
+        {
+          "role": "assistant",
+          "content": "Answer",
+          "think": ""
+        },
+        {
+          "role": "user",
+          "content": "Continue"
+        }
+      ],
+      "reasoning_effort": "medium",
+      "add_generation_prompt": true,
+      "rendered": "<|ifm|begin_of_text|><|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n</ifm|think>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "body": "<|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n</ifm|think>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "token_ids": [
+        0,
+        250018,
+        2672,
+        200,
+        75707,
+        250019,
+        250018,
+        142036,
+        200,
+        250029,
+        200,
+        250030,
+        19163,
+        250019,
+        250018,
+        2672,
+        200,
+        24862,
+        250019,
+        250018,
+        142036,
+        200,
+        250050,
+        200
+      ]
+    },
+    {
+      "name": "history-think-text",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Earlier"
+        },
+        {
+          "role": "assistant",
+          "content": "Answer",
+          "think": "A prior calculation.\n"
+        },
+        {
+          "role": "user",
+          "content": "Continue"
+        }
+      ],
+      "reasoning_effort": "medium",
+      "add_generation_prompt": true,
+      "rendered": "<|ifm|begin_of_text|><|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\nA prior calculation.\n</ifm|think>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "body": "<|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\nA prior calculation.\n</ifm|think>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "token_ids": [
+        0,
+        250018,
+        2672,
+        200,
+        75707,
+        250019,
+        250018,
+        142036,
+        200,
+        250029,
+        200,
+        34,
+        5947,
+        31919,
+        354,
+        250030,
+        19163,
+        250019,
+        250018,
+        2672,
+        200,
+        24862,
+        250019,
+        250018,
+        142036,
+        200,
+        250050,
+        200
+      ]
+    },
+    {
+      "name": "history-think_fast-empty",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Earlier"
+        },
+        {
+          "role": "assistant",
+          "content": "Answer",
+          "think_fast": ""
+        },
+        {
+          "role": "user",
+          "content": "Continue"
+        }
+      ],
+      "reasoning_effort": "medium",
+      "add_generation_prompt": true,
+      "rendered": "<|ifm|begin_of_text|><|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n</ifm|think_fast>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "body": "<|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n</ifm|think_fast>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "token_ids": [
+        0,
+        250018,
+        2672,
+        200,
+        75707,
+        250019,
+        250018,
+        142036,
+        200,
+        250050,
+        200,
+        250051,
+        19163,
+        250019,
+        250018,
+        2672,
+        200,
+        24862,
+        250019,
+        250018,
+        142036,
+        200,
+        250050,
+        200
+      ]
+    },
+    {
+      "name": "history-think_fast-text",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Earlier"
+        },
+        {
+          "role": "assistant",
+          "content": "Answer",
+          "think_fast": "A prior calculation.\n"
+        },
+        {
+          "role": "user",
+          "content": "Continue"
+        }
+      ],
+      "reasoning_effort": "medium",
+      "add_generation_prompt": true,
+      "rendered": "<|ifm|begin_of_text|><|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\nA prior calculation.\n</ifm|think_fast>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "body": "<|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\nA prior calculation.\n</ifm|think_fast>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "token_ids": [
+        0,
+        250018,
+        2672,
+        200,
+        75707,
+        250019,
+        250018,
+        142036,
+        200,
+        250050,
+        200,
+        34,
+        5947,
+        31919,
+        354,
+        250051,
+        19163,
+        250019,
+        250018,
+        2672,
+        200,
+        24862,
+        250019,
+        250018,
+        142036,
+        200,
+        250050,
+        200
+      ]
+    },
+    {
+      "name": "history-think_faster-empty",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Earlier"
+        },
+        {
+          "role": "assistant",
+          "content": "Answer",
+          "think_faster": ""
+        },
+        {
+          "role": "user",
+          "content": "Continue"
+        }
+      ],
+      "reasoning_effort": "medium",
+      "add_generation_prompt": true,
+      "rendered": "<|ifm|begin_of_text|><|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_faster>\n</ifm|think_faster>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "body": "<|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_faster>\n</ifm|think_faster>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "token_ids": [
+        0,
+        250018,
+        2672,
+        200,
+        75707,
+        250019,
+        250018,
+        142036,
+        200,
+        250052,
+        200,
+        250053,
+        19163,
+        250019,
+        250018,
+        2672,
+        200,
+        24862,
+        250019,
+        250018,
+        142036,
+        200,
+        250050,
+        200
+      ]
+    },
+    {
+      "name": "history-think_faster-text",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Earlier"
+        },
+        {
+          "role": "assistant",
+          "content": "Answer",
+          "think_faster": "A prior calculation.\n"
+        },
+        {
+          "role": "user",
+          "content": "Continue"
+        }
+      ],
+      "reasoning_effort": "medium",
+      "add_generation_prompt": true,
+      "rendered": "<|ifm|begin_of_text|><|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_faster>\nA prior calculation.\n</ifm|think_faster>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "body": "<|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_faster>\nA prior calculation.\n</ifm|think_faster>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "token_ids": [
+        0,
+        250018,
+        2672,
+        200,
+        75707,
+        250019,
+        250018,
+        142036,
+        200,
+        250052,
+        200,
+        34,
+        5947,
+        31919,
+        354,
+        250053,
+        19163,
+        250019,
+        250018,
+        2672,
+        200,
+        24862,
+        250019,
+        250018,
+        142036,
+        200,
+        250050,
+        200
+      ]
+    },
+    {
+      "name": "history-reasoning_content-empty",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Earlier"
+        },
+        {
+          "role": "assistant",
+          "content": "Answer",
+          "reasoning_content": ""
+        },
+        {
+          "role": "user",
+          "content": "Continue"
+        }
+      ],
+      "reasoning_effort": "medium",
+      "add_generation_prompt": true,
+      "rendered": "<|ifm|begin_of_text|><|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n</ifm|think>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "body": "<|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n</ifm|think>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "token_ids": [
+        0,
+        250018,
+        2672,
+        200,
+        75707,
+        250019,
+        250018,
+        142036,
+        200,
+        250029,
+        200,
+        250030,
+        19163,
+        250019,
+        250018,
+        2672,
+        200,
+        24862,
+        250019,
+        250018,
+        142036,
+        200,
+        250050,
+        200
+      ]
+    },
+    {
+      "name": "history-reasoning_content-text",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Earlier"
+        },
+        {
+          "role": "assistant",
+          "content": "Answer",
+          "reasoning_content": "A prior calculation.\n"
+        },
+        {
+          "role": "user",
+          "content": "Continue"
+        }
+      ],
+      "reasoning_effort": "medium",
+      "add_generation_prompt": true,
+      "rendered": "<|ifm|begin_of_text|><|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\nA prior calculation.\n</ifm|think>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "body": "<|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\nA prior calculation.\n</ifm|think>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "token_ids": [
+        0,
+        250018,
+        2672,
+        200,
+        75707,
+        250019,
+        250018,
+        142036,
+        200,
+        250029,
+        200,
+        34,
+        5947,
+        31919,
+        354,
+        250030,
+        19163,
+        250019,
+        250018,
+        2672,
+        200,
+        24862,
+        250019,
+        250018,
+        142036,
+        200,
+        250050,
+        200
+      ]
+    },
+    {
+      "name": "history-reasoning-empty",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Earlier"
+        },
+        {
+          "role": "assistant",
+          "content": "Answer",
+          "reasoning": ""
+        },
+        {
+          "role": "user",
+          "content": "Continue"
+        }
+      ],
+      "reasoning_effort": "medium",
+      "add_generation_prompt": true,
+      "rendered": "<|ifm|begin_of_text|><|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n</ifm|think>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "body": "<|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n</ifm|think>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "token_ids": [
+        0,
+        250018,
+        2672,
+        200,
+        75707,
+        250019,
+        250018,
+        142036,
+        200,
+        250029,
+        200,
+        250030,
+        19163,
+        250019,
+        250018,
+        2672,
+        200,
+        24862,
+        250019,
+        250018,
+        142036,
+        200,
+        250050,
+        200
+      ]
+    },
+    {
+      "name": "history-reasoning-text",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Earlier"
+        },
+        {
+          "role": "assistant",
+          "content": "Answer",
+          "reasoning": "A prior calculation.\n"
+        },
+        {
+          "role": "user",
+          "content": "Continue"
+        }
+      ],
+      "reasoning_effort": "medium",
+      "add_generation_prompt": true,
+      "rendered": "<|ifm|begin_of_text|><|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\nA prior calculation.\n</ifm|think>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "body": "<|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\nA prior calculation.\n</ifm|think>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_fast>\n",
+      "token_ids": [
+        0,
+        250018,
+        2672,
+        200,
+        75707,
+        250019,
+        250018,
+        142036,
+        200,
+        250029,
+        200,
+        34,
+        5947,
+        31919,
+        354,
+        250030,
+        19163,
+        250019,
+        250018,
+        2672,
+        200,
+        24862,
+        250019,
+        250018,
+        142036,
+        200,
+        250050,
+        200
+      ]
+    },
+    {
+      "name": "history-priority",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Earlier"
+        },
+        {
+          "role": "assistant",
+          "content": "Answer",
+          "think": "",
+          "think_fast": "ignored",
+          "reasoning": "ignored too"
+        },
+        {
+          "role": "user",
+          "content": "Continue"
+        }
+      ],
+      "reasoning_effort": "high",
+      "add_generation_prompt": true,
+      "rendered": "<|ifm|begin_of_text|><|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n</ifm|think>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n",
+      "body": "<|ifm|im_start|>user\nEarlier<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n</ifm|think>Answer<|ifm|im_end|><|ifm|im_start|>user\nContinue<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n",
+      "token_ids": [
+        0,
+        250018,
+        2672,
+        200,
+        75707,
+        250019,
+        250018,
+        142036,
+        200,
+        250029,
+        200,
+        250030,
+        19163,
+        250019,
+        250018,
+        2672,
+        200,
+        24862,
+        250019,
+        250018,
+        142036,
+        200,
+        250029,
+        200
+      ]
+    },
+    {
+      "name": "history-missing",
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "Answer"
+        },
+        {
+          "role": "user",
+          "content": "Continue"
+        }
+      ],
+      "reasoning_effort": "high",
+      "add_generation_prompt": true,
+      "error": "Assistant message is missing a thinking field. Provide one of: think, reasoning, reasoning_content, think_fast, think_faster."
+    },
+    {
+      "name": "history-nonstring",
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "Answer",
+          "think": 42
+        },
+        {
+          "role": "user",
+          "content": "Continue"
+        }
+      ],
+      "reasoning_effort": "high",
+      "add_generation_prompt": true,
+      "error": "Assistant thinking fields must be strings. Provide one of: think, reasoning, reasoning_content, think_fast, think_faster as a string."
+    }
+  ]
+}

@@ -2,7 +2,7 @@
 
 This is the current implementation map, not the superseded chronological plan.
 Historical decisions, failed experiments, review findings and qualification
-evidence remain in `K2-HORIZON-REVIEW.md` (packets 1-36). User-facing contracts
+evidence remain in `K2-HORIZON-REVIEW.md` (packets 1-37). User-facing contracts
 live in `CLI-UX.md` and `SERVE.md`; reproduction is in
 `scripts/reference/k2/README.md`.
 
@@ -49,6 +49,26 @@ Local weights: `~/models/K2-Horizon-7B-Q8_0.gguf` (9,573,964,160 bytes), from
   prefix parity and actual completed answers; they are not answer-quality claims.
 
 ## Remaining Work
+
+The September 20 out-of-band review is being addressed in leverage order. Chat
+partitioning/HTTP and the current-state index were already delivered in packet 36.
+Packet 37 removes unpriced tensor-sized host staging from K2 owned allocations;
+the admitted 32K-capacity allocation/high-water check passes without claiming a
+paired speedup. Immediate follow-ups, ahead of additional architectural work:
+
+- Separate cache advancement from output readouts, preserving cancellation and
+  poison semantics; reuse admitted packed scratch where useful, then measure pairs.
+- Derive artifact capability reporting from admission; correct request/setup
+  timing; add cooperative cancellation to exhaustive identity checks and truthful
+  inspection I/O/help/README descriptions.
+- Reject overflowing externally supplied RMS inputs without silently changing
+  ordinary arithmetic; tighten the fixed-token continuation wording.
+- Freeze independent history-boundary checks beyond 256; pin named chat fixture
+  inventory and keep diagnostic completion separate from promotion verdicts.
+- Add structured producer/deployment execution compatibility to imported lens
+  provenance, without banning useful cross-backend transfers.
+
+Longer-term workflow/qualification work:
 
 1. Extend useful long-context quality evidence without mistaking declared context
    or synthetic high-position agreement for full-context model qualification.

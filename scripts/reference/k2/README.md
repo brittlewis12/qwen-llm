@@ -9,6 +9,24 @@ F16 remains the application cache. CLI and HTTP no-tools chat are bound to the
 verified final artifact and pinned IFM renderer. Raw mode deliberately
 does not guess a chat/tool contract for unknown checkpoints.
 
+## Owned allocation check
+
+K2 session/scratch/lens allocations directly zero their owned Shared Metal bytes;
+they do not stage a tensor-sized host vector. An opt-in synthetic stress probe
+measures allocation wall time, Metal delta and Darwin process RSS high-water:
+
+```sh
+MTL_DEBUG_LAYER=1 K2_ALLOCATION_EVIDENCE="$PWD/target/profiles/k2-allocation-new.json" \
+cargo test -p qwen-llm --lib \
+  k2_horizon_runtime::allocation_tests::gpu_k2_session_allocation_high_water_probe \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+Run alone in a fresh test process with adequate system memory. Its default 32768
+capacity allocates 4.5 GiB logical KV (no weights); normal production lease and
+memory gates apply. `K2_ALLOCATION_CAPACITY` can lower the probe size. Results do
+not qualify model history length or establish a paired performance improvement.
+
 ## No-tools template checks
 
 The CPU oracle downloads only immutable template/tokenizer/generation metadata,

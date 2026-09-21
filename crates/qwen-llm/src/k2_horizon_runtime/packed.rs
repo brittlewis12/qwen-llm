@@ -124,7 +124,7 @@ impl PackedScratch {
         let before = ctx.current_allocated_size();
         let mut tensors = Vec::new();
         for (dtype, shape) in specs {
-            let tensor = MetalTensor::zeros_dtype(ctx, shape.clone(), dtype)?;
+            let tensor = MetalTensor::zeros_dtype_unstaged(ctx, shape.clone(), dtype)?;
             if tensor.dtype != dtype || tensor.shape != shape || !tensor.is_writable() {
                 return Err(invalid("packed scratch descriptor drift"));
             }

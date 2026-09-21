@@ -1393,3 +1393,39 @@ Closure adversarial verdict: **commit-ready, no concrete correctness or merge
 blocker**. Final checks pass: 74 engine tests under `k2_`, 19 qwen K2 tests,
 127 serving CPU regressions, warning-free all-target checking, and clean diff
 whitespace. Ignored GPU/research suites were not silently counted as executed.
+
+## Packet 37 remove unpriced tensor-sized host staging
+
+The out-of-band allocation finding is confirmed: K2 session and packed scratch
+called `zeros_dtype`, allocating a host zero vector before copying into Metal,
+while admission priced only the eventual Metal buffers. This establishes unpriced
+staging and copy work, not a reproduced OOM or exact doubling of physical memory.
+
+K2 session, packed scratch and lens-owned buffers now use a crate-private
+`zeros_dtype_unstaged`: checked shape/device/CPU extent, one fallible owned Shared
+allocation, full direct byte-zero initialization before publication. The existing
+public helper and other families are unchanged. Outer memory admission, allocation
+transactions, price reconciliation, cache layout and session publication ordering
+are preserved. There is no tensor-sized CPU staging allocation to price. Quantized
+byte-zero semantics match the old helper; no new decoded-numeric-zero claim.
+
+Design and pre-execution adversarial review approved this narrow approach over a
+global allocator rewrite. The optional null-pointer suggestion was not adopted:
+the Metal binding returns `NonNull<c_void>` from `contents()`, already expressing
+that FFI precondition. Extent/storage/ownership checks remain explicit.
+
+Both synthetic ignored probes pass with production-exclusive leases, the actual
+wired-memory gate and API validation. Small I8/I32/F16/F32/Q8 byte checks verify
+full zeroing, independent allocations, writable ownership and invalid extents.
+An injected partial multi-buffer allocation failure releases prior buffers and
+allows a clean retry. The fresh-process 32768-capacity stress probe allocates
+4,831,838,208 logical KV bytes, with first/middle/last page checks and full teardown.
+Its admitted Metal upper price is 4,833,132,544 bytes; observed delta is
+4,833,083,392. Initialization takes 162.719 ms. Darwin process `ru_maxrss` rises
+from 49,463,296 to 4,883,021,824 bytes. Evidence:
+`target/profiles/k2-unstaged-allocation-32k-v1.json`.
+
+RSS is a cumulative process high-water diagnostic, not exact allocation/physical
+residency attribution. This is a synthetic allocation check without model weights
+or full-context inference; there is no paired speedup claim. No giant unsafe old
+staging control was run merely to restate the source-grounded defect.

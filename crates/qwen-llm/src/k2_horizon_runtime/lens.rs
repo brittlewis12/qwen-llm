@@ -191,7 +191,7 @@ pub(super) fn allocate_rows(ctx: &MetalContext, rows: usize) -> Result<MetalTens
     admit(ctx, price)?;
     let before = ctx.current_allocated_size();
     let shape = vec![WIDTH as u64, rows as u64];
-    let tensor = MetalTensor::zeros_dtype(ctx, shape.clone(), GgmlType::F32)?;
+    let tensor = MetalTensor::zeros_dtype_unstaged(ctx, shape.clone(), GgmlType::F32)?;
     if tensor.dtype != GgmlType::F32
         || tensor.shape != shape
         || tensor.n_bytes() != bytes

@@ -632,7 +632,7 @@ impl SessionBuffers {
             .specs()
             .into_iter()
             .map(|(dtype, shape)| -> Result<MetalTensor> {
-                let tensor = MetalTensor::zeros_dtype(ctx, shape.clone(), dtype)?;
+                let tensor = MetalTensor::zeros_dtype_unstaged(ctx, shape.clone(), dtype)?;
                 if tensor.dtype != dtype || tensor.shape != shape || !tensor.is_writable() {
                     return Err(invalid("session allocation descriptor drift"));
                 }
@@ -769,6 +769,8 @@ fn reconcile(ctx: &MetalContext, before: u64, price: u64) -> Result<()> {
 
 #[cfg(test)]
 mod compact_tests;
+#[cfg(test)]
+mod allocation_tests;
 #[cfg(test)]
 mod oracle_tests;
 #[cfg(test)]

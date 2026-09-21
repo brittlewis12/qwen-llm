@@ -1016,6 +1016,41 @@ impl MetalTensor {
         })
     }
 
+    /// Byte-zero owned shared storage without a second, tensor-sized host buffer.
+    /// The caller must admit the Metal allocation before calling this helper.
+    pub(crate) fn zeros_dtype_unstaged(
+        ctx: &MetalContext,
+        shape: Vec<u64>,
+        dtype: GgmlType,
+    ) -> Result<Self, MetalError> {
+        let (_, bytes) = checked_ggml_shape_bytes(&shape, dtype)?;
+        let extent = bytes.max(1);
+        if extent > isize::MAX as usize || extent > ctx.max_buffer_length() {
+            return Err(MetalError::BadShape {
+                kernel: "zeros_dtype_unstaged",
+                detail: "byte extent exceeds CPU or device buffer bounds".into(),
+            });
+        }
+        let buffer = ctx.buffer_uninit(extent)?;
+        if buffer.storageMode() != MTLStorageMode::Shared || buffer.length() < extent {
+            return Err(MetalError::BadShape {
+                kernel: "zeros_dtype_unstaged",
+                detail: "allocation must provide the full shared byte extent".into(),
+            });
+        }
+        // Fresh owned storage, not yet published or submitted to any command.
+        // Zero quantized payload bytes exactly as the staged helper does; this
+        // makes no additional claim about a dtype's decoded numerical zero.
+        unsafe { std::ptr::write_bytes(buffer.contents().as_ptr().cast::<u8>(), 0, extent) };
+        Ok(Self {
+            buffer,
+            offset: 0,
+            shape,
+            dtype,
+            provenance: MetalTensorProvenance::OwnedWritable,
+        })
+    }
+
     /// Build a zero-copy sub-view of this tensor: same underlying MTLBuffer,
     /// shifted by `elem_offset` elements (of the tensor's dtype), with a
     /// new logical `shape`. The resulting view shares storage and aliases

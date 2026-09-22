@@ -2,7 +2,7 @@
 
 This is the current implementation map, not the superseded chronological plan.
 Historical decisions, failed experiments, review findings and qualification
-evidence remain in `K2-HORIZON-REVIEW.md` (packets 1-41). User-facing contracts
+evidence remain in `K2-HORIZON-REVIEW.md`. User-facing contracts
 live in `CLI-UX.md` and `SERVE.md`; reproduction is in
 `scripts/reference/k2/README.md`.
 
@@ -39,6 +39,9 @@ Local weights: `~/models/K2-Horizon-7B-Q8_0.gguf` (9,573,964,160 bytes), from
   CPU admission and the 42-row same-Q4 independent integration screen pass. Q4
   embedding/mixed Q4_K-Q6_K projections use existing kernels, with serial prefill.
   This is not Q8-equivalent quality, packed-prefill or long-context evidence.
+- Verified final Q4_K_M chat shares Q8's upstream semantics, but binds its own
+  retained-content identity. CPU byte/token fixtures and actual CLI/HTTP checks
+  cover high/medium/low effort, reasoning partitioning and raw-control parity.
 - Native chat follows IFM revision `2c9659a84c4eea6f9f60462221fe762c8c84d75c`,
   with separate upstream and embedded-template hashes. Full retained-byte identity
   is required, not a filename or downloader assertion. Source association is the

@@ -1643,3 +1643,35 @@ Actual CLI raw smoke, API validation/production lease enabled: six prompt tokens
 stats retained at `target/profiles/k2-q4-raw-smoke.jsonl`. This is a product wiring
 check, not comparative performance or answer-quality qualification. Q4 verified
 chat identity is deliberately a separate semantic-profile step.
+
+## Packet 43: verified final Q4 chat
+
+The standard Q4_K_M retained-content identity from packet 42 now authorizes the
+same final-release no-tools renderer as Q8. Tokenizer, embedded-template and
+structural model-config checks plus cancellable exhaustive retained-byte hashing
+remain unchanged. The generation-config hash denotes the pinned upstream reference,
+not a separate generation-config file authenticated inside the GGUF; product
+preparation enforces raw EOS 1 and the renderer uses reference chat stops 1/250019.
+Each artifact
+reports its own content identity; filename, quantization label, header similarity
+or a successful numerical screen alone cannot authorize chat. Unknown compatible
+artifacts remain raw-capable. This adds no model-quality or conversion-fidelity claim.
+
+Model-free negative controls independently reject tokenizer/template/content drift
+for both identities. The existing CPU artifact fixture test now compares the
+returned verified identity with the bytes actually hashed, not a Q8-only expected
+value. It passes on Q4, including cancellation and all valid upstream token fixtures.
+
+Actual Q4 CLI evidence: `target/profiles/k2-q4-chat-cli-v1`. Existing checker passes
+all three efforts, history/Unicode, input/token identity, rendered/raw controls,
+completed low-effort answer, timing and explicit unsupported-control refusals.
+Actual Q4 HTTP evidence: `target/profiles/k2-q4-chat-http-v1.json`; existing test
+passes JSON/SSE, raw-prefix equivalence, all efforts, completed/incomplete outputs,
+abort and session reacquisition. GPU work uses API validation and production lease
+ownership; HTTP uses only ephemeral owned loopback sockets. Tools remain next,
+not silently interpreted by the no-tools output partitioner.
+
+`target/profiles/k2-q4-chat-paired-v1` also passes completed CLI/HTTP equality.
+All-target checking is warning-free; all 26 K2 frontend CPU tests pass. Adversarial
+review found no behavioral blocker and requested the reference-generation-config
+wording clarification above rather than inventing a new artifact requirement.

@@ -6,7 +6,7 @@ planner gates. The numerical evidence below remains scoped to its measured lengt
 removing a product cap does not convert short-context tests into full-context proof.
 The materialized test backend alone retains its 7168-position score-scratch limit.
 F16 remains the application cache. CLI and HTTP no-tools chat are bound to the
-verified final artifact and pinned IFM renderer. Raw mode deliberately
+verified final Q8_0/Q4_K_M artifacts and pinned IFM renderer. Raw mode deliberately
 does not guess a chat/tool contract for unknown checkpoints.
 
 ## Final Q4 generation screen
@@ -131,6 +131,9 @@ cargo --config 'profile.test.package.blake3.opt-level=3' \
 
 It covers all effort levels, JSON/SSE partition agreement, incomplete reasoning,
 completed answers, stop-aware raw-prefix controls, aborts and session reacquisition.
+The same CPU template/token check, CLI checker and HTTP test also accept the pinned
+standard `K2-Horizon-7B-Q4_K_M.gguf`; choose the same artifact in both lanes when
+checking CLI/HTTP equality. This is within-artifact parity, not Q8-versus-Q4 equality.
 Add `--http-evidence target/profiles/k2-chat-http-new.json` to `check_chat_cli.py`
 to compare completed HTTP/CLI text and token counts. These remain wiring checks,
 not sustained-service, full-context or cross-checkpoint qualification.

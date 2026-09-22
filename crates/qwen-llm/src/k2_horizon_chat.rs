@@ -13,7 +13,10 @@ pub const GGUF_TEMPLATE_SHA256: &str =
     "f6e3cd6dbf0f95016fff531f41f921dee541025733c14580a881cf5a5f9fa750";
 pub const GENERATION_CONFIG_SHA256: &str =
     "2da7d47641f4509da4ae47711e31d8b5f0f3f801ee08d87e7e9f07f814bdc4a3";
-const CONTENT_ID: &str = "719ae3a7c9386c25db2c33b50be15d715f883aa5a762495d5a65776660179e99";
+const FINAL_CONTENT_IDS: [&str; 2] = [
+    "719ae3a7c9386c25db2c33b50be15d715f883aa5a762495d5a65776660179e99", // Q8_0
+    "a53e7e9ab4a9c2e82596b9526d837668fe4fd4145de085f9d9beafa3c0dfe3b1", // Q4_K_M
+];
 
 #[derive(Debug, thiserror::Error)]
 #[error("K2 chat: {0}")]
@@ -270,7 +273,9 @@ pub fn verify_profile_with_cancel(
 }
 
 fn identity_matches(tokenizer: &str, template: &str, content: &str) -> bool {
-    tokenizer == "51ebd8140ea2abd9" && template == GGUF_TEMPLATE_SHA256 && content == CONTENT_ID
+    tokenizer == "51ebd8140ea2abd9"
+        && template == GGUF_TEMPLATE_SHA256
+        && FINAL_CONTENT_IDS.contains(&content)
 }
 
 #[cfg(test)]
@@ -281,21 +286,30 @@ mod tests {
     }
     #[test]
     fn k2_chat_identity_requires_all_facts_not_header_similarity() {
-        assert!(identity_matches(
-            "51ebd8140ea2abd9",
-            GGUF_TEMPLATE_SHA256,
-            CONTENT_ID
-        ));
-        assert!(!identity_matches(
-            "pretraining",
-            GGUF_TEMPLATE_SHA256,
-            CONTENT_ID
-        ));
-        assert!(!identity_matches(
-            "51ebd8140ea2abd9",
-            TEMPLATE_SHA256,
-            CONTENT_ID
-        ));
+        for content in FINAL_CONTENT_IDS {
+            assert!(identity_matches(
+                "51ebd8140ea2abd9",
+                GGUF_TEMPLATE_SHA256,
+                content
+            ));
+            assert!(!identity_matches(
+                "pretraining",
+                GGUF_TEMPLATE_SHA256,
+                content
+            ));
+            assert!(!identity_matches(
+                "51ebd8140ea2abd9",
+                TEMPLATE_SHA256,
+                content
+            ));
+            let mut changed = content.to_owned();
+            changed.replace_range(0..1, "0");
+            assert!(!identity_matches(
+                "51ebd8140ea2abd9",
+                GGUF_TEMPLATE_SHA256,
+                &changed
+            ));
+        }
         assert!(!identity_matches(
             "51ebd8140ea2abd9",
             GGUF_TEMPLATE_SHA256,
@@ -395,7 +409,11 @@ mod tests {
         assert_eq!(tokenizer.encode("<|ifm|im_end|>", false).unwrap(), [250019]);
         assert_eq!(
             verify_profile(&source).unwrap().checkpoint_content_blake3,
-            CONTENT_ID
+            content
+                .content_id
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
         );
     }
 }

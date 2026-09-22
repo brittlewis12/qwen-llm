@@ -21,10 +21,15 @@ live in `CLI-UX.md` and `SERVE.md`; reproduction is in
 - Checkpoint-context and actual device/memory admission replace the old research
   forward/position/response caps. Requested capacity still bounds every session;
   capacity is not a promise of numerical qualification or practical runtime.
-- Verified final-artifact no-tools CLI and HTTP chat, native BOS ownership,
+- Verified final-artifact CLI and HTTP chat/tools, native BOS ownership,
   high/medium/low reasoning effort, separate reasoning/final output, strict
   history admission, and raw-mode compatibility. Unknown compatible checkpoints
   remain raw-capable rather than inheriting an unverified chat contract.
+- Native tool schema presentation, calls/results and ID-bound history; CLI JSON
+  envelopes and HTTP JSON/SSE share the request/renderer/output contract. Released
+  Markdown/XML/JSON presentation and XML/JSON/typed-XML call formats are supported
+  without dynamic template dependencies. Execution and argument authorization
+  remain caller-owned; the template supports automatic tool choice only.
 
 ## Artifact And Evidence
 
@@ -55,35 +60,24 @@ Local weights: `~/models/K2-Horizon-7B-Q8_0.gguf` (9,573,964,160 bytes), from
 - No-tools template fixtures cover upstream UTF-8 bytes and native token IDs.
   CLI/HTTP tests cover streaming partitions, incomplete/invalid termination, raw
   prefix parity and actual completed answers; they are not answer-quality claims.
+- Actual final Q4 call/result/final-answer round trips pass CLI and HTTP JSON/SSE
+  for all three requested call formats. Model-emitted reasoning terminators may
+  differ from requested effort; typed XML requests can emit ordinary XML. Bounded
+  parsing accepts exact released closes and complete unambiguous untyped blocks,
+  without weakening strict dialect tests or publishing partial calls.
 
 ## Remaining Work
 
 The user's current priority is complete practical support for the released final
 dense 7B, not a campaign across intermediate checkpoint geometries:
 
-1. Run useful non-Q8 quantizations, starting with the publisher's standard Q4_K_M.
-   Reuse the existing mixed-dtype binder and shared projection kernels. Compare
-   native execution with an independent implementation of the *same artifact*;
-   intentional Q4-versus-Q8 differences are not implementation failures. Lens
-   qualification need not block generation support.
-2. Complete the released interaction contract: native tool schemas, calls/results
-   and history in CLI/HTTP, alongside existing high/medium/low reasoning controls.
-   Follow pinned upstream presentation/call formats and fixtures rather than
-   inventing a non-thinking mode or an in-process tool execution loop. Associate
-   additional final quantizations with their own verified artifact identities.
-   Implement rendering in native typed Rust: no dynamic template engines or
-   runtime template dependencies. Pinned Python/Jinja remains a development-only
-   independent fixture oracle, never an application dependency or execution path.
-   Native call/history primitives cover XML, JSON and typed XML plus tool results.
-   Native Markdown/XML/JSON schema presentation and tool system-turn instructions
-   now match pinned fixtures too. Native generated-call decoding and bounded
-   post-reasoning buffering are implemented and composition-tested. CLI/HTTP
-   request/history and response-protocol wiring remain; current frontends still
-   correctly report no-tools.
-3. Preserve the full checkpoint-native context range subject to actual resource
+Q8 and standard mixed Q4 generation, native tools and released reasoning controls
+are implemented end to end. Remaining critical-path work:
+
+1. Preserve the full checkpoint-native context range subject to actual resource
    admission. Add focused independent history-boundary evidence without making
    the extent of existing evidence an artificial execution cap.
-4. Apply established cross-architecture kernel optimizations where dtype, shape
+2. Apply established cross-architecture kernel optimizations where dtype, shape
    and numerical semantics make them applicable. Shared single-token projection
    dispatch is already used; audit mixed-quant packed prefill, reusable scratch
    and existing matrix/fusion paths before inventing new kernels. Measure actual

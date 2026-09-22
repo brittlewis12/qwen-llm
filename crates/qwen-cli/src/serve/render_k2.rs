@@ -1,9 +1,10 @@
-//! Raw completions and artifact-authorized no-tools IFM chat.
+//! Raw completions and artifact-authorized native IFM chat/tools.
 use super::items::{ServeError, ServeRequest};
 use qwen_llm::sampling::SamplingConfig;
 use serde_json::Value;
 
 mod chat;
+pub(crate) mod tools;
 #[cfg(test)]
 pub(crate) use chat::tests::mock_profile;
 pub(crate) use chat::{
@@ -125,8 +126,12 @@ fn normalize_controls(
     request.top_k.get_or_insert(0);
     request.min_p.get_or_insert(0.0);
     request.seed.get_or_insert(0);
-    request.parallel_tool_calls = false;
-    request.tool_choice = Value::String("none".into());
+    let tools = request
+        .k2_tools
+        .as_ref()
+        .is_some_and(|c| !c.config.definitions.is_empty());
+    request.parallel_tool_calls = tools;
+    request.tool_choice = Value::String(if tools { "auto" } else { "none" }.into());
     sampling(request)
         .validate()
         .map_err(|e| invalid("temperature", format!("K2 sampling: {e}")))?;
@@ -144,7 +149,8 @@ pub(crate) fn sampling(request: &ServeRequest) -> SamplingConfig {
 }
 
 pub(crate) fn render(request: &ServeRequest) -> Result<String, ServeError> {
-    if request.instructions.is_some()
+    if request.k2_tools.is_some()
+        || request.instructions.is_some()
         || request.model_request.system.is_some()
         || request.model_request.has_tool_surface()
         || request.reasoning.is_some()

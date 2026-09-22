@@ -8,7 +8,7 @@ pub(super) fn prefix(text: &str) -> ParseResult<(Value, usize)> {
     let value = parser.value(0)?;
     Ok((value, parser.at))
 }
-pub(super) fn complete(text: &str) -> Result<Value> {
+pub(in crate::k2_horizon_chat::tools) fn complete(text: &str) -> Result<Value> {
     match prefix(text) {
         Ok((value, offset)) if text[offset..].trim_matches(json_space).is_empty() => Ok(value),
         Ok(_) => Err(error("trailing tool JSON content")),

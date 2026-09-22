@@ -2,7 +2,7 @@
 use super::*;
 
 mod coerce;
-mod json_decode;
+pub(super) mod json_decode;
 #[cfg(test)]
 mod tests;
 

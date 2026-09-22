@@ -5,7 +5,7 @@ real device/memory admission, not the historical 256-forward or 7168-position
 planner gates. The numerical evidence below remains scoped to its measured lengths;
 removing a product cap does not convert short-context tests into full-context proof.
 The materialized test backend alone retains its 7168-position score-scratch limit.
-F16 remains the application cache. CLI and HTTP no-tools chat are bound to the
+F16 remains the application cache. CLI and HTTP native chat/tools are bound to the
 verified final Q8_0/Q4_K_M artifacts and pinned IFM renderer. Raw mode deliberately
 does not guess a chat/tool contract for unknown checkpoints.
 
@@ -104,7 +104,7 @@ system turns match all 56 successful fixtures, including Markdown (default), XML
 JSON, whole-set fallback, reference traversal and malformed-schema refusal. These
 are presentation functions, not JSON Schema argument validators. Native generated-call
 parsing and post-reasoning stream tests also run under this test filter. Frontend
-request/history and response-protocol wiring remain separate. No dynamic
+request/history and response-protocol checks are described below. No dynamic
 template engine or dependency is linked into Rust. The existing no-tools corpus
 remains unchanged. IFM XML is verbatim tagged text, not escaped XML; `tool_choice`
 is ignored by the upstream template and must not be advertised as a native control.
@@ -136,7 +136,36 @@ is known. Budget truncation before closure yields no calls; a stop before closur
 is an error. A complete block at a token limit may return complete calls, while
 the enclosing response must remain budget-incomplete. Dropping the stream aborts
 without publication. CLI tests compose it with the existing reasoning/UTF-8
-partition at every byte split; this is not yet an HTTP tool-workflow claim.
+partition at every byte split. Strict dialect parsing remains unchanged; generated
+typed-XML requests also accept complete schema-unambiguous ordinary XML, matching
+observed final-Q4 output. Malformed, incomplete and contradictory blocks do not
+gain a partial-publication path.
+
+### Actual Tool Round Trips
+
+```sh
+cargo --config 'profile.dev.package.blake3.opt-level=3' \
+  --config 'profile.dev.package.sha2.opt-level=3' build -p qwen-cli --bin qwen
+uv run scripts/reference/k2/check_tools_cli.py --binary target/debug/qwen \
+  --model "$HOME/models/K2-Horizon-7B-Q4_K_M.gguf" \
+  --call-format json --output target/profiles/k2-tools-cli-new
+K2_GGUF="$HOME/models/K2-Horizon-7B-Q4_K_M.gguf" MTL_DEBUG_LAYER=1 \
+K2_TOOLS_HTTP_EVIDENCE="$PWD/target/profiles/k2-tools-http-new.json" \
+cargo test -p qwen-cli --bin qwen \
+  serve::backend_k2::tests::gpu_k2_tools_roundtrip_all_formats_json_sse \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+CLI accepts `xml` (default), `json` and `xml_typed`; use a fresh evidence directory
+for each run. HTTP tests all three over JSON and SSE using owned ephemeral sockets
+and one resident model. Both paths use production leases/memory gates and Metal
+API validation. The model calls `lookup_code(key="orbital")`, receives the
+caller-supplied result `copper-731`, then returns that code. No tool runs inside
+the engine or harness; this is call/result/continuation wiring evidence, not a
+tool-quality benchmark. Commands, envelopes, stats and token digests are retained;
+the HTTP test also checks abort/session release. Synthetic wire tests cover
+parallel IDs, reordered results, typed outputs, exact JSON containers, incomplete
+calls, empty-tool isolation and unsupported-control refusal.
 
 The CPU oracle downloads only immutable template/tokenizer/generation metadata,
 never weights or remote model code. Jinja renders exact bytes, with output-preserving

@@ -1,4 +1,4 @@
-//! Raw and verified no-tools K2 chat; never falls through to Qwen protocols.
+//! Raw and verified K2 chat/tools; never falls through to Qwen protocols.
 
 use super::*;
 use qwen_llm::k2_horizon_chat as chat;
@@ -16,11 +16,11 @@ use timing::{Phase, Timing};
 // Family implementation facts only. Publish artifact decisions through capability_projection.
 fn family_implementation() -> serde_json::Value {
     serde_json::json!({
-        "run": {"status": "supported", "scope": "raw_or_verified_no_tools_chat", "requires_profile": "dense_7b",
-            "chat_profile": "verified_final_artifact", "output": "raw_literal_or_chat_reasoning_stderr_answer_stdout",
+        "run": {"status": "supported", "scope": "raw_or_verified_chat_and_tools", "requires_profile": "dense_7b",
+            "chat_profile": "verified_final_artifact", "output": "raw_literal_or_chat_text_or_tool_responses_json",
             "capacity_policy": "checkpoint_context_and_device_memory", "native_tokenizer": true, "kv_storage": "f16"},
         "serve": {"status": "partial", "endpoint": "/v1/responses", "input": "raw_string_or_verified_chat_items",
-            "capacity_policy": "checkpoint_context_and_device_memory", "snapshot_cache": false, "tools": false,
+            "capacity_policy": "checkpoint_context_and_device_memory", "snapshot_cache": false, "tools": true,
             "chat": "verified_final_artifact_only", "special_token_control": "x_k2.add_special_tokens_raw_only"},
         "bench": {"status": "partial", "command": "qwen-bench k2-request",
             "scope": "raw_greedy_request_wall", "capacity_policy": "checkpoint_context_and_device_memory",
@@ -39,18 +39,21 @@ pub(crate) fn chat_projection(gguf: &GgufFile) -> Result<serde_json::Value> {
     Ok(match profile {
         Ok(profile) => serde_json::json!({
             "input": {"raw":{"status":"supported"},"user":{"status":"supported"},"messages":{"status":"supported"},
-                "tools":{"status":"unsupported","code":"k2_tools_unimplemented","message":"K2 tool rendering and parsing are not enabled"}},
+                "tools":{"status":"supported","renderer":chat::tools::TOOL_RENDERER,"execution":"caller_owned","tool_choice":["auto"],"parallel_tool_calls":[true],"presentation_formats":["markdown","xml","json"],"call_formats":["xml","json","xml_typed"],"defaults":{"presentation":"markdown","calls":"xml"}}},
             "reasoning":{"levels":["high","medium","low"],"fallback":"high",
                 "no_thinking":{"status":"unsupported","code":"k2_no_non_thinking_mode","message":"IFM releases no non-thinking template transition"},
-                "thinking":{"status":"supported"},"scope":"run_and_serve_no_tools"},
-            "template":{"status":"identified","rendered_as":chat::RENDERER,"profile":profile,"scope":"run_and_serve_no_tools"}
+                "thinking":{"status":"supported"},"scope":"run_and_serve"},
+            "template":{"status":"identified","rendered_as":chat::RENDERER,"tool_renderer":chat::tools::TOOL_RENDERER,"profile":profile,"scope":"run_and_serve"}
         }),
         Err(error) => serde_json::json!({"template":{"status":"unverified","rendered_as":null,
             "code":"chat_profile_unverified","message":error.to_string()}}),
     })
 }
 
-fn render_chat_input(input: cli::AcquiredRunInput, effort: chat::Effort) -> Result<String> {
+fn render_chat_input_full(
+    input: cli::AcquiredRunInput,
+    effort: chat::Effort,
+) -> Result<(String, Option<chat::tools::ToolChatInput>)> {
     let messages = match input {
         cli::AcquiredRunInput::User { system, user } => {
             let mut messages = Vec::new();
@@ -61,13 +64,53 @@ fn render_chat_input(input: cli::AcquiredRunInput, effort: chat::Effort) -> Resu
             messages
         }
         cli::AcquiredRunInput::Messages { document, .. } => {
+            let value = chat::tools::decode_tool_json(&document)?;
+            let tool_input = if value.get("input").is_some() {
+                let map = value
+                    .as_object()
+                    .context("messages document must be an object")?;
+                ensure!(
+                    map.keys()
+                        .all(|key| ["input", "tools", "instructions", "x_k2"]
+                            .contains(&key.as_str())),
+                    "CLI Responses-shaped document supports input/tools/instructions/x_k2 only; generation controls belong to flags"
+                );
+                Some(
+                    crate::serve::render_k2::tools::input_from_responses(&value, effort)
+                        .map_err(|e| anyhow::anyhow!(e.message))?,
+                )
+            } else if value.get("tools").is_some()
+                || value.get("tool_presentation_format").is_some()
+                || value.get("tool_call_format").is_some()
+                || value
+                    .as_array()
+                    .or_else(|| value["messages"].as_array())
+                    .and_then(|m| m.first())
+                    .is_some_and(|m| m.get("tools").is_some())
+            {
+                Some(chat::tools::ToolChatInput::from_document(&value, effort)?)
+            } else {
+                None
+            };
+            if let Some(input) = tool_input {
+                let prompt = input.render()?;
+                return Ok((
+                    prompt,
+                    (!input.config.definitions.is_empty()).then_some(input),
+                ));
+            }
             chat::parse_messages(document.as_bytes())?
         }
         cli::AcquiredRunInput::RawPrompt(_) => {
             bail!("raw input must not pass through the K2 chat renderer")
         }
     };
-    Ok(chat::render(&messages, effort)?)
+    Ok((chat::render(&messages, effort)?, None))
+}
+
+#[cfg(test)]
+fn render_chat_input(input: cli::AcquiredRunInput, effort: chat::Effort) -> Result<String> {
+    Ok(render_chat_input_full(input, effort)?.0)
 }
 
 fn prepare_input(
@@ -76,7 +119,12 @@ fn prepare_input(
     args: &Args,
     explicit: ExplicitCliOptions,
     timing: &mut Timing,
-) -> Result<(String, PromptSource, Option<serde_json::Value>)> {
+) -> Result<(
+    String,
+    PromptSource,
+    Option<serde_json::Value>,
+    Option<chat::tools::ToolChatInput>,
+)> {
     if let cli::Invocation::Run(run) = &invocation
         && !matches!(run.input, cli::RunInput::RawPrompt(_))
     {
@@ -107,13 +155,19 @@ fn prepare_input(
             unreachable!()
         };
         let input = timing.measure(Phase::InputAcquisition, || run.acquire_input())?;
-        let text = timing.measure(Phase::Rendering, || render_chat_input(input, effort))?;
+        let (text, tools) =
+            timing.measure(Phase::Rendering, || render_chat_input_full(input, effort))?;
         let record = serde_json::json!({"profile":profile,"reasoning_effort":effort,"stops":chat::CHAT_STOPS,
             "bos_owner":"native_tokenizer","output":"reasoning_stderr_answer_stdout"});
-        return Ok((text, PromptSource::Messages, Some(record)));
+        let mut record = record;
+        if let Some(tools) = &tools {
+            record["tools"] = tools.config.echo();
+            record["output"] = serde_json::json!("responses_json");
+        }
+        return Ok((text, PromptSource::Messages, Some(record), tools));
     }
     let (text, source) = prepare_raw_timed(invocation, args, explicit, timing)?;
-    Ok((text, source, None))
+    Ok((text, source, None, None))
 }
 
 #[cfg(test)]
@@ -205,9 +259,19 @@ pub(crate) fn run_raw(
     })?;
     let config = artifact.config().clone();
     let tokenizer = artifact.into_tokenizer();
-    let (text, source, mut chat_record) =
+    let (text, source, mut chat_record, tool_chat) =
         prepare_input(gguf, invocation, args, explicit, &mut timing)?;
     let sampling = timing.measure(Phase::RequestPreparation, || cli_sampling_config(args))?;
+    let sampling_echo = sampling.clone();
+    let tool_byte_budget = if tool_chat.is_some() {
+        crate::serve::render_k2::tools::byte_budget(
+            args.tokens,
+            tokenizer.max_decoded_piece_bytes(),
+        )
+        .map_err(|e| anyhow::anyhow!(e.message))?
+    } else {
+        0
+    };
     // Native single-sequence policy inserts BOS once per encoding call. An
     // already serialized BOS requires explicit --no-special-tokens, not guessing.
     let ids = timing.measure(Phase::Encoding, || {
@@ -264,11 +328,22 @@ pub(crate) fn run_raw(
     let mut stderr = std::io::stderr();
     let mut partition = chat_record
         .as_ref()
+        .filter(|_| tool_chat.is_none())
         .map(|record| {
             chat::Effort::parse(record["reasoning_effort"].as_str())
                 .map(crate::serve::partition_k2::K2Partition::new)
         })
         .transpose()?;
+    let mut tool_partition = tool_chat.as_ref().map(|chat| {
+        crate::serve::output_partition::OutputPartition::new(
+            crate::serve::output_partition::OutputProtocol::K2Tools {
+                effort: chat.effort,
+                config: chat.config.clone(),
+                max_bytes: tool_byte_budget,
+            },
+        )
+    });
+    let mut tool_events = Vec::new();
     let mut visible = false;
     let generation = generate_serial(
         logits,
@@ -277,7 +352,9 @@ pub(crate) fn run_raw(
         &mut sampler,
         |token| {
             let bytes = tokenizer.try_decode_piece_bytes_exact(token)?;
-            if let Some(partition) = &mut partition {
+            if let Some(partition) = &mut tool_partition {
+                partition.push(bytes, &mut tool_events);
+            } else if let Some(partition) = &mut partition {
                 let mut events = Vec::new();
                 partition.push(bytes, &mut events);
                 write_chat_events(&events, &mut stdout, &mut stderr, &mut visible)?;
@@ -299,6 +376,43 @@ pub(crate) fn run_raw(
     )?;
     let timing = timing.finish(execution_end.duration_since(request_t0))?;
     let load_ms = timing.load_ms;
+    if let Some(partition) = tool_partition {
+        let (stop, end) = crate::serve::outcome::generation_end(&generation);
+        partition
+            .finish(end, &mut tool_events)
+            .map_err(|e| anyhow::anyhow!(e.message))?;
+        let chat = tool_chat.as_ref().unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+        let request = crate::serve::items::ServeRequest {
+            model: gguf.get_str("general.name").unwrap_or("k2-horizon").into(),
+            k2_tools: Some(chat.clone()),
+            instructions: chat.system_text().map(str::to_owned),
+            allowed_tools: chat.config.names()?,
+            parallel_tool_calls: true,
+            tool_choice: serde_json::json!("auto"),
+            reasoning: Some(serde_json::json!({"effort":chat.effort})),
+            max_output_tokens: Some(args.tokens),
+            temperature_echo: Some(f64::from(sampling_echo.temperature)),
+            top_p_echo: Some(f64::from(sampling_echo.top_p)),
+            ..Default::default()
+        };
+        let response = crate::serve::events::build_response_object(
+            &request,
+            format!("resp_k2_cli_{}_{}", std::process::id(), now.as_nanos()),
+            now.as_secs(),
+            &tool_events,
+            stop,
+            crate::serve::events::Usage {
+                input_tokens: tokens.len(),
+                output_tokens: generation.tokens.len(),
+                cached_tokens: 0,
+            },
+            None,
+        )?;
+        serde_json::to_writer(&mut stdout, &response)?;
+        writeln!(stdout)?;
+        stdout.flush()?;
+    }
     if let Some(partition) = partition {
         let mut events = Vec::new();
         let reasoning_closed = partition.closed();
@@ -354,7 +468,16 @@ pub(crate) fn run_raw(
             path,
             0,
             ModelFamily::K2Horizon.record_label(),
-            request_stats_input(source, chat_record.as_ref().map(|_| chat::RENDERER)),
+            request_stats_input(
+                source,
+                chat_record.as_ref().map(|_| {
+                    if tool_chat.is_some() {
+                        chat::tools::TOOL_RENDERER
+                    } else {
+                        chat::RENDERER
+                    }
+                }),
+            ),
             &measured,
             Some(RequestStatsDiagnostics {
                 deepseek_v4: None,
@@ -536,7 +659,7 @@ mod tests {
             "raw_string_or_verified_chat_items"
         );
         assert_eq!(capabilities["serve"]["snapshot_cache"], false);
-        assert_eq!(capabilities["serve"]["tools"], false);
+        assert_eq!(capabilities["serve"]["tools"], true);
         assert_eq!(capabilities["bench"]["status"], "partial");
         assert_eq!(capabilities["bench"]["command"], "qwen-bench k2-request");
         assert_eq!(capabilities["bench"]["llama_bench_comparable"], false);

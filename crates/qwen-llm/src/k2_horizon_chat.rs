@@ -161,42 +161,52 @@ pub fn render(messages: &[Message], effort: Effort) -> Result<String> {
     }
     let mut out = String::new();
     for (index, message) in messages.iter().enumerate() {
-        match message.role.as_str() {
-            "system" if index != 0 => {
-                return Err(error("only one leading system message is supported"));
-            }
-            "system" | "user" => {
-                if message.thinking().is_some() {
-                    return Err(error("thinking fields belong only to assistant history"));
-                }
-                out.push_str("<|ifm|im_start|>");
-                out.push_str(&message.role);
-                out.push('\n');
-                out.push_str(&message.content);
-            }
-            "assistant" => {
-                let (tag, thinking) = message.thinking().ok_or_else(|| error("assistant history requires an explicit string thinking field (empty is valid)"))?;
-                // Jinja preserves the newline before its generation block.
-                out.push_str("<|ifm|im_start|>assistant\n<");
-                out.push_str(tag);
-                out.push_str(">\n");
-                out.push_str(thinking);
-                out.push_str("</");
-                out.push_str(tag);
-                out.push('>');
-                out.push_str(&message.content);
-            }
-            _ => {
-                return Err(error(
-                    "only string system/user/assistant turns are supported; tools and developer roles are unavailable",
-                ));
-            }
-        }
+        out.push_str(&render_message_body(message, index)?);
         out.push_str("<|ifm|im_end|>");
     }
     out.push_str("<|ifm|im_start|>assistant\n<");
     out.push_str(effort.tag());
     out.push_str(">\n");
+    Ok(out)
+}
+
+fn render_message_body(message: &Message, index: usize) -> Result<String> {
+    let mut out = String::new();
+    match message.role.as_str() {
+        "system" if index != 0 => {
+            return Err(error("only one leading system message is supported"));
+        }
+        "system" | "user" => {
+            if message.thinking().is_some() {
+                return Err(error("thinking fields belong only to assistant history"));
+            }
+            out.push_str("<|ifm|im_start|>");
+            out.push_str(&message.role);
+            out.push('\n');
+            out.push_str(&message.content);
+        }
+        "assistant" => {
+            let (tag, thinking) = message.thinking().ok_or_else(|| {
+                error(
+                    "assistant history requires an explicit string thinking field (empty is valid)",
+                )
+            })?;
+            // Jinja preserves the newline before its generation block.
+            out.push_str("<|ifm|im_start|>assistant\n<");
+            out.push_str(tag);
+            out.push_str(">\n");
+            out.push_str(thinking);
+            out.push_str("</");
+            out.push_str(tag);
+            out.push('>');
+            out.push_str(&message.content);
+        }
+        _ => {
+            return Err(error(
+                "only string system/user/assistant turns are supported; tools and developer roles are unavailable",
+            ));
+        }
+    }
     Ok(out)
 }
 

@@ -16,6 +16,7 @@ pub(super) struct Prepared {
     pub capacity: usize,
     default_max: usize,
     chat_profile: Option<render_k2::ChatCapability>,
+    max_piece_bytes: usize,
 }
 
 fn limits(
@@ -67,6 +68,7 @@ impl Prepared {
         // A termination request must not become a raw-only server fallback.
         crate::shutdown::checkpoint()?;
         Ok(Self {
+            max_piece_bytes: tokenizer.max_decoded_piece_bytes(),
             tokenizer,
             capacity,
             default_max,
@@ -105,6 +107,9 @@ impl GenerationBackend for K2Backend<'_, '_> {
     fn model_id(&self) -> &str {
         &self.model_id
     }
+    fn decode_request_json(&self, body: &[u8]) -> Result<serde_json::Value, ServeError> {
+        render_k2::tools::decode_request_json(body)
+    }
     fn parse_request(&self, body: &serde_json::Value) -> Result<ServeRequest, ServeError> {
         render_k2::parse_with_profile(body, self.prepared.chat_profile.as_ref())
     }
@@ -114,17 +119,23 @@ impl GenerationBackend for K2Backend<'_, '_> {
             self.prepared.default_max,
             self.prepared.capacity,
             self.prepared.chat_profile.as_ref(),
-        )
+        )?;
+        if request.k2_tools.is_some() {
+            render_k2::tools::byte_budget(
+                request.max_output_tokens.unwrap(),
+                self.prepared.max_piece_bytes,
+            )?;
+        }
+        Ok(())
     }
     fn render_prompt(&self, request: &ServeRequest) -> Result<String, ServeError> {
         render_k2::render_with_profile(request, self.prepared.chat_profile.as_ref())
     }
     fn output_protocol(&self, request: &ServeRequest) -> OutputProtocol {
-        match (&self.prepared.chat_profile, &request.k2_chat) {
-            (Some(_), Some(chat)) => OutputProtocol::K2Chat {
-                effort: chat.effort,
-            },
-            _ => OutputProtocol::RawText,
+        if self.prepared.chat_profile.is_some() {
+            render_k2::tools::output_protocol(request, self.prepared.max_piece_bytes)
+        } else {
+            OutputProtocol::RawText
         }
     }
 
@@ -135,7 +146,7 @@ impl GenerationBackend for K2Backend<'_, '_> {
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
         render_k2::render_with_profile(request, self.prepared.chat_profile.as_ref())?;
-        let stops: &[i32] = if request.k2_chat.is_some() {
+        let stops: &[i32] = if request.k2_chat.is_some() || request.k2_tools.is_some() {
             &qwen_llm::k2_horizon_chat::CHAT_STOPS
         } else {
             &[1]

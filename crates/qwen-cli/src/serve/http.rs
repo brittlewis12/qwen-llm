@@ -46,6 +46,12 @@ pub(crate) struct GenerationOutcome {
 
 pub(crate) trait GenerationBackend {
     fn model_id(&self) -> &str;
+    /// Preserve family-owned JSON values before generic Value deserialization.
+    fn decode_request_json(&self, body: &[u8]) -> Result<Value, ServeError> {
+        serde_json::from_slice(body).map_err(|error| {
+            ServeError::invalid_request(None, format!("request body is not JSON: {error}"))
+        })
+    }
     /// Family-specific wire admission before transcript normalization loses origin.
     fn parse_request(&self, body: &Value) -> Result<ServeRequest, ServeError> {
         parse_request(body)
@@ -729,7 +735,7 @@ fn handle_responses(
     mut trace: Option<&mut TraceLog>,
 ) -> io::Result<()> {
     let mut writer = stream;
-    let parsed: Value = match serde_json::from_slice::<Value>(body) {
+    let parsed = match backend.decode_request_json(body) {
         Ok(parsed) => {
             if let Some(trace) = trace.as_deref_mut()
                 && trace.is_enabled()
@@ -749,10 +755,7 @@ fn handle_responses(
                     })
                 });
             }
-            return write_serve_error(
-                &mut writer,
-                &ServeError::invalid_request(None, format!("request body is not JSON: {error}")),
-            );
+            return write_serve_error(&mut writer, &error);
         }
     };
     let mut request = match backend.parse_request(&parsed) {

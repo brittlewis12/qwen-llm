@@ -51,6 +51,11 @@ pub(crate) enum OutputProtocol {
     K2Chat {
         effort: qwen_llm::k2_horizon_chat::Effort,
     },
+    K2Tools {
+        effort: qwen_llm::k2_horizon_chat::Effort,
+        config: qwen_llm::k2_horizon_chat::tools::ToolConfig,
+        max_bytes: usize,
+    },
     /// `<think>`-partitioned text with an optional tool block; the Qwen
     /// families and DeepSeek V4 share this shape and differ in grammar.
     Qwen {
@@ -68,6 +73,7 @@ pub(crate) enum OutputProtocol {
 pub(crate) enum OutputPartition {
     Raw(Utf8Assembler),
     K2(super::partition_k2::K2Partition),
+    K2Tools(super::partition_k2::K2ToolsPartition),
     Qwen(QwenOutputPartition),
     Muse(MuseAtemPartition),
 }
@@ -79,6 +85,13 @@ impl OutputPartition {
             OutputProtocol::K2Chat { effort } => {
                 Self::K2(super::partition_k2::K2Partition::new(effort))
             }
+            OutputProtocol::K2Tools {
+                effort,
+                config,
+                max_bytes,
+            } => Self::K2Tools(super::partition_k2::K2ToolsPartition::new(
+                effort, config, max_bytes,
+            )),
             OutputProtocol::Qwen {
                 preopened_reasoning,
                 parse_tools,
@@ -110,6 +123,7 @@ impl OutputPartition {
             }
             Self::Qwen(partition) => partition.push(bytes, events),
             Self::K2(partition) => partition.push(bytes, events),
+            Self::K2Tools(partition) => partition.push(bytes, events),
             Self::Muse(partition) => partition.push(bytes, events),
         }
     }
@@ -133,6 +147,7 @@ impl OutputPartition {
             }
             Self::Muse(partition) => partition.finish(end, events),
             Self::K2(partition) => partition.finish(end, events),
+            Self::K2Tools(partition) => partition.finish(end, events),
         }
     }
 
@@ -147,6 +162,7 @@ impl OutputPartition {
             Self::Qwen(partition) => partition.abort(events),
             Self::Muse(partition) => partition.abort(events),
             Self::K2(partition) => partition.abort(events),
+            Self::K2Tools(_) => {}
         }
     }
 }

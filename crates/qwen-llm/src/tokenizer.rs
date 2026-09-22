@@ -1229,6 +1229,15 @@ impl NativeTokenizer {
         Ok(self.decode_token_bytes(token))
     }
 
+    /// Exact vocabulary-wide bound for byte-budgeting decoded output, without
+    /// imposing a token or context cap. UTF-8 replacement expansion is caller-owned.
+    pub fn max_decoded_piece_bytes(&self) -> usize {
+        (0..self.id_to_token.len())
+            .map(|id| self.decode_token_bytes(id).len())
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Whether a token is ordinary generated content rather than control,
     /// unknown, user-defined, unused, or padded vocabulary state.
     ///

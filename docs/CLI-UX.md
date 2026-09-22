@@ -308,7 +308,7 @@ qwen run -m "$HOME/models/K2-Horizon-7B-Q4_K_M.gguf" --user 'What is 2+2?' \
 ```
 
 `--user` optionally accepts `--system`; stdin forms work as usual. `--messages`
-accepts a bare array or an object containing only `messages`. Content must be
+accepts a bare array or an object containing `messages`. For ordinary chat, content must be
 strings, with at most one leading system turn and a final user turn. Assistant
 history requires an explicit string thinking field, including the empty string:
 
@@ -323,7 +323,8 @@ history requires an explicit string thinking field, including the empty string:
 The pinned IFM field priority is `think`, `think_fast`, `think_faster`,
 `reasoning_content`, then `reasoning`; the first supplied string wins even when
 empty. This adapter rejects null/non-string fields, unknown/duplicate fields,
-tools, developer roles and multimodal content rather than silently dropping them.
+developer roles and multimodal content rather than silently dropping them. Tool
+documents use the native extension described below.
 Reasoning effort accepts `high` (default), `medium`, or `low`. IFM publishes no
 non-thinking transition, so `--no-thinking` and effort `none` fail explicitly.
 
@@ -334,7 +335,9 @@ Raw completion still stops on EOS 1 only and keeps `--no-special-tokens` semanti
 No history is stripped or summarized.
 
 Chat sends reasoning to stderr and the final answer to stdout, removing the first
-matching effort-specific closing marker and an optional opener at byte zero.
+released IFM reasoning closing marker and an optional matching opener at byte zero.
+All three exact closes are accepted: requested effort controls the prompt, not a
+guarantee of which close the model emits.
 Later marker-like text remains literal; tools are never executed. Exhausting the
 budget inside reasoning leaves stdout empty and prints an explicit incomplete
 diagnostic (normal token-budget exit status, not a completed-answer claim).
@@ -369,7 +372,40 @@ retained ranges and tokenizer. Stable rejection codes identify those stages.
 Run/serve/bench additionally require raw generation EOS metadata `[1]`; lens does
 not sample, so an otherwise valid extra stop set alone does not disable it. Chat
 verification is never attempted after failed core/generation admission. The
-`execution.serve.chat` boolean describes this artifact's verified eligibility.
+`execution.serve.chat` and `execution.serve.tools` booleans describe this artifact's verified eligibility.
+
+### K2 Tools End To End
+
+`--messages tools.json` accepts a Responses-shaped document with `input`, `tools`,
+optional `instructions`, and optional `x_k2`. Generation controls remain CLI flags.
+The same input/tool/history mapping is used by HTTP; see `SERVE.md#k2-horizon-tools`.
+For example:
+
+```json
+{
+  "input": [{"role":"user","content":"Call lookup_code with key orbital."}],
+  "tools": [{"type":"function","name":"lookup_code","parameters":{
+    "type":"object","properties":{"key":{"type":"string"}},"required":["key"]
+  }}],
+  "x_k2": {"tool_call_format":"json"}
+}
+```
+
+With nonempty tool definitions, stdout is one Responses-compatible JSON envelope,
+not plain answer text. It contains reasoning, optional message text and completed
+`function_call` items with `call_id` and JSON-string `arguments`. Append its `output`
+items to the next document's `input`, then append caller-supplied
+`{"type":"function_call_output","call_id":"...","output":"..."}` items. The
+next CLI invocation produces the continuation. Tools are never executed by qwen;
+the caller validates arguments and authorizes execution. Diagnostics remain stderr.
+Empty tools retain ordinary chat output.
+
+Native documents also accept `messages`, `tools`, `tool_presentation_format` and
+`tool_call_format`, including leading-system tool definitions per the pinned
+template. Native assistant `tool_calls` require unique IDs and object arguments;
+tool messages use matching `tool_call_id` and typed `content`. Every pending call
+needs exactly one result before the next turn; results may arrive out of order
+and render in call order. No dynamic template engine or dependency is used.
 
 ### K2 Request Timing
 

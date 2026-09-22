@@ -4,7 +4,9 @@ use super::{Result, error};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+mod conversation;
 mod json;
+pub use conversation::{TOOL_RENDERER, ToolChatInput, ToolConfig, decode_tool_json};
 mod output;
 mod parse;
 mod presentation;

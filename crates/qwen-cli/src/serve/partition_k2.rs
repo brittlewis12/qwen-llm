@@ -1,4 +1,4 @@
-//! No-tools IFM output grammar. Prompt-preopened reasoning never becomes an
+//! IFM reasoning and tool output grammar. Prompt-preopened reasoning never becomes an
 //! answer merely because a budget or malformed termination cut it short.
 use super::items::ServeError;
 use super::output_partition::GenerationEnd;
@@ -6,22 +6,101 @@ use super::partition::{PartitionEvent, safe_emit_len};
 use super::utf8::Utf8Assembler;
 use qwen_llm::k2_horizon_chat::{CHAT_STOPS, Effort};
 
+pub(crate) struct K2ToolsPartition {
+    reasoning: K2Partition,
+    tools: qwen_llm::k2_horizon_chat::tools::ToolOutputStream<'static>,
+    failure: Option<ServeError>,
+}
+impl K2ToolsPartition {
+    pub(crate) fn new(
+        effort: Effort,
+        config: qwen_llm::k2_horizon_chat::tools::ToolConfig,
+        max_bytes: usize,
+    ) -> Self {
+        Self {
+            reasoning: K2Partition::new(effort),
+            tools: qwen_llm::k2_horizon_chat::tools::ToolOutputStream::owned(
+                config.call_format,
+                config.definitions,
+                max_bytes,
+            ),
+            failure: None,
+        }
+    }
+    fn route(&mut self, incoming: Vec<PartitionEvent>, events: &mut Vec<PartitionEvent>) {
+        for event in incoming {
+            if self.failure.is_some() {
+                return;
+            }
+            if let PartitionEvent::Visible(text) = event {
+                match self.tools.push_visible(&text) {
+                    Ok(text) if !text.is_empty() => events.push(PartitionEvent::Visible(text)),
+                    Ok(_) => {}
+                    Err(e) => self.failure = Some(ServeError::server_error(e.to_string())),
+                }
+            } else {
+                events.push(event);
+            }
+        }
+    }
+    pub(crate) fn push(&mut self, bytes: &[u8], events: &mut Vec<PartitionEvent>) {
+        let mut incoming = Vec::new();
+        self.reasoning.push(bytes, &mut incoming);
+        self.route(incoming, events);
+    }
+    pub(crate) fn finish(
+        mut self,
+        end: GenerationEnd,
+        events: &mut Vec<PartitionEvent>,
+    ) -> Result<(), ServeError> {
+        if let Some(error) = self.failure.take() {
+            return Err(error);
+        }
+        let mut incoming = Vec::new();
+        let reasoning = std::mem::replace(&mut self.reasoning, K2Partition::new(Effort::High));
+        reasoning.finish(end, &mut incoming)?;
+        self.route(incoming, events);
+        if let Some(error) = self.failure {
+            return Err(error);
+        }
+        use qwen_llm::k2_horizon_chat::tools::ToolOutputEnd;
+        let result = self
+            .tools
+            .finish(if end.is_token_limit() {
+                ToolOutputEnd::TokenLimit
+            } else {
+                ToolOutputEnd::Stop
+            })
+            .map_err(|e| ServeError::server_error(e.to_string()))?;
+        if !result.visible_tail.is_empty() {
+            events.push(PartitionEvent::Visible(result.visible_tail));
+        }
+        events.extend(result.calls.into_iter().map(|call| {
+            PartitionEvent::FunctionCall(super::tool_parse::ParsedCall {
+                name: call.name,
+                arguments: call.arguments,
+            })
+        }));
+        Ok(())
+    }
+}
+
 pub(crate) struct K2Partition {
     utf8: Utf8Assembler,
     open: String,
-    close: String,
     at_start: bool,
     closed: bool,
     emitted_reasoning: bool,
     pending: String,
 }
 
+const REASONING_CLOSES: [&str; 3] = ["</ifm|think>", "</ifm|think_fast>", "</ifm|think_faster>"];
+
 impl K2Partition {
     pub(crate) fn new(effort: Effort) -> Self {
         Self {
             utf8: Utf8Assembler::new(),
             open: format!("<{}>", effort.tag()),
-            close: format!("</{}>", effort.tag()),
             at_start: true,
             closed: false,
             emitted_reasoning: false,
@@ -51,16 +130,26 @@ impl K2Partition {
             self.at_start = false;
         }
         if !self.closed {
-            if let Some(index) = self.pending.find(&self.close) {
+            // Effort controls the prompt, not which released terminator the
+            // model emits. Never infer closure from a tool marker or EOS.
+            if let Some((index, close)) = REASONING_CLOSES
+                .iter()
+                .filter_map(|close| self.pending.find(close).map(|index| (index, close)))
+                .min_by_key(|(index, _)| *index)
+            {
                 let reasoning = self.pending[..index].to_owned();
-                self.pending.drain(..index + self.close.len());
+                self.pending.drain(..index + close.len());
                 if !reasoning.is_empty() || !self.emitted_reasoning {
                     self.reasoning(reasoning, events);
                 }
                 events.push(PartitionEvent::ReasoningClosed);
                 self.closed = true;
             } else {
-                let safe = safe_emit_len(&self.pending, &self.close);
+                let safe = REASONING_CLOSES
+                    .iter()
+                    .map(|close| safe_emit_len(&self.pending, close))
+                    .min()
+                    .unwrap();
                 if safe > 0 {
                     let text = self.pending[..safe].to_owned();
                     self.pending.drain(..safe);
@@ -183,7 +272,7 @@ mod tests {
         (r, v, close)
     }
     #[test]
-    fn k2_every_byte_split_preserves_utf8_and_only_matching_first_close() {
+    fn k2_every_byte_split_preserves_utf8_and_only_first_close() {
         for effort in [Effort::High, Effort::Medium, Effort::Low] {
             for opener in [String::new(), format!("<{}>", effort.tag())] {
                 for reason in ["", "plan \u{1f389} <think>x</think><ifm|tool_calls>literal"] {
@@ -206,12 +295,32 @@ mod tests {
         }
     }
     #[test]
+    fn k2_requested_effort_does_not_restrict_released_reasoning_terminators() {
+        for effort in [Effort::High, Effort::Medium, Effort::Low] {
+            for close in REASONING_CLOSES {
+                let text = format!("plan{close}answer</ifm|think>literal");
+                for split in 0..=text.len() {
+                    let mut p = K2Partition::new(effort);
+                    let mut events = Vec::new();
+                    p.push(&text.as_bytes()[..split], &mut events);
+                    p.push(&text.as_bytes()[split..], &mut events);
+                    p.finish(GenerationEnd::StopToken(250019), &mut events)
+                        .unwrap();
+                    assert_eq!(
+                        collect(&events),
+                        ("plan".into(), "answer</ifm|think>literal".into(), 1)
+                    );
+                }
+            }
+        }
+    }
+    #[test]
     fn k2_truncated_reasoning_is_incomplete_and_bad_stops_fail() {
         for text in [
             "",
             "p</ifm|thi",
             "<ifm|thi",
-            "p</ifm|think_fast>",
+            "p</ifm|think_unknown>",
             "<ifm|think>",
         ] {
             for end in [

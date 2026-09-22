@@ -4,6 +4,132 @@ use serde_json::json;
 use std::io;
 
 #[test]
+#[ignore = "K2_GGUF production lease/API validation; real tool call-result-final HTTP JSON/SSE round trip"]
+fn gpu_k2_tools_roundtrip_all_formats_json_sse() {
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    let path = std::env::var("K2_GGUF").unwrap();
+    let source = GgufFile::open(&path).unwrap();
+    let invocation = crate::cli::ServeInvocation {
+        model: path.into(),
+        addr: "127.0.0.1:0".into(),
+        max_tokens: Some(512),
+        max_context_tokens: Some(2048),
+        snapshot_cache_mib: 0,
+        drafter: None,
+        trace_sse: None,
+    };
+    let prepared = Prepared::new(&source, &invocation).unwrap();
+    assert!(prepared.chat_profile.is_some());
+    let ctx = MetalContext::new().unwrap();
+    let model = K2LoadedModel::load(&ctx, &source, 2048).unwrap();
+    let mut backend = K2Backend::new(&model, prepared, "k2-tools".into());
+    let mut evidence = Vec::new();
+    fn envelope(response: &str, stream: bool) -> serde_json::Value {
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let body = response.split_once("\r\n\r\n").unwrap().1;
+        if stream {
+            let event = body
+                .split("\n\n")
+                .find(|e| e.starts_with("event: response.completed\n"))
+                .unwrap_or_else(|| panic!("{response}"));
+            let data = event
+                .lines()
+                .find_map(|l| l.strip_prefix("data: "))
+                .unwrap();
+            serde_json::from_str::<serde_json::Value>(data).unwrap()["response"].clone()
+        } else {
+            serde_json::from_str(body).unwrap()
+        }
+    }
+    for format in ["xml", "json", "xml_typed"] {
+        for stream in [false, true] {
+            let mut body = json!({"model":"k2-tools","input":[{"role":"user","content":"Call lookup_code with key orbital to obtain its code. Do not guess the code. After the tool result arrives, repeat that code as your final answer."}],"tools":[{"type":"function","name":"lookup_code","description":"Retrieve the code for a key.","parameters":{"type":"object","properties":{"key":{"type":"string"}},"required":["key"]}}],"reasoning":{"effort":"low"},"max_output_tokens":512,"stream":stream});
+            if format != "xml" {
+                body["x_k2"] = json!({"tool_call_format":format});
+            }
+            let (_, prompt) = request(&backend, body.clone());
+            let prompt_ids = backend.prepared.tokenizer.encode(&prompt, true).unwrap();
+            eprintln!("K2 tools HTTP format={format} stream={stream} phase=call");
+            let wire = wire_request(&mut backend, body.clone());
+            if !wire.starts_with("HTTP/1.1 200") {
+                let (req, prompt) = request(&backend, body.clone());
+                let mut sink = Sink::default();
+                let outcome = backend.generate(&req, &prompt, &mut sink).unwrap();
+                eprintln!(
+                    "K2 failed wire diagnostic end={:?} bytes={:?}",
+                    outcome.end,
+                    String::from_utf8_lossy(&sink.bytes)
+                );
+            }
+            let first = envelope(&wire, stream);
+            assert_eq!(first["status"], "completed");
+            assert_eq!(first["x_k2"]["tool_call_format"], format);
+            let calls: Vec<_> = first["output"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|i| i["type"] == "function_call")
+                .collect();
+            assert_eq!(calls.len(), 1, "{first}");
+            assert_eq!(calls[0]["name"], "lookup_code");
+            assert_eq!(
+                qwen_llm::k2_horizon_chat::tools::decode_tool_json(
+                    calls[0]["arguments"].as_str().unwrap()
+                )
+                .unwrap(),
+                json!({"key":"orbital"})
+            );
+            body["input"]
+                .as_array_mut()
+                .unwrap()
+                .extend(first["output"].as_array().unwrap().iter().cloned());
+            body["input"].as_array_mut().unwrap().push(json!({"type":"function_call_output","call_id":calls[0]["call_id"],"output":"copper-731"}));
+            eprintln!("K2 tools HTTP format={format} stream={stream} phase=result");
+            let final_response = envelope(&wire_request(&mut backend, body.clone()), stream);
+            assert_eq!(final_response["status"], "completed");
+            assert!(
+                final_response["output"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|i| i["type"] != "function_call")
+            );
+            let text = final_response["output"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|i| i["type"] == "message")
+                .flat_map(|i| i["content"].as_array().unwrap())
+                .map(|p| p["text"].as_str().unwrap())
+                .collect::<String>();
+            assert!(text.contains("copper-731"), "{final_response}");
+            drop(model.create_session(0).unwrap());
+            evidence.push(json!({"format":format,"stream":stream,"prompt_token_ids_sha256_i32le":qwen_llm::tokenizer::token_ids_sha256_i32le(&prompt_ids),"first":first,"final":final_response}));
+        }
+    }
+    let body = json!({"model":"k2-tools","input":[{"role":"user","content":"Call lookup_code with key orbital."}],"tools":[{"type":"function","name":"lookup_code","parameters":{"properties":{"key":{"type":"string"}}}}],"reasoning":{"effort":"low"}});
+    let (req, prompt) = request(&backend, body);
+    for mut sink in [
+        Sink {
+            abort_tick: Some(3),
+            ..Sink::default()
+        },
+        Sink {
+            abort_piece: true,
+            ..Sink::default()
+        },
+    ] {
+        assert!(matches!(
+            backend.generate(&req, &prompt, &mut sink),
+            Err(BackendFailure::Aborted(_))
+        ));
+        drop(model.create_session(0).unwrap());
+    }
+    let output = std::env::var("K2_TOOLS_HTTP_EVIDENCE").unwrap();
+    std::fs::write(output,serde_json::to_vec_pretty(&json!({"status":"passed","caller_supplied_tool_result":true,"engine_executes_tools":false,"cases":evidence})).unwrap()).unwrap();
+}
+
+#[test]
 #[ignore = "K2_GGUF leased production Metal chat/JSON/SSE correctness; ephemeral owned loopback only"]
 fn gpu_verified_k2_chat_http_matches_raw_and_releases_sessions() {
     use super::super::partition::PartitionEvent;

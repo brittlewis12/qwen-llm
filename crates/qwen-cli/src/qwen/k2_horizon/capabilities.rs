@@ -56,13 +56,14 @@ fn project_reports(core: Value, generation: Value, chat: Option<Value>) -> Value
             .as_ref()
             .is_some_and(|c| c["template"]["status"] == "identified");
     execution["serve"]["chat"] = json!(verified_chat);
+    execution["serve"]["tools"] = json!(verified_chat);
     execution["serve"]["input"] = json!(if verified_chat {
         "raw_string_or_verified_chat_items"
     } else {
         "raw_string_only"
     });
     execution["run"]["scope"] = json!(if verified_chat {
-        "raw_or_verified_no_tools_chat"
+        "raw_or_verified_chat_and_tools"
     } else {
         "raw_only"
     });
@@ -77,7 +78,7 @@ fn project_reports(core: Value, generation: Value, chat: Option<Value>) -> Value
     let mut result = json!({
         "execution":execution,
         "input":{"raw":raw,"user":unsupported,"messages":unsupported,
-            "tools":{"status":"unsupported","code":"k2_tools_unimplemented","message":"K2 tools are unavailable"}},
+            "tools":{"status":"unsupported","code":"chat_profile_unverified","message":"K2 tools require a verified checkpoint profile"}},
         "reasoning":unsupported,
         "template":{"status":"not_evaluated","rendered_as":null,"code":"k2_generation_not_admitted"}
     });

@@ -2,6 +2,7 @@
 //! belong to the caller; raw or reasoning text must never be routed here.
 use super::parse::TOOL_BLOCK_OPEN;
 use super::*;
+use std::borrow::Cow;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolOutputEnd {
@@ -18,7 +19,7 @@ pub struct ToolOutputFinish {
 
 pub struct ToolOutputStream<'a> {
     format: ToolCallFormat,
-    definitions: &'a [Value],
+    definitions: Cow<'a, [Value]>,
     max_tool_bytes: usize,
     pending: String,
     block: Option<String>,
@@ -31,7 +32,7 @@ impl<'a> ToolOutputStream<'a> {
     pub fn new(format: ToolCallFormat, definitions: &'a [Value], max_tool_bytes: usize) -> Self {
         Self {
             format,
-            definitions,
+            definitions: Cow::Borrowed(definitions),
             max_tool_bytes,
             pending: String::new(),
             block: None,
@@ -120,7 +121,19 @@ impl<'a> ToolOutputStream<'a> {
                 incomplete_tool_block: false,
             });
         };
-        match parse_tool_calls(&block, self.format, self.definitions)? {
+        let parsed = match parse_tool_calls(&block, self.format, &self.definitions) {
+            Err(error) if self.format == ToolCallFormat::XmlTyped => {
+                // The released model can omit type labels despite the prompt.
+                // Accept only a complete strict untyped block with unambiguous
+                // schema-bound types, never a prefix or contradictory labels.
+                match parse_tool_calls(&block, ToolCallFormat::Xml, &self.definitions) {
+                    Ok(complete @ ParsedToolBlock::Complete(_)) => complete,
+                    _ => return Err(error),
+                }
+            }
+            other => other?,
+        };
+        match parsed {
             ParsedToolBlock::Complete(calls) => Ok(ToolOutputFinish {
                 visible_tail: String::new(),
                 calls,
@@ -138,9 +151,63 @@ impl<'a> ToolOutputStream<'a> {
     }
 }
 
+impl ToolOutputStream<'static> {
+    pub fn owned(format: ToolCallFormat, definitions: Vec<Value>, max_tool_bytes: usize) -> Self {
+        Self {
+            format,
+            definitions: Cow::Owned(definitions),
+            max_tool_bytes,
+            pending: String::new(),
+            block: None,
+            failed: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_generation_tolerates_only_complete_unambiguous_untyped_blocks() {
+        let defs = vec![
+            serde_json::json!({"name":"f","parameters":{"properties":{"x":{"type":"string"}}}}),
+        ];
+        let calls = vec![ToolCall {
+            name: "f".into(),
+            arguments: serde_json::json!({"x":"7"}).as_object().unwrap().clone(),
+        }];
+        let block = render_tool_calls(&calls, ToolCallFormat::Xml, &defs).unwrap();
+        assert!(parse_tool_calls(&block, ToolCallFormat::XmlTyped, &defs).is_err());
+        for end in [ToolOutputEnd::Stop, ToolOutputEnd::TokenLimit] {
+            let mut stream = ToolOutputStream::new(ToolCallFormat::XmlTyped, &defs, block.len());
+            stream.push_visible(&block).unwrap();
+            assert_eq!(stream.finish(end).unwrap().calls, calls);
+        }
+        let typed = render_tool_calls(&calls, ToolCallFormat::XmlTyped, &defs).unwrap();
+        for bad in [
+            format!("{block}trailing"),
+            block.replace("</ifm|tool_calls>", ""),
+            typed.replace("<ifm|arg_type>string", "<ifm|arg_type>integer"),
+        ] {
+            for end in [ToolOutputEnd::Stop, ToolOutputEnd::TokenLimit] {
+                let mut stream = ToolOutputStream::new(ToolCallFormat::XmlTyped, &defs, bad.len());
+                stream.push_visible(&bad).unwrap();
+                assert!(stream.finish(end).is_err());
+            }
+        }
+        let partial = "<ifm|tool_calls><ifm|tool_call>f\n<ifm|arg_key>x</ifm|arg_key><ifm|arg_ty";
+        let mut stream = ToolOutputStream::new(ToolCallFormat::XmlTyped, &defs, partial.len());
+        stream.push_visible(partial).unwrap();
+        let result = stream.finish(ToolOutputEnd::TokenLimit).unwrap();
+        assert!(result.calls.is_empty() && result.incomplete_tool_block);
+        let ambiguous = vec![
+            serde_json::json!({"name":"f","parameters":{"properties":{"x":{"type":["string","integer"]}}}}),
+        ];
+        let mut stream = ToolOutputStream::new(ToolCallFormat::XmlTyped, &ambiguous, block.len());
+        stream.push_visible(&block).unwrap();
+        assert!(stream.finish(ToolOutputEnd::Stop).is_err());
+    }
 
     #[test]
     fn literal_prefixes_flush_and_initial_tool_budget_is_checked_before_copying() {

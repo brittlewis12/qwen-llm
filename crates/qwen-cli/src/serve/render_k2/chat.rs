@@ -21,7 +21,7 @@ impl ChatCapability {
     }
 }
 
-fn fields<'a>(
+pub(super) fn fields<'a>(
     value: &'a Value,
     allowed: &[&str],
     param: &'static str,
@@ -46,7 +46,7 @@ fn string<'a>(map: &'a Map<String, Value>, key: &str) -> Result<&'a str, ServeEr
         .ok_or_else(|| invalid("input", format!("{key} must be a string")))
 }
 
-fn text(value: &Value, kind: &str) -> Result<String, ServeError> {
+pub(super) fn text(value: &Value, kind: &str) -> Result<String, ServeError> {
     if let Some(text) = value.as_str() {
         return Ok(text.to_owned());
     }
@@ -86,6 +86,23 @@ pub(crate) fn parse_with_profile(
     body: &Value,
     profile: Option<&ChatCapability>,
 ) -> Result<ServeRequest, ServeError> {
+    if body.get("input").is_some_and(Value::is_array)
+        && (body.get("tools").is_some()
+            || body.get("tool_choice").is_some()
+            || body.get("parallel_tool_calls").is_some()
+            || body
+                .get("x_k2")
+                .and_then(Value::as_object)
+                .is_some_and(|m| m.keys().any(|k| k != "add_special_tokens"))
+            || body["input"].as_array().unwrap().iter().any(|i| {
+                matches!(
+                    i["type"].as_str(),
+                    Some("function_call" | "function_call_output")
+                )
+            }))
+    {
+        return super::tools::parse_with_profile(body, profile);
+    }
     if !body.get("input").is_some_and(Value::is_array) {
         return super::parse_request(body);
     }
@@ -230,6 +247,9 @@ pub(crate) fn render_with_profile(
     request: &ServeRequest,
     profile: Option<&ChatCapability>,
 ) -> Result<String, ServeError> {
+    if request.k2_tools.is_some() {
+        return super::tools::render_with_profile(request, profile);
+    }
     let Some(chat) = &request.k2_chat else {
         return super::render(request);
     };

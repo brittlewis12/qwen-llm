@@ -15,7 +15,7 @@ gate records under `docs/bench/`, the successful real OpenCode session
 
 Private, single-box engine serving local clients over loopback.
 
-K2 Horizon dense 7B has separate raw-string and verified no-tools chat
+K2 Horizon dense 7B has separate raw-string and verified native chat/tools
 `/v1/responses` subsets: see [K2 Horizon Raw Profile](#k2-horizon-raw-profile)
 and [K2 Horizon Verified Chat](#k2-horizon-verified-chat). It does not inherit the
 Qwen/DeepSeek chat, reasoning, tools, snapshots, or long-context capabilities.
@@ -203,7 +203,7 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   `Connection: close`; hand-rolled request parse (loopback threat model;
   request bodies are `Content-Length` JSON).
 - **Implemented families: Qwen3.5/3.6/3.8, Qwen3.8-Flash-Next, DeepSeek
-  V4, Muse Glimmer, and K2 Horizon raw/verified no-tools chat.** DS4 runs its own session and snapshot stack
+  V4, Muse Glimmer, and K2 Horizon raw/verified native chat/tools.** DS4 runs its own session and snapshot stack
   (`serve/backend_ds4.rs`) with a startup-fixed forward budget and a
   serve-owned byte-bounded snapshot LRU (DS4 has no engine-side RAM prefix
   cache). Flash-Next (`serve/backend_qwen4exp.rs`, since 2026-09-17) holds
@@ -237,7 +237,7 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
 K2 dense 7B supports completion-style raw text on `POST /v1/responses`, not a
 new `/v1/completions` endpoint. Choose an unused loopback address:
 
-The verified final artifact also supports [no-tools HTTP chat](#k2-horizon-verified-chat)
+The verified final artifact also supports [HTTP chat](#k2-horizon-verified-chat)
 and local `qwen run --user/--messages`. Raw strings never opt into templating:
 their EOS-only stop set and literal output contract below are unchanged.
 
@@ -326,7 +326,7 @@ evidence remains in `K2-HORIZON-PLAN.md` and `K2-HORIZON-REVIEW.md`.
 
 ## K2 Horizon Verified Chat
 
-For verified final Q8_0 and standard Q4_K_M artifacts, array `input` selects the pinned IFM no-tools
+For verified final Q8_0 and standard Q4_K_M artifacts, array `input` selects the pinned IFM
 renderer; string `input` always remains raw. Startup verifies retained checkpoint
 bytes once, before accepting requests, and owns an opaque chat capability. An
 unverified artifact or verification failure emits a diagnostic and remains raw-only.
@@ -358,13 +358,18 @@ alias (high/base history tag); the request effort controls only the new suffix.
 Completed response items can be replayed verbatim, including string IDs, completed
 status, empty reasoning `summary`, and empty output-text `annotations`. Nonempty
 summaries/annotations and incomplete history are rejected rather than discarded.
-Tools, developer roles, multimodal data, unsupported fields and nulls are rejected
-before transcript normalization. Existing JSON duplicate-key behavior is unchanged.
+Developer roles, multimodal data, unsupported fields and null controls are rejected
+before transcript normalization. Nonempty tools select the extension below. K2
+wire JSON rejects duplicate keys and nesting beyond 128; typed containers and
+number lexemes are preserved, including Serde-internal-looking object keys. These
+are parser safety rules, not inference-context limits; other families are unchanged.
 
 JSON and SSE separate `reasoning` and final `message` items. Generation begins in
-preopened reasoning; only the matching effort's first close switches to final text.
-An optional matching opener at byte zero is removed. Wrong-effort, tool-looking,
-Qwen and later IFM markers remain literal. Empty reasoning still emits a completed
+preopened reasoning; the first exact `</ifm|think>`, `</ifm|think_fast>` or
+`</ifm|think_faster>` switches to final text. Effort is the requested prompt control,
+not a promise that the emitted close matches it. An optional matching opener at
+byte zero is removed. Tool-looking, Qwen and later IFM markers remain literal in
+ordinary no-tools chat. Empty reasoning still emits a completed
 reasoning item so history can be replayed. Budget exhaustion inside reasoning is
 incomplete, never an answer; EOS before its close is a protocol failure. Abort
 discards ambiguous buffered delimiter/UTF-8 bytes and never synthesizes completion.
@@ -377,6 +382,57 @@ parity, and fresh sessions after cancellation. These are wiring/termination chec
 not reasoning-quality, sustained-service, tool, or full-context qualification.
 Total output-token usage includes stop tokens; the existing shared
 `reasoning_tokens: 0` detail is not a measured per-channel token count.
+
+## K2 Horizon Tools
+
+Verified final Q8_0/Q4_K_M chat accepts standard flat function definitions in
+`tools`, `function_call` history with JSON-string `arguments`, and matching
+`function_call_output` items. Tool outputs may be strings, objects or arrays;
+objects/arrays render as native JSON data, not multimodal content. Each assistant
+call group needs preceding reasoning (empty is valid), and every pending ID needs
+exactly one result. Results may arrive out of order and render in original call
+order. IDs remain wire metadata, not tokens inserted into the IFM prompt.
+
+```json
+{
+  "model": "K2-Horizon-7B-Q4_K_M",
+  "input": [{"role":"user","content":"Call lookup_code with key orbital."}],
+  "tools": [{"type":"function","name":"lookup_code","parameters":{
+    "type":"object","properties":{"key":{"type":"string"}},"required":["key"]
+  }}],
+  "reasoning": {"effort":"low"},
+  "x_k2": {"tool_call_format":"json"},
+  "max_output_tokens": 512
+}
+```
+
+`x_k2.tool_presentation_format` accepts `markdown` (default), `xml`, or `json`;
+`x_k2.tool_call_format` accepts `xml` (default), `json`, or `xml_typed`. The response
+echo records these requested formats. Only omitted/`auto` tool choice and
+omitted/`true` parallel calls are supported: the native template has no forced,
+disabled, named or narrowed choice control. `strict: true` is rejected; schema
+presentation is not constrained generation or complete argument validation.
+Empty tools normalize to ordinary chat without tool-format echoes or marker parsing.
+
+JSON and SSE publish completed `function_call` items with stable per-response call
+IDs. Append the response's `output` items and caller-owned results to `input` for
+continuation. qwen never runs the tool. Calls publish only after a whole terminal
+block is valid; incomplete or malformed blocks never leak partial calls. A closed
+valid call at the output budget may publish while the overall response stays
+`incomplete`; EOS before closure fails. Cancellation drops pending calls.
+
+XML is IFM's verbatim tagged text, not entity-escaped XML. Types must be unambiguous
+under the definitions; use JSON for ambiguous values. Requested typed XML may
+accept a fully valid untyped XML block when the model omits labels, but never
+contradictory labels, mixed malformed structure, trailing text or ambiguous types.
+The strict library dialect parser remains strict. No arbitrary token cap or
+heuristic reasoning closure is introduced; buffering uses a checked byte bound
+derived from output budget and native tokenizer piece size.
+
+Actual Q4 checks exercise call -> caller-supplied result -> final answer in all
+three requested formats through CLI, HTTP JSON and SSE. They demonstrate product
+wiring, not universal tool reliability, schema compliance or answer quality.
+Reproduction: `scripts/reference/k2/README.md`.
 
 ## Wire subset (Open Responses)
 

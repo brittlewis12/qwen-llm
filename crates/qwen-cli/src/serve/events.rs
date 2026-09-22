@@ -61,6 +61,7 @@ impl Usage {
 /// (gate 5), so absent-but-required keys are spec violations.
 #[derive(Debug, Clone)]
 pub(crate) struct EnvelopeEcho {
+    pub(crate) k2: Option<Value>,
     pub(crate) temperature: f64,
     pub(crate) top_p: f64,
     pub(crate) max_output_tokens: Option<u64>,
@@ -74,6 +75,7 @@ pub(crate) struct EnvelopeEcho {
 impl Default for EnvelopeEcho {
     fn default() -> Self {
         Self {
+            k2: None,
             temperature: 0.0,
             top_p: 1.0,
             max_output_tokens: None,
@@ -280,7 +282,7 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
         incomplete_reason: Option<&str>,
     ) -> Value {
         let terminal = matches!(status, "completed" | "incomplete" | "failed");
-        json!({
+        let mut envelope = json!({
             "id": self.response_id,
             "object": "response",
             "created_at": self.created_at,
@@ -316,7 +318,11 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
             "metadata": json!({}),
             "safety_identifier": Value::Null,
             "prompt_cache_key": Value::Null,
-        })
+        });
+        if let Some(extension) = &self.echo.k2 {
+            envelope["x_k2"] = extension.clone();
+        }
+        envelope
     }
 
     fn open_reasoning(&mut self) -> io::Result<()> {
@@ -687,7 +693,26 @@ pub(crate) fn envelope_echo(request: &ServeRequest) -> EnvelopeEcho {
             Value::Object(entry)
         })
         .collect();
+    let tools = if let Some(chat) = &request.k2_tools {
+        chat.config
+            .definitions
+            .iter()
+            .map(|tool| {
+                let mut function = tool
+                    .get("function")
+                    .unwrap_or(tool)
+                    .as_object()
+                    .unwrap()
+                    .clone();
+                function.insert("type".into(), json!("function"));
+                Value::Object(function)
+            })
+            .collect()
+    } else {
+        tools
+    };
     EnvelopeEcho {
+        k2: request.k2_tools.as_ref().map(|c| c.config.echo()),
         temperature: request.temperature_echo.unwrap_or(0.0),
         top_p: request.top_p_echo.unwrap_or(1.0),
         max_output_tokens: request.max_output_tokens.map(|value| value as u64),

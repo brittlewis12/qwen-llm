@@ -76,7 +76,7 @@ fn k2_chat_rejects_unsupported_original_fields_and_ambiguous_history() {
     let p = mock_profile();
     let base = json!({"input":[{"role":"user","content":"a"}]});
     for (key, value) in [
-        ("tools", json!([])),
+        ("tools", Value::Null),
         ("tool_choice", json!("none")),
         ("reasoning", json!({"effort":"none"})),
         ("instructions", Value::Null),

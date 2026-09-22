@@ -1805,3 +1805,67 @@ reasoning partition, including false markers before genuine calls. Raw/no-tools
 protocol behavior and frontend capability reporting remain unchanged. All-target
 checking is warning-free; no GPU run or model-quality claim is needed for this
 unwired protocol packet.
+
+## Packet 47: native tools end to end
+
+The shared native `ToolChatInput` now binds tool definitions, ordered assistant
+calls and caller results across CLI and HTTP. IDs never enter the IFM prompt;
+orphan, duplicate and missing results fail before generation, and parallel results
+render in original call order. Fifty-three full upstream prompts match; two
+formatting-only fixtures deliberately omit a parallel result and remain rejected
+by the application contract, as does the duplicate-definition fixture. The native
+renderer remains dependency-free Rust, not a runtime template interpreter.
+
+CLI tool documents emit one Responses-compatible JSON envelope, allowing its
+reasoning/message/call items to be replayed with caller-owned results. HTTP uses
+the same adapter with existing JSON/SSE events and per-response call IDs. Native
+presentation/call formats are echoed as requested controls. The template implements
+automatic choice only: forced/disabled/narrowed choice, parallel suppression and
+strict constrained generation are not advertised. Empty tools retain plain chat;
+raw marker bytes retain their literal output protocol. Capabilities now advertise
+tools only for the artifact-verified chat profiles, not every detected K2 artifact.
+
+Adversarial review found the initial HTTP tool-result adapter unnecessarily
+restricted outputs to text. It now preserves string/object/array results through
+native rendering. A wire test also reproduced Serde's reserved-number-key object
+rewrite in the outer body decoder. A small backend JSON-decoding hook lets K2 use
+its lossless container decoder before any Value conversion; other families retain
+their existing decoder. K2 duplicate-key/nesting safety policy is explicit and
+tested for raw, ordinary chat and tools. SSE tests bind added/done call IDs to the
+terminal envelope, and replay tests preserve large integers and reserved-key objects.
+
+Real model execution exposed two overly strict output assumptions, not runtime
+math failures. With requested low effort, JSON calls ended reasoning with the
+standard `</ifm|think>` instead of `</ifm|think_faster>`. Typed XML requests emitted
+ordinary XML without type labels. Initial HTTP tests failed and their generated
+bytes were inspected rather than changing prompts until tests passed. After
+adversarial review, the partitioner accepts the first exact released reasoning
+close, independent of requested effort. Generated typed-XML output may pass only
+as a whole valid strict untyped-XML block with schema-unambiguous values. Public
+strict dialect parsing remains strict; incomplete blocks, contradictory labels,
+ambiguous types and trailing text never acquire a partial-publication path. These
+are advisory prompt controls, not guarantees of constrained model output.
+
+Actual final-Q4 evidence, under the production exclusive lease, wired-memory gate
+and Metal API validation:
+
+- `target/profiles/k2-tools-cli-xml-v2`, `k2-tools-cli-json-v1` and
+  `k2-tools-cli-xmltyped-v1`: each calls `lookup_code(key="orbital")`, replays the
+  caller-supplied result `copper-731`, and produces final answer `copper-731`.
+- `target/profiles/k2-tools-http-v1.json`: all three requested formats across JSON
+  and SSE pass the same two-request round trip (12 requests), followed by prefill
+  and output abort/session-reacquisition checks. Only owned ephemeral sockets are
+  used, with one resident model and fresh sessions; no tool executes in the engine.
+- `target/profiles/k2-tools-chat-regression-v2`: ordinary no-tools CLI chat/raw
+  parity still passes all efforts, input forms, history, timing and refusal checks.
+  Its raw-output oracle now recognizes all three released closes too; the initial
+  old matching-only assertion failed, not the generated-token parity check.
+
+All 455 nonignored CLI tests and 25 native chat/tool tests pass; all-target checking
+is warning-free. Final `cx` adversarial closure found no remaining concrete blocker;
+requested format remains explicitly distinct from observed emitted dialect.
+These checks establish protocol/wiring behavior, not general
+tool reliability, Q4-versus-Q8 equality, constrained schema compliance, full-context
+quality or performance. Remaining user-critical work is the focused kernel
+optimization audit/measurements and independent longer-history evidence, not more
+unwired tool primitives or a generic maintenance-lane refactor.

@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from pathlib import Path
 import struct
 import subprocess
@@ -163,7 +164,10 @@ def main():
         }[case["reasoning_effort"]]
         raw_text = raw.stdout.removesuffix(b"\n").decode("utf-8", errors="replace")
         raw_text = raw_text.removeprefix(f"<{tag}>")
-        reasoning, closed, visible = raw_text.partition(f"</{tag}>")
+        close = re.search(r"</ifm\|think(?:_fast|_faster)?>", raw_text)
+        reasoning = raw_text[: close.start()] if close else raw_text
+        closed = close is not None
+        visible = raw_text[close.end() :] if close else ""
         assert diagnostic["reasoning_closed"] == bool(closed)
         assert diagnostic["output"] == "reasoning_stderr_answer_stdout"
         assert rendered.stdout == (visible + "\n" if visible else "").encode()
@@ -233,7 +237,7 @@ def main():
     ]:
         run(name, base + options, failure=error)
     for name, doc in [
-        ("tools", {"messages": [{"role": "user", "content": "x"}], "tools": []}),
+        ("tools", {"messages": [{"role": "user", "content": "x"}], "tools": None}),
         (
             "missing-thinking",
             [

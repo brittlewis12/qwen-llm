@@ -22,7 +22,8 @@ Current model paths include:
 - The released Muse Glimmer 30B profile with its supported chat template and
   uniform Q8_0 or BF16 matrix storage.
 - K2 Horizon dense 7B (`k2-horizon`): native raw execution, forward-only lens,
-  and verified final-artifact no-tools CLI/HTTP chat. Numerical evidence is scoped
+  and verified final-artifact native CLI/HTTP chat and tools (Q8_0/Q4_K_M).
+  Rendering is native Rust, without dynamic template dependencies. Numerical evidence is scoped
   to the documented final Q8_0/F16-KV corpus, not every admitted checkpoint/context.
 
 Model-family and request capabilities are intentionally strict. Unsupported

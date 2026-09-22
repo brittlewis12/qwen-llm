@@ -57,6 +57,28 @@ fn native_tool_fixture_inventory_is_named_and_classified() {
         }
     }
     let cases = f["cases"].as_array().unwrap();
+    for presentation in ["markdown", "xml", "json"] {
+        for name in [
+            "annotations",
+            "root-variants",
+            "reference-chain",
+            "boolean-parameters",
+            "container-fallback",
+            "external-ref",
+            "whitespace",
+            "whole-set-fallback",
+        ] {
+            required.insert(format!("schema-{name}-{presentation}"), false);
+        }
+        for name in [
+            "fallback-must-still-validate",
+            "missing-required",
+            "string-required",
+            "undefined-required",
+        ] {
+            required.insert(format!("schema-{name}-{presentation}"), true);
+        }
+    }
     let actual: BTreeMap<_, _> = cases
         .iter()
         .map(|case| {

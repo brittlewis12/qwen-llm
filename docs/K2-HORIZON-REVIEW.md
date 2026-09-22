@@ -1714,3 +1714,43 @@ rejected explicitly. Arbitrary-precision integer arguments retain their digits.
 All seven chat/tool CPU tests and warning-free all-target checking pass; unchanged
 no-tools fixtures regenerate identically. This packet needs no GPU work and makes
 no full tool-workflow or model-quality claim.
+
+## Packet 45: native tool schema presentation
+
+The pinned template's Markdown-default, XML and JSON definition presentation and
+system-turn instructions are now native Rust. No dynamic template dependencies,
+model kernels or frontend capability changes are introduced. Classification
+distinguishes malformed input (error) from pretty-presentation incompatibility
+(whole-toolset JSON fallback); fallback never skips validation of later tools.
+Explicit JSON still enforces the template's structural validation but does not
+run pretty-renderability classification. This is not call-argument validation.
+
+Per-tool reference traversal preserves upstream one-hop root and up-to-two-hop
+nested expansion, ordered sibling overlays, repeat/cycle behavior and definition
+state resets. Markdown/XML share explicit Python-style scalar/collection rendering
+and whitespace helpers, not Rust Debug or an XML entity encoder. The upstream
+delimiter-packed visited-name behavior is retained for byte compatibility rather
+than independently replacing it with a different reference policy.
+
+Thirty-six additional named fixtures extend the original forty without changing
+their prompt/token expectations. They cover nested annotations, constraints,
+pattern/additional properties, returns/response, root variants, Boolean parameters,
+external references, whole-set fallback, malformed required fields, reference
+chains/siblings/cycles and whitespace boundaries. All 56 successful definition
+blocks and system turns match independent Jinja bytes; nonempty native system
+turns also equal the full upstream prompt prefix. All twelve new malformed-schema
+cases fail natively. Existing 19 call-block, 36 result and 276 number comparisons
+remain passing.
+
+An iterative 128-level input-nesting check protects direct Value callers; a separate
+128-level renderer recursion guard protects shallow but long reference chains.
+These are explicit schema stack-safety errors, not model-context limits, silent
+fallbacks or truncation. Negative tests exercise both bounds; ordinary cycles
+remain renderable under the pinned visitation semantics.
+
+All eleven chat/tool CPU tests pass, and the opt-in verified-Q4 native tokenizer
+check matches all 56 successful full-prompt token fixtures. All-target checking
+is warning-free. Adversarial design and implementation reviews found no blocker;
+reference-policy changes suggested as general hardening were not accepted where
+they would diverge from the pinned template. Generated-call parsing and frontend
+request/history integration remain next; no tools are executed or advertised yet.

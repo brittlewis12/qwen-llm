@@ -182,6 +182,9 @@ def main():
 
         cases.clear()
         add_cases(case)
+        from k2_tool_schema_cases import add_schema_cases
+
+        add_schema_cases(case)
         for record in cases:
             if "error" in record:
                 continue
@@ -195,6 +198,23 @@ def main():
             )
             tools = variables.get("tools") or variables["messages"][0].get("tools", [])
             call_format = variables.get("tool_call_format", "xml")
+            first = variables["messages"][0]
+            system_content = (
+                first.get("content", "") if first["role"] == "system" else ""
+            )
+            record["tool_system"] = str(
+                module.render_system_with_tools(
+                    tools,
+                    system_content,
+                    variables.get("tool_presentation_format", "markdown"),
+                    call_format,
+                )
+            )
+            record["tool_definitions"] = str(
+                module.render_tool_presentation(
+                    tools, variables.get("tool_presentation_format", "markdown")
+                )
+            )
             record["call_blocks"] = [
                 str(
                     module.render_tool_calls_block(

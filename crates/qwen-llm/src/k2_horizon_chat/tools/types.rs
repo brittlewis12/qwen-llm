@@ -1,6 +1,6 @@
 use super::*;
 
-fn truthy(value: &Value) -> bool {
+pub(super) fn truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(v) => *v,
@@ -23,7 +23,7 @@ fn compact_name(name: &Value, spec: &Value) -> Result<String> {
     }
 }
 
-fn compact(spec: &Value) -> Result<String> {
+pub(super) fn compact(spec: &Value) -> Result<String> {
     if !spec.is_object() {
         return Ok("any".into());
     }

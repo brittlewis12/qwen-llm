@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 mod json;
+mod presentation;
 mod types;
+pub use presentation::{ToolPresentationFormat, render_tool_definitions, render_tool_system};
 #[cfg(test)]
 mod tests;
 
@@ -41,7 +43,9 @@ pub fn render_tool_calls(
         if format == ToolCallFormat::Json {
             // Upstream builds the name literally, unlike the JSON arguments.
             if call.name.contains(['"', '\\']) || call.name.chars().any(char::is_control) {
-                return Err(error("tool name cannot be represented in IFM JSON call syntax"));
+                return Err(error(
+                    "tool name cannot be represented in IFM JSON call syntax",
+                ));
             }
             out.push_str("{\"name\": \"");
             out.push_str(&call.name);
@@ -89,7 +93,10 @@ pub fn render_tool_result(content: &Value) -> Result<String> {
             if index > 0 {
                 out.push('\n');
             }
-            if let Some(text) = item.as_str().or_else(|| item.get("text").and_then(Value::as_str)) {
+            if let Some(text) = item
+                .as_str()
+                .or_else(|| item.get("text").and_then(Value::as_str))
+            {
                 out.push_str(text);
             } else {
                 out.push_str(&json::encode(item)?);

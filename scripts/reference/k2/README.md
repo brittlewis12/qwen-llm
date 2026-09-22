@@ -87,7 +87,7 @@ bitwise final-logit agreement, and alternates old/new order after warmup. Its
 loaded-model synthetic prefill timings exclude setup and session allocation; they
 are diagnostic, not end-to-end product performance or independent quality evidence.
 
-## No-tools template checks
+## Native template checks
 
 Native tool-history development uses a separate oracle corpus:
 
@@ -96,14 +96,29 @@ uv run scripts/reference/generate_k2_chat_fixtures.py --tools
 cargo test -p qwen-llm --lib k2_horizon_chat::tools::tests
 ```
 
-The 40 named cases pin success/error classification, full upstream rendered bytes
+The 76 named cases pin success/error classification, full upstream rendered bytes
 and token IDs, and upstream call/result macro output. Native Rust currently checks
 19 call blocks and 36 result messages across XML (default), JSON and typed XML,
-plus 276 finite binary64 JSON-number witnesses. Full schema-presentation and
-frontend tool support are not implemented by these history primitives. No dynamic
+plus 276 finite binary64 JSON-number witnesses. Native schema presentation and
+system turns match all 56 successful fixtures, including Markdown (default), XML,
+JSON, whole-set fallback, reference traversal and malformed-schema refusal. These
+are presentation functions, not JSON Schema argument validators. Generated-call
+parsing and frontend tool support remain separate. No dynamic
 template engine or dependency is linked into Rust. The existing no-tools corpus
 remains unchanged. IFM XML is verbatim tagged text, not escaped XML; `tool_choice`
 is ignored by the upstream template and must not be advertised as a native control.
+
+Native tokenizer parity on those successful tool prompts is CPU-only:
+
+```sh
+K2_GGUF="$HOME/models/K2-Horizon-7B-Q4_K_M.gguf" cargo test -p qwen-llm --lib \
+  k2_horizon_chat::tools::presentation::tests::cpu_native_tool_template_token_ids \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+Presentation rejects input JSON nesting above 128 and reference-renderer recursion
+above 128 rather than risking Rust stack exhaustion. Those explicit schema-safety
+errors never truncate schemas, silently select JSON, or restrict inference context.
 
 The CPU oracle downloads only immutable template/tokenizer/generation metadata,
 never weights or remote model code. Jinja renders exact bytes, with output-preserving

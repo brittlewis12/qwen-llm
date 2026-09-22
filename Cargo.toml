@@ -90,6 +90,17 @@ debug = "line-tables-only"
 inherits = "release"
 debug = "full"
 
+# Tests run optimized: numerical tolerances and timing-sensitive paths are
+# qualified at opt-level 3, and the debug profile is both a correctness
+# confound and several times slower. Thin LTO keeps edit-test loops
+# incremental; debug assertions and overflow checks stay on.
+[profile.test]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+debug-assertions = true
+overflow-checks = true
+
 # Criterion for proper statistical benchmarking. cargo bench replaces our
 # #[ignore] perf tests; hyperfine handles the end-to-end wall-clock
 # comparisons against llama-bench.

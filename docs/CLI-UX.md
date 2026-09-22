@@ -294,8 +294,8 @@ consumer migrates.
 ## K2 Horizon Verified Chat
 
 K2's native raw lane remains available for compatible dense 7B checkpoints. The
-first templated CLI profile is deliberately narrower: the verified final Q8_0
-artifact documented in `K2-HORIZON-PLAN.md`, not filename-based detection or a
+templated CLI profile is deliberately narrower: the verified final Q8_0 and
+standard Q4_K_M artifacts documented in `K2-HORIZON-PLAN.md`, not filename-based detection or a
 claim that every intermediate checkpoint was trained for chat.
 
 ```sh
@@ -303,6 +303,8 @@ qwen run -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
   --user 'Explain why long-context evaluation is difficult.' \
   --reasoning-effort high -n 32768 --temp 1 --top-p 0.95
 qwen run -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" --messages conversation.json -n 1024
+qwen run -m "$HOME/models/K2-Horizon-7B-Q4_K_M.gguf" --user 'What is 2+2?' \
+  --reasoning-effort low -n 128
 ```
 
 `--user` optionally accepts `--system`; stdin forms work as usual. `--messages`

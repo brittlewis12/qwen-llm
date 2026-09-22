@@ -1604,3 +1604,74 @@ new latency or throughput qualification. All-target checking is warning-free.
 
 Closure adversarial verdict: **commit-ready, no concrete blocker**. All twenty-two
 K2 frontend CPU tests and final all-target/whitespace checks pass.
+
+## Packet 42: practical final Q4 generation
+
+The user reprioritized final dense 7B quantizations, native tools/reasoning, native
+context and applicable existing optimizations. Intermediate-shape campaigns and
+lens overflow design are not blockers; the latter remains parked, not canonical.
+
+The standard publisher Q4_K_M (revision `a5094087a5a55c2de80264c11504d8ca95a022ff`)
+is downloaded to `~/models`, exact size 5,592,217,984 bytes and SHA256
+`eb89c15a0ae9712be2ee462bf43802de14200f20f93b73da6eb68c2ebdd28e4e` verified.
+Native retained-content BLAKE3 is
+`a53e7e9ab4a9c2e82596b9526d837668fe4fd4145de085f9d9beafa3c0dfe3b1`.
+CPU preparation passes with tokenizer `51ebd8140ea2abd9`, the same embedded-template
+hash as the final Q8, Q4_K embedding, Q6_K head and mixed Q4_K/Q6_K block weights.
+No runtime storage change was needed: K2 already uses the shared quantized kernels.
+
+Before observation, adversarial review accepted a bounded same-artifact screen
+instead of a broad fixture campaign or Q4-versus-Q8 equality. Exclusive limits are
+max logit error .005, RMSE .001 and reciprocal top-choice regret .001; near ties
+are not automatically implementation failures. These are inherited short-screen
+engineering targets, not necessary universal quality laws. Frozen Q8 evidence is
+unchanged. The screen owns the real production lease/wired gate, refreshes wired
+and available-memory checks before serial oracle children, then loads the native
+model under its actual memory admission. Full native/reference rows and verdict
+are retained, not inferred from a diagnostic process exit.
+
+Evidence: `target/profiles/k2-q4-cpu-preflight.log` and
+`target/profiles/k2-q4-screen-98087-1790096166549546000`. All 42 reused short rows
+pass, all top choices agree (zero near-tie allowances used), maximum absolute
+logit error .00302315 and maximum RMSE .000687908. Four selected embedding rows
+(IDs 0, 42, 250019, 250623) match CPU dequantization exactly. This is independent
+implementation agreement on correlated short inputs, not a new unseen holdout,
+quantization-fidelity, long-history, packed-Q4 or lens qualification claim.
+
+Actual CLI raw smoke, API validation/production lease enabled: six prompt tokens,
+16 generated tokens, output starts ` Paris. The capital of Germany is Berlin.`;
+stats retained at `target/profiles/k2-q4-raw-smoke.jsonl`. This is a product wiring
+check, not comparative performance or answer-quality qualification. Q4 verified
+chat identity is deliberately a separate semantic-profile step.
+
+## Packet 43: verified final Q4 chat
+
+The standard Q4_K_M retained-content identity from packet 42 now authorizes the
+same final-release no-tools renderer as Q8. Tokenizer, embedded-template and
+structural model-config checks plus cancellable exhaustive retained-byte hashing
+remain unchanged. The generation-config hash denotes the pinned upstream reference,
+not a separate generation-config file authenticated inside the GGUF; product
+preparation enforces raw EOS 1 and the renderer uses reference chat stops 1/250019.
+Each artifact
+reports its own content identity; filename, quantization label, header similarity
+or a successful numerical screen alone cannot authorize chat. Unknown compatible
+artifacts remain raw-capable. This adds no model-quality or conversion-fidelity claim.
+
+Model-free negative controls independently reject tokenizer/template/content drift
+for both identities. The existing CPU artifact fixture test now compares the
+returned verified identity with the bytes actually hashed, not a Q8-only expected
+value. It passes on Q4, including cancellation and all valid upstream token fixtures.
+
+Actual Q4 CLI evidence: `target/profiles/k2-q4-chat-cli-v1`. Existing checker passes
+all three efforts, history/Unicode, input/token identity, rendered/raw controls,
+completed low-effort answer, timing and explicit unsupported-control refusals.
+Actual Q4 HTTP evidence: `target/profiles/k2-q4-chat-http-v1.json`; existing test
+passes JSON/SSE, raw-prefix equivalence, all efforts, completed/incomplete outputs,
+abort and session reacquisition. GPU work uses API validation and production lease
+ownership; HTTP uses only ephemeral owned loopback sockets. Tools remain next,
+not silently interpreted by the no-tools output partitioner.
+
+`target/profiles/k2-q4-chat-paired-v1` also passes completed CLI/HTTP equality.
+All-target checking is warning-free; all 26 K2 frontend CPU tests pass. Adversarial
+review found no behavioral blocker and requested the reference-generation-config
+wording clarification above rather than inventing a new artifact requirement.

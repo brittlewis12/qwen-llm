@@ -6,8 +6,43 @@ planner gates. The numerical evidence below remains scoped to its measured lengt
 removing a product cap does not convert short-context tests into full-context proof.
 The materialized test backend alone retains its 7168-position score-scratch limit.
 F16 remains the application cache. CLI and HTTP no-tools chat are bound to the
-verified final artifact and pinned IFM renderer. Raw mode deliberately
+verified final Q8_0/Q4_K_M artifacts and pinned IFM renderer. Raw mode deliberately
 does not guess a chat/tool contract for unknown checkpoints.
+
+## Final Q4 generation screen
+
+The published standard `K2-Horizon-7B-Q4_K_M.gguf` uses native Q4_K embedding,
+mixed Q4_K/Q6_K block projections and a Q6_K head. It already runs through shared
+quantized kernels with serial prefill and F16 KV; no Q8-only runtime gate is needed.
+The new test compares this artifact against itself in the pinned independent
+oracle, not against Q8 weights. It does not change frozen Q8 qualification.
+
+```sh
+K2_GGUF="$HOME/models/K2-Horizon-7B-Q4_K_M.gguf" \
+cargo --config 'profile.test.package.blake3.opt-level=3' \
+  --config 'profile.test.package.sha2.opt-level=3' test -p qwen-llm --lib \
+  k2_horizon_runtime::oracle_tests::quantized::cpu_final_q4_artifact_preflight \
+  -- --ignored --exact --nocapture --test-threads=1
+MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q4_K_M.gguf" \
+K2_LLAMA_ORACLE="$PWD/target/profiles/k2-oracle-build/bin/k2_checkpoint_oracle" \
+cargo --config 'profile.test.package.blake3.opt-level=3' \
+  --config 'profile.test.package.sha2.opt-level=3' test -p qwen-llm --lib \
+  k2_horizon_runtime::oracle_tests::quantized::gpu_final_q4_matches_same_artifact_oracle \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+This reuses 42 short rows, not an unseen holdout. Before Q4 observation, the screen
+sets exclusive bounds of .005 maximum logit error, .001 RMSE and .001 two-sided
+top-choice regret (allowing only bounded near ties). These are scoped integration
+targets, not universal model-quality laws. A separate four-row embedding check
+compares GPU gather with CPU dequantization, including special and last-vocabulary
+IDs. Full native/reference rows, tensor census, artifact/content/tokenizer hashes,
+reference/native identities, memory observations and an explicit `verdict.json`
+are retained in a unique `target/profiles/k2-q4-screen-*` directory. Only a complete
+passing verdict establishes this screen; missing/partial evidence is not success.
+The parent owns the production lease, checks real wired/available memory before
+each serial reference child, and loads native resources only after children exit.
+This does not qualify Q4 packed prefill, lenses, long history or Q4-versus-Q8 fidelity.
 
 ## Owned allocation check
 
@@ -96,6 +131,9 @@ cargo --config 'profile.test.package.blake3.opt-level=3' \
 
 It covers all effort levels, JSON/SSE partition agreement, incomplete reasoning,
 completed answers, stop-aware raw-prefix controls, aborts and session reacquisition.
+The same CPU template/token check, CLI checker and HTTP test also accept the pinned
+standard `K2-Horizon-7B-Q4_K_M.gguf`; choose the same artifact in both lanes when
+checking CLI/HTTP equality. This is within-artifact parity, not Q8-versus-Q4 equality.
 Add `--http-evidence target/profiles/k2-chat-http-new.json` to `check_chat_cli.py`
 to compare completed HTTP/CLI text and token counts. These remain wiring checks,
 not sustained-service, full-context or cross-checkpoint qualification.

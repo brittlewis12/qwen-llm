@@ -326,7 +326,7 @@ evidence remains in `K2-HORIZON-PLAN.md` and `K2-HORIZON-REVIEW.md`.
 
 ## K2 Horizon Verified Chat
 
-For the verified final Q8 artifact, array `input` selects the pinned IFM no-tools
+For verified final Q8_0 and standard Q4_K_M artifacts, array `input` selects the pinned IFM no-tools
 renderer; string `input` always remains raw. Startup verifies retained checkpoint
 bytes once, before accepting requests, and owns an opaque chat capability. An
 unverified artifact or verification failure emits a diagnostic and remains raw-only.
@@ -371,7 +371,7 @@ discards ambiguous buffered delimiter/UTF-8 bytes and never synthesizes completi
 Unlike vLLM's K2 parser, this no-tools subset does not use tool-call markers as
 fallback boundaries or reinterpret unterminated reasoning as visible text.
 
-Leased actual-Q8 checks cover all efforts, short incomplete reasoning, completed
+Leased actual-Q8 and Q4_K_M checks cover all efforts, short incomplete reasoning, completed
 low-effort answers, stop-aware raw-prefix parity, JSON/SSE equality, CLI answer
 parity, and fresh sessions after cancellation. These are wiring/termination checks,
 not reasoning-quality, sustained-service, tool, or full-context qualification.

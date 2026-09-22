@@ -97,20 +97,10 @@ fn snapshot_cache_bytes(mib: u64) -> Result<u64> {
         .context("--snapshot-cache-mib byte conversion overflow")
 }
 
-/// Recognised is not served: a family is listed here once it has a
+/// Recognised is not served: a family is served when its profile declares a
 /// `GenerationBackend`.
 fn supports_serve_family(family: Option<ModelFamily>) -> bool {
-    match family {
-        Some(
-            ModelFamily::Qwen35
-            | ModelFamily::Qwen35Moe
-            | ModelFamily::Qwen4Exp
-            | ModelFamily::DeepSeek4
-            | ModelFamily::MuseGlimmer
-            | ModelFamily::K2Horizon,
-        ) => true,
-        None => false,
-    }
+    family.is_some_and(|family| profile(family).serve_backend)
 }
 
 /// Limits for a family whose resident session capacity is fixed at load
@@ -565,15 +555,13 @@ mod tests {
 
     #[test]
     fn serve_family_gate_lists_backends_explicitly() {
-        for family in [
-            ModelFamily::Qwen35,
-            ModelFamily::Qwen35Moe,
-            ModelFamily::Qwen4Exp,
-            ModelFamily::DeepSeek4,
-            ModelFamily::MuseGlimmer,
-            ModelFamily::K2Horizon,
-        ] {
-            assert!(supports_serve_family(Some(family)), "{family:?}");
+        for family in ModelFamily::ALL {
+            assert_eq!(
+                supports_serve_family(Some(*family)),
+                profile(*family).serve_backend,
+                "{family:?}"
+            );
+            assert!(profile(*family).serve_backend, "{family:?}");
         }
         assert!(!supports_serve_family(None));
     }

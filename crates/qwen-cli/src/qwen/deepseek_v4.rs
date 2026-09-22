@@ -12,6 +12,17 @@ pub(crate) const DEEPSEEK_V4_PREFETCH_ENV: &str = "QWEN_DSV4_PREFETCH";
 
 pub(crate) const DEEPSEEK_V4_PREFETCH_AUTO_THRESHOLD: f64 = 0.98;
 
+pub(crate) fn deepseek_v4_generation_stops(gguf: &GgufFile, vocab_size: u32) -> Result<Vec<i32>> {
+    let stop_tokens = gguf
+        .stop_token_ids()
+        .map_err(|error| anyhow!("stop tokens: {error}"))?;
+    for &token in &stop_tokens {
+        checked_token_id(token, vocab_size, "stop")
+            .map_err(|error| anyhow!("invalid stop token: {error}"))?;
+    }
+    Ok(stop_tokens)
+}
+
 #[cfg(feature = "dsv4-diagnostics")]
 pub(crate) const DEEPSEEK_V4_TEMPORAL_WINDOW_ENV: &str = "QWEN_DSV4_TEMPORAL_WINDOW";
 

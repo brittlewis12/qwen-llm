@@ -22,6 +22,10 @@ impl ModelFamily {
         Self::K2Horizon,
     ];
 
+    /// Bump when adding a family; the exhaustive match in the closedness test
+    /// is what tells you to update this value and `ALL`.
+    pub const FAMILY_COUNT: usize = 6;
+
     pub fn from_architecture_name(name: &str) -> Option<Self> {
         Self::ALL
             .iter()
@@ -89,10 +93,10 @@ mod tests {
         assert_eq!(ModelFamily::K2Horizon.record_label(), "k2_horizon");
     }
 
-    /// `ALL` is the closedness witness: every variant round-trips through
-    /// its architecture name, and names and record labels are unique.
+    /// Families in `ALL` round-trip through their architecture names, and
+    /// their names and record labels are unique.
     #[test]
-    fn all_lists_every_family_once() {
+    fn all_families_round_trip_with_unique_names() {
         let mut names = std::collections::BTreeSet::new();
         let mut labels = std::collections::BTreeSet::new();
         for family in ModelFamily::ALL {
@@ -105,8 +109,8 @@ mod tests {
         }
         // Dense and MoE ordinary Qwen share one record label by design.
         assert_eq!(labels.len(), ModelFamily::ALL.len() - 1);
-        // A variant missing from ALL is unreachable by name; this match
-        // fails to compile when a variant is added, prompting the ALL edit.
+        // The match forces this test to acknowledge every enum variant; it
+        // does not prove that every variant appears in ALL.
         for family in ModelFamily::ALL {
             match family {
                 ModelFamily::Qwen35
@@ -117,5 +121,6 @@ mod tests {
                 | ModelFamily::K2Horizon => {}
             }
         }
+        assert_eq!(ModelFamily::ALL.len(), ModelFamily::FAMILY_COUNT);
     }
 }

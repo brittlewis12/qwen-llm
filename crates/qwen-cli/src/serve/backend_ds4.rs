@@ -413,17 +413,8 @@ impl DeepSeekV4Backend {
                 return Err(ServeError::server_error(format!("logits: {error:#}")).into());
             }
         };
-        let stop_tokens = match self.gguf.stop_token_ids() {
-            Ok(tokens) => tokens,
-            Err(error) => {
-                return Err(ServeError::server_error(format!("stop tokens: {error}")).into());
-            }
-        };
-        for token in &stop_tokens {
-            crate::checked_token_id(*token, self.vocab_size, "stop").map_err(|error| {
-                ServeError::server_error(format!("invalid stop token: {error}"))
-            })?;
-        }
+        let stop_tokens = crate::deepseek_v4_generation_stops(&self.gguf, self.vocab_size)
+            .map_err(|error| ServeError::server_error(error.to_string()))?;
         let ctx = &self.ctx;
         let vocab_size = self.vocab_size;
         let generation = decode_loop::decode_serial(

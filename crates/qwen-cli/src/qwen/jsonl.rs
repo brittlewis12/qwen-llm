@@ -169,6 +169,13 @@ impl CachePrefixSource {
     }
 }
 
+fn ordinary_family(arch: ArchKind) -> ModelFamily {
+    match arch {
+        ArchKind::Dense => ModelFamily::Qwen35,
+        ArchKind::Moe => ModelFamily::Qwen35Moe,
+    }
+}
+
 pub(crate) fn run_requests_jsonl(
     model_path: &Path,
     requests_path: &Path,
@@ -249,10 +256,7 @@ pub(crate) fn run_requests_jsonl(
     let mut n_requests = 0usize;
     let mut n_failed = 0usize;
 
-    let model_family = match loaded.arch().kind {
-        ArchKind::Dense => Some(ModelFamily::Qwen35),
-        ArchKind::Moe => Some(ModelFamily::Qwen35Moe),
-    };
+    let arch = loaded.arch().kind;
     let auto_mode = args.execution_mode == Some(execution_selector::ExecutionModeArg::Auto);
     let (mut file_prepared, file_failures) = match file {
         Some(PreparedJsonlFile { prepared, failures }) => (Some(prepared), failures),
@@ -272,34 +276,24 @@ pub(crate) fn run_requests_jsonl(
                     && request.auto_cache_prefix_tokens.is_none()
                     && request.auto_cache_future_hits == 0
             });
-        let (dense_summary, moe_summary) = match (model_family, requests.is_empty()) {
-            (_, true) => (
-                fixed_cohort_jsonl::CohortPlanSummary::default(),
-                fixed_cohort_jsonl::CohortPlanSummary::default(),
-            ),
-            (Some(ModelFamily::Qwen35), false) => (
-                fixed_cohort_jsonl::plan_summary::<DENSE_BATCH8_WIDTH>(requests, args)?,
-                fixed_cohort_jsonl::CohortPlanSummary::default(),
-            ),
-            (Some(ModelFamily::Qwen35Moe), false) => (
-                fixed_cohort_jsonl::CohortPlanSummary::default(),
-                fixed_cohort_jsonl::plan_summary::<MOE_BATCH16_WIDTH>(requests, args)?,
-            ),
+        let (dense_summary, moe_summary) = if requests.is_empty() {
             (
-                Some(
-                    ModelFamily::Qwen4Exp
-                    | ModelFamily::DeepSeek4
-                    | ModelFamily::MuseGlimmer
-                    | ModelFamily::K2Horizon,
-                )
-                | None,
-                false,
-            ) => (
                 fixed_cohort_jsonl::CohortPlanSummary::default(),
                 fixed_cohort_jsonl::CohortPlanSummary::default(),
-            ),
+            )
+        } else {
+            match arch {
+                ArchKind::Dense => (
+                    fixed_cohort_jsonl::plan_summary::<DENSE_BATCH8_WIDTH>(requests, args)?,
+                    fixed_cohort_jsonl::CohortPlanSummary::default(),
+                ),
+                ArchKind::Moe => (
+                    fixed_cohort_jsonl::CohortPlanSummary::default(),
+                    fixed_cohort_jsonl::plan_summary::<MOE_BATCH16_WIDTH>(requests, args)?,
+                ),
+            }
         };
-        let moe_plan = if model_family == Some(ModelFamily::Qwen35Moe) {
+        let moe_plan = if arch == ArchKind::Moe {
             loaded.inspect_moe_batch16_plan().ok()
         } else {
             None
@@ -335,7 +329,7 @@ pub(crate) fn run_requests_jsonl(
             1024 * 1024,
         )?;
         let dense_batch8_memory_admitted =
-            if model_family == Some(ModelFamily::Qwen35) && loaded.inspect_dense_batch8().is_ok() {
+            if arch == ArchKind::Dense && loaded.inspect_dense_batch8().is_ok() {
                 admission(
                     DENSE_BATCH8_WIDTH,
                     dense_summary.max_execution_capacity,
@@ -346,21 +340,20 @@ pub(crate) fn run_requests_jsonl(
             } else {
                 false
             };
-        let moe_batch16_memory_admitted =
-            if model_family == Some(ModelFamily::Qwen35Moe) && moe_plan.is_some() {
-                admission(
-                    MOE_BATCH16_WIDTH,
-                    moe_summary.max_execution_capacity,
-                    loaded
-                        .moe_batch16_scratch_bytes()?
-                        .saturating_add(1024 * 1024),
-                )?
-            } else {
-                false
-            };
+        let moe_batch16_memory_admitted = if arch == ArchKind::Moe && moe_plan.is_some() {
+            admission(
+                MOE_BATCH16_WIDTH,
+                moe_summary.max_execution_capacity,
+                loaded
+                    .moe_batch16_scratch_bytes()?
+                    .saturating_add(1024 * 1024),
+            )?
+        } else {
+            false
+        };
         let selection = execution_selector::select_qwen(execution_selector::QwenSelectionInput {
             mode: args.execution_mode,
-            family: model_family,
+            family: Some(ordinary_family(arch)),
             arch: loaded.arch(),
             request_count: requests.len(),
             all_requests_accelerable,
@@ -374,16 +367,9 @@ pub(crate) fn run_requests_jsonl(
             dense_serial_remainders: dense_summary.serial_fallback_requests,
             moe_full_cohorts: moe_summary.full_cohorts,
             moe_serial_remainders: moe_summary.serial_fallback_requests,
-            fixed_cohort_economics_rejected: match model_family {
-                Some(ModelFamily::Qwen35) => dense_summary.economics_rejected_cohorts > 0,
-                Some(ModelFamily::Qwen35Moe) => moe_summary.economics_rejected_cohorts > 0,
-                Some(
-                    ModelFamily::Qwen4Exp
-                    | ModelFamily::DeepSeek4
-                    | ModelFamily::MuseGlimmer
-                    | ModelFamily::K2Horizon,
-                )
-                | None => false,
+            fixed_cohort_economics_rejected: match arch {
+                ArchKind::Dense => dense_summary.economics_rejected_cohorts > 0,
+                ArchKind::Moe => moe_summary.economics_rejected_cohorts > 0,
             },
             concurrency2_memory_admitted,
             dense_batch8_memory_admitted,
@@ -393,63 +379,28 @@ pub(crate) fn run_requests_jsonl(
         eprintln!(
             "execution_selection: {}",
             serde_json::to_string(&execution_selector::ExecutionSelectionRecord::new(
-                model_family,
+                Some(ordinary_family(arch)),
                 (!requests.is_empty()).then_some(requests.len()),
                 selection,
-                match model_family {
-                    Some(ModelFamily::Qwen35) => dense_summary.ragged_prompt_policy,
-                    Some(ModelFamily::Qwen35Moe) => moe_summary.ragged_prompt_policy,
-                    Some(
-                        ModelFamily::Qwen4Exp
-                        | ModelFamily::DeepSeek4
-                        | ModelFamily::MuseGlimmer
-                        | ModelFamily::K2Horizon,
-                    )
-                    | None => None,
+                match arch {
+                    ArchKind::Dense => dense_summary.ragged_prompt_policy,
+                    ArchKind::Moe => moe_summary.ragged_prompt_policy,
                 },
-                match model_family {
-                    Some(ModelFamily::Qwen35) => dense_summary.ragged_prompt_plan_decision,
-                    Some(ModelFamily::Qwen35Moe) => moe_summary.ragged_prompt_plan_decision,
-                    Some(
-                        ModelFamily::Qwen4Exp
-                        | ModelFamily::DeepSeek4
-                        | ModelFamily::MuseGlimmer
-                        | ModelFamily::K2Horizon,
-                    )
-                    | None => None,
+                match arch {
+                    ArchKind::Dense => dense_summary.ragged_prompt_plan_decision,
+                    ArchKind::Moe => moe_summary.ragged_prompt_plan_decision,
                 },
-                match model_family {
-                    Some(ModelFamily::Qwen35) => dense_summary.refill_policy,
-                    Some(
-                        ModelFamily::Qwen35Moe
-                        | ModelFamily::Qwen4Exp
-                        | ModelFamily::DeepSeek4
-                        | ModelFamily::MuseGlimmer
-                        | ModelFamily::K2Horizon,
-                    )
-                    | None => None,
+                match arch {
+                    ArchKind::Dense => dense_summary.refill_policy,
+                    ArchKind::Moe => None,
                 },
-                match model_family {
-                    Some(ModelFamily::Qwen35) => dense_summary.planned_refill_arenas,
-                    Some(
-                        ModelFamily::Qwen35Moe
-                        | ModelFamily::Qwen4Exp
-                        | ModelFamily::DeepSeek4
-                        | ModelFamily::MuseGlimmer
-                        | ModelFamily::K2Horizon,
-                    )
-                    | None => None,
+                match arch {
+                    ArchKind::Dense => dense_summary.planned_refill_arenas,
+                    ArchKind::Moe => None,
                 },
-                match model_family {
-                    Some(ModelFamily::Qwen35) => dense_summary.planned_refill_requests,
-                    Some(
-                        ModelFamily::Qwen35Moe
-                        | ModelFamily::Qwen4Exp
-                        | ModelFamily::DeepSeek4
-                        | ModelFamily::MuseGlimmer
-                        | ModelFamily::K2Horizon,
-                    )
-                    | None => None,
+                match arch {
+                    ArchKind::Dense => dense_summary.planned_refill_requests,
+                    ArchKind::Moe => None,
                 },
             ))
             .context("serialize execution selection")?

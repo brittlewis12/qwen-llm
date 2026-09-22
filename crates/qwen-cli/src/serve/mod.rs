@@ -33,6 +33,7 @@ pub(crate) mod utf8;
 
 pub(crate) use crate::open_responses::{items, render, tool_parse};
 
+use crate::family_profile::profile;
 use anyhow::{Context, Result, bail, ensure};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalMemorySignals;
@@ -115,11 +116,12 @@ fn supports_serve_family(family: Option<ModelFamily>) -> bool {
 /// Limits for a family whose resident session capacity is fixed at load
 /// (Muse Glimmer, Flash-Next): both ceilings must be explicit.
 fn fixed_session_limits(
-    family: &str,
+    family: ModelFamily,
     model_context: usize,
     max_context_tokens: Option<usize>,
     max_tokens: Option<usize>,
 ) -> Result<(usize, usize)> {
+    let family = profile(family).display;
     let context_limit = max_context_tokens.with_context(|| {
         format!("{family} serve requires --max-context-tokens because its resident session capacity is fixed at startup")
     })?;
@@ -234,7 +236,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             let config = qwen_llm::muse_glimmer::MuseGlimmerConfig::from_gguf(&gguf)
                 .context("bind Muse Glimmer serve contract")?;
             let (context_limit, default_max_tokens) = fixed_session_limits(
-                "Muse Glimmer",
+                ModelFamily::MuseGlimmer,
                 config.context_length as usize,
                 invocation.max_context_tokens,
                 invocation.max_tokens,
@@ -292,7 +294,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             let config = qwen_llm::qwen4exp::Qwen4ExpConfig::from_gguf(&gguf)
                 .context("bind Qwen3.8-Flash-Next serve geometry")?;
             let (context_limit, default_max_tokens) = fixed_session_limits(
-                "Qwen3.8-Flash-Next",
+                ModelFamily::Qwen4Exp,
                 config.context_length as usize,
                 invocation.max_context_tokens,
                 invocation.max_tokens,
@@ -579,17 +581,39 @@ mod tests {
     #[test]
     fn muse_limits_require_explicit_bounded_capacity_and_output_default() {
         assert_eq!(
-            fixed_session_limits("Muse Glimmer", 131_072, Some(7_168), Some(2_048)).unwrap(),
+            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, Some(7_168), Some(2_048),)
+                .unwrap(),
             (7168, 2048)
         );
         assert_eq!(
-            fixed_session_limits("Muse Glimmer", 131_072, Some(131_072), Some(16_384)).unwrap(),
+            fixed_session_limits(
+                ModelFamily::MuseGlimmer,
+                131_072,
+                Some(131_072),
+                Some(16_384),
+            )
+            .unwrap(),
             (131_072, 16_384)
         );
-        assert!(fixed_session_limits("Muse Glimmer", 131_072, None, Some(2_048)).is_err());
-        assert!(fixed_session_limits("Muse Glimmer", 131_072, Some(7_168), None).is_err());
-        assert!(fixed_session_limits("Muse Glimmer", 131_072, Some(131_073), Some(2_048)).is_err());
-        assert!(fixed_session_limits("Muse Glimmer", 131_072, Some(1_024), Some(2_048)).is_err());
+        assert!(
+            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, None, Some(2_048)).is_err()
+        );
+        assert!(
+            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, Some(7_168), None).is_err()
+        );
+        assert!(
+            fixed_session_limits(
+                ModelFamily::MuseGlimmer,
+                131_072,
+                Some(131_073),
+                Some(2_048)
+            )
+            .is_err()
+        );
+        assert!(
+            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, Some(1_024), Some(2_048))
+                .is_err()
+        );
     }
 
     #[test]

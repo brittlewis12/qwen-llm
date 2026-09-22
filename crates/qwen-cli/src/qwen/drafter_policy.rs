@@ -23,6 +23,8 @@ use qwen_llm::metal::MetalContext;
 use qwen_llm::metal_dflash::MetalDFlashHead;
 use qwen_llm::model_family::ModelFamily;
 
+use crate::family_profile::{DrafterSupport, profile};
+
 /// Execution lane the drafter would serve. Batch lanes (`--requests-jsonl`,
 /// `--batch-size`, `--concurrency`) are rejected earlier by the cross-flag
 /// validator and never reach this resolver.
@@ -89,13 +91,7 @@ impl fmt::Display for DrafterUnsupported {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DrafterUnsupported::FamilyNoSpeculation { family, lane } => {
-                let family_label = match family {
-                    ModelFamily::DeepSeek4 => "DeepSeek V4",
-                    ModelFamily::MuseGlimmer => "Muse Glimmer",
-                    ModelFamily::K2Horizon => "K2 Horizon",
-                    ModelFamily::Qwen4Exp => "Qwen3.8-Flash-Next",
-                    ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => "this Qwen",
-                };
+                let family_label = profile(*family).display;
                 let note = match family {
                     ModelFamily::MuseGlimmer => " (Muse DFlash2 integration is not active yet)",
                     _ => "",
@@ -131,17 +127,19 @@ pub(crate) fn resolve_drafter(
         return DrafterDecision::NotRequested;
     }
     match family {
-        Some(ModelFamily::Qwen35) => DrafterDecision::Permitted(DrafterTarget::Dense),
-        Some(ModelFamily::Qwen35Moe) => match lane {
-            Lane::CliSingleTurn => DrafterDecision::Permitted(DrafterTarget::MoeCliSerial),
-            Lane::Serve => DrafterDecision::Unsupported(DrafterUnsupported::ServeMoeTarget),
+        Some(family) => match profile(family).drafter {
+            DrafterSupport::Dense => DrafterDecision::Permitted(DrafterTarget::Dense),
+            DrafterSupport::MoeCliSerial => match lane {
+                Lane::CliSingleTurn => DrafterDecision::Permitted(DrafterTarget::MoeCliSerial),
+                Lane::Serve => DrafterDecision::Unsupported(DrafterUnsupported::ServeMoeTarget),
+            },
+            DrafterSupport::Unsupported(_) => {
+                DrafterDecision::Unsupported(DrafterUnsupported::FamilyNoSpeculation {
+                    family,
+                    lane,
+                })
+            }
         },
-        Some(
-            family @ (ModelFamily::DeepSeek4
-            | ModelFamily::MuseGlimmer
-            | ModelFamily::Qwen4Exp
-            | ModelFamily::K2Horizon),
-        ) => DrafterDecision::Unsupported(DrafterUnsupported::FamilyNoSpeculation { family, lane }),
         None => DrafterDecision::Unsupported(DrafterUnsupported::UnknownFamily),
     }
 }

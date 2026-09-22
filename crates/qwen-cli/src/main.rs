@@ -19,6 +19,8 @@ mod dsv4_temporal;
 #[path = "qwen/durable_cache.rs"]
 mod durable_cache;
 mod execution_selector;
+#[path = "qwen/family_profile.rs"]
+mod family_profile;
 mod fixed_cohort_jsonl;
 #[path = "qwen/jsonl.rs"]
 mod jsonl;
@@ -1008,6 +1010,7 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
         return print_model_info(&info.model);
     }
     use drafter_policy::{DrafterDecision, DrafterTarget, Lane, resolve_drafter};
+    use family_profile::profile;
     let gguf = GgufFile::open(&info.model)
         .with_context(|| format!("open model {}", info.model.display()))?;
     let family = ModelFamily::detect(&gguf);
@@ -1062,61 +1065,19 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
             "message": "--prompt-lookup requires a recognised Qwen target architecture",
         }),
     };
-    // Reasoning contract, family-owned: each entry is derived from the same
-    // table that binds the lane's controls, so this cannot drift from what
-    // `run`, batch rows, and serve accept. Additive under v1; consumers must
-    // tolerate unknown fields.
-    let reasoning = match family {
-        Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe) => {
-            match QwenUserPromptProtocol::resolve(family.expect("ordinary Qwen"), &gguf) {
-                Ok(Some(protocol)) => serde_json::to_value(protocol.reasoning_capability())?,
-                Ok(None) => unreachable!("ordinary Qwen resolves a protocol"),
-                Err(error) => serde_json::json!({
-                    "status": "unsupported",
-                    "code": "template_unresolved",
-                    "message": error.to_string(),
-                }),
-            }
-        }
-        Some(ModelFamily::Qwen4Exp) => {
-            if supports_qwen38_prompt_protocol(ModelFamily::Qwen4Exp, &gguf) {
-                serde_json::to_value(prompt_template::ReasoningCapability {
-                    levels: Qwen38GenerationMode::level_names(),
-                    fallback: Some("xhigh"),
-                    no_thinking: prompt_template::Support::Supported,
-                    thinking: prompt_template::Support::Supported,
-                })?
-            } else {
-                let failure = qwen4exp_prompt_capability_failure(ModelFamily::Qwen4Exp, &gguf)
-                    .expect("unsupported Flash-Next prompt has a capability failure");
-                serde_json::json!({
-                    "status": "unsupported",
-                    "code": "prompt_protocol_unsupported",
-                    "message": format!("Qwen3.8-Flash-Next chat rendering does not support the declared {}", failure.as_str()),
-                })
-            }
-        }
-        Some(ModelFamily::DeepSeek4) => serde_json::to_value(prompt_template::ReasoningCapability {
-            levels: DeepSeekV4Reasoning::level_names(),
-            fallback: Some("none"),
-            // `no_thinking` is an idempotent request for chat mode.
-            no_thinking: prompt_template::Support::Supported,
-            thinking: prompt_template::Support::Unsupported {
-                code: "thinking_unsupported",
-                message: "DeepSeek V4 selects thinking through reasoning effort; there is no explicit thinking toggle".into(),
-            },
-        })?,
-        Some(ModelFamily::MuseGlimmer) => serde_json::to_value(muse_glimmer_reasoning_capability())?,
-        Some(ModelFamily::K2Horizon) => serde_json::json!({
-            "status": "unsupported", "code": "chat_profile_unverified", "message": "K2 chat reasoning requires a verified final-artifact profile",
-        }),
+    let capabilities = match family {
+        Some(family) => (profile(family).capabilities)(&gguf)?,
         None => serde_json::json!({
-            "status": "unsupported",
-            "code": "unknown_family",
-            "message": "reasoning controls require a recognised architecture",
+            "reasoning": {
+                "status": "unsupported",
+                "code": "unknown_family",
+                "message": "reasoning controls require a recognised architecture",
+            },
+            "input": serde_json::to_value(input_capability_for(None, &gguf))?,
+            "template": template_projection(None, &gguf),
         }),
     };
-    let mut projection = serde_json::json!({
+    let projection = serde_json::json!({
         "version": "qwen_info_v1",
         "model": info.model.display().to_string(),
         "architecture": gguf.architecture(),
@@ -1126,20 +1087,8 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
             "serve": project(Lane::Serve),
         },
         "prompt_lookup": { "run": prompt_lookup },
-        "capabilities": {
-            "reasoning": reasoning,
-            "input": if family == Some(ModelFamily::K2Horizon) { serde_json::Value::Null } else { serde_json::to_value(input_capability_for(family, &gguf))? },
-            "template": template_projection(family, &gguf),
-        },
+        "capabilities": capabilities,
     });
-    if family == Some(ModelFamily::K2Horizon) {
-        for (key, value) in k2_horizon::capability_projection(&gguf)?
-            .as_object()
-            .expect("K2 capability projection")
-        {
-            projection["capabilities"][key] = value.clone();
-        }
-    }
     println!("{}", serde_json::to_string_pretty(&projection)?);
     Ok(())
 }

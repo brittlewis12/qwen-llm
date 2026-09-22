@@ -34,6 +34,11 @@ Local weights: `~/models/K2-Horizon-7B-Q8_0.gguf` (9,573,964,160 bytes), from
 
 - File SHA256: `5a98a289aba5c8c99ef05c9261287f19e8f586fd679bab45b632eb86b47809bf`.
 - Verified content BLAKE3: `719ae3a7c9386c25db2c33b50be15d715f883aa5a762495d5a65776660179e99`.
+- Standard Q4_K_M from the same publisher/revision is also downloaded and verified
+  at `~/models/K2-Horizon-7B-Q4_K_M.gguf` (5,592,217,984 bytes). Raw generation,
+  CPU admission and the 42-row same-Q4 independent integration screen pass. Q4
+  embedding/mixed Q4_K-Q6_K projections use existing kernels, with serial prefill.
+  This is not Q8-equivalent quality, packed-prefill or long-context evidence.
 - Native chat follows IFM revision `2c9659a84c4eea6f9f60462221fe762c8c84d75c`,
   with separate upstream and embedded-template hashes. Full retained-byte identity
   is required, not a filename or downloader assertion. Source association is the
@@ -50,43 +55,45 @@ Local weights: `~/models/K2-Horizon-7B-Q8_0.gguf` (9,573,964,160 bytes), from
 
 ## Remaining Work
 
-The September 20 out-of-band review is being addressed in leverage order. Chat
-partitioning/HTTP and the current-state index were already delivered in packet 36.
-Packet 37 removes unpriced tensor-sized host staging from K2 owned allocations;
-the admitted 32K-capacity allocation/high-water check passes without claiming a
-paired speedup. Immediate follow-ups, ahead of additional architectural work:
+The user's current priority is complete practical support for the released final
+dense 7B, not a campaign across intermediate checkpoint geometries:
 
-- Packet 38 separates cache advancement from readouts and preserves cancellation
-  and poison semantics. Bitwise state/continuation tests and paired scheduling
-  diagnostics pass; lazy admitted packed-scratch reuse remains a separate step.
-- Packet 40 derives artifact capabilities from shared CPU preparation used by
-  product lanes, separately from request/device admission, and updates the README.
-  Packet 41 separates request/setup timing while retaining continuous lane wall.
-  Packet 39 supplies cooperative exhaustive
-  verification cancellation and accurate inspection I/O/help without weaker identity.
-- Reject overflowing externally supplied RMS inputs without silently changing
-  ordinary arithmetic; tighten the fixed-token continuation wording.
-- Freeze independent history-boundary checks beyond 256; pin named chat fixture
-  inventory and keep diagnostic completion separate from promotion verdicts.
-- Add structured producer/deployment execution compatibility to imported lens
-  provenance, without banning useful cross-backend transfers.
+1. Run useful non-Q8 quantizations, starting with the publisher's standard Q4_K_M.
+   Reuse the existing mixed-dtype binder and shared projection kernels. Compare
+   native execution with an independent implementation of the *same artifact*;
+   intentional Q4-versus-Q8 differences are not implementation failures. Lens
+   qualification need not block generation support.
+2. Complete the released interaction contract: native tool schemas, calls/results
+   and history in CLI/HTTP, alongside existing high/medium/low reasoning controls.
+   Follow pinned upstream presentation/call formats and fixtures rather than
+   inventing a non-thinking mode or an in-process tool execution loop. Associate
+   additional final quantizations with their own verified artifact identities.
+3. Preserve the full checkpoint-native context range subject to actual resource
+   admission. Add focused independent history-boundary evidence without making
+   the extent of existing evidence an artificial execution cap.
+4. Apply established cross-architecture kernel optimizations where dtype, shape
+   and numerical semantics make them applicable. Shared single-token projection
+   dispatch is already used; audit mixed-quant packed prefill, reusable scratch
+   and existing matrix/fusion paths before inventing new kernels. Measure actual
+   product requests, not qualification-harness runtime.
 
-Longer-term workflow/qualification work:
+Keep safety/contracts, kernel numerical correctness, semantic provenance and
+model-quality/performance evidence distinct. Tests should detect a stated failure
+mode, reuse existing shared-kernel coverage and allow justified floating-point
+variation. Do not require bitwise equality across different quantizations or
+execution topologies, tune frozen gates after observing results, or reinterpret
+historical failed experiments as passes.
 
-1. Extend useful long-context quality evidence without mistaking declared context
-   or synthetic high-position agreement for full-context model qualification.
-2. Improve KV efficiency only behind unchanged quality gates. F16 is the current
-   default at 147456 logical bytes/token. The private Q8 cache uses 78336 bytes/token
-   (46.875% less) but failed 808/1088 row and 8/16 capture comparisons, with seven
-   teacher-forced top-1 differences. Do not promote it, retune gates, or silently
-   drop history. Full 524288-position F16 KV alone is 72 GiB.
-3. Expose existing library forward interventions through a carefully validated CLI
-   interface; retain artifact/site/position ownership and ordered semantics.
-4. Qualify additional quantizations and checkpoint stages before widening evidence
-   claims. Chat remains bound to the verified final artifact, not all repacks.
-5. Tool rendering/parsing, snapshots/prefix reuse and sustained-service qualification
-   are separate future capabilities. Do not advertise them through token strings
-   or template presence alone.
+Packets 37-41 already address direct cache allocation, discarded prefill readouts,
+cancellable identity verification, artifact-derived capabilities and setup timing.
+The readout overflow design investigation is parked, not a canonical rejection
+policy (local stash `151e20b6a648e11f118831cfcd792e2d275e66d1`). CLI interventions,
+imported-lens provenance extensions, snapshots and intermediate-checkpoint campaigns
+are not blockers for the priorities above.
+
+F16 KV remains the default at 147456 logical bytes/token (72 GiB at 524288).
+The private Q8 cache uses 78336 bytes/token (46.875% less), but its recorded
+qualification failed; it is not promoted. No silent history loss is acceptable.
 
 ## Integration Discipline
 

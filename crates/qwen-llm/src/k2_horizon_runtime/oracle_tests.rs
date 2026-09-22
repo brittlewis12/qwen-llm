@@ -11,6 +11,7 @@ mod attention_probe;
 mod cache_precision;
 mod holdout;
 mod probability;
+mod quantized;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReferenceCache {

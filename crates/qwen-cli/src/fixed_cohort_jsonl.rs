@@ -1065,9 +1065,8 @@ fn plan_ordered_bucket<const WIDTH: usize>(
     let mut full_cohorts = 0usize;
     let mut economics_rejected_cohorts = 0usize;
     let mut serial_fallback_requests = 0usize;
-    let mut cohorts = indices.chunks_exact(WIDTH);
-    for cohort in &mut cohorts {
-        let cohort: [usize; WIDTH] = cohort.try_into().expect("exact fixed-cohort planner chunk");
+    let (cohorts, remainder) = indices.as_chunks::<WIDTH>();
+    for &cohort in cohorts {
         candidate_cohorts += 1;
         if requested_transition_utilization_qualifies(&cohort, requested_tokens)? {
             work.push(PlannedWork::Batch(cohort));
@@ -1080,7 +1079,7 @@ fn plan_ordered_bucket<const WIDTH: usize>(
             }
         }
     }
-    for &index in cohorts.remainder() {
+    for &index in remainder {
         work.push(PlannedWork::Serial(index));
         serial_fallback_requests += 1;
     }
@@ -1717,11 +1716,8 @@ fn plan_request_work_configured<const WIDTH: usize>(
             let mut prefix_work = Vec::new();
             let mut prefix_affinity_cohorts = 0usize;
             let mut remaining = Vec::new();
-            let mut prefix_cohorts = indices.chunks_exact(WIDTH);
-            for cohort in &mut prefix_cohorts {
-                let cohort: [usize; WIDTH] = cohort
-                    .try_into()
-                    .expect("exact fixed-cohort prefix planner chunk");
+            let (prefix_cohorts, remainder) = indices.as_chunks::<WIDTH>();
+            for &cohort in prefix_cohorts {
                 if selected_cohort_prefix_tokens(
                     &cohort,
                     requests,
@@ -1736,7 +1732,7 @@ fn plan_request_work_configured<const WIDTH: usize>(
                     remaining.extend(cohort);
                 }
             }
-            remaining.extend(prefix_cohorts.remainder());
+            remaining.extend(remainder);
             let depth = plan_depth_bucket::<WIDTH>(remaining, &requested_tokens, &capacities)?;
             let prefix_affinity_batches = prefix_work
                 .iter()
@@ -1943,9 +1939,18 @@ pub(super) fn validate_model_family(
     ensure!(
         match batch_size {
             None => true,
-            Some(DENSE_BATCH8_WIDTH) => model_family == Some(ModelFamily::Qwen35),
-            Some(MOE_BATCH16_WIDTH) => model_family == Some(ModelFamily::Qwen35Moe),
-            Some(_) => false,
+            Some(batch_size) => match model_family.map(crate::family_profile::profile) {
+                Some(profile) => match profile.fixed_cohort {
+                    crate::family_profile::FixedCohort::Dense8 => {
+                        batch_size == DENSE_BATCH8_WIDTH
+                    }
+                    crate::family_profile::FixedCohort::Moe16 => {
+                        batch_size == MOE_BATCH16_WIDTH
+                    }
+                    crate::family_profile::FixedCohort::None => false,
+                },
+                None => false,
+            },
         },
         "unsupported --batch-size/model combination: batch size 8 requires qwen35 (dense), and batch size 16 requires qwen35moe"
     );

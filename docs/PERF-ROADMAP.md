@@ -12,6 +12,28 @@ confirm a concrete engine hypothesis.
 For append-only checkpoint history and exact current handoff state, see
 `docs/PERF-LOG.md`.
 
+## V4.1 Bring-Up Prerequisite
+
+The source-verified architecture and correctness gates for DeepSeek V4.1 live in
+`docs/DEEPSEEK-V41-STRATEGY.md`. This is a separate profile alongside V4, not a
+relaxation of the existing `deepseek4` contract. Its performance queue is blocked
+on a numerical reference and feasible backbone residency: packed FP4 global KV,
+candidate-only decoder reindexing, Single-Pass mHC fusion, bounded Engram row
+staging, and CED prefill with exact dependency pruning or explicitly approximate
+SWA replay. These are unimplemented opportunities, not measured wins or changes
+to the ranking below.
+The 2026-09-11 community refresh adds DwarfStar's author-reported 15 tok/s V4.1
+SSD-streaming demo on a 128 GB M5 Max (code not public at that inspection),
+PipeNetwork's reference cache-owner correction, and Rapid-MLX's rejected packing/fusion
+experiments. Assess exact fetch-on-miss expert caching and phase-aware encoder
+residency as a capacity lane; do not treat demonstration speeds as local evidence.
+September 12: DwarfStar published V4.1 Metal support at `bd66c402`. Its current
+scheduler favors bounded wide layer sweeps when available, retaining full
+encoder residency as an alternative that replaces the decode expert cache.
+Its disk-only native FP8 Engram and exact decoder dependency-suffix code are now
+inspectable. Compare total prefill plus residency transitions and following
+decode; the screenshot's 800 tok/s excludes the reported eight-second switch.
+
 ## Current North Star
 
 Make one fresh process and one loaded model answer one fresh prompt as quickly,

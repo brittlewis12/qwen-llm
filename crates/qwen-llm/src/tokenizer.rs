@@ -201,6 +201,8 @@ fn hash_identity_bool(digest: &mut Sha256, name: &str, value: bool) -> Result<()
 pub trait Tokenize {
     fn encode(&self, text: &str, add_special: bool) -> Result<Vec<i32>, TokError>;
     fn try_decode_piece(&self, token: i32) -> Result<String, TokError>;
+    /// The token's exact bytes, which need not be valid UTF-8 on their own.
+    fn try_decode_piece_bytes(&self, token: i32) -> Result<Vec<u8>, TokError>;
     fn try_decode(&self, tokens: &[i32]) -> Result<String, TokError>;
     fn decode(&self, tokens: &[i32]) -> String;
     fn n_vocab(&self) -> u32;
@@ -796,6 +798,9 @@ impl Tokenize for LlamaCppTokenizer {
     fn encode(&self, text: &str, add_special: bool) -> Result<Vec<i32>, TokError> {
         LlamaCppTokenizer::encode(self, text, add_special)
     }
+    fn try_decode_piece_bytes(&self, token: i32) -> Result<Vec<u8>, TokError> {
+        LlamaCppTokenizer::try_decode_piece_bytes_exact(self, token)
+    }
     fn try_decode_piece(&self, token: i32) -> Result<String, TokError> {
         LlamaCppTokenizer::try_decode_piece(self, token)
     }
@@ -1277,6 +1282,9 @@ impl NativeTokenizer {
 impl Tokenize for NativeTokenizer {
     fn encode(&self, text: &str, add_special: bool) -> Result<Vec<i32>, TokError> {
         NativeTokenizer::encode(self, text, add_special)
+    }
+    fn try_decode_piece_bytes(&self, token: i32) -> Result<Vec<u8>, TokError> {
+        NativeTokenizer::try_decode_piece_bytes_exact(self, token).map(<[u8]>::to_vec)
     }
     fn try_decode_piece(&self, token: i32) -> Result<String, TokError> {
         NativeTokenizer::try_decode_piece(self, token)

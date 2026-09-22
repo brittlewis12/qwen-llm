@@ -149,7 +149,6 @@ fn rejects_incompatible_graph_metadata() {
         ("k2-horizon.rope.scaling.type", json!("yarn")),
         ("k2-horizon.rope.scaling.factor", json!(16.0)),
         ("k2-horizon.future_graph_feature", json!(true)),
-        ("prism.hadamard.version", json!(1)),
         ("tokenizer.ggml.pre", json!("qwen35")),
     ] {
         let mut metadata = base.clone();

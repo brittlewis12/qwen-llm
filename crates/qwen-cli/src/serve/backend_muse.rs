@@ -1,5 +1,6 @@
 //! Resident Muse Glimmer [`GenerationBackend`].
 
+use super::decode_loop;
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest};
 use super::output_partition::OutputProtocol;
@@ -115,17 +116,9 @@ impl MuseGlimmerBackend {
         self.math_options
     }
 
-    fn encode(&self, prompt: &str) -> Result<Vec<u32>, ServeError> {
-        self.tokenizer
-            .encode(prompt, false)
-            .map_err(|error| ServeError::server_error(format!("tokenize Muse prompt: {error}")))?
-            .into_iter()
-            .enumerate()
-            .map(|(index, token)| {
-                crate::checked_token_id(token, self.vocab_size, &format!("prompt[{index}]"))
-                    .map_err(|error| ServeError::server_error(error.to_string()))
-            })
-            .collect()
+    #[cfg(test)]
+    pub(crate) fn encode(&self, prompt: &str) -> Result<Vec<u32>, ServeError> {
+        decode_loop::encode_checked(&self.tokenizer, prompt, false, self.vocab_size, "Muse")
     }
 }
 
@@ -172,19 +165,12 @@ impl GenerationBackend for MuseGlimmerBackend {
         let mut sampler = Sampler::new(sampling)
             .map_err(|error| ServeError::invalid_request(None, format!("sampling: {error}")))?;
         let tokenize_t0 = Instant::now();
-        let prompt_ids = self.encode(prompt)?;
+        let prompt_ids =
+            decode_loop::encode_checked(&self.tokenizer, prompt, false, self.vocab_size, "Muse")?;
         let tokenize_ms = tokenize_t0.elapsed().as_secs_f64() * 1e3;
-        if prompt_ids.is_empty() {
-            return Err(ServeError::invalid_request(
-                Some("input"),
-                "Muse prompt tokenized to zero tokens",
-            )
-            .into());
-        }
-        let required = required_forwards("Muse", prompt_ids.len(), max_tokens, self.capacity)?;
+        let required =
+            decode_loop::required_forwards("Muse", prompt_ids.len(), max_tokens, self.capacity)?;
         let stop_tokens = [self.eos_token_id, self.eot_token_id];
-        let tokenizer = &self.tokenizer;
-        let vocab_size = self.vocab_size;
         let prefill_t0 = Instant::now();
         let mut runner = self
             .loaded
@@ -222,45 +208,19 @@ impl GenerationBackend for MuseGlimmerBackend {
         };
         let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
 
-        // Canonical serial loop (same shape as DeepSeek serve): the stop
-        // token is counted but never written. `tick` runs on every emitted
-        // token because `piece` only touches the socket when the partition
-        // produces an event — a buffered tool block would otherwise hide a
-        // disconnect for its whole length.
-        let mut abort: Option<io::Error> = None;
-        let generation = {
-            let abort = &mut abort;
-            crate::generate_serial(
+        let generation = decode_loop::decode_serial(
+            decode_loop::DecodeRequest {
+                family: "Muse",
                 logits,
                 max_tokens,
-                &stop_tokens,
-                &mut sampler,
-                |token| {
-                    let bytes = tokenizer
-                        .try_decode_piece_bytes_exact(token)
-                        .with_context(|| format!("decode Muse token {token}"))?;
-                    sink.piece(&bytes)
-                        .and_then(|()| sink.tick())
-                        .map_err(|error| {
-                            *abort = Some(error);
-                            anyhow::anyhow!("client disconnected during decode")
-                        })
-                },
-                |token| {
-                    let token = crate::checked_token_id(token, vocab_size, "generated")?;
-                    runner.forward_token(token).context("forward Muse token")
-                },
-            )
-        };
-        let generation = match generation {
-            Ok(generation) => generation,
-            Err(error) => {
-                return Err(match abort {
-                    Some(io_error) => BackendFailure::Aborted(io_error),
-                    None => ServeError::server_error(format!("decode: {error:#}")).into(),
-                });
-            }
-        };
+                stop_tokens: &stop_tokens,
+                vocab_size: self.vocab_size,
+            },
+            &mut sampler,
+            &self.tokenizer,
+            sink,
+            |token| Ok(runner.forward_token(token)?),
+        )?;
         let consumed_end = prompt_ids.len() + generation.transitions;
         if runner.next_position() != consumed_end {
             return Err(ServeError::server_error("Muse consumed-history frontier mismatch").into());
@@ -304,33 +264,6 @@ fn reusable_prefix(previous: &[u32], prompt: &[u32], position: usize, enabled: b
         .min(prompt.len().saturating_sub(1))
 }
 
-/// Forward budget for a fixed-capacity resident session (Muse, Flash-Next).
-pub(super) fn required_forwards(
-    family: &str,
-    prompt_tokens: usize,
-    max_tokens: usize,
-    capacity: usize,
-) -> Result<usize, ServeError> {
-    if max_tokens == 0 {
-        return Err(ServeError::invalid_request(
-            Some("max_output_tokens"),
-            "max_output_tokens must be >= 1",
-        ));
-    }
-    let required = prompt_tokens.checked_add(max_tokens - 1).ok_or_else(|| {
-        ServeError::invalid_request(None, format!("{family} forward count overflow"))
-    })?;
-    if required > capacity {
-        return Err(ServeError::invalid_request(
-            Some("max_output_tokens"),
-            format!(
-                "request needs {required} {family} forwards, beyond this server's capacity {capacity} (raise --max-context-tokens at startup)"
-            ),
-        ));
-    }
-    Ok(required)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,14 +293,6 @@ mod tests {
         }
         let defaults = MuseGlimmerRuntimeOptions::default();
         assert!(defaults.matrix_prefill && defaults.split_decode);
-    }
-
-    #[test]
-    fn forward_admission_counts_only_required_transitions() {
-        assert_eq!(required_forwards("Muse", 10, 1, 10).unwrap(), 10);
-        assert_eq!(required_forwards("Muse", 10, 3, 12).unwrap(), 12);
-        assert!(required_forwards("Muse", 10, 0, 10).is_err());
-        assert!(required_forwards("Muse", 10, 3, 11).is_err());
     }
 
     #[test]

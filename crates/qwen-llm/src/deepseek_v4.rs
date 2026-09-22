@@ -1221,10 +1221,10 @@ fn validate_hash_expert_payload(
             detail: "hash router top-k must be nonzero".into(),
         });
     }
-    let mut chunks = bytes.chunks_exact(4);
+    let (chunks, remainder) = bytes.as_chunks::<4>();
     let mut entries = 0usize;
-    for (index, chunk) in chunks.by_ref().enumerate() {
-        let expert = i32::from_le_bytes(chunk.try_into().expect("four-byte I32 chunk"));
+    for (index, chunk) in chunks.iter().enumerate() {
+        let expert = i32::from_le_bytes(*chunk);
         if expert < 0 || expert as u32 >= expert_count {
             return Err(DeepSeekV4Error::InvalidTensorValue {
                 tensor: tensor_name.into(),
@@ -1235,7 +1235,7 @@ fn validate_hash_expert_payload(
         }
         entries += 1;
     }
-    if !chunks.remainder().is_empty() {
+    if !remainder.is_empty() {
         return Err(DeepSeekV4Error::InvalidTensorValue {
             tensor: tensor_name.into(),
             detail: "I32 payload has a non-four-byte remainder".into(),

@@ -1,4 +1,5 @@
 //! Borrowed resident model; each request owns and drops its entire fresh session.
+use super::decode_loop;
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest};
 use super::output_partition::OutputProtocol;
@@ -144,32 +145,17 @@ impl GenerationBackend for K2Backend<'_, '_> {
             .unwrap_or(self.prepared.default_max);
         let mut sampler = Sampler::new(render_k2::sampling(request))
             .map_err(|e| ServeError::invalid_request(None, format!("K2 sampler: {e}")))?;
-        let ids = self
-            .prepared
-            .tokenizer
-            .encode(prompt, request.k2_add_special_tokens.unwrap_or(true))
-            .map_err(|e| {
-                ServeError::invalid_request(Some("input"), format!("K2 tokenization: {e}"))
-            })?;
-        if ids.is_empty() {
-            return Err(ServeError::invalid_request(
-                Some("input"),
-                "K2 input tokenized to no tokens",
-            )
-            .into());
-        }
-        let tokens = ids
-            .iter()
-            .map(|&id| crate::checked_token_id(id, self.model.config().vocab_size, "K2 prompt"))
-            .collect::<Result<Vec<_>>>()
-            .map_err(|e| ServeError::invalid_request(Some("input"), e.to_string()))?;
-        super::backend_muse::required_forwards(
+        let tokens = decode_loop::encode_checked(
+            &self.prepared.tokenizer,
+            prompt,
+            request.k2_add_special_tokens.unwrap_or(true),
+            self.model.config().vocab_size,
             "K2",
-            tokens.len(),
-            maximum,
-            self.prepared.capacity,
         )?;
+        let required =
+            decode_loop::required_forwards("K2", tokens.len(), maximum, self.prepared.capacity)?;
         sink.tick().map_err(BackendFailure::Aborted)?;
+        let prefill_t0 = std::time::Instant::now();
         let mut session = self
             .model
             .create_session(0)
@@ -190,37 +176,31 @@ impl GenerationBackend for K2Backend<'_, '_> {
             }
         }
         sink.tick().map_err(BackendFailure::Aborted)?;
-        let mut abort = None;
-        let generation = crate::generate_serial(
-            logits,
-            maximum,
-            stops,
+        let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
+        let generation = decode_loop::decode_serial(
+            decode_loop::DecodeRequest {
+                family: "K2",
+                logits,
+                max_tokens: maximum,
+                stop_tokens: stops,
+                vocab_size: self.model.config().vocab_size,
+            },
             &mut sampler,
-            |token| {
-                let bytes = self
-                    .prepared
-                    .tokenizer
-                    .try_decode_piece_bytes_exact(token)?;
-                sink.piece(bytes)
-                    .and_then(|()| sink.tick())
-                    .map_err(|error| {
-                        abort = Some(error);
-                        anyhow::anyhow!("K2 transport aborted")
-                    })
-            },
-            |token| {
-                let id =
-                    crate::checked_token_id(token, self.model.config().vocab_size, "K2 generated")?;
-                Ok(session.append(&[id])?)
-            },
-        );
-        let generation = generation.map_err(|error| match abort {
-            Some(error) => BackendFailure::Aborted(error),
-            None => ServeError::server_error(format!("K2 decode: {error:#}")).into(),
-        })?;
+            &self.prepared.tokenizer,
+            sink,
+            |token| Ok(session.append(&[token])?),
+        )?;
         if session.committed_len() as usize != tokens.len() + generation.transitions {
             return Err(ServeError::server_error("K2 consumed-prefix accounting mismatch").into());
         }
+        tracing::info!(
+            target: "qwen_diag",
+            "serve phases: family=k2_horizon prefill_ms={prefill_ms:.1} prefill_tokens={} decode_ms={:.1} required_forwards={required} capacity={} transitions={}",
+            tokens.len(),
+            generation.wall_ms,
+            self.prepared.capacity,
+            generation.transitions,
+        );
         Ok(super::outcome::finish_generation(
             tokens.len(),
             &generation,

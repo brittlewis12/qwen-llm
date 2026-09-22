@@ -968,6 +968,42 @@ fn qwen4exp_prompt_capability_is_the_shared_tokenizer_gate() {
 }
 
 #[test]
+fn qwen4exp_projection_does_not_publish_a_renderer_the_lane_rejects() {
+    use crate::prompt_template::{
+        QwenHeaderFacts, QwenReleaseStatus, QwenTokenizerMismatch, identify_qwen_release,
+    };
+    let facts = QwenHeaderFacts {
+        architecture: "qwen4exp",
+        tokenizer_model: Some("other"),
+        tokenizer_pre: Some("qwen35"),
+        token_count: Some(248_320),
+        names: [Some("renamed Flash-Next"), None, None, None, None],
+    };
+    let identity = identify_qwen_release(&facts);
+    assert!(matches!(
+        &identity.status,
+        QwenReleaseStatus::Unknown { reason, .. }
+            if reason.contains("tokenizer.ggml.model")
+    ));
+    let projection = qwen4exp_template_projection(&identity);
+    assert_eq!(projection["status"], "unknown");
+    assert!(projection.get("rendered_as").is_none());
+    let failure = classify_qwen4exp_prompt_capability(ModelFamily::Qwen4Exp, &facts);
+    assert_eq!(
+        failure,
+        Some(Qwen4ExpPromptCapabilityFailure::Tokenizer(
+            QwenTokenizerMismatch::Model
+        ))
+    );
+    assert!(
+        projection["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with(failure.unwrap().as_str())
+    );
+}
+
+#[test]
 fn qwen4exp_stop_validation_honors_valid_producer_vectors() {
     validate_qwen4exp_stop_tokens(&[248_046], 248_320).unwrap();
     validate_qwen4exp_stop_tokens(&[42], 248_320).unwrap();

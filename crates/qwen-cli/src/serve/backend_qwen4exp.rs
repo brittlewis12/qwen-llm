@@ -5,6 +5,7 @@
 //! (`Qwen4ExpLoadedModel::restore_workspace`), so no per-request allocation
 //! and no history carries across requests.
 
+use super::decode_loop;
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{QwenTemplate, ServeError, ServeRequest};
 use super::output_partition::{OutputProtocol, ToolGrammar};
@@ -109,21 +110,6 @@ impl FlashNextBackend {
             stop_tokens,
         })
     }
-
-    fn encode(&self, prompt: &str) -> Result<Vec<u32>, ServeError> {
-        self.tokenizer
-            .encode(prompt, false)
-            .map_err(|error| {
-                ServeError::server_error(format!("tokenize Qwen3.8-Flash-Next prompt: {error}"))
-            })?
-            .into_iter()
-            .enumerate()
-            .map(|(index, token)| {
-                crate::checked_token_id(token, self.vocab_size, &format!("prompt[{index}]"))
-                    .map_err(|error| ServeError::server_error(error.to_string()))
-            })
-            .collect()
-    }
 }
 
 impl GenerationBackend for FlashNextBackend {
@@ -157,107 +143,68 @@ impl GenerationBackend for FlashNextBackend {
         prompt: &str,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
+        const FAMILY: &str = "Qwen3.8-Flash-Next";
         let max_tokens = request.max_output_tokens.unwrap_or(self.default_max_tokens);
         let mut sampler = super::backend::request_sampler(request)?;
         let tokenize_t0 = Instant::now();
-        let prompt_ids = self.encode(prompt)?;
+        let prompt_ids =
+            decode_loop::encode_checked(&self.tokenizer, prompt, false, self.vocab_size, FAMILY)?;
         let tokenize_ms = tokenize_t0.elapsed().as_secs_f64() * 1e3;
-        if prompt_ids.is_empty() {
-            return Err(ServeError::invalid_request(
-                Some("input"),
-                "Qwen3.8-Flash-Next prompt tokenized to zero tokens",
-            )
-            .into());
-        }
-        let required = super::backend_muse::required_forwards(
-            "Qwen3.8-Flash-Next",
+        let required = decode_loop::required_forwards(
+            FAMILY,
             prompt_ids.len(),
             max_tokens,
             self.forward_limit,
         )?;
-        let stop_tokens = self.stop_tokens.clone();
-        let tokenizer = &self.tokenizer;
-        let vocab_size = self.vocab_size;
-        let mut runner = self.loaded.create_runner(&self.ctx).map_err(|error| {
-            ServeError::server_error(format!("bind Qwen3.8-Flash-Next runner: {error}"))
-        })?;
+        let mut runner = self
+            .loaded
+            .create_runner(&self.ctx)
+            .map_err(|error| ServeError::server_error(format!("bind {FAMILY} runner: {error}")))?;
 
         let prefill_t0 = Instant::now();
         let mut checkpoint_abort: Option<io::Error> = None;
         let prefill = runner.prefill_with_command_checkpoint(&prompt_ids, || {
             sink.tick().map_err(|error| {
                 checkpoint_abort = Some(error);
-                Qwen4ExpRuntimeError::Checkpoint(
-                    "transport aborted during Qwen3.8-Flash-Next prefill".into(),
-                )
+                Qwen4ExpRuntimeError::Checkpoint(format!(
+                    "transport aborted during {FAMILY} prefill"
+                ))
             })
         });
         let outcome = match prefill {
             Err(error) => Err(match checkpoint_abort {
                 Some(error) => BackendFailure::Aborted(error),
                 None => {
-                    ServeError::server_error(format!("prefill Qwen3.8-Flash-Next prompt: {error}"))
-                        .into()
+                    ServeError::server_error(format!("prefill {FAMILY} prompt: {error}")).into()
                 }
             }),
             Ok(logits) => {
                 let logits = logits.to_vec();
                 let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
-                // Canonical serial loop (same shape as DeepSeek and Muse
-                // serve): the stop token is counted but never written;
-                // `tick` runs on every emitted token because `piece` only
-                // touches the socket when the partition emits.
-                let mut abort: Option<io::Error> = None;
-                let generation = {
-                    let abort = &mut abort;
-                    crate::generate_serial(
+                decode_loop::decode_serial(
+                    decode_loop::DecodeRequest {
+                        family: FAMILY,
                         logits,
                         max_tokens,
-                        &stop_tokens,
-                        &mut sampler,
-                        |token| {
-                            let bytes =
-                                tokenizer.try_decode_piece_bytes_exact(token).with_context(
-                                    || format!("decode Qwen3.8-Flash-Next token {token}"),
-                                )?;
-                            sink.piece(bytes)
-                                .and_then(|()| sink.tick())
-                                .map_err(|error| {
-                                    *abort = Some(error);
-                                    anyhow::anyhow!("client disconnected during decode")
-                                })
-                        },
-                        |token| {
-                            let token = crate::checked_token_id(token, vocab_size, "generated")?;
-                            Ok(runner
-                                .forward_token(token)
-                                .context("forward Qwen3.8-Flash-Next token")?
-                                .to_vec())
-                        },
-                    )
-                };
-                match generation {
-                    Ok(generation) => {
-                        tracing::info!(
-                            target: "qwen_diag",
-                            "serve phases: family=qwen4exp tokenize_ms={tokenize_ms:.1} prefill_ms={prefill_ms:.1} prefill_tokens={} decode_ms={:.1} required_forwards={required} forward_limit={} transitions={}",
-                            prompt_ids.len(),
-                            generation.wall_ms,
-                            self.forward_limit,
-                            generation.transitions,
-                        );
-                        Ok(super::outcome::finish_generation(
-                            prompt_ids.len(),
-                            &generation,
-                            0,
-                            0.0,
-                        ))
-                    }
-                    Err(error) => Err(match abort {
-                        Some(io_error) => BackendFailure::Aborted(io_error),
-                        None => ServeError::server_error(format!("decode: {error:#}")).into(),
-                    }),
-                }
+                        stop_tokens: &self.stop_tokens,
+                        vocab_size: self.vocab_size,
+                    },
+                    &mut sampler,
+                    &self.tokenizer,
+                    sink,
+                    |token| Ok(runner.forward_token(token)?.to_vec()),
+                )
+                .map(|generation| {
+                    tracing::info!(
+                        target: "qwen_diag",
+                        "serve phases: family=qwen4exp tokenize_ms={tokenize_ms:.1} prefill_ms={prefill_ms:.1} prefill_tokens={} decode_ms={:.1} required_forwards={required} forward_limit={} transitions={}",
+                        prompt_ids.len(),
+                        generation.wall_ms,
+                        self.forward_limit,
+                        generation.transitions,
+                    );
+                    super::outcome::finish_generation(prompt_ids.len(), &generation, 0, 0.0)
+                })
             }
         };
         // The workspace goes back reset whatever the outcome; a failed reset

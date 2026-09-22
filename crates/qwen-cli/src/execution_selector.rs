@@ -169,15 +169,8 @@ impl ExecutionSelectionRecord {
             schema_version: 3,
             backend: "execution_selector_v3",
             requested_mode: "auto",
-            family: match family {
-                Some(ModelFamily::Qwen35) => "qwen35",
-                Some(ModelFamily::Qwen35Moe) => "qwen35moe",
-                Some(ModelFamily::Qwen4Exp) => "qwen4exp",
-                Some(ModelFamily::DeepSeek4) => "deepseek4",
-                Some(ModelFamily::MuseGlimmer) => "muse-glimmer",
-                Some(ModelFamily::K2Horizon) => "k2-horizon",
-                None => "unknown",
-            },
+            // Architecture spelling: dense and MoE select differently.
+            family: family.map_or("unknown", ModelFamily::architecture_name),
             selected_mode: selection.selected.as_str(),
             width: selection.selected.width(),
             reason: selection.reason,

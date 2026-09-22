@@ -19,6 +19,8 @@ mod dsv4_temporal;
 #[path = "qwen/durable_cache.rs"]
 mod durable_cache;
 mod execution_selector;
+#[path = "qwen/family_profile.rs"]
+mod family_profile;
 mod fixed_cohort_jsonl;
 #[path = "qwen/jsonl.rs"]
 mod jsonl;
@@ -257,9 +259,38 @@ fn run() -> Result<()> {
     validate_request_before_model_open(&args)?;
     let gguf = GgufFile::open(&model_path)
         .with_context(|| format!("open model {}", model_path.display()))?;
-    let model_family = ModelFamily::detect(&gguf);
-    if model_family == Some(ModelFamily::K2Horizon) {
-        return k2_horizon::run_raw(&gguf, &args, explicit_options, invocation);
+    let Some(family) = ModelFamily::detect(&gguf) else {
+        bail!(
+            "qwen does not support model architecture {:?}; recognised families: {}",
+            gguf.architecture(),
+            ModelFamily::ALL
+                .iter()
+                .map(|family| family.architecture_name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    };
+    let model_family = Some(family);
+    // One exhaustive dispatch keeps each family out of the wrong admission
+    // lane. K2 and Muse own their request shapes and skip the Qwen batch and
+    // DeepSeek selector validators below.
+    match family {
+        ModelFamily::K2Horizon => {
+            return k2_horizon::run_raw(&gguf, &args, explicit_options, invocation);
+        }
+        ModelFamily::MuseGlimmer => {
+            return run_muse_glimmer_single_turn(
+                &model_path,
+                &gguf,
+                &args,
+                explicit_options,
+                invocation,
+            );
+        }
+        ModelFamily::Qwen35
+        | ModelFamily::Qwen35Moe
+        | ModelFamily::Qwen4Exp
+        | ModelFamily::DeepSeek4 => {}
     }
     // Drafter admission is a header-level decision; settle it (and bind the
     // drafter's metadata) before any family lane allocates on the GPU.
@@ -282,15 +313,8 @@ fn run() -> Result<()> {
         qwen_llm::metal_dflash::ensure_prompt_lookup_n8_supported_for_gguf(&model)
             .map_err(anyhow::Error::msg)?;
     }
-    if model_family == Some(ModelFamily::MuseGlimmer) {
-        return run_muse_glimmer_single_turn(
-            &model_path,
-            &gguf,
-            &args,
-            explicit_options,
-            invocation,
-        );
-    }
+    // DS4 is the only consumer of its snapshot and reasoning flags, which
+    // the remaining lanes refuse.
     fixed_cohort_jsonl::validate_model_family(args.batch_size, model_family)?;
     concurrent_jsonl::validate_model_family(&args, model_family)?;
     validate_deepseek_v4_multigroup_selector_family(
@@ -300,65 +324,69 @@ fn run() -> Result<()> {
     if let cli::Invocation::Run(run) = invocation {
         args.prepared_prompt = Some(prepare_modern_run_prompt(run, model_family, &gguf, &args)?);
     }
-    if model_family == Some(ModelFamily::DeepSeek4) {
-        return if args.requests_jsonl.is_some() {
+    if family != ModelFamily::DeepSeek4 {
+        ensure!(
+            args.deepseek_v4_snapshot.is_none(),
+            "--deepseek-v4-snapshot requires a DeepSeek V4 model"
+        );
+        ensure!(
+            args.reasoning.is_none() && !args.preserve_reasoning,
+            "--reasoning and --preserve-reasoning apply to DeepSeek V4 --messages requests only"
+        );
+    }
+    match family {
+        ModelFamily::K2Horizon => unreachable!("K2 Horizon returned above"),
+        ModelFamily::MuseGlimmer => unreachable!("Muse Glimmer returned above"),
+        ModelFamily::DeepSeek4 if args.requests_jsonl.is_some() => {
             run_deepseek_v4_requests_jsonl(&model_path, gguf, &args, explicit_options)
-        } else {
-            run_deepseek_v4_single_turn(
-                &model_path,
-                gguf,
-                &args,
-                explicit_options,
-                staged_integrity,
-            )
-        };
-    }
-    ensure!(
-        args.deepseek_v4_snapshot.is_none(),
-        "--deepseek-v4-snapshot requires a DeepSeek V4 model"
-    );
-    ensure!(
-        args.reasoning.is_none() && !args.preserve_reasoning,
-        "--reasoning and --preserve-reasoning apply to DeepSeek V4 --messages requests only"
-    );
-    if model_family == Some(ModelFamily::Qwen4Exp) {
-        return run_qwen4exp_single_turn(&model_path, &gguf, &args, explicit_options);
-    }
-
-    let supplied = admission::supplied(&args, explicit_options);
-    if has_single_turn_input(&args) {
-        let lane = &admission::ORDINARY_QWEN_SINGLE_TURN;
-        let mut unsupported = lane.unsupported(&supplied);
-        // Single-turn reads the prefix-capture length and durable tuning
-        // only inside the durable store; without it they would no-op.
-        if args.durable_prefix_cache.is_none() {
-            use admission::LegacyOption as O;
-            unsupported.extend(supplied.iter().filter_map(|option| match option {
-                O::CachePrefixTokens => {
-                    Some("--cache-prefix-tokens (requires --durable-prefix-cache)")
-                }
-                O::DurablePrefixCacheMaxMib => {
-                    Some("--durable-prefix-cache-max-mib (requires --durable-prefix-cache)")
-                }
-                O::DurablePrefixCacheMaxEntryMib => {
-                    Some("--durable-prefix-cache-max-entry-mib (requires --durable-prefix-cache)")
-                }
-                O::DurablePrefixCacheMinTokens => {
-                    Some("--durable-prefix-cache-min-tokens (requires --durable-prefix-cache)")
-                }
-                _ => None,
-            }));
         }
-        lane.refuse(&unsupported)?;
-        return run_single_turn(&model_path, gguf, &args, staged_integrity, drafter);
+        ModelFamily::DeepSeek4 => run_deepseek_v4_single_turn(
+            &model_path,
+            gguf,
+            &args,
+            explicit_options,
+            staged_integrity,
+        ),
+        ModelFamily::Qwen4Exp => {
+            run_qwen4exp_single_turn(&model_path, &gguf, &args, explicit_options)
+        }
+        ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {
+            let supplied = admission::supplied(&args, explicit_options);
+            if has_single_turn_input(&args) {
+                let lane = &admission::ORDINARY_QWEN_SINGLE_TURN;
+                let mut unsupported = lane.unsupported(&supplied);
+                // Single-turn reads the prefix-capture length and durable
+                // tuning only inside the durable store; without it they
+                // would no-op.
+                if args.durable_prefix_cache.is_none() {
+                    use admission::LegacyOption as O;
+                    unsupported.extend(supplied.iter().filter_map(|option| match option {
+                        O::CachePrefixTokens => {
+                            Some("--cache-prefix-tokens (requires --durable-prefix-cache)")
+                        }
+                        O::DurablePrefixCacheMaxMib => {
+                            Some("--durable-prefix-cache-max-mib (requires --durable-prefix-cache)")
+                        }
+                        O::DurablePrefixCacheMaxEntryMib => Some(
+                            "--durable-prefix-cache-max-entry-mib (requires --durable-prefix-cache)",
+                        ),
+                        O::DurablePrefixCacheMinTokens => Some(
+                            "--durable-prefix-cache-min-tokens (requires --durable-prefix-cache)",
+                        ),
+                        _ => None,
+                    }));
+                }
+                lane.refuse(&unsupported)?;
+                return run_single_turn(&model_path, gguf, &args, staged_integrity, drafter);
+            }
+            let path = args
+                .requests_jsonl
+                .as_ref()
+                .expect("request mode was validated above");
+            admission::ORDINARY_QWEN_BATCH.admit(&supplied)?;
+            run_requests_jsonl(&model_path, path, gguf, &args, explicit_options)
+        }
     }
-
-    if let Some(path) = args.requests_jsonl.as_ref() {
-        admission::ORDINARY_QWEN_BATCH.admit(&supplied)?;
-        return run_requests_jsonl(&model_path, path, gguf, &args, explicit_options);
-    }
-
-    unreachable!("request mode was validated above")
 }
 
 fn validate_qwen_model_prefetch_scope(args: &Args) -> Result<()> {
@@ -846,6 +874,9 @@ fn template_projection(family: Option<ModelFamily>, gguf: &GgufFile) -> serde_js
     match family {
         Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe | ModelFamily::Qwen4Exp) => {
             match prompt_template::identify_qwen_release_for_gguf(gguf) {
+                Ok(identity) if family == Some(ModelFamily::Qwen4Exp) => {
+                    qwen4exp_template_projection(&identity)
+                }
                 Ok(identity) => {
                     let mut value =
                         serde_json::to_value(&identity.status).expect("serialize release status");
@@ -879,6 +910,19 @@ fn template_projection(family: Option<ModelFamily>, gguf: &GgufFile) -> serde_js
             "message": "no recognised architecture",
         }),
     }
+}
+
+fn qwen4exp_template_projection(
+    identity: &prompt_template::QwenReleaseIdentity,
+) -> serde_json::Value {
+    let mut value = serde_json::to_value(&identity.status).expect("serialize release status");
+    if matches!(
+        &identity.status,
+        prompt_template::QwenReleaseStatus::Identified { .. }
+    ) {
+        value["rendered_as"] = serde_json::json!(identity.template.renderer_name());
+    }
+    value
 }
 
 /// `--no-thinking` is a released template transition; every identified
@@ -982,6 +1026,7 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
         return print_model_info(&info.model);
     }
     use drafter_policy::{DrafterDecision, DrafterTarget, Lane, resolve_drafter};
+    use family_profile::profile;
     let gguf = GgufFile::open(&info.model)
         .with_context(|| format!("open model {}", info.model.display()))?;
     let family = ModelFamily::detect(&gguf);
@@ -1036,61 +1081,19 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
             "message": "--prompt-lookup requires a recognised Qwen target architecture",
         }),
     };
-    // Reasoning contract, family-owned: each entry is derived from the same
-    // table that binds the lane's controls, so this cannot drift from what
-    // `run`, batch rows, and serve accept. Additive under v1; consumers must
-    // tolerate unknown fields.
-    let reasoning = match family {
-        Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe) => {
-            match QwenUserPromptProtocol::resolve(family.expect("ordinary Qwen"), &gguf) {
-                Ok(Some(protocol)) => serde_json::to_value(protocol.reasoning_capability())?,
-                Ok(None) => unreachable!("ordinary Qwen resolves a protocol"),
-                Err(error) => serde_json::json!({
-                    "status": "unsupported",
-                    "code": "template_unresolved",
-                    "message": error.to_string(),
-                }),
-            }
-        }
-        Some(ModelFamily::Qwen4Exp) => {
-            if supports_qwen38_prompt_protocol(ModelFamily::Qwen4Exp, &gguf) {
-                serde_json::to_value(prompt_template::ReasoningCapability {
-                    levels: Qwen38GenerationMode::level_names(),
-                    fallback: Some("xhigh"),
-                    no_thinking: prompt_template::Support::Supported,
-                    thinking: prompt_template::Support::Supported,
-                })?
-            } else {
-                let failure = qwen4exp_prompt_capability_failure(ModelFamily::Qwen4Exp, &gguf)
-                    .expect("unsupported Flash-Next prompt has a capability failure");
-                serde_json::json!({
-                    "status": "unsupported",
-                    "code": "prompt_protocol_unsupported",
-                    "message": format!("Qwen3.8-Flash-Next chat rendering does not support the declared {}", failure.as_str()),
-                })
-            }
-        }
-        Some(ModelFamily::DeepSeek4) => serde_json::to_value(prompt_template::ReasoningCapability {
-            levels: DeepSeekV4Reasoning::level_names(),
-            fallback: Some("none"),
-            // `no_thinking` is an idempotent request for chat mode.
-            no_thinking: prompt_template::Support::Supported,
-            thinking: prompt_template::Support::Unsupported {
-                code: "thinking_unsupported",
-                message: "DeepSeek V4 selects thinking through reasoning effort; there is no explicit thinking toggle".into(),
-            },
-        })?,
-        Some(ModelFamily::MuseGlimmer) => serde_json::to_value(muse_glimmer_reasoning_capability())?,
-        Some(ModelFamily::K2Horizon) => serde_json::json!({
-            "status": "unsupported", "code": "chat_profile_unverified", "message": "K2 chat reasoning requires a verified final-artifact profile",
-        }),
+    let capabilities = match family {
+        Some(family) => (profile(family).capabilities)(&gguf)?,
         None => serde_json::json!({
-            "status": "unsupported",
-            "code": "unknown_family",
-            "message": "reasoning controls require a recognised architecture",
+            "reasoning": {
+                "status": "unsupported",
+                "code": "unknown_family",
+                "message": "reasoning controls require a recognised architecture",
+            },
+            "input": serde_json::to_value(input_capability_for(None, &gguf))?,
+            "template": template_projection(None, &gguf),
         }),
     };
-    let mut projection = serde_json::json!({
+    let projection = serde_json::json!({
         "version": "qwen_info_v1",
         "model": info.model.display().to_string(),
         "architecture": gguf.architecture(),
@@ -1100,20 +1103,8 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
             "serve": project(Lane::Serve),
         },
         "prompt_lookup": { "run": prompt_lookup },
-        "capabilities": {
-            "reasoning": reasoning,
-            "input": if family == Some(ModelFamily::K2Horizon) { serde_json::Value::Null } else { serde_json::to_value(input_capability_for(family, &gguf))? },
-            "template": template_projection(family, &gguf),
-        },
+        "capabilities": capabilities,
     });
-    if family == Some(ModelFamily::K2Horizon) {
-        for (key, value) in k2_horizon::capability_projection(&gguf)?
-            .as_object()
-            .expect("K2 capability projection")
-        {
-            projection["capabilities"][key] = value.clone();
-        }
-    }
     println!("{}", serde_json::to_string_pretty(&projection)?);
     Ok(())
 }

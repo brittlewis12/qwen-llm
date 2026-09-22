@@ -99,6 +99,25 @@ fn value_type(value: &Value) -> &'static str {
     }
 }
 
+pub(super) fn resolve_argument_ref(parameters: &Value, spec: &Value) -> Option<Value> {
+    let reference = spec["$ref"].as_str()?;
+    let key = reference
+        .strip_prefix("#/$defs/")
+        .or_else(|| reference.strip_prefix("#/definitions/"))?;
+    let defs = if parameters["$defs"].is_object() {
+        &parameters["$defs"]
+    } else {
+        &parameters["definitions"]
+    };
+    let mut merged = defs.get(key)?.as_object()?.clone();
+    for (key, value) in spec.as_object()? {
+        if key != "$ref" {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    Some(Value::Object(merged))
+}
+
 pub(super) fn argument_type(
     definitions: &[Value],
     name: &str,
@@ -115,26 +134,7 @@ pub(super) fn argument_type(
         let Some(spec) = parameters["properties"].get(argument) else {
             continue;
         };
-        let mut spec = spec.clone();
-        if let Some(reference) = spec["$ref"].as_str() {
-            let key = reference
-                .strip_prefix("#/$defs/")
-                .or_else(|| reference.strip_prefix("#/definitions/"));
-            let defs = if parameters["$defs"].is_object() {
-                &parameters["$defs"]
-            } else {
-                &parameters["definitions"]
-            };
-            if let Some(definition) = key.and_then(|key| defs.get(key)).and_then(Value::as_object) {
-                let mut merged = definition.clone();
-                for (key, value) in spec.as_object().unwrap() {
-                    if key != "$ref" {
-                        merged.insert(key.clone(), value.clone());
-                    }
-                }
-                spec = Value::Object(merged);
-            }
-        }
+        let spec = resolve_argument_ref(parameters, spec).unwrap_or_else(|| spec.clone());
         found = if has_combinator(&spec) {
             value_type(value).into()
         } else {

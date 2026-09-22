@@ -109,6 +109,67 @@ impl K2Partition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qwen_llm::k2_horizon_chat::tools::{
+        ToolCall, ToolCallFormat, ToolOutputEnd, ToolOutputStream, render_tool_calls,
+    };
+
+    #[test]
+    fn k2_tool_decoder_composes_with_reasoning_and_every_utf8_byte_split() {
+        let defs = vec![
+            serde_json::json!({"name":"f","parameters":{"properties":{"x":{"type":"string"}}}}),
+        ];
+        let calls = vec![ToolCall {
+            name: "f".into(),
+            arguments: serde_json::json!({"x":"value \u{1f389}"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        }];
+        for effort in [Effort::High, Effort::Medium, Effort::Low] {
+            for format in [
+                ToolCallFormat::Xml,
+                ToolCallFormat::Json,
+                ToolCallFormat::XmlTyped,
+            ] {
+                let block = render_tool_calls(&calls, format, &defs).unwrap();
+                let reason = "plan <ifm|tool_calls>literal</ifm|tool_calls> \u{2192}";
+                let all = format!(
+                    "{reason}</{}>Checking <ifm|tool_x> \u{2192}. {block}",
+                    effort.tag()
+                );
+                for split in 0..=all.len() {
+                    for stop in [1, 250019] {
+                        let mut partition = K2Partition::new(effort);
+                        let mut events = Vec::new();
+                        partition.push(&all.as_bytes()[..split], &mut events);
+                        partition.push(&all.as_bytes()[split..], &mut events);
+                        partition
+                            .finish(GenerationEnd::StopToken(stop), &mut events)
+                            .unwrap();
+                        let mut stream = ToolOutputStream::new(format, &defs, block.len());
+                        let (mut reasoning, mut visible) = (String::new(), String::new());
+                        let mut closed = false;
+                        for event in events {
+                            match event {
+                                PartitionEvent::Reasoning(text) => reasoning.push_str(&text),
+                                PartitionEvent::ReasoningClosed => closed = true,
+                                PartitionEvent::Visible(text) => {
+                                    assert!(closed);
+                                    visible.push_str(&stream.push_visible(&text).unwrap());
+                                }
+                                _ => panic!("reasoning partition must not invent calls"),
+                            }
+                        }
+                        let result = stream.finish(ToolOutputEnd::Stop).unwrap();
+                        assert_eq!(reasoning, reason);
+                        assert_eq!(visible, "Checking <ifm|tool_x> \u{2192}. ");
+                        assert_eq!(result.calls, calls);
+                    }
+                }
+            }
+        }
+    }
+
     fn collect(events: &[PartitionEvent]) -> (String, String, usize) {
         let (mut r, mut v, mut close) = (String::new(), String::new(), 0);
         for e in events {

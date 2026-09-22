@@ -76,8 +76,10 @@ dense 7B, not a campaign across intermediate checkpoint geometries:
    independent fixture oracle, never an application dependency or execution path.
    Native call/history primitives cover XML, JSON and typed XML plus tool results.
    Native Markdown/XML/JSON schema presentation and tool system-turn instructions
-   now match pinned fixtures too. Generated-call parsing and CLI/HTTP request/history
-   wiring remain; current frontends still correctly report no-tools.
+   now match pinned fixtures too. Native generated-call decoding and bounded
+   post-reasoning buffering are implemented and composition-tested. CLI/HTTP
+   request/history and response-protocol wiring remain; current frontends still
+   correctly report no-tools.
 3. Preserve the full checkpoint-native context range subject to actual resource
    admission. Add focused independent history-boundary evidence without making
    the extent of existing evidence an artificial execution cap.

@@ -1,11 +1,15 @@
-//! Native IFM tool-history encoding. These primitives do not authorize chat,
-//! advertise frontend tool support, parse generated calls, or execute tools.
+//! Native IFM tool presentation, history encoding and generated-call decoding.
+//! These primitives do not authorize chat, advertise frontend support or execute tools.
 use super::{Result, error};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 mod json;
+mod output;
+mod parse;
 mod presentation;
+pub use output::{ToolOutputEnd, ToolOutputFinish, ToolOutputStream};
+pub use parse::{ParsedToolBlock, parse_tool_calls};
 mod types;
 pub use presentation::{ToolPresentationFormat, render_tool_definitions, render_tool_system};
 #[cfg(test)]

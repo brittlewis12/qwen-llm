@@ -1754,3 +1754,54 @@ is warning-free. Adversarial design and implementation reviews found no blocker;
 reference-policy changes suggested as general hardening were not accepted where
 they would diverge from the pinned template. Generated-call parsing and frontend
 request/history integration remain next; no tools are executed or advertised yet.
+
+## Packet 46: native generated-call decoding and stream publication
+
+The native decoder now distinguishes complete, incomplete and malformed terminal
+tool blocks for JSON, XML and typed XML. It requires declared function names,
+object arguments, no duplicate keys, no trailing answer/block, and never salvages
+a valid first call from a malformed later call. Duplicate tool definitions are
+refused as ambiguous during decoding even though the historical renderer records
+the upstream last-match behavior. These are protocol interpretations, not execution
+authorization or full JSON Schema argument validation.
+
+XML preserves string bytes and infers outer types conservatively, sharing the
+native reference/sibling-overlay helper with rendering. Unknown schemas and
+string/numeric unions are not guessed when both interpretations are possible;
+explicit JSON or an unambiguous typed format is the escape path. JSON literals
+inside XML array/object arguments are scanned string-aware, so embedded IFM tags
+inside their strings are data, not premature closes. Arbitrary raw XML string
+values remain noninjective, an upstream dialect limitation rather than something
+to hide by adding entity escaping.
+
+A regression reproduced Serde's arbitrary-precision Value visitor interpreting
+an ordinary `$serde_json::private::Number` object as a number. The bounded decoder
+now constructs containers directly, rejects recursive duplicate keys, delegates
+scalar syntax/escapes/numbers to Serde and avoids a second Value deserialization.
+The argument object is preserved, not rejected by an artificial reserved-key ban.
+Scalar grammar checks and all 276 existing Python-number witnesses pass.
+
+`ToolOutputStream` holds only an ambiguous marker prefix until a tool block starts,
+checks the caller-admitted byte budget before copying that first block, and parses
+the terminal span once at finish. It publishes calls together only after complete
+validation. Token-limit truncation before closure returns no calls; stop-before-
+closure is an error. Complete calls at a token boundary remain complete while the
+enclosing response is budget-incomplete. Errors poison the stream; drop/abort
+never publishes calls. Frontend byte-budget derivation and actual HTTP/CLI response
+wiring are still pending, not represented as delivered here.
+
+Adversarial review's alleged lost-prefix bug was disproved by the existing return
+path and additional every-prefix/every-ASCII-byte plus Unicode controls. A proposed
+lexical-only integer gate was also rejected: JSON Schema integer membership is
+mathematical, distinct from IFM's lexical type label. The actual rounding hazard
+was fixed with exact decimal/exponent membership rather than f64 rounding, with
+controls for integral float syntax and fractional values that round to integers.
+Both unsupported review findings were explicitly retracted; closure found no blocker.
+
+The 19 pinned call blocks are either recovered exactly or refused at the documented
+XML ambiguity/duplicate-definition boundaries. Composition tests run all efforts,
+formats, both chat stop IDs and every UTF-8 byte split through the existing CLI
+reasoning partition, including false markers before genuine calls. Raw/no-tools
+protocol behavior and frontend capability reporting remain unchanged. All-target
+checking is warning-free; no GPU run or model-quality claim is needed for this
+unwired protocol packet.

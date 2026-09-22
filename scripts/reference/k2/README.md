@@ -102,8 +102,9 @@ and token IDs, and upstream call/result macro output. Native Rust currently chec
 plus 276 finite binary64 JSON-number witnesses. Native schema presentation and
 system turns match all 56 successful fixtures, including Markdown (default), XML,
 JSON, whole-set fallback, reference traversal and malformed-schema refusal. These
-are presentation functions, not JSON Schema argument validators. Generated-call
-parsing and frontend tool support remain separate. No dynamic
+are presentation functions, not JSON Schema argument validators. Native generated-call
+parsing and post-reasoning stream tests also run under this test filter. Frontend
+request/history and response-protocol wiring remain separate. No dynamic
 template engine or dependency is linked into Rust. The existing no-tools corpus
 remains unchanged. IFM XML is verbatim tagged text, not escaped XML; `tool_choice`
 is ignored by the upstream template and must not be advertised as a native control.
@@ -119,6 +120,23 @@ K2_GGUF="$HOME/models/K2-Horizon-7B-Q4_K_M.gguf" cargo test -p qwen-llm --lib \
 Presentation rejects input JSON nesting above 128 and reference-renderer recursion
 above 128 rather than risking Rust stack exhaustion. Those explicit schema-safety
 errors never truncate schemas, silently select JSON, or restrict inference context.
+
+The generated-call decoder requires one terminal block, declared function names,
+object arguments and unique JSON/argument keys. It preserves JSON containers even
+for Serde-internal-looking property names. XML uses declared outer types without
+guessing ambiguous numeric strings; typed XML checks the native type label. Unknown
+schemas do not silently turn possible numeric values into strings. Consumers still
+own full argument validation. Raw XML strings are not generally round-trippable;
+use explicit JSON for ambiguous data. Array/object JSON literals are string-aware
+even inside XML argument tags.
+
+`ToolOutputStream` receives already UTF-8-assembled, post-reasoning text and a
+caller-admitted byte budget. It withholds all calls until the whole terminal span
+is known. Budget truncation before closure yields no calls; a stop before closure
+is an error. A complete block at a token limit may return complete calls, while
+the enclosing response must remain budget-incomplete. Dropping the stream aborts
+without publication. CLI tests compose it with the existing reasoning/UTF-8
+partition at every byte split; this is not yet an HTTP tool-workflow claim.
 
 The CPU oracle downloads only immutable template/tokenizer/generation metadata,
 never weights or remote model code. Jinja renders exact bytes, with output-preserving

@@ -1081,7 +1081,7 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
             "message": "--prompt-lookup requires a recognised Qwen target architecture",
         }),
     };
-    let mut capabilities = match family {
+    let capabilities = match family {
         Some(family) => (profile(family).capabilities)(&gguf)?,
         None => serde_json::json!({
             "reasoning": {
@@ -1093,18 +1093,6 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
             "template": template_projection(None, &gguf),
         }),
     };
-    if matches!(family, Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe))
-        && let Some(key) = qwen_llm::loader::prism_hadamard_metadata_key(&gguf)
-    {
-        let error = qwen_llm::loader::LoadError::PrismBasisUnsupported {
-            key: key.to_owned(),
-        };
-        capabilities["execution"] = serde_json::json!({
-            "status": "rejected",
-            "code": "prism_basis_unsupported",
-            "message": error.to_string(),
-        });
-    }
     let projection = serde_json::json!({
         "version": "qwen_info_v1",
         "model": info.model.display().to_string(),

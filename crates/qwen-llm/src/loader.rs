@@ -48,6 +48,24 @@
 use crate::gguf::GgufFile;
 use crate::model::{Arch, ArchKind, LayerKind};
 use crate::tensor::{GgmlType, TensorDesc};
+use serde_json::Value;
+use std::collections::BTreeMap;
+
+/// GGUF metadata prefix used by Prism/Bonsai rotated-basis artifacts.
+pub const PRISM_HADAMARD_METADATA_PREFIX: &str = "prism.hadamard.";
+
+pub(crate) fn prism_hadamard_metadata_key_in(metadata: &BTreeMap<String, Value>) -> Option<&str> {
+    metadata
+        .keys()
+        .find(|key| key.starts_with(PRISM_HADAMARD_METADATA_PREFIX))
+        .map(String::as_str)
+}
+
+/// Return the first Prism rotated-basis metadata key, if this GGUF declares
+/// the execution contract that the ordinary Qwen runtime does not implement.
+pub fn prism_hadamard_metadata_key(gguf: &GgufFile) -> Option<&str> {
+    prism_hadamard_metadata_key_in(gguf.model.metadata())
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
@@ -65,6 +83,10 @@ pub enum LoadError {
         "DeepSeek V4 does not bind through the Qwen model runtime; use the native DeepSeek V4 execution path"
     )]
     DeepSeek4RequiresNativeRuntime,
+    #[error(
+        "metadata key {key:?} declares a Prism rotated-basis execution contract that is not implemented"
+    )]
+    PrismBasisUnsupported { key: String },
     #[error("metadata key {0:?} missing or wrong type")]
     BadMetadata(&'static str),
     #[error("metadata says {key:?} = {got}, but Arch expects {expected}")]
@@ -429,6 +451,11 @@ impl<'a> Model<'a> {
         }
         if arch_name != "qwen35" && arch_name != "qwen35moe" {
             return Err(LoadError::UnsupportedArch(Some(arch_name.to_string())));
+        }
+        if let Some(key) = prism_hadamard_metadata_key(g) {
+            return Err(LoadError::PrismBasisUnsupported {
+                key: key.to_owned(),
+            });
         }
 
         let arch = build_arch_from_metadata(g, arch_name)?;
@@ -1690,6 +1717,23 @@ mod tests {
         let err = ensure_divisible("q", 13, "kv", 3)
             .expect_err("non-divisible grouped-query ratio must be rejected");
         assert!(matches!(err, LoadError::MetadataNotDivisible { .. }));
+    }
+
+    #[test]
+    fn prism_metadata_classifier_identifies_rotated_basis_contract() {
+        let metadata =
+            BTreeMap::from([("prism.hadamard.version".to_owned(), serde_json::json!(1))]);
+        let key = prism_hadamard_metadata_key_in(&metadata).expect("Prism metadata key");
+        assert_eq!(key, "prism.hadamard.version");
+        let error = LoadError::PrismBasisUnsupported {
+            key: key.to_owned(),
+        };
+        assert!(error.to_string().contains("prism.hadamard.version"));
+        assert!(
+            error
+                .to_string()
+                .contains("rotated-basis execution contract")
+        );
     }
 
     #[test]

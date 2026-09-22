@@ -379,7 +379,7 @@ fn validate_metadata_features(metadata: &BTreeMap<String, Value>) -> Result<()> 
         "rope.freq_base",
     ];
     for (key, value) in metadata {
-        if key.starts_with("prism.hadamard.") {
+        if key.starts_with(crate::loader::PRISM_HADAMARD_METADATA_PREFIX) {
             return Err(unsupported(
                 key,
                 "rotated weights require a different execution contract",

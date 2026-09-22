@@ -874,6 +874,9 @@ fn template_projection(family: Option<ModelFamily>, gguf: &GgufFile) -> serde_js
     match family {
         Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe | ModelFamily::Qwen4Exp) => {
             match prompt_template::identify_qwen_release_for_gguf(gguf) {
+                Ok(identity) if family == Some(ModelFamily::Qwen4Exp) => {
+                    qwen4exp_template_projection(&identity)
+                }
                 Ok(identity) => {
                     let mut value =
                         serde_json::to_value(&identity.status).expect("serialize release status");
@@ -907,6 +910,19 @@ fn template_projection(family: Option<ModelFamily>, gguf: &GgufFile) -> serde_js
             "message": "no recognised architecture",
         }),
     }
+}
+
+fn qwen4exp_template_projection(
+    identity: &prompt_template::QwenReleaseIdentity,
+) -> serde_json::Value {
+    let mut value = serde_json::to_value(&identity.status).expect("serialize release status");
+    if matches!(
+        &identity.status,
+        prompt_template::QwenReleaseStatus::Identified { .. }
+    ) {
+        value["rendered_as"] = serde_json::json!(identity.template.renderer_name());
+    }
+    value
 }
 
 /// `--no-thinking` is a released template transition; every identified
@@ -1065,7 +1081,7 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
             "message": "--prompt-lookup requires a recognised Qwen target architecture",
         }),
     };
-    let capabilities = match family {
+    let mut capabilities = match family {
         Some(family) => (profile(family).capabilities)(&gguf)?,
         None => serde_json::json!({
             "reasoning": {
@@ -1077,6 +1093,18 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
             "template": template_projection(None, &gguf),
         }),
     };
+    if matches!(family, Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe))
+        && let Some(key) = qwen_llm::loader::prism_hadamard_metadata_key(&gguf)
+    {
+        let error = qwen_llm::loader::LoadError::PrismBasisUnsupported {
+            key: key.to_owned(),
+        };
+        capabilities["execution"] = serde_json::json!({
+            "status": "rejected",
+            "code": "prism_basis_unsupported",
+            "message": error.to_string(),
+        });
+    }
     let projection = serde_json::json!({
         "version": "qwen_info_v1",
         "model": info.model.display().to_string(),

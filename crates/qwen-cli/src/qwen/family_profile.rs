@@ -136,6 +136,28 @@ fn qwen4exp_capabilities(gguf: &GgufFile) -> Result<Value> {
 }
 
 fn deepseek4_capabilities(gguf: &GgufFile) -> Result<Value> {
+    let profile = qwen_llm::deepseek_v4::DeepSeekV4Config::from_gguf(gguf)
+        .and_then(|config| config.validate_flash_0731_profile().map(|()| config));
+    if let Err(error) = profile {
+        return unverified_profile_capabilities(
+            "deepseek4_release_profile_unverified",
+            error.to_string(),
+            &[
+                "general.architecture",
+                "deepseek4.*",
+                "tokenizer.ggml.tokens",
+                "tokenizer.ggml.model",
+                "tokenizer.ggml.pre",
+                "tokenizer.ggml.token_type",
+                "tokenizer.ggml.merges",
+                "tokenizer.ggml.bos_token_id",
+                "tokenizer.ggml.eos_token_id",
+                "tokenizer.ggml.padding_token_id",
+                "tokenizer.ggml.add_bos_token",
+                "tokenizer.ggml.add_eos_token",
+            ],
+        );
+    }
     let reasoning = serde_json::to_value(crate::prompt_template::ReasoningCapability {
         levels: crate::DeepSeekV4Reasoning::level_names(),
         fallback: Some("none"),
@@ -149,11 +171,95 @@ fn deepseek4_capabilities(gguf: &GgufFile) -> Result<Value> {
 }
 
 fn muse_glimmer_capabilities(gguf: &GgufFile) -> Result<Value> {
+    let config = match qwen_llm::muse_glimmer::MuseGlimmerConfig::from_gguf(gguf) {
+        Ok(config) => config,
+        Err(error) => {
+            return unverified_profile_capabilities(
+                "muse_release_profile_unverified",
+                error.to_string(),
+                MUSE_RELEASE_FIELDS,
+            );
+        }
+    };
+    let stop_tokens = match gguf.stop_token_ids() {
+        Ok(stop_tokens) => stop_tokens,
+        Err(error) => {
+            return unverified_profile_capabilities(
+                "muse_release_profile_unverified",
+                error.to_string(),
+                MUSE_RELEASE_FIELDS,
+            );
+        }
+    };
+    if let Err(error) = config.validate_stop_tokens(&stop_tokens) {
+        return unverified_profile_capabilities(
+            "muse_release_profile_unverified",
+            error.to_string(),
+            MUSE_RELEASE_FIELDS,
+        );
+    }
     assemble(
         ModelFamily::MuseGlimmer,
         gguf,
         serde_json::to_value(crate::muse_glimmer_reasoning_capability())?,
     )
+}
+
+const MUSE_RELEASE_FIELDS: &[&str] = &[
+    "general.architecture",
+    "muse-glimmer.block_count",
+    "muse-glimmer.context_length",
+    "muse-glimmer.embedding_length",
+    "muse-glimmer.feed_forward_length",
+    "muse-glimmer.attention.head_count",
+    "muse-glimmer.attention.head_count_kv",
+    "muse-glimmer.attention.key_length",
+    "muse-glimmer.attention.value_length",
+    "muse-glimmer.rope.freq_base",
+    "muse-glimmer.attention.layer_norm_rms_epsilon",
+    "muse-glimmer.attention.sliding_window",
+    "muse-glimmer.attention.sliding_window_pattern",
+    "muse-glimmer.logit_scale",
+    "muse-glimmer.final_logit_softcapping",
+    "tokenizer.ggml.tokens",
+    "tokenizer.ggml.token_type",
+    "tokenizer.ggml.merges",
+    "tokenizer.ggml.model",
+    "tokenizer.ggml.pre",
+    "tokenizer.ggml.bos_token_id",
+    "tokenizer.ggml.eos_token_id",
+    "tokenizer.ggml.eot_token_id",
+    "tokenizer.ggml.padding_token_id",
+    "tokenizer.ggml.add_bos_token",
+    "tokenizer.ggml.add_eos_token",
+    "tokenizer.ggml.add_sep_token",
+    "tokenizer.chat_template",
+];
+
+fn unverified_profile_capabilities(
+    code: &'static str,
+    reason: String,
+    fields_consulted: &[&'static str],
+) -> Result<Value> {
+    let message = format!("release profile is not verified: {reason}");
+    let unsupported = crate::prompt_template::Support::Unsupported {
+        code,
+        message: message.clone(),
+    };
+    Ok(json!({
+        "reasoning": crate::prompt_template::ReasoningCapability {
+            levels: Vec::<&'static str>::new(),
+            fallback: None,
+            no_thinking: unsupported.clone(),
+            thinking: unsupported,
+        },
+        "input": crate::prompt_template::InputCapability::raw_only(code, message),
+        "template": {
+            "status": "unknown",
+            "reason": reason,
+            "fields_consulted": fields_consulted,
+        },
+    }))
 }
 
 fn k2_capabilities(gguf: &GgufFile) -> Result<Value> {
@@ -179,5 +285,28 @@ mod tests {
             assert_eq!(profile.family, *family);
             assert!(displays.insert(profile.display), "{}", profile.display);
         }
+    }
+
+    #[test]
+    fn unverified_profile_projection_is_raw_only_and_explicit() {
+        let capabilities = unverified_profile_capabilities(
+            "muse_release_profile_unverified",
+            "invalid metadata key \"muse-glimmer.block_count\": expected 52, got 1".into(),
+            MUSE_RELEASE_FIELDS,
+        )
+        .unwrap();
+        assert_eq!(capabilities["template"]["status"], "unknown");
+        assert_eq!(
+            capabilities["template"]["fields_consulted"][0],
+            "general.architecture"
+        );
+        assert_eq!(
+            capabilities["input"]["user"]["code"],
+            "muse_release_profile_unverified"
+        );
+        assert_eq!(
+            capabilities["reasoning"]["thinking"]["code"],
+            "muse_release_profile_unverified"
+        );
     }
 }

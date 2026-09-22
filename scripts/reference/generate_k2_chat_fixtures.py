@@ -2,10 +2,14 @@
 # requires-python = ">=3.11"
 # dependencies = ["jinja2==3.1.6", "tokenizers==0.22.2"]
 # ///
-"""Pinned upstream no-tools Jinja/CPU tokenizer oracle; no weights or model execution."""
+"""Pinned IFM chat/tool Jinja and CPU tokenizer oracle; no weights or model execution."""
 
 import hashlib
+import argparse
 import json
+import math
+import random
+import struct
 from pathlib import Path
 import urllib.request
 
@@ -34,6 +38,13 @@ def fail(message):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--tools",
+        action="store_true",
+        help="Generate separate native-tool contract fixtures",
+    )
+    args = parser.parse_args()
     revision = REVISIONS["posttrained"]
     root = Path(__file__).resolve().parents[2]
     tokenizer = Tokenizer.from_file(str(fetch(revision, "tokenizer.json")))
@@ -80,11 +91,12 @@ def main():
     template = env.from_string(source.decode())
     cases = []
 
-    def case(name, messages, effort="high"):
+    def case(name, messages, effort="high", **options):
         variables = {
             "messages": messages,
             "reasoning_effort": effort,
             "add_generation_prompt": True,
+            **options,
         }
         record = {"name": name, **variables}
         try:
@@ -165,6 +177,38 @@ def main():
             {"role": "user", "content": "Continue"},
         ],
     )
+    if args.tools:
+        from k2_tool_fixture_cases import add_cases
+
+        cases.clear()
+        add_cases(case)
+        for record in cases:
+            if "error" in record:
+                continue
+            variables = {
+                k: v
+                for k, v in record.items()
+                if k not in {"name", "rendered", "body", "token_ids"}
+            }
+            module = template.make_module(
+                {**variables, "bos_token": config["bos_token"]}
+            )
+            tools = variables.get("tools") or variables["messages"][0].get("tools", [])
+            call_format = variables.get("tool_call_format", "xml")
+            record["call_blocks"] = [
+                str(
+                    module.render_tool_calls_block(
+                        message["tool_calls"], call_format, tools
+                    )
+                )
+                for message in variables["messages"]
+                if message.get("tool_calls")
+            ]
+            record["tool_results"] = [
+                str(module.render_tool_response_messages(message["content"]))
+                for message in variables["messages"]
+                if message["role"] == "tool"
+            ]
     document = {
         "schema": "k2.no_tools_template_oracle.v1",
         "revision": revision,
@@ -178,6 +222,39 @@ def main():
         "cases": cases,
     }
     output = root / "crates/qwen-llm/tests/fixtures/k2_chat_hf.json"
+    if args.tools:
+        document["schema"] = "k2.tools_template_oracle.v1"
+        numbers = [
+            1.2345678901234567e-7,
+            1.2345678901234567e20,
+            2.2250738585072014e-308,
+            1.7976931348623157e308,
+            5e-324,
+            -5e-324,
+            0.0,
+            -0.0,
+        ]
+        for boundary in [1e-4, 1e16, 1e-5, 1e15]:
+            numbers.extend(
+                [
+                    math.nextafter(boundary, 0),
+                    boundary,
+                    math.nextafter(boundary, math.inf),
+                ]
+            )
+        rng = random.Random(0x4B32)
+        while len(numbers) < 276:
+            number = struct.unpack("<d", rng.getrandbits(64).to_bytes(8, "little"))[0]
+            if math.isfinite(number):
+                numbers.append(number)
+        document["json_number_oracle"] = [
+            {"value": number, "expected": json.dumps(number, ensure_ascii=False)}
+            for number in numbers
+        ]
+        document["empty_call_block"] = str(
+            module.render_tool_calls_block([], "xml", [])
+        )
+        output = output.with_name("k2_tools_hf.json")
     output.write_text(json.dumps(document, ensure_ascii=True, indent=2) + "\n")
     print(
         json.dumps(

@@ -1675,3 +1675,42 @@ not silently interpreted by the no-tools output partitioner.
 All-target checking is warning-free; all 26 K2 frontend CPU tests pass. Adversarial
 review found no behavioral blocker and requested the reference-generation-config
 wording clarification above rather than inventing a new artifact requirement.
+
+## Packet 44: native tool-history primitives
+
+The user explicitly excludes dynamic template engines/dependencies. A proposed
+isolated engine probe was removed before execution; workspace manifests/lockfile
+are unchanged. Implementation is ordinary typed Rust, with pinned Python/Jinja
+used only as the independent development oracle.
+
+`k2_horizon_chat::tools` now supplies `ToolCallFormat`, typed name/argument calls,
+call-block rendering for default XML, explicit JSON and typed XML, and native
+string/list/object tool-result rendering. It preserves insertion order, string
+versus numeric values, local schema-reference siblings, combinator-derived value
+types, and upstream whitespace. It neither authorizes requests nor parses outputs
+nor executes tools. Frontend capabilities and existing no-tools semantics are
+unchanged. Schema presentation, output lifecycle and CLI/HTTP integration follow.
+
+Forty explicitly inventoried oracle cases retain full template bytes/token IDs
+and exported macro outputs. Native tests compare all 19 call blocks and 36 result
+messages. Coverage includes format combinations, reasoning history, Unicode,
+verbatim delimiters, numeric strings, references, duplicate-definition last-match
+behavior, actual JSON fallback and invalid template options. These low-level
+encoding observations do not authorize ambiguous frontend history.
+
+Adversarial suggestions were checked against source rather than accepted blindly:
+the template has no `tool_choice` control; it emits XML string values verbatim,
+not entity-escaped; non-object parameters can fall back rather than always fail.
+Tests preserve those observations. XML cannot represent arbitrary strings
+unambiguously, so rendering is not a promise of parser round-trip safety. JSON
+call names that upstream would interpolate into invalid JSON return an error.
+
+Review requested harder float witnesses before reusing the JSON encoder. The
+corpus now contains 276 finite binary64 values, including requested 17-digit
+significands, adjacent exponent boundaries, subnormals, maximum finite values and
+signed zeros plus seeded bit-pattern samples. Native output matches Python
+`json.dumps(ensure_ascii=False)` exactly on them; nonfinite binary64 conversion is
+rejected explicitly. Arbitrary-precision integer arguments retain their digits.
+All seven chat/tool CPU tests and warning-free all-target checking pass; unchanged
+no-tools fixtures regenerate identically. This packet needs no GPU work and makes
+no full tool-workflow or model-quality claim.

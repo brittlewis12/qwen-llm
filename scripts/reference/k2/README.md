@@ -89,6 +89,22 @@ are diagnostic, not end-to-end product performance or independent quality eviden
 
 ## No-tools template checks
 
+Native tool-history development uses a separate oracle corpus:
+
+```sh
+uv run scripts/reference/generate_k2_chat_fixtures.py --tools
+cargo test -p qwen-llm --lib k2_horizon_chat::tools::tests
+```
+
+The 40 named cases pin success/error classification, full upstream rendered bytes
+and token IDs, and upstream call/result macro output. Native Rust currently checks
+19 call blocks and 36 result messages across XML (default), JSON and typed XML,
+plus 276 finite binary64 JSON-number witnesses. Full schema-presentation and
+frontend tool support are not implemented by these history primitives. No dynamic
+template engine or dependency is linked into Rust. The existing no-tools corpus
+remains unchanged. IFM XML is verbatim tagged text, not escaped XML; `tool_choice`
+is ignored by the upstream template and must not be advertised as a native control.
+
 The CPU oracle downloads only immutable template/tokenizer/generation metadata,
 never weights or remote model code. Jinja renders exact bytes, with output-preserving
 generation blocks; the pinned HF tokenizer supplies IDs. Rust removes only the

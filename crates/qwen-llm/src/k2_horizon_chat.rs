@@ -4,6 +4,8 @@ use crate::gguf::GgufFile;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod tools;
+
 pub const REVISION: &str = "2c9659a84c4eea6f9f60462221fe762c8c84d75c";
 pub const TEMPLATE_SHA256: &str =
     "a892cd0b0195599f283a8c706787520d9a6747640efb2f4dec4144b0abb62590";

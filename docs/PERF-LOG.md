@@ -32,26 +32,6 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   then one near-tie word flip (per-token loop vs grouped half tiles, the same
   arithmetic every Q5_K-down quant already used).
 
-## 2026-09-23 - Generic Grouped MoE Prefill Kernels (Q4_K_S Gap) - GPU Validation Pending
-
-- Gap: Qwen3.6-35B-A3B UD-Q4_K_S prefilled at 304 tok/s vs 1,539 tok/s for
-  UD-Q4_K_M with the same binary. Q4_K_S has Q4_K routed down (38 layers);
-  the grouped prefill path allowlisted only Q5_K/Q6_K/Q8_0/IQ4_XS/BF16 down
-  (and shape-gated gate/up), so those layers silently ran the per-token loop
-  (one encoder per token: route + decode mat-vec experts + shared FFN).
-- Fix: `kernels/quant_tiles.h` holds one canonical tile dequant per dtype
-  (copied verbatim from the mat_mat helpers); `moe.metal` adds one templated
-  grouped-slots down kernel, one fused SwiGLU kernel and an up-silu-mul kernel
-  (mixed gate/up dtypes), instantiated for Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_0,
-  Q4_0, Q4_1, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, F32, F16, BF16 (every
-  dtype the loader keeps resident). Hand-tuned kernels stay first; the
-  generic path replaces the per-token fallback. Q4_K gate/up + Q5_K down
-  (Q4_K_M) dispatches exactly the same kernels as before. Remaining
-  per-token fallbacks are logged once per load (`qwen_diag`, `[moe-prefill]`).
-- Status: compiles (metallib included); CPU coverage tests pass. GPU
-  equivalence (`generic_grouped_moe_`), Q4_K_S/Q4_K_M prefill throughput and
-  prompt oracles are pending on the coordinator.
-
 ## 2026-09-23 - Serve Snapshot Caches: Machine-Scaled Budget, Frecency, Expiry
 
 - Replaces the fixed 4096 MiB byte-LRU in both serve caches (Qwen

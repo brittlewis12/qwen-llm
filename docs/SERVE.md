@@ -637,18 +637,22 @@ because client model-pickers probe it).
   Capture is best-effort and admitted against cache bytes plus Metal/process
   headroom; denial or failure is logged and generation continues. Both family
   caches enforce the configured byte budget.
-  Validated Qwen3.8/Q8 dense-27 requests without a drafter can prefill a restored
-  7-32-token suffix in one packed block when the current request is greedy and
-  the optional scratch price fits 128 MiB. Admission/allocation failure retains
-  serial prefill. Other profiles and fresh/exact hits retain their existing
-  policy. Packed-vs-serial state is numerical, not bitwise; sampled followups
-  can inherit these checkpoints, so this carries no distributional-equivalence
-  claim. Measured scope: `docs/bench/2026-09-06-single-chunk-vt/RESULT.md`.
+  Prompt remainders (fresh, or after a restore) prefill one token at a time
+  only up to 12 tokens on dense and 20 on MoE; anything longer is chunked.
+  Both paths are correct for every model; the limit is where serial stops
+  being cheaper (M4 Max, 2026-09-23: ~41-48 ms per serial token on 27B vs a
+  ~390-640 ms chunk floor; ~10-11 ms vs ~170-300 ms on 35B-A3B). The old fixed
+  48 made 20-47 token remainders 2-3x slower. Restored 7-32-token remainders
+  on the 27B dense geometry (Qwen3.5/3.6/3.8, any weight dtype, greedy or
+  sampled, no drafter) prefill in one packed block when its scratch price fits
+  128 MiB, otherwise chunked; packed is bitwise equal to the chunked plan. The
+  phases line reports `prefill_path=serial_tail|chunked|single_chunk|exact`.
   `QWEN_SERVE_FRESH_PACKED=1` additionally opts validated Qwen3.8/Q8 dense-27
   **fresh cache misses** of 19-48 prompt tokens into bounded packed prefill,
   greedy requests without a drafter only. Unset, `0` and invalid values disable
   this fresh path; Q4 is unsupported even with `1`. The same 128 MiB scratch cap
-  and serial fallback apply. Q8 passes balanced endpoint gates, but automatic
+  and chunked fallback apply (the chunked path already removes most of the
+  serial cost this opt-in was measured against). Q8 passes balanced endpoint gates, but automatic
   enablement remains held after an unpaired first-request outlier under substantial
   global compression. No first-request guarantee or sampled-distribution claim.
   Evidence: `docs/bench/2026-09-07-fresh-serving-http/RESULT.md`.

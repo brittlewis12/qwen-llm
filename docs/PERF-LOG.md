@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-23 - Serve Prompt Remainders: Measured Serial-Tail Limit, Ungated Packed Tails
+
+- Before: remainders of <=48 tokens (after a restore, or a short fresh prompt)
+  prefilled one token at a time on every model; only Qwen3.8 + Q8 LM head +
+  27B + greedy could use the packed tail, and a refused packed plan fell back
+  to serial.
+- Measured (M4 Max, restored remainders): serial ~41-48 ms/token on 27B Q4 vs
+  a chunked floor of ~390 ms (3.2K) / ~640 ms (29K); ~10-11 ms/token on
+  35B-A3B vs ~170-300 ms. Serial wins only below ~10-13 (dense) / ~17-25 (MoE).
+- Now: serial only up to 12 (dense) / 20 (MoE), otherwise chunked. Packed
+  restored tails need only the 27B geometry (template, weight dtype and
+  sampler no longer gate) and fall back to chunked. Phases line reports
+  `prefill_path`.
+- 27B Q4 at 3.2K, remainder 22/32/47: 912/1,307/1,883 -> 397/536/624 ms.
+  A3B remainder 29/44: 285/442 -> 161/174 ms. Pilot at 11.3K+32: packed
+  277 ms vs serial 1,399 ms on 3.8 and 3.6 Q4 (5.05x), packed bitwise equal to
+  chunked, logits cos >= 0.9999993; persistent-state cos vs serial 0.9984 (3.8
+  Q4) / 0.9994 (3.6 Q4), so the pilot's state bound is 0.998 (0.999 was set
+  on Q8). 27B Q4 thinking/no-thinking probe: 6/6 turns identical to main.
+
 ## 2026-09-23 - Serve Live-Prefix Reuse Default-On for Muse and K2
 
 - Muse: `QWEN_MUSE_PREFIX_REUSE` is now default-on (`0`/`false`/`no` roll

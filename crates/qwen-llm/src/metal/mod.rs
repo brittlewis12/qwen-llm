@@ -205,52 +205,19 @@ pub fn with_matmat_q4_legacy_mm_override<R>(enabled: bool, f: impl FnOnce() -> R
     out
 }
 
-fn attn_matrix_vt_override_owner() -> &'static Mutex<Option<std::thread::ThreadId>> {
-    static OWNER: OnceLock<Mutex<Option<std::thread::ThreadId>>> = OnceLock::new();
-    OWNER.get_or_init(|| Mutex::new(None))
-}
-
-fn attn_matrix_vt_capture_owner() -> &'static Mutex<Option<std::thread::ThreadId>> {
-    static OWNER: OnceLock<Mutex<Option<std::thread::ThreadId>>> = OnceLock::new();
-    OWNER.get_or_init(|| Mutex::new(None))
-}
-
-fn claim_attn_matrix_vt_scope(
-    owner_slot: &Mutex<Option<std::thread::ThreadId>>,
-    kernel: &'static str,
-) -> Result<std::thread::ThreadId, MetalError> {
-    let owner = std::thread::current().id();
-    let mut active = owner_slot.lock();
-    if let Some(active_owner) = active.as_ref() {
-        return Err(MetalError::BadShape {
-            kernel,
-            detail: format!("scope already owned by {active_owner:?}"),
-        });
-    }
-    *active = Some(owner);
-    Ok(owner)
-}
-
-fn release_attn_matrix_vt_scope(
-    owner_slot: &Mutex<Option<std::thread::ThreadId>>,
-    owner: &std::thread::ThreadId,
-) {
-    let mut active = owner_slot.lock();
-    if active.as_ref() == Some(owner) {
-        *active = None;
-    }
-}
+// V_T compact-dispatch override and dispatch capture are strictly
+// thread-local: a scope only affects (and only counts) dispatches encoded on
+// the thread that opened it. Other threads keep the env/default behavior, so
+// concurrent tests and callers cannot observe or pollute each other's scopes.
 
 struct AttnMatrixVtOverrideGuard {
     previous: Option<bool>,
-    owner: std::thread::ThreadId,
     _not_send: PhantomData<Rc<()>>,
 }
 
 impl Drop for AttnMatrixVtOverrideGuard {
     fn drop(&mut self) {
         ATTN_MATRIX_VT_COMPACT_DISPATCH_OVERRIDE.with(|slot| slot.set(self.previous));
-        release_attn_matrix_vt_scope(attn_matrix_vt_override_owner(), &self.owner);
     }
 }
 
@@ -258,24 +225,19 @@ pub fn with_attn_matrix_vt_compact_dispatch_override<R>(
     enabled: bool,
     f: impl FnOnce() -> R,
 ) -> Result<R, MetalError> {
-    let owner =
-        claim_attn_matrix_vt_scope(attn_matrix_vt_override_owner(), "attn_matrix_vt_override")?;
-    let previous = ATTN_MATRIX_VT_COMPACT_DISPATCH_OVERRIDE.with(|slot| {
-        let previous = slot.get();
-        slot.set(Some(enabled));
-        previous
-    });
-    if previous.is_some() {
-        ATTN_MATRIX_VT_COMPACT_DISPATCH_OVERRIDE.with(|slot| slot.set(previous));
-        release_attn_matrix_vt_scope(attn_matrix_vt_override_owner(), &owner);
+    if ATTN_MATRIX_VT_COMPACT_DISPATCH_OVERRIDE
+        .with(Cell::get)
+        .is_some()
+    {
         return Err(MetalError::BadShape {
             kernel: "attn_matrix_vt_override",
             detail: "nested compact-dispatch override is forbidden".into(),
         });
     }
+    let previous =
+        ATTN_MATRIX_VT_COMPACT_DISPATCH_OVERRIDE.with(|slot| slot.replace(Some(enabled)));
     let guard = AttnMatrixVtOverrideGuard {
         previous,
-        owner,
         _not_send: PhantomData,
     };
     let out = f();
@@ -284,34 +246,27 @@ pub fn with_attn_matrix_vt_compact_dispatch_override<R>(
 }
 
 struct AttnMatrixVtCaptureGuard {
-    owner: std::thread::ThreadId,
     _not_send: PhantomData<Rc<()>>,
 }
 
 impl Drop for AttnMatrixVtCaptureGuard {
     fn drop(&mut self) {
         ATTN_MATRIX_VT_CAPTURE_ACTIVE.with(|slot| slot.set(false));
-        release_attn_matrix_vt_scope(attn_matrix_vt_capture_owner(), &self.owner);
     }
 }
 
 pub fn capture_attn_matrix_vt_dispatches<R>(
     f: impl FnOnce() -> R,
 ) -> Result<(R, AttnMatrixVtDispatchCapture), MetalError> {
-    let owner =
-        claim_attn_matrix_vt_scope(attn_matrix_vt_capture_owner(), "attn_matrix_vt_capture")?;
-    let already_active = ATTN_MATRIX_VT_CAPTURE_ACTIVE.with(|slot| slot.replace(true));
-    if already_active {
-        ATTN_MATRIX_VT_CAPTURE_ACTIVE.with(|slot| slot.set(true));
-        release_attn_matrix_vt_scope(attn_matrix_vt_capture_owner(), &owner);
+    if ATTN_MATRIX_VT_CAPTURE_ACTIVE.with(Cell::get) {
         return Err(MetalError::BadShape {
             kernel: "attn_matrix_vt_capture",
             detail: "nested V_T dispatch capture is forbidden".into(),
         });
     }
     ATTN_MATRIX_VT_CAPTURE_STATS.with(|slot| slot.set(AttnMatrixVtDispatchStats::default()));
+    ATTN_MATRIX_VT_CAPTURE_ACTIVE.with(|slot| slot.set(true));
     let guard = AttnMatrixVtCaptureGuard {
-        owner,
         _not_send: PhantomData,
     };
     let owner_thread = format!("{:?}", std::thread::current().id());

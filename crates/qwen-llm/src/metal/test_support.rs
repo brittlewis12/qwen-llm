@@ -2216,8 +2216,6 @@ pub(super) fn read_back_u16(tensor: &MetalTensor) -> Vec<u16> {
     out
 }
 
-pub(super) static ATTN_MATRIX_VT_SCOPE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 pub(super) fn greedy_total_order_key(bits: u32) -> Option<u32> {
     ((bits & 0x7fff_ffff) <= 0x7f80_0000).then_some({
         if bits & 0x8000_0000 != 0 {

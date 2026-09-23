@@ -2569,25 +2569,11 @@ crate::env_flag!(
     "QWEN_ATTN_MATRIX_VT_COMPACT_DISPATCH"
 );
 
-pub(crate) fn attn_matrix_vt_compact_dispatch_enabled() -> Result<bool, MetalError> {
-    let current = std::thread::current().id();
-    let active_owner = *attn_matrix_vt_override_owner().lock();
-    if let Some(owner) = active_owner.as_ref()
-        && owner != &current
-    {
-        return Err(MetalError::BadShape {
-            kernel: "attn_matrix_vt_override",
-            detail: format!("dispatch on {current:?} while override is owned by {owner:?}"),
-        });
-    }
-    let scoped = ATTN_MATRIX_VT_COMPACT_DISPATCH_OVERRIDE.with(Cell::get);
-    if active_owner.is_some() && scoped.is_none() {
-        return Err(MetalError::BadShape {
-            kernel: "attn_matrix_vt_override",
-            detail: "active override owner has no thread-local treatment".into(),
-        });
-    }
-    Ok(scoped.unwrap_or_else(attn_matrix_vt_compact_dispatch_env_enabled))
+/// Thread-local scoped override if active on this thread, else env/default.
+pub(crate) fn attn_matrix_vt_compact_dispatch_enabled() -> bool {
+    ATTN_MATRIX_VT_COMPACT_DISPATCH_OVERRIDE
+        .with(Cell::get)
+        .unwrap_or_else(attn_matrix_vt_compact_dispatch_env_enabled)
 }
 
 pub(crate) const ATTN_MATRIX_VT_THREADS: usize = 256;
@@ -2600,31 +2586,10 @@ pub(crate) fn record_attn_matrix_vt_dispatch(
     threadgroups: usize,
     compact: bool,
 ) -> Result<(), MetalError> {
-    let current = std::thread::current().id();
-    let active_owner = *attn_matrix_vt_capture_owner().lock();
-    match active_owner.as_ref() {
-        None => {
-            if ATTN_MATRIX_VT_CAPTURE_ACTIVE.with(Cell::get) {
-                return Err(MetalError::BadShape {
-                    kernel: "attn_matrix_vt_capture",
-                    detail: "thread-local capture is active without a process owner".into(),
-                });
-            }
-            return Ok(());
-        }
-        Some(owner) if owner != &current => {
-            return Err(MetalError::BadShape {
-                kernel: "attn_matrix_vt_capture",
-                detail: format!("dispatch on {current:?} while capture is owned by {owner:?}"),
-            });
-        }
-        Some(_) => {}
-    }
+    // Only a capture opened on this thread records; other threads' captures
+    // are invisible here by construction (thread-local accumulator).
     if !ATTN_MATRIX_VT_CAPTURE_ACTIVE.with(Cell::get) {
-        return Err(MetalError::BadShape {
-            kernel: "attn_matrix_vt_capture",
-            detail: "capture owner has no thread-local accumulator".into(),
-        });
+        return Ok(());
     }
     let to_u64 = |name: &'static str, value: usize| {
         u64::try_from(value).map_err(|_| MetalError::BadShape {
@@ -2908,7 +2873,7 @@ pub fn encode_attn_matrix_transpose_v_f16(
         vt_stride,
         n_kv_heads,
         head_dim,
-        attn_matrix_vt_compact_dispatch_enabled()?,
+        attn_matrix_vt_compact_dispatch_enabled(),
     )
 }
 
@@ -3861,33 +3826,37 @@ mod tests {
 
     #[test]
     fn attn_matrix_vt_scoped_override_restores_and_rejects_nesting() {
-        let _serial = ATTN_MATRIX_VT_SCOPE_TEST_LOCK.lock().unwrap();
-        let baseline = attn_matrix_vt_compact_dispatch_enabled().unwrap();
+        let baseline = attn_matrix_vt_compact_dispatch_enabled();
         assert_eq!(
             with_attn_matrix_vt_compact_dispatch_override(!baseline, || {
                 attn_matrix_vt_compact_dispatch_enabled()
             })
-            .unwrap()
             .unwrap(),
             !baseline
         );
-        assert_eq!(attn_matrix_vt_compact_dispatch_enabled().unwrap(), baseline);
+        assert_eq!(attn_matrix_vt_compact_dispatch_enabled(), baseline);
 
         let nested = with_attn_matrix_vt_compact_dispatch_override(true, || {
             with_attn_matrix_vt_compact_dispatch_override(false, || ())
         })
         .unwrap();
         assert!(nested.is_err());
-        assert_eq!(attn_matrix_vt_compact_dispatch_enabled().unwrap(), baseline);
+        assert_eq!(attn_matrix_vt_compact_dispatch_enabled(), baseline);
 
-        let cross_thread = with_attn_matrix_vt_compact_dispatch_override(true, || {
-            std::thread::spawn(attn_matrix_vt_compact_dispatch_enabled)
-                .join()
-                .unwrap()
-        })
-        .unwrap();
-        assert!(cross_thread.is_err());
-        assert_eq!(attn_matrix_vt_compact_dispatch_enabled().unwrap(), baseline);
+        // The override is thread-local: other threads keep the env/default
+        // treatment instead of being rejected (they used to fail with a
+        // cross-thread ownership error, which broke parallel test runs).
+        let (inside, other_thread) =
+            with_attn_matrix_vt_compact_dispatch_override(!baseline, || {
+                let other = std::thread::spawn(attn_matrix_vt_compact_dispatch_enabled)
+                    .join()
+                    .unwrap();
+                (attn_matrix_vt_compact_dispatch_enabled(), other)
+            })
+            .unwrap();
+        assert_eq!(inside, !baseline);
+        assert_eq!(other_thread, baseline);
+        assert_eq!(attn_matrix_vt_compact_dispatch_enabled(), baseline);
 
         let panicked = std::panic::catch_unwind(|| {
             let _ = with_attn_matrix_vt_compact_dispatch_override(!baseline, || {
@@ -3895,12 +3864,11 @@ mod tests {
             });
         });
         assert!(panicked.is_err());
-        assert_eq!(attn_matrix_vt_compact_dispatch_enabled().unwrap(), baseline);
+        assert_eq!(attn_matrix_vt_compact_dispatch_enabled(), baseline);
     }
 
     #[test]
     fn attn_matrix_vt_dispatch_capture_is_exact_and_scoped() {
-        let _serial = ATTN_MATRIX_VT_SCOPE_TEST_LOCK.lock().unwrap();
         let Some(ctx) = metal_test_context() else {
             return;
         };
@@ -3957,13 +3925,15 @@ mod tests {
         assert!(nested.is_err());
         assert_eq!(outer.stats, AttnMatrixVtDispatchStats::default());
 
+        // Captures are thread-local: a dispatch on another thread proceeds
+        // (it used to be rejected) and is not counted in this capture.
         let (cross_thread, capture) = capture_attn_matrix_vt_dispatches(|| {
             std::thread::spawn(|| record_attn_matrix_vt_dispatch(0, 1, 1, 1, 1, true))
                 .join()
                 .unwrap()
         })
         .unwrap();
-        assert!(cross_thread.is_err());
+        cross_thread.unwrap();
         assert_eq!(capture.stats, AttnMatrixVtDispatchStats::default());
 
         let panicked = std::panic::catch_unwind(|| {

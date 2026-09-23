@@ -12,11 +12,21 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   in our process (`gpuEvent-qwen_llm-*.ips`, restart_reason_desc "firmware-detected
   lockup"); recovery discarded other in-flight command buffers with "Discarded
   (victim of GPU error/recovery) (kIOGPUCommandBufferCallbackErrorInnocentVictim)".
-  Recovery is system-wide, which explains the old serial flake seen only while a
-  separate qwen-bench process ran.
+  Recovery is system-wide, which fits the old serial flake seen only while a
+  separate qwen-bench process ran. July's diagnostic reports no longer exist, so
+  this is the reproduced mechanism, not a proven replay of the July events.
 - `waitUntilCompleted()` returns for discarded buffers. ~250 wait sites (incl. the
   Qwen 3.x serve forward paths) never checked `status()`/`error()` and read partial
   outputs as valid, producing rotating wrong answers instead of errors.
+- Before the fix, 8-thread `metal::` runs also failed 3-4 attn_matrix tests every
+  run on a process-global V_T test-hook owner (a designed rejection, not
+  corruption). After: serial 335/335; 8-thread 30/30 runs clean, 0 GPU events.
+  Full-lib 8-thread runs still fail on memory-admission denials (heavy Muse and
+  Flash-Next sessions allocating at once; fail-closed) and on a stale test
+  (`product_split_binding_and_route_boundaries` expects split QSA, retired
+  2026-09-16; fails serially too). One DS4 retained-attention numeric mismatch
+  with no command error appeared once in ~60 parallel runs and did not recur in
+  210 targeted repeats; unexplained.
 - Fix: `metal::wait_completed` / `commit_and_wait` (status must be `Completed`
   with no NSError, else `MetalError::CommandBufferFailed` with status, domain, code
   and description); all unchecked production and test waits converted. V_T

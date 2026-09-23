@@ -1,22 +1,19 @@
 # Workspace-wide test serialization (v0.433, rationale updated 2026-09-23).
 #
-# Parallel GPU tests all share one Apple GPU and can saturate it. On
-# 2026-09-23 the wrong answers seen under parallel runs (rotating victims,
-# e.g. attn_v4 cos=0.9662, mat_mat cos as low as 0.48) were traced to GPU
-# recovery, not buffer corruption: macOS logged a "firmware-detected lockup"
-# (DiagnosticReports/gpuEvent-qwen_llm-*.ips) and the recovery discarded other
-# in-flight command buffers with kIOGPUCommandBufferCallbackErrorInnocentVictim.
-# Recovery is system-wide, so another process's fault can discard ours too.
-# `waitUntilCompleted()` returns for discarded buffers; call sites that did not
-# check status() read partial outputs as valid. Every wait now goes through
-# `metal::wait_completed` (or an equivalent status check), so such events fail
-# loudly with MetalError::CommandBufferFailed instead of producing garbage.
+# The July wrong answers under parallel GPU tests (rotating victims, e.g.
+# attn_v4 cos=0.9662, mat_mat cos as low as 0.48) match a mechanism reproduced
+# on 2026-09-23: a GPU recovery ("firmware-detected lockup",
+# DiagnosticReports/gpuEvent-qwen_llm-*.ips) discards other in-flight command
+# buffers with kIOGPUCommandBufferCallbackErrorInnocentVictim, across processes.
+# `waitUntilCompleted()` returns for discarded buffers, and unchecked call
+# sites read the partial outputs as valid. Every wait now goes through
+# `metal::wait_completed` (or an equivalent status check), so a recovery fails
+# loudly with MetalError::CommandBufferFailed. With that and thread-local V_T
+# test hooks, `metal::` runs clean at 8 threads (30/30 runs).
 #
-# Remaining reasons to stay serial:
-#   (a) GPU lockups still occur under 8-thread saturation (about 1 per 60 full
-#       `metal::` runs); the kernel that triggers them is not yet identified;
-#   (b) timing-sensitive tests assume an otherwise idle GPU.
-#
-# To run in parallel deliberately: `cargo test ... -- --test-threads=N`.
+# Serial stays the default because the full lib suite at 8 threads still hits
+# fail-closed memory admission (heavy session tests allocating at once), rare
+# GPU lockups whose triggering kernel is unidentified, and timing tests that
+# assume an idle GPU. Run parallel deliberately: `-- --test-threads=N`.
 [env]
 RUST_TEST_THREADS = "1"

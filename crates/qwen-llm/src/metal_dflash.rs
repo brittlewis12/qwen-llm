@@ -766,6 +766,151 @@ fn prefill_moe_grouped_bf16_gateup_enabled(h: usize, f_exp: usize, n_expert: usi
     }
 }
 
+/// Hand-tuned grouped gate/up SwiGLU kernels (tried before the generic
+/// template). `false` does not mean "no grouped path": every dtype with a
+/// generic instantiation (`crate::metal::moe_grouped_generic_supported`)
+/// still runs grouped via the generic kernel.
+fn prefill_moe_grouped_gate_up_specialized(
+    gate: GgmlType,
+    up: GgmlType,
+    h: usize,
+    f_exp: usize,
+    n_expert: usize,
+    chunk_p: usize,
+) -> bool {
+    match (gate, up) {
+        (GgmlType::Q4_K, GgmlType::Q4_K) => true,
+        (GgmlType::Q5_K, GgmlType::Q5_K) => {
+            prefill_moe_grouped_q5_gateup_enabled(h, f_exp, n_expert)
+        }
+        (GgmlType::Q6_K, GgmlType::Q6_K) => {
+            prefill_moe_grouped_q6_gateup_enabled(h, f_exp, n_expert)
+        }
+        (GgmlType::Q8_0, GgmlType::Q8_0) => {
+            prefill_moe_grouped_q8_gateup_enabled(h, f_exp, n_expert)
+        }
+        (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS) | (GgmlType::IQ3_S, GgmlType::IQ3_S) => {
+            chunk_p >= 32 && prefill_moe_grouped_iq3_gateup_enabled(h, f_exp, n_expert)
+        }
+        (GgmlType::F32, GgmlType::F32) => chunk_p >= 32 && prefill_moe_grouped_f32_gateup_enabled(),
+        (GgmlType::BF16, GgmlType::BF16) => {
+            chunk_p >= 32 && prefill_moe_grouped_bf16_gateup_enabled(h, f_exp, n_expert)
+        }
+        _ => false,
+    }
+}
+
+/// Hand-tuned grouped down kernels (tried before the generic template).
+fn prefill_moe_grouped_down_specialized(down: GgmlType) -> bool {
+    matches!(
+        down,
+        GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0 | GgmlType::IQ4_XS | GgmlType::BF16
+    )
+}
+
+/// Why a MoE layer cannot take the grouped routed-expert prefill path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PrefillMoeGroupedFallback {
+    /// `"routed"` (whole routed block), `"gate"`, `"up"` or `"down"`.
+    pub role: &'static str,
+    pub dtype: Option<GgmlType>,
+    pub reason: String,
+}
+
+/// Dtype/shape eligibility of the grouped routed-MoE prefill path
+/// (specialized kernels first, generic template otherwise). `None` means
+/// eligible. Independent of chunk size: the chunk-gated specializations fall
+/// back to the generic kernel rather than to the per-token loop.
+pub(crate) fn prefill_moe_grouped_ineligibility(
+    gate: GgmlType,
+    up: GgmlType,
+    down: GgmlType,
+    h: usize,
+    f_exp: usize,
+) -> Option<PrefillMoeGroupedFallback> {
+    if !prefill_moe_grouped_enabled() {
+        return Some(PrefillMoeGroupedFallback {
+            role: "routed",
+            dtype: None,
+            reason: "QWEN_PREFILL_MOE_GROUPED=0 disables the grouped path".into(),
+        });
+    }
+    if !h.is_multiple_of(256) || !f_exp.is_multiple_of(256) {
+        return Some(PrefillMoeGroupedFallback {
+            role: "routed",
+            dtype: None,
+            reason: format!("hidden={h} / expert_ffn={f_exp} not multiples of 256"),
+        });
+    }
+    for (role, dtype) in [("gate", gate), ("up", up)] {
+        if !crate::metal::moe_grouped_generic_supported(dtype) {
+            return Some(PrefillMoeGroupedFallback {
+                role,
+                dtype: Some(dtype),
+                reason: "no grouped gate/up kernel for this dtype".into(),
+            });
+        }
+    }
+    if !prefill_moe_grouped_down_specialized(down)
+        && !crate::metal::moe_grouped_generic_supported(down)
+    {
+        return Some(PrefillMoeGroupedFallback {
+            role: "down",
+            dtype: Some(down),
+            reason: "no grouped down kernel for this dtype".into(),
+        });
+    }
+    None
+}
+
+/// Loud fallback: once per model load, name every MoE layer group that will
+/// run routed experts through the per-token prefill loop instead of the
+/// grouped kernels.
+pub(crate) fn log_prefill_moe_grouped_fallbacks(
+    arch: &crate::model::Arch,
+    blocks: &[crate::metal_forward::MetalBlock],
+) {
+    let h = arch.hidden_size as usize;
+    let f_exp = arch.expert_feed_forward_length as usize;
+    let mut groups: Vec<(PrefillMoeGroupedFallback, Vec<usize>)> = Vec::new();
+    for (il, block) in blocks.iter().enumerate() {
+        let moe = match block {
+            crate::metal_forward::MetalBlock::Gdn(b) => b.ffn_moe.as_ref(),
+            crate::metal_forward::MetalBlock::Attn(b) => b.ffn_moe.as_ref(),
+        };
+        let Some(moe) = moe else {
+            continue;
+        };
+        let Some(fallback) = prefill_moe_grouped_ineligibility(
+            moe.gate_exps.dtype,
+            moe.up_exps.dtype,
+            moe.down_exps.dtype,
+            h,
+            f_exp,
+        ) else {
+            continue;
+        };
+        match groups.iter_mut().find(|(f, _)| *f == fallback) {
+            Some((_, layers)) => layers.push(il),
+            None => groups.push((fallback, vec![il])),
+        }
+    }
+    for (fallback, layers) in groups {
+        tracing::info!(
+            target: "qwen_diag",
+            "[moe-prefill] grouped routed-expert path unavailable for {} layer(s) {:?}: \
+             role={} dtype={} reason={}; these layers use the per-token prefill fallback",
+            layers.len(),
+            layers,
+            fallback.role,
+            fallback
+                .dtype
+                .map_or_else(|| "-".to_string(), |d| format!("{d:?}")),
+            fallback.reason,
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrefillEnvMode {
     Auto,
@@ -967,7 +1112,33 @@ fn encode_prefill_moe_grouped_swiglu(
     grouped_q4_n32_all: bool,
     hot_expert_min_slots: Option<usize>,
 ) -> Result<(), MetalError> {
-    match (moe.gate_exps.dtype, moe.up_exps.dtype) {
+    let (gate, up) = (moe.gate_exps.dtype, moe.up_exps.dtype);
+    if !prefill_moe_grouped_gate_up_specialized(gate, up, h, f_exp, n_expert, chunk_p) {
+        if !(crate::metal::moe_grouped_generic_supported(gate)
+            && crate::metal::moe_grouped_generic_supported(up))
+        {
+            return Err(MetalError::BadShape {
+                kernel: "prefill_moe_grouped_swiglu",
+                detail: format!("unsupported grouped gate/up dtypes ({gate:?}, {up:?})"),
+            });
+        }
+        return crate::metal::encode_moe_swiglu_f32_grouped_slots_generic(
+            ctx,
+            enc,
+            &moe.gate_exps,
+            &moe.up_exps,
+            h_pack,
+            counts,
+            ids,
+            inner,
+            h,
+            f_exp,
+            n_expert,
+            topk,
+            chunk_p,
+        );
+    }
+    match (gate, up) {
         (GgmlType::Q4_K, GgmlType::Q4_K) => encode_prefill_moe_grouped_swiglu_q4(
             ctx,
             enc,
@@ -1127,7 +1298,35 @@ fn encode_prefill_moe_grouped_swiglu_range(
     max_slots: u32,
     use_q4_n32: bool,
 ) -> Result<(), MetalError> {
-    match (moe.gate_exps.dtype, moe.up_exps.dtype) {
+    let (gate, up) = (moe.gate_exps.dtype, moe.up_exps.dtype);
+    if !prefill_moe_grouped_gate_up_specialized(gate, up, h, f_exp, n_expert, chunk_p) {
+        if !(crate::metal::moe_grouped_generic_supported(gate)
+            && crate::metal::moe_grouped_generic_supported(up))
+        {
+            return Err(MetalError::BadShape {
+                kernel: "prefill_moe_grouped_swiglu_range",
+                detail: format!("unsupported grouped gate/up dtypes ({gate:?}, {up:?})"),
+            });
+        }
+        return crate::metal::encode_moe_swiglu_f32_grouped_slots_generic_range(
+            ctx,
+            enc,
+            &moe.gate_exps,
+            &moe.up_exps,
+            h_pack,
+            counts,
+            ids,
+            inner,
+            h,
+            f_exp,
+            n_expert,
+            topk,
+            chunk_p,
+            min_slots,
+            max_slots,
+        );
+    }
+    match (gate, up) {
         (GgmlType::Q4_K, GgmlType::Q4_K) if use_q4_n32 => {
             crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n32_range(
                 ctx,
@@ -1280,10 +1479,25 @@ fn encode_prefill_moe_grouped_swiglu_range(
                 max_slots,
             )
         }
-        other => Err(MetalError::BadShape {
-            kernel: "prefill_moe_grouped_swiglu_range",
-            detail: format!("unsupported grouped gate/up dtypes {other:?}"),
-        }),
+        // Specialized families without a range variant (F32) use the generic
+        // range kernel.
+        _ => crate::metal::encode_moe_swiglu_f32_grouped_slots_generic_range(
+            ctx,
+            enc,
+            &moe.gate_exps,
+            &moe.up_exps,
+            h_pack,
+            counts,
+            ids,
+            inner,
+            h,
+            f_exp,
+            n_expert,
+            topk,
+            chunk_p,
+            min_slots,
+            max_slots,
+        ),
     }
 }
 
@@ -1336,6 +1550,12 @@ fn encode_prefill_moe_grouped_down(
         GgmlType::BF16 => crate::metal::encode_moe_down_bf16_f32_grouped_slots(
             ctx, enc, down_exps, inner, counts, ids, out, f_exp, h, n_expert, chunk_p,
         ),
+        // General path: every dtype with a generic instantiation.
+        other if crate::metal::moe_grouped_generic_supported(other) => {
+            crate::metal::encode_moe_down_f32_grouped_slots_generic(
+                ctx, enc, down_exps, inner, counts, ids, out, f_exp, h, n_expert, chunk_p,
+            )
+        }
         other => Err(MetalError::BadShape {
             kernel: "prefill_moe_grouped_down",
             detail: format!("unsupported grouped down dtype {other:?}"),
@@ -8442,33 +8662,16 @@ fn encode_packed_verify_moe_grouped_ffn_after_mixer(
         return Ok(false);
     }
 
-    let grouped_gate_up_dtype_eligible = match (moe.gate_exps.dtype, moe.up_exps.dtype) {
-        (GgmlType::Q4_K, GgmlType::Q4_K) => true,
-        (GgmlType::Q5_K, GgmlType::Q5_K) => {
-            prefill_moe_grouped_q5_gateup_enabled(h, f_exp, n_expert)
-        }
-        (GgmlType::Q6_K, GgmlType::Q6_K) => {
-            prefill_moe_grouped_q6_gateup_enabled(h, f_exp, n_expert)
-        }
-        (GgmlType::Q8_0, GgmlType::Q8_0) => {
-            prefill_moe_grouped_q8_gateup_enabled(h, f_exp, n_expert)
-        }
-        (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS) | (GgmlType::IQ3_S, GgmlType::IQ3_S) => {
-            n >= 32 && prefill_moe_grouped_iq3_gateup_enabled(h, f_exp, n_expert)
-        }
-        (GgmlType::F32, GgmlType::F32) => n >= 32 && prefill_moe_grouped_f32_gateup_enabled(),
-        (GgmlType::BF16, GgmlType::BF16) => {
-            n >= 32 && prefill_moe_grouped_bf16_gateup_enabled(h, f_exp, n_expert)
-        }
-        _ => false,
-    };
-    let grouped_down_dtype_eligible = matches!(
+    // Specialized kernels are tried first inside the encode helpers; every
+    // dtype with a generic instantiation is eligible.
+    if prefill_moe_grouped_ineligibility(
+        moe.gate_exps.dtype,
+        moe.up_exps.dtype,
         moe.down_exps.dtype,
-        GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0 | GgmlType::IQ4_XS | GgmlType::BF16
-    );
-    if !(prefill_moe_grouped_enabled()
-        && grouped_gate_up_dtype_eligible
-        && grouped_down_dtype_eligible)
+        h,
+        f_exp,
+    )
+    .is_some()
     {
         return Ok(false);
     }
@@ -13466,46 +13669,23 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                     && moe.gate_exps.dtype == GgmlType::Q4_K
                     && moe.up_exps.dtype == GgmlType::Q4_K
                     && moe.down_exps.dtype == GgmlType::Q5_K;
-                let grouped_down_dtype_eligible = matches!(
-                    moe.down_exps.dtype,
-                    GgmlType::Q5_K
-                        | GgmlType::Q6_K
-                        | GgmlType::Q8_0
-                        | GgmlType::IQ4_XS
-                        | GgmlType::BF16
-                );
                 let topk = arch.expert_used_count.min(arch.expert_count) as usize;
                 let n_expert = arch.expert_count as usize;
                 let f_exp = arch.expert_feed_forward_length as usize;
                 let f_shared = arch.expert_shared_feed_forward_length as usize;
-                let grouped_gate_up_dtype_eligible = match (moe.gate_exps.dtype, moe.up_exps.dtype)
-                {
-                    (GgmlType::Q4_K, GgmlType::Q4_K) => true,
-                    (GgmlType::Q5_K, GgmlType::Q5_K) => {
-                        prefill_moe_grouped_q5_gateup_enabled(h, f_exp, n_expert)
-                    }
-                    (GgmlType::Q6_K, GgmlType::Q6_K) => {
-                        prefill_moe_grouped_q6_gateup_enabled(h, f_exp, n_expert)
-                    }
-                    (GgmlType::Q8_0, GgmlType::Q8_0) => {
-                        prefill_moe_grouped_q8_gateup_enabled(h, f_exp, n_expert)
-                    }
-                    (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS) | (GgmlType::IQ3_S, GgmlType::IQ3_S) => {
-                        chunk_p >= 32 && prefill_moe_grouped_iq3_gateup_enabled(h, f_exp, n_expert)
-                    }
-                    (GgmlType::F32, GgmlType::F32) => {
-                        chunk_p >= 32 && prefill_moe_grouped_f32_gateup_enabled()
-                    }
-                    (GgmlType::BF16, GgmlType::BF16) => {
-                        chunk_p >= 32 && prefill_moe_grouped_bf16_gateup_enabled(h, f_exp, n_expert)
-                    }
-                    _ => false,
-                };
-                let grouped_routed_path = prefill_moe_grouped_enabled()
-                    && grouped_gate_up_dtype_eligible
-                    && grouped_down_dtype_eligible
-                    && h.is_multiple_of(256)
-                    && f_exp.is_multiple_of(256);
+                // Specialized grouped kernels are selected first inside
+                // encode_prefill_moe_grouped_{swiglu,down}[_range]; every
+                // dtype with a generic instantiation is eligible otherwise.
+                // Ineligible layers are logged once at model load
+                // (log_prefill_moe_grouped_fallbacks).
+                let grouped_routed_path = prefill_moe_grouped_ineligibility(
+                    moe.gate_exps.dtype,
+                    moe.up_exps.dtype,
+                    moe.down_exps.dtype,
+                    h,
+                    f_exp,
+                )
+                .is_none();
 
                 if !skip_ffn && (packed_routed_path || grouped_routed_path) {
                     let skip_moe_routed = prefill_noop_moe_routed_enabled();
@@ -13714,7 +13894,10 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                         );
                     }
 
+                    // Mixed gate/up dtypes run two dependent generic
+                    // dispatches, which a concurrent pass cannot order.
                     let concurrent_grouped_shared = grouped_routed_path
+                        && moe.gate_exps.dtype == moe.up_exps.dtype
                         && packed_shared_path
                         && !skip_moe_routed
                         && !skip_moe_shared
@@ -13942,7 +14125,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                         | (GgmlType::BF16, GgmlType::BF16)
                                         | (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS)
                                         | (GgmlType::IQ3_S, GgmlType::IQ3_S) => true,
-                                        _ => false,
+                                        // Generic grouped kernels have range
+                                        // variants for every dtype.
+                                        _ => true,
                                     };
                                 if split_swiglu_bins {
                                     let bins: [(&str, u32, u32); 6] = [
@@ -14047,11 +14232,16 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 }
                             }
                             {
+                                // Specialized down kernels without a range
+                                // variant (Q6_K/Q8_0/IQ4_XS) stay unsplit so
+                                // the trace times the production kernel.
                                 let split_down_bins = prefill_trace_moe_bucket_bins_enabled()
-                                    && matches!(
+                                    && (matches!(
                                         moe.down_exps.dtype,
                                         GgmlType::Q5_K | GgmlType::BF16
-                                    );
+                                    ) || !prefill_moe_grouped_down_specialized(
+                                        moe.down_exps.dtype,
+                                    ));
                                 if split_down_bins {
                                     let bins: [(&str, u32, u32); 6] = [
                                         ("routed_down_lt8", 0, 7),
@@ -14076,6 +14266,22 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                         }
                                         if moe.down_exps.dtype == GgmlType::BF16 {
                                             crate::metal::encode_moe_down_bf16_f32_grouped_slots_range(
+                                                base.ctx,
+                                                &enc,
+                                                &moe.down_exps,
+                                                &moe_group_inner_pack_p,
+                                                &moe_group_count_pack,
+                                                &moe_group_ids_pack,
+                                                &moe_group_out_pack_p,
+                                                f_exp,
+                                                h,
+                                                n_expert,
+                                                chunk_p,
+                                                min_slots,
+                                                max_slots,
+                                            )?;
+                                        } else if moe.down_exps.dtype != GgmlType::Q5_K {
+                                            crate::metal::encode_moe_down_f32_grouped_slots_generic_range(
                                                 base.ctx,
                                                 &enc,
                                                 &moe.down_exps,

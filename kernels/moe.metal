@@ -6804,3 +6804,404 @@ kernel void kernel_scatter_axpy_rows_unique_f32(
     if (dst_row < 0 || dst_row >= int(args.out_rows)) return;
     accum[(ulong)dst_row * args.n_cols + col] += scale[src_row] * x[tid];
 }
+
+// ===========================================================================
+// Generic grouped-slots MoE kernels (one template, every tile dequant).
+//
+// These are the general grouped prefill path: one template per role,
+// instantiated for every weight dtype that has a canonical tile dequant in
+// quant_tiles.h. The hand-specialized kernels above (Q4_K n16/n32 SwiGLU,
+// Q5_K tiny8_r16 down, the per-type grouped kernels, ...) remain the
+// preferred fast paths; the Rust dispatcher tries them first and falls back
+// here. Tile geometry, loads, the K-loop and the epilogues are copied from
+// kernel_moe_down_q5_K_f32_grouped_slots and
+// kernel_moe_swiglu_q4_K_f32_grouped_slots_n16 (+ the slot-validity guards
+// of kernel_moe_swiglu_iq4_xs_f32_grouped_slots_n16); only the dequant call,
+// block size and NL are template parameters.
+//
+// Host-side contract (crates/qwen-llm/src/metal/moe_grouped_generic.rs):
+//   down / up_silu_mul: 128 threads, 8192 B threadgroup memory,
+//     grid (ceil(n_tokens / 32), ceil(M / 64), n_expert)
+//   swiglu:             128 threads, 16384 B threadgroup memory,
+//     grid (ceil(n_tokens / 16), ceil(ffn / 64), n_expert)
+// ===========================================================================
+
+#include "quant_tiles.h"
+
+struct moe_group_generic_mm_args {
+    uint M;          // output rows per slot
+    uint N;          // ids row stride per expert (== n_tokens)
+    uint K;          // inner dim
+    uint nb01;       // weight row stride in bytes
+    uint stride_b;   // activation row stride in f32 elements
+    uint min_count;
+    uint max_count;
+    uint b_div;      // activation row = slot / b_div (1: per-slot input; topk: per-token input)
+    uint slot_limit; // number of valid slots (output rows)
+};
+
+// EPI 0: dst[slot, :] = W_e * srcB[slot / b_div, :]
+// EPI 1: dst[slot, :] = silu(dst[slot, :]) * (W_e * srcB[slot / b_div, :])
+template <int BYTES, short NL,
+          void (*DEQ)(device const uchar *, short, thread half4x4 &),
+          short EPI>
+kernel void kernel_moe_grouped_slots_mm_generic(
+        constant moe_group_generic_mm_args & args [[buffer(0)]],
+        device const uchar * srcA         [[buffer(1)]],
+        device const float * srcB         [[buffer(2)]],
+        device const int   * counts       [[buffer(3)]],
+        device const int   * ids          [[buffer(4)]],
+        device       float * dst          [[buffer(5)]],
+        threadgroup  uchar * shmem        [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup half * sa = (threadgroup half *)(shmem);
+    threadgroup half * sb = (threadgroup half *)(shmem + 4096);
+
+    const int im = tgpig.z;
+    const int r0 = tgpig.y * NR0_MM;
+    const int r1 = tgpig.x * NR1_MM;
+
+    const int count = counts[im];
+    if (count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
+
+    const short nr0 = ((int)args.M - r0 < NR0_MM) ? (short)((int)args.M - r0) : NR0_MM;
+    const short nr1 = (count - r1 < NR1_MM) ? (short)(count - r1) : NR1_MM;
+
+    const short lr0 = ((short)tiitg / NL0_MM) < nr0
+                        ? ((short)tiitg / NL0_MM)
+                        : nr0 - 1;
+    const short il0 = (tiitg % NL0_MM);
+    short il = il0;
+
+    const short lr1 = ((short)tiitg / NL1_MM) < nr1
+                        ? ((short)tiitg / NL1_MM)
+                        : nr1 - 1;
+    const short iy = 8 * (tiitg % NL1_MM);
+
+    const short offset1 = il0 / NL;
+    const ulong expert_stride = (ulong)args.nb01 * args.M;
+    device const uchar * x_ptr = srcA + expert_stride * (ulong)im + (ulong)args.nb01 * (r0 + lr0)
+                                       + (ulong)offset1 * BYTES;
+    const int slot_limit = int(args.slot_limit);
+    const int slot_id = ids[(ulong)im * args.N + (r1 + lr1)];
+    const bool slot_valid = slot_id >= 0 && slot_id < slot_limit;
+    const int b_row = (slot_valid ? slot_id : 0) / int(args.b_div);
+    device const float * y_ptr = srcB + (ulong)args.stride_b * b_row + (ulong)iy;
+
+    simdgroup_half8x8   ma[4];
+    simdgroup_half8x8   mb[2];
+    simdgroup_float8x8  mc[8];
+
+    for (short i = 0; i < 8; ++i) {
+        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    for (uint loop_k = 0; loop_k < args.K; loop_k += NK_MM) {
+        {
+            half4x4 temp_a;
+            DEQ(x_ptr, il, temp_a);
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            for (short i = 0; i < 16; ++i) {
+                const short sx = 2 * il0 + i / 8;
+                const short sy = (tiitg / NL0_MM) / 8;
+                const short lx = (tiitg / NL0_MM) % 8;
+                const short ly = i % 8;
+                const short ib = 8 * sx + sy;
+                sa[64 * ib + 8 * ly + lx] = temp_a[i / 4][i % 4];
+            }
+        }
+
+        {
+            const short sx = (tiitg % NL1_MM);
+            const short sy = (tiitg / NL1_MM) / 8;
+            const short ly = (tiitg / NL1_MM) % 8;
+            const short ib = 4 * sx + sy;
+            *(threadgroup half2x4 *)(sb + 64 * ib + 8 * ly) =
+                (half2x4)(*((device const float2x4 *)y_ptr));
+        }
+
+        il = (il + 2 < NL) ? il + 2 : il % 2;
+        x_ptr = (il < 2)
+                  ? x_ptr + BYTES * ((2 + NL - 1) / NL)
+                  : x_ptr;
+        y_ptr += NK_MM;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        threadgroup const half * lsma = (sa + 4 * 64 * (sgitg % 2));
+        threadgroup const half * lsmb = (sb + 2 * 64 * (sgitg / 2));
+
+        for (short ik = 0; ik < NK_MM / 8; ++ik) {
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 4; ++i) {
+                simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 2; ++i) {
+                simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 8; ++i) {
+                simdgroup_multiply_accumulate(mc[i], mb[i / 4], ma[i % 4], mc[i]);
+            }
+            lsma += 8 * 64;
+            lsmb += 4 * 64;
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float * temp_str = ((threadgroup float *)shmem)
+                                   + 32 * (sgitg & 1)
+                                   + (16 * (sgitg >> 1)) * NR0_MM;
+    for (short i = 0; i < 8; ++i) {
+        simdgroup_store(mc[i], temp_str + 8 * (i % 4) + 8 * NR0_MM * (i / 4),
+                        NR0_MM, 0, false);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sgitg == 0) {
+        for (int j = tiitg; j < nr1; j += NR1_MM) {
+            const int slot = ids[(ulong)im * args.N + r1 + j];
+            if (slot < 0 || slot >= slot_limit) {
+                continue;
+            }
+            device float * D = dst + (ulong)slot * args.M + r0;
+            threadgroup float * C = temp_str + (j * NR0_MM);
+            if (EPI == 0) {
+                for (int i = 0; i < nr0; ++i) {
+                    D[i] = C[i];
+                }
+            } else {
+                for (int i = 0; i < nr0; ++i) {
+                    D[i] = moe_silu_f(D[i]) * C[i];
+                }
+            }
+        }
+    }
+}
+
+// Fused gate+up SwiGLU for same-dtype gate/up banks:
+//   dst[slot, :] = silu(W_gate_e * x[slot / topk]) * (W_up_e * x[slot / topk])
+template <int BYTES, short NL,
+          void (*DEQ)(device const uchar *, short, thread half4x4 &)>
+kernel void kernel_moe_swiglu_grouped_slots_n16_generic(
+        constant moe_group_q4k_args & args [[buffer(0)]],
+        device const uchar * srcA_gate     [[buffer(1)]],
+        device const uchar * srcA_up       [[buffer(2)]],
+        device const float * srcB          [[buffer(3)]],
+        device const int   * counts        [[buffer(4)]],
+        device const int   * ids           [[buffer(5)]],
+        device       float * dst           [[buffer(6)]],
+        threadgroup  uchar * shmem         [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup half * sa_g = (threadgroup half *)(shmem);
+    threadgroup half * sa_u = (threadgroup half *)(shmem + 4096);
+    threadgroup half * sb   = (threadgroup half *)(shmem + 8192);
+
+    const int im = tgpig.z;
+    const int r0 = tgpig.y * NR0_MM;
+    const int r1 = tgpig.x * NR1_GROUP_Q4;
+
+    const int count = counts[im];
+    if (count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
+
+    const short nr0 = ((int)args.ffn - r0 < NR0_MM) ? (short)((int)args.ffn - r0) : NR0_MM;
+    const short nr1 = (count - r1 < NR1_GROUP_Q4) ? (short)(count - r1) : NR1_GROUP_Q4;
+
+    const short lr0 = ((short)tiitg / NL0_MM) < nr0
+                        ? ((short)tiitg / NL0_MM)
+                        : nr0 - 1;
+    const short il0 = (tiitg % NL0_MM);
+    short il = il0;
+
+    const short lr1 = ((short)tiitg / NL1_GROUP_Q4) < nr1
+                        ? ((short)tiitg / NL1_GROUP_Q4)
+                        : nr1 - 1;
+    const short iy = 8 * (tiitg % NL1_GROUP_Q4);
+
+    const short offset1 = il0 / NL;
+    const ulong expert_stride = (ulong)args.nb01 * args.ffn;
+    device const uchar * x_ptr_g = srcA_gate + expert_stride * (ulong)im + (ulong)args.nb01 * (r0 + lr0)
+                                           + (ulong)offset1 * BYTES;
+    device const uchar * x_ptr_u = srcA_up   + expert_stride * (ulong)im + (ulong)args.nb01 * (r0 + lr0)
+                                           + (ulong)offset1 * BYTES;
+    const int slot_limit = int(args.n_tokens * args.topk);
+    const int slot_id = ids[(ulong)im * args.n_tokens + r1 + lr1];
+    const bool slot_valid = slot_id >= 0 && slot_id < slot_limit;
+    const int token = (slot_valid ? slot_id : 0) / int(args.topk);
+    device const float * y_ptr = srcB + (ulong)args.stride_b * token + (ulong)iy;
+
+    simdgroup_half8x8 ma_g[4];
+    simdgroup_half8x8 ma_u[4];
+    simdgroup_half8x8 mb;
+    simdgroup_float8x8 mc_g[4];
+    simdgroup_float8x8 mc_u[4];
+
+    for (short i = 0; i < 4; ++i) {
+        mc_g[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+        mc_u[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    for (uint loop_k = 0; loop_k < args.hidden; loop_k += NK_MM) {
+        {
+            half4x4 temp_a;
+            DEQ(x_ptr_g, il, temp_a);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (short i = 0; i < 16; ++i) {
+                const short sx = 2 * il0 + i / 8;
+                const short sy = (tiitg / NL0_MM) / 8;
+                const short lx = (tiitg / NL0_MM) % 8;
+                const short ly = i % 8;
+                const short ib = 8 * sx + sy;
+                sa_g[64 * ib + 8 * ly + lx] = temp_a[i / 4][i % 4];
+            }
+        }
+        {
+            half4x4 temp_a;
+            DEQ(x_ptr_u, il, temp_a);
+            for (short i = 0; i < 16; ++i) {
+                const short sx = 2 * il0 + i / 8;
+                const short sy = (tiitg / NL0_MM) / 8;
+                const short lx = (tiitg / NL0_MM) % 8;
+                const short ly = i % 8;
+                const short ib = 8 * sx + sy;
+                sa_u[64 * ib + 8 * ly + lx] = temp_a[i / 4][i % 4];
+            }
+        }
+
+        if (tiitg < B_LOAD_THREADS_GROUP_Q4) {
+            const short sx = (tiitg % NL1_GROUP_Q4);
+            const short sy = (tiitg / NL1_GROUP_Q4) / 8;
+            const short ib = 2 * sx + sy;
+            const short ly = (tiitg / NL1_GROUP_Q4) % 8;
+            *(threadgroup half2x4 *)(sb + 64 * ib + 8 * ly) =
+                (half2x4)(*((device const float2x4 *)y_ptr));
+        }
+
+        il = (il + 2 < NL) ? il + 2 : il % 2;
+        x_ptr_g = (il < 2)
+                    ? x_ptr_g + BYTES * ((2 + NL - 1) / NL)
+                    : x_ptr_g;
+        x_ptr_u = (il < 2)
+                    ? x_ptr_u + BYTES * ((2 + NL - 1) / NL)
+                    : x_ptr_u;
+        y_ptr += NK_MM;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        threadgroup const half * lsma_g = (sa_g + 4 * 64 * (sgitg % 2));
+        threadgroup const half * lsma_u = (sa_u + 4 * 64 * (sgitg % 2));
+        threadgroup const half * lsmb   = (sb   + 1 * 64 * (sgitg / 2));
+
+        for (short ik = 0; ik < NK_MM / 8; ++ik) {
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 4; ++i) {
+                simdgroup_load(ma_g[i], lsma_g + 64 * i, 8, 0, false);
+                simdgroup_load(ma_u[i], lsma_u + 64 * i, 8, 0, false);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            simdgroup_load(mb, lsmb, 8, 0, false);
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 4; ++i) {
+                simdgroup_multiply_accumulate(mc_g[i], mb, ma_g[i], mc_g[i]);
+                simdgroup_multiply_accumulate(mc_u[i], mb, ma_u[i], mc_u[i]);
+            }
+            lsma_g += 8 * 64;
+            lsma_u += 8 * 64;
+            lsmb   += 2 * 64;
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    threadgroup float * temp_str_g = ((threadgroup float *)shmem)
+                                     + 32 * (sgitg & 1)
+                                     + (8 * (sgitg >> 1)) * NR0_MM;
+    threadgroup float * temp_str_u = ((threadgroup float *)(shmem + 4096))
+                                     + 32 * (sgitg & 1)
+                                     + (8 * (sgitg >> 1)) * NR0_MM;
+    for (short i = 0; i < 4; ++i) {
+        simdgroup_store(mc_g[i], temp_str_g + 8 * i, NR0_MM, 0, false);
+        simdgroup_store(mc_u[i], temp_str_u + 8 * i, NR0_MM, 0, false);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const short m_off = 32 * (sgitg & 1);
+    const short n_off = 8 * (sgitg >> 1);
+    const short m_local = (short)tiitg & 31;
+    const short tile_i = m_local >> 3;
+    const short mr = m_local & 7;
+    const int global_m = r0 + m_off + m_local;
+    const bool m_in = (global_m < (int)args.ffn);
+    for (short c = 0; c < 8; ++c) {
+        const int global_n = r1 + n_off + c;
+        if (m_in && global_n < count) {
+            const float g_val = temp_str_g[(8 * tile_i + mr) + c * NR0_MM];
+            const float u_val = temp_str_u[(8 * tile_i + mr) + c * NR0_MM];
+            const int slot = ids[(ulong)im * args.n_tokens + global_n];
+            if (slot >= 0 && slot < slot_limit) {
+                dst[global_m + (ulong)slot * args.ffn] = moe_silu_f(g_val) * u_val;
+            }
+        }
+    }
+}
+
+typedef decltype(kernel_moe_grouped_slots_mm_generic<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K, 0>) moe_grouped_slots_mm_generic_t;
+typedef decltype(kernel_moe_swiglu_grouped_slots_n16_generic<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K>) moe_swiglu_grouped_slots_generic_t;
+
+// One line per (role, dtype). Every host_name here must have a matching
+// entry in moe_grouped_generic.rs (enforced by a CPU test).
+template [[host_name("kernel_moe_down_q2_K_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q2_K_BYTES, QT_Q2_K_NL, qt_dequantize_q2_K, 0>;
+template [[host_name("kernel_moe_up_silu_mul_q2_K_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q2_K_BYTES, QT_Q2_K_NL, qt_dequantize_q2_K, 1>;
+template [[host_name("kernel_moe_swiglu_q2_K_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_Q2_K_BYTES, QT_Q2_K_NL, qt_dequantize_q2_K>;
+template [[host_name("kernel_moe_down_q3_K_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q3_K_BYTES, QT_Q3_K_NL, qt_dequantize_q3_K, 0>;
+template [[host_name("kernel_moe_up_silu_mul_q3_K_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q3_K_BYTES, QT_Q3_K_NL, qt_dequantize_q3_K, 1>;
+template [[host_name("kernel_moe_swiglu_q3_K_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_Q3_K_BYTES, QT_Q3_K_NL, qt_dequantize_q3_K>;
+template [[host_name("kernel_moe_down_q4_K_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K, 0>;
+template [[host_name("kernel_moe_up_silu_mul_q4_K_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K, 1>;
+template [[host_name("kernel_moe_swiglu_q4_K_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K>;
+template [[host_name("kernel_moe_down_q5_K_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q5_K_BYTES, QT_Q5_K_NL, qt_dequantize_q5_K, 0>;
+template [[host_name("kernel_moe_up_silu_mul_q5_K_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q5_K_BYTES, QT_Q5_K_NL, qt_dequantize_q5_K, 1>;
+template [[host_name("kernel_moe_swiglu_q5_K_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_Q5_K_BYTES, QT_Q5_K_NL, qt_dequantize_q5_K>;
+template [[host_name("kernel_moe_down_q6_K_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q6_K_BYTES, QT_Q6_K_NL, qt_dequantize_q6_K, 0>;
+template [[host_name("kernel_moe_up_silu_mul_q6_K_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q6_K_BYTES, QT_Q6_K_NL, qt_dequantize_q6_K, 1>;
+template [[host_name("kernel_moe_swiglu_q6_K_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_Q6_K_BYTES, QT_Q6_K_NL, qt_dequantize_q6_K>;
+template [[host_name("kernel_moe_down_q8_0_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q8_0_BYTES, QT_Q8_0_NL, qt_dequantize_q8_0, 0>;
+template [[host_name("kernel_moe_up_silu_mul_q8_0_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q8_0_BYTES, QT_Q8_0_NL, qt_dequantize_q8_0, 1>;
+template [[host_name("kernel_moe_swiglu_q8_0_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_Q8_0_BYTES, QT_Q8_0_NL, qt_dequantize_q8_0>;
+template [[host_name("kernel_moe_down_q4_0_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q4_0_BYTES, QT_Q4_0_NL, qt_dequantize_q4_0, 0>;
+template [[host_name("kernel_moe_up_silu_mul_q4_0_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q4_0_BYTES, QT_Q4_0_NL, qt_dequantize_q4_0, 1>;
+template [[host_name("kernel_moe_swiglu_q4_0_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_Q4_0_BYTES, QT_Q4_0_NL, qt_dequantize_q4_0>;
+template [[host_name("kernel_moe_down_q4_1_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q4_1_BYTES, QT_Q4_1_NL, qt_dequantize_q4_1, 0>;
+template [[host_name("kernel_moe_up_silu_mul_q4_1_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q4_1_BYTES, QT_Q4_1_NL, qt_dequantize_q4_1, 1>;
+template [[host_name("kernel_moe_swiglu_q4_1_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_Q4_1_BYTES, QT_Q4_1_NL, qt_dequantize_q4_1>;
+template [[host_name("kernel_moe_down_iq2_s_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_IQ2_S_BYTES, QT_IQ2_S_NL, qt_dequantize_iq2_s, 0>;
+template [[host_name("kernel_moe_up_silu_mul_iq2_s_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_IQ2_S_BYTES, QT_IQ2_S_NL, qt_dequantize_iq2_s, 1>;
+template [[host_name("kernel_moe_swiglu_iq2_s_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_IQ2_S_BYTES, QT_IQ2_S_NL, qt_dequantize_iq2_s>;
+template [[host_name("kernel_moe_down_iq3_xxs_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_IQ3_XXS_BYTES, QT_IQ3_XXS_NL, qt_dequantize_iq3_xxs, 0>;
+template [[host_name("kernel_moe_up_silu_mul_iq3_xxs_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_IQ3_XXS_BYTES, QT_IQ3_XXS_NL, qt_dequantize_iq3_xxs, 1>;
+template [[host_name("kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_IQ3_XXS_BYTES, QT_IQ3_XXS_NL, qt_dequantize_iq3_xxs>;
+template [[host_name("kernel_moe_down_iq3_s_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_IQ3_S_BYTES, QT_IQ3_S_NL, qt_dequantize_iq3_s, 0>;
+template [[host_name("kernel_moe_up_silu_mul_iq3_s_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_IQ3_S_BYTES, QT_IQ3_S_NL, qt_dequantize_iq3_s, 1>;
+template [[host_name("kernel_moe_swiglu_iq3_s_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_IQ3_S_BYTES, QT_IQ3_S_NL, qt_dequantize_iq3_s>;
+template [[host_name("kernel_moe_down_iq4_nl_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_IQ4_NL_BYTES, QT_IQ4_NL_NL, qt_dequantize_iq4_nl, 0>;
+template [[host_name("kernel_moe_up_silu_mul_iq4_nl_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_IQ4_NL_BYTES, QT_IQ4_NL_NL, qt_dequantize_iq4_nl, 1>;
+template [[host_name("kernel_moe_swiglu_iq4_nl_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_IQ4_NL_BYTES, QT_IQ4_NL_NL, qt_dequantize_iq4_nl>;
+template [[host_name("kernel_moe_down_iq4_xs_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_IQ4_XS_BYTES, QT_IQ4_XS_NL, qt_dequantize_iq4_xs, 0>;
+template [[host_name("kernel_moe_up_silu_mul_iq4_xs_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_IQ4_XS_BYTES, QT_IQ4_XS_NL, qt_dequantize_iq4_xs, 1>;
+template [[host_name("kernel_moe_swiglu_iq4_xs_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_IQ4_XS_BYTES, QT_IQ4_XS_NL, qt_dequantize_iq4_xs>;
+template [[host_name("kernel_moe_down_f32_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_F32_BYTES, QT_F32_NL, qt_dequantize_f32, 0>;
+template [[host_name("kernel_moe_up_silu_mul_f32_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_F32_BYTES, QT_F32_NL, qt_dequantize_f32, 1>;
+template [[host_name("kernel_moe_swiglu_f32_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_F32_BYTES, QT_F32_NL, qt_dequantize_f32>;
+template [[host_name("kernel_moe_down_f16_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_F16_BYTES, QT_F16_NL, qt_dequantize_f16, 0>;
+template [[host_name("kernel_moe_up_silu_mul_f16_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_F16_BYTES, QT_F16_NL, qt_dequantize_f16, 1>;
+template [[host_name("kernel_moe_swiglu_f16_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_F16_BYTES, QT_F16_NL, qt_dequantize_f16>;
+template [[host_name("kernel_moe_down_bf16_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_BF16_BYTES, QT_BF16_NL, qt_dequantize_bf16, 0>;
+template [[host_name("kernel_moe_up_silu_mul_bf16_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_BF16_BYTES, QT_BF16_NL, qt_dequantize_bf16, 1>;
+template [[host_name("kernel_moe_swiglu_bf16_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_BF16_BYTES, QT_BF16_NL, qt_dequantize_bf16>;

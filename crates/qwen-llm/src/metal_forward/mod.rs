@@ -2642,6 +2642,7 @@ impl MetalModel {
             }
         }
         loader.finish(exact_sentinel, expected_storage_requests)?;
+        crate::metal_dflash::log_prefill_moe_grouped_fallbacks(&model.arch, &blocks);
 
         Ok(Self {
             arch: model.arch,

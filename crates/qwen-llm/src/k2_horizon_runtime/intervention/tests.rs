@@ -140,7 +140,11 @@ fn gpu_ordered_interventions_match_formulas_and_preserve_causal_kv() {
     let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
     let source = GgufFile::open(std::env::var("K2_GGUF").expect("K2_GGUF")).unwrap();
     let ctx = MetalContext::new().unwrap();
-    let model = K2LoadedModel::load_unqualified(&ctx, &source, 4).unwrap();
+    let mut model = K2LoadedModel::load_unqualified(&ctx, &source, 4).unwrap();
+    // This test compares whole-span and split appends bit for bit, which only
+    // the serial/Q8 lineage guarantees; batched prefill agrees within
+    // tolerance (k2_general_batched_prefill_matches_serial_*).
+    model.prefill = PrefillMode::bitwise_lineage(&model.weights);
     let mut plain = model.create_session(37).unwrap();
     let baseline = plain
         .append_with_captures(&[0, 42, 17], &[0, 1, 35])

@@ -145,6 +145,19 @@ impl DeepSeekV4CheckpointStore {
         context: DeepSeekV4StoreContext<'_>,
         request_tokens: &[u32],
     ) -> Result<DeepSeekV4LookupReport, DeepSeekV4CheckpointStoreError> {
+        self.lookup_filtered(context, request_tokens, |_, _| true)
+    }
+
+    /// [`Self::lookup`], consulting `admit(matched_len, blob_bytes)` before
+    /// decoding each candidate (longest first); rejected candidates are
+    /// skipped unread. The decoded snapshot is returned by value, so callers
+    /// can share it (e.g. promote it into a RAM cache) before restoring.
+    pub fn lookup_filtered(
+        &self,
+        context: DeepSeekV4StoreContext<'_>,
+        request_tokens: &[u32],
+        mut admit: impl FnMut(usize, u64) -> bool,
+    ) -> Result<DeepSeekV4LookupReport, DeepSeekV4CheckpointStoreError> {
         context.validate()?;
         if request_tokens.is_empty() {
             return Ok(DeepSeekV4LookupReport::miss());
@@ -158,6 +171,9 @@ impl DeepSeekV4CheckpointStore {
             let Some(lease) = self.open_candidate(&candidate.path)? else {
                 continue;
             };
+            if !admit(candidate.matched_len, lease.size) {
+                continue;
+            }
             match decode_causal_snapshot(&mut &lease.file, context.codec_constraints()) {
                 Ok(snapshot)
                     if namespace_matches(

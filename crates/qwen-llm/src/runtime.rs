@@ -10,7 +10,7 @@ use crate::cache_probe::{available_memory_bytes, probe_fd_residency, probe_fd_re
 use crate::checkpoint_codec::SNAPSHOT_RECORD_FIXED_BYTES;
 use crate::checkpoint_identity::{
     CheckpointCompatibilityReport, CheckpointIdentityCache, CheckpointIdentityError,
-    checkpoint_compatibility,
+    checkpoint_compatibility, compose_compatibility_id,
 };
 use crate::checkpoint_store::{
     CheckpointStoreError, DurableCheckpointStore, PublishReport, StoreContext,
@@ -1140,6 +1140,11 @@ impl PreparedPrefixCacheLookup {
         self.restored_prefix_len
     }
 
+    /// Canonical request prefix matched, including a pending token.
+    pub fn matched_prefix_len(&self) -> usize {
+        self.matched_prefix_len
+    }
+
     pub fn is_exact_with_final_logits(&self) -> bool {
         self.exact
             && self.restored_prefix_len == self.matched_prefix_len
@@ -1274,6 +1279,57 @@ pub struct DurableRestoreAttempt {
 pub struct DurablePublishReport {
     pub compatibility: CheckpointCompatibilityReport,
     pub store: PublishReport,
+}
+
+/// Outcome of [`LoadedModel::promote_durable_prefix`].
+#[derive(Clone, Debug)]
+pub struct DurablePromotion {
+    pub lookup: DurableLookupTelemetry,
+    /// Decoded payload bytes of the promoted record; zero on a miss.
+    pub snapshot_bytes: u64,
+    /// RAM cache entry now representing the record, or `None` on a miss or
+    /// when strict cache insertion refused it.
+    pub entry: Option<EntryId>,
+}
+
+impl DurablePromotion {
+    pub fn promoted_prefix_len(&self) -> Option<usize> {
+        self.entry.map(|_| self.lookup.matched_prefix_len)
+    }
+}
+
+/// Publishes prepared checkpoints of one loaded model without borrowing it,
+/// so durable writes can run on a background thread. The model's strong
+/// content identity is supplied per call because it may resolve after the
+/// publisher is created.
+#[derive(Clone)]
+pub struct DetachedCheckpointPublisher {
+    owner: Arc<ModelOwnerToken>,
+    vocab_size: usize,
+}
+
+impl DetachedCheckpointPublisher {
+    pub fn publish(
+        &self,
+        store: &DurableCheckpointStore,
+        content_id: &[u8; 32],
+        prepared: &PreparedCheckpoint,
+        max_record_bytes: u64,
+    ) -> Result<PublishReport, RuntimeError> {
+        ensure_same_model_owner(&self.owner, &prepared.owner)?;
+        let compatibility_id =
+            compose_compatibility_id(*content_id, prepared.snapshot.identity.abi());
+        Ok(store.publish(
+            StoreContext {
+                compatibility_id: &compatibility_id,
+                identity: &prepared.snapshot.identity,
+                vocab_size: self.vocab_size,
+                max_context_tokens: prepared.max_context_tokens,
+                max_record_bytes,
+            },
+            &prepared.snapshot,
+        )?)
+    }
 }
 
 /// One model loaded into a [`Runtime`].
@@ -2198,6 +2254,111 @@ impl LoadedModel {
         restored: &DurablePrefixRestore,
     ) -> Result<PrefixCacheInsert, RuntimeError> {
         self.cache_prepared_checkpoint(&restored.checkpoint)
+    }
+
+    /// Find the longest durable prefix of `request_tokens` and promote it
+    /// into the process-local cache (strictly, marked as already durable)
+    /// without a destination sequence. A following
+    /// [`Self::lookup_cached_prefix`] then restores it exactly like a RAM hit,
+    /// so long-running services keep a single restore path.
+    ///
+    /// `content_id` is this model's strong content identity, resolved by the
+    /// caller (possibly on another thread over the same retained files).
+    /// `admit(matched_len, blob_bytes)` gates each candidate, longest first,
+    /// before it is read.
+    pub fn promote_durable_prefix(
+        &self,
+        store: &DurableCheckpointStore,
+        content_id: &[u8; 32],
+        request_tokens: &[i32],
+        max_record_bytes: u64,
+        admit: impl FnMut(usize, u64) -> bool,
+    ) -> Result<DurablePromotion, RuntimeError> {
+        let identity = self.snapshot_identity_for_abi(self.metal_model.snapshot_abi());
+        let compatibility_id = compose_compatibility_id(*content_id, identity.abi());
+        let max_context_tokens = request_tokens.len().max(1);
+        let vocab_size = self.metal_model.arch.vocab_size as usize;
+        let mut lookup = store.lookup_filtered(
+            StoreContext {
+                compatibility_id: &compatibility_id,
+                identity: &identity,
+                vocab_size,
+                max_context_tokens,
+                max_record_bytes,
+            },
+            request_tokens,
+            admit,
+        )?;
+        let telemetry = DurableLookupTelemetry {
+            matched_prefix_len: lookup.matched_prefix_len,
+            restored_prefix_len: lookup.restored_prefix_len,
+            exact: lookup.exact,
+            candidates_examined: lookup.candidates_examined,
+            corrupt_entries_removed: lookup.corrupt_entries_removed,
+            touched: lookup.touched,
+        };
+        let Some(snapshot) = lookup.snapshot.take() else {
+            return Ok(DurablePromotion {
+                lookup: telemetry,
+                snapshot_bytes: 0,
+                entry: None,
+            });
+        };
+        snapshot.validate_for_restore(&identity, max_context_tokens, Some(vocab_size))?;
+        let snapshot_bytes = snapshot.n_bytes();
+        let entry = self
+            .prefix_cache
+            .lock()
+            .insert_durable_strict(Arc::new(snapshot));
+        Ok(DurablePromotion {
+            lookup: telemetry,
+            snapshot_bytes,
+            entry,
+        })
+    }
+
+    /// A publisher for this model's prepared checkpoints that does not
+    /// borrow the model.
+    pub fn detached_checkpoint_publisher(&self) -> DetachedCheckpointPublisher {
+        DetachedCheckpointPublisher {
+            owner: Arc::clone(&self.owner),
+            vocab_size: self.metal_model.arch.vocab_size as usize,
+        }
+    }
+
+    /// Retain entries that leave the RAM cache through budget eviction or
+    /// idle/age expiry until [`Self::take_prefix_cache_spills`] drains them.
+    /// Pressure relief ([`Self::evict_prefix_cache_for`]) never retains.
+    pub fn set_prefix_cache_spill(&self, enabled: bool) {
+        self.prefix_cache.lock().set_spill(enabled);
+    }
+
+    /// Checkpoints released since the last drain that are not already backed
+    /// by a durable record.
+    pub fn take_prefix_cache_spills(&self) -> Vec<PreparedCheckpoint> {
+        let spilled = self.prefix_cache.lock().take_spilled();
+        spilled
+            .into_iter()
+            .map(|snapshot| self.indexed_checkpoint(snapshot))
+            .collect()
+    }
+
+    /// Indexed checkpoints not already backed by a durable record, most
+    /// valuable first under the cache policy.
+    pub fn prefix_cache_persist_candidates(&self) -> Vec<PreparedCheckpoint> {
+        let candidates = self.prefix_cache.lock().persist_candidates();
+        candidates
+            .into_iter()
+            .map(|snapshot| self.indexed_checkpoint(snapshot))
+            .collect()
+    }
+
+    fn indexed_checkpoint(&self, snapshot: Arc<SessionSnapshot>) -> PreparedCheckpoint {
+        PreparedCheckpoint {
+            owner: Arc::clone(&self.owner),
+            max_context_tokens: snapshot.prefix_len().max(1),
+            snapshot,
+        }
     }
 
     pub fn restore_cached_prefix(

@@ -287,6 +287,18 @@ pub fn checkpoint_content_identity_without_weight_hashing(
     resolve_content_sources_without_weight_hashing(&sources, cache)
 }
 
+/// Whether two opened GGUFs retain the same ordered shard file descriptions
+/// (device, inode, size, mtime, ctime). An identity resolved over one is then
+/// keyed and cached exactly as it would be for the other, so a second open
+/// of the loaded files can resolve the identity on another thread.
+pub fn same_identity_sources(a: &GgufFile, b: &GgufFile) -> bool {
+    a.shards.len() == b.shards.len()
+        && a.shards
+            .iter()
+            .zip(&b.shards)
+            .all(|(a, b)| a.source_stamp == b.source_stamp)
+}
+
 /// Report whether every shard carries a fresh declared-digest sidecar, without
 /// resolving or caching an identity.
 pub fn declared_identity_available(gguf: &GgufFile) -> bool {
@@ -648,7 +660,7 @@ fn update_content_bytes<'a>(
     }
 }
 
-fn compose_compatibility_id(content_id: [u8; 32], abi: SnapshotAbi) -> [u8; 32] {
+pub(crate) fn compose_compatibility_id(content_id: [u8; 32], abi: SnapshotAbi) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(COMPATIBILITY_DOMAIN);
     hasher.update(&content_id);

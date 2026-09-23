@@ -118,6 +118,31 @@ impl DeepSeekV4CausalSnapshot {
         &self.causal_digest
     }
 
+    /// A copy attributed to `model_content_id` instead of the identity it was
+    /// captured under; the causal state is unchanged and its digests are
+    /// recomputed.
+    ///
+    /// Sound only when the caller knows both identities name the same
+    /// resident weights — e.g. a server that bound a process-local stand-in
+    /// identity until the strong content identity finished resolving over the
+    /// very files it loaded. `config` must be the geometry the snapshot was
+    /// captured under; a mismatch is rejected.
+    pub fn rebound_to_model(
+        &self,
+        model_content_id: DeepSeekV4ModelContentId,
+        config: &DeepSeekV4Config,
+    ) -> Result<Self, DeepSeekV4MetalError> {
+        if self.compatibility_digest != snapshot_compatibility_digest(self.model_content_id, config)
+        {
+            return invalid("DeepSeek V4 snapshot geometry does not match the rebinding config");
+        }
+        let mut rebound = self.clone();
+        rebound.model_content_id = model_content_id;
+        rebound.compatibility_digest = snapshot_compatibility_digest(model_content_id, config);
+        rebound.causal_digest = causal_digest(&rebound);
+        Ok(rebound)
+    }
+
     /// Bytes in the canonical token and state arenas, excluding Rust object and
     /// allocator metadata.
     pub fn payload_bytes(&self) -> u64 {
@@ -1706,6 +1731,39 @@ mod tests {
             digest,
             snapshot_compatibility_digest(model_id(0x5a), &tokenizer_drift)
         );
+    }
+
+    #[test]
+    fn rebinding_changes_only_identity_and_its_digests() {
+        let config = crate::deepseek_v4::flash_0731_config_fixture();
+        let mut snapshot = DeepSeekV4CausalSnapshot {
+            model_content_id: model_id(0x11),
+            compatibility_digest: snapshot_compatibility_digest(model_id(0x11), &config),
+            next_position: 2,
+            prefix_tokens: vec![5, 6].into(),
+            prefix_digest: [0; 32],
+            source_observation: DeepSeekV4SnapshotObservation::Unavailable,
+            raw_f16_bits: vec![1, 2, 3].into(),
+            compressor_f32_bits: vec![4].into(),
+            published_f16_bits: Vec::new().into(),
+            causal_digest: [0; 32],
+        };
+        snapshot.refresh_digests();
+        let rebound = snapshot.rebound_to_model(model_id(0x22), &config).unwrap();
+        assert_eq!(rebound.model_content_id(), model_id(0x22));
+        assert_eq!(
+            rebound.compatibility_digest(),
+            snapshot_compatibility_digest(model_id(0x22), &config)
+        );
+        assert_eq!(rebound.causal_digest, causal_digest(&rebound));
+        assert_ne!(rebound.causal_digest, snapshot.causal_digest);
+        assert_eq!(rebound.prefix_digest, snapshot.prefix_digest);
+        assert_eq!(rebound.prefix_tokens, snapshot.prefix_tokens);
+        assert_eq!(rebound.raw_f16_bits, snapshot.raw_f16_bits);
+        assert_eq!(rebound.compressor_f32_bits, snapshot.compressor_f32_bits);
+        let mut drift = config;
+        drift.tokenizer_pre.push('x');
+        assert!(snapshot.rebound_to_model(model_id(0x22), &drift).is_err());
     }
 
     #[test]

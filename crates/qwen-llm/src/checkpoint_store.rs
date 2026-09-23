@@ -139,6 +139,19 @@ impl DurableCheckpointStore {
         context: StoreContext<'_>,
         request_tokens: &[i32],
     ) -> Result<LookupReport, CheckpointStoreError> {
+        self.lookup_filtered(context, request_tokens, |_, _| true)
+    }
+
+    /// [`Self::lookup`], consulting `admit(matched_len, blob_bytes)` before
+    /// decoding each candidate (longest first). A rejected candidate is
+    /// skipped without reading it, so callers can require a longer match
+    /// than they already hold or refuse records they cannot afford to load.
+    pub fn lookup_filtered(
+        &self,
+        context: StoreContext<'_>,
+        request_tokens: &[i32],
+        mut admit: impl FnMut(usize, u64) -> bool,
+    ) -> Result<LookupReport, CheckpointStoreError> {
         if request_tokens.is_empty() {
             return Ok(LookupReport::miss());
         }
@@ -151,6 +164,9 @@ impl DurableCheckpointStore {
             let Some(lease) = self.open_candidate(&candidate.path)? else {
                 continue;
             };
+            if !admit(candidate.matched_len, lease.size) {
+                continue;
+            }
             match decode_snapshot(&mut &lease.file, context.codec_constraints()) {
                 Ok(snapshot)
                     if namespace_matches(

@@ -315,24 +315,43 @@ impl SnapshotPolicy {
         }
     }
 
-    fn victim(&self, protect: Option<EntryId>) -> Option<EntryId> {
-        let now = self.clock.now();
+    /// Every entry (pinned included), most valuable first: the exact reverse
+    /// of the order [`Self::evict_to_budget`] would release them in. Used to
+    /// spend a bounded persistence budget on the entries worth keeping most.
+    pub fn ranked_best_first(&self) -> Vec<EntryId> {
+        let mut ranked: Vec<_> = self
+            .entries
+            .iter()
+            .map(|(&id, meta)| (self.rank_key(meta), id))
+            .collect();
+        ranked.sort_by(|a, b| rank_cmp(&b.0, &a.0));
+        ranked.into_iter().map(|(_, id)| id).collect()
+    }
+
+    fn rank_key(&self, meta: &Meta) -> (f64, Duration, u64) {
         let half_life = self.config.half_life;
+        // Zero half-life is the recency limit: every priority ties.
+        let priority = if half_life.is_zero() {
+            0.0
+        } else {
+            decayed(meta, self.clock.now(), half_life) * meta.value as f64
+                / meta.bytes.max(1) as f64
+        };
+        (priority, meta.last_access, meta.seq)
+    }
+
+    fn victim(&self, protect: Option<EntryId>) -> Option<EntryId> {
         self.entries
             .iter()
             .filter(|(id, meta)| meta.pins == 0 && Some(**id) != protect)
-            .map(|(&id, meta)| {
-                // Zero half-life is the recency limit: every priority ties.
-                let priority = if half_life.is_zero() {
-                    0.0
-                } else {
-                    decayed(meta, now, half_life) * meta.value as f64 / meta.bytes.max(1) as f64
-                };
-                (priority, meta.last_access, meta.seq, id)
-            })
-            .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)))
-            .map(|(.., id)| id)
+            .map(|(&id, meta)| (self.rank_key(meta), id))
+            .min_by(|a, b| rank_cmp(&a.0, &b.0))
+            .map(|(_, id)| id)
     }
+}
+
+fn rank_cmp(a: &(f64, Duration, u64), b: &(f64, Duration, u64)) -> std::cmp::Ordering {
+    a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2))
 }
 
 fn decayed(meta: &Meta, now: Duration, half_life: Duration) -> f64 {
@@ -497,6 +516,24 @@ mod tests {
         let newest = policy.insert(10, 1);
         assert!(policy.evict_to_budget(Some(newest)).is_empty());
         assert_eq!(policy.total_bytes(), 20);
+    }
+
+    #[test]
+    fn ranked_best_first_reverses_victim_order() {
+        let (mut ranked, _) = policy(1000, frecency(600));
+        let low = ranked.insert(10, 1);
+        let high = ranked.insert(10, 50);
+        let mid = ranked.insert(10, 5);
+        let pinned = ranked.insert(10, 0);
+        ranked.pin(pinned);
+        assert_eq!(ranked.ranked_best_first(), [high, mid, low, pinned]);
+        // LRU: most recent access first.
+        let (mut lru, clock) = policy(1000, SnapshotPolicyConfig::LRU);
+        let a = lru.insert(10, 1);
+        let b = lru.insert(10, 1);
+        clock.advance(S);
+        lru.touch(a);
+        assert_eq!(lru.ranked_best_first(), [a, b]);
     }
 
     #[test]

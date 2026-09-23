@@ -47,12 +47,20 @@ pub const DEFAULT_MAX_BYTES: u64 = 16 << 30;
 struct Entry {
     id: EntryId,
     snapshot: Arc<SessionSnapshot>,
+    /// Promoted from a durable store: an equivalent record is already on
+    /// disk, so leaving RAM must not write it again.
+    durable: bool,
 }
 
 pub struct PrefixCache {
     buckets: HashMap<PrefixCacheKey, Vec<Entry>>,
     keys: HashMap<EntryId, PrefixCacheKey>,
     policy: SnapshotPolicy,
+    /// When set, entries released by budget eviction or expiry (not by
+    /// pressure relief, replacement, or clear) are retained in `spilled`
+    /// until the owner drains them with [`Self::take_spilled`].
+    spill: bool,
+    spilled: Vec<Arc<SessionSnapshot>>,
 }
 
 impl Default for PrefixCache {
@@ -87,7 +95,41 @@ impl PrefixCache {
             buckets: HashMap::new(),
             keys: HashMap::new(),
             policy: SnapshotPolicy::with_clock(max_bytes, config, clock),
+            spill: false,
+            spilled: Vec::new(),
         }
+    }
+
+    /// Retain entries that leave through budget eviction or expiry for a
+    /// durable tier. Disabling drops anything not yet drained.
+    pub fn set_spill(&mut self, enabled: bool) {
+        self.spill = enabled;
+        if !enabled {
+            self.spilled.clear();
+        }
+    }
+
+    /// Snapshots released since the last drain, oldest release first. Their
+    /// payload stays resident until the caller drops them.
+    pub fn take_spilled(&mut self) -> Vec<Arc<SessionSnapshot>> {
+        std::mem::take(&mut self.spilled)
+    }
+
+    /// Indexed snapshots not already backed by a durable record, most
+    /// valuable first (the reverse of eviction order).
+    pub fn persist_candidates(&self) -> Vec<Arc<SessionSnapshot>> {
+        self.policy
+            .ranked_best_first()
+            .into_iter()
+            .filter_map(|id| self.entry(id))
+            .filter(|entry| !entry.durable)
+            .map(|entry| Arc::clone(&entry.snapshot))
+            .collect()
+    }
+
+    fn entry(&self, id: EntryId) -> Option<&Entry> {
+        let key = self.keys.get(&id)?;
+        self.buckets.get(key)?.iter().find(|entry| entry.id == id)
     }
 
     pub fn total_bytes(&self) -> u64 {
@@ -126,13 +168,14 @@ impl PrefixCache {
         self.policy.set_max_bytes(max_bytes);
         let newest = self.policy.most_recent();
         let evicted = self.policy.evict_to_budget(newest);
-        self.drop_index(&evicted);
+        self.release(&evicted, true);
     }
 
     pub fn clear(&mut self) {
         self.buckets.clear();
         self.keys.clear();
         self.policy.clear();
+        self.spilled.clear();
     }
 
     /// Bytes held by pinned entries, which neither eviction nor expiry frees.
@@ -153,14 +196,16 @@ impl PrefixCache {
     /// Drop entries past the policy's idle TTL or maximum age.
     pub fn sweep(&mut self) -> Evicted {
         let evicted = self.policy.sweep();
-        self.drop_index(&evicted);
+        self.release(&evicted, true);
         evicted
     }
 
-    /// Evict unpinned entries by rank until `bytes` are released.
+    /// Evict unpinned entries by rank until `bytes` are released. This is
+    /// memory-pressure relief, so released payloads are never retained for
+    /// spilling: the caller needs the bytes back now.
     pub fn evict_for(&mut self, bytes: u64) -> Evicted {
         let evicted = self.policy.evict_for(bytes);
-        self.drop_index(&evicted);
+        self.release(&evicted, false);
         evicted
     }
 
@@ -228,12 +273,32 @@ impl PrefixCache {
         if bucket.iter().any(|entry| entry.id == id) {
             self.policy.touch(id);
         } else {
-            bucket.push(Entry { id, snapshot: snap });
+            bucket.push(Entry {
+                id,
+                snapshot: snap,
+                durable: false,
+            });
             self.keys.insert(id, key);
         }
         let evicted = self.policy.evict_to_budget(Some(id));
-        self.drop_index(&evicted);
+        self.release(&evicted, true);
         id
+    }
+
+    /// Strict insertion of a snapshot decoded from a durable record. The
+    /// entry is marked durable so a later eviction does not rewrite it; an
+    /// equivalent entry that already won keeps its own marking.
+    pub(crate) fn insert_durable_strict(&mut self, snap: Arc<SessionSnapshot>) -> Option<EntryId> {
+        let id = self.insert_shared_strict(Arc::clone(&snap))?;
+        let key = self.keys.get(&id).cloned();
+        if let Some(entry) = key
+            .and_then(|key| self.buckets.get_mut(&key))
+            .and_then(|bucket| bucket.iter_mut().find(|entry| entry.id == id))
+            .filter(|entry| Arc::ptr_eq(&entry.snapshot, &snap))
+        {
+            entry.durable = true;
+        }
+        Some(id)
     }
 
     /// Strict insertion: `None` when the snapshot cannot fit without evicting
@@ -250,13 +315,20 @@ impl PrefixCache {
         Some(id)
     }
 
-    fn drop_index(&mut self, evicted: &Evicted) {
+    /// Drop released entries from the index; `spillable` releases (budget
+    /// eviction, expiry) are retained for the durable tier when enabled.
+    fn release(&mut self, evicted: &Evicted, spillable: bool) {
         for id in &evicted.ids {
             let Some(key) = self.keys.remove(id) else {
                 continue;
             };
             if let Some(bucket) = self.buckets.get_mut(&key) {
-                bucket.retain(|entry| entry.id != *id);
+                if let Some(index) = bucket.iter().position(|entry| entry.id == *id) {
+                    let entry = bucket.remove(index);
+                    if spillable && self.spill && !entry.durable {
+                        self.spilled.push(entry.snapshot);
+                    }
+                }
                 if bucket.is_empty() {
                     self.buckets.remove(&key);
                 }
@@ -926,6 +998,99 @@ mod tests {
         let mut cache = PrefixCache::new();
         let first = cache.insert(snap(id.clone(), &[1, 2], 64));
         assert_eq!(cache.insert(snap(id.clone(), &[1, 2], 96)), first);
+    }
+
+    #[test]
+    fn spill_retains_budget_and_expiry_releases_only() {
+        let id = ident(1);
+        let one = snap_bytes(&[1], 64);
+        let (mut cache, clock) = frecency_cache(2 * one);
+        // Disabled by default: nothing is retained.
+        cache.insert(snap(id.clone(), &[1], 64));
+        cache.insert(snap(id.clone(), &[2], 64));
+        cache.insert(snap(id.clone(), &[3], 64));
+        assert!(cache.take_spilled().is_empty());
+
+        cache.set_spill(true);
+        cache.insert(snap(id.clone(), &[4], 64)); // budget eviction
+        let spilled = cache.take_spilled();
+        assert_eq!(spilled.len(), 1);
+        assert!(cache.take_spilled().is_empty(), "drain empties the buffer");
+
+        clock.advance(Duration::from_secs(3601)); // idle expiry
+        assert_eq!(cache.sweep().ids.len(), 2);
+        assert_eq!(cache.take_spilled().len(), 2);
+
+        // Pressure relief frees memory now; it never retains payloads.
+        cache.insert(snap(id.clone(), &[5], 64));
+        assert_eq!(cache.evict_for(1).ids.len(), 1);
+        assert!(cache.take_spilled().is_empty());
+
+        // Replacement by a dominating representation is not a release.
+        let mut pending = snap(id.clone(), &[6], 32);
+        pending.pending_token = Some(7);
+        pending.final_logits = None;
+        cache.insert(pending);
+        cache.insert(snap(id.clone(), &[6, 7], 32));
+        assert!(cache.take_spilled().is_empty());
+
+        cache.set_spill(false);
+        cache.insert(snap(id.clone(), &[8], 64));
+        cache.insert(snap(id.clone(), &[9], 64));
+        assert!(cache.take_spilled().is_empty());
+    }
+
+    #[test]
+    fn durable_promotions_are_not_spilled_or_persist_candidates() {
+        let id = ident(1);
+        let one = snap_bytes(&[1], 64);
+        let (mut cache, _) = frecency_cache(2 * one);
+        cache.set_spill(true);
+        let promoted = Arc::new(snap(id.clone(), &[1], 64));
+        cache
+            .insert_durable_strict(Arc::clone(&promoted))
+            .expect("fits");
+        cache.insert(snap(id.clone(), &[2], 64));
+        let candidates = cache.persist_candidates();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].prefix_tokens, [2]);
+        // Evict both by budget: only the captured one is spilled.
+        cache.set_max_bytes(0);
+        cache.insert(snap(id.clone(), &[3], 64));
+        let spilled: Vec<_> = cache
+            .take_spilled()
+            .iter()
+            .map(|snapshot| snapshot.prefix_tokens.clone())
+            .collect();
+        assert_eq!(spilled, [vec![2]]);
+        assert!(
+            cache
+                .insert_durable_strict(Arc::new(snap(id, &[4], 64)))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn persist_candidates_follow_rank() {
+        let id = ident(1);
+        let (mut cache, _) = frecency_cache(1 << 20);
+        let cold = cache.insert(snap(id.clone(), &[1], 64));
+        cache.insert(snap(id.clone(), &[2], 64));
+        for _ in 0..3 {
+            assert!(cache.lookup_longest(&id, &[2]).is_some());
+        }
+        let order: Vec<_> = cache
+            .persist_candidates()
+            .iter()
+            .map(|snapshot| snapshot.prefix_tokens.clone())
+            .collect();
+        assert_eq!(order, [vec![2], vec![1]]);
+        assert!(cache.pin(cold));
+        assert_eq!(
+            cache.persist_candidates().len(),
+            2,
+            "pins do not hide entries"
+        );
     }
 
     #[test]

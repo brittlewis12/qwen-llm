@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-23 - Serve Transcript-Boundary Snapshots: Thinking Turns Reuse Their Prefix
+
+- Direct HTTP probes (no client harness), Qwen3.8-27B, greedy, 4.6K-token
+  instructions, 3-4 turns. Before: thinking-mode chat and tool loops that drop
+  reasoning items matched **0** tokens on every turn (~25-29 s/turn re-prefill);
+  no-thinking chat and reasoning-echoing tool loops already hit.
+- Cause: the template re-renders the prior assistant turn as a preclosed or
+  stripped think block while the prompt the model consumed ended `<think>\n`;
+  `\n` and `\n\n` are distinct tokens, so both captured boundaries (prompt end,
+  completed) sit past the divergence and GDN state cannot be rewound.
+- Fix: stop prefill at the generation header's `<|im_start|>`, capture, finish
+  the header. Prompt-end capture is skipped when the transcript snapshot lands;
+  completed capture is skipped when admitting it would evict that snapshot.
+  Drafter requests are unchanged.
+- Q4 4.6K thinking chat turns 2/3: 25.8/24.3 s -> 2.8/3.8 s (matched 4599/4663).
+  Reasoning-dropping tool loop turns 2-4: 28.9/28.9/27.2 s -> 6.7/7.5/3.4 s.
+  Q8 thinking chat turns 2/3: 23.2/23.0 s -> 3.7/4.6 s. Q4 41.5K (4 GiB budget):
+  225 s first turn, then 3.4/4.0 s. Q4 77K (12 GiB budget): 447 s, then 4.6/5.0 s
+  (restore 250 ms); at the 4 GiB default a 77K snapshot (~5.2 GB) is refused.
+- Q8 greedy text is identical base-vs-fix on all six turns, including
+  restored-vs-fresh turns and the split restored packed tail. Unit test plus 140
+  serve tests pass. Host was shared with unrelated media/ML load; decode tok/s
+  varied 10-24 in both binaries, matched-token counts are deterministic.
+
 ## 2026-09-17 - Prepare Muse Native FFN Packet Without GPU Execution
 
 - Source77bce02a adds onlycfg(test) capture hooks and an ignored fixed fusion screen.

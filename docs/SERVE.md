@@ -577,12 +577,22 @@ because client model-pickers probe it).
   rejected (`invalid_request`) — reasoning travels as items, never
   inline (F1: verbatim echo is what makes preserve reuse exact, and
   items make echo structural).
-- The server attempts prompt and completed boundaries when each is useful and
-  representable: an exact Qwen prompt hit skips redundant prompt capture, and
-  DS4 skips a completed boundary with no transition or a truncation inside open
+- Qwen serve snapshots the **transcript boundary**: the last `<|im_start|>`,
+  where the generation header begins. Qwen templates re-render a prior
+  assistant turn differently from the generation suffix the model consumed
+  (`<think>\n` versus a preclosed `<think>\n\n</think>`, or reasoning dropped by
+  the client), so prompt-end and completed snapshots stop prefixing the next
+  request one token after `<think>`, and a hybrid's recurrent state cannot be
+  rewound to recover. Prefill stops at the boundary, captures, then finishes
+  the header. Without it, thinking-mode chat and tool loops whose client drops
+  reasoning reused 0 tokens on every turn. A captured transcript boundary
+  replaces the prompt-end capture (an exact resend re-prefills only the header),
+  and a completed boundary is skipped when admitting it would evict the
+  request's transcript snapshot. Drafter requests keep single-pass prefill and
+  the prompt/completed pair. DS4 captures prompt and completed boundaries and
+  skips a completed boundary with no transition or a truncation inside open
   reasoning. Eligible boundaries enter the **RAM** prefix cache (8–42 ms each
-  per S0; this
-  makes the server's own next-turn path immune to client echo policy).
+  per S0). Evidence: PERF-LOG 2026-09-23 transcript-boundary entry.
   Capture is best-effort and admitted against cache bytes plus Metal/process
   headroom; denial or failure is logged and generation continues. Both family
   caches enforce the configured byte budget.

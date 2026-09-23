@@ -32,6 +32,11 @@ use std::time::Instant;
 const DFLASH_FIXED_SCRATCH_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 const SERIAL_TAIL_THRESHOLD: usize = 48;
 const RESTORED_TAIL_SCRATCH_LIMIT: u64 = 128 * 1024 * 1024;
+/// Longest generation header (`<|im_start|>assistant\n` plus a preopened or
+/// preclosed think block) separating a rendered transcript from its
+/// generation suffix.
+const TRANSCRIPT_HEADER_MAX_TOKENS: usize = 16;
+const IM_START_MARKER: &str = "<|im_start|>";
 
 #[cfg(test)]
 #[path = "restored_tail_pilot.rs"]
@@ -290,6 +295,20 @@ fn complete_dflash_capture(
     window_limit: usize,
 ) -> bool {
     dflash_capture_window_complete(prompt_len, start, captured, window_limit)
+}
+
+/// Token index of the generation header's `<|im_start|>`: the end of the
+/// rendered transcript. Qwen templates re-render a prior assistant turn
+/// differently from the generation suffix that preceded it (`<think>\n`
+/// versus `<think>\n\n</think>` when history reasoning is dropped), so
+/// prompt-end and completed snapshots stop prefixing the next request one
+/// token after `<think>`. The boundary before the header survives that
+/// re-render. A hybrid's recurrent state cannot be truncated, so the
+/// snapshot has to be taken here rather than recovered later.
+fn transcript_boundary(prompt_ids: &[i32], im_start: i32) -> Option<usize> {
+    let boundary = prompt_ids.iter().rposition(|&id| id == im_start)?;
+    let header = prompt_ids.len() - boundary;
+    (boundary > 0 && (2..=TRANSCRIPT_HEADER_MAX_TOKENS).contains(&header)).then_some(boundary)
 }
 
 fn use_serial_tail(
@@ -1133,7 +1152,48 @@ impl GenerationBackend for EngineBackend {
             None => None,
         };
         let mut speculate = dflash_plan.is_some();
+        // Transcript-boundary capture: stop prefill before the generation
+        // header, snapshot, then finish the header. Drafter capture windows
+        // are sized to the whole prompt, so speculative requests keep the
+        // single-pass prefill.
+        let transcript_split = self
+            .tokenizer
+            .encode(IM_START_MARKER, false)
+            .ok()
+            .and_then(|ids| (ids.len() == 1).then(|| ids[0]))
+            .and_then(|im_start| transcript_boundary(&prompt_ids, im_start))
+            .filter(|&boundary| {
+                boundary > sequence.position() && !speculate && dflash_capture.is_none()
+            });
         let prefill_t0 = Instant::now();
+        let mut transcript_capture_ms = 0.0;
+        let mut transcript_snapshot_bytes = None;
+        if let Some(boundary) = transcript_split {
+            prefill_remaining(
+                &self.loaded,
+                &forward,
+                self.dflash_head.as_ref(),
+                false,
+                &prompt_ids[..boundary],
+                chunk,
+                &mut sequence,
+                &mut scratch,
+                &mut dflash_capture,
+                sink,
+            )?;
+            let capture_t0 = Instant::now();
+            transcript_snapshot_bytes = self.try_cache_boundary(
+                &sequence,
+                &prompt_ids[..boundary],
+                None,
+                None,
+                None,
+                0,
+                "transcript",
+                0,
+            );
+            transcript_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
+        }
         let prefill_result = prefill_remaining(
             &self.loaded,
             &forward,
@@ -1192,7 +1252,7 @@ impl GenerationBackend for EngineBackend {
             }
             Err(error) => return Err(error),
         }
-        let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
+        let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3 - transcript_capture_ms;
         let logits = prompt_logits
             .ok_or_else(|| ServeError::server_error("prefill produced no prompt logits"))?;
         if speculate
@@ -1218,10 +1278,14 @@ impl GenerationBackend for EngineBackend {
         }
 
         // Prompt-boundary capture into the RAM cache (skip when this exact
-        // prompt was already an exact hit). The capture window buffer holds
-        // the prompt's trailing columns; publish them as the drafter tail.
+        // prompt was already an exact hit, or when the transcript boundary a
+        // few header tokens earlier already holds this state's reusable
+        // prefix). The capture window buffer holds the prompt's trailing
+        // columns; publish them as the drafter tail.
         let capture_t0 = Instant::now();
-        if !restore.as_ref().is_some_and(|restore| restore.exact) {
+        if !restore.as_ref().is_some_and(|restore| restore.exact)
+            && transcript_snapshot_bytes.is_none()
+        {
             let (tail, features) = match dflash_capture.as_ref() {
                 Some((dst, wstart, _, n_features, ring)) => (
                     ring.map(|window| {
@@ -1239,10 +1303,18 @@ impl GenerationBackend for EngineBackend {
                 tail,
                 features,
                 "prompt",
+                0,
             );
         }
 
-        let prompt_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
+        let prompt_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3 + transcript_capture_ms;
+        let transcript_phase = match transcript_split {
+            Some(boundary) => format!(
+                " transcript_boundary={boundary} transcript_captured={}",
+                transcript_snapshot_bytes.is_some()
+            ),
+            None => String::new(),
+        };
         let stop_tokens = self
             .loaded
             .gguf()
@@ -1384,8 +1456,9 @@ impl GenerationBackend for EngineBackend {
                         }),
                     dflash_prefix_replay_key.as_ref(),
                     replay_sampling.seed,
+                    transcript_snapshot_bytes,
                     format!(
-                        "tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1} decode_path=dflash"
+                        "tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1}{transcript_phase} decode_path=dflash"
                     ),
                 );
             }
@@ -1466,7 +1539,8 @@ impl GenerationBackend for EngineBackend {
                 }),
             dflash_prefix_replay_key.as_ref(),
             replay_sampling.seed,
-            format!("tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1} decode_path=serial"),
+            transcript_snapshot_bytes,
+            format!("tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1}{transcript_phase} decode_path=serial"),
         )
     }
 }
@@ -1507,7 +1581,8 @@ impl EngineBackend {
         capture_tail: Option<Vec<f32>>,
         capture_tail_features: usize,
         boundary: &'static str,
-    ) {
+        retain_bytes: u64,
+    ) -> Option<u64> {
         let estimate = match self.loaded.estimate_checkpoint_boundary_sizes(
             sequence,
             prefix_tokens.len(),
@@ -1520,7 +1595,7 @@ impl EngineBackend {
                 tracing::warn!(
                     "serve: {boundary} snapshot estimate failed; skipping cache capture: {error}"
                 );
-                return;
+                return None;
             }
         };
         if !self.loaded.prefix_cache_strict_eligible(estimate) {
@@ -1528,7 +1603,17 @@ impl EngineBackend {
                 "serve: {boundary} snapshot denied by cache budget; snapshot_bytes={estimate} cache_budget_bytes={}",
                 self.loaded.prefix_cache_stats().max_indexed_bytes,
             );
-            return;
+            return None;
+        }
+        // A same-request snapshot that the byte-LRU would evict to admit this
+        // one takes precedence: it is the boundary the next turn can reuse.
+        let budget = self.loaded.prefix_cache_stats().max_indexed_bytes;
+        if retain_bytes > 0 && estimate.saturating_add(retain_bytes) > budget {
+            tracing::info!(
+                target: "qwen_diag",
+                "serve: {boundary} snapshot skipped to retain transcript boundary; snapshot_bytes={estimate} retained_bytes={retain_bytes} cache_budget_bytes={budget}"
+            );
+            return None;
         }
         let signals = self.loaded.context().memory_signals();
         if let Err(reason) = super::snapshot_capture_admission(estimate, signals) {
@@ -1538,7 +1623,7 @@ impl EngineBackend {
                 signals.recommended_max_bytes,
                 signals.process_limit_remaining_bytes,
             );
-            return;
+            return None;
         }
         match self.loaded.prepare_checkpoint_boundary(
             sequence,
@@ -1549,17 +1634,26 @@ impl EngineBackend {
             capture_tail_features,
         ) {
             Ok(prepared) => match self.loaded.cache_prepared_checkpoint_strict(&prepared) {
-                Ok(Some(_)) => {}
-                Ok(None) => tracing::warn!(
-                    "serve: {boundary} snapshot rejected at strict cache insertion; request continues"
-                ),
-                Err(error) => tracing::warn!(
-                    "serve: {boundary} strict cache insertion failed; request continues: {error}"
-                ),
+                Ok(Some(_)) => Some(estimate),
+                Ok(None) => {
+                    tracing::warn!(
+                        "serve: {boundary} snapshot rejected at strict cache insertion; request continues"
+                    );
+                    None
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "serve: {boundary} strict cache insertion failed; request continues: {error}"
+                    );
+                    None
+                }
             },
-            Err(error) => tracing::warn!(
-                "serve: {boundary} snapshot capture failed; request continues: {error}"
-            ),
+            Err(error) => {
+                tracing::warn!(
+                    "serve: {boundary} snapshot capture failed; request continues: {error}"
+                );
+                None
+            }
         }
     }
 
@@ -1577,6 +1671,7 @@ impl EngineBackend {
         capture_ring: Option<(MetalTensor, usize, usize, usize)>,
         dflash_prefix_replay_key: Option<&DflashPrefixReplayKey>,
         dflash_prefix_replay_seed: u64,
+        transcript_snapshot_bytes: Option<u64>,
         phases: String,
     ) -> Result<GenerationOutcome, BackendFailure> {
         let completed_boundary_valid = match crate::derive_completed_checkpoint_boundary(
@@ -1609,6 +1704,7 @@ impl EngineBackend {
                     tail,
                     features,
                     "completed",
+                    transcript_snapshot_bytes.unwrap_or(0),
                 );
                 true
             }
@@ -1858,6 +1954,26 @@ mod tests {
             restored_extension_offsets,
             [None, Some(0), Some(1), Some(2)]
         );
+    }
+
+    #[test]
+    fn transcript_boundary_is_the_generation_header_start() {
+        const IM: i32 = 7;
+        // system, user, then `<|im_start|>assistant\n<think>\n`.
+        let prompt = [IM, 1, 2, 3, IM, 4, 5, 6, IM, 8, 9, 10, 11];
+        assert_eq!(transcript_boundary(&prompt, IM), Some(8));
+        // Preclosed headers are longer but still bounded.
+        let mut preclosed = vec![IM, 1, 2, IM];
+        preclosed.extend([8, 9, 10, 12, 13, 14]);
+        assert_eq!(transcript_boundary(&preclosed, IM), Some(3));
+        // A trailing marker with no header, a marker at position zero, a
+        // tail longer than any header, or no marker at all: no boundary.
+        assert_eq!(transcript_boundary(&[1, 2, IM], IM), None);
+        assert_eq!(transcript_boundary(&[IM, 1, 2, 3], IM), None);
+        let mut long_tail = vec![1, IM];
+        long_tail.extend(std::iter::repeat_n(3, TRANSCRIPT_HEADER_MAX_TOKENS));
+        assert_eq!(transcript_boundary(&long_tail, IM), None);
+        assert_eq!(transcript_boundary(&[1, 2, 3], IM), None);
     }
 
     #[test]

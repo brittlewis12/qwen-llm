@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-23 - Flash-Next Serve Prefix Reuse via RAM Snapshots
+
+- Flash-Next serve reset its session after every request, so every turn
+  re-prefilled the whole prompt (matched 0). It now snapshots the text session
+  at the transcript boundary (Qwen3.8 template, same reason as the Qwen
+  backend) and restores the longest cached strictly-shorter prefix into the
+  reset workspace; prefill continues on the cold plan's absolute ranges.
+- Snapshot = only state later tokens read: 36 GDN conv+delta, PLE conv and
+  n-gram history, per-QSA pending index keys, `n/4` compressed keys, `n` F16
+  K/V rows: `118,063,104 + 24,576*n + 3,072*floor(n/4)` bytes (170 MB at
+  2,047 tokens). HC/residual/MoE buffers are per-token scratch; logits are not
+  carried. Budget and eviction come from the shared serve snapshot cache
+  (`auto` picked 28.1 GB beside the 64 GB resident UD-Q3_K_XL model).
+- GPU: `snapshot_restore_replays_continuation_bit_exactly` passes (13+6 and
+  2,047+40 across the QSA dense end: logits and all 121 state tensors
+  bit-exact). Serve, UD-Q3_K_XL, 4.6K instructions, greedy: thinking chat
+  turns 2-3 12.1 s -> 2.8/2.2 s (matched 4599/4665); reasoning-dropping tool
+  loop turns 2-4 ~12.7 s -> 2.2-2.9 s; restore 9-20 ms; 7/7 turns identical
+  (reasoning, message, tool calls) to the pre-snapshot binary.
+
 ## 2026-09-23 - Generic Grouped MoE Prefill Kernels (Q4_K_S Gap)
 
 - Gap: Qwen3.6-35B-A3B UD-Q4_K_S prefilled at 304 tok/s against 1,539 tok/s

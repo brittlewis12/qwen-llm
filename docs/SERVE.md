@@ -229,10 +229,17 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   serve-owned snapshot cache (`serve/snapshot_cache.rs`; DS4 has no
   engine-side RAM prefix cache). Flash-Next (`serve/backend_qwen4exp.rs`, since 2026-09-17) holds
   one text-session workspace sized at load and hands it back reset after
-  every request: the Qwen3.8 contract (effort levels, thinking, tools), no
-  prefix reuse, no snapshots. `--snapshot-cache-mib` configures the Qwen and
-  DS4 caches (default `auto`; see the cache policy above). Muse does not claim
-  snapshot reuse yet.
+  every request: the Qwen3.8 contract (effort levels, thinking, tools).
+  Since 2026-09-23 it reuses prefixes through the shared serve snapshot
+  cache: a request restores the longest cached strictly-shorter token prefix
+  into the reset workspace and prefills the rest, with the Qwen
+  transcript-boundary split below. A snapshot holds only state later tokens
+  read — 36 GDN conv+delta states, PLE conv and n-gram history, and per QSA
+  layer its pending index-key block, `n/4` compressed index keys, and `n` F16
+  K/V rows: `118,063,104 + 24,576·n + 3,072·⌊n/4⌋` bytes (≈113 MiB + 24.75
+  KiB/token; ≈0.95 GB at 32K). `--snapshot-cache-mib` configures the Qwen,
+  Flash-Next, and DS4 caches (default `auto`; see the cache policy above). Muse
+  does not claim snapshot reuse yet.
   K2 uses fresh per-request sessions, has a zero snapshot budget, and has
   no prefix reuse, drafter, or tool protocol. Its verified chat profile separates
   reasoning and final answers without inheriting another family's parser.
@@ -610,7 +617,8 @@ because client model-pickers probe it).
   replaces the prompt-end capture (an exact resend re-prefills only the header),
   and the transcript entry is pinned while the completed boundary is inserted
   (skipped if it cannot fit beside it). Drafter requests keep single-pass prefill and
-  the prompt/completed pair. DS4 captures prompt and completed boundaries and
+  the prompt/completed pair. Flash-Next applies the same split and skips a
+  completed capture that would evict its transcript snapshot. DS4 captures prompt and completed boundaries and
   skips a completed boundary with no transition or a truncation inside open
   reasoning. Eligible boundaries enter the **RAM** prefix cache (8–42 ms each
   per S0). Evidence: PERF-LOG 2026-09-23 transcript-boundary entry.

@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-23 - DS4 Serve: Chat-Mode Completed Snapshots; Warm-Start Flip Explained
+
+- Chat-mode DS4 turns stopped by the token limit no longer drop their
+  completed snapshot (the "truncated inside reasoning" rule now requires a
+  preopened `<think>`); the next turn restores 4,585 instead of 4,578 tokens.
+- A serve probe answered turn 2 differently warm ("A prime number is...",
+  repeating turn 1) than cold ("Three primes larger than 50 are"). Present on
+  418a88c0 too. Localized with a GPU test: restoring a snapshot is
+  bit-identical to continuing; the difference is DS4 schedule drift. On a
+  3.4K prompt, continuing vs one cold chunk vs token-by-token decode land at
+  cos 0.996-0.9996 (max logit diff 1.1-2.8), inside the envelope
+  DEEPSEEK-V4-STRATEGY.md documents for native vs llama.cpp b10222 and for
+  llama.cpp's own singleton vs batched schedules. Near-tie greedy tokens can
+  flip between warm and cold turns; this is not a restore bug.
+- A DS4 pre-header snapshot split (as Qwen uses) was measured and dropped:
+  exact resends went 20.4 s -> 0.4 s, but every ordinary follow-up paid ~300
+  ms for the extra header step, and DS4's renderer already keeps prompt-end
+  snapshots prefix-stable. Storing final logits with the prompt-end snapshot
+  would make exact resends free without that cost (not done).
+
 ## 2026-09-23 - Serve Durable Snapshots: Warm Prefixes Across Restarts
 
 - Before: serve snapshots lived only in RAM; a restart re-prefilled every

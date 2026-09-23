@@ -94,6 +94,7 @@ pub mod qwen4exp_text_session;
 mod qwen_queue2;
 pub mod runtime;
 pub mod sampling;
+pub mod snapshot_policy;
 pub mod tensor;
 #[doc(hidden)]
 pub mod test_fixtures;

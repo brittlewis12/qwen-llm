@@ -1,4 +1,7 @@
 use crate::metal_forward::{SessionSnapshot, SnapshotIdentity};
+use crate::snapshot_policy::{
+    Clock, EntryId, Evicted, MonotonicClock, SnapshotPolicy, SnapshotPolicyConfig,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -33,24 +36,23 @@ pub struct PrefixCacheStats {
 /// Session snapshots are large (KV arenas + GDN state — tens to hundreds of
 /// MiB each on 27B-class models), so an unbounded cache is a reliability
 /// hazard in any long-running process. `PrefixCache` therefore carries a
-/// byte budget and evicts least-recently-used entries on insert.
+/// byte budget enforced on insert by a [`SnapshotPolicy`]: LRU without
+/// expiry by default, frecency with expiry for services.
 ///
 /// `DEFAULT_MAX_BYTES` is deliberately generous (16 GiB) so existing bench
 /// workflows never see eviction, while still bounding a runaway session.
 /// Product callers should size it explicitly via [`PrefixCache::with_max_bytes`].
 pub const DEFAULT_MAX_BYTES: u64 = 16 << 30;
 
+struct Entry {
+    id: EntryId,
+    snapshot: Arc<SessionSnapshot>,
+}
+
 pub struct PrefixCache {
-    buckets: HashMap<PrefixCacheKey, Vec<Arc<SessionSnapshot>>>,
-    total_bytes: u64,
-    max_bytes: u64,
-    /// Monotonic logical clock for LRU accounting. Bumped on insert and on
-    /// lookup hit; per-entry stamps live in `last_used`.
-    clock: u64,
-    /// Last-used stamp per (key, prefix_tokens) entry, keyed by the same
-    /// bucket key plus the index within the bucket's Vec. Rebuilt lazily on
-    /// eviction; kept as a parallel map to avoid widening `SessionSnapshot`.
-    last_used: HashMap<(PrefixCacheKey, usize), u64>,
+    buckets: HashMap<PrefixCacheKey, Vec<Entry>>,
+    keys: HashMap<EntryId, PrefixCacheKey>,
+    policy: SnapshotPolicy,
 }
 
 impl Default for PrefixCache {
@@ -64,173 +66,200 @@ impl PrefixCache {
         Self::default()
     }
 
-    /// A cache bounded at `max_bytes`. Inserting a snapshot larger than the
-    /// budget evicts everything else and stores the oversized snapshot alone
-    /// (the newest entry is never rejected: the caller just produced it and
-    /// a cold cache would be strictly worse).
+    /// An LRU cache bounded at `max_bytes`. Inserting a snapshot larger than
+    /// the budget evicts everything else and stores the oversized snapshot
+    /// alone (the newest entry is never rejected: the caller just produced it
+    /// and a cold cache would be strictly worse).
     pub fn with_max_bytes(max_bytes: u64) -> Self {
+        Self::with_policy(
+            max_bytes,
+            SnapshotPolicyConfig::LRU,
+            Arc::new(MonotonicClock::new()),
+        )
+    }
+
+    pub fn with_policy(
+        max_bytes: u64,
+        config: SnapshotPolicyConfig,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         Self {
             buckets: HashMap::new(),
-            total_bytes: 0,
-            max_bytes,
-            clock: 0,
-            last_used: HashMap::new(),
+            keys: HashMap::new(),
+            policy: SnapshotPolicy::with_clock(max_bytes, config, clock),
         }
     }
 
     pub fn total_bytes(&self) -> u64 {
-        self.total_bytes
+        self.policy.total_bytes()
     }
 
     pub fn max_bytes(&self) -> u64 {
-        self.max_bytes
+        self.policy.max_bytes()
     }
 
     pub fn len(&self) -> usize {
-        self.buckets.values().map(Vec::len).sum()
+        self.policy.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.buckets.is_empty()
+        self.policy.is_empty()
     }
 
     pub fn stats(&self) -> PrefixCacheStats {
         PrefixCacheStats {
             entries: self.len(),
-            indexed_bytes: self.total_bytes,
-            max_indexed_bytes: self.max_bytes,
+            indexed_bytes: self.total_bytes(),
+            max_indexed_bytes: self.max_bytes(),
         }
     }
 
+    pub fn policy_config(&self) -> SnapshotPolicyConfig {
+        self.policy.config()
+    }
+
+    pub fn set_policy_config(&mut self, config: SnapshotPolicyConfig) {
+        self.policy.set_config(config);
+    }
+
     pub fn set_max_bytes(&mut self, max_bytes: u64) {
-        self.max_bytes = max_bytes;
-        self.evict_to_budget();
+        self.policy.set_max_bytes(max_bytes);
+        let newest = self.policy.most_recent();
+        let evicted = self.policy.evict_to_budget(newest);
+        self.drop_index(&evicted);
     }
 
     pub fn clear(&mut self) {
         self.buckets.clear();
-        self.last_used.clear();
-        self.total_bytes = 0;
+        self.keys.clear();
+        self.policy.clear();
     }
 
-    /// Check whether an entry can ever fit without changing cache contents.
+    /// Bytes held by pinned entries, which neither eviction nor expiry frees.
+    pub fn pinned_bytes(&self) -> u64 {
+        self.policy.pinned_bytes()
+    }
+
+    /// Exclude an entry from eviction and expiry until [`Self::unpin`].
+    /// Returns false when the entry is no longer indexed.
+    pub fn pin(&mut self, id: EntryId) -> bool {
+        self.policy.pin(id)
+    }
+
+    pub fn unpin(&mut self, id: EntryId) {
+        self.policy.unpin(id);
+    }
+
+    /// Drop entries past the policy's idle TTL or maximum age.
+    pub fn sweep(&mut self) -> Evicted {
+        let evicted = self.policy.sweep();
+        self.drop_index(&evicted);
+        evicted
+    }
+
+    /// Evict unpinned entries by rank until `bytes` are released.
+    pub fn evict_for(&mut self, bytes: u64) -> Evicted {
+        let evicted = self.policy.evict_for(bytes);
+        self.drop_index(&evicted);
+        evicted
+    }
+
+    /// Check whether an entry can fit by evicting only unpinned entries,
+    /// without changing cache contents.
     pub(crate) fn eligible_strict(&self, bytes: u64) -> bool {
-        bytes <= self.max_bytes
+        self.policy.fits_strict(bytes)
     }
 
-    pub fn insert(&mut self, snap: SessionSnapshot) {
-        self.insert_shared(Arc::new(snap));
+    pub fn insert(&mut self, snap: SessionSnapshot) -> EntryId {
+        self.insert_shared(Arc::new(snap))
     }
 
-    pub(crate) fn insert_shared(&mut self, snap: Arc<SessionSnapshot>) {
+    /// Index `snap`, returning the id of the entry now representing its
+    /// canonical prefix (an equivalent existing winner keeps its id).
+    pub(crate) fn insert_shared(&mut self, snap: Arc<SessionSnapshot>) -> EntryId {
+        self.sweep();
         let key = PrefixCacheKey {
             identity: snap.identity.clone(),
             prefix_len: snap.matched_prefix_len(),
             prefix_hash: hash_snapshot_prefix(&snap),
         };
-        self.clock += 1;
-        let stamp = self.clock;
-        let bucket = self.buckets.remove(&key).unwrap_or_default();
-        let old_bucket_bytes: u64 = bucket.iter().map(|entry| entry.n_bytes()).sum();
-        self.total_bytes -= old_bucket_bytes;
-        let mut entries: Vec<(Arc<SessionSnapshot>, u64)> = bucket
-            .into_iter()
-            .enumerate()
-            .map(|(idx, entry)| {
-                let old_stamp = self.last_used.remove(&(key.clone(), idx)).unwrap_or(0);
-                (entry, old_stamp)
+        let bucket = self.buckets.entry(key.clone()).or_default();
+        let equivalent = |entry: &Entry| same_canonical_prefix(&entry.snapshot, &snap);
+        let existing_complete_logits = bucket
+            .iter()
+            .find(|entry| {
+                equivalent(entry)
+                    && entry.snapshot.pending_token.is_none()
+                    && entry.snapshot.final_logits.is_some()
             })
-            .collect();
-
-        let equivalent: Vec<usize> = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, (entry, _))| same_canonical_prefix(entry, &snap))
-            .map(|(idx, _)| idx)
-            .collect();
-        let existing_complete_logits = equivalent.iter().copied().find(|&idx| {
-            let entry = &entries[idx].0;
-            entry.pending_token.is_none() && entry.final_logits.is_some()
-        });
+            .map(|entry| entry.id);
         let incoming_complete_logits = snap.pending_token.is_none() && snap.final_logits.is_some();
-
-        if let Some(winner) = existing_complete_logits {
-            entries[winner].1 = stamp;
-            entries = entries
-                .into_iter()
-                .enumerate()
-                .filter(|(idx, (entry, _))| *idx == winner || !same_canonical_prefix(entry, &snap))
-                .map(|(_, entry)| entry)
-                .collect();
-        } else if incoming_complete_logits {
-            entries.retain(|(entry, _)| !same_canonical_prefix(entry, &snap));
-            entries.push((snap, stamp));
-        } else if let Some(existing) = equivalent
+        let same_representation = bucket
             .iter()
-            .copied()
-            .find(|&idx| same_snapshot_prefix(&entries[idx].0, &snap))
-        {
-            entries[existing].1 = stamp;
-        } else {
-            entries.push((snap, stamp));
-        }
+            .find(|entry| equivalent(entry) && same_snapshot_prefix(&entry.snapshot, &snap))
+            .map(|entry| entry.id);
 
-        if !entries.is_empty() {
-            let mut bucket = Vec::with_capacity(entries.len());
-            for (idx, (entry, entry_stamp)) in entries.into_iter().enumerate() {
-                self.total_bytes += entry.n_bytes();
-                self.last_used.insert((key.clone(), idx), entry_stamp);
-                bucket.push(entry);
+        let (id, replaced) = match (existing_complete_logits, same_representation) {
+            // An equivalent complete-logits checkpoint dominates every other
+            // representation of this boundary, including the incoming one.
+            (Some(winner), _) => (winner, true),
+            (None, Some(existing)) if !incoming_complete_logits => (existing, false),
+            _ => {
+                let id = self
+                    .policy
+                    .insert(snap.n_bytes(), snap.matched_prefix_len() as u64);
+                (id, incoming_complete_logits)
             }
-            self.buckets.insert(key, bucket);
+        };
+        if replaced {
+            let mut dropped = Vec::new();
+            bucket.retain(|entry| {
+                let keep = entry.id == id || !equivalent(entry);
+                if !keep {
+                    dropped.push(entry.id);
+                }
+                keep
+            });
+            for dropped in dropped {
+                self.policy.remove(dropped);
+                self.keys.remove(&dropped);
+            }
         }
-        self.evict_to_budget();
+        if bucket.iter().any(|entry| entry.id == id) {
+            self.policy.touch(id);
+        } else {
+            bucket.push(Entry { id, snapshot: snap });
+            self.keys.insert(id, key);
+        }
+        let evicted = self.policy.evict_to_budget(Some(id));
+        self.drop_index(&evicted);
+        id
     }
 
-    pub(crate) fn insert_shared_strict(&mut self, snap: Arc<SessionSnapshot>) -> bool {
+    /// Strict insertion: `None` when the snapshot cannot fit without evicting
+    /// pinned entries; never retains an oversized snapshot alone.
+    pub(crate) fn insert_shared_strict(&mut self, snap: Arc<SessionSnapshot>) -> Option<EntryId> {
         if !self.eligible_strict(snap.n_bytes()) {
-            return false;
+            return None;
         }
         // Deduplicate or replace the canonical boundary before enforcing the
         // budget. Reserving the full incoming size first can evict unrelated
-        // LRU entries even when an equivalent complete snapshot already wins.
-        self.insert_shared(snap);
-        debug_assert!(self.total_bytes <= self.max_bytes);
-        true
+        // entries even when an equivalent complete snapshot already wins.
+        let id = self.insert_shared(snap);
+        debug_assert!(self.total_bytes() <= self.max_bytes());
+        Some(id)
     }
 
-    /// Evict least-recently-used entries until `total_bytes <= max_bytes`,
-    /// never evicting the most-recently-stamped entry (the one just
-    /// inserted/updated).
-    fn evict_to_budget(&mut self) {
-        while self.total_bytes > self.max_bytes && self.len() > 1 {
-            // Find the (key, idx) with the smallest stamp, excluding the max.
-            let newest = self.last_used.values().copied().max().unwrap_or(0);
-            let victim = self
-                .last_used
-                .iter()
-                .filter(|&(_, &stamp)| stamp != newest)
-                .min_by_key(|&(_, &stamp)| stamp)
-                .map(|(k, _)| k.clone());
-            let Some((vkey, vidx)) = victim else { break };
-            let Some(bucket) = self.buckets.get_mut(&vkey) else {
-                self.last_used.remove(&(vkey, vidx));
+    fn drop_index(&mut self, evicted: &Evicted) {
+        for id in &evicted.ids {
+            let Some(key) = self.keys.remove(id) else {
                 continue;
             };
-            if vidx >= bucket.len() {
-                self.last_used.remove(&(vkey, vidx));
-                continue;
-            }
-            let removed = bucket.swap_remove(vidx);
-            self.total_bytes -= removed.n_bytes();
-            self.last_used.remove(&(vkey.clone(), vidx));
-            // swap_remove moved the former last element into vidx; fix its stamp key.
-            let moved_from = bucket.len();
-            if let Some(stamp) = self.last_used.remove(&(vkey.clone(), moved_from)) {
-                self.last_used.insert((vkey.clone(), vidx), stamp);
-            }
-            if bucket.is_empty() {
-                self.buckets.remove(&vkey);
+            if let Some(bucket) = self.buckets.get_mut(&key) {
+                bucket.retain(|entry| entry.id != *id);
+                if bucket.is_empty() {
+                    self.buckets.remove(&key);
+                }
             }
         }
     }
@@ -254,12 +283,14 @@ impl PrefixCache {
         self.lookup_and_touch(identity, request_tokens, true)
     }
 
+    /// Lookup without recording a hit. Callers sweep first if expiry matters.
     pub(crate) fn peek_longest_for_completion(
         &self,
         identity: &SnapshotIdentity,
         request_tokens: &[i32],
     ) -> Option<PrefixCacheHit> {
         self.lookup_longest_impl(identity, request_tokens, true)
+            .map(|(_, hit)| hit)
     }
 
     fn lookup_longest_impl(
@@ -267,7 +298,7 @@ impl PrefixCache {
         identity: &SnapshotIdentity,
         request_tokens: &[i32],
         exact_requires_logits: bool,
-    ) -> Option<PrefixCacheHit> {
+    ) -> Option<(EntryId, PrefixCacheHit)> {
         if request_tokens.is_empty() {
             return None;
         }
@@ -278,28 +309,30 @@ impl PrefixCache {
                 prefix_len,
                 prefix_hash: prefix_hashes[prefix_len - 1],
             };
-            let hit_idx = self.buckets.get(&key).and_then(|bucket| {
+            let hit = self.buckets.get(&key).and_then(|bucket| {
                 bucket
                     .iter()
-                    .enumerate()
-                    .filter(|(_, snap)| {
+                    .filter(|entry| {
+                        let snap = &entry.snapshot;
                         snapshot_matches_request(snap, request_tokens, prefix_len)
                             && (!exact_requires_logits
                                 || prefix_len != request_tokens.len()
                                 || snap.pending_token.is_some()
                                 || snap.final_logits.is_some())
                     })
-                    .max_by_key(|(_, snap)| snap.prefix_len())
-                    .map(|(idx, _)| idx)
+                    .max_by_key(|entry| entry.snapshot.prefix_len())
             });
-            if let Some(idx) = hit_idx {
-                let snap = Arc::clone(&self.buckets[&key][idx]);
-                return Some(PrefixCacheHit {
-                    restored_prefix_len: snap.prefix_len(),
-                    snapshot: snap,
-                    matched_prefix_len: prefix_len,
-                    exact: prefix_len == request_tokens.len(),
-                });
+            if let Some(entry) = hit {
+                let snap = Arc::clone(&entry.snapshot);
+                return Some((
+                    entry.id,
+                    PrefixCacheHit {
+                        restored_prefix_len: snap.prefix_len(),
+                        snapshot: snap,
+                        matched_prefix_len: prefix_len,
+                        exact: prefix_len == request_tokens.len(),
+                    },
+                ));
             }
         }
         None
@@ -311,8 +344,10 @@ impl PrefixCache {
         request_tokens: &[i32],
         exact_requires_logits: bool,
     ) -> Option<PrefixCacheHit> {
-        let hit = self.lookup_longest_impl(identity, request_tokens, exact_requires_logits)?;
-        self.touch_shared(&hit.snapshot);
+        self.sweep();
+        let (id, hit) =
+            self.lookup_longest_impl(identity, request_tokens, exact_requires_logits)?;
+        self.policy.touch(id);
         Some(hit)
     }
 
@@ -322,15 +357,15 @@ impl PrefixCache {
             prefix_len: snapshot.matched_prefix_len(),
             prefix_hash: hash_snapshot_prefix(snapshot),
         };
-        let Some(index) = self
-            .buckets
-            .get(&key)
-            .and_then(|bucket| bucket.iter().position(|entry| Arc::ptr_eq(entry, snapshot)))
-        else {
-            return;
-        };
-        self.clock += 1;
-        self.last_used.insert((key, index), self.clock);
+        let id = self.buckets.get(&key).and_then(|bucket| {
+            bucket
+                .iter()
+                .find(|entry| Arc::ptr_eq(&entry.snapshot, snapshot))
+                .map(|entry| entry.id)
+        });
+        if let Some(id) = id {
+            self.policy.touch(id);
+        }
     }
 }
 
@@ -400,7 +435,9 @@ mod tests {
     use crate::metal_forward::{
         SNAPSHOT_LAYOUT_VERSION, SessionSnapshot, SnapshotIdentity, SnapshotKvStorageKind,
     };
+    use crate::snapshot_policy::{FakeClock, SnapshotPolicyConfig};
     use std::sync::Arc;
+    use std::time::Duration;
 
     fn ident(model_id: u64) -> SnapshotIdentity {
         SnapshotIdentity {
@@ -457,11 +494,11 @@ mod tests {
             let mut captured = PrefixCache::with_max_bytes(budget);
             let mut elided = PrefixCache::with_max_bytes(budget);
             for cache in [&mut captured, &mut elided] {
-                assert!(cache.insert_shared_strict(Arc::clone(&prior)));
+                assert!(cache.insert_shared_strict(Arc::clone(&prior)).is_some());
                 assert!(cache.eligible_strict(prompt.n_bytes()));
                 assert!(cache.eligible_strict(completed.n_bytes()));
             }
-            assert!(captured.insert_shared_strict(Arc::clone(&prompt)));
+            assert!(captured.insert_shared_strict(Arc::clone(&prompt)).is_some());
 
             // If generation aborts before publishing completion, a retry differs.
             assert_eq!(
@@ -480,7 +517,7 @@ mod tests {
             );
 
             for cache in [&mut captured, &mut elided] {
-                assert!(cache.insert_shared_strict(Arc::clone(&completed)));
+                assert!(cache.insert_shared_strict(Arc::clone(&completed)).is_some());
                 let hit = cache
                     .peek_longest_for_completion(&id, &[10, 11, 12, 13])
                     .unwrap();
@@ -761,13 +798,17 @@ mod tests {
         cache.insert(snap(id.clone(), &[1], 64));
         cache.insert(snap(id.clone(), &[2], 64));
         assert!(cache.lookup_longest(&id, &[1]).is_some());
-        assert!(cache.insert_shared_strict(Arc::new(snap(id.clone(), &[3], 64))));
+        assert!(
+            cache
+                .insert_shared_strict(Arc::new(snap(id.clone(), &[3], 64)))
+                .is_some()
+        );
         assert!(cache.lookup_longest(&id, &[2]).is_none());
-        assert!(!cache.insert_shared_strict(Arc::new(snap(
-            id.clone(),
-            &[4],
-            (2 * one + 1) as usize,
-        ))));
+        assert!(
+            cache
+                .insert_shared_strict(Arc::new(snap(id.clone(), &[4], (2 * one + 1) as usize)))
+                .is_none()
+        );
         assert!(cache.total_bytes() <= cache.max_bytes());
     }
 
@@ -781,7 +822,7 @@ mod tests {
         cache.insert(complete.clone());
         cache.insert(unrelated);
 
-        assert!(cache.insert_shared_strict(Arc::new(complete)));
+        assert!(cache.insert_shared_strict(Arc::new(complete)).is_some());
         assert_eq!(cache.len(), 2);
         assert!(cache.lookup_longest(&id, &[1]).is_some());
         assert!(cache.lookup_longest(&id, &[2]).is_some());
@@ -826,5 +867,79 @@ mod tests {
         assert_eq!(cleared.entries, 0);
         assert_eq!(cleared.indexed_bytes, 0);
         assert_eq!(cleared.max_indexed_bytes, 1);
+    }
+
+    fn frecency_cache(max_bytes: u64) -> (PrefixCache, FakeClock) {
+        let clock = FakeClock::default();
+        let config = SnapshotPolicyConfig {
+            idle_ttl: Duration::from_secs(3600),
+            ..SnapshotPolicyConfig::default()
+        };
+        (
+            PrefixCache::with_policy(max_bytes, config, Arc::new(clock.clone())),
+            clock,
+        )
+    }
+
+    #[test]
+    fn expiry_drops_the_index_arc() {
+        let id = ident(1);
+        let (mut cache, clock) = frecency_cache(1 << 20);
+        let snapshot = Arc::new(snap(id.clone(), &[1, 2], 64));
+        cache.insert_shared(Arc::clone(&snapshot));
+        assert_eq!(Arc::strong_count(&snapshot), 2);
+        clock.advance(Duration::from_secs(3601));
+        assert_eq!(cache.sweep().ids.len(), 1);
+        assert_eq!(Arc::strong_count(&snapshot), 1);
+        assert_eq!(cache.stats().indexed_bytes, 0);
+        // Lookups sweep lazily too.
+        cache.insert(snap(id.clone(), &[3], 64));
+        clock.advance(Duration::from_secs(3601));
+        assert!(cache.lookup_longest(&id, &[3]).is_none());
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn pinned_entry_is_retained_by_strict_insert_and_counted_in_eligibility() {
+        let id = ident(1);
+        let one = snap_bytes(&[1], 64);
+        let (mut cache, _) = frecency_cache(2 * one);
+        let transcript = cache.insert(snap(id.clone(), &[1], 64));
+        cache.insert(snap(id.clone(), &[2], 64));
+        assert!(cache.pin(transcript));
+        assert_eq!(cache.pinned_bytes(), one);
+        assert!(!cache.eligible_strict(one + 1));
+        let completed = cache
+            // One more prefix token (4 bytes) with a 4-byte-smaller arena.
+            .insert_shared_strict(Arc::new(snap(id.clone(), &[1, 5], 60)))
+            .expect("fits by evicting the unpinned entry");
+        cache.unpin(transcript);
+        assert_eq!(cache.len(), 2);
+        assert!(cache.lookup_longest(&id, &[2]).is_none());
+        assert!(cache.lookup_longest(&id, &[1]).is_some());
+        assert_ne!(completed, transcript);
+    }
+
+    #[test]
+    fn equivalent_insert_returns_the_winning_entry_id() {
+        let id = ident(1);
+        let mut cache = PrefixCache::new();
+        let first = cache.insert(snap(id.clone(), &[1, 2], 64));
+        assert_eq!(cache.insert(snap(id.clone(), &[1, 2], 96)), first);
+    }
+
+    #[test]
+    fn evict_for_releases_unpinned_bytes() {
+        let id = ident(1);
+        let one = snap_bytes(&[1], 64);
+        let (mut cache, _) = frecency_cache(10 * one);
+        let pinned = cache.insert(snap(id.clone(), &[1], 64));
+        cache.pin(pinned);
+        cache.insert(snap(id.clone(), &[2], 64));
+        cache.insert(snap(id.clone(), &[3], 64));
+        let evicted = cache.evict_for(one + 1);
+        assert_eq!(evicted.bytes, 2 * one);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.lookup_longest(&id, &[1]).is_some());
     }
 }

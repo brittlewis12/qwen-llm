@@ -258,7 +258,7 @@ pub(crate) fn open_metal_process_lease(
     })
 }
 
-pub(crate) fn host_physical_memory_bytes() -> Option<u64> {
+pub fn host_physical_memory_bytes() -> Option<u64> {
     // SAFETY: sysconf has no pointer arguments for these selectors.
     let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
     // SAFETY: sysconf has no pointer arguments for these selectors.

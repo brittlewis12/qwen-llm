@@ -47,6 +47,7 @@ use crate::qwen_queue2::{
     qwen_queue2_session_upper_bytes,
 };
 use crate::sampling::GreedySelection;
+use crate::snapshot_policy::{EntryId, Evicted, SnapshotPolicyConfig};
 use crate::tokenizer::{TokError, Tokenizer};
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -1103,6 +1104,9 @@ impl Default for LoadedModelConfig {
 #[derive(Clone, Debug)]
 pub struct PrefixCacheInsert {
     pub snapshot_bytes: u64,
+    /// Entry now representing the boundary (an equivalent winner keeps its
+    /// id); valid for pinning until evicted, expired, or replaced.
+    pub entry: EntryId,
     pub stats: PrefixCacheStats,
 }
 
@@ -1826,7 +1830,36 @@ impl LoadedModel {
         cache.stats()
     }
 
+    pub fn set_prefix_cache_policy(&self, config: SnapshotPolicyConfig) {
+        self.prefix_cache.lock().set_policy_config(config);
+    }
+
+    /// Drop entries past the cache policy's idle TTL or maximum age.
+    pub fn sweep_prefix_cache(&self) -> Evicted {
+        self.prefix_cache.lock().sweep()
+    }
+
+    /// Evict unpinned entries by rank until `bytes` are released.
+    pub fn evict_prefix_cache_for(&self, bytes: u64) -> Evicted {
+        self.prefix_cache.lock().evict_for(bytes)
+    }
+
+    pub fn prefix_cache_pinned_bytes(&self) -> u64 {
+        self.prefix_cache.lock().pinned_bytes()
+    }
+
+    /// Protect an entry from eviction and expiry until unpinned. Returns
+    /// false when it is no longer indexed.
+    pub fn pin_prefix_cache_entry(&self, entry: EntryId) -> bool {
+        self.prefix_cache.lock().pin(entry)
+    }
+
+    pub fn unpin_prefix_cache_entry(&self, entry: EntryId) {
+        self.prefix_cache.lock().unpin(entry);
+    }
+
     /// Check strict cache-budget eligibility without evicting any entry.
+    /// Pinned entries count against the budget.
     pub fn prefix_cache_strict_eligible(&self, snapshot_bytes: u64) -> bool {
         self.prefix_cache.lock().eligible_strict(snapshot_bytes)
     }
@@ -1980,9 +2013,10 @@ impl LoadedModel {
         ensure_same_model_owner(&self.owner, &prepared.owner)?;
         let snapshot_bytes = prepared.snapshot.n_bytes();
         let mut cache = self.prefix_cache.lock();
-        cache.insert_shared(Arc::clone(&prepared.snapshot));
+        let entry = cache.insert_shared(Arc::clone(&prepared.snapshot));
         Ok(PrefixCacheInsert {
             snapshot_bytes,
+            entry,
             stats: cache.stats(),
         })
     }
@@ -1996,11 +2030,12 @@ impl LoadedModel {
         ensure_same_model_owner(&self.owner, &prepared.owner)?;
         let snapshot_bytes = prepared.snapshot.n_bytes();
         let mut cache = self.prefix_cache.lock();
-        if !cache.insert_shared_strict(Arc::clone(&prepared.snapshot)) {
+        let Some(entry) = cache.insert_shared_strict(Arc::clone(&prepared.snapshot)) else {
             return Ok(None);
-        }
+        };
         Ok(Some(PrefixCacheInsert {
             snapshot_bytes,
+            entry,
             stats: cache.stats(),
         }))
     }
@@ -2189,7 +2224,8 @@ impl LoadedModel {
     ) -> Option<PreparedPrefixCacheLookup> {
         let identity = self.snapshot_identity_for_abi(self.metal_model.snapshot_abi());
         let (hit, stats) = {
-            let cache = self.prefix_cache.lock();
+            let mut cache = self.prefix_cache.lock();
+            cache.sweep();
             let hit = cache.peek_longest_for_completion(&identity, request_tokens)?;
             (hit, cache.stats())
         };

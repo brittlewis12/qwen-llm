@@ -14,7 +14,8 @@ fn gpu_k2_tools_roundtrip_all_formats_json_sse() {
         addr: "127.0.0.1:0".into(),
         max_tokens: Some(512),
         max_context_tokens: Some(2048),
-        snapshot_cache_mib: 0,
+        snapshot_cache_mib: Some(0),
+        snapshot_policy: Default::default(),
         drafter: None,
         trace_sse: None,
     };
@@ -141,7 +142,8 @@ fn gpu_verified_k2_chat_http_matches_raw_and_releases_sessions() {
         addr: "127.0.0.1:0".into(),
         max_tokens: Some(8),
         max_context_tokens: Some(384),
-        snapshot_cache_mib: 0,
+        snapshot_cache_mib: Some(0),
+        snapshot_policy: Default::default(),
         drafter: None,
         trace_sse: None,
     };
@@ -259,27 +261,34 @@ fn gpu_verified_k2_chat_http_matches_raw_and_releases_sessions() {
 
 #[test]
 fn startup_limits_use_declared_context_and_explicit_residency_no_cache_or_drafter() {
-    assert_eq!(limits(8192, Some(32), Some(8), 0, false).unwrap(), (32, 8));
     assert_eq!(
-        limits(8192, Some(256), Some(256), 0, false).unwrap(),
+        limits(8192, Some(32), Some(8), Some(0), false).unwrap(),
+        (32, 8)
+    );
+    assert_eq!(
+        limits(8192, Some(32), Some(8), None, false).unwrap(),
+        (32, 8)
+    );
+    assert_eq!(
+        limits(8192, Some(256), Some(256), Some(0), false).unwrap(),
         (256, 256)
     );
     for size in [257, 1024, 7169, 8192, 524288] {
         assert_eq!(
-            limits(524288, Some(size), Some(size), 0, false).unwrap(),
+            limits(524288, Some(size), Some(size), Some(0), false).unwrap(),
             (size, size)
         );
     }
     for (context, capacity, maximum, snapshots, drafter) in [
-        (8192, None, Some(8), 0, false),
-        (8192, Some(32), None, 0, false),
-        (8192, Some(0), Some(1), 0, false),
-        (8192, Some(8193), Some(1), 0, false),
-        (8192, Some(32), Some(0), 0, false),
-        (8192, Some(32), Some(33), 0, false),
-        (1, Some(2), Some(1), 0, false),
-        (8192, Some(32), Some(8), 1, false),
-        (8192, Some(32), Some(8), 0, true),
+        (8192, None, Some(8), Some(0), false),
+        (8192, Some(32), None, Some(0), false),
+        (8192, Some(0), Some(1), Some(0), false),
+        (8192, Some(8193), Some(1), Some(0), false),
+        (8192, Some(32), Some(0), Some(0), false),
+        (8192, Some(32), Some(33), Some(0), false),
+        (1, Some(2), Some(1), Some(0), false),
+        (8192, Some(32), Some(8), Some(1), false),
+        (8192, Some(32), Some(8), Some(0), true),
     ] {
         assert!(limits(context, capacity, maximum, snapshots, drafter).is_err());
     }
@@ -298,14 +307,26 @@ struct Sink {
 fn cpu_downloaded_startup_rejects_options_before_listener_or_metal() {
     let path = std::env::var("K2_GGUF").expect("K2_GGUF");
     for (capacity, maximum, snapshots, drafter, expected) in [
-        (Some(usize::MAX), Some(8), 0, None, "capacity must fit"),
-        (None, Some(8), 0, None, "explicit --max-context-tokens"),
-        (Some(32), None, 0, None, "explicit --max-tokens"),
-        (Some(32), Some(8), 1, None, "--snapshot-cache-mib 0"),
+        (
+            Some(usize::MAX),
+            Some(8),
+            Some(0),
+            None,
+            "capacity must fit",
+        ),
+        (
+            None,
+            Some(8),
+            Some(0),
+            None,
+            "explicit --max-context-tokens",
+        ),
+        (Some(32), None, Some(0), None, "explicit --max-tokens"),
+        (Some(32), Some(8), Some(1), None, "--snapshot-cache-mib 0"),
         (
             Some(32),
             Some(8),
-            0,
+            Some(0),
             Some("nonexistent-drafter.gguf"),
             "does not support a drafter",
         ),
@@ -316,6 +337,7 @@ fn cpu_downloaded_startup_rejects_options_before_listener_or_metal() {
             max_tokens: maximum,
             max_context_tokens: capacity,
             snapshot_cache_mib: snapshots,
+            snapshot_policy: Default::default(),
             drafter: drafter.map(Into::into),
             trace_sse: None,
         };
@@ -427,7 +449,8 @@ fn gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests() {
         addr: "127.0.0.1:0".into(),
         max_tokens: Some(8),
         max_context_tokens: Some(32),
-        snapshot_cache_mib: 0,
+        snapshot_cache_mib: Some(0),
+        snapshot_policy: Default::default(),
         drafter: None,
         trace_sse: None,
     };
@@ -570,7 +593,8 @@ fn gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one() {
         addr: "127.0.0.1:0".into(),
         max_tokens: Some(1),
         max_context_tokens: Some(capacity),
-        snapshot_cache_mib: 0,
+        snapshot_cache_mib: Some(0),
+        snapshot_policy: Default::default(),
         drafter: None,
         trace_sse: None,
     };

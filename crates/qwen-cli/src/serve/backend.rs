@@ -24,6 +24,7 @@ use qwen_llm::metal_dflash::{
 use qwen_llm::metal_forward::MetalForward;
 use qwen_llm::runtime::{LoadedModel, Sequence, SequenceConfig};
 use qwen_llm::sampling::{SAMPLER_ALGORITHM_VERSION, Sampler, SamplingConfig};
+use qwen_llm::snapshot_policy::EntryId;
 use qwen_llm::tokenizer::{Tokenizer, token_ids_sha256_i32le};
 use std::collections::VecDeque;
 use std::io;
@@ -696,6 +697,10 @@ impl GenerationBackend for EngineBackend {
         &self.model_id
     }
 
+    fn idle(&mut self) {
+        super::log_expired_snapshots("qwen", &self.loaded.sweep_prefix_cache());
+    }
+
     fn output_protocol(&self, request: &ServeRequest) -> OutputProtocol {
         OutputProtocol::Qwen {
             preopened_reasoning: preopens(self.template, request),
@@ -1167,7 +1172,7 @@ impl GenerationBackend for EngineBackend {
             });
         let prefill_t0 = Instant::now();
         let mut transcript_capture_ms = 0.0;
-        let mut transcript_snapshot_bytes = None;
+        let mut transcript_entry = None;
         if let Some(boundary) = transcript_split {
             prefill_remaining(
                 &self.loaded,
@@ -1182,7 +1187,7 @@ impl GenerationBackend for EngineBackend {
                 sink,
             )?;
             let capture_t0 = Instant::now();
-            transcript_snapshot_bytes = self.try_cache_boundary(
+            transcript_entry = self.try_cache_boundary(
                 &sequence,
                 &prompt_ids[..boundary],
                 None,
@@ -1190,7 +1195,6 @@ impl GenerationBackend for EngineBackend {
                 None,
                 0,
                 "transcript",
-                0,
             );
             transcript_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
         }
@@ -1283,9 +1287,7 @@ impl GenerationBackend for EngineBackend {
         // prefix). The capture window buffer holds the prompt's trailing
         // columns; publish them as the drafter tail.
         let capture_t0 = Instant::now();
-        if !restore.as_ref().is_some_and(|restore| restore.exact)
-            && transcript_snapshot_bytes.is_none()
-        {
+        if !restore.as_ref().is_some_and(|restore| restore.exact) && transcript_entry.is_none() {
             let (tail, features) = match dflash_capture.as_ref() {
                 Some((dst, wstart, _, n_features, ring)) => (
                     ring.map(|window| {
@@ -1303,7 +1305,6 @@ impl GenerationBackend for EngineBackend {
                 tail,
                 features,
                 "prompt",
-                0,
             );
         }
 
@@ -1311,7 +1312,7 @@ impl GenerationBackend for EngineBackend {
         let transcript_phase = match transcript_split {
             Some(boundary) => format!(
                 " transcript_boundary={boundary} transcript_captured={}",
-                transcript_snapshot_bytes.is_some()
+                transcript_entry.is_some()
             ),
             None => String::new(),
         };
@@ -1456,7 +1457,7 @@ impl GenerationBackend for EngineBackend {
                         }),
                     dflash_prefix_replay_key.as_ref(),
                     replay_sampling.seed,
-                    transcript_snapshot_bytes,
+                    transcript_entry,
                     format!(
                         "tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1}{transcript_phase} decode_path=dflash"
                     ),
@@ -1539,7 +1540,7 @@ impl GenerationBackend for EngineBackend {
                 }),
             dflash_prefix_replay_key.as_ref(),
             replay_sampling.seed,
-            transcript_snapshot_bytes,
+            transcript_entry,
             format!("tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1}{transcript_phase} decode_path=serial"),
         )
     }
@@ -1581,8 +1582,7 @@ impl EngineBackend {
         capture_tail: Option<Vec<f32>>,
         capture_tail_features: usize,
         boundary: &'static str,
-        retain_bytes: u64,
-    ) -> Option<u64> {
+    ) -> Option<EntryId> {
         let estimate = match self.loaded.estimate_checkpoint_boundary_sizes(
             sequence,
             prefix_tokens.len(),
@@ -1598,25 +1598,21 @@ impl EngineBackend {
                 return None;
             }
         };
+        // Pinned entries (this request's transcript boundary) count against
+        // the budget: they are never evicted to admit this one.
         if !self.loaded.prefix_cache_strict_eligible(estimate) {
             tracing::warn!(
-                "serve: {boundary} snapshot denied by cache budget; snapshot_bytes={estimate} cache_budget_bytes={}",
+                "serve: {boundary} snapshot denied by cache budget; snapshot_bytes={estimate} pinned_bytes={} cache_budget_bytes={}",
+                self.loaded.prefix_cache_pinned_bytes(),
                 self.loaded.prefix_cache_stats().max_indexed_bytes,
             );
             return None;
         }
-        // A same-request snapshot that the byte-LRU would evict to admit this
-        // one takes precedence: it is the boundary the next turn can reuse.
-        let budget = self.loaded.prefix_cache_stats().max_indexed_bytes;
-        if retain_bytes > 0 && estimate.saturating_add(retain_bytes) > budget {
-            tracing::info!(
-                target: "qwen_diag",
-                "serve: {boundary} snapshot skipped to retain transcript boundary; snapshot_bytes={estimate} retained_bytes={retain_bytes} cache_budget_bytes={budget}"
-            );
-            return None;
-        }
-        let signals = self.loaded.context().memory_signals();
-        if let Err(reason) = super::snapshot_capture_admission(estimate, signals) {
+        if let Err((reason, signals)) = super::admit_snapshot_capture(
+            estimate,
+            || self.loaded.context().memory_signals(),
+            |bytes| self.loaded.evict_prefix_cache_for(bytes),
+        ) {
             tracing::warn!(
                 "serve: {boundary} snapshot denied by memory headroom; reason={reason:?} snapshot_bytes={estimate} metal_current_bytes={} metal_recommended_bytes={} process_remaining_bytes={:?}",
                 signals.current_allocated_bytes,
@@ -1634,7 +1630,7 @@ impl EngineBackend {
             capture_tail_features,
         ) {
             Ok(prepared) => match self.loaded.cache_prepared_checkpoint_strict(&prepared) {
-                Ok(Some(_)) => Some(estimate),
+                Ok(Some(inserted)) => Some(inserted.entry),
                 Ok(None) => {
                     tracing::warn!(
                         "serve: {boundary} snapshot rejected at strict cache insertion; request continues"
@@ -1671,7 +1667,7 @@ impl EngineBackend {
         capture_ring: Option<(MetalTensor, usize, usize, usize)>,
         dflash_prefix_replay_key: Option<&DflashPrefixReplayKey>,
         dflash_prefix_replay_seed: u64,
-        transcript_snapshot_bytes: Option<u64>,
+        transcript_entry: Option<EntryId>,
         phases: String,
     ) -> Result<GenerationOutcome, BackendFailure> {
         let completed_boundary_valid = match crate::derive_completed_checkpoint_boundary(
@@ -1696,6 +1692,11 @@ impl EngineBackend {
                     ),
                     None => (None, 0),
                 };
+                // The transcript boundary is what the next turn reuses when
+                // the template re-renders this turn; never evict it to admit
+                // the completed boundary.
+                let pinned =
+                    transcript_entry.filter(|&entry| self.loaded.pin_prefix_cache_entry(entry));
                 self.try_cache_boundary(
                     &sequence,
                     &consumed,
@@ -1704,8 +1705,10 @@ impl EngineBackend {
                     tail,
                     features,
                     "completed",
-                    transcript_snapshot_bytes.unwrap_or(0),
                 );
+                if let Some(entry) = pinned {
+                    self.loaded.unpin_prefix_cache_entry(entry);
+                }
                 true
             }
             Err(error) => {

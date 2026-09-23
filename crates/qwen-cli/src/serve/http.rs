@@ -82,6 +82,9 @@ pub(crate) trait GenerationBackend {
         prompt: &str,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure>;
+    /// Called from the serial loop while no request is admitted (snapshot
+    /// cache expiry). Must be cheap.
+    fn idle(&mut self) {}
 }
 
 pub(crate) struct TraceLog {

@@ -26,6 +26,7 @@ use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, Generati
 use super::items::{ServeError, ServeRequest};
 use super::output_partition::{OutputProtocol, ToolGrammar};
 use super::render_ds4;
+use super::snapshot_cache::SnapshotCache;
 use crate::DeepSeekV4MultigroupSelectorPlan;
 use anyhow::Context as _;
 use objc2_metal::MTLDevice;
@@ -36,83 +37,9 @@ use qwen_llm::deepseek_v4_metal::{
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
 use qwen_llm::sampling::Sampler;
+use qwen_llm::snapshot_policy::SnapshotPolicyConfig;
 use qwen_llm::tokenizer::Tokenizer;
-use std::sync::Arc;
 use std::time::Instant;
-
-struct SnapshotCacheEntry<V> {
-    prefix: Vec<u32>,
-    value: Arc<V>,
-    bytes: u64,
-}
-
-/// Byte-bounded LRU keyed by exact token prefixes. Values are shared on
-/// lookup so restoring a large snapshot does not clone its state arenas.
-struct SnapshotCache<V> {
-    entries: Vec<SnapshotCacheEntry<V>>,
-    indexed_bytes: u64,
-    max_bytes: u64,
-}
-
-impl<V> SnapshotCache<V> {
-    fn new(max_bytes: u64) -> Self {
-        Self {
-            entries: Vec::new(),
-            indexed_bytes: 0,
-            max_bytes,
-        }
-    }
-
-    /// Longest cached prefix of `tokens`, strictly shorter than the request
-    /// (snapshots carry no observation, so at least one endpoint token must
-    /// be prefilled to produce logits).
-    fn best_prefix(&mut self, tokens: &[u32]) -> Option<(usize, Arc<V>)> {
-        let mut best: Option<usize> = None;
-        for (index, entry) in self.entries.iter().enumerate() {
-            if entry.prefix.len() < tokens.len()
-                && tokens.starts_with(&entry.prefix)
-                && best
-                    .is_none_or(|current| entry.prefix.len() > self.entries[current].prefix.len())
-            {
-                best = Some(index);
-            }
-        }
-        let index = best?;
-        let entry = self.entries.remove(index);
-        let restored = (entry.prefix.len(), Arc::clone(&entry.value));
-        self.entries.push(entry); // most-recently-used
-        Some(restored)
-    }
-
-    fn entry_bytes(prefix_len: usize, value_bytes: u64) -> Option<u64> {
-        value_bytes.checked_add((prefix_len as u64).checked_mul(size_of::<u32>() as u64)?)
-    }
-
-    fn strict_eligibility(&self, tokens: &[u32], value_bytes: u64) -> Option<u64> {
-        if self.entries.iter().any(|entry| entry.prefix == tokens) {
-            return None;
-        }
-        let bytes = Self::entry_bytes(tokens.len(), value_bytes)?;
-        (bytes <= self.max_bytes).then_some(bytes)
-    }
-
-    fn insert_strict(&mut self, tokens: Vec<u32>, value: V, bytes: u64) -> bool {
-        if bytes > self.max_bytes || self.entries.iter().any(|entry| entry.prefix == tokens) {
-            return false;
-        }
-        while self.indexed_bytes.saturating_add(bytes) > self.max_bytes {
-            let evicted = self.entries.remove(0);
-            self.indexed_bytes = self.indexed_bytes.saturating_sub(evicted.bytes);
-        }
-        self.entries.push(SnapshotCacheEntry {
-            prefix: tokens,
-            value: Arc::new(value),
-            bytes,
-        });
-        self.indexed_bytes += bytes;
-        true
-    }
-}
 
 pub(crate) struct DeepSeekV4Backend {
     ctx: MetalContext,
@@ -126,6 +53,7 @@ pub(crate) struct DeepSeekV4Backend {
     default_max_tokens: usize,
     prefill_chunk_tokens: usize,
     cache: SnapshotCache<DeepSeekV4CausalSnapshot>,
+    pub(super) snapshot_cache_plan: super::SnapshotCachePlan,
     /// Snapshots are scoped by a bound identity; capture and restore both
     /// hard-fail without one. Serve's cache is process-local and never
     /// published, so an ephemeral per-process id is the sanctioned binding
@@ -141,7 +69,8 @@ impl DeepSeekV4Backend {
         default_max_tokens: usize,
         forward_limit: usize,
         selector: crate::DeepSeekV4MultigroupSelectorArg,
-        snapshot_cache_max_bytes: u64,
+        snapshot_cache_mib: Option<u64>,
+        snapshot_policy: SnapshotPolicyConfig,
     ) -> anyhow::Result<Self> {
         let tokenizer = Tokenizer::from_gguf(&gguf).context("initialize DeepSeek V4 tokenizer")?;
         let vocab_size = tokenizer.n_vocab();
@@ -185,6 +114,12 @@ impl DeepSeekV4Backend {
         );
         ephemeral[12..32].copy_from_slice(b"qwen-serve-ephemeral");
         let model_content_id = DeepSeekV4ModelContentId::new(ephemeral);
+        // Sized after load so auto budgets see the resident model.
+        let snapshot_cache_plan = super::SnapshotCachePlan::resolve(
+            snapshot_cache_mib,
+            snapshot_policy,
+            ctx.memory_signals(),
+        )?;
         Ok(Self {
             ctx,
             gguf,
@@ -196,7 +131,8 @@ impl DeepSeekV4Backend {
             vocab_size,
             default_max_tokens,
             prefill_chunk_tokens,
-            cache: SnapshotCache::new(snapshot_cache_max_bytes),
+            cache: SnapshotCache::new(snapshot_cache_plan.bytes, snapshot_policy),
+            snapshot_cache_plan,
             model_content_id,
         })
     }
@@ -225,6 +161,10 @@ fn decoded_text_closed_reasoning(
 impl GenerationBackend for DeepSeekV4Backend {
     fn model_id(&self) -> &str {
         &self.model_id
+    }
+
+    fn idle(&mut self) {
+        super::log_expired_snapshots("deepseek_v4", &self.cache.sweep());
     }
 
     fn output_protocol(&self, request: &ServeRequest) -> OutputProtocol {
@@ -484,13 +424,18 @@ impl DeepSeekV4Backend {
         let Some(entry_bytes) = self.cache.strict_eligibility(tokens, payload_bytes) else {
             tracing::warn!(
                 "serve: deepseek_v4 {boundary} snapshot denied by cache budget; payload_bytes={payload_bytes} cache_bytes={} cache_budget_bytes={}",
-                self.cache.indexed_bytes,
-                self.cache.max_bytes,
+                self.cache.indexed_bytes(),
+                self.cache.max_bytes(),
             );
             return;
         };
-        let signals = self.ctx.memory_signals();
-        if let Err(reason) = super::snapshot_capture_admission(entry_bytes, signals) {
+        let ctx = &self.ctx;
+        let cache = &mut self.cache;
+        if let Err((reason, signals)) = super::admit_snapshot_capture(
+            entry_bytes,
+            || ctx.memory_signals(),
+            |bytes| cache.evict_for(bytes),
+        ) {
             tracing::warn!(
                 "serve: deepseek_v4 {boundary} snapshot denied by memory headroom; reason={reason:?} payload_bytes={payload_bytes} metal_current_bytes={} metal_recommended_bytes={} process_remaining_bytes={:?}",
                 signals.current_allocated_bytes,
@@ -532,53 +477,6 @@ mod tests {
         ephemeral[12..32].copy_from_slice(b"qwen-serve-ephemeral");
         assert_eq!(b"qwen-serve-ephemeral".len(), 20);
         assert_eq!(ephemeral.len(), 32);
-    }
-
-    #[test]
-    fn snapshot_cache_prefers_longest_strict_prefix() {
-        let mut cache = SnapshotCache::new(1024);
-        let bytes = cache.strict_eligibility(&[1], 5).unwrap();
-        assert!(cache.insert_strict(vec![1], "short", bytes));
-        let bytes = cache.strict_eligibility(&[1, 2], 4).unwrap();
-        assert!(cache.insert_strict(vec![1, 2], "long", bytes));
-        let (prefix_len, value) = cache.best_prefix(&[1, 2, 3]).unwrap();
-        assert_eq!(prefix_len, 2);
-        assert_eq!(*value, "long");
-        assert!(cache.best_prefix(&[1, 2]).is_some_and(|hit| hit.0 == 1));
-    }
-
-    #[test]
-    fn snapshot_cache_accounts_bytes_and_evicts_lru() {
-        let mut cache = SnapshotCache::new(20);
-        let bytes = cache.strict_eligibility(&[1], 6).unwrap();
-        assert!(cache.insert_strict(vec![1], "first", bytes)); // 10 bytes with key
-        let bytes = cache.strict_eligibility(&[2], 6).unwrap();
-        assert!(cache.insert_strict(vec![2], "second", bytes));
-        assert_eq!(cache.indexed_bytes, 20);
-        assert!(cache.best_prefix(&[1, 9]).is_some()); // first is now MRU
-        let bytes = cache.strict_eligibility(&[3], 6).unwrap();
-        assert!(cache.insert_strict(vec![3], "third", bytes));
-        assert_eq!(cache.indexed_bytes, 20);
-        assert!(cache.best_prefix(&[2, 9]).is_none());
-        assert!(cache.best_prefix(&[1, 9]).is_some());
-        assert!(cache.strict_eligibility(&[4], 17).is_none());
-        assert_eq!(cache.indexed_bytes, 20);
-    }
-
-    #[test]
-    fn snapshot_cache_eligibility_does_not_evict() {
-        let mut cache = SnapshotCache::new(20);
-        let bytes = cache.strict_eligibility(&[1], 6).unwrap();
-        assert!(cache.insert_strict(vec![1], "first", bytes));
-        let bytes = cache.strict_eligibility(&[2], 6).unwrap();
-        assert!(cache.insert_strict(vec![2], "second", bytes));
-
-        assert!(cache.strict_eligibility(&[3], 6).is_some());
-        assert!(cache.strict_eligibility(&[4], 17).is_none());
-        assert_eq!(cache.entries.len(), 2);
-        assert_eq!(cache.indexed_bytes, 20);
-        assert!(cache.best_prefix(&[1, 9]).is_some());
-        assert!(cache.best_prefix(&[2, 9]).is_some());
     }
 
     #[test]

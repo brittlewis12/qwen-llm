@@ -29,6 +29,7 @@ pub(crate) mod partition_muse;
 pub(crate) mod render_ds4;
 pub(crate) mod render_k2;
 pub(crate) mod render_muse;
+pub(crate) mod snapshot_cache;
 pub(crate) mod utf8;
 
 pub(crate) use crate::open_responses::{items, render, tool_parse};
@@ -39,6 +40,7 @@ use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalMemorySignals;
 use qwen_llm::model_family::ModelFamily;
 use qwen_llm::runtime::Runtime;
+use qwen_llm::snapshot_policy::{Evicted, SnapshotPolicyConfig};
 use std::net::{TcpListener, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,9 +53,123 @@ const ADMISSION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(crate) const DEFAULT_SERVE_MAX_CONTEXT_TOKENS: usize = 262_144;
 pub(crate) const DEFAULT_SERVE_MAX_TOKENS: usize = 65_536;
-pub(crate) const DEFAULT_SNAPSHOT_CACHE_MIB: u64 = 4096;
-pub(crate) const DEFAULT_SNAPSHOT_CACHE_BYTES: u64 = DEFAULT_SNAPSHOT_CACHE_MIB * 1024 * 1024;
+const GIB: u64 = 1 << 30;
+/// Auto budget when neither physical-memory nor Metal signals are readable.
+const FALLBACK_SNAPSHOT_CACHE_BYTES: u64 = 4 * GIB;
+const MIN_AUTO_SNAPSHOT_CACHE_BYTES: u64 = GIB;
 const SNAPSHOT_CAPTURE_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Resolved RAM snapshot-cache budget and eviction policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SnapshotCachePlan {
+    pub(crate) bytes: u64,
+    pub(crate) policy: SnapshotPolicyConfig,
+    /// Inputs of an auto-sized budget; `None` when set explicitly.
+    auto: Option<AutoBudgetInputs>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AutoBudgetInputs {
+    physical_bytes: Option<u64>,
+    metal_recommended_bytes: u64,
+    metal_resident_bytes: u64,
+}
+
+impl SnapshotCachePlan {
+    /// `mib: None` is auto: min(25% of physical RAM, 50% of the Metal working
+    /// set left after the resident model), at least 1 GiB. Resolve after the
+    /// model is loaded so `signals` include its residency.
+    pub(crate) fn resolve(
+        mib: Option<u64>,
+        policy: SnapshotPolicyConfig,
+        signals: MetalMemorySignals,
+    ) -> Result<Self> {
+        Self::resolve_with(
+            mib,
+            policy,
+            qwen_llm::metal::host_physical_memory_bytes(),
+            signals,
+        )
+    }
+
+    fn resolve_with(
+        mib: Option<u64>,
+        policy: SnapshotPolicyConfig,
+        physical_bytes: Option<u64>,
+        signals: MetalMemorySignals,
+    ) -> Result<Self> {
+        if let Some(mib) = mib {
+            let bytes = mib
+                .checked_mul(1024 * 1024)
+                .context("--snapshot-cache-mib byte conversion overflow")?;
+            return Ok(Self {
+                bytes,
+                policy,
+                auto: None,
+            });
+        }
+        let quarter_ram = physical_bytes.map(|bytes| bytes / 4);
+        let half_free_working_set = (signals.recommended_max_bytes != 0)
+            .then(|| {
+                signals
+                    .recommended_max_bytes
+                    .checked_sub(signals.current_allocated_bytes)
+            })
+            .flatten()
+            .map(|bytes| bytes / 2);
+        let bytes = [quarter_ram, half_free_working_set]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(FALLBACK_SNAPSHOT_CACHE_BYTES)
+            .max(MIN_AUTO_SNAPSHOT_CACHE_BYTES);
+        Ok(Self {
+            bytes,
+            policy,
+            auto: Some(AutoBudgetInputs {
+                physical_bytes,
+                metal_recommended_bytes: signals.recommended_max_bytes,
+                metal_resident_bytes: signals.current_allocated_bytes,
+            }),
+        })
+    }
+}
+
+impl std::fmt::Display for SnapshotCachePlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "snapshot_cache_bytes={}", self.bytes)?;
+        match self.auto {
+            None => write!(f, " snapshot_cache_source=explicit")?,
+            Some(inputs) => write!(
+                f,
+                " snapshot_cache_source=auto physical_bytes={} metal_recommended_bytes={} metal_resident_bytes={}",
+                inputs
+                    .physical_bytes
+                    .map_or_else(|| "unknown".to_owned(), |bytes| bytes.to_string()),
+                inputs.metal_recommended_bytes,
+                inputs.metal_resident_bytes,
+            )?,
+        }
+        write!(
+            f,
+            " snapshot_half_life_secs={} snapshot_idle_ttl_secs={} snapshot_max_age_secs={}",
+            self.policy.half_life.as_secs(),
+            self.policy.idle_ttl.as_secs(),
+            self.policy.max_age.as_secs(),
+        )
+    }
+}
+
+pub(super) fn log_expired_snapshots(family: &str, expired: &Evicted) {
+    if !expired.is_empty() {
+        tracing::info!(
+            target: "qwen_diag",
+            "serve: {family} snapshot cache expired entries={} freed_bytes={}",
+            expired.ids.len(),
+            expired.bytes,
+        );
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SnapshotCaptureDenial {
@@ -61,7 +177,39 @@ pub(super) enum SnapshotCaptureDenial {
     InvalidMetalSignal,
     MetalHeadroom,
     ProcessSignalUnavailable,
-    ProcessHeadroom,
+    ProcessHeadroom { deficit_bytes: u64 },
+}
+
+/// [`snapshot_capture_admission`], first relieving a process-footprint
+/// deficit by evicting cached snapshots and re-checking once. A Metal
+/// headroom denial is not retried: snapshots live in CPU arenas, so evicting
+/// them does not change the Metal allocation signal.
+pub(super) fn admit_snapshot_capture(
+    bytes: u64,
+    signals: impl Fn() -> MetalMemorySignals,
+    evict_for: impl FnOnce(u64) -> Evicted,
+) -> std::result::Result<(), (SnapshotCaptureDenial, MetalMemorySignals)> {
+    let observed = signals();
+    let deficit_bytes = match snapshot_capture_admission(bytes, observed) {
+        Ok(()) => return Ok(()),
+        Err(SnapshotCaptureDenial::ProcessHeadroom { deficit_bytes }) => deficit_bytes,
+        Err(reason) => return Err((reason, observed)),
+    };
+    let evicted = evict_for(deficit_bytes);
+    if evicted.is_empty() {
+        return Err((
+            SnapshotCaptureDenial::ProcessHeadroom { deficit_bytes },
+            observed,
+        ));
+    }
+    tracing::info!(
+        target: "qwen_diag",
+        "serve: snapshot cache evicted for process headroom; entries={} freed_bytes={} deficit_bytes={deficit_bytes}",
+        evicted.ids.len(),
+        evicted.bytes,
+    );
+    let observed = signals();
+    snapshot_capture_admission(bytes, observed).map_err(|reason| (reason, observed))
 }
 
 pub(super) fn snapshot_capture_admission(
@@ -84,17 +232,14 @@ pub(super) fn snapshot_capture_admission(
         // engine admission contract: Metal headroom remains authoritative.
         Some(0) => {}
         Some(process_available) if required > process_available => {
-            return Err(SnapshotCaptureDenial::ProcessHeadroom);
+            return Err(SnapshotCaptureDenial::ProcessHeadroom {
+                deficit_bytes: required - process_available,
+            });
         }
         Some(_) => {}
         None => return Err(SnapshotCaptureDenial::ProcessSignalUnavailable),
     }
     Ok(())
-}
-
-fn snapshot_cache_bytes(mib: u64) -> Result<u64> {
-    mib.checked_mul(1024 * 1024)
-        .context("--snapshot-cache-mib byte conversion overflow")
 }
 
 /// Recognised is not served: a family is served when its profile declares a
@@ -132,7 +277,6 @@ fn fixed_session_limits(
 /// `qwen serve` entry: resident model, serial accept loop.
 pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     crate::shutdown::checkpoint()?;
-    let snapshot_cache_bytes = snapshot_cache_bytes(invocation.snapshot_cache_mib)?;
     let gguf = GgufFile::open(&invocation.model)
         .with_context(|| format!("open model {}", invocation.model.display()))?;
     let Some(family) = ModelFamily::detect(&gguf) else {
@@ -266,9 +410,10 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 invocation.max_tokens.unwrap_or(DEFAULT_SERVE_MAX_TOKENS),
                 forward_limit,
                 crate::DeepSeekV4MultigroupSelectorArg::Auto,
-                snapshot_cache_bytes,
+                invocation.snapshot_cache_mib,
+                invocation.snapshot_policy,
             )?;
-            tracing::info!(target: "qwen_diag", "serve limits: family=deepseek_v4 max_context_tokens={} snapshot_cache_bytes={}", context_limit, snapshot_cache_bytes);
+            tracing::info!(target: "qwen_diag", "serve limits: family=deepseek_v4 max_context_tokens={} {}", context_limit, backend.snapshot_cache_plan);
             crate::shutdown::checkpoint()?;
             accept_loop(listener, &model_id, 0.0, &mut backend, &mut trace)
         }
@@ -330,13 +475,18 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             let loaded = runtime
                 .load_model_with_config(
                     &invocation.model,
-                    qwen_llm::runtime::LoadedModelConfig {
-                        prefix_cache_max_bytes: snapshot_cache_bytes,
-                        ..qwen_llm::runtime::LoadedModelConfig::default()
-                    },
+                    qwen_llm::runtime::LoadedModelConfig::default(),
                 )
                 .with_context(|| format!("load model {}", invocation.model.display()))?;
             let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
+            // Sized after load so auto budgets see the resident model.
+            let snapshot_cache_plan = SnapshotCachePlan::resolve(
+                invocation.snapshot_cache_mib,
+                invocation.snapshot_policy,
+                loaded.context().memory_signals(),
+            )?;
+            loaded.set_prefix_cache_max_bytes(snapshot_cache_plan.bytes);
+            loaded.set_prefix_cache_policy(snapshot_cache_plan.policy);
             // Admission ceiling: explicit, else the smaller of the hard default and
             // the model's declared context length.
             let (context_ceiling, context_source) =
@@ -357,7 +507,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 template,
                 no_thinking_supported,
             )?;
-            tracing::info!(target: "qwen_diag", "serve limits: family=qwen max_context_tokens={context_ceiling} context_source={context_source} snapshot_cache_bytes={snapshot_cache_bytes}");
+            tracing::info!(target: "qwen_diag", "serve limits: family=qwen max_context_tokens={context_ceiling} context_source={context_source} {snapshot_cache_plan}");
             crate::shutdown::checkpoint()?;
 
             accept_loop(listener, &model_id, load_ms, &mut backend, &mut trace)
@@ -492,7 +642,10 @@ fn accept_loop_with_checkpoint(
             ready.store(true, Ordering::Release);
             let stream = match receiver.recv_timeout(ADMISSION_POLL_INTERVAL) {
                 Ok(stream) => stream,
-                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Timeout) => {
+                    backend.idle();
+                    continue;
+                }
                 Err(RecvTimeoutError::Disconnected) => break,
             };
             // A signal may arrive while admission is parked in recv_timeout.
@@ -722,9 +875,82 @@ mod tests {
     }
 
     #[test]
-    fn default_snapshot_budget_covers_a3b_not_dense_snapshot() {
-        let configured = snapshot_cache_bytes(DEFAULT_SNAPSHOT_CACHE_MIB).unwrap();
-        assert!(configured > 2_700_000_000);
-        assert!(configured < 12_000_000_000);
+    fn auto_snapshot_budget_scales_with_machine_and_resident_model() {
+        let policy = SnapshotPolicyConfig::default();
+        let signals = |recommended, resident| MetalMemorySignals {
+            recommended_max_bytes: recommended,
+            current_allocated_bytes: resident,
+            process_limit_remaining_bytes: Some(0),
+        };
+        let auto = |physical, recommended, resident| {
+            SnapshotCachePlan::resolve_with(None, policy, physical, signals(recommended, resident))
+                .unwrap()
+                .bytes
+        };
+        // 128 GiB host, ~96 GiB working set: RAM quarter vs. free half.
+        assert_eq!(auto(Some(128 * GIB), 96 * GIB, 20 * GIB), 32 * GIB);
+        assert_eq!(auto(Some(128 * GIB), 96 * GIB, 60 * GIB), 18 * GIB);
+        // Nearly full working set clamps up to the floor.
+        assert_eq!(auto(Some(128 * GIB), 96 * GIB, 95 * GIB), GIB);
+        // Missing signals fall back to whichever remains, then the constant.
+        assert_eq!(auto(Some(16 * GIB), 0, 0), 4 * GIB);
+        assert_eq!(auto(None, 96 * GIB, 90 * GIB), 3 * GIB);
+        assert_eq!(auto(None, 0, 0), FALLBACK_SNAPSHOT_CACHE_BYTES);
+        // An explicit value is honored verbatim, including zero.
+        let explicit = |mib| {
+            SnapshotCachePlan::resolve_with(Some(mib), policy, Some(GIB), signals(1, 0))
+                .unwrap()
+                .bytes
+        };
+        assert_eq!(explicit(0), 0);
+        assert_eq!(explicit(8192), 8 * GIB);
+        assert!(
+            SnapshotCachePlan::resolve_with(Some(u64::MAX), policy, None, signals(0, 0)).is_err()
+        );
+    }
+
+    #[test]
+    fn capture_admission_evicts_only_for_process_deficit() {
+        let signals = |process| MetalMemorySignals {
+            recommended_max_bytes: 10 * GIB,
+            current_allocated_bytes: 0,
+            process_limit_remaining_bytes: Some(process),
+        };
+        let required = 100 + SNAPSHOT_CAPTURE_HEADROOM_BYTES;
+        let mut cache = qwen_llm::snapshot_policy::SnapshotPolicy::new(
+            u64::MAX,
+            SnapshotPolicyConfig::default(),
+        );
+        cache.insert(64, 1);
+        // Eviction is asked for exactly the deficit; the re-check sees relief.
+        let observed = std::cell::Cell::new(required - 40);
+        let result = admit_snapshot_capture(
+            100,
+            || signals(observed.get()),
+            |deficit| {
+                assert_eq!(deficit, 40);
+                observed.set(required);
+                cache.evict_for(deficit)
+            },
+        );
+        assert!(result.is_ok());
+        assert!(cache.is_empty());
+        // Nothing evictable: the original denial stands.
+        let result = admit_snapshot_capture(
+            100,
+            || signals(required - 40),
+            |deficit| cache.evict_for(deficit),
+        );
+        assert_eq!(
+            result.unwrap_err().0,
+            SnapshotCaptureDenial::ProcessHeadroom { deficit_bytes: 40 }
+        );
+        // Metal headroom is never retried by evicting CPU snapshots.
+        let result = admit_snapshot_capture(
+            20 * GIB,
+            || signals(0),
+            |_| panic!("metal denial must not evict"),
+        );
+        assert_eq!(result.unwrap_err().0, SnapshotCaptureDenial::MetalHeadroom);
     }
 }

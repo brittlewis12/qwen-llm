@@ -23,13 +23,14 @@ fn limits(
     context: u32,
     capacity: Option<usize>,
     maximum: Option<usize>,
-    snapshots: u64,
+    snapshots: Option<u64>,
     drafter: bool,
 ) -> Result<(usize, usize)> {
     ensure!(!drafter, "K2 serve does not support a drafter");
+    // `auto` (None) resolves to no cache for K2.
     ensure!(
-        snapshots == 0,
-        "K2 serve requires --snapshot-cache-mib 0; snapshots are unsupported"
+        snapshots.unwrap_or(0) == 0,
+        "K2 serve requires --snapshot-cache-mib 0 or auto; snapshots are unsupported"
     );
     let capacity = capacity
         .context("K2 serve requires explicit --max-context-tokens for resident memory planning")?;

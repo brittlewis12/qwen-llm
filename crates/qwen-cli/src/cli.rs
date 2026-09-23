@@ -1,8 +1,10 @@
 use super::Args;
 use anyhow::{Context, Result, ensure};
 use clap::{ArgGroup, Args as ClapArgs, Subcommand};
+use qwen_llm::snapshot_policy::SnapshotPolicyConfig;
 use std::io::Read;
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
@@ -52,9 +54,22 @@ pub(crate) struct ServeArgs {
     #[arg(long, value_parser = parse_positive_usize)]
     max_context_tokens: Option<usize>,
 
-    /// Qwen/DS4 RAM snapshot-cache MiB; K2 requires explicit 0 (no snapshots).
-    #[arg(long, default_value_t = crate::serve::DEFAULT_SNAPSHOT_CACHE_MIB)]
-    snapshot_cache_mib: u64,
+    /// Qwen/DS4 RAM snapshot-cache MiB, or `auto`: min(25% of RAM, 50% of the
+    /// Metal working set left after load), at least 1 GiB. K2: auto or 0.
+    #[arg(long, value_name = "MIB|auto", default_value = "auto", value_parser = parse_snapshot_cache_mib)]
+    snapshot_cache_mib: SnapshotCacheMib,
+
+    /// Expire snapshots unused for this long; 0 disables.
+    #[arg(long, value_name = "SECS", default_value_t = 3600)]
+    snapshot_idle_ttl_secs: u64,
+
+    /// Expire snapshots this long after capture regardless of use; 0 disables.
+    #[arg(long, value_name = "SECS", default_value_t = 86_400)]
+    snapshot_max_age_secs: u64,
+
+    /// Frecency half-life for eviction ranking; 0 evicts pure LRU.
+    #[arg(long, value_name = "SECS", default_value_t = 600)]
+    snapshot_half_life_secs: u64,
 
     /// DFlash drafter GGUF for speculative decode.
     ///
@@ -71,6 +86,20 @@ pub(crate) struct ServeArgs {
     /// Append request and streamed SSE events as JSONL for wire debugging.
     #[arg(long, value_name = "PATH")]
     trace_sse: Option<PathBuf>,
+}
+
+/// `None` is `auto`.
+#[derive(Clone, Copy, Debug)]
+struct SnapshotCacheMib(Option<u64>);
+
+fn parse_snapshot_cache_mib(value: &str) -> std::result::Result<SnapshotCacheMib, String> {
+    if value == "auto" {
+        return Ok(SnapshotCacheMib(None));
+    }
+    value
+        .parse::<u64>()
+        .map(|mib| SnapshotCacheMib(Some(mib)))
+        .map_err(|error| format!("expected `auto` or a MiB count, got {value:?}: {error}"))
 }
 
 fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
@@ -103,7 +132,9 @@ pub(crate) struct ServeInvocation {
     pub(crate) addr: String,
     pub(crate) max_tokens: Option<usize>,
     pub(crate) max_context_tokens: Option<usize>,
-    pub(crate) snapshot_cache_mib: u64,
+    /// `None` sizes the cache automatically after load.
+    pub(crate) snapshot_cache_mib: Option<u64>,
+    pub(crate) snapshot_policy: SnapshotPolicyConfig,
     pub(crate) drafter: Option<PathBuf>,
     pub(crate) trace_sse: Option<PathBuf>,
 }
@@ -362,7 +393,12 @@ pub(crate) fn normalize(args: &mut Args) -> Invocation {
             addr: serve.addr,
             max_tokens: serve.max_tokens,
             max_context_tokens: serve.max_context_tokens,
-            snapshot_cache_mib: serve.snapshot_cache_mib,
+            snapshot_cache_mib: serve.snapshot_cache_mib.0,
+            snapshot_policy: SnapshotPolicyConfig {
+                half_life: Duration::from_secs(serve.snapshot_half_life_secs),
+                idle_ttl: Duration::from_secs(serve.snapshot_idle_ttl_secs),
+                max_age: Duration::from_secs(serve.snapshot_max_age_secs),
+            },
             drafter: serve.drafter,
             trace_sse: serve.trace_sse,
         }),
@@ -444,6 +480,61 @@ mod tests {
             panic!("expected serve invocation")
         };
         assert_eq!(explicit.max_tokens, Some(2048));
+    }
+
+    #[test]
+    fn serve_snapshot_cache_defaults_to_auto_with_service_policy() {
+        let serve = |extra: &[&str]| {
+            let mut argv = vec!["qwen", "serve", "-m", "model.gguf"];
+            argv.extend_from_slice(extra);
+            let Invocation::Serve(serve) = parse(&argv).1 else {
+                panic!("expected serve invocation")
+            };
+            serve
+        };
+        let defaults = serve(&[]);
+        assert_eq!(defaults.snapshot_cache_mib, None);
+        assert_eq!(defaults.snapshot_policy, SnapshotPolicyConfig::default());
+        assert_eq!(
+            serve(&["--snapshot-cache-mib", "auto"]).snapshot_cache_mib,
+            None
+        );
+        assert_eq!(
+            serve(&["--snapshot-cache-mib", "0"]).snapshot_cache_mib,
+            Some(0)
+        );
+        let tuned = serve(&[
+            "--snapshot-cache-mib",
+            "2048",
+            "--snapshot-idle-ttl-secs",
+            "0",
+            "--snapshot-max-age-secs",
+            "60",
+            "--snapshot-half-life-secs",
+            "0",
+        ]);
+        assert_eq!(tuned.snapshot_cache_mib, Some(2048));
+        assert_eq!(
+            tuned.snapshot_policy,
+            SnapshotPolicyConfig {
+                half_life: Duration::ZERO,
+                idle_ttl: Duration::ZERO,
+                max_age: Duration::from_secs(60),
+            }
+        );
+        assert!(
+            Args::try_parse_from([
+                "qwen",
+                "serve",
+                "-m",
+                "m.gguf",
+                "--snapshot-cache-mib",
+                "big"
+            ])
+            .is_err()
+        );
+        assert!(parse_snapshot_cache_mib("Auto").is_err());
+        assert!(parse_snapshot_cache_mib("-1").is_err());
     }
 
     #[test]

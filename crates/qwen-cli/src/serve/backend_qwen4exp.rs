@@ -12,12 +12,11 @@
 //! rewound.
 
 use super::backend::{IM_START_MARKER, transcript_boundary};
-use super::snapshot_cache::SnapshotCache;
-use qwen_llm::snapshot_policy::SnapshotPolicyConfig;
 use super::decode_loop;
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{QwenTemplate, ServeError, ServeRequest};
 use super::output_partition::{OutputProtocol, ToolGrammar};
+use super::snapshot_cache::SnapshotCache;
 use anyhow::Context as _;
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
@@ -26,6 +25,7 @@ use qwen_llm::qwen4exp_runtime::{
     Qwen4ExpLoadedModel, Qwen4ExpRuntimeError, Qwen4ExpSessionCapacity, Qwen4ExpTextRunner,
 };
 use qwen_llm::qwen4exp_text_session::Qwen4ExpTextSnapshot;
+use qwen_llm::snapshot_policy::SnapshotPolicyConfig;
 use qwen_llm::tokenizer::Tokenizer;
 use std::io;
 use std::time::Instant;
@@ -122,8 +122,11 @@ impl FlashNextBackend {
             loaded.hc_up_mix_enabled(),
         );
         // Sized after load so auto budgets see the resident model.
-        let snapshot_cache_plan =
-            super::SnapshotCachePlan::resolve(snapshot_cache_mib, snapshot_policy, ctx.memory_signals())?;
+        let snapshot_cache_plan = super::SnapshotCachePlan::resolve(
+            snapshot_cache_mib,
+            snapshot_policy,
+            ctx.memory_signals(),
+        )?;
         Ok(Self {
             ctx,
             gguf,

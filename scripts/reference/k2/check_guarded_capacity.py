@@ -110,11 +110,12 @@ def main():
         assert (
             doc["method"]["readout"] == "final_prompt_only_one_head_and_logits_download"
         )
+        chunk = min(count, 256)
         assert doc["method"]["prefill_execution"] == {
-            "mode": "q8_lcpp_token_batch",
-            "chunk_tokens": 32,
-            "commands": (count + 31) // 32,
-            "temporary_activation_bytes": 7602304,
+            "mode": "general_matmat_batch",
+            "chunk_tokens": chunk,
+            "commands": (count + 255) // 256,
+            "temporary_activation_bytes": 237572 * chunk,
         }
         ids = sample["outcome"]["sampled_token_ids"]
         assert len(ids) == sampled
@@ -179,7 +180,7 @@ def main():
         run(
             "serial-fallback-bench",
             bbase + ["--token-ids", "0,42", "--tokens", "1"],
-            env_overrides={"QWEN_MATVEC_Q8_0_LCPP": "0"},
+            env_overrides={"QWEN_K2_PREFILL": "serial"},
         ).stdout
     )
     assert fallback["method"]["prefill_execution"] == {
@@ -192,7 +193,7 @@ def main():
         run(
             "serial-fallback-lens",
             lbase + ["--token-ids", "0,42", "--position", "1", "--logit-lens"],
-            env_overrides={"QWEN_MATVEC_Q8_0_LCPP": "0"},
+            env_overrides={"QWEN_K2_PREFILL": "serial"},
         ).stdout
     )
     assert (
@@ -223,7 +224,7 @@ def main():
     assert (
         plain["deployed_model"]["prefill"] == reference["method"]["prefill_execution"]
     )
-    assert plain["deployed_model"]["execution_topology"] == "q8_lcpp_token_batch"
+    assert plain["deployed_model"]["execution_topology"] == "general_matmat_batch"
     assert (
         plain["results"][0]["top_k"][0]["token_id"]
         == reference["samples"][0]["outcome"]["sampled_token_ids"][0]

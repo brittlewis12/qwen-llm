@@ -31,7 +31,6 @@ use std::io;
 use std::time::Instant;
 
 const DFLASH_FIXED_SCRATCH_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
-const SERIAL_TAIL_THRESHOLD: usize = 48;
 const RESTORED_TAIL_SCRATCH_LIMIT: u64 = 128 * 1024 * 1024;
 /// Longest generation header (`<|im_start|>assistant\n` plus a preopened or
 /// preclosed think block) separating a rendered transcript from its
@@ -312,6 +311,21 @@ pub(super) fn transcript_boundary<T: PartialEq>(prompt_ids: &[T], im_start: T) -
     (boundary > 0 && (2..=TRANSCRIPT_HEADER_MAX_TOKENS).contains(&header)).then_some(boundary)
 }
 
+/// Largest prompt remainder prefilled one token at a time instead of as a
+/// chunk. Both paths are correct for every model; this only picks the
+/// cheaper one. Measured 2026-09-23 on M4 Max with restored remainders at
+/// 3.2K and 29K context: a serial token costs ~41-48 ms on dense 27B and
+/// ~10-11 ms on 35B-A3B, while a small chunked prefill has a floor of
+/// ~390-640 ms dense and ~170-300 ms MoE, so serial wins only below ~10-13
+/// tokens dense and ~17-25 MoE. The previous fixed 48 made 20-47 token
+/// remainders 2-3x slower than chunked.
+fn serial_tail_max(kind: qwen_llm::model::ArchKind) -> usize {
+    match kind {
+        qwen_llm::model::ArchKind::Dense => 12,
+        _ => 20,
+    }
+}
+
 fn use_serial_tail(
     remaining: usize,
     threshold: usize,
@@ -330,29 +344,23 @@ fn should_plan_dflash(
     has_head && dense && (matched_tokens == 0 || restore_capture_complete)
 }
 
+/// Whether the request prefills a chunk (and so needs prefill scratch):
+/// anything but an exact hit or a remainder small enough for the serial tail.
 fn needs_prefill_scratch(
-    dense: bool,
+    serial_tail_max: usize,
     prompt_tokens: usize,
     restored_tokens: usize,
     exact_with_logits: bool,
 ) -> bool {
     !exact_with_logits
-        && !(dense
-            && prompt_tokens
-                .checked_sub(restored_tokens)
-                .is_some_and(|remaining| (1..=SERIAL_TAIL_THRESHOLD).contains(&remaining)))
+        && !prompt_tokens
+            .checked_sub(restored_tokens)
+            .is_some_and(|remaining| (1..=serial_tail_max).contains(&remaining))
 }
 
-fn restored_packed_tail_arch(
-    arch: &qwen_llm::model::Arch,
-    template: QwenTemplate,
-    lm_head_dtype: qwen_llm::tensor::GgmlType,
-) -> bool {
-    template == QwenTemplate::Qwen38
-        && lm_head_dtype == qwen_llm::tensor::GgmlType::Q8_0
-        && bounded_packed_dense_arch(arch)
-}
-
+/// Geometry the single-chunk packed kernels and their scratch pricing are
+/// sized for (the 27B dense shape shared by Qwen3.5/3.6/3.8). A
+/// specialization: anything else takes the general chunked path.
 fn bounded_packed_dense_arch(arch: &qwen_llm::model::Arch) -> bool {
     arch.kind == qwen_llm::model::ArchKind::Dense
         && arch.n_layer == 64
@@ -393,22 +401,21 @@ fn fresh_packed_width(
     .then_some(prompt)
 }
 
+/// Restored 7-32 token remainders on the 27B geometry prefill in one packed
+/// block (a specialization over the chunked path, which is the fallback if
+/// the packed plan is not admitted). Not limited by template, weight or
+/// head dtype, or greedy sampling: packed and chunked prefill are the same
+/// numerical class as a fresh prefill.
 fn restored_packed_tail_width(
     qualified_dense: bool,
     has_drafter: bool,
-    greedy: bool,
     prompt: usize,
     restored: usize,
     exact: bool,
 ) -> Option<usize> {
     let remaining = prompt.checked_sub(restored)?;
-    (qualified_dense
-        && !has_drafter
-        && greedy
-        && !exact
-        && restored > 0
-        && (7..=32).contains(&remaining))
-    .then_some(remaining)
+    (qualified_dense && !has_drafter && !exact && restored > 0 && (7..=32).contains(&remaining))
+        .then_some(remaining)
 }
 
 fn allocate_single_chunk_request_state(
@@ -565,7 +572,7 @@ fn prefill_remaining(
         if !single_chunk
             && use_serial_tail(
                 remaining,
-                SERIAL_TAIL_THRESHOLD,
+                serial_tail_max(loaded.arch().kind),
                 dflash_capture.is_some(),
                 serial_capture_supported,
             )
@@ -782,8 +789,9 @@ impl GenerationBackend for EngineBackend {
             .as_ref()
             .is_some_and(|lookup| lookup.is_exact_with_final_logits());
         let dense = self.loaded.arch().kind == qwen_llm::model::ArchKind::Dense;
+        let serial_tail_max = serial_tail_max(self.loaded.arch().kind);
         let needs_scratch = needs_prefill_scratch(
-            dense,
+            serial_tail_max,
             prompt_ids.len(),
             cached_lookup
                 .as_ref()
@@ -830,13 +838,8 @@ impl GenerationBackend for EngineBackend {
         )
         .or_else(|| {
             restored_packed_tail_width(
-                restored_packed_tail_arch(
-                    &self.loaded.arch(),
-                    self.template,
-                    self.loaded.metal_model().lm_head.dtype,
-                ),
+                bounded_packed_dense_arch(&self.loaded.arch()),
                 self.dflash_head.is_some(),
-                sampler.config().temperature == 0.0,
                 prompt_ids.len(),
                 cached_lookup
                     .as_ref()
@@ -912,6 +915,20 @@ impl GenerationBackend for EngineBackend {
         let (mut chunk, mut scratch, mut sequence) = allocation.map_err(|error| {
             ServeError::server_error(format!("allocate request state: {error:#}"))
         })?;
+        // Which prefill path the remainder takes, for the phases line: a slow
+        // path is never silent.
+        let prefill_path = if exact_cached {
+            "exact"
+        } else if scratch
+            .as_ref()
+            .is_some_and(|s| s.prefill_scratch_plan().is_single_chunk())
+        {
+            "single_chunk"
+        } else if scratch.is_none() {
+            "serial_tail"
+        } else {
+            "chunked"
+        };
         if let Some(selected_scratch) = scratch
             .as_ref()
             .filter(|s| s.prefill_scratch_plan().is_single_chunk())
@@ -1459,7 +1476,7 @@ impl GenerationBackend for EngineBackend {
                     replay_sampling.seed,
                     transcript_entry,
                     format!(
-                        "tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1}{transcript_phase} decode_path=dflash"
+                        "tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1}{transcript_phase} prefill_path={prefill_path} decode_path=dflash"
                     ),
                 );
             }
@@ -1541,7 +1558,7 @@ impl GenerationBackend for EngineBackend {
             dflash_prefix_replay_key.as_ref(),
             replay_sampling.seed,
             transcript_entry,
-            format!("tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1}{transcript_phase} decode_path=serial"),
+            format!("tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1}{transcript_phase} prefill_path={prefill_path} decode_path=serial"),
         )
     }
 }
@@ -1931,10 +1948,10 @@ mod tests {
         assert!(!complete_dflash_capture(0, 3076, 3076, w));
         assert!(!complete_dflash_capture(1028, 2047, 3076, w));
         assert!(!complete_dflash_capture(1029, 2048, 3076, w));
-        assert!(use_serial_tail(48, 48, true, true));
-        assert!(!use_serial_tail(48, 48, true, false));
-        assert!(use_serial_tail(48, 48, false, false));
-        assert!(!use_serial_tail(49, 48, false, true));
+        assert!(use_serial_tail(12, 12, true, true));
+        assert!(!use_serial_tail(12, 12, true, false));
+        assert!(use_serial_tail(12, 12, false, false));
+        assert!(!use_serial_tail(13, 12, false, true));
         assert!(should_plan_dflash(true, 0, false, true));
         assert!(!should_plan_dflash(true, 0, false, false));
         assert!(!should_plan_dflash(true, 1, false, true));
@@ -1981,30 +1998,37 @@ mod tests {
 
     #[test]
     fn serial_tail_scratch_plan_uses_consumed_not_matched_tokens() {
-        for restored in [0, 8192, 32768] {
-            for tail in [1, 2, 16, 48] {
-                assert!(!needs_prefill_scratch(
-                    true,
-                    restored + tail,
-                    restored,
-                    false
-                ));
+        use qwen_llm::model::ArchKind;
+        let (dense, moe) = (
+            serial_tail_max(ArchKind::Dense),
+            serial_tail_max(ArchKind::Moe),
+        );
+        assert_eq!((dense, moe), (12, 20));
+        for max in [dense, moe] {
+            for restored in [0, 8192, 32768] {
+                for tail in [1, 2, max] {
+                    assert!(!needs_prefill_scratch(
+                        max,
+                        restored + tail,
+                        restored,
+                        false
+                    ));
+                }
                 assert!(needs_prefill_scratch(
-                    false,
-                    restored + tail,
+                    max,
+                    restored + max + 1,
                     restored,
                     false
                 ));
+                assert!(needs_prefill_scratch(max, restored + 48, restored, false));
+                assert!(needs_prefill_scratch(max, restored, restored, false));
+                assert!(!needs_prefill_scratch(max, restored, restored, true));
             }
-            assert!(needs_prefill_scratch(true, restored + 49, restored, false));
-            assert!(needs_prefill_scratch(true, restored, restored, false));
-            assert!(!needs_prefill_scratch(true, restored, restored, true));
-            assert!(!needs_prefill_scratch(false, restored, restored, true));
+            // The matched pending token is still one of the rows to execute.
+            assert!(needs_prefill_scratch(max, 8193 + max, 8192, false));
+            assert!(!needs_prefill_scratch(max, 8193 + max - 1, 8192, false));
+            assert!(needs_prefill_scratch(max, 8, 9, false));
         }
-        // The matched pending token is still one of the 49 rows to execute.
-        assert!(needs_prefill_scratch(true, 8193 + 48, 8192, false));
-        assert!(!needs_prefill_scratch(true, 8193 + 47, 8192, false));
-        assert!(needs_prefill_scratch(true, 8, 9, false));
     }
 
     #[test]
@@ -2170,7 +2194,7 @@ mod tests {
             .unwrap();
         let forward = loaded.forward();
         for prefix in [0, 8] {
-            for tail in [1, 2, 16, 48] {
+            for tail in [1, 2, 12] {
                 let prompt: Vec<_> = tokens.iter().copied().cycle().take(prefix + tail).collect();
                 let mut reference = loaded
                     .create_sequence(SequenceConfig::new(prompt.len() + 2))
@@ -2179,7 +2203,12 @@ mod tests {
                     &loaded,
                     prompt.len(),
                     prompt.len() + 2,
-                    needs_prefill_scratch(true, prompt.len(), prefix, false),
+                    needs_prefill_scratch(
+                        serial_tail_max(qwen_llm::model::ArchKind::Dense),
+                        prompt.len(),
+                        prefix,
+                        false,
+                    ),
                 )
                 .unwrap();
                 assert!(scratch.is_none());
@@ -2262,22 +2291,23 @@ mod tests {
             .cache_prepared_checkpoint_strict(&checkpoint)
             .unwrap()
             .expect("cache insertion");
-        for length in [9, 56, 57] {
+        // Restored at 8: remainders 1 and 12 stay serial, 13 is chunked.
+        for length in [9, 20, 21] {
             let lookup = loaded
                 .lookup_cached_prefix(&prompt[..length])
                 .expect("pending-token lookup");
             assert_eq!(lookup.restored_prefix_len(), 8);
             assert!(!lookup.is_exact_with_final_logits());
             let needs_scratch = needs_prefill_scratch(
-                true,
+                serial_tail_max(qwen_llm::model::ArchKind::Dense),
                 length,
                 lookup.restored_prefix_len(),
                 lookup.is_exact_with_final_logits(),
             );
-            assert_eq!(needs_scratch, length == 57);
+            assert_eq!(needs_scratch, length == 21);
             let (_, scratch, mut restored) =
                 allocate_serve_request_state(&loaded, length, 64, needs_scratch).unwrap();
-            assert_eq!(scratch.is_some(), length == 57);
+            assert_eq!(scratch.is_some(), length == 21);
             let report = loaded
                 .restore_prepared_cached_prefix(lookup, &mut restored, &prompt[..length])
                 .unwrap();
@@ -2328,13 +2358,19 @@ mod tests {
         )
         .unwrap();
         let request = crate::open_responses::items::parse_request(&serde_json::json!({
-            "model":"owned-serial-test", "input":"Continue: one, two, three,",
+            "model":"owned-serial-test", "input":"Hi",
             "temperature":0.0, "max_output_tokens":4,
         }))
         .unwrap();
         let prompt = backend.render_prompt(&request).unwrap();
         let prompt_ids = backend.tokenizer.encode(&prompt, false).unwrap();
-        assert!(prompt_ids.len() <= SERIAL_TAIL_THRESHOLD);
+        // Serve prefills a fresh prompt in two pieces around the transcript
+        // boundary; both must fit the serial tail for the single-token
+        // reference below to be bit-identical.
+        let im_start = backend.tokenizer.encode(IM_START_MARKER, false).unwrap();
+        let boundary = transcript_boundary(&prompt_ids, im_start[0]).unwrap();
+        let serial_max = serial_tail_max(qwen_llm::model::ArchKind::Dense);
+        assert!(boundary <= serial_max && prompt_ids.len() - boundary <= serial_max);
         let mut reference = backend
             .loaded
             .create_sequence(SequenceConfig::new(128))
@@ -2397,9 +2433,11 @@ mod tests {
                 .unwrap_or_else(|_| panic!("serial backend failed cached={cached}"));
             assert_eq!(actual.0, expected.0);
             assert_eq!(outcome.usage.output_tokens, 4);
+            // An exact resend restores the transcript boundary and prefills
+            // only the generation header.
             assert_eq!(
                 outcome.usage.cached_tokens,
-                if cached { prompt_ids.len() } else { 0 }
+                if cached { boundary } else { 0 }
             );
             let lookup = backend.loaded.lookup_cached_prefix(&completed).unwrap();
             let mut restored = backend

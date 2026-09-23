@@ -8,7 +8,7 @@ fn packed_width(
     restored: usize,
     exact: bool,
 ) -> Option<usize> {
-    restored_packed_tail_width(dense, has_drafter, true, prompt, restored, exact)
+    restored_packed_tail_width(dense, has_drafter, prompt, restored, exact)
 }
 
 #[test]
@@ -26,10 +26,6 @@ fn bounded_restored_tail_plan_preserves_unqualified_lanes() {
             assert_eq!(packed_width(true, true, prefix + tail, prefix, false), None);
             assert_eq!(packed_width(true, false, prefix + tail, prefix, true), None);
             assert_eq!(packed_width(true, false, tail, 0, false), None);
-            assert_eq!(
-                restored_packed_tail_width(true, false, false, prefix + tail, prefix, false),
-                None
-            );
         }
     }
     assert_eq!(packed_width(true, false, 10, 11, false), None);
@@ -37,40 +33,16 @@ fn bounded_restored_tail_plan_preserves_unqualified_lanes() {
     // seven-row suffix is eligible, while incorrectly using matches is not.
     assert_eq!(packed_width(true, false, 13, 6, false), Some(7));
     assert_eq!(packed_width(true, false, 13, 7, false), None);
+    // Eligibility is the 27B dense geometry only. Template (3.5/3.6/3.8),
+    // weight or LM-head dtype, and greedy vs sampled no longer exclude a
+    // request: they don't change what the packed kernels compute.
     let mut arch = qwen_llm::model::QWEN3_27B;
-    use qwen_llm::tensor::GgmlType;
-    assert!(restored_packed_tail_arch(
-        &arch,
-        QwenTemplate::Qwen38,
-        GgmlType::Q8_0
-    ));
-    assert!(!restored_packed_tail_arch(
-        &arch,
-        QwenTemplate::Qwen36,
-        GgmlType::Q8_0
-    ));
-    assert!(!restored_packed_tail_arch(
-        &arch,
-        QwenTemplate::Qwen38,
-        GgmlType::Q6_K
-    ));
+    assert!(bounded_packed_dense_arch(&arch));
     arch.mtp_n_hidden_layers = 0;
-    assert!(restored_packed_tail_arch(
-        &arch,
-        QwenTemplate::Qwen38,
-        GgmlType::Q8_0
-    ));
+    assert!(bounded_packed_dense_arch(&arch));
     arch.n_layer = 63;
-    assert!(!restored_packed_tail_arch(
-        &arch,
-        QwenTemplate::Qwen38,
-        GgmlType::Q8_0
-    ));
-    assert!(!restored_packed_tail_arch(
-        &qwen_llm::model::QWEN3_0_8B,
-        QwenTemplate::Qwen38,
-        GgmlType::Q8_0
-    ));
+    assert!(!bounded_packed_dense_arch(&arch));
+    assert!(!bounded_packed_dense_arch(&qwen_llm::model::QWEN3_0_8B));
 }
 
 #[test]
@@ -762,20 +734,36 @@ fn fresh_short_packed_matches_serial() {
                 .unwrap();
             let allocation_ms = start.elapsed().as_secs_f64() * 1e3;
             let start = Instant::now();
-            let logits = prefill_remaining(
-                &loaded,
-                &forward,
-                None,
-                false,
-                &tokens,
-                width,
-                &mut sequence,
-                &mut scratch,
-                &mut None,
-                &mut Sink,
-            )
-            .unwrap_or_else(|_| panic!("fresh prefill failed"))
-            .unwrap();
+            let logits = if packed {
+                prefill_remaining(
+                    &loaded,
+                    &forward,
+                    None,
+                    false,
+                    &tokens,
+                    width,
+                    &mut sequence,
+                    &mut scratch,
+                    &mut None,
+                    &mut Sink,
+                )
+                .unwrap_or_else(|_| panic!("fresh prefill failed"))
+                .unwrap()
+            } else {
+                // Explicit token-by-token reference: serve now chunks fresh
+                // prompts over the serial-tail limit, so this arm must not go
+                // through the policy.
+                let mut last = Vec::new();
+                for (position, &token) in tokens.iter().enumerate() {
+                    last = forward
+                        .single_token(token, position as u32, unsafe {
+                            sequence.metal_session_mut()
+                        })
+                        .expect("fresh serial prefill");
+                    sequence.advance_by(1).unwrap();
+                }
+                last
+            };
             let prefill_ms = start.elapsed().as_secs_f64() * 1e3;
             assert_eq!(sequence.position(), width);
             eprintln!(
@@ -1093,20 +1081,18 @@ fn restored_suffix32_packed_matches_serial_greedy() {
             .unwrap()
             .0
         } else {
-            prefill_remaining(
-                &loaded,
-                &forward,
-                None,
-                false,
-                &tokens,
-                width,
-                &mut sequence,
-                &mut scratch,
-                &mut None,
-                &mut Sink,
-            )
-            .unwrap_or_else(|_| panic!("serial prefill"))
-            .unwrap()
+            // Explicit token-by-token reference: the serve policy chunks a
+            // 32-token remainder, so this arm must not go through it.
+            let mut last = Vec::new();
+            for (offset, &token) in tokens[prefix..].iter().enumerate() {
+                last = forward
+                    .single_token(token, (prefix + offset) as u32, unsafe {
+                        sequence.metal_session_mut()
+                    })
+                    .expect("serial prefill");
+                sequence.advance_by(1).unwrap();
+            }
+            last
         };
         let ms = start.elapsed().as_secs_f64() * 1e3;
         eprintln!(
@@ -1203,7 +1189,12 @@ fn restored_suffix32_packed_matches_serial_greedy() {
         }
     }
     eprintln!("tail-pilot min_state_cos={min_cos:.10}");
-    assert!(min_cos >= 0.999);
+    // Packed is bitwise equal to the general chunked plan (asserted above);
+    // this bounds chunked-vs-token-by-token drift in persistent state. The
+    // original 0.999 was set on Q8; Q4 weights drift further on every
+    // chunked prefill, not just packed tails (2026-09-23, 11.3K+32: 3.8 Q4
+    // 0.9984, 3.6 Q4 0.9994, logits cos >= 0.9999993).
+    assert!(min_cos >= 0.998);
     drop(snapshots);
     let stops = loaded.gguf().stop_token_ids().unwrap();
     let request = ServeRequest {

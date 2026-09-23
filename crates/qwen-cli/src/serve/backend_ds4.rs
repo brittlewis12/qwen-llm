@@ -408,6 +408,19 @@ fn stop_reason_is_token_limit(generation: &crate::GenerationResult) -> bool {
     matches!(generation.stop_reason, crate::StopReason::TokenLimit)
 }
 
+/// A turn cut off by the token limit while still inside an open `<think>`
+/// re-renders as a closed block, so its token prefix can never be extended.
+/// Only a generation that began inside open reasoning can end inside it; a
+/// chat-mode turn stopped by the limit is still extendable and keeps its
+/// completed snapshot.
+fn truncated_inside_reasoning(
+    preopened_reasoning: bool,
+    stopped_at_token_limit: bool,
+    closed_reasoning: impl FnOnce() -> bool,
+) -> bool {
+    preopened_reasoning && stopped_at_token_limit && !closed_reasoning()
+}
+
 /// True when the generated text contains the reasoning terminator, i.e. the
 /// transcript can still be extended verbatim by the next turn.
 fn decoded_text_closed_reasoning(
@@ -510,9 +523,11 @@ impl GenerationBackend for DeepSeekV4Backend {
                 "DeepSeek V4 residency slot is empty; the server can no longer serve requests",
             )
         })?;
+        let preopened_reasoning = render_ds4::preopens_reasoning(request).unwrap_or(false);
         self.run_request(
             residency,
             &prompt_ids,
+            preopened_reasoning,
             max_tokens,
             tokenize_ms,
             sampler,
@@ -527,6 +542,7 @@ impl DeepSeekV4Backend {
         &mut self,
         residency: DeepSeekV4MetalResidency,
         prompt_ids: &[u32],
+        preopened_reasoning: bool,
         max_tokens: usize,
         tokenize_ms: f64,
         mut sampler: Sampler,
@@ -560,6 +576,7 @@ impl DeepSeekV4Backend {
         let result = self.decode_with_session(
             &mut session,
             prompt_ids,
+            preopened_reasoning,
             warm_start,
             select_ms,
             max_tokens,
@@ -592,6 +609,7 @@ impl DeepSeekV4Backend {
         &mut self,
         session: &mut DeepSeekV4Session,
         prompt_ids: &[u32],
+        preopened_reasoning: bool,
         warm_start: Option<WarmStart>,
         select_ms: f64,
         max_tokens: usize,
@@ -687,8 +705,11 @@ impl DeepSeekV4Backend {
         // A turn truncated *inside* reasoning re-renders as a closed think
         // block, so its token prefix can never be extended — capturing it
         // only churns the LRU (k3 R1.8).
-        let truncated_in_reasoning = stop_reason_is_token_limit(&generation)
-            && !decoded_text_closed_reasoning(&generation, &self.tokenizer);
+        let truncated_in_reasoning = truncated_inside_reasoning(
+            preopened_reasoning,
+            stop_reason_is_token_limit(&generation),
+            || decoded_text_closed_reasoning(&generation, &self.tokenizer),
+        );
         if generation.transitions > 0 && !truncated_in_reasoning {
             let mut consumed = prompt_ids.to_vec();
             for token in generation.tokens.iter().take(generation.transitions) {
@@ -794,6 +815,169 @@ impl DeepSeekV4Backend {
 
 #[cfg(test)]
 mod tests {
+    /// A warm start is exact: restoring a prompt-end snapshot (in place or
+    /// into a fresh session) and prefilling the rest is bit-identical to
+    /// continuing the original session. With DS4_SCHEDULE_REPORT set, also
+    /// print how far continuing, a single cold chunk and token-by-token
+    /// decode land from each other: DS4's packed and singleton schedules
+    /// differ by cos ~0.997 (as llama.cpp's do; DEEPSEEK-V4-STRATEGY.md), so a
+    /// near-tie greedy token can differ between a warm and a cold turn.
+    #[test]
+    #[ignore = "loads DeepSeek V4 (DSV4_GGUF); GPU"]
+    fn gpu_ds4_prompt_snapshot_restore_equals_continuing() {
+        use super::*;
+        let path = std::env::var("DSV4_GGUF").unwrap_or_else(|_| {
+            "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf".into()
+        });
+        let ctx = MetalContext::new().unwrap();
+        let gguf = GgufFile::open(&path).unwrap();
+        let forward_limit = crate::deepseek_v4_forward_budget_for_context_limit(32_768).unwrap();
+        let mut backend = DeepSeekV4Backend::new(
+            ctx,
+            gguf,
+            "ds4-warm-start".into(),
+            64,
+            forward_limit,
+            crate::DeepSeekV4MultigroupSelectorArg::Auto,
+            Some(0),
+            Default::default(),
+        )
+        .unwrap();
+        let system = "You are a careful, pragmatic software engineering agent. Prefer small, verifiable steps. ".repeat(160);
+        let render = |backend: &DeepSeekV4Backend, input: serde_json::Value| -> Vec<u32> {
+            let request = crate::open_responses::items::parse_request(&serde_json::json!({
+                "model": "ds4-warm-start", "instructions": system, "input": input,
+                "reasoning": {"effort": "none"}, "max_output_tokens": 8, "temperature": 0,
+            }))
+            .unwrap();
+            let prompt = backend.render_prompt(&request).unwrap();
+            decode_loop::encode_checked(
+                &backend.tokenizer,
+                &prompt,
+                false,
+                backend.vocab_size,
+                "DS4",
+            )
+            .unwrap()
+        };
+        let user1 = serde_json::json!({"type":"message","role":"user","content":"List three prime numbers, one line."});
+        let p1 = render(&backend, serde_json::json!([user1]));
+        let p2 = render(
+            &backend,
+            serde_json::json!([user1,
+                {"type":"message","role":"assistant","content":"2, 3, 5"},
+                {"type":"message","role":"user","content":"Now three more, larger than 50, one line."}]),
+        );
+        assert!(p2.starts_with(&p1) && p2.len() > p1.len());
+        let chunk = backend.prefill_chunk_tokens;
+        let vocab = backend.vocab_size;
+        let fresh = |backend: &mut DeepSeekV4Backend| -> DeepSeekV4Session {
+            let residency = backend.residency.take().unwrap();
+            let id = session_content_id(backend.strong_content_id(), backend.ephemeral_content_id);
+            let mut session = DeepSeekV4Session::new_with_model_content_id_recoverable(
+                &backend.ctx,
+                residency,
+                id,
+            )
+            .map_err(|failure| failure.into_parts().1)
+            .unwrap();
+            backend
+                .selector_plan
+                .seal_session(&mut session, "test")
+                .unwrap();
+            session
+        };
+        let release = |backend: &mut DeepSeekV4Backend, session: DeepSeekV4Session| {
+            backend.residency = Some(session.into_residency().unwrap());
+        };
+        // Serve's chunking: advance all but the final chunk.
+        let prefill =
+            |backend: &DeepSeekV4Backend, session: &mut DeepSeekV4Session, tokens: &[u32]| {
+                let ranges = crate::deepseek_v4_prefill_chunk_ranges(tokens.len(), chunk);
+                let n = ranges.len();
+                for (index, range) in ranges.into_iter().enumerate() {
+                    if index + 1 == n {
+                        session
+                            .prefill_tokens(&backend.ctx, &tokens[range])
+                            .unwrap();
+                    } else {
+                        session
+                            .advance_tokens(&backend.ctx, &tokens[range])
+                            .unwrap();
+                    }
+                }
+            };
+        let bits = |logits: &[f32]| logits.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+
+        let mut session = fresh(&mut backend);
+        prefill(&backend, &mut session, &p1);
+        let snapshot = session.capture_causal_snapshot().unwrap();
+        prefill(&backend, &mut session, &p2[p1.len()..]);
+        let continued = crate::copy_deepseek_v4_logits(&session, vocab, "continued").unwrap();
+        session.restore_causal_snapshot(&snapshot).unwrap();
+        prefill(&backend, &mut session, &p2[p1.len()..]);
+        let in_place = crate::copy_deepseek_v4_logits(&session, vocab, "in place").unwrap();
+        release(&mut backend, session);
+        let mut session = fresh(&mut backend);
+        session.restore_causal_snapshot(&snapshot).unwrap();
+        prefill(&backend, &mut session, &p2[p1.len()..]);
+        let restored = crate::copy_deepseek_v4_logits(&session, vocab, "restored").unwrap();
+        release(&mut backend, session);
+        assert_eq!(
+            bits(&in_place),
+            bits(&continued),
+            "in-place restore differs from continuing"
+        );
+        assert_eq!(
+            bits(&restored),
+            bits(&continued),
+            "fresh restore differs from continuing"
+        );
+
+        if std::env::var("DS4_SCHEDULE_REPORT").is_err() {
+            return;
+        }
+        let compare = |label: &str, a: &[f32], b: &[f32]| {
+            let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
+            let na: f64 = a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+            let nb: f64 = b.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+            let max_abs = a
+                .iter()
+                .zip(b)
+                .map(|(x, y)| (x - y).abs())
+                .fold(0f32, f32::max);
+            eprintln!(
+                "{label:<34} cos={:.6} max_abs={max_abs:.3}",
+                dot / (na * nb)
+            );
+        };
+        let mut session = fresh(&mut backend);
+        prefill(&backend, &mut session, &p2);
+        let cold = crate::copy_deepseek_v4_logits(&session, vocab, "cold").unwrap();
+        release(&mut backend, session);
+        let mut session = fresh(&mut backend);
+        for &token in &p2 {
+            session.forward_token(&backend.ctx, token).unwrap();
+        }
+        let serial = crate::copy_deepseek_v4_logits(&session, vocab, "serial").unwrap();
+        release(&mut backend, session);
+        compare("continued vs cold single chunk", &continued, &cold);
+        compare("continued vs token-by-token", &continued, &serial);
+        compare("cold single chunk vs token-by-token", &cold, &serial);
+    }
+
+    #[test]
+    fn only_open_reasoning_can_be_truncated_inside_reasoning() {
+        use super::truncated_inside_reasoning as truncated;
+        // Chat mode at the limit: extendable, keeps its completed snapshot.
+        assert!(!truncated(false, true, || false));
+        // Thinking mode at the limit without `</think>`: not extendable.
+        assert!(truncated(true, true, || false));
+        // Thinking mode that closed its reasoning, or stopped naturally.
+        assert!(!truncated(true, true, || true));
+        assert!(!truncated(true, false, || false));
+    }
+
     use super::*;
 
     #[test]

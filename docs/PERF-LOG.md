@@ -24,9 +24,13 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   Specialized kernels are still tried first, so Q4_K/Q4_K/Q5_K dispatches
   exactly the same kernels as before. Layers that still cannot run grouped are logged
   once per model load on `qwen_diag`.
-- Validation: CPU coverage and mapping tests pass. GPU equivalence
-  (`generic_grouped_moe_`) and the A3B Q4_K_S / Q4_K_M prefill measurements
-  are still pending.
+- Validation: CPU coverage and mapping tests pass; GPU equivalence
+  `generic_grouped_moe_` 39/39 (all 16 dtypes, down and gate/up, vs CPU
+  dequant); existing MoE modules 21/21. A3B pp512: UD-Q4_K_S 304 -> 1,551
+  tok/s (5.1x); UD-Q4_K_M 1,539 -> 1,538 (unchanged kernels). `qwen run` Q4_K_S
+  greedy TTFT 3,505 -> 682 ms; generated text identical for 419/431 characters,
+  then one near-tie word flip (per-token loop vs grouped half tiles, the same
+  arithmetic every Q5_K-down quant already used).
 
 ## 2026-09-23 - Generic Grouped MoE Prefill Kernels (Q4_K_S Gap) - GPU Validation Pending
 

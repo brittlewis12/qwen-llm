@@ -759,3 +759,23 @@ fn gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one() {
         "reject_capacity_plus_one_before_session":true,"fresh_after_late_prefill_abort":true,"response_budget_257":true,"performance_claim":false,
     })).unwrap()).unwrap();
 }
+
+#[test]
+fn prefill_span_is_a_whole_multiple_of_the_physical_chunk() {
+    // (chunk_tokens, span): serial, Q8 lcpp, short general appends, general.
+    for (chunk, span) in [
+        (0, 64),
+        (1, 64),
+        (32, 64),
+        (17, 68),
+        (64, 64),
+        (100, 100),
+        (256, 256),
+    ] {
+        assert_eq!(prefill_span(chunk), span, "chunk={chunk}");
+        if chunk > 0 {
+            assert_eq!(prefill_span(chunk) % chunk, 0);
+            assert!(prefill_span(chunk) >= PREFILL_SPAN);
+        }
+    }
+}

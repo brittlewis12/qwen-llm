@@ -23,10 +23,18 @@ pub(super) struct Prepared {
 
 /// Default-on rollback lever for live-session prefix reuse.
 const PREFIX_REUSE_ENV: &str = "QWEN_K2_PREFIX_REUSE";
-/// Prompt tokens per synchronous append; transport ticks (cancellation and
-/// heartbeat) fall between spans. Packed Q8 splits each span into 32-token
-/// commands; serial weights run one command per token inside the span.
+/// Minimum prompt tokens per synchronous append; transport ticks (cancellation
+/// and heartbeat) fall between spans. See [`prefill_span`].
 const PREFILL_SPAN: usize = 64;
+
+/// Span = the model's physical prefill chunk rounded up to a multiple that
+/// covers [`PREFILL_SPAN`]. Keeping spans whole multiples of the chunk makes a
+/// fresh serve prefill execute the same command partition as `qwen run`/bench
+/// (general batched: 256-token commands; Q8 lcpp: 32; serial: 1 per token).
+fn prefill_span(chunk_tokens: usize) -> usize {
+    let chunk = chunk_tokens.max(1);
+    PREFILL_SPAN.div_ceil(chunk) * chunk
+}
 
 fn limits(
     context: u32,
@@ -209,9 +217,10 @@ impl GenerationBackend for K2Backend<'_, '_> {
         // Each span is one synchronous append that commits whole or poisons;
         // ticks between spans are the cancellation boundaries.
         let suffix = &tokens[reused..];
-        let spans = suffix.len().div_ceil(PREFILL_SPAN);
+        let span_tokens = prefill_span(self.model.prefill_info(suffix.len()).chunk_tokens);
+        let spans = suffix.len().div_ceil(span_tokens);
         let mut logits = Vec::new();
-        for (index, span) in suffix.chunks(PREFILL_SPAN).enumerate() {
+        for (index, span) in suffix.chunks(span_tokens).enumerate() {
             sink.tick().map_err(BackendFailure::Aborted)?;
             if index + 1 == spans {
                 logits = session

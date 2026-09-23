@@ -336,12 +336,21 @@ snapshots. History is taken before the session moves and republished only on
 success, so any abort or error clears it and the retry starts from zero; a
 poisoned session is discarded and recreated. A late HTTP write failure after
 success keeps history, which is sound because it is exactly what the session
-committed. Prefill appends run in 64-token spans (packed Q8 splits each into
-32-token commands) with cancellation ticks between spans. Reused tokens are
+committed. Prefill appends run in spans that are whole multiples of the model's
+prefill chunk (at least 64 tokens) with cancellation ticks between spans. By
+default every admitted weight dtype (Q4_K/Q5_K/Q6_K/Q8_0/F16/BF16/F32) uses the
+general batched prefill: 256-token commands with tiled mat-mat projections and
+row-parallel norm/RoPE/KV store/causal attention (chunk shrinks under memory
+admission; the load logs `k2 prefill: mode=... reason=...` on `qwen_diag`).
+`QWEN_K2_PREFILL=q8_lcpp` selects the bitwise-serial-equal Q8 lcpp lineage
+(32-token commands; load fails if the weights are not all Q8_0), and
+`QWEN_K2_PREFILL=serial` one command per token. A fresh serve prefill runs
+the same command partition as `qwen run`. Reused tokens are
 reported as `cached_tokens`/`matched_tokens` with `restore_ms=0`.
 `QWEN_K2_PREFIX_REUSE=0` (or `false`/`no`) disables reuse. Warm and fresh
-prefill are token-identical but can differ numerically (packed vs single-row Q8
-projections), so this carries no bitwise or sampled-exact claim. The borrowing
+prefill are token-identical but can differ numerically (different chunk
+partitions reorder tiled projection accumulation), so this carries no bitwise
+or sampled-exact claim. The borrowing
 backend stays on the accept-loop thread without self-referential/leaked model
 storage. `x_qwen.stats` is opt-in; the response echo has no tools/reasoning and
 disables parallel tool calls.
@@ -352,9 +361,10 @@ Admission bounds are distinct from the lengths covered by numerical fixtures.
 Numerical evidence covers the pinned final Q8_0-weight checkpoint with F16 KV on
 M4 Max, including the frozen v2 holdout; it does not qualify F16 weights or every
 compatible intermediate checkpoint. Serial online attention retains the full
-history without a context-sized score buffer. Serving deliberately keeps singleton
-appends for per-token cancellation, even when local run/bench/lens use eligible
-32-row Q8 packed prefill. Beyond 256 visible positions, attention merges fixed-size
+history without a context-sized score buffer. Numerical fixtures above predate
+the general batched prefill (GPU validation pending; gated by
+`k2_general_batched_prefill_matches_serial_*`). Beyond 256 visible positions,
+attention merges fixed-size
 online summaries in registers to reduce accumulation error without dropping history.
 Stored F16 KV is unchanged; compact KV is not enabled. At 524288 positions the
 logical cache alone is 72 GiB; declared context does not promise that it fits a

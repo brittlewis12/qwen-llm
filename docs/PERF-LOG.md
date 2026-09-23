@@ -6,7 +6,7 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
-## 2026-09-23 - Serve Durable Snapshots: Warm Prefixes Across Restarts (GPU Validation Pending)
+## 2026-09-23 - Serve Durable Snapshots: Warm Prefixes Across Restarts
 
 - Before: serve snapshots lived only in RAM; a restart re-prefilled every
   session (~10 min for the 133k-token overnight Qwen session).
@@ -19,11 +19,21 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   (full-GGUF hash on a cold identity cache) and all writes, with a byte-bounded
   queue. Reads promote a disk record longer than the RAM match into RAM before
   the normal lookup; `serve phases:` reports `restore_source=ram|disk|none`.
-- Evidence so far: CPU unit tests (flags, auto budget, queue bound/drop/order,
-  spill hook on evict/expire only, durable-marked promotions, DS4 identity
-  binding and re-attribution). GPU restart test
-  `restart_restores_prompt_boundary_from_disk_with_identical_continuation`
-  (0.8B) is `#[ignore]`d and not yet run; 27B Q4 and DS4 restart probes pending.
+- CPU unit tests cover flags, auto budget, queue bound/drop/order, the spill
+  hook (evict/expire only), durable-marked promotions and DS4 identity binding.
+  GPU restart test (0.8B) passes.
+- 27B Q4, 3.5K instructions: SIGTERM flushed 4 snapshots (~390 MB each) in
+  2.4 s; after restart turns 1-2 restored 3,465/3,497 tokens from disk
+  (226/238 ms), output identical. With a 1 GB RAM budget, evicted snapshots
+  spilled while serving and the first prompt came back from disk (3,465
+  tokens, 221 ms), output identical.
+- DS4 UD-IQ3_XXS: cold identity hashed 104 GB in 38.7 s, cached afterwards
+  (tier active in ~10 ms). After restart, a turn-2 request restored turn 1's
+  completed boundary from disk (3,439 tokens, 290 ms), output identical. An
+  exact resend of turn 1 cannot hit (DS4 snapshots carry no logits, so a hit
+  must be strictly shorter, and DS4 has no transcript-boundary capture yet).
+- Host note: the auto disk budget is 10% of free space; this machine had 27
+  GiB free, so it resolved to ~3 GB.
 
 ## 2026-09-23 - K2 General Batched Prefill for Every Weight Dtype
 

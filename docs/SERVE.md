@@ -126,7 +126,7 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
 # --max-tokens (resident session capacity is fixed at load); admitted capacity
 # may extend through the model's declared context.
 # K2 requires explicit --max-context-tokens (within checkpoint context) and
-# --max-tokens; --snapshot-cache-mib must be auto (resolves to 0) or 0.
+# --max-tokens; --snapshot-cache-mib is ignored (live-session prefix reuse).
 ```
 
 **Snapshot cache policy (Qwen and DS4).** Both RAM caches share one policy
@@ -239,9 +239,11 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   K/V rows: `118,063,104 + 24,576·n + 3,072·⌊n/4⌋` bytes (≈113 MiB + 24.75
   KiB/token; ≈0.95 GB at 32K). `--snapshot-cache-mib` configures the Qwen,
   Flash-Next, and DS4 caches (default `auto`; see the cache policy above). Muse
-  does not claim snapshot reuse yet.
-  K2 uses fresh per-request sessions, has a zero snapshot budget, and has
-  no prefix reuse, drafter, or tool protocol. Its verified chat profile separates
+  reuses its one live session's longest common token prefix by default (no
+  snapshots; `QWEN_MUSE_PREFIX_REUSE=0` disables).
+  K2 keeps one live session and reuses its longest common token prefix (see
+  [K2 Horizon Raw Profile](#k2-horizon-raw-profile)); it ignores the snapshot
+  budget and has no drafter. Its verified chat profile separates
   reasoning and final answers without inheriting another family's parser.
 - **Stdout is never written.** All diagnostics via the existing stderr
   tracing surface; per-request `qwen_diag` stats line retained and
@@ -271,15 +273,14 @@ their EOS-only stop set and literal output contract below are unchanged.
 
 ```sh
 qwen serve -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
-  --addr 127.0.0.1:8795 --max-context-tokens 256 --max-tokens 8 \
-  --snapshot-cache-mib 0
+  --addr 127.0.0.1:8795 --max-context-tokens 256 --max-tokens 8
 ```
 
 Both limits must be explicit for resident memory planning and the response default.
 Capacity must be positive and fit the checkpoint's declared context and actual
 device/memory admission; the default output limit is 1..=capacity. There is no
-K2-specific 256-forward/response or 7168-context cap. Nonzero snapshot
-budgets and drafters fail startup. K2 config, runtime storage plan, native
+K2-specific 256-forward/response or 7168-context cap. Drafters fail startup;
+a snapshot budget is ignored with a stderr note. K2 config, runtime storage plan, native
 tokenizer, and EOS metadata are checked before listener binding or Metal setup.
 The normal production lease and memory gate apply; listener binding still
 precedes weight loading so busy addresses fail cheaply.
@@ -326,13 +327,24 @@ An over-budget nonstream request returns HTTP 400. If SSE headers have already
 been sent before backend tokenization, the same refusal is a `response.failed`
 event after HTTP 200, with no generated text or request-session allocation.
 
-The model remains resident, but each request owns fresh KV and a fresh sampler.
-There are no snapshots, resets, prefix reuse, or hidden conversation history.
-Synchronous per-token prefill appends provide real cancellation boundaries; abort
-drops the entire session, so the next request cannot inherit partial KV. The
-borrowing backend stays on the accept-loop thread without self-referential/leaked
-model storage. `x_qwen.stats` is opt-in with cached/matched tokens always zero;
-the response echo has no tools/reasoning and disables parallel tool calls.
+The model and one capacity-sized session stay resident; each request gets a fresh
+sampler. Full attention truncates at any token, so each request (raw or chat)
+reuses the longest common token prefix of the session's consumed history (prompt
+plus forwarded outputs of the last successful request), capped to recompute the
+final prompt row, rewinds the session in O(1), and prefills only the suffix. No
+snapshots. History is taken before the session moves and republished only on
+success, so any abort or error clears it and the retry starts from zero; a
+poisoned session is discarded and recreated. A late HTTP write failure after
+success keeps history, which is sound because it is exactly what the session
+committed. Prefill appends run in 64-token spans (packed Q8 splits each into
+32-token commands) with cancellation ticks between spans. Reused tokens are
+reported as `cached_tokens`/`matched_tokens` with `restore_ms=0`.
+`QWEN_K2_PREFIX_REUSE=0` (or `false`/`no`) disables reuse. Warm and fresh
+prefill are token-identical but can differ numerically (packed vs single-row Q8
+projections), so this carries no bitwise or sampled-exact claim. The borrowing
+backend stays on the accept-loop thread without self-referential/leaked model
+storage. `x_qwen.stats` is opt-in; the response echo has no tools/reasoning and
+disables parallel tool calls.
 
 Validation covers CPU wire/UTF-8/EOS controls and actual-Q8 borrowed-backend
 JSON/SSE, BOS, abort isolation, and requested-capacity boundaries on ephemeral sockets.
@@ -641,14 +653,16 @@ because client model-pickers probe it).
   global compression. No first-request guarantee or sampled-distribution claim.
   Evidence: `docs/bench/2026-09-07-fresh-serving-http/RESULT.md`.
   Muse defaults to fresh packed prefill in superchunks of up to128 tokens
-  with a16-token packing quantum, followed by a scalar remainder. Set
-  `QWEN_MUSE_PREFIX_REUSE=1` to reuse the exact consumed-token prefix of the last
-   completed backend generation in its resident session, without snapshot copies. It always
+  with a16-token packing quantum, followed by a scalar remainder. By default
+  it reuses the exact consumed-token prefix of the last
+  completed backend generation in its resident session, without snapshot copies
+  (`QWEN_MUSE_PREFIX_REUSE=0`, `false` or `no` disables). It always
   recomputes at least the final prompt row, reports only actually reused tokens
   as cached/matched, and keeps `restore_ms=0`. Capacity rejection preserves the
-   prior history; a detected generation abort clears reuse history. Publication
-   precedes final HTTP framing, so a late transport/framing failure may retain
-   the completed backend history. GPU poison remains
+  prior history; history is taken before the session moves and republished only
+  on success, so any abort or error clears it. A late transport/framing failure
+  after backend success retains history, which is sound: it is exactly what the
+  session consumed. GPU poison remains
   fail-stop. This is one serial resident history, not durable or cross-process
   caching; it does not accelerate fresh prompts or per-token decode. Evidence:
    `docs/bench/2026-09-08-muse-live-prefix/RESULT.md`.

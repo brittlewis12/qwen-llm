@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-23 - Serve Live-Prefix Reuse Default-On for Muse and K2
+
+- Muse: `QWEN_MUSE_PREFIX_REUSE` is now default-on (`0`/`false`/`no` roll
+  back). Basis: `docs/bench/2026-09-08-muse-live-prefix/RESULT.md` (216.8 s ->
+  3.83 s, exact output parity). History is taken before the session moves and
+  republished only on success.
+- K2: new `K2Session::rewind` (ledger-only; attention visibility already follows
+  the committed prefix). Serve keeps one live session, reuses the LCP of consumed
+  history (cap prompt-1), prefills the suffix in 64-token appends instead of one
+  token per append, reports reuse as cached/matched, recreates a poisoned
+  session, and ignores `--snapshot-cache-mib`. `QWEN_K2_PREFIX_REUSE=0` rolls back.
+- GPU: `gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests`
+  passes on K2 Q4_K_M and Q8_0 (serve output equals `qwen run`, aborts clear
+  history). HTTP, 4.4-4.5K instructions, greedy: K2 Q4_K_M chat turns 2-3
+  173.9/175.0 s -> 4.8/2.3 s (matched 4406/4466); Muse 30B Q8_0 turns 2-3
+  26.8/27.8 s -> 2.6/3.2 s (matched 4606/4657). Output identical with reuse
+  on and off (K2 4/4, Muse 3/3 turns).
+- Found, not fixed here: K2 Q4_K_M prefills at ~26 tok/s (168.8 s for 4,408
+  tokens) because `k2_horizon_runtime/packed.rs` batches only when all 252
+  block projections are Q8_0; everything else runs one forward per token. K2
+  tool loops whose client drops reasoning items are rejected with 400 (the
+  native template needs a reasoning item before each call group; empty is
+  valid).
+
 ## 2026-09-23 - Flash-Next Serve Prefix Reuse via RAM Snapshots
 
 - Flash-Next serve reset its session after every request, so every turn

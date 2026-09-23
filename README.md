@@ -152,7 +152,10 @@ Serving is single-flight: concurrent connections receive `503` with
 `Retry-After: 1`. Qwen and DeepSeek use bounded in-memory snapshot caches; Muse
 and K2 reuse the longest common token prefix of their live session by default
 (`QWEN_MUSE_PREFIX_REUSE=0` / `QWEN_K2_PREFIX_REUSE=0` disable).
-Cross-restart durable warmth is not wired.
+Qwen and DeepSeek V4 also keep warm prefixes across restarts in a durable disk
+tier (default `~/.cache/qwen-llm/serve-checkpoints`, `--durable-snapshot-dir off`
+disables; the first start on a model hashes its GGUF in the background). See
+`docs/SERVE.md` for the write policy and flags.
 Muse Q8_0 on unified Apple M4 Max defaults to matrix/tiled prefill and
 split-position decode with admitted528 KiB scratch. Separate rollback controls
 `QWEN_SERVE_MUSE_MATRIX_PREFILL=0` and `QWEN_SERVE_MUSE_SPLIT_DECODE=0` disable each.

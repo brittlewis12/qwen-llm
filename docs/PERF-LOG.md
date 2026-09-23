@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-23 - Serve Durable Snapshots: Warm Prefixes Across Restarts (GPU Validation Pending)
+
+- Before: serve snapshots lived only in RAM; a restart re-prefilled every
+  session (~10 min for the 133k-token overnight Qwen session).
+- Now: Qwen and DS4 serve put a disk tier under the RAM caches
+  (`--durable-snapshot-dir|max-mib|min-tokens`, default on under
+  `~/.cache/qwen-llm/serve-checkpoints/<family>`, auto budget min(64 GiB, 10%
+  free)). Qwen spills entries leaving RAM by budget eviction/expiry and flushes
+  top-ranked entries on SIGINT/SIGTERM within 10 s; DS4 writes every captured
+  boundary behind. One background thread per family owns identity resolution
+  (full-GGUF hash on a cold identity cache) and all writes, with a byte-bounded
+  queue. Reads promote a disk record longer than the RAM match into RAM before
+  the normal lookup; `serve phases:` reports `restore_source=ram|disk|none`.
+- Evidence so far: CPU unit tests (flags, auto budget, queue bound/drop/order,
+  spill hook on evict/expire only, durable-marked promotions, DS4 identity
+  binding and re-attribution). GPU restart test
+  `restart_restores_prompt_boundary_from_disk_with_identical_continuation`
+  (0.8B) is `#[ignore]`d and not yet run; 27B Q4 and DS4 restart probes pending.
+
 ## 2026-09-23 - K2 General Batched Prefill for Every Weight Dtype
 
 - Before: K2 batched prefill only when all 252 block projections were Q8_0 and

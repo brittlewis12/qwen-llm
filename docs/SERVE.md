@@ -38,18 +38,14 @@ Operating goals, in order:
 
 ## Remaining program (2026-08-20)
 
-**F1 — Durable continuity.** Serve holds checkpoints in RAM, so a
-restart drops the session; rebuilding the 133 k-token session from the
-overnight run costs ~10 minutes of prefill. The engine ships
-`DurableCheckpointStore`: private dir, flock'd single writer, blobs
-named by compat-namespace + prefix length + digest, LRU to a byte
-budget, corrupt-blob self-heal, atomic staged publish. Wire serve to it,
-defaulting to a canonical location (`~/.cache/qwen-llm/…`, the path
-`game/play.py` uses), enabled by default with the flag as override, and
-log the resolved path and budget at startup.
+**F1 — Durable continuity: implemented for Qwen and DS4 (2026-09-23), GPU
+validation pending.** See [Durable snapshots](#durable-snapshots-cross-restart-warmth)
+for the behavior and flags. Remaining: restart continuity is proven only by
+the ignored 0.8B GPU test and the manual 27B/DS4 probes in the PERF-LOG entry;
+crash resilience (no graceful shutdown) still loses the Qwen RAM tier.
 
-**F2 — Per-family publication policy.** Publication cost is not uniform,
-and this decides the policy:
+**F2 — Per-family publication policy (the one F1 implements).** Publication
+cost is not uniform, and this decides the policy:
 
 | model | KV per token | snapshot at 133 k |
 | --- | ---: | ---: |
@@ -116,7 +112,8 @@ One new subcommand:
 qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
   [--max-context-tokens N] [--snapshot-cache-mib auto|MIB] [--drafter GGUF] \
   [--snapshot-idle-ttl-secs 3600] [--snapshot-max-age-secs 86400] \
-  [--snapshot-half-life-secs 600]
+  [--snapshot-half-life-secs 600] [--durable-snapshot-dir PATH|off] \
+  [--durable-snapshot-max-mib auto|MIB] [--durable-snapshot-min-tokens 1024]
 # Qwen: without --max-context-tokens the admission ceiling is the smaller of the
 # 262,144 hard default and the GGUF's declared context length; --drafter is
 # accepted for dense targets only (an MoE target fails startup rather than
@@ -148,6 +145,52 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
   by the same rank for the deficit and re-checks once. Metal-headroom denials
   are not retried: snapshots are CPU arenas, invisible to the Metal signal.
 
+### Durable snapshots (cross-restart warmth)
+
+Qwen (3.5/3.6/3.8 dense and MoE) and DeepSeek V4 keep warm prefixes across
+restarts in a disk tier under the RAM cache. Flash-Next, Muse Glimmer, and K2
+have no durable tier (their flags are ignored).
+
+- **Flags.** `--durable-snapshot-dir PATH|off` (default
+  `~/.cache/qwen-llm/serve-checkpoints`; each family uses its own subdirectory
+  `qwen/` or `deepseek_v4/`, and so its own budget). `--durable-snapshot-max-mib
+  auto|MIB`: `auto` = min(64 GiB, 10% of that volume's free space), `0` disables.
+  `--durable-snapshot-min-tokens 1024`: shorter prefixes are neither written nor
+  looked up. The resolved plan is logged as a `serve durable:` line at startup.
+- **Stores.** Qwen uses `DurableCheckpointStore` (QWENCKP v1 blobs) and DS4
+  `DeepSeekV4CheckpointStore`, unchanged: staged temp file, fsync, decode-verify,
+  flock, hard-link publish, corrupt-blob self-heal, and LRU-by-mtime eviction to
+  the byte budget (a disk hit touches mtime). Disk ranking is plain LRU, not the
+  RAM frecency.
+- **Identity.** Records are keyed by the model's strong content identity (the
+  CLI's `checkpoint_identity`: full ordered GGUF hash, or Hugging Face sidecar
+  SHA-256s, cached under the store's `identity/`). It resolves on a background
+  thread over a second open of the loaded files (checked to be the same inodes
+  and timestamps). **The first start on a model hashes every shard** (seconds for
+  a 16 GB 27B; roughly a minute or more for ~97 GB DS4, disk-bound) unless
+  sidecars exist; later starts hit the identity cache. Until it resolves the
+  durable tier is inactive; `serve durable: ... tier active after N ms` marks the
+  switch. DS4 sessions bind a process-local stand-in identity until then; RAM
+  hits captured under it are re-attributed to the strong identity afterwards.
+- **Writes** all happen on one background thread with a byte-bounded queue
+  (a quarter of the RAM budget, clamped to 1–16 GiB); when full, the snapshot is
+  dropped with a once-only warning, and the request path never waits on
+  encoding or fsync.
+  - *Qwen* (dense snapshots are GBs): an entry is written when it leaves RAM
+    through budget eviction or idle/age expiry, and on graceful shutdown
+    (SIGINT/SIGTERM) the top-ranked RAM entries not already on disk are flushed
+    within 10 s. Nothing is written per turn. Memory-pressure evictions are not
+    spilled (that memory is needed now), and entries promoted from disk are
+    never rewritten. A crash loses whatever was still only in RAM.
+  - *DS4* (small snapshots): every captured prompt/completed boundary is written
+    behind as it is captured; shutdown waits up to 10 s for the queue.
+- **Reads.** Before the RAM lookup, a disk record strictly longer than the best
+  RAM match is looked up (longest first; each candidate is gated by the strict
+  RAM budget and the capture memory admission before it is read), decoded, and
+  promoted into the RAM cache; the request then restores it like any RAM hit.
+  Restored tokens count in `matched_tokens`/`cached_tokens` and `restore_ms`, and
+  the `serve phases:` line reports `restore_source=ram|disk|none`.
+
 The listener rejects every resolved non-loopback address and is bound before
 the model loads, so an unresolvable or busy address fails startup immediately;
 connections that arrive during the load wait in the backlog and are answered
@@ -166,10 +209,9 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
 - **Residency:** model loads once; the process is the warm tier. S0's F2
   finding makes this the TTFT mechanism (per-process paging floor is
   5–8 s on A3B even with checkpoint hits; `load_ms` does not cover
-  first-touch). **Current serve is RAM-cache-only**: durable checkpoint
-  publication/restore is not wired into serve, so cross-restart warmth
-  currently re-prefills (closing k3 review, D3).
-  Durable checkpoints remain the intended cross-restart substrate. The finite
+  first-touch). Warm prefixes survive a restart through the
+  [durable tier](#durable-snapshots-cross-restart-warmth) for Qwen and DS4
+  (closing k3 review, D3); the process remains the fastest tier. The finite
   default Qwen context ceiling is 262,144 tokens; an omitted limit sizes each
   request to need without making the ceiling unbounded. Muse keeps one fixed
   resident session and resets it between requests by default; its separate
@@ -694,9 +736,10 @@ because client model-pickers probe it).
    make optimized warm/reset arithmetic numerical, not bitwise or sampled-exact.
    Diagnostics report resolved options, planned tiled/online token counts, and
    actual generation transitions; planned counts are not dispatch measurements.
-  Durable publication keeps the existing completed-else-prompt shadowing
-  policy. **Durable publication remains parked**: current serve is RAM-only,
-  so cross-restart warmth still re-prefills. `--durable-dual-publish` is
+  Serve's durable tier (see
+  [Durable snapshots](#durable-snapshots-cross-restart-warmth)) spills Qwen
+  entries on eviction/expiry and shutdown rather than publishing per turn.
+  `--durable-dual-publish` is
   designed but unbuilt (review R2: at q38's ~90 KB/token, dual durable publish
   of a 32k context is ~6 GB/turn — LRU churn that evicts the prefixes it
   is meant to protect, and publish time serializes the next request on a

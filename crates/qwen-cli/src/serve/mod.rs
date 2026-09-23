@@ -443,9 +443,11 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 model_id.clone(),
                 default_max_tokens,
                 context_limit,
+                invocation.snapshot_cache_mib,
+                invocation.snapshot_policy,
             )?;
             let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
-            tracing::info!(target: "qwen_diag", "serve limits: family=qwen4exp max_context_tokens={context_limit} default_max_tokens={default_max_tokens} snapshot_cache_bytes=0");
+            tracing::info!(target: "qwen_diag", "serve limits: family=qwen4exp max_context_tokens={context_limit} default_max_tokens={default_max_tokens} {}", backend.snapshot_cache_plan);
             crate::shutdown::checkpoint()?;
             accept_loop(listener, &model_id, load_ms, &mut backend, &mut trace)
         }

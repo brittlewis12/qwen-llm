@@ -37,7 +37,7 @@ const RESTORED_TAIL_SCRATCH_LIMIT: u64 = 128 * 1024 * 1024;
 /// preclosed think block) separating a rendered transcript from its
 /// generation suffix.
 const TRANSCRIPT_HEADER_MAX_TOKENS: usize = 16;
-const IM_START_MARKER: &str = "<|im_start|>";
+pub(super) const IM_START_MARKER: &str = "<|im_start|>";
 
 #[cfg(test)]
 #[path = "restored_tail_pilot.rs"]
@@ -306,8 +306,8 @@ fn complete_dflash_capture(
 /// token after `<think>`. The boundary before the header survives that
 /// re-render. A hybrid's recurrent state cannot be truncated, so the
 /// snapshot has to be taken here rather than recovered later.
-fn transcript_boundary(prompt_ids: &[i32], im_start: i32) -> Option<usize> {
-    let boundary = prompt_ids.iter().rposition(|&id| id == im_start)?;
+pub(super) fn transcript_boundary<T: PartialEq>(prompt_ids: &[T], im_start: T) -> Option<usize> {
+    let boundary = prompt_ids.iter().rposition(|id| *id == im_start)?;
     let header = prompt_ids.len() - boundary;
     (boundary > 0 && (2..=TRANSCRIPT_HEADER_MAX_TOKENS).contains(&header)).then_some(boundary)
 }

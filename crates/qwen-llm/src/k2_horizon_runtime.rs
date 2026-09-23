@@ -4,7 +4,8 @@
 //! and context. One synchronous command is in flight at a time. A whole append commits
 //! once; any failure after submission poisons the session rather than exposing
 //! partial state. Eligible Q8/lcpp prefill uses bounded packed chunks through the
-//! same block graph. No snapshots, fitting, eviction, or speed claims.
+//! same block graph. No snapshots, fitting, eviction, or speed claims; prefix
+//! reuse is `rewind` of the live session.
 
 use crate::gguf::{GgufError, GgufFile};
 use crate::k2_horizon::{K2HorizonConfig, K2HorizonError, K2KvStorage};
@@ -256,6 +257,14 @@ impl K2Session<'_, '_> {
     }
     pub fn is_poisoned(&self) -> bool {
         self.ledger.is_poisoned()
+    }
+
+    /// Truncate the committed prefix to `prefix` tokens so a later append
+    /// continues from there. Full causal attention has no per-position state
+    /// beyond the KV rows, whose visibility follows the committed prefix, so
+    /// this is O(1). Refused on a poisoned session or when growing.
+    pub fn rewind(&mut self, prefix: u32) -> Result<()> {
+        self.ledger.rewind(prefix)
     }
 
     /// Bounded prefill/continuation, returning only the final token's logits.

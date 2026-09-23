@@ -160,6 +160,34 @@ fn premature_commit_cannot_expose_staged_rows() {
 }
 
 #[test]
+fn rewind_only_shrinks_a_healthy_prefix_and_reopens_capacity() {
+    let mut ledger = Ledger::default();
+    let mut append = ledger.begin(&[1, 2, 3], 10, 3).unwrap();
+    for _ in 0..3 {
+        append.submitting().unwrap();
+        append.checked().unwrap();
+    }
+    append.commit().unwrap();
+    assert!(ledger.begin(&[4], 10, 3).is_err());
+    assert!(ledger.rewind(4).is_err());
+    assert_eq!(ledger.prefix(), 3);
+    ledger.rewind(3).unwrap();
+    ledger.rewind(1).unwrap();
+    assert_eq!(ledger.prefix(), 1);
+    let mut append = ledger.begin(&[5, 6], 10, 3).unwrap();
+    assert_eq!(append.old_prefix(), 1);
+    for _ in 0..2 {
+        append.submitting().unwrap();
+        append.checked().unwrap();
+    }
+    append.commit().unwrap();
+    assert_eq!(ledger.prefix(), 3);
+    ledger.rewind(0).unwrap();
+    ledger.poison();
+    assert!(matches!(ledger.rewind(0), Err(K2RuntimeError::Poisoned)));
+}
+
+#[test]
 fn readout_transaction_completes_once_without_advancing_even_at_capacity() {
     let mut ledger = Ledger::default();
     let mut append = ledger.begin(&[0], 10, 1).unwrap();

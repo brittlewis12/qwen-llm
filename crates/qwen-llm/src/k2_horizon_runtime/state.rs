@@ -17,6 +17,20 @@ impl Ledger {
         self.poisoned = true;
     }
 
+    /// Shrink the committed prefix. Rows past it stay in the arena but are
+    /// invisible (attention reads only `0..=cache_index`) and are overwritten
+    /// by the next append at those indices.
+    pub fn rewind(&mut self, prefix: u32) -> Result<()> {
+        if self.poisoned {
+            return Err(K2RuntimeError::Poisoned);
+        }
+        if prefix > self.prefix {
+            return Err(invalid("rewind target exceeds committed prefix"));
+        }
+        self.prefix = prefix;
+        Ok(())
+    }
+
     pub fn begin(&mut self, tokens: &[u32], vocab: u32, capacity: u32) -> Result<Transaction<'_>> {
         self.begin_chunked(tokens, vocab, capacity, 1)
     }

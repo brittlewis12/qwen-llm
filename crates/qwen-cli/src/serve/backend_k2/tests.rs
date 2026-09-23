@@ -16,6 +16,7 @@ fn gpu_k2_tools_roundtrip_all_formats_json_sse() {
         max_context_tokens: Some(2048),
         snapshot_cache_mib: Some(0),
         snapshot_policy: Default::default(),
+        durable: crate::serve::durable::DurableSnapshotConfig::off(),
         drafter: None,
         trace_sse: None,
     };
@@ -143,6 +144,7 @@ fn gpu_verified_k2_chat_http_matches_raw_and_releases_sessions() {
         max_context_tokens: Some(384),
         snapshot_cache_mib: Some(0),
         snapshot_policy: Default::default(),
+        durable: crate::serve::durable::DurableSnapshotConfig::off(),
         drafter: None,
         trace_sse: None,
     };
@@ -315,6 +317,7 @@ fn cpu_downloaded_startup_rejects_options_before_listener_or_metal() {
             // Ignored by K2; a nonzero budget must not affect startup checks.
             snapshot_cache_mib: Some(4096),
             snapshot_policy: Default::default(),
+            durable: crate::serve::durable::DurableSnapshotConfig::off(),
             drafter: drafter.map(Into::into),
             trace_sse: None,
         };
@@ -428,6 +431,7 @@ fn gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests() {
         max_context_tokens: Some(32),
         snapshot_cache_mib: Some(0),
         snapshot_policy: Default::default(),
+        durable: crate::serve::durable::DurableSnapshotConfig::off(),
         drafter: None,
         trace_sse: None,
     };
@@ -608,6 +612,7 @@ fn gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one() {
         max_context_tokens: Some(capacity),
         snapshot_cache_mib: Some(0),
         snapshot_policy: Default::default(),
+        durable: crate::serve::durable::DurableSnapshotConfig::off(),
         drafter: None,
         trace_sse: None,
     };
@@ -738,15 +743,20 @@ fn gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one() {
     // Late prefill abort: first replace the history with unrelated text so the
     // aborted request cannot reuse it, then abort on the tick that starts its
     // last prefill span (one tick precedes prefill, one starts each span).
-    let (reset, reset_prompt) =
-        request(&backend, json!({"model":"k2-boundary","input":"Unrelated reset."}));
+    let (reset, reset_prompt) = request(
+        &backend,
+        json!({"model":"k2-boundary","input":"Unrelated reset."}),
+    );
     backend
         .generate(&reset, &reset_prompt, &mut Sink::default())
         .unwrap();
     let (req, prompt) = request(&backend, json!({"model":"k2-boundary","input":text}));
     let span_tokens = prefill_span(model.prefill_info(cases[0].2).chunk_tokens);
     let spans = cases[0].2.div_ceil(span_tokens);
-    assert!(spans >= 2, "the boundary prompt must span several prefill commands");
+    assert!(
+        spans >= 2,
+        "the boundary prompt must span several prefill commands"
+    );
     let mut aborted = Sink {
         abort_tick: Some(1 + spans),
         ..Sink::default()

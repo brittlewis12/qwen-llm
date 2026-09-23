@@ -4,8 +4,9 @@
 //!
 //! Residency is the TTFT mechanism (S0 F2); dual capture — prompt boundary
 //! and completed turn — makes the server's next-turn path independent of
-//! client echo policy (S0 F1, SERVE.md review R2: RAM always, durable
-//! stays on the existing CLI shadowing policy and is out of this slice).
+//! client echo policy (S0 F1). RAM always; the optional durable tier
+//! (`backend_durable.rs`) spills entries leaving RAM to disk and promotes
+//! longer disk prefixes back into RAM before the normal cache lookup.
 
 use super::events::{ServeStats, StopReason, Usage};
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
@@ -38,9 +39,12 @@ const RESTORED_TAIL_SCRATCH_LIMIT: u64 = 128 * 1024 * 1024;
 const TRANSCRIPT_HEADER_MAX_TOKENS: usize = 16;
 pub(super) const IM_START_MARKER: &str = "<|im_start|>";
 
+#[path = "backend_durable.rs"]
+mod durable_tier;
 #[cfg(test)]
 #[path = "restored_tail_pilot.rs"]
 mod restored_tail_pilot;
+use durable_tier::restore_source;
 const DFLASH_PREFIX_REPLAY_ENV: &str = "QWEN_DFLASH_PREFIX_REPLAY";
 const DFLASH_PREFIX_REPLAY_MAX_ENTRIES: usize = 4;
 const DFLASH_PREFIX_REPLAY_MAX_TOKENS: usize = 4096;
@@ -208,6 +212,11 @@ pub(crate) struct EngineBackend {
     /// can differ slightly from serial token-major decoding.
     dflash_head: Option<MetalDFlashHead>,
     dflash_prefix_replay: DflashPrefixReplayCache,
+    /// Cross-restart tier; `None` when disabled or failed.
+    durable: Option<durable_tier::QwenDurable>,
+    /// Where the current request's restored prefix came from, for the
+    /// phases line: `ram`, `disk`, or `none`.
+    restore_source: &'static str,
 }
 
 impl EngineBackend {
@@ -264,6 +273,8 @@ impl EngineBackend {
             no_thinking_supported,
             dflash_head,
             dflash_prefix_replay: DflashPrefixReplayCache::from_env(),
+            durable: None,
+            restore_source: "none",
         })
     }
 }
@@ -706,6 +717,11 @@ impl GenerationBackend for EngineBackend {
 
     fn idle(&mut self) {
         super::log_expired_snapshots("qwen", &self.loaded.sweep_prefix_cache());
+        self.durable_idle();
+    }
+
+    fn shutdown(&mut self) {
+        self.durable_shutdown();
     }
 
     fn output_protocol(&self, request: &ServeRequest) -> OutputProtocol {
@@ -784,7 +800,18 @@ impl GenerationBackend for EngineBackend {
         })?;
 
         let restore_t0 = Instant::now();
+        // Queue anything released since the last idle tick, then let a
+        // longer durable prefix (if any) enter RAM so the single cached
+        // lookup below restores it like any RAM hit.
+        self.drain_spills();
+        let promoted = self.promote_durable_prefix(&prompt_ids);
         let cached_lookup = self.loaded.lookup_cached_prefix(&prompt_ids);
+        self.restore_source = restore_source(
+            cached_lookup
+                .as_ref()
+                .map(|lookup| lookup.matched_prefix_len()),
+            promoted,
+        );
         let exact_cached = cached_lookup
             .as_ref()
             .is_some_and(|lookup| lookup.is_exact_with_final_logits());
@@ -1758,7 +1785,11 @@ impl EngineBackend {
         } else {
             0.0
         };
-        tracing::info!(target: "qwen_diag", "serve phases: family=qwen {phases}");
+        tracing::info!(
+            target: "qwen_diag",
+            "serve phases: family=qwen restore_source={} {phases}",
+            self.restore_source,
+        );
         tracing::info!(
             target: "qwen_diag",
             "serve stats: version=serve_stats_v1 prompt_tokens={} generated_tokens={} stop_reason={} matched_tokens={} restore_ms={:.1} decode_tps={:.2}",

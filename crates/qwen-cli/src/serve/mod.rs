@@ -19,6 +19,7 @@ pub(crate) mod backend_k2;
 pub(crate) mod backend_muse;
 pub(crate) mod backend_qwen4exp;
 pub(crate) mod decode_loop;
+pub(crate) mod durable;
 pub(crate) mod events;
 pub(crate) mod http;
 pub(crate) mod outcome;
@@ -414,6 +415,19 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 invocation.snapshot_policy,
             )?;
             tracing::info!(target: "qwen_diag", "serve limits: family=deepseek_v4 max_context_tokens={} {}", context_limit, backend.snapshot_cache_plan);
+            match invocation.durable.resolve("deepseek_v4") {
+                Ok(Some(plan)) => {
+                    if let Err(error) = backend.attach_durable(plan, &invocation.model) {
+                        tracing::warn!(target: "qwen_diag", "serve durable: family=deepseek_v4 tier disabled: {error:#}");
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!(target: "qwen_diag", "serve durable: family=deepseek_v4 tier off")
+                }
+                Err(error) => {
+                    tracing::warn!(target: "qwen_diag", "serve durable: family=deepseek_v4 tier disabled: {error:#}")
+                }
+            }
             crate::shutdown::checkpoint()?;
             accept_loop(listener, &model_id, 0.0, &mut backend, &mut trace)
         }
@@ -510,6 +524,21 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 no_thinking_supported,
             )?;
             tracing::info!(target: "qwen_diag", "serve limits: family=qwen max_context_tokens={context_ceiling} context_source={context_source} {snapshot_cache_plan}");
+            match invocation.durable.resolve("qwen") {
+                Ok(Some(plan)) => {
+                    if let Err(error) =
+                        backend.attach_durable(plan, &invocation.model, snapshot_cache_plan.bytes)
+                    {
+                        tracing::warn!(target: "qwen_diag", "serve durable: family=qwen tier disabled: {error:#}");
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!(target: "qwen_diag", "serve durable: family=qwen tier off")
+                }
+                Err(error) => {
+                    tracing::warn!(target: "qwen_diag", "serve durable: family=qwen tier disabled: {error:#}")
+                }
+            }
             crate::shutdown::checkpoint()?;
 
             accept_loop(listener, &model_id, load_ms, &mut backend, &mut trace)
@@ -663,7 +692,11 @@ fn accept_loop_with_checkpoint(
     ready.store(false, Ordering::Release);
     stopping.store(true, Ordering::Release);
     drop(receiver);
-    if acceptor.join().is_err() {
+    let acceptor_result = acceptor.join();
+    // Stop accepting before the bounded durable flush, so clients see a
+    // closed port rather than a stalled server during shutdown.
+    backend.shutdown();
+    if acceptor_result.is_err() {
         return Err(anyhow::anyhow!("HTTP acceptor panicked"));
     }
     result

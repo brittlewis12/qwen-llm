@@ -72,6 +72,18 @@ impl<V> SnapshotCache<V> {
     }
 
     pub(crate) fn insert_strict(&mut self, tokens: Vec<u32>, value: V, bytes: u64) -> bool {
+        self.insert_shared_strict(tokens, Arc::new(value), bytes)
+    }
+
+    /// [`Self::insert_strict`] for a value the caller keeps using (e.g. a
+    /// snapshot promoted from disk that is restored right after insertion,
+    /// or one handed to a background writer).
+    pub(crate) fn insert_shared_strict(
+        &mut self,
+        tokens: Vec<u32>,
+        value: Arc<V>,
+        bytes: u64,
+    ) -> bool {
         self.sweep();
         if !self.policy.fits_strict(bytes)
             || self.entries.values().any(|(prefix, _)| *prefix == tokens)
@@ -79,7 +91,7 @@ impl<V> SnapshotCache<V> {
             return false;
         }
         let id = self.policy.insert(bytes, tokens.len() as u64);
-        self.entries.insert(id, (tokens, Arc::new(value)));
+        self.entries.insert(id, (tokens, value));
         let evicted = self.policy.evict_to_budget(Some(id));
         self.drop_entries(&evicted);
         true

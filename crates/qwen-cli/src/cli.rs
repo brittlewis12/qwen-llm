@@ -71,6 +71,21 @@ pub(crate) struct ServeArgs {
     #[arg(long, value_name = "SECS", default_value_t = 600)]
     snapshot_half_life_secs: u64,
 
+    /// Qwen/DS4 durable snapshot directory for warm prefixes across restarts,
+    /// or `off`. Default ~/.cache/qwen-llm/serve-checkpoints; each family
+    /// uses its own subdirectory and budget.
+    #[arg(long, value_name = "PATH|off", value_parser = crate::serve::durable::parse_durable_dir)]
+    durable_snapshot_dir: Option<crate::serve::durable::DurableDir>,
+
+    /// Durable snapshot disk budget in MiB, or `auto`: min(64 GiB, 10% of
+    /// the volume's free space). Least recently used records are evicted.
+    #[arg(long, value_name = "MIB|auto", default_value = "auto", value_parser = parse_durable_max_mib)]
+    durable_snapshot_max_mib: DurableMaxMib,
+
+    /// Never persist (or look up on disk) prefixes shorter than this.
+    #[arg(long, value_name = "TOKENS", default_value_t = crate::serve::durable::DEFAULT_MIN_TOKENS)]
+    durable_snapshot_min_tokens: usize,
+
     /// DFlash drafter GGUF for speculative decode.
     ///
     /// Greedy and sampled proposals are verified by the target model. Sampled
@@ -91,6 +106,14 @@ pub(crate) struct ServeArgs {
 /// `None` is `auto`.
 #[derive(Clone, Copy, Debug)]
 struct SnapshotCacheMib(Option<u64>);
+
+/// `None` is `auto`.
+#[derive(Clone, Copy, Debug)]
+struct DurableMaxMib(Option<u64>);
+
+fn parse_durable_max_mib(value: &str) -> std::result::Result<DurableMaxMib, String> {
+    crate::serve::durable::parse_durable_max_mib(value).map(DurableMaxMib)
+}
 
 fn parse_snapshot_cache_mib(value: &str) -> std::result::Result<SnapshotCacheMib, String> {
     if value == "auto" {
@@ -135,6 +158,7 @@ pub(crate) struct ServeInvocation {
     /// `None` sizes the cache automatically after load.
     pub(crate) snapshot_cache_mib: Option<u64>,
     pub(crate) snapshot_policy: SnapshotPolicyConfig,
+    pub(crate) durable: crate::serve::durable::DurableSnapshotConfig,
     pub(crate) drafter: Option<PathBuf>,
     pub(crate) trace_sse: Option<PathBuf>,
 }
@@ -399,6 +423,13 @@ pub(crate) fn normalize(args: &mut Args) -> Invocation {
                 idle_ttl: Duration::from_secs(serve.snapshot_idle_ttl_secs),
                 max_age: Duration::from_secs(serve.snapshot_max_age_secs),
             },
+            durable: crate::serve::durable::DurableSnapshotConfig {
+                dir: serve
+                    .durable_snapshot_dir
+                    .unwrap_or(crate::serve::durable::DurableDir::Default),
+                max_mib: serve.durable_snapshot_max_mib.0,
+                min_tokens: serve.durable_snapshot_min_tokens,
+            },
             drafter: serve.drafter,
             trace_sse: serve.trace_sse,
         }),
@@ -535,6 +566,53 @@ mod tests {
         );
         assert!(parse_snapshot_cache_mib("Auto").is_err());
         assert!(parse_snapshot_cache_mib("-1").is_err());
+    }
+
+    #[test]
+    fn serve_durable_snapshots_default_on_with_auto_budget() {
+        use crate::serve::durable::{DEFAULT_MIN_TOKENS, DurableDir, DurableSnapshotConfig};
+        let serve = |extra: &[&str]| {
+            let mut argv = vec!["qwen", "serve", "-m", "model.gguf"];
+            argv.extend_from_slice(extra);
+            let Invocation::Serve(serve) = parse(&argv).1 else {
+                panic!("expected serve invocation")
+            };
+            serve.durable
+        };
+        assert_eq!(
+            serve(&[]),
+            DurableSnapshotConfig {
+                dir: DurableDir::Default,
+                max_mib: None,
+                min_tokens: DEFAULT_MIN_TOKENS,
+            }
+        );
+        assert_eq!(DEFAULT_MIN_TOKENS, 1024);
+        assert_eq!(
+            serve(&["--durable-snapshot-dir", "off"]).dir,
+            DurableDir::Off
+        );
+        let tuned = serve(&[
+            "--durable-snapshot-dir",
+            "/tmp/warm",
+            "--durable-snapshot-max-mib",
+            "4096",
+            "--durable-snapshot-min-tokens",
+            "0",
+        ]);
+        assert_eq!(tuned.dir, DurableDir::Path("/tmp/warm".into()));
+        assert_eq!(tuned.max_mib, Some(4096));
+        assert_eq!(tuned.min_tokens, 0);
+        assert_eq!(serve(&["--durable-snapshot-max-mib", "auto"]).max_mib, None);
+        for bad in [
+            &["--durable-snapshot-max-mib", "lots"][..],
+            &["--durable-snapshot-dir", ""],
+            &["--durable-snapshot-min-tokens", "-1"],
+        ] {
+            let mut argv = vec!["qwen", "serve", "-m", "m.gguf"];
+            argv.extend_from_slice(bad);
+            assert!(Args::try_parse_from(argv).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

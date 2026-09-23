@@ -85,6 +85,10 @@ pub(crate) trait GenerationBackend {
     /// Called from the serial loop while no request is admitted (snapshot
     /// cache expiry). Must be cheap.
     fn idle(&mut self) {}
+    /// Called once when the serial loop stops (including on a termination
+    /// signal), before the backend is torn down. May block for a bounded
+    /// time (durable-snapshot flush).
+    fn shutdown(&mut self) {}
 }
 
 pub(crate) struct TraceLog {

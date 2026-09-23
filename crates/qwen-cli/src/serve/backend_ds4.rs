@@ -15,13 +15,24 @@
 //! - **a serve-owned RAM snapshot cache**: DS4 has no `PrefixCache`
 //!   equivalent (that type is Qwen-snapshot-typed), only durable blobs, so
 //!   warm reuse here holds `DeepSeekV4CausalSnapshot` values keyed by their
-//!   exact token prefix.
+//!   exact token prefix;
+//! - **an optional durable tier** (`--durable-snapshot-*`): every captured
+//!   boundary of at least the minimum length is written behind on a
+//!   background thread (DS4 snapshots are small), and a disk record longer
+//!   than the best RAM match is promoted into RAM before restore. Sessions
+//!   bind a process-local stand-in identity until the strong content
+//!   identity resolves in the background; RAM hits captured under the
+//!   stand-in are re-attributed to the strong identity once it is live.
 //!
 //! Thinking tiers pre-open `<think>` in the prompt, so [`preopens_reasoning`]
 //! reports headless generation to the transport (S3-1).
 
 use super::backend::request_sampler;
 use super::decode_loop;
+use super::durable::{
+    DurablePlan, DurableWorker, Resolved, SHUTDOWN_FLUSH_BUDGET, queue_cap_bytes,
+    resolve_content_identity,
+};
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest};
 use super::output_partition::{OutputProtocol, ToolGrammar};
@@ -30,16 +41,32 @@ use super::snapshot_cache::SnapshotCache;
 use crate::DeepSeekV4MultigroupSelectorPlan;
 use anyhow::Context as _;
 use objc2_metal::MTLDevice;
+use qwen_llm::checkpoint_identity::same_identity_sources;
+use qwen_llm::deepseek_v4::DeepSeekV4Config;
+use qwen_llm::deepseek_v4_checkpoint_store::{DeepSeekV4CheckpointStore, DeepSeekV4StoreContext};
 use qwen_llm::deepseek_v4_metal::{
-    DeepSeekV4CausalSnapshot, DeepSeekV4MetalResidency, DeepSeekV4ModelContentId,
-    DeepSeekV4Session, DeepSeekV4SessionCapacity,
+    DeepSeekV4CausalSnapshot, DeepSeekV4CompatibilityDigest, DeepSeekV4MetalResidency,
+    DeepSeekV4ModelContentId, DeepSeekV4Session, DeepSeekV4SessionCapacity,
+    DeepSeekV4SnapshotCodecConstraints,
 };
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
 use qwen_llm::sampling::Sampler;
 use qwen_llm::snapshot_policy::SnapshotPolicyConfig;
 use qwen_llm::tokenizer::Tokenizer;
+use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
+
+struct Ds4Durable {
+    plan: DurablePlan,
+    store: DeepSeekV4CheckpointStore,
+    worker: DurableWorker<Arc<DeepSeekV4CausalSnapshot>>,
+}
+
+/// A chosen warm start: matched prefix length, the snapshot (bound to the
+/// session's identity), and which tier supplied it.
+type WarmStart = (usize, Arc<DeepSeekV4CausalSnapshot>, &'static str);
 
 pub(crate) struct DeepSeekV4Backend {
     ctx: MetalContext,
@@ -55,10 +82,64 @@ pub(crate) struct DeepSeekV4Backend {
     cache: SnapshotCache<DeepSeekV4CausalSnapshot>,
     pub(super) snapshot_cache_plan: super::SnapshotCachePlan,
     /// Snapshots are scoped by a bound identity; capture and restore both
-    /// hard-fail without one. Serve's cache is process-local and never
-    /// published, so an ephemeral per-process id is the sanctioned binding
-    /// (durable publication would require the full content identity).
-    model_content_id: DeepSeekV4ModelContentId,
+    /// hard-fail without one. Until the strong content identity resolves
+    /// (or when the durable tier is off) sessions bind this process-local
+    /// stand-in, which is never published.
+    ephemeral_content_id: DeepSeekV4ModelContentId,
+    config: DeepSeekV4Config,
+    durable: Option<Ds4Durable>,
+}
+
+/// Process-unique, never published: pid + start nanos + a tag.
+fn ephemeral_content_id() -> DeepSeekV4ModelContentId {
+    let mut ephemeral = [0u8; 32];
+    ephemeral[..4].copy_from_slice(&std::process::id().to_le_bytes());
+    ephemeral[4..12].copy_from_slice(
+        &std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos() as u64)
+            .unwrap_or(0)
+            .to_le_bytes(),
+    );
+    ephemeral[12..32].copy_from_slice(b"qwen-serve-ephemeral");
+    DeepSeekV4ModelContentId::new(ephemeral)
+}
+
+/// The identity a new session binds: the strong content identity once the
+/// durable tier resolved it, else the process-local stand-in.
+fn session_content_id(
+    strong: Option<DeepSeekV4ModelContentId>,
+    ephemeral: DeepSeekV4ModelContentId,
+) -> DeepSeekV4ModelContentId {
+    strong.unwrap_or(ephemeral)
+}
+
+/// Write-behind eligibility for one captured boundary.
+fn persistable(
+    prefix_len: usize,
+    min_tokens: usize,
+    bound: DeepSeekV4ModelContentId,
+    strong: Option<DeepSeekV4ModelContentId>,
+) -> bool {
+    prefix_len >= min_tokens.max(1) && strong == Some(bound)
+}
+
+fn store_context(
+    content_id: DeepSeekV4ModelContentId,
+    config: &DeepSeekV4Config,
+    session_capacity: DeepSeekV4SessionCapacity,
+    max_record_bytes: u64,
+) -> DeepSeekV4StoreContext<'_> {
+    DeepSeekV4StoreContext {
+        compatibility_digest: DeepSeekV4CompatibilityDigest::for_model(content_id, config),
+        codec_constraints: DeepSeekV4SnapshotCodecConstraints {
+            config,
+            session_capacity,
+            expected_model_content_id: content_id,
+            max_record_bytes,
+        },
+        max_record_bytes,
+    }
 }
 
 impl DeepSeekV4Backend {
@@ -102,18 +183,7 @@ impl DeepSeekV4Backend {
             session_capacity.forward_limit(),
             load_t0.elapsed().as_secs_f64() * 1e3,
         );
-        // Process-unique, never published: pid + start nanos + a tag.
-        let mut ephemeral = [0u8; 32];
-        ephemeral[..4].copy_from_slice(&std::process::id().to_le_bytes());
-        ephemeral[4..12].copy_from_slice(
-            &std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_nanos() as u64)
-                .unwrap_or(0)
-                .to_le_bytes(),
-        );
-        ephemeral[12..32].copy_from_slice(b"qwen-serve-ephemeral");
-        let model_content_id = DeepSeekV4ModelContentId::new(ephemeral);
+        let config = residency.config().clone();
         // Sized after load so auto budgets see the resident model.
         let snapshot_cache_plan = super::SnapshotCachePlan::resolve(
             snapshot_cache_mib,
@@ -133,8 +203,204 @@ impl DeepSeekV4Backend {
             prefill_chunk_tokens,
             cache: SnapshotCache::new(snapshot_cache_plan.bytes, snapshot_policy),
             snapshot_cache_plan,
-            model_content_id,
+            ephemeral_content_id: ephemeral_content_id(),
+            config,
+            durable: None,
         })
+    }
+
+    /// Enable write-behind persistence and disk promotion. The strong
+    /// content identity resolves on the worker thread over a second open of
+    /// the loaded files (hashing every shard on a cold identity cache).
+    pub(crate) fn attach_durable(
+        &mut self,
+        plan: DurablePlan,
+        model_path: &Path,
+    ) -> anyhow::Result<()> {
+        let gguf = GgufFile::open(model_path)
+            .with_context(|| format!("reopen {} for identity", model_path.display()))?;
+        anyhow::ensure!(
+            same_identity_sources(&gguf, &self.gguf),
+            "model files changed since load; durable identity would not name the resident weights"
+        );
+        let store = DeepSeekV4CheckpointStore::new(&plan.root, plan.max_bytes);
+        let worker_store = store.clone();
+        let config = self.config.clone();
+        let capacity = self.session_capacity;
+        let max_record_bytes = plan.max_record_bytes;
+        let worker = DurableWorker::spawn(
+            "deepseek_v4",
+            queue_cap_bytes(self.snapshot_cache_plan.bytes),
+            move || {
+                worker_store
+                    .has_managed_blobs()
+                    .context("open durable snapshot store")?;
+                let (content_id, detail) =
+                    resolve_content_identity(&gguf, &worker_store.identity_cache())?;
+                drop(gguf);
+                let content_id = DeepSeekV4ModelContentId::new(content_id);
+                Ok(Resolved {
+                    content_id: *content_id.as_bytes(),
+                    detail,
+                    writer: move |snapshot: Arc<DeepSeekV4CausalSnapshot>| {
+                        let report = worker_store.publish(
+                            store_context(content_id, &config, capacity, max_record_bytes),
+                            &snapshot,
+                        )?;
+                        Ok(format!(
+                            "tokens={} blob_bytes={} outcome={:?} managed_bytes={} evicted_entries={}",
+                            snapshot.next_position(),
+                            report.blob_bytes,
+                            report.outcome,
+                            report.managed_bytes_after,
+                            report.evicted_entries,
+                        ))
+                    },
+                })
+            },
+        )?;
+        tracing::info!(
+            target: "qwen_diag",
+            "serve durable: family=deepseek_v4 {plan} queue_cap_bytes={} write_policy=write_behind identity=resolving",
+            worker.cap_bytes(),
+        );
+        self.durable = Some(Ds4Durable {
+            plan,
+            store,
+            worker,
+        });
+        Ok(())
+    }
+
+    fn strong_content_id(&self) -> Option<DeepSeekV4ModelContentId> {
+        self.durable
+            .as_ref()
+            .and_then(|durable| durable.worker.content_id())
+            .map(DeepSeekV4ModelContentId::new)
+    }
+
+    /// Pick the warm start for `prompt_ids`: the best RAM prefix, replaced by
+    /// a strictly longer durable record (promoted into RAM) when one exists.
+    /// The returned snapshot is bound to `session_id`.
+    fn select_warm_start(
+        &mut self,
+        prompt_ids: &[u32],
+        session_id: DeepSeekV4ModelContentId,
+    ) -> Option<WarmStart> {
+        let mut chosen = self
+            .cache
+            .best_prefix(prompt_ids)
+            .map(|(len, snapshot)| (len, snapshot, "ram"));
+        if let Some(promoted) =
+            self.promote_durable_prefix(prompt_ids, chosen.as_ref().map_or(0, |(len, ..)| *len))
+        {
+            chosen = Some((promoted.0, promoted.1, "disk"));
+        }
+        let (len, snapshot, source) = chosen?;
+        if snapshot.model_content_id() == session_id {
+            return Some((len, snapshot, source));
+        }
+        // A RAM hit captured under the stand-in before the strong identity
+        // resolved: same resident weights, so re-attribute a copy.
+        match snapshot.rebound_to_model(session_id, &self.config) {
+            Ok(rebound) => Some((len, Arc::new(rebound), source)),
+            Err(error) => {
+                tracing::warn!(
+                    "serve: deepseek_v4 snapshot identity rebinding failed; cold prefilling: {error}"
+                );
+                None
+            }
+        }
+    }
+
+    /// Promote the longest durable prefix strictly longer than `floor`.
+    fn promote_durable_prefix(
+        &mut self,
+        prompt_ids: &[u32],
+        floor: usize,
+    ) -> Option<(usize, Arc<DeepSeekV4CausalSnapshot>)> {
+        let strong = self.strong_content_id()?;
+        let Self {
+            durable,
+            cache,
+            ctx,
+            config,
+            session_capacity,
+            ..
+        } = self;
+        let durable = durable.as_ref()?;
+        let min_tokens = durable.plan.min_tokens;
+        // Strict prefixes only: a snapshot carries no logits.
+        if prompt_ids.len() <= min_tokens.max(floor) {
+            return None;
+        }
+        let t0 = Instant::now();
+        let mut denied = None;
+        let result = durable.store.lookup_filtered(
+            store_context(
+                strong,
+                config,
+                *session_capacity,
+                durable.plan.max_record_bytes,
+            ),
+            prompt_ids,
+            |matched, blob_bytes| {
+                if matched <= floor || matched < min_tokens {
+                    return false;
+                }
+                let Some(entry_bytes) =
+                    cache.strict_eligibility(&prompt_ids[..matched], blob_bytes)
+                else {
+                    denied = Some("cache_budget");
+                    return false;
+                };
+                if super::admit_snapshot_capture(
+                    entry_bytes,
+                    || ctx.memory_signals(),
+                    |bytes| cache.evict_for(bytes),
+                )
+                .is_err()
+                {
+                    denied = Some("memory_headroom");
+                    return false;
+                }
+                true
+            },
+        );
+        let ms = t0.elapsed().as_secs_f64() * 1e3;
+        let report = match result {
+            Ok(report) => report,
+            Err(error) => {
+                tracing::warn!(
+                    target: "qwen_diag",
+                    "serve durable: family=deepseek_v4 lookup failed after {ms:.1} ms; continuing without disk: {error}"
+                );
+                return None;
+            }
+        };
+        if report.candidates_examined > 0 {
+            tracing::info!(
+                target: "qwen_diag",
+                "serve durable: family=deepseek_v4 lookup hit={} matched={} ram_matched={floor} candidates={} corrupt_removed={} denied={} lookup_ms={ms:.1}",
+                report.snapshot.is_some(),
+                report.matched_prefix_len,
+                report.candidates_examined,
+                report.corrupt_entries_removed,
+                denied.unwrap_or("none"),
+            );
+        }
+        let snapshot = Arc::new(report.snapshot?);
+        let tokens = snapshot.prefix_tokens().to_vec();
+        if let Some(bytes) = SnapshotCache::<DeepSeekV4CausalSnapshot>::entry_bytes(
+            tokens.len(),
+            snapshot.payload_bytes(),
+        ) && !cache.insert_shared_strict(tokens, Arc::clone(&snapshot), bytes)
+        {
+            tracing::warn!(
+                "serve: deepseek_v4 disk snapshot not retained in RAM; restoring it once"
+            );
+        }
+        Some((report.matched_prefix_len, snapshot))
     }
 }
 
@@ -165,6 +431,36 @@ impl GenerationBackend for DeepSeekV4Backend {
 
     fn idle(&mut self) {
         super::log_expired_snapshots("deepseek_v4", &self.cache.sweep());
+        if self
+            .durable
+            .as_ref()
+            .is_some_and(|durable| durable.worker.failed())
+        {
+            self.durable = None;
+        }
+    }
+
+    /// Snapshots are written behind as they are captured, so shutdown only
+    /// waits (bounded) for the queue to drain.
+    fn shutdown(&mut self) {
+        let Some(durable) = self.durable.as_ref() else {
+            return;
+        };
+        if durable.worker.content_id().is_none() {
+            tracing::info!(target: "qwen_diag", "serve durable: family=deepseek_v4 shutdown: identity still resolving; nothing flushed");
+            return;
+        }
+        let started = Instant::now();
+        let drained = durable.worker.wait_idle(started + SHUTDOWN_FLUSH_BUDGET);
+        let stats = durable.worker.stats();
+        tracing::info!(
+            target: "qwen_diag",
+            "serve durable: family=deepseek_v4 shutdown drained={drained} elapsed_ms={:.1} written_total={} failed_total={} dropped_total={}",
+            started.elapsed().as_secs_f64() * 1e3,
+            stats.written,
+            stats.failed,
+            stats.dropped,
+        );
     }
 
     fn output_protocol(&self, request: &ServeRequest) -> OutputProtocol {
@@ -236,13 +532,17 @@ impl DeepSeekV4Backend {
         mut sampler: Sampler,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
+        // Choose the warm start before binding the session: the session's
+        // identity must match the snapshot it restores.
+        let restore_t0 = Instant::now();
+        let session_id = session_content_id(self.strong_content_id(), self.ephemeral_content_id);
+        let warm_start = self.select_warm_start(prompt_ids, session_id);
+        let select_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
         // Session per request over the long-lived residency; the slot is
         // restored on every exit path below.
         let session_t0 = Instant::now();
         let mut session = match DeepSeekV4Session::new_with_model_content_id_recoverable(
-            &self.ctx,
-            residency,
-            self.model_content_id,
+            &self.ctx, residency, session_id,
         ) {
             Ok(session) => session,
             Err(failure) => {
@@ -260,6 +560,8 @@ impl DeepSeekV4Backend {
         let result = self.decode_with_session(
             &mut session,
             prompt_ids,
+            warm_start,
+            select_ms,
             max_tokens,
             tokenize_ms,
             session_ms,
@@ -290,25 +592,31 @@ impl DeepSeekV4Backend {
         &mut self,
         session: &mut DeepSeekV4Session,
         prompt_ids: &[u32],
+        warm_start: Option<WarmStart>,
+        select_ms: f64,
         max_tokens: usize,
         tokenize_ms: f64,
         session_ms: f64,
         sampler: &mut Sampler,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
-        // Warm restore from the serve-owned snapshot cache.
+        // Warm restore from the chosen RAM or promoted disk snapshot.
         let restore_t0 = Instant::now();
-        let matched_tokens = match self.cache.best_prefix(prompt_ids) {
-            Some((prefix_len, snapshot)) => match session.restore_causal_snapshot(&snapshot) {
-                Ok(()) => prefix_len,
-                Err(error) => {
-                    tracing::warn!("serve: deepseek_v4 restore failed, cold prefilling: {error}");
-                    0
+        let (matched_tokens, restore_source) = match warm_start {
+            Some((prefix_len, snapshot, source)) => {
+                match session.restore_causal_snapshot(&snapshot) {
+                    Ok(()) => (prefix_len, source),
+                    Err(error) => {
+                        tracing::warn!(
+                            "serve: deepseek_v4 {source} restore failed, cold prefilling: {error}"
+                        );
+                        (0, "none")
+                    }
                 }
-            },
-            None => 0,
+            }
+            None => (0, "none"),
         };
-        let restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
+        let restore_ms = select_ms + restore_t0.elapsed().as_secs_f64() * 1e3;
 
         // Chunk locally rather than calling execute_deepseek_v4_prompt_suffix
         // so the transport can heartbeat and detect disconnects between
@@ -404,7 +712,7 @@ impl DeepSeekV4Backend {
 
         tracing::info!(
             target: "qwen_diag",
-            "serve phases: tokenize_ms={tokenize_ms:.1} session_ms={session_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={capture_ms:.1} family=deepseek_v4",
+            "serve phases: tokenize_ms={tokenize_ms:.1} session_ms={session_ms:.1} restore_ms={restore_ms:.1} restore_source={restore_source} prefill_ms={prefill_ms:.1} prompt_capture_ms={capture_ms:.1} family=deepseek_v4",
         );
         Ok(super::outcome::finish_generation(
             prompt_ids.len(),
@@ -412,6 +720,23 @@ impl DeepSeekV4Backend {
             matched_tokens,
             restore_ms,
         ))
+    }
+
+    /// Queue a freshly captured boundary for disk when it is long enough and
+    /// bound to the strong identity (stand-in captures are never published).
+    fn write_behind(&self, snapshot: Arc<DeepSeekV4CausalSnapshot>, payload_bytes: u64) {
+        let Some(durable) = self.durable.as_ref() else {
+            return;
+        };
+        if !persistable(
+            snapshot.next_position() as usize,
+            durable.plan.min_tokens,
+            snapshot.model_content_id(),
+            self.strong_content_id(),
+        ) {
+            return;
+        }
+        durable.worker.try_enqueue(snapshot, payload_bytes);
     }
 
     fn capture_snapshot(
@@ -447,14 +772,18 @@ impl DeepSeekV4Backend {
         match session.capture_causal_snapshot() {
             Ok(snapshot) => {
                 debug_assert_eq!(snapshot.payload_bytes(), payload_bytes);
-                if !self
-                    .cache
-                    .insert_strict(tokens.to_vec(), snapshot, entry_bytes)
-                {
+                let snapshot = Arc::new(snapshot);
+                if !self.cache.insert_shared_strict(
+                    tokens.to_vec(),
+                    Arc::clone(&snapshot),
+                    entry_bytes,
+                ) {
                     tracing::warn!(
                         "serve: deepseek_v4 {boundary} snapshot rejected at strict cache insertion; request continues"
                     );
+                    return;
                 }
+                self.write_behind(snapshot, payload_bytes);
             }
             Err(error) => tracing::warn!(
                 "serve: deepseek_v4 {boundary} snapshot capture failed; request continues: {error}"
@@ -471,12 +800,36 @@ mod tests {
     fn ephemeral_identity_fills_exactly_32_bytes() {
         // The startup panic this replaces (source 32 vs destination 16) only
         // surfaced when a 97 GB model finished loading.
-        let mut ephemeral = [0u8; 32];
-        ephemeral[..4].copy_from_slice(&std::process::id().to_le_bytes());
-        ephemeral[4..12].copy_from_slice(&0u64.to_le_bytes());
-        ephemeral[12..32].copy_from_slice(b"qwen-serve-ephemeral");
-        assert_eq!(b"qwen-serve-ephemeral".len(), 20);
-        assert_eq!(ephemeral.len(), 32);
+        let ephemeral = ephemeral_content_id();
+        assert_eq!(&ephemeral.as_bytes()[12..], b"qwen-serve-ephemeral");
+        assert_eq!(
+            &ephemeral.as_bytes()[..4],
+            &std::process::id().to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn sessions_bind_the_strong_identity_once_durable_resolves_it() {
+        let ephemeral = ephemeral_content_id();
+        let strong = DeepSeekV4ModelContentId::new([9; 32]);
+        // Durable off or still resolving: the process-local stand-in.
+        assert_eq!(session_content_id(None, ephemeral), ephemeral);
+        // Resolved: never ephemeral again.
+        assert_eq!(session_content_id(Some(strong), ephemeral), strong);
+        assert_ne!(session_content_id(Some(strong), ephemeral), ephemeral);
+    }
+
+    #[test]
+    fn only_long_strong_bound_boundaries_are_written_behind() {
+        let ephemeral = ephemeral_content_id();
+        let strong = DeepSeekV4ModelContentId::new([9; 32]);
+        assert!(persistable(1024, 1024, strong, Some(strong)));
+        assert!(!persistable(1023, 1024, strong, Some(strong)));
+        assert!(!persistable(4096, 1024, ephemeral, Some(strong)));
+        assert!(!persistable(4096, 1024, ephemeral, None));
+        // A zero minimum still never persists an empty prefix.
+        assert!(!persistable(0, 0, strong, Some(strong)));
+        assert!(persistable(1, 0, strong, Some(strong)));
     }
 
     #[test]

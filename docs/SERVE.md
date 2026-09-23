@@ -114,7 +114,9 @@ One new subcommand:
 
 ```sh
 qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
-  [--max-context-tokens N] [--snapshot-cache-mib 4096] [--drafter GGUF]
+  [--max-context-tokens N] [--snapshot-cache-mib auto|MIB] [--drafter GGUF] \
+  [--snapshot-idle-ttl-secs 3600] [--snapshot-max-age-secs 86400] \
+  [--snapshot-half-life-secs 600]
 # Qwen: without --max-context-tokens the admission ceiling is the smaller of the
 # 262,144 hard default and the GGUF's declared context length; --drafter is
 # accepted for dense targets only (an MoE target fails startup rather than
@@ -123,9 +125,28 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
 # Muse Glimmer and Qwen3.8-Flash-Next require both --max-context-tokens and
 # --max-tokens (resident session capacity is fixed at load); admitted capacity
 # may extend through the model's declared context.
-# K2 requires explicit --max-context-tokens (within checkpoint context), --max-tokens, and
-# --snapshot-cache-mib 0; only raw string input is supported.
+# K2 requires explicit --max-context-tokens (within checkpoint context) and
+# --max-tokens; --snapshot-cache-mib must be auto (resolves to 0) or 0.
 ```
+
+**Snapshot cache policy (Qwen and DS4).** Both RAM caches share one policy
+(`qwen_llm::snapshot_policy`), logged on the `serve limits:` line:
+
+- **Budget.** `auto` (default) = min(25% of physical RAM, 50% of the Metal
+  recommended working set left after the model loads), at least 1 GiB; an
+  integer is MiB, taken verbatim (0 disables capture).
+- **Eviction** when over budget removes the entry with the lowest
+  `score * reusable_tokens / bytes`, where a hit adds 1 to a score that decays
+  with `--snapshot-half-life-secs` (ties: older access). `0` is exact LRU.
+- **Expiry.** Entries unused for `--snapshot-idle-ttl-secs` or older than
+  `--snapshot-max-age-secs` are dropped (0 disables each), lazily on lookup and
+  insert and from the idle admission loop, so memory is returned while idle.
+- **Pins.** The request's transcript entry is pinned while its completed
+  boundary is inserted; pinned bytes count against the budget, so a completed
+  boundary that would need to evict it is skipped.
+- **Memory pressure.** A capture denied for process-footprint headroom evicts
+  by the same rank for the deficit and re-checks once. Metal-headroom denials
+  are not retried: snapshots are CPU arenas, invisible to the Metal signal.
 
 The listener rejects every resolved non-loopback address and is bound before
 the model loads, so an unresolvable or busy address fails startup immediately;
@@ -205,14 +226,14 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
 - **Implemented families: Qwen3.5/3.6/3.8, Qwen3.8-Flash-Next, DeepSeek
   V4, Muse Glimmer, and K2 Horizon raw/verified native chat/tools.** DS4 runs its own session and snapshot stack
   (`serve/backend_ds4.rs`) with a startup-fixed forward budget and a
-  serve-owned byte-bounded snapshot LRU (DS4 has no engine-side RAM prefix
-  cache). Flash-Next (`serve/backend_qwen4exp.rs`, since 2026-09-17) holds
+  serve-owned snapshot cache (`serve/snapshot_cache.rs`; DS4 has no
+  engine-side RAM prefix cache). Flash-Next (`serve/backend_qwen4exp.rs`, since 2026-09-17) holds
   one text-session workspace sized at load and hands it back reset after
   every request: the Qwen3.8 contract (effort levels, thinking, tools), no
   prefix reuse, no snapshots. `--snapshot-cache-mib` configures the Qwen and
-  DS4 cache implementations and defaults to 4096 MiB. Muse does not claim
+  DS4 caches (default `auto`; see the cache policy above). Muse does not claim
   snapshot reuse yet.
-  K2 uses fresh per-request sessions, requires a zero snapshot budget, and has
+  K2 uses fresh per-request sessions, has a zero snapshot budget, and has
   no prefix reuse, drafter, or tool protocol. Its verified chat profile separates
   reasoning and final answers without inheriting another family's parser.
 - **Stdout is never written.** All diagnostics via the existing stderr
@@ -587,8 +608,8 @@ because client model-pickers probe it).
   the header. Without it, thinking-mode chat and tool loops whose client drops
   reasoning reused 0 tokens on every turn. A captured transcript boundary
   replaces the prompt-end capture (an exact resend re-prefills only the header),
-  and a completed boundary is skipped when admitting it would evict the
-  request's transcript snapshot. Drafter requests keep single-pass prefill and
+  and the transcript entry is pinned while the completed boundary is inserted
+  (skipped if it cannot fit beside it). Drafter requests keep single-pass prefill and
   the prompt/completed pair. DS4 captures prompt and completed boundaries and
   skips a completed boundary with no transition or a truncation inside open
   reasoning. Eligible boundaries enter the **RAM** prefix cache (8–42 ms each

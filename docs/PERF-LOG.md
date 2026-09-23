@@ -6,6 +6,19 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-23 - Serve Snapshot Caches: Machine-Scaled Budget, Frecency, Expiry
+
+- Replaces the fixed 4096 MiB byte-LRU in both serve caches (Qwen
+  `PrefixCache`, DS4 serve cache) with one policy (`snapshot_policy.rs`):
+  `auto` budget = min(25% RAM, 50% of Metal working set left after load),
+  >= 1 GiB; eviction by decayed hit score x reusable tokens / byte (half-life
+  600 s); idle TTL 3600 s and max age 86400 s, swept from the idle loop.
+- The completed capture pins the transcript entry instead of reserving its
+  bytes; process-headroom capture denials evict for the deficit and re-check.
+  Non-serve `PrefixCache` users keep exact LRU without expiry.
+- Unit-tested only (FakeClock). No GPU measurement yet: warm-hit rate under
+  pressure and the auto budget on 27B/A3B hosts need a live serve run.
+
 ## 2026-09-23 - GPU Test "Corruption" Is GPU Recovery Read Through Unchecked Waits
 
 - Mechanism: under saturated concurrent GPU load the firmware detected a lockup

@@ -6,7 +6,7 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
-## 2026-09-23 - K2 General Batched Prefill for Every Weight Dtype (GPU validation pending)
+## 2026-09-23 - K2 General Batched Prefill for Every Weight Dtype
 
 - Before: K2 batched prefill only when all 252 block projections were Q8_0 and
   lcpp matvec was on, and even then only projections were batched (token-axis
@@ -25,12 +25,17 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   `QWEN_K2_PREFILL=q8_lcpp|serial` selects the old lineages explicitly.
 - Decode unchanged. Serve spans are whole multiples of the chunk, so fresh
   serve prefill keeps `qwen run`'s command partition.
-- Expectation, unmeasured: projections become compute-bound tiled GEMM (7B at
-  256 rows); target >=500 tok/s at 4.4K on M4 Max, attention (sequential
-  per-row online walk) the next limiter at long context.
-- Gates: `k2_general_batched_prefill_matches_serial_*` (logits cos >= 0.9999,
-  max-abs <= 0.25, argmax equal; K/V planes cos >= 0.999). Not bitwise:
-  tiled accumulation order differs from mat-vec.
+- GPU: `k2_general_batched_prefill_matches_serial_*` 4/4 on Q4_K_M and Q8_0
+  (logits cos >= 0.999998, same argmax incl. next-token after a 3-chunk
+  600-token prompt; worst KV row cos 0.999994 over 601 rows x 36 layers).
+  Existing K2 GPU tests pass (smoke, captures, readout, interventions,
+  online attention, serve borrowed/chat/boundary, Q4 same-artifact oracle
+  screen, guarded-capacity script at 1024). The 256-token IFM oracle corpora
+  test fails 215/768 rows identically on main and this branch (serial lineage
+  pinned); pre-existing, not caused here.
+- Serve, K2 Q4_K_M, 4,408-token prompt: prefill 168.7 s -> 8.4 s (~26 -> ~525
+  tok/s, 20x); with live-prefix reuse, turns 2-3 4.8/2.3 s -> 0.9/0.27 s.
+  Greedy output identical to `QWEN_K2_PREFILL=serial` (3/3 turns).
 
 ## 2026-09-23 - Serve Prompt Remainders: Measured Serial-Tail Limit, Ungated Packed Tails
 

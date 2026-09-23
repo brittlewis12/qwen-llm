@@ -378,7 +378,7 @@ fn chained_encoding_is_correct() {
     }
     enc.end();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    wait_completed(&cmd).expect("Metal command buffer failed");
     let gpu = read_back_f32(&y_t.buffer, n_out);
 
     let max_abs = gpu
@@ -485,7 +485,7 @@ fn packed_q2_attention_matches_per_row_at_high_nwg() {
         .expect("packed encode");
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        wait_completed(&cmd).expect("Metal command buffer failed");
     }
 
     let o_per_row =
@@ -522,7 +522,7 @@ fn packed_q2_attention_matches_per_row_at_high_nwg() {
         }
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        wait_completed(&cmd).expect("Metal command buffer failed");
     }
 
     unsafe {
@@ -632,7 +632,7 @@ fn packed_q2_attention_perf_audit_130k() {
     }
     enc.end();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    wait_completed(&cmd).expect("Metal command buffer failed");
     let per_row_chain_ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
     eprintln!("[per-row-chain-audit] ctx={n_pos} rows={N_ROWS} gpu_ms={per_row_chain_ms:.3}");
     let o_partial = MetalTensor::zeros_f32(
@@ -662,7 +662,7 @@ fn packed_q2_attention_perf_audit_130k() {
     .expect("packed encode");
     enc.end();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    wait_completed(&cmd).expect("Metal command buffer failed");
     let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
     // KV read once per row-pair: ceil(N_ROWS/2) passes over the layer KV.
     let passes = N_ROWS.div_ceil(2) as f64;
@@ -717,7 +717,7 @@ fn packed_q2_attention_perf_audit_130k() {
     .expect("matrix kqv direct v");
     enc.end();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    wait_completed(&cmd).expect("Metal command buffer failed");
     let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
     eprintln!(
         "[matrix-audit] ctx={n_pos} gpu_ms={ms:.3} (per-row baseline ~38.5 ms/layer at 130K)"

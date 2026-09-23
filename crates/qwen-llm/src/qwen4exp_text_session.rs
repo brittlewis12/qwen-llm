@@ -4006,7 +4006,7 @@ mod tests {
         encode_post_layer_hyper_probe(&ctx, &encoder, 23, &hyper, Some(&probe)).unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("Metal command buffer failed");
 
         let mut expected = initial;
         expected[17] = 1.25;

@@ -252,7 +252,7 @@ fn metal_drafter_cosine_vs_cpu() {
     }
     enc.end();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
 
     let mf = MetalForward::new(&ctx, &mm);
     let mut spec = DFlashDecoder::new(&mf, &mhead, msess);
@@ -656,7 +656,7 @@ fn packed_verify_phase_profile_27b() {
             .expect("embed");
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
             let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             accum("embed", ms);
         }
@@ -686,7 +686,7 @@ fn packed_verify_phase_profile_27b() {
                 .expect("pre-norm");
                 enc.end();
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
                 accum("pre_norm", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
             }
 
@@ -726,7 +726,8 @@ fn packed_verify_phase_profile_27b() {
                             .expect("scatter");
                             enc.end();
                             cmd.commit();
-                            cmd.waitUntilCompleted();
+                            qwen_llm::metal::wait_completed(&cmd)
+                                .expect("Metal command buffer failed");
                             gdn_compute_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                         }
                         // Blit pass.
@@ -743,7 +744,8 @@ fn packed_verify_phase_profile_27b() {
                             );
                             blit.end();
                             cmd.commit();
-                            cmd.waitUntilCompleted();
+                            qwen_llm::metal::wait_completed(&cmd)
+                                .expect("Metal command buffer failed");
                             gdn_blit_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                         }
                     }
@@ -780,7 +782,7 @@ fn packed_verify_phase_profile_27b() {
                         .expect("scatter");
                         enc.end();
                         cmd.commit();
-                        cmd.waitUntilCompleted();
+                        qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
                         attn_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     }
                     accum("attn_mixer", attn_ms);
@@ -800,7 +802,7 @@ fn packed_verify_phase_profile_27b() {
                 .expect("residual1");
                 enc.end();
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
                 accum("residual1", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
             }
 
@@ -827,7 +829,7 @@ fn packed_verify_phase_profile_27b() {
                     }
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
                     accum(
                         "hidden_capture",
                         (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
@@ -856,7 +858,7 @@ fn packed_verify_phase_profile_27b() {
                 .expect("post-norm");
                 enc.end();
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
                 accum("post_norm", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
             }
 
@@ -944,7 +946,7 @@ fn packed_verify_phase_profile_27b() {
                 .expect("residual2");
                 enc.end();
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
                 accum(
                     "ffn_plus_residual2",
                     (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
@@ -1010,7 +1012,7 @@ fn packed_verify_phase_profile_27b() {
             }
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
             accum("tail", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
         }
 
@@ -1168,7 +1170,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
         .expect("embed");
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
         accum("embed", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
     }
 
@@ -1196,7 +1198,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
             .expect("pre-norm");
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
             accum("pre_norm", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
         }
 
@@ -1234,7 +1236,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
                     .expect("in_proj_z mat-mat");
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
                     accum(
                         "gdn_step_a_proj_in_qkv_z",
                         (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
@@ -1308,7 +1310,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
                         .expect("gdn_tail");
                         enc.end();
                         cmd.commit();
-                        cmd.waitUntilCompleted();
+                        qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
                         compute_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     }
                     {
@@ -1324,7 +1326,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
                         );
                         blit.end();
                         cmd.commit();
-                        cmd.waitUntilCompleted();
+                        qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
                         blit_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     }
                 }
@@ -1348,7 +1350,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
                     .expect("out_proj mat-mat");
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
                     accum(
                         "gdn_step_c_proj_out",
                         (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
@@ -1439,7 +1441,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
                     .expect("attn step A: k-norm");
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
                     accum(
                         "attn_step_a_proj_split_norm",
                         (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
@@ -1540,7 +1542,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
                     }
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
                     attn_per_tok_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                 }
                 accum("attn_per_token", attn_per_tok_ms);
@@ -1577,7 +1579,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
                     .expect("attn step C: o_proj mat-mat");
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
                     accum(
                         "attn_step_c_gate_oproj",
                         (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
@@ -1599,7 +1601,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
             .expect("residual1");
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
             accum("residual1", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
         }
 
@@ -1626,7 +1628,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
                 }
                 enc.end();
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
                 accum(
                     "hidden_capture",
                     (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
@@ -1655,7 +1657,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
             .expect("post-norm");
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
             accum("post_norm", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
         }
 
@@ -1717,7 +1719,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
             .expect("residual2");
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
             accum(
                 "ffn_plus_residual2",
                 (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
@@ -1762,7 +1764,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
         .expect("argmax");
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
         accum("tail", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
     }
 
@@ -2047,7 +2049,7 @@ fn packed_verify_skinny_gemm_micro_27b() {
             enc.end();
             let t = std::time::Instant::now();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
             best = best.min(t.elapsed().as_secs_f64() / ITERS as f64);
         }
         best
@@ -2176,7 +2178,7 @@ fn multicol_gemv_micro_27b() {
             enc.end();
             let t = std::time::Instant::now();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
             best = best.min(t.elapsed().as_secs_f64() / ITERS as f64);
         }
         best
@@ -2228,7 +2230,7 @@ fn multicol_gemv_micro_27b() {
             }
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
 
             let got = unsafe {
                 std::slice::from_raw_parts(
@@ -2416,7 +2418,7 @@ fn smalln_mma_micro_27b() {
             enc.end();
             let t = std::time::Instant::now();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
             best = best.min(t.elapsed().as_secs_f64() / ITERS as f64);
         }
         best
@@ -2468,7 +2470,7 @@ fn smalln_mma_micro_27b() {
             }
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
 
             let got = unsafe {
                 std::slice::from_raw_parts(
@@ -2636,7 +2638,7 @@ fn smalln_selection_sweep_27b() {
             enc.end();
             let t = std::time::Instant::now();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
             best = best.min(t.elapsed().as_secs_f64() / iters as f64);
         }
         best
@@ -2682,7 +2684,7 @@ fn smalln_selection_sweep_27b() {
             }
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
         }
         let want_all = unsafe {
             std::slice::from_raw_parts(y_ref.buffer.contents().as_ptr() as *const f32, 16 * n_out)
@@ -2854,7 +2856,7 @@ fn smalln_selection_sweep_27b() {
                     encode(&enc);
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    qwen_llm::metal::wait_completed(&cmd).expect("Metal command buffer failed");
                 }
                 let got = unsafe {
                     std::slice::from_raw_parts(

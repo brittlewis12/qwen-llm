@@ -7540,6 +7540,8 @@ struct CommittedPackedCommand {
 
 impl Drop for CommittedPackedCommand {
     fn drop(&mut self) {
+        // Lifetime guard only: keeps buffers alive until the GPU is done.
+        // Completion status is checked on the normal path before readback.
         self.command.waitUntilCompleted();
     }
 }
@@ -11572,7 +11574,7 @@ impl DeepSeekV4Session {
             } else {
                 let wait_started = trace_layers.then(std::time::Instant::now);
                 command.commit();
-                command.waitUntilCompleted();
+                crate::metal::wait_completed(&command)?;
                 let wait_seconds = wait_started
                     .as_ref()
                     .map_or(0.0, |started| started.elapsed().as_secs_f64());
@@ -11938,10 +11940,10 @@ impl DeepSeekV4Session {
                 .as_ref()
                 .map_or(0.0, |started| started.elapsed().as_secs_f64());
             if let Some(shared_command) = &shared_overlap_command
-                && let Some(error) = shared_command.command.error()
+                && let Err(error) = crate::metal::wait_completed(&shared_command.command)
             {
                 return invalid(format!(
-                    "packed layer {layer} shared-expert command failed: {error:?}"
+                    "packed layer {layer} shared-expert command failed: {error}"
                 ));
             }
             if let Some(error) = expert_command.error() {

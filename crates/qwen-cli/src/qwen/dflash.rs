@@ -631,7 +631,7 @@ where
                 .context("off-mode ring scatter")?;
                 ring_enc.end();
                 ring_encoder.commit();
-                ring_encoder.waitUntilCompleted();
+                qwen_llm::metal::wait_completed(&ring_encoder)?;
             }
             stats.serial_ms += serial_t0.elapsed().as_secs_f64() * 1e3;
             sequence.advance_by(1)?;
@@ -894,7 +894,7 @@ where
                             .context("fallback ring scatter")?;
                             ring_enc.end();
                             ring_encoder.commit();
-                            ring_encoder.waitUntilCompleted();
+                            qwen_llm::metal::wait_completed(&ring_encoder)?;
                         }
                         Ok(argmax_i32(&ref_logits))
                     };
@@ -986,7 +986,7 @@ where
                 }
                 ring_enc.end();
                 ring_encoder.commit();
-                ring_encoder.waitUntilCompleted();
+                qwen_llm::metal::wait_completed(&ring_encoder)?;
             }
             stats.append_ms += append_t0.elapsed().as_secs_f64() * 1e3;
         }

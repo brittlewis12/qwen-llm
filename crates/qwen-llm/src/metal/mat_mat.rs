@@ -5209,7 +5209,7 @@ mod tests {
             enc.end();
             let t = Instant::now();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            wait_completed(&cmd).expect("Metal command buffer failed");
             let wall = t.elapsed().as_secs_f64() * 1e3;
             let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             (wall, gpu)
@@ -5227,7 +5227,7 @@ mod tests {
             enc.end();
             let t = Instant::now();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            wait_completed(&cmd).expect("Metal command buffer failed");
             let wall = t.elapsed().as_secs_f64() * 1e3;
             let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             (wall, gpu)
@@ -5247,7 +5247,7 @@ mod tests {
             enc.end();
             let t = Instant::now();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            wait_completed(&cmd).expect("Metal command buffer failed");
             let wall = t.elapsed().as_secs_f64() * 1e3;
             let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             (wall, gpu)
@@ -5436,7 +5436,7 @@ mod tests {
             enc.end();
             let t = Instant::now();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            wait_completed(&cmd).expect("Metal command buffer failed");
             let wall = t.elapsed().as_secs_f64() * 1e3;
             let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             (wall, gpu)
@@ -5457,7 +5457,7 @@ mod tests {
             enc.end();
             let t = Instant::now();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            wait_completed(&cmd).expect("Metal command buffer failed");
             let wall = t.elapsed().as_secs_f64() * 1e3;
             let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             (wall, gpu)
@@ -5713,7 +5713,7 @@ mod tests {
             blit.end();
         }
         cmd.commit();
-        cmd.waitUntilCompleted();
+        wait_completed(&cmd).expect("Metal command buffer failed");
 
         // Read back via host pointer.
         let got: Vec<f32> = unsafe {
@@ -5745,7 +5745,7 @@ mod tests {
             blit.end();
         }
         cmd2.commit();
-        cmd2.waitUntilCompleted();
+        wait_completed(&cmd2).expect("Metal command buffer failed");
         let got2: Vec<f32> = unsafe {
             let p = dst.buffer.contents().as_ptr() as *const f32;
             (0..N).map(|i| *p.add(i)).collect()

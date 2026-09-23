@@ -5245,7 +5245,7 @@ fn metal_27b_q5_fallback_bench() {
         }
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd).expect("Metal command buffer failed");
     }
 
     // Timed replay.
@@ -5260,7 +5260,7 @@ fn metal_27b_q5_fallback_bench() {
         }
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd).expect("Metal command buffer failed");
         gpu_sum_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
     }
     let total_ms = t.elapsed().as_secs_f64() * 1e3;
@@ -5560,7 +5560,7 @@ fn attn_intra_profile_single_block(
         cb(&enc)?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd)?;
         let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
         phases.push((label.into(), ms));
         Ok(())
@@ -6006,7 +6006,7 @@ fn gdn_intra_profile_single_block(
         cb(&enc)?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd)?;
         let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
         phases.push((label.into(), ms));
         Ok(())
@@ -6287,7 +6287,7 @@ fn moe_intra_profile_single_block(
         cb(&enc)?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd)?;
         let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
         phases.push((label.into(), ms));
         Ok(())
@@ -6301,7 +6301,7 @@ fn moe_intra_profile_single_block(
         cb(&enc)?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd)?;
         let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
         phases.push((label.into(), ms));
         Ok(())

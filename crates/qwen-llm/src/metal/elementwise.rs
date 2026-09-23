@@ -3483,7 +3483,7 @@ mod tests {
             encode_argmax_f32_greedy(ctx, &enc, &xt, &ot, n_rows, n).expect("encode greedy argmax");
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            wait_completed(&cmd).expect("Metal command buffer failed");
             unsafe {
                 let ptr = ot.buffer.contents().as_ptr() as *const i32;
                 (0..n_rows).map(|row| *ptr.add(row)).collect()
@@ -3604,7 +3604,7 @@ mod tests {
             encode_argmax_f32(ctx, &enc, &xt, &ot, n_rows, n).expect("encode argmax");
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            wait_completed(&cmd).expect("Metal command buffer failed");
             unsafe {
                 let p = ot.buffer.contents().as_ptr() as *const i32;
                 (0..n_rows).map(|i| *p.add(i)).collect()
@@ -3769,7 +3769,7 @@ mod tests {
                 .expect("encode argmax top2");
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            wait_completed(&cmd).expect("Metal command buffer failed");
             unsafe {
                 let pi = ot.buffer.contents().as_ptr() as *const i32;
                 let pg = gt.buffer.contents().as_ptr() as *const f32;

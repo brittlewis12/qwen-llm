@@ -287,6 +287,7 @@ use crate::tensor::{GgmlType, TensorDesc, checked_shape_elements, ggml_type_layo
 mod attn;
 mod bench;
 mod census;
+mod completion;
 mod context;
 mod dflash;
 mod elementwise;
@@ -309,6 +310,7 @@ mod vjp;
 pub use attn::*;
 pub use bench::*;
 pub use census::*;
+pub use completion::*;
 pub use context::*;
 pub use dflash::*;
 pub use elementwise::*;
@@ -359,6 +361,8 @@ pub enum MetalError {
     GgufNoCopy(String),
     #[error("Metal process lease unavailable: {0}")]
     ProcessLease(String),
+    #[error("Metal command buffer did not complete: status={status} error={error}")]
+    CommandBufferFailed { status: String, error: String },
     #[error("could not inspect host memory before Metal initialization: {0}")]
     HostMemoryTelemetry(String),
     #[error(

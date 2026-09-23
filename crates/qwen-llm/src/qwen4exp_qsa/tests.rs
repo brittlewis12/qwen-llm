@@ -3297,7 +3297,7 @@ fn dense_packed_qsa_preflight_ownership_poison_and_reset_are_strict() {
     .unwrap();
     poison_encoder.end();
     poison_command.commit();
-    poison_command.waitUntilCompleted();
+    crate::metal::wait_completed(&poison_command).expect("Metal command buffer failed");
     write_i32_scalar(&workspace.selector_status, 17).unwrap();
     assert!(workspace.release_after().is_err());
     assert!(workspace.is_poisoned());
@@ -3609,7 +3609,7 @@ fn command_ownership_abandon_poison_reset_and_capacity_are_strict() {
     .unwrap();
     poison_encoder.end();
     poison_command.commit();
-    poison_command.waitUntilCompleted();
+    crate::metal::wait_completed(&poison_command).expect("Metal command buffer failed");
     drop(poison_read);
     write_i32_scalar(&workspace.selector_status, 17).unwrap();
     assert!(workspace.release_after().is_err());

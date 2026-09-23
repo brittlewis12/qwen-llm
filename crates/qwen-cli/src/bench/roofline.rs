@@ -57,7 +57,7 @@ pub(crate) fn run_roofline(args: RooflineArgs) -> Result<()> {
     encode_fill_f32(&ctx, &init_enc, &mat_y, 0.0)?;
     init_enc.end();
     init_cmd.commit();
-    init_cmd.waitUntilCompleted();
+    qwen_llm::metal::wait_completed(&init_cmd)?;
 
     fn timed_kernel(
         ctx: &MetalContext,
@@ -71,7 +71,7 @@ pub(crate) fn run_roofline(args: RooflineArgs) -> Result<()> {
             encode(&enc)?;
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&cmd)?;
             if rep > 0 {
                 samples.push((cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
             }

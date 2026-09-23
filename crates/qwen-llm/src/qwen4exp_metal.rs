@@ -3265,7 +3265,7 @@ mod tests {
         .unwrap();
         resumed_encoder.end();
         resumed_command.commit();
-        resumed_command.waitUntilCompleted();
+        crate::metal::wait_completed(&resumed_command).expect("Metal command buffer failed");
         drop(final_read);
         scratch.release_after().unwrap();
 

@@ -50,7 +50,7 @@ where
         encode(&enc)?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
     }
 
     let mut wall_ms = 0.0f64;
@@ -62,7 +62,7 @@ where
         enc.end();
         let t = Instant::now();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
         wall_ms += t.elapsed().as_secs_f64() * 1e3;
         gpu_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
     }
@@ -102,7 +102,7 @@ where
         encode(&enc)?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
     }
 
     let mut wall_samples = Vec::with_capacity(iters);
@@ -114,7 +114,7 @@ where
         enc.end();
         let t = Instant::now();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
         wall_samples.push(t.elapsed().as_secs_f64() * 1e3);
         gpu_samples.push((cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
     }
@@ -146,7 +146,7 @@ where
         let cmd = ctx.queue.commandBuffer().context("warmup cmd")?;
         encode(&cmd)?;
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
     }
 
     let mut wall_samples = Vec::with_capacity(iters);
@@ -156,7 +156,7 @@ where
         encode(&cmd)?;
         let t = Instant::now();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
         wall_samples.push(t.elapsed().as_secs_f64() * 1e3);
         gpu_samples.push((cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
     }

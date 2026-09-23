@@ -5070,7 +5070,7 @@ impl MetalDFlashSession {
         self.append_target_ctx_column(ctx, &enc, hidden_block, position, n_target_features)?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd)?;
         Ok(())
     }
 
@@ -5183,7 +5183,7 @@ impl MetalDFlashSession {
         )?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd)?;
 
         // Stamp positions on the host side (pos_ctx is shared-storage F32
         // typed buffer holding i32; same convention as
@@ -5233,7 +5233,7 @@ impl MetalDFlashSession {
         }
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd)?;
         Ok(())
     }
 }
@@ -8359,7 +8359,7 @@ fn encode_packed_verify_inner_impl(
     }
 
     cmd_buf.commit();
-    cmd_buf.waitUntilCompleted();
+    crate::metal::wait_completed(&cmd_buf)?;
     // Read back verify_argmax (only N i32 values; trivial).
     let mut out = vec![0i32; n];
     unsafe {
@@ -10532,7 +10532,7 @@ pub fn encode_packed_verify_layer_major_inner(
     emit_mtp_verify_count_phase(trace_counts, -1, "tail", "lm_head_argmax");
 
     cmd_buf.commit();
-    cmd_buf.waitUntilCompleted();
+    crate::metal::wait_completed(&cmd_buf)?;
 
     let mut out = vec![0i32; n];
     unsafe {
@@ -15766,7 +15766,7 @@ pub fn encode_restore_after_partial_accept_inner(
     }
     blit.end();
     cmd_buf.commit();
-    cmd_buf.waitUntilCompleted();
+    crate::metal::wait_completed(&cmd_buf)?;
     // -- Host-side: update kv_n_pos for every attn layer.
     //
     // KV slot bytes at [start_position + n_keep, ...) physically remain
@@ -15855,7 +15855,7 @@ pub fn encode_restore_to_pre_block(
     }
     blit.end();
     cmd_buf.commit();
-    cmd_buf.waitUntilCompleted();
+    crate::metal::wait_completed(&cmd_buf)?;
     for i in 0..target_session.kv_n_pos.len() {
         target_session.kv_n_pos[i] = start_position as usize;
     }
@@ -16060,7 +16060,7 @@ impl<'a> DFlashDecoder<'a> {
             enc.end();
             if shared_cmd.is_none() {
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                crate::metal::wait_completed(&cmd)?;
                 self.session.maybe_record("phase1_ctx_fc_norm", &cmd);
             }
             // ctx_h_ready_n watermark advances after the final wait (see
@@ -16088,7 +16088,7 @@ impl<'a> DFlashDecoder<'a> {
         enc.end();
         if shared_cmd.is_none() {
             cmd.commit();
-            cmd.waitUntilCompleted();
+            crate::metal::wait_completed(&cmd)?;
             self.session.maybe_record("phase2_embed", &cmd);
         }
 
@@ -16421,7 +16421,7 @@ impl<'a> DFlashDecoder<'a> {
             enc.end();
             if shared_cmd.is_none() {
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                crate::metal::wait_completed(&cmd)?;
                 self.session.maybe_record("phase2_proj_norm_rope", &cmd);
             }
 
@@ -16977,7 +16977,7 @@ impl<'a> DFlashDecoder<'a> {
             enc.end();
             if shared_cmd.is_none() {
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                crate::metal::wait_completed(&cmd)?;
                 let phase3_gpu_ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                 self.session
                     .maybe_record("phase3_attn_oproj_ffn_residuals", &cmd);
@@ -17088,7 +17088,7 @@ impl<'a> DFlashDecoder<'a> {
         }
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd)?;
         self.session
             .maybe_record("phase4_tail_norm_lmhead_argmax", &cmd);
 

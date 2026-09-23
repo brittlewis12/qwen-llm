@@ -2098,6 +2098,7 @@ fn k0s_wrapper_source_has_one_draft_and_no_metal_tail_work() {
     for forbidden in [
         ".commit()",
         "waitUntilCompleted",
+        "wait_completed",
         "KernelEncoder::begin",
         "BlitEncoder::begin",
         "commandBuffer()",
@@ -2121,6 +2122,7 @@ fn k0s_wrapper_source_has_one_draft_and_no_metal_tail_work() {
     for forbidden in [
         ".commit()",
         "waitUntilCompleted",
+        "wait_completed",
         "KernelEncoder::begin",
         "commandBuffer()",
         "draft_block(",
@@ -2144,6 +2146,7 @@ fn k0s_wrapper_source_has_one_draft_and_no_metal_tail_work() {
         "extract_k0s_post_sync",
         ".commit()",
         "waitUntilCompleted",
+        "wait_completed",
         "KernelEncoder::begin",
         "commandBuffer()",
         "draft_block(",
@@ -3174,7 +3177,7 @@ where
     f(&enc);
     enc.end();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    crate::metal::wait_completed(&cmd).expect("Metal command buffer failed");
     (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3
 }
 
@@ -3242,7 +3245,7 @@ fn run_packed_moe_tail_profile(model_path: &str, label: &str, chunk_p: usize, n_
         .expect("warmup postnorm");
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd).expect("Metal command buffer failed");
     }
     for n_idx in 0..chunk_p.min(2) {
         let cmd = ctx.queue.commandBuffer().expect("cmd");
@@ -3259,7 +3262,7 @@ fn run_packed_moe_tail_profile(model_path: &str, label: &str, chunk_p: usize, n_
         encode_scatter_offset_f32(&ctx, &enc, &session.x, &x_pack, n_idx * h, h).expect("scatter");
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd).expect("Metal command buffer failed");
     }
 
     let mut postnorm_ms = 0.0f64;
@@ -3288,7 +3291,7 @@ fn run_packed_moe_tail_profile(model_path: &str, label: &str, chunk_p: usize, n_
             .expect("postnorm");
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            crate::metal::wait_completed(&cmd).expect("Metal command buffer failed");
             postnorm_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
         }
         for n_idx in 0..chunk_p {
@@ -3303,7 +3306,7 @@ fn run_packed_moe_tail_profile(model_path: &str, label: &str, chunk_p: usize, n_
                     .expect("route");
                 enc.end();
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                crate::metal::wait_completed(&cmd).expect("Metal command buffer failed");
                 route_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             }
             {
@@ -3313,7 +3316,7 @@ fn run_packed_moe_tail_profile(model_path: &str, label: &str, chunk_p: usize, n_
                     .expect("routed");
                 enc.end();
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                crate::metal::wait_completed(&cmd).expect("Metal command buffer failed");
                 routed_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             }
             {
@@ -3326,7 +3329,7 @@ fn run_packed_moe_tail_profile(model_path: &str, label: &str, chunk_p: usize, n_
                     .expect("scatter");
                 enc.end();
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                crate::metal::wait_completed(&cmd).expect("Metal command buffer failed");
                 resid_scatter_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             }
         }
@@ -8457,7 +8460,7 @@ fn run_grouped_moe_overlap_falsifier(model_path: &str, label: &str, chunk_p: usi
         encode_add_inplace_f32(&ctx, &enc, &serial_final, &mixer_out).expect("serial add");
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd).expect("Metal command buffer failed");
         serial_gpu += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
         serial_wall += wall.elapsed().as_secs_f64() * 1e3;
 
@@ -8492,7 +8495,7 @@ fn run_grouped_moe_overlap_falsifier(model_path: &str, label: &str, chunk_p: usi
             enc.end();
         }
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd).expect("Metal command buffer failed");
         concurrent_gpu += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
         concurrent_wall += wall.elapsed().as_secs_f64() * 1e3;
 
@@ -10593,7 +10596,7 @@ fn run_packed_dense_prefill_phase_profile(model_path: &str, prompt: &str, chunk_
             cb(&enc).expect(label);
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            crate::metal::wait_completed(&cmd).expect("Metal command buffer failed");
             (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3
         };
 
@@ -11415,7 +11418,7 @@ fn metal_27b_packed_gdn_tail_profile() {
             cb(&enc).expect(label);
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            crate::metal::wait_completed(&cmd).expect("Metal command buffer failed");
             (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3
         };
 

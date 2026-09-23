@@ -22,7 +22,7 @@ pub fn bench_q4_k_chained(
     }
     enc.end();
     cmd_buf.commit();
-    cmd_buf.waitUntilCompleted();
+    wait_completed(&cmd_buf)?;
     Ok(())
 }
 
@@ -44,7 +44,7 @@ pub fn bench_q5_k_chained(
     }
     enc.end();
     cmd_buf.commit();
-    cmd_buf.waitUntilCompleted();
+    wait_completed(&cmd_buf)?;
     Ok(())
 }
 
@@ -69,7 +69,7 @@ pub fn bench_q5_k_mat_mat_chained(
     }
     enc.end();
     cmd_buf.commit();
-    cmd_buf.waitUntilCompleted();
+    wait_completed(&cmd_buf)?;
     Ok(())
 }
 
@@ -90,7 +90,7 @@ pub fn bench_q6_k_chained(
     }
     enc.end();
     cmd_buf.commit();
-    cmd_buf.waitUntilCompleted();
+    wait_completed(&cmd_buf)?;
     Ok(())
 }
 
@@ -112,7 +112,7 @@ pub fn bench_q6_k_mat_mat_chained(
     }
     enc.end();
     cmd_buf.commit();
-    cmd_buf.waitUntilCompleted();
+    wait_completed(&cmd_buf)?;
     Ok(())
 }
 
@@ -145,7 +145,7 @@ pub fn bench_q4_k_mat_mat_chained(
     }
     enc.end();
     cmd_buf.commit();
-    cmd_buf.waitUntilCompleted();
+    wait_completed(&cmd_buf)?;
     Ok(())
 }
 
@@ -568,7 +568,7 @@ pub fn bench_trellis3_chained(
     }
     enc.end();
     cmd_buf.commit();
-    cmd_buf.waitUntilCompleted();
+    wait_completed(&cmd_buf)?;
     Ok(())
 }
 

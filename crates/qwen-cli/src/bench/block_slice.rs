@@ -182,7 +182,7 @@ pub(crate) fn run_decode_block_slice_replay(args: DecodeBlockSliceReplayArgs) ->
         encode_block_slice_baseline(&mf, &enc, start_block, n_blocks, position, &mut base)?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
 
         let cmd = ctx
             .queue
@@ -204,7 +204,7 @@ pub(crate) fn run_decode_block_slice_replay(args: DecodeBlockSliceReplayArgs) ->
             v_dim,
         )?;
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
 
         let mut min_cos = 1.0f64;
         let mut max_abs_all = 0.0f32;
@@ -417,7 +417,7 @@ pub(crate) fn run_decode_block_slice_trace(args: DecodeBlockSliceTraceArgs) -> R
         encode_block_slice_baseline(&mf, &enc, block_i, 1, position, &mut base)?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
 
         let cmd = ctx
             .queue
@@ -438,7 +438,7 @@ pub(crate) fn run_decode_block_slice_trace(args: DecodeBlockSliceTraceArgs) -> R
             v_dim,
         )?;
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
 
         for slot in 0..tokens {
             let base_route = read_route_fingerprint(&base[slot], topk, n_expert);
@@ -595,7 +595,7 @@ pub(crate) fn trace_block_slice_summary(
         encode_block_slice_baseline(mf, &enc, block_i, 1, position, &mut base)?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
 
         let cmd = ctx
             .queue
@@ -616,7 +616,7 @@ pub(crate) fn trace_block_slice_summary(
             v_dim,
         )?;
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
 
         for slot in 0..tokens {
             let base_route = read_route_fingerprint(&base[slot], topk, n_expert);
@@ -685,7 +685,7 @@ pub(crate) fn copy_recurrent_session_state(
     }
     blit.end();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    qwen_llm::metal::wait_completed(&cmd)?;
     dst.kv_n_pos.clone_from(&src.kv_n_pos);
     Ok(())
 }
@@ -766,7 +766,7 @@ pub(crate) fn reset_block_slice_sessions(
     }
     blit.end();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    qwen_llm::metal::wait_completed(&cmd)?;
     for (a, b) in src.iter().zip(dst.iter_mut()) {
         b.kv_n_pos.clone_from(&a.kv_n_pos);
     }
@@ -806,7 +806,7 @@ pub(crate) fn prepare_moe_session_to_block(
     }
     enc.end();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    qwen_llm::metal::wait_completed(&cmd)?;
     Ok(())
 }
 
@@ -901,7 +901,7 @@ pub(crate) fn time_validated_block_slice_replay(
                 v_dim,
             )?;
             cmd.commit();
-            cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&cmd)?;
             gpu_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
 
             for (slot, session) in sessions.iter().enumerate() {
@@ -962,7 +962,7 @@ pub(crate) fn trace_prepared_block_slice_summary(
         encode_block_slice_baseline(mf, &enc, block_i, 1, position, base)?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
 
         let cmd = ctx
             .queue
@@ -972,7 +972,7 @@ pub(crate) fn trace_prepared_block_slice_summary(
             ctx, mf, mm, &cmd, block_i, position, replay, scratch, gdn_layers, h, conv_dim, v_dim,
         )?;
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
 
         for slot in 0..base.len() {
             let base_route = read_route_fingerprint(&base[slot], topk, n_expert);
@@ -1746,6 +1746,6 @@ pub(crate) fn seed_session_current_token(
     )?;
     enc.end();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    qwen_llm::metal::wait_completed(&cmd)?;
     Ok(())
 }

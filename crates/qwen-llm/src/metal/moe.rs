@@ -8056,7 +8056,7 @@ mod tests {
                         }
                         enc.end();
                         cmd.commit();
-                        cmd.waitUntilCompleted();
+                        wait_completed(&cmd).expect("Metal command buffer failed");
                         let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                         eprintln!(
                             "[v4-moe-nwg {label_shape} group={group:>2} n_pos={n_pos:>6} nwg={nwg:>2} {label}] gpu={gpu:7.2} ms  per-call={:6.3} ms",
@@ -8168,7 +8168,7 @@ mod tests {
                             }
                             enc.end();
                             cmd.commit();
-                            cmd.waitUntilCompleted();
+                            wait_completed(&cmd).expect("Metal command buffer failed");
                             let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                             eprintln!(
                                 "[v4-moe-c {label_shape} group={group:>2} n_pos={n_pos:>6} nwg={nwg:>2} C={tile_c:>2} {label}] gpu={gpu:7.2} ms  per-call={:6.3} ms",
@@ -8278,7 +8278,7 @@ mod tests {
                     enc.end();
                     let _t = Instant::now();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    wait_completed(&cmd).expect("Metal command buffer failed");
                     let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     eprintln!(
                         "[v4-main {label_shape} group={group:>2} n_pos={n_pos:>6} nwg={nwg:>2} C={tile_c:>3} {label}] gpu={gpu:7.2} ms  per-call={:6.3} ms",
@@ -8325,7 +8325,7 @@ mod tests {
                     enc.end();
                     let _t = Instant::now();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    wait_completed(&cmd).expect("Metal command buffer failed");
                     let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     eprintln!(
                         "[v4-reduce {label_shape} group={group:>2} n_pos={n_pos:>6} nwg={nwg:>2} {label}] gpu={gpu:7.2} ms  per-call={:6.3} ms",
@@ -8510,7 +8510,7 @@ mod tests {
                     enc.end();
                     let _t = Instant::now();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    wait_completed(&cmd).expect("Metal command buffer failed");
                     let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     eprintln!(
                         "[v4-main-token {label_shape} group={group:>2} tile={group_tile:>2} n_pos={n_pos:>6} nwg={nwg:>2} C={tile_c:>2} {label}] gpu={gpu:7.2} ms  per-call={:6.3} ms",
@@ -8530,7 +8530,7 @@ mod tests {
                     enc.end();
                     let _t = Instant::now();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    wait_completed(&cmd).expect("Metal command buffer failed");
                     let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     eprintln!(
                         "[v4-main-hmajor {label_shape} group={group:>2} tile={group_tile:>2} n_pos={n_pos:>6} nwg={nwg:>2} C={tile_c:>2} {label}] gpu={gpu:7.2} ms  per-call={:6.3} ms",
@@ -8667,7 +8667,7 @@ mod tests {
                         }
                         enc.end();
                         cmd.commit();
-                        cmd.waitUntilCompleted();
+                        wait_completed(&cmd).expect("Metal command buffer failed");
                         let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                         eprintln!(
                             "[prefill-v4-main {label_shape} rows={n_rows:>2} group={group:>2} base_pos={base_pos:>6} nwg={nwg:>2} {label}] gpu={gpu:7.2} ms  per-call={:6.3} ms",
@@ -8733,7 +8733,7 @@ mod tests {
                         }
                         enc.end();
                         cmd.commit();
-                        cmd.waitUntilCompleted();
+                        wait_completed(&cmd).expect("Metal command buffer failed");
                         let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                         eprintln!(
                             "[prefill-v4-reduce {label_shape} rows={n_rows:>2} group={group:>2} base_pos={base_pos:>6} nwg={nwg:>2} {label}] gpu={gpu:7.2} ms  per-call={:6.3} ms",

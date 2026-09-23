@@ -312,7 +312,7 @@ fn run_command(
     encode(&encoder)?;
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    qwen_llm::metal::wait_completed(&command)?;
     Ok((command.GPUEndTime() - command.GPUStartTime()) * 1e3)
 }
 

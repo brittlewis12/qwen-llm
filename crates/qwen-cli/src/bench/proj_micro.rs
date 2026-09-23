@@ -173,7 +173,7 @@ pub(crate) fn projection_fill_inputs(
     }
     enc.end();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    qwen_llm::metal::wait_completed(&cmd)?;
     Ok(())
 }
 
@@ -231,7 +231,7 @@ pub(crate) fn run_gdn_proj_micro(args: GdnProjMicroArgs) -> Result<()> {
         encode_fill_f32(&ctx, &enc, &gdn_normed_batch, 0.0625)?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
     }
 
     let qkv_bytes: u64 = gdn_blocks.iter().map(|gb| gb.in_proj_qkv.n_bytes()).sum();
@@ -550,7 +550,7 @@ pub(crate) fn run_matmat_smalln_micro(args: MatmatSmallnMicroArgs) -> Result<()>
         encode_fill_f32(&ctx, &enc, &x8, 0.125)?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
     }
 
     println!(

@@ -123,7 +123,7 @@ pub(crate) fn run_decode_moe_router_repack_check(
                 mf.encode_moe_mixer_prep_by_index(&enc, block_i, context as u32, session)?;
                 enc.end();
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                qwen_llm::metal::wait_completed(&cmd)?;
 
                 let h_cpu = read_f32_tensor_prefix(&session.h, h);
                 let f32_route = cpu_route_fingerprint(moe, &h_cpu, topk, n_expert);
@@ -133,7 +133,7 @@ pub(crate) fn run_decode_moe_router_repack_check(
                 mf.encode_moe_route_prepare_by_index(&enc, block_i, session)?;
                 enc.end();
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                qwen_llm::metal::wait_completed(&cmd)?;
 
                 let gpu_route = read_route_fingerprint(session, topk, n_expert);
                 route_checks += 1;
@@ -160,7 +160,7 @@ pub(crate) fn run_decode_moe_router_repack_check(
                 mf.encode_moe_ffn_after_mixer_by_index(&enc, block_i, session)?;
                 enc.end();
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                qwen_llm::metal::wait_completed(&cmd)?;
             }
         }
 
@@ -505,7 +505,7 @@ pub(crate) fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
         }
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
         let read = |t: &MetalTensor| -> Vec<f32> {
             let n = t.n_elements() as usize;
             let mut xs = vec![0.0f32; n];

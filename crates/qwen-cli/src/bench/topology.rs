@@ -58,7 +58,7 @@ where
     encode(&enc)?;
     enc.end();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    qwen_llm::metal::wait_completed(&cmd)?;
     Ok((cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3)
 }
 
@@ -482,7 +482,7 @@ pub(crate) fn tp_arm_s(
                 })?;
                 let mut bg_ms = 0.0;
                 if let Some((_q2, cmd)) = bg {
-                    cmd.waitUntilCompleted();
+                    qwen_llm::metal::wait_completed(&cmd)?;
                     bg_ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                 }
                 let st = tp_read_u32(&stats, consumers * 4);
@@ -562,7 +562,7 @@ pub(crate) fn tp_arm_s(
             )
         })?;
         if let Some((_q2, cmd)) = bg {
-            cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&cmd)?;
         }
         let st = tp_read_u32(&stats, consumers * 4);
         let fresh: u64 = (0..consumers).map(|c| st[c * 4] as u64).sum();

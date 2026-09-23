@@ -43,7 +43,7 @@ pub(crate) fn fill_gdn_replay_inputs(ctx: &MetalContext, sessions: &[MetalSessio
     }
     enc.end();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    qwen_llm::metal::wait_completed(&cmd)?;
     Ok(())
 }
 
@@ -587,7 +587,7 @@ pub(crate) fn run_decode_gdn_layer_replay(args: DecodeGdnLayerReplayArgs) -> Res
             encode_gdn_layer_baseline(&ctx, &mf, &enc, layer.gb, layer.gdn_i, &mut base)?;
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&cmd)?;
 
             let cmd = ctx
                 .queue
@@ -606,7 +606,7 @@ pub(crate) fn run_decode_gdn_layer_replay(args: DecodeGdnLayerReplayArgs) -> Res
                 v_dim,
             )?;
             cmd.commit();
-            cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&cmd)?;
 
             let mut min_cos = 1.0f64;
             let mut max_abs_all = 0.0f32;
@@ -841,7 +841,7 @@ pub(crate) fn run_decode_gdn_chain_replay(args: DecodeGdnChainReplayArgs) -> Res
         encode_gdn_chain_baseline(&ctx, &mf, &enc, selected, &mut base)?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
 
         let cmd = ctx
             .queue
@@ -859,7 +859,7 @@ pub(crate) fn run_decode_gdn_chain_replay(args: DecodeGdnChainReplayArgs) -> Res
             v_dim,
         )?;
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
 
         let mut min_cos = 1.0f64;
         let mut max_abs_all = 0.0f32;

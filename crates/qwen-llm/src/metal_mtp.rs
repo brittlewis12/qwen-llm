@@ -1106,7 +1106,7 @@ impl<'a> SpeculativeDecoder<'a> {
         )?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd)?;
         Ok(())
     }
 
@@ -1549,7 +1549,7 @@ impl<'a> SpeculativeDecoder<'a> {
             self.encode_mtp_kv_only(&enc, position)?;
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            crate::metal::wait_completed(&cmd)?;
             self.mtp_session.kv_n_pos = position as usize + 1;
             return Ok(DraftResult {
                 logits: None,
@@ -1602,7 +1602,7 @@ impl<'a> SpeculativeDecoder<'a> {
 
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd)?;
 
         // KV side-effect was committed by encode_mtp_attn; bump our counter.
         self.mtp_session.kv_n_pos = position as usize + 1;
@@ -1828,7 +1828,7 @@ impl<'a> SpeculativeDecoder<'a> {
             blit.end();
         }
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd)?;
 
         self.mtp_session.kv_n_pos = start_position as usize + n_drafts;
         let mut out = vec![0i32; n_drafts];
@@ -1918,7 +1918,7 @@ impl<'a> SpeculativeDecoder<'a> {
             enc.end();
         }
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd)?;
 
         self.mtp_session.kv_n_pos = start_position as usize + drafts.len();
         Ok(())
@@ -2482,7 +2482,7 @@ impl<'a> SpeculativeDecoder<'a> {
                 )?;
                 enc.end();
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                crate::metal::wait_completed(&cmd)?;
                 Some(normalized)
             } else {
                 None

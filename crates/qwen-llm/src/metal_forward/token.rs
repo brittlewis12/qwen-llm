@@ -729,7 +729,7 @@ impl<'a> MetalForward<'a> {
 
         let t_gpu = std::time::Instant::now();
         cmd_buf.commit();
-        cmd_buf.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd_buf)?;
         let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
         let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
 
@@ -1756,7 +1756,7 @@ impl<'a> MetalForward<'a> {
 
         enc.end();
         cmd_buf.commit();
-        cmd_buf.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd_buf)?;
         // Read back logits to CPU.
         let mut logits = vec![0.0f32; arch.vocab_size as usize];
         unsafe {
@@ -1836,7 +1836,7 @@ impl<'a> MetalForward<'a> {
             )?;
             enc.end();
             cmd_buf.commit();
-            cmd_buf.waitUntilCompleted();
+            crate::metal::wait_completed(&cmd_buf)?;
             let argmax = unsafe {
                 let src = session.argmax_tok.buffer.contents().as_ptr() as *const i32;
                 *src
@@ -1920,7 +1920,7 @@ impl<'a> MetalForward<'a> {
 
         enc.end();
         cmd_buf.commit();
-        cmd_buf.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd_buf)?;
 
         let argmax = unsafe {
             let src = session.argmax_tok.buffer.contents().as_ptr() as *const i32;
@@ -1983,7 +1983,7 @@ impl<'a> MetalForward<'a> {
             )?;
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            crate::metal::wait_completed(&cmd)?;
             let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             phases.push(("embedding".into(), ms));
         }
@@ -2010,7 +2010,7 @@ impl<'a> MetalForward<'a> {
             )?;
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            crate::metal::wait_completed(&cmd)?;
             let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             match block {
                 MetalBlock::Gdn(_) => {
@@ -2040,7 +2040,7 @@ impl<'a> MetalForward<'a> {
             )?;
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            crate::metal::wait_completed(&cmd)?;
             let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             phases.push(("final norm".into(), ms));
         }
@@ -2060,7 +2060,7 @@ impl<'a> MetalForward<'a> {
             )?;
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            crate::metal::wait_completed(&cmd)?;
             let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             phases.push(("lm head".into(), ms));
         }
@@ -2078,7 +2078,7 @@ impl<'a> MetalForward<'a> {
             )?;
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            crate::metal::wait_completed(&cmd)?;
             let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             phases.push(("lm argmax".into(), ms));
         }

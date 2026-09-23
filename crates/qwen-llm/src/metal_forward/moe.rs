@@ -2415,7 +2415,7 @@ impl<'a> MetalForward<'a> {
         let cpu_encode_ms = t_encode.elapsed().as_secs_f64() * 1e3;
         let t_gpu = std::time::Instant::now();
         cmd_buf.commit();
-        cmd_buf.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd_buf)?;
         let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
         let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
 
@@ -2978,7 +2978,7 @@ impl<'a> MetalForward<'a> {
         let cpu_encode_ms = t_encode.elapsed().as_secs_f64() * 1e3;
         let t_gpu = std::time::Instant::now();
         cmd_buf.commit();
-        cmd_buf.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd_buf)?;
         let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
         let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
 
@@ -3154,7 +3154,7 @@ impl<'a> MetalForward<'a> {
 
         let t_gpu = std::time::Instant::now();
         cmd_buf.commit();
-        cmd_buf.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd_buf)?;
         let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
         let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
 
@@ -3214,7 +3214,7 @@ impl<'a> MetalForward<'a> {
 
         let t_gpu = std::time::Instant::now();
         cmd_buf.commit();
-        cmd_buf.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd_buf)?;
         let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
         let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
 
@@ -3275,7 +3275,7 @@ impl<'a> MetalForward<'a> {
             )?;
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            crate::metal::wait_completed(&cmd)?;
         }
 
         let mut routes = Vec::new();
@@ -3306,7 +3306,7 @@ impl<'a> MetalForward<'a> {
                 self.encode_moe_mixer_prep(&enc, block, slot, position, session)?;
                 enc.end();
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                crate::metal::wait_completed(&cmd)?;
             }
             {
                 let cmd = self.ctx.queue.commandBuffer().expect("cmd");
@@ -3314,7 +3314,7 @@ impl<'a> MetalForward<'a> {
                 self.encode_moe_route_prepare(&enc, session, moe)?;
                 enc.end();
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                crate::metal::wait_completed(&cmd)?;
             }
 
             let route = self.read_moe_route_result(session, topk);
@@ -3347,7 +3347,7 @@ impl<'a> MetalForward<'a> {
                     enc.end();
                 }
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                crate::metal::wait_completed(&cmd)?;
             }
         }
         Ok(routes)
@@ -3385,7 +3385,7 @@ impl<'a> MetalForward<'a> {
             )?;
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            crate::metal::wait_completed(&cmd)?;
             phases.push((
                 "embedding".into(),
                 (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
@@ -3473,7 +3473,7 @@ impl<'a> MetalForward<'a> {
                         )?;
                         enc.end();
                         cmd.commit();
-                        cmd.waitUntilCompleted();
+                        crate::metal::wait_completed(&cmd)?;
                         gdn_pre_norm_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     }
                     if split_gdn_proj {
@@ -3499,7 +3499,7 @@ impl<'a> MetalForward<'a> {
                             }
                             enc.end();
                             cmd.commit();
-                            cmd.waitUntilCompleted();
+                            crate::metal::wait_completed(&cmd)?;
                             gdn_qkv_proj_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                         }
                         {
@@ -3520,7 +3520,7 @@ impl<'a> MetalForward<'a> {
                             }
                             enc.end();
                             cmd.commit();
-                            cmd.waitUntilCompleted();
+                            crate::metal::wait_completed(&cmd)?;
                             gdn_z_proj_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                         }
                         {
@@ -3551,7 +3551,7 @@ impl<'a> MetalForward<'a> {
                             }
                             enc.end();
                             cmd.commit();
-                            cmd.waitUntilCompleted();
+                            crate::metal::wait_completed(&cmd)?;
                             gdn_beta_proj_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                         }
                         {
@@ -3572,7 +3572,7 @@ impl<'a> MetalForward<'a> {
                             }
                             enc.end();
                             cmd.commit();
-                            cmd.waitUntilCompleted();
+                            crate::metal::wait_completed(&cmd)?;
                             gdn_alpha_proj_total_ms +=
                                 (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                         }
@@ -3582,7 +3582,7 @@ impl<'a> MetalForward<'a> {
                         self.encode_gdn_front_projections(&enc, g, session)?;
                         enc.end();
                         cmd.commit();
-                        cmd.waitUntilCompleted();
+                        crate::metal::wait_completed(&cmd)?;
                         gdn_front_proj_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     }
                     {
@@ -3601,7 +3601,7 @@ impl<'a> MetalForward<'a> {
                         )?;
                         enc.end();
                         cmd.commit();
-                        cmd.waitUntilCompleted();
+                        crate::metal::wait_completed(&cmd)?;
                         gdn_alpha_beta_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     }
                     {
@@ -3639,7 +3639,7 @@ impl<'a> MetalForward<'a> {
                             )?;
                             enc.end();
                             cmd.commit();
-                            cmd.waitUntilCompleted();
+                            crate::metal::wait_completed(&cmd)?;
                             gdn_tail_conv_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
 
                             let cmd = self.ctx.queue.commandBuffer().expect("cmd");
@@ -3664,7 +3664,7 @@ impl<'a> MetalForward<'a> {
                             )?;
                             enc.end();
                             cmd.commit();
-                            cmd.waitUntilCompleted();
+                            crate::metal::wait_completed(&cmd)?;
                             gdn_tail_l2_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
 
                             let cmd = self.ctx.queue.commandBuffer().expect("cmd");
@@ -3685,7 +3685,7 @@ impl<'a> MetalForward<'a> {
                             )?;
                             enc.end();
                             cmd.commit();
-                            cmd.waitUntilCompleted();
+                            crate::metal::wait_completed(&cmd)?;
                             gdn_tail_step_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
 
                             let cmd = self.ctx.queue.commandBuffer().expect("cmd");
@@ -3703,7 +3703,7 @@ impl<'a> MetalForward<'a> {
                             )?;
                             enc.end();
                             cmd.commit();
-                            cmd.waitUntilCompleted();
+                            crate::metal::wait_completed(&cmd)?;
                             gdn_tail_norm_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                         } else {
                             let cmd = self.ctx.queue.commandBuffer().expect("cmd");
@@ -3721,7 +3721,7 @@ impl<'a> MetalForward<'a> {
                             )?;
                             enc.end();
                             cmd.commit();
-                            cmd.waitUntilCompleted();
+                            crate::metal::wait_completed(&cmd)?;
                             gdn_tail_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                         }
                     }
@@ -3739,7 +3739,7 @@ impl<'a> MetalForward<'a> {
                         )?;
                         enc.end();
                         cmd.commit();
-                        cmd.waitUntilCompleted();
+                        crate::metal::wait_completed(&cmd)?;
                         gdn_out_proj_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     }
                     {
@@ -3756,7 +3756,7 @@ impl<'a> MetalForward<'a> {
                         )?;
                         enc.end();
                         cmd.commit();
-                        cmd.waitUntilCompleted();
+                        crate::metal::wait_completed(&cmd)?;
                         gdn_resid_post_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     }
                 }
@@ -3766,7 +3766,7 @@ impl<'a> MetalForward<'a> {
                     self.encode_moe_mixer_prep(&enc, block, slot, position, session)?;
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    crate::metal::wait_completed(&cmd)?;
                     attn_mixer_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                 }
                 _ => {
@@ -3787,14 +3787,14 @@ impl<'a> MetalForward<'a> {
                     self.encode_moe_route_prepare(&enc, session, moe)?;
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    crate::metal::wait_completed(&cmd)?;
                 } else if split_route_deep {
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
                     let enc = KernelEncoder::begin(&cmd);
                     self.encode_moe_router_logits(&enc, session, moe)?;
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    crate::metal::wait_completed(&cmd)?;
                     route_logits_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
 
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
@@ -3802,7 +3802,7 @@ impl<'a> MetalForward<'a> {
                     self.encode_moe_topk_parallel_from_logits(&enc, session)?;
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    crate::metal::wait_completed(&cmd)?;
                     route_topk_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
 
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
@@ -3810,7 +3810,7 @@ impl<'a> MetalForward<'a> {
                     self.encode_moe_shared_gate(&enc, session, moe)?;
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    crate::metal::wait_completed(&cmd)?;
                     route_shared_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                 } else if split_route {
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
@@ -3818,7 +3818,7 @@ impl<'a> MetalForward<'a> {
                     self.encode_moe_router_logits(&enc, session, moe)?;
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    crate::metal::wait_completed(&cmd)?;
                     route_logits_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
 
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
@@ -3826,7 +3826,7 @@ impl<'a> MetalForward<'a> {
                     self.encode_moe_topk_and_shared_from_logits(&enc, session, moe)?;
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    crate::metal::wait_completed(&cmd)?;
                     route_topk_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                 } else {
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
@@ -3834,7 +3834,7 @@ impl<'a> MetalForward<'a> {
                     self.encode_moe_route_prepare(&enc, session, moe)?;
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    crate::metal::wait_completed(&cmd)?;
                     route_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                 }
             }
@@ -3857,7 +3857,7 @@ impl<'a> MetalForward<'a> {
                     self.encode_moe_routed_gate_up_gpu(&enc, session, moe)?;
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    crate::metal::wait_completed(&cmd)?;
                     ffn_routed_gate_up_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
 
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
@@ -3866,7 +3866,7 @@ impl<'a> MetalForward<'a> {
                         self.encode_moe_routed_down_only_gpu(&enc, session, moe)?;
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    crate::metal::wait_completed(&cmd)?;
                     ffn_routed_down_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
 
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
@@ -3875,7 +3875,7 @@ impl<'a> MetalForward<'a> {
                         self.encode_moe_shared_ffn_gate_up_gpu(&enc, session, ffn_gate, ffn_up)?;
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    crate::metal::wait_completed(&cmd)?;
                     ffn_shared_gate_up_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
 
                     if !shared_inner_fused {
@@ -3884,7 +3884,7 @@ impl<'a> MetalForward<'a> {
                         self.encode_moe_shared_ffn_silu_gpu(&enc, session)?;
                         enc.end();
                         cmd.commit();
-                        cmd.waitUntilCompleted();
+                        crate::metal::wait_completed(&cmd)?;
                         ffn_shared_silu_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     }
 
@@ -3893,7 +3893,7 @@ impl<'a> MetalForward<'a> {
                     self.encode_moe_shared_ffn_down_gpu(&enc, session, ffn_down)?;
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    crate::metal::wait_completed(&cmd)?;
                     ffn_shared_down_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
 
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
@@ -3905,7 +3905,7 @@ impl<'a> MetalForward<'a> {
                         None,
                     )?;
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    crate::metal::wait_completed(&cmd)?;
                     ffn_finalizer_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                 } else if concurrent_shared_moe_decode_enabled()
                     && moe.gate_exps.dtype == GgmlType::Q4_K
@@ -3916,7 +3916,7 @@ impl<'a> MetalForward<'a> {
                         &cmd, session, ffn_gate, ffn_up, moe, None, None,
                     )?;
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    crate::metal::wait_completed(&cmd)?;
                     ffn_gate_up_wave_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
 
                     if !shared_inner_fused {
@@ -3925,7 +3925,7 @@ impl<'a> MetalForward<'a> {
                         self.encode_moe_shared_ffn_silu_gpu(&enc, session)?;
                         enc.end();
                         cmd.commit();
-                        cmd.waitUntilCompleted();
+                        crate::metal::wait_completed(&cmd)?;
                         ffn_shared_silu_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     }
 
@@ -3933,7 +3933,7 @@ impl<'a> MetalForward<'a> {
                     let routed_weighted_sum_is_pending = self
                         .encode_moe_ffn_down_wave_gpu(&cmd, session, ffn_down, moe, None, None)?;
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    crate::metal::wait_completed(&cmd)?;
                     ffn_down_wave_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
 
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
@@ -3945,7 +3945,7 @@ impl<'a> MetalForward<'a> {
                         None,
                     )?;
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    crate::metal::wait_completed(&cmd)?;
                     ffn_finalizer_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                 } else {
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
@@ -3953,7 +3953,7 @@ impl<'a> MetalForward<'a> {
                     self.encode_moe_routed_ffn_gpu(&enc, session, moe)?;
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    crate::metal::wait_completed(&cmd)?;
                     ffn_fallback_routed_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
 
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
@@ -3961,7 +3961,7 @@ impl<'a> MetalForward<'a> {
                     self.encode_moe_shared_ffn_core_gpu(&enc, session, ffn_gate, ffn_up, ffn_down)?;
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    crate::metal::wait_completed(&cmd)?;
                     ffn_fallback_shared_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
 
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
@@ -3969,7 +3969,7 @@ impl<'a> MetalForward<'a> {
                     self.encode_moe_final_residual_gpu(&enc, session)?;
                     enc.end();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    crate::metal::wait_completed(&cmd)?;
                     ffn_finalizer_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                 }
             } else {
@@ -3984,7 +3984,7 @@ impl<'a> MetalForward<'a> {
                     enc.end();
                 }
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                crate::metal::wait_completed(&cmd)?;
                 ffn_apply_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             }
         }
@@ -4107,7 +4107,7 @@ impl<'a> MetalForward<'a> {
             )?;
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            crate::metal::wait_completed(&cmd)?;
             phases.push((
                 "final norm".into(),
                 (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
@@ -4127,7 +4127,7 @@ impl<'a> MetalForward<'a> {
             )?;
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            crate::metal::wait_completed(&cmd)?;
             phases.push((
                 "lm head".into(),
                 (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
@@ -4147,7 +4147,7 @@ impl<'a> MetalForward<'a> {
             )?;
             enc.end();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            crate::metal::wait_completed(&cmd)?;
             phases.push((
                 "lm argmax".into(),
                 (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,

@@ -258,7 +258,7 @@ pub(crate) fn pp_warm_moe_weight_banks(ctx: &MetalContext, mf: &MetalForward<'_>
     }
     enc.end();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    qwen_llm::metal::wait_completed(&cmd)?;
     Ok(touched)
 }
 

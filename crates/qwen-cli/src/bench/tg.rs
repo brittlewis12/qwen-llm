@@ -185,7 +185,7 @@ pub(crate) fn run_tg(args: TgArgs) -> Result<()> {
             )?;
             next_enc.end();
 
-            pending_cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&pending_cmd)?;
             gpu_ms_acc += (pending_cmd.GPUEndTime() - pending_cmd.GPUStartTime()) * 1e3;
             unsafe {
                 let ptr = ids_ping[next_slot].buffer.contents().as_ptr() as *mut i32;
@@ -196,7 +196,7 @@ pub(crate) fn run_tg(args: TgArgs) -> Result<()> {
             pending_slot = next_slot;
         }
 
-        pending_cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&pending_cmd)?;
         gpu_ms_acc += (pending_cmd.GPUEndTime() - pending_cmd.GPUStartTime()) * 1e3;
         let wall_ms = t0.elapsed().as_secs_f64() * 1e3;
         let counts = trace_counts.then(kernel_trace_snapshot);

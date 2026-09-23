@@ -5136,7 +5136,7 @@ mod tests {
             enc.end();
             let t0 = std::time::Instant::now();
             cmd_buf.commit();
-            cmd_buf.waitUntilCompleted();
+            wait_completed(&cmd_buf).expect("Metal command buffer failed");
             t0.elapsed().as_secs_f64() / iters as f64
         }
 
@@ -5646,7 +5646,7 @@ mod tests {
                     enc.end();
                     let t = Instant::now();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    wait_completed(&cmd).expect("Metal command buffer failed");
                     let wall = t.elapsed().as_secs_f64() * 1e3;
                     let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     eprintln!(
@@ -5692,7 +5692,7 @@ mod tests {
                     enc.end();
                     let t = Instant::now();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    wait_completed(&cmd).expect("Metal command buffer failed");
                     let wall = t.elapsed().as_secs_f64() * 1e3;
                     let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     eprintln!(
@@ -5803,7 +5803,7 @@ mod tests {
                     enc.end();
                     let t = Instant::now();
                     cmd.commit();
-                    cmd.waitUntilCompleted();
+                    wait_completed(&cmd).expect("Metal command buffer failed");
                     let wall = t.elapsed().as_secs_f64() * 1e3;
                     let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     eprintln!(
@@ -5887,7 +5887,7 @@ mod tests {
         .expect("encode attn v4");
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        wait_completed(&cmd).expect("Metal command buffer failed");
         let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
         let bytes = n_pos as f64 * (n_kv * head_dim * 2) as f64 * 2.0;
         let gbps = bytes / 1e9 / (ms / 1e3);

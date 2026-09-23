@@ -142,7 +142,7 @@ impl<'a> MetalForward<'a> {
         let cpu_encode_ms = t_encode.elapsed().as_secs_f64() * 1e3;
         let t_gpu = std::time::Instant::now();
         cmd_buf.commit();
-        cmd_buf.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd_buf)?;
         let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
         let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
 
@@ -717,7 +717,7 @@ impl<'a> MetalForward<'a> {
 
         enc.end();
         cmd_buf.commit();
-        cmd_buf.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd_buf)?;
         let mut out = vec![0.0f32; h];
         unsafe {
             let src = s.x.buffer.contents().as_ptr() as *const f32;

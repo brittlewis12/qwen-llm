@@ -11,9 +11,7 @@ where
     let encode_result = encode(&enc);
     enc.end();
     encode_result?;
-    cmd_buf.commit();
-    cmd_buf.waitUntilCompleted();
-    Ok(())
+    commit_and_wait(&cmd_buf)
 }
 
 pub(crate) fn read_back_f32(buf: &Buffer, n: usize) -> Vec<f32> {

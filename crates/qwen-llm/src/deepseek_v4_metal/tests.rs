@@ -634,7 +634,7 @@ fn decode_prepare_norm_pair_matches_composed_bitwise() {
     assert!(format!("{error}").contains("distinct F32 input/output rows"));
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("Metal command buffer failed");
 }
 
 #[test]
@@ -759,7 +759,7 @@ fn decode_prepare_rope_pair_matches_composed_bitwise() {
     assert!(format!("{error}").contains("distinct complete Q/KV head sets"));
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("Metal command buffer failed");
 }
 
 #[test]
@@ -1026,7 +1026,7 @@ fn decode_grouped_output_gemv_matches_singleton_loop_bitwise() {
     );
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("Metal command buffer failed");
 }
 
 #[test]
@@ -1370,7 +1370,7 @@ fn decode_compressor_q8_pair_matches_composed_frontier_write_bitwise() {
     assert!(format!("{error}").contains("ds4_compressor_pair_q8_0"));
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("Metal command buffer failed");
 }
 
 #[test]
@@ -19629,7 +19629,7 @@ fn learned_moe_route_breaks_exact_score_bias_ties_by_expert_id() {
         .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("Metal command buffer failed");
     let tied_bias = offset_f32(&ctx, &[0.5, 0.5, 0.5, -0.2], vec![4]);
     scratch.route_learned(&tied_bias).unwrap();
     assert_eq!(read_i32(scratch.expert_ids()), vec![0, 1, 2]);
@@ -20333,7 +20333,7 @@ fn profile_gpu_moe_route_dispatches() {
         encode(&encoder).unwrap();
         encoder.end();
         warm.commit();
-        warm.waitUntilCompleted();
+        crate::metal::wait_completed(&warm).expect("Metal command buffer failed");
 
         let command = ctx.queue.commandBuffer().unwrap();
         let encoder = KernelEncoder::begin(&command);
@@ -21519,7 +21519,7 @@ fn native_hyper_connections_match_oracle_with_offsets_and_asymmetric_streams() {
     .expect("norm preflight");
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("Metal command buffer failed");
     assert_close(
         "offset norm preflight",
         &read_f32(scratch.normalized()),
@@ -21723,7 +21723,7 @@ fn initial_repeat_and_first_pre_match_equal_stream_oracle() {
         .expect("first pre");
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("Metal command buffer failed");
 
     assert_eq!(read_f32(&residual), repeated);
     assert_close(

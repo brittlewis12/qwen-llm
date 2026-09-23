@@ -2723,7 +2723,7 @@ mod tests {
             .expect("MXFP4 dispatch arm");
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        wait_completed(&cmd).expect("Metal command buffer failed");
 
         let mut expected = vec![0.0f32; N_OUT];
         for row in 0..N_OUT {
@@ -3420,7 +3420,7 @@ mod tests {
             enc.end();
             let t = Instant::now();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            wait_completed(&cmd).expect("Metal command buffer failed");
             let wall = t.elapsed().as_secs_f64() * 1e3;
             let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             (wall, gpu)
@@ -3448,7 +3448,7 @@ mod tests {
             enc.end();
             let t = Instant::now();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            wait_completed(&cmd).expect("Metal command buffer failed");
             let wall = t.elapsed().as_secs_f64() * 1e3;
             let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             (wall, gpu)

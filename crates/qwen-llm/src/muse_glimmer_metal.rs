@@ -1635,7 +1635,7 @@ mod tests {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("Metal command buffer failed");
 
         let materialized = read_f32(&materialized);
         let online = read_f32(&online);
@@ -1986,7 +1986,7 @@ mod tests {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("Metal command buffer failed");
 
         let output = read_f32(&output);
         assert!(output.iter().all(|value| value.is_finite()));
@@ -2085,7 +2085,7 @@ mod tests {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("Metal command buffer failed");
 
         let output = read_f32(&output);
         assert!(output.iter().all(|value| value.is_finite()));
@@ -2170,7 +2170,7 @@ mod tests {
             .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("Metal command buffer failed");
 
         let mut expected_query = query_source;
         let mut expected_key = key_source;
@@ -2333,7 +2333,7 @@ mod tests {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("Metal command buffer failed");
 
         let mut expected_query = query_source.clone();
         let mut expected_key = key_source.clone();
@@ -2354,7 +2354,7 @@ mod tests {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("Metal command buffer failed");
         for (actual, expected) in read_f32(&query).into_iter().zip(query_source) {
             assert!((actual - expected).abs() < 4e-5, "{actual} != {expected}");
         }

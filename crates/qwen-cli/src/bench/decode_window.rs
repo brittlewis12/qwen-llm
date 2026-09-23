@@ -227,7 +227,7 @@ pub(crate) fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
             encode_ms.push(next_encode_t.elapsed().as_secs_f64() * 1e3);
 
             let wait_t = Instant::now();
-            pending_cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(&pending_cmd)?;
             wait_ms.push(wait_t.elapsed().as_secs_f64() * 1e3);
             gpu_ms.push((pending_cmd.GPUEndTime() - pending_cmd.GPUStartTime()) * 1e3);
             next_tok = unsafe {
@@ -245,7 +245,7 @@ pub(crate) fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
         }
 
         let wait_t = Instant::now();
-        pending_cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&pending_cmd)?;
         wait_ms.push(wait_t.elapsed().as_secs_f64() * 1e3);
         gpu_ms.push((pending_cmd.GPUEndTime() - pending_cmd.GPUStartTime()) * 1e3);
 
@@ -579,7 +579,7 @@ pub(crate) fn run_decode_window_multi_stream(
 
         let wait_t = Instant::now();
         for cmd in &cmds {
-            cmd.waitUntilCompleted();
+            qwen_llm::metal::wait_completed(cmd)?;
         }
         wait_ms.push(wait_t.elapsed().as_secs_f64() * 1e3);
 

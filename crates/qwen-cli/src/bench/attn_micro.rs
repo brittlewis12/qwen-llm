@@ -66,7 +66,7 @@ pub(crate) fn run_attn_front_micro(args: AttnFrontMicroArgs) -> Result<()> {
         encode_mat_mat_dispatch(&ctx, &enc, &block.v, &x_t, &v_out, h, kv_dim, rows)?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
     }
     let separate_ms = t.elapsed().as_secs_f64() * 1e3;
 
@@ -77,7 +77,7 @@ pub(crate) fn run_attn_front_micro(args: AttnFrontMicroArgs) -> Result<()> {
         encode_mat_mat_dispatch(&ctx, &enc, &fused_w, &x_t, &fused_out_t, h, fused_out, rows)?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
     }
     let fused_ms = t.elapsed().as_secs_f64() * 1e3;
 
@@ -191,7 +191,7 @@ pub(crate) fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
         encode_scatter_offset_f32_to_f16(&ctx, &enc, &src_t, dst, 0, src_f32.len())?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
     }
 
     let out_baseline = MetalTensor::zeros_f32(&ctx, vec![(rows * n_q * HD) as u64])?;
@@ -234,7 +234,7 @@ pub(crate) fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
         });
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
         Ok(())
     };
     run_baseline()?;
@@ -321,7 +321,7 @@ pub(crate) fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
         }
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
         Ok(())
     };
     run_packed()?;
@@ -509,7 +509,7 @@ pub(crate) fn run_attn_layer_micro(args: AttnLayerMicroArgs) -> Result<()> {
         encode_scatter_offset_f32_to_f16(&ctx, &enc, &src_t, dst, 0, src_f32.len())?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
         Ok(())
     };
     for dst in [&baseline_k_cache, &packed_k_cache] {
@@ -650,7 +650,7 @@ pub(crate) fn run_attn_layer_micro(args: AttnLayerMicroArgs) -> Result<()> {
         run_tail(&enc, &baseline)?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
         Ok(())
     };
 
@@ -735,7 +735,7 @@ pub(crate) fn run_attn_layer_micro(args: AttnLayerMicroArgs) -> Result<()> {
         run_tail(&enc, &packed)?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
         Ok(())
     };
 
@@ -884,7 +884,7 @@ pub(crate) fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
         cb(&enc)?;
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        qwen_llm::metal::wait_completed(&cmd)?;
         phases.push((
             label.to_string(),
             (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,

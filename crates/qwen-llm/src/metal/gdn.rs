@@ -2507,7 +2507,7 @@ mod tests {
             blit.end();
         }
         cmd.commit();
-        cmd.waitUntilCompleted();
+        wait_completed(&cmd).expect("Metal command buffer failed");
 
         let packed_conv = read_back_f32(&conv_packed.buffer, conv_state_elems);
         let token_conv = read_back_f32(&conv_token.buffer, conv_state_elems);
@@ -2649,7 +2649,7 @@ mod tests {
             blit.end();
         }
         cmd.commit();
-        cmd.waitUntilCompleted();
+        wait_completed(&cmd).expect("Metal command buffer failed");
 
         let packed_state = read_back_f32(&state_packed.buffer, state_elems);
         let token_state = read_back_f32(&state_token.buffer, state_elems);

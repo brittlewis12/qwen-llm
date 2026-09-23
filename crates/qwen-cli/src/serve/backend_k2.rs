@@ -1,4 +1,6 @@
-//! Borrowed resident model; each request owns and drops its entire fresh session.
+//! Borrowed resident model with one live session kept across requests. Full
+//! attention truncates at any token, so multi-turn reuse is the longest common
+//! prefix of the consumed history, rewound in O(1); no snapshots.
 use super::decode_loop;
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest};
@@ -6,7 +8,7 @@ use super::output_partition::OutputProtocol;
 use super::render_k2;
 use anyhow::{Context, Result, ensure};
 use qwen_llm::gguf::GgufFile;
-use qwen_llm::k2_horizon_runtime::{K2LoadedModel, K2PreparedArtifact, K2RuntimePlan};
+use qwen_llm::k2_horizon_runtime::{K2LoadedModel, K2PreparedArtifact, K2RuntimePlan, K2Session};
 use qwen_llm::metal::host_page_size_bytes;
 use qwen_llm::sampling::Sampler;
 use qwen_llm::tokenizer::NativeTokenizer;
@@ -19,19 +21,20 @@ pub(super) struct Prepared {
     max_piece_bytes: usize,
 }
 
+/// Default-on rollback lever for live-session prefix reuse.
+const PREFIX_REUSE_ENV: &str = "QWEN_K2_PREFIX_REUSE";
+/// Prompt tokens per synchronous append; transport ticks (cancellation and
+/// heartbeat) fall between spans. Packed Q8 splits each span into 32-token
+/// commands; serial weights run one command per token inside the span.
+const PREFILL_SPAN: usize = 64;
+
 fn limits(
     context: u32,
     capacity: Option<usize>,
     maximum: Option<usize>,
-    snapshots: Option<u64>,
     drafter: bool,
 ) -> Result<(usize, usize)> {
     ensure!(!drafter, "K2 serve does not support a drafter");
-    // `auto` (None) resolves to no cache for K2.
-    ensure!(
-        snapshots.unwrap_or(0) == 0,
-        "K2 serve requires --snapshot-cache-mib 0 or auto; snapshots are unsupported"
-    );
     let capacity = capacity
         .context("K2 serve requires explicit --max-context-tokens for resident memory planning")?;
     let maximum = maximum.context("K2 serve requires explicit --max-tokens")?;
@@ -53,9 +56,13 @@ impl Prepared {
             config.context_length,
             invocation.max_context_tokens,
             invocation.max_tokens,
-            invocation.snapshot_cache_mib,
             invocation.drafter.is_some(),
         )?;
+        if invocation.snapshot_cache_mib.is_some_and(|mib| mib != 0) {
+            eprintln!(
+                "K2 serve ignores --snapshot-cache-mib; prefix reuse rewinds the live session"
+            );
+        }
         let artifact = K2PreparedArtifact::inspect(gguf)?;
         artifact.generation_stops()?;
         K2RuntimePlan::inspect(
@@ -88,6 +95,10 @@ pub(super) struct K2Backend<'model, 'ctx> {
     model: &'model K2LoadedModel<'ctx>,
     prepared: Prepared,
     model_id: String,
+    session: Option<K2Session<'model, 'ctx>>,
+    /// Exactly the tokens `session` has committed, or empty when unknown.
+    history: Vec<u32>,
+    prefix_reuse: bool,
 }
 
 impl<'model, 'ctx> K2Backend<'model, 'ctx> {
@@ -100,6 +111,9 @@ impl<'model, 'ctx> K2Backend<'model, 'ctx> {
             model,
             prepared,
             model_id,
+            session: None,
+            history: Vec::new(),
+            prefix_reuse: qwen_llm::env_flag::read_default_on(PREFIX_REUSE_ENV),
         }
     }
 }
@@ -168,22 +182,44 @@ impl GenerationBackend for K2Backend<'_, '_> {
             decode_loop::required_forwards("K2", tokens.len(), maximum, self.prepared.capacity)?;
         sink.tick().map_err(BackendFailure::Aborted)?;
         let prefill_t0 = std::time::Instant::now();
-        let mut session = self
-            .model
-            .create_session(0)
-            .map_err(|e| ServeError::server_error(format!("K2 fresh session: {e}")))?;
+        // Taken before the session moves and republished only on success, so any
+        // error or abort below leaves no history and the next request rewinds to
+        // zero. A late HTTP write failure after success keeps it, which is sound:
+        // it records exactly what the session committed.
+        let mut history = std::mem::take(&mut self.history);
+        // A poisoned session (failed submitted command) is dropped, releasing its
+        // one-per-model permit, before a replacement is created.
+        let session = match self.session.take().filter(|s| !s.is_poisoned()) {
+            Some(session) => session,
+            None => self
+                .model
+                .create_session(0)
+                .map_err(|e| ServeError::server_error(format!("K2 session: {e}")))?,
+        };
+        let session = self.session.insert(session);
+        let reused = decode_loop::reusable_prefix(
+            &history,
+            &tokens,
+            session.committed_len() as usize,
+            self.prefix_reuse,
+        );
+        session
+            .rewind(reused as u32)
+            .map_err(|e| ServeError::server_error(format!("K2 rewind: {e}")))?;
+        // Each span is one synchronous append that commits whole or poisons;
+        // ticks between spans are the cancellation boundaries.
+        let suffix = &tokens[reused..];
+        let spans = suffix.len().div_ceil(PREFILL_SPAN);
         let mut logits = Vec::new();
-        // Genuine per-token cancellation boundaries. Every append is synchronous;
-        // no staged prefix survives an aborted request's session drop.
-        for (index, token) in tokens.iter().enumerate() {
+        for (index, span) in suffix.chunks(PREFILL_SPAN).enumerate() {
             sink.tick().map_err(BackendFailure::Aborted)?;
-            if index + 1 == tokens.len() {
+            if index + 1 == spans {
                 logits = session
-                    .append(&[*token])
+                    .append(span)
                     .map_err(|e| ServeError::server_error(format!("K2 prefill: {e}")))?;
             } else {
                 session
-                    .advance(&[*token])
+                    .advance(span)
                     .map_err(|e| ServeError::server_error(format!("K2 prefill: {e}")))?;
             }
         }
@@ -205,10 +241,18 @@ impl GenerationBackend for K2Backend<'_, '_> {
         if session.committed_len() as usize != tokens.len() + generation.transitions {
             return Err(ServeError::server_error("K2 consumed-prefix accounting mismatch").into());
         }
+        history.clear();
+        history.extend_from_slice(&tokens);
+        history.extend(
+            generation.tokens[..generation.transitions]
+                .iter()
+                .map(|&token| token as u32),
+        );
+        self.history = history;
         tracing::info!(
             target: "qwen_diag",
-            "serve phases: family=k2_horizon prefill_ms={prefill_ms:.1} prefill_tokens={} decode_ms={:.1} required_forwards={required} capacity={} transitions={}",
-            tokens.len(),
+            "serve phases: family=k2_horizon prefill_ms={prefill_ms:.1} reused_tokens={reused} prefill_tokens={} decode_ms={:.1} required_forwards={required} capacity={} transitions={}",
+            tokens.len() - reused,
             generation.wall_ms,
             self.prepared.capacity,
             generation.transitions,
@@ -216,7 +260,7 @@ impl GenerationBackend for K2Backend<'_, '_> {
         Ok(super::outcome::finish_generation(
             tokens.len(),
             &generation,
-            0,
+            reused,
             0.0,
         ))
     }

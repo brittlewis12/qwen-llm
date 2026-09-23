@@ -55,7 +55,7 @@ pub(crate) struct ServeArgs {
     max_context_tokens: Option<usize>,
 
     /// Qwen/Flash-Next/DS4 RAM snapshot-cache MiB, or `auto`: min(25% of RAM, 50% of the
-    /// Metal working set left after load), at least 1 GiB. K2: auto or 0.
+    /// Metal working set left after load), at least 1 GiB. K2 ignores it (live-session prefix reuse).
     #[arg(long, value_name = "MIB|auto", default_value = "auto", value_parser = parse_snapshot_cache_mib)]
     snapshot_cache_mib: SnapshotCacheMib,
 

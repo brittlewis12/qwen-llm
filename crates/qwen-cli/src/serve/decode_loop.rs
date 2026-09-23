@@ -83,6 +83,29 @@ pub(crate) fn required_forwards(
     Ok(required)
 }
 
+/// Live-session prefix reuse for pure-attention families whose KV truncates at
+/// any token. `previous` is the consumed-token history of the resident session
+/// and is trusted only when it matches the session's committed length exactly;
+/// callers clear it before touching the session and republish it only after a
+/// successful generation. The final prompt row is always recomputed so the
+/// request gets fresh logits.
+pub(crate) fn reusable_prefix(
+    previous: &[u32],
+    prompt: &[u32],
+    committed: usize,
+    enabled: bool,
+) -> usize {
+    if !enabled || previous.len() != committed {
+        return 0;
+    }
+    previous
+        .iter()
+        .zip(prompt)
+        .take_while(|(a, b)| a == b)
+        .count()
+        .min(prompt.len().saturating_sub(1))
+}
+
 /// Run the canonical loop. Every emitted token is written with `piece` and
 /// followed by `tick`, because `piece` only touches the socket when the
 /// output partition emits — a buffered tool block would otherwise hide a
@@ -384,6 +407,20 @@ mod tests {
         assert_eq!((long.status, long.param.as_deref()), (400, Some("input")));
         let oov = encode_checked(&Bytes, "ab", false, 97, "t").unwrap_err();
         assert_eq!(oov.status, 500);
+    }
+
+    #[test]
+    fn live_prefix_reuse_requires_consumed_identity_and_a_fresh_logit_row() {
+        assert_eq!(reusable_prefix(&[1, 2, 3], &[1, 2, 3, 4], 3, true), 3);
+        assert_eq!(reusable_prefix(&[1, 2, 3], &[1, 2, 3], 3, true), 2);
+        assert_eq!(reusable_prefix(&[1, 2, 3], &[1, 2], 3, true), 1);
+        assert_eq!(reusable_prefix(&[1, 2, 3], &[1, 9, 3], 3, true), 1);
+        assert_eq!(reusable_prefix(&[1, 2, 3], &[9, 2, 3], 3, true), 0);
+        assert_eq!(reusable_prefix(&[1], &[1], 1, true), 0);
+        assert_eq!(reusable_prefix(&[1], &[], 1, true), 0);
+        assert_eq!(reusable_prefix(&[1, 2, 3], &[1, 2, 3], 2, true), 0);
+        assert_eq!(reusable_prefix(&[], &[1, 2], 2, true), 0);
+        assert_eq!(reusable_prefix(&[1, 2, 3], &[1, 2, 3], 3, false), 0);
     }
 
     #[test]

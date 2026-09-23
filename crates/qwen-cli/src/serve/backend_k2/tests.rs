@@ -104,7 +104,6 @@ fn gpu_k2_tools_roundtrip_all_formats_json_sse() {
                 .map(|p| p["text"].as_str().unwrap())
                 .collect::<String>();
             assert!(text.contains("copper-731"), "{final_response}");
-            drop(model.create_session(0).unwrap());
             evidence.push(json!({"format":format,"stream":stream,"prompt_token_ids_sha256_i32le":qwen_llm::tokenizer::token_ids_sha256_i32le(&prompt_ids),"first":first,"final":final_response}));
         }
     }
@@ -124,7 +123,7 @@ fn gpu_k2_tools_roundtrip_all_formats_json_sse() {
             backend.generate(&req, &prompt, &mut sink),
             Err(BackendFailure::Aborted(_))
         ));
-        drop(model.create_session(0).unwrap());
+        assert!(backend.history.is_empty());
     }
     let output = std::env::var("K2_TOOLS_HTTP_EVIDENCE").unwrap();
     std::fs::write(output,serde_json::to_vec_pretty(&json!({"status":"passed","caller_supplied_tool_result":true,"engine_executes_tools":false,"cases":evidence})).unwrap()).unwrap();
@@ -238,7 +237,6 @@ fn gpu_verified_k2_chat_http_matches_raw_and_releases_sessions() {
             assert_eq!(envelope["reasoning"], json!({"effort":effort}));
             evidence
                 .push(json!({"effort":effort,"budget":budget,"stream":stream,"response":envelope}));
-            drop(model.create_session(0).unwrap());
         }
         let mut aborted = Sink {
             abort_tick: Some(2),
@@ -248,7 +246,7 @@ fn gpu_verified_k2_chat_http_matches_raw_and_releases_sessions() {
             backend.generate(&req, &prompt, &mut aborted),
             Err(BackendFailure::Aborted(_))
         ));
-        drop(model.create_session(0).unwrap());
+        assert!(backend.history.is_empty());
     }
     if let Ok(path) = std::env::var("K2_CHAT_HTTP_EVIDENCE") {
         std::fs::write(
@@ -260,37 +258,29 @@ fn gpu_verified_k2_chat_http_matches_raw_and_releases_sessions() {
 }
 
 #[test]
-fn startup_limits_use_declared_context_and_explicit_residency_no_cache_or_drafter() {
+fn startup_limits_use_declared_context_and_explicit_residency_no_drafter() {
+    assert_eq!(limits(8192, Some(32), Some(8), false).unwrap(), (32, 8));
     assert_eq!(
-        limits(8192, Some(32), Some(8), Some(0), false).unwrap(),
-        (32, 8)
-    );
-    assert_eq!(
-        limits(8192, Some(32), Some(8), None, false).unwrap(),
-        (32, 8)
-    );
-    assert_eq!(
-        limits(8192, Some(256), Some(256), Some(0), false).unwrap(),
+        limits(8192, Some(256), Some(256), false).unwrap(),
         (256, 256)
     );
     for size in [257, 1024, 7169, 8192, 524288] {
         assert_eq!(
-            limits(524288, Some(size), Some(size), Some(0), false).unwrap(),
+            limits(524288, Some(size), Some(size), false).unwrap(),
             (size, size)
         );
     }
-    for (context, capacity, maximum, snapshots, drafter) in [
-        (8192, None, Some(8), Some(0), false),
-        (8192, Some(32), None, Some(0), false),
-        (8192, Some(0), Some(1), Some(0), false),
-        (8192, Some(8193), Some(1), Some(0), false),
-        (8192, Some(32), Some(0), Some(0), false),
-        (8192, Some(32), Some(33), Some(0), false),
-        (1, Some(2), Some(1), Some(0), false),
-        (8192, Some(32), Some(8), Some(1), false),
-        (8192, Some(32), Some(8), Some(0), true),
+    for (context, capacity, maximum, drafter) in [
+        (8192, None, Some(8), false),
+        (8192, Some(32), None, false),
+        (8192, Some(0), Some(1), false),
+        (8192, Some(8193), Some(1), false),
+        (8192, Some(32), Some(0), false),
+        (8192, Some(32), Some(33), false),
+        (1, Some(2), Some(1), false),
+        (8192, Some(32), Some(8), true),
     ] {
-        assert!(limits(context, capacity, maximum, snapshots, drafter).is_err());
+        assert!(limits(context, capacity, maximum, drafter).is_err());
     }
 }
 
@@ -306,27 +296,13 @@ struct Sink {
 #[ignore = "CPU/header-only K2_GGUF startup rejection; never binds a socket or initializes Metal"]
 fn cpu_downloaded_startup_rejects_options_before_listener_or_metal() {
     let path = std::env::var("K2_GGUF").expect("K2_GGUF");
-    for (capacity, maximum, snapshots, drafter, expected) in [
-        (
-            Some(usize::MAX),
-            Some(8),
-            Some(0),
-            None,
-            "capacity must fit",
-        ),
-        (
-            None,
-            Some(8),
-            Some(0),
-            None,
-            "explicit --max-context-tokens",
-        ),
-        (Some(32), None, Some(0), None, "explicit --max-tokens"),
-        (Some(32), Some(8), Some(1), None, "--snapshot-cache-mib 0"),
+    for (capacity, maximum, drafter, expected) in [
+        (Some(usize::MAX), Some(8), None, "capacity must fit"),
+        (None, Some(8), None, "explicit --max-context-tokens"),
+        (Some(32), None, None, "explicit --max-tokens"),
         (
             Some(32),
             Some(8),
-            Some(0),
             Some("nonexistent-drafter.gguf"),
             "does not support a drafter",
         ),
@@ -336,7 +312,8 @@ fn cpu_downloaded_startup_rejects_options_before_listener_or_metal() {
             addr: "invalid-listen-address".into(),
             max_tokens: maximum,
             max_context_tokens: capacity,
-            snapshot_cache_mib: snapshots,
+            // Ignored by K2; a nonzero budget must not affect startup checks.
+            snapshot_cache_mib: Some(4096),
             snapshot_policy: Default::default(),
             drafter: drafter.map(Into::into),
             trace_sse: None,
@@ -473,36 +450,71 @@ fn gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests() {
         result.end,
         super::super::output_partition::GenerationEnd::TokenLimit
     );
-    drop(model.create_session(0).unwrap());
+    // Prompt plus the 7 forwarded outputs (the 8th is sampled, never forwarded).
+    assert_eq!(backend.history.len(), 13);
 
-    for mut sink in [
-        Sink {
-            abort_tick: Some(1),
-            ..Sink::default()
-        },
-        Sink {
-            abort_tick: Some(4),
-            ..Sink::default()
-        },
-        Sink {
-            abort_piece: true,
-            ..Sink::default()
-        },
-        Sink {
-            abort_tick: Some(10),
-            ..Sink::default()
-        },
+    // An abort at the admission tick precedes any session movement and keeps
+    // history; later aborts clear it, so the retry recomputes from zero.
+    for (mut sink, cached) in [
+        (
+            Sink {
+                abort_tick: Some(1),
+                ..Sink::default()
+            },
+            5,
+        ),
+        (
+            Sink {
+                abort_tick: Some(4),
+                ..Sink::default()
+            },
+            0,
+        ),
+        (
+            Sink {
+                abort_piece: true,
+                ..Sink::default()
+            },
+            0,
+        ),
+        (
+            Sink {
+                abort_tick: Some(10),
+                ..Sink::default()
+            },
+            0,
+        ),
     ] {
         assert!(matches!(
             backend.generate(&req, &prompt, &mut sink),
             Err(BackendFailure::Aborted(_))
         ));
-        drop(model.create_session(0).unwrap());
-        let mut fresh = Sink::default();
-        let result = backend.generate(&req, &prompt, &mut fresh).unwrap();
-        assert_eq!(fresh.bytes, first.bytes);
-        assert_eq!(result.usage.cached_tokens, 0);
+        assert_eq!(backend.history.is_empty(), cached == 0);
+        let mut retry = Sink::default();
+        let result = backend.generate(&req, &prompt, &mut retry).unwrap();
+        assert_eq!(retry.bytes, first.bytes);
+        assert_eq!(result.usage.cached_tokens, cached);
     }
+    // Warm repeat: the longest common prefix, capped to recompute the last row.
+    let mut warm = Sink::default();
+    let result = backend.generate(&req, &prompt, &mut warm).unwrap();
+    assert_eq!(warm.bytes, first.bytes);
+    assert_eq!(result.usage.cached_tokens, 5);
+    // Continuation: the whole previous exchange is reused, only the new turn runs.
+    let (followup, followup_prompt) = request(
+        &backend,
+        json!({"model":"k2-test","input":format!("{text}{}.", String::from_utf8(first.bytes.clone()).unwrap()),"max_output_tokens":1}),
+    );
+    let result = backend
+        .generate(&followup, &followup_prompt, &mut Sink::default())
+        .unwrap();
+    assert!(result.usage.cached_tokens >= 13, "{:?}", result.usage);
+    backend.prefix_reuse = false;
+    let result = backend
+        .generate(&req, &prompt, &mut Sink::default())
+        .unwrap();
+    assert_eq!(result.usage.cached_tokens, 0);
+    backend.prefix_reuse = true;
     let (explicit, prompt) = request(
         &backend,
         json!({"model":"k2-test","input":format!("<|ifm|begin_of_text|>{text}"),
@@ -554,11 +566,11 @@ fn gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests() {
         assert_eq!(envelope["usage"]["input_tokens"], 6);
         assert_eq!(envelope["usage"]["output_tokens"], 8);
         if stream {
-            assert_eq!(envelope["x_qwen"]["matched_tokens"], 0);
+            // Follows the identical nonstream request.
+            assert_eq!(envelope["x_qwen"]["matched_tokens"], 5);
         } else {
             assert!(envelope.get("x_qwen").is_none());
         }
-        drop(model.create_session(0).unwrap());
     }
 
     let (oversized, prompt) = request(
@@ -571,7 +583,8 @@ fn gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests() {
         Err(BackendFailure::Serve(_))
     ));
     assert_eq!(sink.ticks, 0);
-    drop(model.create_session(0).unwrap());
+    // Capacity rejection precedes the session and keeps its history.
+    assert_eq!(backend.history.len(), 13);
 }
 
 #[test]
@@ -629,6 +642,9 @@ fn gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one() {
     let ctx = MetalContext::new().unwrap();
     let model = K2LoadedModel::load(&ctx, &source, u32::try_from(capacity).unwrap()).unwrap();
     let mut backend = K2Backend::new(&model, prepared, "k2-boundary".into());
+    // Fresh-prefill parity with run/bench; the capacity-sized session is still
+    // kept and rewound to zero between requests.
+    backend.prefix_reuse = false;
     for (text, sampled, count, expected) in &cases {
         let (req, prompt) = request(
             &backend,
@@ -673,7 +689,6 @@ fn gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one() {
             assert_eq!(envelope["usage"]["input_tokens"], json!(count));
             assert_eq!(envelope["usage"]["output_tokens"], json!(sampled));
             assert_eq!(envelope["x_qwen"]["matched_tokens"], 0);
-            drop(model.create_session(0).unwrap());
         }
     }
     let text = &cases[0].0;

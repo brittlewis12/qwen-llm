@@ -22,6 +22,8 @@ mod prefix_pilot;
 
 pub(crate) const MATRIX_PREFILL_ENV: &str = "QWEN_SERVE_MUSE_MATRIX_PREFILL";
 pub(crate) const SPLIT_DECODE_ENV: &str = "QWEN_SERVE_MUSE_SPLIT_DECODE";
+/// Default-on rollback lever for live-session prefix reuse.
+const PREFIX_REUSE_ENV: &str = "QWEN_MUSE_PREFIX_REUSE";
 
 pub(crate) fn read_math_options() -> anyhow::Result<MuseGlimmerRuntimeOptions> {
     Ok(MuseGlimmerRuntimeOptions {
@@ -107,7 +109,7 @@ impl MuseGlimmerBackend {
             eot_token_id,
             profile,
             consumed_tokens: Vec::new(),
-            prefix_reuse: std::env::var("QWEN_MUSE_PREFIX_REUSE").is_ok_and(|value| value == "1"),
+            prefix_reuse: qwen_llm::env_flag::read_default_on(PREFIX_REUSE_ENV),
             math_options,
         })
     }
@@ -172,19 +174,21 @@ impl GenerationBackend for MuseGlimmerBackend {
             decode_loop::required_forwards("Muse", prompt_ids.len(), max_tokens, self.capacity)?;
         let stop_tokens = [self.eos_token_id, self.eot_token_id];
         let prefill_t0 = Instant::now();
+        // Taken before the session moves and republished only on success, so
+        // any error or abort below leaves no history. A late HTTP write failure
+        // after success keeps it, which is sound: it records exactly what the
+        // session consumed.
+        let mut history = std::mem::take(&mut self.consumed_tokens);
         let mut runner = self
             .loaded
             .create_runner(&self.ctx)
             .map_err(|error| ServeError::server_error(format!("bind Muse runner: {error}")))?;
-        let reused_tokens = reusable_prefix(
-            &self.consumed_tokens,
+        let reused_tokens = decode_loop::reusable_prefix(
+            &history,
             &prompt_ids,
             runner.next_position(),
             self.prefix_reuse,
         );
-        // Backend completion publishes history before HTTP finalization. Detected
-        // generation aborts must not leave a partially advanced prefix eligible.
-        self.consumed_tokens.clear();
         runner
             .rewind_prefix(reused_tokens)
             .map_err(|error| ServeError::server_error(format!("rewind Muse session: {error}")))?;
@@ -225,12 +229,14 @@ impl GenerationBackend for MuseGlimmerBackend {
         if runner.next_position() != consumed_end {
             return Err(ServeError::server_error("Muse consumed-history frontier mismatch").into());
         }
-        self.consumed_tokens.extend_from_slice(&prompt_ids);
-        self.consumed_tokens.extend(
+        history.clear();
+        history.extend_from_slice(&prompt_ids);
+        history.extend(
             generation.tokens[..generation.transitions]
                 .iter()
                 .map(|&token| token as u32),
         );
+        self.consumed_tokens = history;
         tracing::info!(
             target: "qwen_diag",
             "serve phases: family=muse_glimmer tokenize_ms={tokenize_ms:.1} prefill_ms={prefill_ms:.1} reused_tokens={reused_tokens} prefill_tokens={} decode_ms={:.1} required_forwards={required} capacity={} transitions={} matrix_prefill={} split_decode={} planned_tiled_tokens={} planned_online_tokens={}",
@@ -250,18 +256,6 @@ impl GenerationBackend for MuseGlimmerBackend {
             0.0,
         ))
     }
-}
-
-fn reusable_prefix(previous: &[u32], prompt: &[u32], position: usize, enabled: bool) -> usize {
-    if !enabled || previous.len() != position {
-        return 0;
-    }
-    previous
-        .iter()
-        .zip(prompt)
-        .take_while(|(a, b)| a == b)
-        .count()
-        .min(prompt.len().saturating_sub(1))
 }
 
 #[cfg(test)]
@@ -293,19 +287,5 @@ mod tests {
         }
         let defaults = MuseGlimmerRuntimeOptions::default();
         assert!(defaults.matrix_prefill && defaults.split_decode);
-    }
-
-    #[test]
-    fn live_prefix_reuse_requires_consumed_identity_and_a_fresh_logit_row() {
-        assert_eq!(reusable_prefix(&[1, 2, 3], &[1, 2, 3, 4], 3, true), 3);
-        assert_eq!(reusable_prefix(&[1, 2, 3], &[1, 2, 3], 3, true), 2);
-        assert_eq!(reusable_prefix(&[1, 2, 3], &[1, 2], 3, true), 1);
-        assert_eq!(reusable_prefix(&[1, 2, 3], &[1, 9, 3], 3, true), 1);
-        assert_eq!(reusable_prefix(&[1, 2, 3], &[9, 2, 3], 3, true), 0);
-        assert_eq!(reusable_prefix(&[1], &[1], 1, true), 0);
-        assert_eq!(reusable_prefix(&[1], &[], 1, true), 0);
-        assert_eq!(reusable_prefix(&[1, 2, 3], &[1, 2, 3], 2, true), 0);
-        assert_eq!(reusable_prefix(&[], &[1, 2], 2, true), 0);
-        assert_eq!(reusable_prefix(&[1, 2, 3], &[1, 2, 3], 3, false), 0);
     }
 }

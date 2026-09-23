@@ -140,6 +140,11 @@ impl GatedDeltaNetMetalGeometry {
             .expect("validated GDN delta state")
     }
 
+    /// Recurrent state a session snapshot carries: F32 conv + delta state.
+    pub fn snapshot_bytes(self) -> usize {
+        (self.conv_state_elements() + self.delta_state_elements()) * size_of::<f32>()
+    }
+
     fn validate(self) -> Result<(), Qwen4ExpGdnError> {
         if self.hidden_size == 0 || self.key_heads == 0 || self.value_heads == 0 {
             return invalid("hidden size and head counts must be nonzero");
@@ -408,7 +413,6 @@ impl GatedDeltaNetMetalWorkspace {
         self.geometry
     }
 
-    #[cfg(test)]
     pub(crate) fn persistent_state_tensors(&self) -> Vec<MetalTensor> {
         vec![self.conv_state.clone(), self.delta_state.clone()]
     }

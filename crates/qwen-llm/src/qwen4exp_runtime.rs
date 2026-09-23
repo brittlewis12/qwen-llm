@@ -20,7 +20,7 @@ use crate::qwen4exp_text_session::{
     Qwen4ExpCompletedLogits, Qwen4ExpFixedHyperAddTensor, Qwen4ExpPackedEncodeCpuTiming,
     Qwen4ExpPostLayerHyperProbe, Qwen4ExpTextSessionError, Qwen4ExpTextSessionMetalWeights,
     Qwen4ExpTextSessionMetalWorkspace, Qwen4ExpTextSessionPending, Qwen4ExpTextSessionPlan,
-    Qwen4ExpTextSessionReleaseTiming, encode_qwen4exp_text_packed,
+    Qwen4ExpTextSessionReleaseTiming, Qwen4ExpTextSnapshot, encode_qwen4exp_text_packed,
     encode_qwen4exp_text_packed_layer_sampled, encode_qwen4exp_text_packed_profiled,
     encode_qwen4exp_text_token, encode_qwen4exp_text_token_layer_sampled,
     encode_qwen4exp_text_token_with_post_layer_hyper_probe,
@@ -242,7 +242,27 @@ struct Qwen4ExpPrefillExecutionPlan {
     contains_selection: bool,
 }
 
+#[cfg(test)]
 fn plan_qwen4exp_prefill_execution(
+    token_count: usize,
+    packed_capacity: Option<usize>,
+    selected_enabled: bool,
+    dense_end: usize,
+) -> Result<Qwen4ExpPrefillExecutionPlan, Qwen4ExpRuntimeError> {
+    plan_qwen4exp_prefill_execution_from(
+        0,
+        token_count,
+        packed_capacity,
+        selected_enabled,
+        dense_end,
+    )
+}
+
+/// Plan `token_count` tokens starting at absolute position `start`. Ranges
+/// and `scalar_start` are absolute positions; `dense_end` is the absolute
+/// position past which packed QSA must select.
+fn plan_qwen4exp_prefill_execution_from(
+    start: usize,
     token_count: usize,
     packed_capacity: Option<usize>,
     selected_enabled: bool,
@@ -257,11 +277,14 @@ fn plan_qwen4exp_prefill_execution(
     if packed_capacity.is_none() && selected_enabled {
         return invalid("selected packed execution requires packed scratch");
     }
+    let end = start
+        .checked_add(token_count)
+        .ok_or_else(|| Qwen4ExpRuntimeError::Invalid("prefill position range overflow".into()))?;
     let Some(packed_capacity) = packed_capacity else {
         return Ok(Qwen4ExpPrefillExecutionPlan {
             packed_ranges: Vec::new(),
             packed_token_count: 0,
-            scalar_start: 0,
+            scalar_start: start,
             contains_selection: false,
         });
     };
@@ -271,12 +294,12 @@ fn plan_qwen4exp_prefill_execution(
         ));
     }
     let packed_end = if selected_enabled {
-        token_count
+        end
     } else {
-        token_count.min(dense_end)
+        end.min(dense_end).max(start)
     };
-    let mut packed_ranges = Vec::with_capacity(packed_end.div_ceil(packed_capacity));
-    let mut cursor = 0_usize;
+    let mut packed_ranges = Vec::with_capacity((packed_end - start).div_ceil(packed_capacity));
+    let mut cursor = start;
     while packed_end - cursor >= 2 {
         let mut rows = (packed_end - cursor).min(packed_capacity);
         let proposed_end = cursor
@@ -297,7 +320,7 @@ fn plan_qwen4exp_prefill_execution(
     let contains_selection = packed_ranges.iter().any(|range| range.end > dense_end);
     Ok(Qwen4ExpPrefillExecutionPlan {
         packed_ranges,
-        packed_token_count: cursor,
+        packed_token_count: cursor - start,
         scalar_start: cursor,
         contains_selection,
     })
@@ -907,6 +930,26 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
     pub fn prefill_with_command_checkpoint<F>(
         &mut self,
         token_ids: &[u32],
+        checkpoint: F,
+    ) -> Result<Qwen4ExpCompletedLogits<'_>, Qwen4ExpRuntimeError>
+    where
+        F: FnMut() -> Result<(), Qwen4ExpRuntimeError>,
+    {
+        if self.next_position() != 0 {
+            return invalid(format!(
+                "prefill requires a reset session at position zero, got position {}",
+                self.next_position()
+            ));
+        }
+        self.prefill_continuation_with_command_checkpoint(token_ids, checkpoint)
+    }
+
+    /// Prefill `token_ids` after the committed sequence (position zero or a
+    /// restored snapshot), with the same packed/scalar plan as a cold
+    /// prefill over the same absolute positions.
+    pub fn prefill_continuation_with_command_checkpoint<F>(
+        &mut self,
+        token_ids: &[u32],
         mut checkpoint: F,
     ) -> Result<Qwen4ExpCompletedLogits<'_>, Qwen4ExpRuntimeError>
     where
@@ -917,7 +960,8 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
         let start = self.next_position();
         let selected_enabled =
             self.workspace.packed_selected_capable() && qwen4exp_packed_selected_qsa_enabled();
-        let plan = plan_qwen4exp_prefill_execution(
+        let plan = plan_qwen4exp_prefill_execution_from(
+            start,
             token_ids.len(),
             self.workspace.packed_prefill_capacity(),
             selected_enabled,
@@ -933,7 +977,7 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
             self.run_prefill_checkpoint(start, token_ids.len(), &mut checkpoint)?;
             match execute_qwen4exp_text_packed_sync(
                 self.ctx,
-                &token_ids[range.clone()],
+                &token_ids[range.start - start..range.end - start],
                 self.ple_table,
                 &self.weights,
                 &mut self.workspace,
@@ -962,7 +1006,7 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
                 }
             }
         }
-        for (index, &token_id) in token_ids[plan.scalar_start..].iter().enumerate() {
+        for (index, &token_id) in token_ids[plan.scalar_start - start..].iter().enumerate() {
             self.run_prefill_checkpoint(start, token_ids.len(), &mut checkpoint)?;
             match execute_qwen4exp_text_token_sync(
                 self.ctx,
@@ -1004,6 +1048,12 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
         token_ids: &[u32],
     ) -> Result<Qwen4ExpPackedProfileOutcome, Qwen4ExpRuntimeError> {
         self.last_prefill_timing = None;
+        if self.next_position() != 0 {
+            return invalid(format!(
+                "prefill requires a reset session at position zero, got position {}",
+                self.next_position()
+            ));
+        }
         self.validate_prefill_request(token_ids)?;
         let packed_capacity = self.workspace.packed_prefill_capacity().ok_or_else(|| {
             Qwen4ExpRuntimeError::Invalid("packed prefill was not admitted for this runner".into())
@@ -1039,12 +1089,6 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
     }
 
     fn validate_prefill_request(&self, token_ids: &[u32]) -> Result<(), Qwen4ExpRuntimeError> {
-        if self.next_position() != 0 {
-            return invalid(format!(
-                "prefill requires a reset session at position zero, got position {}",
-                self.next_position()
-            ));
-        }
         if token_ids.is_empty() {
             return invalid("prompt token sequence must be nonempty");
         }
@@ -1107,6 +1151,34 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
         self.last_token_timing = None;
         self.last_prefill_timing = None;
         Ok(())
+    }
+
+    /// Bytes [`Self::capture_snapshot`] would hold at the committed length.
+    pub fn snapshot_bytes(&self) -> Result<u64, Qwen4ExpRuntimeError> {
+        Ok(self.workspace.snapshot_bytes()?)
+    }
+
+    pub fn capture_snapshot(&self) -> Result<Qwen4ExpTextSnapshot, Qwen4ExpRuntimeError> {
+        Ok(self.workspace.capture_snapshot()?)
+    }
+
+    /// Continue from `snapshot`; the next prefill starts at its length. On
+    /// failure the runner is left reset at position zero.
+    pub fn restore_snapshot(
+        &mut self,
+        snapshot: &Qwen4ExpTextSnapshot,
+    ) -> Result<(), Qwen4ExpRuntimeError> {
+        self.last_token_timing = None;
+        self.last_prefill_timing = None;
+        if snapshot.length() >= self.capacity.forward_limit {
+            self.workspace.reset()?;
+            return invalid(format!(
+                "snapshot length {} leaves no forwards under limit {}",
+                snapshot.length(),
+                self.capacity.forward_limit
+            ));
+        }
+        Ok(self.workspace.restore_snapshot(snapshot)?)
     }
 
     /// Release the weight binding and hand the workspace back (see
@@ -1869,6 +1941,7 @@ fn invalid<T>(detail: impl Into<String>) -> Result<T, Qwen4ExpRuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod snapshot;
     mod split_decode;
     use crate::metal::{DispatchCensusRow, evaluate_metal_memory_admission, host_page_size_bytes};
     use crate::qwen4exp_composition_trace::{
@@ -3414,6 +3487,41 @@ mod tests {
         assert!(plan_qwen4exp_prefill_execution(2, Some(1), false, D).is_err());
         assert!(plan_qwen4exp_prefill_execution(2, None, true, D).is_err());
         assert!(plan_qwen4exp_prefill_execution(2, Some(C), false, 0).is_err());
+    }
+
+    #[test]
+    fn continuation_prefill_plan_uses_absolute_positions() {
+        const C: usize = 2_048;
+        const D: usize = 2_051;
+        let plan = |start, tokens, selected| {
+            plan_qwen4exp_prefill_execution_from(start, tokens, Some(C), selected, D).unwrap()
+        };
+        let cases = [
+            (10, 5, false, vec![10..15], 15, false),
+            (10, 1, false, vec![], 10, false),
+            (2_050, 10, false, vec![], 2_050, false),
+            (3_000, 10, false, vec![], 3_000, false),
+            (2_000, 100, false, vec![2_000..D], D, false),
+            (2_000, 100, true, vec![2_000..D, D..2_100], 2_100, true),
+            (2_050, 10, true, vec![2_050..2_060], 2_060, true),
+            (3_000, C + 1, true, vec![3_000..3_000 + C], 3_000 + C, true),
+        ];
+        for (start, tokens, selected, ranges, scalar_start, contains_selection) in cases {
+            let plan = plan(start, tokens, selected);
+            assert_eq!(plan.packed_ranges, ranges, "start={start} tokens={tokens}");
+            assert_eq!(plan.scalar_start, scalar_start, "start={start}");
+            assert_eq!(plan.packed_token_count, scalar_start - start);
+            assert_eq!(plan.contains_selection, contains_selection, "start={start}");
+        }
+        let scalar = plan_qwen4exp_prefill_execution_from(40, 3, None, false, D).unwrap();
+        assert!(scalar.packed_ranges.is_empty());
+        assert_eq!((scalar.packed_token_count, scalar.scalar_start), (0, 40));
+        for tokens in [1, 2, 7, C, C + 5, 3 * C] {
+            assert_eq!(
+                plan_qwen4exp_prefill_execution_from(0, tokens, Some(C), true, D).unwrap(),
+                plan_qwen4exp_prefill_execution(tokens, Some(C), true, D).unwrap()
+            );
+        }
     }
 
     #[test]

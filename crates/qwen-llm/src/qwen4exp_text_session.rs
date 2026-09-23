@@ -57,6 +57,9 @@ use std::time::Instant;
 
 #[cfg(test)]
 mod checkpoint;
+mod snapshot;
+
+pub use snapshot::Qwen4ExpTextSnapshot;
 
 #[inline(always)]
 fn with_diagnostic_execution_range<R>(

@@ -564,6 +564,37 @@ impl Qwen4ExpPostPleBlockMetalWorkspace {
         self.mixer.persistent_state_tensors()
     }
 
+    /// Mixer state that continues `length` committed tokens (the MoE and
+    /// residual buffers are per-token scratch).
+    pub(crate) fn snapshot_regions(
+        &self,
+        length: usize,
+    ) -> Result<Vec<MetalTensor>, Qwen4ExpPostPleBlockError> {
+        Ok(match &self.mixer {
+            Qwen4ExpPostPleMixerMetalWorkspace::GatedDeltaNet(workspace) => {
+                workspace.persistent_state_tensors()
+            }
+            Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(workspace) => {
+                workspace.snapshot_regions(length)?
+            }
+        })
+    }
+
+    pub(crate) fn restore_mixer_length(
+        &mut self,
+        length: usize,
+    ) -> Result<(), Qwen4ExpPostPleBlockError> {
+        self.require_idle()?;
+        if self.state_poisoned || self.encode_failed {
+            return invalid("mixer length restore requires a healthy released block");
+        }
+        if let Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(workspace) = &mut self.mixer
+        {
+            workspace.restore_committed_length(length)?;
+        }
+        Ok(())
+    }
+
     pub fn is_poisoned(&self) -> bool {
         self.state_poisoned
     }

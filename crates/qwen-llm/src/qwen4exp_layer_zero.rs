@@ -352,7 +352,6 @@ impl Qwen4ExpLayerZeroMetalWorkspace {
         self.residual.hc_up_mix_enabled()
     }
 
-    #[cfg(test)]
     pub(crate) fn persistent_state_tensors(&self) -> Vec<MetalTensor> {
         self.gdn.persistent_state_tensors()
     }

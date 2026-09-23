@@ -799,6 +799,15 @@ impl QwenSparseAttentionMetalGeometry {
         self.token_budget + self.ratio - 1
     }
 
+    /// State a session snapshot carries for `length` committed tokens: the
+    /// F32 pending index-key block, `length / ratio` F16 compressed index
+    /// keys, and `length` F16 K and V rows.
+    pub fn snapshot_bytes(self, length: usize) -> usize {
+        self.index_head_dim * self.ratio * size_of::<f32>()
+            + self.index_head_dim * (length / self.ratio) * size_of::<u16>()
+            + 2 * length * self.kv_width() * size_of::<u16>()
+    }
+
     fn plan_packed_range(
         self,
         start_position: usize,
@@ -1624,6 +1633,56 @@ impl QwenSparseAttentionMetalWorkspace {
         assert!(self.pending_length.is_none() && self.pending_selected_bands.is_none());
         assert!(length <= self.committed_length);
         self.committed_length = length;
+    }
+
+    /// Views of the state that continues a sequence of `length` committed
+    /// tokens, in [`QwenSparseAttentionMetalGeometry::snapshot_bytes`] order.
+    pub(crate) fn snapshot_regions(
+        &self,
+        length: usize,
+    ) -> Result<Vec<MetalTensor>, Qwen4ExpQsaError> {
+        let g = self.geometry;
+        if length == 0 || length > g.capacity {
+            return invalid(format!(
+                "QSA snapshot length {length} is outside 1..={}",
+                g.capacity
+            ));
+        }
+        let blocks = length / g.ratio;
+        let rows = vec![g.head_dim as u64, g.kv_heads as u64, length as u64];
+        let mut regions = vec![self.pending_index_keys.clone()];
+        if blocks > 0 {
+            regions.push(
+                self.compressed_index_keys
+                    .view_subrange(0, vec![g.index_head_dim as u64, blocks as u64]),
+            );
+        }
+        regions.push(self.key_cache.view_subrange(0, rows.clone()));
+        regions.push(self.value_cache.view_subrange(0, rows));
+        Ok(regions)
+    }
+
+    /// Publish `length` restored rows on a reset workspace.
+    pub(crate) fn restore_committed_length(
+        &mut self,
+        length: usize,
+    ) -> Result<(), Qwen4ExpQsaError> {
+        self.require_idle()?;
+        if self.state_poisoned
+            || self.committed_length != 0
+            || self.pending_length.is_some()
+            || self.pending_selected_bands.is_some()
+        {
+            return invalid("QSA restore requires a reset, healthy workspace");
+        }
+        if length > self.geometry.capacity {
+            return invalid(format!(
+                "QSA restored length {length} exceeds capacity {}",
+                self.geometry.capacity
+            ));
+        }
+        self.committed_length = length;
+        Ok(())
     }
 
     #[cfg(test)]

@@ -377,7 +377,27 @@ impl Qwen4ExpLayersZeroOneMetalWorkspace {
         self.history = history.clone();
     }
 
-    #[cfg(test)]
+    pub(crate) fn history(&self) -> &PleHistory {
+        &self.history
+    }
+
+    /// Install a snapshot's PLE history into freshly reset bootstrap layers.
+    pub(crate) fn restore_history(
+        &mut self,
+        history: PleHistory,
+    ) -> Result<(), Qwen4ExpLayersZeroOneError> {
+        self.require_idle()?;
+        if self.state_poisoned
+            || self.encode_failed
+            || self.pending_history.is_some()
+            || self.history.next_position().is_some()
+        {
+            return invalid("PLE history restore requires reset, healthy bootstrap layers");
+        }
+        self.history = history;
+        Ok(())
+    }
+
     pub(crate) fn persistent_state_tensors(&self) -> Vec<MetalTensor> {
         let mut tensors = self.layer_zero.persistent_state_tensors();
         tensors.extend(self.ple.persistent_state_tensors());

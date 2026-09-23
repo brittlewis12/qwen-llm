@@ -132,6 +132,11 @@ impl Qwen4ExpPleMetalGeometry {
             .expect("validated PLE history length")
     }
 
+    /// Dilated-convolution history a session snapshot carries (F32).
+    pub fn conv_state_bytes(self) -> usize {
+        self.history_len() * self.hyper_width() * size_of::<f32>()
+    }
+
     pub fn packed_row_bytes(self) -> usize {
         self.head_dim
             .checked_div(32)
@@ -422,7 +427,6 @@ impl Qwen4ExpPleMetalWorkspace {
         self.geometry
     }
 
-    #[cfg(test)]
     pub(crate) fn persistent_state_tensors(&self) -> Vec<MetalTensor> {
         vec![self.conv_state.clone()]
     }

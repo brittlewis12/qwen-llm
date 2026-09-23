@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-23 - GPU Test "Corruption" Is GPU Recovery Read Through Unchecked Waits
+
+- Mechanism: under saturated concurrent GPU load the firmware detected a lockup
+  in our process (`gpuEvent-qwen_llm-*.ips`, restart_reason_desc "firmware-detected
+  lockup"); recovery discarded other in-flight command buffers with "Discarded
+  (victim of GPU error/recovery) (kIOGPUCommandBufferCallbackErrorInnocentVictim)".
+  Recovery is system-wide, which explains the old serial flake seen only while a
+  separate qwen-bench process ran.
+- `waitUntilCompleted()` returns for discarded buffers. ~250 wait sites (incl. the
+  Qwen 3.x serve forward paths) never checked `status()`/`error()` and read partial
+  outputs as valid, producing rotating wrong answers instead of errors.
+- Fix: `metal::wait_completed` / `commit_and_wait` (status must be `Completed`
+  with no NSError, else `MetalError::CommandBufferFailed` with status, domain, code
+  and description); all unchecked production and test waits converted. V_T
+  dispatch override/capture made purely thread-local (no cross-thread rejection).
+- `RUST_TEST_THREADS=1` kept: lockups still occur (~1/60 full parallel `metal::` runs).
+
 ## 2026-09-23 - Serve Transcript-Boundary Snapshots: Thinking Turns Reuse Their Prefix
 
 - Direct HTTP probes (no client harness), Qwen3.8-27B, greedy, 4.6K-token

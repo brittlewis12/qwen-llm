@@ -435,5 +435,254 @@ pub fn encode_online_attention(
     Ok(())
 }
 
+/// Row-major `[rows, hidden]` activation views for the general batched path.
+fn rows_view(tensor: &MetalTensor, width: u64, rows: usize, write: bool) -> Result<CheckedView> {
+    let elements = width
+        .checked_mul(rows as u64)
+        .ok_or_else(|| invalid("row view overflow"))?;
+    View::from(tensor).check(&[elements], GgmlType::F32, write)
+}
+
+fn chunk_rows(first: &TokenPlan<'_>, last: &TokenPlan<'_>) -> Result<usize> {
+    let rows = last
+        .visible_positions()
+        .checked_sub(first.visible_positions())
+        .and_then(|span| span.checked_add(1))
+        .filter(|&rows| rows >= 1)
+        .ok_or_else(|| invalid("chunk rows must be contiguous and ascending"))?;
+    if rows as usize > crate::k2_horizon_plan::MAX_CHUNK_TOKENS {
+        return Err(invalid("chunk rows exceed the K2 batched prefill bound"));
+    }
+    Ok(rows as usize)
+}
+
+/// Grouped RMSNorm for `rows` contiguous hidden rows in one dispatch. Every
+/// (group, row) threadgroup performs the serial group reduction; gamma is
+/// indexed in full hidden coordinates exactly as [`encode_grouped_norm`].
+pub(crate) fn encode_grouped_norm_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    plan: &K2ShortContextPlan,
+    x: &MetalTensor,
+    gamma: &MetalTensor,
+    out: &MetalTensor,
+    rows: usize,
+) -> Result<()> {
+    serial(enc)?;
+    let x_view = rows_view(x, 4096, rows, false)?;
+    let gamma_view = View::from(gamma).check(&[4096], GgmlType::F32, false)?;
+    let out_view = rows_view(out, 4096, rows, true)?;
+    disjoint(&x_view, &out_view)?;
+    disjoint(&gamma_view, &out_view)?;
+    let groups = plan.norm_groups();
+    let width = groups[0].elements.end - groups[0].elements.start;
+    let epsilon = groups[0].epsilon;
+    if groups.iter().enumerate().any(|(index, group)| {
+        group.elements.start != index as u64 * width
+            || group.elements.end - group.elements.start != width
+            || group.epsilon.to_bits() != epsilon.to_bits()
+    }) || width * groups.len() as u64 != 4096
+    {
+        return Err(invalid(
+            "grouped norm rows require uniform contiguous groups",
+        ));
+    }
+    let pipeline = ctx.pipeline("kernel_k2_grouped_rms_norm_rows_f32")?;
+    let threads = pipeline.maxTotalThreadsPerThreadgroup().min(1024);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        width: u32,
+        groups: u32,
+        rows: u32,
+        threads: u32,
+        eps: f32,
+    }
+    enc.note_read(x);
+    enc.note_read(gamma);
+    enc.note_write(out);
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(
+        0,
+        &Args {
+            width: width as u32,
+            groups: groups.len() as u32,
+            rows: rows as u32,
+            threads: threads as u32,
+            eps: epsilon,
+        },
+    );
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, gamma);
+    enc.set_tensor(3, out);
+    enc.set_threadgroup_memory(0, (threads.div_ceil(32) * 4).max(32));
+    enc.dispatch(
+        MTLSize {
+            width: groups.len(),
+            height: rows,
+            depth: 1,
+        },
+        MTLSize {
+            width: threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Full NEOX RoPE for `rows` consecutive positions starting at `first`. Uses
+/// the packed-consecutive kernel, whose per-pair `pow`/`cos`/`sin` arithmetic
+/// matches the singleton pair kernel used by [`encode_full_rope`].
+pub(crate) fn encode_full_rope_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    first: &TokenPlan<'_>,
+    rows: usize,
+    query: &MetalTensor,
+    key: &MetalTensor,
+) -> Result<()> {
+    serial(enc)?;
+    let q = rows_view(query, 4096, rows, true)?;
+    let k = rows_view(key, 1024, rows, true)?;
+    disjoint(&q, &k)?;
+    enc.note_write(query);
+    enc.note_write(key);
+    let rope = first.rope();
+    for (tensor, heads) in [
+        (query, FullNeoxRope::QUERY_HEADS),
+        (key, FullNeoxRope::KV_HEADS),
+    ] {
+        crate::metal::encode_rope_neox_f32_packed_consecutive(
+            ctx,
+            enc,
+            tensor,
+            rows,
+            heads,
+            FullNeoxRope::HEAD_DIM,
+            FullNeoxRope::ROTARY_DIM,
+            rope.position(),
+            rope.theta(),
+        )?;
+    }
+    Ok(())
+}
+
+/// Store `first..=last` post-RoPE K and projected V rows. Consecutive cache
+/// rows are contiguous in each plane, so one F32-to-F16 conversion per plane
+/// writes the whole chunk with the serial store's rounding.
+pub(crate) fn encode_store_kv_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    first: &TokenPlan<'_>,
+    last: &TokenPlan<'_>,
+    layer: u32,
+    arena: &MetalTensor,
+    key: &MetalTensor,
+    value: &MetalTensor,
+) -> Result<()> {
+    serial(enc)?;
+    let rows = chunk_rows(first, last)?;
+    let cache = arena_view(arena, last, true)?;
+    let k = rows_view(key, 1024, rows, false)?;
+    let v = rows_view(value, 1024, rows, false)?;
+    disjoint(&cache, &k)?;
+    disjoint(&cache, &v)?;
+    let head = first
+        .write_ranges(layer)
+        .map_err(|error| invalid(error.to_string()))?;
+    let tail = last
+        .write_ranges(layer)
+        .map_err(|error| invalid(error.to_string()))?;
+    let span = rows as u64 * 2048;
+    if tail.key.end - head.key.start != span || tail.value.end - head.value.start != span {
+        return Err(invalid(
+            "chunk cache rows are not one contiguous plane span",
+        ));
+    }
+    let k_dst = plane(arena, head.key.start..tail.key.end);
+    let v_dst = plane(arena, head.value.start..tail.value.end);
+    enc.note_read(key);
+    enc.note_read(value);
+    enc.note_write(&k_dst);
+    enc.note_write(&v_dst);
+    encode_scatter_offset_f32_to_f16(ctx, enc, key, &k_dst, 0, 1024 * rows)?;
+    encode_scatter_offset_f32_to_f16(ctx, enc, value, &v_dst, 0, 1024 * rows)
+}
+
+/// Causal chunk attention: row `r` of `first..=last` attends to positions
+/// `0..first.visible_positions() + r`. The caller must have stored every
+/// chunk row (and all earlier rows) for this layer before this dispatch.
+pub(crate) fn encode_online_attention_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    first: &TokenPlan<'_>,
+    last: &TokenPlan<'_>,
+    layer: u32,
+    arena: &MetalTensor,
+    query: &MetalTensor,
+    out: &MetalTensor,
+) -> Result<()> {
+    serial(enc)?;
+    let rows = chunk_rows(first, last)?;
+    let cache = arena_view(arena, last, false)?;
+    let q = rows_view(query, 4096, rows, false)?;
+    let y = rows_view(out, 4096, rows, true)?;
+    disjoint(&cache, &q)?;
+    disjoint(&cache, &y)?;
+    disjoint(&q, &y)?;
+    let ranges = last
+        .read_ranges(layer)
+        .map_err(|error| invalid(error.to_string()))?;
+    let key = plane(arena, ranges.key);
+    let value = plane(arena, ranges.value);
+    online_alignment(query.offset, key.offset, value.offset, out.offset)?;
+    let pipeline = ctx.pipeline("kernel_k2_attn_online_rows_f16kv_h128")?;
+    if pipeline.threadExecutionWidth() != 32 || pipeline.maxTotalThreadsPerThreadgroup() < 512 {
+        return Err(invalid(
+            "chunk attention requires 32-lane SIMDgroups and 512-thread groups",
+        ));
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        rows: u32,
+        first_positions: u32,
+        scale: f32,
+    }
+    enc.note_read(query);
+    enc.note_read(&key);
+    enc.note_read(&value);
+    enc.note_write(out);
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(
+        0,
+        &Args {
+            rows: rows as u32,
+            first_positions: first.visible_positions(),
+            scale: 128.0_f32.sqrt().recip(),
+        },
+    );
+    enc.set_tensor(1, query);
+    enc.set_tensor(2, &key);
+    enc.set_tensor(3, &value);
+    enc.set_tensor(4, out);
+    // K2_TILE_POSITIONS (32) x 32 half4 lanes x {K, V} x 8 bytes.
+    enc.set_threadgroup_memory(0, 32 * 32 * 2 * 8);
+    enc.dispatch(
+        MTLSize {
+            width: 8,
+            height: rows.div_ceil(4),
+            depth: 1,
+        },
+        MTLSize {
+            width: 512,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;

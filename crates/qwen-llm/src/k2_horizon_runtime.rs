@@ -3,9 +3,12 @@
 //! Weights remain native and read-only; sessions borrow the exact loaded model
 //! and context. One synchronous command is in flight at a time. A whole append commits
 //! once; any failure after submission poisons the session rather than exposing
-//! partial state. Eligible Q8/lcpp prefill uses bounded packed chunks through the
-//! same block graph. No snapshots, fitting, eviction, or speed claims; prefix
-//! reuse is `rewind` of the live session.
+//! partial state. Multi-token appends run bounded chunks through the general
+//! batched graph (tiled mat-mat projections, row-parallel norm/RoPE/KV/
+//! attention) for every admitted projection dtype; the Q8/lcpp token-batched
+//! lineage remains an explicit opt-in. Single tokens use the serial graph.
+//! No snapshots, fitting, or eviction; prefix reuse is `rewind` of the live
+//! session.
 
 use crate::gguf::{GgufError, GgufFile};
 use crate::k2_horizon::{K2HorizonConfig, K2HorizonError, K2KvStorage};
@@ -29,6 +32,7 @@ use std::cell::Cell;
 mod admission;
 #[cfg(test)]
 mod context_tests;
+mod general;
 mod intervention;
 pub use admission::{
     K2AdmissionError, K2ArtifactLayout, K2PreparedArtifact, validate_generation_stops,
@@ -105,7 +109,8 @@ impl<'a> K2LoadedModel<'a> {
             capacity,
             DEFAULT_ATTENTION_BACKEND,
         )?;
-        model.prefill = PrefillMode::for_weights(&model.weights);
+        model.prefill =
+            PrefillMode::for_model(ctx, &model.weights, &model.plan.session.buffer_bytes())?;
         Ok(model)
     }
 
@@ -357,7 +362,12 @@ impl K2Session<'_, '_> {
                 .commandBuffer()
                 .ok_or_else(|| invalid("cannot create command buffer"))?;
             let encoder = KernelEncoder::begin(&command);
-            let encoded = encode_tokens(
+            let encode = if plans.len() > 1 && self.model.prefill.is_general() {
+                general::encode_chunk
+            } else {
+                encode_tokens
+            };
+            let encoded = encode(
                 ctx,
                 &encoder,
                 &self.model.weights,

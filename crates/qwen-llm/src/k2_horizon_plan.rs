@@ -6,7 +6,14 @@ use std::ops::Range;
 
 /// `metal::encode_attn_decode_f16kv_f32` limits score scratch to 28 KiB.
 pub const MATERIALIZED_POSITION_CEILING: u32 = 7168;
+/// Row bound of the Q8 lcpp token-batched projection specialization.
 pub(crate) const PACKED_CHUNK_TOKENS: usize = 32;
+/// Default rows per command for the general batched prefill (tiled mat-mat
+/// projections, row-parallel norm/RoPE/KV store/attention). Scratch is
+/// priced per row at load and the chunk shrinks before prefill turns serial.
+pub(crate) const GENERAL_CHUNK_TOKENS: usize = 256;
+/// Largest physical chunk any K2 prefill mode may execute in one command.
+pub(crate) const MAX_CHUNK_TOKENS: usize = GENERAL_CHUNK_TOKENS;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PlanError {

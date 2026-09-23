@@ -290,10 +290,14 @@ fn gpu_checkpoint_forward_and_split_prefill_smoke() {
     let path = std::env::var("K2_GGUF").expect("K2_GGUF");
     let source = GgufFile::open(path).unwrap();
     let ctx = MetalContext::new().unwrap();
-    let model = K2LoadedModel::load_unqualified(&ctx, &source, 4).unwrap();
+    let mut model = K2LoadedModel::load_unqualified(&ctx, &source, 4).unwrap();
     assert_eq!(model.attention, AttentionBackend::Online);
-    assert_eq!(model.prefill, PrefillMode::BatchQ8);
+    assert_eq!(model.prefill, PrefillMode::General { chunk: 256 });
     assert_eq!(model.prefill_info(3).chunk_tokens, 3);
+    // Bitwise split identity is a property of the Q8 lcpp/serial lineages; the
+    // general path is covered by k2_general_batched_prefill_matches_serial_*.
+    model.prefill = PrefillMode::bitwise_lineage(&model.weights);
+    let model = model;
     let mut full = model.create_session(0).unwrap();
     let expected = full.append(&[0, 42, 17]).unwrap();
     assert_eq!(expected.len(), 250624);
@@ -319,7 +323,10 @@ fn gpu_checkpoint_captures_and_readout_preserve_continuation() {
     let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
     let source = GgufFile::open(std::env::var("K2_GGUF").expect("K2_GGUF")).unwrap();
     let ctx = MetalContext::new().unwrap();
-    let model = K2LoadedModel::load_unqualified(&ctx, &source, 4).unwrap();
+    let mut model = K2LoadedModel::load_unqualified(&ctx, &source, 4).unwrap();
+    // Bitwise split/plain identity below is pinned to the Q8 lcpp/serial lineage.
+    model.prefill = PrefillMode::bitwise_lineage(&model.weights);
+    let model = model;
     let layers = (0..36).collect::<Vec<_>>();
     let bits = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
     let cache_bits = |session: &K2Session<'_, '_>| unsafe {

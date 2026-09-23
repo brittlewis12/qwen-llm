@@ -45,7 +45,7 @@ impl Ledger {
         if self.poisoned {
             return Err(K2RuntimeError::Poisoned);
         }
-        if !(1..=crate::k2_horizon_plan::PACKED_CHUNK_TOKENS).contains(&chunk) {
+        if !(1..=crate::k2_horizon_plan::MAX_CHUNK_TOKENS).contains(&chunk) {
             return Err(invalid("invalid physical chunk size"));
         }
         let count =

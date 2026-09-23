@@ -650,7 +650,11 @@ fn extended_oracle_comparison(position_control: bool) {
         .collect::<Vec<_>>();
     assert_eq!(source.revalidate_retained_shard_stamps().unwrap(), stamps);
     let ctx = MetalContext::new().unwrap();
-    let model = K2LoadedModel::load_unqualified(&ctx, &source, 256).unwrap();
+    let mut model = K2LoadedModel::load_unqualified(&ctx, &source, 256).unwrap();
+    // Bitwise split/whole identity below is pinned to the Q8 lcpp/serial lineage;
+    // the default general path is gated by k2_general_batched_prefill_*.
+    model.prefill = PrefillMode::bitwise_lineage(&model.weights);
+    let model = model;
     let mut reports = Vec::new();
     for ((name, base, tokens), output) in cases.iter().zip(outputs) {
         let mut rows = OracleRows::new(

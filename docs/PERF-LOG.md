@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-23 - K2 General Batched Prefill for Every Weight Dtype (GPU validation pending)
+
+- Before: K2 batched prefill only when all 252 block projections were Q8_0 and
+  lcpp matvec was on, and even then only projections were batched (token-axis
+  GEMV); norm/RoPE/KV store/attention stayed per token (one 32-thread-group
+  attention dispatch per token per layer). Q4_K_M ran one forward per token:
+  168.8 s for a 4,408-token prompt (~26 tok/s).
+- Now (default, all admitted dtypes): 256-token commands. Projections via
+  `encode_mat_mat_dispatch` (tiled mat-mat per dtype); grouped RMSNorm, RoPE,
+  F16 KV store and causal attention are one dispatch per layer over all rows.
+  New `kernel_k2_attn_online_rows_f16kv_h128`: a threadgroup = 1 KV head x 4
+  rows x 4 GQA heads shares 32-position K/V tiles in threadgroup memory
+  (16x fewer cache reads than per-row) while each row runs the serial
+  blocked online recurrence. Scratch 237,572 B/row (61 MB at 256) is priced
+  with one session at load; the chunk halves to 2 before choosing serial.
+  Load logs `k2 prefill: mode chunk_tokens reason` on `qwen_diag`.
+  `QWEN_K2_PREFILL=q8_lcpp|serial` selects the old lineages explicitly.
+- Decode unchanged. Serve spans are whole multiples of the chunk, so fresh
+  serve prefill keeps `qwen run`'s command partition.
+- Expectation, unmeasured: projections become compute-bound tiled GEMM (7B at
+  256 rows); target >=500 tok/s at 4.4K on M4 Max, attention (sequential
+  per-row online walk) the next limiter at long context.
+- Gates: `k2_general_batched_prefill_matches_serial_*` (logits cos >= 0.9999,
+  max-abs <= 0.25, argmax equal; K/V planes cos >= 0.999). Not bitwise:
+  tiled accumulation order differs from mat-vec.
+
 ## 2026-09-23 - Serve Prompt Remainders: Measured Serial-Tail Limit, Ungated Packed Tails
 
 - Before: remainders of <=48 tokens (after a restore, or a short fresh prompt)

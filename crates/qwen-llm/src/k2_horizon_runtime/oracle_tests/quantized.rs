@@ -219,7 +219,8 @@ fn gpu_final_q4_matches_same_artifact_oracle() {
     assert_eq!(source.revalidate_retained_shard_stamps().unwrap(), stamps);
     let ctx = MetalContext::new().unwrap();
     let model = K2LoadedModel::load(&ctx, &source, 32).unwrap();
-    assert_eq!(model.prefill, PrefillMode::Serial);
+    // Single-token appends below use the serial graph in every mode.
+    assert_eq!(model.prefill, PrefillMode::General { chunk: 256 });
     let embedding = embedding_check(&model, &source);
     let mut reports = Vec::new();
     for ((base, tokens), rows) in cases.iter().zip(references) {

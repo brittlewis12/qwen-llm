@@ -735,9 +735,20 @@ fn gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one() {
             assert!(response.starts_with("HTTP/1.1 400"), "{response}");
         }
     }
+    // Late prefill abort: first replace the history with unrelated text so the
+    // aborted request cannot reuse it, then abort on the tick that starts its
+    // last prefill span (one tick precedes prefill, one starts each span).
+    let (reset, reset_prompt) =
+        request(&backend, json!({"model":"k2-boundary","input":"Unrelated reset."}));
+    backend
+        .generate(&reset, &reset_prompt, &mut Sink::default())
+        .unwrap();
     let (req, prompt) = request(&backend, json!({"model":"k2-boundary","input":text}));
+    let span_tokens = prefill_span(model.prefill_info(cases[0].2).chunk_tokens);
+    let spans = cases[0].2.div_ceil(span_tokens);
+    assert!(spans >= 2, "the boundary prompt must span several prefill commands");
     let mut aborted = Sink {
-        abort_tick: Some(250),
+        abort_tick: Some(1 + spans),
         ..Sink::default()
     };
     assert!(matches!(

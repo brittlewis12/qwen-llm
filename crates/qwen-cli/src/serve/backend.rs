@@ -549,6 +549,27 @@ fn dflash_ring_offset(position: usize, capture_start: usize, ring_window: usize)
     }
 }
 
+/// Columns a drafter capture window starts early so that, when prefill stops
+/// at the transcript boundary `split_at`, it holds the window ending there
+/// as well as the full-prompt window: the header length, bounded by the
+/// window's own start (a window that already begins at 0 holds both).
+fn transcript_capture_extension(
+    prompt_len: usize,
+    window_limit: usize,
+    split_at: Option<usize>,
+) -> usize {
+    let (wstart, _) = dflash_capture_window_span(prompt_len, window_limit);
+    split_at.map_or(0, |boundary| wstart.min(prompt_len - boundary))
+}
+
+/// Whether a drafter tail of `window` columns ending at `consumed` holds only
+/// captured or seeded history: a restore without a usable tail leaves the
+/// columns before the first prefilled position (`valid_from`) empty until
+/// the ring rolls past them.
+fn capture_tail_valid(consumed: usize, window: usize, valid_from: usize) -> bool {
+    consumed.saturating_sub(window) >= valid_from
+}
+
 fn dflash_prompt_capture_offset(position: usize, capture_start: usize) -> Option<usize> {
     position.checked_sub(capture_start)
 }
@@ -688,8 +709,10 @@ fn prefill_remaining(
         let (logits, _span_ms) = match dflash_capture.as_mut() {
             Some((dst, capture_start, captured, n_features, _ring)) => {
                 let head = dflash_head.expect("capture window buffer implies a drafter head");
-                let window_limit = dflash_capture_window_limit(head);
-                let (wstart, _window) = dflash_capture_window_span(prompt_ids.len(), window_limit);
+                // The request's capture base is fixed at allocation, so a
+                // prefill split at the transcript boundary captures both
+                // segments into one consistent window.
+                let wstart = *capture_start;
                 let scratch = scratch.as_mut().ok_or_else(|| {
                     ServeError::server_error("uncached prefill has no scratch allocation")
                 })?;
@@ -712,7 +735,6 @@ fn prefill_remaining(
                         ((cstart - wstart) * *n_features) as u64,
                         vec![((end - cstart) * *n_features) as u64],
                     );
-                    *capture_start = wstart;
                     let out = crate::prefill_span_with_capture(
                         forward,
                         sequence,
@@ -1069,6 +1091,21 @@ impl GenerationBackend for EngineBackend {
         let restored_prefix_len = restore
             .as_ref()
             .map_or(0, |restore| restore.restored_prefix_len);
+        // Transcript-boundary split point (see `transcript_boundary`). A
+        // drafter-capturing request takes it too: its capture window starts
+        // `capture_ext` columns early so it also holds the window ending at
+        // the boundary (stored with the transcript snapshot), and is rebased
+        // onto the full-prompt window after prefill.
+        let transcript_at = self
+            .tokenizer
+            .encode(IM_START_MARKER, false)
+            .ok()
+            .and_then(|ids| (ids.len() == 1).then(|| ids[0]))
+            .and_then(|im_start| transcript_boundary(&prompt_ids, im_start));
+        let split_at = transcript_at.filter(|&boundary| boundary > sequence.position());
+        let capture_ext = |window_limit: usize| {
+            transcript_capture_extension(prompt_ids.len(), window_limit, split_at)
+        };
         let mut dflash_capture: Option<DflashPromptCapture> = match self
             .dflash_head
             .as_ref()
@@ -1082,6 +1119,8 @@ impl GenerationBackend for EngineBackend {
                     .ok_or_else(|| ServeError::server_error("DFlash feature count overflow"))?;
                 let window_limit = dflash_capture_window_limit(head);
                 let (wstart, window) = dflash_capture_window_span(prompt_ids.len(), window_limit);
+                let ext = capture_ext(window_limit);
+                let base = wstart - ext;
                 // Ring capacity: a fixed window for all-SWA heads (the ring
                 // wraps through decode, so it must hold a full window even
                 // for short prompts); legacy full-attn heads keep a
@@ -1091,7 +1130,7 @@ impl GenerationBackend for EngineBackend {
                 } else {
                     Some(window_limit)
                 };
-                let capture_columns = ring_columns.unwrap_or(prompt_ids.len());
+                let capture_columns = ring_columns.unwrap_or(prompt_ids.len()) + ext;
                 let capture_elements =
                     capture_columns.checked_mul(n_features).ok_or_else(|| {
                         ServeError::server_error("DFlash capture element count overflow")
@@ -1119,12 +1158,12 @@ impl GenerationBackend for EngineBackend {
                                 );
                             } else {
                                 let tail_wstart = restored_prefix_len - tail_src_cols;
-                                let seed_start = wstart.max(tail_wstart);
+                                let seed_start = base.max(tail_wstart);
                                 let seed_end = matched_tokens.min(restored_prefix_len);
                                 if seed_end > seed_start {
                                     let skip = seed_start - tail_wstart;
                                     let count = seed_end - seed_start;
-                                    let dst_off = seed_start - wstart;
+                                    let dst_off = seed_start - base;
                                     let src = &tail[skip * n_features..(skip + count) * n_features];
                                     unsafe {
                                         let dst_ptr = dst.buffer.contents().as_ptr() as *mut f32;
@@ -1138,7 +1177,7 @@ impl GenerationBackend for EngineBackend {
                                 }
                             }
                         }
-                        Some((dst, wstart, seeded, n_features, ring_columns))
+                        Some((dst, base, seeded, n_features, ring_columns))
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -1155,12 +1194,26 @@ impl GenerationBackend for EngineBackend {
         // requests capture via prefill; restored requests need the capture
         // tail from the checkpoint they restored. Decided after the capture
         // buffer so restored requests pay nothing extra.
+        // Before prefill the capture holds only the seed, which covers the
+        // consumed prefix; a pending token (matched = restored + 1) is still
+        // to be prefilled and captured, so compare with `restored_prefix_len`.
         let restore_capture_complete =
             dflash_capture
                 .as_ref()
                 .is_some_and(|(_, capture_start, captured, _, _)| {
-                    restored_dflash_capture_complete(matched_tokens, *capture_start, *captured)
+                    restored_dflash_capture_complete(restored_prefix_len, *capture_start, *captured)
                 });
+        // First position whose drafter column is real: the capture base when
+        // the seed made the window contiguous, else the first prefilled one.
+        let capture_valid_from = dflash_capture
+            .as_ref()
+            .map_or(0, |(_, base, seeded, _, _)| {
+                if restored_prefix_len <= *base || *seeded == restored_prefix_len - *base {
+                    *base
+                } else {
+                    restored_prefix_len
+                }
+            });
         let speculate_candidate = should_plan_dflash(
             self.dflash_head.is_some(),
             matched_tokens,
@@ -1179,7 +1232,7 @@ impl GenerationBackend for EngineBackend {
                     prompt_ids.len()
                 } else {
                     window_limit
-                };
+                } + capture_ext(window_limit);
                 let n_features = head
                     .target_layer_ids
                     .len()
@@ -1272,17 +1325,9 @@ impl GenerationBackend for EngineBackend {
         };
         let mut speculate = dflash_plan.is_some();
         // Transcript-boundary capture: stop prefill before the generation
-        // header, snapshot, then finish the header. Drafter capture windows
-        // are sized to the whole prompt, so speculative requests keep the
-        // single-pass prefill.
-        let transcript_at = self
-            .tokenizer
-            .encode(IM_START_MARKER, false)
-            .ok()
-            .and_then(|ids| (ids.len() == 1).then(|| ids[0]))
-            .and_then(|im_start| transcript_boundary(&prompt_ids, im_start))
-            .filter(|_| !speculate && dflash_capture.is_none());
-        let transcript_split = transcript_at.filter(|&boundary| boundary > sequence.position());
+        // header, snapshot (with the drafter window ending there, when a
+        // drafter capture is running), then finish the header.
+        let transcript_split = split_at;
         // A restore ending exactly on the transcript boundary (a resent or
         // regenerated turn) already holds the transcript snapshot: protect it
         // like a fresh capture and skip the redundant prompt capture, which
@@ -1294,8 +1339,9 @@ impl GenerationBackend for EngineBackend {
         let transcript_restored = transcript_entry.is_some();
         let prefill_t0 = Instant::now();
         let mut transcript_capture_ms = 0.0;
+        let mut split_failure = None;
         if let Some(boundary) = transcript_split {
-            prefill_remaining(
+            match prefill_remaining(
                 &self.loaded,
                 &forward,
                 self.dflash_head.as_ref(),
@@ -1306,31 +1352,55 @@ impl GenerationBackend for EngineBackend {
                 &mut scratch,
                 &mut dflash_capture,
                 sink,
-            )?;
-            let capture_t0 = Instant::now();
-            transcript_entry = self.try_cache_boundary(
-                &sequence,
-                &prompt_ids[..boundary],
-                None,
-                None,
-                None,
-                0,
-                "transcript",
-            );
-            transcript_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
+            ) {
+                Ok(_) => {
+                    // The drafter window ending at the boundary, only when
+                    // every column of it was actually captured or seeded.
+                    let (tail, features) = match dflash_capture.as_ref() {
+                        Some((dst, base, captured, n_features, Some(window)))
+                            if restored_dflash_capture_complete(boundary, *base, *captured) =>
+                        {
+                            (
+                                Some(read_window_tail(dst, *n_features, boundary, *base, *window)),
+                                *n_features,
+                            )
+                        }
+                        _ => (None, 0),
+                    };
+                    let capture_t0 = Instant::now();
+                    transcript_entry = self.try_cache_boundary(
+                        &sequence,
+                        &prompt_ids[..boundary],
+                        None,
+                        None,
+                        tail,
+                        features,
+                        "transcript",
+                    );
+                    transcript_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
+                }
+                // Same recovery as a failed single-pass capture prefill below.
+                Err(BackendFailure::Serve(error)) if speculate && matched_tokens == 0 => {
+                    split_failure = Some(error);
+                }
+                Err(error) => return Err(error),
+            }
         }
-        let prefill_result = prefill_remaining(
-            &self.loaded,
-            &forward,
-            self.dflash_head.as_ref(),
-            speculate,
-            &prompt_ids,
-            chunk,
-            &mut sequence,
-            &mut scratch,
-            &mut dflash_capture,
-            sink,
-        );
+        let prefill_result = match split_failure {
+            Some(error) => Err(BackendFailure::Serve(error)),
+            None => prefill_remaining(
+                &self.loaded,
+                &forward,
+                self.dflash_head.as_ref(),
+                speculate,
+                &prompt_ids,
+                chunk,
+                &mut sequence,
+                &mut scratch,
+                &mut dflash_capture,
+                sink,
+            ),
+        };
         match prefill_result {
             Ok(logits) => {
                 if logits.is_some() {
@@ -1377,6 +1447,23 @@ impl GenerationBackend for EngineBackend {
             }
             Err(error) => return Err(error),
         }
+        // Rebase a capture window started early for the transcript tail onto
+        // the full-prompt window that speculation and the decode ring expect.
+        if let Some((dst, base, captured, n_features, ring)) = dflash_capture.as_mut() {
+            let ext = self
+                .dflash_head
+                .as_ref()
+                .map_or(0, |head| capture_ext(dflash_capture_window_limit(head)));
+            if ext > 0 {
+                let columns = ring.unwrap_or(prompt_ids.len());
+                *dst = dst.view_subrange(
+                    (ext * *n_features) as u64,
+                    vec![(columns * *n_features) as u64],
+                );
+                *base += ext;
+                *captured = captured.saturating_sub(ext);
+            }
+        }
         let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3 - transcript_capture_ms;
         let logits = prompt_logits
             .ok_or_else(|| ServeError::server_error("prefill produced no prompt logits"))?;
@@ -1411,7 +1498,10 @@ impl GenerationBackend for EngineBackend {
         if !restore.as_ref().is_some_and(|restore| restore.exact) && transcript_entry.is_none() {
             let (tail, features) = match dflash_capture.as_ref() {
                 Some((dst, wstart, _, n_features, ring)) => (
-                    ring.map(|window| {
+                    ring.filter(|&window| {
+                        capture_tail_valid(prompt_ids.len(), window, capture_valid_from)
+                    })
+                    .map(|window| {
                         read_window_tail(dst, *n_features, prompt_ids.len(), *wstart, window)
                     }),
                     *n_features,
@@ -1577,7 +1667,9 @@ impl GenerationBackend for EngineBackend {
                     dflash_capture
                         .as_ref()
                         .and_then(|(dst, wstart, _, n_features, ring)| {
-                            ring.map(|window| (dst.clone(), *wstart, *n_features, window))
+                            ring.map(|window| {
+                                (dst.clone(), *wstart, *n_features, window, capture_valid_from)
+                            })
                         }),
                     dflash_prefix_replay_key.as_ref(),
                     replay_sampling.seed,
@@ -1660,7 +1752,9 @@ impl GenerationBackend for EngineBackend {
             dflash_capture
                 .as_ref()
                 .and_then(|(dst, wstart, _, n_features, ring)| {
-                    ring.map(|window| (dst.clone(), *wstart, *n_features, window))
+                    ring.map(|window| {
+                        (dst.clone(), *wstart, *n_features, window, capture_valid_from)
+                    })
                 }),
             dflash_prefix_replay_key.as_ref(),
             replay_sampling.seed,
@@ -1684,7 +1778,9 @@ fn read_window_tail(
     let count = consumed - start;
     let mut tail: Vec<f32> = Vec::with_capacity(count * features);
     unsafe {
-        let src = dst.buffer.contents().as_ptr() as *const f32;
+        // Honor the tensor's offset: the capture may be a rebased view.
+        let src =
+            (dst.buffer.contents().as_ptr() as *const u8).add(dst.offset as usize) as *const f32;
         for p in start..consumed {
             let offset = (p - wstart) % window;
             let column = src.add(offset * features);
@@ -1794,7 +1890,7 @@ impl EngineBackend {
         prompt_ids: Vec<i32>,
         matched_tokens: usize,
         restore_ms: f64,
-        capture_ring: Option<(MetalTensor, usize, usize, usize)>,
+        capture_ring: Option<(MetalTensor, usize, usize, usize, usize)>,
         dflash_prefix_replay_key: Option<&DflashPrefixReplayKey>,
         dflash_prefix_replay_seed: u64,
         transcript_entry: Option<EntryId>,
@@ -1810,17 +1906,21 @@ impl EngineBackend {
                 let pending_token = boundary.pending_token;
                 let consumed = boundary.consumed_tokens(&prompt_ids, &generation.tokens);
                 let (tail, features) = match capture_ring.as_ref() {
-                    Some((dst, wstart, n_features, ring_window)) => (
-                        Some(read_window_tail(
-                            dst,
+                    Some((dst, wstart, n_features, ring_window, valid_from))
+                        if capture_tail_valid(consumed.len(), *ring_window, *valid_from) =>
+                    {
+                        (
+                            Some(read_window_tail(
+                                dst,
+                                *n_features,
+                                consumed.len(),
+                                *wstart,
+                                *ring_window,
+                            )),
                             *n_features,
-                            consumed.len(),
-                            *wstart,
-                            *ring_window,
-                        )),
-                        *n_features,
-                    ),
-                    None => (None, 0),
+                        )
+                    }
+                    _ => (None, 0),
                 };
                 // The transcript boundary is what the next turn reuses when
                 // the template re-renders this turn; never evict it to admit
@@ -2682,6 +2782,80 @@ mod tests {
                 .map(|lookup| lookup.restored_prefix_len());
             assert_eq!(reused, Some(boundary), "resend={resend}");
         }
+    }
+
+    #[test]
+    fn drafter_tail_waits_until_unseeded_columns_age_out() {
+        // Cold or fully seeded: valid from the capture base.
+        assert!(capture_tail_valid(10_000, 2048, 10_000 - 2048));
+        // A restore of 1,000 tokens without a usable tail: prefill resumes at
+        // 1,000, so no 2,048-column tail is whole until position 3,048.
+        assert!(!capture_tail_valid(1_101, 2048, 1_000));
+        assert!(!capture_tail_valid(3_047, 2048, 1_000));
+        assert!(capture_tail_valid(3_048, 2048, 1_000));
+        // A short prompt's tail covers everything from 0.
+        assert!(capture_tail_valid(500, 2048, 0));
+        assert!(!capture_tail_valid(500, 2048, 1));
+    }
+
+    #[test]
+    fn transcript_capture_extension_holds_both_windows() {
+        // Long prompt, 2048-column ring, 5-token header: start 5 early.
+        assert_eq!(transcript_capture_extension(10_000, 2048, Some(9_995)), 5);
+        assert_eq!(transcript_capture_extension(10_000, 2048, None), 0);
+        // The window already starts at 0: it holds both.
+        assert_eq!(transcript_capture_extension(1_000, 2048, Some(995)), 0);
+        // The window starts 2 in; it cannot start before position 0.
+        assert_eq!(transcript_capture_extension(2_050, 2048, Some(2_045)), 2);
+        // Legacy full-attention heads capture the whole prompt.
+        assert_eq!(
+            transcript_capture_extension(10_000, usize::MAX, Some(9_995)),
+            0
+        );
+    }
+
+    /// A capture started early for the transcript tail yields the window
+    /// ending at the boundary before rebasing, and the full-prompt window
+    /// through the rebased view afterwards.
+    #[test]
+    fn early_capture_window_serves_boundary_tail_then_rebases() {
+        let Ok(ctx) = qwen_llm::metal::MetalContext::new() else {
+            return;
+        };
+        let (features, window, prompt_len, boundary) = (3usize, 8usize, 20usize, 17usize);
+        let ext = transcript_capture_extension(prompt_len, window, Some(boundary));
+        assert_eq!(ext, 3);
+        let base = prompt_len - window - ext;
+        let dst = MetalTensor::zeros_f32(&ctx, vec![((window + ext) * features) as u64]).unwrap();
+        // Linear capture from `base`: column for position p holds p.
+        unsafe {
+            let ptr = dst.buffer.contents().as_ptr() as *mut f32;
+            for p in base..prompt_len {
+                for f in 0..features {
+                    *ptr.add((p - base) * features + f) = p as f32;
+                }
+            }
+        }
+        let positions = |tail: Vec<f32>| {
+            tail.chunks(features)
+                .map(|c| c[0] as usize)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            positions(read_window_tail(&dst, features, boundary, base, window)),
+            (boundary - window..boundary).collect::<Vec<_>>()
+        );
+        let rebased = dst.view_subrange((ext * features) as u64, vec![(window * features) as u64]);
+        assert_eq!(
+            positions(read_window_tail(
+                &rebased,
+                features,
+                prompt_len,
+                base + ext,
+                window
+            )),
+            (prompt_len - window..prompt_len).collect::<Vec<_>>()
+        );
     }
 
     #[test]

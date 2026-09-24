@@ -426,21 +426,26 @@ impl PrefixCache {
     /// Record a use of the indexed entry holding `snapshot`, returning its id
     /// (none once the entry has left the index).
     pub(crate) fn touch_shared(&mut self, snapshot: &Arc<SessionSnapshot>) -> Option<EntryId> {
+        let id = self.entry_id_of(snapshot);
+        if let Some(id) = id {
+            self.policy.touch(id);
+        }
+        id
+    }
+
+    /// Id of the indexed entry holding exactly this `snapshot` allocation.
+    pub(crate) fn entry_id_of(&self, snapshot: &Arc<SessionSnapshot>) -> Option<EntryId> {
         let key = PrefixCacheKey {
             identity: snapshot.identity.clone(),
             prefix_len: snapshot.matched_prefix_len(),
             prefix_hash: hash_snapshot_prefix(snapshot),
         };
-        let id = self.buckets.get(&key).and_then(|bucket| {
+        self.buckets.get(&key).and_then(|bucket| {
             bucket
                 .iter()
                 .find(|entry| Arc::ptr_eq(&entry.snapshot, snapshot))
                 .map(|entry| entry.id)
-        });
-        if let Some(id) = id {
-            self.policy.touch(id);
-        }
-        id
+        })
     }
 }
 

@@ -1904,6 +1904,14 @@ impl LoadedModel {
         self.prefix_cache.lock().evict_for(bytes)
     }
 
+    /// Pin the cache entry a prepared lookup will restore, so pressure relief
+    /// before the restore cannot drop it; `None` once it has left the index.
+    pub fn pin_prepared_lookup(&self, lookup: &PreparedPrefixCacheLookup) -> Option<EntryId> {
+        let mut cache = self.prefix_cache.lock();
+        let id = cache.entry_id_of(&lookup.checkpoint.snapshot)?;
+        cache.pin(id).then_some(id)
+    }
+
     pub fn prefix_cache_pinned_bytes(&self) -> u64 {
         self.prefix_cache.lock().pinned_bytes()
     }

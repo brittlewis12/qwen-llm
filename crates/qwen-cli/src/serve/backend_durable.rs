@@ -145,6 +145,9 @@ impl EngineBackend {
             .loaded
             .lookup_cached_prefix(prompt_ids)
             .map_or(0, |lookup| lookup.matched_prefix_len());
+        // The lookup's expiry sweep may have released entries; queue them
+        // before the promotion's memory admission below.
+        self.drain_spills();
         if floor >= prompt_ids.len() {
             return None;
         }

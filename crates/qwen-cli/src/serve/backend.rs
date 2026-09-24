@@ -444,6 +444,21 @@ fn allocate_single_chunk_request_state(
     Ok((chunk, Some(scratch), sequence))
 }
 
+/// Bytes of process memory a denied admission is short by, when releasing
+/// cached snapshots (process memory) could admit it; `None` otherwise. A
+/// Metal working-set shortfall (alone or with a process one) is excluded:
+/// snapshots do not hold Metal allocations, so evicting them cannot fix it.
+fn process_deficit(admission: &qwen_llm::metal::MetalMemoryAdmission) -> Option<u64> {
+    use qwen_llm::metal::MetalMemoryAdmissionReason as Reason;
+    if admission.admitted || admission.reason != Reason::ProcessInsufficient {
+        return None;
+    }
+    let deficit = admission
+        .required_bytes?
+        .checked_sub(admission.signals.process_limit_remaining_bytes?)?;
+    (deficit > 0).then_some(deficit)
+}
+
 fn admit_optional_tail<P, E>(
     mut candidate: Option<(P, u64)>,
     baseline_price: u64,
@@ -823,6 +838,9 @@ impl GenerationBackend for EngineBackend {
         self.drain_spills();
         let promoted = self.promote_durable_prefix(&prompt_ids);
         let cached_lookup = self.loaded.lookup_cached_prefix(&prompt_ids);
+        // Promotion and the lookup's expiry sweep can both release entries;
+        // queue them before admission so pressure relief is not blind to them.
+        self.drain_spills();
         self.restore_source = restore_source(
             cached_lookup
                 .as_ref()
@@ -921,6 +939,41 @@ impl GenerationBackend for EngineBackend {
             .map_err(|error| {
                 ServeError::server_error(format!("price request memory: {error:#}"))
             })?;
+        // Cached snapshots are disposable process memory: before refusing
+        // the request, release unpinned ones for the process deficit (keeping
+        // the entry this request restores) and ask once more.
+        let admission = match process_deficit(&admission) {
+            Some(deficit) => {
+                let keep = cached_lookup
+                    .as_ref()
+                    .and_then(|lookup| self.loaded.pin_prepared_lookup(lookup));
+                let evicted = self.loaded.evict_prefix_cache_for(deficit);
+                if let Some(entry) = keep {
+                    self.loaded.unpin_prefix_cache_entry(entry);
+                }
+                if evicted.is_empty() {
+                    admission
+                } else {
+                    tracing::info!(
+                        target: "qwen_diag",
+                        "serve: snapshot cache evicted for request admission; entries={} freed_bytes={} deficit_bytes={deficit}",
+                        evicted.ids.len(),
+                        evicted.bytes,
+                    );
+                    self.loaded
+                        .qwen_execution_memory_admission(
+                            1,
+                            capacity,
+                            prefill_scratch_upper_bytes,
+                            0,
+                        )
+                        .map_err(|error| {
+                            ServeError::server_error(format!("price request memory: {error:#}"))
+                        })?
+                }
+            }
+            None => admission,
+        };
         if !admission.admitted {
             return Err(ServeError {
                 status: 503,
@@ -1701,7 +1754,13 @@ impl EngineBackend {
             capture_tail_features,
         ) {
             Ok(prepared) => match self.loaded.cache_prepared_checkpoint_strict(&prepared) {
-                Ok(Some(inserted)) => Some(inserted.entry),
+                Ok(Some(inserted)) => {
+                    // Hand entries this insertion evicted to the durable queue
+                    // (bounded) now, instead of holding them until the request
+                    // ends, where pressure relief cannot reach them.
+                    self.drain_spills();
+                    Some(inserted.entry)
+                }
                 Ok(None) => {
                     tracing::warn!(
                         "serve: {boundary} snapshot rejected at strict cache insertion; request continues"
@@ -2032,6 +2091,36 @@ mod tests {
             restored_extension_offsets,
             [None, Some(0), Some(1), Some(2)]
         );
+    }
+
+    #[test]
+    fn only_process_shortfalls_release_cached_snapshots() {
+        use qwen_llm::metal::{
+            MetalMemoryAdmissionReason as Reason, MetalMemorySignals,
+            evaluate_metal_memory_admission,
+        };
+        let signals = |process: Option<u64>, headroom: u64| MetalMemorySignals {
+            recommended_max_bytes: 100 + headroom,
+            current_allocated_bytes: 100,
+            process_limit_remaining_bytes: process,
+        };
+        let process_short = evaluate_metal_memory_admission(60, 0, signals(Some(50), 1000), false);
+        assert_eq!(process_short.reason, Reason::ProcessInsufficient);
+        assert_eq!(process_deficit(&process_short), Some(10));
+        // Snapshots are process memory; they cannot help a Metal working-set
+        // shortfall (even alongside a process one), a missing signal, or an
+        // admitted request.
+        let both_short = evaluate_metal_memory_admission(60, 0, signals(Some(50), 10), false);
+        assert_eq!(both_short.reason, Reason::BothInsufficient);
+        assert_eq!(process_deficit(&both_short), None);
+        let working_set = evaluate_metal_memory_admission(60, 0, signals(Some(500), 10), false);
+        assert_eq!(working_set.reason, Reason::WorkingSetInsufficient);
+        assert_eq!(process_deficit(&working_set), None);
+        let unavailable = evaluate_metal_memory_admission(60, 0, signals(None, 1000), false);
+        assert_eq!(process_deficit(&unavailable), None);
+        let admitted = evaluate_metal_memory_admission(60, 0, signals(Some(500), 1000), false);
+        assert!(admitted.admitted);
+        assert_eq!(process_deficit(&admitted), None);
     }
 
     #[test]

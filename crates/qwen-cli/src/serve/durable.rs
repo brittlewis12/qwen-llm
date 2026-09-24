@@ -19,7 +19,7 @@ use anyhow::{Context as _, Result, bail};
 use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
 use qwen_llm::gguf::GgufFile;
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -83,7 +83,7 @@ impl DurableSnapshotConfig {
                 BudgetSource::Explicit,
             ),
             None => {
-                let free_bytes = free_space_bytes(&root);
+                let free_bytes = qwen_llm::checkpoint_store::volume_free_bytes(&root);
                 (
                     auto_budget_bytes(free_bytes),
                     BudgetSource::Auto { free_bytes },
@@ -170,27 +170,10 @@ pub(crate) fn auto_budget_bytes(free_bytes: Option<u64>) -> u64 {
 }
 
 /// Bytes a spill/write-behind queue may hold beyond the RAM cache budget:
-/// a quarter of that budget, clamped to [1 GiB, 16 GiB].
+/// a quarter of that budget, clamped to [1 GiB, 16 GiB]. One snapshot larger
+/// than this still goes through, alone, when the queue is idle.
 pub(crate) fn queue_cap_bytes(ram_budget_bytes: u64) -> u64 {
     (ram_budget_bytes / 4).clamp(MIN_QUEUE_BYTES, MAX_QUEUE_BYTES)
-}
-
-/// Available bytes on the volume holding `path` (or its nearest existing
-/// ancestor, since the store directory may not exist yet).
-fn free_space_bytes(path: &Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let existing = path.ancestors().find(|candidate| candidate.exists())?;
-    let path = std::ffi::CString::new(existing.as_os_str().as_bytes()).ok()?;
-    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
-    // SAFETY: `path` is NUL-terminated and `stat` is a valid out-pointer.
-    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
-        return None;
-    }
-    // SAFETY: statvfs succeeded and initialized the struct.
-    let stat = unsafe { stat.assume_init() };
-    // Field widths differ across platforms (u32 vs u64 block counts).
-    #[allow(clippy::unnecessary_cast)]
-    (stat.f_bavail as u64).checked_mul(stat.f_frsize as u64)
 }
 
 /// Resolve the strong content identity over `gguf` (a second open of the
@@ -328,16 +311,20 @@ impl<J> DurableWorker<J> {
         }
         if !fits(state.queued_bytes, bytes, self.cap_bytes) {
             state.stats.dropped += 1;
-            if !state.drop_logged {
-                state.drop_logged = true;
+            let first_drop = !std::mem::replace(&mut state.drop_logged, true);
+            let queued_bytes = state.queued_bytes;
+            // Log and free the payload after unlocking: the request path
+            // enqueues, and must not wait on a blocked log writer.
+            drop(state);
+            if first_drop {
                 tracing::warn!(
                     target: "qwen_diag",
-                    "serve durable: family={} write queue full; dropping snapshot (logged once) job_bytes={bytes} queued_bytes={} cap_bytes={}",
+                    "serve durable: family={} write queue full; dropping snapshot (logged once) job_bytes={bytes} queued_bytes={queued_bytes} cap_bytes={}",
                     self.label,
-                    state.queued_bytes,
                     self.cap_bytes,
                 );
             }
+            drop(job);
             return false;
         }
         push(&mut state, job, bytes);
@@ -347,11 +334,9 @@ impl<J> DurableWorker<J> {
     }
 
     /// Queue, waiting up to `deadline` for room. Used only off the request
-    /// path (graceful shutdown). A job larger than the cap never fits.
+    /// path (graceful shutdown). A job larger than the cap waits for an idle
+    /// queue.
     pub(crate) fn enqueue_until(&self, job: J, bytes: u64, deadline: Instant) -> bool {
-        if bytes > self.cap_bytes {
-            return false;
-        }
         let mut state = self.shared.lock();
         loop {
             if state.failed || state.closed {
@@ -406,8 +391,13 @@ impl<J> Drop for DurableWorker<J> {
     }
 }
 
+/// Room for `bytes` within the cap, or, for a job larger than the whole cap,
+/// an idle queue (queued bytes count until written, so zero also means
+/// nothing in flight). Such a job came out of the RAM cache, so the RAM
+/// budget bounds it, and only one is held beyond the cap at a time; without
+/// this, long-context snapshots larger than the cap could never persist.
 fn fits(queued: u64, bytes: u64, cap: u64) -> bool {
-    queued.checked_add(bytes).is_some_and(|total| total <= cap)
+    queued.checked_add(bytes).is_some_and(|total| total <= cap) || (bytes > cap && queued == 0)
 }
 
 fn push<J>(state: &mut State<J>, job: J, bytes: u64) {
@@ -444,10 +434,11 @@ fn run_worker<J, W>(
             );
             let mut state = shared.lock();
             state.failed = true;
-            state.jobs.clear();
+            let abandoned = std::mem::take(&mut state.jobs);
             state.queued_bytes = 0;
             drop(state);
             shared.changed.notify_all();
+            drop(abandoned);
             return;
         }
     };
@@ -471,27 +462,28 @@ fn run_worker<J, W>(
         let write_t0 = Instant::now();
         let result = writer(job);
         let write_ms = write_t0.elapsed().as_secs_f64() * 1e3;
-        let mut state = shared.lock();
-        state.writing = false;
-        state.queued_bytes -= bytes;
-        match result {
-            Ok(detail) => {
-                state.stats.written += 1;
-                tracing::info!(
-                    target: "qwen_diag",
-                    "serve durable: family={label} wrote snapshot write_ms={write_ms:.1} {detail}",
-                );
-            }
-            Err(error) => {
-                state.stats.failed += 1;
-                tracing::warn!(
-                    target: "qwen_diag",
-                    "serve durable: family={label} snapshot write failed after {write_ms:.1} ms: {error:#}",
-                );
+        {
+            let mut state = shared.lock();
+            state.writing = false;
+            state.queued_bytes -= bytes;
+            match &result {
+                Ok(_) => state.stats.written += 1,
+                Err(_) => state.stats.failed += 1,
             }
         }
-        drop(state);
         shared.changed.notify_all();
+        // Logged after unlocking so a blocked log writer never holds the
+        // queue the request path enqueues into.
+        match result {
+            Ok(detail) => tracing::info!(
+                target: "qwen_diag",
+                "serve durable: family={label} wrote snapshot write_ms={write_ms:.1} {detail}",
+            ),
+            Err(error) => tracing::warn!(
+                target: "qwen_diag",
+                "serve durable: family={label} snapshot write failed after {write_ms:.1} ms: {error:#}",
+            ),
+        }
     }
 }
 
@@ -525,7 +517,7 @@ mod tests {
             min_tokens: 7,
         };
         let plan = explicit.resolve("deepseek_v4").unwrap().unwrap();
-        assert_eq!(plan.root, Path::new("/tmp/durable/deepseek_v4"));
+        assert_eq!(plan.root, std::path::Path::new("/tmp/durable/deepseek_v4"));
         assert_eq!(plan.max_bytes, 2 * GIB);
         assert_eq!(plan.max_record_bytes, 2 * GIB);
         assert_eq!(plan.min_tokens, 7);
@@ -559,7 +551,9 @@ mod tests {
         assert_eq!(auto_budget_bytes(Some(0)), 0);
         assert_eq!(auto_budget_bytes(None), AUTO_FALLBACK_BYTES);
         // Reads a real volume through a not-yet-created leaf.
-        let free = free_space_bytes(&std::env::temp_dir().join("qwen-durable-missing/a/b"));
+        let free = qwen_llm::checkpoint_store::volume_free_bytes(
+            &std::env::temp_dir().join("qwen-durable-missing/a/b"),
+        );
         assert!(free.is_some());
     }
 
@@ -667,14 +661,39 @@ mod tests {
     }
 
     #[test]
+    fn oversized_job_goes_alone_when_the_queue_is_idle() {
+        let (worker, gate, done) = gated_worker(100);
+        wait_for_identity(&worker);
+        assert!(worker.try_enqueue(1, 10));
+        assert!(
+            !worker.try_enqueue(2, 150),
+            "busy queue refuses an oversized job"
+        );
+        gate.send(()).unwrap();
+        assert_eq!(done.recv_timeout(LONG).unwrap(), 1);
+        assert!(worker.wait_idle(Instant::now() + LONG));
+        assert!(
+            worker.try_enqueue(3, 150),
+            "idle queue admits one oversized job"
+        );
+        assert!(
+            !worker.try_enqueue(4, 1),
+            "nothing joins it while in flight"
+        );
+        gate.send(()).unwrap();
+        assert_eq!(done.recv_timeout(LONG).unwrap(), 3);
+        assert!(worker.wait_idle(Instant::now() + LONG));
+        assert!(worker.try_enqueue(5, 60));
+        gate.send(()).unwrap();
+        assert_eq!(done.recv_timeout(LONG).unwrap(), 5);
+        assert!(worker.wait_idle(Instant::now() + LONG));
+    }
+
+    #[test]
     fn enqueue_until_waits_for_room_then_gives_up_at_deadline() {
         let (worker, gate, done) = gated_worker(10);
         wait_for_identity(&worker);
         assert!(worker.try_enqueue(1, 10));
-        assert!(
-            !worker.enqueue_until(2, 11, Instant::now() + LONG),
-            "never fits"
-        );
         assert!(!worker.enqueue_until(3, 5, Instant::now() + Duration::from_millis(20)));
         let releaser = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(20));
@@ -686,6 +705,19 @@ mod tests {
         gate.send(()).unwrap();
         assert_eq!(done.recv_timeout(LONG).unwrap(), 1);
         assert_eq!(done.recv_timeout(LONG).unwrap(), 4);
+        assert!(worker.wait_idle(Instant::now() + LONG));
+        // At shutdown an oversized job waits for the queue to drain, then goes.
+        assert!(worker.try_enqueue(6, 10));
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            gate.send(()).unwrap();
+            gate
+        });
+        assert!(worker.enqueue_until(7, 11, Instant::now() + LONG));
+        let gate = releaser.join().unwrap();
+        gate.send(()).unwrap();
+        assert_eq!(done.recv_timeout(LONG).unwrap(), 6);
+        assert_eq!(done.recv_timeout(LONG).unwrap(), 7);
         assert!(worker.wait_idle(Instant::now() + LONG));
     }
 

@@ -181,7 +181,7 @@ impl Pilot {
             }
         }
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_unchecked(&cmd);
         let wall_ms = start.elapsed().as_secs_f64() * 1e3 / repeats as f64;
         assert_eq!(
             cmd.status(),

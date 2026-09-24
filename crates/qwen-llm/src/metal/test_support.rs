@@ -734,7 +734,7 @@ pub(super) fn run_mxfp4_f32_matrix_tile_k216_bucket_floor(
     .expect("encode production-K matrix check");
     check_encoder.end();
     check_command.commit();
-    check_command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&check_command);
     assert!(check_command.error().is_none());
     let check_control = tensor_f32_at_offset(&control_output);
     let check_candidate = tensor_f32_at_offset(&candidate_output);
@@ -799,7 +799,7 @@ pub(super) fn run_mxfp4_f32_matrix_tile_k216_bucket_floor(
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         assert!(command.error().is_none());
         (
             started.elapsed().as_secs_f64() * 1e3,

@@ -311,7 +311,7 @@ pub fn run(args: AttnStageFloorArgs, build_identity: Value) -> Result<()> {
         encode(&enc)?;
         enc.end();
         command.commit();
-        command.waitUntilCompleted();
+        qwen_llm::metal::wait_unchecked(&command);
         if let Err(error) = qwen_llm::metal::command_buffer_completed(&command) {
             return Err(anyhow!("stage-floor command failed: {error}"));
         }
@@ -331,7 +331,7 @@ pub fn run(args: AttnStageFloorArgs, build_identity: Value) -> Result<()> {
         encode_copy_offset_f32(&ctx, &enc, &scrub_source, 0, &scrub_target, scrub_elements)?;
         enc.end();
         command.commit();
-        command.waitUntilCompleted();
+        qwen_llm::metal::wait_unchecked(&command);
         if let Err(error) = qwen_llm::metal::command_buffer_completed(&command) {
             bail!("stage-floor scrub failed: {error}");
         }
@@ -348,7 +348,7 @@ pub fn run(args: AttnStageFloorArgs, build_identity: Value) -> Result<()> {
     }
     ramp_enc.end();
     ramp.commit();
-    ramp.waitUntilCompleted();
+    qwen_llm::metal::wait_unchecked(&ramp);
     if let Err(error) = qwen_llm::metal::command_buffer_completed(&ramp) {
         bail!("stage-floor ramp failed: {error}");
     }

@@ -111,7 +111,7 @@ fn mxfp4_f32_matrix_tile_matches_scalar_envelope_and_guards() {
         .expect("encode repeated MXFP4 matrix candidate");
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
 
         let control_values = tensor_f32_at_offset(&control);

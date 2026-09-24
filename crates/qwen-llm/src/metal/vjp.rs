@@ -1053,7 +1053,7 @@ mod tests {
             }
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(command.error().is_none(), "{:?}", command.error());
             for (name, candidate, control) in [
                 ("RMSNorm", &rms_candidate, &rms_control),
@@ -1451,7 +1451,7 @@ mod tests {
             .unwrap();
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(command.error().is_none(), "{:?}", command.error());
 
             let actual = tensor_f32_at_offset(&candidate);
@@ -1658,7 +1658,7 @@ mod tests {
                 }
                 encoder.end();
                 command.commit();
-                command.waitUntilCompleted();
+                crate::metal::wait_completed(&command).expect("command buffer completed");
                 assert!(command.error().is_none(), "{:?}", command.error());
                 let start = command.GPUStartTime();
                 let end = command.GPUEndTime();

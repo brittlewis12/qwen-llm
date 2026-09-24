@@ -517,7 +517,7 @@ pub(super) fn attn_mixer_replay_vjp_readback(
     encoder.end();
     encode_result?;
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     validate_completed_command(&command)?;
 
     let q_raw = read_f32(&front.q_raw, q_total);
@@ -596,7 +596,7 @@ pub(super) fn attn_mixer_replay_vjp_readback(
     encoder.end();
     encode_result?;
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     validate_completed_command(&command)?;
     let mixer_outputs = read_f32(&mixer_output, hidden_total);
     let grad_gated = read_f32(&grad_gated, q_total);
@@ -739,7 +739,7 @@ pub(super) fn attn_mixer_replay_vjp_readback(
     encoder.end();
     encode_result?;
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     validate_completed_command(&command)?;
     Ok(AttnMixerVjpReadback {
         mixer_outputs,
@@ -807,7 +807,7 @@ pub(super) fn attn_mixer_replay_vjp_batch_readback(
     encoder.end();
     encode_result?;
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     validate_completed_command(&command)?;
 
     let q_raw = read_f32(&front.q_raw, q_total);
@@ -886,7 +886,7 @@ pub(super) fn attn_mixer_replay_vjp_batch_readback(
     encoder.end();
     encode_result?;
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     validate_completed_command(&command)?;
     let mixer_outputs = read_f32(&mixer_output, hidden_total);
     let grad_gated = read_f32(&grad_gated, q_query_total);
@@ -1077,7 +1077,7 @@ pub(super) fn attn_mixer_replay_vjp_batch_readback(
     encoder.end();
     encode_result?;
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     validate_completed_command(&command)?;
     Ok(AttnMixerVjpReadback {
         mixer_outputs,

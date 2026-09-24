@@ -1428,7 +1428,7 @@ impl<'a> MetalForward<'a> {
 
         enc.end();
         cmd_buf.commit();
-        cmd_buf.waitUntilCompleted();
+        crate::metal::wait_unchecked(&cmd_buf);
         let status = cmd_buf.status();
         let error = cmd_buf.error();
         if status != MTLCommandBufferStatus::Completed || error.is_some() {
@@ -1538,7 +1538,7 @@ impl<'a> MetalForward<'a> {
         // commit. If get_rows for token i hasn't run yet, it would
         // read the overwritten id. Defer real async pipelining to
         // v0.75.1 where packed prefill restructures this.
-        cmd_buf.waitUntilCompleted();
+        crate::metal::wait_unchecked(&cmd_buf);
         let status = cmd_buf.status();
         let error = cmd_buf.error();
         if status != MTLCommandBufferStatus::Completed || error.is_some() {
@@ -1654,7 +1654,7 @@ impl<'a> MetalForward<'a> {
         // SKIP final RMSNorm + lm_head + readback.
         enc.end();
         cmd_buf.commit();
-        cmd_buf.waitUntilCompleted();
+        crate::metal::wait_unchecked(&cmd_buf);
         let status = cmd_buf.status();
         let error = cmd_buf.error();
         if status != MTLCommandBufferStatus::Completed || error.is_some() {
@@ -2174,7 +2174,7 @@ impl<'a> MetalForward<'a> {
 
         let t_gpu = std::time::Instant::now();
         cmd_buf.commit();
-        cmd_buf.waitUntilCompleted();
+        crate::metal::wait_unchecked(&cmd_buf);
         let status = cmd_buf.status();
         let error = cmd_buf.error();
         if status != MTLCommandBufferStatus::Completed || error.is_some() {

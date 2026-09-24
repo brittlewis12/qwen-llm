@@ -1311,7 +1311,7 @@ fn k0s_synthetic_dispatch(
     }
     enc.end();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    crate::metal::wait_completed(&cmd).expect("command buffer completed");
     require_prefill_command_completed(&cmd).unwrap();
     let (rows, counters) = observer.finish().unwrap();
     let rows = rows
@@ -2755,7 +2755,7 @@ fn prefill_command_completion_check_fails_closed() {
     let cmd = ctx.queue.commandBuffer().expect("command buffer");
     assert!(require_prefill_command_completed(&cmd).is_err());
     cmd.commit();
-    cmd.waitUntilCompleted();
+    crate::metal::wait_completed(&cmd).expect("command buffer completed");
     require_prefill_command_completed(&cmd).unwrap();
 }
 

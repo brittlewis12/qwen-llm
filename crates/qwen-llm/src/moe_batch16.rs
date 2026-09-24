@@ -1036,7 +1036,7 @@ impl<'a> MoeBatch16Executor<'a> {
             }
         }
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         let status = command.status();
         let error = command.error();
         if status != MTLCommandBufferStatus::Completed || error.is_some() {

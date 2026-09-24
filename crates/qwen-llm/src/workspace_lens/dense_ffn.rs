@@ -226,7 +226,7 @@ pub(super) fn dense_ffn_vjp_readback(
     encoder.end();
     encode_result?;
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     let status = command.status();
     let error = command.error();
     if status != MTLCommandBufferStatus::Completed || error.is_some() {
@@ -460,7 +460,7 @@ pub(super) fn dense_ffn_vjp_rows_readback(
     encoder.end();
     encode_result?;
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     validate_completed_command(&command)?;
     Ok(read_f32(&grad_input, hidden_elements))
 }
@@ -711,7 +711,7 @@ pub(super) fn dense_ffn_vjp_query_rows_readback(
     encoder.end();
     encode_result?;
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     validate_completed_command(&command)?;
     Ok(read_f32(&grad_input, hidden_query_elements))
 }

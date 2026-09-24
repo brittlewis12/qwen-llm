@@ -346,7 +346,7 @@ pub fn muse_glimmer_selected_token_covectors(
     encoder.end();
     encode_result?;
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     let status = command.status();
     let command_error = command.error().map(|error| error.to_string());
     if status != MTLCommandBufferStatus::Completed || command_error.is_some() {
@@ -436,7 +436,7 @@ pub fn project_f16_transport_covectors(
     encoder.end();
     encode_result?;
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     let status = command.status();
     let command_error = command.error().map(|error| error.to_string());
     if status != MTLCommandBufferStatus::Completed || command_error.is_some() {

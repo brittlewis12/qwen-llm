@@ -137,7 +137,7 @@ impl<'a> QwenQueue2Executor<'a> {
             command.commit();
         }
         for command in &commands {
-            command.waitUntilCompleted();
+            crate::metal::wait_unchecked(&command);
         }
         for (slot, command) in commands.iter().enumerate() {
             let status = command.status();

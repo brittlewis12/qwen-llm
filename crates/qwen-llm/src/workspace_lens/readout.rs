@@ -330,7 +330,7 @@ impl WorkspaceLensFullReadoutWorkspace<'_> {
         encoder.end();
         encode_result?;
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         validate_completed_command(&command)?;
 
         let transported_values = read_f32_fallible(
@@ -547,7 +547,7 @@ impl WorkspaceLensFullReadoutWorkspace<'_> {
             vocab_size,
         )?;
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         validate_completed_command(&command)?;
         let readout_wall_ms = readout_started.elapsed().as_secs_f64() * 1e3;
         let readout_gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
@@ -1213,7 +1213,7 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
         encoder.end();
         encode_result?;
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         validate_completed_command(&command)?;
 
         let mut values =
@@ -1373,7 +1373,7 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
         encoder.end();
         encode_result?;
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         validate_completed_command(&command)?;
         read_f32_fallible(
             &grad_input,
@@ -1672,7 +1672,7 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
             vocab_size,
         )?;
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         validate_completed_command(&command)?;
         let readout_wall_ms = readout_started.elapsed().as_secs_f64() * 1e3;
         let readout_gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
@@ -1813,7 +1813,7 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
         encoder.end();
         encode_result?;
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         validate_completed_command(&command)?;
 
         let transported_values = read_f32_fallible(
@@ -2131,7 +2131,7 @@ impl<'model> WorkspaceLensPassiveSession<'model, '_> {
         encoder.end();
         encode_result?;
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         validate_completed_command(&command)?;
 
         let transported_values = read_f32_fallible(

@@ -578,7 +578,7 @@ fn check_packed_router_e8p32_bits(ctx: MetalContext, token_counts: &[usize]) {
         assert_eq!(census[1].threads_width, 32);
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         assert!(command.error().is_none());
 
@@ -974,7 +974,7 @@ fn packed_router_supports_512_experts_with_stable_ties() {
         assert_eq!(census[0].threads_width, EXPERTS as u64);
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         assert!(command.error().is_none());
 
@@ -1119,7 +1119,7 @@ fn grouped_iq4_xs_swiglu_matches_slotwise_512_expert_execution() {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(
             command.status(),
             MTLCommandBufferStatus::Completed,
@@ -1223,7 +1223,7 @@ fn grouped_iq4_xs_swiglu_matches_slotwise_512_expert_execution() {
         );
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         assert!(command.error().is_none());
 
@@ -1379,7 +1379,7 @@ fn grouped_iq4_nl_down_matches_slotwise_512_expert_execution() {
         );
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         assert!(command.error().is_none());
 
@@ -1538,7 +1538,7 @@ fn grouped_iq4_nl_down_m128_n16_is_bit_exact_and_guarded() {
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(
             command.status(),
             MTLCommandBufferStatus::Completed,
@@ -1880,7 +1880,7 @@ fn packed_common_moe_motor_matches_serial_rows_and_routes() {
         );
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         assert!(command.error().is_none());
 
@@ -1944,7 +1944,7 @@ fn packed_common_moe_motor_matches_serial_rows_and_routes() {
             }));
             range_encoder.end();
             range_command.commit();
-            range_command.waitUntilCompleted();
+            crate::metal::wait_completed(&range_command).expect("command buffer completed");
             assert_eq!(range_command.status(), MTLCommandBufferStatus::Completed);
             assert!(range_command.error().is_none());
 
@@ -1996,7 +1996,7 @@ fn packed_common_moe_motor_matches_serial_rows_and_routes() {
                 }
                 .unwrap();
                 split_command.commit();
-                split_command.waitUntilCompleted();
+                crate::metal::wait_completed(&split_command).expect("command buffer completed");
                 assert_eq!(split_command.status(), MTLCommandBufferStatus::Completed);
                 assert!(split_command.error().is_none());
                 assert_eq!(spans.len(), QWEN4EXP_PACKED_PROFILE_MOE_SPANS);
@@ -2230,7 +2230,7 @@ fn packed_common_moe_motor_matches_serial_rows_and_routes() {
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         assert!(command.error().is_none());
         assert_bits_eq(
@@ -2299,7 +2299,7 @@ fn packed_common_moe_motor_matches_serial_rows_and_routes() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
     assert!(command.error().is_none());
     assert_packed_scratch_guards(&perturbed_scratch, MAX_TOKENS);
@@ -2413,7 +2413,7 @@ fn packed_common_moe_motor_matches_serial_rows_and_routes() {
         );
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         assert!(command.error().is_none());
         let views = q8_scratch.views(tokens).unwrap();
@@ -2575,7 +2575,7 @@ fn packed_common_moe_motor_matches_serial_rows_and_routes() {
         );
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         assert!(command.error().is_none());
 
@@ -3978,7 +3978,7 @@ fn released_layers_two_and_three_packed_motor_match_serial_rows() {
         );
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         assert!(command.error().is_none());
 

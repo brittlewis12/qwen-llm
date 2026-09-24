@@ -260,7 +260,7 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
         encoder.end();
         encode_result?;
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         let status = command.status();
         let error = command.error();
         if status != MTLCommandBufferStatus::Completed || error.is_some() {

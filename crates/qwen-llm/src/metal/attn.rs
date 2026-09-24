@@ -4546,7 +4546,7 @@ mod tests {
             enc.end();
             let wall_start = std::time::Instant::now();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            crate::metal::wait_completed(&cmd).expect("command buffer completed");
             let wall_ms = wall_start.elapsed().as_secs_f64() * 1e3;
             let status = cmd.status();
             let error = cmd.error();

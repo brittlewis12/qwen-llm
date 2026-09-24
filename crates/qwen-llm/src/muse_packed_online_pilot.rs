@@ -123,7 +123,7 @@ fn packed_online_screen(long: bool) {
             });
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_unchecked(&command);
             let wall_ms = started.elapsed().as_secs_f64() * 1e3 / chains as f64;
             assert_eq!(
                 command.status(),

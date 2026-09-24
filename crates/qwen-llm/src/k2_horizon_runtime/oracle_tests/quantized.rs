@@ -132,7 +132,7 @@ fn embedding_check(model: &K2LoadedModel<'_>, source: &GgufFile) -> serde_json::
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
     let row_bytes = desc.n_bytes as usize / 250624;
     let mut row_desc = desc.clone();

@@ -488,7 +488,7 @@ fn candidate_step(
     )?;
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    qwen_llm::metal::wait_unchecked(&command);
     ensure!(
         command.status() == MTLCommandBufferStatus::Completed && command.error().is_none(),
         "repair command failed: {:?}",

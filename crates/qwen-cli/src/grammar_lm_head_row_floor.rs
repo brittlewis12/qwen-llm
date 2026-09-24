@@ -1130,7 +1130,7 @@ fn run_q6_dispatch(
     encode_mat_vec_q6_k_f32(ctx, &enc, weight, x, y, n_in, n_out)?;
     enc.end();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    qwen_llm::metal::wait_unchecked(&cmd);
     let wall_ms = start.elapsed().as_secs_f64() * 1e3;
     check_command(&cmd, label)?;
     Ok(DispatchTiming {
@@ -1734,7 +1734,7 @@ fn run_timed_arm(
 
     let phase = Instant::now();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    qwen_llm::metal::wait_unchecked(&cmd);
     check_command(&cmd, arm.label())?;
     let gpu_ms = command_gpu_ms(&cmd)?;
     let commit_wait_status_ms = elapsed_ms(phase);

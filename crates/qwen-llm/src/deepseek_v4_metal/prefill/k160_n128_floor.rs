@@ -472,7 +472,7 @@ fn k160_n128_grouped_q3q4_representative_layer_floor() {
         encoder.end();
         result.expect("encode N128 floor");
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         assert!(command.error().is_none(), "{:?}", command.error());
         (
             started.elapsed().as_secs_f64() * 1e3,

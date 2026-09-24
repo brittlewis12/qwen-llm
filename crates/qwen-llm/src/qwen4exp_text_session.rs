@@ -1482,7 +1482,7 @@ impl Qwen4ExpTextSessionMetalWorkspace {
             ));
         }
         let wait_started = timing.is_some().then(Instant::now);
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         if let (Some(timing), Some(started)) = (timing.as_deref_mut(), wait_started) {
             timing.root_wait_ms = started.elapsed().as_secs_f64() * 1e3;
         }

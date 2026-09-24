@@ -74,7 +74,7 @@ fn muse_prefill_equal_work_batch_screen() {
             }
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_unchecked(&command);
             let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
             assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
             assert!(command.error().is_none());

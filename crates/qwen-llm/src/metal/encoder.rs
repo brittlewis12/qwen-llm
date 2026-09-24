@@ -449,7 +449,7 @@ mod tests {
         let enc = KernelEncoder::begin(&cmd);
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd).expect("command buffer completed");
         assert!(cmd.error().is_none(), "command failed: {:?}", cmd.error());
     }
 
@@ -469,7 +469,7 @@ mod tests {
         let enc = KernelEncoder::begin(&cmd);
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd).expect("command buffer completed");
         assert!(cmd.error().is_none(), "command failed: {:?}", cmd.error());
     }
 

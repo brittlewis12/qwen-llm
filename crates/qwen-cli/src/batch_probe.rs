@@ -456,7 +456,7 @@ fn run_qwen_serialized(
             )?;
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            qwen_llm::metal::wait_unchecked(&command);
             qwen_llm::metal::command_buffer_completed(&command).map_err(|error| {
                 anyhow::anyhow!("serialized Qwen probe command failed: {error}")
             })?;
@@ -583,7 +583,7 @@ fn run_qwen_independent(
             command.commit();
         }
         for command in &commands {
-            command.waitUntilCompleted();
+            qwen_llm::metal::wait_unchecked(&command);
         }
         for command in &commands {
             qwen_llm::metal::command_buffer_completed(command)

@@ -93,7 +93,7 @@ fn dispatch(
     }
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
     assert!(command.error().is_none(), "{:?}", command.error());
 }

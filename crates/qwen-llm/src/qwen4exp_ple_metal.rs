@@ -502,7 +502,7 @@ impl Qwen4ExpPleMetalWorkspace {
                 "workspace owner is not committed (status {status:?}); commit it or abandon the uncommitted command"
             ));
         }
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         let status = command.status();
         let error = command.error().map(|error| error.to_string());
         self.active_command = None;
@@ -2538,7 +2538,7 @@ mod tests {
             .unwrap();
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
             assert!(command.error().is_none());
 
@@ -2573,7 +2573,7 @@ mod tests {
             .unwrap();
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
             assert!(command.error().is_none());
 
@@ -2675,7 +2675,7 @@ mod tests {
         encode_gate(&ctx, &encoder, &workspace, geometry).unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         assert!(command.error().is_none());
 
@@ -3287,7 +3287,7 @@ mod tests {
             );
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
             assert!(command.error().is_none());
 
@@ -3447,7 +3447,7 @@ mod tests {
             );
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
             assert!(command.error().is_none());
             assert_similarity(

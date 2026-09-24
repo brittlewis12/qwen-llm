@@ -24,7 +24,7 @@ fn replace_first_word(ctx: &MetalContext, destination: &MetalTensor, bytes: [u8;
     );
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
     assert!(command.error().is_none());
 }

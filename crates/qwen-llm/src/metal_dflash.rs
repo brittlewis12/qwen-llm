@@ -1695,7 +1695,7 @@ fn flush_prefill_phase(
         return Ok(());
     }
     cmd_buf.commit();
-    cmd_buf.waitUntilCompleted();
+    crate::metal::wait_unchecked(&cmd_buf);
     require_prefill_command_completed(cmd_buf)?;
     let gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
     *prefill_gpu_total_ms += gpu_ms;
@@ -1786,7 +1786,7 @@ fn flush_prefill_layer_phase(
         return Ok(());
     }
     cmd_buf.commit();
-    cmd_buf.waitUntilCompleted();
+    crate::metal::wait_unchecked(&cmd_buf);
     require_prefill_command_completed(cmd_buf)?;
     let gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
     *prefill_gpu_total_ms += gpu_ms;
@@ -1804,7 +1804,7 @@ fn flush_prefill_layer_phase_accum(
     prefill_gpu_total_ms: &mut f64,
 ) -> Result<f64, DFlashError> {
     cmd_buf.commit();
-    cmd_buf.waitUntilCompleted();
+    crate::metal::wait_unchecked(&cmd_buf);
     require_prefill_command_completed(cmd_buf)?;
     let gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
     *prefill_gpu_total_ms += gpu_ms;
@@ -13158,7 +13158,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     enc.end();
                                     if attn_packed_oracle {
                                         cmd_buf.commit();
-                                        cmd_buf.waitUntilCompleted();
+                                        crate::metal::wait_unchecked(&cmd_buf);
                                         require_prefill_command_completed(&cmd_buf)?;
                                         prefill_gpu_total_ms +=
                                             (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
@@ -13220,7 +13220,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                             enc.end();
                                         }
                                         oracle_cmd.commit();
-                                        oracle_cmd.waitUntilCompleted();
+                                        crate::metal::wait_unchecked(&oracle_cmd);
                                         require_prefill_command_completed(&oracle_cmd)?;
 
                                         let packed = cpu_read_f32buf(&attn_o_pack_p);
@@ -14366,7 +14366,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                         enc.end();
 
                         cmd_buf.commit();
-                        cmd_buf.waitUntilCompleted();
+                        crate::metal::wait_unchecked(&cmd_buf);
                         require_prefill_command_completed(&cmd_buf)?;
                         prefill_gpu_total_ms +=
                             (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
@@ -15576,7 +15576,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
             let before_commit = Instant::now();
             cmd_buf.commit();
             let after_commit = Instant::now();
-            cmd_buf.waitUntilCompleted();
+            crate::metal::wait_unchecked(&cmd_buf);
             let after_wait = Instant::now();
             if let Some(evidence) = tail_evidence.as_mut() {
                 let status = cmd_buf.status();
@@ -15645,7 +15645,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
         let before_commit = Instant::now();
         cmd_buf.commit();
         let after_commit = Instant::now();
-        cmd_buf.waitUntilCompleted();
+        crate::metal::wait_unchecked(&cmd_buf);
         let after_wait = Instant::now();
         require_prefill_command_completed(&cmd_buf)?;
         let chunk_gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;

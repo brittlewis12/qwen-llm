@@ -16,8 +16,20 @@ use super::MetalError;
 /// Block until `cmd` finishes, then fail unless it completed without error.
 /// Does not commit; pair with an earlier `commit()`.
 pub fn wait_completed(cmd: &ProtocolObject<dyn MTLCommandBuffer>) -> Result<(), MetalError> {
+    #[allow(clippy::disallowed_methods)]
     cmd.waitUntilCompleted();
     command_buffer_completed(cmd)
+}
+
+/// Block until `cmd` finishes WITHOUT checking how it finished. Only for a
+/// caller that inspects `status()` and `error()` itself right after (to
+/// poison a session or report a family-specific error) or reads nothing the
+/// command wrote; everything else uses [`wait_completed`]. The bare
+/// `waitUntilCompleted` is a disallowed method (clippy.toml), so every
+/// unchecked wait is spelled here, where it can be found.
+pub fn wait_unchecked(cmd: &ProtocolObject<dyn MTLCommandBuffer>) {
+    #[allow(clippy::disallowed_methods)]
+    cmd.waitUntilCompleted();
 }
 
 /// `commit()` then [`wait_completed`].

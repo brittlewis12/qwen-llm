@@ -2486,7 +2486,7 @@ mod tests {
         )
         .expect("second top-k pass");
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         let elapsed = started.elapsed();
         assert_eq!(
             command.status(),

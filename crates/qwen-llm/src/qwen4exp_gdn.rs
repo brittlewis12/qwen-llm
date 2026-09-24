@@ -438,7 +438,7 @@ impl GatedDeltaNetMetalWorkspace {
                 "workspace owner is not committed (status {status:?}); commit it or abandon the uncommitted command"
             ));
         }
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         let status = command.status();
         let error = command.error().map(|error| error.to_string());
         self.active_command = None;
@@ -2505,7 +2505,7 @@ mod tests {
             .unwrap();
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(command.error().is_none());
 
             let serial = read_f32(&serial_output);
@@ -2630,7 +2630,7 @@ mod tests {
             .unwrap();
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(command.error().is_none());
 
             assert_bits_eq(
@@ -2708,7 +2708,7 @@ mod tests {
             .unwrap();
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(command.error().is_none());
 
             assert_bits_eq(
@@ -2790,7 +2790,7 @@ mod tests {
             .unwrap();
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(command.error().is_none());
 
             assert_bits_eq(
@@ -3025,7 +3025,7 @@ mod tests {
             );
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
             assert!(command.error().is_none());
 
@@ -3297,7 +3297,7 @@ mod tests {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
 
         let mut expected = vec![0.0; 256];
@@ -3725,7 +3725,7 @@ mod tests {
         .unwrap();
         l2_encoder.end();
         l2_command.commit();
-        l2_command.waitUntilCompleted();
+        crate::metal::wait_completed(&l2_command).expect("command buffer completed");
         assert!(l2_command.error().is_none());
         assert_close(&read_f32(&l2_query_output), expected_l2_query, 2e-6, 2e-6);
         assert_close(&read_f32(&l2_key_output), expected_l2_key, 2e-6, 2e-6);

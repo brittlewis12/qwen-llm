@@ -547,7 +547,7 @@ fn muse_ffn_fusion_cells(
                 }
                 encoder.end();
                 command.commit();
-                command.waitUntilCompleted();
+                crate::metal::wait_unchecked(&command);
                 let wall = started.elapsed().as_secs_f64() * 1000.0;
                 assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
                 assert!(command.error().is_none());

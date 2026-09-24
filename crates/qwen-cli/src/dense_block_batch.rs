@@ -265,7 +265,7 @@ fn wait_success(
     label: &str,
 ) -> Result<()> {
     command.commit();
-    command.waitUntilCompleted();
+    qwen_llm::metal::wait_unchecked(&command);
     qwen_llm::metal::command_buffer_completed(&command)
         .map_err(|error| anyhow::anyhow!("{label} command failed: {error}"))?;
     Ok(())
@@ -366,7 +366,7 @@ fn time_with_reset(
             .context("dense static-batch timed command")?;
         encode(&command, sessions)?;
         command.commit();
-        command.waitUntilCompleted();
+        qwen_llm::metal::wait_unchecked(&command);
         qwen_llm::metal::command_buffer_completed(&command)
             .map_err(|error| anyhow::anyhow!("dense static-batch timed command failed: {error}"))?;
         let wall_ms = started.elapsed().as_secs_f64() * 1e3;

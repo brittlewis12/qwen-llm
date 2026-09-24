@@ -167,7 +167,7 @@ pub(super) fn replay(
     encoder.end();
     result.unwrap();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
     let actual = read_f32(&output);
     let candidate = read_f32(&online);

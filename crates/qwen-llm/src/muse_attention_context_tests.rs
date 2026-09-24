@@ -114,7 +114,7 @@ fn attention_model_context_oracle(check_split: bool) {
         encode(&encoder);
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(
             command.status(),
             objc2_metal::MTLCommandBufferStatus::Completed

@@ -89,7 +89,7 @@ fn blit(ctx: &MetalContext, sections: &[Section], arenas: &[MetalTensor], captur
     }
     enc.end();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    crate::metal::wait_unchecked(&cmd);
     assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
     assert!(cmd.error().is_none());
 }

@@ -160,7 +160,7 @@ fn primitive(ctx: &MetalContext, native: Vec<f32>, artifact: &std::path::Path) {
             select(ctx, &enc, &logits, &ids, &weights, parallel);
             enc.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_unchecked(&command);
             assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
             assert!(command.error().is_none());
             std::fs::write(
@@ -266,7 +266,7 @@ fn packet(
     }
     enc.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     let wall = started.elapsed().as_secs_f64() * 1e3;
     let gpu = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
     let rows = if census {

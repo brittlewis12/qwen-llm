@@ -712,7 +712,7 @@ pub(super) fn gdn_mixer_replay_vjp_readback(
     encoder.end();
     encode_result?;
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     validate_completed_command(&command)?;
     let (
         final_conv_state,
@@ -1095,7 +1095,7 @@ pub(super) fn gdn_mixer_replay_vjp_batch_readback(
     encoder.end();
     encode_result?;
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     validate_completed_command(&command)?;
     let (
         final_conv_state,

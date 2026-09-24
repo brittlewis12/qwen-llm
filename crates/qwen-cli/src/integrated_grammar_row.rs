@@ -1807,7 +1807,7 @@ fn run_q6_dispatch(
     encode_mat_vec_q6_k_f32(ctx, &encoder, weight, input, output, HIDDEN, n_out)?;
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    qwen_llm::metal::wait_unchecked(&command);
     check_command(&command, label)
 }
 

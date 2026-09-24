@@ -398,7 +398,7 @@ impl K2Session<'_, '_> {
             encoded?;
             transaction.submitting()?;
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_unchecked(&command);
             if command.status() != MTLCommandBufferStatus::Completed {
                 return Err(invalid(format!(
                     "token command failed: {:?}",

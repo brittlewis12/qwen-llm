@@ -1214,7 +1214,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         encode_result?;
 
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         let status = command.status();
         let command_error = command.error().map(|error| error.to_string());
         if status != MTLCommandBufferStatus::Completed || command_error.is_some() {
@@ -1436,7 +1436,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         transport_encoder.end();
         transport_encode_result?;
         transport_command.commit();
-        transport_command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&transport_command);
         let transport_status = transport_command.status();
         let transport_error = transport_command.error().map(|error| error.to_string());
         if transport_status != MTLCommandBufferStatus::Completed || transport_error.is_some() {
@@ -1546,7 +1546,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         output_tail_encoder.end();
         output_tail_encode_result?;
         output_tail_command.commit();
-        output_tail_command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&output_tail_command);
         let output_tail_status = output_tail_command.status();
         let output_tail_error = output_tail_command.error().map(|error| error.to_string());
         if output_tail_status != MTLCommandBufferStatus::Completed || output_tail_error.is_some() {
@@ -1627,7 +1627,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         encoder.end();
         encode_result?;
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         let status = command.status();
         let command_error = command.error().map(|error| error.to_string());
         if status != MTLCommandBufferStatus::Completed || command_error.is_some() {
@@ -2103,7 +2103,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         encode_result?;
 
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         let status = command.status();
         let command_error = command.error().map(|error| error.to_string());
         if status != MTLCommandBufferStatus::Completed || command_error.is_some() {
@@ -2520,7 +2520,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         }
 
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         let status = command.status();
         let command_error = command.error().map(|error| error.to_string());
         if status != MTLCommandBufferStatus::Completed || command_error.is_some() {
@@ -3553,7 +3553,7 @@ mod tests {
         encode_topk16_f32(&ctx, &encoder, &input, &second_ids, &second_values, 3, 64).unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         let first_ids = read_i32(&first_ids);
         let first_values = read_f32(&first_values);
@@ -3699,7 +3699,7 @@ mod tests {
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
 
         for row in 0..rows {
@@ -3717,7 +3717,7 @@ mod tests {
             .unwrap();
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         }
         assert_eq!(
@@ -3869,7 +3869,7 @@ mod tests {
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
 
         let packed = read_f32(&packed);
@@ -4533,7 +4533,7 @@ mod tests {
             encode(&encoder).expect("encode stage chain");
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
             if iteration >= 2 {
                 walls.push(started.elapsed().as_secs_f64() * 1e3);
@@ -4606,7 +4606,7 @@ mod tests {
                 .unwrap();
         }
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         assert!(command.error().is_none());
         session.next_position += 1;
@@ -4797,7 +4797,7 @@ mod tests {
                 .unwrap();
         }
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         let profile_wall_ms = started.elapsed().as_secs_f64() * 1e3;
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         assert!(command.error().is_none());

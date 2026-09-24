@@ -2487,7 +2487,7 @@ fn gguf_no_copy_split_a10b_resources_outlive_loader() {
         }
         blit.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none(), "split A10B sample blit failed");
         for ((_, _, expected), output) in samples.iter().zip(&outputs) {
             let actual = unsafe {
@@ -4300,7 +4300,7 @@ fn dense_ffn_capture_brackets_the_residual_update() {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         assert!(command.error().is_none());
         let ffn_output = read_f32(&output, hidden_size);

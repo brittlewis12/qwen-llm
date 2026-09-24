@@ -499,7 +499,7 @@ pub(super) fn execute(ctx: &MetalContext, f: impl FnOnce(&KernelEncoder) -> Resu
     encoder.end();
     result.unwrap();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert_eq!(
         command.status(),
         objc2_metal::MTLCommandBufferStatus::Completed

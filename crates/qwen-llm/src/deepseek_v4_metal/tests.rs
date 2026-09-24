@@ -450,7 +450,7 @@ fn decode_prepare_projection_pairs_match_composed_bitwise() {
             let paired_trace = crate::metal::kernel_trace_take_delta();
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(
                 command.error().is_none(),
                 "paired prepare projection command failed: {:?}",
@@ -513,7 +513,7 @@ fn decode_prepare_projection_pairs_match_composed_bitwise() {
     assert_eq!(crate::metal::kernel_trace_take_delta().dispatches, 1);
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
 }
 
@@ -602,7 +602,7 @@ fn decode_prepare_norm_pair_matches_composed_bitwise() {
         let paired_trace = crate::metal::kernel_trace_take_delta();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "paired prepare norm command failed: {:?}",
@@ -717,7 +717,7 @@ fn decode_prepare_rope_pair_matches_composed_bitwise() {
     }
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "paired prepare RoPE command failed: {:?}",
@@ -856,7 +856,7 @@ fn decode_prepare_paired_matches_composed_path_bitwise() {
                 let trace = crate::metal::kernel_trace_snapshot();
                 encoder.end();
                 command.commit();
-                command.waitUntilCompleted();
+                crate::metal::wait_completed(&command).expect("command buffer completed");
                 assert!(
                     command.error().is_none(),
                     "{label} prepare command failed: {:?}",
@@ -989,7 +989,7 @@ fn decode_grouped_output_gemv_matches_singleton_loop_bitwise() {
         .expect("grouped GEMV");
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "grouped GEMV command failed: {:?}",
@@ -1150,7 +1150,7 @@ fn decode_shared_swiglu_fusions_match_composed_paths_bitwise() {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none(), "{dtype:?} command failed");
 
         let gate = read_f32(&gate);
@@ -1314,7 +1314,7 @@ fn decode_compressor_q8_pair_matches_composed_frontier_write_bitwise() {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none(), "compressor pair command failed");
 
         let assert_bits = |label: &str, composed: &MetalTensor, fused: &MetalTensor| {
@@ -1599,7 +1599,7 @@ fn decode_compressor_q8_pair_matches_composed_frontier_steps_bitwise() {
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none(), "frontier-step command failed");
 
         let assert_f32_bits = |label: &str, left: &MetalTensor, right: &MetalTensor| {
@@ -6622,7 +6622,7 @@ fn position_zero_attention_matches_operation_oracles_with_offsets_and_groups() {
     .expect("encode attention cache roundtrip");
     cache_encoder.end();
     cache_command.commit();
-    cache_command.waitUntilCompleted();
+    crate::metal::wait_completed(&cache_command).expect("command buffer completed");
     assert!(
         cache_command.error().is_none(),
         "cache command failed: {:?}",
@@ -6659,7 +6659,7 @@ fn position_zero_attention_matches_operation_oracles_with_offsets_and_groups() {
     assert!(std::ptr::eq(encoded_output, scratch.output()));
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "attention command failed: {:?}",
@@ -6898,7 +6898,7 @@ fn continuing_rope_f16_cache_and_local_attention_match_cpu() {
     encode_ds4_rope_tail_adjacent_in_place(&ctx, &encoder, &output, 1, rope, true).unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "command failed: {:?}",
@@ -7015,7 +7015,7 @@ fn yarn_rope_pins_direct_power_through_the_full_context_regime() {
             .unwrap();
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(command.error().is_none());
             let actual = read_f32(&actual);
             let direct = direct_power(position, inverse);
@@ -7125,7 +7125,7 @@ fn batched_rope_matches_position_ordered_rows() {
             }
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(command.error().is_none());
             let batched = read_f32(&batched);
             let ordered = read_f32(&ordered);
@@ -7197,7 +7197,7 @@ fn unscaled_rope_remains_bounded_through_the_full_context_regime() {
             .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
         let actual = read_f32(&actual);
         let mut squared_error = 0.0f64;
@@ -7283,7 +7283,7 @@ fn compressor_frontier_projects_ape_into_the_position_one_lane() {
         .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "command failed: {:?}",
@@ -7450,7 +7450,7 @@ fn compressor_chunk_matches_ordered_state_and_publications() {
             .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
 
         let label = format!("ratio={ratio} head={head_dim} start={start_position}");
@@ -7618,7 +7618,7 @@ fn ratio4_frontier_publishes_rolls_and_continues_at_second_boundary() {
     }
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "command failed: {:?}",
@@ -7767,7 +7767,7 @@ fn ratio4_indexer_publication_matches_the_integrated_oracle() {
     }
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "command failed: {:?}",
@@ -7929,7 +7929,7 @@ fn ratio128_attention_publications_match_the_integrated_oracle() {
     }
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "pre-boundary command failed: {:?}",
@@ -7978,7 +7978,7 @@ fn ratio128_attention_publications_match_the_integrated_oracle() {
         .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "boundary command failed: {:?}",
@@ -8048,7 +8048,7 @@ fn ratio128_attention_publications_match_the_integrated_oracle() {
     }
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "second pre-boundary command failed: {:?}",
@@ -8100,7 +8100,7 @@ fn ratio128_attention_publications_match_the_integrated_oracle() {
         .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "second boundary command failed: {:?}",
@@ -8176,7 +8176,7 @@ fn ratio128_attention_publications_match_the_integrated_oracle() {
     }
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "third pre-boundary command failed: {:?}",
@@ -8234,7 +8234,7 @@ fn ratio128_attention_publications_match_the_integrated_oracle() {
         .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "third boundary command failed: {:?}",
@@ -8316,7 +8316,7 @@ fn ratio128_attention_publications_match_the_integrated_oracle() {
     }
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "fourth pre-boundary command failed: {:?}",
@@ -8380,7 +8380,7 @@ fn ratio128_attention_publications_match_the_integrated_oracle() {
         .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "fourth boundary command failed: {:?}",
@@ -8567,7 +8567,7 @@ fn ratio128_frontier_preserves_twenty_four_rows_and_publishes_before_attention()
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "row {row} pre-boundary command failed: {:?}",
@@ -8737,7 +8737,7 @@ fn ratio128_frontier_preserves_twenty_four_rows_and_publishes_before_attention()
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "row {row} publication command failed: {:?}",
@@ -8816,7 +8816,7 @@ fn ratio128_frontier_preserves_twenty_four_rows_and_publishes_before_attention()
         .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "position {position} continuation command failed: {:?}",
@@ -8975,7 +8975,7 @@ fn ratio4_frontiers_enter_third_slab_and_reject_row_768() {
             }
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(
                 command.error().is_none(),
                 "ratio-4 {label} chunk {chunk_start} command failed: {:?}",
@@ -9054,7 +9054,7 @@ fn ratio4_frontiers_enter_third_slab_and_reject_row_768() {
             .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "ratio-4 {label} second-slab-end command failed: {:?}",
@@ -9123,7 +9123,7 @@ fn ratio4_frontiers_enter_third_slab_and_reject_row_768() {
             .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "ratio-4 {label} position-2048 command failed: {:?}",
@@ -9190,7 +9190,7 @@ fn ratio4_frontiers_enter_third_slab_and_reject_row_768() {
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "ratio-4 {label} third-slab entry command failed: {:?}",
@@ -9269,7 +9269,7 @@ fn ratio4_frontiers_enter_third_slab_and_reject_row_768() {
             }
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(
                 command.error().is_none(),
                 "ratio-4 {label} full-third-slab chunk {chunk_start} failed: {:?}",
@@ -9334,7 +9334,7 @@ fn ratio4_frontiers_enter_third_slab_and_reject_row_768() {
             .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "ratio-4 {label} position-3072 command failed: {:?}",
@@ -9370,7 +9370,7 @@ fn ratio4_frontiers_enter_third_slab_and_reject_row_768() {
             .unwrap_err();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "ratio-4 {label} rejected-row command failed: {:?}",
@@ -9506,7 +9506,7 @@ fn ratio4_frontiers_publish_the_final_model_context_row_without_prefix_replay() 
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
         assert_eq!(
             expected_rows
@@ -9756,7 +9756,7 @@ fn ratio128_frontier_publishes_the_final_model_context_row_without_prefix_replay
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
     assert_eq!(frontier.published_count(1_048_575), CAPACITY_ROWS);
     let published = frontier.published.view_subrange(
@@ -9980,7 +9980,7 @@ fn tiled_hca_is_bit_identical_to_legacy_through_512_rows() {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
         assert!(
             read_f32(&legacy)
@@ -10124,7 +10124,7 @@ fn tiled_hca_matches_cpu_through_the_full_model_context() {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "{count}-row tiled HCA command failed: {:?}",
@@ -10408,7 +10408,7 @@ fn online_hca_matches_legacy_envelope_at_structural_boundaries() {
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "{count}-row online HCA command failed: {:?}",
@@ -10643,7 +10643,7 @@ fn tiled_hca_terminal_pair_preserves_visibility_and_raw_causality() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
     assert_close(
         "terminal paired tiled HCA",
@@ -10672,7 +10672,7 @@ fn hadamard_128_matches_the_indexer_oracle() {
     encode_hadamard_128_in_place(&ctx, &encoder, &tensor).unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "command failed: {:?}",
@@ -10735,7 +10735,7 @@ fn multigroup_selector_threshold_matches_current_and_fails_closed() {
             .unwrap();
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(command.error().is_none(), "{label}: {:?}", command.error());
             (
                 read_i32(&records),
@@ -10819,7 +10819,7 @@ fn multigroup_selector_threshold_matches_current_and_fails_closed() {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
         assert_eq!(
             read_i32(&status),
@@ -10942,7 +10942,7 @@ fn multigroup_selector_threshold_matches_current_and_fails_closed() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
     let stale_state = read_i32(&state)
         .into_iter()
@@ -11027,7 +11027,7 @@ fn multigroup_selector_full_matches_current_and_fails_closed() {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none(), "{label}: current command");
         let current = PublishedSelection {
             mask: read_i32(&current_mask),
@@ -11089,7 +11089,7 @@ fn multigroup_selector_full_matches_current_and_fails_closed() {
             .unwrap();
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(command.error().is_none(), "{label}: candidate command");
             PublishedSelection {
                 mask: read_i32(&selected_mask),
@@ -11319,7 +11319,7 @@ fn multigroup_selector_full_matches_current_and_fails_closed() {
             .unwrap();
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(command.error().is_none(), "{label}: command");
             assert_eq!(read_i32(&status), [3], "{label}: status");
             assert_eq!(read_i32(&count), [TOP_K as i32], "{label}: count");
@@ -11411,7 +11411,7 @@ fn multigroup_selector_publisher_rejects_corrupt_private_state() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
     assert_eq!(read_i32(&status), [0]);
 
@@ -11442,7 +11442,7 @@ fn multigroup_selector_publisher_rejects_corrupt_private_state() {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none(), "{label}: command");
         assert_eq!(read_i32(&status), [3], "{label}: status");
         assert_eq!(read_i32(&count), [TOP_K as i32], "{label}: count");
@@ -11535,7 +11535,7 @@ fn sparse_csa_multigroup_route_is_exact_and_opt_in() {
             .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none(), "{:?}", command.error());
         scratch.validate_completed(&record).unwrap();
         PublishedSelection {
@@ -11604,7 +11604,7 @@ fn profile_multigroup_selector_full_ceiling() {
         encode(&encoder).unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         let wall_ms = started.elapsed().as_secs_f64() * 1e3;
         assert!(command.error().is_none(), "{:?}", command.error());
         let gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
@@ -11875,7 +11875,7 @@ fn profile_sparse_csa_multigroup_integrated_gate() {
         encode(&encoder).unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         let wall_ms = started.elapsed().as_secs_f64() * 1e3;
         assert!(command.error().is_none(), "{:?}", command.error());
         let gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
@@ -12455,7 +12455,7 @@ fn profile_multigroup_selector_crossover() {
         encode(&encoder).unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         let wall_ms = started.elapsed().as_secs_f64() * 1e3;
         assert!(command.error().is_none(), "{:?}", command.error());
         let gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
@@ -12667,7 +12667,7 @@ fn profile_multigroup_selector_threshold_ceiling() {
         encode(&encoder).unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none(), "{:?}", command.error());
         let elapsed = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
         assert!(elapsed.is_finite() && elapsed > 0.0);
@@ -13061,7 +13061,7 @@ fn parallel_selector_flushes_subnormals_and_ties_signed_zero_by_row() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
     assert_eq!(read_i32(&status), [0]);
     assert_eq!(read_i32(&counts), [TOP_K as i32]);
@@ -13149,7 +13149,7 @@ fn batched_hadamard_and_stable_top512_match_cpu_contracts() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "batched indexer command failed: {:?}",
@@ -13294,7 +13294,7 @@ fn radix_top512_matches_mixed_packed_cpu_contracts_repeatably() {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
         (
             read_i32(&mask),
@@ -13330,7 +13330,7 @@ fn radix_top512_matches_mixed_packed_cpu_contracts_repeatably() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
     assert_eq!(read_i32(&maskless_ids), radix4.2);
     assert_eq!(read_i32(&maskless_counts), radix4.3);
@@ -13503,7 +13503,7 @@ fn shallow_scalar_parallel_and_radix_selectors_match_cpu_contracts() {
     }
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
 
     let read_outputs = |outputs: &(
@@ -13626,7 +13626,7 @@ fn packed_publication_cadence_uses_the_same_scalar_and_production_selection() {
     }
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
     for (label, scalar, production) in [
         ("mask", &scalar.0, &production.0),
@@ -13707,7 +13707,7 @@ fn scalar_parallel_and_radix_top512_are_bit_identical_at_1024() {
     }
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
     for (label, left, right) in [
         ("mask", &scalar.0, &radix.0),
@@ -13761,7 +13761,7 @@ fn profile_shallow_sparse_selector_crossover() {
         encode(&encoder).expect("encode selector profile phase");
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "selector profile command failed: {:?}",
@@ -13929,7 +13929,7 @@ fn stable_top512_scales_to_the_full_64k_csa_history() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     let cold_elapsed = started.elapsed();
     assert!(
         command.error().is_none(),
@@ -13969,7 +13969,7 @@ fn stable_top512_scales_to_the_full_64k_csa_history() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     let warm_elapsed = warm_started.elapsed();
     assert!(command.error().is_none());
     assert_eq!(read_i32(&status), [0]);
@@ -14030,7 +14030,7 @@ fn packed_top512_scales_to_the_full_64k_csa_history() {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
         (
             (command.GPUEndTime() - command.GPUStartTime()) * 1e3,
@@ -14345,7 +14345,7 @@ fn sparse_csa_indexer_and_selected_attention_match_cpu_oracles() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "sparse CSA command failed: {:?}",
@@ -14612,7 +14612,7 @@ fn sparse_csa_score_select_attention_reaches_the_full_context_frontier() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "far sparse CSA command failed: {:?}",
@@ -14815,7 +14815,7 @@ fn cooperative_dense_attention_matches_legacy_singleton_within_roundoff() {
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
         let legacy = read_f32(&legacy);
         let cooperative = read_f32(&cooperative);
@@ -15098,7 +15098,7 @@ fn cooperative_selected_attention_matches_legacy_singleton_within_roundoff() {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
         let legacy = read_f32(&legacy);
         let reference_norm = legacy
@@ -15242,7 +15242,7 @@ fn direct_selected_attention_matches_staged_for_packed_chunk_layout() {
     }
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none(), "{:?}", command.error());
     assert_eq!(
         read_f32(&direct)
@@ -15330,7 +15330,7 @@ fn cooperative_selected_attention_bounds_corrupt_selector_metadata() {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "corrupt-selector command failed: {:?}",
@@ -15550,7 +15550,7 @@ fn cooperative_lightning_scores_match_scalar_for_packed_visibility() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "cooperative Lightning score command failed: {:?}",
@@ -15735,7 +15735,7 @@ fn fp4_shadow_preflight_carries_operand_validity_and_fails_closed() {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "preflight command failed: {:?}",
@@ -15894,7 +15894,7 @@ fn fp4_metal_primitives_and_packer_match_the_frozen_contract() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "FP4 pack command failed: {:?}",
@@ -15992,7 +15992,7 @@ fn fp4_metal_raw_row_validation_classifies_the_frozen_invalid_domain() {
         .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
     let actual = read_i32(&status);
     assert_eq!(actual[0], 0);
@@ -16116,7 +16116,7 @@ fn fp4_query_unpack_is_exact_for_codes_offsets_tails_and_128_queries() {
     }
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
     assert_eq!(read_f16_bits(&tail_units), tail_expected);
     assert_eq!(read_f16_bits(&batched_first), batched_expected);
@@ -16209,7 +16209,7 @@ fn fp4_matrix_shadow_matches_frozen_score_vectors_and_top2() {
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "{} command failed: {:?}",
@@ -16387,7 +16387,7 @@ fn fp4_shadow_runs_pack_unpack_and_score_without_host_reconstruction() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
     assert_eq!(read_i32(&query_status), vec![0; HEADS]);
     assert_eq!(read_i32(&key_status), vec![0; ROWS]);
@@ -16508,7 +16508,7 @@ fn fp4_shadow_layer_addressed_output_matches_instrumented_output_exactly() {
                 .unwrap();
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(command.error().is_none());
             scratch.validate_completed().unwrap();
             read_i32(&scratch.cache_order_ids)
@@ -16568,7 +16568,7 @@ fn fp4_shadow_layer_addressed_output_matches_instrumented_output_exactly() {
         .unwrap();
     collapsed_encoder.end();
     collapsed_command.commit();
-    collapsed_command.waitUntilCompleted();
+    crate::metal::wait_completed(&collapsed_command).expect("command buffer completed");
     assert!(collapsed_command.error().is_none());
 
     selection_records
@@ -16770,7 +16770,7 @@ fn fp4_matrix_shadow_covers_batched_queries_tails_offsets_and_envelope() {
     }
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
 
     let actual = read_f32(&first);
@@ -16938,7 +16938,7 @@ fn fp4_matrix_shadow_preserves_selector_decisions_and_fallback() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
 
     let scores = read_f32(&scores);
@@ -17031,7 +17031,7 @@ fn matrix_ceiling_lightning_scores_match_f16_cpu_oracle() {
     }
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "matrix-ceiling Lightning score command failed: {:?}",
@@ -17163,7 +17163,7 @@ fn matrix_ceiling_lightning_scores_preserve_selector_contracts() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
 
     let scores = read_f32(&scores);
@@ -17246,7 +17246,7 @@ fn matrix_ceiling_lightning_scores_cover_batched_query_tail_geometry() {
     }
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
 
     let actual = read_f32(&first);
@@ -17329,7 +17329,7 @@ fn matrix_lightning_scorer_bounds_dispatch_to_visible_prefix() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
 
     let scores = read_f32(&scores);
@@ -17367,7 +17367,7 @@ fn profile_lightning_matrix_ceiling_at_far_context() {
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "profile command failed: {:?}",
@@ -17600,7 +17600,7 @@ fn profile_lightning_fp4_matrix_shadow_at_far_context() {
         encode(&encoder).expect("encode FP4 profiled phase");
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "FP4 profile command failed: {:?}",
@@ -17873,7 +17873,7 @@ fn profile_sparse_csa_decode_phases_at_far_context() {
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "profile command failed: {:?}",
@@ -18116,7 +18116,7 @@ fn profile_sparse_csa_decode_phases_at_far_context() {
         }
         encoder.end();
         warm.commit();
-        warm.waitUntilCompleted();
+        crate::metal::wait_completed(&warm).expect("command buffer completed");
         assert!(warm.error().is_none());
         assert_eq!(
             read_f32(&score_rows)
@@ -18469,7 +18469,7 @@ fn profile_tiled_hca_at_far_context() {
         encode(&encoder).expect("encode HCA profile phase");
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "HCA profile command failed: {:?}",
@@ -18990,7 +18990,7 @@ fn dense_compressed_attention_includes_the_newest_published_row() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "command failed: {:?}",
@@ -19258,7 +19258,7 @@ fn dense_attention_matches_wrapped_geometries_through_two_csa_slabs() {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "position {position} command failed: {:?}",
@@ -19504,7 +19504,7 @@ fn single_token_moe_learned_and_hash_match_oracles_with_exact_bank_slices() {
             .expect("encode router");
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none(), "{label} router command failed");
         assert_close(
             label,
@@ -19576,7 +19576,7 @@ fn single_token_moe_learned_and_hash_match_oracles_with_exact_bank_slices() {
             .expect("encode experts");
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none(), "{label} expert command failed");
         assert_close(
             label,
@@ -19886,7 +19886,7 @@ fn layer_records_preserve_earlier_failures_across_later_success() {
         .unwrap();
     ready_encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none(), "{:?}", command.error());
 
     let completed = routes.read_completed().unwrap();
@@ -20111,7 +20111,7 @@ fn gpu_moe_route_records_match_oracle_and_fail_closed() {
         encode(&encoder).unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "GPU route command failed: {:?}",
@@ -20287,7 +20287,7 @@ fn failed_gpu_route_zeros_all_indexed_experts_and_rejects_after_completion() {
         .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "failed-route composition command failed: {:?}",
@@ -20342,7 +20342,7 @@ fn profile_gpu_moe_route_dispatches() {
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
         (command.GPUEndTime() - command.GPUStartTime()) * 1e3 / REPEATS as f64
     };
@@ -20391,7 +20391,7 @@ fn gpu_learned_routes_preserve_cpu_ids_across_cutoff_shapes() {
             .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
         scratch.capture_gpu_route_record().unwrap()
     };
@@ -20585,7 +20585,7 @@ fn indexed_ds4_expert_projections_match_static_views_and_zero_failures() {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "{dtype:?} indexed command failed: {:?}",
@@ -20645,7 +20645,7 @@ fn indexed_ds4_expert_projections_match_static_views_and_zero_failures() {
             .unwrap();
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(command.error().is_none(), "{dtype:?} {label}");
             assert_eq!(read_f32(&output), vec![0.0; N_OUT], "{dtype:?} {label}");
         }
@@ -20826,7 +20826,7 @@ fn all_slot_routed_experts_match_serial_indexed_path_and_zero_failures() {
             .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "{gate_dtype:?}/{down_dtype:?} all-slot command failed: {:?}",
@@ -20899,7 +20899,7 @@ fn all_slot_routed_experts_match_serial_indexed_path_and_zero_failures() {
             .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none(), "{label}");
         let inner = read_f32(scratch.routed_inner());
         let output = read_f32(scratch.expert_outputs());
@@ -21026,7 +21026,7 @@ fn all_slot_iq2_xs_production_input_width_matches_cpu_codec() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
 
     let mut expected = vec![0.0f32; F * K];
@@ -21073,7 +21073,7 @@ fn profile_indexed_ds4_expert_projections_against_static_views() {
         encode(&encoder).unwrap();
         encoder.end();
         warm.commit();
-        warm.waitUntilCompleted();
+        crate::metal::wait_completed(&warm).expect("command buffer completed");
         assert!(warm.error().is_none());
 
         let command = ctx.queue.commandBuffer().unwrap();
@@ -21083,7 +21083,7 @@ fn profile_indexed_ds4_expert_projections_against_static_views() {
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
         (command.GPUEndTime() - command.GPUStartTime()) * 1e3 / REPEATS as f64
     };
@@ -21262,7 +21262,7 @@ fn profile_all_slot_routed_experts_against_serial_indexed() {
         encode(&encoder).unwrap();
         encoder.end();
         warm.commit();
-        warm.waitUntilCompleted();
+        crate::metal::wait_completed(&warm).expect("command buffer completed");
         assert!(warm.error().is_none());
 
         let command = ctx.queue.commandBuffer().unwrap();
@@ -21272,7 +21272,7 @@ fn profile_all_slot_routed_experts_against_serial_indexed() {
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
         (command.GPUEndTime() - command.GPUStartTime()) * 1e3 / REPEATS as f64
     };
@@ -21543,7 +21543,7 @@ fn native_hyper_connections_match_oracle_with_offsets_and_asymmetric_streams() {
         .expect("encode pre");
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "pre command failed: {:?}",
@@ -21607,7 +21607,7 @@ fn native_hyper_connections_match_oracle_with_offsets_and_asymmetric_streams() {
         .expect("encode head");
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "post/head command failed: {:?}",

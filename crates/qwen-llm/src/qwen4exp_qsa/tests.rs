@@ -54,7 +54,7 @@ fn product_split_binding_and_route_boundaries() {
         let rows = crate::metal::dispatch_census_take();
         enc.end();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        crate::metal::wait_completed(&cmd).expect("command buffer completed");
         assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
         assert!(cmd.error().is_none());
         assert!(read_f32(&w.output).iter().all(|v| v.is_finite()));
@@ -1372,7 +1372,7 @@ fn selected_index_primitives_match_repeated_scalar_kernels() {
     let census = crate::metal::dispatch_census_take();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
     assert!(command.error().is_none());
 
@@ -1476,7 +1476,7 @@ fn selected_index_selector_ties_and_failures_expand_deterministically() {
     let census = crate::metal::dispatch_census_take();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
     assert!(command.error().is_none());
 
@@ -1584,7 +1584,7 @@ fn selected_attention_logits_match_repeated_scalar_kernels() {
     let census = crate::metal::dispatch_census_take();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
     assert!(command.error().is_none());
 
@@ -1740,7 +1740,7 @@ fn selected_attention_packet_matches_repeated_scalar_kernels() {
             let census = crate::metal::dispatch_census_take();
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
             assert!(command.error().is_none());
 
@@ -2028,7 +2028,7 @@ fn selected_attention_faults_overwrite_outputs_without_cache_reads() {
     let census = crate::metal::dispatch_census_take();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
     assert!(command.error().is_none());
 
@@ -2640,7 +2640,7 @@ fn selected_audit_preserves_native_failures_and_detects_stale_rows() {
         let census = crate::metal::dispatch_census_take();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         assert_eq!(census.len(), 1);
         assert_eq!(census[0].kernel, "kernel_qwen4exp_qsa_audit_selected_i32");
@@ -2720,7 +2720,7 @@ fn selected_control_reset_clears_only_the_reused_band() {
     let census = crate::metal::dispatch_census_take();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
     for tensor in [&visible, &counts, &status] {
         let values = read_i32(tensor);
@@ -3779,7 +3779,7 @@ fn released_attention_launch_geometry_and_large_width_reduction_match_cpu() {
     let census = crate::metal::dispatch_census_take();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "command failed: {:?}",

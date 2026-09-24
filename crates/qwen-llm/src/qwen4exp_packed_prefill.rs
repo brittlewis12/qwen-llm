@@ -197,7 +197,7 @@ impl Qwen4ExpPackedPrefillWorkspace {
                 "workspace owner is not committed (status {status:?}); commit it or abandon the uncommitted command"
             ));
         }
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         let status = command.status();
         let command_error = command.error().map(|error| error.to_string());
         self.active_command = None;

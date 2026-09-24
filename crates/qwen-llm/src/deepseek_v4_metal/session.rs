@@ -1546,7 +1546,7 @@ impl DeepSeekV4Session {
                 .map(|started| started.elapsed().as_secs_f64() * 1e3)
                 .unwrap_or_default();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_unchecked(&command);
             if let Err(error) = crate::metal::command_buffer_completed(&command) {
                 return invalid(format!("layer {layer} command failed: {error}"));
             }
@@ -1832,7 +1832,7 @@ impl DeepSeekV4Session {
                 .as_secs_f64()
                 * 1e3;
         }
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         if let Some(profile) = whole_profile.as_deref_mut() {
             profile.commit_wait_wall_ms = commit_wait_started
                 .expect("whole-token profile requires a commit/wait timer")

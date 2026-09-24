@@ -454,7 +454,7 @@ fn tiled_prefill_numerical_diagnostic() {
                 .unwrap();
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_unchecked(&command);
             assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
             assert!(command.error().is_none());
             readouts.push(session.read_logits());

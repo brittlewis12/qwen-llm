@@ -350,7 +350,7 @@ fn replay_packet(
         Vec::new()
     };
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     let packet_path = artifact.join(format!("layer{}-{packet}-packet.json", c.layer));
     let mut evidence = serde_json::json!({"validation":"pending","layer":c.layer,"packet":packet,"repeats":repeats,"sampled":sampled,"stages":STAGES,"sample_mapping":"2*(repeat*6+stage) start, next index end","status":format!("{:?}",command.status()),"error":command.error().map(|e|e.to_string()),"gpu_start":command.GPUStartTime(),"gpu_end":command.GPUEndTime(),"census":rows.iter().map(row_json).collect::<Vec<_>>()});
     std::fs::write(&packet_path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
@@ -531,7 +531,7 @@ fn stage_timestamp_interval_diagnostic() {
         enc.end();
     }
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     let mut evidence = serde_json::json!({"validation":"pending","status":format!("{:?}",command.status()),"error":command.error().map(|e|e.to_string()),"gpu_start":command.GPUStartTime(),"gpu_end":command.GPUEndTime(),"sample_mapping":"pair i is encoder i start/end, one dependent65536-float copy each","purpose":"interval classification only; not MoE cost or speedup"});
     std::fs::write(&path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
     assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
@@ -653,7 +653,7 @@ pub(crate) fn captured_interval_diagnostic(
     }
     let census = dispatch_census_take();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     let mut evidence = serde_json::json!({"validation":"pending","source":source.display().to_string(),"status":format!("{:?}",command.status()),"error":command.error().map(|e|e.to_string()),"gpu_start":command.GPUStartTime(),"gpu_end":command.GPUEndTime(),"stages":STAGES,"sample_mapping":"2*(repeat*6+stage) start, next index end","census":census.iter().map(row_json).collect::<Vec<_>>(),"purpose":"saved layer2 interval classification only; not a MoE performance rerun"});
     std::fs::write(artifact, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
     assert_eq!(command.status(), MTLCommandBufferStatus::Completed);

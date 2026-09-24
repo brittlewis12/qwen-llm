@@ -131,7 +131,7 @@ fn tiled_prefill_primitive_screen(kind: u8) {
             encoder.end();
             let start = std::time::Instant::now();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             let wall = start.elapsed().as_secs_f64() * 1000.0;
             assert_eq!(
                 command.status(),

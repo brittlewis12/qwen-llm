@@ -1,0 +1,5 @@
+# A bare wait returns for command buffers the GPU discarded (faults,
+# timeouts, innocent victims of a GPU recovery); their outputs are partial.
+disallowed-methods = [
+    { path = "objc2_metal::MTLCommandBuffer::waitUntilCompleted", reason = "use qwen_llm::metal::wait_completed / commit_and_wait, which fail unless the buffer completed without error" },
+]

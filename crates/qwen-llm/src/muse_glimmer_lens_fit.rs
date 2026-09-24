@@ -3578,7 +3578,7 @@ where
     encoder.end();
     result?;
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     let status = command.status();
     let error = command.error().map(|error| error.to_string());
     if status != MTLCommandBufferStatus::Completed || error.is_some() {

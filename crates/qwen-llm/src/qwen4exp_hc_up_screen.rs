@@ -253,7 +253,7 @@ fn run(
     }
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_unchecked(&command);
     let wall = start.elapsed().as_secs_f64() * 1e3 / repeats as f64;
     assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
     assert!(command.error().is_none(), "{:?}", command.error());

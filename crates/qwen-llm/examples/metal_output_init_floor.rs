@@ -127,7 +127,7 @@ fn fill(ctx: &MetalContext, buffer: &Buffer, elements: usize, value: f32) -> Fil
 
     let started = Instant::now();
     command.commit();
-    command.waitUntilCompleted();
+    qwen_llm::metal::wait_unchecked(&command);
     let wall_ms = started.elapsed().as_secs_f64() * 1e3;
     assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
     assert!(command.error().is_none());

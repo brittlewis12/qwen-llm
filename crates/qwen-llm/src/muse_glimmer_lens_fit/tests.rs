@@ -187,7 +187,7 @@ impl AttentionBankBuffers {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none(), "{:?}", command.error());
         let start = command.GPUStartTime();
         let end = command.GPUEndTime();
@@ -612,7 +612,7 @@ fn one_full_attention_block_vjp_bank_matches_scalar() {
                 .unwrap();
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(command.error().is_none(), "{:?}", command.error());
 
             let mut expected = Vec::with_capacity(target.len());
@@ -1477,7 +1477,7 @@ fn run_zero_q8_muse_bank_profile_arm(
     drop(trace_guard);
 
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none(), "{:?}", command.error());
     let start = command.GPUStartTime();
     let end = command.GPUEndTime();

@@ -2248,7 +2248,7 @@ fn materialize_transient_mmap_blit(
         blit.end();
         encode_result?;
         command.commit();
-        command.waitUntilCompleted();
+        qwen_llm::metal::wait_unchecked(&command);
         let command_status = command.status();
         let command_error = command.error();
         if command_status != MTLCommandBufferStatus::Completed || command_error.is_some() {

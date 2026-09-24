@@ -1777,7 +1777,7 @@ mod tests {
                 }
                 encoder.end();
                 command.commit();
-                command.waitUntilCompleted();
+                crate::metal::wait_completed(&command).expect("command buffer completed");
                 assert_eq!(
                     command.status(),
                     objc2_metal::MTLCommandBufferStatus::Completed
@@ -1920,7 +1920,7 @@ mod tests {
             }
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert_eq!(
                 command.status(),
                 objc2_metal::MTLCommandBufferStatus::Completed
@@ -2255,7 +2255,7 @@ mod tests {
             }
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert_eq!(
                 command.status(),
                 objc2_metal::MTLCommandBufferStatus::Completed

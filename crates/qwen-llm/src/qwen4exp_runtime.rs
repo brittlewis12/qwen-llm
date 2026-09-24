@@ -3185,7 +3185,7 @@ mod tests {
         };
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         assert!(command.error().is_none());
         let gpu_start = command.GPUStartTime();

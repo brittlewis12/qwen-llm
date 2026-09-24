@@ -2626,7 +2626,7 @@ fn packed_grouped_mapped_iq3_consumes_explicit_source_rows() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none(), "{:?}", command.error());
 
     assert_eq!(
@@ -2801,7 +2801,7 @@ fn packed_grouped_mapped_q3_q4_match_static_expert_views() {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "{dtype:?}: {:?}",
@@ -2834,7 +2834,7 @@ fn q8_f32_mma_r2c4k64_reduces_operand_rounding_and_preserves_guards() {
         encoder.end();
         result.unwrap();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none(), "{:?}", command.error());
     }
 
@@ -2927,7 +2927,7 @@ fn q8_f32_mma_r2c16k64_matches_r2c4k64_bits() {
         encoder.end();
         result.unwrap();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none(), "{:?}", command.error());
     }
 
@@ -2998,7 +2998,7 @@ fn q8_f32_grouped_r2c16k64_matches_per_group_controls_bits() {
         encoder.end();
         result.unwrap();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none(), "{:?}", command.error());
     }
 
@@ -3261,7 +3261,7 @@ fn profile_q8_f32_mma_r2c4k64_attention_output_packet() {
         encoder.end();
         result.unwrap();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         let wall_ms = started.elapsed().as_secs_f64() * 1e3;
         assert!(
             command.error().is_none(),
@@ -3724,7 +3724,7 @@ fn packed_grouped_iq2_xs_iq3_xxs_matches_bucket_path() {
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "N={n_tokens}: {:?}",
@@ -4010,7 +4010,7 @@ fn packed_grouped_iq2_xs_f32_matrix_schedules_match_reduced_k_scalar() {
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "N={n_tokens}: {:?}",
@@ -4375,7 +4375,7 @@ fn packed_grouped_iq2_xs_f32_matrix_schedules_traverse_production_k() {
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "N={n_tokens}: {:?}",
@@ -4606,7 +4606,7 @@ fn packed_gpu_route_compaction_feeds_all_iq3_at_n2048() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none(), "{:?}", command.error());
 
     let capture = fixture.scratch.capture_compact(N);
@@ -4648,7 +4648,7 @@ fn packed_gpu_route_compaction_feeds_all_iq3_at_n2048() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none(), "{:?}", command.error());
 
     let bits = |tensor: &MetalTensor, label| {
@@ -4702,7 +4702,7 @@ fn packed_grouped_all_iq3_matches_bucket_path_and_arena_contract() {
         encoder.end();
         result.unwrap();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none(), "{label}: {:?}", command.error());
     }
 
@@ -5741,7 +5741,7 @@ fn profile_packed_grouped_fused_all_iq3_production_shape() {
             encoder.end();
             result.unwrap();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             let wall_ms = started.elapsed().as_secs_f64() * 1e3;
             assert!(
                 command.error().is_none(),
@@ -6362,7 +6362,7 @@ impl PackedRouteFixture {
             .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "packed route command failed: {:?}",
@@ -6402,7 +6402,7 @@ impl PackedRouteFixture {
             .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "packed compact route command failed: {:?}",
@@ -6809,7 +6809,7 @@ fn packed_duplicate_hash_routes_flow_through_grouped_experts_and_sum() {
         .unwrap();
     route_encoder.end();
     route_command.commit();
-    route_command.waitUntilCompleted();
+    crate::metal::wait_completed(&route_command).expect("command buffer completed");
     assert!(route_command.error().is_none());
 
     let route_count = N * MOE_TOP_K;
@@ -6937,7 +6937,7 @@ fn packed_duplicate_hash_routes_flow_through_grouped_experts_and_sum() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none(), "{:?}", command.error());
 
     let gate_values = host_read_f32(&gate, "duplicate grouped gate").unwrap();
@@ -7031,7 +7031,7 @@ fn packed_gpu_route_compaction_handles_maximum_concentrated_count() {
         .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
     let capture = fixture.scratch.capture_compact(n_tokens);
     let schedule = vec![ExpertBucket {
@@ -7122,7 +7122,7 @@ fn packed_gpu_route_compaction_rejects_invalid_late_tokens() {
             .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
         let header =
             host_read_i32(&fixture.scratch.compact_header, "compact invalid header").unwrap();
@@ -7335,7 +7335,7 @@ fn packed_gpu_routes_are_bitwise_singleton_equivalent_on_adversarial_scores() {
             }
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(command.error().is_none(), "route case {case} failed");
             let expected = singleton.capture_gpu_route_record().unwrap();
             let mut actual_ids =
@@ -7537,7 +7537,7 @@ fn production_packed_gpu_route_owns_and_compacts_the_qualified_schedule() {
             .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
         let schedule = production
             .moe
@@ -7651,7 +7651,7 @@ fn production_packed_gpu_route_owns_and_compacts_the_qualified_schedule() {
         .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
 
     let schedule = production
@@ -7858,7 +7858,7 @@ fn packed_gpu_route_records_repeat_and_reject_missing_producers() {
         .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
     let missing_validator = fixture.scratch.capture(n_tokens, generation.get());
     assert_eq!(
@@ -7956,7 +7956,7 @@ fn packed_route_authority_rejects_invalid_producers_and_private_state() {
             .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
         fixture.scratch.capture(n_tokens, generation.get())
     };
@@ -8112,7 +8112,7 @@ fn packed_route_authority_rejects_invalid_producers_and_private_state() {
             .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
         fixture.scratch.capture(n_tokens, generation.get())
     };
@@ -8186,7 +8186,7 @@ fn packed_route_authority_rejects_invalid_producers_and_private_state() {
                 .unwrap();
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(command.error().is_none());
             let capture = fixture.scratch.capture(n_tokens, generation.get());
             assert_packed_route_failure(&capture, n_tokens, expected_status, expected_total);
@@ -8328,7 +8328,7 @@ fn profile_exact_packed_gpu_route_and_schedule_packet() {
         }
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         let wall_ms = started.elapsed().as_secs_f64() * 1e3;
         assert!(command.error().is_none());
         let gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
@@ -8513,7 +8513,7 @@ fn packed_raw_chunk_publication_matches_ordered_ring_updates() {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none());
 
         let expected_chunk = source_values
@@ -8759,7 +8759,7 @@ fn packed_dense_attention_matches_ordered_singleton_rows_within_roundoff() {
     }
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
     let packed = host_read_f32(&packed, "packed attention").unwrap();
     let ordered = host_read_f32(&ordered, "ordered attention").unwrap();
@@ -8956,7 +8956,7 @@ fn packed_hca_splits_the_first_tiled_query_without_future_raw_leakage() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "packed HCA split command failed: {:?}",
@@ -9203,7 +9203,7 @@ fn packed_sparse_suffix_matches_cpu_with_original_chunk_ring_visibility() {
     .unwrap();
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(
         command.error().is_none(),
         "packed sparse attention failed: {:?}",
@@ -9408,7 +9408,7 @@ fn retained_packed_attention_preserves_ring_and_absolute_visibility() {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "retained {kind:?} command failed: {:?}",
@@ -9553,7 +9553,7 @@ fn q8_token_axis_gemv_is_bitwise_singleton_equivalent() {
     }
     encoder.end();
     command.commit();
-    command.waitUntilCompleted();
+    crate::metal::wait_completed(&command).expect("command buffer completed");
     assert!(command.error().is_none());
     let packed = host_read_f32(&packed, "packed Q8 output").unwrap();
     let singleton = host_read_f32(&singleton, "singleton Q8 output").unwrap();

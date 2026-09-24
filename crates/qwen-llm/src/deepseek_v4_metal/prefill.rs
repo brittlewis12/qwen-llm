@@ -7542,7 +7542,7 @@ impl Drop for CommittedPackedCommand {
     fn drop(&mut self) {
         // Lifetime guard only: keeps buffers alive until the GPU is done.
         // Completion status is checked on the normal path before readback.
-        self.command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&self.command);
     }
 }
 
@@ -11935,7 +11935,7 @@ impl DeepSeekV4Session {
                 .map_or(0.0, |started| started.elapsed().as_secs_f64());
             let post_route_wait_started = trace_layers.then(std::time::Instant::now);
             expert_command.commit();
-            expert_command.waitUntilCompleted();
+            crate::metal::wait_unchecked(&expert_command);
             let post_route_wait_seconds = post_route_wait_started
                 .as_ref()
                 .map_or(0.0, |started| started.elapsed().as_secs_f64());

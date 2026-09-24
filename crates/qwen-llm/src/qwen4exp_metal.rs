@@ -220,7 +220,7 @@ impl GatedResidualMetalScratch {
             )));
         }
 
-        command.waitUntilCompleted();
+        crate::metal::wait_unchecked(&command);
         let status = command.status();
         let error = command.error().map(|error| error.to_string());
         self.active_command = None;
@@ -2340,7 +2340,7 @@ mod tests {
         read.encode_combine().unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "command failed: {:?}",
@@ -2370,7 +2370,7 @@ mod tests {
         .unwrap();
         final_encoder.end();
         final_command.commit();
-        final_command.waitUntilCompleted();
+        crate::metal::wait_completed(&final_command).expect("command buffer completed");
         assert!(
             final_command.error().is_none(),
             "final command failed: {:?}",
@@ -2535,7 +2535,7 @@ mod tests {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "command failed: {:?}",
@@ -2643,7 +2643,7 @@ mod tests {
         .unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(
             command.error().is_none(),
             "command failed: {:?}",
@@ -2822,7 +2822,7 @@ mod tests {
                 "N={tokens} packed HC projection sequence: {census:#?}"
             );
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
             assert!(command.error().is_none());
 
@@ -2972,7 +2972,7 @@ mod tests {
         read.encode_combine(&encoder).unwrap();
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         assert!(command.error().is_none());
         let perturbed = SerialPackedHcTrace {
@@ -3105,7 +3105,7 @@ mod tests {
         assert_eq!(census[0].kernel, "kernel_qwen4exp_hc_repeat_packed_f32");
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         assert!(
             command.error().is_none(),

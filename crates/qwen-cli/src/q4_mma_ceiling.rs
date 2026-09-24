@@ -215,7 +215,7 @@ fn run_dispatch(
 
     let wall_start = Instant::now();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    qwen_llm::metal::wait_unchecked(&cmd);
     let wall_ms = wall_start.elapsed().as_secs_f64() * 1e3;
     let status = cmd.status();
     let error = cmd.error();
@@ -241,7 +241,7 @@ fn fill_tensor(ctx: &MetalContext, tensor: &MetalTensor, value: f32) -> Result<(
     encode_fill_f32(ctx, &enc, tensor, value)?;
     enc.end();
     cmd.commit();
-    cmd.waitUntilCompleted();
+    qwen_llm::metal::wait_unchecked(&cmd);
     let status = cmd.status();
     let error = cmd.error();
     if status != MTLCommandBufferStatus::Completed || error.is_some() {
@@ -649,7 +649,7 @@ pub fn run(args: Q4MmaCeilingArgs, build_identity: Value) -> Result<()> {
     encode_fill_f32(&ctx, &init_enc, &y_storage, GUARD_VALUE)?;
     init_enc.end();
     init_cmd.commit();
-    init_cmd.waitUntilCompleted();
+    qwen_llm::metal::wait_unchecked(&init_cmd);
     let init_status = init_cmd.status();
     let init_error = init_cmd.error();
     if init_status != MTLCommandBufferStatus::Completed || init_error.is_some() {

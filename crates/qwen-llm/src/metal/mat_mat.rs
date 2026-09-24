@@ -2810,7 +2810,7 @@ mod tests {
         .expect("IQ2_XS mat-vec dispatch");
         encoder.end();
         command.commit();
-        command.waitUntilCompleted();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
         assert!(command.error().is_none(), "IQ2_XS mat-vec command failed");
         let expected_row = |row: usize, input: &[f32]| {
             decoded[row * N_IN..(row + 1) * N_IN]
@@ -2856,7 +2856,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("IQ2_XS mat-mat N={n_query}: {error}"));
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(
                 command.error().is_none(),
                 "IQ2_XS mat-mat N={n_query} command failed"
@@ -2992,7 +2992,7 @@ mod tests {
                 .expect("diagnostic source blit");
             blit.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(command.error().is_none(), "no-copy blit command failed");
             let got = unsafe {
                 std::slice::from_raw_parts(dst.buffer.contents().as_ptr().cast::<u8>(), 64)
@@ -3017,7 +3017,7 @@ mod tests {
                 .expect("nonzero-offset matvec");
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert!(command.error().is_none(), "no-copy matvec command failed");
             let got = unsafe {
                 std::slice::from_raw_parts(y.buffer.contents().as_ptr().cast::<f32>(), n_out)
@@ -3127,7 +3127,7 @@ mod tests {
                 blit.copy_buffer(&staging, 0, &staging_out, 0, 64);
                 blit.end();
                 command.commit();
-                command.waitUntilCompleted();
+                crate::metal::wait_completed(&command).expect("command buffer completed");
                 assert_eq!(
                     command.status(),
                     objc2_metal::MTLCommandBufferStatus::Completed
@@ -3297,7 +3297,7 @@ mod tests {
                     blit.copy_tensor(&shared_second, &shared_second_out);
                     blit.end();
                     command.commit();
-                    command.waitUntilCompleted();
+                    crate::metal::wait_completed(&command).expect("command buffer completed");
                     assert!(command.error().is_none(), "window blit command failed");
                 }
                 let first_got = unsafe {

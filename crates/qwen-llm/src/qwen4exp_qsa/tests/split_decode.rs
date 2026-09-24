@@ -126,7 +126,7 @@ fn qualify_split_attention(timing: bool) {
             }
             encoder.end();
             command.commit();
-            command.waitUntilCompleted();
+            crate::metal::wait_completed(&command).expect("command buffer completed");
             assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
             assert!(command.error().is_none(), "{:?}", command.error());
             let gpu = (command.GPUEndTime() - command.GPUStartTime()) * 1e3 / repeats as f64;

@@ -869,6 +869,9 @@ impl GenerationBackend for EngineBackend {
                 .map(|lookup| lookup.matched_prefix_len()),
             promoted,
         );
+        // `restore_ms` is lookup (including any disk promotion) plus the
+        // restore copy; admission and allocation are reported separately.
+        let lookup_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
         let exact_cached = cached_lookup
             .as_ref()
             .is_some_and(|lookup| lookup.is_exact_with_final_logits());
@@ -1063,6 +1066,7 @@ impl GenerationBackend for EngineBackend {
         let forward = self.loaded.forward();
 
         // RAM prefix cache restore (dual-boundary entries from prior turns).
+        let restore_copy_t0 = Instant::now();
         let restore = cached_lookup
             .map(|lookup| {
                 self.loaded
@@ -1070,7 +1074,7 @@ impl GenerationBackend for EngineBackend {
             })
             .transpose()
             .map_err(|error| ServeError::server_error(format!("prefix restore: {error:#}")))?;
-        let restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
+        let restore_ms = lookup_ms + restore_copy_t0.elapsed().as_secs_f64() * 1e3;
         let matched_tokens = restore
             .as_ref()
             .map_or(0, |restore| restore.matched_prefix_len);

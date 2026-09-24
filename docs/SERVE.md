@@ -39,10 +39,11 @@ Operating goals, in order:
 ## Remaining program (2026-08-20)
 
 **F1 — Durable continuity: implemented for Qwen and DS4 (2026-09-23), GPU
-validation pending.** See [Durable snapshots](#durable-snapshots-cross-restart-warmth)
-for the behavior and flags. Remaining: restart continuity is proven only by
-the ignored 0.8B GPU test and the manual 27B/DS4 probes in the PERF-LOG entry;
-crash resilience (no graceful shutdown) still loses the Qwen RAM tier.
+validated (2026-09-24: a 1.51 GB 27B snapshot, larger than the write queue,
+persisted at shutdown and restored after restart in 862 ms).** See
+[Durable snapshots](#durable-snapshots-cross-restart-warmth) for the behavior
+and flags. Remaining: crash resilience (no graceful shutdown) still loses the
+Qwen RAM tier.
 
 **F2 — Per-family publication policy (the one F1 implements).** Publication
 cost is not uniform, and this decides the policy:
@@ -65,11 +66,15 @@ remains single-flight, but a separate acceptor now fails concurrent connections
 fast with `503 Service Unavailable`, `Retry-After: 1`, and a `server_busy`
 envelope instead of leaving them silent in the listen backlog.
 
-**F4 — DeepSeek V4 tool support.** DS4 serve handles chat and reasoning;
-tool definitions are rejected. Agent loops need them.
+**F4 — DeepSeek V4 tool support: implemented.** DS4 serve renders declared
+tools with the 0731 chat template (`render_ds4.rs`, pinned against the
+template's `tools_chat_one_round` case) and parses DSML tool calls into
+Responses `function_call` items.
 
 **F5 — Memory admission: implemented, live rerun pending.** Qwen requests are
-priced before execution and fail with `503` when denied. Qwen and DS4 boundary
+priced before execution and fail with `503` when denied; a process-memory
+shortfall first evicts unpinned RAM snapshots (keeping the one the request
+restores) and re-checks once. Qwen and DS4 boundary
 capture is memory-admitted and best-effort: denial or capture failure skips the
 snapshot while the request continues. Both caches are byte-bounded; DS4 session
 construction returns ownership on failure so residency remains recoverable.
@@ -158,10 +163,16 @@ have no durable tier (their flags are ignored).
   `--durable-snapshot-min-tokens 1024`: shorter prefixes are neither written nor
   looked up. The resolved plan is logged as a `serve durable:` line at startup.
 - **Stores.** Qwen uses `DurableCheckpointStore` (QWENCKP v1 blobs) and DS4
-  `DeepSeekV4CheckpointStore`, unchanged: staged temp file, fsync, decode-verify,
-  flock, hard-link publish, corrupt-blob self-heal, and LRU-by-mtime eviction to
-  the byte budget (a disk hit touches mtime). Disk ranking is plain LRU, not the
-  RAM frecency.
+  `DeepSeekV4CheckpointStore`: staged temp file, fsync, decode-verify, flock,
+  hard-link publish, corrupt-blob self-heal, and LRU-by-mtime eviction to the
+  byte budget (a disk hit touches mtime). Disk ranking is plain LRU, not the
+  RAM frecency. Publishers serialize on `writer.lock`; each sizes its record
+  exactly, then requires record + 2 GiB free on the volume, evicting its
+  oldest blobs if other activity filled the disk and refusing (logged) before
+  writing if that is not enough. Lookups never wait more than ~100 ms on a
+  publisher (a busy store is a logged miss), skip and keep records they cannot
+  use (`unusable_skipped`), and each publish sweeps one other model's
+  directory for staging files a crash left behind.
 - **Identity.** Records are keyed by the model's strong content identity (the
   CLI's `checkpoint_identity`: full ordered GGUF hash, or Hugging Face sidecar
   SHA-256s, cached under the store's `identity/`). It resolves on a background
@@ -173,9 +184,11 @@ have no durable tier (their flags are ignored).
   switch. DS4 sessions bind a process-local stand-in identity until then; RAM
   hits captured under it are re-attributed to the strong identity afterwards.
 - **Writes** all happen on one background thread with a byte-bounded queue
-  (a quarter of the RAM budget, clamped to 1–16 GiB); when full, the snapshot is
-  dropped with a once-only warning, and the request path never waits on
-  encoding or fsync.
+  (a quarter of the RAM budget, clamped to 1–16 GiB); one snapshot larger than
+  that goes alone when the queue is idle (long-context sessions); otherwise a
+  snapshot that does not fit is dropped with a once-only warning, and the
+  request path never waits on encoding or fsync. Entries leaving RAM are
+  queued as soon as a capture or lookup releases them.
   - *Qwen* (dense snapshots are GBs): an entry is written when it leaves RAM
     through budget eviction or idle/age expiry, and on graceful shutdown
     (SIGINT/SIGTERM) the top-ranked RAM entries not already on disk are flushed

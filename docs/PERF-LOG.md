@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-24 - Review Fixes: MoE Decode Completion, Transcript Retention, Durable Tier
+
+Adversarial Codex reviews of the 2026-09-23 work found real defects; fixed:
+- MoE decode (default concurrent-GDN, full logits) checked command-buffer
+  completion only behind a flag its production callers left off, so a GPU
+  recovery could feed partial logits to the sampler (fec5e6eb). New
+  fail-injection test proves the decode now fails and poisons the session.
+- A resent/regenerated thinking turn restored exactly at the transcript
+  boundary but did not protect it; its captures could evict it and the next
+  reasoning-dropped turn reused 0 tokens. Flash-Next's transcript could also
+  lose to frecency (e08bfbd4). Flash-Next, 200 MiB budget (one ~140 MB
+  snapshot): the resend keeps T and turn 2 reuses 875/946 tokens.
+- Durable queue refused any snapshot larger than a quarter of the RAM
+  budget, so long-context sessions never persisted (df11f195). 27B, 2 GiB
+  RAM budget, 20.7K-token turn (1.51 GB snapshot), SIGTERM: main skipped it,
+  now written in 1.83 s; after restart restored in 862 ms (1.5 s wall vs
+  98 s cold).
+- Durable store: lookups bounded to ~100 ms behind a publisher, publishes
+  keep 2 GiB free (evicting oldest blobs first, exact record sizing under a
+  writer lock), unusable records skipped instead of aborting lookup,
+  crash-stranded staging swept across model directories (16955f8d). Request
+  admission evicts RAM snapshots for a process shortfall before a 503.
+
 ## 2026-09-24 - Auto Prefill Chunk: Every Qwen MoE, Every Prompt Over 1,024
 
 - Before: the 2048/4096-token prefill chunk applied only to two named GGUFs

@@ -2381,3 +2381,31 @@ noise without reducing technical risk. Revisit after S5.
    0.468917 ms shallow penalty.
 8. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.
+
+## Identity-gated fast paths (audit 2026-09-24)
+
+Several DS4 fast paths run only for the three qualified artifacts (fresh 256
+experts, REAP k160, REAP k216: exact `source_bytes` and `tensor_count ==
+1328`) on an "Apple M4 Max". A read-only audit found most of these gates
+protect **numerics as well as speed** (half staging, reduction order,
+whole-model arithmetic validated on those artifacts), so replacing them with
+capability predicates is not a mechanical change: it needs a
+production-dispatch regression packet (packed widths 128/256/337/2048/4096,
+selected-implementation counts, logits/state/continuation, a sparse CSA
+suffix at N4096) and a shared production resolver, because `cfg(test)`
+branches currently override production selection for the multigroup
+selector, long HCA and the F16 scorer. Load now logs one line
+(`deepseek_v4: artifact profile=... identity_gated_fast_paths=on|off`) so an
+unqualified artifact is not silently slow.
+
+| Gate | Protects | Capability replacement |
+|---|---|---|
+| Compressor / shared / Q-A / raw-KV Q8 matrices | numerics + perf | per-role Q8 views and R2C capability, crossover and arithmetic policy |
+| Strict router | exact arithmetic + perf | F32 views, E % 8, 32-thread pipeline |
+| Q-B / output Auto schedules | numerics + perf | wide/narrow capability, 128-token rule, strides |
+| Grouped IQ / IQ2 matrix / grouped Q3/Q4 / MXFP4 down | layout, numerics + perf | dtype triple, valid E/K/maps, arena and pipeline caps, N policy |
+| All-slot Q3/Q4 MoE | numerics + perf | K6, legal E, block geometry, alias and pipeline checks |
+| Multigroup selector, long/split-K HCA | exactness contract, reduction order + perf | scratch/pipeline capability plus visibility band |
+| F16 scorer | diagnostic scope | capability, keeping default off |
+| Residency set | wired memory (owner's call) | unchanged |
+

@@ -24,11 +24,39 @@ use std::time::SystemTime;
 
 pub(crate) const TEMP_PREFIX: &str = ".tmp-";
 const LOCK_FILE: &str = "store.lock";
+/// Serializes publishers (never readers) so a free-space check and the
+/// staging write it admits are atomic with respect to other publishers.
+const WRITER_LOCK_FILE: &str = "writer.lock";
 const LOCKED_TEMP_VERSION: &str = "l1";
 const MAX_STAGING_EXAMINED_PER_PUBLISH: usize = 256;
 pub(crate) const MAX_STAGING_SCAVENGE_PER_PUBLISH: usize = 64;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Longest a lookup waits for the namespace lock.
+pub(crate) const LOOKUP_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Free space a publish leaves on the volume: the cache yields to the rest
+/// of the disk rather than write it full.
+pub(crate) const VOLUME_FREE_RESERVE_BYTES: u64 = 2 << 30;
+
+/// Available bytes on the volume holding `path` (or its nearest existing
+/// ancestor); `None` when unreadable.
+pub fn volume_free_bytes(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let existing = path.ancestors().find(|candidate| candidate.exists())?;
+    let path = std::ffi::CString::new(existing.as_os_str().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    // SAFETY: `path` is NUL-terminated and `stat` is a valid out-pointer.
+    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: statvfs succeeded and initialized the struct.
+    let stat = unsafe { stat.assume_init() };
+    // Field widths differ across platforms (u32 vs u64 block counts).
+    #[allow(clippy::unnecessary_cast)]
+    (stat.f_bavail as u64).checked_mul(stat.f_frsize as u64)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CheckpointFsError {
@@ -63,6 +91,11 @@ pub(crate) struct StoreNamespace {
     root: PathBuf,
     version: &'static str,
     ready: Arc<AtomicBool>,
+    /// Which sibling compatibility directory the next publish sweeps.
+    sibling_sweep_turn: Arc<std::sync::atomic::AtomicUsize>,
+    /// Test seam: volume free bytes to report instead of `statvfs`.
+    #[cfg(test)]
+    pub(crate) test_free_bytes: Arc<std::sync::Mutex<Option<u64>>>,
 }
 
 impl StoreNamespace {
@@ -71,6 +104,9 @@ impl StoreNamespace {
             root: root.into(),
             version,
             ready: Arc::new(AtomicBool::new(false)),
+            sibling_sweep_turn: Arc::default(),
+            #[cfg(test)]
+            test_free_bytes: Arc::default(),
         }
     }
 
@@ -102,14 +138,130 @@ impl StoreNamespace {
         self.lock(libc::LOCK_EX)
     }
 
+    /// Shared lock for lookups, which run on request paths: give up after
+    /// [`LOOKUP_LOCK_WAIT`] rather than stall behind a publisher's scan, evict
+    /// and fsync in this or another process. Busy is an `Io(WouldBlock)`
+    /// error, which callers log and treat as a miss.
+    pub(crate) fn lock_shared_for_lookup(&self) -> Result<StoreLock, CheckpointFsError> {
+        let file = self.open_lock_file(LOCK_FILE)?;
+        let started = std::time::Instant::now();
+        loop {
+            match flock_retry(&file, libc::LOCK_SH | libc::LOCK_NB) {
+                Ok(()) => return Ok(StoreLock { file }),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if started.elapsed() >= LOOKUP_LOCK_WAIT {
+                        return Err(CheckpointFsError::Io(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            format!(
+                                "checkpoint namespace busy for {LOOKUP_LOCK_WAIT:?} (a writer holds it)"
+                            ),
+                        )));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    /// Make room to stage a `record_bytes` record while leaving
+    /// [`VOLUME_FREE_RESERVE_BYTES`] free. The budget is sized from free space
+    /// at startup; when other activity has since filled the volume, evict this
+    /// namespace's oldest blobs first, and fail with `StorageFull` if that is
+    /// not enough, before writing anything. Returns the bytes evicted. Call
+    /// with [`Self::lock_writer`] held so no other publisher stages between
+    /// the check and the write.
+    pub(crate) fn ensure_volume_space(
+        &self,
+        record_bytes: u64,
+        is_managed_name: impl Fn(&std::ffi::OsStr) -> bool,
+    ) -> Result<u64, CheckpointFsError> {
+        #[cfg(test)]
+        if let Some(free) = *self.test_free_bytes.lock().unwrap() {
+            return self.ensure_volume_space_with(record_bytes, is_managed_name, || Some(free));
+        }
+        self.ensure_volume_space_with(record_bytes, is_managed_name, || {
+            volume_free_bytes(&self.root)
+        })
+    }
+
+    pub(crate) fn ensure_volume_space_with(
+        &self,
+        record_bytes: u64,
+        is_managed_name: impl Fn(&std::ffi::OsStr) -> bool,
+        mut free_bytes: impl FnMut() -> Option<u64>,
+    ) -> Result<u64, CheckpointFsError> {
+        let needed = record_bytes.saturating_add(VOLUME_FREE_RESERVE_BYTES);
+        let unreadable = || {
+            CheckpointFsError::Io(io::Error::other(
+                "volume free space is unreadable; not staging a record that could fill it",
+            ))
+        };
+        let free = free_bytes().ok_or_else(unreadable)?;
+        if free >= needed {
+            return Ok(0);
+        }
+        let (free, evicted_bytes) = {
+            let _lock = self.lock_exclusive()?;
+            // Re-read under the lock: a lookup's lease may have released space.
+            let free = free_bytes().ok_or_else(unreadable)?;
+            let scan = scan_managed_blobs(&self.blobs_root(), is_managed_name)?;
+            let total = scan.total_bytes;
+            let shortfall = needed.saturating_sub(free).min(total);
+            (free, evict_to_fit(scan, shortfall, total, None)?.1)
+        };
+        let free_after = free_bytes().unwrap_or(0);
+        if evicted_bytes > 0 {
+            tracing::warn!(
+                "checkpoint store: volume low on space; evicted {evicted_bytes} bytes of oldest blobs \
+                 (free {free} -> {free_after}) to stage a {record_bytes}-byte record"
+            );
+        }
+        if free_after < needed {
+            return Err(CheckpointFsError::Io(io::Error::new(
+                io::ErrorKind::StorageFull,
+                format!(
+                    "volume has {free_after} bytes free; a {record_bytes}-byte record needs \
+                     {needed} with the {VOLUME_FREE_RESERVE_BYTES}-byte reserve"
+                ),
+            )));
+        }
+        Ok(evicted_bytes)
+    }
+
     fn lock(&self, operation: libc::c_int) -> Result<StoreLock, CheckpointFsError> {
+        let file = self.open_lock_file(LOCK_FILE)?;
+        flock_retry(&file, operation)?;
+        Ok(StoreLock { file })
+    }
+
+    /// Exclusive namespace lock if free right now; `None` under contention.
+    /// Lookup maintenance (LRU touch, corrupt removal) uses this so a request
+    /// path never waits on a publisher.
+    fn try_lock_exclusive(&self) -> Result<Option<StoreLock>, CheckpointFsError> {
+        let file = self.open_lock_file(LOCK_FILE)?;
+        match flock_retry(&file, libc::LOCK_EX | libc::LOCK_NB) {
+            Ok(()) => Ok(Some(StoreLock { file })),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Held by a publisher from its free-space check through publication.
+    pub(crate) fn lock_writer(&self) -> Result<StoreLock, CheckpointFsError> {
+        let file = self.open_lock_file(WRITER_LOCK_FILE)?;
+        flock_retry(&file, libc::LOCK_EX)?;
+        Ok(StoreLock { file })
+    }
+
+    fn open_lock_file(&self, name: &str) -> Result<File, CheckpointFsError> {
         let initialize = !self.ready.load(Ordering::Acquire);
         if initialize {
             self.ensure_namespace()?;
         }
         let namespace = self.namespace_root();
         ensure_real_directory(&namespace)?;
-        let path = namespace.join(LOCK_FILE);
+        let path = namespace.join(name);
         let mut options = OpenOptions::new();
         options
             .read(true)
@@ -120,15 +272,14 @@ impl StoreNamespace {
         let file = options.open(path)?;
         if !file.metadata()?.file_type().is_file() {
             return Err(CheckpointFsError::ForeignEntryAtKey(
-                self.namespace_root().join(LOCK_FILE),
+                self.namespace_root().join(name),
             ));
         }
         if initialize {
             sync_directory(&namespace)?;
             self.ready.store(true, Ordering::Release);
         }
-        flock_retry(&file, operation)?;
-        Ok(StoreLock { file })
+        Ok(file)
     }
 
     fn ensure_namespace(&self) -> Result<(), CheckpointFsError> {
@@ -160,7 +311,30 @@ impl StoreNamespace {
         if blob_dir_created {
             sync_directory(&blobs_root)?;
         }
-        scavenge_staging_files_locked(blob_dir)
+        let mut report = scavenge_staging_files_locked(blob_dir)?;
+        // A crash strands staging files in whichever model's directory was
+        // publishing; sweep one sibling per publish, rotating, so switching
+        // models does not leave them outside every budget while this lock's
+        // hold stays bounded. Best effort: a sibling's error never fails this
+        // publish.
+        let mut siblings: Vec<PathBuf> = std::fs::read_dir(&blobs_root)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .map(|entry| entry.path())
+                    .filter(|path| path != blob_dir)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !siblings.is_empty() {
+            siblings.sort();
+            let turn = self.sibling_sweep_turn.fetch_add(1, Ordering::Relaxed);
+            if let Ok(swept) = scavenge_staging_files_locked(&siblings[turn % siblings.len()]) {
+                report.absorb(swept);
+            }
+        }
+        Ok(report)
     }
 
     /// Create and lock one staging file without exposing an unlocked managed
@@ -220,6 +394,15 @@ impl StoreNamespace {
         open_blob_nofollow(path)
     }
 
+    /// [`Self::open_candidate`] under the bounded lookup lock.
+    pub(crate) fn open_candidate_for_lookup(
+        &self,
+        path: &Path,
+    ) -> Result<Option<BlobLease>, CheckpointFsError> {
+        let _lock = self.lock_shared_for_lookup()?;
+        open_blob_nofollow(path)
+    }
+
     /// Unlink a managed blob only while it is still the leased inode.
     pub(crate) fn remove_if_same_inode(
         &self,
@@ -227,6 +410,26 @@ impl StoreNamespace {
         lease: &BlobLease,
     ) -> Result<bool, CheckpointFsError> {
         let _lock = self.lock_exclusive()?;
+        Self::remove_if_same_inode_locked(path, lease)
+    }
+
+    /// Lookup-path removal of a proven-corrupt blob: skipped (left for a
+    /// later lookup or publish) when a publisher holds the namespace.
+    pub(crate) fn remove_if_same_inode_for_lookup(
+        &self,
+        path: &Path,
+        lease: &BlobLease,
+    ) -> Result<bool, CheckpointFsError> {
+        let Some(_lock) = self.try_lock_exclusive()? else {
+            return Ok(false);
+        };
+        Self::remove_if_same_inode_locked(path, lease)
+    }
+
+    fn remove_if_same_inode_locked(
+        path: &Path,
+        lease: &BlobLease,
+    ) -> Result<bool, CheckpointFsError> {
         let Some(metadata) = metadata_nofollow(path)? else {
             return Ok(false);
         };
@@ -252,7 +455,10 @@ impl StoreNamespace {
         path: &Path,
         lease: &BlobLease,
     ) -> Result<(), CheckpointFsError> {
-        let _lock = self.lock_exclusive()?;
+        // An LRU touch is optional: skip it rather than wait on a publisher.
+        let Some(_lock) = self.try_lock_exclusive()? else {
+            return Err(CheckpointFsError::TouchLostRace);
+        };
         let metadata = metadata_nofollow(path)?.ok_or(CheckpointFsError::TouchLostRace)?;
         if metadata.dev() != lease.dev || metadata.ino() != lease.ino {
             return Err(CheckpointFsError::TouchLostRace);
@@ -328,6 +534,18 @@ pub(crate) struct StagingCleanupReport {
     pub(crate) legacy_entries: usize,
     pub(crate) foreign_entries: usize,
     pub(crate) truncated: bool,
+}
+
+impl StagingCleanupReport {
+    fn absorb(&mut self, other: Self) {
+        self.examined_entries += other.examined_entries;
+        self.removed_entries += other.removed_entries;
+        self.reclaimed_bytes = self.reclaimed_bytes.saturating_add(other.reclaimed_bytes);
+        self.live_entries += other.live_entries;
+        self.legacy_entries += other.legacy_entries;
+        self.foreign_entries += other.foreign_entries;
+        self.truncated |= other.truncated;
+    }
 }
 
 pub(crate) fn flock_retry(file: &File, operation: libc::c_int) -> io::Result<()> {

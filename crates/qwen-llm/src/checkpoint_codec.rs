@@ -218,6 +218,35 @@ impl WireLayout {
     }
 }
 
+/// Exact size of the record [`encode_snapshot`] would write, with the same
+/// validation (including the record budget), without writing anything.
+pub fn encoded_snapshot_record_bytes(
+    snapshot: &SessionSnapshot,
+    constraints: SnapshotCodecConstraints<'_>,
+) -> Result<u64, SnapshotCodecError> {
+    require_little_endian()?;
+    if &snapshot.identity != constraints.expected_identity {
+        return Err(SnapshotCodecError::IdentityMismatch);
+    }
+    snapshot.validate_for_restore(
+        constraints.expected_identity,
+        constraints.max_context_tokens,
+        Some(constraints.expected_vocab_size),
+    )?;
+    Ok(WireLayout::derive(
+        snapshot.prefix_len() as u64,
+        snapshot.pending_token,
+        snapshot.final_logits.is_some(),
+        snapshot.capture_tail.is_some(),
+        snapshot
+            .capture_tail
+            .as_ref()
+            .map_or(0, |t| (t.len() * 4) as u64),
+        constraints,
+    )?
+    .record_bytes)
+}
+
 pub fn encode_snapshot<W: Write>(
     dst: &mut W,
     snapshot: &SessionSnapshot,

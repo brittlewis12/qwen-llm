@@ -26,7 +26,7 @@ use crate::deepseek_v4_metal::{
     DeepSeekV4CausalSnapshot, DeepSeekV4CompatibilityDigest, DeepSeekV4EncodedSnapshot,
     DeepSeekV4MetalError, DeepSeekV4ModelContentId, DeepSeekV4Session, DeepSeekV4SessionCapacity,
     DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotCodecError, decode_causal_snapshot,
-    encode_causal_snapshot,
+    encode_causal_snapshot, encoded_causal_snapshot_record_bytes,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::fs::FileTimes;
@@ -110,7 +110,21 @@ impl DeepSeekV4CheckpointStore {
         }
         let digest = snapshot_prefix_key(context.compatibility_digest.as_bytes(), snapshot);
         let blob_dir = self.blob_dir(context.compatibility_digest.as_bytes());
+        // One publisher at a time from the space check through publication.
+        let _writer = self.namespace.lock_writer()?;
         let staging_cleanup = self.ensure_blob_dir(&blob_dir)?;
+        // Size and validate the record exactly (the codec enforces the record
+        // budget) and check the store budget before reclaiming any space.
+        let record_bytes =
+            encoded_causal_snapshot_record_bytes(snapshot, context.codec_constraints)?;
+        if record_bytes > self.max_managed_blob_bytes {
+            return Err(DeepSeekV4CheckpointStoreError::OversizedBlob {
+                blob_bytes: record_bytes,
+                max_managed_blob_bytes: self.max_managed_blob_bytes,
+            });
+        }
+        self.namespace
+            .ensure_volume_space(record_bytes, is_managed_blob_name)?;
         let final_path = blob_dir.join(blob_name(matched_len, &digest));
         let temp_path = unique_temp_path(&blob_dir, &digest);
         let staged = match self.encode_staged(&temp_path, context, snapshot) {
@@ -166,9 +180,10 @@ impl DeepSeekV4CheckpointStore {
         let candidates = self.discover_candidates(&blob_dir, request_tokens, context)?;
         let mut examined = 0usize;
         let mut corrupt_removed = 0usize;
+        let mut unusable_skipped = 0usize;
         for candidate in candidates {
             examined += 1;
-            let Some(lease) = self.open_candidate(&candidate.path)? else {
+            let Some(lease) = self.open_candidate_for_lookup(&candidate.path)? else {
                 continue;
             };
             if !admit(candidate.matched_len, lease.size) {
@@ -192,6 +207,7 @@ impl DeepSeekV4CheckpointStore {
                         exact: false,
                         candidates_examined: examined,
                         corrupt_entries_removed: corrupt_removed,
+                        unusable_skipped,
                         touched,
                     });
                 }
@@ -203,14 +219,19 @@ impl DeepSeekV4CheckpointStore {
                     return Err(DeepSeekV4CheckpointStoreError::NamespaceCollision);
                 }
                 Ok(_) => {
-                    if self.remove_if_same_inode(&candidate.path, &lease)? {
+                    if self.remove_if_same_inode_for_lookup(&candidate.path, &lease)? {
                         corrupt_removed += 1;
                     }
                 }
                 Err(error) if codec_error_proves_invalid_blob(&error) => {
-                    if self.remove_if_same_inode(&candidate.path, &lease)? {
+                    if self.remove_if_same_inode_for_lookup(&candidate.path, &lease)? {
                         corrupt_removed += 1;
                     }
+                }
+                // Valid but unusable here (over the current record budget or
+                // allocation): keep it and try the next, shorter candidate.
+                Err(error) if !matches!(error, DeepSeekV4SnapshotCodecError::Io(_)) => {
+                    unusable_skipped += 1;
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -218,6 +239,7 @@ impl DeepSeekV4CheckpointStore {
         Ok(DeepSeekV4LookupReport {
             candidates_examined: examined,
             corrupt_entries_removed: corrupt_removed,
+            unusable_skipped,
             ..DeepSeekV4LookupReport::miss()
         })
     }
@@ -430,7 +452,7 @@ impl DeepSeekV4CheckpointStore {
         request_tokens: &[u32],
         context: DeepSeekV4StoreContext<'_>,
     ) -> Result<Vec<Candidate>, DeepSeekV4CheckpointStoreError> {
-        let lock = self.namespace.lock_shared()?;
+        let lock = self.namespace.lock_shared_for_lookup()?;
         let mut found = Vec::new();
         let mut lengths = BTreeSet::new();
         if !require_real_directory_if_exists(&self.blobs_root())?
@@ -546,6 +568,23 @@ impl DeepSeekV4CheckpointStore {
         lease: &BlobLease,
     ) -> Result<bool, DeepSeekV4CheckpointStoreError> {
         Ok(self.namespace.remove_if_same_inode(path, lease)?)
+    }
+
+    fn open_candidate_for_lookup(
+        &self,
+        path: &Path,
+    ) -> Result<Option<BlobLease>, DeepSeekV4CheckpointStoreError> {
+        Ok(self.namespace.open_candidate_for_lookup(path)?)
+    }
+
+    fn remove_if_same_inode_for_lookup(
+        &self,
+        path: &Path,
+        lease: &BlobLease,
+    ) -> Result<bool, DeepSeekV4CheckpointStoreError> {
+        Ok(self
+            .namespace
+            .remove_if_same_inode_for_lookup(path, lease)?)
     }
 
     fn touch_if_same_inode(
@@ -768,6 +807,8 @@ pub struct DeepSeekV4LookupReport {
     pub exact: bool,
     pub candidates_examined: usize,
     pub corrupt_entries_removed: usize,
+    /// Valid records skipped because this process cannot use them.
+    pub unusable_skipped: usize,
     pub touched: bool,
 }
 
@@ -780,6 +821,7 @@ impl DeepSeekV4LookupReport {
             exact: false,
             candidates_examined: 0,
             corrupt_entries_removed: 0,
+            unusable_skipped: 0,
             touched: false,
         }
     }
@@ -1249,12 +1291,12 @@ mod tests {
         let mut extension = fixture.snapshot.prefix_tokens().to_vec();
         extension.push(99);
 
-        assert!(matches!(
-            store.lookup(fixture.context(published.blob_bytes - 1), &extension),
-            Err(DeepSeekV4CheckpointStoreError::Codec(
-                DeepSeekV4SnapshotCodecError::RecordBudgetExceeded { .. }
-            ))
-        ));
+        // Over this process's record budget: skipped and kept, not an error.
+        let report = store
+            .lookup(fixture.context(published.blob_bytes - 1), &extension)
+            .unwrap();
+        assert!(report.snapshot.is_none());
+        assert_eq!(report.unusable_skipped, 1);
         assert!(fixture.blob_path(&store).exists());
         assert!(
             store

@@ -38,7 +38,8 @@ pub use snapshot::{
     DeepSeekV4SnapshotFileOutcome, DeepSeekV4SnapshotFileReport, DeepSeekV4SnapshotObservation,
     DeepSeekV4SnapshotRestoreErrorKind, causal_snapshot_capture_error_kind,
     causal_snapshot_record_bytes, causal_snapshot_restore_error_kind, decode_causal_snapshot,
-    encode_causal_snapshot, load_causal_snapshot_file, publish_causal_snapshot_file,
+    encode_causal_snapshot, encoded_causal_snapshot_record_bytes, load_causal_snapshot_file,
+    publish_causal_snapshot_file,
 };
 
 use crate::deepseek_v4::{

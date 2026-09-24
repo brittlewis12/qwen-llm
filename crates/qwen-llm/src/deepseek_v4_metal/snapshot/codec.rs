@@ -162,6 +162,28 @@ pub fn causal_snapshot_record_bytes(
     .record_bytes)
 }
 
+/// Exact size of the record [`encode_causal_snapshot`] would write, with the
+/// same validation (including the record budget), without writing anything.
+pub fn encoded_causal_snapshot_record_bytes(
+    snapshot: &DeepSeekV4CausalSnapshot,
+    constraints: DeepSeekV4SnapshotCodecConstraints<'_>,
+) -> Result<u64, DeepSeekV4SnapshotCodecError> {
+    require_little_endian()?;
+    validate_snapshot(
+        snapshot,
+        constraints.config,
+        constraints.session_capacity,
+        constraints.expected_model_content_id,
+    )
+    .map_err(snapshot_codec_error)?;
+    Ok(WireLayout::derive(
+        snapshot.next_position,
+        snapshot.source_observation,
+        constraints,
+    )?
+    .record_bytes)
+}
+
 pub fn encode_causal_snapshot<W: Write>(
     dst: &mut W,
     snapshot: &DeepSeekV4CausalSnapshot,

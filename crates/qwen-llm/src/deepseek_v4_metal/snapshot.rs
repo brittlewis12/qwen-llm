@@ -6,6 +6,7 @@ mod file;
 pub use codec::{
     DeepSeekV4EncodedSnapshot, DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotCodecError,
     causal_snapshot_record_bytes, decode_causal_snapshot, encode_causal_snapshot,
+    encoded_causal_snapshot_record_bytes,
 };
 pub use file::{
     DeepSeekV4SnapshotFileError, DeepSeekV4SnapshotFileOutcome, DeepSeekV4SnapshotFileReport,

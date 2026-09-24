@@ -381,11 +381,12 @@ impl DeepSeekV4Backend {
         if report.candidates_examined > 0 {
             tracing::info!(
                 target: "qwen_diag",
-                "serve durable: family=deepseek_v4 lookup hit={} matched={} ram_matched={floor} candidates={} corrupt_removed={} denied={} lookup_ms={ms:.1}",
+                "serve durable: family=deepseek_v4 lookup hit={} matched={} ram_matched={floor} candidates={} corrupt_removed={} unusable_skipped={} denied={} lookup_ms={ms:.1}",
                 report.snapshot.is_some(),
                 report.matched_prefix_len,
                 report.candidates_examined,
                 report.corrupt_entries_removed,
+                report.unusable_skipped,
                 denied.unwrap_or("none"),
             );
         }

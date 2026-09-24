@@ -1261,6 +1261,7 @@ pub struct DurableLookupTelemetry {
     pub exact: bool,
     pub candidates_examined: usize,
     pub corrupt_entries_removed: usize,
+    pub unusable_skipped: usize,
     pub touched: bool,
 }
 
@@ -2213,6 +2214,7 @@ impl LoadedModel {
             exact: lookup.exact,
             candidates_examined: lookup.candidates_examined,
             corrupt_entries_removed: lookup.corrupt_entries_removed,
+            unusable_skipped: lookup.unusable_skipped,
             touched: lookup.touched,
         };
         let hit = if let Some(snapshot) = lookup.snapshot.take() {
@@ -2298,6 +2300,7 @@ impl LoadedModel {
             exact: lookup.exact,
             candidates_examined: lookup.candidates_examined,
             corrupt_entries_removed: lookup.corrupt_entries_removed,
+            unusable_skipped: lookup.unusable_skipped,
             touched: lookup.touched,
         };
         let Some(snapshot) = lookup.snapshot.take() else {

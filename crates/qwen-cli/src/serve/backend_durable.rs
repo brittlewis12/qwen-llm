@@ -183,11 +183,12 @@ impl EngineBackend {
                 if promoted.is_some() || promotion.lookup.candidates_examined > 0 {
                     tracing::info!(
                         target: "qwen_diag",
-                        "serve durable: family=qwen lookup hit={} matched={} ram_matched={floor} candidates={} corrupt_removed={} snapshot_bytes={} denied={} lookup_ms={ms:.1}",
+                        "serve durable: family=qwen lookup hit={} matched={} ram_matched={floor} candidates={} corrupt_removed={} unusable_skipped={} snapshot_bytes={} denied={} lookup_ms={ms:.1}",
                         promoted.is_some(),
                         promotion.lookup.matched_prefix_len,
                         promotion.lookup.candidates_examined,
                         promotion.lookup.corrupt_entries_removed,
+                        promotion.lookup.unusable_skipped,
                         promotion.snapshot_bytes,
                         denied.unwrap_or("none"),
                     );

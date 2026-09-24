@@ -14,8 +14,10 @@
 //! returns an error; callers must remain correct after any cache entry disappears.
 
 use crate::checkpoint_codec::{
-    EncodedSnapshot, SnapshotCodecConstraints, SnapshotCodecError, decode_snapshot, encode_snapshot,
+    EncodedSnapshot, SnapshotCodecConstraints, SnapshotCodecError, decode_snapshot,
+    encode_snapshot, encoded_snapshot_record_bytes,
 };
+pub use crate::checkpoint_fs::volume_free_bytes;
 use crate::checkpoint_fs::{
     BlobLease, CheckpointFsError, FileStamp, StagingCleanupReport, StoreNamespace, evict_to_fit,
     has_managed_blob, hex, metadata_nofollow, parse_hex_32, path_exists_nofollow,
@@ -103,7 +105,20 @@ impl DurableCheckpointStore {
         let matched_len = snapshot.matched_prefix_len();
         let digest = snapshot_prefix_key(context.compatibility_id, snapshot);
         let blob_dir = self.blob_dir(context.compatibility_id);
+        // One publisher at a time from the space check through publication.
+        let _writer = self.namespace.lock_writer()?;
         let staging_cleanup = self.ensure_blob_dir(&blob_dir)?;
+        // Size and validate the record exactly (the codec enforces the record
+        // budget) and check the store budget before reclaiming any space.
+        let record_bytes = encoded_snapshot_record_bytes(snapshot, context.codec_constraints())?;
+        if record_bytes > self.max_managed_blob_bytes {
+            return Err(CheckpointStoreError::OversizedBlob {
+                blob_bytes: record_bytes,
+                max_managed_blob_bytes: self.max_managed_blob_bytes,
+            });
+        }
+        self.namespace
+            .ensure_volume_space(record_bytes, is_managed_blob_name)?;
         let final_path = blob_dir.join(blob_name(matched_len, mode, &digest));
         let temp_path = unique_temp_path(&blob_dir, &digest);
         let staged = match self.encode_staged(&temp_path, context, snapshot) {
@@ -159,9 +174,10 @@ impl DurableCheckpointStore {
         let candidates = self.discover_candidates(&blob_dir, request_tokens, context)?;
         let mut examined = 0usize;
         let mut corrupt_removed = 0usize;
+        let mut unusable_skipped = 0usize;
         for candidate in candidates {
             examined += 1;
-            let Some(lease) = self.open_candidate(&candidate.path)? else {
+            let Some(lease) = self.open_candidate_for_lookup(&candidate.path)? else {
                 continue;
             };
             if !admit(candidate.matched_len, lease.size) {
@@ -186,18 +202,25 @@ impl DurableCheckpointStore {
                         exact: candidate.matched_len == request_tokens.len(),
                         candidates_examined: examined,
                         corrupt_entries_removed: corrupt_removed,
+                        unusable_skipped,
                         touched,
                     });
                 }
                 Ok(_) => {
-                    if self.remove_if_same_inode(&candidate.path, &lease)? {
+                    if self.remove_if_same_inode_for_lookup(&candidate.path, &lease)? {
                         corrupt_removed += 1;
                     }
                 }
                 Err(error) if codec_error_proves_invalid_blob(&error) => {
-                    if self.remove_if_same_inode(&candidate.path, &lease)? {
+                    if self.remove_if_same_inode_for_lookup(&candidate.path, &lease)? {
                         corrupt_removed += 1;
                     }
+                }
+                // Valid but unusable here (over the current record budget,
+                // context capacity, or allocation): keep it for a process
+                // that can load it and try the next, shorter candidate.
+                Err(error) if !matches!(error, SnapshotCodecError::Io(_)) => {
+                    unusable_skipped += 1;
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -205,6 +228,7 @@ impl DurableCheckpointStore {
         Ok(LookupReport {
             candidates_examined: examined,
             corrupt_entries_removed: corrupt_removed,
+            unusable_skipped,
             ..LookupReport::miss()
         })
     }
@@ -384,7 +408,7 @@ impl DurableCheckpointStore {
         request_tokens: &[i32],
         context: StoreContext<'_>,
     ) -> Result<Vec<Candidate>, CheckpointStoreError> {
-        let lock = self.namespace.lock_shared()?;
+        let lock = self.namespace.lock_shared_for_lookup()?;
         let mut found = Vec::new();
         let mut lengths = BTreeSet::new();
         if !require_real_directory_if_exists(&self.blobs_root())?
@@ -491,6 +515,23 @@ impl DurableCheckpointStore {
         lease: &BlobLease,
     ) -> Result<bool, CheckpointStoreError> {
         Ok(self.namespace.remove_if_same_inode(path, lease)?)
+    }
+
+    fn open_candidate_for_lookup(
+        &self,
+        path: &Path,
+    ) -> Result<Option<BlobLease>, CheckpointStoreError> {
+        Ok(self.namespace.open_candidate_for_lookup(path)?)
+    }
+
+    fn remove_if_same_inode_for_lookup(
+        &self,
+        path: &Path,
+        lease: &BlobLease,
+    ) -> Result<bool, CheckpointStoreError> {
+        Ok(self
+            .namespace
+            .remove_if_same_inode_for_lookup(path, lease)?)
     }
 
     fn touch_if_same_inode(
@@ -631,6 +672,8 @@ pub struct LookupReport {
     pub exact: bool,
     pub candidates_examined: usize,
     pub corrupt_entries_removed: usize,
+    /// Valid records skipped because this process cannot use them.
+    pub unusable_skipped: usize,
     pub touched: bool,
 }
 
@@ -643,6 +686,7 @@ impl LookupReport {
             exact: false,
             candidates_examined: 0,
             corrupt_entries_removed: 0,
+            unusable_skipped: 0,
             touched: false,
         }
     }
@@ -1229,6 +1273,34 @@ mod tests {
     }
 
     #[test]
+    fn publication_reclaims_abandoned_staging_in_other_model_directories() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TestDir::new("sibling-scavenge");
+        let store = DurableCheckpointStore::new(&temp.0, 1 << 20);
+        let other_model = store.blob_dir(&[0x5a; 32]);
+        store.ensure_blob_dir(&other_model).unwrap();
+        let abandoned = unique_temp_path(&other_model, &[0x11; 32]);
+        std::fs::write(&abandoned, b"abandoned by a crashed publisher").unwrap();
+        std::fs::set_permissions(&abandoned, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let other_live = unique_temp_path(&other_model, &[0x22; 32]);
+        let other_live_file = store
+            .namespace
+            .create_staging_file(&other_live, true)
+            .unwrap();
+
+        let this_model = snapshot(&[1, 2], None, true);
+        let report = store
+            .publish(context(&this_model.identity), &this_model)
+            .unwrap();
+        assert!(!abandoned.exists());
+        assert!(other_live.exists(), "a locked, live staging file is kept");
+        assert_eq!(report.staging_entries_removed, 1);
+        assert_eq!(report.staging_live_entries, 1);
+        drop(other_live_file);
+    }
+
+    #[test]
     fn managed_blob_probe_ignores_staging_and_foreign_entries() {
         let temp = TestDir::new("managed-probe");
         let store = DurableCheckpointStore::new(&temp.0, 1 << 20);
@@ -1651,6 +1723,173 @@ mod tests {
     }
 
     #[test]
+    fn low_volume_space_evicts_oldest_blobs_then_refuses_before_staging() {
+        use crate::checkpoint_fs::VOLUME_FREE_RESERVE_BYTES;
+        let temp = TestDir::new("low-volume");
+        let store = DurableCheckpointStore::new(&temp.0, 1 << 20);
+        let older = snapshot(&[1, 2], None, true);
+        store.publish(context(&older.identity), &older).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let newer = snapshot(&[1, 2, 3], None, true);
+        store.publish(context(&newer.identity), &newer).unwrap();
+        let record = 1000;
+        let needed = record + VOLUME_FREE_RESERVE_BYTES;
+
+        // One byte short (checked, then re-read under the lock): the oldest
+        // blob goes, the newer one stays.
+        let mut free = [needed - 1, needed - 1, needed].into_iter();
+        let evicted = store
+            .namespace
+            .ensure_volume_space_with(record, is_managed_blob_name, || free.next())
+            .unwrap();
+        assert!(evicted > 0);
+        assert!(!blob_path(&store, &older).exists());
+        assert!(blob_path(&store, &newer).exists());
+
+        // Still short after evicting everything: refuse before any write.
+        let mut free = [0, 0].into_iter();
+        let error = store
+            .namespace
+            .ensure_volume_space_with(record, is_managed_blob_name, || free.next())
+            .unwrap_err();
+        assert!(
+            matches!(&error, crate::checkpoint_fs::CheckpointFsError::Io(io) if io.kind() == std::io::ErrorKind::StorageFull),
+            "{error}"
+        );
+        assert!(!blob_path(&store, &newer).exists());
+
+        // Plenty of room: nothing is touched.
+        store.publish(context(&older.identity), &older).unwrap();
+        assert_eq!(
+            store
+                .namespace
+                .ensure_volume_space_with(record, is_managed_blob_name, || Some(u64::MAX))
+                .unwrap(),
+            0
+        );
+        assert!(blob_path(&store, &older).exists());
+    }
+
+    #[test]
+    fn every_lookup_lock_gives_way_to_a_publisher() {
+        let temp = TestDir::new("lookup-locks");
+        let store = DurableCheckpointStore::new(&temp.0, 1 << 20);
+        let snapshot = snapshot(&[1, 2], None, true);
+        store
+            .publish(context(&snapshot.identity), &snapshot)
+            .unwrap();
+        let path = blob_path(&store, &snapshot);
+        let lease = store.namespace.open_candidate(&path).unwrap().unwrap();
+
+        let held = store.lock_exclusive().unwrap();
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            store.namespace.open_candidate_for_lookup(&path),
+            Err(crate::checkpoint_fs::CheckpointFsError::Io(io)) if io.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        assert!(matches!(
+            store.namespace.touch_if_same_inode(&path, &lease),
+            Err(crate::checkpoint_fs::CheckpointFsError::TouchLostRace)
+        ));
+        assert!(
+            !store
+                .namespace
+                .remove_if_same_inode_for_lookup(&path, &lease)
+                .unwrap(),
+            "removal is deferred, not waited for"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(path.exists());
+        drop(held);
+        store.namespace.touch_if_same_inode(&path, &lease).unwrap();
+    }
+
+    #[test]
+    fn publishers_serialize_on_the_writer_lock() {
+        let temp = TestDir::new("writer-lock");
+        let store = std::sync::Arc::new(DurableCheckpointStore::new(&temp.0, 1 << 20));
+        let snapshot = snapshot(&[1, 2], None, true);
+        let writer = store.namespace.lock_writer().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let publisher = {
+            let store = std::sync::Arc::clone(&store);
+            let snapshot = snapshot.clone();
+            std::thread::spawn(move || {
+                let report = store.publish(context(&snapshot.identity), &snapshot);
+                done_tx.send(report.is_ok()).unwrap();
+            })
+        };
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "a second publisher waits for the first"
+        );
+        drop(writer);
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+        );
+        publisher.join().unwrap();
+    }
+
+    #[test]
+    fn oversized_or_unmeasurable_publications_reclaim_nothing() {
+        let temp = TestDir::new("refuse-before-reclaim");
+        let store = DurableCheckpointStore::new(&temp.0, 1 << 20);
+        let kept = snapshot(&[1, 2], None, true);
+        store.publish(context(&kept.identity), &kept).unwrap();
+        // The payload fits the record budget exactly, but the encoded record
+        // (headers, checksum) does not; with the volume "full", nothing may be
+        // reclaimed for a record that is then refused.
+        let big = snapshot(&[1, 2, 3], None, true);
+        let mut tight = context(&big.identity);
+        tight.max_record_bytes = big.n_bytes();
+        *store.namespace.test_free_bytes.lock().unwrap() = Some(0);
+        assert!(matches!(
+            store.publish(tight, &big),
+            Err(CheckpointStoreError::Codec(
+                SnapshotCodecError::RecordBudgetExceeded { .. }
+            ))
+        ));
+        assert!(blob_path(&store, &kept).exists());
+        *store.namespace.test_free_bytes.lock().unwrap() = None;
+
+        let error = store
+            .namespace
+            .ensure_volume_space_with(1000, is_managed_blob_name, || None)
+            .unwrap_err();
+        assert!(error.to_string().contains("unreadable"), "{error}");
+        assert!(blob_path(&store, &kept).exists());
+    }
+
+    #[test]
+    fn lookup_gives_up_on_a_busy_namespace_instead_of_blocking() {
+        let temp = TestDir::new("busy-lookup");
+        let store = DurableCheckpointStore::new(&temp.0, 1 << 20);
+        let snapshot = snapshot(&[1, 2], None, true);
+        store
+            .publish(context(&snapshot.identity), &snapshot)
+            .unwrap();
+        let held = store.lock_exclusive().unwrap();
+        let started = std::time::Instant::now();
+        let error = store
+            .lookup(context(&snapshot.identity), &[1, 2, 3])
+            .unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(
+            matches!(&error, CheckpointStoreError::Io(io) if io.kind() == std::io::ErrorKind::WouldBlock),
+            "{error}"
+        );
+        drop(held);
+        let report = store
+            .lookup(context(&snapshot.identity), &[1, 2, 3])
+            .unwrap();
+        assert!(report.snapshot.is_some());
+    }
+
+    #[test]
     fn store_keeps_valid_blob_on_caller_budget_failure() {
         let temp = TestDir::new("caller-budget");
         let store = DurableCheckpointStore::new(&temp.0, 1 << 20);
@@ -1662,12 +1901,10 @@ mod tests {
         let mut constrained = context(&snapshot.identity);
         constrained.max_record_bytes = published.blob_bytes - 1;
 
-        assert!(matches!(
-            store.lookup(constrained, &[1, 2]),
-            Err(CheckpointStoreError::Codec(
-                SnapshotCodecError::RecordBudgetExceeded { .. }
-            ))
-        ));
+        // Over this process's record budget: skipped and kept, not an error.
+        let report = store.lookup(constrained, &[1, 2]).unwrap();
+        assert!(report.snapshot.is_none());
+        assert_eq!(report.unusable_skipped, 1);
         assert!(path.exists());
         assert!(matches!(
             store.publish(constrained, &snapshot),
@@ -1683,6 +1920,17 @@ mod tests {
                 .snapshot
                 .is_some()
         );
+
+        // A longer record over the budget does not hide a shorter one.
+        let longer = self::snapshot(&[1, 2, 3], None, true);
+        let longer_published = store.publish(context(&longer.identity), &longer).unwrap();
+        assert!(longer_published.blob_bytes > published.blob_bytes);
+        let mut fits_shorter = context(&snapshot.identity);
+        fits_shorter.max_record_bytes = published.blob_bytes;
+        let report = store.lookup(fits_shorter, &[1, 2, 3, 4]).unwrap();
+        assert_eq!(report.matched_prefix_len, 2);
+        assert_eq!(report.unusable_skipped, 1);
+        assert!(blob_path(&store, &longer).exists());
     }
 
     #[test]

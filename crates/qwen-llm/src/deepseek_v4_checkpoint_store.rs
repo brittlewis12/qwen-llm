@@ -1,249 +1,39 @@
-//! Bounded, catalog-free durable checkpoint blob store.
-//!
-//! The byte budget covers recognized, linked blob files only. Open-but-unlinked
-//! restore leases, staging files, identity entries, and foreign files are not a
-//! physical free-space guarantee.
-//!
-//! The configured root is a private store namespace. The implementation rejects
-//! substituted managed directories and final entries, but does not defend every
-//! parent-component lookup against a malicious process mutating the namespace
-//! concurrently.
-//!
-//! Checkpoints are disposable cache state, not an authoritative transaction log.
-//! Corruption repair or budget eviction may complete before a later operation
-//! returns an error; callers must remain correct after any cache entry disappears.
+//! DeepSeek V4 causal-snapshot checkpoints on the generic durable store
+//! ([`crate::durable_store`]): record naming, prefix keys, codec error
+//! classification, and the session-typed restore/prepare helpers. The store
+//! itself (publication, lookup, budgets, locking) is shared with Qwen.
 
-use crate::checkpoint_fs::{
-    BlobLease, CheckpointFsError, FileStamp, StagingCleanupReport, StoreNamespace, evict_to_fit,
-    has_managed_blob, hex, metadata_nofollow, parse_hex_32, path_exists_nofollow,
-    require_real_directory_if_exists, scan_managed_blobs, sync_directory, unique_temp_path,
-    validate_post_link_stamp, validate_staged_stamp,
-};
-use crate::checkpoint_identity::CheckpointIdentityCache;
-use crate::checkpoint_store::{PublishOutcome, StagedIntegrityMode, StagedIntegrityReport};
+use crate::checkpoint_fs::{hex, parse_hex_32};
+use crate::checkpoint_store::PublishReport;
 use crate::deepseek_v4::DeepSeekV4Config;
 use crate::deepseek_v4_metal::{
-    DeepSeekV4CausalSnapshot, DeepSeekV4CompatibilityDigest, DeepSeekV4EncodedSnapshot,
-    DeepSeekV4MetalError, DeepSeekV4ModelContentId, DeepSeekV4Session, DeepSeekV4SessionCapacity,
+    DeepSeekV4CausalSnapshot, DeepSeekV4CompatibilityDigest, DeepSeekV4MetalError,
+    DeepSeekV4ModelContentId, DeepSeekV4Session, DeepSeekV4SessionCapacity,
     DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotCodecError, decode_causal_snapshot,
     encode_causal_snapshot, encoded_causal_snapshot_record_bytes,
 };
+use crate::durable_store::{
+    DurablePayload, DurableStore, DurableStoreError, LookupReport, LookupVerdict,
+};
 use std::collections::{BTreeSet, HashMap};
-use std::fs::FileTimes;
-use std::io::{self, BufWriter, Seek, SeekFrom, Write};
-use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime};
+use std::io::{self, Read, Write};
 
 const NAMESPACE_VERSION: &str = "dsv4-v1";
 const PREFIX_KEY_DOMAIN: &[u8] = b"qwen-dsv4-checkpoint-prefix-key-v1\0";
 const BLOB_EXTENSION: &str = "dsv4cp";
-const MAX_PUBLICATION_ATTEMPTS: usize = 8;
 
-#[derive(Clone, Debug)]
-pub struct DeepSeekV4CheckpointStore {
-    namespace: StoreNamespace,
-    max_managed_blob_bytes: u64,
-    staged_integrity: StagedIntegrityMode,
-    staged_integrity_explicit: bool,
+pub type DeepSeekV4CheckpointStore = DurableStore<DeepSeekV4CausalSnapshot>;
+pub type DeepSeekV4CheckpointStoreError = DurableStoreError<DeepSeekV4SnapshotCodecError>;
+pub type DeepSeekV4PublishReport = PublishReport;
+pub type DeepSeekV4LookupReport = LookupReport<DeepSeekV4CausalSnapshot>;
+
+impl From<DeepSeekV4SnapshotCodecError> for DeepSeekV4CheckpointStoreError {
+    fn from(error: DeepSeekV4SnapshotCodecError) -> Self {
+        Self::Codec(error)
+    }
 }
 
 impl DeepSeekV4CheckpointStore {
-    pub fn new(root: impl Into<PathBuf>, max_managed_blob_bytes: u64) -> Self {
-        Self {
-            namespace: StoreNamespace::new(root, NAMESPACE_VERSION),
-            max_managed_blob_bytes,
-            staged_integrity: StagedIntegrityMode::Decode,
-            staged_integrity_explicit: false,
-        }
-    }
-
-    pub fn with_staged_integrity(
-        root: impl Into<PathBuf>,
-        max_managed_blob_bytes: u64,
-        staged_integrity: StagedIntegrityMode,
-    ) -> Self {
-        Self {
-            namespace: StoreNamespace::new(root, NAMESPACE_VERSION),
-            max_managed_blob_bytes,
-            staged_integrity,
-            staged_integrity_explicit: true,
-        }
-    }
-
-    pub fn root(&self) -> &Path {
-        self.namespace.root()
-    }
-
-    pub fn max_managed_blob_bytes(&self) -> u64 {
-        self.max_managed_blob_bytes
-    }
-
-    pub fn staged_integrity_mode(&self) -> StagedIntegrityMode {
-        self.staged_integrity
-    }
-
-    pub fn staged_integrity_is_explicit(&self) -> bool {
-        self.staged_integrity_explicit
-    }
-
-    pub fn identity_cache(&self) -> CheckpointIdentityCache {
-        CheckpointIdentityCache::new(self.namespace.identity_root())
-    }
-
-    /// Cheap global emptiness probe for callers that can skip strong identity
-    /// resolution when no checkpoint blob could possibly match.
-    pub fn has_managed_blobs(&self) -> Result<bool, DeepSeekV4CheckpointStoreError> {
-        let _lock = self.namespace.lock_shared()?;
-        Ok(has_managed_blob(&self.blobs_root(), is_managed_blob_name)?)
-    }
-
-    pub fn publish(
-        &self,
-        context: DeepSeekV4StoreContext<'_>,
-        snapshot: &DeepSeekV4CausalSnapshot,
-    ) -> Result<DeepSeekV4PublishReport, DeepSeekV4CheckpointStoreError> {
-        context.validate()?;
-        let matched_len = snapshot.next_position() as usize;
-        if snapshot.compatibility_digest() != context.compatibility_digest {
-            return Err(DeepSeekV4CheckpointStoreError::CompatibilityMismatch);
-        }
-        let digest = snapshot_prefix_key(context.compatibility_digest.as_bytes(), snapshot);
-        let blob_dir = self.blob_dir(context.compatibility_digest.as_bytes());
-        // One publisher at a time from the space check through publication.
-        let _writer = self.namespace.lock_writer()?;
-        let staging_cleanup = self.ensure_blob_dir(&blob_dir)?;
-        // Size and validate the record exactly (the codec enforces the record
-        // budget) and check the store budget before reclaiming any space.
-        let record_bytes =
-            encoded_causal_snapshot_record_bytes(snapshot, context.codec_constraints)?;
-        if record_bytes > self.max_managed_blob_bytes {
-            return Err(DeepSeekV4CheckpointStoreError::OversizedBlob {
-                blob_bytes: record_bytes,
-                max_managed_blob_bytes: self.max_managed_blob_bytes,
-            });
-        }
-        self.namespace
-            .ensure_volume_space(record_bytes, is_managed_blob_name)?;
-        let final_path = blob_dir.join(blob_name(matched_len, &digest));
-        let temp_path = unique_temp_path(&blob_dir, &digest);
-        let staged = match self.encode_staged(&temp_path, context, snapshot) {
-            Ok(staged) => staged,
-            Err(error) => {
-                let _ = std::fs::remove_file(&temp_path);
-                return Err(error);
-            }
-        };
-        if staged.encoded.record_bytes > self.max_managed_blob_bytes {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(DeepSeekV4CheckpointStoreError::OversizedBlob {
-                blob_bytes: staged.encoded.record_bytes,
-                max_managed_blob_bytes: self.max_managed_blob_bytes,
-            });
-        }
-
-        let result = self.publish_staged(
-            context,
-            snapshot,
-            digest,
-            &final_path,
-            &staged,
-            staging_cleanup,
-        );
-        let _ = std::fs::remove_file(&staged.path);
-        result
-    }
-
-    pub fn lookup(
-        &self,
-        context: DeepSeekV4StoreContext<'_>,
-        request_tokens: &[u32],
-    ) -> Result<DeepSeekV4LookupReport, DeepSeekV4CheckpointStoreError> {
-        self.lookup_filtered(context, request_tokens, |_, _| true)
-    }
-
-    /// [`Self::lookup`], consulting `admit(matched_len, blob_bytes)` before
-    /// decoding each candidate (longest first); rejected candidates are
-    /// skipped unread. The decoded snapshot is returned by value, so callers
-    /// can share it (e.g. promote it into a RAM cache) before restoring.
-    pub fn lookup_filtered(
-        &self,
-        context: DeepSeekV4StoreContext<'_>,
-        request_tokens: &[u32],
-        mut admit: impl FnMut(usize, u64) -> bool,
-    ) -> Result<DeepSeekV4LookupReport, DeepSeekV4CheckpointStoreError> {
-        context.validate()?;
-        if request_tokens.is_empty() {
-            return Ok(DeepSeekV4LookupReport::miss());
-        }
-        let blob_dir = self.blob_dir(context.compatibility_digest.as_bytes());
-        let candidates = self.discover_candidates(&blob_dir, request_tokens, context)?;
-        let mut examined = 0usize;
-        let mut corrupt_removed = 0usize;
-        let mut unusable_skipped = 0usize;
-        for candidate in candidates {
-            examined += 1;
-            let Some(lease) = self.open_candidate_for_lookup(&candidate.path)? else {
-                continue;
-            };
-            if !admit(candidate.matched_len, lease.size) {
-                continue;
-            }
-            match decode_causal_snapshot(&mut &lease.file, context.codec_constraints()) {
-                Ok(snapshot)
-                    if namespace_matches(
-                        &snapshot,
-                        request_tokens,
-                        candidate.matched_len,
-                        context.compatibility_digest.as_bytes(),
-                        &candidate.digest,
-                    ) =>
-                {
-                    let touched = self.touch_if_same_inode(&candidate.path, &lease).is_ok();
-                    return Ok(DeepSeekV4LookupReport {
-                        snapshot: Some(snapshot),
-                        matched_prefix_len: candidate.matched_len,
-                        restored_prefix_len: candidate.matched_len,
-                        exact: false,
-                        candidates_examined: examined,
-                        corrupt_entries_removed: corrupt_removed,
-                        unusable_skipped,
-                        touched,
-                    });
-                }
-                Ok(snapshot)
-                    if snapshot.next_position() as usize == candidate.matched_len
-                        && same_request_prefix(&snapshot, request_tokens)
-                        && snapshot.compatibility_digest() == context.compatibility_digest =>
-                {
-                    return Err(DeepSeekV4CheckpointStoreError::NamespaceCollision);
-                }
-                Ok(_) => {
-                    if self.remove_if_same_inode_for_lookup(&candidate.path, &lease)? {
-                        corrupt_removed += 1;
-                    }
-                }
-                Err(error) if codec_error_proves_invalid_blob(&error) => {
-                    if self.remove_if_same_inode_for_lookup(&candidate.path, &lease)? {
-                        corrupt_removed += 1;
-                    }
-                }
-                // Valid but unusable here (over the current record budget or
-                // allocation): keep it and try the next, shorter candidate.
-                Err(error) if !matches!(error, DeepSeekV4SnapshotCodecError::Io(_)) => {
-                    unusable_skipped += 1;
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
-        Ok(DeepSeekV4LookupReport {
-            candidates_examined: examined,
-            corrupt_entries_removed: corrupt_removed,
-            unusable_skipped,
-            ..DeepSeekV4LookupReport::miss()
-        })
-    }
-
     /// Publish a prepared checkpoint captured earlier from a session that
     /// may no longer exist.
     pub fn publish_prepared(
@@ -263,375 +53,138 @@ impl DeepSeekV4CheckpointStore {
         };
         self.publish(context, &prepared.snapshot)
     }
+}
 
-    fn publish_staged(
-        &self,
-        context: DeepSeekV4StoreContext<'_>,
-        snapshot: &DeepSeekV4CausalSnapshot,
-        digest: [u8; 32],
-        final_path: &Path,
-        staged: &StagedBlob,
-        staging_cleanup: StagingCleanupReport,
-    ) -> Result<DeepSeekV4PublishReport, DeepSeekV4CheckpointStoreError> {
-        let mut repaired = false;
-        for _ in 0..MAX_PUBLICATION_ATTEMPTS {
-            if let Some(lease) = self.open_candidate(final_path)? {
-                let valid =
-                    match decode_causal_snapshot(&mut &lease.file, context.codec_constraints()) {
-                        Ok(existing) => {
-                            if !same_causal_state(&existing, snapshot)
-                                || existing.next_position() != snapshot.next_position()
-                                || snapshot_prefix_key(
-                                    context.compatibility_digest.as_bytes(),
-                                    &existing,
-                                ) != digest
-                            {
-                                return Err(DeepSeekV4CheckpointStoreError::NamespaceCollision);
-                            }
-                            true
-                        }
-                        Err(error) if codec_error_proves_invalid_blob(&error) => false,
-                        Err(error) => return Err(error.into()),
-                    };
-                if valid {
-                    if let Some(report) =
-                        self.admit_existing(final_path, &lease, staged.integrity, staging_cleanup)?
-                    {
-                        return Ok(report);
-                    }
-                    continue;
-                }
-                repaired |= self.remove_if_same_inode(final_path, &lease)?;
-                continue;
-            }
+impl DurablePayload for DeepSeekV4CausalSnapshot {
+    type Token = u32;
+    type Context<'a> = DeepSeekV4StoreContext<'a>;
+    type CodecError = DeepSeekV4SnapshotCodecError;
+    /// One record per prefix: no mode.
+    type Mode = ();
+    const FAMILY_LABEL: &'static str = "DeepSeek V4";
+    const NAMESPACE_VERSION: &'static str = NAMESPACE_VERSION;
+    /// Causal state is a pure function of its prefix: a different valid
+    /// record under the same key is a collision, never a repair.
+    const MISMATCHED_EXISTING_IS_COLLISION: bool = true;
 
-            let lock = self.namespace.lock_exclusive()?;
-            if path_exists_nofollow(final_path)? {
-                drop(lock);
-                continue;
-            }
-            let before = scan_managed_blobs(&self.blobs_root(), is_managed_blob_name)?;
-            let (evicted_entries, evicted_bytes, remaining_bytes) = evict_to_fit(
-                before,
-                staged.encoded.record_bytes,
-                self.max_managed_blob_bytes,
-                Some(final_path),
-            )?;
-            let source_meta = metadata_nofollow(&staged.path)?.ok_or(
-                DeepSeekV4CheckpointStoreError::StagedMetadata("staging path disappeared"),
-            )?;
-            let source_stamp = FileStamp::from_metadata(&source_meta);
-            validate_staged_stamp(
-                &source_stamp,
-                staged.encoded.record_bytes,
-                1,
-                Some(&staged.synced),
-            )?;
-            if let Err(source) = std::fs::hard_link(&staged.path, final_path) {
-                if evicted_entries > 0 {
-                    return Err(DeepSeekV4CheckpointStoreError::PostMutationIo {
-                        operation: "publish blob after eviction",
-                        source,
-                    });
-                }
-                return Err(source.into());
-            }
-            let staged_meta = metadata_nofollow(&staged.path)
-                .map_err(|source| DeepSeekV4CheckpointStoreError::PostMutationIo {
-                    operation: "stat staged blob after publication",
-                    source,
-                })?
-                .ok_or(DeepSeekV4CheckpointStoreError::PostCommit(
-                    "staged blob disappeared",
-                ))?;
-            let final_meta = metadata_nofollow(final_path)
-                .map_err(|source| DeepSeekV4CheckpointStoreError::PostMutationIo {
-                    operation: "stat final blob after publication",
-                    source,
-                })?
-                .ok_or(DeepSeekV4CheckpointStoreError::PostCommit(
-                    "final disappeared",
-                ))?;
-            let fd_stamp = FileStamp::from_metadata(&staged.file.metadata().map_err(|source| {
-                DeepSeekV4CheckpointStoreError::PostMutationIo {
-                    operation: "stat staged descriptor after publication",
-                    source,
-                }
-            })?);
-            let staged_stamp = FileStamp::from_metadata(&staged_meta);
-            let final_stamp = FileStamp::from_metadata(&final_meta);
-            validate_post_link_stamp(&fd_stamp, staged.encoded.record_bytes, &staged.opening)
-                .map_err(|_| {
-                    DeepSeekV4CheckpointStoreError::PostCommit("staged descriptor drifted")
-                })?;
-            validate_post_link_stamp(&staged_stamp, staged.encoded.record_bytes, &fd_stamp)
-                .map_err(|_| DeepSeekV4CheckpointStoreError::PostCommit("staged path drifted"))?;
-            validate_post_link_stamp(&final_stamp, staged.encoded.record_bytes, &fd_stamp)
-                .map_err(|_| DeepSeekV4CheckpointStoreError::PostCommit("final blob drifted"))?;
-            sync_directory(final_path.parent().expect("blob parent")).map_err(|source| {
-                DeepSeekV4CheckpointStoreError::PostMutationIo {
-                    operation: "sync published blob directory",
-                    source,
-                }
-            })?;
-            drop(lock);
-            return Ok(DeepSeekV4PublishReport {
-                outcome: if repaired {
-                    PublishOutcome::RepairedCorrupt
-                } else {
-                    PublishOutcome::Published
-                },
-                blob_bytes: staged.encoded.record_bytes,
-                managed_bytes_after: remaining_bytes
-                    .checked_add(staged.encoded.record_bytes)
-                    .ok_or(DeepSeekV4CheckpointStoreError::ManagedBytesOverflow)?,
-                evicted_entries,
-                evicted_bytes,
-                touched: false,
-                staged_integrity: staged.integrity,
-                staging_entries_removed: staging_cleanup.removed_entries,
-                staging_allocated_bytes_reclaimed: staging_cleanup.reclaimed_bytes,
-                staging_entries_examined: staging_cleanup.examined_entries,
-                staging_live_entries: staging_cleanup.live_entries,
-                staging_legacy_entries: staging_cleanup.legacy_entries,
-                staging_foreign_entries: staging_cleanup.foreign_entries,
-                staging_cleanup_truncated: staging_cleanup.truncated,
-            });
-        }
-        Err(DeepSeekV4CheckpointStoreError::ConcurrentChurn)
+    fn compatibility_id(context: &DeepSeekV4StoreContext<'_>) -> [u8; 32] {
+        *context.compatibility_digest.as_bytes()
     }
 
-    fn encode_staged(
+    fn check_publish(
         &self,
-        temp_path: &Path,
-        context: DeepSeekV4StoreContext<'_>,
-        snapshot: &DeepSeekV4CausalSnapshot,
-    ) -> Result<StagedBlob, DeepSeekV4CheckpointStoreError> {
-        let mut file = self.namespace.create_staging_file(
-            temp_path,
-            self.staged_integrity == StagedIntegrityMode::Decode,
-        )?;
-        let opening = FileStamp::from_metadata(&file.metadata()?);
-        validate_staged_stamp(&opening, 0, 1, None)?;
-        let encoded = {
-            let mut writer = BufWriter::new(&mut file);
-            let encoded =
-                encode_causal_snapshot(&mut writer, snapshot, context.codec_constraints())?;
-            writer.flush()?;
-            encoded
-        };
-        file.sync_all()?;
-        let integrity_t0 = Instant::now();
-        let synced = FileStamp::from_metadata(&file.metadata()?);
-        validate_staged_stamp(&synced, encoded.record_bytes, 1, Some(&opening))?;
-        if self.staged_integrity == StagedIntegrityMode::Decode {
-            file.seek(SeekFrom::Start(0))?;
-            let decoded = decode_causal_snapshot(&mut file, context.codec_constraints())?;
-            if !same_causal_state(&decoded, snapshot)
-                || decoded.next_position() != snapshot.next_position()
-            {
-                return Err(DeepSeekV4CheckpointStoreError::StagedValidation);
-            }
-        }
-        Ok(StagedBlob {
-            file,
-            path: temp_path.to_path_buf(),
-            encoded,
-            opening,
-            synced,
-            integrity: StagedIntegrityReport {
-                mode: self.staged_integrity,
-                elapsed: integrity_t0.elapsed(),
-            },
-        })
-    }
-
-    fn discover_candidates(
-        &self,
-        blob_dir: &Path,
-        request_tokens: &[u32],
-        context: DeepSeekV4StoreContext<'_>,
-    ) -> Result<Vec<Candidate>, DeepSeekV4CheckpointStoreError> {
-        let lock = self.namespace.lock_shared_for_lookup()?;
-        let mut found = Vec::new();
-        let mut lengths = BTreeSet::new();
-        if !require_real_directory_if_exists(&self.blobs_root())?
-            || !require_real_directory_if_exists(blob_dir)?
-        {
-            drop(lock);
-            return Ok(Vec::new());
-        }
-        let entries = match std::fs::read_dir(blob_dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                drop(lock);
-                return Ok(Vec::new());
-            }
-            Err(error) => return Err(error.into()),
-        };
-        for entry in entries {
-            let entry = entry?;
-            let Some(parsed) = parse_blob_name(&entry.file_name()) else {
-                continue;
-            };
-            if parsed.matched_len <= request_tokens.len() {
-                lengths.insert(parsed.matched_len);
-                found.push((entry.path(), parsed));
-            }
-        }
-        drop(lock);
-        let digests = request_prefix_keys(
-            context.compatibility_digest.as_bytes(),
-            request_tokens,
-            &lengths,
-        );
-        let mut candidates = Vec::new();
-        for (path, parsed) in found {
-            if parsed.matched_len == request_tokens.len() {
-                continue;
-            }
-            if digests.get(&parsed.matched_len) == Some(&parsed.digest) {
-                candidates.push(Candidate {
-                    path,
-                    matched_len: parsed.matched_len,
-                    digest: parsed.digest,
-                });
-            }
-        }
-        candidates.sort_by(|a, b| {
-            b.matched_len
-                .cmp(&a.matched_len)
-                .then_with(|| a.path.cmp(&b.path))
-        });
-        Ok(candidates)
-    }
-
-    fn ensure_blob_dir(
-        &self,
-        blob_dir: &Path,
-    ) -> Result<StagingCleanupReport, DeepSeekV4CheckpointStoreError> {
-        Ok(self.namespace.ensure_blob_dir(blob_dir)?)
-    }
-
-    fn admit_existing(
-        &self,
-        path: &Path,
-        lease: &BlobLease,
-        staged_integrity: StagedIntegrityReport,
-        staging_cleanup: StagingCleanupReport,
-    ) -> Result<Option<DeepSeekV4PublishReport>, DeepSeekV4CheckpointStoreError> {
-        let _lock = self.namespace.lock_exclusive()?;
-        let Some(metadata) = metadata_nofollow(path)? else {
-            return Ok(None);
-        };
-        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-            return Ok(None);
-        }
-        if metadata.dev() != lease.dev || metadata.ino() != lease.ino {
-            return Ok(None);
-        }
-        let before = scan_managed_blobs(&self.blobs_root(), is_managed_blob_name)?;
-        let (evicted_entries, evicted_bytes, managed_bytes_after) =
-            evict_to_fit(before, 0, self.max_managed_blob_bytes, Some(path))?;
-        let touched = lease
-            .file
-            .set_times(FileTimes::new().set_modified(SystemTime::now()))
-            .is_ok();
-        Ok(Some(DeepSeekV4PublishReport {
-            outcome: PublishOutcome::ExistingValid,
-            blob_bytes: lease.size,
-            managed_bytes_after,
-            evicted_entries,
-            evicted_bytes,
-            touched,
-            staged_integrity,
-            staging_entries_removed: staging_cleanup.removed_entries,
-            staging_allocated_bytes_reclaimed: staging_cleanup.reclaimed_bytes,
-            staging_entries_examined: staging_cleanup.examined_entries,
-            staging_live_entries: staging_cleanup.live_entries,
-            staging_legacy_entries: staging_cleanup.legacy_entries,
-            staging_foreign_entries: staging_cleanup.foreign_entries,
-            staging_cleanup_truncated: staging_cleanup.truncated,
-        }))
-    }
-
-    fn open_candidate(
-        &self,
-        path: &Path,
-    ) -> Result<Option<BlobLease>, DeepSeekV4CheckpointStoreError> {
-        Ok(self.namespace.open_candidate(path)?)
-    }
-
-    fn remove_if_same_inode(
-        &self,
-        path: &Path,
-        lease: &BlobLease,
-    ) -> Result<bool, DeepSeekV4CheckpointStoreError> {
-        Ok(self.namespace.remove_if_same_inode(path, lease)?)
-    }
-
-    fn open_candidate_for_lookup(
-        &self,
-        path: &Path,
-    ) -> Result<Option<BlobLease>, DeepSeekV4CheckpointStoreError> {
-        Ok(self.namespace.open_candidate_for_lookup(path)?)
-    }
-
-    fn remove_if_same_inode_for_lookup(
-        &self,
-        path: &Path,
-        lease: &BlobLease,
-    ) -> Result<bool, DeepSeekV4CheckpointStoreError> {
-        Ok(self
-            .namespace
-            .remove_if_same_inode_for_lookup(path, lease)?)
-    }
-
-    fn touch_if_same_inode(
-        &self,
-        path: &Path,
-        lease: &BlobLease,
+        context: &DeepSeekV4StoreContext<'_>,
     ) -> Result<(), DeepSeekV4CheckpointStoreError> {
-        Ok(self.namespace.touch_if_same_inode(path, lease)?)
-    }
-
-    #[cfg(test)]
-    fn namespace_root(&self) -> PathBuf {
-        self.namespace.namespace_root()
-    }
-
-    fn blobs_root(&self) -> PathBuf {
-        self.namespace.blobs_root()
-    }
-
-    fn blob_dir(&self, compatibility_id: &[u8; 32]) -> PathBuf {
-        self.namespace.blob_dir(compatibility_id)
-    }
-}
-
-fn is_managed_blob_name(name: &std::ffi::OsStr) -> bool {
-    parse_blob_name(name).is_some()
-}
-
-impl From<CheckpointFsError> for DeepSeekV4CheckpointStoreError {
-    fn from(error: CheckpointFsError) -> Self {
-        match error {
-            CheckpointFsError::Io(source) => Self::Io(source),
-            CheckpointFsError::ForeignEntryAtKey(path) => Self::ForeignEntryAtKey(path),
-            CheckpointFsError::ManagedBytesOverflow => Self::ManagedBytesOverflow,
-            CheckpointFsError::OversizedBlob {
-                blob_bytes,
-                max_managed_blob_bytes,
-            } => Self::OversizedBlob {
-                blob_bytes,
-                max_managed_blob_bytes,
-            },
-            CheckpointFsError::PostMutationIo { operation, source } => {
-                Self::PostMutationIo { operation, source }
-            }
-            CheckpointFsError::StagedMetadata(reason) => Self::StagedMetadata(reason),
-            CheckpointFsError::TouchLostRace => Self::TouchLostRace,
+        context.validate()?;
+        if self.compatibility_digest() != context.compatibility_digest {
+            return Err(compatibility_mismatch());
         }
+        Ok(())
+    }
+
+    fn check_lookup(
+        context: &DeepSeekV4StoreContext<'_>,
+    ) -> Result<(), DeepSeekV4CheckpointStoreError> {
+        context.validate()
+    }
+
+    fn matched_len(&self) -> usize {
+        self.next_position() as usize
+    }
+
+    fn mode(&self) {}
+
+    fn prefix_key(&self, compatibility_id: &[u8; 32]) -> [u8; 32] {
+        snapshot_prefix_key(compatibility_id, self)
+    }
+
+    fn request_prefix_keys(
+        compatibility_id: &[u8; 32],
+        request_tokens: &[u32],
+        lengths: &BTreeSet<usize>,
+    ) -> HashMap<usize, [u8; 32]> {
+        request_prefix_keys(compatibility_id, request_tokens, lengths)
+    }
+
+    fn blob_name(matched_len: usize, _mode: (), digest: &[u8; 32]) -> String {
+        blob_name(matched_len, digest)
+    }
+
+    fn parse_blob_name(name: &std::ffi::OsStr) -> Option<(usize, (), [u8; 32])> {
+        parse_blob_name(name)
+    }
+
+    /// A snapshot carries no observation, so it must leave at least one
+    /// request token to prefill.
+    fn candidate_rank(_mode: (), covers_request: bool) -> Option<usize> {
+        (!covers_request).then_some(0)
+    }
+
+    fn restored_len(_mode: (), matched_len: usize) -> usize {
+        matched_len
+    }
+
+    fn lookup_verdict(
+        &self,
+        request_tokens: &[u32],
+        matched_len: usize,
+        _mode: (),
+        context: &DeepSeekV4StoreContext<'_>,
+        digest: &[u8; 32],
+    ) -> LookupVerdict {
+        if namespace_matches(
+            self,
+            request_tokens,
+            matched_len,
+            context.compatibility_digest.as_bytes(),
+            digest,
+        ) {
+            LookupVerdict::Match
+        } else if self.next_position() as usize == matched_len
+            && same_request_prefix(self, request_tokens)
+            && self.compatibility_digest() == context.compatibility_digest
+        {
+            LookupVerdict::Collision
+        } else {
+            LookupVerdict::Mismatch
+        }
+    }
+
+    fn same_checkpoint(&self, other: &Self) -> bool {
+        same_causal_state(self, other)
+    }
+
+    fn encoded_record_bytes(
+        &self,
+        context: DeepSeekV4StoreContext<'_>,
+    ) -> Result<u64, DeepSeekV4SnapshotCodecError> {
+        // Preflight sizes against the inner codec budget, as before the
+        // generic store; encode/decode use the outer `max_record_bytes`.
+        // Every caller sets both equal.
+        encoded_causal_snapshot_record_bytes(self, context.codec_constraints)
+    }
+
+    fn encode<W: Write>(
+        &self,
+        writer: &mut W,
+        context: DeepSeekV4StoreContext<'_>,
+    ) -> Result<u64, DeepSeekV4SnapshotCodecError> {
+        Ok(encode_causal_snapshot(writer, self, context.codec_constraints())?.record_bytes)
+    }
+
+    fn decode<R: Read>(
+        reader: &mut R,
+        context: DeepSeekV4StoreContext<'_>,
+    ) -> Result<Self, DeepSeekV4SnapshotCodecError> {
+        decode_causal_snapshot(reader, context.codec_constraints())
+    }
+
+    fn codec_error_proves_invalid(error: &DeepSeekV4SnapshotCodecError) -> bool {
+        codec_error_proves_invalid_blob(error)
+    }
+
+    fn codec_error_is_io(error: &DeepSeekV4SnapshotCodecError) -> bool {
+        matches!(error, DeepSeekV4SnapshotCodecError::Io(_))
     }
 }
 
@@ -768,7 +321,7 @@ impl DeepSeekV4StoreContext<'_> {
                 self.codec_constraints.config,
             )
         {
-            return Err(DeepSeekV4CheckpointStoreError::CompatibilityMismatch);
+            return Err(compatibility_mismatch());
         }
         Ok(())
     }
@@ -781,108 +334,10 @@ impl DeepSeekV4StoreContext<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DeepSeekV4PublishReport {
-    pub outcome: PublishOutcome,
-    pub blob_bytes: u64,
-    pub managed_bytes_after: u64,
-    pub evicted_entries: usize,
-    pub evicted_bytes: u64,
-    pub touched: bool,
-    pub staged_integrity: StagedIntegrityReport,
-    pub staging_entries_removed: usize,
-    pub staging_allocated_bytes_reclaimed: u64,
-    pub staging_entries_examined: usize,
-    pub staging_live_entries: usize,
-    pub staging_legacy_entries: usize,
-    pub staging_foreign_entries: usize,
-    pub staging_cleanup_truncated: bool,
-}
-
-#[derive(Debug)]
-pub struct DeepSeekV4LookupReport {
-    pub snapshot: Option<DeepSeekV4CausalSnapshot>,
-    pub matched_prefix_len: usize,
-    pub restored_prefix_len: usize,
-    pub exact: bool,
-    pub candidates_examined: usize,
-    pub corrupt_entries_removed: usize,
-    /// Valid records skipped because this process cannot use them.
-    pub unusable_skipped: usize,
-    pub touched: bool,
-}
-
-impl DeepSeekV4LookupReport {
-    fn miss() -> Self {
-        Self {
-            snapshot: None,
-            matched_prefix_len: 0,
-            restored_prefix_len: 0,
-            exact: false,
-            candidates_examined: 0,
-            corrupt_entries_removed: 0,
-            unusable_skipped: 0,
-            touched: false,
-        }
+fn compatibility_mismatch() -> DeepSeekV4CheckpointStoreError {
+    DeepSeekV4CheckpointStoreError::CompatibilityMismatch {
+        family: <DeepSeekV4CausalSnapshot as DurablePayload>::FAMILY_LABEL,
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum DeepSeekV4CheckpointStoreError {
-    #[error("checkpoint store I/O: {0}")]
-    Io(#[from] io::Error),
-    #[error("checkpoint store codec: {0}")]
-    Codec(#[from] DeepSeekV4SnapshotCodecError),
-    #[error("DeepSeek V4 snapshot compatibility does not match store context")]
-    CompatibilityMismatch,
-    #[error("DeepSeek V4 checkpoint prefix key resolved to different causal state")]
-    NamespaceCollision,
-    #[error("checkpoint blob size {blob_bytes} exceeds managed budget {max_managed_blob_bytes}")]
-    OversizedBlob {
-        blob_bytes: u64,
-        max_managed_blob_bytes: u64,
-    },
-    #[error("foreign non-regular entry at managed checkpoint key: {0}")]
-    ForeignEntryAtKey(PathBuf),
-    #[error("checkpoint managed-byte accounting overflow")]
-    ManagedBytesOverflow,
-    #[error("checkpoint publication changed namespace but failed: {0}")]
-    PostCommit(&'static str),
-    #[error("checkpoint store mutated namespace before {operation} failed: {source}")]
-    PostMutationIo {
-        operation: &'static str,
-        #[source]
-        source: io::Error,
-    },
-    #[error("checkpoint staged validation failed")]
-    StagedValidation,
-    #[error("checkpoint staged metadata failed: {0}")]
-    StagedMetadata(&'static str),
-    #[error("checkpoint store changed repeatedly during publication")]
-    ConcurrentChurn,
-    #[error("checkpoint touch lost an eviction or replacement race")]
-    TouchLostRace,
-}
-
-#[derive(Clone)]
-struct Candidate {
-    path: PathBuf,
-    matched_len: usize,
-    digest: [u8; 32],
-}
-
-struct StagedBlob {
-    file: std::fs::File,
-    path: PathBuf,
-    encoded: DeepSeekV4EncodedSnapshot,
-    opening: FileStamp,
-    synced: FileStamp,
-    integrity: StagedIntegrityReport,
-}
-
-struct ParsedBlobName {
-    matched_len: usize,
-    digest: [u8; 32],
 }
 
 fn snapshot_prefix_key(
@@ -958,7 +413,7 @@ fn blob_name(matched_len: usize, digest: &[u8; 32]) -> String {
     format!("{matched_len}-{}.{}", hex(digest), BLOB_EXTENSION)
 }
 
-fn parse_blob_name(name: &std::ffi::OsStr) -> Option<ParsedBlobName> {
+fn parse_blob_name(name: &std::ffi::OsStr) -> Option<(usize, (), [u8; 32])> {
     let name = name.to_str()?;
     let stem = name.strip_suffix(&format!(".{BLOB_EXTENSION}"))?;
     let mut parts = stem.split('-');
@@ -973,10 +428,7 @@ fn parse_blob_name(name: &std::ffi::OsStr) -> Option<ParsedBlobName> {
     }
     let matched_len = length_text.parse::<usize>().ok()?;
     let digest = parse_hex_32(digest_text)?;
-    Some(ParsedBlobName {
-        matched_len,
-        digest,
-    })
+    Some((matched_len, (), digest))
 }
 
 fn codec_error_proves_invalid_blob(error: &DeepSeekV4SnapshotCodecError) -> bool {
@@ -999,6 +451,13 @@ fn codec_error_proves_invalid_blob(error: &DeepSeekV4SnapshotCodecError) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checkpoint_fs::scan_managed_blobs;
+    use crate::durable_store::PublishOutcome;
+    use std::path::{Path, PathBuf};
+
+    fn is_managed_blob_name(name: &std::ffi::OsStr) -> bool {
+        crate::durable_store::is_managed_blob_name_for::<DeepSeekV4CausalSnapshot>(name)
+    }
     use crate::checkpoint_fs::unique_temp_path;
     use crate::metal::MetalContext;
     use std::io::Write;
@@ -1045,8 +504,8 @@ mod tests {
         let digest = [0xab; 32];
         let name = blob_name(12, &digest);
         let parsed = parse_blob_name(std::ffi::OsStr::new(&name)).unwrap();
-        assert_eq!(parsed.matched_len, 12);
-        assert_eq!(parsed.digest, digest);
+        assert_eq!(parsed.0, 12);
+        assert_eq!(parsed.2, digest);
         for invalid in [
             "012-abababababababababababababababababababababababababababababababab.dsv4cp",
             "12-ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB.dsv4cp",
@@ -1069,7 +528,7 @@ mod tests {
         store.ensure_blob_dir(&blob_dir).unwrap();
         let abandoned = unique_temp_path(&blob_dir, &[0x42; 32]);
         let mut file = store
-            .namespace
+            .namespace()
             .create_staging_file(&abandoned, true)
             .unwrap();
         file.write_all(b"abandoned-deepseek-staging").unwrap();
@@ -1389,7 +848,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             store.publish(variant.context(1 << 30), &variant.snapshot),
-            Err(DeepSeekV4CheckpointStoreError::NamespaceCollision)
+            Err(DeepSeekV4CheckpointStoreError::NamespaceCollision { .. })
         ));
         let mut extension = original.snapshot.prefix_tokens().to_vec();
         extension.push(99);

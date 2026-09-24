@@ -1,591 +1,150 @@
-//! Bounded, catalog-free durable checkpoint blob store.
-//!
-//! The byte budget covers recognized, linked blob files only. Open-but-unlinked
-//! restore leases, staging files, identity entries, and foreign files are not a
-//! physical free-space guarantee.
-//!
-//! The configured root is a private store namespace. The implementation rejects
-//! substituted managed directories and final entries, but does not defend every
-//! parent-component lookup against a malicious process mutating the namespace
-//! concurrently.
-//!
-//! Checkpoints are disposable cache state, not an authoritative transaction log.
-//! Corruption repair or budget eviction may complete before a later operation
-//! returns an error; callers must remain correct after any cache entry disappears.
+//! Qwen `SessionSnapshot` checkpoints on the generic durable store
+//! ([`crate::durable_store`]): record naming, prefix keys, snapshot modes and
+//! codec error classification. The store itself (publication, lookup,
+//! budgets, locking) is shared with DeepSeek V4.
 
 use crate::checkpoint_codec::{
-    EncodedSnapshot, SnapshotCodecConstraints, SnapshotCodecError, decode_snapshot,
-    encode_snapshot, encoded_snapshot_record_bytes,
+    SnapshotCodecConstraints, SnapshotCodecError, decode_snapshot, encode_snapshot,
+    encoded_snapshot_record_bytes,
 };
 pub use crate::checkpoint_fs::volume_free_bytes;
-use crate::checkpoint_fs::{
-    BlobLease, CheckpointFsError, FileStamp, StagingCleanupReport, StoreNamespace, evict_to_fit,
-    has_managed_blob, hex, metadata_nofollow, parse_hex_32, path_exists_nofollow,
-    require_real_directory_if_exists, scan_managed_blobs, sync_directory, unique_temp_path,
-    validate_post_link_stamp, validate_staged_stamp,
+use crate::checkpoint_fs::{hex, parse_hex_32};
+use crate::durable_store::{DurablePayload, DurableStore, DurableStoreError, LookupVerdict};
+pub use crate::durable_store::{
+    PublishOutcome, PublishReport, StagedIntegrityMode, StagedIntegrityReport,
 };
-use crate::checkpoint_identity::CheckpointIdentityCache;
 use crate::metal_forward::{SessionSnapshot, SnapshotIdentity};
 use std::collections::{BTreeSet, HashMap};
-use std::fs::FileTimes;
-use std::io::{self, BufWriter, Seek, SeekFrom, Write};
-use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::io::{self, Read, Write};
 
 const NAMESPACE_VERSION: &str = "v1";
 const PREFIX_KEY_DOMAIN: &[u8] = b"qwen-checkpoint-prefix-key-v1\0";
 const BLOB_EXTENSION: &str = "qcp";
-const MAX_PUBLICATION_ATTEMPTS: usize = 8;
 
-#[derive(Clone, Debug)]
-pub struct DurableCheckpointStore {
-    namespace: StoreNamespace,
-    max_managed_blob_bytes: u64,
-    staged_integrity: StagedIntegrityMode,
-    staged_integrity_explicit: bool,
+pub type DurableCheckpointStore = DurableStore<SessionSnapshot>;
+pub type CheckpointStoreError = DurableStoreError<SnapshotCodecError>;
+pub type LookupReport = crate::durable_store::LookupReport<SessionSnapshot>;
+
+impl From<SnapshotCodecError> for CheckpointStoreError {
+    fn from(error: SnapshotCodecError) -> Self {
+        Self::Codec(error)
+    }
 }
 
-impl DurableCheckpointStore {
-    pub fn new(root: impl Into<PathBuf>, max_managed_blob_bytes: u64) -> Self {
-        Self {
-            namespace: StoreNamespace::new(root, NAMESPACE_VERSION),
-            max_managed_blob_bytes,
-            staged_integrity: StagedIntegrityMode::Decode,
-            staged_integrity_explicit: false,
-        }
+impl DurablePayload for SessionSnapshot {
+    type Token = i32;
+    type Context<'a> = StoreContext<'a>;
+    type CodecError = SnapshotCodecError;
+    type Mode = SnapshotMode;
+    const FAMILY_LABEL: &'static str = "Qwen";
+    const NAMESPACE_VERSION: &'static str = NAMESPACE_VERSION;
+    /// A different record under a Qwen key is repaired by replacement.
+    const MISMATCHED_EXISTING_IS_COLLISION: bool = false;
+
+    fn compatibility_id(context: &StoreContext<'_>) -> [u8; 32] {
+        *context.compatibility_id
     }
 
-    pub fn with_staged_integrity(
-        root: impl Into<PathBuf>,
-        max_managed_blob_bytes: u64,
-        staged_integrity: StagedIntegrityMode,
-    ) -> Self {
-        Self {
-            namespace: StoreNamespace::new(root, NAMESPACE_VERSION),
-            max_managed_blob_bytes,
-            staged_integrity,
-            staged_integrity_explicit: true,
-        }
+    fn check_publish(&self, _context: &StoreContext<'_>) -> Result<(), CheckpointStoreError> {
+        Ok(())
     }
 
-    pub fn root(&self) -> &Path {
-        self.namespace.root()
+    fn check_lookup(_context: &StoreContext<'_>) -> Result<(), CheckpointStoreError> {
+        Ok(())
     }
 
-    pub fn max_managed_blob_bytes(&self) -> u64 {
-        self.max_managed_blob_bytes
+    fn matched_len(&self) -> usize {
+        self.matched_prefix_len()
     }
 
-    pub fn staged_integrity_mode(&self) -> StagedIntegrityMode {
-        self.staged_integrity
+    fn mode(&self) -> SnapshotMode {
+        SnapshotMode::from_snapshot(self)
     }
 
-    pub fn staged_integrity_is_explicit(&self) -> bool {
-        self.staged_integrity_explicit
+    fn prefix_key(&self, compatibility_id: &[u8; 32]) -> [u8; 32] {
+        snapshot_prefix_key(compatibility_id, self)
     }
 
-    pub fn identity_cache(&self) -> CheckpointIdentityCache {
-        CheckpointIdentityCache::new(self.namespace.identity_root())
-    }
-
-    /// Cheap global emptiness probe for callers that can skip strong identity
-    /// resolution when no checkpoint blob could possibly match.
-    pub fn has_managed_blobs(&self) -> Result<bool, CheckpointStoreError> {
-        let _lock = self.namespace.lock_shared()?;
-        Ok(has_managed_blob(&self.blobs_root(), is_managed_blob_name)?)
-    }
-
-    pub fn publish(
-        &self,
-        context: StoreContext<'_>,
-        snapshot: &SessionSnapshot,
-    ) -> Result<PublishReport, CheckpointStoreError> {
-        let mode = SnapshotMode::from_snapshot(snapshot);
-        let matched_len = snapshot.matched_prefix_len();
-        let digest = snapshot_prefix_key(context.compatibility_id, snapshot);
-        let blob_dir = self.blob_dir(context.compatibility_id);
-        // One publisher at a time from the space check through publication.
-        let _writer = self.namespace.lock_writer()?;
-        let staging_cleanup = self.ensure_blob_dir(&blob_dir)?;
-        // Size and validate the record exactly (the codec enforces the record
-        // budget) and check the store budget before reclaiming any space.
-        let record_bytes = encoded_snapshot_record_bytes(snapshot, context.codec_constraints())?;
-        if record_bytes > self.max_managed_blob_bytes {
-            return Err(CheckpointStoreError::OversizedBlob {
-                blob_bytes: record_bytes,
-                max_managed_blob_bytes: self.max_managed_blob_bytes,
-            });
-        }
-        self.namespace
-            .ensure_volume_space(record_bytes, is_managed_blob_name)?;
-        let final_path = blob_dir.join(blob_name(matched_len, mode, &digest));
-        let temp_path = unique_temp_path(&blob_dir, &digest);
-        let staged = match self.encode_staged(&temp_path, context, snapshot) {
-            Ok(staged) => staged,
-            Err(error) => {
-                let _ = std::fs::remove_file(&temp_path);
-                return Err(error);
-            }
-        };
-        if staged.encoded.record_bytes > self.max_managed_blob_bytes {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(CheckpointStoreError::OversizedBlob {
-                blob_bytes: staged.encoded.record_bytes,
-                max_managed_blob_bytes: self.max_managed_blob_bytes,
-            });
-        }
-
-        let result = self.publish_staged(
-            context,
-            snapshot,
-            mode,
-            digest,
-            &final_path,
-            &staged,
-            staging_cleanup,
-        );
-        let _ = std::fs::remove_file(&staged.path);
-        result
-    }
-
-    pub fn lookup(
-        &self,
-        context: StoreContext<'_>,
+    fn request_prefix_keys(
+        compatibility_id: &[u8; 32],
         request_tokens: &[i32],
-    ) -> Result<LookupReport, CheckpointStoreError> {
-        self.lookup_filtered(context, request_tokens, |_, _| true)
+        lengths: &BTreeSet<usize>,
+    ) -> HashMap<usize, [u8; 32]> {
+        request_prefix_keys(compatibility_id, request_tokens, lengths)
     }
 
-    /// [`Self::lookup`], consulting `admit(matched_len, blob_bytes)` before
-    /// decoding each candidate (longest first). A rejected candidate is
-    /// skipped without reading it, so callers can require a longer match
-    /// than they already hold or refuse records they cannot afford to load.
-    pub fn lookup_filtered(
+    fn blob_name(matched_len: usize, mode: SnapshotMode, digest: &[u8; 32]) -> String {
+        blob_name(matched_len, mode, digest)
+    }
+
+    fn parse_blob_name(name: &std::ffi::OsStr) -> Option<(usize, SnapshotMode, [u8; 32])> {
+        parse_blob_name(name)
+    }
+
+    /// A record covering the whole request serves it only with its logits
+    /// or pending token; among equal lengths, logits first.
+    fn candidate_rank(mode: SnapshotMode, covers_request: bool) -> Option<usize> {
+        (!(covers_request && mode == SnapshotMode::Consumed))
+            .then(|| mode_rank(mode, covers_request))
+    }
+
+    fn restored_len(mode: SnapshotMode, matched_len: usize) -> usize {
+        mode.restored_len(matched_len)
+    }
+
+    fn lookup_verdict(
         &self,
-        context: StoreContext<'_>,
         request_tokens: &[i32],
-        mut admit: impl FnMut(usize, u64) -> bool,
-    ) -> Result<LookupReport, CheckpointStoreError> {
-        if request_tokens.is_empty() {
-            return Ok(LookupReport::miss());
-        }
-        let blob_dir = self.blob_dir(context.compatibility_id);
-        let candidates = self.discover_candidates(&blob_dir, request_tokens, context)?;
-        let mut examined = 0usize;
-        let mut corrupt_removed = 0usize;
-        let mut unusable_skipped = 0usize;
-        for candidate in candidates {
-            examined += 1;
-            let Some(lease) = self.open_candidate_for_lookup(&candidate.path)? else {
-                continue;
-            };
-            if !admit(candidate.matched_len, lease.size) {
-                continue;
-            }
-            match decode_snapshot(&mut &lease.file, context.codec_constraints()) {
-                Ok(snapshot)
-                    if namespace_matches(
-                        &snapshot,
-                        request_tokens,
-                        candidate.matched_len,
-                        candidate.mode,
-                        context.compatibility_id,
-                        &candidate.digest,
-                    ) =>
-                {
-                    let touched = self.touch_if_same_inode(&candidate.path, &lease).is_ok();
-                    return Ok(LookupReport {
-                        snapshot: Some(snapshot),
-                        matched_prefix_len: candidate.matched_len,
-                        restored_prefix_len: candidate.mode.restored_len(candidate.matched_len),
-                        exact: candidate.matched_len == request_tokens.len(),
-                        candidates_examined: examined,
-                        corrupt_entries_removed: corrupt_removed,
-                        unusable_skipped,
-                        touched,
-                    });
-                }
-                Ok(_) => {
-                    if self.remove_if_same_inode_for_lookup(&candidate.path, &lease)? {
-                        corrupt_removed += 1;
-                    }
-                }
-                Err(error) if codec_error_proves_invalid_blob(&error) => {
-                    if self.remove_if_same_inode_for_lookup(&candidate.path, &lease)? {
-                        corrupt_removed += 1;
-                    }
-                }
-                // Valid but unusable here (over the current record budget,
-                // context capacity, or allocation): keep it for a process
-                // that can load it and try the next, shorter candidate.
-                Err(error) if !matches!(error, SnapshotCodecError::Io(_)) => {
-                    unusable_skipped += 1;
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
-        Ok(LookupReport {
-            candidates_examined: examined,
-            corrupt_entries_removed: corrupt_removed,
-            unusable_skipped,
-            ..LookupReport::miss()
-        })
-    }
-
-    fn publish_staged(
-        &self,
-        context: StoreContext<'_>,
-        snapshot: &SessionSnapshot,
+        matched_len: usize,
         mode: SnapshotMode,
-        digest: [u8; 32],
-        final_path: &Path,
-        staged: &StagedBlob,
-        staging_cleanup: StagingCleanupReport,
-    ) -> Result<PublishReport, CheckpointStoreError> {
-        let mut repaired = false;
-        for _ in 0..MAX_PUBLICATION_ATTEMPTS {
-            if let Some(lease) = self.open_candidate(final_path)? {
-                let valid = match decode_snapshot(&mut &lease.file, context.codec_constraints()) {
-                    Ok(existing) => {
-                        same_snapshot_prefix(&existing, snapshot)
-                            && existing.matched_prefix_len() == snapshot.matched_prefix_len()
-                            && SnapshotMode::from_snapshot(&existing) == mode
-                            && snapshot_prefix_key(context.compatibility_id, &existing) == digest
-                    }
-                    Err(error) if codec_error_proves_invalid_blob(&error) => false,
-                    Err(error) => return Err(error.into()),
-                };
-                if valid {
-                    if let Some(report) =
-                        self.admit_existing(final_path, &lease, staged.integrity, staging_cleanup)?
-                    {
-                        return Ok(report);
-                    }
-                    continue;
-                }
-                repaired |= self.remove_if_same_inode(final_path, &lease)?;
-                continue;
-            }
-
-            let lock = self.namespace.lock_exclusive()?;
-            if path_exists_nofollow(final_path)? {
-                drop(lock);
-                continue;
-            }
-            let before = scan_managed_blobs(&self.blobs_root(), is_managed_blob_name)?;
-            let (evicted_entries, evicted_bytes, remaining_bytes) = evict_to_fit(
-                before,
-                staged.encoded.record_bytes,
-                self.max_managed_blob_bytes,
-                Some(final_path),
-            )?;
-            let source_meta = metadata_nofollow(&staged.path)?.ok_or(
-                CheckpointStoreError::StagedMetadata("staging path disappeared"),
-            )?;
-            let source_stamp = FileStamp::from_metadata(&source_meta);
-            validate_staged_stamp(
-                &source_stamp,
-                staged.encoded.record_bytes,
-                1,
-                Some(&staged.synced),
-            )?;
-            if let Err(source) = std::fs::hard_link(&staged.path, final_path) {
-                if evicted_entries > 0 {
-                    return Err(CheckpointStoreError::PostMutationIo {
-                        operation: "publish blob after eviction",
-                        source,
-                    });
-                }
-                return Err(source.into());
-            }
-            let staged_meta = metadata_nofollow(&staged.path)
-                .map_err(|source| CheckpointStoreError::PostMutationIo {
-                    operation: "stat staged blob after publication",
-                    source,
-                })?
-                .ok_or(CheckpointStoreError::PostCommit("staged blob disappeared"))?;
-            let final_meta = metadata_nofollow(final_path)
-                .map_err(|source| CheckpointStoreError::PostMutationIo {
-                    operation: "stat final blob after publication",
-                    source,
-                })?
-                .ok_or(CheckpointStoreError::PostCommit("final disappeared"))?;
-            let fd_stamp = FileStamp::from_metadata(&staged.file.metadata().map_err(|source| {
-                CheckpointStoreError::PostMutationIo {
-                    operation: "stat staged descriptor after publication",
-                    source,
-                }
-            })?);
-            let staged_stamp = FileStamp::from_metadata(&staged_meta);
-            let final_stamp = FileStamp::from_metadata(&final_meta);
-            validate_post_link_stamp(&fd_stamp, staged.encoded.record_bytes, &staged.opening)
-                .map_err(|_| CheckpointStoreError::PostCommit("staged descriptor drifted"))?;
-            validate_post_link_stamp(&staged_stamp, staged.encoded.record_bytes, &fd_stamp)
-                .map_err(|_| CheckpointStoreError::PostCommit("staged path drifted"))?;
-            validate_post_link_stamp(&final_stamp, staged.encoded.record_bytes, &fd_stamp)
-                .map_err(|_| CheckpointStoreError::PostCommit("final blob drifted"))?;
-            sync_directory(final_path.parent().expect("blob parent")).map_err(|source| {
-                CheckpointStoreError::PostMutationIo {
-                    operation: "sync published blob directory",
-                    source,
-                }
-            })?;
-            drop(lock);
-            return Ok(PublishReport {
-                outcome: if repaired {
-                    PublishOutcome::RepairedCorrupt
-                } else {
-                    PublishOutcome::Published
-                },
-                blob_bytes: staged.encoded.record_bytes,
-                managed_bytes_after: remaining_bytes
-                    .checked_add(staged.encoded.record_bytes)
-                    .ok_or(CheckpointStoreError::ManagedBytesOverflow)?,
-                evicted_entries,
-                evicted_bytes,
-                touched: false,
-                staged_integrity: staged.integrity,
-                staging_entries_removed: staging_cleanup.removed_entries,
-                staging_allocated_bytes_reclaimed: staging_cleanup.reclaimed_bytes,
-                staging_entries_examined: staging_cleanup.examined_entries,
-                staging_live_entries: staging_cleanup.live_entries,
-                staging_legacy_entries: staging_cleanup.legacy_entries,
-                staging_foreign_entries: staging_cleanup.foreign_entries,
-                staging_cleanup_truncated: staging_cleanup.truncated,
-            });
+        context: &StoreContext<'_>,
+        digest: &[u8; 32],
+    ) -> LookupVerdict {
+        if namespace_matches(
+            self,
+            request_tokens,
+            matched_len,
+            mode,
+            context.compatibility_id,
+            digest,
+        ) {
+            LookupVerdict::Match
+        } else {
+            LookupVerdict::Mismatch
         }
-        Err(CheckpointStoreError::ConcurrentChurn)
     }
 
-    fn encode_staged(
+    fn same_checkpoint(&self, other: &Self) -> bool {
+        same_snapshot_prefix(self, other)
+            && self.matched_prefix_len() == other.matched_prefix_len()
+            && SnapshotMode::from_snapshot(self) == SnapshotMode::from_snapshot(other)
+    }
+
+    fn encoded_record_bytes(&self, context: StoreContext<'_>) -> Result<u64, SnapshotCodecError> {
+        encoded_snapshot_record_bytes(self, context.codec_constraints())
+    }
+
+    fn encode<W: Write>(
         &self,
-        temp_path: &Path,
+        writer: &mut W,
         context: StoreContext<'_>,
-        snapshot: &SessionSnapshot,
-    ) -> Result<StagedBlob, CheckpointStoreError> {
-        let mut file = self.namespace.create_staging_file(
-            temp_path,
-            self.staged_integrity == StagedIntegrityMode::Decode,
-        )?;
-        let opening = FileStamp::from_metadata(&file.metadata()?);
-        validate_staged_stamp(&opening, 0, 1, None)?;
-        let encoded = {
-            let mut writer = BufWriter::new(&mut file);
-            let encoded = encode_snapshot(&mut writer, snapshot, context.codec_constraints())?;
-            writer.flush()?;
-            encoded
-        };
-        file.sync_all()?;
-        let integrity_t0 = Instant::now();
-        let synced = FileStamp::from_metadata(&file.metadata()?);
-        validate_staged_stamp(&synced, encoded.record_bytes, 1, Some(&opening))?;
-        if self.staged_integrity == StagedIntegrityMode::Decode {
-            file.seek(SeekFrom::Start(0))?;
-            let decoded = decode_snapshot(&mut file, context.codec_constraints())?;
-            if !same_snapshot_prefix(&decoded, snapshot)
-                || SnapshotMode::from_snapshot(&decoded) != SnapshotMode::from_snapshot(snapshot)
-            {
-                return Err(CheckpointStoreError::StagedValidation);
-            }
-        }
-        Ok(StagedBlob {
-            file,
-            path: temp_path.to_path_buf(),
-            encoded,
-            opening,
-            synced,
-            integrity: StagedIntegrityReport {
-                mode: self.staged_integrity,
-                elapsed: integrity_t0.elapsed(),
-            },
-        })
+    ) -> Result<u64, SnapshotCodecError> {
+        Ok(encode_snapshot(writer, self, context.codec_constraints())?.record_bytes)
     }
 
-    fn discover_candidates(
-        &self,
-        blob_dir: &Path,
-        request_tokens: &[i32],
+    fn decode<R: Read>(
+        reader: &mut R,
         context: StoreContext<'_>,
-    ) -> Result<Vec<Candidate>, CheckpointStoreError> {
-        let lock = self.namespace.lock_shared_for_lookup()?;
-        let mut found = Vec::new();
-        let mut lengths = BTreeSet::new();
-        if !require_real_directory_if_exists(&self.blobs_root())?
-            || !require_real_directory_if_exists(blob_dir)?
-        {
-            drop(lock);
-            return Ok(Vec::new());
-        }
-        let entries = match std::fs::read_dir(blob_dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                drop(lock);
-                return Ok(Vec::new());
-            }
-            Err(error) => return Err(error.into()),
-        };
-        for entry in entries {
-            let entry = entry?;
-            let Some(parsed) = parse_blob_name(&entry.file_name()) else {
-                continue;
-            };
-            if parsed.matched_len <= request_tokens.len() {
-                lengths.insert(parsed.matched_len);
-                found.push((entry.path(), parsed));
-            }
-        }
-        drop(lock);
-        let digests = request_prefix_keys(context.compatibility_id, request_tokens, &lengths);
-        let mut candidates = Vec::new();
-        for (path, parsed) in found {
-            if parsed.matched_len == request_tokens.len() && parsed.mode == SnapshotMode::Consumed {
-                continue;
-            }
-            if digests.get(&parsed.matched_len) == Some(&parsed.digest) {
-                candidates.push(Candidate {
-                    path,
-                    matched_len: parsed.matched_len,
-                    mode: parsed.mode,
-                    digest: parsed.digest,
-                });
-            }
-        }
-        candidates.sort_by(|a, b| {
-            b.matched_len
-                .cmp(&a.matched_len)
-                .then_with(|| {
-                    mode_rank(a.mode, a.matched_len == request_tokens.len())
-                        .cmp(&mode_rank(b.mode, b.matched_len == request_tokens.len()))
-                })
-                .then_with(|| a.path.cmp(&b.path))
-        });
-        Ok(candidates)
+    ) -> Result<Self, SnapshotCodecError> {
+        decode_snapshot(reader, context.codec_constraints())
     }
 
-    fn admit_existing(
-        &self,
-        path: &Path,
-        lease: &BlobLease,
-        staged_integrity: StagedIntegrityReport,
-        staging_cleanup: StagingCleanupReport,
-    ) -> Result<Option<PublishReport>, CheckpointStoreError> {
-        let _lock = self.namespace.lock_exclusive()?;
-        let Some(metadata) = metadata_nofollow(path)? else {
-            return Ok(None);
-        };
-        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-            return Ok(None);
-        }
-        if metadata.dev() != lease.dev || metadata.ino() != lease.ino {
-            return Ok(None);
-        }
-        let before = scan_managed_blobs(&self.blobs_root(), is_managed_blob_name)?;
-        let (evicted_entries, evicted_bytes, managed_bytes_after) =
-            evict_to_fit(before, 0, self.max_managed_blob_bytes, Some(path))?;
-        let touched = lease
-            .file
-            .set_times(FileTimes::new().set_modified(SystemTime::now()))
-            .is_ok();
-        Ok(Some(PublishReport {
-            outcome: PublishOutcome::ExistingValid,
-            blob_bytes: lease.size,
-            managed_bytes_after,
-            evicted_entries,
-            evicted_bytes,
-            touched,
-            staged_integrity,
-            staging_entries_removed: staging_cleanup.removed_entries,
-            staging_allocated_bytes_reclaimed: staging_cleanup.reclaimed_bytes,
-            staging_entries_examined: staging_cleanup.examined_entries,
-            staging_live_entries: staging_cleanup.live_entries,
-            staging_legacy_entries: staging_cleanup.legacy_entries,
-            staging_foreign_entries: staging_cleanup.foreign_entries,
-            staging_cleanup_truncated: staging_cleanup.truncated,
-        }))
+    fn codec_error_proves_invalid(error: &SnapshotCodecError) -> bool {
+        codec_error_proves_invalid_blob(error)
     }
 
-    fn open_candidate(&self, path: &Path) -> Result<Option<BlobLease>, CheckpointStoreError> {
-        Ok(self.namespace.open_candidate(path)?)
-    }
-
-    fn remove_if_same_inode(
-        &self,
-        path: &Path,
-        lease: &BlobLease,
-    ) -> Result<bool, CheckpointStoreError> {
-        Ok(self.namespace.remove_if_same_inode(path, lease)?)
-    }
-
-    fn open_candidate_for_lookup(
-        &self,
-        path: &Path,
-    ) -> Result<Option<BlobLease>, CheckpointStoreError> {
-        Ok(self.namespace.open_candidate_for_lookup(path)?)
-    }
-
-    fn remove_if_same_inode_for_lookup(
-        &self,
-        path: &Path,
-        lease: &BlobLease,
-    ) -> Result<bool, CheckpointStoreError> {
-        Ok(self
-            .namespace
-            .remove_if_same_inode_for_lookup(path, lease)?)
-    }
-
-    fn touch_if_same_inode(
-        &self,
-        path: &Path,
-        lease: &BlobLease,
-    ) -> Result<(), CheckpointStoreError> {
-        Ok(self.namespace.touch_if_same_inode(path, lease)?)
-    }
-
-    fn ensure_blob_dir(
-        &self,
-        blob_dir: &Path,
-    ) -> Result<StagingCleanupReport, CheckpointStoreError> {
-        Ok(self.namespace.ensure_blob_dir(blob_dir)?)
-    }
-
-    #[cfg(test)]
-    fn lock_exclusive(&self) -> Result<crate::checkpoint_fs::StoreLock, CheckpointStoreError> {
-        Ok(self.namespace.lock_exclusive()?)
-    }
-
-    fn blobs_root(&self) -> PathBuf {
-        self.namespace.blobs_root()
-    }
-
-    fn blob_dir(&self, compatibility_id: &[u8; 32]) -> PathBuf {
-        self.namespace.blob_dir(compatibility_id)
-    }
-}
-
-fn is_managed_blob_name(name: &std::ffi::OsStr) -> bool {
-    parse_blob_name(name).is_some()
-}
-
-impl From<CheckpointFsError> for CheckpointStoreError {
-    fn from(error: CheckpointFsError) -> Self {
-        match error {
-            CheckpointFsError::Io(source) => Self::Io(source),
-            CheckpointFsError::ForeignEntryAtKey(path) => Self::ForeignEntryAtKey(path),
-            CheckpointFsError::ManagedBytesOverflow => Self::ManagedBytesOverflow,
-            CheckpointFsError::OversizedBlob {
-                blob_bytes,
-                max_managed_blob_bytes,
-            } => Self::OversizedBlob {
-                blob_bytes,
-                max_managed_blob_bytes,
-            },
-            CheckpointFsError::PostMutationIo { operation, source } => {
-                Self::PostMutationIo { operation, source }
-            }
-            CheckpointFsError::StagedMetadata(reason) => Self::StagedMetadata(reason),
-            CheckpointFsError::TouchLostRace => Self::TouchLostRace,
-        }
+    fn codec_error_is_io(error: &SnapshotCodecError) -> bool {
+        matches!(error, SnapshotCodecError::Io(_))
     }
 }
 
@@ -610,123 +169,10 @@ impl StoreContext<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PublishOutcome {
-    Published,
-    ExistingValid,
-    RepairedCorrupt,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum StagedIntegrityMode {
-    Decode,
-    DeferredRestore,
-}
-
-impl StagedIntegrityMode {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "decode" => Some(Self::Decode),
-            "deferred-restore" => Some(Self::DeferredRestore),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Decode => "decode",
-            Self::DeferredRestore => "deferred-restore",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct StagedIntegrityReport {
-    pub mode: StagedIntegrityMode,
-    pub elapsed: Duration,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PublishReport {
-    pub outcome: PublishOutcome,
-    pub blob_bytes: u64,
-    pub managed_bytes_after: u64,
-    pub evicted_entries: usize,
-    pub evicted_bytes: u64,
-    pub touched: bool,
-    pub staged_integrity: StagedIntegrityReport,
-    pub staging_entries_removed: usize,
-    pub staging_allocated_bytes_reclaimed: u64,
-    pub staging_entries_examined: usize,
-    pub staging_live_entries: usize,
-    pub staging_legacy_entries: usize,
-    pub staging_foreign_entries: usize,
-    pub staging_cleanup_truncated: bool,
-}
-
-#[derive(Debug)]
-pub struct LookupReport {
-    pub snapshot: Option<SessionSnapshot>,
-    pub matched_prefix_len: usize,
-    pub restored_prefix_len: usize,
-    pub exact: bool,
-    pub candidates_examined: usize,
-    pub corrupt_entries_removed: usize,
-    /// Valid records skipped because this process cannot use them.
-    pub unusable_skipped: usize,
-    pub touched: bool,
-}
-
-impl LookupReport {
-    fn miss() -> Self {
-        Self {
-            snapshot: None,
-            matched_prefix_len: 0,
-            restored_prefix_len: 0,
-            exact: false,
-            candidates_examined: 0,
-            corrupt_entries_removed: 0,
-            unusable_skipped: 0,
-            touched: false,
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum CheckpointStoreError {
-    #[error("checkpoint store I/O: {0}")]
-    Io(#[from] io::Error),
-    #[error("checkpoint store codec: {0}")]
-    Codec(#[from] SnapshotCodecError),
-    #[error("checkpoint blob size {blob_bytes} exceeds managed budget {max_managed_blob_bytes}")]
-    OversizedBlob {
-        blob_bytes: u64,
-        max_managed_blob_bytes: u64,
-    },
-    #[error("foreign non-regular entry at managed checkpoint key: {0}")]
-    ForeignEntryAtKey(PathBuf),
-    #[error("checkpoint managed-byte accounting overflow")]
-    ManagedBytesOverflow,
-    #[error("checkpoint publication changed namespace but failed: {0}")]
-    PostCommit(&'static str),
-    #[error("checkpoint store mutated namespace before {operation} failed: {source}")]
-    PostMutationIo {
-        operation: &'static str,
-        #[source]
-        source: io::Error,
-    },
-    #[error("checkpoint staged validation failed")]
-    StagedValidation,
-    #[error("checkpoint staged metadata failed: {0}")]
-    StagedMetadata(&'static str),
-    #[error("checkpoint store changed repeatedly during publication")]
-    ConcurrentChurn,
-    #[error("checkpoint touch lost an eviction or replacement race")]
-    TouchLostRace,
-}
-
+/// Which state a Qwen record holds at its prefix: whether a pending token
+/// is still to be consumed and whether final logits are stored.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-enum SnapshotMode {
+pub enum SnapshotMode {
     Consumed,
     ConsumedWithLogits,
     Pending,
@@ -790,29 +236,6 @@ fn mode_rank(mode: SnapshotMode, exact: bool) -> usize {
             SnapshotMode::PendingWithLogits => 3,
         }
     }
-}
-
-#[derive(Clone)]
-struct Candidate {
-    path: PathBuf,
-    matched_len: usize,
-    mode: SnapshotMode,
-    digest: [u8; 32],
-}
-
-struct StagedBlob {
-    file: std::fs::File,
-    path: PathBuf,
-    encoded: EncodedSnapshot,
-    opening: FileStamp,
-    synced: FileStamp,
-    integrity: StagedIntegrityReport,
-}
-
-struct ParsedBlobName {
-    matched_len: usize,
-    mode: SnapshotMode,
-    digest: [u8; 32],
 }
 
 fn snapshot_prefix_key(compatibility_id: &[u8; 32], snapshot: &SessionSnapshot) -> [u8; 32] {
@@ -892,7 +315,7 @@ fn blob_name(matched_len: usize, mode: SnapshotMode, digest: &[u8; 32]) -> Strin
     )
 }
 
-fn parse_blob_name(name: &std::ffi::OsStr) -> Option<ParsedBlobName> {
+fn parse_blob_name(name: &std::ffi::OsStr) -> Option<(usize, SnapshotMode, [u8; 32])> {
     let name = name.to_str()?;
     let stem = name.strip_suffix(&format!(".{BLOB_EXTENSION}"))?;
     let mut parts = stem.split('-');
@@ -908,11 +331,7 @@ fn parse_blob_name(name: &std::ffi::OsStr) -> Option<ParsedBlobName> {
     }
     let matched_len = length_text.parse::<usize>().ok()?;
     let digest = parse_hex_32(digest_text)?;
-    Some(ParsedBlobName {
-        matched_len,
-        mode,
-        digest,
-    })
+    Some((matched_len, mode, digest))
 }
 
 fn codec_error_proves_invalid_blob(error: &SnapshotCodecError) -> bool {
@@ -939,6 +358,19 @@ fn codec_error_proves_invalid_blob(error: &SnapshotCodecError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checkpoint_fs::{
+        FileStamp, scan_managed_blobs, unique_temp_path, validate_post_link_stamp,
+        validate_staged_stamp,
+    };
+    use crate::durable_store::PublishOutcome;
+    use std::fs::FileTimes;
+    use std::os::unix::fs::MetadataExt;
+    use std::path::{Path, PathBuf};
+    use std::time::{Instant, SystemTime};
+
+    fn is_managed_blob_name(name: &std::ffi::OsStr) -> bool {
+        crate::durable_store::is_managed_blob_name_for::<SessionSnapshot>(name)
+    }
     use crate::checkpoint_fs::{MAX_STAGING_SCAVENGE_PER_PUBLISH, TEMP_PREFIX};
     use crate::metal_forward::{
         SNAPSHOT_LAYOUT_VERSION, SnapshotKvStorageKind, SnapshotValidationError,
@@ -1183,7 +615,11 @@ mod tests {
         let deferred = deferred_store
             .encode_staged(&deferred_path, context(&snapshot.identity), &snapshot)
             .unwrap();
-        assert_eq!(decode.encoded, deferred.encoded);
+        assert_eq!(decode.record_bytes, deferred.record_bytes);
+        assert_eq!(
+            std::fs::read(&decode_path).unwrap(),
+            std::fs::read(&deferred_path).unwrap()
+        );
         assert_eq!(decode.integrity.mode, StagedIntegrityMode::Decode);
         assert_eq!(
             deferred.integrity.mode,
@@ -1239,7 +675,7 @@ mod tests {
         std::fs::set_permissions(&abandoned, std::fs::Permissions::from_mode(0o600)).unwrap();
 
         let live = unique_temp_path(&blob_dir, &[0x22; 32]);
-        let live_file = store.namespace.create_staging_file(&live, true).unwrap();
+        let live_file = store.namespace().create_staging_file(&live, true).unwrap();
         (&live_file).write_all(b"live-staging-data").unwrap();
 
         let foreign = blob_dir.join(format!("{TEMP_PREFIX}foreign-lookalike"));
@@ -1285,7 +721,7 @@ mod tests {
         std::fs::set_permissions(&abandoned, std::fs::Permissions::from_mode(0o600)).unwrap();
         let other_live = unique_temp_path(&other_model, &[0x22; 32]);
         let other_live_file = store
-            .namespace
+            .namespace()
             .create_staging_file(&other_live, true)
             .unwrap();
 
@@ -1464,7 +900,7 @@ mod tests {
         let blob_dir = store.blob_dir(&COMPATIBILITY_ID);
         store.ensure_blob_dir(&blob_dir).unwrap();
         let path = unique_temp_path(&blob_dir, &[0x99; 32]);
-        let file = store.namespace.create_staging_file(&path, true).unwrap();
+        let file = store.namespace().create_staging_file(&path, true).unwrap();
         (&file).write_all(&[0x5a; 23]).unwrap();
         std::fs::write(&ready, path.to_string_lossy().as_bytes()).unwrap();
         loop {
@@ -1739,7 +1175,7 @@ mod tests {
         // blob goes, the newer one stays.
         let mut free = [needed - 1, needed - 1, needed].into_iter();
         let evicted = store
-            .namespace
+            .namespace()
             .ensure_volume_space_with(record, is_managed_blob_name, || free.next())
             .unwrap();
         assert!(evicted > 0);
@@ -1749,7 +1185,7 @@ mod tests {
         // Still short after evicting everything: refuse before any write.
         let mut free = [0, 0].into_iter();
         let error = store
-            .namespace
+            .namespace()
             .ensure_volume_space_with(record, is_managed_blob_name, || free.next())
             .unwrap_err();
         assert!(
@@ -1762,7 +1198,7 @@ mod tests {
         store.publish(context(&older.identity), &older).unwrap();
         assert_eq!(
             store
-                .namespace
+                .namespace()
                 .ensure_volume_space_with(record, is_managed_blob_name, || Some(u64::MAX))
                 .unwrap(),
             0
@@ -1779,21 +1215,21 @@ mod tests {
             .publish(context(&snapshot.identity), &snapshot)
             .unwrap();
         let path = blob_path(&store, &snapshot);
-        let lease = store.namespace.open_candidate(&path).unwrap().unwrap();
+        let lease = store.namespace().open_candidate(&path).unwrap().unwrap();
 
         let held = store.lock_exclusive().unwrap();
         let started = std::time::Instant::now();
         assert!(matches!(
-            store.namespace.open_candidate_for_lookup(&path),
+            store.namespace().open_candidate_for_lookup(&path),
             Err(crate::checkpoint_fs::CheckpointFsError::Io(io)) if io.kind() == std::io::ErrorKind::WouldBlock
         ));
         assert!(matches!(
-            store.namespace.touch_if_same_inode(&path, &lease),
+            store.namespace().touch_if_same_inode(&path, &lease),
             Err(crate::checkpoint_fs::CheckpointFsError::TouchLostRace)
         ));
         assert!(
             !store
-                .namespace
+                .namespace()
                 .remove_if_same_inode_for_lookup(&path, &lease)
                 .unwrap(),
             "removal is deferred, not waited for"
@@ -1801,7 +1237,10 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
         assert!(path.exists());
         drop(held);
-        store.namespace.touch_if_same_inode(&path, &lease).unwrap();
+        store
+            .namespace()
+            .touch_if_same_inode(&path, &lease)
+            .unwrap();
     }
 
     #[test]
@@ -1809,7 +1248,7 @@ mod tests {
         let temp = TestDir::new("writer-lock");
         let store = std::sync::Arc::new(DurableCheckpointStore::new(&temp.0, 1 << 20));
         let snapshot = snapshot(&[1, 2], None, true);
-        let writer = store.namespace.lock_writer().unwrap();
+        let writer = store.namespace().lock_writer().unwrap();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let publisher = {
             let store = std::sync::Arc::clone(&store);
@@ -1846,7 +1285,7 @@ mod tests {
         let big = snapshot(&[1, 2, 3], None, true);
         let mut tight = context(&big.identity);
         tight.max_record_bytes = big.n_bytes();
-        *store.namespace.test_free_bytes.lock().unwrap() = Some(0);
+        *store.namespace().test_free_bytes.lock().unwrap() = Some(0);
         assert!(matches!(
             store.publish(tight, &big),
             Err(CheckpointStoreError::Codec(
@@ -1854,10 +1293,10 @@ mod tests {
             ))
         ));
         assert!(blob_path(&store, &kept).exists());
-        *store.namespace.test_free_bytes.lock().unwrap() = None;
+        *store.namespace().test_free_bytes.lock().unwrap() = None;
 
         let error = store
-            .namespace
+            .namespace()
             .ensure_volume_space_with(1000, is_managed_blob_name, || None)
             .unwrap_err();
         assert!(error.to_string().contains("unreadable"), "{error}");
@@ -2370,9 +1809,9 @@ mod tests {
         let digest = [0xab; 32];
         let valid = blob_name(12, SnapshotMode::Pending, &digest);
         let parsed = parse_blob_name(std::ffi::OsStr::new(&valid)).unwrap();
-        assert_eq!(parsed.matched_len, 12);
-        assert_eq!(parsed.mode, SnapshotMode::Pending);
-        assert_eq!(parsed.digest, digest);
+        assert_eq!(parsed.0, 12);
+        assert_eq!(parsed.1, SnapshotMode::Pending);
+        assert_eq!(parsed.2, digest);
         for invalid in [
             "012-p0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.qcp",
             "12-p2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.qcp",

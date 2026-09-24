@@ -39,6 +39,7 @@ pub mod deepseek_v4_checkpoint_store;
 pub mod deepseek_v4_metal;
 pub mod deepseek_v4_oracle;
 pub mod dense_batch8;
+pub mod durable_store;
 pub mod env_flag;
 pub mod forward;
 pub mod gguf;

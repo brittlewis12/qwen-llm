@@ -47,7 +47,6 @@ pub(crate) mod guarded_topk;
 #[path = "qwen4exp_moe_observe.rs"]
 pub(crate) mod singleton_observe;
 const MAX_PACKED_TOKENS: usize = 2_048;
-const PACKED_ROUTER_E8P32_STRICT_DEVICE: &str = "Apple M4 Max";
 const PACKED_ROUTER_E8P32_STRICT_HIDDEN: usize = 2_560;
 const PACKED_ROUTER_E8P32_STRICT_EXPERTS: usize = 512;
 const PACKED_ROUTER_E8P32_STRICT_N512_TOKENS: usize = 512;
@@ -60,7 +59,6 @@ pub(crate) const PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS: [usize; 4] = [
     PACKED_ROUTER_E8P32_STRICT_N1024_TOKENS,
     PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS,
 ];
-const PACKED_IQ4_DOWN_M128_N16_DEVICE: &str = "Apple M4 Max";
 const PACKED_IQ4_DOWN_M128_N16_HIDDEN: usize = 2_560;
 const PACKED_IQ4_DOWN_M128_N16_ROUTED: usize = 640;
 const PACKED_IQ4_DOWN_M128_N16_EXPERTS: usize = 512;
@@ -474,18 +472,66 @@ fn encode_qwen4exp_moe_route_count_capture(
     })
 }
 
+/// Tuned scope of the strict E8P32 router: the Flash-Next geometry at the
+/// token counts it was measured faster on (a speed scope, not a kernel
+/// limit), on a pipeline that can run it. Other counts use the generic path.
 fn packed_router_e8p32_strict_scope_qualified(
-    device_name: &str,
+    pipeline_capable: bool,
     hidden_size: usize,
     expert_count: usize,
     router_dtype: GgmlType,
     tokens: usize,
 ) -> bool {
-    device_name == PACKED_ROUTER_E8P32_STRICT_DEVICE
+    pipeline_capable
         && hidden_size == PACKED_ROUTER_E8P32_STRICT_HIDDEN
         && expert_count == PACKED_ROUTER_E8P32_STRICT_EXPERTS
         && router_dtype == GgmlType::F32
         && PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS.contains(&tokens)
+}
+
+/// The strict E8P32 router launches 32-thread SIMD groups.
+pub(crate) fn packed_router_e8p32_strict_supported(ctx: &MetalContext) -> bool {
+    pipeline_supports(ctx, "kernel_mat_mat_f32_f32_router_e8p32_strict", 32, 0)
+}
+
+/// The IQ4 m128/n16 grouped down launches 128 threads with 9,216 bytes of
+/// threadgroup memory.
+pub(crate) fn packed_iq4_down_m128_n16_supported(ctx: &MetalContext) -> bool {
+    pipeline_supports(
+        ctx,
+        "kernel_moe_down_iq4_nl_f32_grouped_slots_m128_n16",
+        128,
+        9_216,
+    )
+}
+
+/// SIMD width 32, `threads` per threadgroup, and `threadgroup_bytes` beyond
+/// the static allocation; a failure to build the pipeline is logged once per
+/// kernel and declines the fast path.
+fn pipeline_supports(
+    ctx: &MetalContext,
+    kernel: &'static str,
+    threads: usize,
+    threadgroup_bytes: usize,
+) -> bool {
+    match ctx.pipeline(kernel) {
+        Ok(p) => {
+            p.threadExecutionWidth() == 32
+                && p.maxTotalThreadsPerThreadgroup() >= threads
+                && p.staticThreadgroupMemoryLength()
+                    .checked_add(threadgroup_bytes)
+                    .is_some_and(|bytes| bytes <= ctx.device.maxThreadgroupMemoryLength())
+        }
+        Err(error) => {
+            static LOGGED: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+            let mut logged = LOGGED.lock().unwrap_or_else(|poison| poison.into_inner());
+            if !logged.contains(&kernel) {
+                logged.push(kernel);
+                tracing::warn!("qwen4exp: {kernel} unavailable, using the generic path: {error}");
+            }
+            false
+        }
+    }
 }
 
 fn packed_router_e8p32_strict_qualified(
@@ -496,21 +542,24 @@ fn packed_router_e8p32_strict_qualified(
 ) -> bool {
     qwen4exp_packed_router_e8p32_strict_enabled()
         && packed_router_e8p32_strict_scope_qualified(
-            &ctx.device.name().to_string(),
+            true,
             geometry.hidden_size,
             geometry.expert_count,
             router_dtype,
             tokens,
         )
+        && packed_router_e8p32_strict_supported(ctx)
 }
 
+/// Tuned scope of the IQ4 m128/n16 grouped down: the Flash-Next geometry at
+/// the token counts it was measured faster on, on a pipeline that can run it.
 fn packed_iq4_down_m128_n16_scope_qualified(
-    device_name: &str,
+    pipeline_capable: bool,
     geometry: Qwen4ExpMoeMetalGeometry,
     dtype: GgmlType,
     tokens: usize,
 ) -> bool {
-    device_name == PACKED_IQ4_DOWN_M128_N16_DEVICE
+    pipeline_capable
         && geometry.hidden_size == PACKED_IQ4_DOWN_M128_N16_HIDDEN
         && geometry.routed_intermediate_size == PACKED_IQ4_DOWN_M128_N16_ROUTED
         && geometry.expert_count == PACKED_IQ4_DOWN_M128_N16_EXPERTS
@@ -526,12 +575,8 @@ fn packed_iq4_down_m128_n16_qualified(
     tokens: usize,
 ) -> bool {
     qwen4exp_moe_iq4_down_m128_n16_enabled()
-        && packed_iq4_down_m128_n16_scope_qualified(
-            &ctx.device.name().to_string(),
-            geometry,
-            dtype,
-            tokens,
-        )
+        && packed_iq4_down_m128_n16_scope_qualified(true, geometry, dtype, tokens)
+        && packed_iq4_down_m128_n16_supported(ctx)
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -231,7 +231,7 @@ fn packed_router_e8p32_strict_scope_is_exact() {
     for tokens in 1..=MAX_PACKED_TOKENS + 1 {
         assert_eq!(
             qualified(
-                PACKED_ROUTER_E8P32_STRICT_DEVICE,
+                true,
                 PACKED_ROUTER_E8P32_STRICT_HIDDEN,
                 PACKED_ROUTER_E8P32_STRICT_EXPERTS,
                 GgmlType::F32,
@@ -242,28 +242,28 @@ fn packed_router_e8p32_strict_scope_is_exact() {
         );
     }
     assert!(!qualified(
-        "Apple M3 Max",
+        false,
         PACKED_ROUTER_E8P32_STRICT_HIDDEN,
         PACKED_ROUTER_E8P32_STRICT_EXPERTS,
         GgmlType::F32,
         PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_ROUTER_E8P32_STRICT_DEVICE,
+        true,
         PACKED_ROUTER_E8P32_STRICT_HIDDEN / 2,
         PACKED_ROUTER_E8P32_STRICT_EXPERTS,
         GgmlType::F32,
         PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_ROUTER_E8P32_STRICT_DEVICE,
+        true,
         PACKED_ROUTER_E8P32_STRICT_HIDDEN,
         160,
         GgmlType::F32,
         PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_ROUTER_E8P32_STRICT_DEVICE,
+        true,
         PACKED_ROUTER_E8P32_STRICT_HIDDEN,
         PACKED_ROUTER_E8P32_STRICT_EXPERTS,
         GgmlType::F16,
@@ -287,12 +287,7 @@ fn packed_iq4_down_m128_n16_scope_is_exact_and_rollbackable() {
     };
     for tokens in 1..=MAX_PACKED_TOKENS + 1 {
         assert_eq!(
-            qualified(
-                PACKED_IQ4_DOWN_M128_N16_DEVICE,
-                exact,
-                GgmlType::IQ4_NL,
-                tokens,
-            ),
+            qualified(true, exact, GgmlType::IQ4_NL, tokens,),
             PACKED_IQ4_DOWN_M128_N16_TOKEN_COUNTS.contains(&tokens),
             "tokens={tokens}",
         );
@@ -300,15 +295,15 @@ fn packed_iq4_down_m128_n16_scope_is_exact_and_rollbackable() {
 
     for (label, device, geometry, dtype, tokens) in [
         (
-            "device",
-            "Apple M3 Max",
+            "pipeline",
+            false,
             exact,
             GgmlType::IQ4_NL,
             PACKED_IQ4_DOWN_M128_N16_N512_TOKENS,
         ),
         (
             "hidden",
-            PACKED_IQ4_DOWN_M128_N16_DEVICE,
+            true,
             Qwen4ExpMoeMetalGeometry::new(
                 2_304,
                 exact.expert_count,
@@ -322,7 +317,7 @@ fn packed_iq4_down_m128_n16_scope_is_exact_and_rollbackable() {
         ),
         (
             "routed",
-            PACKED_IQ4_DOWN_M128_N16_DEVICE,
+            true,
             Qwen4ExpMoeMetalGeometry::new(
                 exact.hidden_size,
                 exact.expert_count,
@@ -336,7 +331,7 @@ fn packed_iq4_down_m128_n16_scope_is_exact_and_rollbackable() {
         ),
         (
             "experts",
-            PACKED_IQ4_DOWN_M128_N16_DEVICE,
+            true,
             Qwen4ExpMoeMetalGeometry::new(
                 exact.hidden_size,
                 511,
@@ -350,7 +345,7 @@ fn packed_iq4_down_m128_n16_scope_is_exact_and_rollbackable() {
         ),
         (
             "top-k",
-            PACKED_IQ4_DOWN_M128_N16_DEVICE,
+            true,
             Qwen4ExpMoeMetalGeometry::new(
                 exact.hidden_size,
                 exact.expert_count,
@@ -364,7 +359,7 @@ fn packed_iq4_down_m128_n16_scope_is_exact_and_rollbackable() {
         ),
         (
             "dtype",
-            PACKED_IQ4_DOWN_M128_N16_DEVICE,
+            true,
             exact,
             GgmlType::Q8_0,
             PACKED_IQ4_DOWN_M128_N16_N512_TOKENS,
@@ -388,7 +383,7 @@ fn packed_iq4_down_m128_n16_scope_is_exact_and_rollbackable() {
         with_qwen4exp_moe_iq4_down_m128_n16_override(true, || {
             assert_eq!(
                 packed_iq4_down_m128_n16_qualified(&ctx, exact, GgmlType::IQ4_NL, tokens,),
-                ctx.device.name().to_string() == PACKED_IQ4_DOWN_M128_N16_DEVICE,
+                packed_iq4_down_m128_n16_supported(&ctx),
             );
         });
     }
@@ -399,9 +394,9 @@ fn packed_router_e8p32_strict_matches_generic_route_bits() {
     let Some(ctx) = packed_test_context() else {
         return;
     };
-    if ctx.device.name().to_string() != PACKED_ROUTER_E8P32_STRICT_DEVICE {
+    if !packed_router_e8p32_strict_supported(&ctx) {
         eprintln!(
-            "strict E8P32 Qwen router differential skipped on {}",
+            "strict E8P32 Qwen router differential skipped: pipeline unsupported on {}",
             ctx.device.name()
         );
         return;
@@ -416,10 +411,7 @@ fn packed_router_n1024_component_qualification() {
     let _lease =
         crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
     let ctx = MetalContext::new().expect("real Metal required");
-    assert_eq!(
-        ctx.device.name().to_string(),
-        PACKED_ROUTER_E8P32_STRICT_DEVICE
-    );
+    assert!(packed_router_e8p32_strict_supported(&ctx));
     check_packed_router_e8p32_bits(ctx, &[1024]);
 }
 

@@ -13,16 +13,9 @@ fn decode_policy_defaults_and_independent_qualification() {
         hc_up_mix: false,
     };
     assert_eq!(Qwen4ExpDecodeOptions::default(), on);
-    assert_eq!(on.qualified("Apple M4 Max", [true; 2]), on);
-    for device in [
-        "Apple M4",
-        "Apple M4 Pro",
-        "Apple M3 Max",
-        "Apple M5 Max",
-        "",
-    ] {
-        assert_eq!(on.qualified(device, [true; 2]), off);
-    }
+    // Pipeline capability decides; the GPU's name does not.
+    assert_eq!(on.qualified([true; 2]), on);
+    assert_eq!(on.qualified([false; 2]), off);
     for bits in 0..4 {
         let flags = [bits & 1 != 0, bits & 2 != 0];
         let expected = Qwen4ExpDecodeOptions {
@@ -30,8 +23,9 @@ fn decode_policy_defaults_and_independent_qualification() {
             split_qsa: false,
             hc_up_mix: flags[1],
         };
-        assert_eq!(on.qualified("Apple M4 Max", flags), expected);
-        assert_eq!(expected.qualified("Apple M4 Max", [true; 2]), expected);
+        assert_eq!(on.qualified(flags), expected);
+        assert_eq!(expected.qualified([true; 2]), expected);
+        assert_eq!(off.qualified(flags), off);
     }
 }
 

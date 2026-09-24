@@ -510,29 +510,30 @@ impl Default for Qwen4ExpDecodeOptions {
 }
 
 impl Qwen4ExpDecodeOptions {
-    fn qualified(self, device: &str, capabilities: [bool; 2]) -> Self {
-        let qualified = device == "Apple M4 Max";
+    /// Keep each requested fast path whose pipeline capability check passed.
+    fn qualified(self, capabilities: [bool; 2]) -> Self {
         Self {
-            guarded_topk: self.guarded_topk && qualified && capabilities[0],
+            guarded_topk: self.guarded_topk && capabilities[0],
             #[cfg(test)]
             split_qsa: self.split_qsa,
-            hc_up_mix: self.hc_up_mix && qualified && capabilities[1],
+            hc_up_mix: self.hc_up_mix && capabilities[1],
         }
     }
 
+    /// The fast paths need what their pipelines report (SIMD width 32, thread
+    /// count, threadgroup memory), not a particular GPU; a decline is logged.
     fn resolve(self, ctx: &MetalContext) -> Result<Self, Qwen4ExpRuntimeError> {
-        let device = ctx.device.name().to_string();
-        let requested = self.qualified(&device, [true; 2]);
-        let topk = requested.guarded_topk
+        let topk = self.guarded_topk
             && crate::qwen4exp_moe::guarded_topk::supported(ctx)
                 .map_err(Qwen4ExpTextSessionError::from)?;
-        let hc = requested.hc_up_mix
+        let hc = self.hc_up_mix
             && crate::qwen4exp_metal::hc_up::supported(ctx)
                 .map_err(Qwen4ExpTextSessionError::from)?;
-        let resolved = self.qualified(&device, [topk, hc]);
+        let resolved = self.qualified([topk, hc]);
         if self != resolved {
             eprintln!(
-                "qwen4exp: decode policy requested={self:?} effective={resolved:?} device={device:?}; only qualified Apple M4 Max pipelines are enabled"
+                "qwen4exp: decode policy requested={self:?} effective={resolved:?} device={:?}; a pipeline capability check declined the fast path",
+                ctx.device.name().to_string()
             );
         }
         Ok(resolved)

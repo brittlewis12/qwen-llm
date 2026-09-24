@@ -24,6 +24,22 @@ pub(super) fn moe_iq3_expert_native_enabled(desc: &TensorDesc) -> bool {
     desc.shape.len() >= 3 && desc.shape[0..3] == [2048, 512, 256]
 }
 
+/// Whether decode's routed gate/up for these expert dtypes is one fused
+/// dispatch, so it can share the concurrent gate/up wave with the shared
+/// expert (measured +8.8% decode on A3B Q4_K). Multi-pass dtypes (separate
+/// gate and up products then SiLU*mul) stay on the serial encoder, which
+/// orders them.
+pub(super) fn routed_gate_up_single_dispatch(gate: GgmlType, up: GgmlType) -> bool {
+    gate == up
+        && match gate {
+            GgmlType::Q4_K | GgmlType::Q6_K | GgmlType::Q8_0 | GgmlType::IQ4_XS => true,
+            GgmlType::IQ3_XXS | GgmlType::IQ3_S => {
+                decode_moe_iq3_fast_swiglu_enabled() || decode_moe_iq3_fused_swiglu_enabled()
+            }
+            _ => false,
+        }
+}
+
 pub(super) fn phase_moe_ffn_split_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -775,42 +791,6 @@ impl<'a> MetalForward<'a> {
         Ok(())
     }
 
-    pub(super) fn encode_moe_routed_gate_up_q4_gpu(
-        &self,
-        enc: &KernelEncoder,
-        session: &mut MetalSession,
-        moe: &MetalMoeFfn,
-    ) -> Result<(), MfError> {
-        let arch = &self.model.arch;
-        let h = arch.hidden_size as usize;
-        let f_exp = arch.expert_feed_forward_length as usize;
-        let n_expert = arch.expert_count as usize;
-        let topk = arch.expert_used_count.min(arch.expert_count) as usize;
-        let moe_inner = session
-            .moe_inner
-            .view_subrange(0, vec![(topk * f_exp) as u64]);
-        let topk_idx = session.moe_topk_idx.view_subrange(0, vec![topk as u64]);
-
-        if decode_moe_noop_routed_gateup_enabled() {
-            encode_fill_f32(self.ctx, enc, &moe_inner, 0.0)?;
-        } else {
-            encode_moe_swiglu_q4_K_f32(
-                self.ctx,
-                enc,
-                &moe.gate_exps,
-                &moe.up_exps,
-                &session.h,
-                &topk_idx,
-                &moe_inner,
-                h,
-                f_exp,
-                n_expert,
-                topk,
-            )?;
-        }
-        Ok(())
-    }
-
     pub(super) fn encode_moe_routed_gate_up_gpu(
         &self,
         enc: &KernelEncoder,
@@ -1328,8 +1308,15 @@ impl<'a> MetalForward<'a> {
         stage_recorder: Option<&mut DecodeStageRecorder>,
         stage_meta: Option<DecodeStageMeta>,
     ) -> Result<bool, MfError> {
+        // The wave is one concurrent encoder: the routed gate/up must be a
+        // single dispatch (reads `h` and the routing indices, writes only
+        // `moe_inner`) to run beside the shared-expert projections.
+        debug_assert!(routed_gate_up_single_dispatch(
+            moe.gate_exps.dtype,
+            moe.up_exps.dtype
+        ));
         let enc = begin_decode_stage(cmd_buf, stage_recorder, stage_meta, true)?;
-        self.encode_moe_routed_gate_up_q4_gpu(&enc, session, moe)?;
+        self.encode_moe_routed_gate_up_gpu(&enc, session, moe)?;
         let shared_inner_fused =
             self.encode_moe_shared_ffn_gate_up_gpu(&enc, session, ffn_gate, ffn_up)?;
         enc.end();
@@ -1640,7 +1627,7 @@ impl<'a> MetalForward<'a> {
         ffn_down: &MetalTensor,
         moe: &MetalMoeFfn,
     ) -> Result<(), MfError> {
-        if moe.gate_exps.dtype != GgmlType::Q4_K || moe.up_exps.dtype != GgmlType::Q4_K {
+        if !routed_gate_up_single_dispatch(moe.gate_exps.dtype, moe.up_exps.dtype) {
             let enc = KernelEncoder::begin(cmd_buf);
             self.encode_moe_ffn_apply_gpu(&enc, session, ffn_gate, ffn_up, ffn_down, moe)?;
             enc.end();
@@ -1679,7 +1666,7 @@ impl<'a> MetalForward<'a> {
         ffn_down: &MetalTensor,
         moe: &MetalMoeFfn,
     ) -> Result<(), MfError> {
-        if moe.gate_exps.dtype != GgmlType::Q4_K || moe.up_exps.dtype != GgmlType::Q4_K {
+        if !routed_gate_up_single_dispatch(moe.gate_exps.dtype, moe.up_exps.dtype) {
             let enc = begin_decode_stage(
                 cmd_buf,
                 Some(&mut *recorder),
@@ -3905,8 +3892,7 @@ impl<'a> MetalForward<'a> {
                     crate::metal::wait_completed(&cmd)?;
                     ffn_finalizer_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                 } else if concurrent_shared_moe_decode_enabled()
-                    && moe.gate_exps.dtype == GgmlType::Q4_K
-                    && moe.up_exps.dtype == GgmlType::Q4_K
+                    && routed_gate_up_single_dispatch(moe.gate_exps.dtype, moe.up_exps.dtype)
                 {
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
                     let shared_inner_fused = self.encode_moe_ffn_gate_up_wave_gpu(

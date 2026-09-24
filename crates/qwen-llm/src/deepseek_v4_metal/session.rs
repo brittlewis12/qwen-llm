@@ -1547,8 +1547,8 @@ impl DeepSeekV4Session {
                 .unwrap_or_default();
             command.commit();
             command.waitUntilCompleted();
-            if let Some(error) = command.error() {
-                return invalid(format!("layer {layer} command failed: {error:?}"));
+            if let Err(error) = crate::metal::command_buffer_completed(&command) {
+                return invalid(format!("layer {layer} command failed: {error}"));
             }
             self.moe
                 .validate_gpu_route_record_completed(&route_record)?;
@@ -1842,8 +1842,8 @@ impl DeepSeekV4Session {
         }
 
         let status_started = whole_profile.as_ref().map(|_| std::time::Instant::now());
-        if let Some(error) = command.error() {
-            return invalid(format!("whole-token Metal command failed: {error:?}"));
+        if let Err(error) = crate::metal::command_buffer_completed(&command) {
+            return invalid(format!("whole-token Metal command failed: {error}"));
         }
         if let Some(profile) = whole_profile.as_deref_mut() {
             let gpu_seconds = command.GPUEndTime() - command.GPUStartTime();

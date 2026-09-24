@@ -11946,8 +11946,8 @@ impl DeepSeekV4Session {
                     "packed layer {layer} shared-expert command failed: {error}"
                 ));
             }
-            if let Some(error) = expert_command.error() {
-                return invalid(format!("packed layer {layer} command failed: {error:?}"));
+            if let Err(error) = crate::metal::command_buffer_completed(&expert_command) {
+                return invalid(format!("packed layer {layer} command failed: {error}"));
             }
             #[cfg(feature = "dsv4-diagnostics")]
             if let Some(collector) = mhc_command_collector.as_deref_mut() {

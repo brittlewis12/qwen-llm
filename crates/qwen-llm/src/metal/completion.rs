@@ -26,11 +26,44 @@ pub fn commit_and_wait(cmd: &ProtocolObject<dyn MTLCommandBuffer>) -> Result<(),
     wait_completed(cmd)
 }
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_CHECK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test seam: the next completion check on this thread reports a discarded
+/// command buffer, so failure paths can be exercised without a GPU recovery.
+/// Disarmed when the guard drops, so an early return cannot leak it into a
+/// later healthy check.
+#[cfg(test)]
+#[must_use = "the injection is disarmed when the guard drops"]
+pub(crate) fn fail_next_completion_check() -> FailNextCompletionCheck {
+    FAIL_NEXT_CHECK.with(|flag| flag.set(true));
+    FailNextCompletionCheck
+}
+
+#[cfg(test)]
+pub(crate) struct FailNextCompletionCheck;
+
+#[cfg(test)]
+impl Drop for FailNextCompletionCheck {
+    fn drop(&mut self) {
+        FAIL_NEXT_CHECK.with(|flag| flag.set(false));
+    }
+}
+
 /// Check an already-finished command buffer: `Ok` only for status `Completed`
 /// with no attached `NSError`.
 pub fn command_buffer_completed(
     cmd: &ProtocolObject<dyn MTLCommandBuffer>,
 ) -> Result<(), MetalError> {
+    #[cfg(test)]
+    if FAIL_NEXT_CHECK.with(|flag| flag.replace(false)) {
+        return Err(MetalError::CommandBufferFailed {
+            status: "Error".to_string(),
+            error: "injected discarded command buffer".to_string(),
+        });
+    }
     let status = cmd.status();
     let error = cmd.error();
     if status == MTLCommandBufferStatus::Completed && error.is_none() {

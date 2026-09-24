@@ -2117,8 +2117,9 @@ impl<'a> MetalForward<'a> {
         position: u32,
         session: &mut MetalSession,
         tail: LmHeadTail<'_>,
-        require_completed_command: bool,
+        validate_tail: bool,
     ) -> Result<(TokenProfile, LmHeadTailEvidence, std::time::Instant), MfError> {
+        session.ensure_usable()?;
         let arch = &self.model.arch;
         if arch.kind != ArchKind::Moe {
             return Err(MfError::UnsupportedMoe);
@@ -2126,7 +2127,7 @@ impl<'a> MetalForward<'a> {
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
             return Err(MfError::BadToken(token_id, arch.vocab_size));
         }
-        let mut evidence = if require_completed_command {
+        let mut evidence = if validate_tail {
             self.validate_lm_head_tail(session, tail)?
         } else {
             if !matches!(tail, LmHeadTail::Resident) {
@@ -2166,17 +2167,13 @@ impl<'a> MetalForward<'a> {
         cmd_buf.waitUntilCompleted();
         let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
         let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
-        if require_completed_command {
-            let status = cmd_buf.status();
-            let error = cmd_buf.error();
-            evidence.command_completed = status == MTLCommandBufferStatus::Completed;
-            evidence.command_error_none = error.is_none();
-            if !evidence.command_completed || !evidence.command_error_none {
-                return Err(MfError::CommandBuffer {
-                    status: format!("{status:?}"),
-                    error: format!("{error:?}"),
-                });
-            }
+        // Checked on every path: a discarded command leaves partial logits
+        // and a half-advanced recurrent state.
+        evidence.command_completed = cmd_buf.status() == MTLCommandBufferStatus::Completed;
+        evidence.command_error_none = cmd_buf.error().is_none();
+        if let Err(failure) = crate::metal::command_buffer_completed(&cmd_buf) {
+            session.poison("MoE concurrent-GDN decode command failed");
+            return Err(failure.into());
         }
 
         Ok((

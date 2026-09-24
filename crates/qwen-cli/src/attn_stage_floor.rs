@@ -312,8 +312,8 @@ pub fn run(args: AttnStageFloorArgs, build_identity: Value) -> Result<()> {
         enc.end();
         command.commit();
         command.waitUntilCompleted();
-        if let Some(error) = command.error() {
-            return Err(anyhow!("stage-floor command failed: {error:?}"));
+        if let Err(error) = qwen_llm::metal::command_buffer_completed(&command) {
+            return Err(anyhow!("stage-floor command failed: {error}"));
         }
         let start = command.GPUStartTime();
         let end = command.GPUEndTime();
@@ -332,8 +332,8 @@ pub fn run(args: AttnStageFloorArgs, build_identity: Value) -> Result<()> {
         enc.end();
         command.commit();
         command.waitUntilCompleted();
-        if let Some(error) = command.error() {
-            bail!("stage-floor scrub failed: {error:?}");
+        if let Err(error) = qwen_llm::metal::command_buffer_completed(&command) {
+            bail!("stage-floor scrub failed: {error}");
         }
         Ok(())
     };
@@ -349,8 +349,8 @@ pub fn run(args: AttnStageFloorArgs, build_identity: Value) -> Result<()> {
     ramp_enc.end();
     ramp.commit();
     ramp.waitUntilCompleted();
-    if let Some(error) = ramp.error() {
-        bail!("stage-floor ramp failed: {error:?}");
+    if let Err(error) = qwen_llm::metal::command_buffer_completed(&ramp) {
+        bail!("stage-floor ramp failed: {error}");
     }
 
     let mut samples = Vec::with_capacity(args.runs);

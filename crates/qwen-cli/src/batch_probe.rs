@@ -457,11 +457,9 @@ fn run_qwen_serialized(
             encoder.end();
             command.commit();
             command.waitUntilCompleted();
-            ensure!(
-                command.error().is_none(),
-                "serialized Qwen probe command failed: {:?}",
-                command.error()
-            );
+            qwen_llm::metal::command_buffer_completed(&command).map_err(|error| {
+                anyhow::anyhow!("serialized Qwen probe command failed: {error}")
+            })?;
             gpu_sum_ms += validate_gpu_interval(
                 command.GPUStartTime(),
                 command.GPUEndTime(),
@@ -588,11 +586,8 @@ fn run_qwen_independent(
             command.waitUntilCompleted();
         }
         for command in &commands {
-            ensure!(
-                command.error().is_none(),
-                "queue-overlap Qwen command failed: {:?}",
-                command.error()
-            );
+            qwen_llm::metal::command_buffer_completed(command)
+                .map_err(|error| anyhow::anyhow!("queue-overlap Qwen command failed: {error}"))?;
         }
         let mut min_start = f64::INFINITY;
         let mut max_end: f64 = 0.0;

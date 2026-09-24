@@ -3549,6 +3549,50 @@ fn metal_single_token_concurrent_gdn_moe_matches_serial_a3b() {
     run_concurrent_gdn_moe_equivalence(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b", 4, 0.995);
 }
 
+/// A discarded decode command must fail the call and poison the session on
+/// the default MoE decode path, which once read partial logits unchecked.
+#[test]
+fn moe_decode_rejects_a_discarded_command_and_poisons_the_session() {
+    let model_path = crate::test_fixtures::A3B_Q4_K_M.path();
+    if !std::path::Path::new(model_path).exists() {
+        eprintln!("[moe-discarded-command] skipped — fixture missing");
+        return;
+    }
+    let ctx = match MetalContext::new() {
+        Ok(c) => c,
+        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+        Err(e) => panic!("init failed: {e}"),
+    };
+    let g = GgufFile::open(model_path).expect("open");
+    let m = Model::from_gguf(&g).expect("load");
+    let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+    let forward = MetalForward::new(&ctx, &mm);
+
+    let mut session = MetalSession::fresh(&ctx, &mm, 4).expect("session");
+    forward
+        .single_token_profiled_concurrent_gdn_moe(1, 0, &mut session)
+        .expect("healthy decode");
+    let armed = crate::metal::fail_next_completion_check();
+    let failed = forward.single_token_profiled_concurrent_gdn_moe(2, 1, &mut session);
+    drop(armed);
+    assert!(
+        matches!(
+            failed,
+            Err(MfError::Metal(MetalError::CommandBufferFailed { .. }))
+        ),
+        "discarded command must fail the decode: {:?}",
+        failed.map(|(logits, _)| logits.len())
+    );
+    assert!(matches!(
+        session.ensure_usable(),
+        Err(MfError::SessionPoisoned { .. })
+    ));
+    assert!(matches!(
+        forward.single_token_profiled_concurrent_gdn_moe(2, 1, &mut session),
+        Err(MfError::SessionPoisoned { .. })
+    ));
+}
+
 #[test]
 #[ignore = "requires the 22 GB A3B fixture and Metal GPU"]
 fn metal_sampled_attribution_matches_production_a3b() {

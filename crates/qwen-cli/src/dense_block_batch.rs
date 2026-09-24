@@ -266,11 +266,8 @@ fn wait_success(
 ) -> Result<()> {
     command.commit();
     command.waitUntilCompleted();
-    ensure!(
-        command.error().is_none(),
-        "{label} command failed: {:?}",
-        command.error()
-    );
+    qwen_llm::metal::command_buffer_completed(&command)
+        .map_err(|error| anyhow::anyhow!("{label} command failed: {error}"))?;
     Ok(())
 }
 
@@ -370,11 +367,8 @@ fn time_with_reset(
         encode(&command, sessions)?;
         command.commit();
         command.waitUntilCompleted();
-        ensure!(
-            command.error().is_none(),
-            "dense static-batch timed command failed: {:?}",
-            command.error()
-        );
+        qwen_llm::metal::command_buffer_completed(&command)
+            .map_err(|error| anyhow::anyhow!("dense static-batch timed command failed: {error}"))?;
         let wall_ms = started.elapsed().as_secs_f64() * 1e3;
         let gpu_start = command.GPUStartTime();
         let gpu_end = command.GPUEndTime();

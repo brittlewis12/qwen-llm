@@ -8,6 +8,12 @@
 //! preferred fast paths and are selected first by the dispatcher in
 //! `metal_dflash.rs`; anything they do not cover lands here instead of the
 //! per-token fallback.
+//!
+//! Numerics: like llama.cpp's Metal `mul_mm`, tiles stage weights and
+//! activations in half and accumulate in f32. Quantized weights fit half by
+//! construction (f16 block scales); F32/BF16 weights or activations beyond
+//! +-65504 would overflow, a limit every quantized MMA prefill path shares
+//! for activations and no trained weight approaches.
 
 use super::*;
 

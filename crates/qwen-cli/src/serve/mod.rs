@@ -276,6 +276,41 @@ fn fixed_session_limits(
 }
 
 /// `qwen serve` entry: resident model, serial accept loop.
+/// Refuse an explicit durable-tier request on a family that has none (the
+/// user would wait through a cold re-prefill after restart believing it was
+/// on); say once that the defaulted tier does not apply; warn that a
+/// snapshot budget means nothing to a live-session family.
+fn check_warmth_flags(
+    family: &crate::family_profile::FamilyProfile,
+    durable: &durable::DurableSnapshotConfig,
+    snapshot_cache_mib: Option<u64>,
+) -> Result<()> {
+    use crate::family_profile::ServeWarmth;
+    let durable_off = matches!(durable.dir, durable::DurableDir::Off) || durable.max_mib == Some(0);
+    if family.serve_warmth != ServeWarmth::SnapshotsDurable && !durable_off {
+        let explicit = matches!(durable.dir, durable::DurableDir::Path(_))
+            || durable.max_mib.is_some()
+            || durable.min_tokens != durable::DEFAULT_MIN_TOKENS;
+        ensure!(
+            !explicit,
+            "{} serve has no durable snapshot tier, so --durable-snapshot-* cannot keep prefixes across restarts; drop the flags or pass --durable-snapshot-dir off",
+            family.display
+        );
+        tracing::info!(
+            target: "qwen_diag",
+            "serve durable: family={} tier unsupported; prefixes do not survive a restart",
+            family.display
+        );
+    }
+    if family.serve_warmth == ServeWarmth::LiveSession && snapshot_cache_mib.is_some() {
+        tracing::warn!(
+            "serve: --snapshot-cache-mib has no effect for {}: it reuses its live session's prefix, not snapshots",
+            family.display
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     crate::shutdown::checkpoint()?;
     let gguf = GgufFile::open(&invocation.model)
@@ -296,6 +331,11 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         "qwen serve has no backend for {} (docs/SERVE.md)",
         family.architecture_name()
     );
+    check_warmth_flags(
+        profile(family),
+        &invocation.durable,
+        invocation.snapshot_cache_mib,
+    )?;
     // Keep K2 out of the generic serve admission and listener setup. Its
     // resident plan and raw request contract are owned by the K2 lane.
     match family {
@@ -705,6 +745,46 @@ fn accept_loop_with_checkpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durable_flags_are_refused_where_no_tier_exists_and_off_is_always_fine() {
+        use crate::family_profile::profile;
+        use durable::{DEFAULT_MIN_TOKENS, DurableDir, DurableSnapshotConfig};
+        let config = |dir, max_mib, min_tokens| DurableSnapshotConfig {
+            dir,
+            max_mib,
+            min_tokens,
+        };
+        let defaulted = config(DurableDir::Default, None, DEFAULT_MIN_TOKENS);
+        let explicit = [
+            config(DurableDir::Path("/tmp/x".into()), None, DEFAULT_MIN_TOKENS),
+            config(DurableDir::Default, Some(512), DEFAULT_MIN_TOKENS),
+            config(DurableDir::Default, None, 64),
+        ];
+        let off = [
+            config(DurableDir::Off, None, DEFAULT_MIN_TOKENS),
+            config(DurableDir::Off, Some(512), 64),
+            config(DurableDir::Default, Some(0), DEFAULT_MIN_TOKENS),
+        ];
+        for family in ModelFamily::ALL {
+            let family = profile(*family);
+            let has_tier =
+                family.serve_warmth == crate::family_profile::ServeWarmth::SnapshotsDurable;
+            assert!(check_warmth_flags(family, &defaulted, None).is_ok());
+            assert!(check_warmth_flags(family, &defaulted, Some(1024)).is_ok());
+            for config in &explicit {
+                assert_eq!(
+                    check_warmth_flags(family, config, None).is_ok(),
+                    has_tier,
+                    "{} {config:?}",
+                    family.display
+                );
+            }
+            for config in &off {
+                assert!(check_warmth_flags(family, config, None).is_ok());
+            }
+        }
+    }
 
     const THREAD_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
 

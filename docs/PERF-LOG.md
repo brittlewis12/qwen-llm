@@ -262,7 +262,11 @@ Adversarial Codex reviews of the 2026-09-23 work found real defects; fixed:
   210 targeted repeats; unexplained.
 - Fix: `metal::wait_completed` / `commit_and_wait` (status must be `Completed`
   with no NSError, else `MetalError::CommandBufferFailed` with status, domain, code
-  and description); all unchecked production and test waits converted. V_T
+  and description); the unchecked waits then found were converted. (Correction
+  2026-09-24: the default MoE decode still checked only behind a flag its
+  callers left off, and DS4 waits checked `error()` but not status; fixed in
+  fec5e6eb. Remaining raw `waitUntilCompleted` calls in production check status
+  and error by hand.) V_T
   dispatch override/capture made purely thread-local (no cross-thread rejection).
 - `RUST_TEST_THREADS=1` kept: lockups still occur (~1/60 full parallel `metal::` runs).
 
@@ -26445,7 +26449,9 @@ Status: two new guarded experimental branches now exist, both off by default:
 - `QWEN_PREFILL_MOE_GROUPED_ZERO_FILL=0` skips grouped routed `inner/out`
   zero-fills after new coverage proof.
 - `QWEN_PREFILL_MOE_GROUPED_CONCURRENT_TAIL=1` overlaps the live grouped routed
-  tail with the live shared FFN tail for `chunk_p >= 512`.
+  tail with the live shared FFN tail for `chunk_p >= 512`. (Removed 2026-09-24
+  in 3393df0a: its dependent dispatches shared a concurrent encoder with no
+  barrier; the commands below no longer select it.)
 
 ### What Changed
 

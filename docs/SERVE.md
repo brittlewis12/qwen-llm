@@ -154,7 +154,10 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
 
 Qwen (3.5/3.6/3.8 dense and MoE) and DeepSeek V4 keep warm prefixes across
 restarts in a disk tier under the RAM cache. Flash-Next, Muse Glimmer, and K2
-have no durable tier (their flags are ignored).
+have no durable tier: an explicit `--durable-snapshot-*` value is refused at
+startup (`--durable-snapshot-dir off` is accepted), and the default logs that
+the tier does not apply. Muse and K2 reuse their live session instead of
+snapshots, so `--snapshot-cache-mib` only draws a warning there.
 
 - **Flags.** `--durable-snapshot-dir PATH|off` (default
   `~/.cache/qwen-llm/serve-checkpoints`; each family uses its own subdirectory

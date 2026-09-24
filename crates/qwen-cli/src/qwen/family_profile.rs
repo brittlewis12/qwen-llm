@@ -17,6 +17,18 @@ pub(crate) enum FixedCohort {
     Moe16,
 }
 
+/// How `qwen serve` keeps a family's prefixes warm between requests.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ServeWarmth {
+    /// RAM snapshot cache (`--snapshot-cache-mib`) plus the durable disk tier
+    /// (`--durable-snapshot-*`).
+    SnapshotsDurable,
+    /// RAM snapshot cache only; nothing survives a restart.
+    SnapshotsRam,
+    /// Reuse of the resident session's live prefix; no snapshots at all.
+    LiveSession,
+}
+
 pub(crate) struct FamilyProfile {
     pub(crate) family: ModelFamily,
     pub(crate) display: &'static str,
@@ -24,6 +36,7 @@ pub(crate) struct FamilyProfile {
     pub(crate) fixed_cohort: FixedCohort,
     /// A `GenerationBackend` exists; not artifact or device admission.
     pub(crate) serve_backend: bool,
+    pub(crate) serve_warmth: ServeWarmth,
     pub(crate) capabilities: fn(&GgufFile) -> Result<Value>,
 }
 
@@ -33,6 +46,7 @@ static QWEN35: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::Dense,
     fixed_cohort: FixedCohort::Dense8,
     serve_backend: true,
+    serve_warmth: ServeWarmth::SnapshotsDurable,
     capabilities: qwen35_capabilities,
 };
 
@@ -42,6 +56,7 @@ static QWEN35_MOE: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::MoeCliSerial,
     fixed_cohort: FixedCohort::Moe16,
     serve_backend: true,
+    serve_warmth: ServeWarmth::SnapshotsDurable,
     capabilities: qwen35_moe_capabilities,
 };
 
@@ -51,6 +66,7 @@ static QWEN4EXP: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::Unsupported("family_no_speculation"),
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
+    serve_warmth: ServeWarmth::SnapshotsRam,
     capabilities: qwen4exp_capabilities,
 };
 
@@ -60,6 +76,7 @@ static DEEPSEEK4: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::Unsupported("family_no_speculation"),
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
+    serve_warmth: ServeWarmth::SnapshotsDurable,
     capabilities: deepseek4_capabilities,
 };
 
@@ -69,6 +86,7 @@ static MUSE_GLIMMER: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::Unsupported("family_no_speculation"),
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
+    serve_warmth: ServeWarmth::LiveSession,
     capabilities: muse_glimmer_capabilities,
 };
 
@@ -78,6 +96,7 @@ static K2_HORIZON: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::Unsupported("family_no_speculation"),
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
+    serve_warmth: ServeWarmth::LiveSession,
     capabilities: k2_capabilities,
 };
 

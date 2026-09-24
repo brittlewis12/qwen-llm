@@ -53,7 +53,8 @@ pub struct MuseGlimmerRuntimeOptions {
     /// visible KV ranges >=1024 on the Q8 M4 Max lane, through admitted model context.
     pub split_decode: bool,
     /// Allow Q8 matrix prefill with tiled N128 attention and online packed remainders; scalar kernels unchanged.
-    /// Restricted to Q8/M4 Max and the admitted model context, not a benchmark length.
+    /// Requires all-Q8 projection matrices (the matrix kernels are Q8) and
+    /// capable pipelines, within the admitted model context.
     pub matrix_prefill: bool,
 }
 
@@ -72,13 +73,44 @@ impl MuseGlimmerRuntimeOptions {
         matrix_prefill: false,
     };
 
-    fn resolve(self, profile: MuseGlimmerArtifactProfile, device: &str, unified: bool) -> Self {
-        if profile == MuseGlimmerArtifactProfile::UnslothQ8_0 && device == "Apple M4 Max" && unified
-        {
-            self
-        } else {
-            Self::REFERENCE
+    /// Each option on its own requirements: split decode is attention over
+    /// the f16 KV cache (any weight dtype); matrix prefill needs all-Q8
+    /// projections. Both need unified memory and pipelines that can run them
+    /// (`[split_decode, matrix_prefill]` capability); the GPU's name does not
+    /// matter.
+    fn resolve(
+        self,
+        profile: MuseGlimmerArtifactProfile,
+        unified: bool,
+        capable: [bool; 2],
+    ) -> Self {
+        Self {
+            split_decode: self.split_decode && unified && capable[0],
+            matrix_prefill: self.matrix_prefill
+                && unified
+                && capable[1]
+                && profile == MuseGlimmerArtifactProfile::UnslothQ8_0,
         }
+    }
+
+    /// `[split_decode, matrix_prefill]` pipeline capability: SIMD width 32,
+    /// the launch's threads per threadgroup, static threadgroup memory that
+    /// fits.
+    fn pipeline_capability(ctx: &MetalContext) -> [bool; 2] {
+        use objc2_metal::{MTLComputePipelineState, MTLDevice};
+        let capable = |kernel: &str, threads: usize| {
+            ctx.pipeline(kernel).is_ok_and(|p| {
+                p.threadExecutionWidth() == 32
+                    && p.maxTotalThreadsPerThreadgroup() >= threads
+                    && p.staticThreadgroupMemoryLength() <= ctx.device.maxThreadgroupMemoryLength()
+            })
+        };
+        [
+            capable("kernel_muse_split_attention_h128", 32)
+                && capable("kernel_muse_split_attention_reduce_h128", 32),
+            capable("kernel_muse_prefill_tiled_f32_h128", 128)
+                && capable("kernel_muse_prefill_online_h128", 32),
+        ]
     }
 }
 
@@ -117,11 +149,19 @@ impl MuseGlimmerLoadedModel {
         options: MuseGlimmerRuntimeOptions,
     ) -> Result<Self, MuseGlimmerRuntimeError> {
         let weight_plan = MuseGlimmerMetalWeightPlan::for_release(ctx, gguf)?;
+        let requested = options;
         let options = options.resolve(
             weight_plan.artifact_profile(),
-            &ctx.device.name().to_string(),
             ctx.device.hasUnifiedMemory(),
+            MuseGlimmerRuntimeOptions::pipeline_capability(ctx),
         );
+        if options != requested {
+            tracing::info!(
+                "muse: runtime options requested={requested:?} effective={options:?} profile={:?} device={:?}",
+                weight_plan.artifact_profile(),
+                ctx.device.name().to_string(),
+            );
+        }
         let geometry = MuseGlimmerTextGeometry::from_config(weight_plan.config(), capacity)?;
         let session_plan = MuseGlimmerTextSessionMemoryPlan::for_geometry_with_split_decode(
             ctx,
@@ -652,35 +692,44 @@ mod tests {
     use crate::muse_glimmer::MuseGlimmerConfig;
 
     #[test]
-    fn muse_math_defaults_resolve_only_qualified_lanes_and_preserve_rollbacks() {
+    fn muse_math_defaults_resolve_each_lane_on_its_requirements_and_preserve_rollbacks() {
         let defaults = MuseGlimmerRuntimeOptions::default();
         assert!(defaults.split_decode && defaults.matrix_prefill);
         for profile in [
             MuseGlimmerArtifactProfile::UnslothQ8_0,
             MuseGlimmerArtifactProfile::UnslothBf16,
         ] {
-            for device in ["Apple M4 Max", "Apple M4 Pro", "Apple M5 Max", "Other"] {
-                for unified in [false, true] {
+            for unified in [false, true] {
+                for capable_bits in 0..4 {
+                    let capable = [capable_bits & 1 != 0, capable_bits & 2 != 0];
                     for split_decode in [false, true] {
                         for matrix_prefill in [false, true] {
                             let requested = MuseGlimmerRuntimeOptions {
                                 split_decode,
                                 matrix_prefill,
                             };
-                            let expected = if profile == MuseGlimmerArtifactProfile::UnslothQ8_0
-                                && device == "Apple M4 Max"
-                                && unified
-                            {
-                                requested
-                            } else {
-                                MuseGlimmerRuntimeOptions::REFERENCE
+                            let expected = MuseGlimmerRuntimeOptions {
+                                split_decode: split_decode && unified && capable[0],
+                                matrix_prefill: matrix_prefill
+                                    && unified
+                                    && capable[1]
+                                    && profile == MuseGlimmerArtifactProfile::UnslothQ8_0,
                             };
-                            assert_eq!(requested.resolve(profile, device, unified), expected);
+                            assert_eq!(requested.resolve(profile, unified, capable), expected);
                         }
                     }
                 }
             }
         }
+        // Rollback to the reference arithmetic always holds.
+        assert_eq!(
+            MuseGlimmerRuntimeOptions::REFERENCE.resolve(
+                MuseGlimmerArtifactProfile::UnslothQ8_0,
+                true,
+                [true; 2]
+            ),
+            MuseGlimmerRuntimeOptions::REFERENCE
+        );
     }
 
     #[test]

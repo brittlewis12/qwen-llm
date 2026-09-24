@@ -37,10 +37,13 @@ fn metadata(item: &Value, allowed: &[&str]) -> Result<(), ServeError> {
 
 /// Shared by HTTP and CLI's Responses-shaped messages documents; verification
 /// remains the caller's responsibility before invoking this wire adapter.
+/// Also returns how many assistant turns arrived without a reasoning item;
+/// each renders with explicit empty reasoning (missing is empty reasoning,
+/// serve's rule for every family), and the caller reports the count.
 pub(crate) fn input_from_responses(
     body: &Value,
     effort: Effort,
-) -> Result<ToolChatInput, ServeError> {
+) -> Result<(ToolChatInput, usize), ServeError> {
     let tools = body
         .get("tools")
         .map(|v| {
@@ -76,6 +79,7 @@ pub(crate) fn input_from_responses(
     }
     let mut reasoning: Option<String> = None;
     let mut assistant: Option<usize> = None;
+    let mut history_reasoning_missing = 0;
     for item in body["input"]
         .as_array()
         .ok_or_else(|| invalid("input", "expected message items"))?
@@ -107,10 +111,10 @@ pub(crate) fn input_from_responses(
                 }
                 let mut message = json!({"role":role,"content":chat::text(&item["content"], if role == "assistant" {"output_text"} else {"input_text"})?});
                 if role == "assistant" {
-                    message["reasoning"] = json!(reasoning.take().ok_or_else(|| invalid(
-                        "input",
-                        "assistant history requires preceding reasoning"
-                    ))?);
+                    message["reasoning"] = json!(reasoning.take().unwrap_or_else(|| {
+                        history_reasoning_missing += 1;
+                        String::new()
+                    }));
                     assistant = Some(messages.len());
                 } else {
                     if reasoning.is_some() {
@@ -128,13 +132,15 @@ pub(crate) fn input_from_responses(
                 if let Some(reasoning) = reasoning.take() {
                     assistant = Some(messages.len());
                     messages.push(json!({"role":"assistant","content":"","reasoning":reasoning}));
+                } else if assistant.is_none() {
+                    // A call group replayed without its reasoning item opens
+                    // an assistant turn with empty reasoning; its parallel
+                    // calls attach to it below.
+                    history_reasoning_missing += 1;
+                    assistant = Some(messages.len());
+                    messages.push(json!({"role":"assistant","content":"","reasoning":""}));
                 }
-                let index = assistant.ok_or_else(|| {
-                    invalid(
-                        "input",
-                        "function call requires assistant reasoning history",
-                    )
-                })?;
+                let index = assistant.expect("a call group always has an assistant turn");
                 let arguments = decode_tool_json(string(item, "arguments")?)
                     .map_err(|e| invalid("input", e.to_string()))?;
                 if !arguments.is_object() {
@@ -190,7 +196,9 @@ pub(crate) fn input_from_responses(
             }
         }
     }
-    ToolChatInput::from_document(&document, effort).map_err(|e| invalid("input", e.to_string()))
+    ToolChatInput::from_document(&document, effort)
+        .map(|input| (input, history_reasoning_missing))
+        .map_err(|e| invalid("input", e.to_string()))
 }
 
 pub(super) fn parse_with_profile(
@@ -238,8 +246,9 @@ pub(super) fn parse_with_profile(
         Effort::parse(None)
     }
     .map_err(|e| invalid("reasoning", e.to_string()))?;
-    let input = input_from_responses(body, effort)?;
+    let (input, history_reasoning_missing) = input_from_responses(body, effort)?;
     if input.config.definitions.is_empty() {
+        // The no-tools parser re-reads the input and reports its own count.
         let mut plain = body.clone();
         let map = plain.as_object_mut().unwrap();
         for key in ["tools", "tool_choice", "parallel_tool_calls"] {
@@ -279,6 +288,7 @@ pub(super) fn parse_with_profile(
         .map(str::to_owned);
     request.reasoning = Some(json!({"effort":effort}));
     request.k2_tools = Some(input);
+    request.history_reasoning_missing = history_reasoning_missing;
     Ok(request)
 }
 pub(super) fn render_with_profile(

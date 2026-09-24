@@ -169,5 +169,51 @@
     }
    }
   ]
+ },
+ {
+  "id": "history_missing_reasoning_tool_loop_default_preserve",
+  "messages": [
+   {
+    "role": "user",
+    "content": "One"
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "type": "function",
+      "function": {
+       "name": "ping",
+       "arguments": {}
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "content": "pong"
+   },
+   {
+    "role": "assistant",
+    "content": "Done."
+   },
+   {
+    "role": "user",
+    "content": "Two"
+   }
+  ],
+  "add_generation_prompt": true,
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "parameters": {
+      "type": "object"
+     }
+    }
+   }
+  ]
  }
 ]

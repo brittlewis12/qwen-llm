@@ -278,6 +278,44 @@ mod tests {
         parse_request(&value).unwrap()
     }
 
+    /// Missing reasoning is empty reasoning (serve's rule for every family):
+    /// neither renders an ATEM `to=self` record. This is a native-renderer
+    /// contract; no independent Muse template oracle exists.
+    #[test]
+    fn missing_history_reasoning_renders_as_explicit_empty_reasoning() {
+        let user = |text: &str| json!({"role": "user", "content": text});
+        let empty = json!({"type": "reasoning", "content": ""});
+        let call =
+            json!({"type": "function_call", "call_id": "c1", "name": "ping", "arguments": "{}"});
+        let output = json!({"type": "function_call_output", "call_id": "c1", "output": "pong"});
+        let answer = json!({"role": "assistant", "content": "Done."});
+        let histories = [
+            (
+                json!([user("One"), answer, user("Two")]),
+                json!([user("One"), empty, answer, user("Two")]),
+            ),
+            (
+                json!([user("One"), call, output, answer, user("Two")]),
+                json!([user("One"), empty, call, output, empty, answer, user("Two")]),
+            ),
+        ];
+        for (missing, explicit) in &histories {
+            let render = |input: &Value| {
+                let mut request = parse(json!({"model": "muse", "input": input,
+                    "tools": [{"type": "function", "name": "ping", "parameters": {"type": "object"}}]}));
+                normalize_request(&mut request, 512).unwrap();
+                render_muse_glimmer_serve_prompt(
+                    &request,
+                    MuseGlimmerChatTemplateProfile::UnslothLaunch,
+                )
+                .unwrap()
+            };
+            let rendered = render(missing);
+            assert_eq!(rendered, render(explicit), "{missing}");
+            assert!(!rendered.contains("to=self"), "{rendered}");
+        }
+    }
+
     #[test]
     fn omitted_controls_normalize_to_the_released_preset() {
         let mut request = parse(json!({"model":"muse", "input":"hello"}));

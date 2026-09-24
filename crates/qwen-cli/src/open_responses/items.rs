@@ -162,6 +162,15 @@ pub(crate) struct ServeRequest {
     pub(crate) qwen38_mode: Option<crate::messages::Qwen38GenerationMode>,
     pub(crate) strip_history_thinking: bool,
     pub(crate) echo_stats: bool,
+    /// Assistant history turns (a message with the calls attached to it, or
+    /// a call-only group) that arrived without a reasoning item. One rule for
+    /// every family: such a turn renders exactly as the family's template
+    /// renders empty reasoning (K2's adapter supplies the explicit empty field
+    /// its native renderer requires); only the unverified Generic Qwen
+    /// contract keeps history verbatim. Counted after grouping is final, so
+    /// this is an observed absence, not proof the client discarded reasoning.
+    /// Serve logs it on thinking requests.
+    pub(crate) history_reasoning_missing: usize,
 }
 
 impl Default for ServeRequest {
@@ -194,6 +203,7 @@ impl Default for ServeRequest {
             qwen38_mode: None,
             strip_history_thinking: false,
             echo_stats: false,
+            history_reasoning_missing: 0,
         }
     }
 }
@@ -726,7 +736,14 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
                                 ),
                             ));
                         }
-                        if request.no_thinking && pending_reasoning.is_some() {
+                        // Nonempty reasoning is refused here (it would be
+                        // dropped); empty reasoning equals none and is
+                        // admitted, as missing reasoning always was.
+                        if request.no_thinking
+                            && pending_reasoning
+                                .as_deref()
+                                .is_some_and(|text| !text.is_empty())
+                        {
                             return Err(ServeError::invalid_request(
                                 Some("input"),
                                 format!(
@@ -911,12 +928,30 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
     match request.model_request.turns.last() {
         // A tool loop resumes generation after tool results, so
         // function_call_output is a legal terminal item (capture F-S2.3).
-        Some(Turn::User(_) | Turn::ToolResults(_)) => Ok(()),
-        _ => Err(ServeError::invalid_request(
-            Some("input"),
-            "the final input item must be a user message or function_call_output",
-        )),
+        Some(Turn::User(_) | Turn::ToolResults(_)) => {}
+        _ => {
+            return Err(ServeError::invalid_request(
+                Some("input"),
+                "the final input item must be a user message or function_call_output",
+            ));
+        }
     }
+    // After grouping: a message plus its attached parallel calls is one turn.
+    request.history_reasoning_missing = request
+        .model_request
+        .turns
+        .iter()
+        .filter(|turn| {
+            matches!(
+                turn,
+                Turn::Assistant {
+                    reasoning: None,
+                    ..
+                }
+            )
+        })
+        .count();
+    Ok(())
 }
 
 fn required_str(
@@ -1669,16 +1704,46 @@ mod tests {
         );
     }
 
+    /// `x_qwen.no_thinking` refuses reasoning text before an assistant
+    /// message (it would be dropped). Empty reasoning is the same as none and
+    /// is admitted wherever missing reasoning is, message or call turn.
     #[test]
     fn no_thinking_rejects_reasoning_history() {
-        let error = parse(json!({"model": "m", "input": [
+        let no_thinking = |input: Value| {
+            parse(json!({"model": "m", "input": input, "x_qwen": {"no_thinking": true}}))
+        };
+        let error = no_thinking(json!([
             {"role": "user", "content": "q"},
             {"type": "reasoning", "content": "r"},
             {"role": "assistant", "content": "a"},
             {"role": "user", "content": "q2"},
-        ], "x_qwen": {"no_thinking": true}}))
+        ]))
         .unwrap_err();
         assert!(error.message.contains("no_thinking sessions"));
+
+        let call =
+            json!({"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"});
+        let output = json!({"type": "function_call_output", "call_id": "c1", "output": "ok"});
+        for (reasoning, rest) in [
+            (
+                true,
+                json!([{"role": "assistant", "content": "a"}, {"role": "user", "content": "q2"}]),
+            ),
+            (
+                false,
+                json!([{"role": "assistant", "content": "a"}, {"role": "user", "content": "q2"}]),
+            ),
+            (true, json!([call, output])),
+            (false, json!([call, output])),
+        ] {
+            let mut input = vec![json!({"role": "user", "content": "q"})];
+            if reasoning {
+                input.push(json!({"type": "reasoning", "content": ""}));
+            }
+            input.extend(rest.as_array().unwrap().iter().cloned());
+            let request = no_thinking(Value::Array(input)).unwrap();
+            assert_eq!(request.history_reasoning_missing, usize::from(!reasoning));
+        }
     }
 
     #[test]
@@ -1864,6 +1929,82 @@ mod tests {
         ]}))
         .unwrap_err();
         assert!(bad_reasoning.message.contains("reasoning_text"));
+    }
+
+    /// Missing reasoning is counted per finalized assistant turn: a message
+    /// with its attached parallel calls is one turn, reasoning that arrives
+    /// between a message and its calls still attaches (no split), and an
+    /// explicit empty item is not missing.
+    #[test]
+    fn history_reasoning_missing_counts_finalized_assistant_turns() {
+        let count = |input: Value| {
+            parse(json!({"model": "m", "input": input}))
+                .unwrap()
+                .history_reasoning_missing
+        };
+        let call = |id: &str| json!({"type": "function_call", "call_id": id, "name": "f", "arguments": "{}"});
+        let output =
+            |id: &str| json!({"type": "function_call_output", "call_id": id, "output": "ok"});
+        let user = |text: &str| json!({"role": "user", "content": text});
+        let assistant = |text: &str| json!({"role": "assistant", "content": text});
+        let reasoning = |text: &str| json!({"type": "reasoning", "content": text});
+
+        assert_eq!(count(json!([user("q")])), 0);
+        assert_eq!(count(json!([user("q"), assistant("a"), user("q2")])), 1);
+        assert_eq!(
+            count(json!([
+                user("q"),
+                reasoning(""),
+                assistant("a"),
+                user("q2")
+            ])),
+            0,
+            "explicit empty reasoning is supplied, not missing"
+        );
+        // Message plus parallel calls, none with reasoning: one turn.
+        assert_eq!(
+            count(json!([
+                user("q"),
+                assistant("checking"),
+                call("c1"),
+                call("c2"),
+                output("c1"),
+                output("c2")
+            ])),
+            1
+        );
+        // Call-only group without reasoning: one turn.
+        assert_eq!(count(json!([user("q"), call("c1"), output("c1")])), 1);
+        // Reasoning between the message and its call attaches to the
+        // message's turn rather than opening a second one.
+        let late = parse(json!({"model": "m", "input": [
+            user("q"), assistant("checking"), reasoning("plan"), call("c1"), output("c1")
+        ]}))
+        .unwrap();
+        assert_eq!(late.history_reasoning_missing, 0);
+        assert_eq!(
+            late.model_request
+                .turns
+                .iter()
+                .filter(|turn| matches!(turn, Turn::Assistant { .. }))
+                .count(),
+            1
+        );
+        // Two tool rounds, each without reasoning, then a final answer
+        // that has it.
+        assert_eq!(
+            count(json!([
+                user("q"),
+                call("c1"),
+                output("c1"),
+                call("c2"),
+                output("c2"),
+                reasoning("r"),
+                assistant("done"),
+                user("q2")
+            ])),
+            2
+        );
     }
 
     #[test]

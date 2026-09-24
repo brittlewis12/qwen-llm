@@ -146,6 +146,7 @@ pub(crate) fn parse_with_profile(
         messages.push(Message::text("system", system.into()));
     }
     let mut pending_reasoning = None;
+    let mut history_reasoning_missing = 0;
     for item in map["input"].as_array().unwrap() {
         let kind = item
             .get("type")
@@ -208,7 +209,13 @@ pub(crate) fn parse_with_profile(
             )?,
         );
         if role == "assistant" {
-            message.reasoning = Some(pending_reasoning.take().ok_or_else(|| invalid("input", "assistant history requires an explicit preceding reasoning item (empty is valid)"))?);
+            // Missing reasoning is empty reasoning (serve's rule for every
+            // family); the native renderer, which mirrors the upstream
+            // template's missing-field error, receives the explicit field.
+            message.reasoning = Some(pending_reasoning.take().unwrap_or_else(|| {
+                history_reasoning_missing += 1;
+                String::new()
+            }));
         } else if pending_reasoning.is_some() {
             return Err(invalid(
                 "input",
@@ -240,6 +247,7 @@ pub(crate) fn parse_with_profile(
     request.instructions = instructions.map(str::to_owned);
     request.reasoning = Some(json!({"effort": effort}));
     request.k2_chat = Some(ChatInput { messages, effort });
+    request.history_reasoning_missing = history_reasoning_missing;
     Ok(request)
 }
 

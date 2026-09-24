@@ -1348,6 +1348,13 @@ base/high history alias; selected effort applies to the new generation suffix.
 Completed emitted items replay, including empty summary/annotations metadata;
 incomplete history and unsupported metadata reject rather than disappear.
 
+Qualification (2026-09-24): serve and the CLI adapters no longer refuse an
+assistant turn or call group without a reasoning item. Missing reasoning is
+empty reasoning for every family, so the adapter supplies the explicit empty
+field and reports `history_reasoning_missing=N`. The native renderer and its
+`history-missing` upstream error fixture are unchanged: the rendered bytes are
+those of the explicit-empty case the oracle already covers.
+
 CLI and HTTP share a bounded incremental UTF-8 partitioner. It starts in reasoning,
 optionally removes one matching opener at byte zero, and switches to visible text
 at the first matching effort-specific close. Later/wrong-effort/Qwen/tool strings

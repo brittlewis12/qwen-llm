@@ -92,7 +92,8 @@ fn k2_chat_rejects_unsupported_original_fields_and_ambiguous_history() {
         json!([]),
         json!([1, 2]),
         json!([{"role":"developer","content":"x"},{"role":"user","content":"a"}]),
-        json!([{"role":"assistant","content":"x"},{"role":"user","content":"a"}]),
+        // An assistant without reasoning is admitted as empty reasoning
+        // (k2_missing_history_reasoning_renders_as_explicit_empty_reasoning).
         json!([{"type":"reasoning","content":""},{"role":"user","content":"a"}]),
         json!([{"role":"user","content":"a","extra":false}]),
         json!([{"role":"user","content":[{"type":"input_text","text":"a","extra":1}]}]),

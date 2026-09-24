@@ -70,6 +70,23 @@ pub(crate) enum OutputProtocol {
     },
 }
 
+impl OutputProtocol {
+    /// Whether this generation reasons, so the family renders history
+    /// reasoning as model input (K2 and Muse always; Qwen and DeepSeek V4
+    /// when the prompt opens `<think>`). A no-thinking generation renders
+    /// history preclosed or dropped, where absent reasoning changes nothing.
+    pub(crate) fn reasons(&self) -> bool {
+        match self {
+            Self::RawText => false,
+            Self::K2Chat { .. } | Self::K2Tools { .. } | Self::MuseAtem { .. } => true,
+            Self::Qwen {
+                preopened_reasoning,
+                ..
+            } => *preopened_reasoning,
+        }
+    }
+}
+
 pub(crate) enum OutputPartition {
     Raw(Utf8Assembler),
     K2(super::partition_k2::K2Partition),
@@ -356,6 +373,82 @@ mod tests {
         }
         partition.finish(end, &mut events).unwrap();
         events
+    }
+
+    /// The missing-reasoning diagnostic fires exactly for reasoning
+    /// generations: every K2 chat/tools and Muse request, Qwen and DS4 when
+    /// the prompt opens `<think>` (the backends' own predicates), never raw.
+    #[test]
+    fn reasons_tracks_thinking_generations() {
+        use crate::open_responses::items::{QwenTemplate, parse_request};
+        use crate::open_responses::render::{QwenGeneration, qwen_generation};
+        use qwen_llm::k2_horizon_chat::Effort;
+        use serde_json::json;
+
+        let qwen = |preopened_reasoning| OutputProtocol::Qwen {
+            preopened_reasoning,
+            parse_tools: true,
+            tool_grammar: ToolGrammar::QwenXml,
+        };
+        assert!(!OutputProtocol::RawText.reasons());
+        assert!(
+            OutputProtocol::K2Chat {
+                effort: Effort::Low
+            }
+            .reasons()
+        );
+        assert!(
+            OutputProtocol::MuseAtem {
+                eos_token_id: 1,
+                eot_token_id: 2,
+                declared_tools: Vec::new()
+            }
+            .reasons()
+        );
+        assert!(qwen(true).reasons() && !qwen(false).reasons());
+
+        let preopens = |template: QwenTemplate, body: serde_json::Value| {
+            let request = parse_request(&body).unwrap();
+            let bound = crate::open_responses::bind_qwen_request(&request, template, true).unwrap();
+            qwen_generation(&bound) == QwenGeneration::PreOpen
+        };
+        let input = json!([{"role": "user", "content": "q"}]);
+        for (template, x_qwen, effort, expected) in [
+            (QwenTemplate::Qwen36, json!({}), None, true),
+            (
+                QwenTemplate::Qwen36,
+                json!({"no_thinking": true}),
+                None,
+                false,
+            ),
+            (QwenTemplate::Qwen35, json!({}), None, false),
+            (QwenTemplate::Qwen35, json!({"thinking": true}), None, true),
+            (QwenTemplate::Qwen38, json!({}), None, true),
+            (QwenTemplate::Qwen38, json!({}), Some("none"), false),
+            (QwenTemplate::Generic, json!({}), None, false),
+        ] {
+            let mut body = json!({"model": "m", "input": input, "x_qwen": x_qwen});
+            if let Some(effort) = effort {
+                body["reasoning"] = json!({"effort": effort});
+            }
+            assert_eq!(
+                preopens(template, body),
+                expected,
+                "{} {x_qwen} {effort:?}",
+                template.label()
+            );
+        }
+        for (effort, expected) in [(None, false), (Some("high"), true)] {
+            let mut body = json!({"model": "ds", "input": input});
+            if let Some(effort) = effort {
+                body["reasoning"] = json!({"effort": effort});
+            }
+            let request = parse_request(&body).unwrap();
+            assert_eq!(
+                crate::serve::render_ds4::preopens_reasoning(&request).unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]

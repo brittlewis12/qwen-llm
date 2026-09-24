@@ -1660,6 +1660,42 @@ mod tests {
         }
     }
 
+    /// `qwen run --messages` on a pinned Qwen3.6 template preserves history,
+    /// so an assistant turn without `reasoning_content` renders the empty
+    /// block the released template gives it under `preserve_thinking=true`
+    /// (missing reasoning is empty reasoning, as in serve).
+    #[test]
+    fn qwen36_cli_missing_history_reasoning_matches_jinja_preserve() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/qwen36_chat_template_oracle_v1.json"
+        ))
+        .unwrap();
+        let expected = fixture["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["id"] == "history_preserve_missing_reasoning")
+            .unwrap()["rendered"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let rendered = render_qwen_chat_for_template(
+            &[
+                message("user", "One"),
+                message("assistant", "Answer one"),
+                message("user", "Two"),
+            ],
+            &[],
+            QwenTemplate::Qwen36,
+            true,
+            true,
+            QwenGenerationMode::Auto,
+            None,
+        )
+        .unwrap();
+        assert_eq!(rendered.text, expected);
+    }
+
     fn assert_authored_spans(render: &AnnotatedMessageRender) {
         let mut cursor = 0;
         for span in &render.spans {

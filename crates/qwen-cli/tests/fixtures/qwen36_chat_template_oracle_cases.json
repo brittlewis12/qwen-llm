@@ -511,5 +511,117 @@
     }
    }
   ]
+ },
+ {
+  "id": "history_preserve_missing_reasoning",
+  "messages": [
+   {
+    "role": "user",
+    "content": "One"
+   },
+   {
+    "role": "assistant",
+    "content": "Answer one"
+   },
+   {
+    "role": "user",
+    "content": "Two"
+   }
+  ],
+  "add_generation_prompt": true,
+  "preserve_thinking": true
+ },
+ {
+  "id": "history_preserve_missing_reasoning_tool_loop",
+  "messages": [
+   {
+    "role": "user",
+    "content": "One"
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "type": "function",
+      "function": {
+       "name": "ping",
+       "arguments": {}
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "content": "pong"
+   },
+   {
+    "role": "assistant",
+    "content": "Done."
+   },
+   {
+    "role": "user",
+    "content": "Two"
+   }
+  ],
+  "add_generation_prompt": true,
+  "preserve_thinking": true,
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "parameters": {
+      "type": "object"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "id": "history_strip_missing_reasoning_tool_loop",
+  "messages": [
+   {
+    "role": "user",
+    "content": "One"
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "type": "function",
+      "function": {
+       "name": "ping",
+       "arguments": {}
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "content": "pong"
+   },
+   {
+    "role": "assistant",
+    "content": "Done."
+   },
+   {
+    "role": "user",
+    "content": "Two"
+   }
+  ],
+  "add_generation_prompt": true,
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "parameters": {
+      "type": "object"
+     }
+    }
+   }
+  ]
  }
 ]

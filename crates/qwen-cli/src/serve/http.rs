@@ -585,6 +585,21 @@ fn write_serve_error(stream: &mut &TcpStream, error: &ServeError) -> io::Result<
     write_json_response(stream, error.status, &error.to_json())
 }
 
+/// Every family renders history without reasoning as empty reasoning; a
+/// reasoning request that relied on it says so (never silently). Absent
+/// reasoning in a no-thinking generation changes nothing and is not logged.
+fn history_reasoning_diagnostic(
+    request: &ServeRequest,
+    protocol: &OutputProtocol,
+) -> Option<String> {
+    (request.history_reasoning_missing > 0 && protocol.reasons()).then(|| {
+        format!(
+            "serve: history_reasoning_missing={} (assistant turns replayed without a reasoning item render with empty reasoning)",
+            request.history_reasoning_missing
+        )
+    })
+}
+
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -787,6 +802,10 @@ fn handle_responses(
 
     // Resolved before the mutable generate borrow.
     let output_protocol = backend.output_protocol(&request);
+    // Said per request, before generation can fail.
+    if let Some(line) = history_reasoning_diagnostic(&request, &output_protocol) {
+        eprintln!("{line}");
+    }
     if !request.stream {
         let mut sink = CollectSink {
             pieces: Vec::new(),

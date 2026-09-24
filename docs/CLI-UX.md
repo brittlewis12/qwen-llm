@@ -123,7 +123,11 @@ Contract:
   assistant content, unknown fields, wrapper metadata, undeclared tools, and
   unmatched results are rejected rather than ignored. Rendering is
   byte-checked against the released Qwen3.6 template
-  (`tests/fixtures/qwen36_chat_template_oracle_v1.json`).
+  (`tests/fixtures/qwen36_chat_template_oracle_v1.json`). Identified releases
+  preserve history reasoning, and an assistant turn without
+  `reasoning_content` renders as empty reasoning (the empty
+  `<think>\n\n</think>\n\n` block the released template emits under
+  `preserve_thinking`), exactly as serve renders a missing reasoning item.
 - Muse modern messages use the shared ATEM request contract. They preserve
   validated reasoning and tool history, require declared calls and matching
   tool results, and accept only histories awaiting an assistant continuation.
@@ -310,7 +314,10 @@ qwen run -m "$HOME/models/K2-Horizon-7B-Q4_K_M.gguf" --user 'What is 2+2?' \
 `--user` optionally accepts `--system`; stdin forms work as usual. `--messages`
 accepts a bare array or an object containing `messages`. For ordinary chat, content must be
 strings, with at most one leading system turn and a final user turn. Assistant
-history requires an explicit string thinking field, including the empty string:
+history carries a string thinking field; one without any renders with empty
+reasoning, as in every family (stderr reports `k2:
+history_reasoning_missing=N`). The native renderer, like the upstream template,
+still requires the field, so the CLI supplies it:
 
 ```json
 [

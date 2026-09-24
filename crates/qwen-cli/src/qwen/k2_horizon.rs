@@ -50,6 +50,72 @@ pub(crate) fn chat_projection(gguf: &GgufFile) -> Result<serde_json::Value> {
     })
 }
 
+/// Native thinking fields on a K2 assistant message (IFM template aliases).
+const THINKING_FIELDS: [&str; 5] = [
+    "think",
+    "think_fast",
+    "think_faster",
+    "reasoning_content",
+    "reasoning",
+];
+
+/// Missing reasoning is empty reasoning (serve's rule for every family): an
+/// assistant turn with no thinking field gets the explicit empty `reasoning`
+/// the native renderer requires (it mirrors the upstream template, which
+/// errors). A present-but-malformed field is left for the renderer to refuse.
+/// Returns how many turns were filled.
+fn fill_missing_document_thinking(document: &mut serde_json::Value) -> usize {
+    let messages = match document {
+        serde_json::Value::Array(messages) => Some(messages),
+        serde_json::Value::Object(map) => map
+            .get_mut("messages")
+            .and_then(serde_json::Value::as_array_mut),
+        _ => None,
+    };
+    let mut filled = 0;
+    for message in messages
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_object_mut)
+    {
+        if message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+            && !THINKING_FIELDS.iter().any(|key| message.contains_key(*key))
+        {
+            message.insert("reasoning".into(), serde_json::Value::String(String::new()));
+            filled += 1;
+        }
+    }
+    filled
+}
+
+fn fill_missing_message_thinking(messages: &mut [chat::Message]) -> usize {
+    let mut filled = 0;
+    for message in messages.iter_mut().filter(|m| m.role == "assistant") {
+        if [
+            &message.think,
+            &message.think_fast,
+            &message.think_faster,
+            &message.reasoning_content,
+            &message.reasoning,
+        ]
+        .iter()
+        .all(|field| field.is_none())
+        {
+            message.reasoning = Some(String::new());
+            filled += 1;
+        }
+    }
+    filled
+}
+
+fn report_missing_thinking(filled: usize) {
+    if filled > 0 {
+        eprintln!(
+            "k2: history_reasoning_missing={filled} (assistant turns without reasoning render with empty reasoning)"
+        );
+    }
+}
+
 fn render_chat_input_full(
     input: cli::AcquiredRunInput,
     effort: chat::Effort,
@@ -64,7 +130,7 @@ fn render_chat_input_full(
             messages
         }
         cli::AcquiredRunInput::Messages { document, .. } => {
-            let value = chat::tools::decode_tool_json(&document)?;
+            let mut value = chat::tools::decode_tool_json(&document)?;
             let tool_input = if value.get("input").is_some() {
                 let map = value
                     .as_object()
@@ -75,10 +141,11 @@ fn render_chat_input_full(
                             .contains(&key.as_str())),
                     "CLI Responses-shaped document supports input/tools/instructions/x_k2 only; generation controls belong to flags"
                 );
-                Some(
+                let (input, history_reasoning_missing) =
                     crate::serve::render_k2::tools::input_from_responses(&value, effort)
-                        .map_err(|e| anyhow::anyhow!(e.message))?,
-                )
+                        .map_err(|e| anyhow::anyhow!(e.message))?;
+                report_missing_thinking(history_reasoning_missing);
+                Some(input)
             } else if value.get("tools").is_some()
                 || value.get("tool_presentation_format").is_some()
                 || value.get("tool_call_format").is_some()
@@ -88,6 +155,7 @@ fn render_chat_input_full(
                     .and_then(|m| m.first())
                     .is_some_and(|m| m.get("tools").is_some())
             {
+                report_missing_thinking(fill_missing_document_thinking(&mut value));
                 Some(chat::tools::ToolChatInput::from_document(&value, effort)?)
             } else {
                 None
@@ -99,7 +167,9 @@ fn render_chat_input_full(
                     (!input.config.definitions.is_empty()).then_some(input),
                 ));
             }
-            chat::parse_messages(document.as_bytes())?
+            let mut messages = chat::parse_messages(document.as_bytes())?;
+            report_missing_thinking(fill_missing_message_thinking(&mut messages));
+            messages
         }
         cli::AcquiredRunInput::RawPrompt(_) => {
             bail!("raw input must not pass through the K2 chat renderer")
@@ -524,6 +594,59 @@ mod tests {
         let invocation = cli::normalize(&mut args);
         invocation.apply_option_overrides(&mut args);
         (args, explicit, invocation)
+    }
+
+    /// Missing reasoning is empty reasoning on every CLI document shape, as
+    /// in serve: an assistant turn without a thinking field renders the same
+    /// bytes as one carrying an explicit empty field. The native renderer
+    /// itself still refuses the missing field (upstream oracle parity).
+    #[test]
+    fn k2_cli_missing_history_thinking_renders_as_explicit_empty() {
+        let tools =
+            r#"[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}]"#;
+        let responses_tools = r#"[{"type":"function","name":"f","parameters":{"type":"object"}}]"#;
+        let assistant =
+            |thinking: &str| format!(r#"{{"role":"assistant"{thinking},"content":"x"}}"#);
+        let documents = |thinking: &str| {
+            let history = format!(
+                r#"[{{"role":"user","content":"a"}},{},{{"role":"user","content":"b"}}]"#,
+                assistant(thinking)
+            );
+            let responses_history = if thinking.is_empty() {
+                r#"[{"role":"user","content":"a"},{"role":"assistant","content":"x"},{"role":"user","content":"b"}]"#.to_owned()
+            } else {
+                r#"[{"role":"user","content":"a"},{"type":"reasoning","content":""},{"role":"assistant","content":"x"},{"role":"user","content":"b"}]"#.to_owned()
+            };
+            [
+                history.clone(),
+                format!(r#"{{"messages":{history}}}"#),
+                format!(r#"{{"messages":{history},"tools":{tools}}}"#),
+                format!(r#"{{"input":{responses_history},"tools":{responses_tools}}}"#),
+            ]
+        };
+        let render = |document: String| {
+            render_chat_input(
+                cli::AcquiredRunInput::Messages {
+                    document,
+                    source: "test".into(),
+                },
+                chat::Effort::Medium,
+            )
+        };
+        for (missing, explicit) in documents("").into_iter().zip(documents(r#","think":"""#)) {
+            assert_eq!(
+                render(missing.clone()).unwrap(),
+                render(explicit).unwrap(),
+                "{missing}"
+            );
+        }
+        let mut native = chat::parse_messages(
+            r#"[{"role":"assistant","content":"x"},{"role":"user","content":"b"}]"#.as_bytes(),
+        )
+        .unwrap();
+        assert!(chat::render(&native, chat::Effort::High).is_err());
+        assert_eq!(fill_missing_message_thinking(&mut native), 1);
+        assert!(chat::render(&native, chat::Effort::High).is_ok());
     }
 
     #[test]

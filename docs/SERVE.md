@@ -459,9 +459,11 @@ Chat additionally accepts string `instructions` and `reasoning` containing only
 
 History permits one leading system (or `instructions`, not both), user and
 assistant messages, and must end in a user turn. Message content is a string or
-`input_text`/`output_text` parts matching the role. Every assistant needs a directly
-preceding reasoning item with string content or `reasoning_text` parts; empty
-reasoning is valid. Generic replayed reasoning uses IFM's canonical `reasoning`
+`input_text`/`output_text` parts matching the role. An assistant's reasoning
+item directly precedes it, with string content or `reasoning_text` parts; an
+assistant without one renders with empty reasoning, like every family (see
+"Missing reasoning is empty reasoning"; the native renderer and its upstream
+oracle still require the explicit field, which serve supplies). Generic replayed reasoning uses IFM's canonical `reasoning`
 alias (high/base history tag); the request effort controls only the new suffix.
 Completed response items can be replayed verbatim, including string IDs, completed
 status, empty reasoning `summary`, and empty output-text `annotations`. Nonempty
@@ -496,10 +498,11 @@ Total output-token usage includes stop tokens; the existing shared
 Verified final Q8_0/Q4_K_M chat accepts standard flat function definitions in
 `tools`, `function_call` history with JSON-string `arguments`, and matching
 `function_call_output` items. Tool outputs may be strings, objects or arrays;
-objects/arrays render as native JSON data, not multimodal content. Each assistant
-call group needs preceding reasoning (empty is valid), and every pending ID needs
-exactly one result. Results may arrive out of order and render in original call
+objects/arrays render as native JSON data, not multimodal content. Every
+pending ID needs exactly one result. Results may arrive out of order and render in original call
 order. IDs remain wire metadata, not tokens inserted into the IFM prompt.
+A call group replayed without reasoning opens an assistant turn with empty
+reasoning; its parallel calls attach to it.
 
 ```json
 {
@@ -799,9 +802,9 @@ because client model-pickers probe it).
   a serve policy there). Documented divergences: history assistant turns keep
   the preclosed block in a no-thinking session (which is what the released
   template itself renders for preserved empty reasoning), a second system
-  item is rejected rather than merged, and the template's
-  `last_query_index` rule (reasoning kept only for assistant turns after the
-  final user query) is not applied until tool continuation lands. Trimming
+  item is rejected rather than merged, and Qwen3.5 thinking sessions preserve
+  history reasoning (a serve policy; the template strips it before the last
+  user query). Trimming
   follows Python `str.strip()`. An unidentified release (no version token in
   any name field, conflicting versions, or a foreign tokenizer) keeps the
   legacy generic ChatML contract (bare suffix, verbatim content) rather than
@@ -827,9 +830,26 @@ because client model-pickers probe it).
 - Preserve/strip rendering policy: preserve is the default for the validated
   Qwen3.6 identity (owner position, Amendment 1 of S0; economics measured in S0
   G2), and strip remains available there via `x_qwen`. Validated Qwen3.8 uses
-  its preclosed-history renderer. DS4 rejects strip mode and preserves reasoning
-  history whenever the current request selects a non-`none` thinking tier.
-  Muse rejects strip mode and preserves structured ATEM reasoning/tool history.
+  its preclosed-history renderer for plain assistant turns (its released
+  template, and Flash-Next's, preserves by default; aligning plain turns is a
+  pending behavior change), and its tool turns follow the preserve rules.
+  DS4 rejects strip mode and preserves reasoning history whenever the current
+  request selects a non-`none` thinking tier. Muse rejects strip mode and
+  preserves structured ATEM reasoning/tool history.
+- **Missing reasoning is empty reasoning, for every family.** Clients may
+  replay history without its reasoning items (conforming Responses usage).
+  An assistant turn (a message with its attached calls, or a call-only group)
+  that arrives without one renders exactly as an explicit empty reasoning item
+  would: the empty think block wherever that family's template shows one
+  (Qwen3.5/3.6/3.8, DS4 thinking tiers), no ATEM `to=self` record for Muse,
+  and the explicit empty field K2's native renderer requires. Strip and
+  no-thinking modes apply to it as to any other turn; `x_qwen.no_thinking`
+  admits an empty reasoning item wherever it admits a missing one (it still
+  refuses reasoning text before an assistant message). Only the unidentified generic Qwen
+  contract keeps history verbatim. Thinking requests that relied on this log
+  `serve: history_reasoning_missing=N` before generation. This cannot restore
+  reasoning the client discarded, so the transcript boundary above is still
+  what keeps such loops warm.
 
 ## Cancellation
 

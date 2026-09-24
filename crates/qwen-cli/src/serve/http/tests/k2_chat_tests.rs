@@ -158,6 +158,149 @@ fn k2_tools_json_sse_roundtrip_ids_modes_and_reordered_results() {
     }
 }
 
+/// Missing reasoning is empty reasoning on K2 too (serve's rule for every
+/// family): history replayed without reasoning items renders the same native
+/// bytes as history replaying explicit empty ones, on the chat and tools
+/// paths, and the adapter reports how many turns it filled.
+#[test]
+fn k2_missing_history_reasoning_renders_as_explicit_empty_reasoning() {
+    let user = |text: &str| json!({"role":"user","content":text});
+    let assistant = |text: &str| json!({"role":"assistant","content":text});
+    let empty = json!({"type":"reasoning","content":""});
+    let call =
+        |id: &str| json!({"type":"function_call","call_id":id,"name":"lookup","arguments":"{}"});
+    let output = |id: &str| json!({"type":"function_call_output","call_id":id,"output":"ok"});
+    let tools = json!([{"type":"function","name":"lookup","parameters":{"type":"object"}}]);
+    let no_tools = json!([]);
+    let cases = [
+        // Empty `tools` falls back to the chat parser, which alone counts.
+        (
+            Some(&no_tools),
+            json!([user("a"), assistant("x"), user("b")]),
+            json!([user("a"), empty, assistant("x"), user("b")]),
+            1,
+        ),
+        // (tools, missing history, explicit-empty history, missing count)
+        (
+            None,
+            json!([user("a"), assistant("x"), user("b")]),
+            json!([user("a"), empty, assistant("x"), user("b")]),
+            1,
+        ),
+        // History may open with an assistant turn (the upstream
+        // `history-missing` shape, which the native template refuses).
+        (
+            None,
+            json!([assistant("x"), user("b")]),
+            json!([empty, assistant("x"), user("b")]),
+            1,
+        ),
+        // Parallel call group, then a final answer, both without reasoning.
+        (
+            Some(&tools),
+            json!([
+                user("a"),
+                call("c1"),
+                call("c2"),
+                output("c2"),
+                output("c1"),
+                assistant("done"),
+                user("b")
+            ]),
+            json!([
+                user("a"),
+                empty,
+                call("c1"),
+                call("c2"),
+                output("c2"),
+                output("c1"),
+                empty,
+                assistant("done"),
+                user("b")
+            ]),
+            2,
+        ),
+        // A message and its calls are one turn.
+        (
+            Some(&tools),
+            json!([user("a"), assistant("Checking."), call("c1"), output("c1")]),
+            json!([
+                user("a"),
+                empty,
+                assistant("Checking."),
+                call("c1"),
+                output("c1")
+            ]),
+            1,
+        ),
+    ];
+    let profile = render_k2::mock_profile();
+    for effort in ["high", "medium", "low"] {
+        for (tools, missing, explicit, count) in &cases {
+            let parse = |input: &Value| {
+                let mut body =
+                    json!({"model":"k2-test","input":input,"reasoning":{"effort":effort}});
+                if let Some(tools) = tools {
+                    body["tools"] = (*tools).clone();
+                }
+                let request = render_k2::parse_with_profile(&body, Some(&profile)).unwrap();
+                let prompt = render_k2::render_with_profile(&request, Some(&profile)).unwrap();
+                (prompt, request.history_reasoning_missing)
+            };
+            let (missing_prompt, missing_count) = parse(missing);
+            let (explicit_prompt, explicit_count) = parse(explicit);
+            assert_eq!(missing_prompt, explicit_prompt, "{effort} {missing}");
+            assert_eq!(
+                (missing_count, explicit_count),
+                (*count, 0),
+                "{effort} {missing}"
+            );
+        }
+    }
+}
+
+/// The per-request diagnostic fires when a reasoning request's history was
+/// missing reasoning items, and not for explicit empty reasoning or for a
+/// no-thinking generation (where absent reasoning changes nothing).
+#[test]
+fn history_reasoning_diagnostic_fires_only_for_filled_reasoning_history() {
+    use crate::serve::output_partition::ToolGrammar;
+    let profile = render_k2::mock_profile();
+    let user = |text: &str| json!({"role":"user","content":text});
+    let call = json!({"type":"function_call","call_id":"c1","name":"lookup","arguments":"{}"});
+    let output = json!({"type":"function_call_output","call_id":"c1","output":"ok"});
+    let k2 = |input: Value| {
+        let body = json!({"model":"k2-test","input":input,
+            "tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]});
+        let request = render_k2::parse_with_profile(&body, Some(&profile)).unwrap();
+        let protocol = render_k2::tools::output_protocol(&request, 128);
+        assert!(matches!(protocol, OutputProtocol::K2Tools { .. }));
+        history_reasoning_diagnostic(&request, &protocol)
+    };
+    let line = k2(json!([user("a"), call, output])).unwrap();
+    assert!(
+        line.starts_with("serve: history_reasoning_missing=1 "),
+        "{line}"
+    );
+    assert_eq!(
+        k2(json!([user("a"), {"type":"reasoning","content":""}, call, output])),
+        None
+    );
+
+    let qwen = crate::open_responses::items::parse_request(&json!({"model":"m","input":[
+        user("q"), {"role":"assistant","content":"a"}, user("q2")
+    ]}))
+    .unwrap();
+    assert_eq!(qwen.history_reasoning_missing, 1);
+    let protocol = |preopened_reasoning| OutputProtocol::Qwen {
+        preopened_reasoning,
+        parse_tools: true,
+        tool_grammar: ToolGrammar::QwenXml,
+    };
+    assert!(history_reasoning_diagnostic(&qwen, &protocol(true)).is_some());
+    assert_eq!(history_reasoning_diagnostic(&qwen, &protocol(false)), None);
+}
+
 #[test]
 fn k2_tool_replay_preserves_typed_outputs_and_lossless_arguments_on_wire() {
     use qwen_llm::k2_horizon_chat::tools::{decode_tool_json, render_tool_result};

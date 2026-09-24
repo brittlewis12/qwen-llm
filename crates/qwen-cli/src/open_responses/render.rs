@@ -765,11 +765,14 @@ pub(crate) fn render_qwen_serve_prompt_annotated_with(
                         None,
                     );
                 } else {
-                    // After the last real user query the released template
-                    // always emits the think block, empty if no reasoning.
-                    let reasoning = reasoning
-                        .as_deref()
-                        .or((verified && after_last_query).then_some(""));
+                    // Missing reasoning is empty reasoning (one rule for
+                    // every family): strip and no-thinking below decide
+                    // whether the block shows, exactly as for an explicit
+                    // empty reasoning item. That is the released rendering
+                    // (empty block after the last real user query, and on
+                    // every turn under Qwen3.6/3.8 preserve). The unverified
+                    // Generic contract keeps history verbatim.
+                    let reasoning = reasoning.as_deref().or(verified.then_some(""));
                     push_assistant_body(
                         &mut output,
                         context,
@@ -1244,7 +1247,13 @@ mod tests {
             template,
             no_thinking: input["enable_thinking"] == json!(false),
             thinking_requested: input["enable_thinking"] == json!(true),
-            strip_history_thinking: input["preserve_thinking"] != json!(true),
+            // Each template's own default when `preserve_thinking` is
+            // unset: Qwen3.8 preserves, Qwen3.5/3.6 strip.
+            strip_history_thinking: if template == QwenTemplate::Qwen38 {
+                input["preserve_thinking"] == json!(false)
+            } else {
+                input["preserve_thinking"] != json!(true)
+            },
             reasoning_effort: input["reasoning_effort"].as_str().map(str::to_owned),
             ..ServeRequest::default()
         };
@@ -1373,19 +1382,20 @@ mod tests {
             include_str!("../../tests/fixtures/qwen36_chat_template_oracle_v1.json"),
             QwenTemplate::Qwen36,
             &[("history_no_thinking_mode", preclose_history)],
-            20,
+            23,
         );
     }
 
     /// Digest-verified Qwen3.8 rendering: effort instruction placement,
-    /// preclosed history, and `tojson` argument scalars (`true`/`null`).
+    /// preclosed history, `tojson` argument scalars (`true`/`null`), and the
+    /// empty block its default preserve mode gives history without reasoning.
     #[test]
     fn qwen38_matches_jinja_oracle_fixture() {
         assert_oracle_fixture(
             include_str!("../../tests/fixtures/qwen38_chat_template_oracle_v1.json"),
             QwenTemplate::Qwen38,
             &[],
-            6,
+            7,
         );
     }
 
@@ -1404,6 +1414,101 @@ mod tests {
                 ("history_explicit_thinking_preserve", preserve_history),
             ],
             5,
+        );
+    }
+
+    /// Missing reasoning is empty reasoning, end to end (parse, bind,
+    /// render): for every verified template, history mode and turn shape, a
+    /// history whose reasoning items were dropped renders byte-identically to
+    /// one replaying explicit empty reasoning items, and both are admitted or
+    /// refused together. Only the unverified Generic contract keeps history
+    /// verbatim.
+    #[test]
+    fn missing_history_reasoning_renders_as_explicit_empty_reasoning() {
+        let user = |text: &str| json!({"role": "user", "content": text});
+        let assistant = |text: &str| json!({"role": "assistant", "content": text});
+        let empty = json!({"type": "reasoning", "content": ""});
+        let call =
+            json!({"type": "function_call", "call_id": "c1", "name": "ping", "arguments": "{}"});
+        let output = json!({"type": "function_call_output", "call_id": "c1", "output": "pong"});
+        let histories = [
+            (
+                json!([user("One"), assistant("Answer one"), user("Two")]),
+                json!([user("One"), empty, assistant("Answer one"), user("Two")]),
+            ),
+            (
+                json!([user("One"), call, output, assistant("Done."), user("Two")]),
+                json!([
+                    user("One"),
+                    empty,
+                    call,
+                    output,
+                    empty,
+                    assistant("Done."),
+                    user("Two")
+                ]),
+            ),
+            // Tool continuation: the call turn is after the last user query.
+            (
+                json!([user("One"), assistant("Checking."), call, output]),
+                json!([user("One"), empty, assistant("Checking."), call, output]),
+            ),
+        ];
+        let render = |template: QwenTemplate, x_qwen: &Value, input: &Value| {
+            let request = parse_request(&json!({
+                "model": "m", "input": input, "x_qwen": x_qwen,
+                "tools": [{"type": "function", "name": "ping", "parameters": {"type": "object"}}]
+            }))?;
+            crate::open_responses::bind_qwen_request(&request, template, true)
+                .map(|bound| render_qwen_serve_prompt(&bound))
+        };
+        let modes = [
+            json!({}),
+            json!({"history_thinking": "strip"}),
+            json!({"no_thinking": true}),
+            json!({"thinking": true}),
+            json!({"thinking": true, "history_thinking": "strip"}),
+        ];
+        let mut rendered = 0;
+        for template in [
+            QwenTemplate::Qwen35,
+            QwenTemplate::Qwen36,
+            QwenTemplate::Qwen38,
+        ] {
+            for x_qwen in &modes {
+                for (missing, explicit) in &histories {
+                    let label = format!("{} {x_qwen} {missing}", template.label());
+                    match (
+                        render(template, x_qwen, missing),
+                        render(template, x_qwen, explicit),
+                    ) {
+                        (Ok(missing), Ok(explicit)) => {
+                            assert_eq!(missing, explicit, "{label}");
+                            rendered += 1;
+                        }
+                        (Err(missing), Err(explicit)) => {
+                            assert_eq!(missing.message, explicit.message, "{label}");
+                        }
+                        (missing, explicit) => {
+                            panic!("{label}: admission differs: {missing:?} vs {explicit:?}")
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            rendered, 45,
+            "coverage census: 3 templates x 5 modes x 3 histories"
+        );
+
+        // Generic keeps replayed history verbatim: no think block appears
+        // for a turn the client sent without reasoning.
+        let generic = render_qwen_serve_prompt(
+            &parse_request(&json!({"model": "m", "input": histories[0].0})).unwrap(),
+        );
+        assert!(
+            generic.contains("<|im_start|>assistant\nAnswer one<|im_end|>"),
+            "{generic}"
         );
     }
 

@@ -124,6 +124,41 @@ mod tests {
         parse_request(&body).expect("request parses")
     }
 
+    /// Missing reasoning is empty reasoning (serve's rule for every family):
+    /// thinking tiers render `<think></think>` for both, chat mode drops both.
+    #[test]
+    fn missing_history_reasoning_renders_as_explicit_empty_reasoning() {
+        let user = |text: &str| json!({"role": "user", "content": text});
+        let empty = json!({"type": "reasoning", "content": ""});
+        let call =
+            json!({"type": "function_call", "call_id": "c1", "name": "ping", "arguments": "{}"});
+        let output = json!({"type": "function_call_output", "call_id": "c1", "output": "pong"});
+        let answer = json!({"role": "assistant", "content": "Done."});
+        let histories = [
+            (
+                json!([user("One"), answer, user("Two")]),
+                json!([user("One"), empty, answer, user("Two")]),
+            ),
+            (
+                json!([user("One"), call, output, answer, user("Two")]),
+                json!([user("One"), empty, call, output, empty, answer, user("Two")]),
+            ),
+        ];
+        for effort in [None, Some("high"), Some("max")] {
+            for (missing, explicit) in &histories {
+                let render = |input: &serde_json::Value| {
+                    let mut body = json!({"model": "ds", "input": input,
+                        "tools": [{"type": "function", "name": "ping", "parameters": {"type": "object"}}]});
+                    if let Some(effort) = effort {
+                        body["reasoning"] = json!({"effort": effort});
+                    }
+                    render_deepseek_v4_serve_prompt(&request(body)).unwrap()
+                };
+                assert_eq!(render(missing), render(explicit), "{effort:?} {missing}");
+            }
+        }
+    }
+
     #[test]
     fn chat_mode_closes_thinking_and_is_not_preopened() {
         let request = request(json!({"model": "ds", "input": "hi"}));

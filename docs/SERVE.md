@@ -698,7 +698,11 @@ because client model-pickers probe it).
   on the 27B dense geometry (Qwen3.5/3.6/3.8, any weight dtype, greedy or
   sampled, no drafter) prefill in one packed block when its scratch price fits
   128 MiB, otherwise chunked; packed is bitwise equal to the chunked plan. The
-  phases line reports `prefill_path=serial_tail|chunked|single_chunk|exact`.
+  phases line reports `prefill_path=serial_tail|chunked|single_chunk|exact`
+  and `prefill_chunk=N`. Chunked prefill on any Qwen MoE uses 2048-token
+  chunks for prompts over 1,024 tokens (4096 for the pinned 122B-A10B profile)
+  when memory admission passes; dense models use 1024. A declined larger chunk
+  is logged with its reason (PERF-LOG 2026-09-24 auto prefill chunk entry).
   `QWEN_SERVE_FRESH_PACKED=1` additionally opts validated Qwen3.8/Q8 dense-27
   **fresh cache misses** of 19-48 prompt tokens into bounded packed prefill,
   greedy requests without a drafter only. Unset, `0` and invalid values disable

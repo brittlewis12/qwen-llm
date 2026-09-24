@@ -179,8 +179,11 @@ pub(crate) struct Args {
     #[arg(long, value_name = "GGUF")]
     pub(crate) drafter: Option<PathBuf>,
 
-    /// Prompt prefill chunk size, or `auto` for the bounded MoE allowlist.
-    #[arg(long, hide_short_help = true, default_value = "1024")]
+    /// Prompt prefill chunk size, or `auto` (default): 2048-token chunks for MoE
+    /// (4096 for the pinned A10B profile) on prompts over 1,024 tokens when
+    /// memory admission passes, otherwise 1024. Dense models use 1024.
+    /// Without this flag, `--requests-jsonl` and `--sampling-attribution` use 1024.
+    #[arg(long, hide_short_help = true, default_value = "auto")]
     pub(crate) prefill_chunk: PrefillChunkArg,
 
     /// Override sequence capacity. Defaults to prompt + generated tokens + slack.

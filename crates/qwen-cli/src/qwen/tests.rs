@@ -610,7 +610,7 @@ fn test_auto_profile() -> AutoPrefillProfile {
         name: "test-profile",
         outer_chunk: 2048,
         query_heads: 16,
-        gdn_overlay_bytes: 235_405_312,
+        gdn_overlay_bytes: Some(235_405_312),
     }
 }
 
@@ -1963,6 +1963,54 @@ fn prefill_chunk_argument_preserves_numeric_json_and_accepts_auto() {
 }
 
 #[test]
+fn defaulted_prefill_chunk_is_auto_except_where_a_fixed_chunk_is_required() {
+    let resolved = |argv: &[&str]| {
+        let (mut args, explicit) = Args::parse_with_explicit(argv.iter().copied());
+        resolve_default_prefill_chunk(&mut args, explicit.prefill_chunk);
+        args.prefill_chunk
+    };
+    let base = ["qwen", "--model", "model.gguf"];
+    let with = |extra: &[&'static str]| [&base[..], extra].concat();
+
+    assert_eq!(
+        resolved(&with(&["--prompt", "hello"])),
+        PrefillChunkArg::Auto
+    );
+    assert_eq!(
+        resolved(&with(&["--requests-jsonl", "requests.jsonl"])),
+        PrefillChunkArg::Fixed(BASELINE_PREFILL_CHUNK)
+    );
+    assert_eq!(
+        resolved(&with(&[
+            "--prompt-file",
+            "p.txt",
+            "--request-timings",
+            "t.jsonl",
+            "--sampling-attribution"
+        ])),
+        PrefillChunkArg::Fixed(BASELINE_PREFILL_CHUNK)
+    );
+    // An explicit choice is never rewritten, including `auto` for JSONL.
+    assert_eq!(
+        resolved(&with(&[
+            "--requests-jsonl",
+            "requests.jsonl",
+            "--prefill-chunk",
+            "auto"
+        ])),
+        PrefillChunkArg::Auto
+    );
+    assert_eq!(
+        resolved(&with(&["--prompt", "hello", "--prefill-chunk", "512"])),
+        PrefillChunkArg::Fixed(512)
+    );
+    assert_eq!(
+        resolved(&["qwen", "run", "-m", "model.gguf", "--user", "hello"]),
+        PrefillChunkArg::Auto
+    );
+}
+
+#[test]
 fn sampling_request_contract_supports_cli_defaults_and_jsonl_overrides() {
     let args = Args::try_parse_from([
         "qwen",
@@ -2745,7 +2793,7 @@ fn auto_prefill_profiles_require_complete_allowlisted_topology() {
             name: "qwen3.6-35b-a3b-filetype15",
             outer_chunk: 2048,
             query_heads: 16,
-            gdn_overlay_bytes: 235_405_312,
+            gdn_overlay_bytes: Some(235_405_312),
         })
     );
     assert_eq!(
@@ -2754,17 +2802,33 @@ fn auto_prefill_profiles_require_complete_allowlisted_topology() {
             name: "qwen3.5-122b-a10b-filetype15",
             outer_chunk: 4096,
             query_heads: 32,
-            gdn_overlay_bytes: 807_403_520,
+            gdn_overlay_bytes: Some(807_403_520),
         })
     );
 
+    // Any geometry drift from a pinned profile falls back to the MoE
+    // geometry-derived profile (planner-computed overlay), never to a pinned
+    // one; a dense model gets no auto profile at all.
+    let derived = |arch: Arch| {
+        Some(AutoPrefillProfile {
+            name: "qwen-moe-general",
+            outer_chunk: 2048,
+            query_heads: u64::from(arch.n_q_heads),
+            gdn_overlay_bytes: None,
+        })
+    };
     macro_rules! reject_field {
         ($arch:expr, $name:expr, $field:ident, $value:expr) => {{
             let mut invalid = $arch;
             invalid.$field = $value;
+            let expected = if invalid.kind == ArchKind::Moe {
+                derived(invalid)
+            } else {
+                None
+            };
             assert_eq!(
                 auto_prefill_profile(invalid, Some($name), Some(15)),
-                None,
+                expected,
                 "{}",
                 stringify!($field)
             );
@@ -2782,12 +2846,15 @@ fn auto_prefill_profiles_require_complete_allowlisted_topology() {
         reject_field!(arch, name, gdn_head_dim, 64);
         reject_field!(arch, name, gdn_conv_kernel, 3);
         reject_field!(arch, name, mtp_n_hidden_layers, 1);
-        assert_eq!(auto_prefill_profile(arch, Some(name), Some(14)), None);
+        assert_eq!(
+            auto_prefill_profile(arch, Some(name), Some(14)),
+            derived(arch)
+        );
         assert_eq!(
             auto_prefill_profile(arch, Some("wrong model"), Some(15)),
-            None
+            derived(arch)
         );
-        assert_eq!(auto_prefill_profile(arch, None, Some(15)), None);
+        assert_eq!(auto_prefill_profile(arch, None, Some(15)), derived(arch));
     }
 
     reject_field!(a3b, "Qwen3.6 35B A3B", n_layer, 39);
@@ -2817,29 +2884,37 @@ fn auto_prefill_profiles_require_complete_allowlisted_topology() {
 }
 
 #[test]
-fn auto_prefill_chunk_decision_bounds_the_measured_prompt_range() {
-    let profile = Some(AutoPrefillProfile {
+fn auto_prefill_chunk_decision_starts_at_the_second_baseline_chunk_without_a_ceiling() {
+    let pinned = AutoPrefillProfile {
         name: "test-profile",
         outer_chunk: 2048,
         query_heads: 16,
-        gdn_overlay_bytes: 235_405_312,
-    });
-    for (prompt_tokens, selected, reason) in [
-        (8191, 1024, "prompt_below_validated_range"),
-        (8192, 2048, "matched_validated_profile"),
-        (16384, 2048, "matched_validated_profile"),
-        (16385, 1024, "prompt_above_memory_bounded_range"),
+        gdn_overlay_bytes: Some(235_405_312),
+    };
+    let general = AutoPrefillProfile {
+        gdn_overlay_bytes: None,
+        ..pinned
+    };
+    for (profile, prompt_tokens, selected, reason) in [
+        (pinned, 1024, 1024, "prompt_fits_one_baseline_chunk"),
+        (pinned, 1025, 1025, "pinned_profile"),
+        (pinned, 8192, 2048, "pinned_profile"),
+        (general, 1025, 1025, "general_moe_profile"),
+        (general, 65_536, 2048, "general_moe_profile"),
+        (general, 262_144, 2048, "general_moe_profile"),
     ] {
-        let decision = auto_prefill_chunk_decision(profile, prompt_tokens, false, true);
+        let decision = auto_prefill_chunk_decision(Some(profile), prompt_tokens, false, true);
         assert_eq!(decision.selected, selected);
         assert_eq!(decision.reason, reason);
-        assert_eq!(decision.validated_prompt_range, Some([8192, 16384]));
+        assert_eq!(decision.min_prompt_tokens, Some(1025));
         assert_eq!(decision.evidence_baseline_chunk, Some(1024));
+        assert!(!decision.declined_candidate());
     }
+    let profile = Some(pinned);
 
     let unsupported = auto_prefill_chunk_decision(None, 10_000, false, true);
     assert_eq!(unsupported.selected, 1024);
-    assert_eq!(unsupported.validated_prompt_range, None);
+    assert_eq!(unsupported.min_prompt_tokens, None);
     assert_eq!(unsupported.evidence_baseline_chunk, None);
 
     let environment = auto_prefill_chunk_decision(profile, 10_000, true, true);
@@ -2857,16 +2932,16 @@ fn auto_prefill_overlay_equations_cover_range_boundaries() {
         name: "a3b",
         outer_chunk: 2048,
         query_heads: 16,
-        gdn_overlay_bytes: 235_405_312,
+        gdn_overlay_bytes: Some(235_405_312),
     };
     let a10b = AutoPrefillProfile {
         name: "a10b",
         outer_chunk: 4096,
         query_heads: 32,
-        gdn_overlay_bytes: 807_403_520,
+        gdn_overlay_bytes: Some(807_403_520),
     };
     assert_eq!(
-        expected_auto_prefill_overlay(a3b, 8192).unwrap(),
+        expected_auto_prefill_overlay(a3b, 8192, 235_405_312).unwrap(),
         PrefillScratchOverlayStats {
             backing_bytes: 285_212_672,
             attention_bytes: 285_212_672,
@@ -2875,7 +2950,7 @@ fn auto_prefill_overlay_equations_cover_range_boundaries() {
         }
     );
     assert_eq!(
-        expected_auto_prefill_overlay(a3b, 16_384).unwrap(),
+        expected_auto_prefill_overlay(a3b, 16_384, 235_405_312).unwrap(),
         PrefillScratchOverlayStats {
             backing_bytes: 570_425_344,
             attention_bytes: 570_425_344,
@@ -2884,7 +2959,7 @@ fn auto_prefill_overlay_equations_cover_range_boundaries() {
         }
     );
     assert_eq!(
-        expected_auto_prefill_overlay(a3b, 11_287).unwrap(),
+        expected_auto_prefill_overlay(a3b, 11_287, 235_405_312).unwrap(),
         PrefillScratchOverlayStats {
             backing_bytes: 393_052_160,
             attention_bytes: 393_052_160,
@@ -2893,7 +2968,7 @@ fn auto_prefill_overlay_equations_cover_range_boundaries() {
         }
     );
     assert_eq!(
-        expected_auto_prefill_overlay(a10b, 11_287).unwrap(),
+        expected_auto_prefill_overlay(a10b, 11_287, 807_403_520).unwrap(),
         PrefillScratchOverlayStats {
             backing_bytes: 807_403_520,
             attention_bytes: 786_104_320,
@@ -2907,7 +2982,9 @@ fn auto_prefill_overlay_equations_cover_range_boundaries() {
 fn auto_prefill_plan_topology_rejects_every_geometry_drift() {
     let profile = test_auto_profile();
     let prompt_tokens = 10_000;
-    let overlay = expected_auto_prefill_overlay(profile, prompt_tokens).unwrap();
+    let overlay =
+        expected_auto_prefill_overlay(profile, prompt_tokens, profile.gdn_overlay_bytes.unwrap())
+            .unwrap();
     assert_eq!(
         validate_auto_prefill_plan_topology(
             profile,
@@ -3081,20 +3158,13 @@ fn auto_prefill_reserve_requires_positive_checked_sequence_growth() {
 fn ineligible_auto_prefill_preserves_legacy_constructor_order_and_reasons() {
     let profile = Some(test_auto_profile());
     for (candidate, prompt, environment, cache_safe, reason) in [
-        (None, 10_000, false, true, "profile_not_allowlisted"),
+        (None, 10_000, false, true, "dense_baseline"),
         (
             profile,
             AUTO_CHUNK_PROMPT_MIN - 1,
             false,
             true,
-            "prompt_below_validated_range",
-        ),
-        (
-            profile,
-            AUTO_CHUNK_PROMPT_MAX + 1,
-            false,
-            true,
-            "prompt_above_memory_bounded_range",
+            "prompt_fits_one_baseline_chunk",
         ),
         (
             profile,
@@ -3128,6 +3198,14 @@ fn ineligible_auto_prefill_preserves_legacy_constructor_order_and_reasons() {
         assert_eq!(state.scratch, "legacy");
         assert_eq!(decision.reason, reason);
         assert_eq!(decision.classification, "baseline");
+        assert_eq!(
+            decision.declined_candidate(),
+            matches!(
+                reason,
+                "prefill_environment_override_present" | "prefix_cache_interaction_unvalidated"
+            ),
+            "{reason}"
+        );
         assert!(decision.plan.is_none());
         assert!(decision.admission.is_none());
         assert_eq!(
@@ -3351,6 +3429,7 @@ fn admitted_auto_prefill_allocates_only_the_candidate_scratch() {
     assert_eq!(state.chunk, 2048);
     assert_eq!(state.scratch, "candidate");
     assert_eq!(decision.reason, "admitted");
+    assert!(!decision.declined_candidate());
     assert!(decision.plan.is_some());
     assert!(decision.admission.as_ref().unwrap().admitted);
     assert_eq!(
@@ -3364,6 +3443,44 @@ fn admitted_auto_prefill_allocates_only_the_candidate_scratch() {
             AllocationEvent::CandidateScratch,
             AllocationEvent::CurrentAllocated,
         ]
+    );
+}
+
+#[test]
+fn admitted_short_auto_prefill_reports_the_rows_it_runs_and_plans_a_full_block() {
+    let mut allocator = fake_allocator(
+        &[100, 200, 300],
+        Ok(fake_plan_decision(1_000)),
+        10_000_000_000,
+        false,
+    );
+    let profile = test_auto_profile();
+    let state = allocate_prefill_request_state_with(
+        &mut allocator,
+        PrefillChunkArg::Auto,
+        1025,
+        1042,
+        true,
+        Some(profile),
+        false,
+    )
+    .unwrap();
+    let decision = state.decision.as_ref().unwrap();
+
+    assert_eq!(decision.reason, "admitted");
+    assert_eq!((state.chunk, decision.selected), (1025, 1025));
+    assert_eq!(state.scratch, "candidate");
+    // Pricing, allocation and validation plan the profile's full block.
+    assert_eq!(auto_candidate_plan_geometry(profile, 1025), (2048, 2048));
+    assert_eq!(
+        auto_candidate_plan_geometry(profile, 10_000),
+        (2048, 10_000)
+    );
+    let overlay = expected_auto_prefill_overlay(profile, 2048, 235_405_312).unwrap();
+    validate_auto_prefill_plan_topology(profile, 1025, 2048, 2048, 1024, Some(overlay)).unwrap();
+    assert!(
+        validate_auto_prefill_plan_topology(profile, 1025, 1025, 2048, 1024, Some(overlay))
+            .is_err()
     );
 }
 
@@ -3385,6 +3502,7 @@ fn denied_auto_prefill_reuses_sequence_and_allocates_legacy_scratch() {
     assert_eq!(state.chunk, 1024);
     assert_eq!(state.scratch, "legacy");
     assert_eq!(decision.reason, "memory_admission_denied");
+    assert!(decision.declined_candidate());
     assert!(decision.plan.is_some());
     assert!(!decision.admission.as_ref().unwrap().admitted);
     assert_eq!(

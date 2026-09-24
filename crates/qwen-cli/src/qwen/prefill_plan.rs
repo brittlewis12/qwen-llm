@@ -22,6 +22,20 @@ impl PrefillChunkArg {
     }
 }
 
+/// Fixed chunk kept by paths that need one when `--prefill-chunk` is absent.
+pub(crate) const BASELINE_PREFILL_CHUNK: usize = 1024;
+
+/// `--prefill-chunk` defaults to `auto`, which single-prompt generation
+/// resolves per request. Without the flag, JSONL request runs and sampling
+/// attribution keep the fixed baseline instead: the batched, paired, fanout
+/// and file-root planners align shared prefixes to a fixed chunk and were
+/// measured at 1024, and attribution pins 1024. An explicit value is kept.
+pub(crate) fn resolve_default_prefill_chunk(args: &mut Args, explicit: bool) {
+    if !explicit && (args.requests_jsonl.is_some() || args.sampling_attribution) {
+        args.prefill_chunk = PrefillChunkArg::Fixed(BASELINE_PREFILL_CHUNK);
+    }
+}
+
 impl FromStr for PrefillChunkArg {
     type Err = String;
 
@@ -56,7 +70,7 @@ pub(crate) struct PrefillChunkDecision {
     pub(crate) reason: &'static str,
     pub(crate) candidate: Option<usize>,
     pub(crate) selected: usize,
-    pub(crate) validated_prompt_range: Option<[usize; 2]>,
+    pub(crate) min_prompt_tokens: Option<usize>,
     pub(crate) evidence_baseline_chunk: Option<usize>,
     pub(crate) baseline: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -67,12 +81,24 @@ pub(crate) struct PrefillChunkDecision {
     pub(crate) admission: Option<PrefillAdmissionDecision>,
 }
 
+impl PrefillChunkDecision {
+    /// A larger chunk applied to this prompt but was not used: memory
+    /// admission, an unpriceable plan, or an environment override.
+    pub(crate) fn declined_candidate(&self) -> bool {
+        self.classification == "baseline"
+            && self.candidate.is_some()
+            && self.reason != "prompt_fits_one_baseline_chunk"
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AutoPrefillProfile {
     pub(crate) name: &'static str,
     pub(crate) outer_chunk: usize,
     pub(crate) query_heads: u64,
-    pub(crate) gdn_overlay_bytes: u64,
+    /// Pinned GDN overlay size for a validated profile, checked against the
+    /// planner as a regression sentinel; `None` trusts the planner's value.
+    pub(crate) gdn_overlay_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -136,9 +162,12 @@ pub(crate) struct PrefillScratchOverlayTimingStats {
     pub(crate) saved_bytes: u64,
 }
 
-pub(crate) const AUTO_CHUNK_PROMPT_MIN: usize = 8192;
-
-pub(crate) const AUTO_CHUNK_PROMPT_MAX: usize = 16384;
+/// Auto chunking applies from the first prompt that needs a second baseline
+/// chunk, with no upper bound: memory admission decides, and a declined
+/// candidate falls back to the baseline chunk (2026-09-24, A3B UD-Q4_K_M,
+/// 2048-token chunks vs 1024: +5.5% at 4K, +2.0% at 8K, +7.8% at 16K, +4.4%
+/// at 32K, +4.8% at 64K).
+pub(crate) const AUTO_CHUNK_PROMPT_MIN: usize = 1025;
 
 pub(crate) const AUTO_CHUNK_QUERY_ROWS: usize = 1024;
 
@@ -184,13 +213,35 @@ pub(crate) fn cache_prefix_needs_extension(
     configured_prefix > restored_prefix
 }
 
+/// Auto prefill profile: a pinned profile when the model is one of them,
+/// otherwise the general 2048-token MoE profile sized by the planner. Larger
+/// chunks help MoE (fewer passes over the expert weights, more rows per expert
+/// per grouped matmul) and not dense (27B: 230.5/228.4/227.9 tok/s at
+/// 1024/2048/4096 on pp8192), so dense keeps the baseline.
 pub(crate) fn auto_prefill_profile(
     arch: Arch,
     base_model_name: Option<&str>,
     file_type: Option<u64>,
 ) -> Option<AutoPrefillProfile> {
-    if arch.kind != ArchKind::Moe
-        || arch.expert_count != 256
+    if arch.kind != ArchKind::Moe {
+        return None;
+    }
+    pinned_auto_prefill_profile(arch, base_model_name, file_type).or(Some(AutoPrefillProfile {
+        name: "qwen-moe-general",
+        outer_chunk: 2048,
+        query_heads: u64::from(arch.n_q_heads),
+        gdn_overlay_bytes: None,
+    }))
+}
+
+/// Profiles validated end to end (PERF-LOG v0.567/v0.601), with their overlay
+/// sizes pinned so planner drift on these models is caught.
+fn pinned_auto_prefill_profile(
+    arch: Arch,
+    base_model_name: Option<&str>,
+    file_type: Option<u64>,
+) -> Option<AutoPrefillProfile> {
+    if arch.expert_count != 256
         || arch.expert_used_count != 8
         || arch.full_attention_interval != 4
         || arch.attn_head_dim != 256
@@ -217,7 +268,7 @@ pub(crate) fn auto_prefill_profile(
                 name: "qwen3.6-35b-a3b-filetype15",
                 outer_chunk: 2048,
                 query_heads: 16,
-                gdn_overlay_bytes: 235_405_312,
+                gdn_overlay_bytes: Some(235_405_312),
             })
         }
         Some("Qwen3.5 122B A10B")
@@ -233,11 +284,22 @@ pub(crate) fn auto_prefill_profile(
                 name: "qwen3.5-122b-a10b-filetype15",
                 outer_chunk: 4096,
                 query_heads: 32,
-                gdn_overlay_bytes: 807_403_520,
+                gdn_overlay_bytes: Some(807_403_520),
             })
         }
         _ => None,
     }
+}
+
+/// Scratch geometry of an auto candidate plan, `(block_size, matrix_max_pos)`:
+/// the profile's outer chunk, spanning at least one full block. Admission
+/// pricing, allocation and validation share it; a prompt shorter than the
+/// outer chunk runs fewer rows than the plan holds.
+pub(crate) fn auto_candidate_plan_geometry(
+    profile: AutoPrefillProfile,
+    prompt_tokens: usize,
+) -> (usize, usize) {
+    (profile.outer_chunk, prompt_tokens.max(profile.outer_chunk))
 }
 
 pub(crate) fn baseline_prefill_chunk(prompt_tokens: usize) -> usize {
@@ -252,17 +314,10 @@ pub(crate) fn auto_prefill_chunk_decision(
 ) -> PrefillChunkDecision {
     let baseline = baseline_prefill_chunk(prompt_tokens);
     let (classification, reason, selected, profile_name, candidate) = match profile {
-        None => ("baseline", "profile_not_allowlisted", baseline, None, None),
+        None => ("baseline", "dense_baseline", baseline, None, None),
         Some(profile) if prompt_tokens < AUTO_CHUNK_PROMPT_MIN => (
             "baseline",
-            "prompt_below_validated_range",
-            baseline,
-            Some(profile.name),
-            Some(profile.outer_chunk),
-        ),
-        Some(profile) if prompt_tokens > AUTO_CHUNK_PROMPT_MAX => (
-            "baseline",
-            "prompt_above_memory_bounded_range",
+            "prompt_fits_one_baseline_chunk",
             baseline,
             Some(profile.name),
             Some(profile.outer_chunk),
@@ -283,21 +338,24 @@ pub(crate) fn auto_prefill_chunk_decision(
         ),
         Some(profile) => (
             "candidate",
-            "matched_validated_profile",
+            if profile.gdn_overlay_bytes.is_some() {
+                "pinned_profile"
+            } else {
+                "general_moe_profile"
+            },
             profile.outer_chunk.min(prompt_tokens.max(1)),
             Some(profile.name),
             Some(profile.outer_chunk),
         ),
     };
     PrefillChunkDecision {
-        policy: "moe_allowlist_v2",
+        policy: "moe_general_v3",
         profile: profile_name,
         classification,
         reason,
         candidate,
         selected,
-        validated_prompt_range: profile_name
-            .map(|_| [AUTO_CHUNK_PROMPT_MIN, AUTO_CHUNK_PROMPT_MAX]),
+        min_prompt_tokens: profile_name.map(|_| AUTO_CHUNK_PROMPT_MIN),
         evidence_baseline_chunk: profile_name.map(|_| 1024),
         baseline: AUTO_CHUNK_BASELINE,
         detail: None,
@@ -333,6 +391,7 @@ pub(crate) fn checked_overlay_alignment(value: u64) -> Result<u64> {
 pub(crate) fn expected_auto_prefill_overlay(
     profile: AutoPrefillProfile,
     matrix_max_pos: usize,
+    gdn_bytes: u64,
 ) -> Result<PrefillScratchOverlayStats> {
     let matrix_max_pos =
         u64::try_from(matrix_max_pos).context("matrix max pos does not fit u64")?;
@@ -352,7 +411,6 @@ pub(crate) fn expected_auto_prefill_overlay(
             .checked_add(ml_bytes)
             .context("prefill attention overlay byte overflow")?,
     )?;
-    let gdn_bytes = profile.gdn_overlay_bytes;
     Ok(PrefillScratchOverlayStats {
         backing_bytes: attention_bytes.max(gdn_bytes),
         attention_bytes,
@@ -422,15 +480,20 @@ pub(crate) fn validate_auto_prefill_plan_topology(
     matrix_query_rows: u32,
     overlay: Option<PrefillScratchOverlayStats>,
 ) -> Result<PrefillScratchOverlayStats> {
-    let expected_matrix_max_pos = prompt_tokens.max(profile.outer_chunk);
+    let (expected_block_size, expected_matrix_max_pos) =
+        auto_candidate_plan_geometry(profile, prompt_tokens);
     ensure!(
-        block_size == u32::try_from(profile.outer_chunk)?
+        block_size == u32::try_from(expected_block_size)?
             && matrix_max_pos == u64::try_from(expected_matrix_max_pos)?
             && matrix_query_rows == u32::try_from(AUTO_CHUNK_QUERY_ROWS)?,
         "auto-prefill candidate plan geometry drifted"
     );
-    let expected_overlay = expected_auto_prefill_overlay(profile, expected_matrix_max_pos)?;
     let overlay = overlay.context("auto-prefill candidate plan has no scratch overlay")?;
+    let expected_overlay = expected_auto_prefill_overlay(
+        profile,
+        expected_matrix_max_pos,
+        profile.gdn_overlay_bytes.unwrap_or(overlay.gdn_bytes),
+    )?;
     ensure!(
         overlay == expected_overlay,
         "auto-prefill candidate overlay geometry drifted"
@@ -607,9 +670,9 @@ impl PrefillRequestAllocator for MetalPrefillRequestAllocator<'_> {
         profile: AutoPrefillProfile,
         prompt_tokens: usize,
     ) -> std::result::Result<(Self::Plan, PrefillPlanDecision), CandidatePlanFailure> {
-        let block_size = u32::try_from(profile.outer_chunk)
+        let (block_size, matrix_max_pos) = auto_candidate_plan_geometry(profile, prompt_tokens);
+        let block_size = u32::try_from(block_size)
             .map_err(|error| CandidatePlanFailure::Unavailable(error.to_string()))?;
-        let matrix_max_pos = prompt_tokens.max(profile.outer_chunk);
         let plan = self
             .loaded
             .plan_packed_prefill_scratch_configured(
@@ -817,7 +880,7 @@ pub(crate) fn allocate_prefill_request_state_with<A: PrefillRequestAllocator>(
     let scratch_allocation_ms = scratch_t0.elapsed().as_secs_f64() * 1e3;
     let after_scratch_allocated = allocator.current_allocated_size();
     Ok(AllocatedPrefillRequestState {
-        chunk: profile.outer_chunk,
+        chunk: decision.selected,
         decision: Some(decision),
         scratch,
         sequence,

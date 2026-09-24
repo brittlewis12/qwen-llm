@@ -902,10 +902,12 @@ pub(super) fn prefill_scratch_upper_bytes(
         prefill_environment_override_present(),
         true,
     );
+    // Price the plan the allocator builds, not the rows a short prompt uses.
     if decision.classification == "candidate"
+        && let Some(profile) = profile
         && let Ok(candidate) = price_prefill_scratch_plan(
             loaded,
-            decision.selected,
+            auto_candidate_plan_geometry(profile, prompt_tokens).0,
             prompt_tokens,
             PrefillScratchConfig {
                 matrix_query_cap: Some(AUTO_CHUNK_QUERY_ROWS),

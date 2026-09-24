@@ -3535,7 +3535,7 @@ mod tests {
     }
 
     fn test_args() -> Args {
-        Args::try_parse_from([
+        let mut args = Args::try_parse_from([
             "qwen",
             "--model",
             "model.gguf",
@@ -3546,7 +3546,9 @@ mod tests {
             "--tokens",
             "3",
         ])
-        .expect("valid dense B=8 test arguments")
+        .expect("valid dense B=8 test arguments");
+        resolve_default_prefill_chunk(&mut args, test_explicit().prefill_chunk);
+        args
     }
 
     fn prepared(id: &str, tokens: &[i32]) -> PreparedJsonlRequest {

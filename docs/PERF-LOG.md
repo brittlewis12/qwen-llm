@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-24 - Auto Prefill Chunk: Every Qwen MoE, Every Prompt Over 1,024
+
+- Before: the 2048/4096-token prefill chunk applied only to two named GGUFs
+  (A3B and 122B-A10B base-model names, `file_type==15`) on prompts of
+  8,192-16,384 tokens; A3B Q4_K_S, every other MoE, and every other length
+  used 1024. `qwen run` defaulted to 1024.
+- Now: any Qwen MoE gets a general 2048-token profile sized by the planner
+  (the two pinned profiles stay as regression sentinels); auto applies to
+  every prompt over 1,024 tokens with memory admission as the only ceiling.
+  Dense stays at 1024. `auto` is the default for single-prompt `qwen run`;
+  without the flag, `--requests-jsonl` and `--sampling-attribution` keep the
+  fixed 1024 their planners need. Serve logs `prefill_chunk=N` per request
+  and warns when admission or planning declines the larger chunk.
+- qwen-bench pp, A3B UD-Q4_K_M, chunk 1024 vs 2048: 4K 1693 vs 1787, 8K 1593
+  vs 1624, 16K 1419 vs 1529, 32K 1197 vs 1251, 64K 897 vs 941 t/s. Dense 27B
+  pp8192: 230.5 / 228.4 / 227.9 at 1024 / 2048 / 4096 (no gain).
+- Serve cold prefill ABAB (main vs branch, 3 distinct prompts per block,
+  durable tier off, UD-Q4_K_M medians): ~1.5K 1012 -> 927 ms (-8.4%), ~3.2K
+  2103 -> 1971 ms (-6.2%), 32K 27502 -> 26244 ms (-4.6%); every pair faster.
+  A 16K ABBA landed inside the old pinned range (both sides 2048) and measured
+  the noise floor: 11165 vs 11219 ms.
+- Greedy output (48 tokens, temp 0) byte-identical between chunk 1024 and the
+  default on UD-Q4_K_M and UD-Q4_K_S at 4.8K and 24K prompts.
+- Not done: the decision uses the full prompt length, not the uncached
+  remainder after a restore (scratch is sized for the full prompt; rows are
+  unaffected).
+
 ## 2026-09-23 - DS4 Serve: Chat-Mode Completed Snapshots; Warm-Start Flip Explained
 
 - Chat-mode DS4 turns stopped by the token limit no longer drop their

@@ -192,6 +192,7 @@ fn run() -> Result<()> {
         other => other,
     };
     invocation.apply_option_overrides(&mut args);
+    resolve_default_prefill_chunk(&mut args, explicit_options.prefill_chunk);
     let modern_run = invocation.is_run();
     validate_deepseek_v4_reasoning_scope(&args)?;
     validate_qwen_model_prefetch_scope(&args)?;

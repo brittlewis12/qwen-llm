@@ -485,6 +485,23 @@ fn allocate_serve_request_state(
             capacity,
             true,
         )?;
+        if let Some(decision) = allocated
+            .decision
+            .as_ref()
+            .filter(|decision| decision.declined_candidate())
+        {
+            tracing::warn!(
+                "serve prefill: auto chunk {} declined ({}{}); using {}",
+                decision.candidate.unwrap_or_default(),
+                decision.reason,
+                decision
+                    .detail
+                    .as_deref()
+                    .map(|detail| format!(": {detail}"))
+                    .unwrap_or_default(),
+                decision.selected,
+            );
+        }
         Ok((
             allocated.chunk,
             Some(allocated.scratch.into_inner()),
@@ -1503,7 +1520,7 @@ impl GenerationBackend for EngineBackend {
                     replay_sampling.seed,
                     transcript_entry,
                     format!(
-                        "tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1}{transcript_phase} prefill_path={prefill_path} decode_path=dflash"
+                        "tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1}{transcript_phase} prefill_path={prefill_path} prefill_chunk={chunk} decode_path=dflash"
                     ),
                 );
             }
@@ -1585,7 +1602,7 @@ impl GenerationBackend for EngineBackend {
             dflash_prefix_replay_key.as_ref(),
             replay_sampling.seed,
             transcript_entry,
-            format!("tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1}{transcript_phase} prefill_path={prefill_path} decode_path=serial"),
+            format!("tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1}{transcript_phase} prefill_path={prefill_path} prefill_chunk={chunk} decode_path=serial"),
         )
     }
 }

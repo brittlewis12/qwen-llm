@@ -3801,7 +3801,11 @@ control. It is no longer an active experiment; keep `decode` as the default.
   allowlist and `8192..=16384` range. Missing usable signals, MTP, prefill
   environment overrides, cache interaction, disabled online attention/overlay,
   or insufficient memory fall back to 1024. Require fresh TTFT confirmation on
-  each admitted profile before default-on.
+  each admitted profile before default-on. (2026-09-24: superseded. Any Qwen
+  MoE now gets a general 2048 profile sized by the planner, the pinned A3B/A10B
+  profiles remain regression sentinels, auto applies to every prompt over 1,024
+  tokens with memory admission as the only ceiling, and `auto` is the default
+  for single-prompt `qwen run` as for serve.)
 - **Production-Q4 attribution**: no-op arms must preserve the exact production
   grid, loop counts, initialized inputs, half-to-float MMA family,
   accumulation/store observability, and every instruction not intentionally

@@ -536,7 +536,11 @@ fn log_deepseek_v4_artifact_qualification(
     report: &DeepSeekV4ResidencyReport,
 ) {
     let device = ctx.device.name().to_string();
-    let profile = match (report.tensor_count, config.expert_count, report.source_bytes) {
+    let profile = match (
+        report.tensor_count,
+        config.expert_count,
+        report.source_bytes,
+    ) {
         (DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT, 256, DEEPSEEK_V4_FRESH_SOURCE_BYTES) => "fresh",
         (DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT, 160, DEEPSEEK_V4_REAP_K160_SOURCE_BYTES) => {
             "reap_k160"
@@ -741,11 +745,10 @@ impl DeepSeekV4MetalResidency {
         let windows = realize_windows(ctx, gguf, &plan.retained)?;
         let tensors = realize_tensors(ctx, gguf, &plan.retained, &windows)?;
         validate_realization(gguf, &tensors, &plan.report)?;
-        let residency_set =
-            {
-                log_deepseek_v4_artifact_qualification(ctx, &plan.config, &plan.report);
-                create_deepseek_v4_residency_set(ctx, &tensors, &plan.config, &plan.report)
-            };
+        let residency_set = {
+            log_deepseek_v4_artifact_qualification(ctx, &plan.config, &plan.report);
+            create_deepseek_v4_residency_set(ctx, &tensors, &plan.config, &plan.report)
+        };
         let after_residency_bytes = ctx.current_allocated_size();
         plan.memory.reconcile_residency(
             refreshed_admission.signals.current_allocated_bytes,

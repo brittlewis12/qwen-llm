@@ -58,18 +58,29 @@ fn product_split_binding_and_route_boundaries() {
         assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
         assert!(cmd.error().is_none());
         assert!(read_f32(&w.output).iter().all(|v| v.is_finite()));
-        let expected = if length >= 2048 {
-            "kernel_qwen4exp_qsa_split_f16"
-        } else {
-            "kernel_qwen4exp_qsa_attention_logits_f16"
-        };
-        assert_eq!(rows.iter().filter(|r| r.kernel == expected).count(), 1);
-        let opposite = if length >= 2048 {
-            "kernel_qwen4exp_qsa_attention_logits_f16"
-        } else {
-            "kernel_qwen4exp_qsa_split_f16"
-        };
-        assert!(!rows.iter().any(|r| r.kernel == opposite));
+        // Both routes compute logits with the same kernel; the split route
+        // then runs split softmax/value/merge instead of the fused
+        // softmax-value kernel.
+        let count = |kernel: &str| rows.iter().filter(|r| r.kernel == kernel).count();
+        let split = length >= 2048;
+        assert_eq!(count("kernel_qwen4exp_qsa_attention_logits_f16"), 1);
+        for kernel in [
+            "kernel_qwen4exp_qsa_split_softmax_f32",
+            "kernel_qwen4exp_qsa_split_f16",
+            "kernel_qwen4exp_qsa_split_merge_f32",
+        ] {
+            assert_eq!(
+                count(kernel),
+                usize::from(split),
+                "{kernel} length={length}"
+            );
+        }
+        assert_eq!(
+            count("kernel_qwen4exp_qsa_attention_softmax_value_f16")
+                + count("kernel_qwen4exp_qsa_attention_softmax_value_packed_gqa4_f16"),
+            usize::from(!split),
+            "fused softmax-value length={length}"
+        );
     }
 }
 

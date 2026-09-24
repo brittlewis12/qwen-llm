@@ -57,6 +57,24 @@ impl<V> SnapshotCache<V> {
         Some(hit)
     }
 
+    /// Id of the entry cached under exactly `tokens`.
+    pub(crate) fn entry_for(&self, tokens: &[u32]) -> Option<EntryId> {
+        self.entries
+            .iter()
+            .find(|(_, (prefix, _))| prefix == tokens)
+            .map(|(&id, _)| id)
+    }
+
+    /// Exclude an entry from eviction and expiry until [`Self::unpin`].
+    /// Returns false when the entry is no longer indexed.
+    pub(crate) fn pin(&mut self, id: EntryId) -> bool {
+        self.policy.pin(id)
+    }
+
+    pub(crate) fn unpin(&mut self, id: EntryId) {
+        self.policy.unpin(id);
+    }
+
     pub(crate) fn entry_bytes(prefix_len: usize, value_bytes: u64) -> Option<u64> {
         value_bytes.checked_add((prefix_len as u64).checked_mul(size_of::<u32>() as u64)?)
     }
@@ -178,6 +196,41 @@ mod tests {
         assert_eq!(cache.indexed_bytes(), 20);
         assert!(cache.best_prefix(&[1, 9]).is_some());
         assert!(cache.best_prefix(&[2, 9]).is_some());
+    }
+
+    /// A hot unrelated entry H, then a transcript T and a completed C from
+    /// one request; the budget fits H+T or T+C but not all three. Frecency
+    /// alone evicts the new, rarely used T; pinning T evicts H instead.
+    #[test]
+    fn pinned_transcript_survives_completed_admission_over_a_hot_entry() {
+        for pin_transcript in [false, true] {
+            let clock = FakeClock::default();
+            let mut cache = SnapshotCache::with_clock(
+                30,
+                SnapshotPolicyConfig::default(),
+                Arc::new(clock.clone()),
+            );
+            let bytes = cache.strict_eligibility(&[9], 6).unwrap(); // 10 with key
+            assert!(cache.insert_strict(vec![9], "hot", bytes));
+            for _ in 0..5 {
+                assert!(cache.best_prefix(&[9, 0]).is_some());
+            }
+            let bytes = cache.strict_eligibility(&[1, 2], 6).unwrap(); // 14
+            assert!(cache.insert_strict(vec![1, 2], "transcript", bytes));
+            let transcript = cache.entry_for(&[1, 2]).unwrap();
+            assert_eq!(cache.entry_for(&[1, 2, 3]), None);
+
+            let pinned = pin_transcript.then(|| cache.pin(transcript));
+            let bytes = cache.strict_eligibility(&[1, 2, 3], 3).unwrap(); // 15
+            assert!(cache.insert_strict(vec![1, 2, 3], "completed", bytes));
+            if pinned == Some(true) {
+                cache.unpin(transcript);
+            }
+
+            assert!(cache.entry_for(&[1, 2, 3]).is_some());
+            assert_eq!(cache.entry_for(&[1, 2]).is_some(), pin_transcript);
+            assert_eq!(cache.entry_for(&[9]).is_some(), !pin_transcript);
+        }
     }
 
     #[test]

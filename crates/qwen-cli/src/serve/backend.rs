@@ -1222,18 +1222,25 @@ impl GenerationBackend for EngineBackend {
         // header, snapshot, then finish the header. Drafter capture windows
         // are sized to the whole prompt, so speculative requests keep the
         // single-pass prefill.
-        let transcript_split = self
+        let transcript_at = self
             .tokenizer
             .encode(IM_START_MARKER, false)
             .ok()
             .and_then(|ids| (ids.len() == 1).then(|| ids[0]))
             .and_then(|im_start| transcript_boundary(&prompt_ids, im_start))
-            .filter(|&boundary| {
-                boundary > sequence.position() && !speculate && dflash_capture.is_none()
-            });
+            .filter(|_| !speculate && dflash_capture.is_none());
+        let transcript_split = transcript_at.filter(|&boundary| boundary > sequence.position());
+        // A restore ending exactly on the transcript boundary (a resent or
+        // regenerated turn) already holds the transcript snapshot: protect it
+        // like a fresh capture and skip the redundant prompt capture, which
+        // could otherwise evict it.
+        let mut transcript_entry = restore
+            .as_ref()
+            .filter(|restore| transcript_at == Some(restore.restored_prefix_len))
+            .and_then(|restore| restore.entry);
+        let transcript_restored = transcript_entry.is_some();
         let prefill_t0 = Instant::now();
         let mut transcript_capture_ms = 0.0;
-        let mut transcript_entry = None;
         if let Some(boundary) = transcript_split {
             prefill_remaining(
                 &self.loaded,
@@ -1370,12 +1377,15 @@ impl GenerationBackend for EngineBackend {
         }
 
         let prompt_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3 + transcript_capture_ms;
-        let transcript_phase = match transcript_split {
-            Some(boundary) => format!(
+        let transcript_phase = match (transcript_split, transcript_at) {
+            (Some(boundary), _) => format!(
                 " transcript_boundary={boundary} transcript_captured={}",
                 transcript_entry.is_some()
             ),
-            None => String::new(),
+            (None, Some(boundary)) if transcript_restored => {
+                format!(" transcript_boundary={boundary} transcript_restored=true")
+            }
+            _ => String::new(),
         };
         let stop_tokens = self
             .loaded
@@ -2510,6 +2520,78 @@ mod tests {
             assert_eq!(actual_state.kv_v_arena, expected_state.kv_v_arena);
             assert_eq!(actual_state.gdn_conv_arena, expected_state.gdn_conv_arena);
             assert_eq!(actual_state.gdn_state_arena, expected_state.gdn_state_arena);
+        }
+    }
+
+    /// With room for one snapshot, a resent turn restores the transcript
+    /// boundary; its prompt and completed captures must not evict it, or the
+    /// next turn (which re-renders this one without reasoning) reuses nothing.
+    #[test]
+    #[ignore = "serial Metal, real 0.8B transcript retention under a one-snapshot budget"]
+    fn resent_turn_keeps_the_transcript_boundary_under_a_one_snapshot_budget() {
+        struct Discard;
+        impl GenerationSink for Discard {
+            fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+                Ok(())
+            }
+            fn tick(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let runtime = qwen_llm::runtime::Runtime::metal().unwrap();
+        let loaded = runtime
+            .load_model("/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf")
+            .unwrap();
+        let family = qwen_llm::model_family::ModelFamily::detect(loaded.gguf()).unwrap();
+        let template = crate::prompt_template::serve_qwen_template(family, loaded.gguf()).unwrap();
+        let no_thinking = crate::supports_qwen_no_thinking_prompt(family, loaded.gguf());
+        let mut backend = EngineBackend::new(
+            loaded,
+            "transcript-budget-test".into(),
+            4,
+            Some(128),
+            128,
+            None,
+            template,
+            no_thinking,
+        )
+        .unwrap();
+        let request = crate::open_responses::items::parse_request(&serde_json::json!({
+            "model":"transcript-budget-test", "input":"Hi",
+            "temperature":0.0, "max_output_tokens":4,
+        }))
+        .unwrap();
+        let prompt = backend.render_prompt(&request).unwrap();
+        let prompt_ids = backend.tokenizer.encode(&prompt, false).unwrap();
+        let im_start = backend.tokenizer.encode(IM_START_MARKER, false).unwrap();
+        let boundary = transcript_boundary(&prompt_ids, im_start[0]).unwrap();
+        // The next turn shares the transcript boundary and the header token,
+        // then diverges from this prompt's generation suffix.
+        let mut next_turn = prompt_ids[..=boundary].to_vec();
+        assert_ne!(prompt_ids[boundary + 1], prompt_ids[0]);
+        next_turn.push(prompt_ids[0]);
+
+        // Measure the transcript and completed snapshots, then leave room
+        // for one of them but not both.
+        backend.generate(&request, &prompt, &mut Discard).unwrap();
+        let stats = backend.loaded.prefix_cache_stats();
+        assert_eq!(stats.entries, 2, "transcript and completed snapshots");
+        backend.loaded.set_prefix_cache_max_bytes(0);
+        backend
+            .loaded
+            .set_prefix_cache_max_bytes(stats.indexed_bytes / 4 * 3);
+
+        for resend in [false, true] {
+            let outcome = backend.generate(&request, &prompt, &mut Discard).unwrap();
+            assert_eq!(
+                outcome.usage.cached_tokens,
+                if resend { boundary } else { 0 }
+            );
+            let reused = backend
+                .loaded
+                .lookup_cached_prefix(&next_turn)
+                .map(|lookup| lookup.restored_prefix_len());
+            assert_eq!(reused, Some(boundary), "resend={resend}");
         }
     }
 

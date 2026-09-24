@@ -423,7 +423,9 @@ impl PrefixCache {
         Some(hit)
     }
 
-    pub(crate) fn touch_shared(&mut self, snapshot: &Arc<SessionSnapshot>) {
+    /// Record a use of the indexed entry holding `snapshot`, returning its id
+    /// (none once the entry has left the index).
+    pub(crate) fn touch_shared(&mut self, snapshot: &Arc<SessionSnapshot>) -> Option<EntryId> {
         let key = PrefixCacheKey {
             identity: snapshot.identity.clone(),
             prefix_len: snapshot.matched_prefix_len(),
@@ -438,6 +440,7 @@ impl PrefixCache {
         if let Some(id) = id {
             self.policy.touch(id);
         }
+        id
     }
 }
 

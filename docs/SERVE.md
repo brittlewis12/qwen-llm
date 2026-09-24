@@ -680,9 +680,11 @@ because client model-pickers probe it).
   reasoning reused 0 tokens on every turn. A captured transcript boundary
   replaces the prompt-end capture (an exact resend re-prefills only the header),
   and the transcript entry is pinned while the completed boundary is inserted
-  (skipped if it cannot fit beside it). Drafter requests keep single-pass prefill and
-  the prompt/completed pair. Flash-Next applies the same split and skips a
-  completed capture that would evict its transcript snapshot. DS4 captures prompt and completed boundaries and
+  (skipped if it cannot fit beside it). A resend or regeneration that restores
+  exactly at the transcript boundary treats the restored entry the same way
+  (phases: `transcript_restored=true`), so its captures cannot evict it.
+  Drafter requests keep single-pass prefill and the prompt/completed pair.
+  Flash-Next applies the same split, resend handling and pin. DS4 captures prompt and completed boundaries and
   skips a completed boundary with no transition or a truncation inside open
   reasoning. Eligible boundaries enter the **RAM** prefix cache (8–42 ms each
   per S0). Evidence: PERF-LOG 2026-09-23 transcript-boundary entry.

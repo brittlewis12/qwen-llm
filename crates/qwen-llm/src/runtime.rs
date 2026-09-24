@@ -1122,6 +1122,9 @@ pub struct PrefixCacheRestore {
     pub capture_tail: Option<Vec<f32>>,
     /// Cache-index accounting captured at lookup, before the unlocked restore.
     pub stats_at_lookup: PrefixCacheStats,
+    /// Cache entry the state came from, for pinning; none if it was evicted
+    /// while the restore ran unlocked.
+    pub entry: Option<EntryId>,
 }
 
 pub struct PreparedPrefixCacheLookup {
@@ -2413,7 +2416,8 @@ impl LoadedModel {
     ) -> Result<PrefixCacheRestore, RuntimeError> {
         let restored =
             self.restore_prepared_checkpoint(&lookup.checkpoint, sequence, request_tokens)?;
-        self.prefix_cache
+        let entry = self
+            .prefix_cache
             .lock()
             .touch_shared(&lookup.checkpoint.snapshot);
         debug_assert_eq!(restored.matched_prefix_len, lookup.matched_prefix_len);
@@ -2426,6 +2430,7 @@ impl LoadedModel {
             exact_final_logits: restored.exact_final_logits,
             capture_tail: restored.capture_tail,
             stats_at_lookup: lookup.stats_at_lookup,
+            entry,
         })
     }
 }

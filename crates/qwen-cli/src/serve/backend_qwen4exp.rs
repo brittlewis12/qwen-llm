@@ -218,24 +218,31 @@ impl GenerationBackend for FlashNextBackend {
 
             // Transcript-boundary capture: stop prefill before the generation
             // header, snapshot, then finish the header.
-            let transcript_split = self
+            let transcript_at = self
                 .im_start
-                .and_then(|im_start| transcript_boundary(&prompt_ids, im_start))
-                .filter(|&boundary| boundary > matched_tokens);
+                .and_then(|im_start| transcript_boundary(&prompt_ids, im_start));
+            let transcript_split = transcript_at.filter(|&boundary| boundary > matched_tokens);
+            // A restore ending exactly on the transcript boundary (a resent or
+            // regenerated turn) already holds the transcript snapshot; it is
+            // protected like a fresh capture below.
+            let mut transcript_entry = transcript_at
+                .filter(|&boundary| boundary == matched_tokens)
+                .and_then(|boundary| self.cache.entry_for(&prompt_ids[..boundary]));
+            let transcript_restored = transcript_entry.is_some();
             let prefill_t0 = Instant::now();
             let mut capture_ms = 0.0;
-            let mut transcript_bytes = None;
             if let Some(boundary) = transcript_split {
                 prefill_segment(&mut runner, &prompt_ids[matched_tokens..boundary], sink)?;
                 let capture_t0 = Instant::now();
-                transcript_bytes = capture_snapshot(
+                if capture_snapshot(
                     &mut self.cache,
                     &self.ctx,
                     &runner,
                     &prompt_ids[..boundary],
                     "transcript",
-                    0,
-                );
+                ) {
+                    transcript_entry = self.cache.entry_for(&prompt_ids[..boundary]);
+                }
                 capture_ms += capture_t0.elapsed().as_secs_f64() * 1e3;
             }
             let start = transcript_split.unwrap_or(matched_tokens);
@@ -247,16 +254,9 @@ impl GenerationBackend for FlashNextBackend {
                 .to_vec();
             // The transcript boundary a few header tokens earlier already
             // holds this prompt's reusable prefix.
-            if transcript_bytes.is_none() {
+            if transcript_entry.is_none() {
                 let capture_t0 = Instant::now();
-                capture_snapshot(
-                    &mut self.cache,
-                    &self.ctx,
-                    &runner,
-                    &prompt_ids,
-                    "prompt",
-                    0,
-                );
+                capture_snapshot(&mut self.cache, &self.ctx, &runner, &prompt_ids, "prompt");
                 capture_ms += capture_t0.elapsed().as_secs_f64() * 1e3;
             }
 
@@ -274,8 +274,10 @@ impl GenerationBackend for FlashNextBackend {
                 |token| Ok(runner.forward_token(token)?.to_vec()),
             )?;
 
-            // Completed-turn capture under prompt + consumed generated tokens,
-            // unless admitting it would evict the transcript snapshot.
+            // Completed-turn capture under prompt + consumed generated tokens.
+            // The transcript snapshot is what the next turn reuses when the
+            // template re-renders this one; pin it so admitting the completed
+            // boundary never evicts it.
             match crate::derive_completed_checkpoint_boundary(
                 prompt_ids.len(),
                 &generation.tokens,
@@ -290,26 +292,26 @@ impl GenerationBackend for FlashNextBackend {
                 Ok(consumed)
             }) {
                 Ok(consumed) => {
-                    capture_snapshot(
-                        &mut self.cache,
-                        &self.ctx,
-                        &runner,
-                        &consumed,
-                        "completed",
-                        transcript_bytes.unwrap_or(0),
-                    );
+                    let pinned = transcript_entry.filter(|&entry| self.cache.pin(entry));
+                    capture_snapshot(&mut self.cache, &self.ctx, &runner, &consumed, "completed");
+                    if let Some(entry) = pinned {
+                        self.cache.unpin(entry);
+                    }
                 }
                 Err(error) => {
                     tracing::warn!("serve: qwen4exp completed boundary derivation failed: {error}")
                 }
             }
 
-            let transcript_phase = match transcript_split {
-                Some(boundary) => format!(
+            let transcript_phase = match (transcript_split, transcript_at) {
+                (Some(boundary), _) => format!(
                     " transcript_boundary={boundary} transcript_captured={}",
-                    transcript_bytes.is_some()
+                    transcript_entry.is_some()
                 ),
-                None => String::new(),
+                (None, Some(boundary)) if transcript_restored => {
+                    format!(" transcript_boundary={boundary} transcript_restored=true")
+                }
+                _ => String::new(),
             };
             tracing::info!(
                 target: "qwen_diag",
@@ -363,24 +365,23 @@ fn prefill_segment(
     })
 }
 
-/// Snapshot the runner's committed state under `tokens`. `retain_bytes` is a
-/// same-request snapshot that must not be evicted to admit this one.
+/// Snapshot the runner's committed state under `tokens`; true when cached.
+/// Pinned entries are never evicted to admit it.
 fn capture_snapshot(
     cache: &mut SnapshotCache<Qwen4ExpTextSnapshot>,
     ctx: &MetalContext,
     runner: &Qwen4ExpTextRunner<'_, '_, '_>,
     tokens: &[u32],
     boundary: &'static str,
-    retain_bytes: u64,
-) -> Option<u64> {
+) -> bool {
     if cache.max_bytes() == 0 {
-        return None;
+        return false;
     }
     let payload_bytes = match runner.snapshot_bytes() {
         Ok(bytes) => bytes,
         Err(error) => {
             tracing::warn!("serve: qwen4exp {boundary} snapshot estimate failed: {error}");
-            return None;
+            return false;
         }
     };
     let Some(entry_bytes) = cache.strict_eligibility(tokens, payload_bytes) else {
@@ -389,16 +390,8 @@ fn capture_snapshot(
             "serve: qwen4exp {boundary} snapshot not cached (already present or over budget); payload_bytes={payload_bytes} cache_budget_bytes={}",
             cache.max_bytes(),
         );
-        return None;
+        return false;
     };
-    if retain_bytes > 0 && entry_bytes.saturating_add(retain_bytes) > cache.max_bytes() {
-        tracing::info!(
-            target: "qwen_diag",
-            "serve: qwen4exp {boundary} snapshot skipped to retain transcript boundary; snapshot_bytes={entry_bytes} retained_bytes={retain_bytes} cache_budget_bytes={}",
-            cache.max_bytes(),
-        );
-        return None;
-    }
     let signals = ctx.memory_signals();
     if let Err(reason) = super::snapshot_capture_admission(entry_bytes, signals) {
         tracing::warn!(
@@ -407,21 +400,20 @@ fn capture_snapshot(
             signals.recommended_max_bytes,
             signals.process_limit_remaining_bytes,
         );
-        return None;
+        return false;
     }
     match runner.capture_snapshot() {
         Ok(snapshot) => {
             debug_assert_eq!(snapshot.payload_bytes(), payload_bytes);
-            if cache.insert_strict(tokens.to_vec(), snapshot, entry_bytes) {
-                Some(entry_bytes)
-            } else {
+            let inserted = cache.insert_strict(tokens.to_vec(), snapshot, entry_bytes);
+            if !inserted {
                 tracing::warn!("serve: qwen4exp {boundary} snapshot rejected at cache insertion");
-                None
             }
+            inserted
         }
         Err(error) => {
             tracing::warn!("serve: qwen4exp {boundary} snapshot capture failed: {error}");
-            None
+            false
         }
     }
 }

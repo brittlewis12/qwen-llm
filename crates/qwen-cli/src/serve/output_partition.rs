@@ -24,6 +24,18 @@ impl ToolGrammar {
         }
     }
 
+    /// Separator the renderer itself inserts between visible content and the
+    /// call block, so it belongs to the call syntax rather than the visible
+    /// text. The DS4 release encoder renders `content + "\n\n" + block`
+    /// verbatim; Qwen templates trim content, so their separator needs no
+    /// ownership rule.
+    fn call_separator(self) -> Option<&'static str> {
+        match self {
+            Self::QwenXml => None,
+            Self::DeepSeekDsml => Some("\n\n"),
+        }
+    }
+
     fn parse(self, buffer: &str) -> super::tool_parse::ParsedEmission {
         match self {
             Self::QwenXml => parse_emission(buffer),
@@ -191,6 +203,9 @@ pub(crate) struct QwenOutputPartition {
     tool_grammar: ToolGrammar,
     pending_visible: String,
     tool_buffer: String,
+    /// The grammar's call separator seen right before the open marker: part
+    /// of the call syntax when calls parse, visible text when they do not.
+    tool_separator: &'static str,
     in_tool_span: bool,
 }
 
@@ -258,6 +273,7 @@ impl QwenOutputPartition {
             tool_grammar,
             pending_visible: String::new(),
             tool_buffer: String::new(),
+            tool_separator: "",
             in_tool_span: false,
         }
     }
@@ -295,10 +311,18 @@ impl QwenOutputPartition {
             return;
         }
         self.pending_visible.push_str(text);
-        if let Some(index) = self.pending_visible.find(self.tool_grammar.open_marker()) {
-            let prose = self.pending_visible[..index].to_owned();
+        let marker = self.tool_grammar.open_marker();
+        let separator = self.tool_grammar.call_separator();
+        if let Some(index) = self.pending_visible.find(marker) {
+            let mut prose = self.pending_visible[..index].to_owned();
             let calls = self.pending_visible[index..].to_owned();
             self.pending_visible.clear();
+            if let Some(separator) = separator
+                && prose.ends_with(separator)
+            {
+                prose.truncate(prose.len() - separator.len());
+                self.tool_separator = separator;
+            }
             if !prose.is_empty() {
                 events.push(PartitionEvent::Visible(prose));
             }
@@ -306,7 +330,14 @@ impl QwenOutputPartition {
             self.in_tool_span = true;
             return;
         }
-        let safe = safe_emit_len(&self.pending_visible, self.tool_grammar.open_marker());
+        // Also hold back a trailing separator that may precede the marker.
+        let mut safe = safe_emit_len(&self.pending_visible, marker);
+        if let Some(separator) = separator {
+            safe = safe.min(safe_emit_len(
+                &self.pending_visible,
+                &format!("{separator}{marker}"),
+            ));
+        }
         if safe > 0 {
             let text = self.pending_visible[..safe].to_owned();
             self.pending_visible.drain(..safe);
@@ -340,7 +371,10 @@ impl QwenOutputPartition {
         let buffer = std::mem::take(&mut self.tool_buffer);
         let parsed = self.tool_grammar.parse(&buffer);
         if parsed.calls.is_empty() {
-            events.push(PartitionEvent::Visible(buffer));
+            events.push(PartitionEvent::Visible(format!(
+                "{}{buffer}",
+                self.tool_separator
+            )));
             return;
         }
         if !parsed.visible.is_empty() {
@@ -353,6 +387,7 @@ impl QwenOutputPartition {
         self.flush_reasoning(events);
         let mut raw = std::mem::take(&mut self.pending_visible);
         if self.in_tool_span {
+            raw.push_str(self.tool_separator);
             raw.push_str(&self.tool_buffer);
         }
         if !raw.is_empty() {
@@ -601,5 +636,74 @@ mod tests {
             PartitionEvent::ReasoningClosed => true,
             PartitionEvent::FunctionCall(_) => false,
         }));
+    }
+
+    /// The DSML call separator is withheld from visible text only when a
+    /// call actually parses. A malformed block, a token-limit cut, an abort
+    /// and plain text ending in newlines all keep every visible byte, at
+    /// every chunking.
+    #[test]
+    fn dsml_separator_is_visible_unless_a_call_parses() {
+        let dsml = ToolGrammar::DeepSeekDsml;
+        let protocol = OutputProtocol::Qwen {
+            preopened_reasoning: false,
+            parse_tools: true,
+            tool_grammar: dsml,
+        };
+        let visible = |events: &[PartitionEvent]| {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    PartitionEvent::Visible(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>()
+        };
+        let calls = |events: &[PartitionEvent]| {
+            events
+                .iter()
+                .filter(|event| matches!(event, PartitionEvent::FunctionCall(_)))
+                .count()
+        };
+        let marker = dsml.open_marker();
+        let malformed = format!("Checking.\n\n{marker}\n<not a call>");
+        let valid = format!(
+            "Checking.\n\n{marker}\n<｜DSML｜invoke name=\"ping\">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
+        );
+        for chunk in 1..=valid.len() {
+            let pieces = |text: &str| -> Vec<Vec<u8>> {
+                text.as_bytes().chunks(chunk).map(<[u8]>::to_vec).collect()
+            };
+            let drive = |text: &str, end: Option<GenerationEnd>| {
+                let mut partition = OutputPartition::new(protocol.clone());
+                let mut events = Vec::new();
+                for piece in pieces(text) {
+                    partition.push(&piece, &mut events);
+                }
+                match end {
+                    Some(end) => partition.finish(end, &mut events).unwrap(),
+                    None => partition.abort(&mut events),
+                }
+                events
+            };
+            for end in [
+                Some(GenerationEnd::StopToken(1)),
+                Some(GenerationEnd::TokenLimit),
+                None,
+            ] {
+                // Plain text ending in newlines, and a malformed block.
+                for text in ["Plain answer.\n\n", "Plain answer.\n", malformed.as_str()] {
+                    let events = drive(text, end);
+                    assert_eq!(visible(&events), text, "chunk {chunk} {end:?} {text:?}");
+                    assert_eq!(calls(&events), 0);
+                }
+            }
+            let events = drive(&valid, Some(GenerationEnd::StopToken(1)));
+            assert_eq!(visible(&events), "Checking.", "chunk {chunk}");
+            assert_eq!(calls(&events), 1);
+            // An abort mid-block keeps the separator with the raw bytes.
+            let cut = &valid[..valid.find("</｜DSML｜invoke>").unwrap()];
+            assert_eq!(visible(&drive(cut, None)), cut, "chunk {chunk}");
+        }
     }
 }

@@ -1195,6 +1195,92 @@ mod tests {
         );
     }
 
+    /// DS4 tool turns replay byte-identically: the release encoder renders
+    /// `content + "\n\n" + DSML block`, so the separator the model emits
+    /// before the block belongs to the call syntax, not the visible text
+    /// (replaying it as text doubled it). Chat and thinking tiers, prose and
+    /// call-only turns, every streaming chunk size.
+    #[test]
+    fn ds4_tool_turns_replay_byte_identically() {
+        use crate::serve::render_ds4::{preopens_reasoning, render_deepseek_v4_serve_prompt};
+
+        let block = concat!(
+            "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"ping\">\n",
+            "<｜DSML｜parameter name=\"host\" string=\"true\">example.com</｜DSML｜parameter>\n",
+            "</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
+        );
+        let request = |effort: Option<&str>, input: Value| {
+            let mut body = json!({"model": "ds", "input": input,
+                "tools": [{"type": "function", "name": "ping", "parameters": {"type": "object",
+                    "properties": {"host": {"type": "string"}}}}]});
+            if let Some(effort) = effort {
+                body["reasoning"] = json!({"effort": effort});
+            }
+            crate::serve::items::parse_request(&body).unwrap()
+        };
+        let user = json!({"role": "user", "content": "One"});
+        let mut checked = 0;
+        for effort in [None, Some("high")] {
+            let t1 = request(effort, json!([user]));
+            let p1 = render_deepseek_v4_serve_prompt(&t1).unwrap();
+            let preopened = preopens_reasoning(&t1).unwrap();
+            for prose in ["Checking.", ""] {
+                let reasoning = if preopened { "plan\n</think>" } else { "" };
+                let generated = format!("{reasoning}{prose}\n\n{block}");
+                for chunk in 1..=generated.len() {
+                    let mut partition = OutputPartition::new(OutputProtocol::Qwen {
+                        preopened_reasoning: preopened,
+                        parse_tools: true,
+                        tool_grammar: ToolGrammar::DeepSeekDsml,
+                    });
+                    let mut events = Vec::new();
+                    for bytes in generated.as_bytes().chunks(chunk) {
+                        partition.push(bytes, &mut events);
+                    }
+                    partition
+                        .finish(GenerationEnd::StopToken(0), &mut events)
+                        .unwrap();
+                    let response = build_response_object(
+                        &t1,
+                        "resp_t1".into(),
+                        1_755_500_000,
+                        &events,
+                        StopReason::Eos,
+                        Usage::default(),
+                        None,
+                    )
+                    .unwrap();
+                    let items = response["output"].as_array().unwrap().clone();
+                    let messages: Vec<&Value> = items
+                        .iter()
+                        .filter(|item| item["type"] == "message")
+                        .collect();
+                    match prose {
+                        "" => assert!(messages.is_empty(), "call-only turn: {items:?}"),
+                        prose => assert_eq!(messages[0]["content"][0]["text"], prose),
+                    }
+                    let call = items
+                        .iter()
+                        .find(|item| item["type"] == "function_call")
+                        .expect("parsed call");
+                    let mut input = vec![user.clone()];
+                    input.extend(items.iter().cloned());
+                    input.push(json!({"type": "function_call_output",
+                        "call_id": call["call_id"], "output": "pong"}));
+                    let p2 = render_deepseek_v4_serve_prompt(&request(effort, Value::Array(input)))
+                        .unwrap();
+                    let completed = format!("{p1}{generated}<｜end▁of▁sentence｜>");
+                    assert!(
+                        p2.starts_with(&completed),
+                        "{effort:?} {prose:?} chunk {chunk}\n--- expected prefix\n{completed}\n--- turn 2\n{p2}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0);
+    }
+
     #[test]
     fn request_echo_and_no_tools_constraint_are_truthful() {
         let request = crate::serve::items::parse_request(&json!({

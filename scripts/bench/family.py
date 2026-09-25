@@ -306,7 +306,10 @@ def source_identity(root: Path) -> tuple[str, bool, str]:
         for entry in flags.split(b"\0")
         if entry
     )
-    dirty = bool(git_bytes(root, "status", "--porcelain", "--untracked-files=all"))
+    # Tracked changes only, as `source_identity::git_dirty` (Rust) decides:
+    # the sweep writes its own untracked output under docs/bench, which
+    # must not read as the source changing mid-sweep.
+    dirty = bool(git_bytes(root, "status", "--porcelain", "-uno"))
     dirty = dirty or hidden
     return commit, dirty, tracked_source_state(root)
 

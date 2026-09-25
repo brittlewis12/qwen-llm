@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-25 - Cross-Family Baseline vs llama.cpp b11182
+
+First llama.cpp comparison since b9833 (2026-06-28) and the first beyond the
+Qwen size ladder. `qwen-bench suite` now runs every family on its production
+path (1adfc66f); `family.py` runs ABBA blocks with depths and both llama.cpp
+micro-batch sizes. qwen-llm `70ec9a9b`, llama.cpp `e9f824d8c0`; 4 samples per
+cell; ratio against llama.cpp's better `-ub` per cell. Artifact:
+`docs/bench/2026-09-25-1759-families-family/` (FINDINGS.md, README.md, JSON).
+
+| model | pp512 | pp4096 | tg128 | tg128@8K | tg128@32K |
+|---|---:|---:|---:|---:|---:|
+| Qwen3.8-27B | 1.01x | 1.07x | 1.05x | 1.07x | 1.10x |
+| Qwen3.6-35B-A3B | 0.97x | 1.05x | 1.19x | 1.16x | 1.25x |
+| Qwen3.5-122B-A10B | 0.96x | 1.04x | 1.11x | 1.12x | — |
+| Flash-Next | 0.86x | 0.77x | 0.88x | 0.75x | — |
+| DS4 Flash 0731 | 0.48x | 0.83x | 1.00x | 0.85x | — |
+| Muse Glimmer 30B | 0.86x | 0.85x | 0.97x | 0.99x | — |
+| K2 Horizon 7B | 754 t/s | 543 t/s | 71.0 t/s | 8.8 t/s | no llama.cpp |
+
+- llama.cpp closed most of the June decode lead (A3B 1.42x -> 1.19x, dense 27B
+  1.26x -> 1.05x); MoE short-prompt prefill is now slightly behind.
+- Every post-June family trails somewhere; DS4 pp512 (0.48x) is the largest
+  gap. Flash-Next's pp4096 is below its own pp512 and its decode loses 26% by
+  8K (llama.cpp 13%).
+- K2 decode drops 8x from depth 0 to 8K; no other family loses more than 26%.
+- llama.cpp uses Metal residency sets by default; qwen-llm's DS4 set is opt-in.
+  Synthetic tokens; no MLX, quality, serve-level or speculation numbers.
+
 ## 2026-09-24 - Review Fixes: MoE Decode Completion, Transcript Retention, Durable Tier
 
 Adversarial Codex reviews of the 2026-09-23 work found real defects; fixed:

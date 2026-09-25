@@ -2571,10 +2571,29 @@ uncertainty.
 
 ## Latest Baseline Snapshot
 
-M4 Max, release `qwen-bench`, clean narrow family spot after `v0.344` against
-fresh llama.cpp b9833 (`c818263f2`, `MTL,BLAS`). No recorded thermal or
-performance warnings. Artifact:
-`docs/bench/2026-06-28-1551-v0345-fresh-lcpp-c818-family/README.md`.
+**2026-09-25, cross-family, llama.cpp b11182** (`e9f824d8c0`), qwen-llm
+`70ec9a9b`, one daily-driver artifact per family, production paths on both
+sides, ABBA blocks, 4 samples per cell, ratio against llama.cpp's better
+`-ub` (512 or 2048). Artifact:
+`docs/bench/2026-09-25-1759-families-family/FINDINGS.md`.
+
+| Model | `pp512` | `pp4096` | `tg128` | `tg128@8K` | `tg128@32K` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Qwen3.8-27B dense | `1.01x` | `1.07x` | `1.05x` | `1.07x` | `1.10x` |
+| Qwen3.6-35B-A3B | `0.97x` | `1.05x` | `1.19x` | `1.16x` | `1.25x` |
+| Qwen3.5-122B-A10B | `0.96x` | `1.04x` | `1.11x` | `1.12x` | — |
+| Qwen3.8 Flash-Next | `0.86x` | `0.77x` | `0.88x` | `0.75x` | — |
+| DeepSeek V4 Flash 0731 | `0.48x` | `0.83x` | `1.00x` | `0.85x` | — |
+| Muse Glimmer 30B | `0.86x` | `0.85x` | `0.97x` | `0.99x` | — |
+| K2 Horizon 7B | 754 t/s | 543 t/s | 71.0 t/s | **8.8 t/s** | no llama.cpp |
+
+Read: the Qwen path still leads (most at depth) but by much less than in June;
+every family added since June trails somewhere; K2 decode collapses with
+context. Synthetic tokens, warm, steady state: not a TTFT, serve-level,
+quality or MLX comparison.
+
+Previous board (2026-06-28, Qwen ladder only, llama.cpp b9833 at default
+flags, runs=1): `docs/bench/2026-06-28-1551-v0345-fresh-lcpp-c818-family/README.md`.
 
 | Model | `pp512` qwen/lcpp | `pp4096` qwen/lcpp | `tg128` qwen/lcpp | Notes |
 | --- | ---: | ---: | ---: | --- |
@@ -2586,10 +2605,11 @@ performance warnings. Artifact:
 | 35B A3B | `1.07x` | `1.19x` | `1.42x` | v0.344 Q5 K512 R2 included |
 | 122B A10B | `1.02x` | `1.15x` | `1.25x` | runs=1 spot |
 
-Read: this board is a warm prompt-throughput and decode regression guard, not a
-fresh-TTFT scoreboard. Default `qwen-bench pp` warms the model, excludes session
-and scratch allocation, normally skips the final tail, and does not measure first
-token delivery. Do not infer product responsiveness from `pp<N>` alone.
+Read (June board): a warm prompt-throughput and decode regression guard, not a
+fresh-TTFT scoreboard. Its `qwen-bench pp` warmed the model, excluded session
+and scratch allocation, skipped the final tail (the 2026-09-25 board includes
+it), and did not measure first token delivery. Do not infer product
+responsiveness from `pp<N>` alone.
 
 ## BS=1 Objective Reset — 2026-07-10
 

@@ -1,0 +1,79 @@
+[
+  {
+    "schema_version": 3,
+    "engine": "qwen-llm",
+    "build_commit": "70ec9a9b5",
+    "build_dirty": 0,
+    "build_identity": {
+      "schema_version": 2,
+      "build_commit": "70ec9a9b525610119841937b6676ce8ec39f4fef",
+      "build_commit_short": "70ec9a9b5",
+      "build_dirty": false,
+      "build_source_state": "git-source-sha256-v2:5d863483ea4c60394c3363ad53067cf43336a2ddba2b6e29e921e9de25246892",
+      "stamp_source": "git",
+      "stamp_error": null,
+      "runtime_commit": "70ec9a9b525610119841937b6676ce8ec39f4fef",
+      "runtime_dirty": false,
+      "runtime_source_state": "git-source-sha256-v2:5d863483ea4c60394c3363ad53067cf43336a2ddba2b6e29e921e9de25246892",
+      "status": "match",
+      "problems": [],
+      "overrides": []
+    },
+    "test_time": "2026-09-25T19:11:36Z",
+    "model_filename": "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+    "model_size": 104202502492,
+    "model_n_params": 284334567511,
+    "arch_kind": "deepseek_v4",
+    "family": "deepseek_v4",
+    "test": "tg128@d8192",
+    "n_tokens": 128,
+    "n_depth": 8192,
+    "n_repetitions": 4,
+    "avg_ts": 22.380940694745902,
+    "stddev_ts": 0.0101929657092751,
+    "samples_ts": [
+      22.385296777444157,
+      22.38507363290158,
+      22.365750836493277,
+      22.387641532144603
+    ],
+    "samples_ns": [
+      5718039000,
+      5718096000,
+      5723036125,
+      5717440124
+    ],
+    "avg_ns": 5719152812,
+    "avg_compute_ns": 5718067500,
+    "avg_session_alloc_ns": null,
+    "avg_scratch_alloc_ns": null,
+    "avg_gpu_ns": null,
+    "kernel_trace_command_buffers_per_token": null,
+    "kernel_trace_encoders_per_token": null,
+    "kernel_trace_concurrent_encoders_per_token": null,
+    "kernel_trace_dispatches_per_token": null,
+    "decode_gb_per_s": null,
+    "prefill_chunk": null,
+    "decode_mode": "forward_token+logits_copy",
+    "prefill_mode": null,
+    "power": {
+      "source": "AC Power",
+      "battery_percent": 100,
+      "battery_state": "finishing charge",
+      "battery_warning": null,
+      "powermode_battery": 2,
+      "powermode_ac": 2,
+      "thermal_warning_recorded": false,
+      "performance_warning_recorded": false,
+      "cpu_power_status_recorded": false
+    },
+    "qwen_env": {
+      "QWEN_METAL_LEASE_WAIT": "1"
+    },
+    "block_avg_ts": [
+      22.385185205172867,
+      22.376696184318938
+    ],
+    "n_blocks": 2
+  }
+]

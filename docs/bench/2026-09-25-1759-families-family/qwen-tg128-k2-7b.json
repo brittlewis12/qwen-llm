@@ -1,0 +1,79 @@
+[
+  {
+    "schema_version": 3,
+    "engine": "qwen-llm",
+    "build_commit": "70ec9a9b5",
+    "build_dirty": 0,
+    "build_identity": {
+      "schema_version": 2,
+      "build_commit": "70ec9a9b525610119841937b6676ce8ec39f4fef",
+      "build_commit_short": "70ec9a9b5",
+      "build_dirty": false,
+      "build_source_state": "git-source-sha256-v2:5d863483ea4c60394c3363ad53067cf43336a2ddba2b6e29e921e9de25246892",
+      "stamp_source": "git",
+      "stamp_error": null,
+      "runtime_commit": "70ec9a9b525610119841937b6676ce8ec39f4fef",
+      "runtime_dirty": false,
+      "runtime_source_state": "git-source-sha256-v2:5d863483ea4c60394c3363ad53067cf43336a2ddba2b6e29e921e9de25246892",
+      "status": "match",
+      "problems": [],
+      "overrides": []
+    },
+    "test_time": "2026-09-25T19:35:02Z",
+    "model_filename": "/Users/tito/models/K2-Horizon-7B-Q4_K_M.gguf",
+    "model_size": 5580759040,
+    "model_n_params": 8999178240,
+    "arch_kind": "k2_horizon",
+    "family": "k2_horizon",
+    "test": "tg128",
+    "n_tokens": 128,
+    "n_depth": 0,
+    "n_repetitions": 4,
+    "avg_ts": 70.9586210878919,
+    "stddev_ts": 0.2848298215092889,
+    "samples_ts": [
+      71.31605228829214,
+      71.05974084012878,
+      70.74090688894262,
+      70.71778433420404
+    ],
+    "samples_ns": [
+      1794827334,
+      1801301249,
+      1809419833,
+      1810011459
+    ],
+    "avg_ns": 1803889968,
+    "avg_compute_ns": 1798064292,
+    "avg_session_alloc_ns": null,
+    "avg_scratch_alloc_ns": null,
+    "avg_gpu_ns": null,
+    "kernel_trace_command_buffers_per_token": null,
+    "kernel_trace_encoders_per_token": null,
+    "kernel_trace_concurrent_encoders_per_token": null,
+    "kernel_trace_dispatches_per_token": null,
+    "decode_gb_per_s": null,
+    "prefill_chunk": null,
+    "decode_mode": "append+logits_copy+source_checks",
+    "prefill_mode": null,
+    "power": {
+      "source": "AC Power",
+      "battery_percent": 100,
+      "battery_state": "finishing charge",
+      "battery_warning": null,
+      "powermode_battery": 2,
+      "powermode_ac": 2,
+      "thermal_warning_recorded": false,
+      "performance_warning_recorded": false,
+      "cpu_power_status_recorded": false
+    },
+    "qwen_env": {
+      "QWEN_METAL_LEASE_WAIT": "1"
+    },
+    "block_avg_ts": [
+      71.18789656421046,
+      70.72934561157334
+    ],
+    "n_blocks": 2
+  }
+]

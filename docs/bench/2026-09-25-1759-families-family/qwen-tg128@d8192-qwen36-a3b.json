@@ -1,0 +1,79 @@
+[
+  {
+    "schema_version": 3,
+    "engine": "qwen-llm",
+    "build_commit": "70ec9a9b5",
+    "build_dirty": 0,
+    "build_identity": {
+      "schema_version": 2,
+      "build_commit": "70ec9a9b525610119841937b6676ce8ec39f4fef",
+      "build_commit_short": "70ec9a9b5",
+      "build_dirty": false,
+      "build_source_state": "git-source-sha256-v2:5d863483ea4c60394c3363ad53067cf43336a2ddba2b6e29e921e9de25246892",
+      "stamp_source": "git",
+      "stamp_error": null,
+      "runtime_commit": "70ec9a9b525610119841937b6676ce8ec39f4fef",
+      "runtime_dirty": false,
+      "runtime_source_state": "git-source-sha256-v2:5d863483ea4c60394c3363ad53067cf43336a2ddba2b6e29e921e9de25246892",
+      "status": "match",
+      "problems": [],
+      "overrides": []
+    },
+    "test_time": "2026-09-25T18:37:22Z",
+    "model_filename": "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+    "model_size": 22123538944,
+    "model_n_params": 34660610688,
+    "arch_kind": "moe",
+    "family": "qwen",
+    "test": "tg128@d8192",
+    "n_tokens": 128,
+    "n_depth": 8192,
+    "n_repetitions": 4,
+    "avg_ts": 98.79272442386446,
+    "stddev_ts": 1.1027862511097288,
+    "samples_ts": [
+      97.15181061468918,
+      99.49956120460307,
+      99.3596284367207,
+      99.15989743944486
+    ],
+    "samples_ns": [
+      1317525625,
+      1286437834,
+      1288249584,
+      1290844417
+    ],
+    "avg_ns": 1295764365,
+    "avg_compute_ns": 1301981729,
+    "avg_session_alloc_ns": 483208,
+    "avg_scratch_alloc_ns": null,
+    "avg_gpu_ns": null,
+    "kernel_trace_command_buffers_per_token": null,
+    "kernel_trace_encoders_per_token": null,
+    "kernel_trace_concurrent_encoders_per_token": null,
+    "kernel_trace_dispatches_per_token": null,
+    "decode_gb_per_s": null,
+    "prefill_chunk": null,
+    "decode_mode": "decode_token+logits_copy",
+    "prefill_mode": null,
+    "power": {
+      "source": "AC Power",
+      "battery_percent": 100,
+      "battery_state": "charged",
+      "battery_warning": null,
+      "powermode_battery": 2,
+      "powermode_ac": 2,
+      "thermal_warning_recorded": false,
+      "performance_warning_recorded": false,
+      "cpu_power_status_recorded": false
+    },
+    "qwen_env": {
+      "QWEN_METAL_LEASE_WAIT": "1"
+    },
+    "block_avg_ts": [
+      98.32568590964613,
+      99.25976293808279
+    ],
+    "n_blocks": 2
+  }
+]

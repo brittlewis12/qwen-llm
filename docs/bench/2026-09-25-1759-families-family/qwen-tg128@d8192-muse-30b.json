@@ -1,0 +1,79 @@
+[
+  {
+    "schema_version": 3,
+    "engine": "qwen-llm",
+    "build_commit": "70ec9a9b5",
+    "build_dirty": 0,
+    "build_identity": {
+      "schema_version": 2,
+      "build_commit": "70ec9a9b525610119841937b6676ce8ec39f4fef",
+      "build_commit_short": "70ec9a9b5",
+      "build_dirty": false,
+      "build_source_state": "git-source-sha256-v2:5d863483ea4c60394c3363ad53067cf43336a2ddba2b6e29e921e9de25246892",
+      "stamp_source": "git",
+      "stamp_error": null,
+      "runtime_commit": "70ec9a9b525610119841937b6676ce8ec39f4fef",
+      "runtime_dirty": false,
+      "runtime_source_state": "git-source-sha256-v2:5d863483ea4c60394c3363ad53067cf43336a2ddba2b6e29e921e9de25246892",
+      "status": "match",
+      "problems": [],
+      "overrides": []
+    },
+    "test_time": "2026-09-25T19:22:46Z",
+    "model_filename": "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf",
+    "model_size": 29599844352,
+    "model_n_params": 27854794240,
+    "arch_kind": "muse_glimmer",
+    "family": "muse_glimmer",
+    "test": "tg128@d8192",
+    "n_tokens": 128,
+    "n_depth": 8192,
+    "n_repetitions": 4,
+    "avg_ts": 15.687192467465401,
+    "stddev_ts": 0.024244809662351346,
+    "samples_ts": [
+      15.68515699042337,
+      15.654232570966427,
+      15.710194532404318,
+      15.699185776067495
+    ],
+    "samples_ns": [
+      8160581375,
+      8176702334,
+      8147575750,
+      8153289083
+    ],
+    "avg_ns": 8159537135,
+    "avg_compute_ns": 8168641854,
+    "avg_session_alloc_ns": null,
+    "avg_scratch_alloc_ns": null,
+    "avg_gpu_ns": null,
+    "kernel_trace_command_buffers_per_token": null,
+    "kernel_trace_encoders_per_token": null,
+    "kernel_trace_concurrent_encoders_per_token": null,
+    "kernel_trace_dispatches_per_token": null,
+    "decode_gb_per_s": null,
+    "prefill_chunk": null,
+    "decode_mode": "split_decode+logits_copy",
+    "prefill_mode": null,
+    "power": {
+      "source": "AC Power",
+      "battery_percent": 100,
+      "battery_state": "finishing charge",
+      "battery_warning": null,
+      "powermode_battery": 2,
+      "powermode_ac": 2,
+      "thermal_warning_recorded": false,
+      "performance_warning_recorded": false,
+      "cpu_power_status_recorded": false
+    },
+    "qwen_env": {
+      "QWEN_METAL_LEASE_WAIT": "1"
+    },
+    "block_avg_ts": [
+      15.669694780694897,
+      15.704690154235905
+    ],
+    "n_blocks": 2
+  }
+]

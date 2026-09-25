@@ -1,0 +1,79 @@
+[
+  {
+    "schema_version": 3,
+    "engine": "qwen-llm",
+    "build_commit": "70ec9a9b5",
+    "build_dirty": 0,
+    "build_identity": {
+      "schema_version": 2,
+      "build_commit": "70ec9a9b525610119841937b6676ce8ec39f4fef",
+      "build_commit_short": "70ec9a9b5",
+      "build_dirty": false,
+      "build_source_state": "git-source-sha256-v2:5d863483ea4c60394c3363ad53067cf43336a2ddba2b6e29e921e9de25246892",
+      "stamp_source": "git",
+      "stamp_error": null,
+      "runtime_commit": "70ec9a9b525610119841937b6676ce8ec39f4fef",
+      "runtime_dirty": false,
+      "runtime_source_state": "git-source-sha256-v2:5d863483ea4c60394c3363ad53067cf43336a2ddba2b6e29e921e9de25246892",
+      "status": "match",
+      "problems": [],
+      "overrides": []
+    },
+    "test_time": "2026-09-25T18:57:00Z",
+    "model_filename": "/Users/tito/models/Qwen3.8-Flash-Next-UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf",
+    "model_size": 89975329280,
+    "model_n_params": 176943899520,
+    "arch_kind": "qwen4exp",
+    "family": "qwen4exp",
+    "test": "tg128",
+    "n_tokens": 128,
+    "n_depth": 0,
+    "n_repetitions": 4,
+    "avg_ts": 36.38172413612987,
+    "stddev_ts": 1.939517043203345,
+    "samples_ts": [
+      34.39605691923025,
+      35.03898519889593,
+      38.0356032275898,
+      38.0562511988035
+    ],
+    "samples_ns": [
+      3721356790,
+      3653073834,
+      3365268041,
+      3363442167
+    ],
+    "avg_ns": 3525785208,
+    "avg_compute_ns": 3687215312,
+    "avg_session_alloc_ns": null,
+    "avg_scratch_alloc_ns": null,
+    "avg_gpu_ns": null,
+    "kernel_trace_command_buffers_per_token": null,
+    "kernel_trace_encoders_per_token": null,
+    "kernel_trace_concurrent_encoders_per_token": null,
+    "kernel_trace_dispatches_per_token": null,
+    "decode_gb_per_s": null,
+    "prefill_chunk": null,
+    "decode_mode": "forward_token+logits_copy",
+    "prefill_mode": null,
+    "power": {
+      "source": "AC Power",
+      "battery_percent": 100,
+      "battery_state": "charged",
+      "battery_warning": null,
+      "powermode_battery": 2,
+      "powermode_ac": 2,
+      "thermal_warning_recorded": false,
+      "performance_warning_recorded": false,
+      "cpu_power_status_recorded": false
+    },
+    "qwen_env": {
+      "QWEN_METAL_LEASE_WAIT": "1"
+    },
+    "block_avg_ts": [
+      34.71752105906309,
+      38.04592721319665
+    ],
+    "n_blocks": 2
+  }
+]

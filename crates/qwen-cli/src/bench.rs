@@ -32,6 +32,11 @@ mod diagnostics;
 mod dsv4_mhc_delete;
 #[cfg(feature = "dsv4-diagnostics")]
 mod dsv4_prefill;
+/// Production option decisions for the non-Qwen families, shared with
+/// `qwen run` and serve.
+#[allow(dead_code)]
+#[path = "qwen/family_options.rs"]
+mod family_options;
 #[path = "bench/gdn_replay.rs"]
 mod gdn_replay;
 mod gguf_arena_floor;
@@ -59,6 +64,11 @@ mod pld;
 mod power;
 #[path = "bench/pp.rs"]
 mod pp;
+/// The production Qwen prefill allocator `qwen run` and serve use, shared so
+/// the bench measures the same chunking, plan and admission.
+#[allow(dead_code)]
+#[path = "qwen/prefill_plan.rs"]
+mod prefill_plan;
 #[path = "bench/prefix_cache.rs"]
 mod prefix_cache;
 mod prefix_cache_vt_ab;

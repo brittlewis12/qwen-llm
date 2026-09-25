@@ -1,6 +1,24 @@
 //! Prefill chunk decisions, admission pricing, and prefill request allocation.
+//!
+//! Compiled into both `qwen` and `qwen-bench` (explicit imports only, no CLI
+//! types), so the bench measures the production allocator.
 
-use super::*;
+use std::str::FromStr;
+use std::time::Instant;
+
+use anyhow::{Context, Result, ensure};
+use qwen_llm::metal::{
+    MetalBufferSizeAndAlign, MetalContext, MetalMemoryAdmission, MetalMemorySignals,
+    evaluate_metal_memory_admission,
+};
+use qwen_llm::metal_dflash::{
+    PrefillScratchConfig, PrefillScratchOverlayStats, PrefillScratchPlan,
+};
+use qwen_llm::model::{Arch, ArchKind};
+use qwen_llm::runtime::{
+    LoadedModel, PackedPrefillScratch, PackedPrefillScratchPlan, Sequence, SequenceConfig,
+};
+use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PrefillChunkArg {
@@ -24,17 +42,6 @@ impl PrefillChunkArg {
 
 /// Fixed chunk kept by paths that need one when `--prefill-chunk` is absent.
 pub(crate) const BASELINE_PREFILL_CHUNK: usize = 1024;
-
-/// `--prefill-chunk` defaults to `auto`, which single-prompt generation
-/// resolves per request. Without the flag, JSONL request runs and sampling
-/// attribution keep the fixed baseline instead: the batched, paired, fanout
-/// and file-root planners align shared prefixes to a fixed chunk and were
-/// measured at 1024, and attribution pins 1024. An explicit value is kept.
-pub(crate) fn resolve_default_prefill_chunk(args: &mut Args, explicit: bool) {
-    if !explicit && (args.requests_jsonl.is_some() || args.sampling_attribution) {
-        args.prefill_chunk = PrefillChunkArg::Fixed(BASELINE_PREFILL_CHUNK);
-    }
-}
 
 impl FromStr for PrefillChunkArg {
     type Err = String;

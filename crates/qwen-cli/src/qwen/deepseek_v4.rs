@@ -352,45 +352,8 @@ pub(crate) fn validate_deepseek_v4_request_context_limit(
     Ok(())
 }
 
-pub(crate) fn parse_deepseek_v4_prefill_chunk_tokens(value: Option<&str>) -> Result<usize> {
-    let Some(value) = value else {
-        return Ok(DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS);
-    };
-    let chunk_tokens = value
-        .parse::<usize>()
-        .with_context(|| format!("QWEN_DSV4_PREFILL_CHUNK_TOKENS={value:?} is not an integer"))?;
-    ensure!(
-        (1..=DEEPSEEK_V4_PREFILL_MAX_TOKENS).contains(&chunk_tokens),
-        "QWEN_DSV4_PREFILL_CHUNK_TOKENS must be in 1..={DEEPSEEK_V4_PREFILL_MAX_TOKENS}, got {chunk_tokens}"
-    );
-    Ok(chunk_tokens)
-}
-
-pub(crate) fn deepseek_v4_prefill_chunk_tokens() -> Result<usize> {
-    let value = std::env::var("QWEN_DSV4_PREFILL_CHUNK_TOKENS").ok();
-    parse_deepseek_v4_prefill_chunk_tokens(value.as_deref())
-}
-
-pub(crate) fn deepseek_v4_prefill_chunk_ranges(
-    prompt_tokens: usize,
-    chunk_tokens: usize,
-) -> Vec<std::ops::Range<usize>> {
-    let mut ranges = Vec::new();
-    let mut start = 0usize;
-    while start < prompt_tokens {
-        let remaining = prompt_tokens - start;
-        let len = if remaining >= chunk_tokens {
-            chunk_tokens
-        } else if chunk_tokens == DEEPSEEK_V4_PREFILL_MAX_TOKENS && remaining >= 2_048 {
-            2_048
-        } else {
-            remaining
-        };
-        ranges.push(start..start + len);
-        start += len;
-    }
-    ranges
-}
+// Prefill chunk size and ranges live in `family_options`, shared with serve
+// and qwen-bench.
 
 pub(crate) fn deepseek_v4_packed_chunk_count(prompt_tokens: usize, chunk_tokens: usize) -> usize {
     if prompt_tokens < 2 {

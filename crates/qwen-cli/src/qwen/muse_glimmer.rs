@@ -170,10 +170,7 @@ pub(crate) fn run_muse_glimmer_single_turn(
             !prefill_packed_tokens.is_multiple_of(MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS),
         )
         + prefill_scalar_tail_commands;
-    let options = qwen_llm::muse_glimmer_runtime::MuseGlimmerRuntimeOptions {
-        split_decode: read_math_flag("QWEN_MUSE_SPLIT_DECODE")?,
-        matrix_prefill: read_math_flag("QWEN_MUSE_MATRIX_PREFILL")?,
-    };
+    let options = muse_runtime_options_from_env()?;
     eprintln!(
         "muse_glimmer: loading {} for text generation",
         model_path.display()
@@ -345,21 +342,4 @@ pub(crate) fn run_muse_glimmer_single_turn(
         )?;
     }
     Ok(())
-}
-
-pub(crate) fn read_math_flag(name: &str) -> Result<bool> {
-    let value = std::env::var(name);
-    match value {
-        Ok(value) => parse_math_flag(name, Some(&value)),
-        Err(std::env::VarError::NotPresent) => parse_math_flag(name, None),
-        Err(error) => Err(error).with_context(|| format!("read {name}")),
-    }
-}
-
-pub(crate) fn parse_math_flag(name: &str, value: Option<&str>) -> Result<bool> {
-    match value {
-        None | Some("1") => Ok(true),
-        Some("0") => Ok(false),
-        Some(value) => bail!("{name} must be 0 or 1, got {value:?}"),
-    }
 }

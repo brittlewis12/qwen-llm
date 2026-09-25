@@ -19,6 +19,8 @@ mod dsv4_temporal;
 #[path = "qwen/durable_cache.rs"]
 mod durable_cache;
 mod execution_selector;
+#[path = "qwen/family_options.rs"]
+mod family_options;
 #[path = "qwen/family_profile.rs"]
 mod family_profile;
 mod fixed_cohort_jsonl;
@@ -75,33 +77,31 @@ use qwen_llm::deepseek_v4_checkpoint_store::{
 };
 use qwen_llm::deepseek_v4_metal::{
     DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES, DEEPSEEK_V4_MULTIGROUP_SELECTOR_MAX_CAPACITY_ROWS,
-    DEEPSEEK_V4_MULTIGROUP_SELECTOR_MIN_VISIBLE_ROWS, DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS,
-    DEEPSEEK_V4_PREFILL_MAX_TOKENS, DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, DeepSeekV4MemorySamples,
-    DeepSeekV4MetalResidency, DeepSeekV4ModelContentId, DeepSeekV4MultigroupSelectorGeometry,
-    DeepSeekV4MultigroupSelectorTelemetry, DeepSeekV4Session, DeepSeekV4SessionCapacity,
-    DeepSeekV4SnapshotCaptureErrorKind, DeepSeekV4SnapshotCodecConstraints,
-    DeepSeekV4SnapshotFileOutcome, DeepSeekV4SnapshotRestoreErrorKind, DeepSeekV4StageKind,
-    DeepSeekV4StageProfile, causal_snapshot_capture_error_kind, causal_snapshot_record_bytes,
+    DEEPSEEK_V4_MULTIGROUP_SELECTOR_MIN_VISIBLE_ROWS, DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
+    DeepSeekV4MemorySamples, DeepSeekV4MetalResidency, DeepSeekV4ModelContentId,
+    DeepSeekV4MultigroupSelectorGeometry, DeepSeekV4MultigroupSelectorTelemetry, DeepSeekV4Session,
+    DeepSeekV4SessionCapacity, DeepSeekV4SnapshotCaptureErrorKind,
+    DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotFileOutcome,
+    DeepSeekV4SnapshotRestoreErrorKind, DeepSeekV4StageKind, DeepSeekV4StageProfile,
+    causal_snapshot_capture_error_kind, causal_snapshot_record_bytes,
     causal_snapshot_restore_error_kind, load_causal_snapshot_file, publish_causal_snapshot_file,
 };
 use qwen_llm::dense_batch8::DENSE_BATCH8_WIDTH;
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::{
-    KernelEncoder, MetalBufferSizeAndAlign, MetalContext, MetalMemoryAdmission, MetalMemorySignals,
-    MetalPipelineCacheMetrics, MetalTensor, evaluate_metal_memory_admission,
-    evaluate_metal_memory_admission_with_cpu_bytes,
+    KernelEncoder, MetalContext, MetalPipelineCacheMetrics, MetalTensor,
+    evaluate_metal_memory_admission, evaluate_metal_memory_admission_with_cpu_bytes,
 };
 use qwen_llm::metal_dflash::{
     DFlashDecoder, MetalDFlashDebugScratch, MetalDFlashHead, MetalDFlashLayerMajorScratch,
-    MetalDFlashSession, MetalDFlashVerifyScratch, PrefillScratchConfig, PrefillScratchOverlayStats,
-    PrefillScratchPlan, plan_prefill_scratch_with_matrix_max_pos_configured,
-    prefill_tokens_with_multi_hidden,
+    MetalDFlashSession, MetalDFlashVerifyScratch, PrefillScratchConfig,
+    plan_prefill_scratch_with_matrix_max_pos_configured, prefill_tokens_with_multi_hidden,
 };
 use qwen_llm::metal_forward::{
     LogitsReadbackProfile, MetalForward, MfError, SnapshotValidationError, StructuralRowEvidence,
     TokenProfile, encode_scatter_offset_f32,
 };
-use qwen_llm::model::{Arch, ArchKind};
+use qwen_llm::model::ArchKind;
 use qwen_llm::model_family::ModelFamily;
 use qwen_llm::moe_batch16::MOE_BATCH16_WIDTH;
 use qwen_llm::muse_glimmer::MuseGlimmerConfig;
@@ -122,9 +122,8 @@ use qwen_llm::qwen4exp_runtime::{
     Qwen4ExpSessionCapacity, Qwen4ExpTokenTiming,
 };
 use qwen_llm::runtime::{
-    LoadedModel, LoadedModelConfig, PackedPrefillScratch, PackedPrefillScratchPlan, PrefetchPolicy,
-    PrefetchResidencyProbe, PreparedCheckpoint, Runtime, RuntimeError, Sequence, SequenceConfig,
-    prefetch_opened_gguf,
+    LoadedModel, LoadedModelConfig, PackedPrefillScratch, PrefetchPolicy, PrefetchResidencyProbe,
+    PreparedCheckpoint, Runtime, RuntimeError, Sequence, SequenceConfig, prefetch_opened_gguf,
 };
 use qwen_llm::sampling::{
     BoundedTopKEvidence, GreedySelection, SAMPLER_ALGORITHM_VERSION, SampledToken, Sampler,
@@ -140,7 +139,6 @@ use std::io::{BufRead, IsTerminal, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use std::sync::LazyLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -1005,6 +1003,7 @@ use decode::*;
 use deepseek_v4::*;
 use dflash::*;
 use durable_cache::*;
+use family_options::*;
 pub(crate) use fingerprint::GeneratedTokenSha256Digest;
 use jsonl::*;
 use muse_glimmer::*;
@@ -1014,6 +1013,19 @@ use qwen4exp::*;
 use run_options::*;
 use single_turn::*;
 use telemetry::*;
+
+/// `--prefill-chunk` defaults to `auto`, which single-prompt generation
+/// resolves per request. Without the flag, JSONL request runs and sampling
+/// attribution keep the fixed baseline instead: the batched, paired, fanout
+/// and file-root planners align shared prefixes to a fixed chunk and were
+/// measured at 1024, and attribution pins 1024. An explicit value is kept.
+/// (Lives here, not in `prefill_plan`, because that module is shared with
+/// `qwen-bench`, which has no CLI `Args`.)
+pub(crate) fn resolve_default_prefill_chunk(args: &mut Args, explicit: bool) {
+    if !explicit && (args.requests_jsonl.is_some() || args.sampling_attribution) {
+        args.prefill_chunk = PrefillChunkArg::Fixed(BASELINE_PREFILL_CHUNK);
+    }
+}
 
 /// `qwen info`: text mode is header inspection; K2 JSON chat eligibility also
 /// verifies retained checkpoint bytes with cancellation. Text mode is the legacy model

@@ -1,5 +1,9 @@
 use super::*;
 use clap::CommandFactory;
+use qwen_llm::deepseek_v4_metal::DEEPSEEK_V4_PREFILL_MAX_TOKENS;
+use qwen_llm::metal::{MetalBufferSizeAndAlign, MetalMemorySignals};
+use qwen_llm::metal_dflash::PrefillScratchOverlayStats;
+use qwen_llm::model::Arch;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::os::unix::fs::PermissionsExt;

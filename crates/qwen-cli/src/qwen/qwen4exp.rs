@@ -9,36 +9,8 @@ pub(crate) const QWEN4EXP_PACKED_PREFILL_PROFILE_ENV: &str = "QWEN4EXP_PACKED_PR
 pub(crate) const QWEN4EXP_PACKED_SELECTED_QSA_ENV: &str = "QWEN4EXP_PACKED_SELECTED_QSA";
 
 pub(crate) const QWEN4EXP_FULL_SHARD_PREFETCH_ENV: &str = "QWEN4EXP_FULL_SHARD_PREFETCH";
-pub(crate) const QWEN4EXP_HC_UP_MIX_ENV: &str = "QWEN4EXP_HC_UP_MIX";
-pub(crate) const QWEN4EXP_GUARDED_TOPK_ENV: &str = "QWEN4EXP_GUARDED_TOPK";
-
-/// `QWEN4EXP_GUARDED_TOPK` / `QWEN4EXP_HC_UP_MIX` rollbacks, shared by the
-/// run and serve lanes.
-pub(crate) fn qwen4exp_decode_options_from_env()
--> Result<qwen_llm::qwen4exp_runtime::Qwen4ExpDecodeOptions> {
-    Ok(qwen_llm::qwen4exp_runtime::Qwen4ExpDecodeOptions {
-        guarded_topk: parse_qwen4exp_decode_flag(
-            std::env::var_os(QWEN4EXP_GUARDED_TOPK_ENV).as_deref(),
-            QWEN4EXP_GUARDED_TOPK_ENV,
-        )?,
-        hc_up_mix: parse_qwen4exp_decode_flag(
-            std::env::var_os(QWEN4EXP_HC_UP_MIX_ENV).as_deref(),
-            QWEN4EXP_HC_UP_MIX_ENV,
-        )?,
-    })
-}
-
-pub(crate) fn parse_qwen4exp_decode_flag(
-    value: Option<&std::ffi::OsStr>,
-    name: &str,
-) -> Result<bool> {
-    match value {
-        None => Ok(true),
-        Some(value) if value == "0" => Ok(false),
-        Some(value) if value == "1" => Ok(true),
-        _ => bail!("{name} must be 0 or 1"),
-    }
-}
+// Decode options (`QWEN4EXP_GUARDED_TOPK` / `QWEN4EXP_HC_UP_MIX`) live in
+// `family_options`, shared with serve and qwen-bench.
 
 pub(crate) const QWEN4EXP_MAX_STOP_TOKENS: usize = 256;
 

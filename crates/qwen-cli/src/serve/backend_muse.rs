@@ -27,8 +27,8 @@ const PREFIX_REUSE_ENV: &str = "QWEN_MUSE_PREFIX_REUSE";
 
 pub(crate) fn read_math_options() -> anyhow::Result<MuseGlimmerRuntimeOptions> {
     Ok(MuseGlimmerRuntimeOptions {
-        matrix_prefill: crate::muse_glimmer::read_math_flag(MATRIX_PREFILL_ENV)?,
-        split_decode: crate::muse_glimmer::read_math_flag(SPLIT_DECODE_ENV)?,
+        matrix_prefill: crate::family_options::read_math_flag(MATRIX_PREFILL_ENV)?,
+        split_decode: crate::family_options::read_math_flag(SPLIT_DECODE_ENV)?,
     })
 }
 
@@ -261,7 +261,7 @@ impl GenerationBackend for MuseGlimmerBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::muse_glimmer::parse_math_flag;
+    use crate::family_options::parse_math_flag;
 
     #[test]
     fn serve_math_switches_are_strict_and_separate_from_run() {

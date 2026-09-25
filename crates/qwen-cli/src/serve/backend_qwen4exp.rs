@@ -84,7 +84,7 @@ impl FlashNextBackend {
             .and_then(|ids| (ids.len() == 1).then(|| u32::try_from(ids[0]).ok())?);
         let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, context_limit)
             .context("derive Qwen3.8-Flash-Next resident session capacity")?;
-        let decode_options = crate::qwen4exp::qwen4exp_decode_options_from_env()?;
+        let decode_options = crate::family_options::qwen4exp_decode_options_from_env()?;
         // Packed prefill sized to the whole context; when that allocation
         // is refused, prompts prefill token by token as on the run lane.
         let (loaded, packed_fallback) = match Qwen4ExpLoadedModel::load_with_decode_options(

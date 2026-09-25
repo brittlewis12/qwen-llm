@@ -34,12 +34,51 @@ Its disk-only native FP8 Engram and exact decoder dependency-suffix code are now
 inspectable. Compare total prefill plus residency transitions and following
 decode; the screenshot's 800 tok/s excludes the reported eight-second switch.
 
+## Leverage Map — 2026-09-25 (after the cross-family baseline)
+
+Active force-ranked queue. Supersedes the ordering in the 2026-09-07 Qwen
+restored-request map and the 2026-09-09 Muse priority (kept below as history).
+Inputs: the cross-family baseline
+(`docs/bench/2026-09-25-1759-families-family/FINDINGS.md`), two same-day
+attributions (K2 decode, Flash-Next prefill; PERF-LOG 2026-09-25), and an
+adversarial map review. Rule: correctness and continuity of real sessions
+first; engine work targeted at located gaps, not a campaign to restore June's
+Qwen margins. Costs are arithmetic from measured rates, not session savings.
+
+| # | Item | Cost | Evidence / mechanism | Cheapest decisive next step | Effort |
+|---|---|---|---|---|---|
+| 1 | DS4 warm turn answers the previous question | failed agent turn | PERF-LOG 2026-09-23: bit-identical restore, different warm/cold schedules (restored-suffix chunking, `serve/backend_ds4.rs`) | replay the retained two-turn case as live, snapshot, cold, and cold-partitioned-at-the-boundary with fixed token ids; find the first divergence | ½ day diagnosis |
+| 2 | Render history as generated, independent of the current thinking mode | 400 or lost prefix reuse on a mode switch; Qwen3.8 plain turns drop supplied reasoning | `open_responses/render.rs` precloses history in no-thinking mode; `items.rs` refuses reasoning under `x_qwen.no_thinking`; DS4 needs transition provenance (jam 2026-09-25) | CPU round-trip fixtures (emitted items → admission → render → token ids, first mismatch and reusable prefix), then one real switch replay | Qwen 1–2 days, DS4 more |
+| 3 | Qwen long-session decode | serve 14.5 → 8.4 t/s from 31K → 133K: ~12.8 s per 256 output tokens | `SERVE.md`; attention growth vs speculation acceptance vs capture/restore not yet separated | one real long conversation at two depths with phase attribution | ½ day, fix 2–5 days |
+| 4 | K2 decode attention is serial over history | tg 74 → 8.8 t/s from depth 0 → 8K; halves by 1K | confirmed: +12.1 µs per cached position, linear; one SIMD-group per head, no split-K, no GQA sharing (`k2_horizon_metal.rs` `encode_online_attention`, `kernels/attn.metal`); Muse's split decode is the template | split-position partial softmax + in-order reduce, sharing K/V across the 4 GQA heads; parity against the strict K2 gates | 2–4 days |
+| 5 | Flash-Next selected-range prefill and depth decode | 0.75–0.88x of llama.cpp; ~2 s per fresh 4K prompt, ~2.4 s per 256 tokens at 8K | confirmed step at the 2051-token dense shoulder (+275 ms for 3 tokens) and 2.44 vs 1.6 ms per token past it; planner splits 4096 as 2048 + 3 + 2045 (`qwen4exp_runtime.rs` `plan_qwen4exp_prefill_execution_from`) | time the three commands separately; attribute the selected command to QSA scoring/selection vs MoE/GDN | ½ day, fix 2–5 days |
+| 6 | DS4 short-prompt prefill | 0.48x at pp512, 0.83x at pp4096 | 512-token chunks miss the compact GPU routing path (2048/4096 predicate, capped at 2048) and fall to CPU routing (`deepseek_v4_metal/prefill.rs`); residency sets explain at most ~25% | census one real 512-token prompt's routes, experts and command waits; force-path comparison | ½ day, 2–4 days |
+| 7 | Flash-Next durable tier | restart discards reusable history (follow-ups ~12 s instead of 2–3 s) | RAM cache only (`serve/backend_qwen4exp.rs`); generic `DurableStore<P>` exists | snapshot codec round trip, then graceful restart and identical continuation | 2–4 days (moves up if restarts are common) |
+| 8 | Muse prefill | 0.85x; ~3.1 s per fresh 4K prompt | 128-token command chunks, projection efficiency, attention growth | early/late chunk attribution on one real 4K prompt | ½ day screen |
+
+Deprioritized: identity-gate cleanup as its own milestone, blanket cache
+rewrites, continuous batching without observed busy failures, process-cold CLI
+optimization as the default goal, DS4 residency by default (owner decision).
+MLX and quality/KLD comparisons are deferred by the owner.
+
+The measurement that would re-rank this: one real agent session replayed
+against llama-server (same artifact, tool results, output budget; a warm
+continuation, a thinking-mode switch and a restart), recording session wall,
+reused vs new tokens and decode throughput. If reuse holds and decode
+dominates, engine items move ahead of serve items after the correctness pair.
+
 ## Current North Star
 
 Make one fresh process and one loaded model answer one fresh prompt as quickly,
-efficiently, lightly, and accurately as possible on the local M4 Max. Repeated
-process-cold CLI invocation is the primary deployment shape today. The inference
-contract remains serial batch size one, not aggregate serving throughput.
+efficiently, lightly, and accurately as possible on the local M4 Max. The
+inference contract remains serial batch size one, not aggregate serving
+throughput.
+
+Deployment shape (amended 2026-09-25): multi-turn agent sessions through
+`qwen serve` are the primary deployment (the owner's daily driver), so session
+wall, prefix reuse and restart continuity rank alongside the phase latencies
+below. Process-cold CLI invocation remains measured but is no longer the
+default optimization target.
 
 The three co-primary latency objectives are:
 
@@ -187,6 +226,9 @@ Decision rules:
 
 ## Muse Fresh / Decode Priority - 2026-09-09
 
+> History: the active queue is the 2026-09-25 Leverage Map above (Muse prefill
+> is #8 there; decode measured at parity with llama.cpp).
+
 The active Muse priority is **fresh prefill and decode**, not further cache work.
 Generation now selects Q8/unified M4 Max matrix/tiled-online and split math by
 default; existing run/serve variables become independent0 rollbacks (unset/1 allows
@@ -256,6 +298,8 @@ Evidence: `docs/bench/2026-09-09-muse-serve-math/RESULT.md`,
 contracts stay unchanged; temperature1/top-k64/top-p0.95 is sampled, not greedy.
 
 ## Qwen Restored-Request Leverage Map - 2026-09-07
+
+> History: the active queue is the 2026-09-25 Leverage Map above.
 
 The ranking changes materially for restored requests. This is a next-experiment
 map, not a claim that warm serving is the largest opportunity in every lane.

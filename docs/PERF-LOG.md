@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-25 - K2 Decode Attention Is Serial; Flash-Next Prefill Steps At The Shoulder
+
+Two baseline anomalies located the same day (release `qwen-bench suite`, 2 reps):
+
+- **K2 decode** (`--tg 32 -d 0,1024,2048,4096,8192`): 13.5 / 25.8 / 38.3 /
+  63.5 / 113.2 ms per token, i.e. **+12.1 µs per cached position, exactly
+  linear** (74.0 → 8.8 t/s; already halved at 1K). The decode attention
+  (`kernel_k2_attn_online[_blocked]_f16kv_h128`, `k2_horizon_metal.rs`
+  `encode_online_attention`) runs one SIMD-group per query head (32 in total)
+  scanning every position serially; the 256-row blocks only restructure
+  accumulation, the 4 GQA heads each re-read their KV head, and nothing else
+  in the per-token work grows with depth. Muse had the same shape before split
+  decode (8.7 → 15.9 forwards/s at 6.2K). Fix: split-position partial
+  softmax + in-order reduce with GQA sharing, checked against the strict K2
+  gates. Leverage map #4.
+- **Flash-Next prefill** (`--pp 1024,2048,2051,2176,2560,3072,4096`): 609 /
+  623 / 576 / 534 / 514 / 498 / 480 t/s. Crossing the 2051-token dense
+  shoulder costs **+275 ms for 3 tokens**, and each token past it costs
+  2.44 ms versus 1.6 ms below it (every row executed packed). llama.cpp holds
+  ~610 t/s through 4096. The planner splits 4096 as 2048 + 3 + 2045; next is
+  timing the three commands and attributing the selected-range command.
+  Leverage map #5.
+
 ## 2026-09-25 - Cross-Family Baseline vs llama.cpp b11182
 
 First llama.cpp comparison since b9833 (2026-06-28) and the first beyond the

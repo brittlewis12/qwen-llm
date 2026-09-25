@@ -117,7 +117,7 @@ class FamilyIdentityTests(unittest.TestCase):
         row_identity = identity(dirty=True)
         row_identity["overrides"] = ["allow_dirty"]
         row = {
-            "schema_version": 2,
+            "schema_version": 3,
             "engine": "qwen-llm",
             "build_commit": COMMIT_A[:9],
             "build_dirty": 1,
@@ -139,7 +139,7 @@ class FamilyIdentityTests(unittest.TestCase):
         expected = identity()
         row_identity = identity()
         row = {
-            "schema_version": 2,
+            "schema_version": 3,
             "engine": "qwen-llm",
             "build_commit": COMMIT_A[:9],
             "build_dirty": 0,
@@ -190,13 +190,6 @@ class FamilyIdentityTests(unittest.TestCase):
 
             self.assertEqual(len({clean, dirty_a, dirty_b, staged_b}), 4)
 
-            untracked = repo / "untracked.rs"
-            untracked.write_text("fn untracked() {}\n")
-            untracked_state = family.tracked_source_state(repo)
-            self.assertNotIn(untracked_state, {clean, dirty_a, dirty_b, staged_b})
-            self.assertTrue(family.source_identity(repo)[1])
-            untracked.unlink()
-
             subprocess.run(
                 [
                     "git",
@@ -213,6 +206,17 @@ class FamilyIdentityTests(unittest.TestCase):
                 check=True,
             )
             committed = family.tracked_source_state(repo)
+            self.assertFalse(family.source_identity(repo)[1])
+
+            # Untracked files (bench output, work-in-progress docs) change
+            # neither the source state nor the dirty flag, matching the
+            # binary's tracked-only identity (32bacc9a, 4bf0482).
+            untracked = repo / "untracked.rs"
+            untracked.write_text("fn untracked() {}\n")
+            self.assertEqual(family.tracked_source_state(repo), committed)
+            self.assertFalse(family.source_identity(repo)[1])
+            untracked.unlink()
+
             subprocess.run(
                 [
                     "git",
@@ -228,6 +232,50 @@ class FamilyIdentityTests(unittest.TestCase):
             hidden = family.tracked_source_state(repo)
             self.assertNotEqual(hidden, committed)
             self.assertTrue(family.source_identity(repo)[1])
+
+
+class MergeBlocksTests(unittest.TestCase):
+    def row(self, samples: list[float], **extra) -> dict:
+        return {
+            "test": "tg128",
+            "samples_ts": samples,
+            "samples_ns": [int(1e9 / s) for s in samples],
+            "avg_ts": sum(samples) / len(samples),
+            "stddev_ns": 0,
+            "avg_session_alloc_ns": extra.pop("alloc", 100),
+            "prefill_mode": extra.pop("mode", "packed"),
+            **extra,
+        }
+
+    def merge(self, *blocks: dict) -> dict:
+        with contextlib.redirect_stderr(io.StringIO()):
+            (merged,) = family.merge_blocks(
+                [[b] for b in blocks], key=lambda r: r["test"]
+            )
+        return merged
+
+    def test_statistics_cover_every_block(self) -> None:
+        merged = self.merge(
+            self.row([10.0, 12.0], alloc=100), self.row([14.0], alloc=400)
+        )
+        self.assertEqual(merged["samples_ts"], [10.0, 12.0, 14.0])
+        self.assertAlmostEqual(merged["avg_ts"], 12.0)
+        self.assertAlmostEqual(merged["stddev_ts"], 2.0)
+        self.assertGreater(merged["stddev_ns"], 0)
+        self.assertEqual(merged["n_repetitions"], 3)
+        self.assertEqual(merged["n_blocks"], 2)
+        self.assertEqual(merged["block_avg_ts"], [11.0, 14.0])
+        # Repetition-weighted: (100*2 + 400*1) / 3.
+        self.assertEqual(merged["avg_session_alloc_ns"], 200)
+        self.assertNotIn("heterogeneous_fields", merged)
+
+    def test_blocks_that_executed_differently_are_flagged(self) -> None:
+        merged = self.merge(
+            self.row([10.0], mode="packed"), self.row([9.0], mode="scalar")
+        )
+        self.assertEqual(
+            merged["heterogeneous_fields"], {"prefill_mode": ['"packed"', '"scalar"']}
+        )
 
 
 class BuildScriptIntegrationTests(unittest.TestCase):

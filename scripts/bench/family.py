@@ -602,9 +602,11 @@ def merge_blocks(blocks: list[list[dict]], key) -> list[dict]:
     the summary statistics are recomputed over all of them. Each row keeps
     its per-block means in `block_avg_ts` so drift stays visible."""
     merged: dict = {}
+    per_block: dict = {}
     for rows in blocks:
         for row in rows:
             k = key(row)
+            per_block.setdefault(k, []).append(row)
             if k not in merged:
                 merged[k] = dict(row)
                 merged[k]["samples_ts"] = list(row.get("samples_ts") or [])
@@ -614,22 +616,81 @@ def merge_blocks(blocks: list[list[dict]], key) -> list[dict]:
                 merged[k]["samples_ts"] += list(row.get("samples_ts") or [])
                 merged[k]["samples_ns"] += list(row.get("samples_ns") or [])
                 merged[k]["block_avg_ts"].append(row.get("avg_ts"))
-    for row in merged.values():
+    for k, row in merged.items():
         ts = row["samples_ts"]
         ns = row["samples_ns"]
         if ts:
-            mean = sum(ts) / len(ts)
-            row["avg_ts"] = mean
-            row["stddev_ts"] = (
-                (sum((x - mean) ** 2 for x in ts) / (len(ts) - 1)) ** 0.5
-                if len(ts) > 1
-                else 0.0
-            )
+            row["avg_ts"] = sample_mean(ts)
+            row["stddev_ts"] = sample_stddev(ts)
         if ns:
-            row["avg_ns"] = int(sum(ns) / len(ns))
+            row["avg_ns"] = int(sample_mean(ns))
+            if "stddev_ns" in row:
+                row["stddev_ns"] = int(sample_stddev(ns))
+            if "avg_compute_ns" in row and row["avg_compute_ns"] is not None:
+                row["avg_compute_ns"] = row["avg_ns"]
+            if row.get("decode_gb_per_s") is not None and row.get("n_tokens"):
+                per_token_s = row["avg_ns"] / 1e9 / row["n_tokens"]
+                row["decode_gb_per_s"] = row["model_size"] / 1e9 / per_token_s
+        # Averages whose samples are not retained: repetition-weighted mean
+        # of the block values, or null if any block lacks one.
+        for field in BLOCK_WEIGHTED_FIELDS:
+            if field not in row:
+                continue
+            values = [
+                (b.get(field), len(b.get("samples_ts") or [])) for b in per_block[k]
+            ]
+            if any(v is None for v, _ in values):
+                row[field] = None
+            else:
+                reps = sum(n for _, n in values) or 1
+                row[field] = int(sum(v * n for v, n in values) / reps)
+        # A block that executed differently (auto chunk admission, packed vs
+        # scalar fallback, llama.cpp settings) must not merge silently.
+        mixed = {
+            field: sorted({json.dumps(b.get(field)) for b in per_block[k]})
+            for field in BLOCK_INVARIANT_FIELDS
+            if field in row
+            and len({json.dumps(b.get(field)) for b in per_block[k]}) > 1
+        }
+        if mixed:
+            row["heterogeneous_fields"] = mixed
+            print(
+                f"[family] warning: {row.get('test')} blocks differ in {sorted(mixed)}",
+                file=sys.stderr,
+            )
         row["n_repetitions"] = len(ts)
         row["n_blocks"] = len(row["block_avg_ts"])
     return list(merged.values())
+
+
+# Per-block averages merged by repetition weight (their samples are not kept).
+BLOCK_WEIGHTED_FIELDS = ("avg_session_alloc_ns", "avg_scratch_alloc_ns", "avg_gpu_ns")
+
+# Execution settings every block of one row must share.
+BLOCK_INVARIANT_FIELDS = (
+    "prefill_chunk",
+    "prefill_mode",
+    "decode_mode",
+    "family",
+    "n_ubatch",
+    "n_batch",
+    "flash_attn",
+    "type_k",
+    "type_v",
+    "n_gpu_layers",
+    "build_commit",
+)
+
+
+def sample_mean(values: list) -> float:
+    return sum(values) / len(values)
+
+
+def sample_stddev(values: list) -> float:
+    if len(values) < 2:
+        return 0.0
+    mean = sample_mean(values)
+    return (sum((x - mean) ** 2 for x in values) / (len(values) - 1)) ** 0.5
 
 
 def main() -> int:
@@ -734,9 +795,8 @@ def main() -> int:
     # Resolve every model up front so we fail fast on missing files.
     resolved = [(row, *resolve_model(row)) for row in registry]
     # Probe llama.cpp on a model it implements (a registry may lead with one
-    # it does not, e.g. K2 Horizon).
+    # it does not, e.g. K2 Horizon); with none in the sweep, do not probe.
     lcpp_models = [path for row, path, _size in resolved if row.get("lcpp", True)]
-    sample_path = lcpp_models[0] if lcpp_models else resolved[0][1]
 
     # Stderr noise filters — lcpp prints ggml_metal_* setup lines on every
     # run; qwen-bench prints its own [pp]/[bench]/[tg]/[suite] progress lines. None
@@ -744,12 +804,20 @@ def main() -> int:
     qwen_noise = re.compile(r"^(\[(pp|bench|tg|suite)\]|ggml_metal_|\s*$)")
     lcpp_noise = re.compile(r"^(ggml_metal_|\s*$)")
 
-    lcpp_engine = probe_lcpp(
-        llama_bench,
-        sample_path,
-        lock=lcpp_lock,
-        allow_unpinned=args.allow_unpinned_lcpp,
-    )
+    if lcpp_models:
+        lcpp_engine = probe_lcpp(
+            llama_bench,
+            lcpp_models[0],
+            lock=lcpp_lock,
+            allow_unpinned=args.allow_unpinned_lcpp,
+        )
+    else:
+        print(
+            "[family] no model in this sweep has an upstream llama.cpp "
+            "implementation; llama.cpp is not probed",
+            file=sys.stderr,
+        )
+        lcpp_engine = {"status": "not_probed", "reason": "no_supported_model"}
     lcpp_engine["locked"] = llama_bench_locked
 
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M")

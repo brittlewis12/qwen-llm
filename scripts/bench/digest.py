@@ -373,6 +373,14 @@ def sanity_flags(state: dict, pp_shapes: list[int], tg_shapes: list[int]) -> lis
             flags.append(f"{tag} {test}: qwen-llm row missing.")
         elif lc is None and supported[tag]:
             flags.append(f"{tag} {test}: llama.cpp row missing.")
+    for engine in ("qwen", "lcpp"):
+        for tag, rows in state[engine].items():
+            for row in rows:
+                if row.get("heterogeneous_fields"):
+                    flags.append(
+                        f"{tag} {row.get('test')} ({engine}): blocks executed "
+                        f"differently: {row['heterogeneous_fields']}"
+                    )
     # pp throughput non-monotonic (pp1024 < pp512) — historically a
     # prefill-chunk-tuning artifact worth surfacing.
     for m in state["manifest"]["models"]:
@@ -428,11 +436,16 @@ def main(argv: list[str]) -> int:
         f"- `qwen-llm`: `{qwen_id['build_commit']}`"
         + (" (**dirty worktree**)" if qwen_id["build_dirty"] else "")
     )
-    print(
-        f"- `llama.cpp`: `{lcpp_id['build_commit']}` "
-        f"(build {lcpp_id['build_number']}, backends `{lcpp_id['backends']}`)"
-    )
-    print(f"- GPU: `{lcpp_id['gpu_info']}`")
+    if lcpp_id.get("status") == "not_probed":
+        print(
+            "- `llama.cpp`: not probed (no model in this sweep has an upstream implementation)"
+        )
+    else:
+        print(
+            f"- `llama.cpp`: `{lcpp_id['build_commit']}` "
+            f"(build {lcpp_id['build_number']}, backends `{lcpp_id['backends']}`)"
+        )
+        print(f"- GPU: `{lcpp_id['gpu_info']}`")
     qe = manifest.get("qwen_env_at_start") or {}
     if qe:
         kv = ", ".join(f"`{k}={v}`" for k, v in qe.items())
@@ -493,10 +506,18 @@ def main(argv: list[str]) -> int:
             "block's mean). Never in parallel."
         )
         print(
-            f"- llama.cpp pp at `-ub {manifest['sweep'].get('lcpp_ubatch')}`; the "
-            f"comparator is `-ub {manifest['sweep'].get('lcpp_tuned_ubatch')}`. "
-            "tg at depth uses llama-bench `-d` and qwen-bench `--depth` "
-            "(untimed fill per rep)."
+            f"- llama.cpp pp runs at `-ub {manifest['sweep'].get('lcpp_ubatch')}`; the "
+            "main tables compare against the "
+            f"`ub{manifest['sweep'].get('lcpp_tuned_ubatch')}` rows (not a per-cell "
+            "best; the variant table shows the others)."
+        )
+        print(
+            "- Depth: neither engine times its fill. llama-bench fills once and "
+            "restores the cached depth state for later reps; qwen-bench refills "
+            "per rep. llama-bench's tg warm-up is one token; qwen-bench runs a "
+            "model warm-up plus one full untimed rep per row. At `-b 2048`, "
+            "llama-bench pp4096 computes last-token logits at both batch "
+            "endpoints; qwen-llm's production prefill computes the final one."
         )
     else:
         print(f"- engine_order = `{order}` (see `manifest.json`).")

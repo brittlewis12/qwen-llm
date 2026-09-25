@@ -168,6 +168,7 @@ pub(crate) fn with_family_bench<R>(
                 session: None,
                 chunk,
                 vocab,
+                last_prefill_mode: "none",
             };
             body(&mut bench)
         }
@@ -255,6 +256,7 @@ struct DeepSeekV4Bench<'ctx> {
     session: Option<DeepSeekV4Session>,
     chunk: usize,
     vocab: usize,
+    last_prefill_mode: &'static str,
 }
 
 impl DeepSeekV4Bench<'_> {
@@ -301,7 +303,8 @@ impl FamilyBench for DeepSeekV4Bench<'_> {
         let ctx = self.ctx;
         let chunk = self.chunk;
         let session = self.session()?;
-        if ids.len() < 2 {
+        let scalar = ids.len() < 2;
+        if scalar {
             for &id in ids {
                 session.forward_token(ctx, id)?;
             }
@@ -316,6 +319,11 @@ impl FamilyBench for DeepSeekV4Bench<'_> {
                 }
             }
         }
+        self.last_prefill_mode = if scalar {
+            "forward_token+logits_copy"
+        } else {
+            "packed_chunks+final_logits_copy"
+        };
         self.copy_logits()
     }
     fn decode(&mut self, id: u32) -> Result<()> {
@@ -325,7 +333,7 @@ impl FamilyBench for DeepSeekV4Bench<'_> {
     }
     fn semantics(&self) -> FamilySemantics {
         FamilySemantics {
-            prefill_mode: "packed_chunks+final_logits_copy",
+            prefill_mode: self.last_prefill_mode,
             decode_mode: "forward_token+logits_copy",
             prefill_chunk: Some(self.chunk),
         }

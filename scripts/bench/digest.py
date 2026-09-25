@@ -58,10 +58,12 @@ def load_dir(root: Path) -> dict[str, Any]:
                 if row.get("test") is None:
                     n_prompt = row.get("n_prompt", 0) or 0
                     n_gen = row.get("n_gen", 0) or 0
+                    depth = row.get("n_depth", 0) or 0
+                    suffix = f"@d{depth}" if depth else ""
                     if n_prompt > 0 and n_gen == 0:
-                        row["test"] = f"pp{n_prompt}"
+                        row["test"] = f"pp{n_prompt}{suffix}"
                     elif n_gen > 0 and n_prompt == 0:
-                        row["test"] = f"tg{n_gen}"
+                        row["test"] = f"tg{n_gen}{suffix}"
                     else:
                         # combined pp+tg "depth" row; we skip these for
                         # the scoreboard since qwen-bench doesn't emit
@@ -69,6 +71,16 @@ def load_dir(root: Path) -> dict[str, Any]:
                         # oranges.
                         row["test"] = f"pp{n_prompt}+tg{n_gen}"
                 lcpp[tag].append(row)
+
+    # llama.cpp at non-comparator micro-batch sizes (e.g. its default 512),
+    # written by family.py as lcpp_ub<N>-<tag>.json.
+    lcpp_variants: dict[int, dict[str, list[dict]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    for path in sorted(root.glob("lcpp_ub*-*.json")):
+        ubatch_text, tag = path.stem.removeprefix("lcpp_ub").split("-", 1)
+        with path.open() as f:
+            lcpp_variants[int(ubatch_text)][tag].extend(json.load(f))
 
     for path in sorted(root.glob("qwen-*-*.json")):
         # qwen-pp512-27B.json / qwen-tg128-27B.json — tag is the suffix after
@@ -83,7 +95,17 @@ def load_dir(root: Path) -> dict[str, Any]:
             for row in json.load(f):
                 qwen[tag].append(row)
 
-    return {"manifest": manifest, "lcpp": dict(lcpp), "qwen": dict(qwen)}
+    return {
+        "manifest": manifest,
+        "lcpp": dict(lcpp),
+        "lcpp_variants": {k: dict(v) for k, v in lcpp_variants.items()},
+        "qwen": dict(qwen),
+    }
+
+
+def lcpp_supported(model: dict) -> bool:
+    """False when upstream llama.cpp has no implementation (not measured)."""
+    return model.get("lcpp", True)
 
 
 def find_row(rows: list[dict], test: str) -> dict | None:
@@ -193,6 +215,59 @@ def tg_table(state: dict, shapes: list[int]) -> str:
     return "\n".join(out)
 
 
+def depth_table(state: dict, shapes: list[int]) -> str | None:
+    """tg at each model's nonzero depths (llama-bench -d); rows match on the
+    full `tg<N>@d<depth>` label, never on the shape alone."""
+    manifest = state["manifest"]
+    depths = sorted(
+        {d for m in manifest["models"] for d in m.get("tg_depths", []) if d > 0}
+    )
+    if not depths:
+        return None
+    labels = [f"tg{n}@d{d}" for n in shapes for d in depths]
+    out = [
+        "| model | " + " | ".join(f"{t} lcpp | {t} qwen | Δ" for t in labels) + " |",
+        "| --- | " + " | ".join(["---:"] * (3 * len(labels))) + " |",
+    ]
+    for m in manifest["models"]:
+        tag = m["tag"]
+        cells = [f"{m['display']} {m['kind']}"]
+        for test in labels:
+            lc = find_row(state["lcpp"].get(tag, []), test)
+            qw = find_row(state["qwen"].get(tag, []), test)
+            lc_ts = lc.get("avg_ts") if lc else None
+            qw_ts = qw.get("avg_ts") if qw else None
+            cells += [fmt(lc_ts), fmt(qw_ts), fmt_ratio(qw_ts, lc_ts)]
+        out.append("| " + " | ".join(cells) + " |")
+    return "\n".join(out)
+
+
+def lcpp_default_pp_table(state: dict, shapes: list[int]) -> str | None:
+    """qwen-llm against llama.cpp at its other micro-batch sizes (its
+    shipped default is 512), next to the tuned comparator."""
+    variants = state.get("lcpp_variants") or {}
+    if not variants:
+        return None
+    manifest = state["manifest"]
+    out = []
+    cols = [(u, p) for u in sorted(variants) for p in shapes]
+    out.append(
+        "| model | " + " | ".join(f"pp{p} lcpp ub{u} | Δ qwen" for u, p in cols) + " |"
+    )
+    out.append("| --- | " + " | ".join(["---:"] * (2 * len(cols))) + " |")
+    for m in manifest["models"]:
+        tag = m["tag"]
+        cells = [f"{m['display']} {m['kind']}"]
+        for ubatch, p in cols:
+            lc = find_row(variants[ubatch].get(tag, []), f"pp{p}")
+            qw = find_row(state["qwen"].get(tag, []), f"pp{p}")
+            lc_ts = lc.get("avg_ts") if lc else None
+            qw_ts = qw.get("avg_ts") if qw else None
+            cells += [fmt(lc_ts), fmt_ratio(qw_ts, lc_ts)]
+        out.append("| " + " | ".join(cells) + " |")
+    return "\n".join(out)
+
+
 def bandwidth_table(state: dict, shape: int) -> str:
     """Decode bandwidth utilization (% of peak) at the given tg shape."""
     manifest = state["manifest"]
@@ -241,8 +316,11 @@ def family_summary_table(state: dict) -> str:
         qw = find_row(state["qwen"].get(tag, []), "tg128")
         lc_pp = find_row(state["lcpp"].get(tag, []), "pp512")
         qw_pp = find_row(state["qwen"].get(tag, []), "pp512")
+        supported = lcpp_supported(m)
 
         def verdict(qw_v, lc_v):
+            if not supported:
+                return "no llama.cpp implementation"
             if qw_v is None or lc_v is None:
                 return "—"
             r = (qw_v.get("avg_ts") or 0) / (lc_v.get("avg_ts") or 1e-9)
@@ -274,11 +352,18 @@ def sanity_flags(state: dict, pp_shapes: list[int], tg_shapes: list[int]) -> lis
     # set. Without this check a half-complete sweep prints a verdict table
     # full of "—" cells and reads as if the run succeeded.
     expected: list[tuple[str, str]] = []
+    supported = {m["tag"]: lcpp_supported(m) for m in state["manifest"]["models"]}
     for m in state["manifest"]["models"]:
+        if not supported[m["tag"]]:
+            flags.append(
+                f"{m['display']}: upstream llama.cpp has no implementation of "
+                "this architecture; its cells are qwen-llm only."
+            )
         for p in pp_shapes:
             expected.append((m["tag"], f"pp{p}"))
         for n in tg_shapes:
-            expected.append((m["tag"], f"tg{n}"))
+            for d in m.get("tg_depths", [0]):
+                expected.append((m["tag"], f"tg{n}@d{d}" if d else f"tg{n}"))
     for tag, test in expected:
         qw = find_row(state["qwen"].get(tag, []), test)
         lc = find_row(state["lcpp"].get(tag, []), test)
@@ -286,7 +371,7 @@ def sanity_flags(state: dict, pp_shapes: list[int], tg_shapes: list[int]) -> lis
             flags.append(f"{tag} {test}: neither engine ran (missing from JSON set).")
         elif qw is None:
             flags.append(f"{tag} {test}: qwen-llm row missing.")
-        elif lc is None:
+        elif lc is None and supported[tag]:
             flags.append(f"{tag} {test}: llama.cpp row missing.")
     # pp throughput non-monotonic (pp1024 < pp512) — historically a
     # prefill-chunk-tuning artifact worth surfacing.
@@ -329,7 +414,7 @@ def main(argv: list[str]) -> int:
     print(f"# Family Baseline — {manifest['stamp']}")
     print()
     print(
-        "Apples-to-apples scoreboard for the Qwen3.5 / 3.6 family. Same "
+        "qwen-llm vs llama.cpp scoreboard across model families. Same "
         "physical box, sequential runs, no concurrent benches. This file "
         "is auto-generated by `scripts/bench/digest.py` from the JSON "
         "results in this directory; edit the inputs, not this README."
@@ -363,6 +448,23 @@ def main(argv: list[str]) -> int:
     print()
     print(tg_table(state, tg_shapes))
     print()
+    depth = depth_table(state, tg_shapes)
+    if depth:
+        print("## Token generation at depth (tokens/sec)")
+        print()
+        print(depth)
+        print()
+    defaults = lcpp_default_pp_table(state, pp_shapes)
+    if defaults:
+        print("## Prompt processing vs llama.cpp micro-batch variants")
+        print()
+        print(
+            "The tables above compare against llama.cpp at its tuned "
+            "micro-batch; its shipped default is `-ub 512`."
+        )
+        print()
+        print(defaults)
+        print()
     if 128 in tg_shapes:
         print("## Decode bandwidth utilization @ tg128")
         print()
@@ -381,6 +483,20 @@ def main(argv: list[str]) -> int:
             f"- Per model: `llama-bench` first (`-r {runs}`), then "
             "`qwen-bench` on the same model. Interleaved by model, never "
             "in parallel."
+        )
+    elif order == "abba_per_model_alternating":
+        blocks = manifest["sweep"].get("blocks")
+        print(
+            f"- Per model: {blocks} paired blocks with alternating engine order "
+            f"(ABBA, first engine also alternating by model), `-r {runs}` per "
+            "block; samples merge across blocks (`block_avg_ts` keeps each "
+            "block's mean). Never in parallel."
+        )
+        print(
+            f"- llama.cpp pp at `-ub {manifest['sweep'].get('lcpp_ubatch')}`; the "
+            f"comparator is `-ub {manifest['sweep'].get('lcpp_tuned_ubatch')}`. "
+            "tg at depth uses llama-bench `-d` and qwen-bench `--depth` "
+            "(untimed fill per rep)."
         )
     else:
         print(f"- engine_order = `{order}` (see `manifest.json`).")

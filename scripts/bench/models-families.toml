@@ -1,0 +1,72 @@
+# One representative per model family: the daily-driver artifact of each,
+# for the cross-family qwen-llm vs llama.cpp baseline. `scripts/bench/models.toml`
+# remains the Qwen size ladder.
+#
+# `lcpp = false`: upstream llama.cpp has no implementation of the
+# architecture, so the cell is reported rather than measured.
+# `tg_depths`: context depths for tg rows (llama-bench -d); long-context
+# depths go to the models used for long sessions.
+
+[[models]]
+tag = "qwen38-27b"
+display = "Qwen3.8-27B"
+family = "qwen"
+kind = "dense"
+quant = "Q4_K_M"
+path = "~/models/Qwen3.8-27B-Q4_K_M.gguf"
+tg_depths = [0, 8192, 32768]
+
+[[models]]
+tag = "qwen36-a3b"
+display = "Qwen3.6-35B-A3B"
+family = "qwen"
+kind = "moe"
+quant = "UD-Q4_K_M"
+path = "~/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+tg_depths = [0, 8192, 32768]
+
+[[models]]
+tag = "qwen35-a10b"
+display = "Qwen3.5-122B-A10B"
+family = "qwen"
+kind = "moe"
+quant = "UD-Q4_K_XL"
+path = "~/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"
+tg_depths = [0, 8192]
+
+[[models]]
+tag = "flash-next"
+display = "Qwen3.8-Flash-Next"
+family = "qwen4exp"
+kind = "moe"
+quant = "UD-Q3_K_XL"
+path = "~/models/Qwen3.8-Flash-Next-UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf"
+tg_depths = [0, 8192]
+
+[[models]]
+tag = "ds4-flash"
+display = "DeepSeek-V4-Flash-0731"
+family = "deepseek_v4"
+kind = "moe"
+quant = "UD-IQ3_XXS"
+path = "~/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf"
+tg_depths = [0, 8192]
+
+[[models]]
+tag = "muse-30b"
+display = "Muse-Glimmer-30B"
+family = "muse_glimmer"
+kind = "dense"
+quant = "Q8_0"
+path = "~/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf"
+tg_depths = [0, 8192]
+
+[[models]]
+tag = "k2-7b"
+display = "K2-Horizon-7B"
+family = "k2_horizon"
+kind = "dense"
+quant = "Q4_K_M"
+path = "~/models/K2-Horizon-7B-Q4_K_M.gguf"
+lcpp = false
+tg_depths = [0, 8192]

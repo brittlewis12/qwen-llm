@@ -545,7 +545,7 @@ def capture_host() -> dict:
 
 
 def capture_qwen_env() -> dict[str, str]:
-    return {k: v for k, v in os.environ.items() if k.startswith("QWEN_")}
+    return {k: v for k, v in os.environ.items() if k.startswith(("QWEN_", "QWEN4EXP_"))}
 
 
 def parse_shapes(
@@ -568,13 +568,96 @@ def parse_shapes(
     return pp, tg
 
 
+def parse_int_list(arg: str, name: str) -> list[int]:
+    try:
+        values = [int(piece) for piece in arg.split(",") if piece.strip()]
+    except ValueError:
+        die(f"{name} must be a comma list of integers, got {arg!r}")
+    if not values or any(v < 0 for v in values):
+        die(f"{name} must list non-negative integers, got {arg!r}")
+    return values
+
+
+def shape_test(kind: str, n: int, depth: int) -> str:
+    """qwen-bench's `test` vocabulary: `pp512`, `tg128@d8192`."""
+    return f"{kind}{n}" if depth == 0 else f"{kind}{n}@d{depth}"
+
+
+def lcpp_test(row: dict) -> str:
+    n_prompt = row.get("n_prompt") or 0
+    n_gen = row.get("n_gen") or 0
+    depth = row.get("n_depth") or 0
+    if n_prompt > 0 and n_gen == 0:
+        return shape_test("pp", n_prompt, depth)
+    if n_gen > 0 and n_prompt == 0:
+        return shape_test("tg", n_gen, depth)
+    return f"pp{n_prompt}+tg{n_gen}"
+
+
+def merge_blocks(blocks: list[list[dict]], key) -> list[dict]:
+    """Merge one engine's rows from several blocks: samples concatenate and
+    the summary statistics are recomputed over all of them. Each row keeps
+    its per-block means in `block_avg_ts` so drift stays visible."""
+    merged: dict = {}
+    for rows in blocks:
+        for row in rows:
+            k = key(row)
+            if k not in merged:
+                merged[k] = dict(row)
+                merged[k]["samples_ts"] = list(row.get("samples_ts") or [])
+                merged[k]["samples_ns"] = list(row.get("samples_ns") or [])
+                merged[k]["block_avg_ts"] = [row.get("avg_ts")]
+            else:
+                merged[k]["samples_ts"] += list(row.get("samples_ts") or [])
+                merged[k]["samples_ns"] += list(row.get("samples_ns") or [])
+                merged[k]["block_avg_ts"].append(row.get("avg_ts"))
+    for row in merged.values():
+        ts = row["samples_ts"]
+        ns = row["samples_ns"]
+        if ts:
+            mean = sum(ts) / len(ts)
+            row["avg_ts"] = mean
+            row["stddev_ts"] = (
+                (sum((x - mean) ** 2 for x in ts) / (len(ts) - 1)) ** 0.5
+                if len(ts) > 1
+                else 0.0
+            )
+        if ns:
+            row["avg_ns"] = int(sum(ns) / len(ns))
+        row["n_repetitions"] = len(ts)
+        row["n_blocks"] = len(row["block_avg_ts"])
+    return list(merged.values())
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--tag", help="only run this model tag")
     ap.add_argument("--shapes", help="comma list of pp<N>/tg<N> shapes")
-    ap.add_argument("--runs", type=int, default=3)
+    ap.add_argument(
+        "--runs", type=int, default=3, help="timed reps per engine command per block"
+    )
+    ap.add_argument(
+        "--blocks",
+        type=int,
+        default=2,
+        help="paired blocks per model; engine order alternates (ABBA) and "
+        "each engine's block samples merge into one row per test",
+    )
+    ap.add_argument(
+        "--depths",
+        default="0",
+        help="comma list of context depths for tg shapes (llama-bench -d); "
+        "a model's `tg_depths` in models.toml overrides it",
+    )
+    ap.add_argument(
+        "--lcpp-ubatch",
+        default="512,2048",
+        help="llama.cpp micro-batch sizes for pp shapes; the largest is the "
+        "tuned comparator (lcpp-<tag>.json), the rest are written as "
+        "lcpp_ub<N>-<tag>.json (512 is llama.cpp's default)",
+    )
     ap.add_argument(
         "--cooldown-seconds",
         type=float,
@@ -629,8 +712,15 @@ def main() -> int:
     pp_shapes, tg_shapes = parse_shapes(args.shapes, [128, 512, 1024], [32, 128])
     if args.runs < 1:
         die("--runs must be >= 1")
+    if args.blocks < 1:
+        die("--blocks must be >= 1")
     if args.cooldown_seconds < 0:
         die("--cooldown-seconds must be >= 0")
+    default_depths = parse_int_list(args.depths, "--depths")
+    ubatches = sorted(set(parse_int_list(args.lcpp_ubatch, "--lcpp-ubatch")))
+    if 0 in ubatches:
+        die("--lcpp-ubatch values must be >= 1")
+    tuned_ubatch = ubatches[-1]
 
     # Fail closed before resolving or loading any model. qwen-bench independently
     # compares its compiled stamp with its source checkout; this driver also
@@ -640,7 +730,10 @@ def main() -> int:
     registry = load_registry(args.models_toml, args.tag)
     # Resolve every model up front so we fail fast on missing files.
     resolved = [(row, *resolve_model(row)) for row in registry]
-    sample_path = resolved[0][1]
+    # Probe llama.cpp on a model it implements (a registry may lead with one
+    # it does not, e.g. K2 Horizon).
+    lcpp_models = [path for row, path, _size in resolved if row.get("lcpp", True)]
+    sample_path = lcpp_models[0] if lcpp_models else resolved[0][1]
 
     # Stderr noise filters — lcpp prints ggml_metal_* setup lines on every
     # run; qwen-bench prints its own [pp]/[bench]/[tg]/[suite] progress lines. None
@@ -669,7 +762,7 @@ def main() -> int:
             for p in out_dir.iterdir()
             if p.name == "manifest.json"
             or p.name == "README.md"
-            or p.name.startswith(("lcpp-", "qwen-"))
+            or p.name.startswith(("lcpp-", "lcpp_ub", "qwen-"))
         )
         if not args.overwrite:
             existing = ", ".join(p.name for p in known) or "(unrelated files)"
@@ -700,7 +793,15 @@ def main() -> int:
             # Driver runs `lcpp(model_i); qwen(model_i)` for each model so
             # crash recovery is local and lcpp's baseline for each model is
             # taken minutes (not hours) before our number.
-            "engine_order": "per_model_lcpp_then_qwen_suite",
+            "blocks": args.blocks,
+            "default_tg_depths": default_depths,
+            "lcpp_ubatch": ubatches,
+            "lcpp_tuned_ubatch": tuned_ubatch,
+            # Per model, `blocks` paired blocks; within a block both engines
+            # run pp (depth 0) then tg (at the model's depths). The first
+            # engine alternates by block and by model (ABBA), and each
+            # engine's samples merge across blocks into one row per test.
+            "engine_order": "abba_per_model_alternating",
         },
         "qwen_env_at_start": capture_qwen_env(),
         "command_records": [],
@@ -715,76 +816,165 @@ def main() -> int:
                 # the same as a row's `model_size`, which is weight
                 # tensor bytes only.
                 "file_size_bytes": size,
+                "family": row.get("family", "qwen"),
+                # False when upstream llama.cpp has no implementation of
+                # the architecture: the cell is reported, not measured.
+                "lcpp": row.get("lcpp", True),
+                "tg_depths": row.get("tg_depths", default_depths),
             }
             for row, path, size in resolved
         ],
     }
     write_manifest(out_dir, manifest)
 
-    # Sweep. lcpp first per model so a mid-sweep crash still leaves a fresh
-    # baseline. Never run engines in parallel.
+    # Sweep. Never run engines in parallel. Per model, `blocks` paired
+    # blocks alternate which engine goes first (ABBA), and the first engine
+    # also alternates by model, so linear thermal drift cancels instead of
+    # always favoring one engine.
     lcpp_count = 0
     qwen_count = 0
     first_measured = True
-    for row, path, _size in resolved:
-        tag = row["tag"]
-        display = row["display"]
-        print(f"[family] === {tag} ({display}) ===", file=sys.stderr)
 
-        lcpp_out = out_dir / f"lcpp-{tag}.json"
-        print(f"[family] -> {lcpp_out}", file=sys.stderr)
-        cmd: list[str | Path] = [llama_bench, "-m", path]
-        for p in pp_shapes:
-            cmd += ["-p", str(p)]
-        for n in tg_shapes:
-            cmd += ["-n", str(n)]
-        cmd += ["-r", str(args.runs), "-o", "json"]
-        cooldown = 0.0 if first_measured else args.cooldown_seconds
-        first_measured = False
-        assert_source_identity(qwen_engine)
-        lcpp_rows, record = run_json_measured(
-            cmd, stderr_filter=lcpp_noise, cooldown_seconds=cooldown
-        )
-        assert_source_identity(qwen_engine)
-        record.update({"engine": "llama.cpp", "tag": tag, "test": "all"})
-        manifest["command_records"].append(record)
-        write_manifest(out_dir, manifest)
-        lcpp_out.write_text(json.dumps(lcpp_rows, indent=2) + "\n")
-        lcpp_count += 1
-
-        cmd = [qwen_bench]
-        if args.allow_dirty:
-            cmd.append("--allow-dirty")
-        cmd += ["suite", "-m", path, "--runs", str(args.runs), "-o", "json"]
-        if pp_shapes:
-            cmd += ["--pp", ",".join(str(p) for p in pp_shapes)]
-        if tg_shapes:
-            cmd += ["--tg", ",".join(str(n) for n in tg_shapes)]
-        print(f"[family] -> qwen suite {tag}", file=sys.stderr)
+    def measured(cmd: list[str | Path], noise: re.Pattern, what: dict) -> list:
+        nonlocal first_measured
         cooldown = 0.0 if first_measured else args.cooldown_seconds
         first_measured = False
         assert_source_identity(qwen_engine)
         rows, record = run_json_measured(
-            cmd,
-            stderr_filter=qwen_noise,
-            cooldown_seconds=cooldown,
+            cmd, stderr_filter=noise, cooldown_seconds=cooldown
         )
         assert_source_identity(qwen_engine)
-        validate_qwen_rows(
-            rows,
-            qwen_engine["build_identity"],
-            allow_dirty=args.allow_dirty,
-            expected_tests={
-                *(f"pp{shape}" for shape in pp_shapes),
-                *(f"tg{shape}" for shape in tg_shapes),
-            },
-        )
-        record.update({"engine": "qwen", "tag": tag, "test": "suite"})
+        record.update(what)
         manifest["command_records"].append(record)
         write_manifest(out_dir, manifest)
-        for bench_row in rows:
+        return rows
+
+    for model_index, (row, path, _size) in enumerate(resolved):
+        tag = row["tag"]
+        display = row["display"]
+        lcpp_supported = row.get("lcpp", True)
+        depths = row.get("tg_depths", default_depths)
+        print(f"[family] === {tag} ({display}) ===", file=sys.stderr)
+        if not lcpp_supported:
+            print(
+                f"[family] {tag}: llama.cpp has no upstream implementation; "
+                "measuring qwen-llm only",
+                file=sys.stderr,
+            )
+
+        def run_lcpp(block: int) -> list[dict]:
+            rows: list[dict] = []
+            if pp_shapes:
+                cmd: list[str | Path] = [llama_bench, "-m", path]
+                cmd += ["-p", ",".join(str(p) for p in pp_shapes), "-n", "0"]
+                cmd += ["-ub", ",".join(str(u) for u in ubatches)]
+                cmd += ["-r", str(args.runs), "-o", "json"]
+                rows += measured(
+                    cmd,
+                    lcpp_noise,
+                    {"engine": "llama.cpp", "tag": tag, "test": "pp", "block": block},
+                )
+            if tg_shapes:
+                cmd = [llama_bench, "-m", path, "-p", "0"]
+                cmd += ["-n", ",".join(str(n) for n in tg_shapes)]
+                cmd += ["-d", ",".join(str(d) for d in depths)]
+                cmd += ["-ub", str(tuned_ubatch)]
+                cmd += ["-r", str(args.runs), "-o", "json"]
+                rows += measured(
+                    cmd,
+                    lcpp_noise,
+                    {"engine": "llama.cpp", "tag": tag, "test": "tg", "block": block},
+                )
+            for lcpp_row in rows:
+                lcpp_row["test"] = lcpp_test(lcpp_row)
+            return rows
+
+        def run_qwen(block: int) -> list[dict]:
+            rows: list[dict] = []
+            base: list[str | Path] = [qwen_bench]
+            if args.allow_dirty:
+                base.append("--allow-dirty")
+            base += ["suite", "-m", path, "--runs", str(args.runs), "-o", "json"]
+            invocations = []
+            if pp_shapes:
+                invocations.append(
+                    (
+                        "pp",
+                        ["--pp", ",".join(str(p) for p in pp_shapes)],
+                        {shape_test("pp", p, 0) for p in pp_shapes},
+                    )
+                )
+            if tg_shapes:
+                invocations.append(
+                    (
+                        "tg",
+                        [
+                            "--tg",
+                            ",".join(str(n) for n in tg_shapes),
+                            "--depth",
+                            ",".join(str(d) for d in depths),
+                        ],
+                        {shape_test("tg", n, d) for n in tg_shapes for d in depths},
+                    )
+                )
+            for test, extra, expected in invocations:
+                got = measured(
+                    base + extra,
+                    qwen_noise,
+                    {"engine": "qwen", "tag": tag, "test": test, "block": block},
+                )
+                validate_qwen_rows(
+                    got,
+                    qwen_engine["build_identity"],
+                    allow_dirty=args.allow_dirty,
+                    expected_tests=expected,
+                )
+                rows += got
+            return rows
+
+        lcpp_blocks: list[list[dict]] = []
+        qwen_blocks: list[list[dict]] = []
+        for block in range(args.blocks):
+            order = (
+                ["lcpp", "qwen"] if (model_index + block) % 2 == 0 else ["qwen", "lcpp"]
+            )
+            if not lcpp_supported:
+                order = ["qwen"]
+            for engine in order:
+                print(f"[family] -> {tag} block {block} {engine}", file=sys.stderr)
+                if engine == "lcpp":
+                    lcpp_blocks.append(run_lcpp(block))
+                else:
+                    qwen_blocks.append(run_qwen(block))
+
+        if lcpp_supported:
+            lcpp_rows = merge_blocks(
+                lcpp_blocks, key=lambda r: (r["test"], r.get("n_ubatch"))
+            )
+            tuned = [
+                r
+                for r in lcpp_rows
+                if r["test"].startswith("tg") or r.get("n_ubatch") == tuned_ubatch
+            ]
+            (out_dir / f"lcpp-{tag}.json").write_text(
+                json.dumps(tuned, indent=2) + "\n"
+            )
+            for ubatch in ubatches:
+                if ubatch == tuned_ubatch:
+                    continue
+                variant = [
+                    r
+                    for r in lcpp_rows
+                    if r["test"].startswith("pp") and r.get("n_ubatch") == ubatch
+                ]
+                (out_dir / f"lcpp_ub{ubatch}-{tag}.json").write_text(
+                    json.dumps(variant, indent=2) + "\n"
+                )
+            lcpp_count += 1
+
+        for bench_row in merge_blocks(qwen_blocks, key=lambda r: r["test"]):
             test = bench_row.get("test", "")
-            if not re.fullmatch(r"(?:pp|tg)\d+", test):
+            if not re.fullmatch(r"(?:pp|tg)\d+(?:@d\d+)?", test):
                 die(f"unexpected qwen suite test name for tag={tag}: {test!r}")
             qwen_out = out_dir / f"qwen-{test}-{tag}.json"
             qwen_out.write_text(json.dumps([bench_row], indent=2) + "\n")

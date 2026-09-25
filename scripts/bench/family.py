@@ -278,24 +278,23 @@ def hash_worktree_entry(
 
 
 def tracked_source_state(root: Path) -> str:
+    """Mirror of `source_identity::tracked_source_state` (Rust): tracked
+    content only. Untracked files (bench output, work-in-progress docs) do
+    not change a binary's identity (32bacc9a); hashing them here made every
+    sweep since 2026-08-17 refuse a freshly built binary."""
     head = git_bytes(root, "rev-parse", "HEAD")
     index = git_bytes(root, "ls-files", "--stage", "-z")
     index_flags = git_bytes(root, "ls-files", "-v", "-z")
     tracked = git_bytes(root, "ls-files", "-z")
-    untracked = git_bytes(root, "ls-files", "--others", "--exclude-standard", "-z")
     digest = hashlib.sha256()
     digest.update(b"qwen-git-source-state-v2\0")
     hash_section(digest, b"head", head)
     hash_section(digest, b"index", index)
     hash_section(digest, b"index-flags", index_flags)
     hash_section(digest, b"tracked-paths", tracked)
-    hash_section(digest, b"untracked-paths", untracked)
     for path in tracked.split(b"\0"):
         if path:
             hash_worktree_entry(digest, root, b"tracked", path)
-    for path in untracked.split(b"\0"):
-        if path:
-            hash_worktree_entry(digest, root, b"untracked", path)
     return f"{SOURCE_STATE_PREFIX}{digest.hexdigest()}"
 
 
@@ -512,7 +511,7 @@ def validate_qwen_rows(
             identity["build_dirty"] is True or identity["runtime_dirty"] is True
         )
         aliases = {
-            "schema_version": 2,
+            "schema_version": 3,
             "engine": "qwen-llm",
             "build_commit": identity["build_commit_short"],
             "build_dirty": expected_dirty,

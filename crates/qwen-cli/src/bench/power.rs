@@ -2,9 +2,11 @@
 
 use super::*;
 
+/// Every engine lever in the environment, recorded on each row: `QWEN_*`
+/// plus Flash-Next's `QWEN4EXP_*` rollbacks, which change execution.
 pub(crate) fn capture_qwen_env() -> std::collections::BTreeMap<String, String> {
     std::env::vars()
-        .filter(|(k, _)| k.starts_with("QWEN_"))
+        .filter(|(k, _)| k.starts_with("QWEN_") || k.starts_with("QWEN4EXP_"))
         .collect()
 }
 

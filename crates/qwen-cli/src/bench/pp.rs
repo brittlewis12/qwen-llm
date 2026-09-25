@@ -443,7 +443,35 @@ pub(crate) fn print_prefill_lowering_summary(mm: &MetalModel) {
     }
 }
 
+/// Synthetic `pp<N>` for every family runs the suite's production path
+/// (production allocator and `LoadedModel::prefill` for Qwen, the family
+/// adapters otherwise). Real prompts (`--prompt`/`--file`/`--messages`) keep
+/// the Qwen-only legacy path below.
 pub(crate) fn run_pp(args: PpArgs) -> Result<()> {
+    let real_prompt = args.prompt.is_some() || args.file.is_some() || args.messages.is_some();
+    let family = crate::family_bench::non_qwen_family(&args.model)?;
+    if let Some(family) = family {
+        anyhow::ensure!(
+            !real_prompt && args.prefill_chunk.is_none(),
+            "{} pp times synthetic tokens through its production prefill; --prompt/--file/--messages/--prefill-chunk are Qwen-only",
+            family.record_label()
+        );
+    }
+    if !real_prompt {
+        // The suite always times the endpoint head and logits, so
+        // `--with-tail` is satisfied rather than ignored.
+        return crate::suite::run_suite(SuiteArgs {
+            model: args.model,
+            pp: vec![args.n_prompt],
+            tg: Vec::new(),
+            depth: vec![0],
+            runs: args.runs,
+            no_warmup: args.no_warmup,
+            prefill_chunk: args.prefill_chunk,
+            seed: args.seed,
+            output: args.output,
+        });
+    }
     let PpArgs {
         model,
         n_prompt,
@@ -682,6 +710,8 @@ pub(crate) fn run_pp(args: PpArgs) -> Result<()> {
             },
             test: format!("pp{}", ids.len()),
             n_tokens: ids.len(),
+            n_depth: 0,
+            family: "qwen",
             n_repetitions: runs,
             avg_ts: ts_mean,
             stddev_ts: ts_sd,
@@ -977,6 +1007,8 @@ pub(crate) fn run_pp_wait(args: PpWaitArgs) -> Result<()> {
             },
             test: format!("pp{}", ids.len()),
             n_tokens: ids.len(),
+            n_depth: 0,
+            family: "qwen",
             n_repetitions: 1,
             avg_ts: ts,
             stddev_ts: 0.0,

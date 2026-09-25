@@ -2,7 +2,31 @@
 
 use super::*;
 
+/// `tg<N>` for every family runs the suite's production decode path. The
+/// Qwen-only experimental modes (`--pipelined`, `--concurrent-gdn-proj`)
+/// keep the legacy argmax path below.
 pub(crate) fn run_tg(args: TgArgs) -> Result<()> {
+    let experimental = args.pipelined || args.concurrent_gdn_proj;
+    if let Some(family) = crate::family_bench::non_qwen_family(&args.model)? {
+        anyhow::ensure!(
+            !experimental,
+            "{} tg times its production decode; --pipelined/--concurrent-gdn-proj are Qwen-only",
+            family.record_label()
+        );
+    }
+    if !experimental {
+        return crate::suite::run_suite(SuiteArgs {
+            model: args.model,
+            pp: Vec::new(),
+            tg: vec![args.n_gen],
+            depth: vec![0],
+            runs: args.runs,
+            no_warmup: args.no_warmup,
+            prefill_chunk: None,
+            seed: args.seed,
+            output: args.output,
+        });
+    }
     let TgArgs {
         model,
         n_gen,
@@ -285,6 +309,8 @@ pub(crate) fn run_tg(args: TgArgs) -> Result<()> {
             arch_kind: arch_kind_str,
             test: format!("tg{}", n_gen),
             n_tokens: n_gen,
+            n_depth: 0,
+            family: "qwen",
             n_repetitions: runs,
             avg_ts: ts_mean,
             stddev_ts: ts_sd,
@@ -666,6 +692,8 @@ pub(crate) fn run_decode(args: DecodeArgs) -> Result<()> {
             arch_kind: arch_kind_str,
             test: format!("pp{}", ids.len()),
             n_tokens: ids.len(),
+            n_depth: 0,
+            family: "qwen",
             n_repetitions: runs,
             avg_ts: sample_mean(&prefill_ts_samples),
             stddev_ts: sample_stdev(&prefill_ts_samples),
@@ -721,6 +749,8 @@ pub(crate) fn run_decode(args: DecodeArgs) -> Result<()> {
                 arch_kind: arch_kind_str,
                 test: format!("tg{}", tokens),
                 n_tokens: tokens,
+                n_depth: 0,
+                family: "qwen",
                 n_repetitions: decode_steady_ts_samples.len(),
                 avg_ts: sample_mean(&decode_steady_ts_samples),
                 stddev_ts: sample_stdev(&decode_steady_ts_samples),

@@ -32,6 +32,9 @@ mod diagnostics;
 mod dsv4_mhc_delete;
 #[cfg(feature = "dsv4-diagnostics")]
 mod dsv4_prefill;
+/// pp/tg adapters for the families outside the Qwen runtime.
+#[path = "bench/family.rs"]
+mod family_bench;
 /// Production option decisions for the non-Qwen families, shared with
 /// `qwen run` and serve.
 #[allow(dead_code)]
@@ -478,7 +481,9 @@ mod stop_token_cli_tests {
 /// JSON schema version for `BenchRow`. Bump when fields are renamed,
 /// removed, or have their semantics changed. Adding new optional fields
 /// (always-null on old emitters) does NOT require a bump.
-const BENCH_SCHEMA_VERSION: u32 = 2;
+/// v3: `family` and `n_depth`; `test` gains an `@d<depth>` suffix at depth;
+/// `arch_kind` carries the family label for non-Qwen families.
+const BENCH_SCHEMA_VERSION: u32 = 3;
 
 /// One bench result row. Field names match `llama-bench`'s JSON schema where
 /// the meaning is the same; engine-specific fields are `Option<T>` and
@@ -498,9 +503,15 @@ struct BenchRow {
     model_size: u64,
     model_n_params: u64,
     arch_kind: &'static str,
-    /// `pp<N>` or `tg<N>`, matching `llama-bench`'s shape vocabulary.
+    /// `ModelFamily::record_label` (`qwen`, `qwen4exp`, `deepseek_v4`, ...).
+    family: &'static str,
+    /// `pp<N>` or `tg<N>`, matching `llama-bench`'s shape vocabulary, with
+    /// `@d<depth>` when timed after an untimed depth fill.
     test: String,
     n_tokens: usize,
+    /// Tokens already in the context before the timed phase (llama-bench
+    /// `n_depth`).
+    n_depth: usize,
     n_repetitions: usize,
     avg_ts: f64,
     stddev_ts: f64,

@@ -482,14 +482,24 @@ pub(crate) struct SuiteArgs {
     /// Generation-only decode shapes. Accepts repeated flags or comma lists.
     #[arg(long = "tg", value_delimiter = ',')]
     pub(crate) tg: Vec<usize>,
+    /// Context depths (llama-bench `-d`): each pp/tg row runs at every depth
+    /// after an untimed fill of that many tokens. Accepts comma lists.
+    #[arg(
+        short = 'd',
+        long = "depth",
+        value_delimiter = ',',
+        default_value = "0"
+    )]
+    pub(crate) depth: Vec<usize>,
     /// Number of timed reps after each row's optional warmup.
     #[arg(long, default_value = "1")]
     pub(crate) runs: usize,
     /// Skip each row's warmup pass.
     #[arg(long)]
     pub(crate) no_warmup: bool,
-    /// Packed prefill chunk size for pp rows. If omitted, uses the model-aware
-    /// default for each pp shape.
+    /// Fixed Qwen prefill chunk for pp rows. If omitted, the production
+    /// allocator decides per row, as `qwen run` does (auto; MoE prompts over
+    /// 1024 tokens take 2048-token chunks when admitted).
     #[arg(long)]
     pub(crate) prefill_chunk: Option<usize>,
     /// Deterministic seed for synthetic tokens.

@@ -72,5 +72,45 @@
    }
   ],
   "add_generation_prompt": true
+ },
+ {
+  "id": "history_default_reasoning_stripped",
+  "messages": [
+   {
+    "role": "user",
+    "content": "One"
+   },
+   {
+    "role": "assistant",
+    "content": "Answer one",
+    "reasoning_content": "thinking"
+   },
+   {
+    "role": "user",
+    "content": "Two"
+   }
+  ],
+  "add_generation_prompt": true
+ },
+ {
+  "id": "history_no_thinking_preserve",
+  "messages": [
+   {
+    "role": "user",
+    "content": "One"
+   },
+   {
+    "role": "assistant",
+    "content": "Answer one",
+    "reasoning_content": "thinking"
+   },
+   {
+    "role": "user",
+    "content": "Two"
+   }
+  ],
+  "add_generation_prompt": true,
+  "enable_thinking": false,
+  "preserve_thinking": true
  }
 ]

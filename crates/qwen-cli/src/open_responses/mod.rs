@@ -6,6 +6,7 @@ pub(crate) mod items;
 pub(crate) mod render;
 pub(crate) mod tool_parse;
 
+use crate::model_request::Turn;
 use items::{QwenTemplate, ServeError, ServeRequest};
 
 pub(crate) fn bind_qwen_request(
@@ -31,6 +32,20 @@ pub(crate) fn bind_qwen_request(
         return Err(ServeError::invalid_request(
             Some("x_qwen.no_thinking"),
             "x_qwen.no_thinking is not validated for the loaded model identity",
+        ));
+    }
+    // Identified releases render history reasoning as generated in every
+    // mode. The unverified contract re-renders history in the current mode,
+    // so a no-thinking request would silently drop supplied reasoning.
+    if request.no_thinking
+        && !template.verified()
+        && request.model_request.turns.iter().any(|turn| {
+            matches!(turn, Turn::Assistant { reasoning: Some(reasoning), .. } if !reasoning.is_empty())
+        })
+    {
+        return Err(ServeError::invalid_request(
+            Some("input"),
+            "reasoning history requires an identified Qwen release when x_qwen.no_thinking is set",
         ));
     }
     // Tools and tool history: the same family rule `qwen run --messages`

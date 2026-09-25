@@ -2794,7 +2794,7 @@ mod tests {
     /// The `qwen run --messages` path (strict parser + shared renderer)
     /// reproduces the released Qwen3.6 template on every oracle case whose
     /// document shape the strict subset accepts, including both two-round
-    /// tool cases. Divergences are the documented serve policies.
+    /// tool cases and history preserved into a no-thinking generation.
     #[test]
     fn run_messages_match_qwen36_jinja_oracle() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
@@ -2830,14 +2830,6 @@ mod tests {
             )
             .unwrap()
             .text;
-            let expected = match id {
-                "history_no_thinking_mode" => expected.replacen(
-                    "<|im_start|>assistant\nAnswer one",
-                    "<|im_start|>assistant\n<think>\n\n</think>\n\nAnswer one",
-                    1,
-                ),
-                _ => expected.to_owned(),
-            };
             assert_eq!(rendered, expected, "{id}");
             checked.push(id);
         }

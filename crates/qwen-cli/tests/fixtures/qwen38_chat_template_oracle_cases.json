@@ -215,5 +215,107 @@
     }
    }
   ]
+ },
+ {
+  "id": "history_preserve_plain_reasoning",
+  "messages": [
+   {
+    "role": "user",
+    "content": "One"
+   },
+   {
+    "role": "assistant",
+    "content": "Answer one",
+    "reasoning_content": "thinking"
+   },
+   {
+    "role": "user",
+    "content": "Two"
+   }
+  ],
+  "add_generation_prompt": true
+ },
+ {
+  "id": "history_no_thinking_keeps_reasoning",
+  "messages": [
+   {
+    "role": "user",
+    "content": "One"
+   },
+   {
+    "role": "assistant",
+    "content": "Answer one",
+    "reasoning_content": "thinking"
+   },
+   {
+    "role": "user",
+    "content": "Two"
+   }
+  ],
+  "add_generation_prompt": true,
+  "enable_thinking": false
+ },
+ {
+  "id": "history_strip_plain_reasoning",
+  "messages": [
+   {
+    "role": "user",
+    "content": "One"
+   },
+   {
+    "role": "assistant",
+    "content": "Answer one",
+    "reasoning_content": "thinking"
+   },
+   {
+    "role": "user",
+    "content": "Two"
+   }
+  ],
+  "add_generation_prompt": true,
+  "preserve_thinking": false
+ },
+ {
+  "id": "history_strip_no_thinking_tool_continuation",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Ping."
+   },
+   {
+    "role": "assistant",
+    "content": "Checking.",
+    "reasoning_content": "plan",
+    "tool_calls": [
+     {
+      "type": "function",
+      "function": {
+       "name": "ping",
+       "arguments": {}
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "content": "pong"
+   }
+  ],
+  "add_generation_prompt": true,
+  "preserve_thinking": false,
+  "enable_thinking": false,
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "ping",
+     "description": "Ping it",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ]
  }
 ]

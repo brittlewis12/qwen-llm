@@ -736,21 +736,10 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
                                 ),
                             ));
                         }
-                        // Nonempty reasoning is refused here (it would be
-                        // dropped); empty reasoning equals none and is
-                        // admitted, as missing reasoning always was.
-                        if request.no_thinking
-                            && pending_reasoning
-                                .as_deref()
-                                .is_some_and(|text| !text.is_empty())
-                        {
-                            return Err(ServeError::invalid_request(
-                                Some("input"),
-                                format!(
-                                    "item {index}: no_thinking sessions do not carry reasoning history"
-                                ),
-                            ));
-                        }
+                        // Reasoning history is admitted in every generation
+                        // mode: identified releases render it as generated
+                        // (render.rs). Binding refuses it where it would be
+                        // dropped (no_thinking on the unverified contract).
                         head = false;
                         request.model_request.turns.push(Turn::Assistant {
                             reasoning: pending_reasoning.take(),
@@ -1704,22 +1693,46 @@ mod tests {
         );
     }
 
-    /// `x_qwen.no_thinking` refuses reasoning text before an assistant
-    /// message (it would be dropped). Empty reasoning is the same as none and
+    /// `x_qwen.no_thinking` admits reasoning history (identified releases
+    /// render it as generated); only binding to the unverified contract,
+    /// which would drop it, refuses. Empty reasoning is the same as none and
     /// is admitted wherever missing reasoning is, message or call turn.
     #[test]
-    fn no_thinking_rejects_reasoning_history() {
+    fn no_thinking_admits_reasoning_history() {
         let no_thinking = |input: Value| {
             parse(json!({"model": "m", "input": input, "x_qwen": {"no_thinking": true}}))
         };
-        let error = no_thinking(json!([
+        let request = no_thinking(json!([
             {"role": "user", "content": "q"},
             {"type": "reasoning", "content": "r"},
             {"role": "assistant", "content": "a"},
             {"role": "user", "content": "q2"},
         ]))
-        .unwrap_err();
-        assert!(error.message.contains("no_thinking sessions"));
+        .unwrap();
+        assert!(matches!(
+            &request.model_request.turns[1],
+            Turn::Assistant { reasoning: Some(reasoning), .. } if reasoning == "r"
+        ));
+        for template in [
+            QwenTemplate::Qwen35,
+            QwenTemplate::Qwen36,
+            QwenTemplate::Qwen38,
+        ] {
+            let bound = crate::open_responses::bind_qwen_request(&request, template, true).unwrap();
+            let prompt = crate::open_responses::render::render_qwen_serve_prompt(&bound);
+            assert!(
+                prompt.contains("<|im_start|>assistant\n<think>\nr\n</think>\n\na<|im_end|>")
+                    && prompt.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"),
+                "{template:?}: {prompt}"
+            );
+        }
+        let error = crate::open_responses::bind_qwen_request(&request, QwenTemplate::Generic, true)
+            .unwrap_err();
+        assert!(
+            error.message.contains("identified Qwen release"),
+            "{}",
+            error.message
+        );
 
         let call =
             json!({"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"});

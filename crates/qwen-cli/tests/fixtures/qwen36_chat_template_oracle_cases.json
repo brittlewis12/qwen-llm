@@ -623,5 +623,26 @@
     }
    }
   ]
+ },
+ {
+  "id": "history_no_thinking_preserve_keeps_reasoning",
+  "messages": [
+   {
+    "role": "user",
+    "content": "One"
+   },
+   {
+    "role": "assistant",
+    "content": "Answer one",
+    "reasoning_content": "thinking"
+   },
+   {
+    "role": "user",
+    "content": "Two"
+   }
+  ],
+  "add_generation_prompt": true,
+  "enable_thinking": false,
+  "preserve_thinking": true
  }
 ]

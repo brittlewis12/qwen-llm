@@ -1030,6 +1030,171 @@ mod tests {
         assert_eq!(built, streamed);
     }
 
+    /// History renders as generated across thinking-mode switches, through
+    /// the real path: turn 1 is rendered in mode A, its generated text is
+    /// partitioned into response items, the items are replayed in mode B,
+    /// and the turn-2 prompt must extend turn 1's prompt plus generated
+    /// bytes (what a completed snapshot holds). Pairs whose transcripts
+    /// differ before generation (Qwen3.8 low/xhigh instructions lead the
+    /// prompt) are the negative control: they must diverge inside the
+    /// leading system block.
+    #[test]
+    fn qwen_history_replays_as_generated_across_mode_switches() {
+        use crate::open_responses::bind_qwen_request;
+        use crate::open_responses::items::QwenTemplate;
+        use crate::open_responses::render::{
+            QwenGeneration, qwen_generation, render_qwen_serve_prompt,
+            render_qwen_serve_prompt_annotated_with,
+        };
+
+        let tools = json!([{"type": "function", "name": "ping",
+            "parameters": {"type": "object", "properties": {"host": {"type": "string"}}}}]);
+        let call = "<tool_call>\n<function=ping>\n<parameter=host>\nexample.com\n</parameter>\n</function>\n</tool_call>";
+        let bodies = [
+            ("plain", "Answer one".to_owned()),
+            ("call", call.to_owned()),
+            ("prose_call", format!("Checking.\n\n{call}")),
+        ];
+        let modes: [(QwenTemplate, Vec<(&str, Value)>); 3] = [
+            (
+                QwenTemplate::Qwen35,
+                vec![
+                    ("default", json!({})),
+                    ("thinking", json!({"x_qwen": {"thinking": true}})),
+                ],
+            ),
+            (
+                QwenTemplate::Qwen36,
+                vec![
+                    ("default", json!({})),
+                    ("no_thinking", json!({"x_qwen": {"no_thinking": true}})),
+                ],
+            ),
+            (
+                QwenTemplate::Qwen38,
+                vec![
+                    ("none", json!({"reasoning": {"effort": "none"}})),
+                    ("low", json!({"reasoning": {"effort": "low"}})),
+                    ("medium", json!({"reasoning": {"effort": "medium"}})),
+                    ("xhigh", json!({"reasoning": {"effort": "xhigh"}})),
+                    ("no_thinking", json!({"x_qwen": {"no_thinking": true}})),
+                ],
+            ),
+        ];
+        let bind = |template: QwenTemplate, mode: &Value, input: Value| {
+            let mut body = json!({"model": "m", "tools": tools, "input": input});
+            for (key, value) in mode.as_object().unwrap() {
+                body[key] = value.clone();
+            }
+            let request = crate::serve::items::parse_request(&body).unwrap();
+            bind_qwen_request(&request, template, true).unwrap()
+        };
+        let user = |text: &str| json!({"role": "user", "content": text});
+        let (mut identical, mut controls) = (0, 0);
+        for (template, template_modes) in &modes {
+            for (name_a, mode_a) in template_modes {
+                let t1 = bind(*template, mode_a, json!([user("One")]));
+                let p1 = render_qwen_serve_prompt(&t1);
+                let preopened = qwen_generation(&t1) == QwenGeneration::PreOpen;
+                // Canonical thinking output, nonempty and immediately closed
+                // (whitespace-only reasoning); no-thinking output has none.
+                let reasonings: &[Option<&str>] = if preopened {
+                    &[Some("plan\n"), Some("\n")]
+                } else {
+                    &[None]
+                };
+                for (name_b, mode_b) in template_modes {
+                    for ((shape, body), reasoning) in bodies
+                        .iter()
+                        .flat_map(|body| reasonings.iter().map(move |r| (body, r)))
+                    {
+                        let label = format!(
+                            "{} {name_a}->{name_b} {shape} reasoning={reasoning:?}",
+                            template.label()
+                        );
+                        let generated = match reasoning {
+                            Some(reasoning) => format!("{reasoning}</think>\n\n{body}"),
+                            None => body.clone(),
+                        };
+                        let mut partition = OutputPartition::new(OutputProtocol::Qwen {
+                            preopened_reasoning: preopened,
+                            parse_tools: true,
+                            tool_grammar: ToolGrammar::QwenXml,
+                        });
+                        let mut events = Vec::new();
+                        partition.push(generated.as_bytes(), &mut events);
+                        partition
+                            .finish(GenerationEnd::StopToken(0), &mut events)
+                            .unwrap();
+                        let response = build_response_object(
+                            &t1,
+                            "resp_t1".into(),
+                            1_755_500_000,
+                            &events,
+                            StopReason::Eos,
+                            Usage::default(),
+                            None,
+                        )
+                        .unwrap();
+                        let items = response["output"].as_array().unwrap().clone();
+                        let mut input = vec![user("One")];
+                        input.extend(items.iter().cloned());
+                        match items.iter().find(|item| item["type"] == "function_call") {
+                            Some(call) => input.push(json!({"type": "function_call_output",
+                                "call_id": call["call_id"], "output": "pong"})),
+                            None => input.push(user("Two")),
+                        }
+                        let t2 = bind(*template, mode_b, Value::Array(input));
+                        let p2 = render_qwen_serve_prompt(&t2);
+                        let head_a = render_qwen_serve_prompt_annotated_with(&t1, false).text;
+                        let head_b = render_qwen_serve_prompt_annotated_with(
+                            &bind(*template, mode_b, json!([user("One")])),
+                            false,
+                        )
+                        .text;
+                        // The assistant turn as generated, from its header.
+                        let generation_suffix = &p1[p1.rfind("<|im_start|>assistant\n").unwrap()..];
+                        let span = format!("{generation_suffix}{generated}<|im_end|>\n");
+                        assert!(
+                            p2.contains(&span),
+                            "{label}: history lost the turn as generated\n--- expected span\n{span}\n--- turn 2\n{p2}"
+                        );
+                        if head_a == head_b {
+                            let completed = format!("{p1}{generated}<|im_end|>\n");
+                            assert!(
+                                p2.starts_with(&completed),
+                                "{label}: turn 2 does not extend turn 1 as generated\n--- turn 1 + generated\n{completed}\n--- turn 2\n{p2}"
+                            );
+                            identical += 1;
+                        } else {
+                            let first_user = p1.find("<|im_start|>user").unwrap();
+                            let diverged = p1
+                                .bytes()
+                                .zip(p2.bytes())
+                                .position(|(a, b)| a != b)
+                                .unwrap();
+                            assert!(
+                                diverged < first_user,
+                                "{label}: diverged at byte {diverged}, after the system block"
+                            );
+                            controls += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // Per shape, weighting each pair by mode A's reasoning variants
+        // (2 when it thinks, 1 otherwise). Same head: Qwen3.5 and 3.6 6 each;
+        // Qwen3.8 none/medium/no_thinking among themselves 12, low->low and
+        // xhigh->xhigh 2 each. Different head: low or xhigh to the 4 other
+        // modes (8 each) and none/medium/no_thinking to low or xhigh (8).
+        assert_eq!(
+            (identical, controls),
+            ((6 + 6 + 16) * 3, 24 * 3),
+            "pair census"
+        );
+    }
+
     #[test]
     fn request_echo_and_no_tools_constraint_are_truthful() {
         let request = crate::serve::items::parse_request(&json!({

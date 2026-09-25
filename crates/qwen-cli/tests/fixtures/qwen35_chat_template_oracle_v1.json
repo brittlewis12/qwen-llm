@@ -93,6 +93,52 @@
         "add_generation_prompt": true
       },
       "rendered": "<|im_start|>system\nBe concise.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "id": "history_default_reasoning_stripped",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "One"
+          },
+          {
+            "role": "assistant",
+            "content": "Answer one",
+            "reasoning_content": "thinking"
+          },
+          {
+            "role": "user",
+            "content": "Two"
+          }
+        ],
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>user\nOne<|im_end|>\n<|im_start|>assistant\nAnswer one<|im_end|>\n<|im_start|>user\nTwo<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "id": "history_no_thinking_preserve",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "One"
+          },
+          {
+            "role": "assistant",
+            "content": "Answer one",
+            "reasoning_content": "thinking"
+          },
+          {
+            "role": "user",
+            "content": "Two"
+          }
+        ],
+        "add_generation_prompt": true,
+        "enable_thinking": false,
+        "preserve_thinking": true
+      },
+      "rendered": "<|im_start|>user\nOne<|im_end|>\n<|im_start|>assistant\nAnswer one<|im_end|>\n<|im_start|>user\nTwo<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
     }
   ]
 }

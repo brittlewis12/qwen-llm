@@ -799,12 +799,10 @@ because client model-pickers probe it).
   preserved reasoning replays as `<think>\n{reasoning}\n</think>\n\n{content}`.
   Qwen3.6 thinks unless `x_qwen.no_thinking`; Qwen3.5's released default is
   no-thinking (its template has no `preserve_thinking` at all, so preserve is
-  a serve policy there). Documented divergences: history assistant turns keep
-  the preclosed block in a no-thinking session (which is what the released
-  template itself renders for preserved empty reasoning), a second system
-  item is rejected rather than merged, and Qwen3.5 thinking sessions preserve
-  history reasoning (a serve policy; the template strips it before the last
-  user query). Trimming
+  a serve policy there). Documented divergences: a second system item is
+  rejected rather than merged, and Qwen3.5 preserves history reasoning in both
+  thinking and no-thinking sessions (a serve policy; the template strips it
+  before the last user query). Trimming
   follows Python `str.strip()`. An unidentified release (no version token in
   any name field, conflicting versions, or a foreign tokenizer) keeps the
   legacy generic ChatML contract (bare suffix, verbatim content) rather than
@@ -829,10 +827,10 @@ because client model-pickers probe it).
   (Qwen3.6 oracle `fs.list`, Muse ATEM namespaces).
 - Preserve/strip rendering policy: preserve is the default for the validated
   Qwen3.6 identity (owner position, Amendment 1 of S0; economics measured in S0
-  G2), and strip remains available there via `x_qwen`. Validated Qwen3.8 uses
-  its preclosed-history renderer for plain assistant turns (its released
-  template, and Flash-Next's, preserves by default; aligning plain turns is a
-  pending behavior change), and its tool turns follow the preserve rules.
+  G2), and strip remains available there via `x_qwen`. Validated Qwen3.8 and
+  Flash-Next follow their released template, which preserves by default:
+  plain and tool turns alike replay their reasoning (until 2026-09-25 plain
+  turns always rendered the empty block and dropped it).
   DS4 rejects strip mode and preserves reasoning history whenever the current
   request selects a non-`none` thinking tier. Muse rejects strip mode and
   preserves structured ATEM reasoning/tool history.
@@ -842,14 +840,49 @@ because client model-pickers probe it).
   that arrives without one renders exactly as an explicit empty reasoning item
   would: the empty think block wherever that family's template shows one
   (Qwen3.5/3.6/3.8, DS4 thinking tiers), no ATEM `to=self` record for Muse,
-  and the explicit empty field K2's native renderer requires. Strip and
-  no-thinking modes apply to it as to any other turn; `x_qwen.no_thinking`
-  admits an empty reasoning item wherever it admits a missing one (it still
-  refuses reasoning text before an assistant message). Only the unidentified generic Qwen
+  and the explicit empty field K2's native renderer requires. Strip applies
+  to it as to any other turn. Only the unidentified generic Qwen
   contract keeps history verbatim. Thinking requests that relied on this log
   `serve: history_reasoning_missing=N` before generation. This cannot restore
   reasoning the client discarded, so the transcript boundary above is still
   what keeps such loops warm.
+- **Qwen history renders as generated, independent of the generation mode
+  (2026-09-25).** On identified Qwen releases (3.5/3.6/3.8, Flash-Next),
+  thinking controls (`x_qwen.no_thinking`, `x_qwen.thinking`,
+  `reasoning.effort`) change only the new turn's generation suffix. History
+  keeps each turn's supplied reasoning in every mode. A turn generated without
+  thinking has no reasoning item and replays as the empty block it consumed,
+  byte-identical to the preclosed suffix. A mode switch therefore no longer
+  changes earlier turns' bytes.
+  - This removes only mode-induced changes. Replay is byte-identical for
+    canonically formatted output (as the released templates render it).
+    Other output still re-renders canonically: for example, `</think>`
+    emitted without its preceding newline, surrounding whitespace, or
+    reasoning truncated by the token limit. A completed snapshot hit also
+    still needs matching token ids and a retained snapshot.
+  - Previously a no-thinking request refused reasoning history
+    (`x_qwen.no_thinking`) or re-rendered every prior turn with the preclosed
+    block (Qwen3.8 `none`, Qwen3.5 default).
+  - Only an explicit `x_qwen.history_thinking: "strip"` removes history
+    reasoning, with the released last-query rule. Stripped turns before the
+    last user query show no block even if they were generated without
+    thinking, as in the released templates.
+  - Qwen3.8 `low`/`xhigh` effort instructions lead the system block, so
+    changing to or from those tiers still changes the prompt head.
+  - The unidentified generic contract has no per-turn provenance. It keeps
+    rendering history in the current mode and refuses nonempty reasoning
+    history under `x_qwen.no_thinking` rather than drop it.
+  - Pinned by the per-template Jinja oracle cases and
+    `qwen_history_replays_as_generated_across_mode_switches` (serve
+    partition, response items, admission and rendering, for every mode pair
+    and for plain, call-only and prose-plus-call turns, with nonempty and
+    immediately closed reasoning).
+  - Serve replay, Qwen3.8-27B Q4_K_M, efforts medium, none, medium, none, with
+    items replayed verbatim; each turn shows prompt tokens / matched tokens:
+    before 1865/0, 1925/1860, 1987/1960, 2054/1982 (the turn-1 reasoning was
+    dropped, and each switch re-prefilled the prior assistant turn); after
+    1865/0, 1977/1944, 2039/2012, 2156/2134 (completed-snapshot hits). No
+    no-thinking turn leaked a think tag.
 
 ## Cancellation
 

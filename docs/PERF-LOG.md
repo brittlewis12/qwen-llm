@@ -6,6 +6,59 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-25 - DS4 History Renders As Generated; `--template-style house|upstream`
+
+Leverage map #2, DS4 half. Owner principle: serve does not rewrite past turns
+because of a new request's controls. Deliberate departures from a release
+template are allowed and configurable.
+
+- **Before:** the DS4 release encoder renders every past assistant transition
+  in the current tier, and serve followed it. A `low`→`none` switch dropped
+  all past reasoning and re-prefilled the whole history. An immediately
+  closed thinking turn emitted the same items as a chat turn, so no renderer
+  could tell them apart.
+- **Now:**
+  - **House style (default):** each past turn renders from its own items. A
+    reasoning item, even empty, gives `<think>reasoning</think>`; none gives
+    `</think>`. Only the new turn follows the current tier.
+  - **Emitter:** serve emits an explicit empty reasoning item for immediately
+    closed thinking turns. A DS4 chat generation never opens a reasoning item.
+  - **`upstream`:** `--template-style upstream` (or per request,
+    `x_qwen.template_style`) follows the release rules instead:
+    - DS4: the encoder's current-tier rendering, with drop_thinking unless
+      tools are declared or `history_thinking: preserve` is sent.
+    - Qwen: each template's history-reasoning default (3.5/3.6 strip before
+      the last query, 3.8 keeps).
+  - Explicit `history_thinking` overrides either style.
+  - Muse, K2 and the generic Qwen contract refuse `upstream`.
+- **Evidence:**
+  - `ds4_history_replays_as_generated_across_tier_switches` chains tiers
+    (none/low/high/max) through the partition, items, admission and
+    renderer. It covers plain, call-only and prose+call turns, and thinking
+    turns that reason or close immediately. It fails when house style is
+    mutated back to release rendering.
+  - Unit tests cover style precedence and the refusals. All qwen-cli bin
+    tests pass.
+  - Serve replay, DS4 UD-IQ3_XXS, efforts low, none, low, none, items
+    replayed verbatim (prompt / matched tokens):
+
+    | Build | t1 | t2 | t3 | t4 |
+    |---|---|---|---|---|
+    | before | 1863/0 | 1903/0 | 1977/1912 | 1985/1927 |
+    | after | 1863/0 | 1934/1912 | 1976/1958 | 2058/2046 |
+
+    Before, the switch to chat re-prefilled all 1.9K tokens (8.0 s); after,
+    prefill was 0.9-1.4 s per turn. Chat turns that followed visible past
+    reasoning stayed chat: no reasoning item, no think tag in the visible
+    text, and correct answers.
+- **Not covered:**
+  - A reasoning-only response followed by a user message is still refused
+    at admission (pre-existing, all families).
+  - A turn cut off inside its reasoning replays closed.
+  - Whether the AI SDK returns empty reasoning items is untested.
+  - Switches to or from `high`/`max` still change the prompt head (their
+    effort prompt), by design.
+
 ## 2026-09-25 - Qwen History Renders As Generated Across Thinking-Mode Switches
 
 Leverage map #2, Qwen half. Owner rule: turning reasoning off mid-chat must

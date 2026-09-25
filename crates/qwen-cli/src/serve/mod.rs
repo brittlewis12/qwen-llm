@@ -336,6 +336,16 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         &invocation.durable,
         invocation.snapshot_cache_mib,
     )?;
+    let template_style = invocation.template_style;
+    if matches!(family, ModelFamily::K2Horizon | ModelFamily::MuseGlimmer) {
+        ensure!(
+            template_style == items::TemplateStyle::House,
+            "--template-style upstream is defined for Qwen and DeepSeek V4 serve; {} serve renders its release format",
+            family.architecture_name()
+        );
+    } else {
+        tracing::info!(target: "qwen_diag", "serve: template_style={}", template_style.as_str());
+    }
     // Keep K2 out of the generic serve admission and listener setup. Its
     // resident plan and raw request contract are owned by the K2 lane.
     match family {
@@ -454,6 +464,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 invocation.snapshot_cache_mib,
                 invocation.snapshot_policy,
             )?;
+            backend.template_style = template_style;
             tracing::info!(target: "qwen_diag", "serve limits: family=deepseek_v4 max_context_tokens={} {}", context_limit, backend.snapshot_cache_plan);
             match invocation.durable.resolve("deepseek_v4") {
                 Ok(Some(plan)) => {
@@ -500,6 +511,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 invocation.snapshot_cache_mib,
                 invocation.snapshot_policy,
             )?;
+            backend.template_style = template_style;
             let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
             tracing::info!(target: "qwen_diag", "serve limits: family=qwen4exp max_context_tokens={context_limit} default_max_tokens={default_max_tokens} {}", backend.snapshot_cache_plan);
             crate::shutdown::checkpoint()?;
@@ -515,6 +527,10 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             }
             let template = identity.template.serve_template();
             let no_thinking_supported = template.verified();
+            ensure!(
+                template.verified() || template_style == items::TemplateStyle::House,
+                "--template-style upstream requires an identified Qwen release; this model uses the generic ChatML contract"
+            );
             // Deriving the default ceiling from the model requires readable context
             // metadata; an explicit --max-context-tokens does not.
             let declared_context =
@@ -563,6 +579,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 template,
                 no_thinking_supported,
             )?;
+            backend.template_style = template_style;
             tracing::info!(target: "qwen_diag", "serve limits: family=qwen max_context_tokens={context_ceiling} context_source={context_source} {snapshot_cache_plan}");
             match invocation.durable.resolve("qwen") {
                 Ok(Some(plan)) => {

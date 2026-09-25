@@ -49,6 +49,8 @@ pub(crate) struct FlashNextBackend {
     /// refuses a snapshot whose session geometry differs.
     cache: SnapshotCache<Qwen4ExpTextSnapshot>,
     pub(super) snapshot_cache_plan: super::SnapshotCachePlan,
+    /// Deployment default for `x_qwen.template_style` (`--template-style`).
+    pub(super) template_style: super::items::TemplateStyle,
 }
 
 impl FlashNextBackend {
@@ -140,6 +142,7 @@ impl FlashNextBackend {
             im_start,
             cache: SnapshotCache::new(snapshot_cache_plan.bytes, snapshot_cache_plan.policy),
             snapshot_cache_plan,
+            template_style: super::items::TemplateStyle::House,
         })
     }
 }
@@ -158,6 +161,10 @@ impl GenerationBackend for FlashNextBackend {
     fn normalize_request(&self, request: &mut ServeRequest) -> Result<(), ServeError> {
         *request = crate::open_responses::bind_qwen_request(request, QwenTemplate::Qwen38, true)?;
         Ok(())
+    }
+
+    fn template_style_default(&self) -> Option<super::items::TemplateStyle> {
+        Some(self.template_style)
     }
 
     fn output_protocol(&self, request: &ServeRequest) -> OutputProtocol {

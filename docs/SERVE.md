@@ -595,7 +595,12 @@ startup. Muse requires an explicit startup default:
   `<think>\n` opener on templates whose default is no-thinking (Qwen3.5) and
   is a no-op where thinking is already the default. DS4 uses
   `reasoning.effort` instead, while Muse directs callers to effort `low`.
-  This is a documented implementor extension.
+  `template_style: "house" | "upstream"` overrides the deployment's
+  `--template-style` for this request (identified Qwen releases and DS4 only;
+  refused elsewhere). `history_thinking: "preserve" | "strip"` overrides
+  either style's history-reasoning rule on Qwen; DS4 refuses `strip`, and
+  `preserve` matters there only under `upstream` in a thinking tier. This is
+  a documented implementor extension.
 - `stream` — SSE when true, single JSON response otherwise.
 - `store` — `false`, `null`, or absent; `true` → `invalid_request`.
 - `previous_response_id` — → error code `previous_response_not_found`.
@@ -831,21 +836,43 @@ because client model-pickers probe it).
   Flash-Next follow their released template, which preserves by default:
   plain and tool turns alike replay their reasoning (until 2026-09-25 plain
   turns always rendered the empty block and dropped it).
-  DS4 rejects strip mode and preserves reasoning history whenever the current
-  request selects a non-`none` thinking tier. Muse rejects strip mode and
-  preserves structured ATEM reasoning/tool history.
-- **Missing reasoning is empty reasoning, for every family.** Clients may
+  DS4 rejects strip mode; under house style it renders each past turn as
+  generated (see below). Muse rejects strip mode and preserves structured ATEM
+  reasoning/tool history.
+- **Missing reasoning: one predictable rendering per family.** Clients may
   replay history without its reasoning items (conforming Responses usage).
   An assistant turn (a message with its attached calls, or a call-only group)
   that arrives without one renders exactly as an explicit empty reasoning item
-  would: the empty think block wherever that family's template shows one
-  (Qwen3.5/3.6/3.8, DS4 thinking tiers), no ATEM `to=self` record for Muse,
-  and the explicit empty field K2's native renderer requires. Strip applies
-  to it as to any other turn. Only the unidentified generic Qwen
-  contract keeps history verbatim. Thinking requests that relied on this log
-  `serve: history_reasoning_missing=N` before generation. This cannot restore
-  reasoning the client discarded, so the transcript boundary above is still
-  what keeps such loops warm.
+  would on Qwen3.5/3.6/3.8 (the empty think block), Muse (no ATEM `to=self`
+  record) and K2 (the explicit empty field its native renderer requires). DS4
+  house style is the exception: there a reasoning item's presence is the
+  turn's provenance, so a turn without one renders as a chat turn,
+  `</think>content`, which is also the release encoder's form for dropped
+  reasoning. Strip applies to it as to any other turn. Only the unidentified
+  generic Qwen contract keeps history verbatim. Thinking requests that relied
+  on this log `serve: history_reasoning_missing=N` before generation (not DS4
+  house style, where absence is provenance). This cannot restore reasoning the
+  client discarded, so the transcript boundary above is still what keeps such
+  loops warm.
+- **Principle: serve does not rewrite past turns because of a new request's
+  controls (2026-09-25).** The client owns the transcript; thinking mode and
+  effort apply to the turn being generated. Where a release template
+  re-renders history in the current mode, serve's `house` template style
+  deliberately departs from it, and `--template-style upstream` (or
+  `x_qwen.template_style: "upstream"`) follows the release rules instead.
+  Effort instructions stay where each template puts them (the Qwen3.8 system
+  block, DS4 after BOS), so changing effort still changes the prompt head;
+  that is a deliberate edit, like editing the system prompt or forking a
+  transcript, and serve renders it as sent.
+  - `upstream` for Qwen restores each template's history-reasoning default:
+    Qwen3.5 and 3.6 drop reasoning before the last user query, Qwen3.8 keeps
+    it. Qwen history is otherwise already mode-independent in the releases.
+  - `upstream` for DS4 is the release encoder within the supported subset:
+    the whole transcript in the current tier; chat drops all past reasoning;
+    thinking keeps it only with declared tools or an explicit
+    `history_thinking: "preserve"`.
+  - `upstream` is refused on the generic Qwen contract, Muse and K2 (at
+    startup for the flag, per request for the override).
 - **Qwen history renders as generated, independent of the generation mode
   (2026-09-25).** On identified Qwen releases (3.5/3.6/3.8, Flash-Next),
   thinking controls (`x_qwen.no_thinking`, `x_qwen.thinking`,
@@ -883,6 +910,39 @@ because client model-pickers probe it).
     dropped, and each switch re-prefilled the prior assistant turn); after
     1865/0, 1977/1944, 2039/2012, 2156/2134 (completed-snapshot hits). No
     no-thinking turn leaked a think tag.
+- **DS4 history renders as generated under house style (2026-09-25).** The
+  release encoder renders every past assistant transition in the current
+  tier. House style renders each past turn from its own items: a reasoning
+  item, even empty, means the turn thought (`<think>reasoning</think>`); none
+  means it was a chat turn (`</think>`). Only the new turn's transition
+  follows the current tier.
+  - Serve emits an explicit empty reasoning item when a thinking turn closes
+    its block immediately (every family; identified Qwen releases render it
+    exactly like a missing item, the generic contract as the `<think></think>`
+    it generated), and a DS4 chat generation never opens a reasoning item
+    (its prompt already closed the block): any `<think>` it writes is
+    content, admitted and replayed verbatim. Qwen binding still refuses
+    inline `<think>` in assistant content; DS4 and Muse accept it as literal
+    text. Replay is exact for clients that return these items, including
+    empty ones.
+  - Tier switches between `none` and `low` keep every earlier turn's bytes.
+    `high` and `max` insert their effort prompt after BOS, so switching to or
+    from them still changes the head.
+  - Not guaranteed: legacy or client-omitted reasoning (renders as chat), a
+    turn cut off inside its reasoning (replays closed), a reasoning-only
+    response followed by a user message (admission currently refuses it), and
+    a thinking turn that ends immediately after the opened `<think>` (no
+    items, so the replay has consecutive user turns, which DS4 refuses).
+  - Pinned by `ds4_history_replays_as_generated_across_tier_switches` (tier
+    chains through the partition, response items, admission and renderer)
+    and `reasoning_item_presence_is_history_provenance`.
+  - Serve replay, DS4 UD-IQ3_XXS, efforts low, none, low, none, items
+    replayed verbatim, prompt / matched tokens per turn: before 1863/0,
+    1903/0, 1977/1912, 1985/1927 (the switch to chat re-prefilled the whole
+    history, 8.0 s at 1.9K tokens); after 1863/0, 1934/1912, 1976/1958,
+    2058/2046 (completed-snapshot hits, 0.9-1.4 s prefill). Chat turns that
+    followed visible past reasoning stayed chat: no reasoning item, no think
+    tag in visible text, and correct answers.
 
 ## Cancellation
 

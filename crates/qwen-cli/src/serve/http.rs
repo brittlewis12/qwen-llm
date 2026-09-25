@@ -7,7 +7,7 @@
 //! against a mock over real loopback sockets.
 
 use super::events::{EventWrite, ResponseStream, ServeStats, SseWriter, StopReason, Usage};
-use super::items::{ServeError, ServeRequest, parse_request};
+use super::items::{ServeError, ServeRequest, TemplateStyle, parse_request};
 use super::output_partition::{GenerationEnd, OutputPartition, OutputProtocol, ToolGrammar};
 use super::render::render_qwen_serve_prompt;
 use serde_json::{Value, json};
@@ -59,6 +59,12 @@ pub(crate) trait GenerationBackend {
     /// Resolve family defaults before prompt rendering and response echoes.
     fn normalize_request(&self, _request: &mut ServeRequest) -> Result<(), ServeError> {
         Ok(())
+    }
+    /// The deployment's template style (`--template-style`), or `None` for
+    /// families that define no house departures from their release format
+    /// (the per-request override is then refused rather than ignored).
+    fn template_style_default(&self) -> Option<TemplateStyle> {
+        None
     }
     /// Family-owned grammar for exact generated token bytes.
     fn output_protocol(&self, _request: &ServeRequest) -> OutputProtocol {
@@ -585,16 +591,19 @@ fn write_serve_error(stream: &mut &TcpStream, error: &ServeError) -> io::Result<
     write_json_response(stream, error.status, &error.to_json())
 }
 
-/// Every family renders history without reasoning as empty reasoning; a
-/// reasoning request that relied on it says so (never silently). Absent
-/// reasoning in a no-thinking generation changes nothing and is not logged.
+/// A reasoning request whose history arrived without reasoning items says
+/// so (never silently): that reasoning cannot be restored, and each family
+/// renders such a turn in its template's form for absent reasoning. Absent
+/// reasoning in a no-thinking generation changes nothing and is not logged;
+/// families whose absent reasoning is provenance rather than loss (DS4 house
+/// style: a chat turn) clear the count when normalizing.
 fn history_reasoning_diagnostic(
     request: &ServeRequest,
     protocol: &OutputProtocol,
 ) -> Option<String> {
     (request.history_reasoning_missing > 0 && protocol.reasons()).then(|| {
         format!(
-            "serve: history_reasoning_missing={} (assistant turns replayed without a reasoning item render with empty reasoning)",
+            "serve: history_reasoning_missing={} (assistant turns replayed without a reasoning item; their reasoning cannot be restored)",
             request.history_reasoning_missing
         )
     })
@@ -789,6 +798,19 @@ fn handle_responses(
             &mut writer,
             &ServeError::model_not_found(&request.model, backend.model_id()),
         );
+    }
+    match (backend.template_style_default(), request.template_style) {
+        (Some(default), None) => request.template_style = Some(default),
+        (None, Some(_)) => {
+            return write_serve_error(
+                &mut writer,
+                &ServeError::invalid_request(
+                    Some("x_qwen.template_style"),
+                    "x_qwen.template_style is defined for identified Qwen releases and DeepSeek V4 only",
+                ),
+            );
+        }
+        _ => {}
     }
     if let Err(error) = backend.normalize_request(&mut request) {
         return write_serve_error(&mut writer, &error);
@@ -1328,6 +1350,21 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200"));
         let parsed: Value = serde_json::from_str(body_of(&response)).unwrap();
         assert_eq!(parsed["data"][0]["id"], "qwen-test");
+    }
+
+    /// A family that defines no template styles refuses the per-request
+    /// override rather than ignoring it.
+    #[test]
+    fn template_style_is_refused_where_undefined() {
+        let response = roundtrip(
+            MockBackend::new(&["answer"], StopReason::Eos),
+            &post(
+                "/v1/responses",
+                r#"{"model":"qwen-test","input":"hi","x_qwen":{"template_style":"upstream"}}"#,
+            ),
+        );
+        assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+        assert!(body_of(&response).contains("x_qwen.template_style"));
     }
 
     #[test]

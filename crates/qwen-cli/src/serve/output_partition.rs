@@ -265,6 +265,11 @@ impl QwenOutputPartition {
         Self {
             reasoning: if preopened_reasoning {
                 StreamPartition::with_preopened_reasoning()
+            } else if tool_grammar == ToolGrammar::DeepSeekDsml {
+                // A DS4 prompt always ends in `<think>` or `</think>`, so a
+                // generation that is not pre-opened starts after `</think>`:
+                // any tag it writes is content, and it has no reasoning.
+                StreamPartition::with_closed_reasoning()
             } else {
                 StreamPartition::new()
             },

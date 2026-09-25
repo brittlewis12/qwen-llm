@@ -124,7 +124,25 @@ pub(crate) struct DeepSeekV4EncodeOptions {
     /// Maps to the release encoder's `drop_thinking=False`. The official
     /// trigger is declared tool schemas; this explicit knob exists for
     /// no-tools workloads that want interleaved reasoning retention.
+    /// Release history only.
     pub(crate) preserve_reasoning: bool,
+    pub(crate) history: DeepSeekV4History,
+}
+
+/// How past assistant turns render.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum DeepSeekV4History {
+    /// The release encoder: the whole transcript in the current tier. Chat
+    /// renders every past turn `</think>content`; thinking renders every
+    /// past turn as a thinking turn (reasoning kept or dropped per
+    /// `preserve_reasoning` and declared tools).
+    #[default]
+    Release,
+    /// Each past turn as it was generated: a turn carrying a reasoning field
+    /// (even empty) renders `<think>reasoning</think>content`, a turn without
+    /// one renders `</think>content`. Only the generation transition follows
+    /// the current tier; the tier's effort prompt still leads the prompt.
+    AsGenerated,
 }
 
 impl Default for DeepSeekV4EncodeOptions {
@@ -132,6 +150,7 @@ impl Default for DeepSeekV4EncodeOptions {
         Self {
             reasoning: DeepSeekV4Reasoning::None,
             preserve_reasoning: false,
+            history: DeepSeekV4History::Release,
         }
     }
 }
@@ -1417,7 +1436,8 @@ pub(crate) fn render_deepseek_v4_0731_messages_prompt(
     options: DeepSeekV4EncodeOptions,
 ) -> Result<String> {
     let thinking = !matches!(options.reasoning, DeepSeekV4Reasoning::None);
-    if options.preserve_reasoning && !thinking {
+    let as_generated = options.history == DeepSeekV4History::AsGenerated;
+    if options.preserve_reasoning && !thinking && !as_generated {
         bail!(
             "preserve-reasoning requires reasoning low, high, or max; the release encoder renders preserved reasoning only in thinking mode"
         );
@@ -1453,6 +1473,8 @@ pub(crate) fn render_deepseek_v4_0731_messages_prompt(
     // Whether the previous rendered turn was a user-like turn that is still
     // open (tool results and a following user message share one turn).
     let mut in_user = false;
+    // Whether the transition before the next assistant turn opened `<think>`.
+    let mut assistant_thinks = false;
 
     for (index, message) in messages.iter().enumerate() {
         if !message.extra.is_empty() {
@@ -1513,7 +1535,16 @@ pub(crate) fn render_deepseek_v4_0731_messages_prompt(
                     .is_some_and(|next| matches!(next.role.as_str(), "user" | "tool"));
                 if !next_is_user_like {
                     output.push_str(DEEPSEEK_V4_ASSISTANT);
-                    let open_thinking = thinking && (preserve_reasoning || index >= last_user_like);
+                    let open_thinking = match (as_generated, messages.get(index + 1)) {
+                        // A past turn's own provenance: it thought iff it
+                        // carries a reasoning field, even an empty one.
+                        (true, Some(next)) => {
+                            deepseek_v4_message_reasoning(index + 1, next)?.is_some()
+                        }
+                        (true, None) => thinking,
+                        (false, _) => thinking && (preserve_reasoning || index >= last_user_like),
+                    };
+                    assistant_thinks = open_thinking;
                     output.push_str(if open_thinking {
                         DEEPSEEK_V4_THINK_START
                     } else {
@@ -1524,7 +1555,12 @@ pub(crate) fn render_deepseek_v4_0731_messages_prompt(
                 }
             }
             "assistant" if !expect_user => {
-                if thinking && preserve_reasoning {
+                let renders_reasoning = if as_generated {
+                    assistant_thinks
+                } else {
+                    thinking && preserve_reasoning
+                };
+                if renders_reasoning {
                     // `drop_thinking=False`: reasoning (or empty) closes with
                     // `</think>` before the summary (vLLM:314-316).
                     output.push_str(reasoning_field.unwrap_or(""));
@@ -1801,6 +1837,7 @@ mod tests {
         DeepSeekV4EncodeOptions {
             reasoning,
             preserve_reasoning,
+            history: DeepSeekV4History::Release,
         }
     }
 
@@ -2757,6 +2794,7 @@ mod tests {
             let options = DeepSeekV4EncodeOptions {
                 reasoning,
                 preserve_reasoning: !case["drop_thinking"].as_bool().expect("drop flag"),
+                history: DeepSeekV4History::Release,
             };
             let rendered = render_deepseek_v4_0731_messages_prompt(&messages, &tools, options)
                 .unwrap_or_else(|error| panic!("render {name}: {error}"));
@@ -3015,6 +3053,7 @@ mod tests {
                 DeepSeekV4EncodeOptions {
                     reasoning: DeepSeekV4Reasoning::Low,
                     preserve_reasoning: true,
+                    history: DeepSeekV4History::Release,
                 },
                 DeepSeekV4InlineThinking::PromoteToReasoning,
             )
@@ -3177,6 +3216,7 @@ mod tests {
         let options = DeepSeekV4EncodeOptions {
             reasoning: DeepSeekV4Reasoning::Low,
             preserve_reasoning: true,
+            history: DeepSeekV4History::Release,
         };
         let prompt = render_deepseek_v4_0731_messages_prompt(&promoted, &[], options).unwrap();
         assert_eq!(

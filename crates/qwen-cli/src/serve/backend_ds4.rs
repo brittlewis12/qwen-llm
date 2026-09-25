@@ -34,7 +34,7 @@ use super::durable::{
     resolve_content_identity,
 };
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
-use super::items::{ServeError, ServeRequest};
+use super::items::{ServeError, ServeRequest, TemplateStyle};
 use super::output_partition::{OutputProtocol, ToolGrammar};
 use super::render_ds4;
 use super::snapshot_cache::SnapshotCache;
@@ -88,6 +88,8 @@ pub(crate) struct DeepSeekV4Backend {
     ephemeral_content_id: DeepSeekV4ModelContentId,
     config: DeepSeekV4Config,
     durable: Option<Ds4Durable>,
+    /// Deployment default for `x_qwen.template_style` (`--template-style`).
+    pub(super) template_style: TemplateStyle,
 }
 
 /// Process-unique, never published: pid + start nanos + a tag.
@@ -206,6 +208,7 @@ impl DeepSeekV4Backend {
             ephemeral_content_id: ephemeral_content_id(),
             config,
             durable: None,
+            template_style: TemplateStyle::House,
         })
     }
 
@@ -475,6 +478,19 @@ impl GenerationBackend for DeepSeekV4Backend {
             stats.failed,
             stats.dropped,
         );
+    }
+
+    fn template_style_default(&self) -> Option<TemplateStyle> {
+        Some(self.template_style)
+    }
+
+    /// Under house style an absent reasoning item is a chat turn's
+    /// provenance, not lost reasoning, so it is not reported as missing.
+    fn normalize_request(&self, request: &mut ServeRequest) -> Result<(), ServeError> {
+        if request.template_style != Some(TemplateStyle::Upstream) {
+            request.history_reasoning_missing = 0;
+        }
+        Ok(())
     }
 
     fn output_protocol(&self, request: &ServeRequest) -> OutputProtocol {

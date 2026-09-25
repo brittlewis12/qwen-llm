@@ -7,7 +7,7 @@ pub(crate) mod render;
 pub(crate) mod tool_parse;
 
 use crate::model_request::Turn;
-use items::{QwenTemplate, ServeError, ServeRequest};
+use items::{QwenTemplate, ServeError, ServeRequest, TemplateStyle};
 
 pub(crate) fn bind_qwen_request(
     request: &ServeRequest,
@@ -16,6 +16,18 @@ pub(crate) fn bind_qwen_request(
 ) -> Result<ServeRequest, ServeError> {
     let mut request = request.clone();
     request.template = template;
+    // Qwen templates give `<think>` meaning, so reasoning must travel as
+    // items for history to replay faithfully.
+    if let Some(turn) = request.model_request.turns.iter().position(
+        |turn| matches!(turn, Turn::Assistant { visible, .. } if visible.contains("<think>")),
+    ) {
+        return Err(ServeError::invalid_request(
+            Some("input"),
+            format!(
+                "assistant turn {turn}: content must not embed <think>; reasoning travels as reasoning items"
+            ),
+        ));
+    }
     if request.thinking_requested && request.no_thinking {
         return Err(ServeError::invalid_request(
             Some("x_qwen.thinking"),
@@ -47,6 +59,22 @@ pub(crate) fn bind_qwen_request(
             Some("input"),
             "reasoning history requires an identified Qwen release when x_qwen.no_thinking is set",
         ));
+    }
+    if request.template_style == Some(TemplateStyle::Upstream) {
+        if !template.verified() {
+            return Err(ServeError::invalid_request(
+                Some("x_qwen.template_style"),
+                "template_style upstream requires an identified Qwen release",
+            ));
+        }
+        // Qwen history is already mode-independent in the released
+        // templates; upstream only restores each template's own default for
+        // history reasoning (Qwen3.5 has no preserve option, Qwen3.6
+        // defaults it off, Qwen3.8 on). An explicit history_thinking wins.
+        if request.history_thinking.is_none() && !request.strip_history_thinking {
+            request.strip_history_thinking =
+                matches!(template, QwenTemplate::Qwen35 | QwenTemplate::Qwen36);
+        }
     }
     // Tools and tool history: the same family rule `qwen run --messages`
     // applies, so a model refuses identically on both lanes.
@@ -84,6 +112,50 @@ pub(crate) fn bind_qwen_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Upstream restores each Qwen template's own history-reasoning default
+    /// (3.5/3.6 strip before the last query, 3.8 keeps); house keeps it for
+    /// every release; an explicit history_thinking overrides either style;
+    /// the generic contract has no upstream template.
+    #[test]
+    fn template_style_resolves_history_thinking_per_release() {
+        use items::{HistoryThinking, TemplateStyle};
+        let bind = |template, style, history| {
+            let request = ServeRequest {
+                template_style: Some(style),
+                history_thinking: history,
+                strip_history_thinking: history == Some(HistoryThinking::Strip),
+                ..ServeRequest::default()
+            };
+            bind_qwen_request(&request, template, true).map(|bound| bound.strip_history_thinking)
+        };
+        for (template, upstream_strips) in [
+            (QwenTemplate::Qwen35, true),
+            (QwenTemplate::Qwen36, true),
+            (QwenTemplate::Qwen38, false),
+        ] {
+            assert_eq!(bind(template, TemplateStyle::House, None), Ok(false));
+            assert_eq!(
+                bind(template, TemplateStyle::Upstream, None),
+                Ok(upstream_strips)
+            );
+            for style in [TemplateStyle::House, TemplateStyle::Upstream] {
+                assert_eq!(
+                    bind(template, style, Some(HistoryThinking::Preserve)),
+                    Ok(false)
+                );
+                assert_eq!(
+                    bind(template, style, Some(HistoryThinking::Strip)),
+                    Ok(true)
+                );
+            }
+        }
+        assert!(bind(QwenTemplate::Generic, TemplateStyle::Upstream, None).is_err());
+        assert_eq!(
+            bind(QwenTemplate::Generic, TemplateStyle::House, None),
+            Ok(false)
+        );
+    }
 
     #[test]
     fn model_binding_applies_the_same_reasoning_gates_without_a_backend() {

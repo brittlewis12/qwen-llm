@@ -217,6 +217,8 @@ pub(crate) struct EngineBackend {
     /// Where the current request's restored prefix came from, for the
     /// phases line: `ram`, `disk`, or `none`.
     restore_source: &'static str,
+    /// Deployment default for `x_qwen.template_style` (`--template-style`).
+    pub(super) template_style: super::items::TemplateStyle,
 }
 
 impl EngineBackend {
@@ -275,6 +277,7 @@ impl EngineBackend {
             dflash_prefix_replay: DflashPrefixReplayCache::from_env(),
             durable: None,
             restore_source: "none",
+            template_style: super::items::TemplateStyle::House,
         })
     }
 }
@@ -776,6 +779,10 @@ impl GenerationBackend for EngineBackend {
 
     fn shutdown(&mut self) {
         self.durable_shutdown();
+    }
+
+    fn template_style_default(&self) -> Option<super::items::TemplateStyle> {
+        Some(self.template_style)
     }
 
     fn output_protocol(&self, request: &ServeRequest) -> OutputProtocol {

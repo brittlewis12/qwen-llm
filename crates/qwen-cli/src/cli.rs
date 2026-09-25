@@ -101,6 +101,21 @@ pub(crate) struct ServeArgs {
     /// Append request and streamed SSE events as JSONL for wire debugging.
     #[arg(long, value_name = "PATH")]
     trace_sse: Option<PathBuf>,
+
+    /// Whose conventions prompts follow where serve deliberately departs from
+    /// a release chat template (Qwen and DeepSeek V4). `house`: past turns
+    /// render as they were generated whatever the current thinking mode, and
+    /// reasoning history is kept. `upstream`: the release template's own
+    /// rules. Requests may override with `x_qwen.template_style`.
+    #[arg(long, value_name = "house|upstream", default_value = "house", value_parser = parse_template_style)]
+    template_style: crate::open_responses::items::TemplateStyle,
+}
+
+fn parse_template_style(
+    value: &str,
+) -> std::result::Result<crate::open_responses::items::TemplateStyle, String> {
+    crate::open_responses::items::TemplateStyle::parse(value)
+        .ok_or_else(|| format!("expected `house` or `upstream`, got {value:?}"))
 }
 
 /// `None` is `auto`.
@@ -161,6 +176,7 @@ pub(crate) struct ServeInvocation {
     pub(crate) durable: crate::serve::durable::DurableSnapshotConfig,
     pub(crate) drafter: Option<PathBuf>,
     pub(crate) trace_sse: Option<PathBuf>,
+    pub(crate) template_style: crate::open_responses::items::TemplateStyle,
 }
 
 #[derive(Debug)]
@@ -432,6 +448,7 @@ pub(crate) fn normalize(args: &mut Args) -> Invocation {
             },
             drafter: serve.drafter,
             trace_sse: serve.trace_sse,
+            template_style: serve.template_style,
         }),
         Command::Run(run) => {
             let input = match (run.user, run.messages, run.raw_prompt) {
@@ -526,6 +543,13 @@ mod tests {
         let defaults = serve(&[]);
         assert_eq!(defaults.snapshot_cache_mib, None);
         assert_eq!(defaults.snapshot_policy, SnapshotPolicyConfig::default());
+        use crate::open_responses::items::TemplateStyle;
+        assert_eq!(defaults.template_style, TemplateStyle::House);
+        assert_eq!(
+            serve(&["--template-style", "upstream"]).template_style,
+            TemplateStyle::Upstream
+        );
+        assert!(parse_template_style("vendor").is_err());
         assert_eq!(
             serve(&["--snapshot-cache-mib", "auto"]).snapshot_cache_mib,
             None

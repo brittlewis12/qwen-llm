@@ -19,6 +19,7 @@ fn gpu_k2_tools_roundtrip_all_formats_json_sse() {
         durable: crate::serve::durable::DurableSnapshotConfig::off(),
         drafter: None,
         trace_sse: None,
+        template_style: Default::default(),
     };
     let prepared = Prepared::new(&source, &invocation).unwrap();
     assert!(prepared.chat_profile.is_some());
@@ -147,6 +148,7 @@ fn gpu_verified_k2_chat_http_matches_raw_and_releases_sessions() {
         durable: crate::serve::durable::DurableSnapshotConfig::off(),
         drafter: None,
         trace_sse: None,
+        template_style: Default::default(),
     };
     let prepared = Prepared::new(&source, &invocation).unwrap();
     assert!(prepared.chat_profile.is_some());
@@ -320,6 +322,7 @@ fn cpu_downloaded_startup_rejects_options_before_listener_or_metal() {
             durable: crate::serve::durable::DurableSnapshotConfig::off(),
             drafter: drafter.map(Into::into),
             trace_sse: None,
+            template_style: Default::default(),
         };
         let error = super::super::run_serve(invocation).unwrap_err();
         assert!(error.to_string().contains(expected), "{error:#}");
@@ -434,6 +437,7 @@ fn gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests() {
         durable: crate::serve::durable::DurableSnapshotConfig::off(),
         drafter: None,
         trace_sse: None,
+        template_style: Default::default(),
     };
     let prepared = Prepared::new(&source, &invocation).unwrap();
     // qwen-llm is a non-test dependency in this CLI test: new() acquires the
@@ -615,6 +619,7 @@ fn gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one() {
         durable: crate::serve::durable::DurableSnapshotConfig::off(),
         drafter: None,
         trace_sse: None,
+        template_style: Default::default(),
     };
     let prepared = Prepared::new(&source, &invocation).unwrap();
     let mut cases = Vec::new();

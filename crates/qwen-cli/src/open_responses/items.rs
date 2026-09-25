@@ -119,6 +119,47 @@ impl QwenTemplate {
     }
 }
 
+/// Whose conventions a prompt follows where serve deliberately departs from
+/// a release chat template: the serve flag `--template-style`, overridable
+/// per request with `x_qwen.template_style`. Defined for identified Qwen
+/// releases and DeepSeek V4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum TemplateStyle {
+    /// Serve's conventions: past turns render as they were generated,
+    /// whatever this request's thinking mode, and reasoning history is kept.
+    #[default]
+    House,
+    /// The release template's own rules (within the supported subset), even
+    /// where they re-render past turns in the current mode or drop their
+    /// reasoning.
+    Upstream,
+}
+
+impl TemplateStyle {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "house" => Some(Self::House),
+            "upstream" => Some(Self::Upstream),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::House => "house",
+            Self::Upstream => "upstream",
+        }
+    }
+}
+
+/// An explicit `x_qwen.history_thinking` request, kept distinct from its
+/// absence so it can override either template style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HistoryThinking {
+    Preserve,
+    Strip,
+}
+
 /// Validated transcript plus generation controls, ready for rendering.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ServeRequest {
@@ -160,7 +201,12 @@ pub(crate) struct ServeRequest {
     /// for templates without an effort control. Renderers read this rather
     /// than re-parsing `reasoning_effort`.
     pub(crate) qwen38_mode: Option<crate::messages::Qwen38GenerationMode>,
+    /// Resolved: strip history reasoning before the last user query.
     pub(crate) strip_history_thinking: bool,
+    /// As sent in `x_qwen.history_thinking`; overrides the template style.
+    pub(crate) history_thinking: Option<HistoryThinking>,
+    /// `None` until serve applies its deployment default.
+    pub(crate) template_style: Option<TemplateStyle>,
     pub(crate) echo_stats: bool,
     /// Assistant history turns (a message with the calls attached to it, or
     /// a call-only group) that arrived without a reasoning item. One rule for
@@ -202,6 +248,8 @@ impl Default for ServeRequest {
             template: QwenTemplate::default(),
             qwen38_mode: None,
             strip_history_thinking: false,
+            history_thinking: None,
+            template_style: None,
             echo_stats: false,
             history_reasoning_missing: 0,
         }
@@ -537,9 +585,25 @@ pub(crate) fn parse_request(body: &Value) -> Result<ServeRequest, ServeError> {
                         )
                     })?
                 }
+                "template_style" => {
+                    request.template_style = Some(
+                        value
+                            .as_str()
+                            .and_then(TemplateStyle::parse)
+                            .ok_or_else(|| {
+                                ServeError::invalid_request(
+                                    Some("x_qwen.template_style"),
+                                    "x_qwen.template_style must be \"house\" or \"upstream\"",
+                                )
+                            })?,
+                    )
+                }
                 "history_thinking" => match value.as_str() {
-                    Some("preserve") => {}
-                    Some("strip") => request.strip_history_thinking = true,
+                    Some("preserve") => request.history_thinking = Some(HistoryThinking::Preserve),
+                    Some("strip") => {
+                        request.strip_history_thinking = true;
+                        request.history_thinking = Some(HistoryThinking::Strip);
+                    }
                     Some(other) => {
                         return Err(ServeError::invalid_request(
                             Some("x_qwen.history_thinking"),
@@ -728,14 +792,9 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
                         request.model_request.turns.push(Turn::User(text));
                     }
                     "assistant" => {
-                        if text.contains("<think>") {
-                            return Err(ServeError::invalid_request(
-                                Some("input"),
-                                format!(
-                                    "item {index}: assistant content must not embed <think>; reasoning travels as reasoning items"
-                                ),
-                            ));
-                        }
+                        // Inline `<think>` is refused where a family's
+                        // template gives it meaning (Qwen binding); DS4 chat
+                        // content may carry it literally.
                         // Reasoning history is admitted in every generation
                         // mode: identified releases render it as generated
                         // (render.rs). Binding refuses it where it would be
@@ -1373,12 +1432,15 @@ mod tests {
         .unwrap_err();
         assert!(error.message.contains("final input item"));
 
-        let error = parse(json!({"model": "m", "input": [
+        let inline_think = parse(json!({"model": "m", "input": [
             {"role": "user", "content": "q"},
             {"role": "assistant", "content": "<think>x</think>a"},
             {"role": "user", "content": "q2"},
         ]}))
-        .unwrap_err();
+        .unwrap();
+        let error =
+            crate::open_responses::bind_qwen_request(&inline_think, QwenTemplate::Qwen36, true)
+                .unwrap_err();
         assert!(
             error
                 .message

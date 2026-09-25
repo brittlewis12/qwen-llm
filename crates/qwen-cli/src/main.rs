@@ -689,6 +689,7 @@ fn prepare_modern_run_prompt(
             DeepSeekV4EncodeOptions {
                 reasoning,
                 preserve_reasoning: reasoning.is_thinking(),
+                history: crate::messages::DeepSeekV4History::Release,
             }
         }
         _ => DeepSeekV4EncodeOptions::default(),

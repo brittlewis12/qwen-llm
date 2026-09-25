@@ -218,6 +218,7 @@ pub(crate) fn deepseek_v4_encode_options(args: &Args) -> Result<DeepSeekV4Encode
     Ok(DeepSeekV4EncodeOptions {
         reasoning,
         preserve_reasoning: args.preserve_reasoning,
+        history: crate::messages::DeepSeekV4History::Release,
     })
 }
 

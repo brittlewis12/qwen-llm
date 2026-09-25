@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-25 - DS4 Warm-Turn Flip Is a Near-Tie That llama.cpp Also Resolves Both Ways
+
+Leverage map #1. Retained case: serve probe `chat-nothink`, UD-IQ3_XXS,
+greedy, 8-token turns, prompts of 4,578 and 4,602 tokens. Turn 2 answered
+"A prime number is..." after a prompt-end warm start and "Three primes larger
+than 50 are" when cold. Since 093ec7d4 the warm turn restores the completed
+boundary instead, and answers "Three".
+
+- **Native, same token ids** (ignored GPU tests `gpu_ds4_turn2_schedule_report`
+  and `gpu_ds4_turn2_partition_sweep`):
+  - Cold, the top three tokens are within 0.12 logits (Three 27.44, Sure 27.38,
+    A 27.33).
+  - Legal packed partitions alone move the distribution by KL 0 to 0.031 and
+    swing the A−Three gap from −0.19 to +0.12. 9 of 24 alternative partitions
+    (compared against the cold reference) flip greedy to "A" (for example
+    4450, 4500, 4098, 4586, 4578), with no alignment pattern (4570, 4574, 4577
+    and 4582 do not flip).
+  - The prompt-end warm start (4096 + 482, then 24) is KL 0.020 from cold. Live
+    continuation, the suffix as singletons, cold 512/1024 chunks and
+    all-singleton prefill answer "Three" (KL ≤ 0.003).
+  - Separate processes reproduced the printed logits of the shared schedules.
+    Restore stays bit-exact.
+- **llama.cpp b11182, same GGUF and ids** (`llama-server`, pre-sampling
+  logprobs):
+  - `-ub 512` answers "A prime number is a natural number greater" (A −1.43,
+    Three −1.59, Sure −1.73).
+  - `-ub 2048` answers "Three primes larger than 50 are" (Three −1.44, A −1.62,
+    Sure −1.68).
+  - Its warm continuation at `-ub 512` (turn 1 live, then 17 tokens) answers "A".
+  - Its two schedules swing the A−Three gap by 0.34 logits.
+- **Verdict:** consistent with the schedule tier of the snapshot contract. The
+  prompt is a three-way near-tie that an independent engine resolves both
+  ways, and every tested legal schedule lands on one side or the other. No fix
+  is planned; completed (live continuation) snapshots stay the warm default.
+- **Residual risk, accepted:** this evidence cannot exclude a smaller, separate
+  error at these boundaries in small-chunk projection, the
+  compressor/frontier, or sparse visibility. The model-free checks at these
+  geometries have not been run.
+- **Not measured:** a control where the turn-1 answer is complete rather than
+  truncated.
+
 ## 2026-09-25 - K2 Decode Attention Is Serial; Flash-Next Prefill Steps At The Shoulder
 
 Two baseline anomalies located the same day (release `qwen-bench suite`, 2 reps):

@@ -816,6 +816,91 @@ impl DeepSeekV4Backend {
 
 #[cfg(test)]
 mod tests {
+    /// The serve backend over the local DS4 GGUF (`DSV4_GGUF` overrides),
+    /// with the 32K forward budget serve probes use.
+    fn gpu_backend(model_id: &str) -> DeepSeekV4Backend {
+        let path = std::env::var("DSV4_GGUF").unwrap_or_else(|_| {
+            "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf".into()
+        });
+        let ctx = MetalContext::new().unwrap();
+        let gguf = GgufFile::open(&path).unwrap();
+        let forward_limit = crate::deepseek_v4_forward_budget_for_context_limit(32_768).unwrap();
+        DeepSeekV4Backend::new(
+            ctx,
+            gguf,
+            model_id.into(),
+            64,
+            forward_limit,
+            crate::DeepSeekV4MultigroupSelectorArg::Auto,
+            Some(0),
+            Default::default(),
+        )
+        .unwrap()
+    }
+
+    /// Render and tokenize a chat-mode request exactly as serve does.
+    fn render_ids(
+        backend: &DeepSeekV4Backend,
+        instructions: &str,
+        input: serde_json::Value,
+    ) -> Vec<u32> {
+        let request = crate::open_responses::items::parse_request(&serde_json::json!({
+            "model": backend.model_id, "instructions": instructions, "input": input,
+            "reasoning": {"effort": "none"}, "max_output_tokens": 8, "temperature": 0,
+        }))
+        .unwrap();
+        let prompt = backend.render_prompt(&request).unwrap();
+        decode_loop::encode_checked(
+            &backend.tokenizer,
+            &prompt,
+            false,
+            backend.vocab_size,
+            "DS4",
+        )
+        .unwrap()
+    }
+
+    /// A sealed session over the backend's residency, as `run_request` makes.
+    fn fresh_session(backend: &mut DeepSeekV4Backend) -> DeepSeekV4Session {
+        let residency = backend.residency.take().unwrap();
+        let id = session_content_id(backend.strong_content_id(), backend.ephemeral_content_id);
+        let mut session =
+            DeepSeekV4Session::new_with_model_content_id_recoverable(&backend.ctx, residency, id)
+                .map_err(|failure| failure.into_parts().1)
+                .unwrap();
+        backend
+            .selector_plan
+            .seal_session(&mut session, "test")
+            .unwrap();
+        session
+    }
+
+    fn release_session(backend: &mut DeepSeekV4Backend, session: DeepSeekV4Session) {
+        backend.residency = Some(session.into_residency().unwrap());
+    }
+
+    /// Serve's chunking at `chunk` tokens: advance all but the final chunk.
+    fn serve_prefill(
+        backend: &DeepSeekV4Backend,
+        session: &mut DeepSeekV4Session,
+        tokens: &[u32],
+        chunk: usize,
+    ) {
+        let ranges = crate::deepseek_v4_prefill_chunk_ranges(tokens.len(), chunk);
+        let n = ranges.len();
+        for (index, range) in ranges.into_iter().enumerate() {
+            if index + 1 == n {
+                session
+                    .prefill_tokens(&backend.ctx, &tokens[range])
+                    .unwrap();
+            } else {
+                session
+                    .advance_tokens(&backend.ctx, &tokens[range])
+                    .unwrap();
+            }
+        }
+    }
+
     /// A warm start is exact: restoring a prompt-end snapshot (in place or
     /// into a fresh session) and prefilling the rest is bit-identical to
     /// continuing the original session. With DS4_SCHEDULE_REPORT set, also
@@ -826,45 +911,13 @@ mod tests {
     #[test]
     #[ignore = "loads DeepSeek V4 (DSV4_GGUF); GPU"]
     fn gpu_ds4_prompt_snapshot_restore_equals_continuing() {
-        use super::*;
-        let path = std::env::var("DSV4_GGUF").unwrap_or_else(|_| {
-            "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf".into()
-        });
-        let ctx = MetalContext::new().unwrap();
-        let gguf = GgufFile::open(&path).unwrap();
-        let forward_limit = crate::deepseek_v4_forward_budget_for_context_limit(32_768).unwrap();
-        let mut backend = DeepSeekV4Backend::new(
-            ctx,
-            gguf,
-            "ds4-warm-start".into(),
-            64,
-            forward_limit,
-            crate::DeepSeekV4MultigroupSelectorArg::Auto,
-            Some(0),
-            Default::default(),
-        )
-        .unwrap();
+        let mut backend = gpu_backend("ds4-warm-start");
         let system = "You are a careful, pragmatic software engineering agent. Prefer small, verifiable steps. ".repeat(160);
-        let render = |backend: &DeepSeekV4Backend, input: serde_json::Value| -> Vec<u32> {
-            let request = crate::open_responses::items::parse_request(&serde_json::json!({
-                "model": "ds4-warm-start", "instructions": system, "input": input,
-                "reasoning": {"effort": "none"}, "max_output_tokens": 8, "temperature": 0,
-            }))
-            .unwrap();
-            let prompt = backend.render_prompt(&request).unwrap();
-            decode_loop::encode_checked(
-                &backend.tokenizer,
-                &prompt,
-                false,
-                backend.vocab_size,
-                "DS4",
-            )
-            .unwrap()
-        };
         let user1 = serde_json::json!({"type":"message","role":"user","content":"List three prime numbers, one line."});
-        let p1 = render(&backend, serde_json::json!([user1]));
-        let p2 = render(
+        let p1 = render_ids(&backend, &system, serde_json::json!([user1]));
+        let p2 = render_ids(
             &backend,
+            &system,
             serde_json::json!([user1,
                 {"type":"message","role":"assistant","content":"2, 3, 5"},
                 {"type":"message","role":"user","content":"Now three more, larger than 50, one line."}]),
@@ -872,41 +925,11 @@ mod tests {
         assert!(p2.starts_with(&p1) && p2.len() > p1.len());
         let chunk = backend.prefill_chunk_tokens;
         let vocab = backend.vocab_size;
-        let fresh = |backend: &mut DeepSeekV4Backend| -> DeepSeekV4Session {
-            let residency = backend.residency.take().unwrap();
-            let id = session_content_id(backend.strong_content_id(), backend.ephemeral_content_id);
-            let mut session = DeepSeekV4Session::new_with_model_content_id_recoverable(
-                &backend.ctx,
-                residency,
-                id,
-            )
-            .map_err(|failure| failure.into_parts().1)
-            .unwrap();
-            backend
-                .selector_plan
-                .seal_session(&mut session, "test")
-                .unwrap();
-            session
-        };
-        let release = |backend: &mut DeepSeekV4Backend, session: DeepSeekV4Session| {
-            backend.residency = Some(session.into_residency().unwrap());
-        };
-        // Serve's chunking: advance all but the final chunk.
+        let fresh = fresh_session;
+        let release = release_session;
         let prefill =
             |backend: &DeepSeekV4Backend, session: &mut DeepSeekV4Session, tokens: &[u32]| {
-                let ranges = crate::deepseek_v4_prefill_chunk_ranges(tokens.len(), chunk);
-                let n = ranges.len();
-                for (index, range) in ranges.into_iter().enumerate() {
-                    if index + 1 == n {
-                        session
-                            .prefill_tokens(&backend.ctx, &tokens[range])
-                            .unwrap();
-                    } else {
-                        session
-                            .advance_tokens(&backend.ctx, &tokens[range])
-                            .unwrap();
-                    }
-                }
+                serve_prefill(backend, session, tokens, chunk)
             };
         let bits = |logits: &[f32]| logits.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
 
@@ -965,6 +988,257 @@ mod tests {
         compare("continued vs cold single chunk", &continued, &cold);
         compare("continued vs token-by-token", &continued, &serial);
         compare("cold single chunk vs token-by-token", &cold, &serial);
+    }
+
+    /// The retained serve probe case (/tmp/qwen-probe/probe.py, SYS_REPEAT=60,
+    /// `chat-nothink`, 8 output tokens): turn-1 and turn-2 prompt ids.
+    fn retained_turn2_ids(backend: &DeepSeekV4Backend) -> (Vec<u32>, Vec<u32>) {
+        let para = "You are a careful, pragmatic software engineering agent working in a local \
+            repository. Prefer small, verifiable steps. Read files before editing them. \
+            Explain your reasoning briefly, cite file paths with line numbers, and never \
+            invent APIs. When a command fails, read the error carefully before retrying. \
+            Keep answers concise and avoid unnecessary preamble or summaries. ";
+        let system = (0..60)
+            .map(|i| format!("## Guideline {i}\n{para}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let user1 = serde_json::json!({"type": "message", "role": "user",
+            "content": "Name three prime numbers and say in one sentence what a prime is."});
+        let answer1 = serde_json::json!({"id": "msg_resp_6ab450b40001", "type": "message",
+            "role": "assistant", "status": "incomplete", "content": [{"type": "output_text",
+            "text": "A prime number is a natural number greater", "annotations": []}]});
+        let user2 = serde_json::json!({"type": "message", "role": "user",
+            "content": "Name three more primes larger than 50, one line."});
+        let p1 = render_ids(backend, &system, serde_json::json!([user1]));
+        let p2 = render_ids(backend, &system, serde_json::json!([user1, answer1, user2]));
+        assert!(p2.starts_with(&p1));
+        // The retained serve logs: 4,578 / 4,602 prompt tokens, completed
+        // boundary at 4,585 (7 decoded transitions).
+        assert_eq!(
+            (p1.len(), p2.len()),
+            (4_578, 4_602),
+            "not the retained case"
+        );
+        (p1, p2)
+    }
+
+    /// KL(p || q) of the softmaxes of two logit vectors.
+    fn logits_kl(p: &[f32], q: &[f32]) -> f64 {
+        let log_softmax = |x: &[f32]| {
+            let max = x.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+            let sum: f64 = x.iter().map(|&v| (v as f64 - max).exp()).sum();
+            x.iter()
+                .map(|&v| v as f64 - max - sum.ln())
+                .collect::<Vec<_>>()
+        };
+        let (lp, lq) = (log_softmax(p), log_softmax(q));
+        lp.iter().zip(&lq).map(|(a, b)| a.exp() * (a - b)).sum()
+    }
+
+    /// How the retained turn-2 distribution moves with the packed partition
+    /// alone: the prompt split at explicit interior boundaries
+    /// (`DS4_FLIP_PARTITIONS`, `;`-separated lists of `,`-separated
+    /// positions; chunks at most 4096 tokens), each compared with serve's
+    /// cold schedule by KL and top-3. On 2026-09-25 legal partitions ranged
+    /// from KL 0 to 0.031 and several flipped greedy "Three" to "A".
+    #[test]
+    #[ignore = "loads DeepSeek V4 (DSV4_GGUF); GPU; ~20 s per partition"]
+    fn gpu_ds4_turn2_partition_sweep() {
+        let mut backend = gpu_backend("DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004");
+        let (_, p2) = retained_turn2_ids(&backend);
+        let vocab = backend.vocab_size;
+        let partitions = std::env::var("DS4_FLIP_PARTITIONS")
+            .unwrap_or_else(|_| "4096,4578;4096,4577;4096,4586;4096,4450;4096,4578,4580".into());
+        let run = |backend: &mut DeepSeekV4Backend, boundaries: &[usize]| -> Vec<f32> {
+            let mut session = fresh_session(backend);
+            let mut starts = vec![0];
+            starts.extend_from_slice(boundaries);
+            for (index, &start) in starts.iter().enumerate() {
+                let end = starts.get(index + 1).copied().unwrap_or(p2.len());
+                assert!(
+                    start < end
+                        && end - start
+                            <= qwen_llm::deepseek_v4_metal::DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+                    "chunk {start}..{end} must be nonempty and at most 4096 tokens"
+                );
+                if end == p2.len() {
+                    session
+                        .prefill_tokens(&backend.ctx, &p2[start..end])
+                        .unwrap();
+                } else {
+                    session
+                        .advance_tokens(&backend.ctx, &p2[start..end])
+                        .unwrap();
+                }
+            }
+            let logits = crate::copy_deepseek_v4_logits(&session, vocab, "sweep").unwrap();
+            release_session(backend, session);
+            logits
+        };
+        let reference = run(&mut backend, &[4_096]);
+        for partition in partitions.split(';') {
+            let boundaries: Vec<usize> = partition
+                .split(',')
+                .map(|value| value.trim().parse().unwrap())
+                .collect();
+            let logits = run(&mut backend, &boundaries);
+            let mut order: Vec<usize> = (0..logits.len()).collect();
+            order.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]));
+            let top = order[..3]
+                .iter()
+                .map(|&id| {
+                    format!(
+                        "{:?}={:.3}",
+                        backend.tokenizer.decode(&[id as i32]),
+                        logits[id]
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            eprintln!(
+                "boundaries={partition:<16} kl_vs_cold={:.5} top: {top}",
+                logits_kl(&logits, &reference)
+            );
+        }
+    }
+
+    /// Diagnosis for the retained warm/cold turn-2 flip (PERF-LOG 2026-09-23,
+    /// leverage map #1): the serve probe's exact two-turn chat case under
+    /// every legal native schedule of the turn-2 prompt. Prints each
+    /// schedule's top tokens and greedy continuation, and writes the prompt
+    /// ids and raw last-position logits under `DS4_FLIP_DUMP` (default
+    /// `/tmp/qwen-probe/ds4-flip`) for offline comparison with llama.cpp.
+    #[test]
+    #[ignore = "loads DeepSeek V4 (DSV4_GGUF); GPU; ~5 minutes"]
+    fn gpu_ds4_turn2_schedule_report() {
+        let dump = std::path::PathBuf::from(
+            std::env::var("DS4_FLIP_DUMP").unwrap_or_else(|_| "/tmp/qwen-probe/ds4-flip".into()),
+        );
+        std::fs::create_dir_all(&dump).unwrap();
+        let mut backend = gpu_backend("DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004");
+        let (p1, p2) = retained_turn2_ids(&backend);
+        let completed = p1.len() + 7;
+        let chunk = backend.prefill_chunk_tokens;
+        assert_eq!(
+            chunk, 4_096,
+            "the retained case ran at serve's default chunk; unset QWEN_DSV4_PREFILL_CHUNK_TOKENS"
+        );
+        let vocab = backend.vocab_size;
+        let piece = |backend: &DeepSeekV4Backend, id: usize| {
+            format!("{:?}", backend.tokenizer.decode(&[id as i32]))
+        };
+        let argmax = |logits: &[f32]| {
+            logits
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .unwrap()
+                .0
+        };
+        std::fs::write(
+            dump.join("prompt_ids.json"),
+            serde_json::json!({"p1": p1, "p2": p2, "completed": completed}).to_string(),
+        )
+        .unwrap();
+
+        // Greedy continuation from the session's current logits, then report
+        // and dump. Consumes the session.
+        let finish = |backend: &mut DeepSeekV4Backend,
+                      mut session: DeepSeekV4Session,
+                      label: &str|
+         -> Vec<f32> {
+            let logits = crate::copy_deepseek_v4_logits(&session, vocab, label).unwrap();
+            let bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+            std::fs::write(dump.join(format!("{label}.f32")), bytes).unwrap();
+            let mut order: Vec<usize> = (0..logits.len()).collect();
+            order.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]));
+            let top = order[..8]
+                .iter()
+                .map(|&id| format!("{}={:.3}", piece(backend, id), logits[id]))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut greedy = vec![argmax(&logits)];
+            while greedy.len() < 8 {
+                session
+                    .forward_token(&backend.ctx, *greedy.last().unwrap() as u32)
+                    .unwrap();
+                let next = crate::copy_deepseek_v4_logits(&session, vocab, label).unwrap();
+                greedy.push(argmax(&next));
+            }
+            let text = backend
+                .tokenizer
+                .decode(&greedy.iter().map(|&id| id as i32).collect::<Vec<_>>());
+            eprintln!("{label:<22} top: {top}");
+            eprintln!("{label:<22} greedy: {text:?}");
+            release_session(backend, session);
+            logits
+        };
+
+        // Turn 1 as serve ran it; its prompt-end boundary seeds S1/S2/S4.
+        let mut session = fresh_session(&mut backend);
+        serve_prefill(&backend, &mut session, &p1, chunk);
+        let t1 = crate::copy_deepseek_v4_logits(&session, vocab, "t1").unwrap();
+        let snapshot = session.capture_causal_snapshot().unwrap();
+        release_session(&mut backend, session);
+        let from_prompt_end = |backend: &mut DeepSeekV4Backend| {
+            let mut session = fresh_session(backend);
+            session.restore_causal_snapshot(&snapshot).unwrap();
+            session
+        };
+        eprintln!(
+            "t1 greedy first token {} (history has {})",
+            piece(&backend, argmax(&t1)),
+            piece(&backend, p2[p1.len()] as usize)
+        );
+
+        // S1: serve warm from the prompt-end snapshot (== cold partitioned at
+        // the turn boundary, by the exact-restore test above).
+        let mut session = from_prompt_end(&mut backend);
+        serve_prefill(&backend, &mut session, &p2[p1.len()..], chunk);
+        finish(&mut backend, session, "s1_prompt_end_warm");
+
+        // S2: the live session: turn 1's 7 decoded transitions as singleton
+        // forwards (they must be its greedy tokens), then the rest.
+        let mut session = from_prompt_end(&mut backend);
+        let mut expected = argmax(&t1);
+        for &token in &p2[p1.len()..completed] {
+            assert_eq!(
+                token as usize,
+                expected,
+                "s2: turn 1 decoded {} but history has {}",
+                piece(&backend, expected),
+                piece(&backend, token as usize)
+            );
+            session.forward_token(&backend.ctx, token).unwrap();
+            expected = argmax(&crate::copy_deepseek_v4_logits(&session, vocab, "s2").unwrap());
+        }
+        serve_prefill(&backend, &mut session, &p2[completed..], chunk);
+        finish(&mut backend, session, "s2_live_continuation");
+
+        // S4: the 24-token suffix as singleton forwards.
+        let mut session = from_prompt_end(&mut backend);
+        for &token in &p2[p1.len()..] {
+            session.forward_token(&backend.ctx, token).unwrap();
+        }
+        finish(&mut backend, session, "s4_suffix_singleton");
+
+        // S3/S5/S6: cold at serve's chunk and two smaller legal chunks.
+        for (label, cold_chunk) in [
+            ("s3_cold_4096", chunk),
+            ("s5_cold_1024", 1_024),
+            ("s6_cold_512", 512),
+        ] {
+            let mut session = fresh_session(&mut backend);
+            serve_prefill(&backend, &mut session, &p2, cold_chunk);
+            finish(&mut backend, session, label);
+        }
+
+        // S7: every prompt token as a singleton forward (~3 minutes).
+        let mut session = fresh_session(&mut backend);
+        for &token in &p2 {
+            session.forward_token(&backend.ctx, token).unwrap();
+        }
+        finish(&mut backend, session, "s7_all_singleton");
     }
 
     #[test]

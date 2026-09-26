@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-26 - Daily-Driver Screens: Real Reuse, Restart At 66K, Prefill Parity
+
+Map reassessment (cx) against actual owner usage. The opencode DB shows only
+Qwen3.8-27B-Q8_0 through serve, effort medium, sessions up to ~73K, no
+effort switches.
+
+- **The Sep 14 session reused nothing.** All 16 requests reported 0 cached
+  tokens, and each re-prefilled 12-73K tokens (63-483 s per request, 41
+  minutes in total). That build predates transcript-boundary capture
+  (12373e49, Sep 23), without which thinking turns reuse 0 tokens.
+- **Reuse now, through the real client:** `opencode run --local` with the
+  stock `@ai-sdk/open-responses` provider (isolated data dir, sandbox files),
+  27B Q8, three turns with tool calls, 7 model requests after the title
+  request. Every request after the first matched the previous transcript
+  boundary (12157/12223, 12218/16080, 16075/16188, 16183/16247,
+  16242/17948, 17943/18019). Only new tool output was prefilled: 3.8K
+  tokens in 20.1 s, 1.7K in 8.4 s, small tails in 0.7-1.1 s.
+- **Restart at the owner's depth:** a 66,115-token prompt at effort medium
+  took a 371 s cold prefill.
+  - On SIGTERM, the shutdown flush published the 66,240-token completed
+    boundary (4.5 GB in 6.4 s). The second queued snapshot missed the 10 s
+    budget (`drained=false`).
+  - The server restarted and was ready in 4.1 s. Turn 2 restored 66,240
+    tokens from disk: 2.2 s lookup, 2.4 s restore, 1.0 s suffix prefill,
+    12.3 s wall versus 380 s cold.
+- **Long prefill vs llama.cpp** (27B Q8 pp512 at depth 0/32K/64K, tok/s):
+  qwen 257.5/178.2/141.5; llama.cpp best of ub512/ub2048
+  256.2/180.2/143.7. At parity; there is no engine gap to chase against
+  llama.cpp. The depth cost is prefill attention (+1.64 s per 512 tokens at
+  64K), which runs at about 8 TFLOPS in both engines.
+- **Continuity risk found:** writes run at about 0.7-0.9 GB/s and the
+  shutdown budget is 10 s. That caps graceful-restart continuity at about
+  7-9 GB of snapshots, or roughly 100-130K tokens for 27B Q8. The overnight
+  session reached 133K; its snapshot (~9 GB) would not finish flushing, and
+  the restart would cold-prefill for about 10 minutes. The write policy has
+  no idle publish (`spill_on_evict_or_expire+shutdown_flush`).
+
 ## 2026-09-26 - K2 Decode Attention Split Across Blocks: 8.8 -> 57 tok/s At 8K
 
 Leverage map #4.

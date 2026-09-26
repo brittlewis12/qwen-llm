@@ -34,9 +34,33 @@ Its disk-only native FP8 Engram and exact decoder dependency-suffix code are now
 inspectable. Compare total prefill plus residency transitions and following
 decode; the screenshot's 800 tok/s excludes the reported eight-second switch.
 
+## Leverage Map — 2026-09-26 (after the daily-driver screens)
+
+Active force-ranked queue; supersedes the 2026-09-25 map below. Items #1-#4
+there are closed. Re-ranked against actual owner usage (opencode DB:
+Qwen3.8-27B-Q8_0 through serve only, effort medium, sessions up to ~73K
+tokens, overnight to 133K) and same-day screens (PERF-LOG 2026-09-26):
+
+- Reuse works through the real client.
+- Restart at 66K restores from disk in 2.4 s.
+- Decode leads llama.cpp by 1.07-1.59x.
+- Long prefill is at parity with llama.cpp.
+- Families the owner does not use are parked, in their prior order.
+
+| # | Item | Owner cost | Evidence / mechanism | Cheapest decisive next step | Effort |
+|---|---|---|---|---|---|
+| 1 | Restart continuity above ~100K (27B Q8) | restart cold-prefills ~10 min at 133K | shutdown flush budget 10 s (`serve/durable.rs` `SHUTDOWN_FLUSH_BUDGET`) at 0.7-0.9 GB/s writes publishes ~7-9 GB; the 66K test already left the second snapshot unwritten; no idle publish (`spill_on_evict_or_expire+shutdown_flush`) | design jam: idle write-behind of the newest completed boundary vs a larger budget vs faster writes (locate write throughput: blake3/codec vs disk) | ½ day screen, 1-2 days fix |
+| 2 | Prefill attention at depth (dense Qwen) | new tool output at 16-73K depth: pp512 257 → 141 t/s from 0 → 64K; a 47K-token jump took ~7 min | parity with llama.cpp; attention share ~8 TFLOPS | time the prefill attention kernel alone at 32K/64K against its FLOP count and a mat-mat reference; decide whether a tiled flash-prefill is worth it | ½ day screen, 3-5 days fix |
+| 3 | DFlash on owner-eligible requests | early turns (≤16K) decode serially at ~16 t/s unless a drafter is loaded | speculation off above 16,384 (`DFLASH_OFF_CTX_DEFAULT`); unknown whether the owner's launch loads a drafter | check the launch; one retained opencode-shaped request serial vs DFlash, full request wall | 2-4 h screen |
+| 4 | AI SDK retention of empty reasoning items | possible replay drift for immediately closed thinking turns | emitted since c7b49279; provider capture covers only nonempty reasoning | one provider capture with an empty item through the next request | 1-2 h |
+| 5 | Flash-Next selected-range prefill and depth decode (parked: unused) | 0.75-0.88x of llama.cpp | 2048 + 3 + 2045 plan; +275 ms shoulder | time the three commands separately | ½ day, fix 2-5 days |
+| 6 | DS4 short-prompt prefill (parked) | 0.48x at pp512 | CPU routing below 2048 | route census on one 512-token prompt | ½ day, 2-4 days |
+| 7 | Flash-Next durable tier (parked) | restart discards history | RAM cache only | codec round trip | 2-4 days |
+| 8 | Muse prefill (parked) | 0.85x | 128-token chunks | early/late chunk attribution | ½ day screen |
+
 ## Leverage Map — 2026-09-25 (after the cross-family baseline)
 
-Active force-ranked queue. Supersedes the ordering in the 2026-09-07 Qwen
+Superseded by the 2026-09-26 map above. Supersedes the ordering in the 2026-09-07 Qwen
 restored-request map and the 2026-09-09 Muse priority (kept below as history).
 Inputs: the cross-family baseline
 (`docs/bench/2026-09-25-1759-families-family/FINDINGS.md`), two same-day

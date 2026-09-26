@@ -929,10 +929,19 @@ because client model-pickers probe it).
     `high` and `max` insert their effort prompt after BOS, so switching to or
     from them still changes the head.
   - Not guaranteed: legacy or client-omitted reasoning (renders as chat), a
-    turn cut off inside its reasoning (replays closed), a reasoning-only
-    response followed by a user message (admission currently refuses it), and
-    a thinking turn that ends immediately after the opened `<think>` (no
-    items, so the replay has consecutive user turns, which DS4 refuses).
+    turn cut off inside its reasoning (replays closed), and a thinking turn
+    that ends immediately after the opened `<think>` (no items, so the replay
+    has consecutive user turns, which DS4 refuses).
+- **A reasoning-only turn replays (Qwen, Flash-Next, DS4, Muse).** A thinking turn cut off
+  by the token limit returns only an incomplete reasoning item. Replayed
+  before the next user message, it is admitted as an assistant turn with
+  empty visible text and its reasoning closed (Qwen
+  `<think>\n{reasoning}\n</think>\n\n`, DS4 `<think>{reasoning}</think>`), a
+  canonical completion rather than the unclosed bytes. Before 2026-09-26
+  admission refused it, so the session could not continue. A trailing
+  reasoning item, or one before a `function_call_output`, is still refused.
+  K2 has its own parsers and still refuses both incomplete items and
+  reasoning before a user message.
   - Pinned by `ds4_history_replays_as_generated_across_tier_switches` (tier
     chains through the partition, response items, admission and renderer)
     and `reasoning_item_presence_is_history_provenance`.

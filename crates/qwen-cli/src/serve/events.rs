@@ -1421,6 +1421,89 @@ mod tests {
         assert!(next.contains("<｜Assistant｜></think>Answer."), "{next}");
     }
 
+    /// A thinking turn cut off by the token limit returns only an incomplete
+    /// reasoning item; the conversation continues by replaying it before the
+    /// next user message. Qwen and DS4 render it as an assistant turn whose
+    /// reasoning closes (canonical completion, not the unclosed bytes).
+    #[test]
+    fn reasoning_only_turn_replays_before_the_next_user_message() {
+        let generate = |protocol: OutputProtocol, request: &ServeRequest| {
+            let mut partition = OutputPartition::new(protocol);
+            let mut events = Vec::new();
+            partition.push(b"plan so far", &mut events);
+            partition
+                .finish(GenerationEnd::TokenLimit, &mut events)
+                .unwrap();
+            let response = build_response_object(
+                request,
+                "resp_cut".into(),
+                1_755_500_000,
+                &events,
+                StopReason::TokenLimit,
+                Usage::default(),
+                None,
+            )
+            .unwrap();
+            let items = response["output"].as_array().unwrap().clone();
+            assert_eq!(items.len(), 1, "{items:?}");
+            assert_eq!(items[0]["type"], "reasoning");
+            assert_eq!(items[0]["status"], "incomplete");
+            let mut input = vec![json!({"role": "user", "content": "One"})];
+            input.extend(items);
+            input.push(json!({"role": "user", "content": "Two"}));
+            Value::Array(input)
+        };
+        let qwen =
+            crate::serve::items::parse_request(&json!({"model": "m", "input": "One"})).unwrap();
+        let input = generate(
+            OutputProtocol::Qwen {
+                preopened_reasoning: true,
+                parse_tools: true,
+                tool_grammar: ToolGrammar::QwenXml,
+            },
+            &qwen,
+        );
+        let replay =
+            crate::serve::items::parse_request(&json!({"model": "m", "input": input})).unwrap();
+        let bound = crate::open_responses::bind_qwen_request(
+            &replay,
+            crate::open_responses::items::QwenTemplate::Qwen36,
+            true,
+        )
+        .unwrap();
+        let prompt = crate::open_responses::render::render_qwen_serve_prompt(&bound);
+        assert!(
+            prompt.contains(
+                "<|im_start|>assistant\n<think>\nplan so far\n</think>\n\n<|im_end|>\n<|im_start|>user\nTwo"
+            ),
+            "{prompt}"
+        );
+
+        let ds4 = crate::serve::items::parse_request(
+            &json!({"model": "ds", "input": "One", "reasoning": {"effort": "low"}}),
+        )
+        .unwrap();
+        let input = generate(
+            OutputProtocol::Qwen {
+                preopened_reasoning: true,
+                parse_tools: true,
+                tool_grammar: ToolGrammar::DeepSeekDsml,
+            },
+            &ds4,
+        );
+        let replay = crate::serve::items::parse_request(
+            &json!({"model": "ds", "input": input, "reasoning": {"effort": "low"}}),
+        )
+        .unwrap();
+        let prompt = crate::serve::render_ds4::render_deepseek_v4_serve_prompt(&replay).unwrap();
+        assert!(
+            prompt.contains(
+                "<｜Assistant｜><think>plan so far</think><｜end▁of▁sentence｜><｜User｜>Two"
+            ),
+            "{prompt}"
+        );
+    }
+
     #[test]
     fn request_echo_and_no_tools_constraint_are_truthful() {
         let request = crate::serve::items::parse_request(&json!({

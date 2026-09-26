@@ -780,13 +780,16 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
                         });
                     }
                     "user" => {
-                        if pending_reasoning.is_some() {
-                            return Err(ServeError::invalid_request(
-                                Some("input"),
-                                format!(
-                                    "item {index}: reasoning item must immediately precede its assistant message"
-                                ),
-                            ));
+                        // A reasoning item directly before a user message is
+                        // an assistant turn that produced only reasoning (a
+                        // thinking turn cut off by the token limit replays
+                        // this way): admit it with empty visible text.
+                        if let Some(reasoning) = pending_reasoning.take() {
+                            request.model_request.turns.push(Turn::Assistant {
+                                reasoning: Some(reasoning),
+                                visible: String::new(),
+                                calls: Vec::new(),
+                            });
                         }
                         head = false;
                         request.model_request.turns.push(Turn::User(text));
@@ -1410,13 +1413,22 @@ mod tests {
 
     #[test]
     fn sequence_violations_fail_closed() {
-        let error = parse(json!({"model": "m", "input": [
+        // A reasoning-only assistant turn (e.g. cut off by the token limit)
+        // replays before the next user message.
+        let request = parse(json!({"model": "m", "input": [
             {"role": "user", "content": "q"},
             {"type": "reasoning", "content": "r"},
             {"role": "user", "content": "q2"},
         ]}))
-        .unwrap_err();
-        assert!(error.message.contains("immediately precede"));
+        .unwrap();
+        assert_eq!(
+            request.model_request.turns[1],
+            Turn::Assistant {
+                reasoning: Some("r".into()),
+                visible: String::new(),
+                calls: Vec::new(),
+            }
+        );
 
         let error = parse(json!({"model": "m", "input": [
             {"role": "user", "content": "q"},

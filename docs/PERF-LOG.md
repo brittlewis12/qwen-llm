@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-26 - A Reasoning-Only Turn Can Be Continued
+
+- **Before:** a thinking turn cut off by the token limit returns only an
+  incomplete reasoning item. Replaying it before the next user message got a
+  400 ("reasoning item must immediately precede its assistant message") on
+  every family using the shared parser, so the session could not continue.
+  K2's own parsers still refuse it.
+- **Now:** a reasoning item directly before a user message is admitted as an
+  assistant turn with empty visible text. Its reasoning renders closed: Qwen
+  `<think>\n…\n</think>\n\n`, DS4 `<think>…</think>`. This is a canonical
+  completion, not the unclosed bytes. For Qwen, the reasoning tokens
+  consumed before the cut can still prefix-match; DS4 skips capturing
+  truncated-inside-reasoning turns, which forfeits that reuse (a performance
+  limitation, not a correctness one). Trailing reasoning, and reasoning
+  before a `function_call_output`, are still refused.
+- **Evidence:** `reasoning_only_turn_replays_before_the_next_user_message`
+  runs a real token-limited partition and response for Qwen3.6 and DS4
+  `low`, then admission and rendering. It asserts the exact rendered
+  assistant turn.
+
 ## 2026-09-25 - DS4 History Renders As Generated; `--template-style house|upstream`
 
 Leverage map #2, DS4 half. Owner principle: serve does not rewrite past turns

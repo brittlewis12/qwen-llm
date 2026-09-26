@@ -6,6 +6,53 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-26 - K2 Decode Attention Split Across Blocks: 8.8 -> 57 tok/s At 8K
+
+Leverage map #4.
+- **Before:** decode attention ran one SIMD-group per query head, scanning
+  every cached position serially (`kernel_k2_attn_online_blocked_f16kv_h128`):
+  +12.1 us per cached position, 113 ms per token at 8K.
+- **Now:** production F16 K2 decode with more than 256 visible positions
+  runs two kernels:
+  - `kernel_k2_attn_split_partial_f16kv_h128`: one SIMD-group per (query
+    head, 256-position block), each running the blocked kernel's exact
+    per-block recurrence into 132-float records.
+  - `kernel_k2_attn_split_reduce_h128`: merges the records in block order
+    with the blocked kernel's exact merge.
+
+  Scratch is session-owned and priced in `SessionMemoryPlan`: one record per
+  head per block, 8.25 MiB at 128K; compact Q8_0 caches get a one-record
+  placeholder and keep their serial kernel. Histories of at most 256
+  positions keep the single-block kernel. The serial blocked kernel remains
+  as the test control.
+- **Evidence:**
+  - The GPU primitive corpus runs with the Metal debug layer. Split output
+    is raw-bit equal to the serial blocked kernel at 255-257, 511-513, 1000,
+    4096, 7168 and 8192 positions, with adversarial gains and one
+    NaN-poisoned scratch reused from 8192 back down to 257. The F64 bound
+    (2e-5) is unchanged.
+  - K2 runtime GPU tests pass on Q8_0 (17) and Q4_K_M (general prefill and
+    checkpoints, 6), as do the serve backend tests (borrowed backend,
+    verified chat, tools round trip). The guarded-capacity boundary test
+    needs its external evidence directory and was not run.
+  - `qwen run`, K2 Q4_K_M, a ~1.8K-token prompt, greedy 48 tokens: output
+    byte-identical between the old and new binaries.
+  - `qwen-bench suite` K2 Q4_K_M tg32, ms per token:
+
+    | Depth | 0 | 1K | 2K | 4K | 8K |
+    |---|---:|---:|---:|---:|---:|
+    | before | 13.5 | 25.8 | 38.3 | 63.5 | 113.2 |
+    | after | 13.7 | 16.5 | 16.6 | 16.8 | 17.4 |
+
+    The depth slope fell from about 12 ms to about 0.14 ms per 1K
+    positions.
+- **Deferred (Should/Could):**
+  - four sibling heads per threadgroup;
+  - smaller blocks for the latency-bound 1K step (+2.8 ms), which needs
+    separate numerical qualification;
+  - the same split for the compact Q8_0 kernel, which is a different
+    arithmetic grouping.
+
 ## 2026-09-26 - Qwen Long-Session Decode: Already Fixed, Near The Bandwidth Floor
 
 Leverage map #3. The evidence was SERVE.md F7: an overnight session on

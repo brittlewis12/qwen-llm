@@ -64,7 +64,9 @@ fn gpu_compact_cache_preserves_transactions_causality_and_lens() {
     assert_eq!(serial.buffers.cache.n_bytes(), 4 * 78336);
     assert_eq!(
         model.plan.session.buffer_bytes().iter().sum::<u64>(),
-        4 * 78336 + 1_240_068
+        // Activations plus the one-record split placeholder (compact caches
+        // keep the serial kernel).
+        4 * 78336 + 1_240_068 + crate::k2_horizon_metal::SPLIT_RECORD_FLOATS * 4
     );
     poison_empty(&serial);
     let empty = bytes(&serial);

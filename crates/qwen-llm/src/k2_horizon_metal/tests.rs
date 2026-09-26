@@ -168,6 +168,10 @@ fn host_online_vector_alignment_is_stricter_than_scalar_alignment() {
     }
 }
 
+/// Also pins the split decode path (`encode_split_attention`): raw-bit equal
+/// to the serial blocked kernel at every length, including block boundaries,
+/// with one NaN-poisoned partial scratch reused across lengths (a shorter
+/// history after a longer one must not read stale records).
 #[test]
 #[ignore = "GPU primitive correctness; production lease and real wired-memory gate"]
 fn gpu_online_attention_matches_f64_and_materialized_with_future_poison() {
@@ -175,17 +179,42 @@ fn gpu_online_attention_matches_f64_and_materialized_with_future_poison() {
     let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
     let ctx = MetalContext::new().unwrap();
     let prefix = 16u64;
+    let partial_floats = split_partial_floats(8192);
+    let partial_price = ctx
+        .price_shared_buffer_upper(partial_floats * 4)
+        .unwrap()
+        .priced_upper_bytes;
+    let _partial_transaction = ctx.begin_allocation_transaction();
+    let admission = crate::metal::evaluate_metal_memory_admission(
+        partial_price,
+        256 * 1024 * 1024,
+        ctx.memory_signals(),
+        true,
+    );
+    assert!(admission.admitted, "{}", admission.reason.as_str());
+    let partials = MetalTensor::from_bytes(
+        &ctx,
+        bytemuck::cast_slice(&vec![f32::NAN; partial_floats as usize]),
+        vec![partial_floats],
+        GgmlType::F32,
+    )
+    .unwrap();
     for (count, gain) in [
         (1, 1.),
         (32, 1.),
         (33, 1.),
         (128, 1.),
+        (255, 1.),
         (256, 1.),
         (257, 1.),
         (257, 0.),
         (257, 16.),
+        (511, 1.),
         (512, 1.),
         (512, -1.),
+        (513, 1.),
+        (1000, 1.),
+        (4096, 1.),
         (7168, 0.),
         (7168, 1.),
         (7168, 16.),
@@ -196,11 +225,12 @@ fn gpu_online_attention_matches_f64_and_materialized_with_future_poison() {
         (8192, 1.),
         (8192, 16.),
         (8192, -1.),
+        (257, 1.),
     ] {
         let plan = request(count as u32 + 3, 524288 - count as u32 - 3);
         let arena_elements = plan.arena_bytes() / 2;
         let buffer_bytes = (arena_elements + prefix + 16) * 2;
-        let price = [buffer_bytes, 4096 * 4, 4096 * 4, 4096 * 4]
+        let price = [buffer_bytes, 4096 * 4, 4096 * 4, 4096 * 4, 4096 * 4]
             .map(|bytes| {
                 ctx.price_shared_buffer_upper(bytes)
                     .unwrap()
@@ -260,11 +290,13 @@ fn gpu_online_attention_matches_f64_and_materialized_with_future_poison() {
         let query = tensor(&ctx, &q, &[128, 32]);
         let online = MetalTensor::zeros_f32(&ctx, vec![128, 32]).unwrap();
         let materialized = MetalTensor::zeros_f32(&ctx, vec![128, 32]).unwrap();
+        let split = MetalTensor::zeros_f32(&ctx, vec![128, 32]).unwrap();
         assert!(ctx.current_allocated_size().saturating_sub(before) <= price);
         let append = plan.append(0, plan.start_position(), count as u32).unwrap();
         let token = append.token(count as u32 - 1).unwrap();
         execute(&ctx, |encoder| {
             encode_online_attention(&ctx, encoder, &token, 35, &arena, &query, &online)?;
+            encode_split_attention(&ctx, encoder, &token, 35, &arena, &query, &split, &partials)?;
             let control =
                 encode_short_attention(&ctx, encoder, &token, 35, &arena, &query, &materialized);
             if count <= 7168 {
@@ -276,6 +308,12 @@ fn gpu_online_attention_matches_f64_and_materialized_with_future_poison() {
         });
         let actual = read(&online);
         let control = read(&materialized);
+        let split_bits = read(&split).iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        let online_bits = actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        assert_eq!(
+            split_bits, online_bits,
+            "positions={count} gain={gain}: split differs from the blocked kernel"
+        );
         let mut max_error = 0.0_f64;
         let mut max_control = 0.0_f64;
         for head in 0..32 {

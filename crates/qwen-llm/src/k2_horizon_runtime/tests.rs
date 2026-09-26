@@ -25,7 +25,7 @@ fn application_default_is_online_without_capacity_or_cache_layout_change() {
     assert_eq!(plan.cache_bytes, 147456 * 256);
     assert_eq!(
         plan.buffer_bytes().iter().sum::<u64>(),
-        147456 * 256 + 1_240_068
+        147456 * 256 + 1_240_068 + crate::k2_horizon_metal::split_partial_floats(256) * 4
     );
 }
 
@@ -34,13 +34,16 @@ fn compact_session_replaces_the_arena_without_hidden_float_history() {
     for capacity in [1, 32, 256, 7168] {
         let f16 = SessionMemoryPlan::new(&config(), capacity, K2KvStorage::F16).unwrap();
         let q8 = SessionMemoryPlan::new(&config(), capacity, K2KvStorage::Q8_0).unwrap();
-        assert_eq!(q8.specs().len(), 13);
+        assert_eq!(q8.specs().len(), 14);
         assert_eq!(&q8.specs()[..12], &f16.specs()[..12]);
         assert_eq!(q8.cache_bytes, 78336 * u64::from(capacity));
         assert_eq!(q8.specs()[12], (GgmlType::I8, vec![q8.cache_bytes]));
+        // Compact caches keep the serial kernel: one placeholder record.
+        let record = crate::k2_horizon_metal::SPLIT_RECORD_FLOATS;
+        assert_eq!(q8.specs()[13], (GgmlType::F32, vec![record]));
         assert_eq!(
             q8.buffer_bytes().iter().sum::<u64>(),
-            q8.cache_bytes + 1_240_068
+            q8.cache_bytes + 1_240_068 + record * 4
         );
         assert_eq!(
             f16.cache_bytes - q8.cache_bytes,
@@ -53,16 +56,20 @@ fn compact_session_replaces_the_arena_without_hidden_float_history() {
 fn session_memory_is_capacity_shaped_with_one_logits_row() {
     for capacity in [1, 17, 7168, 7169, 8192, 524288] {
         let plan = SessionMemoryPlan::new(&config(), capacity, K2KvStorage::F16).unwrap();
-        assert_eq!(plan.specs().len(), 13);
+        assert_eq!(plan.specs().len(), 14);
+        // One 132-float record per head per 256-position block.
+        let partials = crate::k2_horizon_metal::split_partial_floats(capacity);
+        assert_eq!(partials, 32 * 132 * u64::from(capacity.div_ceil(256)));
         assert_eq!(
             plan.buffer_bytes().iter().sum::<u64>(),
-            147456 * u64::from(capacity) + 1_240_068
+            147456 * u64::from(capacity) + 1_240_068 + partials * 4
         );
         assert_eq!(plan.specs()[11], (GgmlType::F32, vec![250624]));
         assert_eq!(
             plan.specs()[12],
             (GgmlType::F16, vec![plan.cache_bytes / 2])
         );
+        assert_eq!(plan.specs()[13], (GgmlType::F32, vec![partials]));
     }
     assert!(SessionMemoryPlan::new(&config(), 524289, K2KvStorage::F16).is_err());
 }
@@ -278,7 +285,8 @@ fn inspect_downloaded_runtime_plan_without_metal() {
     assert!(physical < plan.weight_payload_bytes() + 1024 * 1024);
     assert_eq!(
         plan.session_buffer_bytes().iter().sum::<u64>(),
-        32 * 147456 + 1_240_068
+        // Activations plus one split-attention record block per head.
+        32 * 147456 + 1_240_068 + crate::k2_horizon_metal::split_partial_floats(32) * 4
     );
     plan.revalidate_source().unwrap();
 }

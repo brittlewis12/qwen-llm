@@ -147,22 +147,24 @@ fn encode_serial_attention(
     b: &SessionBuffers,
     layer: u32,
 ) -> Result<()> {
-    let encode_attention = match attention {
-        #[cfg(test)]
-        AttentionBackend::Materialized => crate::k2_horizon_metal::encode_short_attention,
-        AttentionBackend::Online => encode_online_attention,
-    };
     for (index, token) in tokens.iter().enumerate() {
         let row = b.rows(index, 1)?;
-        let (store, attend) = match token.storage() {
-            K2KvStorage::F16 => (encode_store_kv as StoreFn, encode_attention as AttendFn),
-            K2KvStorage::Q8_0 => (
-                crate::k2_horizon_metal::compact::encode_store as StoreFn,
-                crate::k2_horizon_metal::compact::encode_attention as AttendFn,
-            ),
+        let store = match token.storage() {
+            K2KvStorage::F16 => encode_store_kv as StoreFn,
+            K2KvStorage::Q8_0 => crate::k2_horizon_metal::compact::encode_store as StoreFn,
         };
         store(ctx, enc, token, layer, &b.cache, &row.key, &row.value)?;
-        attend(ctx, enc, token, layer, &b.cache, &row.query, &row.attention)?;
+        encode_row_attention(
+            ctx,
+            enc,
+            attention,
+            token,
+            layer,
+            &b.cache,
+            &row.query,
+            &row.attention,
+            &b.attention_partials,
+        )?;
     }
     Ok(())
 }
@@ -176,7 +178,6 @@ type StoreFn = fn(
     &MetalTensor,
     &MetalTensor,
 ) -> std::result::Result<(), MetalError>;
-type AttendFn = StoreFn;
 
 #[cfg(test)]
 mod tests;

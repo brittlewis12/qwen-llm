@@ -59,6 +59,7 @@ fn gpu_unstaged_zero_bytes_ownership_and_partial_failure_cleanup() {
     let plan = SessionMemoryPlan {
         cache_bytes: 147456,
         storage: K2KvStorage::F16,
+        attention_partial_floats: crate::k2_horizon_metal::split_partial_floats(1),
     };
     let before = ctx.current_allocated_size();
     let mut constructed = 0;
@@ -102,6 +103,7 @@ fn gpu_k2_session_allocation_high_water_probe() {
     let plan = SessionMemoryPlan {
         cache_bytes: 147456 * capacity,
         storage: K2KvStorage::F16,
+        attention_partial_floats: crate::k2_horizon_metal::split_partial_floats(capacity as u32),
     };
     let price = price_buffers(&ctx, &plan.buffer_bytes()).unwrap();
     let _transaction = ctx.begin_allocation_transaction();

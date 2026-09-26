@@ -386,40 +386,153 @@ pub fn encode_online_attention(
 ) -> Result<()> {
     let (key, value) = attention_views(enc, token, layer, arena, query, out)?;
     online_alignment(query.offset, key.offset, value.offset, out.offset)?;
-    let pipeline = ctx.pipeline(if token.visible_positions() <= 256 {
+    let pipeline = ctx.pipeline(if token.visible_positions() <= SPLIT_BLOCK_POSITIONS {
         "kernel_k2_attn_online_f16kv_h128"
     } else {
         "kernel_k2_attn_online_blocked_f16kv_h128"
     })?;
-    if pipeline.threadExecutionWidth() != 32 || pipeline.maxTotalThreadsPerThreadgroup() < 32 {
-        return Err(invalid("online attention requires a 32-thread SIMDgroup"));
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Args {
-        n_q_heads: u32,
-        n_kv_heads: u32,
-        head_dim: u32,
-        n_pos: u32,
-        kv_stride: u32,
-        scale: f32,
-    }
+    simdgroup_pipeline(&pipeline)?;
     enc.set_pipeline(&pipeline);
-    enc.set_bytes(
-        0,
-        &Args {
-            n_q_heads: 32,
-            n_kv_heads: 8,
-            head_dim: 128,
-            n_pos: token.visible_positions(),
-            kv_stride: 1024,
-            scale: 128.0_f32.sqrt().recip(),
-        },
-    );
+    enc.set_bytes(0, &OnlineArgs::new(token.visible_positions()));
     enc.set_tensor(1, query);
     enc.set_tensor(2, &key);
     enc.set_tensor(3, &value);
     enc.set_tensor(4, out);
+    enc.dispatch(
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct OnlineArgs {
+    n_q_heads: u32,
+    n_kv_heads: u32,
+    head_dim: u32,
+    n_pos: u32,
+    kv_stride: u32,
+    scale: f32,
+}
+
+impl OnlineArgs {
+    fn new(n_pos: u32) -> Self {
+        Self {
+            n_q_heads: 32,
+            n_kv_heads: 8,
+            head_dim: 128,
+            n_pos,
+            kv_stride: 1024,
+            scale: 128.0_f32.sqrt().recip(),
+        }
+    }
+}
+
+fn simdgroup_pipeline(
+    pipeline: &objc2::runtime::ProtocolObject<dyn MTLComputePipelineState>,
+) -> Result<()> {
+    if pipeline.threadExecutionWidth() != 32 || pipeline.maxTotalThreadsPerThreadgroup() < 32 {
+        return Err(invalid("online attention requires a 32-thread SIMDgroup"));
+    }
+    Ok(())
+}
+
+/// Positions per online-attention block (the blocked kernel's summary size).
+pub(crate) const SPLIT_BLOCK_POSITIONS: u32 = 256;
+/// Floats per split-attention partial record: the 32-lane float4 accumulator,
+/// then maximum and denominator, padded so every record is 16-byte aligned.
+pub(crate) const SPLIT_RECORD_FLOATS: u64 = 132;
+
+/// Partial-record floats a session of `capacity` positions needs (all 32
+/// query heads, one record per 256-position block).
+pub(crate) fn split_partial_floats(capacity: u32) -> u64 {
+    32 * SPLIT_RECORD_FLOATS * u64::from(capacity.div_ceil(SPLIT_BLOCK_POSITIONS).max(1))
+}
+
+/// Decode attention with the blocked kernel's 256-position blocks run in
+/// parallel: one SIMD-group per (query head, block) runs that kernel's exact
+/// per-block recurrence into `partials`, then one SIMD-group per head merges
+/// the block summaries in block order with its exact merge. Same arithmetic
+/// as `encode_online_attention`, bitwise on this device (pinned by
+/// `split_attention_matches_blocked_bitwise`); a single-block history uses
+/// the single-block kernel directly.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_split_attention(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    token: &TokenPlan<'_>,
+    layer: u32,
+    arena: &MetalTensor,
+    query: &MetalTensor,
+    out: &MetalTensor,
+    partials: &MetalTensor,
+) -> Result<()> {
+    let n_pos = token.visible_positions();
+    if n_pos <= SPLIT_BLOCK_POSITIONS {
+        return encode_online_attention(ctx, enc, token, layer, arena, query, out);
+    }
+    let (key, value) = attention_views(enc, token, layer, arena, query, out)?;
+    online_alignment(query.offset, key.offset, value.offset, out.offset)?;
+    let blocks = n_pos.div_ceil(SPLIT_BLOCK_POSITIONS);
+    let needed = 32 * SPLIT_RECORD_FLOATS * u64::from(blocks);
+    View::from(partials).check(&partials.shape, GgmlType::F32, true)?;
+    if partials.shape.len() != 1
+        || partials.n_elements() < needed
+        || !partials.offset.is_multiple_of(16)
+    {
+        return Err(invalid(
+            "split attention partials are smaller than the history or misaligned",
+        ));
+    }
+    let used = partials.view_subrange(0, vec![needed]);
+    let records = View::from(&used).check(&[needed], GgmlType::F32, true)?;
+    disjoint(&records, &arena_view(arena, token, false)?)?;
+    disjoint(
+        &records,
+        &View::from(query).check(&[128, 32], GgmlType::F32, false)?,
+    )?;
+    disjoint(
+        &records,
+        &View::from(out).check(&[128, 32], GgmlType::F32, true)?,
+    )?;
+    let partial = ctx.pipeline("kernel_k2_attn_split_partial_f16kv_h128")?;
+    let reduce = ctx.pipeline("kernel_k2_attn_split_reduce_h128")?;
+    simdgroup_pipeline(&partial)?;
+    simdgroup_pipeline(&reduce)?;
+    let args = OnlineArgs::new(n_pos);
+    enc.note_write(&used);
+    enc.set_pipeline(&partial);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, query);
+    enc.set_tensor(2, &key);
+    enc.set_tensor(3, &value);
+    enc.set_tensor(4, &used);
+    enc.dispatch(
+        MTLSize {
+            width: 32,
+            height: blocks as usize,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    enc.note_read(&used);
+    enc.set_pipeline(&reduce);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, &used);
+    enc.set_tensor(2, out);
     enc.dispatch(
         MTLSize {
             width: 32,

@@ -447,3 +447,80 @@ kernel void kernel_k2_attn_online_blocked_f16kv_h128(
     }
     ((device float4 *)(output + (ulong)head * 128u))[lane] = total_accumulator / total_denominator;
 }
+
+// Split decode for the blocked kernel above: the same 256-row blocks run in
+// parallel, one SIMD-group per (query head, block), each with exactly the
+// blocked kernel's per-block recurrence, and the reduce kernel merges their
+// summaries in block order with exactly its merge. Records are 132 floats:
+// the accumulator (32 lanes x float4) first, then maximum and denominator at
+// 128 and 129, keeping every record 16-byte aligned.
+constant constexpr uint K2_SPLIT_BLOCK = 256u;
+constant constexpr uint K2_SPLIT_RECORD = 132u;
+
+[[max_total_threads_per_threadgroup(32)]]
+kernel void kernel_k2_attn_split_partial_f16kv_h128(
+        constant attn_decode_args & args [[buffer(0)]],
+        device const float * query [[buffer(1)]],
+        device const half * keys [[buffer(2)]],
+        device const half * values [[buffer(3)]],
+        device float * partials [[buffer(4)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    const uint head = group.x;
+    const uint block = group.y;
+    const uint n_blocks = (args.n_pos + K2_SPLIT_BLOCK - 1u) / K2_SPLIT_BLOCK;
+    if (head >= 32u || block >= n_blocks) return;
+    const ulong channel = (ulong)(head / 4u) * 128u + (ulong)lane * 4u;
+    const float4 q = ((device const float4 *)(query + (ulong)head * 128u))[lane];
+    const uint start = block * K2_SPLIT_BLOCK;
+    const uint end = start + min(args.n_pos - start, K2_SPLIT_BLOCK);
+    ulong offset = (ulong)start * 1024u + channel;
+    float maximum = simd_sum(dot(q, float4(*((device const half4 *)(keys + offset))))) * args.scale;
+    float denominator = 1.0f;
+    float4 accumulator = float4(*((device const half4 *)(values + offset)));
+    for (uint position = start + 1u; position < end; ++position) {
+        offset = (ulong)position * 1024u + channel;
+        const float score = simd_sum(dot(q, float4(*((device const half4 *)(keys + offset))))) * args.scale;
+        const float next_maximum = max(maximum, score);
+        const float previous_weight = exp(maximum - next_maximum);
+        const float current_weight = exp(score - next_maximum);
+        accumulator = accumulator * previous_weight
+            + float4(*((device const half4 *)(values + offset))) * current_weight;
+        denominator = denominator * previous_weight + current_weight;
+        maximum = next_maximum;
+    }
+    device float * record = partials + ((ulong)head * n_blocks + block) * K2_SPLIT_RECORD;
+    ((device float4 *)record)[lane] = accumulator;
+    if (lane == 0) {
+        record[128] = maximum;
+        record[129] = denominator;
+    }
+}
+
+[[max_total_threads_per_threadgroup(32)]]
+kernel void kernel_k2_attn_split_reduce_h128(
+        constant attn_decode_args & args [[buffer(0)]],
+        device const float * partials [[buffer(1)]],
+        device float * output [[buffer(2)]],
+        uint head [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    if (head >= 32u || args.n_pos == 0u) return;
+    const uint n_blocks = (args.n_pos + K2_SPLIT_BLOCK - 1u) / K2_SPLIT_BLOCK;
+    device const float * base = partials + (ulong)head * n_blocks * K2_SPLIT_RECORD;
+    float total_maximum = base[128];
+    float total_denominator = base[129];
+    float4 total_accumulator = ((device const float4 *)base)[lane];
+    for (uint block = 1u; block < n_blocks; ++block) {
+        device const float * record = base + (ulong)block * K2_SPLIT_RECORD;
+        const float maximum = record[128];
+        const float denominator = record[129];
+        const float4 accumulator = ((device const float4 *)record)[lane];
+        const float merged_maximum = max(total_maximum, maximum);
+        const float previous_weight = exp(total_maximum - merged_maximum);
+        const float current_weight = exp(maximum - merged_maximum);
+        total_accumulator = total_accumulator * previous_weight + accumulator * current_weight;
+        total_denominator = total_denominator * previous_weight + denominator * current_weight;
+        total_maximum = merged_maximum;
+    }
+    ((device float4 *)(output + (ulong)head * 128u))[lane] = total_accumulator / total_denominator;
+}

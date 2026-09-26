@@ -12,9 +12,7 @@
 
 use crate::gguf::{GgufError, GgufFile};
 use crate::k2_horizon::{K2HorizonConfig, K2HorizonError, K2KvStorage};
-use crate::k2_horizon_metal::{
-    encode_full_rope, encode_grouped_norm, encode_online_attention, encode_store_kv,
-};
+use crate::k2_horizon_metal::{encode_full_rope, encode_grouped_norm, encode_store_kv};
 use crate::k2_horizon_plan::{K2ShortContextPlan, PlanError, TokenPlan};
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
@@ -448,6 +446,39 @@ impl K2Session<'_, '_> {
     }
 }
 
+/// Decode attention for one stored row: F16 caches use the split online
+/// kernels (same arithmetic as the serial blocked kernel), Q8_0 caches the
+/// compact kernel.
+#[allow(clippy::too_many_arguments)]
+fn encode_row_attention(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    attention: AttentionBackend,
+    token: &TokenPlan<'_>,
+    layer: u32,
+    cache: &MetalTensor,
+    query: &MetalTensor,
+    out: &MetalTensor,
+    partials: &MetalTensor,
+) -> std::result::Result<(), MetalError> {
+    match (token.storage(), attention) {
+        (K2KvStorage::Q8_0, _) => crate::k2_horizon_metal::compact::encode_attention(
+            ctx, enc, token, layer, cache, query, out,
+        ),
+        #[cfg(test)]
+        (K2KvStorage::F16, AttentionBackend::Materialized) => {
+            crate::k2_horizon_metal::encode_short_attention(
+                ctx, enc, token, layer, cache, query, out,
+            )
+        }
+        (K2KvStorage::F16, AttentionBackend::Online) => {
+            crate::k2_horizon_metal::encode_split_attention(
+                ctx, enc, token, layer, cache, query, out, partials,
+            )
+        }
+    }
+}
+
 fn encode_tokens(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -523,20 +554,11 @@ fn encode_tokens(
         project(&layer.query, &b.norm, &b.query, 4096, 4096)?;
         project(&layer.key, &b.norm, &b.key, 4096, 1024)?;
         project(&layer.value, &b.norm, &b.value, 4096, 1024)?;
-        let encode_attention = match attention {
-            #[cfg(test)]
-            AttentionBackend::Materialized => crate::k2_horizon_metal::encode_short_attention,
-            AttentionBackend::Online => encode_online_attention,
-        };
         for (token, row) in tokens.iter().zip(&rows) {
             encode_full_rope(ctx, enc, token, &row.query, &row.key)?;
             let store = match token.storage() {
                 K2KvStorage::F16 => encode_store_kv,
                 K2KvStorage::Q8_0 => crate::k2_horizon_metal::compact::encode_store,
-            };
-            let attend = match token.storage() {
-                K2KvStorage::F16 => encode_attention,
-                K2KvStorage::Q8_0 => crate::k2_horizon_metal::compact::encode_attention,
             };
             store(
                 ctx,
@@ -547,14 +569,16 @@ fn encode_tokens(
                 &row.key,
                 &row.value,
             )?;
-            attend(
+            encode_row_attention(
                 ctx,
                 enc,
+                attention,
                 token,
                 index as u32,
                 &b.cache,
                 &row.query,
                 &row.attention,
+                &b.attention_partials,
             )?;
         }
         project(
@@ -614,10 +638,23 @@ fn encode_readout(
     Ok(())
 }
 
+/// Split-attention scratch a session needs: capacity-shaped for F16 caches;
+/// compact (Q8_0) caches keep their serial kernel, so one record keeps the
+/// buffer non-empty without pricing unused history.
+fn attention_partial_floats(capacity: u32, storage: K2KvStorage) -> u64 {
+    match storage {
+        K2KvStorage::F16 => crate::k2_horizon_metal::split_partial_floats(capacity),
+        K2KvStorage::Q8_0 => crate::k2_horizon_metal::SPLIT_RECORD_FLOATS,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SessionMemoryPlan {
     cache_bytes: u64,
     storage: K2KvStorage,
+    /// Split decode-attention block summaries for the session's capacity,
+    /// reused by every layer and row (`encode_split_attention`).
+    attention_partial_floats: u64,
 }
 
 impl SessionMemoryPlan {
@@ -626,10 +663,11 @@ impl SessionMemoryPlan {
         Ok(Self {
             cache_bytes: request.arena_bytes(),
             storage,
+            attention_partial_floats: attention_partial_floats(capacity, storage),
         })
     }
 
-    fn specs(&self) -> [(GgmlType, Vec<u64>); 13] {
+    fn specs(&self) -> [(GgmlType, Vec<u64>); 14] {
         [
             (GgmlType::I32, vec![1]),
             (GgmlType::F32, vec![4096]),
@@ -647,6 +685,7 @@ impl SessionMemoryPlan {
                 K2KvStorage::F16 => (GgmlType::F16, vec![self.cache_bytes / 2]),
                 K2KvStorage::Q8_0 => (GgmlType::I8, vec![self.cache_bytes]),
             },
+            (GgmlType::F32, vec![self.attention_partial_floats]),
         ]
     }
 
@@ -675,6 +714,7 @@ struct SessionBuffers {
     gated: MetalTensor,
     logits: MetalTensor,
     cache: MetalTensor,
+    attention_partials: MetalTensor,
 }
 
 impl SessionBuffers {
@@ -735,6 +775,7 @@ impl SessionBuffers {
             gated: tensors.next().unwrap()?,
             logits: tensors.next().unwrap()?,
             cache: tensors.next().unwrap()?,
+            attention_partials: tensors.next().unwrap()?,
         })
     }
 

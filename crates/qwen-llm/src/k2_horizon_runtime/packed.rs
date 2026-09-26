@@ -309,6 +309,7 @@ fn scratch_specs(rows: usize) -> Result<Vec<(GgmlType, Vec<u64>)>> {
     Ok(SessionMemoryPlan {
         cache_bytes: 0,
         storage: K2KvStorage::F16,
+        attention_partial_floats: 0,
     }
     .specs()
     .into_iter()
@@ -344,6 +345,10 @@ impl PackedScratch {
         }
         tensors.push(base.logits.view_subrange(0, base.logits.shape.clone()));
         tensors.push(base.cache.view_bytes(0, base.cache.shape.clone()));
+        tensors.push(
+            base.attention_partials
+                .view_subrange(0, base.attention_partials.shape.clone()),
+        );
         reconcile(ctx, before, price)?;
         Ok(Self {
             buffers: SessionBuffers::from_tensors(tensors.into_iter().map(Ok))?,
@@ -381,6 +386,10 @@ impl SessionBuffers {
             slice(&self.gated, 12288, &[12288], GgmlType::F32),
             Ok(self.logits.view_subrange(0, self.logits.shape.clone())),
             Ok(self.cache.view_bytes(0, self.cache.shape.clone())),
+            // Shared block-summary scratch: never sliced per row.
+            Ok(self
+                .attention_partials
+                .view_subrange(0, self.attention_partials.shape.clone())),
         ];
         Self::from_tensors(tensors.into_iter())
     }

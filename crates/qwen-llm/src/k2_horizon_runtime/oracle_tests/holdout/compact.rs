@@ -54,7 +54,10 @@ fn memory_record(model: &K2LoadedModel<'_>, ctx: &MetalContext) -> serde_json::V
     assert_eq!(cache.n_bytes(), expected);
     assert_eq!(
         model.plan.session.buffer_bytes().iter().sum::<u64>(),
-        expected + 1_240_068
+        expected
+            + 1_240_068
+            + crate::k2_horizon_runtime::attention_partial_floats(256, model.plan.session.storage)
+                * 4
     );
     json!({"cache_storage":format!("{:?}",model.plan.session.storage),"tensor_dtype":format!("{:?}",cache.dtype),
         "actual_logical_cache_bytes":cache.n_bytes(),"cache_buffer_length":cache.buffer.length(),

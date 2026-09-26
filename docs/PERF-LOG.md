@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-26 - Qwen Long-Session Decode: Already Fixed, Near The Bandwidth Floor
+
+Leverage map #3. The evidence was SERVE.md F7: an overnight session on
+2026-08-20 (Qwen3.8-27B-Q8_0, effort medium, per the opencode DB) decoded at
+14.5 tok/s at 31K and 8.4 at 133K. That run predates the 2026-08-22 attn-v4
+split-K retune (3cd4751).
+
+- **Engine now,** 27B Q8, tg64, fresh fill per rep (tokens/s):
+
+  | Build | d0 | d32K | d64K | d128K |
+  |---|---:|---:|---:|---:|
+  | qwen-llm (main c7b49279) | 17.19 | 15.30 | 13.99 | 12.20 |
+  | llama.cpp b11182 (same GGUF, llama-bench, 1 rep) | 16.09 | 14.14 | 11.47 | 7.70 |
+  | ratio | 1.07x | 1.08x | 1.22x | 1.59x |
+
+- **Byte model** (design jam; 16 full-attention layers, F16 KV at 64 KiB per
+  position):
+  - Depth 0 streams the weights at about 470 GB/s (58.2 ms per token).
+  - At 128K, attention adds 23.8 ms against about 18 ms for its 8.6 GB of KV
+    at that rate. That leaves roughly 6-7% of per-token time at 64-128K.
+    Below the 10% bar the jam set for engine work.
+- **Serve now,** same binary, cold single request, 256 tokens at effort none:
+  - no drafter: 16.58 tok/s at 1.9K, 14.04 tok/s at 66K (engine: 17.2 and
+    14.0);
+  - DFlash2 drafter loaded: 17.27 at 1.9K and 13.91 at 66K, so the
+    drafter-loaded path costs nothing measurable once speculation is off.
+  - Serve overhead is at most 3%.
+- **Verdict:** no fix. The F7 regression was the pre-retune attention, and
+  long-context decode leads llama.cpp by 1.2-1.6x.
+- **Where long-session time actually goes:** cold prefill. The 66K request
+  spent 373-377 s in prefill (about 176 tok/s). Snapshot reuse (RAM and the
+  durable tier) is the lever, not decode.
+
 ## 2026-09-26 - A Reasoning-Only Turn Can Be Continued
 
 - **Before:** a thinking turn cut off by the token limit returns only an

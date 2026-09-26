@@ -85,9 +85,13 @@ construction returns ownership on failure so residency remains recoverable.
 overlapped decode today. Route serve through them: wiring and
 scheduling, with F3 as the on-ramp.
 
-**F7 — Long-context performance stability.** Measured overnight:
-decode fell 14.5 → 8.4 tok/s from 31 k → 133 k, and restore grew to
-~1.5 s.
+**F7 — Long-context performance stability.** Measured overnight
+(2026-08-20, 27B Q8): decode fell 14.5 → 8.4 tok/s from 31 k → 133 k, and
+restore grew to ~1.5 s. Resolved by the 2026-08-22 attention retune:
+serve on 27B Q8 now decodes 14.0 tok/s at 66 k (engine 14.0; 12.2 at
+128 k, 1.59x llama.cpp), with or without a drafter loaded (PERF-LOG
+2026-09-26). Cold prefill (≈176 tok/s at 64 k) is now the long-session
+cost; snapshot reuse is its lever.
 
 Also open: selector `emit_completion` telemetry (k3 R1.4), and fresh execution
 of S3 live cells 6–9 (LRU eviction, DS4 cancellation/heartbeat, DS4 TTFT @8k,

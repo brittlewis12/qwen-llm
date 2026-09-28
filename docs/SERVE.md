@@ -42,8 +42,10 @@ Operating goals, in order:
 validated (2026-09-24: a 1.51 GB 27B snapshot, larger than the write queue,
 persisted at shutdown and restored after restart in 862 ms).** See
 [Durable snapshots](#durable-snapshots-cross-restart-warmth) for the behavior
-and flags. Remaining: crash resilience (no graceful shutdown) still loses the
-Qwen RAM tier.
+and flags. Since 2026-09-26 Qwen also publishes the latest continuation
+boundary after 30 s idle, so a crash after an idle period keeps the session
+(27B Q8, 66K: restored from disk after SIGKILL). A crash before the first
+idle publication still loses what was only in RAM.
 
 **F2 — Per-family publication policy (the one F1 implements).** Publication
 cost is not uniform, and this decides the policy:
@@ -58,8 +60,10 @@ DeepSeek V4 can afford DwarfStar-style periodic writes during
 generation plus a shutdown flush. A dense 27B cannot: 12 GB per turn is
 unwritable, so Qwen families get **publish on graceful shutdown and idle
 only** until content-addressed delta chains exist (S0 F6 — consecutive
-snapshots share nearly all their bytes). F1 covers restart continuity; crash
-resilience waits on those chains.
+snapshots share nearly all their bytes). Both halves are implemented
+(idle since 2026-09-26). The 12.4 GB row above overstates today's F16
+cache: the 27B's 16 attention layers hold 64 KiB per token, so 133K is about
+9 GB (4.5 GB measured at 66K).
 
 **F3 — Honest behaviour when busy: implemented, live rerun pending.** Serve
 remains single-flight, but a separate acceptor now fails concurrent connections
@@ -122,7 +126,8 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
   [--max-context-tokens N] [--snapshot-cache-mib auto|MIB] [--drafter GGUF] \
   [--snapshot-idle-ttl-secs 3600] [--snapshot-max-age-secs 86400] \
   [--snapshot-half-life-secs 600] [--durable-snapshot-dir PATH|off] \
-  [--durable-snapshot-max-mib auto|MIB] [--durable-snapshot-min-tokens 1024]
+  [--durable-snapshot-max-mib auto|MIB] [--durable-snapshot-min-tokens 1024] \
+  [--durable-idle-publish-secs 30] [--durable-shutdown-secs 30]
 # Qwen: without --max-context-tokens the admission ceiling is the smaller of the
 # 262,144 hard default and the GGUF's declared context length; --drafter is
 # accepted for dense targets only (an MoE target fails startup rather than
@@ -176,7 +181,11 @@ snapshots, so `--snapshot-cache-mib` only draws a warning there.
   RAM frecency. Publishers serialize on `writer.lock`; each sizes its record
   exactly, then requires record + 2 GiB free on the volume, evicting its
   oldest blobs if other activity filled the disk and refusing (logged) before
-  writing if that is not enough. Lookups never wait more than ~100 ms on a
+  writing if that is not enough. A publication that may not evict (Qwen's
+  ranked shutdown writes) is refused instead, for the volume reserve and the
+  budget alike, under the writer lock. A valid record already at the final
+  key has its directory fsync'd before it is reported as existing, so one
+  left by a failed post-link sync is never acknowledged as durable. Lookups never wait more than ~100 ms on a
   publisher (a busy store is a logged miss), skip and keep records they cannot
   use (`unusable_skipped`), and each publish sweeps one other model's
   directory for staging files a crash left behind.
@@ -196,14 +205,75 @@ snapshots, so `--snapshot-cache-mib` only draws a warning there.
   snapshot that does not fit is dropped with a once-only warning, and the
   request path never waits on encoding or fsync. Entries leaving RAM are
   queued as soon as a capture or lookup releases them.
-  - *Qwen* (dense snapshots are GBs): an entry is written when it leaves RAM
-    through budget eviction or idle/age expiry, and on graceful shutdown
-    (SIGINT/SIGTERM) the top-ranked RAM entries not already on disk are flushed
-    within 10 s. Nothing is written per turn. Memory-pressure evictions are not
-    spilled (that memory is needed now), and entries promoted from disk are
-    never rewritten. A crash loses whatever was still only in RAM.
+  - *Qwen* (dense snapshots are GBs). Nothing is written per request.
+    - **Idle publication:** once no request has arrived for
+      `--durable-idle-publish-secs` (default 30, 0 = off; any request, even a
+      failed one, restarts the clock), the latest completed request's
+      transcript boundary is written.
+      - The transcript boundary is what every later turn reuses. The
+        completed boundary only extends when the next prompt re-renders the
+        turn exactly, so after a restart just that turn's tokens re-prefill.
+      - If the target left RAM, the ranked entries are tried best first and
+        the first one not already on disk or in flight is written.
+      - It happens once per idle period, only when the writer is empty, and
+        only with memory headroom for the write's second copy (the staged
+        decode check); otherwise it is deferred and logged.
+      - Agent loops send requests seconds apart, so this is usually one
+        write per human turn (1-9 GB each for long 27B sessions). A restart
+        or crash after it keeps the session.
+    - **Spill:** an entry is written when it leaves RAM through budget
+      eviction or idle/age expiry, unless its record is known to be on disk
+      (see below). It is queued only with memory headroom for its write's
+      decode copy; otherwise it is dropped (`spill dropped
+      reason=memory_headroom`) and its payload freed.
+    - **Graceful shutdown** (SIGINT/SIGTERM): one shared budget,
+      `--durable-shutdown-secs` (default 30; was 10).
+      - Jobs already queued finish first, then the continuation target, then
+        the other ranked entries, one write at a time.
+      - A ranked write never evicts a record, the target's among them. The
+        store refuses it under its writer lock, before staging, when it would
+        fit only by eviction (store budget or volume free-space reserve), and
+        it is logged as `no_room`.
+      - Each write is logged as `serve durable: ... shutdown write
+        role=target|ranked outcome=published|already_on_disk|failed|
+        timed_out|no_room`. The summary reports `target=` and, checked
+        again at the end, `target_on_disk=`.
+      - A write already running is not cancelled at the deadline.
+    - Writes are acknowledged by the writer before an entry is marked
+      durable. Marking uses payload identity, so an equivalent replacement is
+      never marked.
+    - A write is skipped only when this process has validated the record:
+      its own write was acknowledged, or it was promoted from disk. The
+      record must also still be on disk as a regular file of the exact
+      record size. Otherwise it is written, and the store itself validates
+      or repairs any record already there.
+    - A job already in flight is not queued again, matched by payload or by
+      record name (length, mode, digest), even before the model identity
+      resolves.
+    - Memory:
+      - Memory-pressure evictions are not spilled (that memory is needed
+        now), and they skip entries also held by a write or restore in
+        flight, because evicting those frees nothing.
+      - Each queued write reserves one decoded copy (its snapshot size: the
+        staged decode check, or validation of a record already at its key,
+        in any integrity mode) from enqueue until the writer acknowledges
+        it. Request admission (prefill and decode), snapshot capture,
+        promotion, spills and idle publication all count it; spills and
+        idle publication also require headroom for their own copy. While the
+        copy is resident the memory signals count it too, which errs toward
+        refusing.
+    - Measured on 27B Q8 at 66K:
+      - The idle write of the 66,110-token transcript boundary took 5.5 s,
+        2.1 s of it for the staged decode check.
+      - After SIGKILL, the restart restored it from disk and prefilled 152
+        tokens: 13.0 s wall vs 381 s cold.
+      - A later SIGTERM, in 11.9 s, wrote the new target and one ranked
+        entry and reported the disk-promoted entry as `already_on_disk`
+        (`target_on_disk=true persisted=3`).
+      - Sessions above ~100K are not yet measured.
   - *DS4* (small snapshots): every captured prompt/completed boundary is written
-    behind as it is captured; shutdown waits up to 10 s for the queue.
+    behind as it is captured; shutdown waits up to `--durable-shutdown-secs`
+    for the queue.
 - **Reads.** Before the RAM lookup, a disk record strictly longer than the best
   RAM match is looked up (longest first; each candidate is gated by the strict
   RAM budget and the capture memory admission before it is read), decoded, and

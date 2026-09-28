@@ -131,6 +131,16 @@ pub enum RuntimeError {
     PackedPrefillPositionOverflow { position: usize },
 }
 
+impl RuntimeError {
+    /// A publication that may not evict found no room for its record.
+    pub fn is_no_room_without_eviction(&self) -> bool {
+        matches!(
+            self,
+            Self::CheckpointStore(CheckpointStoreError::NoRoomWithoutEviction { .. })
+        )
+    }
+}
+
 struct RuntimeInner {
     ctx: MetalContext,
 }
@@ -1163,6 +1173,29 @@ pub struct PreparedCheckpoint {
     max_context_tokens: usize,
 }
 
+/// Names one prepared checkpoint's payload by pointer identity without
+/// keeping it resident: durable-write acknowledgements carry this, not the
+/// payload.
+#[derive(Clone, Debug)]
+pub struct CheckpointTicket(std::sync::Weak<SessionSnapshot>);
+
+impl CheckpointTicket {
+    /// Whether `prepared` holds exactly this ticket's payload.
+    pub fn refers_to(&self, prepared: &PreparedCheckpoint) -> bool {
+        std::ptr::eq(self.0.as_ptr(), Arc::as_ptr(&prepared.snapshot))
+    }
+
+    pub fn same(&self, other: &CheckpointTicket) -> bool {
+        std::sync::Weak::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl PreparedCheckpoint {
+    pub fn ticket(&self) -> CheckpointTicket {
+        CheckpointTicket(Arc::downgrade(&self.snapshot))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PreparedCheckpointRestore {
     pub matched_prefix_len: usize,
@@ -1229,6 +1262,14 @@ impl PreparedCheckpoint {
 
     pub fn matched_prefix_len(&self) -> usize {
         self.snapshot.matched_prefix_len()
+    }
+
+    /// The token prefix a request must start with to reuse this checkpoint
+    /// (consumed tokens plus any pending terminal token).
+    pub fn matched_tokens(&self) -> Vec<i32> {
+        let mut tokens = self.snapshot.prefix_tokens.clone();
+        tokens.extend(self.snapshot.pending_token);
+        tokens
     }
 
     pub fn restored_prefix_len(&self) -> usize {
@@ -1320,10 +1361,49 @@ impl DetachedCheckpointPublisher {
         prepared: &PreparedCheckpoint,
         max_record_bytes: u64,
     ) -> Result<PublishReport, RuntimeError> {
+        self.publish_with(store, content_id, prepared, max_record_bytes, true)
+    }
+
+    /// [`Self::publish`]; with `allow_eviction` false the store never removes
+    /// another record to make room and refuses instead (see
+    /// [`RuntimeError::is_no_room_without_eviction`]).
+    pub fn publish_with(
+        &self,
+        store: &DurableCheckpointStore,
+        content_id: &[u8; 32],
+        prepared: &PreparedCheckpoint,
+        max_record_bytes: u64,
+        allow_eviction: bool,
+    ) -> Result<PublishReport, RuntimeError> {
         ensure_same_model_owner(&self.owner, &prepared.owner)?;
         let compatibility_id =
             compose_compatibility_id(*content_id, prepared.snapshot.identity.abi());
-        Ok(store.publish(
+        Ok(store.publish_with(
+            StoreContext {
+                compatibility_id: &compatibility_id,
+                identity: &prepared.snapshot.identity,
+                vocab_size: self.vocab_size,
+                max_context_tokens: prepared.max_context_tokens,
+                max_record_bytes,
+            },
+            &prepared.snapshot,
+            allow_eviction,
+        )?)
+    }
+
+    /// Whether `prepared` already has a final record in `store` (a metadata
+    /// check; lookup still validates the record before any use).
+    pub fn contains(
+        &self,
+        store: &DurableCheckpointStore,
+        content_id: &[u8; 32],
+        prepared: &PreparedCheckpoint,
+        max_record_bytes: u64,
+    ) -> Result<bool, RuntimeError> {
+        ensure_same_model_owner(&self.owner, &prepared.owner)?;
+        let compatibility_id =
+            compose_compatibility_id(*content_id, prepared.snapshot.identity.abi());
+        Ok(store.contains(
             StoreContext {
                 compatibility_id: &compatibility_id,
                 identity: &prepared.snapshot.identity,
@@ -1333,6 +1413,31 @@ impl DetachedCheckpointPublisher {
             },
             &prepared.snapshot,
         )?)
+    }
+
+    /// A process-local key for the record `prepared` would publish as (its
+    /// file name: prefix length, mode and digest, under a fixed model
+    /// stand-in, since one process serves one model). Equal for equivalent
+    /// payloads, so it deduplicates writes a payload pointer cannot (an
+    /// evicted and recaptured boundary), even before the strong model
+    /// identity resolves.
+    pub fn dedup_key(
+        &self,
+        store: &DurableCheckpointStore,
+        prepared: &PreparedCheckpoint,
+        max_record_bytes: u64,
+    ) -> String {
+        let compatibility_id = compose_compatibility_id([0; 32], prepared.snapshot.identity.abi());
+        store.record_name(
+            StoreContext {
+                compatibility_id: &compatibility_id,
+                identity: &prepared.snapshot.identity,
+                vocab_size: self.vocab_size,
+                max_context_tokens: prepared.max_context_tokens,
+                max_record_bytes,
+            },
+            &prepared.snapshot,
+        )
     }
 }
 
@@ -2347,24 +2452,42 @@ impl LoadedModel {
         self.prefix_cache.lock().set_spill(enabled);
     }
 
-    /// Checkpoints released since the last drain that are not already backed
-    /// by a durable record.
-    pub fn take_prefix_cache_spills(&self) -> Vec<PreparedCheckpoint> {
+    /// Checkpoints released since the last drain, each with its durable
+    /// marking (published or promoted this process; its record may have
+    /// left the disk since).
+    pub fn take_prefix_cache_spills(&self) -> Vec<(PreparedCheckpoint, bool)> {
         let spilled = self.prefix_cache.lock().take_spilled();
         spilled
             .into_iter()
-            .map(|snapshot| self.indexed_checkpoint(snapshot))
+            .map(|(snapshot, durable)| (self.indexed_checkpoint(snapshot), durable))
             .collect()
     }
 
-    /// Indexed checkpoints not already backed by a durable record, most
-    /// valuable first under the cache policy.
-    pub fn prefix_cache_persist_candidates(&self) -> Vec<PreparedCheckpoint> {
+    /// Every indexed checkpoint with its durable marking: unmarked first,
+    /// then marked, each most valuable first under the cache policy.
+    pub fn prefix_cache_persist_candidates(&self) -> Vec<(PreparedCheckpoint, bool)> {
         let candidates = self.prefix_cache.lock().persist_candidates();
         candidates
             .into_iter()
-            .map(|snapshot| self.indexed_checkpoint(snapshot))
+            .map(|(snapshot, durable)| (self.indexed_checkpoint(snapshot), durable))
             .collect()
+    }
+
+    /// The checkpoint indexed as `entry`, if still cached, and whether it is
+    /// marked durable (published or promoted from disk).
+    pub fn prefix_cache_entry_checkpoint(
+        &self,
+        entry: EntryId,
+    ) -> Option<(PreparedCheckpoint, bool)> {
+        let (snapshot, durable) = self.prefix_cache.lock().entry_snapshot(entry)?;
+        Some((self.indexed_checkpoint(snapshot), durable))
+    }
+
+    /// Mark the cache entry holding exactly `ticket`'s payload as backed by a
+    /// durable record, so spills and shutdown flushes skip it. An equivalent
+    /// replacement is never marked. Returns whether the entry is still cached.
+    pub fn mark_prefix_cache_durable(&self, ticket: &CheckpointTicket) -> bool {
+        self.prefix_cache.lock().mark_durable(&ticket.0)
     }
 
     fn indexed_checkpoint(&self, snapshot: Arc<SessionSnapshot>) -> PreparedCheckpoint {

@@ -290,10 +290,12 @@ fn check_warmth_flags(
     if family.serve_warmth != ServeWarmth::SnapshotsDurable && !durable_off {
         let explicit = matches!(durable.dir, durable::DurableDir::Path(_))
             || durable.max_mib.is_some()
-            || durable.min_tokens != durable::DEFAULT_MIN_TOKENS;
+            || durable.min_tokens != durable::DEFAULT_MIN_TOKENS
+            || durable.shutdown_secs != durable::DEFAULT_SHUTDOWN_SECS
+            || durable.idle_publish_secs != durable::DEFAULT_IDLE_PUBLISH_SECS;
         ensure!(
             !explicit,
-            "{} serve has no durable snapshot tier, so --durable-snapshot-* cannot keep prefixes across restarts; drop the flags or pass --durable-snapshot-dir off",
+            "{} serve has no durable snapshot tier, so --durable-* flags cannot keep prefixes across restarts; drop the flags or pass --durable-snapshot-dir off",
             family.display
         );
         tracing::info!(
@@ -742,6 +744,7 @@ fn accept_loop_with_checkpoint(
             if let Err(error) = http::handle_connection(&stream, backend, trace.as_mut()) {
                 tracing::info!(target: "qwen_diag", "serve: connection aborted: {error}");
             }
+            backend.request_finished();
         }
         Ok(())
     })();
@@ -771,6 +774,7 @@ mod tests {
             dir,
             max_mib,
             min_tokens,
+            ..DurableSnapshotConfig::off()
         };
         let defaulted = config(DurableDir::Default, None, DEFAULT_MIN_TOKENS);
         let explicit = [

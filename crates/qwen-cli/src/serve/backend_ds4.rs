@@ -30,8 +30,7 @@
 use super::backend::request_sampler;
 use super::decode_loop;
 use super::durable::{
-    DurablePlan, DurableWorker, Resolved, SHUTDOWN_FLUSH_BUDGET, queue_cap_bytes,
-    resolve_content_identity,
+    DurablePlan, DurableWorker, Resolved, queue_cap_bytes, resolve_content_identity,
 };
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest, TemplateStyle};
@@ -468,7 +467,9 @@ impl GenerationBackend for DeepSeekV4Backend {
             return;
         }
         let started = Instant::now();
-        let drained = durable.worker.wait_idle(started + SHUTDOWN_FLUSH_BUDGET);
+        let drained = durable
+            .worker
+            .wait_idle(started + durable.plan.shutdown_budget);
         let stats = durable.worker.stats();
         tracing::info!(
             target: "qwen_diag",

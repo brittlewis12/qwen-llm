@@ -95,6 +95,9 @@ pub(crate) trait GenerationBackend {
     /// signal), before the backend is torn down. May block for a bounded
     /// time (durable-snapshot flush).
     fn shutdown(&mut self) {}
+    /// Called by the serial loop after every admitted connection, whatever
+    /// its outcome (idle-publication debounce).
+    fn request_finished(&mut self) {}
 }
 
 pub(crate) struct TraceLog {

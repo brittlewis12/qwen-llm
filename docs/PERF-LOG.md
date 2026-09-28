@@ -6,6 +6,96 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-09-26 - Qwen Idle Publication: Sessions Survive A Crash; 30 s Shutdown
+
+Leverage map (2026-09-26) #1.
+- **Before:** Qwen serve wrote snapshots only on RAM eviction/expiry and in a
+  10 s shutdown flush.
+  - At about 0.7-0.9 GB/s, the flush ceiling was about 7-9 GB, so a
+    133K-token 27B session (~9 GB) would not survive a restart.
+  - A crash lost whatever had not already spilled to disk; for an active
+    session, that was usually all of it.
+  - SERVE.md F2's owner decision ("publish on graceful shutdown and idle")
+    had only its shutdown half implemented.
+- **Now:**
+  - **Idle publication:** after 30 s without any request
+    (`--durable-idle-publish-secs`, 0 = off; failed requests reset the
+    clock), the latest completed request's transcript boundary is written.
+    - The transcript boundary is chosen because every later turn reuses it.
+    - If it left RAM, the ranked entries are tried best first, and the first
+      one not already on disk or in flight is written.
+    - At most once per idle period, only when the writer is empty, and only
+      with memory headroom for the staged decode's second copy.
+  - **Acknowledged state:**
+    - The writer acknowledges each write before its entry is marked durable,
+      by payload pointer identity.
+    - A write is skipped only for a record this process validated (its write
+      was acknowledged or it was promoted from disk) that is still on disk
+      at its exact size. Anything else is written, and the store validates
+      or repairs.
+    - Nothing in flight is queued again, matched by payload or by record
+      name.
+    - Durable-marked entries still spill and remain candidates.
+    - A valid record already at its key has its directory fsync'd before it
+      is reported, so one left by a failed post-link sync is never
+      acknowledged as durable.
+  - **Shutdown:** one shared budget, `--durable-shutdown-secs` (default 30).
+    - Queued jobs finish first, then the target, then the ranked entries.
+    - A ranked write never evicts a record, possibly the target: the store
+      refuses it under its writer lock, before staging, by store budget or
+      by volume reserve, and it is logged as `no_room`.
+    - Each write's outcome is logged, and `target_on_disk=` is re-checked at
+      the end.
+  - **Memory:**
+    - Pressure eviction skips entries a write or restore also holds.
+    - Each queued write reserves one decoded copy (its snapshot size, in any
+      integrity mode) from enqueue until the writer acknowledges it. Request
+      admission (prefill and decode), capture, promotion, spills and idle
+      publication all count it.
+    - A spill or idle write is queued only with headroom for its own copy.
+      Otherwise a spill is dropped (logged) and its payload freed, and idle
+      publication is deferred.
+- **Evidence, final version (27B Q8, 66,115-token prompt, effort medium):**
+  - Idle publication fired at 30.1 s and wrote the 66,110-token transcript
+    boundary (4.5 GB) in 5.5 s, 2.1 s of it for the staged decode check.
+  - After `kill -KILL`, the restarted server restored 66,110 tokens from
+    disk (2.2 s) and prefilled 152 tokens (1.8 s): 13.0 s wall versus 381 s
+    cold.
+  - SIGTERM then, in 11.9 s:
+    - wrote the new target;
+    - wrote one ranked entry (no eviction allowed; there was room);
+    - reported the disk-promoted entry as `already_on_disk`;
+    - ended with `target=published target_on_disk=true persisted=3`.
+  - The previous iteration of this version measured 5.9 s, 12.9 s and
+    12.2 s (`persisted=2`, before ranked entries already on disk were
+    reported).
+- **Evidence, first version (published the completed boundary; same
+  prompt):**
+  - Idle publication fired at 30.0 s and wrote 66,240 tokens (4.5 GB) in
+    5.5 s, 2.3 s of it for the staged decode check.
+  - After `kill -KILL`, the restarted server restored 66,240 tokens from
+    disk: 12.2 s wall versus 381 s cold.
+  - A following SIGTERM wrote the new target and one ranked entry in 11.2 s
+    (`target=published persisted=2`); the disk-promoted entry was not
+    rewritten.
+- **Tests:**
+  - GPU test `idle_publication_writes_the_continuation_once_and_survives_a_crash`
+    (0.8B): one idle write of the transcript boundary and no rewrite. The
+    backend is then dropped without any shutdown flush, and a new backend
+    promotes exactly that boundary. The existing restart test also passes.
+  - `publication_without_eviction_refuses_and_removes_nothing`: budget and
+    volume-reserve refusals remove nothing, and an existing record in an
+    over-budget store is admitted without a sweep.
+  - `mark_durable_uses_pointer_identity` and
+    `pressure_eviction_skips_externally_held_entries` pass, as do all
+    qwen-cli bin tests and the qwen-llm lib tests (1158).
+- **Not done:**
+  - `deferred-restore` staged integrity as the serve default. It would
+    remove about 40% of write time and the decode copy; it needs size,
+    pressure and failure evidence.
+  - Delta chains, to cut per-turn write volume.
+  - Measurement above ~100K tokens.
+
 ## 2026-09-26 - Daily-Driver Screens: Real Reuse, Restart At 66K, Prefill Parity
 
 Map reassessment (cx) against actual owner usage. The opencode DB shows only

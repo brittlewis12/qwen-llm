@@ -781,6 +781,10 @@ impl GenerationBackend for EngineBackend {
         self.durable_shutdown();
     }
 
+    fn request_finished(&mut self) {
+        self.durable_note_request_unwind();
+    }
+
     fn template_style_default(&self) -> Option<super::items::TemplateStyle> {
         Some(self.template_style)
     }
@@ -963,10 +967,19 @@ impl GenerationBackend for EngineBackend {
                 .ok()?;
             (price <= RESTORED_TAIL_SCRATCH_LIMIT).then_some((plan, price))
         });
+        // Durable writes queued or running hold a decoded copy of their
+        // snapshot that the memory signals may not show yet.
+        let durable_reserved = self.durable_reserved_bytes();
         let (packed_tail_plan, admission) =
             admit_optional_tail(packed_tail_plan, prefill_scratch_upper_bytes, |price| {
                 self.loaded
-                    .qwen_execution_memory_admission(1, capacity, price, 0)
+                    .qwen_execution_memory_admission_with_additional_bytes(
+                        1,
+                        capacity,
+                        price,
+                        0,
+                        durable_reserved,
+                    )
             })
             .map_err(|error| {
                 ServeError::server_error(format!("price request memory: {error:#}"))
@@ -993,11 +1006,12 @@ impl GenerationBackend for EngineBackend {
                         evicted.bytes,
                     );
                     self.loaded
-                        .qwen_execution_memory_admission(
+                        .qwen_execution_memory_admission_with_additional_bytes(
                             1,
                             capacity,
                             prefill_scratch_upper_bytes,
                             0,
+                            durable_reserved,
                         )
                         .map_err(|error| {
                             ServeError::server_error(format!("price request memory: {error:#}"))
@@ -1839,8 +1853,10 @@ impl EngineBackend {
             );
             return None;
         }
+        // Plus the durable writer's in-flight decode copy, which the memory
+        // signals may not show yet.
         if let Err((reason, signals)) = super::admit_snapshot_capture(
-            estimate,
+            estimate.saturating_add(self.durable_reserved_bytes()),
             || self.loaded.context().memory_signals(),
             |bytes| self.loaded.evict_prefix_cache_for(bytes),
         ) {
@@ -1907,6 +1923,7 @@ impl EngineBackend {
         transcript_entry: Option<EntryId>,
         phases: String,
     ) -> Result<GenerationOutcome, BackendFailure> {
+        let mut completed_entry = None;
         let completed_boundary_valid = match crate::derive_completed_checkpoint_boundary(
             prompt_ids.len(),
             &generation.tokens,
@@ -1938,7 +1955,7 @@ impl EngineBackend {
                 // the completed boundary.
                 let pinned =
                     transcript_entry.filter(|&entry| self.loaded.pin_prefix_cache_entry(entry));
-                self.try_cache_boundary(
+                completed_entry = self.try_cache_boundary(
                     &sequence,
                     &consumed,
                     Some(pending_token),
@@ -1957,6 +1974,11 @@ impl EngineBackend {
                 false
             }
         };
+        // Idle publication writes the transcript boundary: every later turn
+        // reuses it, while the completed boundary only extends when the next
+        // prompt re-renders this turn exactly (restart then re-prefills just
+        // this turn's tokens, instead of risking a cold prefill).
+        self.durable_note_request_end(transcript_entry.or(completed_entry));
         if let Some(key) = dflash_prefix_replay_key.filter(|_| completed_boundary_valid) {
             self.dflash_prefix_replay.insert(
                 key.clone(),

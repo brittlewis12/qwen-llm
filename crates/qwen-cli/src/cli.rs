@@ -86,6 +86,16 @@ pub(crate) struct ServeArgs {
     #[arg(long, value_name = "TOKENS", default_value_t = crate::serve::durable::DEFAULT_MIN_TOKENS)]
     durable_snapshot_min_tokens: usize,
 
+    /// Qwen: once no request has arrived for this long, write the latest
+    /// request's continuation snapshot to disk so a restart or crash keeps
+    /// it (one write per idle period, GBs for long dense sessions); 0 = off.
+    #[arg(long, value_name = "SECS", default_value_t = crate::serve::durable::DEFAULT_IDLE_PUBLISH_SECS)]
+    durable_idle_publish_secs: u64,
+
+    /// Graceful-shutdown budget for writing snapshots not yet on disk.
+    #[arg(long, value_name = "SECS", default_value_t = crate::serve::durable::DEFAULT_SHUTDOWN_SECS)]
+    durable_shutdown_secs: u64,
+
     /// DFlash drafter GGUF for speculative decode.
     ///
     /// Greedy and sampled proposals are verified by the target model. Sampled
@@ -445,6 +455,8 @@ pub(crate) fn normalize(args: &mut Args) -> Invocation {
                     .unwrap_or(crate::serve::durable::DurableDir::Default),
                 max_mib: serve.durable_snapshot_max_mib.0,
                 min_tokens: serve.durable_snapshot_min_tokens,
+                shutdown_secs: serve.durable_shutdown_secs,
+                idle_publish_secs: serve.durable_idle_publish_secs,
             },
             drafter: serve.drafter,
             trace_sse: serve.trace_sse,
@@ -609,6 +621,8 @@ mod tests {
                 dir: DurableDir::Default,
                 max_mib: None,
                 min_tokens: DEFAULT_MIN_TOKENS,
+                shutdown_secs: 30,
+                idle_publish_secs: 30,
             }
         );
         assert_eq!(DEFAULT_MIN_TOKENS, 1024);
@@ -623,10 +637,15 @@ mod tests {
             "4096",
             "--durable-snapshot-min-tokens",
             "0",
+            "--durable-idle-publish-secs",
+            "0",
+            "--durable-shutdown-secs",
+            "90",
         ]);
         assert_eq!(tuned.dir, DurableDir::Path("/tmp/warm".into()));
         assert_eq!(tuned.max_mib, Some(4096));
         assert_eq!(tuned.min_tokens, 0);
+        assert_eq!((tuned.idle_publish_secs, tuned.shutdown_secs), (0, 90));
         assert_eq!(serve(&["--durable-snapshot-max-mib", "auto"]).max_mib, None);
         for bad in [
             &["--durable-snapshot-max-mib", "lots"][..],

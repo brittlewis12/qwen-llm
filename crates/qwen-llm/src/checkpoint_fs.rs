@@ -176,13 +176,16 @@ impl StoreNamespace {
         record_bytes: u64,
         is_managed_name: impl Fn(&std::ffi::OsStr) -> bool,
     ) -> Result<u64, CheckpointFsError> {
+        self.ensure_volume_space_with(record_bytes, is_managed_name, || self.free_bytes())
+    }
+
+    /// Free bytes on the store's volume (`None` when unreadable).
+    pub(crate) fn free_bytes(&self) -> Option<u64> {
         #[cfg(test)]
         if let Some(free) = *self.test_free_bytes.lock().unwrap() {
-            return self.ensure_volume_space_with(record_bytes, is_managed_name, || Some(free));
+            return Some(free);
         }
-        self.ensure_volume_space_with(record_bytes, is_managed_name, || {
-            volume_free_bytes(&self.root)
-        })
+        volume_free_bytes(&self.root)
     }
 
     pub(crate) fn ensure_volume_space_with(

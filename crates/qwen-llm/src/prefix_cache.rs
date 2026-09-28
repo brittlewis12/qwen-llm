@@ -47,8 +47,10 @@ pub const DEFAULT_MAX_BYTES: u64 = 16 << 30;
 struct Entry {
     id: EntryId,
     snapshot: Arc<SessionSnapshot>,
-    /// Promoted from a durable store: an equivalent record is already on
-    /// disk, so leaving RAM must not write it again.
+    /// Promoted from, or acknowledged as written to, a durable store: an
+    /// equivalent record was on disk, so shutdown flushes skip it. It is
+    /// still spilled when it leaves RAM (the record may have been evicted
+    /// from disk since); the durable tier checks the disk before rewriting.
     durable: bool,
 }
 
@@ -60,7 +62,8 @@ pub struct PrefixCache {
     /// pressure relief, replacement, or clear) are retained in `spilled`
     /// until the owner drains them with [`Self::take_spilled`].
     spill: bool,
-    spilled: Vec<Arc<SessionSnapshot>>,
+    /// Released snapshots and whether each was marked durable.
+    spilled: Vec<(Arc<SessionSnapshot>, bool)>,
 }
 
 impl Default for PrefixCache {
@@ -109,27 +112,55 @@ impl PrefixCache {
         }
     }
 
-    /// Snapshots released since the last drain, oldest release first. Their
-    /// payload stays resident until the caller drops them.
-    pub fn take_spilled(&mut self) -> Vec<Arc<SessionSnapshot>> {
+    /// Snapshots released since the last drain, oldest release first, each
+    /// with its durable marking. Their payload stays resident until the
+    /// caller drops them.
+    pub fn take_spilled(&mut self) -> Vec<(Arc<SessionSnapshot>, bool)> {
         std::mem::take(&mut self.spilled)
     }
 
-    /// Indexed snapshots not already backed by a durable record, most
-    /// valuable first (the reverse of eviction order).
-    pub fn persist_candidates(&self) -> Vec<Arc<SessionSnapshot>> {
-        self.policy
+    /// Every indexed snapshot with its durable marking: unmarked ones first,
+    /// then marked ones (their record may have left the disk since; the
+    /// durable tier checks), each group most valuable first.
+    pub fn persist_candidates(&self) -> Vec<(Arc<SessionSnapshot>, bool)> {
+        let ranked: Vec<_> = self
+            .policy
             .ranked_best_first()
             .into_iter()
             .filter_map(|id| self.entry(id))
-            .filter(|entry| !entry.durable)
-            .map(|entry| Arc::clone(&entry.snapshot))
-            .collect()
+            .map(|entry| (Arc::clone(&entry.snapshot), entry.durable))
+            .collect();
+        let (unmarked, marked): (Vec<_>, Vec<_>) =
+            ranked.into_iter().partition(|(_, durable)| !durable);
+        unmarked.into_iter().chain(marked).collect()
     }
 
     fn entry(&self, id: EntryId) -> Option<&Entry> {
         let key = self.keys.get(&id)?;
         self.buckets.get(key)?.iter().find(|entry| entry.id == id)
+    }
+
+    /// The snapshot indexed as `id` and whether it is marked durable.
+    pub fn entry_snapshot(&self, id: EntryId) -> Option<(Arc<SessionSnapshot>, bool)> {
+        self.entry(id)
+            .map(|entry| (Arc::clone(&entry.snapshot), entry.durable))
+    }
+
+    /// Mark the entry holding exactly this snapshot (pointer identity, never
+    /// an equivalent replacement) as backed by a durable record. Returns
+    /// whether such an entry is still indexed.
+    pub fn mark_durable(&mut self, snapshot: &std::sync::Weak<SessionSnapshot>) -> bool {
+        let target = snapshot.as_ptr();
+        for bucket in self.buckets.values_mut() {
+            if let Some(entry) = bucket
+                .iter_mut()
+                .find(|entry| std::ptr::eq(Arc::as_ptr(&entry.snapshot), target))
+            {
+                entry.durable = true;
+                return true;
+            }
+        }
+        false
     }
 
     pub fn total_bytes(&self) -> u64 {
@@ -202,9 +233,24 @@ impl PrefixCache {
 
     /// Evict unpinned entries by rank until `bytes` are released. This is
     /// memory-pressure relief, so released payloads are never retained for
-    /// spilling: the caller needs the bytes back now.
+    /// spilling: the caller needs the bytes back now. Entries whose payload
+    /// is also held outside the cache (a restore or a durable write in
+    /// flight) are skipped: evicting them would return no memory.
     pub fn evict_for(&mut self, bytes: u64) -> Evicted {
+        let held: Vec<EntryId> = self
+            .buckets
+            .values()
+            .flatten()
+            .filter(|entry| Arc::strong_count(&entry.snapshot) > 1)
+            .map(|entry| entry.id)
+            .collect();
+        for &id in &held {
+            self.policy.pin(id);
+        }
         let evicted = self.policy.evict_for(bytes);
+        for &id in &held {
+            self.policy.unpin(id);
+        }
         self.release(&evicted, false);
         evicted
     }
@@ -325,8 +371,8 @@ impl PrefixCache {
             if let Some(bucket) = self.buckets.get_mut(&key) {
                 if let Some(index) = bucket.iter().position(|entry| entry.id == *id) {
                     let entry = bucket.remove(index);
-                    if spillable && self.spill && !entry.durable {
-                        self.spilled.push(entry.snapshot);
+                    if spillable && self.spill {
+                        self.spilled.push((entry.snapshot, entry.durable));
                     }
                 }
                 if bucket.is_empty() {
@@ -1048,8 +1094,11 @@ mod tests {
         assert!(cache.take_spilled().is_empty());
     }
 
+    /// Durable-marked entries are still persist candidates (after unmarked
+    /// ones) and still spill, each carrying its marking: the durable tier
+    /// checks the disk before skipping them.
     #[test]
-    fn durable_promotions_are_not_spilled_or_persist_candidates() {
+    fn durable_promotions_carry_their_marking_through_candidates_and_spills() {
         let id = ident(1);
         let one = snap_bytes(&[1], 64);
         let (mut cache, _) = frecency_cache(2 * one);
@@ -1058,23 +1107,75 @@ mod tests {
         cache
             .insert_durable_strict(Arc::clone(&promoted))
             .expect("fits");
+        drop(promoted);
         cache.insert(snap(id.clone(), &[2], 64));
-        let candidates = cache.persist_candidates();
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].prefix_tokens, [2]);
-        // Evict both by budget: only the captured one is spilled.
+        let candidates: Vec<_> = cache
+            .persist_candidates()
+            .iter()
+            .map(|(snapshot, durable)| (snapshot.prefix_tokens.clone(), *durable))
+            .collect();
+        assert_eq!(candidates, [(vec![2], false), (vec![1], true)]);
         cache.set_max_bytes(0);
         cache.insert(snap(id.clone(), &[3], 64));
-        let spilled: Vec<_> = cache
+        let mut spilled: Vec<_> = cache
             .take_spilled()
             .iter()
-            .map(|snapshot| snapshot.prefix_tokens.clone())
+            .map(|(snapshot, durable)| (snapshot.prefix_tokens.clone(), *durable))
             .collect();
-        assert_eq!(spilled, [vec![2]]);
+        spilled.sort();
+        assert_eq!(spilled, [(vec![1], true), (vec![2], false)]);
         assert!(
             cache
                 .insert_durable_strict(Arc::new(snap(id, &[4], 64)))
                 .is_none()
+        );
+    }
+
+    /// Pressure relief never evicts an entry whose payload is also held
+    /// elsewhere (a restore or durable write in flight): that frees nothing.
+    #[test]
+    fn pressure_eviction_skips_externally_held_entries() {
+        let id = ident(1);
+        let (mut cache, _) = frecency_cache(1 << 20);
+        let held = cache.insert(snap(id.clone(), &[1], 64));
+        let free = cache.insert(snap(id.clone(), &[2], 64));
+        let (holder, _) = cache.entry_snapshot(held).unwrap();
+        let evicted = cache.evict_for(u64::MAX);
+        assert_eq!(evicted.ids, [free]);
+        assert!(cache.entry_snapshot(held).is_some());
+        drop(holder);
+        assert_eq!(cache.evict_for(u64::MAX).ids, [held]);
+    }
+
+    /// Marking by pointer identity: the entry holding exactly the published
+    /// payload becomes durable; a payload that is no longer indexed marks
+    /// nothing.
+    #[test]
+    fn mark_durable_uses_pointer_identity() {
+        let id = ident(1);
+        let (mut cache, _) = frecency_cache(1 << 20);
+        cache.set_spill(true);
+        let entry = cache.insert(snap(id.clone(), &[1], 64));
+        cache.insert(snap(id.clone(), &[2], 64));
+        let (published, durable) = cache.entry_snapshot(entry).unwrap();
+        assert!(!durable);
+        let ticket = Arc::downgrade(&published);
+        drop(published);
+        // An equal but distinct payload is not the published one.
+        let twin = Arc::new(snap(id.clone(), &[1], 64));
+        assert!(!cache.mark_durable(&Arc::downgrade(&twin)));
+        assert!(cache.mark_durable(&ticket));
+        assert!(cache.entry_snapshot(entry).unwrap().1);
+        let candidates = cache.persist_candidates();
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].0.prefix_tokens, [2]);
+        assert!(candidates[1].1, "marked entries rank after unmarked ones");
+        cache.set_max_bytes(0);
+        cache.insert(snap(id, &[3], 64));
+        assert_eq!(cache.take_spilled().len(), 2, "durable entries still spill");
+        assert!(
+            !cache.mark_durable(&ticket),
+            "evicted payload marks nothing"
         );
     }
 
@@ -1090,7 +1191,7 @@ mod tests {
         let order: Vec<_> = cache
             .persist_candidates()
             .iter()
-            .map(|snapshot| snapshot.prefix_tokens.clone())
+            .map(|(snapshot, _)| snapshot.prefix_tokens.clone())
             .collect();
         assert_eq!(order, [vec![2], vec![1]]);
         assert!(cache.pin(cold));

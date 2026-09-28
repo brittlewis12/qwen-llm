@@ -1486,6 +1486,98 @@ mod tests {
         assert!(blob_path(&constrained, &third).exists());
     }
 
+    /// A publication that may not evict refuses instead of making room, by
+    /// budget or by volume reserve, and admits a record already at its key
+    /// without sweeping an over-budget store.
+    #[test]
+    fn publication_without_eviction_refuses_and_removes_nothing() {
+        let temp = TestDir::new("no-evict");
+        let first = snapshot(&[1, 2], None, true);
+        let second = snapshot(&[2, 3], None, true);
+        let third = snapshot(&[3, 4], None, true);
+        let generous = DurableCheckpointStore::new(&temp.0, 1 << 20);
+        let record = generous
+            .publish(context(&first.identity), &first)
+            .unwrap()
+            .blob_bytes;
+        let first_path = blob_path(&generous, &first);
+        let with_free = |max_bytes: u64, free: u64| {
+            let store = DurableCheckpointStore::new(&temp.0, max_bytes);
+            *store.namespace().test_free_bytes.lock().unwrap() = Some(free);
+            store
+        };
+
+        // Room for one record: the second is refused and the first stays.
+        let one = with_free(record + record / 2, u64::MAX);
+        let error = one
+            .publish_with(context(&second.identity), &second, false)
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                CheckpointStoreError::NoRoomWithoutEviction {
+                    limit: "store budget",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert!(first_path.exists());
+        assert!(!blob_path(&one, &second).exists());
+
+        // The volume reserve is refused the same way, before staging.
+        let low = with_free(1 << 20, 0);
+        let error = low
+            .publish_with(context(&second.identity), &second, false)
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                CheckpointStoreError::NoRoomWithoutEviction {
+                    limit: "volume free-space reserve",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert!(first_path.exists());
+
+        // Room for both: published, nothing evicted.
+        let two = with_free(record * 2, u64::MAX);
+        let report = two
+            .publish_with(context(&second.identity), &second, false)
+            .unwrap();
+        assert_eq!(report.outcome, PublishOutcome::Published);
+        assert_eq!(report.evicted_entries, 0);
+        assert!(first_path.exists());
+
+        // Over budget (two records, room for one): the record at its own key
+        // is admitted without room and without evicting the other.
+        let over = with_free(record, u64::MAX);
+        let report = over
+            .publish_with(context(&first.identity), &first, false)
+            .unwrap();
+        assert_eq!(report.outcome, PublishOutcome::ExistingValid);
+        assert_eq!(report.evicted_entries, 0);
+        assert!(blob_path(&over, &second).exists());
+        // With eviction allowed, the same admission sweeps to the budget.
+        let report = over.publish(context(&first.identity), &first).unwrap();
+        assert_eq!(report.outcome, PublishOutcome::ExistingValid);
+        assert_eq!(report.evicted_entries, 1);
+        assert!(first_path.exists());
+        assert!(!blob_path(&over, &second).exists());
+
+        // An unrelated record is refused while the budget is full.
+        let error = over
+            .publish_with(context(&third.identity), &third, false)
+            .unwrap_err();
+        assert!(
+            matches!(error, CheckpointStoreError::NoRoomWithoutEviction { .. }),
+            "{error}"
+        );
+        assert!(first_path.exists());
+    }
+
     #[test]
     fn mixed_integrity_publishers_converge_on_one_valid_inode() {
         let temp = TestDir::new("concurrent");

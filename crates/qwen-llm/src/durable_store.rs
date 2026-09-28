@@ -19,10 +19,10 @@
 //! mismatched record at a final key is repaired or reported as a collision.
 
 use crate::checkpoint_fs::{
-    BlobLease, CheckpointFsError, FileStamp, StagingCleanupReport, StoreNamespace, evict_to_fit,
-    has_managed_blob, metadata_nofollow, path_exists_nofollow, require_real_directory_if_exists,
-    scan_managed_blobs, sync_directory, unique_temp_path, validate_post_link_stamp,
-    validate_staged_stamp,
+    BlobLease, CheckpointFsError, FileStamp, StagingCleanupReport, StoreNamespace,
+    VOLUME_FREE_RESERVE_BYTES, evict_to_fit, has_managed_blob, metadata_nofollow,
+    path_exists_nofollow, require_real_directory_if_exists, scan_managed_blobs, sync_directory,
+    unique_temp_path, validate_post_link_stamp, validate_staged_stamp,
 };
 use crate::checkpoint_identity::CheckpointIdentityCache;
 use std::collections::{BTreeSet, HashMap};
@@ -256,6 +256,14 @@ pub enum DurableStoreError<C: std::error::Error + 'static> {
     ConcurrentChurn,
     #[error("checkpoint touch lost an eviction or replacement race")]
     TouchLostRace,
+    /// A publication that may not evict found no room for its record.
+    #[error(
+        "no room for a {blob_bytes}-byte checkpoint record within the {limit} without evicting other records"
+    )]
+    NoRoomWithoutEviction {
+        blob_bytes: u64,
+        limit: &'static str,
+    },
 }
 
 impl<C: std::error::Error + 'static> From<CheckpointFsError> for DurableStoreError<C> {
@@ -354,6 +362,21 @@ impl<P: DurablePayload> DurableStore<P> {
     }
 
     pub fn publish(&self, context: P::Context<'_>, snapshot: &P) -> StoreResult<P, PublishReport> {
+        self.publish_with(context, snapshot, true)
+    }
+
+    /// [`Self::publish`]; with `allow_eviction` false, the publication never
+    /// removes another record, neither for the store budget nor for the
+    /// volume's free-space reserve, and fails with
+    /// [`DurableStoreError::NoRoomWithoutEviction`] instead (before staging
+    /// anything when the shortfall is visible up front). Enforced under the
+    /// writer lock, so no concurrent publisher can change the answer.
+    pub fn publish_with(
+        &self,
+        context: P::Context<'_>,
+        snapshot: &P,
+        allow_eviction: bool,
+    ) -> StoreResult<P, PublishReport> {
         snapshot.check_publish(&context)?;
         let compatibility_id = P::compatibility_id(&context);
         let mode = snapshot.mode();
@@ -373,9 +396,13 @@ impl<P: DurablePayload> DurableStore<P> {
                 max_managed_blob_bytes: self.max_managed_blob_bytes,
             });
         }
-        self.namespace
-            .ensure_volume_space(record_bytes, is_managed_blob_name::<P>)?;
         let final_path = blob_dir.join(P::blob_name(snapshot.matched_len(), mode, &digest));
+        if allow_eviction {
+            self.namespace
+                .ensure_volume_space(record_bytes, is_managed_blob_name::<P>)?;
+        } else {
+            self.require_room_without_eviction(record_bytes, &final_path)?;
+        }
         let temp_path = unique_temp_path(&blob_dir, &digest);
         let staged = match self.encode_staged(&temp_path, context, snapshot) {
             Ok(staged) => staged,
@@ -399,9 +426,97 @@ impl<P: DurablePayload> DurableStore<P> {
             &final_path,
             &staged,
             staging_cleanup,
+            allow_eviction,
         );
         let _ = std::fs::remove_file(&staged.path);
         result
+    }
+
+    /// Refuse, before staging, a record that fits only by evicting: the
+    /// volume must keep its free-space reserve after the record, and the
+    /// store budget must hold it beside every current record (a record
+    /// already at the final key is admitted or replaced in place, so it
+    /// needs no budget room; publication re-checks at link time).
+    fn require_room_without_eviction(
+        &self,
+        record_bytes: u64,
+        final_path: &Path,
+    ) -> StoreResult<P, ()> {
+        let needed = record_bytes.saturating_add(VOLUME_FREE_RESERVE_BYTES);
+        if !self
+            .namespace
+            .free_bytes()
+            .is_some_and(|free| free >= needed)
+        {
+            return Err(DurableStoreError::NoRoomWithoutEviction {
+                blob_bytes: record_bytes,
+                limit: "volume free-space reserve",
+            });
+        }
+        let _lock = self.namespace.lock_shared()?;
+        if path_exists_nofollow(final_path)? {
+            return Ok(());
+        }
+        let scan = scan_managed_blobs(&self.namespace.blobs_root(), is_managed_blob_name::<P>)?;
+        self.check_budget_without_eviction(scan.total_bytes, record_bytes)
+    }
+
+    fn check_budget_without_eviction(
+        &self,
+        managed_bytes: u64,
+        record_bytes: u64,
+    ) -> StoreResult<P, ()> {
+        let total = managed_bytes
+            .checked_add(record_bytes)
+            .ok_or(DurableStoreError::ManagedBytesOverflow)?;
+        if total > self.max_managed_blob_bytes {
+            return Err(DurableStoreError::NoRoomWithoutEviction {
+                blob_bytes: record_bytes,
+                limit: "store budget",
+            });
+        }
+        Ok(())
+    }
+
+    /// Whether this snapshot's final record exists as a regular file of
+    /// exactly its encoded size. A metadata check, not a content check:
+    /// lookup still decodes and validates a record before use, and removes
+    /// one that fails.
+    pub fn contains(&self, context: P::Context<'_>, snapshot: &P) -> StoreResult<P, bool> {
+        let compatibility_id = P::compatibility_id(&context);
+        let digest = snapshot.prefix_key(&compatibility_id);
+        let final_path = self
+            .namespace
+            .blob_dir(&compatibility_id)
+            .join(P::blob_name(
+                snapshot.matched_len(),
+                snapshot.mode(),
+                &digest,
+            ));
+        let Some(metadata) = metadata_nofollow(&final_path)? else {
+            return Ok(false);
+        };
+        if !metadata.file_type().is_file() {
+            return Ok(false);
+        }
+        let record_bytes = snapshot
+            .encoded_record_bytes(context)
+            .map_err(DurableStoreError::Codec)?;
+        Ok(metadata.len() == record_bytes)
+    }
+
+    /// Managed record bytes currently on disk and the store's budget.
+    pub fn managed_bytes(&self) -> StoreResult<P, (u64, u64)> {
+        let _lock = self.namespace.lock_shared()?;
+        let scan = scan_managed_blobs(&self.namespace.blobs_root(), is_managed_blob_name::<P>)?;
+        Ok((scan.total_bytes, self.max_managed_blob_bytes))
+    }
+
+    /// The record file name `snapshot` publishes under within its
+    /// compatibility directory (prefix length, mode and digest).
+    pub fn record_name(&self, context: P::Context<'_>, snapshot: &P) -> String {
+        let digest = snapshot.prefix_key(&P::compatibility_id(&context));
+        P::blob_name(snapshot.matched_len(), snapshot.mode(), &digest)
     }
 
     pub fn lookup(
@@ -506,6 +621,7 @@ impl<P: DurablePayload> DurableStore<P> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn publish_staged(
         &self,
         context: P::Context<'_>,
@@ -514,6 +630,7 @@ impl<P: DurablePayload> DurableStore<P> {
         final_path: &Path,
         staged: &StagedBlob,
         staging_cleanup: StagingCleanupReport,
+        allow_eviction: bool,
     ) -> StoreResult<P, PublishReport> {
         let compatibility_id = P::compatibility_id(&context);
         let mut repaired = false;
@@ -534,9 +651,13 @@ impl<P: DurablePayload> DurableStore<P> {
                     Err(error) => return Err(DurableStoreError::Codec(error)),
                 };
                 if valid {
-                    if let Some(report) =
-                        self.admit_existing(final_path, &lease, staged.integrity, staging_cleanup)?
-                    {
+                    if let Some(report) = self.admit_existing(
+                        final_path,
+                        &lease,
+                        staged.integrity,
+                        staging_cleanup,
+                        allow_eviction,
+                    )? {
                         return Ok(report);
                     }
                     continue;
@@ -552,6 +673,10 @@ impl<P: DurablePayload> DurableStore<P> {
             }
             let before =
                 scan_managed_blobs(&self.namespace.blobs_root(), is_managed_blob_name::<P>)?;
+            if !allow_eviction {
+                // Then `evict_to_fit` below finds it fits and removes nothing.
+                self.check_budget_without_eviction(before.total_bytes, staged.record_bytes)?;
+            }
             let (evicted_entries, evicted_bytes, remaining_bytes) = evict_to_fit(
                 before,
                 staged.record_bytes,
@@ -742,6 +867,7 @@ impl<P: DurablePayload> DurableStore<P> {
         lease: &BlobLease,
         staged_integrity: StagedIntegrityReport,
         staging_cleanup: StagingCleanupReport,
+        allow_eviction: bool,
     ) -> StoreResult<P, Option<PublishReport>> {
         let _lock = self.namespace.lock_exclusive()?;
         let Some(metadata) = metadata_nofollow(path)? else {
@@ -753,9 +879,15 @@ impl<P: DurablePayload> DurableStore<P> {
         if metadata.dev() != lease.dev || metadata.ino() != lease.ino {
             return Ok(None);
         }
+        // The record may be the link of a publication whose directory sync
+        // failed; it is durable (and reported so) only once that sync holds.
+        sync_directory(path.parent().expect("blob parent"))?;
         let before = scan_managed_blobs(&self.namespace.blobs_root(), is_managed_blob_name::<P>)?;
-        let (evicted_entries, evicted_bytes, managed_bytes_after) =
-            evict_to_fit(before, 0, self.max_managed_blob_bytes, Some(path))?;
+        let (evicted_entries, evicted_bytes, managed_bytes_after) = if allow_eviction {
+            evict_to_fit(before, 0, self.max_managed_blob_bytes, Some(path))?
+        } else {
+            (0, 0, before.total_bytes)
+        };
         let touched = lease
             .file
             .set_times(FileTimes::new().set_modified(SystemTime::now()))

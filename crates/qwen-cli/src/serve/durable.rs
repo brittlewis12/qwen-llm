@@ -11,9 +11,11 @@
 //!   inactive and queued jobs wait (within the byte bound).
 //!
 //! Families decide *what* to write: Qwen spills entries leaving RAM through
-//! budget eviction or expiry and flushes its top-ranked entries on graceful
-//! shutdown (dense snapshots are GBs, so never every turn); DeepSeek V4
-//! writes behind every captured boundary (its snapshots are small).
+//! budget eviction or expiry, publishes the latest request's continuation
+//! boundary once the server has been idle (`--durable-idle-publish-secs`),
+//! and flushes on graceful shutdown (dense snapshots are GBs, so never every
+//! turn); DeepSeek V4 writes behind every captured boundary (its snapshots
+//! are small).
 
 use anyhow::{Context as _, Result, bail};
 use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
@@ -35,8 +37,11 @@ const AUTO_FALLBACK_BYTES: u64 = 8 * GIB;
 const MAX_RECORD_BYTES: u64 = 16 * GIB;
 const MIN_QUEUE_BYTES: u64 = GIB;
 const MAX_QUEUE_BYTES: u64 = 16 * GIB;
-/// Graceful-shutdown persistence budget.
-pub(crate) const SHUTDOWN_FLUSH_BUDGET: Duration = Duration::from_secs(10);
+/// Default graceful-shutdown persistence budget: a 133K-token 27B Q8
+/// snapshot (~9 GB) takes ~13 s at the measured 0.7 GB/s.
+pub(crate) const DEFAULT_SHUTDOWN_SECS: u64 = 30;
+/// Default idle time before the latest continuation boundary is published.
+pub(crate) const DEFAULT_IDLE_PUBLISH_SECS: u64 = 30;
 const DEFAULT_SUBDIR: &str = ".cache/qwen-llm/serve-checkpoints";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,6 +58,11 @@ pub(crate) struct DurableSnapshotConfig {
     /// `None` is `auto`.
     pub(crate) max_mib: Option<u64>,
     pub(crate) min_tokens: usize,
+    /// Graceful-shutdown flush budget in seconds.
+    pub(crate) shutdown_secs: u64,
+    /// Idle seconds before publishing the latest continuation boundary;
+    /// 0 disables idle publication.
+    pub(crate) idle_publish_secs: u64,
 }
 
 impl DurableSnapshotConfig {
@@ -61,6 +71,8 @@ impl DurableSnapshotConfig {
             dir: DurableDir::Off,
             max_mib: None,
             min_tokens: DEFAULT_MIN_TOKENS,
+            shutdown_secs: DEFAULT_SHUTDOWN_SECS,
+            idle_publish_secs: DEFAULT_IDLE_PUBLISH_SECS,
         }
     }
 
@@ -98,6 +110,9 @@ impl DurableSnapshotConfig {
             max_bytes,
             max_record_bytes: max_bytes.min(MAX_RECORD_BYTES),
             min_tokens: self.min_tokens,
+            shutdown_budget: Duration::from_secs(self.shutdown_secs),
+            idle_publish_after: (self.idle_publish_secs > 0)
+                .then(|| Duration::from_secs(self.idle_publish_secs)),
             budget,
         }))
     }
@@ -137,6 +152,11 @@ pub(crate) struct DurablePlan {
     pub(crate) max_record_bytes: u64,
     /// Prefixes shorter than this are neither persisted nor looked up.
     pub(crate) min_tokens: usize,
+    /// Graceful-shutdown flush budget.
+    pub(crate) shutdown_budget: Duration,
+    /// Idle time before publishing the latest continuation boundary (Qwen);
+    /// `None` disables idle publication.
+    pub(crate) idle_publish_after: Option<Duration>,
     budget: BudgetSource,
 }
 
@@ -144,11 +164,13 @@ impl std::fmt::Display for DurablePlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "durable_dir={} durable_max_bytes={} durable_max_record_bytes={} durable_min_tokens={}",
+            "durable_dir={} durable_max_bytes={} durable_max_record_bytes={} durable_min_tokens={} durable_shutdown_secs={} durable_idle_publish_secs={}",
             self.root.display(),
             self.max_bytes,
             self.max_record_bytes,
             self.min_tokens,
+            self.shutdown_budget.as_secs(),
+            self.idle_publish_after.map_or(0, |after| after.as_secs()),
         )?;
         match self.budget {
             BudgetSource::Explicit => write!(f, " durable_budget_source=explicit"),
@@ -300,6 +322,12 @@ impl<J> DurableWorker<J> {
 
     pub(crate) fn stats(&self) -> WorkerStats {
         self.shared.lock().stats
+    }
+
+    /// Nothing queued and nothing being written.
+    pub(crate) fn is_idle(&self) -> bool {
+        let state = self.shared.lock();
+        state.jobs.is_empty() && !state.writing
     }
 
     /// Queue without waiting. `false` means the job was dropped: the queue
@@ -515,12 +543,24 @@ mod tests {
             dir: DurableDir::Path("/tmp/durable".into()),
             max_mib: Some(2048),
             min_tokens: 7,
+            shutdown_secs: 45,
+            idle_publish_secs: 0,
         };
         let plan = explicit.resolve("deepseek_v4").unwrap().unwrap();
         assert_eq!(plan.root, std::path::Path::new("/tmp/durable/deepseek_v4"));
         assert_eq!(plan.max_bytes, 2 * GIB);
         assert_eq!(plan.max_record_bytes, 2 * GIB);
         assert_eq!(plan.min_tokens, 7);
+        assert_eq!(plan.shutdown_budget, Duration::from_secs(45));
+        assert_eq!(plan.idle_publish_after, None, "0 disables idle publication");
+        let idle = DurableSnapshotConfig {
+            idle_publish_secs: 30,
+            ..explicit.clone()
+        };
+        assert_eq!(
+            idle.resolve("qwen").unwrap().unwrap().idle_publish_after,
+            Some(Duration::from_secs(30))
+        );
         assert!(plan.to_string().contains("durable_budget_source=explicit"));
         let huge = DurableSnapshotConfig {
             max_mib: Some(100 * 1024),

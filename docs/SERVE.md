@@ -384,12 +384,17 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
 - **Opt-in asynchronous SSE trace:** `--trace-sse PATH` appends one JSON object per line
   for each `/v1/responses` request, plus each streamed response's heartbeat,
   event (including its exact JSON `data` payload), and terminal `[DONE]` marker.
+  Every record has a `trace_request_id`, allocated before JSON decoding and shared
+  by that request's records; it is separate from the response's protocol ID.
   It is disabled by default and may contain prompts, tool definitions, and
   generated text. The file is opened append-only with `O_NOFOLLOW|O_CLOEXEC`,
   using nonblocking open so a FIFO cannot hang startup; it must be a regular file
   owned by the current user and is forced to mode 0600.
-  A bounded background-writer queue keeps trace I/O off the response path; a
-  full queue or writer failure disables tracing rather than blocking serving.
+  One background writer serves all request subscribers. Its queue holds at most
+  eight records (not a byte budget); a full queue or writer failure disables
+  tracing for all subscribers rather than blocking serving. Records retain their
+  per-request order; records from different requests may interleave. Trace loss
+  does not alter response bytes, and this optional log is not durable job history.
   Shutdown gives the writer 250 ms to drain, then detaches it so a stalled
   filesystem cannot hold process exit; queued trace events may be lost in that
   case.

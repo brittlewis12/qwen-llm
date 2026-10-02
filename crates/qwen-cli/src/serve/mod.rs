@@ -33,6 +33,7 @@ pub(crate) mod render_k2;
 pub(crate) mod render_muse;
 pub(crate) mod request_profile;
 pub(crate) mod snapshot_cache;
+mod trace;
 pub(crate) mod utf8;
 
 pub(crate) use crate::open_responses::{items, render, tool_parse};
@@ -755,7 +756,8 @@ fn accept_loop_with_checkpoint(
             let guard = admission
                 .try_admit()
                 .context("HTTP owner admission is closed")?;
-            if let Err(error) = http::handle_connection(&stream, backend, trace.as_mut()) {
+            let subscriber = trace.as_ref().map(http::TraceLog::subscriber);
+            if let Err(error) = http::handle_connection(&stream, backend, subscriber) {
                 tracing::info!(target: "qwen_diag", "serve: connection aborted: {error}");
             }
             drop(guard);

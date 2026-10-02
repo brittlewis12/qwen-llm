@@ -67,7 +67,7 @@ recovery is explicitly recorded below.
 | R03 | Typed prefills and annotated input: `lens_input.rs`, `model_request.rs`, `messages.rs`, `open_responses/render.rs`, CLI callers | Rework against current renderers; R02 uses existing span types only | Exact prompt bytes, token positions, reasoning-only continuation, tools and house/upstream rendering |
 | R04 | Deployment binding and asset verification: `linear_transport{.rs,/deployment.rs,/cpu_fixture.rs}`, `full_lens/access.rs` | Reuse after R01; retain main's expected-profile checks | Binding mismatch refusal, retained payload hashes, CPU-before-Metal admission, no implicit transfer override |
 | R05 | Shared ordinary execution: `ordinary_executor.rs`, `qwen/decode.rs`, `lens_run/execute.rs` | Rework around main's current decode paths; not an automatic replacement | CLI/serve sampling, cancellation, terminal nonconsumption and telemetry remain equivalent |
-| R06 | Owner queue and CPU HTTP coordination: `serve/{control,queue,request_profile}.rs`, backend/HTTP wiring | Partially recovered: immutable request profiles and serial owner activity accounting; concurrent coordination still pending | Idle/request-finished/shutdown ownership, busy admission, cancellation/disconnect, JSON/SSE protocols |
+| R06 | Owner queue and CPU HTTP coordination: `serve/{control,queue,request_profile}.rs`, backend/HTTP wiring | Partially recovered: immutable request profiles, serial owner activity accounting and shared trace subscribers; concurrent coordination still pending | Idle/request-finished/shutdown ownership, busy admission, cancellation/disconnect, JSON/SSE protocols |
 | R07 | Durable job metadata: `serve/jobs/{state,store,preview}.rs` | Reuse with R06; distinct from main's durable model snapshots | Exact-key acceptance/retry, bounded publication, recovery and corruption handling, history without inference |
 | R08 | Native request/routes/preconditions: `serve/lens_http/*`, `serve/native/preconditions.rs` | Reuse schema where compatible; R03/R06/R07 | Unknown-field rejection, local HTTP checks, binding coverage, stale rejection before acceptance, accepted-key recovery |
 | R09 | Native baseline and observation lifecycle: `serve/native/{mod,execute,writer}.rs` | Rework admission around current resident/cache budgets; R05-R08 | Disconnected completion, cancellation, independent outcomes, bounded writer, isolated diagnostic state |
@@ -228,4 +228,60 @@ Actual accept-loop traces cover success, ordinary GETs, malformed input, renderi
 refusal, disconnect, busy rejection, post-receive shutdown and owner-only callbacks;
 shutdown observes a closed listener. Serving tests pass: 190 passed, 23 opt-in
 ignored; all binaries check. This qualifies bookkeeping and serial integration,
-not concurrent coordination, real snapshot persistence or web recovery. No GPU work.
+not concurrent coordination, real snapshot persistence or web recovery.
+
+### R06: Trace Ownership And Request Correlation
+
+One `TraceLog` owns the background writer; each HTTP request receives a separate
+`TraceSubscriber` before decoding. Subscribers cannot keep the writer alive after
+owner closure. Every trace record gains a `trace_request_id`, distinct from the
+response protocol ID, including records for malformed JSON. Existing fields,
+event payloads and HTTP wire bytes retain their meaning. This is an optional lossy
+diagnostic log, not durable job history or a new persistence lane.
+
+Queue overflow, disconnection and writer I/O failure disable all subscribers.
+Payload construction, serialization and shutdown joining occur outside the sender
+mutex; closing the owner during construction prevents a late enqueue. The existing
+eight-record queue, private append-only file policy and 250 ms detach-on-stall
+shutdown remain. Eight records are not a byte budget: concurrent transport still
+needs to account for constructing, queued and in-flight trace payloads.
+
+CPU tests force interleaved subscribers and verify correlation and per-request
+ordering, shared failure, closure races, surviving subscriber lifetimes and writer
+exit. Existing file-safety, bounded shutdown and wire-equivalence tests remain.
+Serving qualification explicitly excludes the existing unmarked Metal-context
+test `serve::backend::tests::early_capture_window_serves_boundary_tail_then_rebases`:
+195 tests pass, 23 remain ignored, with that additional test filtered out. Binary,
+format and whitespace checks pass.
+
+Earlier unfiltered serving runs included that test, which silently returns when
+Metal context creation fails. Their reported pass counts must not be interpreted
+as GPU qualification or proof that every test was CPU-only. Future CPU gates must
+exclude it explicitly, alongside the unrelated Muse test noted under R01.
+
+### Next R06 Integration Boundary
+
+The ordinary HTTP worker/owner bridge must land as a complete replacement, not
+another serving lane. Its queue, activity lifetime, cancellation, transport memory
+admission and worker settlement cannot be split into disconnected implementations.
+One owner queue without the old readiness/dispatcher hop is the preferred design.
+
+The old piece-buffer allowance is not a total transport budget. Account for request
+bodies, parsed/rendered forms, queued work, generation output, response assembly,
+trace payloads and overlapping response writers. Qwen's initial admission and
+snapshot-eviction retry must both retain durable reservations plus transport
+reservations. Preserve the other families' distinct residency/session policies.
+
+Reserve before expensive preparation; order closure atomically with delivery;
+settle all acquired reservations. An ordinary HTTP request has one completion
+lifetime shared with enqueued/executing work, but worker exit signals cancellation
+independently. Preserve request-side half-close semantics and consume all pieces
+before terminal success. Define overload behavior before SSE headers, and do not
+copy the old arbitrary piece-size refusal without validating or splitting pieces.
+
+Stop acceptance, cancel work, wake both socket and channel waits, and join workers
+outside accounting locks before final completion drain and backend shutdown.
+Include socket-registration/closure races and read watchdogs in that settlement.
+CPU tests can qualify coordination and policy decisions, not real Metal pressure,
+cache continuity or durable snapshot persistence. Bounded live checks remain
+pending; never override memory safety to obtain them.

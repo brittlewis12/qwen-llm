@@ -15,14 +15,17 @@ use super::output_partition::ToolGrammar;
 use super::output_partition::{GenerationEnd, OutputPartition, OutputProtocol};
 #[cfg(test)]
 use super::render::render_qwen_serve_prompt;
+pub(crate) use super::trace::TraceLog;
+use super::trace::TraceSubscriber;
 use serde_json::{Value, json};
-use std::fs::OpenOptions;
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::net::{Shutdown, TcpStream};
+#[cfg(test)]
 use std::path::Path;
-use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::sync_channel;
+#[cfg(test)]
+use std::time::Instant;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_REQUEST_LINE_BYTES: usize = 8 * 1024;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
@@ -30,9 +33,6 @@ const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(35);
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_READ_DEADLINE: Duration = Duration::from_secs(30);
-const TRACE_QUEUE_CAPACITY: usize = 8;
-const TRACE_SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
-const TRACE_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// Streaming sink handed to the backend. `piece` delivers generated text;
 /// `tick` is called between prefill chunks so the transport can heartbeat
@@ -102,130 +102,13 @@ pub(crate) trait GenerationBackend {
     fn request_finished(&mut self) {}
 }
 
-pub(crate) struct TraceLog {
-    sender: Option<SyncSender<Value>>,
-    worker: Option<JoinHandle<()>>,
-}
-
-impl TraceLog {
-    pub(crate) fn open(path: &Path) -> io::Result<Self> {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path)?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "trace path is not a regular file",
-            ));
-        }
-        if metadata.uid() != unsafe { libc::geteuid() } {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "trace file must be owned by the current user",
-            ));
-        }
-        if metadata.permissions().mode() & 0o077 != 0 {
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        }
-        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
-        if flags < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let (sender, receiver) = sync_channel::<Value>(TRACE_QUEUE_CAPACITY);
-        let worker = std::thread::Builder::new()
-            .name("qwen-sse-trace".into())
-            .spawn(move || {
-                let mut file = BufWriter::new(file);
-                for value in receiver {
-                    let result = (|| {
-                        serde_json::to_writer(&mut file, &value)
-                            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                        file.write_all(b"\n")?;
-                        file.flush()
-                    })();
-                    if let Err(error) = result {
-                        tracing::warn!(target: "qwen_diag", "serve: disabling SSE trace after write failure: {error}");
-                        break;
-                    }
-                }
-            })?;
-        Ok(Self {
-            sender: Some(sender),
-            worker: Some(worker),
-        })
-    }
-
-    fn is_enabled(&self) -> bool {
-        self.sender.is_some()
-    }
-
-    fn line(&mut self, make_value: impl FnOnce() -> Value) {
-        let Some(sender) = self.sender.as_ref() else {
-            return;
-        };
-        match sender.try_send(make_value()) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
-                tracing::warn!(target: "qwen_diag", "serve: disabling SSE trace because its bounded queue is full");
-                self.sender = None;
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                tracing::warn!(target: "qwen_diag", "serve: disabling SSE trace because its writer stopped");
-                self.sender = None;
-            }
-        }
-    }
-}
-
-fn join_trace_worker_with_grace(
-    worker: JoinHandle<()>,
-    grace: Duration,
-) -> Option<std::thread::Result<()>> {
-    let started = Instant::now();
-    while !worker.is_finished() {
-        let remaining = grace.saturating_sub(started.elapsed());
-        if remaining.is_zero() {
-            return None;
-        }
-        std::thread::sleep(remaining.min(TRACE_SHUTDOWN_POLL_INTERVAL));
-    }
-    Some(worker.join())
-}
-
-impl Drop for TraceLog {
-    fn drop(&mut self) {
-        self.sender = None;
-        let Some(worker) = self.worker.take() else {
-            return;
-        };
-        match join_trace_worker_with_grace(worker, TRACE_SHUTDOWN_GRACE) {
-            Some(Ok(())) => {}
-            Some(Err(_)) => {
-                tracing::warn!(target: "qwen_diag", "serve: SSE trace writer panicked");
-            }
-            None => {
-                tracing::warn!(target: "qwen_diag", "serve: SSE trace writer did not stop within {} ms; detaching so shutdown can continue (queued trace events may be lost)", TRACE_SHUTDOWN_GRACE.as_millis());
-            }
-        }
-    }
-}
-
 struct TraceSseWriter<'a, 'b> {
     inner: SseWriter<&'a TcpStream>,
-    trace: Option<&'b mut TraceLog>,
+    trace: Option<&'b TraceSubscriber>,
 }
 
 impl<'a, 'b> TraceSseWriter<'a, 'b> {
-    fn new(stream: &'a TcpStream, trace: Option<&'b mut TraceLog>) -> Self {
+    fn new(stream: &'a TcpStream, trace: Option<&'b TraceSubscriber>) -> Self {
         Self {
             inner: SseWriter(stream),
             trace,
@@ -234,7 +117,7 @@ impl<'a, 'b> TraceSseWriter<'a, 'b> {
 
     fn heartbeat(&mut self) -> io::Result<()> {
         self.inner.heartbeat()?;
-        if let Some(trace) = self.trace.as_deref_mut() {
+        if let Some(trace) = self.trace {
             trace.line(|| json!({"kind": "heartbeat"}));
         }
         Ok(())
@@ -242,7 +125,7 @@ impl<'a, 'b> TraceSseWriter<'a, 'b> {
 
     fn done(&mut self) -> io::Result<()> {
         self.inner.done()?;
-        if let Some(trace) = self.trace.as_deref_mut() {
+        if let Some(trace) = self.trace {
             trace.line(|| json!({"kind": "done"}));
         }
         Ok(())
@@ -251,13 +134,13 @@ impl<'a, 'b> TraceSseWriter<'a, 'b> {
 
 impl EventWrite for TraceSseWriter<'_, '_> {
     fn event(&mut self, event_type: &str, payload: Value) -> io::Result<()> {
-        let trace_enabled = self.trace.as_deref().is_some_and(TraceLog::is_enabled);
+        let trace_enabled = self.trace.is_some_and(TraceSubscriber::is_enabled);
         if trace_enabled {
             self.inner.event(event_type, payload.clone())?;
         } else {
             return self.inner.event(event_type, payload);
         }
-        if let Some(trace) = self.trace.as_deref_mut() {
+        if let Some(trace) = self.trace {
             trace.line(|| {
                 json!({
                     "kind": "event",
@@ -713,7 +596,7 @@ impl<W: EventWrite> GenerationSink for StreamingSink<'_, '_, W> {
 pub(crate) fn handle_connection(
     stream: &TcpStream,
     backend: &mut dyn GenerationBackend,
-    trace: Option<&mut TraceLog>,
+    trace: Option<TraceSubscriber>,
 ) -> io::Result<()> {
     configure_stream(stream)?;
     let mut writer = stream;
@@ -740,7 +623,9 @@ pub(crate) fn handle_connection(
                 "data": [{"id": backend.model_id(), "object": "model", "owned_by": "local"}],
             }),
         ),
-        ("POST", "/v1/responses") => handle_responses(&request.body, stream, backend, trace),
+        ("POST", "/v1/responses") => {
+            handle_responses(&request.body, stream, backend, trace.as_ref())
+        }
         ("GET", _) | ("POST", _) => write_serve_error(
             &mut writer,
             &ServeError {
@@ -768,12 +653,12 @@ fn handle_responses(
     body: &[u8],
     stream: &TcpStream,
     backend: &mut dyn GenerationBackend,
-    mut trace: Option<&mut TraceLog>,
+    trace: Option<&TraceSubscriber>,
 ) -> io::Result<()> {
     let mut writer = stream;
     let parsed = match backend.decode_request_json(body) {
         Ok(parsed) => {
-            if let Some(trace) = trace.as_deref_mut()
+            if let Some(trace) = trace
                 && trace.is_enabled()
             {
                 trace.line(|| json!({"kind": "request", "body": parsed.clone()}));
@@ -781,7 +666,7 @@ fn handle_responses(
             parsed
         }
         Err(error) => {
-            if let Some(trace) = trace.as_deref_mut()
+            if let Some(trace) = trace
                 && trace.is_enabled()
             {
                 trace.line(|| {
@@ -1239,7 +1124,8 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&path);
         {
-            let mut trace = TraceLog::open(&path).expect("open trace");
+            let log = TraceLog::open(&path).expect("open trace");
+            let trace = log.subscriber();
             trace.line(|| json!({"kind": "request", "body": {"model": "m"}}));
             trace.line(|| json!({"kind": "event", "event": "response.created"}));
             trace.line(|| json!({"kind": "done"}));
@@ -1256,7 +1142,8 @@ mod tests {
         );
         // Appends rather than truncating, so a restart keeps history.
         {
-            let mut trace = TraceLog::open(&path).expect("reopen trace");
+            let log = TraceLog::open(&path).expect("reopen trace");
+            let trace = log.subscriber();
             trace.line(|| json!({"kind": "heartbeat"}));
         }
         assert_eq!(
@@ -1337,8 +1224,8 @@ mod tests {
         let trace_path = trace_path.to_path_buf();
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            let mut trace = TraceLog::open(&trace_path).expect("open trace");
-            handle_connection(&stream, &mut backend, Some(&mut trace)).unwrap();
+            let trace = TraceLog::open(&trace_path).expect("open trace");
+            handle_connection(&stream, &mut backend, Some(trace.subscriber())).unwrap();
         });
         let mut client = TcpStream::connect(addr).unwrap();
         client.write_all(request.as_bytes()).unwrap();
@@ -1426,8 +1313,8 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut backend = MockBackend::new(&["answer"], StopReason::Eos);
-            let mut trace = TraceLog::open(&trace_path).unwrap();
-            handle_connection(&stream, &mut backend, Some(&mut trace)).unwrap();
+            let trace = TraceLog::open(&trace_path).unwrap();
+            handle_connection(&stream, &mut backend, Some(trace.subscriber())).unwrap();
         });
         let mut client = TcpStream::connect(addr).unwrap();
         client
@@ -1451,12 +1338,78 @@ mod tests {
         assert_eq!(lines[0]["kind"], "request");
         assert_eq!(lines[0]["body"]["stream"], true);
         assert!(
+            lines[0]["trace_request_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("trace_")
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|line| line["trace_request_id"] == lines[0]["trace_request_id"])
+        );
+        assert!(
             lines
                 .iter()
                 .any(|line| { line["kind"] == "event" && line["event"] == "response.created" })
         );
         assert_eq!(lines.last().unwrap()["kind"], "done");
         assert!(response.ends_with("data: [DONE]\n\n"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn trace_correlates_each_request_even_when_json_decoding_fails() {
+        let path =
+            std::env::temp_dir().join(format!("qwen-trace-invalid-{}.jsonl", next_response_id()));
+        let trace_path = path.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let trace = TraceLog::open(&trace_path).unwrap();
+            let mut backend = MockBackend::new(&["answer"], StopReason::Eos);
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().unwrap();
+                handle_connection(&stream, &mut backend, Some(trace.subscriber())).unwrap();
+            }
+        });
+        for (body, status) in [
+            (r#"{"model":"qwen-test","input":"hi"}"#, "200"),
+            ("not JSON", "400"),
+        ] {
+            let mut client = TcpStream::connect(address).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            client
+                .write_all(post("/v1/responses", body).as_bytes())
+                .unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).unwrap();
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status}")),
+                "{response}"
+            );
+        }
+        server.join().unwrap();
+        let rows = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["body"]["input"], "hi");
+        assert_eq!(rows[1]["body"], "not JSON");
+        assert_ne!(rows[0]["trace_request_id"], rows[1]["trace_request_id"]);
+        for row in rows {
+            assert_eq!(row["kind"], "request");
+            assert!(
+                row["trace_request_id"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("trace_")
+            );
+        }
         std::fs::remove_file(path).unwrap();
     }
 
@@ -1696,40 +1649,6 @@ mod tests {
         let body: Value = serde_json::from_str(body_of(&response)).unwrap();
         assert_eq!(body["error"]["code"], "server_busy");
         assert_eq!(body["error"]["param"], "");
-    }
-
-    #[test]
-    fn full_trace_queue_disables_without_future_value_construction() {
-        let (sender, receiver) = sync_channel(1);
-        sender.send(json!({"kind": "queued"})).unwrap();
-        let mut trace = TraceLog {
-            sender: Some(sender),
-            worker: None,
-        };
-        trace.line(|| json!({"kind": "full"}));
-        assert!(!trace.is_enabled());
-        let constructed = std::cell::Cell::new(false);
-        trace.line(|| {
-            constructed.set(true);
-            json!({"kind": "ignored"})
-        });
-        assert!(!constructed.get());
-        drop(receiver);
-    }
-
-    #[test]
-    fn stalled_trace_worker_is_detached_instead_of_blocking_shutdown() {
-        let (release_sender, release_receiver) = std::sync::mpsc::channel();
-        let (done_sender, done_receiver) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            release_receiver.recv().unwrap();
-            done_sender.send(()).unwrap();
-        });
-        assert!(join_trace_worker_with_grace(worker, Duration::ZERO).is_none());
-        release_sender.send(()).unwrap();
-        done_receiver
-            .recv_timeout(Duration::from_secs(1))
-            .expect("detached worker remains able to finish");
     }
 
     #[test]

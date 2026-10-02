@@ -67,7 +67,7 @@ recovery is explicitly recorded below.
 | R03 | Typed prefills and annotated input: `lens_input.rs`, `model_request.rs`, `messages.rs`, `open_responses/render.rs`, CLI callers | Rework against current renderers; R02 uses existing span types only | Exact prompt bytes, token positions, reasoning-only continuation, tools and house/upstream rendering |
 | R04 | Deployment binding and asset verification: `linear_transport{.rs,/deployment.rs,/cpu_fixture.rs}`, `full_lens/access.rs` | Reuse after R01; retain main's expected-profile checks | Binding mismatch refusal, retained payload hashes, CPU-before-Metal admission, no implicit transfer override |
 | R05 | Shared ordinary execution: `ordinary_executor.rs`, `qwen/decode.rs`, `lens_run/execute.rs` | Rework around main's current decode paths; not an automatic replacement | CLI/serve sampling, cancellation, terminal nonconsumption and telemetry remain equivalent |
-| R06 | Owner queue and CPU HTTP coordination: `serve/{control,queue,request_profile}.rs`, backend/HTTP wiring | Partially recovered: immutable request profiles, serial owner activity accounting and shared trace subscribers; concurrent coordination still pending | Idle/request-finished/shutdown ownership, busy admission, cancellation/disconnect, JSON/SSE protocols |
+| R06 | Owner queue and CPU HTTP coordination: `serve/{control,queue,request_profile}.rs`, backend/HTTP wiring | Partially recovered: ordinary single-admission CPU transport and owner-only generation, with profiles/activity/traces; multi-request/native coordination and live qualification remain pending | Idle/request-finished/shutdown ownership, busy admission, cancellation/disconnect, JSON/SSE protocols |
 | R07 | Durable job metadata: `serve/jobs/{state,store,preview}.rs` | Reuse with R06; distinct from main's durable model snapshots | Exact-key acceptance/retry, bounded publication, recovery and corruption handling, history without inference |
 | R08 | Native request/routes/preconditions: `serve/lens_http/*`, `serve/native/preconditions.rs` | Reuse schema where compatible; R03/R06/R07 | Unknown-field rejection, local HTTP checks, binding coverage, stale rejection before acceptance, accepted-key recovery |
 | R09 | Native baseline and observation lifecycle: `serve/native/{mod,execute,writer}.rs` | Rework admission around current resident/cache budgets; R05-R08 | Disconnected completion, cancellation, independent outcomes, bounded writer, isolated diagnostic state |
@@ -259,12 +259,68 @@ Metal context creation fails. Their reported pass counts must not be interpreted
 as GPU qualification or proof that every test was CPU-only. Future CPU gates must
 exclude it explicitly, alongside the unrelated Muse test noted under R01.
 
+### R06: Single-Admission Owner/HTTP Bridge
+
+The accept loop now dispatches the admitted connection to a CPU HTTP worker and
+executes only generation on the resident owner. This replaces the production
+handler path rather than adding an optional interface lane. One connection remains
+admitted through preparation, generation and response cleanup; concurrent clients
+retain main's pre-header busy503 behavior. No multi-request reservation pool,
+native routes or dispatcher scaffolding lands in this slice.
+
+This narrows the earlier multiworker proposal deliberately: a many-request bridge
+needs bounds for simultaneous bodies, parsed/rendered forms and response writers,
+not merely the old token-channel allowance. The current bridge shares prepared
+request/prompt storage through `Arc` rather than cloning them. Its two-slot channel
+splits pieces at 4096 bytes; the owner waits for acknowledgement after downstream
+processing of each original piece before advancing. This preserves the previous
+synchronous sink boundary, including potentially large reasoning/tool event work.
+Nonstream collection keeps one allocation per original piece. Streaming delta
+boundaries may differ without changing text, UTF-8, output protocol or usage.
+
+The added CPU allowance is a conservative 2 MiB worker stack plus 32 KiB bridge
+buffer/metadata reserve, not a total memory bound or a pre-spawn gate. Qwen retains
+durable plus transport bytes through optional-tail fallback and pressure-relief
+retry. Muse/Flash retain resident-runner policy with an added CPU headroom check;
+K2's fresh session admission includes the CPU reserve while its existing API
+delegates with zero. DS4 checks before and after session construction and restores
+residency on returned rejection. Its construction peak and panic recovery are not
+qualified by that check. Existing response-collection/trace limits are inherited.
+
+One activity guard survives through both worker and owner work. Cancellation is
+separate from its last release. Stop/error paths close channel waits, shut down
+the owned socket and join the HTTP worker before completion drain and backend
+shutdown. No new worker detaches; the trace writer's existing timeout exception
+remains. Generation itself is cooperative, not preemptible.
+
+The existing all-family JSON/SSE profile fixtures now also traverse the real bridge
+and compare results against the direct handler. CPU tests cover full-channel
+backpressure, shared preparation, terminal ordering, waiting heartbeats, missing
+terminals, cancelled queued work, failing/panicking subscribers, downstream
+acknowledgement and cancellation, DS4 restoration control flow, and Qwen's three
+pricing attempts retaining the same reserve. Actual accept-loop tests cover
+busy503 and settlement during blocked reads, nonstream writes and streamed
+generation backpressure with client reset. The latter is disconnect coverage,
+not an injected SIGTERM test. A real streaming partition test crosses both UTF-8
+and reasoning delimiters at bridge chunk boundaries.
+
+Live Metal pressure/performance, cache continuity and signal/durable-shutdown
+verification remain pending. No GPU or model loading is required for these CPU
+gates, and the known unmarked Metal test is explicitly excluded.
+
+Final CPU gates pass: 211 serving tests, 23 opt-in ignored (the unmarked Metal
+context test is explicitly filtered); 351 Lens tests, nine opt-in ignored and the
+unmarked Muse Metal test explicitly filtered. The library's CPU-only-versus-Metal
+headroom arithmetic regression passes. All binaries, formatting and whitespace
+checks pass without warnings. These are scoped CPU results, not a full-suite or
+live qualification claim.
+
 ### Next R06 Integration Boundary
 
-The ordinary HTTP worker/owner bridge must land as a complete replacement, not
-another serving lane. Its queue, activity lifetime, cancellation, transport memory
-admission and worker settlement cannot be split into disconnected implementations.
-One owner queue without the old readiness/dispatcher hop is the preferred design.
+The next expansion is concurrent diagnostic/history handling and native owner
+work. Its queue, activity lifetime, cancellation, transport memory admission and
+worker settlement must remain one coherent implementation. Reuse the owner bridge;
+do not add another service or restore the old readiness/dispatcher hop.
 
 The old piece-buffer allowance is not a total transport budget. Account for request
 bodies, parsed/rendered forms, queued work, generation output, response assembly,

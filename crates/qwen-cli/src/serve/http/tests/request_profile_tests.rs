@@ -4,11 +4,39 @@ use crate::serve::request_profile::RequestProfile;
 use qwen_llm::muse_glimmer::MuseGlimmerChatTemplateProfile;
 use std::sync::Arc;
 
+#[derive(Clone)]
 struct ProfileBackend {
     profile: RequestProfile,
     expected_prompt: Option<String>,
     output: String,
     end: GenerationEnd,
+}
+
+fn roundtrip(mut backend: ProfileBackend, request: &str) -> String {
+    let direct = super::roundtrip(backend.clone(), request);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut activity = crate::serve::owner_activity::OwnerActivity::default();
+        let guard = activity.admission().try_admit().unwrap();
+        crate::serve::transport::handle_connection(stream, &mut backend, None, guard, || Ok(()))
+            .unwrap();
+        let mut completions = 0;
+        activity.drain_finished(|| completions += 1);
+        assert_eq!(completions, 1);
+        assert!(activity.is_settled());
+    });
+    let mut client = TcpStream::connect(address).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    client.write_all(request.as_bytes()).unwrap();
+    let mut bridged = String::new();
+    client.read_to_string(&mut bridged).unwrap();
+    server.join().unwrap();
+    assert_eq!(regex_lite_replace(&direct), regex_lite_replace(&bridged));
+    bridged
 }
 
 impl GenerationBackend for ProfileBackend {

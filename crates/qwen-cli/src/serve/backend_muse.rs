@@ -158,6 +158,10 @@ impl GenerationBackend for MuseGlimmerBackend {
         let tokenize_ms = tokenize_t0.elapsed().as_secs_f64() * 1e3;
         let required =
             decode_loop::required_forwards("Muse", prompt_ids.len(), max_tokens, self.capacity)?;
+        super::transport_memory::admit_resident_transport(
+            sink.transport_reserve_bytes(),
+            self.ctx.memory_signals().process_limit_remaining_bytes,
+        )?;
         let stop_tokens = [self.eos_token_id, self.eot_token_id];
         let prefill_t0 = Instant::now();
         // Taken before the session moves and republished only on success, so

@@ -484,6 +484,24 @@ fn allocate_optional_tail<P, T, E>(
     }
 }
 
+fn admit_with_pressure_relief<P, E>(
+    candidate: Option<(P, u64)>,
+    baseline_price: u64,
+    cpu_reserved: u64,
+    mut admit: impl FnMut(u64, u64) -> Result<qwen_llm::metal::MetalMemoryAdmission, E>,
+    mut release: impl FnMut(u64) -> bool,
+) -> Result<(Option<P>, qwen_llm::metal::MetalMemoryAdmission), E> {
+    let (plan, mut admission) = admit_optional_tail(candidate, baseline_price, |price| {
+        admit(price, cpu_reserved)
+    })?;
+    if let Some(deficit) = process_deficit(&admission)
+        && release(deficit)
+    {
+        admission = admit(baseline_price, cpu_reserved)?;
+    }
+    Ok((plan, admission))
+}
+
 fn allocate_serve_request_state(
     loaded: &LoadedModel,
     prompt_tokens: usize,
@@ -951,26 +969,27 @@ impl GenerationBackend for EngineBackend {
         });
         // Durable writes queued or running hold a decoded copy of their
         // snapshot that the memory signals may not show yet.
-        let durable_reserved = self.durable_reserved_bytes();
-        let (packed_tail_plan, admission) =
-            admit_optional_tail(packed_tail_plan, prefill_scratch_upper_bytes, |price| {
+        let cpu_reserved = super::transport_memory::combined_reserve(
+            self.durable_reserved_bytes(),
+            sink.transport_reserve_bytes(),
+        )?;
+        let (packed_tail_plan, admission) = admit_with_pressure_relief(
+            packed_tail_plan,
+            prefill_scratch_upper_bytes,
+            cpu_reserved,
+            |price, reserved| {
                 self.loaded
                     .qwen_execution_memory_admission_with_additional_bytes(
                         1,
                         capacity,
                         price,
                         0,
-                        durable_reserved,
+                        reserved,
                     )
-            })
-            .map_err(|error| {
-                ServeError::server_error(format!("price request memory: {error:#}"))
-            })?;
-        // Cached snapshots are disposable process memory: before refusing
-        // the request, release unpinned ones for the process deficit (keeping
-        // the entry this request restores) and ask once more.
-        let admission = match process_deficit(&admission) {
-            Some(deficit) => {
+            },
+            |deficit| {
+                // Keep the restore entry pinned while releasing disposable
+                // snapshots, then retry with the same complete CPU reservation.
                 let keep = cached_lookup
                     .as_ref()
                     .and_then(|lookup| self.loaded.pin_prepared_lookup(lookup));
@@ -979,7 +998,7 @@ impl GenerationBackend for EngineBackend {
                     self.loaded.unpin_prefix_cache_entry(entry);
                 }
                 if evicted.is_empty() {
-                    admission
+                    false
                 } else {
                     tracing::info!(
                         target: "qwen_diag",
@@ -987,21 +1006,13 @@ impl GenerationBackend for EngineBackend {
                         evicted.ids.len(),
                         evicted.bytes,
                     );
-                    self.loaded
-                        .qwen_execution_memory_admission_with_additional_bytes(
-                            1,
-                            capacity,
-                            prefill_scratch_upper_bytes,
-                            0,
-                            durable_reserved,
-                        )
-                        .map_err(|error| {
-                            ServeError::server_error(format!("price request memory: {error:#}"))
-                        })?
+                    true
                 }
-            }
-            None => admission,
-        };
+            },
+        )
+        .map_err(|error| {
+            ServeError::server_error(format!("price request memory: {error:#}"))
+        })?;
         if !admission.admitted {
             return Err(ServeError {
                 status: 503,
@@ -2049,6 +2060,43 @@ impl EngineBackend {
 mod tests {
     use super::*;
 
+    #[test]
+    fn optional_fallback_and_pressure_retry_keep_durable_and_transport_reservations() {
+        use qwen_llm::metal::{MetalMemorySignals, evaluate_metal_memory_admission_with_cpu_bytes};
+        let remaining = std::cell::Cell::new(50);
+        let reserve = super::super::transport_memory::combined_reserve(100, 52).unwrap();
+        let mut prices = Vec::new();
+        let mut evicted = Vec::new();
+        let (plan, admission) = super::admit_with_pressure_relief(
+            Some(("packed", 40)),
+            30,
+            reserve,
+            |scratch, cpu| {
+                prices.push((scratch, cpu));
+                Ok::<_, ()>(evaluate_metal_memory_admission_with_cpu_bytes(
+                    scratch,
+                    cpu,
+                    0,
+                    MetalMemorySignals {
+                        recommended_max_bytes: 1000,
+                        current_allocated_bytes: 0,
+                        process_limit_remaining_bytes: Some(remaining.get()),
+                    },
+                    false,
+                ))
+            },
+            |deficit| {
+                evicted.push(deficit);
+                remaining.set(182);
+                true
+            },
+        )
+        .unwrap();
+        assert!(plan.is_none());
+        assert!(admission.admitted);
+        assert_eq!(prices, [(40, 152), (30, 152), (30, 152)]);
+        assert_eq!(evicted, [132]);
+    }
     fn replay_cache() -> DflashPrefixReplayCache {
         DflashPrefixReplayCache {
             enabled: true,

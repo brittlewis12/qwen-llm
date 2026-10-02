@@ -188,6 +188,15 @@ impl<'a> K2LoadedModel<'a> {
     /// Each session receives separate KV/scratch and fresh admission. The capacity
     /// is the request extent priced at load, not the checkpoint's declared max.
     pub fn create_session(&self, start_position: u32) -> Result<K2Session<'_, 'a>> {
+        self.create_session_with_cpu_reserve(start_position, 0)
+    }
+
+    /// Admit session buffers together with caller-owned future CPU storage.
+    pub fn create_session_with_cpu_reserve(
+        &self,
+        start_position: u32,
+        cpu_reserve_bytes: u64,
+    ) -> Result<K2Session<'_, 'a>> {
         if self.session_active.get() {
             return Err(invalid(
                 "initial K2 runtime allows one live session per loaded model",
@@ -202,7 +211,7 @@ impl<'a> K2LoadedModel<'a> {
         )?;
         let price = price_buffers(self.ctx, &self.plan.session.buffer_bytes())?;
         let _transaction = self.ctx.begin_allocation_transaction();
-        admit(self.ctx, price)?;
+        admit_with_cpu_reserve(self.ctx, price, cpu_reserve_bytes)?;
         let before = self.ctx.current_allocated_size();
         let buffers = SessionBuffers::new(self.ctx, &self.plan.session)?;
         buffers.validate_cache_contract(&request)?;
@@ -860,8 +869,17 @@ fn price_buffers(ctx: &MetalContext, buffers: &[u64]) -> Result<u64> {
 }
 
 fn admit(ctx: &MetalContext, bytes: u64) -> Result<()> {
-    let admission =
-        evaluate_metal_memory_admission(bytes, RESERVE_BYTES, ctx.memory_signals(), true);
+    admit_with_cpu_reserve(ctx, bytes, 0)
+}
+
+fn admit_with_cpu_reserve(ctx: &MetalContext, bytes: u64, cpu_bytes: u64) -> Result<()> {
+    let admission = crate::metal::evaluate_metal_memory_admission_with_cpu_bytes(
+        bytes,
+        cpu_bytes,
+        RESERVE_BYTES,
+        ctx.memory_signals(),
+        true,
+    );
     if !admission.admitted {
         return Err(invalid(format!(
             "memory admission denied: {}",

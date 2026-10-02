@@ -10,7 +10,9 @@
 //!   family, satisfying the normative cases in
 //!   `tests/fixtures/serve_render_fixtures_v1.json` (fixture-before-renderer).
 //!
-//! The serial HTTP/SSE loop lands in the next slice and consumes these.
+//! [`request_profile`] owns CPU request semantics; [`transport`] connects one
+//! admitted HTTP worker to the resident owner. [`owner_activity`] gates owner
+//! maintenance on complete request lifetimes, and [`trace`] owns the shared log.
 #![allow(dead_code)] // consumed incrementally; the HTTP slice wires the rest
 
 pub(crate) mod backend;
@@ -34,6 +36,8 @@ pub(crate) mod render_muse;
 pub(crate) mod request_profile;
 pub(crate) mod snapshot_cache;
 mod trace;
+mod transport;
+mod transport_memory;
 pub(crate) mod utf8;
 
 pub(crate) use crate::open_responses::{items, render, tool_parse};
@@ -688,8 +692,8 @@ fn spawn_acceptor(
         .context("spawn HTTP acceptor")
 }
 
-/// Serial generation loop shared by every family backend. Acceptance runs on
-/// a separate thread so busy clients can be rejected without moving backend.
+/// Single-admission owner loop shared by every family backend. Acceptance and
+/// HTTP handling run on CPU threads without moving the resident backend.
 fn accept_loop(
     listener: TcpListener,
     model_id: &str,
@@ -706,6 +710,7 @@ fn accept_loop(
 enum OwnerCheckpoint {
     BeforeAdmission,
     BeforeHandling,
+    DuringHandling,
 }
 
 fn accept_loop_with_checkpoint(
@@ -757,11 +762,11 @@ fn accept_loop_with_checkpoint(
                 .try_admit()
                 .context("HTTP owner admission is closed")?;
             let subscriber = trace.as_ref().map(http::TraceLog::subscriber);
-            if let Err(error) = http::handle_connection(&stream, backend, subscriber) {
-                tracing::info!(target: "qwen_diag", "serve: connection aborted: {error}");
-            }
-            drop(guard);
+            let handled = transport::handle_connection(stream, backend, subscriber, guard, || {
+                checkpoint(OwnerCheckpoint::DuringHandling)
+            });
             activity.drain_finished(|| backend.request_finished());
+            handled?;
         }
         Ok(())
     })();

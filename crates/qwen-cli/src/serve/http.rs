@@ -22,6 +22,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::net::{Shutdown, TcpStream};
 #[cfg(test)]
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::mpsc::sync_channel;
 #[cfg(test)]
 use std::time::Instant;
@@ -39,7 +40,21 @@ const REQUEST_READ_DEADLINE: Duration = Duration::from_secs(30);
 /// and detect disconnects (cancellation = the returned error).
 pub(crate) trait GenerationSink {
     fn piece(&mut self, bytes: &[u8]) -> io::Result<()>;
+    /// Transport fragments may change streaming delta boundaries. A collector
+    /// can use the first fragment's original length to keep its allocation shape.
+    fn piece_fragment(&mut self, bytes: &[u8], _new_piece_bytes: Option<usize>) -> io::Result<()> {
+        self.piece(bytes)
+    }
     fn tick(&mut self) -> io::Result<()>;
+    /// Additional future CPU buffer allowance, beyond resident request storage.
+    fn transport_reserve_bytes(&self) -> u64 {
+        0
+    }
+}
+
+pub(crate) struct PreparedResponse {
+    pub(crate) request: ServeRequest,
+    pub(crate) prompt: String,
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +105,13 @@ pub(crate) trait GenerationBackend {
         prompt: &str,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure>;
+    fn generate_prepared(
+        &mut self,
+        prepared: Arc<PreparedResponse>,
+        sink: &mut dyn GenerationSink,
+    ) -> Result<GenerationOutcome, BackendFailure> {
+        self.generate(&prepared.request, &prepared.prompt, sink)
+    }
     /// Called from the serial loop while no request is admitted (snapshot
     /// cache expiry). Must be cheap.
     fn idle(&mut self) {}
@@ -553,6 +575,7 @@ fn shutdown_checkpoint() -> io::Result<()> {
 
 struct CollectSink<'a> {
     pieces: Vec<Vec<u8>>,
+    fragment_remaining: usize,
     stream: &'a TcpStream,
 }
 
@@ -566,6 +589,29 @@ impl GenerationSink for CollectSink<'_> {
     fn tick(&mut self) -> io::Result<()> {
         shutdown_checkpoint()?;
         probe_peer(self.stream)
+    }
+
+    fn piece_fragment(&mut self, bytes: &[u8], new_piece_bytes: Option<usize>) -> io::Result<()> {
+        self.tick()?;
+        if let Some(length) = new_piece_bytes {
+            if self.fragment_remaining != 0 {
+                return Err(transport_error("previous output piece is incomplete"));
+            }
+            let mut piece = Vec::new();
+            piece.try_reserve_exact(length).map_err(io::Error::other)?;
+            self.pieces.push(piece);
+            self.fragment_remaining = length;
+        }
+        let remaining = self
+            .fragment_remaining
+            .checked_sub(bytes.len())
+            .ok_or_else(|| transport_error("output fragment exceeds original piece"))?;
+        self.pieces
+            .last_mut()
+            .ok_or_else(|| transport_error("output fragment has no original piece"))?
+            .extend_from_slice(bytes);
+        self.fragment_remaining = remaining;
+        Ok(())
     }
 }
 
@@ -718,12 +764,15 @@ fn handle_responses(
     if let Some(line) = history_reasoning_diagnostic(&request, &output_protocol) {
         eprintln!("{line}");
     }
+    let prepared = Arc::new(PreparedResponse { request, prompt });
+    let request = &prepared.request;
     if !request.stream {
         let mut sink = CollectSink {
             pieces: Vec::new(),
+            fragment_remaining: 0,
             stream,
         };
-        match backend.generate(&request, &prompt, &mut sink) {
+        match backend.generate_prepared(Arc::clone(&prepared), &mut sink) {
             Ok(outcome) => {
                 let mut partition = OutputPartition::new(output_protocol);
                 let mut partition_events = Vec::new();
@@ -769,7 +818,7 @@ fn handle_responses(
             stream: &mut response,
             partition: OutputPartition::new(output_protocol),
         };
-        let outcome = backend.generate(&request, &prompt, &mut sink);
+        let outcome = backend.generate_prepared(Arc::clone(&prepared), &mut sink);
         let StreamingSink { partition, .. } = sink;
         match outcome {
             Ok(outcome) => {
@@ -981,6 +1030,28 @@ mod tests {
 
     fn body_of(response: &str) -> &str {
         response.split("\r\n\r\n").nth(1).unwrap()
+    }
+
+    #[test]
+    fn nonstream_fragments_preserve_one_allocation_per_original_piece() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let mut sink = CollectSink {
+            pieces: Vec::new(),
+            fragment_remaining: 0,
+            stream: &stream,
+        };
+        sink.piece_fragment(b"abc", Some(7)).unwrap();
+        let pointer = sink.pieces[0].as_ptr();
+        sink.piece_fragment(b"defg", None).unwrap();
+        assert_eq!(sink.pieces.len(), 1);
+        assert_eq!(sink.pieces[0], b"abcdefg");
+        assert_eq!(sink.pieces[0].as_ptr(), pointer);
+        assert_eq!(sink.fragment_remaining, 0);
+        sink.piece_fragment(b"next", Some(4)).unwrap();
+        assert_eq!(sink.pieces.len(), 2);
+        assert!(sink.piece_fragment(b"overflow", None).is_err());
     }
 
     fn sse_payload(response: &str, event_type: &str) -> Value {
@@ -1203,19 +1274,24 @@ mod tests {
             rest = &rest[skip..];
         }
         out.push_str(rest);
-        let mut deadline = String::with_capacity(out.len());
-        let mut rest = out.as_str();
-        while let Some(index) = rest.find("\"created_at\":") {
-            deadline.push_str(&rest[..index]);
-            deadline.push_str("\"created_at\":0");
-            rest = &rest[index + 13..];
-            let skip = rest
-                .find(|c: char| !c.is_ascii_digit())
-                .unwrap_or(rest.len());
-            rest = &rest[skip..];
+        for field in ["\"created_at\":", "\"completed_at\":"] {
+            let mut normalized = String::with_capacity(out.len());
+            let mut rest = out.as_str();
+            while let Some(index) = rest.find(field) {
+                normalized.push_str(&rest[..index + field.len()]);
+                rest = &rest[index + field.len()..];
+                let skip = rest
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(rest.len());
+                if skip > 0 {
+                    normalized.push('0');
+                }
+                rest = &rest[skip..];
+            }
+            normalized.push_str(rest);
+            out = normalized;
         }
-        deadline.push_str(rest);
-        deadline
+        out
     }
 
     fn roundtrip_traced(mut backend: MockBackend, request: &str, trace_path: &Path) -> String {

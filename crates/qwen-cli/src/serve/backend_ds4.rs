@@ -514,6 +514,11 @@ impl GenerationBackend for DeepSeekV4Backend {
             self.session_capacity.forward_limit(),
         )?;
 
+        super::transport_memory::admit_resident_transport(
+            sink.transport_reserve_bytes(),
+            self.ctx.memory_signals().process_limit_remaining_bytes,
+        )?;
+
         let residency = self.residency.take().ok_or_else(|| {
             // Unreachable unless a prior request poisoned the slot; a server
             // that can never serve again must not pretend otherwise (k3 R1.5).
@@ -571,20 +576,32 @@ impl DeepSeekV4Backend {
         }
         let session_ms = session_t0.elapsed().as_secs_f64() * 1e3;
 
-        let result = self.decode_with_session(
-            &mut session,
-            prompt_ids,
-            preopened_reasoning,
-            warm_start,
-            select_ms,
-            max_tokens,
-            tokenize_ms,
-            session_ms,
-            &mut sampler,
-            sink,
-        );
-        self.restore_residency(session);
-        result
+        with_request_session(
+            self,
+            session,
+            |owner, session| {
+                // Session construction allocates fresh scratch. Recheck the CPU
+                // allowance afterwards, before any model work, without losing
+                // residency on rejection. This does not price the construction peak.
+                super::transport_memory::admit_resident_transport(
+                    sink.transport_reserve_bytes(),
+                    owner.ctx.memory_signals().process_limit_remaining_bytes,
+                )?;
+                owner.decode_with_session(
+                    session,
+                    prompt_ids,
+                    preopened_reasoning,
+                    warm_start,
+                    select_ms,
+                    max_tokens,
+                    tokenize_ms,
+                    session_ms,
+                    &mut sampler,
+                    sink,
+                )
+            },
+            Self::restore_residency,
+        )
     }
 
     /// Return the residency to its slot. A failure here permanently disables
@@ -811,8 +828,38 @@ impl DeepSeekV4Backend {
     }
 }
 
+fn with_request_session<O, S, T, E>(
+    owner: &mut O,
+    mut session: S,
+    run: impl FnOnce(&mut O, &mut S) -> Result<T, E>,
+    restore: impl FnOnce(&mut O, S),
+) -> Result<T, E> {
+    let result = run(owner, &mut session);
+    restore(owner, session);
+    result
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn post_construction_transport_rejection_restores_session_without_execution() {
+        let mut residency = None;
+        let mut executed = false;
+        let result = super::with_request_session(
+            &mut residency,
+            "resident",
+            |_, _| {
+                super::super::transport_memory::admit_resident_transport(10, Some(9))?;
+                executed = true;
+                Ok::<_, super::ServeError>(())
+            },
+            |owner, session| *owner = Some(session),
+        );
+        assert!(result.is_err());
+        assert!(!executed);
+        assert_eq!(residency, Some("resident"));
+    }
+
     /// The serve backend over the local DS4 GGUF (`DSV4_GGUF` overrides),
     /// with the 32K forward budget serve probes use.
     fn gpu_backend(model_id: &str) -> DeepSeekV4Backend {

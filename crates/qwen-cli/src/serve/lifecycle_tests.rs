@@ -35,11 +35,15 @@ impl http::GenerationBackend for LifecycleBackend {
         "test"
     }
 
-    fn render_prompt(&self, request: &items::ServeRequest) -> Result<String, items::ServeError> {
+    fn request_profile(&self) -> request_profile::RequestProfile {
         if self.fail_render {
-            return Err(items::ServeError::invalid_request(None, "render refused"));
+            return request_profile::RequestProfile::OrdinaryQwen {
+                template: items::QwenTemplate::Qwen35,
+                no_thinking_supported: false,
+                style: items::TemplateStyle::House,
+            };
         }
-        self.request_profile().render(request)
+        request_profile::RequestProfile::UnboundQwen
     }
 
     fn generate(
@@ -90,7 +94,8 @@ fn connect(address: SocketAddr) -> TcpStream {
 }
 
 fn post() -> String {
-    let body = r#"{"model":"test","input":"hello","max_output_tokens":1}"#;
+    let body =
+        r#"{"model":"test","input":"hello","max_output_tokens":1,"x_qwen":{"no_thinking":true}}"#;
     format!(
         "POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
@@ -100,8 +105,11 @@ fn post() -> String {
 fn stop_after_handling() -> impl FnMut(OwnerCheckpoint) -> Result<()> {
     let mut handling = false;
     move |checkpoint| {
-        ensure!(!handling, "test stop after handling");
-        handling = checkpoint == OwnerCheckpoint::BeforeHandling;
+        ensure!(
+            !(handling && checkpoint == OwnerCheckpoint::BeforeAdmission),
+            "test stop after handling"
+        );
+        handling |= checkpoint == OwnerCheckpoint::BeforeHandling;
         Ok(())
     }
 }
@@ -293,4 +301,176 @@ fn busy_rejection_does_not_create_an_owner_completion() {
     assert_eq!(observed.recv_timeout(WAIT).unwrap(), Event::Shutdown);
     server.join().unwrap();
     assert!(observed.try_recv().is_err());
+}
+
+struct PhaseBackend {
+    owner: ThreadId,
+    address: SocketAddr,
+    events: Sender<&'static str>,
+    payload: Vec<u8>,
+}
+
+impl PhaseBackend {
+    fn record(&self, event: &'static str) {
+        assert_eq!(std::thread::current().id(), self.owner);
+        self.events.send(event).unwrap();
+    }
+}
+
+impl http::GenerationBackend for PhaseBackend {
+    fn model_id(&self) -> &str {
+        "test"
+    }
+    fn generate(
+        &mut self,
+        _: &items::ServeRequest,
+        _: &str,
+        sink: &mut dyn http::GenerationSink,
+    ) -> Result<http::GenerationOutcome, http::BackendFailure> {
+        self.record("generate");
+        let result = sink.piece(&self.payload);
+        self.record(if result.is_ok() {
+            "generated"
+        } else {
+            "aborted"
+        });
+        result.map_err(http::BackendFailure::Aborted)?;
+        Ok(http::GenerationOutcome {
+            end: output_partition::GenerationEnd::TokenLimit,
+            usage: events::Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cached_tokens: 0,
+            },
+            stats: None,
+        })
+    }
+    fn request_finished(&mut self) {
+        self.record("finished");
+    }
+    fn shutdown(&mut self) {
+        assert!(TcpStream::connect_timeout(&self.address, WAIT).is_err());
+        self.record("shutdown");
+    }
+}
+
+fn small_socket_buffer(socket: &impl std::os::fd::AsRawFd, option: i32) {
+    let bytes: libc::c_int = 4096;
+    // This test owns the socket and passes a correctly sized integer option.
+    assert_eq!(
+        unsafe {
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                option,
+                (&bytes as *const libc::c_int).cast(),
+                std::mem::size_of_val(&bytes) as libc::socklen_t,
+            )
+        },
+        0
+    );
+}
+
+#[test]
+fn busy_and_shutdown_cover_reading_generation_backpressure_and_response_writing() {
+    for phase in ["reading", "generation", "writing"] {
+        let listener = bind_loopback("127.0.0.1:0").unwrap();
+        small_socket_buffer(&listener, libc::SO_SNDBUF);
+        let address = listener.local_addr().unwrap();
+        let mut client = connect(address);
+        small_socket_buffer(&client, libc::SO_RCVBUF);
+        if phase == "reading" {
+            client
+                .write_all(b"POST /v1/responses HTTP/1.1\r\n")
+                .unwrap();
+        } else {
+            let body = format!(
+                r#"{{"model":"test","input":"hi","stream":{}}}"#,
+                phase == "generation"
+            );
+            client.write_all(format!("POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
+        }
+        let stopping = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&stopping);
+        let (entered, entry) = channel();
+        let (events, observed) = channel();
+        let (done, completion) = channel();
+        let server = std::thread::spawn(move || {
+            let mut backend = PhaseBackend {
+                owner: std::thread::current().id(),
+                address,
+                events,
+                payload: vec![b'x'; 2 * 1024 * 1024],
+            };
+            let mut entered = Some(entered);
+            let result = accept_loop_with_checkpoint(
+                listener,
+                "test",
+                0.0,
+                &mut backend,
+                &mut None,
+                |point| {
+                    if point == OwnerCheckpoint::DuringHandling
+                        && let Some(entered) = entered.take()
+                    {
+                        entered.send(()).unwrap();
+                    }
+                    ensure!(!stop.load(Ordering::Acquire), "test stop during {phase}");
+                    Ok(())
+                },
+            );
+            done.send(result).unwrap();
+        });
+        entry.recv_timeout(WAIT).unwrap();
+        if phase != "reading" {
+            assert_eq!(observed.recv_timeout(WAIT).unwrap(), "generate");
+            if phase == "writing" {
+                assert_eq!(observed.recv_timeout(WAIT).unwrap(), "generated");
+            }
+            // Seeing a response byte establishes that writing has begun; the
+            // deliberately small socket buffers cannot hold the full response.
+            client.read_exact(&mut [0u8; 1]).unwrap();
+        }
+        let mut busy = connect(address);
+        let mut response = String::new();
+        busy.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 503"), "{phase}: {response}");
+        assert!(
+            observed.try_recv().is_err(),
+            "request finished while {phase} was blocked"
+        );
+        stopping.store(true, Ordering::Release);
+        if phase == "generation" {
+            // Reset only this owned test connection to wake a blocked streaming
+            // subscriber; a request-side FIN alone is deliberately inconclusive.
+            use std::os::fd::AsRawFd;
+            let linger = libc::linger {
+                l_onoff: 1,
+                l_linger: 0,
+            };
+            assert_eq!(
+                unsafe {
+                    libc::setsockopt(
+                        client.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_LINGER,
+                        (&linger as *const libc::linger).cast(),
+                        std::mem::size_of_val(&linger) as libc::socklen_t,
+                    )
+                },
+                0
+            );
+            drop(client);
+            assert_eq!(observed.recv_timeout(WAIT).unwrap(), "aborted");
+        }
+        let error = completion
+            .recv_timeout(WAIT)
+            .expect("shutdown must wake and join the HTTP worker")
+            .unwrap_err();
+        assert!(error.to_string().contains("test stop"));
+        assert_eq!(observed.recv_timeout(WAIT).unwrap(), "finished");
+        assert_eq!(observed.recv_timeout(WAIT).unwrap(), "shutdown");
+        server.join().unwrap();
+        assert!(observed.try_recv().is_err());
+    }
 }

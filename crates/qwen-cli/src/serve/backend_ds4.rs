@@ -34,7 +34,6 @@ use super::durable::{
 };
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest, TemplateStyle};
-use super::output_partition::{OutputProtocol, ToolGrammar};
 use super::render_ds4;
 use super::snapshot_cache::SnapshotCache;
 use crate::DeepSeekV4MultigroupSelectorPlan;
@@ -481,29 +480,10 @@ impl GenerationBackend for DeepSeekV4Backend {
         );
     }
 
-    fn template_style_default(&self) -> Option<TemplateStyle> {
-        Some(self.template_style)
-    }
-
-    /// Under house style an absent reasoning item is a chat turn's
-    /// provenance, not lost reasoning, so it is not reported as missing.
-    fn normalize_request(&self, request: &mut ServeRequest) -> Result<(), ServeError> {
-        if request.template_style != Some(TemplateStyle::Upstream) {
-            request.history_reasoning_missing = 0;
+    fn request_profile(&self) -> super::request_profile::RequestProfile {
+        super::request_profile::RequestProfile::DeepSeekV4 {
+            style: self.template_style,
         }
-        Ok(())
-    }
-
-    fn output_protocol(&self, request: &ServeRequest) -> OutputProtocol {
-        OutputProtocol::Qwen {
-            preopened_reasoning: render_ds4::preopens_reasoning(request).unwrap_or(false),
-            parse_tools: !request.model_request.tools.is_empty(),
-            tool_grammar: ToolGrammar::DeepSeekDsml,
-        }
-    }
-
-    fn render_prompt(&self, request: &ServeRequest) -> Result<String, ServeError> {
-        render_ds4::render_deepseek_v4_serve_prompt(request)
     }
 
     fn generate(

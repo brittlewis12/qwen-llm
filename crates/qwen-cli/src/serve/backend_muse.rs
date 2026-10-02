@@ -3,8 +3,6 @@
 use super::decode_loop;
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest};
-use super::output_partition::OutputProtocol;
-use super::render_muse;
 use anyhow::Context as _;
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
@@ -129,25 +127,13 @@ impl GenerationBackend for MuseGlimmerBackend {
         &self.model_id
     }
 
-    fn normalize_request(&self, request: &mut ServeRequest) -> Result<(), ServeError> {
-        render_muse::normalize_request(request, self.default_max_tokens)
-    }
-
-    fn output_protocol(&self, request: &ServeRequest) -> OutputProtocol {
-        OutputProtocol::MuseAtem {
+    fn request_profile(&self) -> super::request_profile::RequestProfile {
+        super::request_profile::RequestProfile::Muse {
+            template: self.profile,
+            default_max_tokens: self.default_max_tokens,
             eos_token_id: self.eos_token_id,
             eot_token_id: self.eot_token_id,
-            declared_tools: request
-                .model_request
-                .tools
-                .iter()
-                .map(|tool| tool.name.clone())
-                .collect(),
         }
-    }
-
-    fn render_prompt(&self, request: &ServeRequest) -> Result<String, ServeError> {
-        render_muse::render_muse_glimmer_serve_prompt(request, self.profile)
     }
 
     fn generate(

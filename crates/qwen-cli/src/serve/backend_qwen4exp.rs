@@ -14,8 +14,7 @@
 use super::backend::{IM_START_MARKER, transcript_boundary};
 use super::decode_loop;
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
-use super::items::{QwenTemplate, ServeError, ServeRequest};
-use super::output_partition::{OutputProtocol, ToolGrammar};
+use super::items::{ServeError, ServeRequest};
 use super::snapshot_cache::SnapshotCache;
 use anyhow::Context as _;
 use qwen_llm::gguf::GgufFile;
@@ -156,28 +155,10 @@ impl GenerationBackend for FlashNextBackend {
         super::log_expired_snapshots("qwen4exp", &self.cache.sweep());
     }
 
-    /// Bind once through the family table so the bound request is what
-    /// renders, selects the output protocol, and echoes.
-    fn normalize_request(&self, request: &mut ServeRequest) -> Result<(), ServeError> {
-        *request = crate::open_responses::bind_qwen_request(request, QwenTemplate::Qwen38, true)?;
-        Ok(())
-    }
-
-    fn template_style_default(&self) -> Option<super::items::TemplateStyle> {
-        Some(self.template_style)
-    }
-
-    fn output_protocol(&self, request: &ServeRequest) -> OutputProtocol {
-        OutputProtocol::Qwen {
-            preopened_reasoning: super::render::qwen_generation(request)
-                == super::render::QwenGeneration::PreOpen,
-            parse_tools: true,
-            tool_grammar: ToolGrammar::QwenXml,
+    fn request_profile(&self) -> super::request_profile::RequestProfile {
+        super::request_profile::RequestProfile::FlashNext {
+            style: self.template_style,
         }
-    }
-
-    fn render_prompt(&self, request: &ServeRequest) -> Result<String, ServeError> {
-        Ok(super::render::render_qwen_serve_prompt(request))
     }
 
     fn generate(

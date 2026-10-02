@@ -30,6 +30,7 @@ pub(crate) mod partition_muse;
 pub(crate) mod render_ds4;
 pub(crate) mod render_k2;
 pub(crate) mod render_muse;
+pub(crate) mod request_profile;
 pub(crate) mod snapshot_cache;
 pub(crate) mod utf8;
 

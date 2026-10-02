@@ -67,7 +67,7 @@ recovery is explicitly recorded below.
 | R03 | Typed prefills and annotated input: `lens_input.rs`, `model_request.rs`, `messages.rs`, `open_responses/render.rs`, CLI callers | Rework against current renderers; R02 uses existing span types only | Exact prompt bytes, token positions, reasoning-only continuation, tools and house/upstream rendering |
 | R04 | Deployment binding and asset verification: `linear_transport{.rs,/deployment.rs,/cpu_fixture.rs}`, `full_lens/access.rs` | Reuse after R01; retain main's expected-profile checks | Binding mismatch refusal, retained payload hashes, CPU-before-Metal admission, no implicit transfer override |
 | R05 | Shared ordinary execution: `ordinary_executor.rs`, `qwen/decode.rs`, `lens_run/execute.rs` | Rework around main's current decode paths; not an automatic replacement | CLI/serve sampling, cancellation, terminal nonconsumption and telemetry remain equivalent |
-| R06 | Owner queue and CPU HTTP coordination: `serve/{control,queue,request_profile}.rs`, backend/HTTP wiring | Rework on main lifecycle and family contracts; review before expanding execution | Idle/request-finished/shutdown ownership, busy admission, cancellation/disconnect, JSON/SSE protocols |
+| R06 | Owner queue and CPU HTTP coordination: `serve/{control,queue,request_profile}.rs`, backend/HTTP wiring | Partially recovered: current-main immutable request profiles extracted; owner coordination/lifecycle recovery still pending | Idle/request-finished/shutdown ownership, busy admission, cancellation/disconnect, JSON/SSE protocols |
 | R07 | Durable job metadata: `serve/jobs/{state,store,preview}.rs` | Reuse with R06; distinct from main's durable model snapshots | Exact-key acceptance/retry, bounded publication, recovery and corruption handling, history without inference |
 | R08 | Native request/routes/preconditions: `serve/lens_http/*`, `serve/native/preconditions.rs` | Reuse schema where compatible; R03/R06/R07 | Unknown-field rejection, local HTTP checks, binding coverage, stale rejection before acceptance, accepted-key recovery |
 | R09 | Native baseline and observation lifecycle: `serve/native/{mod,execute,writer}.rs` | Rework admission around current resident/cache budgets; R05-R08 | Disconnected completion, cancellation, independent outcomes, bounded writer, isolated diagnostic state |
@@ -150,3 +150,27 @@ pass with 31. All binaries check successfully. No GPU execution was performed.
 The old tree's numeric selector cardinality helper, stricter coefficient decoder,
 shared operation validation/lowering and native integration are deliberately not
 included in this refactor. They require their own focused recovery and tests.
+
+### R06: Immutable Family Request Semantics
+
+The resident backends now provide an owned CPU `RequestProfile`; the existing
+HTTP trait delegates JSON decoding, parsing, normalization, template defaults,
+rendering and output protocol selection to it. Every production family selects
+its own profile. The serial acceptor, model execution, memory admission, sessions
+and lifecycle callbacks are unchanged. This is not yet CPU-worker coordination.
+
+The profile preserves current main's distinctions: ordinary Qwen binds a cloned
+request during rendering while Flash-Next binds before response echoes; DS4 keeps
+house/upstream history provenance; Muse retains released defaults and ATEM IDs;
+K2 retains its lossless outer decoder, verified chat capability, tool byte bounds
+and output grammar, including raw fallback. K2 capability verification and its
+cancellation boundary remain in preparation; an `Arc` shares only the verified
+CPU metadata. Profiles are checked as `Send + Sync + 'static`.
+
+New socket fixtures exercise the default delegates, not per-hook mock overrides,
+for every family through JSON and SSE with byte-fragment output. Fixed prompt
+expectations cover Qwen, DS4's pinned fixture, Muse and K2. Tests cover normalized
+fields, style overrides changing exact history bytes, raw marker preservation,
+K2 large-integer tool arguments, typed result decoding, duplicate-key rejection,
+tool-byte overflow and unsupported style refusal. Current serving tests pass:
+180 passed, 23 opt-in ignored; all binaries check without warnings. No GPU work.

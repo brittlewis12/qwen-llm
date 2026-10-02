@@ -7,8 +7,13 @@
 //! against a mock over real loopback sockets.
 
 use super::events::{EventWrite, ResponseStream, ServeStats, SseWriter, StopReason, Usage};
-use super::items::{ServeError, ServeRequest, TemplateStyle, parse_request};
-use super::output_partition::{GenerationEnd, OutputPartition, OutputProtocol, ToolGrammar};
+#[cfg(test)]
+use super::items::parse_request;
+use super::items::{ServeError, ServeRequest, TemplateStyle};
+#[cfg(test)]
+use super::output_partition::ToolGrammar;
+use super::output_partition::{GenerationEnd, OutputPartition, OutputProtocol};
+#[cfg(test)]
 use super::render::render_qwen_serve_prompt;
 use serde_json::{Value, json};
 use std::fs::OpenOptions;
@@ -46,37 +51,34 @@ pub(crate) struct GenerationOutcome {
 
 pub(crate) trait GenerationBackend {
     fn model_id(&self) -> &str;
+    fn request_profile(&self) -> super::request_profile::RequestProfile {
+        super::request_profile::RequestProfile::UnboundQwen
+    }
     /// Preserve family-owned JSON values before generic Value deserialization.
     fn decode_request_json(&self, body: &[u8]) -> Result<Value, ServeError> {
-        serde_json::from_slice(body).map_err(|error| {
-            ServeError::invalid_request(None, format!("request body is not JSON: {error}"))
-        })
+        self.request_profile().decode(body)
     }
     /// Family-specific wire admission before transcript normalization loses origin.
     fn parse_request(&self, body: &Value) -> Result<ServeRequest, ServeError> {
-        parse_request(body)
+        self.request_profile().parse(body)
     }
     /// Resolve family defaults before prompt rendering and response echoes.
-    fn normalize_request(&self, _request: &mut ServeRequest) -> Result<(), ServeError> {
-        Ok(())
+    fn normalize_request(&self, request: &mut ServeRequest) -> Result<(), ServeError> {
+        self.request_profile().normalize(request)
     }
     /// The deployment's template style (`--template-style`), or `None` for
     /// families that define no house departures from their release format
     /// (the per-request override is then refused rather than ignored).
     fn template_style_default(&self) -> Option<TemplateStyle> {
-        None
+        self.request_profile().template_style_default()
     }
     /// Family-owned grammar for exact generated token bytes.
-    fn output_protocol(&self, _request: &ServeRequest) -> OutputProtocol {
-        OutputProtocol::Qwen {
-            preopened_reasoning: false,
-            parse_tools: true,
-            tool_grammar: ToolGrammar::QwenXml,
-        }
+    fn output_protocol(&self, request: &ServeRequest) -> OutputProtocol {
+        self.request_profile().output(request)
     }
     /// Family-specific prompt rendering. Defaults to the Qwen ChatML path.
     fn render_prompt(&self, request: &ServeRequest) -> Result<String, ServeError> {
-        Ok(render_qwen_serve_prompt(request))
+        self.request_profile().render(request)
     }
     /// Render is already done; `prompt` is the exact model input. The
     /// backend streams raw generated text into `sink` and returns the
@@ -1154,6 +1156,8 @@ mod tests {
 
     #[path = "k2_chat_tests.rs"]
     mod k2_chat;
+    #[path = "request_profile_tests.rs"]
+    mod request_profiles;
 
     #[test]
     fn muse_non_stream_partitions_reasoning_visible_and_calls() {

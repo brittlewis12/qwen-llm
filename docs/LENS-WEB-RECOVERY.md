@@ -67,7 +67,7 @@ recovery is explicitly recorded below.
 | R03 | Typed prefills and annotated input: `lens_input.rs`, `model_request.rs`, `messages.rs`, `open_responses/render.rs`, CLI callers | Rework against current renderers; R02 uses existing span types only | Exact prompt bytes, token positions, reasoning-only continuation, tools and house/upstream rendering |
 | R04 | Deployment binding and asset verification: `linear_transport{.rs,/deployment.rs,/cpu_fixture.rs}`, `full_lens/access.rs` | Reuse after R01; retain main's expected-profile checks | Binding mismatch refusal, retained payload hashes, CPU-before-Metal admission, no implicit transfer override |
 | R05 | Shared ordinary execution: `ordinary_executor.rs`, `qwen/decode.rs`, `lens_run/execute.rs` | Rework around main's current decode paths; not an automatic replacement | CLI/serve sampling, cancellation, terminal nonconsumption and telemetry remain equivalent |
-| R06 | Owner queue and CPU HTTP coordination: `serve/{control,queue,request_profile}.rs`, backend/HTTP wiring | Partially recovered: current-main immutable request profiles extracted; owner coordination/lifecycle recovery still pending | Idle/request-finished/shutdown ownership, busy admission, cancellation/disconnect, JSON/SSE protocols |
+| R06 | Owner queue and CPU HTTP coordination: `serve/{control,queue,request_profile}.rs`, backend/HTTP wiring | Partially recovered: immutable request profiles and serial owner activity accounting; concurrent coordination still pending | Idle/request-finished/shutdown ownership, busy admission, cancellation/disconnect, JSON/SSE protocols |
 | R07 | Durable job metadata: `serve/jobs/{state,store,preview}.rs` | Reuse with R06; distinct from main's durable model snapshots | Exact-key acceptance/retry, bounded publication, recovery and corruption handling, history without inference |
 | R08 | Native request/routes/preconditions: `serve/lens_http/*`, `serve/native/preconditions.rs` | Reuse schema where compatible; R03/R06/R07 | Unknown-field rejection, local HTTP checks, binding coverage, stale rejection before acceptance, accepted-key recovery |
 | R09 | Native baseline and observation lifecycle: `serve/native/{mod,execute,writer}.rs` | Rework admission around current resident/cache budgets; R05-R08 | Disconnected completion, cancellation, independent outcomes, bounded writer, isolated diagnostic state |
@@ -174,3 +174,32 @@ fields, style overrides changing exact history bytes, raw marker preservation,
 K2 large-integer tool arguments, typed result decoding, duplicate-key rejection,
 tool-byte overflow and unsupported style refusal. Current serving tests pass:
 180 passed, 23 opt-in ignored; all binaries check without warnings. No GPU work.
+
+### R06: Owner Activity And Lifecycle Ordering
+
+The current serial owner now uses transferable, non-cloneable admission guards.
+Active preparation/handling and pending completions both prevent idle maintenance;
+guard destruction records one completion and only the owner delivers callbacks.
+The accounting supports explicit read-only release, but no production endpoint is
+exempted yet: ordinary GETs, errors and disconnects retain main's debounce behavior.
+
+Admission begins after the post-receive shutdown checkpoint. A connection refused
+at that checkpoint or rejected as busy produces no completion callback. Shutdown
+closes admission, stops and joins the acceptor, drains completions, verifies settled
+activity, then invokes the existing bounded backend shutdown. Closing admission
+alone does not settle outstanding work; concurrent worker settlement is not yet
+implemented. Generation, socket deadlines and memory admission remain unchanged.
+
+Idle holds the admission mutex across the callback so new work cannot race idle
+publication. Future worker admissions may wait for maintenance; the callback must
+not reenter accounting or wait for workers needing that mutex. Completion callbacks
+run outside it, and new completions block subsequent idle. Poisoned accounting
+fails closed for admission/idle while guards can unwind without a poison panic.
+
+Channel-coordinated CPU tests cover completion during draining, maintenance versus
+admission, outstanding work after closure, read-only release and poison/unwinding.
+Actual accept-loop traces cover success, ordinary GETs, malformed input, rendering
+refusal, disconnect, busy rejection, post-receive shutdown and owner-only callbacks;
+shutdown observes a closed listener. Serving tests pass: 190 passed, 23 opt-in
+ignored; all binaries check. This qualifies bookkeeping and serial integration,
+not concurrent coordination, real snapshot persistence or web recovery. No GPU work.

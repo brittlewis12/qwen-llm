@@ -24,6 +24,7 @@ pub(crate) mod events;
 pub(crate) mod http;
 pub(crate) mod outcome;
 pub(crate) mod output_partition;
+mod owner_activity;
 pub(crate) mod partition;
 pub(crate) mod partition_k2;
 pub(crate) mod partition_muse;
@@ -695,9 +696,15 @@ fn accept_loop(
     backend: &mut dyn http::GenerationBackend,
     trace: &mut Option<http::TraceLog>,
 ) -> Result<()> {
-    accept_loop_with_checkpoint(listener, model_id, load_ms, backend, trace, || {
+    accept_loop_with_checkpoint(listener, model_id, load_ms, backend, trace, |_| {
         crate::shutdown::checkpoint()
     })
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum OwnerCheckpoint {
+    BeforeAdmission,
+    BeforeHandling,
 }
 
 fn accept_loop_with_checkpoint(
@@ -706,7 +713,7 @@ fn accept_loop_with_checkpoint(
     load_ms: f64,
     backend: &mut dyn http::GenerationBackend,
     trace: &mut Option<http::TraceLog>,
-    mut checkpoint: impl FnMut() -> Result<()>,
+    mut checkpoint: impl FnMut(OwnerCheckpoint) -> Result<()>,
 ) -> Result<()> {
     let local_addr = listener
         .local_addr()
@@ -726,34 +733,44 @@ fn accept_loop_with_checkpoint(
     let stopping = Arc::new(AtomicBool::new(false));
     let accept_stopping = Arc::clone(&stopping);
     let acceptor = spawn_acceptor(listener, sender, accept_ready, accept_stopping)?;
+    let mut activity = owner_activity::OwnerActivity::default();
+    let admission = activity.admission();
 
     let result = (|| -> Result<()> {
         loop {
-            checkpoint()?;
+            checkpoint(OwnerCheckpoint::BeforeAdmission)?;
             ready.store(true, Ordering::Release);
             let stream = match receiver.recv_timeout(ADMISSION_POLL_INTERVAL) {
                 Ok(stream) => stream,
                 Err(RecvTimeoutError::Timeout) => {
-                    backend.idle();
+                    activity.drain_finished(|| backend.request_finished());
+                    activity.idle_if_quiet(|| backend.idle());
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
             };
             // A signal may arrive while admission is parked in recv_timeout.
             // Never start an admitted request without checking it again.
-            checkpoint()?;
+            checkpoint(OwnerCheckpoint::BeforeHandling)?;
+            let guard = admission
+                .try_admit()
+                .context("HTTP owner admission is closed")?;
             if let Err(error) = http::handle_connection(&stream, backend, trace.as_mut()) {
                 tracing::info!(target: "qwen_diag", "serve: connection aborted: {error}");
             }
-            backend.request_finished();
+            drop(guard);
+            activity.drain_finished(|| backend.request_finished());
         }
         Ok(())
     })();
 
+    admission.close();
     ready.store(false, Ordering::Release);
     stopping.store(true, Ordering::Release);
     drop(receiver);
     let acceptor_result = acceptor.join();
+    activity.drain_finished(|| backend.request_finished());
+    ensure!(activity.is_settled(), "HTTP owner activity did not settle");
     // Stop accepting before the bounded durable flush, so clients see a
     // closed port rather than a stalled server during shutdown.
     backend.shutdown();
@@ -762,6 +779,9 @@ fn accept_loop_with_checkpoint(
     }
     result
 }
+
+#[cfg(test)]
+mod lifecycle_tests;
 
 #[cfg(test)]
 mod tests {
@@ -924,7 +944,7 @@ mod tests {
                 0.0,
                 &mut backend,
                 &mut trace,
-                || Err(anyhow::anyhow!("termination already requested")),
+                |_| Err(anyhow::anyhow!("termination already requested")),
             )
         });
         assert_thread_finishes(

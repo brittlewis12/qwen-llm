@@ -62,7 +62,7 @@ recovery is explicitly recorded below.
 
 | ID | Behavior and source | Disposition / dependencies | Required gate |
 | --- | --- | --- | --- |
-| R01 | Bounded regular-file access: `bounded_file.rs`, Lens readers | Reuse; audit current reader contracts | CPU symlink/type/length/mutation tests; all reader consumers build |
+| R01 | Bounded regular-file access: `bounded_file.rs`, Lens readers | Shared readers recovered with current CLI consumers; future HTTP reader wiring travels with its consuming slice | CPU symlink/type/length/mutation tests; all reader consumers build |
 | R02 | Shared authored scopes and operation semantics: `lens_scope.rs`, `lens_intervention.rs`, `lens_run/{plan,execute,sweep}.rs` | Partially recovered: current-main scopes/validation, direction/action wire forms and normalization extracted with existing CLI consumers; lowering and behavior changes remain pending | Current CLI wire/binding/normalization/lowering regressions; no new service dependency |
 | R03 | Typed prefills and annotated input: `lens_input.rs`, `model_request.rs`, `messages.rs`, `open_responses/render.rs`, CLI callers | Rework against current renderers; R02 uses existing span types only | Exact prompt bytes, token positions, reasoning-only continuation, tools and house/upstream rendering |
 | R04 | Deployment binding and asset verification: `linear_transport{.rs,/deployment.rs,/cpu_fixture.rs}`, `full_lens/access.rs` | Reuse after R01; retain main's expected-profile checks | Binding mismatch refusal, retained payload hashes, CPU-before-Metal admission, no implicit transfer override |
@@ -130,6 +130,32 @@ on this branch yet.
 
 After recovery, interaction design and usable information density remain the
 primary product focus. This repair is not authorization for new feature scope.
+
+### R01: Shared Bounded File Readers
+
+`bounded_file.rs` now owns current-main's four regular-file helpers; root imports
+retain existing CLI consumer paths. Exact/bounded limits, fallible allocation,
+current-offset reads, descriptor-derived lengths and trailing-byte checks remain
+unchanged. Opening adds the preserved implementation's `O_NONBLOCK` flag alongside
+`O_NOFOLLOW`, preventing blocking opens on certain substituted special files before
+the opened-descriptor type check. This is not a filesystem latency deadline,
+ancestor confinement, identity with the initial pathname inspection, or immutable
+content capture. Same-length edits still require consumer-owned integrity checks.
+
+Transport profile validation, retained handles, streaming scans and content hashes
+are unchanged. No new size limits or HTTP module declarations accompany this slice.
+Seven helper tests cover empty/boundary files, exact-length refusal, leaf symlinks,
+directories/FIFOs, descriptor flags, deterministic shrink/growth, pathname
+replacement, current offsets, same-length edits and allocation failure. Existing
+nine transport tests and the artifact-size regression pass.
+
+The broad default Lens run passed 351 tests but encountered one existing unmarked
+Metal test: `muse_lens_run::tests::operation_only_execution_preserves_enabled_order_and_skips_zero_controls`.
+Metal initialization was refused by the wired-memory safety gate; it was not
+retried. With that unrelated test explicitly excluded, 351 pass, nine opt-in tests
+remain ignored, and one is filtered out. All binaries and formatting check cleanly.
+This is CPU reader qualification, not a full-suite or GPU pass. HTTP reader wiring
+will land with its consumers, not as unused scaffolding.
 
 ### R02: Shared Authored Semantics
 

@@ -1,7 +1,12 @@
+pub(crate) use crate::lens_intervention::Normalization;
+pub(crate) use crate::lens_scope::{
+    RenderedSpanEdge, RenderedSpanOccurrence, RenderedSpanSelector, Scope, Selector,
+};
+
 use crate::lens_input::{
     LensCohortRequest, LensInputRendering, LensInputSpec, LensMessageMode, LensRenderedSpan,
-    PreparedLensInput, is_known_lens_span, prepare_qwen_model_input,
-    prepare_qwen_model_messages_bytes, validate_lens_input_spec,
+    PreparedLensInput, prepare_qwen_model_input, prepare_qwen_model_messages_bytes,
+    validate_lens_input_spec,
 };
 use crate::template_lens::{TemplateLens, TemplateScore, TemplateVocabulary};
 use anyhow::{Context, Result, bail, ensure};
@@ -203,13 +208,6 @@ pub(crate) enum RunStdoutFormat {
     Json,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Normalization {
-    AsStored,
-    UnitL2,
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReadoutDefinition {
@@ -217,22 +215,6 @@ pub(crate) struct ReadoutDefinition {
     pub(crate) lens: String,
     pub(crate) scope: Scope,
     pub(crate) top_k: usize,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum RenderedSpanOccurrence {
-    #[default]
-    Unique,
-    First,
-    Last,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum RenderedSpanEdge {
-    Start,
-    End,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

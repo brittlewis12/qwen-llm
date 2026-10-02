@@ -1,6 +1,65 @@
 use super::*;
 
 #[test]
+fn canonical_plan_wire_and_digest_preserve_defaults_and_signed_zero() {
+    let canonical = concat!(
+        r#"{"version":1,"lenses":[{"kind":"native_selected","id":"lens","artifact":"lens.npz"}],"#,
+        r#""directions":[{"id":"d","lens":"lens","row":{"kind":"token_id","token_id":7},"normalization":"unit_l2"}],"#,
+        r#""operations":[{"id":"add","scope":{"layers":{"kind":"values","values":[0,2]},"prefill":{"kind":"range","start":0,"end":1},"decode":null},"#,
+        r#""action":{"kind":"fixed_add","direction":"d","coefficient":-0.0}}],"readouts":[]}"#,
+    );
+    let plan = parse_plan_bytes(canonical.as_bytes()).unwrap();
+    validate_plan(&plan).unwrap();
+    assert_eq!(serde_json::to_string(&plan).unwrap(), canonical);
+    assert_eq!(
+        canonical_plan_blake3(&plan).unwrap(),
+        blake3::hash(canonical.as_bytes()).to_hex().as_str()
+    );
+    assert_eq!(
+        plan.directions[0]
+            .lens_row()
+            .unwrap()
+            .effective_target_covector(),
+        DirectionTargetCovector::DeployedLogitNumerator
+    );
+    assert_eq!(
+        plan.operations[0].action.coefficient().to_bits(),
+        (-0.0_f32).to_bits()
+    );
+    assert!(!operation_enabled(&plan.operations[0]));
+}
+
+#[test]
+fn action_wire_shapes_and_direction_order_are_stable() {
+    for kind in [
+        "fixed_add",
+        "residual_l2_fraction",
+        "projection_ablate",
+        "source_to_target",
+        "coordinate_swap",
+    ] {
+        let paired = matches!(kind, "source_to_target" | "coordinate_swap");
+        let names = if paired {
+            r#""source":"a","target":"b""#
+        } else {
+            r#""direction":"a""#
+        };
+        let encoded = format!(r#"{{"kind":"{kind}",{names},"coefficient":-0.25}}"#);
+        let mut action: Action =
+            serde_json::from_value(serde_json::from_str::<serde_json::Value>(&encoded).unwrap())
+                .unwrap();
+        assert_eq!(serde_json::to_string(&action).unwrap(), encoded);
+        assert_eq!(
+            action.direction_ids().collect::<Vec<_>>(),
+            if paired { vec!["a", "b"] } else { vec!["a"] }
+        );
+        assert_eq!(action_requires_unit_l2(&action), kind != "fixed_add");
+        action.set_coefficient(0.5);
+        assert_eq!(action.coefficient(), 0.5);
+    }
+}
+
+#[test]
 fn all_plan_artifacts_are_cpu_bound_before_any_projection_can_start() {
     let first = crate::linear_transport::tests::fixture("first-valid", 2, 1);
     let second = crate::linear_transport::tests::fixture("second-wrong-geometry", 3, 2);

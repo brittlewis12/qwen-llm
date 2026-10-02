@@ -20,7 +20,9 @@ mod full_output;
 mod lens_compare;
 mod lens_input;
 mod lens_inspect;
+mod lens_intervention;
 mod lens_run;
+mod lens_scope;
 pub mod linear_transport;
 #[allow(dead_code)]
 mod messages;

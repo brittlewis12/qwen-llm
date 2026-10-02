@@ -57,12 +57,13 @@ in this reconstruction's source commits.
 
 Paths below refer to the preserved source tree unless marked as current main.
 `reuse` means a salvage candidate, not a claim of completion; `rework` identifies
-integration that cannot be copied wholesale. All rows start pending.
+integration that cannot be copied wholesale. Rows remain pending unless a partial
+recovery is explicitly recorded below.
 
 | ID | Behavior and source | Disposition / dependencies | Required gate |
 | --- | --- | --- | --- |
 | R01 | Bounded regular-file access: `bounded_file.rs`, Lens readers | Reuse; audit current reader contracts | CPU symlink/type/length/mutation tests; all reader consumers build |
-| R02 | Shared authored scopes and operation semantics: `lens_scope.rs`, `lens_intervention.rs`, `lens_run/{plan,execute,sweep}.rs` | Reuse in focused refactors, separate behavior fixes | Current CLI wire/binding/normalization/lowering regressions; no new service dependency |
+| R02 | Shared authored scopes and operation semantics: `lens_scope.rs`, `lens_intervention.rs`, `lens_run/{plan,execute,sweep}.rs` | Partially recovered: current-main scopes/validation, direction/action wire forms and normalization extracted with existing CLI consumers; lowering and behavior changes remain pending | Current CLI wire/binding/normalization/lowering regressions; no new service dependency |
 | R03 | Typed prefills and annotated input: `lens_input.rs`, `model_request.rs`, `messages.rs`, `open_responses/render.rs`, CLI callers | Rework against current renderers; R02 uses existing span types only | Exact prompt bytes, token positions, reasoning-only continuation, tools and house/upstream rendering |
 | R04 | Deployment binding and asset verification: `linear_transport{.rs,/deployment.rs,/cpu_fixture.rs}`, `full_lens/access.rs` | Reuse after R01; retain main's expected-profile checks | Binding mismatch refusal, retained payload hashes, CPU-before-Metal admission, no implicit transfer override |
 | R05 | Shared ordinary execution: `ordinary_executor.rs`, `qwen/decode.rs`, `lens_run/execute.rs` | Rework around main's current decode paths; not an automatic replacement | CLI/serve sampling, cancellation, terminal nonconsumption and telemetry remain equivalent |
@@ -129,3 +130,23 @@ on this branch yet.
 
 After recovery, interaction design and usable information density remain the
 primary product focus. This repair is not authorization for new feature scope.
+
+### R02: Shared Authored Semantics
+
+`lens_scope.rs` and `lens_intervention.rs` are extracted from the pinned main's
+current plan implementation, not copied from the old worktree. Existing CLI plan,
+sweep, comparison and Muse consumers retain their public paths through re-exports.
+Schema tags/defaults, canonical serialization, plan digest, signed zero, direction
+order, normalization math, selector validation and rendered-span binding remain
+unchanged. No HTTP profile, backend, queue or renderer is changed by this slice.
+
+Two golden regressions pass before and after extraction. Canonical bytes/digest,
+the default covector and signed zero use the actual `parse_plan_bytes` CLI path.
+The wire forms and direction order of all five actions use the same `Value`
+conversion pattern directly. Lens run tests pass with 56 tests and two opt-in
+cases ignored; Muse plan tests pass with seven and one ignored; comparison tests
+pass with 31. All binaries check successfully. No GPU execution was performed.
+
+The old tree's numeric selector cardinality helper, stricter coefficient decoder,
+shared operation validation/lowering and native integration are deliberately not
+included in this refactor. They require their own focused recovery and tests.

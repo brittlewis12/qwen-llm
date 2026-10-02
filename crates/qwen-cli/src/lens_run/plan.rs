@@ -1,16 +1,16 @@
 //! Lens plan schema, validation, and intervention lowering.
 
 use super::*;
+pub(crate) use crate::lens_intervention::{
+    Action, DirectionRow, DirectionTargetCovector, LensRowDirectionDefinition, OperationDefinition,
+    action_requires_unit_l2, normalize_direction, operation_enabled,
+};
 
 pub(super) const MAX_PLAN_BYTES: usize = 16 * 1024 * 1024;
 
 pub(super) const MAX_DIRECTIONS: usize = 4096;
 
 pub(super) const MAX_OPERATIONS: usize = 4096;
-
-pub(super) const MAX_SELECTOR_VALUES: usize = 4096;
-
-pub(super) const MAX_RENDERED_SELECTOR_TEXT_BYTES: usize = 1024;
 
 pub(super) const MAX_RENDERED_SELECTORS_PER_PLAN: usize = 1024;
 
@@ -71,25 +71,6 @@ pub(crate) enum DirectionDefinition {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LensRowDirectionDefinition {
-    pub(crate) id: String,
-    pub(crate) lens: String,
-    pub(crate) row: DirectionRow,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) target_covector: Option<DirectionTargetCovector>,
-    pub(crate) normalization: Normalization,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum DirectionTargetCovector {
-    DeployedLogitNumerator,
-    RawLmHead,
-    RawLmHeadOrthogonalToDeployedLogitNumerator,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct NativeHyperDirectionDefinition {
     pub(crate) id: String,
     pub(crate) source: NativeHyperDirectionSource,
@@ -128,303 +109,11 @@ impl DirectionDefinition {
     }
 }
 
-impl LensRowDirectionDefinition {
-    pub(super) fn effective_target_covector(&self) -> DirectionTargetCovector {
-        self.target_covector
-            .unwrap_or(DirectionTargetCovector::DeployedLogitNumerator)
-    }
-}
-
 impl NativeHyperDirectionSource {
     pub(super) fn path_and_layer(&self) -> (&Path, u32) {
         match self {
             Self::NativeHyperF32 { path, layer } => (path, *layer),
         }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum DirectionRow {
-    TokenId { token_id: i32 },
-    TemplateRowId { template_row_id: usize },
-    Label { label: String },
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct OperationDefinition {
-    pub(crate) id: String,
-    pub(crate) scope: Scope,
-    pub(crate) action: Action,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum Action {
-    FixedAdd {
-        direction: String,
-        coefficient: f32,
-    },
-    ResidualL2Fraction {
-        direction: String,
-        coefficient: f32,
-    },
-    ProjectionAblate {
-        direction: String,
-        coefficient: f32,
-    },
-    SourceToTarget {
-        source: String,
-        target: String,
-        coefficient: f32,
-    },
-    CoordinateSwap {
-        source: String,
-        target: String,
-        coefficient: f32,
-    },
-}
-
-impl Action {
-    pub(crate) fn coefficient(&self) -> f32 {
-        match self {
-            Self::FixedAdd { coefficient, .. }
-            | Self::ResidualL2Fraction { coefficient, .. }
-            | Self::ProjectionAblate { coefficient, .. }
-            | Self::SourceToTarget { coefficient, .. }
-            | Self::CoordinateSwap { coefficient, .. } => *coefficient,
-        }
-    }
-
-    pub(super) fn set_coefficient(&mut self, value: f32) {
-        match self {
-            Self::FixedAdd { coefficient, .. }
-            | Self::ResidualL2Fraction { coefficient, .. }
-            | Self::ProjectionAblate { coefficient, .. }
-            | Self::SourceToTarget { coefficient, .. }
-            | Self::CoordinateSwap { coefficient, .. } => *coefficient = value,
-        }
-    }
-
-    pub(crate) fn direction_ids<'a>(&'a self) -> impl Iterator<Item = &'a str> + 'a {
-        match self {
-            Self::FixedAdd { direction, .. }
-            | Self::ResidualL2Fraction { direction, .. }
-            | Self::ProjectionAblate { direction, .. } => {
-                EitherDirectionIds::One(std::iter::once(direction.as_str()))
-            }
-            Self::SourceToTarget { source, target, .. }
-            | Self::CoordinateSwap { source, target, .. } => {
-                EitherDirectionIds::Two([source.as_str(), target.as_str()].into_iter())
-            }
-        }
-    }
-}
-
-pub(super) enum EitherDirectionIds<'a> {
-    One(std::iter::Once<&'a str>),
-    Two(std::array::IntoIter<&'a str, 2>),
-}
-
-impl<'a> Iterator for EitherDirectionIds<'a> {
-    type Item = &'a str;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::One(iter) => iter.next(),
-            Self::Two(iter) => iter.next(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Scope {
-    pub(crate) layers: Selector,
-    #[serde(default)]
-    pub(crate) prefill: Option<Selector>,
-    #[serde(default)]
-    pub(crate) decode: Option<Selector>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum Selector {
-    All,
-    Values {
-        values: Vec<u32>,
-    },
-    Range {
-        start: u32,
-        end: u32,
-    },
-    RenderedSpans {
-        selectors: Vec<RenderedSpanSelector>,
-    },
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RenderedSpanSelector {
-    pub(crate) span_kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) message_index: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) tool_call_index: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) role: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) channel: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) label: Option<String>,
-    #[serde(default)]
-    pub(crate) occurrence: RenderedSpanOccurrence,
-    pub(crate) edge: RenderedSpanEdge,
-}
-
-impl Selector {
-    pub(super) fn validate(&self, name: &str, allow_rendered_spans: bool) -> Result<()> {
-        match self {
-            Self::All => Ok(()),
-            Self::Values { values } => {
-                ensure!(!values.is_empty(), "{name} values must not be empty");
-                ensure!(
-                    values.len() <= MAX_SELECTOR_VALUES,
-                    "{name} has too many explicit values"
-                );
-                ensure!(
-                    values.windows(2).all(|pair| pair[0] < pair[1]),
-                    "{name} values must be sorted and unique"
-                );
-                Ok(())
-            }
-            Self::Range { start, end } => {
-                ensure!(
-                    start <= end,
-                    "{name} range must be inclusive with start <= end"
-                );
-                ensure!(
-                    u64::from(*end) - u64::from(*start) < MAX_SELECTOR_VALUES as u64,
-                    "{name} range is too large"
-                );
-                Ok(())
-            }
-            Self::RenderedSpans { selectors } => {
-                ensure!(
-                    allow_rendered_spans,
-                    "{name} does not support rendered-span selectors"
-                );
-                ensure!(
-                    !selectors.is_empty() && selectors.len() <= MAX_SELECTOR_VALUES,
-                    "{name} rendered_spans requires 1..={MAX_SELECTOR_VALUES} selectors"
-                );
-                ensure!(
-                    selectors.iter().collect::<BTreeSet<_>>().len() == selectors.len(),
-                    "{name} repeats an authored rendered-span selector"
-                );
-                for (index, selector) in selectors.iter().enumerate() {
-                    selector.validate(&format!("{name}.selectors[{index}]"))?;
-                }
-                Ok(())
-            }
-        }
-    }
-
-    pub(super) fn expand(&self, upper_bound: u32, name: &str) -> Result<Vec<u32>> {
-        self.validate(name, false)?;
-        let values = match self {
-            Self::All => (0..upper_bound).collect(),
-            Self::Values { values } => values.clone(),
-            Self::Range { start, end } => (*start..=*end).collect(),
-            Self::RenderedSpans { .. } => unreachable!("validation rejects unresolved selectors"),
-        };
-        ensure!(
-            values.iter().all(|&value| value < upper_bound),
-            "{name} contains a value outside 0..{upper_bound}"
-        );
-        Ok(values)
-    }
-}
-
-impl RenderedSpanSelector {
-    pub(super) fn validate(&self, name: &str) -> Result<()> {
-        ensure!(
-            is_known_lens_span(&self.span_kind),
-            "{name}.span_kind is not a known renderer span"
-        );
-        ensure!(
-            self.message_index
-                .is_none_or(|index| index < MAX_SELECTOR_VALUES)
-                && self
-                    .tool_call_index
-                    .is_none_or(|index| index < MAX_SELECTOR_VALUES),
-            "{name} message/tool-call index exceeds the selector bound"
-        );
-        ensure!(
-            self.role
-                .as_deref()
-                .is_none_or(|role| { matches!(role, "system" | "user" | "assistant" | "tool") }),
-            "{name}.role is unsupported"
-        );
-        ensure!(
-            self.channel.as_deref().is_none_or(|channel| {
-                matches!(channel, "thinking" | "tool_call" | "tool_result")
-            }),
-            "{name}.channel is unsupported"
-        );
-        for (field, value) in [
-            ("role", self.role.as_deref()),
-            ("channel", self.channel.as_deref()),
-            ("label", self.label.as_deref()),
-        ] {
-            ensure!(
-                value.is_none_or(|value| {
-                    !value.is_empty() && value.len() <= MAX_RENDERED_SELECTOR_TEXT_BYTES
-                }),
-                "{name}.{field} is empty or too long"
-            );
-        }
-        Ok(())
-    }
-
-    pub(super) fn matches(&self, span: &LensRenderedSpan) -> bool {
-        span.kind == self.span_kind
-            && self
-                .message_index
-                .is_none_or(|value| span.message_index == Some(value))
-            && self
-                .tool_call_index
-                .is_none_or(|value| span.tool_call_index == Some(value))
-            && self
-                .role
-                .as_deref()
-                .is_none_or(|value| span.role.as_deref() == Some(value))
-            && self
-                .channel
-                .as_deref()
-                .is_none_or(|value| span.channel.as_deref() == Some(value))
-            && self
-                .label
-                .as_deref()
-                .is_none_or(|value| span.label.as_deref() == Some(value))
-    }
-}
-
-impl Scope {
-    pub(super) fn validate(&self, name: &str, plan_version: u32) -> Result<()> {
-        self.layers.validate(&format!("{name}.layers"), false)?;
-        ensure!(
-            self.prefill.is_some() || self.decode.is_some(),
-            "{name} must select prefill and/or decode"
-        );
-        if let Some(selector) = &self.prefill {
-            selector.validate(&format!("{name}.prefill"), plan_version == 2)?;
-        }
-        if let Some(selector) = &self.decode {
-            selector.validate(&format!("{name}.decode"), false)?;
-        }
-        Ok(())
     }
 }
 
@@ -1431,16 +1120,6 @@ pub(crate) fn coordinate_swap_reflection_direction(
     normalize_direction(difference, Normalization::UnitL2, id)
 }
 
-pub(super) fn action_requires_unit_l2(action: &Action) -> bool {
-    matches!(
-        action,
-        Action::ResidualL2Fraction { .. }
-            | Action::ProjectionAblate { .. }
-            | Action::SourceToTarget { .. }
-            | Action::CoordinateSwap { .. }
-    )
-}
-
 pub(super) fn resolve_plan_path(plan_dir: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
@@ -1482,37 +1161,6 @@ pub(super) fn raw_lm_head_direction_row(
     native_lens_row(raw, selector, layer, &prepared.id)
 }
 
-pub(crate) fn normalize_direction(
-    mut row: Vec<f32>,
-    normalization: Normalization,
-    id: &str,
-) -> Result<Vec<f32>> {
-    ensure!(!row.is_empty(), "direction {id} is empty");
-    ensure!(
-        row.iter().all(|value| value.is_finite()),
-        "direction {id} has a non-finite value"
-    );
-    let norm_squared = row
-        .iter()
-        .map(|&value| f64::from(value) * f64::from(value))
-        .sum::<f64>();
-    let norm = norm_squared.sqrt();
-    ensure!(
-        norm.is_finite() && norm > 0.0,
-        "direction {id} has a zero or non-finite norm"
-    );
-    if normalization == Normalization::UnitL2 {
-        for value in &mut row {
-            *value = (f64::from(*value) / norm) as f32;
-        }
-    }
-    ensure!(
-        row.iter().all(|value| value.is_finite()),
-        "direction {id} normalization overflowed"
-    );
-    Ok(row)
-}
-
 pub(crate) fn validate_reachable_scopes(
     plan: &LensPlan,
     prompt_len: usize,
@@ -1548,10 +1196,6 @@ pub(super) fn validate_scope_reachable(
         selector.expand(decode_bound, &format!("{id}.decode"))?;
     }
     Ok(())
-}
-
-pub(super) fn operation_enabled(operation: &OperationDefinition) -> bool {
-    operation.action.coefficient() != 0.0
 }
 
 pub(super) fn scope_matches(scope: &Scope, phase: Phase, layer: u32) -> Result<bool> {

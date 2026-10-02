@@ -789,6 +789,8 @@ fn accept_loop_with_checkpoint(
 
 #[cfg(test)]
 mod lifecycle_tests;
+#[cfg(test)]
+mod signal_tests;
 
 #[cfg(test)]
 mod tests {

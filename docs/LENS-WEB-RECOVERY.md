@@ -315,6 +315,31 @@ headroom arithmetic regression passes. All binaries, formatting and whitespace
 checks pass without warnings. These are scoped CPU results, not a full-suite or
 live qualification claim.
 
+### R06: Process-Signal Shutdown
+
+A CPU-only subprocess now runs the actual accept loop with installed process
+signal handlers and a mock backend. The parent waits for both generation and a
+test-only observation of a full-channel/acknowledgement wait, then sends SIGTERM
+only to its owned, unreaped child. The response socket remains connected and
+unread through child exit, so disconnect cancellation cannot mask a broken signal
+path. Markers and assertions verify generation abort, exactly one completion,
+owner-thread callbacks, listener closure before shutdown, and clean worker
+settlement. Callback ordering/counts are checked through process exit.
+
+The parent uses an overall five-second deadline and RAII cleanup of its exact
+child and stdout reader. That deadline bounds successful protocol completion;
+failure cleanup is best-effort and may exceed it. The test runs in about 60 ms
+locally, with no model or Metal initialization. Observation hooks compile only in
+test builds. The child asserts the termination error and passes through the Rust
+test harness; this does not test the CLI's signal-derived exit status, Metal command
+interruption, snapshot persistence or durable flushing.
+
+The fixture is an ignored test invoked explicitly by its parent, not a new runtime
+mode. Serving CPU qualification now passes 212 tests with 24 ignored entries
+(23 existing opt-in tests plus that child fixture); the known unmarked Metal
+context test remains explicitly filtered. Binaries, formatting and whitespace
+checks pass. Live model-backed qualification remains pending.
+
 ### Next R06 Integration Boundary
 
 The next expansion is concurrent diagnostic/history handling and native owner

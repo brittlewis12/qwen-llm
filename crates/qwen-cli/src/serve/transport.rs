@@ -91,6 +91,8 @@ impl OwnerSink {
                 }
                 Err(TrySendError::Full(bytes)) => {
                     pending = bytes;
+                    #[cfg(test)]
+                    super::signal_tests::bridge_wait_observed();
                     wait();
                 }
             }
@@ -124,7 +126,10 @@ impl GenerationSink for OwnerSink {
                 self.tick()?;
                 match self.processed.recv_timeout(POLL) {
                     Ok(()) => break,
-                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Timeout) => {
+                        #[cfg(test)]
+                        super::signal_tests::bridge_wait_observed();
+                    }
                     Err(RecvTimeoutError::Disconnected) => {
                         return Err(aborted("HTTP piece processing stopped"));
                     }

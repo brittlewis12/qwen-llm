@@ -441,9 +441,14 @@ an in-flight Metal command. The optional trace writer retains its separate 250 m
 detach-on-stall policy.
 
 The bridge has CPU protocol, ownership, cancellation and admission-policy coverage.
-Live Metal pressure, performance, cache continuity and signal/durable-shutdown
-qualification remain pending. Concurrent history/native routes and the Lens web
-client are not provided by this milestone.
+An isolated CPU subprocess also verifies real SIGTERM during observed bridge
+backpressure while the client stays connected and unread: generation aborts,
+one completion callback runs, workers settle, and the listener closes before
+backend shutdown. The fixture checks the termination error and exits through the
+test harness; it does not qualify the production CLI's signal-derived exit code.
+Live Metal pressure, performance, cache continuity and model-backed signal/durable
+shutdown remain pending. Concurrent history/native routes and the Lens web client
+are not provided by this milestone.
 
 ## K2 Horizon Raw Profile
 

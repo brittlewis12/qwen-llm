@@ -225,6 +225,7 @@ pub(crate) struct EngineBackend {
     loaded: LoadedModel,
     tokenizer: std::sync::Arc<Tokenizer>,
     control_cpu_reserve: u64,
+    lens_registry: Option<std::sync::Arc<super::native::registry::Registry>>,
     model_id: String,
     default_max_tokens: usize,
     max_context_tokens: Option<usize>,
@@ -251,6 +252,21 @@ pub(crate) struct EngineBackend {
 }
 
 impl EngineBackend {
+    pub(super) fn attach_lens_registry(
+        &mut self,
+        registry: Option<std::sync::Arc<super::native::registry::Registry>>,
+    ) -> anyhow::Result<()> {
+        if let Some(registry) = &registry {
+            anyhow::ensure!(
+                self.native_profile()?.is_some(),
+                "fitted assets require qualified native generation"
+            );
+            registry.validate_loaded(&self.loaded)?;
+        }
+        self.lens_registry = registry;
+        Ok(())
+    }
+
     pub(crate) fn new(
         loaded: LoadedModel,
         model_id: String,
@@ -297,6 +313,7 @@ impl EngineBackend {
             loaded,
             tokenizer: std::sync::Arc::new(tokenizer),
             control_cpu_reserve: 0,
+            lens_registry: None,
             model_id,
             default_max_tokens,
             max_context_tokens,
@@ -536,7 +553,7 @@ fn with_native_admission<T>(
     readout_cpu: u64,
     admit: impl FnMut(u64, u64) -> anyhow::Result<qwen_llm::metal::MetalMemoryAdmission>,
     release: impl FnMut(u64) -> bool,
-    execute: impl FnOnce() -> T,
+    execute: impl FnOnce(u64) -> T,
 ) -> anyhow::Result<T> {
     let cpu = durable
         .checked_add(super::control::CPU_RESERVE_BYTES)
@@ -550,7 +567,11 @@ fn with_native_admission<T>(
         "native memory admission denied: {}",
         admission.reason.as_str()
     );
-    Ok(execute())
+    Ok(execute(
+        admission
+            .required_bytes
+            .context("admitted native memory estimate missing")?,
+    ))
 }
 
 fn allocate_serve_request_state(
@@ -858,6 +879,7 @@ impl GenerationBackend for EngineBackend {
             max_tokens: self.context_ceiling,
             no_thinking_supported: self.no_thinking_supported,
             plain_readouts: self.loaded.validate_passive_workspace_lens_output().is_ok(),
+            registry: self.lens_registry.clone(),
         })))
     }
 
@@ -882,7 +904,17 @@ impl GenerationBackend for EngineBackend {
                         )?)
                 },
                 |deficit| !self.loaded.evict_prefix_cache_for(deficit).is_empty(),
-                || super::native::run_loaded(&self.loaded, &self.tokenizer, prepared, sink),
+                |reserve| {
+                    super::native::with_staged(prepared, sink, reserve, |staged| {
+                        super::native::run_loaded(
+                            &self.loaded,
+                            &self.tokenizer,
+                            prepared,
+                            sink,
+                            staged,
+                        )
+                    })
+                },
             )
         })();
         match result {
@@ -2217,7 +2249,8 @@ mod tests {
                     remaining.set(reserved + 17);
                     release_succeeds
                 },
-                || {
+                |authorized| {
+                    assert_eq!(authorized, reserved + 17);
                     allocations.set(allocations.get() + 1);
                 },
             );

@@ -72,7 +72,7 @@ recovery is explicitly recorded below.
 | R08 | Native request/routes/preconditions: `serve/lens_http/*`, `serve/native/preconditions.rs` | Baseline routes/preconditions recovered; diagnostic admission pending | CPU unknown-field/local HTTP/binding checks and accepted-key recovery pass |
 | R09 | Native baseline and observation lifecycle: `serve/native/{mod,execute,writer}.rs` | Baseline recovered on current resident/cache admission, joined writer; observation production pending | CPU lifecycle and scoped Qwen3.6 live disconnect/decode/interruption/restart pass; broader numerical/pressure qualification pending |
 | R10 | Plain original-forward readouts: `serve/native/{readouts,observe}.rs` | Producer recovered with browser/current admission; no replay | CPU scopes/lifecycle/publication/HTTP/browser and scoped Qwen3.6 live unchanged-sample/final-layer witness gate pass |
-| R11 | Fitted readouts and direction staging: `serve/native/{registry,interventions}.rs`, `workspace_lens/*` | Reuse after R04/R09/R10 | Registered identity, matrix integrity, bounded ready-only staging/workspace, independent numerical oracle |
+| R11 | Fitted readouts and direction staging: `serve/native/{registry,interventions}.rs`, `workspace_lens/*` | Fitted producer recovered and CPU-qualified; direction staging remains R12; live oracle pending | Registered identity, matrix integrity, owner-admitted joined staging/workspace, independent numerical oracle |
 | R12 | Ordered scoped interventions: `serve/native/interventions/*`, `lens_intervention.rs` | Reuse after R02/R11 | Exact order/scopes, zero controls, deployed covector semantics, independent transformation checks |
 | R13 | Retained full scores/source arrays: `serve/jobs/arrays.rs`, native observer/writer, `web/retention*` | Reuse after R07/R10 | Raw admission, dual-watermark durability, digest/finite/shape checks, offline rank/entropy, no implicit fetch |
 | R14 | Whole-site pre/post capture: `metal_forward/token.rs`, `serve/native/measurements.rs` | Reuse after R12/R13; do not imply per-operation intermediates | Before/after placement, independent layer sets, alias refusal, actual-vector metrics and zero controls |
@@ -851,3 +851,51 @@ fault injection or fitted execution.
 Local evidence: `target/lens-baseline-baa78f07-db9d-4030-8550-9def3c2af09f/`.
 Tested binary Git blob fingerprint: `1ca3a930ec9e1dbed92dc2ac99a15b7b1c287420`;
 unchanged harness fingerprint: `4eb6f567bcc52908a017bf29f3d1c675a578c7a5`.
+
+### R11: Registered Fitted Readouts And Owner-Admitted Staging
+
+`--lens-config` now consumes explicit data-only assets on the same ordinary House
+Qwen3.6/3.8 server. Unsupported protocols fail before asset scanning/Metal. Config
+keys and aliases are strict; geometry is checked before payload access. Exact bindings
+verify retained model bytes and cannot be overridden. Unbound assets require explicit
+transfer acknowledgement. The existing same-opened-GGUF loader and loaded-identity
+check remain in use. Manifest identity, binding status and producer-only qualification
+are advertised; direction rows and operators are not yet offered.
+
+One original-forward capture serves all aliases at a site, with separate shared heads
+by position/layer/alias. Fitted rows retain artifact identity, target and method, and
+never carry a generation-distribution witness. The existing fitted readout workspace
+is used, with all nine retained buffers individually aligned in admission alongside
+any overlapping plain-head allocations and the three simultaneously live host logits.
+Selected alias/layer matrices are bounded to 512 MiB, independent of other allowances.
+
+The old ready dispatcher was not restored. Current owner admission includes sequence,
+workspace, capture, matrices/scratch and dynamic pending durable/control/writer reserves
+before authorizing one staging command on the existing joined artifact worker. The
+owner performs no payload file reads. The worker rehashes retained matrices and transfers
+them without cloning. Fresh process checks retain the entire originally authorized
+future allowance, conservatively over-refusing if staged bytes are counted again.
+Cancellation, shutdown, private owner abandonment and ordinary staging failure remain
+distinct. Failure prevents execution; terminal publication uses the existing writer.
+No extra queue, worker, model service or deadline-bounded filesystem guarantee is added.
+
+Coordinated CPU tests cover once-only transfer, pressure loss, corrupt matrix, explicit
+cancel/shutdown during staging, cancellation after handoff, publication failure with a
+waiting command, worker panic/disconnection and restart settlement, and owner unwind
+without synthetic cancellation. HTTP tests pin identities, reject stale bindings before
+acceptance and reopen exact shared fitted/plain rows without execution. CPU browser
+evidence `web/.browser-test/baseline-e94c2aa8-1a56-4699-aafb-8a12f6368052/` passes fitted
+selection/provenance, prefills/sampling, submission/reload/copy/history and phone/desktop
+parity through the actual Rust control/store/writer with synthetic heads.
+
+CPU gates: 317 serving tests pass, 27 ignored and the known unmarked Metal test explicitly
+excluded; Lens 388 pass, nine ignored plus explicit Muse exclusion; CLI 14 pass; two
+workspace-plan tests pass; Bun 55 tests, typecheck/build and binaries/tests/fmt pass.
+The independent original-forward oracle is opt-in and live-pending at this checkpoint.
+It uses a release test executable with test-only F64 transport verification, synthetic
+nonidentity middle-layer and identity final-layer matrices, baseline/observed sampling,
+and required plain-generation witnesses. It is not fitted-quality evidence or an
+uninstrumented production-binary qualification. Its owned-process harness rechecks
+absolute deadlines/sticky interruption after evidence reads and cleanup, and owns build
+interruption too. `cx` review requested and received these false-pass corrections before
+commit. R12 interventions, R13 retained arrays and R14 pre/post pairs remain pending.

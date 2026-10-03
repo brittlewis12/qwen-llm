@@ -1,4 +1,6 @@
 //! Strict data-only transport opener; qualification is producer metadata only.
+#[cfg(test)]
+pub(crate) mod cpu_fixture;
 pub(crate) mod deployment;
 
 use anyhow::{Result, ensure};
@@ -15,7 +17,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const SCAN_BUFFER_BYTES: usize = 1024 * 1024;
+pub(crate) const SCAN_BUFFER_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, clap::Args)]
 pub struct VerifyFullArgs {
@@ -68,6 +70,9 @@ structure!(Payload {
 
 // Value's normal decoder silently replaces duplicate keys, including metadata.
 struct Unique(serde_json::Value);
+pub(crate) fn parse_unique_json(bytes: &[u8]) -> Result<serde_json::Value> {
+    Ok(serde_json::from_slice::<Unique>(bytes)?.0)
+}
 impl<'de> Deserialize<'de> for Unique {
     fn deserialize<D: de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct V;
@@ -146,6 +151,16 @@ impl VerifiedTransport {
     pub fn payload_blake3(&self) -> &str {
         &self.payload_blake3
     }
+    pub(crate) fn matrix_bytes(&self) -> u64 {
+        self.matrix_bytes
+    }
+    pub(crate) fn manifest_digest(&self) -> Result<String> {
+        let mut canonical = self.original.clone();
+        canonical.sort_all_objects();
+        Ok(blake3::hash(&serde_json::to_vec(&canonical)?)
+            .to_hex()
+            .to_string())
+    }
     pub fn open(directory: &Path) -> Result<Self> {
         Self::open_checked(directory, &mut || Ok(()))
     }
@@ -155,7 +170,7 @@ impl VerifiedTransport {
         directory: &Path,
         checkpoint: &mut impl FnMut() -> Result<()>,
     ) -> Result<Self> {
-        Self::open_inner(directory, None, checkpoint)
+        Self::open_validated_checked(directory, |_| Ok(()), checkpoint)
     }
 
     pub fn open_with_expected_profile(
@@ -170,12 +185,26 @@ impl VerifiedTransport {
         profile: ExpectedProfile<'_>,
         checkpoint: &mut impl FnMut() -> Result<()>,
     ) -> Result<Self> {
-        Self::open_inner(directory, Some(profile), checkpoint)
+        Self::open_validated_checked(
+            directory,
+            |m| {
+                ensure!(
+                    m.model.architecture == profile.architecture
+                        && m.model.n_layers == profile.n_layers
+                        && m.model.hidden_size == profile.hidden_size
+                        && m.model.vocab_size == profile.vocab_size
+                        && m.transport.target_layer == profile.target_layer,
+                    "transport manifest does not match expected runtime profile/target layer"
+                );
+                Ok(())
+            },
+            checkpoint,
+        )
     }
 
-    fn open_inner(
+    pub(crate) fn open_validated_checked(
         directory: &Path,
-        profile: Option<ExpectedProfile<'_>>,
+        validate: impl FnOnce(&Manifest) -> Result<()>,
         checkpoint: &mut impl FnMut() -> Result<()>,
     ) -> Result<Self> {
         checkpoint()?;
@@ -189,14 +218,15 @@ impl VerifiedTransport {
             );
         }
         checkpoint()?;
-        let (mut file, length) = super::open_regular_file(&directory.join("lens.json"))?;
+        let (mut file, length) =
+            crate::bounded_file::open_regular_file(&directory.join("lens.json"))?;
         ensure!(length <= 1024 * 1024, "manifest exceeds 1 MiB limit");
         let mut bytes = Vec::new();
         checkpoint()?;
         (&mut file).take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
         ensure!(bytes.len() <= 1024 * 1024, "manifest grew beyond limit");
         checkpoint()?;
-        let original = serde_json::from_slice::<Unique>(&bytes)?.0;
+        let original = parse_unique_json(&bytes)?;
         for key in ["exact_binding", "source_checkpoint", "source_tokenizer"] {
             ensure!(
                 original
@@ -235,16 +265,7 @@ impl VerifiedTransport {
                 && (1..=4194304).contains(&m.model.vocab_size),
             "model dimensions exceed bounds"
         );
-        if let Some(profile) = profile {
-            ensure!(
-                m.model.architecture == profile.architecture
-                    && m.model.n_layers == profile.n_layers
-                    && m.model.hidden_size == profile.hidden_size
-                    && m.model.vocab_size == profile.vocab_size
-                    && t.target_layer == profile.target_layer,
-                "transport manifest does not match expected runtime profile/target layer"
-            );
-        }
+        validate(&m)?;
         let sources: BTreeSet<_> = t.source_layers.iter().copied().collect();
         ensure!(
             !sources.is_empty()
@@ -291,7 +312,8 @@ impl VerifiedTransport {
             );
         }
         checkpoint()?;
-        let (file, length) = super::open_regular_file(&directory.join("transport.f16le"))?;
+        let (file, length) =
+            crate::bounded_file::open_regular_file(&directory.join("transport.f16le"))?;
         ensure!(length as u64 == total, "payload length mismatch");
         let mut result = Self {
             manifest: m,

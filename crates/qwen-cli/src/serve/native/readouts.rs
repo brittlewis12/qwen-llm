@@ -1,10 +1,12 @@
 //! CPU planning for bounded original-forward plain readouts.
 
+use super::registry::{MatrixKey, Registry, STAGING_OVERHEAD_BYTES};
 use crate::lens_scope::Scope;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 pub(crate) const MAX_READOUTS: usize = 1024;
 pub(crate) const MAX_TOP_K: usize = 1024;
@@ -25,7 +27,7 @@ pub(crate) struct Readout {
     retain: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct Plan {
     pub(crate) readouts: Vec<Readout>,
     // Absolute consumed position -> layer -> caller-ordered readout indices.
@@ -34,15 +36,30 @@ pub(crate) struct Plan {
     pub(crate) head_evaluations: usize,
     pub(crate) output_rows: usize,
     pub(crate) output_scores: usize,
+    pub(crate) registry: Option<Arc<Registry>>,
+    pub(crate) matrices: BTreeSet<MatrixKey>,
+    pub(crate) matrix_bytes: u64,
 }
 
 impl Plan {
+    #[cfg(test)]
     pub(crate) fn compile(
         values: &[Value],
         layers: u32,
         prompt: usize,
         max_tokens: usize,
         vocab: usize,
+    ) -> Result<Self> {
+        Self::compile_with_registry(values, layers, prompt, max_tokens, vocab, None)
+    }
+
+    pub(crate) fn compile_with_registry(
+        values: &[Value],
+        layers: u32,
+        prompt: usize,
+        max_tokens: usize,
+        vocab: usize,
+        registry: Option<Arc<Registry>>,
     ) -> Result<Self> {
         ensure!(values.len() <= MAX_READOUTS, "too many readout requests");
         ensure!(
@@ -54,7 +71,10 @@ impl Plan {
         prompt
             .checked_add(decode)
             .context("readout position overflow")?;
-        let mut plan = Self::default();
+        let mut plan = Self {
+            registry,
+            ..Self::default()
+        };
         let mut ids = BTreeSet::new();
         for value in values {
             let readout: Readout = serde_json::from_value(value.clone())?;
@@ -67,8 +87,8 @@ impl Plan {
                 "readout IDs must be nonempty, bounded and unique"
             );
             ensure!(
-                readout.lens == "plain" && readout.mode == "full_vocabulary",
-                "only plain full_vocabulary readouts are recovered"
+                readout.mode == "full_vocabulary",
+                "only full_vocabulary readouts are recovered"
             );
             ensure!(
                 readout.top_k > 0 && readout.top_k <= MAX_TOP_K.min(vocab),
@@ -117,6 +137,20 @@ impl Plan {
                 "aggregate full-vocabulary head evaluation budget exceeded"
             );
             let selected_layers = readout.scope.layers.expand(layers, "readout layers")?;
+            if readout.lens != "plain" {
+                let registry = plan
+                    .registry
+                    .as_ref()
+                    .context("unknown fitted lens alias")?;
+                registry.asset(&readout.lens)?;
+                for &layer in &selected_layers {
+                    plan.matrices.insert(MatrixKey {
+                        alias: readout.lens.clone(),
+                        layer,
+                    });
+                }
+                plan.matrix_bytes = registry.matrix_bytes(&plan.matrices)?;
+            }
             let prefill = readout
                 .scope
                 .prefill
@@ -138,7 +172,11 @@ impl Plan {
             {
                 let event = plan.events.entry(position).or_default();
                 for &layer in &selected_layers {
-                    if !event.contains_key(&layer) {
+                    if !event.get(&layer).is_some_and(|indices| {
+                        indices
+                            .iter()
+                            .any(|&i| plan.readouts[i].lens == readout.lens)
+                    }) {
                         plan.head_evaluations += 1;
                         ensure!(
                             plan.head_evaluations <= MAX_HEAD_EVALUATIONS,
@@ -152,6 +190,17 @@ impl Plan {
             plan.readouts.push(readout);
         }
         Ok(plan)
+    }
+
+    pub(crate) fn heads(&self, position: u32, layer: u32) -> BTreeMap<&str, Vec<usize>> {
+        let mut heads = BTreeMap::<_, Vec<_>>::new();
+        for &index in &self.events[&position][&layer] {
+            heads
+                .entry(self.readouts[index].lens.as_str())
+                .or_default()
+                .push(index);
+        }
+        heads
     }
 
     pub(crate) fn memory_bytes(
@@ -174,6 +223,15 @@ impl Plan {
         if self.events.is_empty() {
             return Ok((0, 0));
         }
+        let fitted = if self.matrices.is_empty() {
+            None
+        } else {
+            Some(
+                qwen_llm::workspace_lens::WorkspaceLensFullReadoutWorkspace::allocation_bytes(
+                    1, hidden, vocab,
+                )?,
+            )
+        };
         let hidden = u64::try_from(hidden)?
             .checked_mul(4)
             .context("hidden bytes overflow")?;
@@ -184,8 +242,17 @@ impl Plan {
             .checked_mul(u64::try_from(self.max_capture_layers)?)
             .context("capture bytes overflow")?;
         let mut gpu = 0u64;
-        // Original-forward capture plus transported, normalized and head-logit tensors.
-        for bytes in [capture, hidden, hidden, vocab] {
+        // A retained fitted workspace overlaps transient plain heads when both are requested.
+        let mut allocations = vec![capture];
+        if self.readouts.iter().any(|r| r.lens == "plain") {
+            allocations.extend([hidden, hidden, vocab]);
+        }
+        if let Some(fitted) = fitted {
+            for bytes in fitted {
+                allocations.push(u64::try_from(bytes)?);
+            }
+        }
+        for bytes in allocations {
             gpu = gpu
                 .checked_add(aligned(bytes)?)
                 .context("readout GPU bytes overflow")?;
@@ -196,6 +263,14 @@ impl Plan {
             .checked_add(hidden)
             .and_then(|n| vocab.checked_mul(3).and_then(|v| n.checked_add(v)))
             .and_then(|n| n.checked_add(2 * super::RECORD_BYTES as u64))
+            .and_then(|n| n.checked_add(self.matrix_bytes))
+            .and_then(|n| {
+                n.checked_add(if self.matrices.is_empty() {
+                    0
+                } else {
+                    STAGING_OVERHEAD_BYTES
+                })
+            })
             .context("readout CPU bytes overflow")?;
         Ok((gpu, cpu))
     }
@@ -205,6 +280,64 @@ impl Plan {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn fitted_heads_deduplicate_matrices_and_price_all_overlapping_buffers() {
+        let (_files, registry) = super::super::registry::tests::fitted_fixture();
+        let one = |id, lens| {
+            json!({"id":id,"lens":lens,"mode":"full_vocabulary","top_k":2,
+            "scope":{"layers":{"kind":"values","values":[0]},"prefill":{"kind":"values","values":[0,1]}}})
+        };
+        let plan = Plan::compile_with_registry(
+            &[
+                one("plain", "plain"),
+                one("fit-a", "fit"),
+                one("fit-b", "fit"),
+            ],
+            3,
+            3,
+            2,
+            32,
+            Some(registry),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                plan.head_evaluations,
+                plan.output_rows,
+                plan.max_capture_layers
+            ),
+            (4, 6, 1)
+        );
+        assert_eq!(plan.matrices.len(), 1);
+        assert_eq!(plan.matrix_bytes, 8);
+        assert_eq!(plan.heads(0, 0)["fit"], [1, 2]);
+        let mut allocations = Vec::new();
+        let (gpu, cpu) = plan
+            .price(2, 32, |n| {
+                allocations.push(n);
+                Ok(n.div_ceil(256) * 256)
+            })
+            .unwrap();
+        assert_eq!(&allocations[..4], &[8, 8, 8, 128]);
+        assert_eq!(allocations.len(), 13);
+        assert_eq!(&allocations[4..9], &[8, 8, 8, 8, 128]);
+        assert!(
+            allocations[9..]
+                .iter()
+                .all(|&n| n > 0 && n == allocations[9])
+        );
+        assert_eq!(
+            gpu,
+            allocations
+                .iter()
+                .map(|n| n.div_ceil(256) * 256)
+                .sum::<u64>()
+        );
+        assert_eq!(
+            cpu,
+            8 + 8 + 3 * 128 + 2 * super::super::RECORD_BYTES as u64 + 8 + STAGING_OVERHEAD_BYTES
+        );
+    }
     fn readout(id: &str) -> Value {
         json!({"id":id,"lens":"plain","mode":"full_vocabulary","top_k":2,
             "scope":{"layers":{"kind":"values","values":[0,3]},"prefill":{"kind":"values","values":[0,2]},"decode":{"kind":"all"}}})

@@ -372,6 +372,14 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         .transpose()
         .context("open prebuilt Lens client")?
         .map(Arc::new);
+    ensure!(
+        invocation.lens_config.is_none() || invocation.lens_data_dir.is_some(),
+        "--lens-config requires --lens-data-dir"
+    );
+    ensure!(
+        invocation.lens_config.is_none() || template_style == items::TemplateStyle::House,
+        "--lens-config requires qualified House native generation"
+    );
     let workbench = invocation
         .lens_data_dir
         .as_deref()
@@ -596,6 +604,23 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 tracing::warn!(target: "qwen_diag", "serve: {warning}");
             }
             let template = identity.template.serve_template();
+            ensure!(
+                invocation.lens_config.is_none()
+                    || matches!(
+                        template,
+                        items::QwenTemplate::Qwen36 | items::QwenTemplate::Qwen38
+                    ),
+                "--lens-config requires an identified Qwen3.6/3.8 native protocol"
+            );
+            let registry = invocation
+                .lens_config
+                .as_deref()
+                .map(|path| {
+                    native::registry::Registry::open(path, &gguf, &mut crate::shutdown::checkpoint)
+                        .map(Arc::new)
+                })
+                .transpose()
+                .context("open fitted Lens assets before Metal")?;
             let no_thinking_supported = template.verified();
             ensure!(
                 template.verified() || template_style == items::TemplateStyle::House,
@@ -651,6 +676,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             )?;
             backend.template_style = template_style;
             tracing::info!(target: "qwen_diag", "serve limits: family=qwen max_context_tokens={context_ceiling} context_source={context_source} {snapshot_cache_plan}");
+            backend.attach_lens_registry(registry)?;
             match invocation.durable.resolve("qwen") {
                 Ok(Some(plan)) => {
                     if let Err(error) =

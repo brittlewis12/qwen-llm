@@ -12,7 +12,7 @@ use serde_json::json;
 use std::io::{self, Write};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     mpsc::{Receiver, SyncSender, sync_channel},
 };
 use std::thread::JoinHandle;
@@ -66,6 +66,7 @@ impl Drop for Bytes {
 }
 
 enum Event {
+    Stage(Box<super::staging::Request>),
     Record(Vec<u8>, Bytes, Phase, Counters),
     Progress(Phase, Counters),
 }
@@ -77,10 +78,51 @@ pub(crate) struct Sink {
     sender: SyncSender<Event>,
     failure: Arc<Mutex<Option<JobError>>>,
     budget: Arc<Budget>,
+    staging_started: AtomicBool,
+    #[cfg(test)]
+    staging_hook: Option<super::staging::Hook>,
     #[cfg(test)]
     after_record: Option<Box<dyn Fn(&Sink) + Send>>,
 }
 impl Sink {
+    pub(in crate::serve) fn stage(
+        &self,
+        plan: &super::readouts::Plan,
+        reserve: u64,
+    ) -> Result<super::registry::Staged> {
+        super::checkpoint(self)?;
+        ensure!(
+            !self.staging_started.swap(true, Ordering::AcqRel),
+            "native staging requested twice"
+        );
+        let (request, response, _guard) = super::staging::request(plan, reserve)?;
+        #[cfg(test)]
+        let request = {
+            let mut request = request;
+            request.hook = self.staging_hook.clone();
+            request
+        };
+        self.sender
+            .try_send(Event::Stage(Box::new(request)))
+            .map_err(|_| anyhow::anyhow!("artifact worker unavailable for staging"))?;
+        loop {
+            super::checkpoint(self)?;
+            match response.recv_timeout(std::time::Duration::from_millis(25)) {
+                Ok(result) => {
+                    #[cfg(test)]
+                    if let Some(hook) = &self.staging_hook {
+                        hook(super::staging::Point::Handoff)?;
+                    }
+                    super::checkpoint(self)?;
+                    return result;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    anyhow::bail!("artifact worker stopped during staging")
+                }
+            }
+        }
+    }
     pub(super) fn fail_recording(&self, code: &str, message: &str) {
         self.failure
             .lock()
@@ -178,6 +220,7 @@ impl Writer {
         let failure: Arc<Mutex<Option<JobError>>> = Arc::default();
         let worker_failure = Arc::clone(&failure);
         let worker_control = control.clone();
+        let worker_server = server.clone();
         let budget = Arc::new(Budget::default());
         let worker_budget = Arc::clone(&budget);
         let worker = std::thread::Builder::new().name("qwen-native-artifacts".into()).stack_size(STACK_BYTES).spawn(move || {
@@ -210,8 +253,24 @@ impl Writer {
             let _ = started.send(Ok(Readiness::Execute));
             let mut last = initial;
             let mut disk_failed = false;
+            let mut stage_used = false;
+            let mut records_started = false;
             for event in incoming {
+                let event = match event {
+                    Event::Stage(request) => {
+                        if disk_failed || stage_used || records_started {
+                            request.refuse("staging requires a healthy writer before generation, once per job");
+                        } else {
+                            stage_used = true;
+                            request.run(|| super::execute::preparation_checkpoint(&worker_control, &worker_server),
+                                qwen_llm::metal::MetalContext::process_limit_bytes_remaining);
+                        }
+                        continue;
+                    }
+                    event => event,
+                };
                 if disk_failed { continue; }
+                records_started = true;
                 let result = (|| -> Result<()> {
                     let (phase, counters) = match event {
                         Event::Record(bytes, _permit, phase, counters) => {
@@ -219,6 +278,7 @@ impl Writer {
                             (phase, counters)
                         }
                         Event::Progress(phase, counters) => (phase, counters),
+                        Event::Stage(_) => unreachable!("staging handled before publication"),
                     };
                     store.progress(&id, phase, counters.clone())?;
                     last = counters;
@@ -253,6 +313,9 @@ impl Writer {
                 sender,
                 failure,
                 budget,
+                staging_started: AtomicBool::new(false),
+                #[cfg(test)]
+                staging_hook: None,
                 #[cfg(test)]
                 after_record: None,
             }),
@@ -267,6 +330,10 @@ impl Writer {
     #[cfg(test)]
     pub(super) fn after_record(&mut self, hook: impl Fn(&Sink) + Send + 'static) {
         self.sink.as_mut().unwrap().after_record = Some(Box::new(hook));
+    }
+    #[cfg(test)]
+    pub(super) fn staging_hook(&mut self, hook: super::staging::Hook) {
+        self.sink.as_mut().unwrap().staging_hook = Some(hook);
     }
     pub(super) fn wait_ready(&self) -> Result<Readiness> {
         self.ready

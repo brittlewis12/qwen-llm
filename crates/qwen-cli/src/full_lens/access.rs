@@ -126,6 +126,9 @@ impl FullAccess {
         self.transport.source_layers.contains(&layer)
     }
     pub(super) fn matrix_bytes(&self) -> Result<u64> {
+        if let Storage::Data(data) = &self.storage {
+            return Ok(data.matrix_bytes());
+        }
         u64::from(self.transport.hidden_size)
             .checked_pow(2)
             .and_then(|n| n.checked_mul(2))
@@ -230,11 +233,7 @@ impl FullAccess {
     }
     pub(super) fn manifest_digest(&self) -> Result<String> {
         match &self.storage {
-            Storage::Data(d) => {
-                let mut canonical = d.original_manifest().clone();
-                canonical.sort_all_objects();
-                digest_json(&canonical)
-            }
+            Storage::Data(d) => d.manifest_digest(),
             Storage::Legacy { manifest, .. } => digest_json(manifest),
         }
     }

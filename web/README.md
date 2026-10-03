@@ -3,7 +3,7 @@
 Preserved React/TypeScript workbench, recovered onto current serving semantics.
 Bun owns development serving/HMR and production builds. No Vite, Next, SSR,
 authentication flow, network assets or second production server. Current recovery
-supports durable baseline generation and scoped plain readouts; fitted/intervention
+supports durable baseline generation and scoped plain/fitted readouts; intervention
 and retained-capture producers remain pending. Compatible saved diagnostics remain
 inspectable without inference.
 
@@ -134,6 +134,9 @@ child, whose test harness verifies settlement. No model or GPU lease is used.
 Plain mode additionally submits a decode-scoped readout and checks visible token
 IDs/scores against the actual saved records. Its heads remain synthetic; it is not
 a numerical Metal-head qualification.
+`LENS_TEST_FITTED_ONLY=1 bun run baseline-browser-check.ts` additionally uses a real
+CPU-bound registry and verified matrix staging with synthetic forwards/heads. It
+checks alias selection, saved fitted provenance and the same phone/desktop flow.
 
 Browser profiles/logs stay in ignored `.browser-test/`. Layout and interaction
 assertions are not screenshot-based visual review. Optional screenshot capture

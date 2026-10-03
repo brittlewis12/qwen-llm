@@ -230,6 +230,18 @@ pub(super) fn multiply_token_readout_gamma_in_place(
 }
 
 impl WorkspaceLensFullReadoutWorkspace<'_> {
+    /// Logical bytes of each retained buffer; callers must price device alignment
+    /// separately and retain their own host, capture and execution allowances.
+    pub fn allocation_bytes(
+        row_capacity: usize,
+        hidden_size: usize,
+        vocab_size: usize,
+    ) -> Result<[usize; 9], WorkspaceLensError> {
+        if row_capacity == 0 {
+            return Err(WorkspaceLensError::EmptyFullReadoutWorkspace);
+        }
+        full_readout_workspace_allocation_bytes(row_capacity, hidden_size, vocab_size)
+    }
     /// Bind one F16 hidden-to-hidden transport for repeated row or tile use.
     pub fn bind_f16_transport(&mut self, transport_bytes: &[u8]) -> Result<(), WorkspaceLensError> {
         self.transport_bound = false;
@@ -1046,8 +1058,11 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
         let arch = self.arch();
         let hidden_size = arch.hidden_size as usize;
         let vocab_size = arch.vocab_size as usize;
-        let allocation_bytes =
-            full_readout_workspace_allocation_bytes(row_capacity, hidden_size, vocab_size)?;
+        let allocation_bytes = WorkspaceLensFullReadoutWorkspace::allocation_bytes(
+            row_capacity,
+            hidden_size,
+            vocab_size,
+        )?;
         let logical_bytes = allocation_bytes.iter().try_fold(0usize, |total, &bytes| {
             total
                 .checked_add(bytes)

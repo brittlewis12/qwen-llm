@@ -35,6 +35,8 @@ mod k2_horizon;
 mod lens_input;
 #[allow(dead_code)] // Rendered selector binding is used by the Lens CLI binary.
 mod lens_scope;
+#[allow(dead_code)] // Shared transport verification also serves CLI-only consumers.
+mod linear_transport;
 mod messages;
 mod model_request;
 #[path = "qwen/muse_glimmer.rs"]

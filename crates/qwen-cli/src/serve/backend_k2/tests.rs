@@ -11,6 +11,7 @@ fn gpu_k2_tools_roundtrip_all_formats_json_sse() {
     let source = GgufFile::open(&path).unwrap();
     let invocation = crate::cli::ServeInvocation {
         lens_data_dir: None,
+        lens_config: None,
         web_root: None,
         model: path.into(),
         addr: "127.0.0.1:0".into(),
@@ -142,6 +143,7 @@ fn gpu_verified_k2_chat_http_matches_raw_and_releases_sessions() {
     let source = GgufFile::open(&path).unwrap();
     let invocation = crate::cli::ServeInvocation {
         lens_data_dir: None,
+        lens_config: None,
         web_root: None,
         model: path.into(),
         addr: "127.0.0.1:0".into(),
@@ -317,6 +319,7 @@ fn cpu_downloaded_startup_rejects_options_before_listener_or_metal() {
     ] {
         let invocation = crate::cli::ServeInvocation {
             lens_data_dir: None,
+            lens_config: None,
             web_root: None,
             model: path.clone().into(),
             addr: "invalid-listen-address".into(),
@@ -435,6 +438,7 @@ fn gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests() {
     let source = GgufFile::open(&path).unwrap();
     let invocation = crate::cli::ServeInvocation {
         lens_data_dir: None,
+        lens_config: None,
         web_root: None,
         model: path.into(),
         addr: "127.0.0.1:0".into(),
@@ -619,6 +623,7 @@ fn gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one() {
     assert!(capacity >= 258);
     let invocation = crate::cli::ServeInvocation {
         lens_data_dir: None,
+        lens_config: None,
         web_root: None,
         model: path.into(),
         addr: "127.0.0.1:0".into(),

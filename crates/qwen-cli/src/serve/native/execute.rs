@@ -51,6 +51,16 @@ fn observe(
     Ok(())
 }
 impl Outcome {
+    pub(crate) fn diagnostic_preparation_failed(counters: Counters, cause: anyhow::Error) -> Self {
+        let mut outcome = classify(counters, cause, None);
+        if outcome.reason == StopReason::ExecutionError {
+            outcome.error = Some(writer::error(
+                "diagnostic_preparation_failed",
+                "Diagnostic staging failed before any model forward; see server diagnostics.",
+            ));
+        }
+        outcome
+    }
     pub(crate) fn preparation_failed(counters: Counters, cause: anyhow::Error) -> Self {
         let mut outcome = classify(counters, cause, None);
         if outcome.reason == StopReason::ExecutionError {
@@ -97,10 +107,17 @@ impl std::fmt::Display for Interrupted {
 impl std::error::Error for Interrupted {}
 
 pub(crate) fn checkpoint(sink: &Sink) -> Result<()> {
+    preparation_checkpoint(&sink.control, &sink.server)
+}
+
+pub(super) fn preparation_checkpoint(
+    control: &ordinary_executor::ExecutionControl,
+    server: &crate::serve::control::ExecutionGate,
+) -> Result<()> {
     crate::shutdown::checkpoint()
         .map_err(|cause| anyhow::Error::new(Interrupted).context(cause))?;
-    sink.server.checkpoint()?;
-    sink.control.checkpoint()?;
+    server.checkpoint()?;
+    control.checkpoint()?;
     Ok(())
 }
 
@@ -109,6 +126,7 @@ pub(crate) fn run_loaded(
     tokenizer: &Tokenizer,
     prepared: &Prepared,
     sink: &Sink,
+    staged: &super::registry::Staged,
 ) -> Outcome {
     let setup = (|| -> Result<_> {
         checkpoint(sink)?;
@@ -122,18 +140,23 @@ pub(crate) fn run_loaded(
         Ok(value) => value,
         Err(cause) => return classify(prepared.counters(), cause, None),
     };
-    let mut engine =
-        match super::observe::Engine::new(loaded, tokenizer, sequence, &prepared.readouts) {
-            Ok(engine) => engine,
-            Err(cause) => {
-                tracing::error!("native readout preparation failed: {cause:#}");
-                return Outcome::failed(
-                    prepared.counters(),
-                    "diagnostic_preparation_failed",
-                    "Readout preparation failed before any model forward.",
-                );
-            }
-        };
+    let mut engine = match super::observe::Engine::new(
+        loaded,
+        tokenizer,
+        sequence,
+        &prepared.readouts,
+        staged,
+    ) {
+        Ok(engine) => engine,
+        Err(cause) => {
+            tracing::error!("native readout preparation failed: {cause:#}");
+            return Outcome::failed(
+                prepared.counters(),
+                "diagnostic_preparation_failed",
+                "Readout preparation failed before any model forward.",
+            );
+        }
+    };
     run_engine(prepared, sink, &stops, &mut engine, |token| {
         let bytes = tokenizer.try_decode_piece_bytes_exact(token)?;
         ensure!(

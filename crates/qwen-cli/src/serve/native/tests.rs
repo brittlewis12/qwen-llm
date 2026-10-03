@@ -43,6 +43,7 @@ impl Fixture {
             max_tokens: 16,
             no_thinking_supported: true,
             plain_readouts: false,
+            registry: None,
         });
         Self {
             root,

@@ -116,6 +116,10 @@ pub(crate) struct ServeArgs {
     #[arg(long)]
     lens_data_dir: Option<PathBuf>,
 
+    /// Explicit fitted Lens assets, verified against the resident model before loading.
+    #[arg(long, requires = "lens_data_dir")]
+    lens_config: Option<PathBuf>,
+
     /// Prebuilt Bun client directory; requires durable Lens history on this server.
     #[arg(long, requires = "lens_data_dir")]
     web_root: Option<PathBuf>,
@@ -195,6 +199,7 @@ pub(crate) struct ServeInvocation {
     pub(crate) drafter: Option<PathBuf>,
     pub(crate) trace_sse: Option<PathBuf>,
     pub(crate) lens_data_dir: Option<PathBuf>,
+    pub(crate) lens_config: Option<PathBuf>,
     pub(crate) web_root: Option<PathBuf>,
     pub(crate) template_style: crate::open_responses::items::TemplateStyle,
 }
@@ -471,6 +476,7 @@ pub(crate) fn normalize(args: &mut Args) -> Invocation {
             drafter: serve.drafter,
             trace_sse: serve.trace_sse,
             lens_data_dir: serve.lens_data_dir,
+            lens_config: serve.lens_config,
             web_root: serve.web_root,
             template_style: serve.template_style,
         }),
@@ -558,6 +564,35 @@ mod tests {
         };
         assert_eq!(serve.web_root.as_deref(), Some(Path::new("web/dist")));
         assert_eq!(serve.lens_data_dir.as_deref(), Some(Path::new("jobs")));
+    }
+
+    #[test]
+    fn fitted_registry_requires_history_and_preserves_explicit_configuration() {
+        assert!(
+            Args::try_parse_from([
+                "qwen",
+                "serve",
+                "-m",
+                "model.gguf",
+                "--lens-config",
+                "lenses.json"
+            ])
+            .is_err()
+        );
+        let (_, invocation) = parse(&[
+            "qwen",
+            "serve",
+            "-m",
+            "model.gguf",
+            "--lens-data-dir",
+            "jobs",
+            "--lens-config",
+            "lenses.json",
+        ]);
+        let Invocation::Serve(serve) = invocation else {
+            panic!("expected serve")
+        };
+        assert_eq!(serve.lens_config.as_deref(), Some(Path::new("lenses.json")));
     }
 
     #[test]

@@ -1,9 +1,12 @@
 //! Cache-isolated native baseline execution on the existing resident owner.
 
 mod execute;
+#[cfg(test)]
+mod fitted_live;
 mod observe;
 pub(crate) mod preconditions;
 mod readouts;
+pub(crate) mod registry;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -12,6 +15,7 @@ pub(crate) use execute::run_tokens;
 pub(crate) use observe::run_cpu_readouts;
 #[cfg(test)]
 pub(crate) use tests::Fixture as CpuFixture;
+mod staging;
 mod writer;
 pub(crate) use execute::{Outcome, checkpoint, run_loaded};
 pub(super) use writer::CPU_UPPER_BYTES;
@@ -33,6 +37,28 @@ pub(crate) const RECORD_BYTES: usize = 1024 * 1024;
 // Leave room for worst-case JSON byte numbers, escaped/lossy text and framing.
 pub(crate) const MAX_TOKEN_PIECE_BYTES: usize = (RECORD_BYTES - 1024) / 10;
 
+pub(crate) fn with_staged(
+    prepared: &Prepared,
+    sink: &Sink,
+    reserve: u64,
+    execute: impl FnOnce(&registry::Staged) -> Outcome,
+) -> Outcome {
+    let staged = (|| {
+        checkpoint(sink)?;
+        let staged = if prepared.readouts.matrices.is_empty() {
+            registry::Staged::default()
+        } else {
+            sink.stage(&prepared.readouts, reserve)?
+        };
+        checkpoint(sink)?;
+        Ok(staged)
+    })();
+    match staged {
+        Ok(staged) => execute(&staged),
+        Err(cause) => Outcome::diagnostic_preparation_failed(prepared.counters(), cause),
+    }
+}
+
 pub(crate) struct Profile {
     pub(crate) model_id: String,
     pub(crate) identity: String,
@@ -44,6 +70,7 @@ pub(crate) struct Profile {
     pub(crate) max_tokens: usize,
     pub(crate) no_thinking_supported: bool,
     pub(crate) plain_readouts: bool,
+    pub(crate) registry: Option<Arc<registry::Registry>>,
 }
 
 pub(crate) struct Prepared {
@@ -75,7 +102,11 @@ impl Prepared {
 impl Profile {
     fn check_preconditions(&self, request: &Request) -> Result<(), ApiError> {
         preconditions::check(request, &self.identity, |alias| {
-            (self.plain_readouts && alias == "plain").then_some(self.identity.as_str())
+            if self.plain_readouts && alias == "plain" {
+                Some(self.identity.as_str())
+            } else {
+                self.registry.as_ref()?.asset(alias).ok()?["identity"].as_str()
+            }
         })
     }
     pub(crate) fn prepare(&self, request: &Request) -> Result<Prepared, ApiError> {
@@ -123,12 +154,13 @@ impl Profile {
                 "The resident model has no qualified passive readout head.",
             ));
         }
-        let readouts = readouts::Plan::compile(
+        let readouts = readouts::Plan::compile_with_registry(
             values,
             self.layers,
             prepared.input.token_ids.len(),
             request.generation.max_new_tokens,
             self.tokenizer.n_vocab() as usize,
+            self.registry.clone(),
         )
         .map_err(|cause| ApiError::new(400, "invalid_readout", cause.to_string()))?;
         // Bound serialization before materializing a Value tree of token bytes
@@ -140,8 +172,17 @@ impl Profile {
         record["model_identity_kind"] = "runtime_gguf_metadata_not_content_hash".into();
         record["requested_preconditions"] = json!(request.preconditions);
         record["asset_identities"] = json!({});
-        if !readouts.readouts.is_empty() {
-            record["asset_identities"]["plain"] = self.identity.clone().into();
+        for readout in &readouts.readouts {
+            record["asset_identities"][&readout.lens] = if readout.lens == "plain" {
+                self.identity.clone().into()
+            } else {
+                self.registry
+                    .as_ref()
+                    .expect("compiled registry")
+                    .asset(&readout.lens)
+                    .expect("compiled asset")["identity"]
+                    .clone()
+            };
         }
         record["resolved_scopes"] = json!(
             readouts
@@ -200,7 +241,7 @@ impl Admission for NativeAdmission {
             "limits":{"max_new_tokens":self.profile.max_tokens,"max_context_tokens":self.profile.context,"max_token_piece_bytes":MAX_TOKEN_PIECE_BYTES,"max_directions":0,"max_operations":0,"max_readouts":if self.profile.plain_readouts {readouts::MAX_READOUTS} else {0},"max_top_k":if self.profile.plain_readouts {readouts::MAX_TOP_K.min(self.profile.tokenizer.n_vocab() as usize)} else {0},"max_head_evaluations":readouts::MAX_HEAD_EVALUATIONS,"max_readout_rows":readouts::MAX_ROWS,"max_readout_scores":readouts::MAX_SCORES,"max_readout_label_bytes":readouts::MAX_LABEL_BYTES,"max_queued_jobs":1}})
     }
     fn assets(&self) -> Value {
-        let assets = if self.profile.plain_readouts {
+        let mut assets = if self.profile.plain_readouts {
             vec![
                 json!({"alias":"plain","kind":"plain_logit_lens","identity":self.profile.identity,"available":true,"unavailable_reason":null,
                 "source_layers":(0..self.profile.layers).collect::<Vec<_>>(),"target_layer":null,"readout_modes":["full_vocabulary"],"direction_rows":[],"transfer":"identity"}),
@@ -208,6 +249,9 @@ impl Admission for NativeAdmission {
         } else {
             vec![]
         };
+        if let Some(registry) = &self.profile.registry {
+            assets.extend(registry.metadata().cloned());
+        }
         json!({"schema_version":1,"model_identity":self.profile.identity,"assets":assets})
     }
     fn reserve(&self, request: &Request) -> Result<Box<dyn ReservedSubmission>, ApiError> {

@@ -17,6 +17,16 @@ fn browser_baseline_child() {
     let mut fixture = native::CpuFixture::new();
     Arc::get_mut(&mut fixture.profile).unwrap().plain_readouts =
         std::env::var("QWEN_LENS_BROWSER_READOUTS").as_deref() == Ok("1");
+    let _fitted_files = if std::env::var("QWEN_LENS_BROWSER_FITTED").as_deref() == Ok("1") {
+        let (files, registry) = native::registry::tests::fitted_fixture();
+        let profile = Arc::get_mut(&mut fixture.profile).unwrap();
+        profile.plain_readouts = true;
+        profile.layers = 3;
+        profile.registry = Some(registry);
+        Some(files)
+    } else {
+        None
+    };
     let assets = crate::serve::assets::WebAssets::open(std::path::Path::new(
         &std::env::var("QWEN_LENS_BROWSER_WEB_ROOT").unwrap(),
     ))
@@ -321,6 +331,86 @@ fn qualified_plain_http_submission_reaches_the_shared_owner_and_saved_results() 
             .1,
         page
     );
+    assert_eq!(server.calls.load(Ordering::Acquire), 1);
+    server.stop();
+}
+
+#[test]
+fn fitted_http_pins_registry_identity_and_reopens_original_shared_rows() {
+    let mut fixture = native::CpuFixture::new();
+    let (_files, registry) = native::registry::tests::fitted_fixture();
+    let profile = Arc::get_mut(&mut fixture.profile).unwrap();
+    profile.plain_readouts = true;
+    profile.layers = 3;
+    profile.registry = Some(registry);
+    let mut server = Server::start(&fixture);
+    let (_, catalog) = server.request("GET", "/v1/lens/assets", "");
+    let fit = catalog["assets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["alias"] == "fit")
+        .unwrap();
+    assert_eq!(fit["direction_rows"], serde_json::json!([]));
+    let mut request = fixture.request("http-fit");
+    request["preconditions"]["asset_identities"] =
+        serde_json::json!({"plain":"cpu-fixture","fit":"stale"});
+    let row = |id, lens| {
+        serde_json::json!({"id":id,"lens":lens,"mode":"full_vocabulary","top_k":2,
+        "scope":{"layers":{"kind":"values","values":[0]},"decode":{"kind":"all"}}})
+    };
+    request["diagnostics"] = serde_json::json!({"directions":[],"operations":[],"readouts":[row("plain","plain"),row("fit-a","fit"),row("fit-b","fit")]});
+    assert!(
+        server
+            .request("POST", "/v1/lens/jobs", &request.to_string())
+            .0
+            .starts_with("HTTP/1.1 412")
+    );
+    assert_eq!(server.calls.load(Ordering::Acquire), 0);
+    request["preconditions"]["asset_identities"]["fit"] = fit["identity"].clone();
+    let (head, accepted) = server.request("POST", "/v1/lens/jobs", &request.to_string());
+    assert!(head.starts_with("HTTP/1.1 202"), "{head} {accepted}");
+    let id = accepted["id"].as_str().unwrap();
+    server.entered.recv_timeout(WAIT).unwrap();
+    server.release.send(()).unwrap();
+    assert_eq!(server.wait_terminal(id)["state"], "completed");
+    let path = format!("/v1/lens/jobs/{id}/result");
+    let (_, page) = server.request("GET", &path, "");
+    let rows = page["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "readout")
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 6);
+    assert_eq!(
+        page["records"][0]["asset_identities"]["fit"],
+        fit["identity"]
+    );
+    assert_eq!(
+        page["records"][0]["readout_admission"]["head_evaluations_upper"],
+        4
+    );
+    for row in rows.iter().filter(|r| r["lens"] == "fit") {
+        assert_eq!(row["asset_identity"], fit["identity"]);
+        assert_eq!(row["target_layer"], 1);
+        assert_eq!(
+            row["binding_status"],
+            "source_deployment_equivalence_unverified"
+        );
+        assert!(row["generation_logit_witness"].is_null());
+        assert_eq!(
+            row["cost"]["readout_ms"].is_null(),
+            row["readout_id"] == "fit-b"
+        );
+    }
+    assert_eq!(
+        server
+            .request("POST", "/v1/lens/jobs", &request.to_string())
+            .1["id"],
+        id
+    );
+    assert_eq!(server.request("GET", &path, "").1, page);
     assert_eq!(server.calls.load(Ordering::Acquire), 1);
     server.stop();
 }

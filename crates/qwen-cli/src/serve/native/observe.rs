@@ -1,4 +1,4 @@
-//! Read plain heads from successful original-forward captures, never replay.
+//! Read shared plain/fitted heads from original-forward captures, never replay.
 
 use super::{
     Sink, checkpoint,
@@ -16,6 +16,8 @@ use qwen_llm::{
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{borrow::Cow, time::Instant};
+#[cfg(test)]
+mod verification;
 
 pub(super) struct Engine<'a> {
     loaded: &'a LoadedModel,
@@ -24,13 +26,16 @@ pub(super) struct Engine<'a> {
     plan: &'a Plan,
     capture: Option<MetalTensor>,
     layers: Vec<u32>,
+    staged: &'a super::registry::Staged,
+    fitted: Option<qwen_llm::workspace_lens::WorkspaceLensFullReadoutWorkspace<'a>>,
 }
 impl<'a> Engine<'a> {
     pub(super) fn new(
         loaded: &'a LoadedModel,
         tokenizer: &'a Tokenizer,
-        sequence: Sequence,
+        mut sequence: Sequence,
         plan: &'a Plan,
+        staged: &'a super::registry::Staged,
     ) -> Result<Self> {
         let capture = if plan.max_capture_layers == 0 {
             None
@@ -44,6 +49,15 @@ impl<'a> Engine<'a> {
                 vec![u64::try_from(count)?],
             )?)
         };
+        let fitted = if plan.matrices.is_empty() {
+            None
+        } else {
+            Some(
+                loaded
+                    .passive_workspace_lens_session(&mut sequence)?
+                    .full_readout_workspace(1)?,
+            )
+        };
         Ok(Self {
             loaded,
             tokenizer,
@@ -51,6 +65,8 @@ impl<'a> Engine<'a> {
             plan,
             capture,
             layers: Vec::new(),
+            staged,
+            fitted,
         })
     }
 }
@@ -105,29 +121,62 @@ impl TokenEngine for Engine<'_> {
             self.layers.len() * hidden,
         )?;
         for (slot, &layer) in self.layers.iter().enumerate() {
-            checkpoint(sink)?;
-            let start = Instant::now();
-            let residual = &values[slot * hidden..(slot + 1) * hidden];
-            let full = self
-                .loaded
-                .passive_workspace_lens_session(&mut self.sequence)?
-                .deployed_logits_from_post_block_residual(residual)?;
-            publish_head(
-                self.plan,
-                self.tokenizer,
-                HeadSite {
-                    token,
-                    position,
-                    layer,
-                    counters,
-                    generation_logits: (layer + 1 == self.loaded.arch().n_layer
-                        && !generation_logits.is_empty())
-                    .then_some(generation_logits),
-                },
-                full,
-                sink,
-                start,
-            )?;
+            for lens in self.plan.heads(position, layer).keys().copied() {
+                checkpoint(sink)?;
+                let start = Instant::now();
+                let residual = &values[slot * hidden..(slot + 1) * hidden];
+                #[cfg(test)]
+                let mut transport_witness = None;
+                let full = if lens == "plain" {
+                    self.loaded
+                        .passive_workspace_lens_session(&mut self.sequence)?
+                        .deployed_logits_from_post_block_residual(residual)?
+                } else {
+                    let key = super::registry::MatrixKey {
+                        alias: lens.into(),
+                        layer,
+                    };
+                    let matrix = self
+                        .staged
+                        .matrices
+                        .get(&key)
+                        .context("missing admitted matrix")?;
+                    let full = self
+                        .fitted
+                        .as_mut()
+                        .context("missing fitted workspace")?
+                        .apply_row_f16_transport_logits_with_vector(matrix, residual)?;
+                    #[cfg(test)]
+                    {
+                        transport_witness = Some(verification::transport(
+                            matrix,
+                            residual,
+                            &full.transported_values,
+                        )?);
+                    }
+                    full
+                };
+                publish_head(
+                    self.plan,
+                    self.tokenizer,
+                    HeadSite {
+                        token,
+                        position,
+                        layer,
+                        lens,
+                        #[cfg(test)]
+                        transport_witness,
+                        counters,
+                        generation_logits: (lens == "plain"
+                            && layer + 1 == self.loaded.arch().n_layer
+                            && !generation_logits.is_empty())
+                        .then_some(generation_logits),
+                    },
+                    full,
+                    sink,
+                    start,
+                )?;
+            }
         }
         Ok(())
     }
@@ -137,6 +186,9 @@ struct HeadSite<'a> {
     token: i32,
     position: u32,
     layer: u32,
+    lens: &'a str,
+    #[cfg(test)]
+    transport_witness: Option<Value>,
     counters: &'a Counters,
     generation_logits: Option<&'a [f32]>,
 }
@@ -153,6 +205,9 @@ fn publish_head(
         token,
         position,
         layer,
+        lens,
+        #[cfg(test)]
+        transport_witness,
         counters,
         generation_logits,
     } = site;
@@ -169,7 +224,21 @@ fn publish_head(
     let witness = generation_logits
         .map(|actual| logit_witness(&full.logits, actual))
         .transpose()?;
-    let indices = &plan.events[&position][&layer];
+    let indices = plan.events[&position][&layer]
+        .iter()
+        .copied()
+        .filter(|&i| plan.readouts[i].lens == lens)
+        .collect::<Vec<_>>();
+    let asset = if lens == "plain" {
+        None
+    } else {
+        Some(
+            plan.registry
+                .as_ref()
+                .context("missing fitted registry")?
+                .asset(lens)?,
+        )
+    };
     let max_k = indices
         .iter()
         .map(|&i| plan.readouts[i].top_k)
@@ -213,17 +282,19 @@ fn publish_head(
             ReadoutRecord {
                 kind: "readout",
                 readout_id: &readout.id,
-                lens: "plain",
+                lens,
                 phase,
                 index,
                 position,
                 input_token_id: token,
                 predicts_position: u64::from(position) + 1,
                 source_layer: layer,
-                target_layer: None,
-                asset_identity: None,
-                binding_status: None,
-                method: None,
+                target_layer: asset
+                    .and_then(|v| v["target_layer"].as_u64())
+                    .map(|v| v as u32),
+                asset_identity: asset.and_then(|v| v["identity"].as_str()),
+                binding_status: asset.and_then(|v| v["transfer"].as_str()),
+                method: asset.and_then(|v| v["method"].as_str()),
                 capture_stage: "post_block_after_operations",
                 applied_operation_ids: &[],
                 provenance: "original_forward",
@@ -231,12 +302,14 @@ fn publish_head(
                 candidate_universe: "full_vocabulary",
                 scores: &scores[..readout.top_k],
                 generation_logit_witness: witness.as_ref(),
+                #[cfg(test)]
+                test_transport_witness: transport_witness.as_ref(),
                 retained: None,
                 cost: Cost {
                     readout_ms: (ordinal == 0).then_some(elapsed),
                     shared_head_position: position,
                     shared_head_layer: layer,
-                    shared_head_lens: "plain",
+                    shared_head_lens: lens,
                 },
             },
             phase,
@@ -255,17 +328,17 @@ struct Score<'a> {
     score: f32,
 }
 #[derive(Serialize)]
-struct Cost {
+struct Cost<'a> {
     readout_ms: Option<f64>,
     shared_head_position: u32,
     shared_head_layer: u32,
-    shared_head_lens: &'static str,
+    shared_head_lens: &'a str,
 }
 #[derive(Serialize)]
 struct ReadoutRecord<'a> {
     kind: &'static str,
     readout_id: &'a str,
-    lens: &'static str,
+    lens: &'a str,
     phase: Phase,
     index: u64,
     position: u32,
@@ -283,8 +356,11 @@ struct ReadoutRecord<'a> {
     candidate_universe: &'static str,
     scores: &'a [Score<'a>],
     generation_logit_witness: Option<&'a Value>,
+    #[cfg(test)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    test_transport_witness: Option<&'a Value>,
     retained: Option<&'a Value>,
-    cost: Cost,
+    cost: Cost<'a>,
 }
 
 fn read_capture(capture: &MetalTensor, count: usize) -> Result<Vec<f32>> {
@@ -355,6 +431,7 @@ mod tests {
         tokenizer: &'a Tokenizer,
         forwards: usize,
         heads: usize,
+        staged: Option<&'a super::super::registry::Staged>,
     }
     impl TokenEngine for Synthetic<'_> {
         fn forward(&mut self, _: i32, position: u32, _: bool) -> Result<Vec<f32>> {
@@ -378,28 +455,40 @@ mod tests {
             );
             if let Some(event) = self.plan.events.get(&position) {
                 for &layer in event.keys() {
-                    checkpoint(sink)?;
-                    self.heads += 1;
-                    publish_head(
-                        self.plan,
-                        self.tokenizer,
-                        HeadSite {
-                            token,
-                            position,
-                            layer,
-                            counters,
-                            generation_logits: (layer == 1
-                                && position as u64 + 1 >= counters.prompt_tokens)
-                                .then_some(logits),
-                        },
-                        qwen_llm::workspace_lens::WorkspaceLensFullVocabularyLogitsWithVector {
-                            logits: logits.to_vec(),
-                            transported_values: vec![1., 2.],
-                            rms_denominator_f64_recomputed: 1.,
-                        },
-                        sink,
-                        Instant::now(),
-                    )?;
+                    for lens in self.plan.heads(position, layer).keys().copied() {
+                        checkpoint(sink)?;
+                        if lens != "plain" {
+                            let key = super::super::registry::MatrixKey {
+                                alias: lens.into(),
+                                layer,
+                            };
+                            assert!(!self.staged.unwrap().matrices[&key].is_empty());
+                        }
+                        self.heads += 1;
+                        publish_head(
+                            self.plan,
+                            self.tokenizer,
+                            HeadSite {
+                                token,
+                                position,
+                                layer,
+                                lens,
+                                transport_witness: None,
+                                counters,
+                                generation_logits: (lens == "plain"
+                                    && layer == 1
+                                    && position as u64 + 1 >= counters.prompt_tokens)
+                                    .then_some(logits),
+                            },
+                            qwen_llm::workspace_lens::WorkspaceLensFullVocabularyLogitsWithVector {
+                                logits: logits.to_vec(),
+                                transported_values: vec![1., 2.],
+                                rms_denominator_f64_recomputed: 1.,
+                            },
+                            sink,
+                            Instant::now(),
+                        )?;
+                    }
                 }
             }
             Ok(())
@@ -410,13 +499,21 @@ mod tests {
         sink: &Sink,
         tokenizer: &Tokenizer,
     ) -> crate::serve::native::Outcome {
-        let mut engine = Synthetic {
-            plan: &prepared.readouts,
-            tokenizer,
-            forwards: 0,
-            heads: 0,
-        };
-        execute::run_engine(prepared, sink, &[], &mut engine, |_| Ok(b"x".to_vec()))
+        super::super::with_staged(
+            prepared,
+            sink,
+            prepared.readouts.matrix_bytes + super::super::registry::STAGING_OVERHEAD_BYTES,
+            |staged| {
+                let mut engine = Synthetic {
+                    plan: &prepared.readouts,
+                    tokenizer,
+                    forwards: 0,
+                    heads: 0,
+                    staged: Some(staged),
+                };
+                execute::run_engine(prepared, sink, &[], &mut engine, |_| Ok(b"x".to_vec()))
+            },
+        )
     }
 
     #[test]
@@ -463,6 +560,7 @@ mod tests {
             tokenizer: &fixture.profile.tokenizer,
             forwards: 0,
             heads: 0,
+            staged: None,
         };
         let outcome = execute::run_engine(&prepared, writer.sink(), &[], &mut engine, |_| {
             Ok(b"x".to_vec())
@@ -550,6 +648,7 @@ mod tests {
                 tokenizer: &fixture.profile.tokenizer,
                 forwards: 0,
                 heads: 0,
+                staged: None,
             };
             let outcome = execute::run_engine(&prepared, writer.sink(), &[], &mut engine, |_| {
                 panic!("stopped during first prompt forward")
@@ -640,6 +739,8 @@ mod tests {
                     token: prepared.prompt[0],
                     position: 0,
                     layer: 0,
+                    lens: "plain",
+                    transport_witness: None,
                     counters: &counters,
                     generation_logits: None,
                 },

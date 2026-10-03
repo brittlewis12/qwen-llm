@@ -256,7 +256,8 @@ try {
   await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   if (liveOrigin && Bun.env.LENS_TEST_BASELINE_ONLY === "1") {
     await send("Page.navigate", { url: liveOrigin });
-    const plain = Bun.env.LENS_TEST_PLAIN_ONLY === "1";
+    const fitted = Bun.env.LENS_TEST_FITTED_ONLY === "1";
+    const plain = Bun.env.LENS_TEST_PLAIN_ONLY === "1" || fitted;
     await wait(`document.body.textContent.includes(${JSON.stringify(plain ? "Readouts available" : "Baseline available")})`, "discovery alongside history polling");
     await setInput("#message-0", "Name an animal.");
     await setInput("#generation-mode", "no_thinking");
@@ -270,6 +271,10 @@ try {
     assert(await evaluate<boolean>(`[...document.querySelectorAll('button')].filter(b => ${JSON.stringify(plain ? ["Add direction", "Add operation"] : ["Add readout", "Add direction", "Add operation"])}.includes(b.textContent)).every(b => b.disabled)`));
     if (plain) {
       await click("Add readout");
+      if (fitted) {
+        await evaluate(`(() => { const input = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Readout alias')).querySelector('select'); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(input, 'fit'); input.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+        await wait(`document.body.textContent.includes('source_deployment_equivalence_unverified')`, "fitted binding disclosure");
+      }
       await wait(`document.querySelectorAll('.scope-editor select').length === 3`, "plain numeric scopes");
       await evaluate(`(() => { const input = document.querySelectorAll('.scope-editor select')[1]; Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(input, 'none'); input.dispatchEvent(new Event('change', { bubbles: true })); })()`);
       await evaluate(`(() => { const input = document.querySelectorAll('.scope-editor select')[2]; Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(input, 'values'); input.dispatchEvent(new Event('change', { bubbles: true })); })()`);
@@ -291,9 +296,11 @@ try {
     if (plain) {
       const rows = recorded.records.filter(isReadout);
       assert.equal(rows.length, 1);
+      assert.equal(rows[0]!.lens, fitted ? "fit" : "plain");
       assert.equal(rows[0]!.phase, "decode"); assert.equal(rows[0]!.index, 0); assert.equal(rows[0]!.source_layer, 0);
       await wait(`!!document.querySelector('button[aria-label="Inspect saved layer 0"]')`, "saved plain layer");
       await evaluate(`document.querySelector('button[aria-label="Inspect saved layer 0"]').click()`);
+      if (fitted) await wait(`document.querySelector('.score-panel')?.textContent.includes('source_deployment_equivalence_unverified') && document.querySelector('.score-panel')?.textContent.includes('not the final generation distribution')`, "saved fitted provenance");
       const expected = rows[0]!.scores.map(score => [String(score.score), `Token ${score.token_id} / row ${score.row_id}`]);
       await wait(`JSON.stringify([...document.querySelectorAll('.score-panel .scores > li')].map(node => [node.querySelector('.score-value').textContent, node.querySelector('p.muted').textContent])) === ${JSON.stringify(JSON.stringify(expected))}`, "plain displayed scores equal actual saved records");
     }
@@ -314,7 +321,7 @@ try {
     assert(!await evaluate<boolean>(`document.documentElement.scrollWidth > innerWidth`), "desktop baseline overflow");
     assert.deepEqual(await (await fetch(`${liveOrigin}/v1/lens/jobs`)).json(), before);
     assert.equal(await evaluate<number>(`document.querySelectorAll('.error-ledger details').length`), 0, "real control-pool startup must not strand discovery or report transient read saturation");
-    console.log(`${plain ? "Plain readout" : "Baseline"} browser passed: actual same-port assets/store/producer, phone prefill/sampling/submit/reload/copy/history, exact records, desktop parity, no extra jobs. Job ${jobId}`);
+    console.log(`${fitted ? "Fitted readout" : plain ? "Plain readout" : "Baseline"} browser passed: actual same-port assets/store/producer, phone prefill/sampling/submit/reload/copy/history, exact records, desktop parity, no extra jobs. Job ${jobId}`);
   } else if (liveOrigin) {
     const fittedAlias = Bun.env.LENS_TEST_FITTED_ALIAS;
     const sourceLayer = fittedAlias ? 46 : 0;

@@ -3,8 +3,8 @@
 ## Recovered Now
 
 The reconstruction provides a durable baseline API and the preserved Bun/React
-client on `qwen serve`, including scoped plain original-forward readouts. Fitted
-assets, interventions and retained capture production are not yet recovered.
+client on `qwen serve`, including scoped plain and registered fitted original-forward
+readouts. Interventions and retained capture production are not yet recovered.
 Compatible historical records remain inspectable. This is an intermediate workbench,
 not completion of recovery. See [the recovery ledger](LENS-WEB-RECOVERY.md).
 
@@ -124,7 +124,44 @@ aligned capture/head buffer. Host allowance includes capture readback, transport
 vector, all three simultaneously live previous/new/observer logit arrays, bounded
 ranking/labels/serialization, plus existing durable/control/writer reservations.
 Eviction retry retains the same complete allowances; denial precedes capture setup.
-`retain`, fitted aliases, directions, operations and residual pairs remain refused.
+`retain`, directions, operations and residual pairs remain refused.
+
+## Fitted Readouts
+
+Add `--lens-config lenses.json` to the same history-enabled server. This currently
+requires an identified Qwen3.6/3.8 House protocol. Configuration is explicit; no
+automatic lens discovery or second model service is introduced:
+
+```json
+{
+  "schema_version": 1,
+  "assets": [{"alias": "fitted", "path": "assets/my-transport"}]
+}
+```
+
+Paths are relative to the config file. Assets use the data-only
+`llm.lens.linear_transport` contract, not legacy published-import manifests. Exact
+deployment bindings must match retained model bytes and tokenizer identity. For an
+artifact without an exact binding, explicitly add `"allow_unvalidated_transfer": true`
+to that asset; this cannot override a mismatched exact binding or geometry. Producer
+qualification remains a claim, not independent proof of fit quality. Startup verifies
+manifest geometry before payload scanning and loads the same retained GGUF afterward.
+
+Select the advertised alias in the existing readout editor, or use it as `lens` with
+the same scopes and top-k fields as plain readouts. Select only its advertised source
+layers and pin its advertised identity. Heads are shared by position/layer/alias;
+captures are shared across aliases. Saved fitted rows retain target, artifact identity,
+method and binding status, and never claim to be the final generation distribution.
+
+The owner admits all pending durable/control/writer memory, selected host matrices,
+scan scratch, capture, sequence and aligned fitted workspace before any matrix staging.
+The existing joined artifact worker then rehashes selected matrices and transfers them
+once, with cancellation and shutdown checks. No additional worker or dispatch queue is
+created. Fresh staging checks preserve the full original future process allowance;
+already-staged bytes can be conservatively counted again, causing over-refusal under
+pressure. Up to 512 MiB of unique alias/layer matrices may be staged per job. This cap
+does not include the other allowances. Staging failure settles without model forwards;
+filesystem calls remain cooperatively cancellable, not deadline-bounded.
 
 ## Bounds And Lifecycle
 

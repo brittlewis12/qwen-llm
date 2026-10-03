@@ -819,3 +819,21 @@ with the known unmarked Muse Metal test explicitly excluded. All binaries/tests,
 formatting and whitespace checks pass. No GPU used. `cx` gives GO for this independently
 consumed prerequisite, not for pending registry staging or fitted execution. Fetched
 main remains `8bc9e6b739e953023a1f2ffc5dc3379c22758e00`.
+
+### R04/R11: Retain The Ordinary Serve Deployment Through Loading
+
+Ordinary Qwen serving now moves the GGUF used for family/template/context preflight
+into the existing opened-model Runtime loader instead of dropping it and reopening
+the model pathname. This prevents a path replacement between preflight and loading
+from silently switching the deployment, and gives fitted-asset CPU binding the same
+source that will subsequently load. Retained descriptors do not make file contents
+immutable. Reusable load intent, default configuration, memory admission, prefetch,
+snapshot identity and diagnostic path are unchanged. The existing `load_ms` interval
+no longer includes a second GGUF open/parse; this is not a performance improvement
+claim.
+
+Serving CPU gate: 303 pass, 26 ignored, with the known unmarked Metal test explicitly
+excluded. Runtime CPU tests: 39 pass, 33 ignored. Binary/test compilation, formatting
+and whitespace checks pass. `cx` approves the focused loader change. Clean-release
+live baseline/plain-readout requalification is pending; registry and fitted execution
+remain pending, not implied by this retained-source prerequisite.

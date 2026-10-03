@@ -610,13 +610,13 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                         "read the model's declared context length for the serve ceiling",
                     )?),
                 };
-            drop(gguf);
             crate::shutdown::checkpoint()?;
             let runtime = Runtime::metal().context("initialize Metal runtime")?;
             let load_t0 = Instant::now();
             let loaded = runtime
-                .load_model_with_config(
-                    &invocation.model,
+                .load_opened_gguf_with_config(
+                    gguf,
+                    invocation.model.clone(),
                     qwen_llm::runtime::LoadedModelConfig::default(),
                 )
                 .with_context(|| format!("load model {}", invocation.model.display()))?;

@@ -406,6 +406,7 @@ pub(super) fn forward_event(
                 position,
                 needs_logits,
                 Some((event.capture_layers(), capture)),
+                None,
                 &borrowed,
             )?
         }
@@ -416,6 +417,7 @@ pub(super) fn forward_event(
                 token,
                 position,
                 needs_logits,
+                None,
                 None,
                 &borrowed,
             )?

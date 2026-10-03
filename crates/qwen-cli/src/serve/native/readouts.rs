@@ -42,6 +42,7 @@ pub(crate) struct Plan {
     pub(crate) retained_sources: BTreeSet<(u32, u32)>,
     pub(crate) retained_heads: BTreeSet<(u32, u32, String)>,
     pub(crate) archive_bytes: u64,
+    pub(crate) pairs: super::measurements::Plan,
 }
 
 impl Plan {
@@ -201,8 +202,35 @@ impl Plan {
             }
             plan.readouts.push(readout);
         }
-        if !plan.retained_heads.is_empty() {
-            let bytes = |count: usize| -> Result<u64> {
+        plan.price_archive(hidden, vocab)?;
+        Ok(plan)
+    }
+
+    pub(crate) fn with_pairs(
+        mut self,
+        pairs: super::measurements::Plan,
+        hidden: usize,
+        vocab: usize,
+    ) -> Result<Self> {
+        for (&position, event) in &pairs.events {
+            let after = self.events.entry(position).or_default();
+            for &layer in event.keys() {
+                after.entry(layer).or_default();
+                self.retained_sources.insert((position, layer));
+            }
+            self.max_capture_layers = self.max_capture_layers.max(after.len());
+        }
+        self.pairs = pairs;
+        self.price_archive(hidden, vocab)?;
+        Ok(self)
+    }
+
+    fn price_archive(&mut self, hidden: usize, vocab: usize) -> Result<()> {
+        if !self.retained_sources.is_empty() {
+            let bytes = |count: usize, arrays: usize| -> Result<u64> {
+                if arrays == 0 {
+                    return Ok(0);
+                }
                 let bytes = count
                     .checked_mul(4)
                     .context("retained array bytes overflow")?;
@@ -210,24 +238,24 @@ impl Plan {
                     bytes > 0 && bytes <= crate::serve::jobs::store::MAX_ARRAY_BYTES,
                     "retained array exceeds byte limit"
                 );
-                Ok(bytes as u64)
+                (bytes as u64)
+                    .checked_mul(arrays as u64)
+                    .context("retention byte overflow")
             };
-            let source_bytes = bytes(hidden)?;
-            let score_bytes = bytes(vocab)?;
-            plan.archive_bytes = source_bytes
-                .checked_mul(plan.retained_sources.len() as u64)
-                .and_then(|n| {
-                    score_bytes
-                        .checked_mul(plan.retained_heads.len() as u64)?
-                        .checked_add(n)
-                })
+            let sources = self
+                .retained_sources
+                .len()
+                .checked_add(self.pairs.sites())
+                .context("source count overflow")?;
+            self.archive_bytes = bytes(hidden, sources)?
+                .checked_add(bytes(vocab, self.retained_heads.len())?)
                 .context("retention byte overflow")?;
             ensure!(
-                plan.archive_bytes <= crate::serve::jobs::store::MAX_ARCHIVE_BYTES,
+                self.archive_bytes <= crate::serve::jobs::store::MAX_ARCHIVE_BYTES,
                 "retained archive exceeds raw byte budget"
             );
         }
-        Ok(plan)
+        Ok(())
     }
 
     pub(crate) fn heads(&self, position: u32, layer: u32) -> BTreeMap<&str, Vec<usize>> {
@@ -279,9 +307,15 @@ impl Plan {
         let capture = hidden
             .checked_mul(u64::try_from(self.max_capture_layers)?)
             .context("capture bytes overflow")?;
+        let before = hidden
+            .checked_mul(u64::try_from(self.pairs.max_layers)?)
+            .context("before capture bytes overflow")?;
         let mut gpu = 0u64;
         // A retained fitted workspace overlaps transient plain heads when both are requested.
         let mut allocations = vec![capture];
+        if before > 0 {
+            allocations.push(before);
+        }
         if self.readouts.iter().any(|r| r.lens == "plain") {
             allocations.extend([hidden, hidden, vocab]);
         }
@@ -298,7 +332,8 @@ impl Plan {
         // Readback, transported vector, observer/new/previous logits, bounded top-k,
         // lossy labels and record construction. Ranking uses the existing O(k) helper.
         let cpu = capture
-            .checked_add(hidden)
+            .checked_add(before)
+            .and_then(|n| n.checked_add(hidden))
             .and_then(|n| vocab.checked_mul(3).and_then(|v| n.checked_add(v)))
             .and_then(|n| n.checked_add(2 * super::RECORD_BYTES as u64))
             .and_then(|n| {
@@ -323,6 +358,69 @@ impl Plan {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn pairs_merge_independent_capture_sets_without_heads_and_share_after_arrays() {
+        let pair = |id| json!({"id":id,"scope":{"layers":{"kind":"values","values":[1,3]},"prefill":{"kind":"values","values":[0]},"decode":{"kind":"all"}}});
+        let pairs =
+            || super::super::measurements::Plan::compile(&[pair("a"), pair("b")], 4, 3, 2).unwrap();
+        let alone = Plan::default().with_pairs(pairs(), 2, usize::MAX).unwrap();
+        assert_eq!(
+            (
+                alone.pairs.sites(),
+                alone.pairs.rows,
+                alone.head_evaluations,
+                alone.archive_bytes
+            ),
+            (4, 8, 0, 64)
+        );
+        assert!(alone.heads(0, 1).is_empty());
+        assert!(alone.matrices.is_empty());
+        let mut row = readout("r");
+        row["retain"] = json!("scores_and_residual");
+        let base = Plan::compile_with_registry(&[row], 4, 3, 2, 10, None, 2).unwrap();
+        let (base_gpu, base_cpu) = base.price(2, 10, Ok).unwrap();
+        let combined = base.with_pairs(pairs(), 2, 10).unwrap();
+        assert_eq!(
+            combined.events[&0].keys().copied().collect::<Vec<_>>(),
+            [0, 1, 3]
+        );
+        assert_eq!(
+            combined.pairs.events[&0]
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            [1, 3]
+        );
+        assert_eq!(
+            (
+                combined.retained_sources.len(),
+                combined.retained_heads.len(),
+                combined.archive_bytes
+            ),
+            (8, 6, 336)
+        );
+        let (gpu, cpu) = combined.price(2, 10, Ok).unwrap();
+        assert_eq!(gpu - base_gpu, 8 + 16);
+        assert_eq!(cpu - base_cpu, 8 + 16 + 48);
+        let pairs = || {
+            super::super::measurements::Plan::compile(
+                &[json!({"id":"all","scope":{"layers":{"kind":"all"},"prefill":{"kind":"all"}}})],
+                1,
+                4,
+                1,
+            )
+            .unwrap()
+        };
+        let hidden = crate::serve::jobs::store::MAX_ARRAY_BYTES / 4;
+        assert_eq!(
+            Plan::default()
+                .with_pairs(pairs(), hidden, usize::MAX)
+                .unwrap()
+                .archive_bytes,
+            crate::serve::jobs::store::MAX_ARCHIVE_BYTES
+        );
+        assert!(Plan::default().with_pairs(pairs(), hidden + 1, 10).is_err());
+    }
     #[test]
     fn retention_deduplicates_selected_heads_and_prices_exact_raw_boundaries() {
         let row = |id, lens, retain| {

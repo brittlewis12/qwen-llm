@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 // Owns one opt-in Metal test process; never targets an existing server.
 const model = Bun.env.QWEN_LENS_TEST_MODEL;
 const mode = Bun.env.QWEN_LENS_ORACLE_MODE ?? "readouts";
-assert(["readouts", "interventions"].includes(mode), "Unknown oracle mode");
+assert(["readouts", "interventions", "pairs"].includes(mode), "Unknown oracle mode");
 if (!model) throw new Error("Set QWEN_LENS_TEST_MODEL to a qualified House Qwen3.6/3.8 GGUF.");
 const root = resolve(import.meta.dir, "../..");
 const output = `${root}/target/lens-fitted-${crypto.randomUUID()}`;
@@ -46,7 +46,7 @@ try {
   deadline = Date.now() + 120_000;
   const testName = mode === "readouts" ? "serve::native::fitted_live::fitted_original_forward_cpu_oracle" : "serve::native::intervention_live::ordered_interventions_cpu_oracle";
   const test = child = Bun.spawn([binary, "--exact", testName, "--ignored", "--nocapture"], {
-    cwd: root, env: { ...env, QWEN_LENS_TEST_MODEL: model, QWEN_LENS_TEST_OUTPUT: `${output}/oracle`, QWEN_METAL_LEASE_WAIT: "1" },
+    cwd: root, env: { ...env, QWEN_LENS_ORACLE_MODE: mode, QWEN_LENS_TEST_MODEL: model, QWEN_LENS_TEST_OUTPUT: `${output}/oracle`, QWEN_METAL_LEASE_WAIT: "1" },
     stdout: Bun.file(`${output}/stdout.log`), stderr: Bun.file(`${output}/stderr.log`),
   });
   watchdog = setTimeout(() => { timedOut = true; void stop(); }, 120_000);
@@ -59,6 +59,14 @@ try {
     assert.equal(witnesses.identity_controls, 2);
     assert.equal(witnesses.unchanged_sampling, true);
     assert.equal(witnesses.passing_generation_witnesses, 1);
+  } else if (mode === "pairs") {
+    assert.equal(witnesses.zero_control_equal, true);
+    assert.equal(witnesses.operation_only_samples_equal, true);
+    assert.equal(witnesses.pair_only_samples_equal, true);
+    assert.equal(witnesses.transformation_sites_checked, 4);
+    assert.equal(witnesses.metrics_checked, 20);
+    assert.equal(witnesses.noncommuting_order_distinguished, true);
+    assert.equal(witnesses.destination_validation, true);
   } else {
     assert.equal(witnesses.zero_control_equal, true);
     assert.equal(witnesses.operation_only_samples_equal, true);

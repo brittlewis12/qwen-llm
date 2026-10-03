@@ -1171,6 +1171,61 @@ impl<'a> MetalForward<'a> {
         allow_moe: bool,
         run_tail: bool,
     ) -> Result<Vec<f32>, MfError> {
+        self.single_token_with_hidden_sites_and_before(
+            token_id,
+            position,
+            session,
+            target_layer_ids,
+            post_block_dst,
+            pre_ffn_dst,
+            interventions,
+            allow_moe,
+            run_tail,
+            None,
+        )
+    }
+
+    /// Capture independent layer sets before and after the whole post-block program
+    /// in the original forward. This does not capture per-operation intermediates.
+    #[allow(clippy::too_many_arguments)]
+    pub fn single_token_with_post_block_measurements(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        before: (&[u32], &MetalTensor),
+        after: (&[u32], &MetalTensor),
+        interventions: &[PostBlockIntervention<'_>],
+        run_tail: bool,
+    ) -> Result<Vec<f32>, MfError> {
+        self.single_token_with_hidden_sites_and_before(
+            token_id,
+            position,
+            session,
+            after.0,
+            Some(after.1),
+            None,
+            interventions,
+            true,
+            run_tail,
+            Some(before),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn single_token_with_hidden_sites_and_before(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        target_layer_ids: &[u32],
+        post_block_dst: Option<&MetalTensor>,
+        pre_ffn_dst: Option<&MetalTensor>,
+        interventions: &[PostBlockIntervention<'_>],
+        allow_moe: bool,
+        run_tail: bool,
+        before: Option<(&[u32], &MetalTensor)>,
+    ) -> Result<Vec<f32>, MfError> {
         session.ensure_usable()?;
         if self.model.arch.kind == ArchKind::Moe && !allow_moe {
             return Err(MfError::UnsupportedMoe);
@@ -1248,6 +1303,59 @@ impl<'a> MetalForward<'a> {
                 }));
             }
         }
+        let mut before_range = None;
+        if let Some((layers, destination)) = before {
+            let elements = layers
+                .len()
+                .checked_mul(h)
+                .filter(|&n| u32::try_from(n).is_ok())
+                .ok_or_else(|| {
+                    MfError::Metal(MetalError::BadShape {
+                        kernel: "single_token_with_hidden_sites",
+                        detail: "before capture exceeds u32 scatter addressing".into(),
+                    })
+                })?;
+            let bytes = elements
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| {
+                    MfError::Metal(MetalError::BadShape {
+                        kernel: "single_token_with_hidden_sites",
+                        detail: "before capture byte overflow".into(),
+                    })
+                })?;
+            let range = validate_hidden_capture_destination(
+                "before_operations",
+                destination,
+                &[elements as u64],
+                bytes,
+            )?;
+            if session.aliases_mutable_buffer(destination)
+                || layers
+                    .iter()
+                    .any(|&layer| layer as usize >= self.model.blocks.len())
+            {
+                return Err(MfError::Metal(MetalError::BadShape {
+                    kernel: "single_token_with_hidden_sites",
+                    detail:
+                        "before capture aliases mutable session storage or selects an invalid layer"
+                            .into(),
+                }));
+            }
+            for (other, other_range) in [
+                (post_block_dst, post_block_range),
+                (pre_ffn_dst, pre_ffn_range),
+            ] {
+                if let (Some(other), Some(other_range)) = (other, other_range)
+                    && capture_ranges_overlap(destination, range, other, other_range)
+                {
+                    return Err(MfError::Metal(MetalError::BadShape {
+                        kernel: "single_token_with_hidden_sites",
+                        detail: "before and after capture destinations overlap".into(),
+                    }));
+                }
+            }
+            before_range = Some(range);
+        }
         for (op_index, intervention) in interventions.iter().enumerate() {
             let (layer, coefficient) = match intervention {
                 PostBlockIntervention::Fixed {
@@ -1280,25 +1388,39 @@ impl<'a> MetalForward<'a> {
                     ),
                 }));
             }
+            let validate = |tensor: &MetalTensor, role| -> Result<(), MfError> {
+                validate_post_block_intervention_tensor(session, tensor, h, op_index, role)?;
+                let range = (
+                    tensor.offset,
+                    tensor.offset + (h * std::mem::size_of::<f32>()) as u64,
+                );
+                for (destination, capture_range) in [
+                    (post_block_dst, post_block_range),
+                    (pre_ffn_dst, pre_ffn_range),
+                    (before.map(|(_, dst)| dst), before_range),
+                ] {
+                    if let (Some(destination), Some(capture_range)) = (destination, capture_range)
+                        && capture_ranges_overlap(tensor, range, destination, capture_range)
+                    {
+                        return Err(MfError::Metal(MetalError::BadShape {
+                            kernel: "single_token_with_post_block_interventions",
+                            detail: format!(
+                                "intervention {op_index} {role} overlaps capture destination"
+                            ),
+                        }));
+                    }
+                }
+                Ok(())
+            };
             match intervention {
                 PostBlockIntervention::Fixed { direction, .. }
                 | PostBlockIntervention::ResidualL2Relative { direction, .. }
                 | PostBlockIntervention::Projection { direction, .. } => {
-                    validate_post_block_intervention_tensor(
-                        session,
-                        direction,
-                        h,
-                        op_index,
-                        "direction",
-                    )?;
+                    validate(direction, "direction")?;
                 }
                 PostBlockIntervention::SourceToTarget { source, target, .. } => {
-                    validate_post_block_intervention_tensor(
-                        session, source, h, op_index, "source",
-                    )?;
-                    validate_post_block_intervention_tensor(
-                        session, target, h, op_index, "target",
-                    )?;
+                    validate(source, "source")?;
+                    validate(target, "target")?;
                 }
             }
         }
@@ -1373,6 +1495,20 @@ impl<'a> MetalForward<'a> {
                     session,
                     pre_ffn_capture,
                 )?;
+            }
+            if let Some((layers, destination)) = before {
+                for (slot, &layer) in layers.iter().enumerate() {
+                    if layer as usize == il {
+                        encode_scatter_offset_f32(
+                            self.ctx,
+                            &enc,
+                            &session.x,
+                            destination,
+                            slot * h,
+                            h,
+                        )?;
+                    }
+                }
             }
             for intervention in interventions.iter().filter(|intervention| {
                 let layer = match intervention {

@@ -259,7 +259,8 @@ try {
   if (liveOrigin && Bun.env.LENS_TEST_BASELINE_ONLY === "1") {
     await send("Page.navigate", { url: liveOrigin });
     const operations = Bun.env.LENS_TEST_OPERATIONS === "1";
-    const retention = Bun.env.LENS_TEST_RETENTION === "1";
+    const pairs = Bun.env.LENS_TEST_PAIRS === "1";
+    const retention = Bun.env.LENS_TEST_RETENTION === "1" || pairs;
     const fitted = Bun.env.LENS_TEST_FITTED_ONLY === "1" || operations;
     const plain = Bun.env.LENS_TEST_PLAIN_ONLY === "1" || fitted || retention;
     await wait(`document.body.textContent.includes(${JSON.stringify(fitted ? "Lens available" : plain ? "Readouts available" : "Baseline available")})`, "discovery alongside history polling");
@@ -304,6 +305,14 @@ try {
       await wait(`JSON.parse(localStorage.getItem('qwen-lens.draft.v1')).operations[0].document.action.kind === 'projection_ablate'`, "phone authored operation reordering");
       await wait(`![...document.querySelectorAll('button')].find(b => b.textContent === 'Run experiment').disabled`, "intervention submission enabled");
     }
+    if (pairs) {
+      await click("Add residual pair capture");
+      const row = `([...document.querySelectorAll('.operation-row')].find(r => r.querySelector('h4')?.textContent.startsWith('Residual pair 1')))`;
+      for (const [index, value] of [[1, "none"], [2, "values"]] as const) {
+        await evaluate(`(() => { const input = (${row}).querySelectorAll('.scope-editor select')[${index}]; Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(input, ${JSON.stringify(value)}); input.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+      }
+      await wait(`JSON.parse(localStorage.getItem('qwen-lens.draft.v1')).residualPairs.length === 1`, "phone pair scope persisted");
+    }
     await click("Run experiment");
     await wait(`!!document.querySelector('.job-id')?.textContent`, "durable baseline acceptance");
     const jobId = await evaluate<string>(`document.querySelector('.job-id').textContent`);
@@ -337,7 +346,7 @@ try {
       if (retention) {
         assert.equal(arrayRequests.length, 0, "Browser must not fetch retained arrays implicitly");
         const arrays = recorded.records.filter(isRetainedArray);
-        assert.equal(arrays.length, 2);
+        assert.equal(arrays.length, pairs ? 3 : 2);
         const logits = arrays.find(a => a.quantity === "readout_logits")!;
         const bytes = await (await fetch(`${liveOrigin}${logits.array.url}`)).arrayBuffer();
         const view = new DataView(bytes);
@@ -353,6 +362,13 @@ try {
         await setInput(`[id=${JSON.stringify(id)}]`, String(token));
         await wait(`Number(document.querySelector('[data-field=rank]')?.textContent) === ${rank} && Number(document.querySelector('[data-field=score]')?.textContent) === ${score}`, "outside-top-k rank and score from saved bytes");
         assert(arrayRequests.some(url => url.endsWith(logits.array.url)), "Explicit load reaches saved array endpoint");
+        if (pairs) {
+          assert.equal(recorded.records.filter((r: any) => r.kind === "residual_pair").length, 1);
+          await evaluate(`(() => { const select = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Measured site')).querySelector('select'); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(select, select.options[1].value); select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+          await wait(`!!document.querySelector('.pair-inspector')`, "saved pair joins real producer arrays");
+          await click("Verify measured change / no inference");
+          await wait(`document.body.textContent.includes('Verified from retained before/after arrays.')`, "verify real saved pair on phone");
+        }
       }
     }
     const before = await (await fetch(`${liveOrigin}/v1/lens/jobs`)).json();
@@ -363,6 +379,7 @@ try {
     assert.equal(copied.generation.sampling.temperature, 0.8);
     assert.equal(copied.readouts.length, plain ? 1 : 0);
     if (retention) assert.equal(copied.readouts[0].retain, "scores_and_residual");
+    if (pairs) assert.equal(copied.residualPairs.length, 1);
     if (operations) assert.deepEqual(copied.operations.map((r: any) => r.document.action.kind), ["projection_ablate", "fixed_add"]);
     await click("03 History");
     await click("Refresh history now");

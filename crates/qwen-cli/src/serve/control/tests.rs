@@ -336,6 +336,62 @@ fn qualified_plain_http_submission_reaches_the_shared_owner_and_saved_results() 
 }
 
 #[test]
+fn paired_http_history_and_exact_retry_survive_loss_of_capture_capability() {
+    let mut fixture = native::CpuFixture::new();
+    Arc::get_mut(&mut fixture.profile).unwrap().plain_readouts = true;
+    let mut server = Server::start(&fixture);
+    assert_eq!(
+        server.request("GET", "/v1/lens/capabilities", "").1["residual_pair_capture"],
+        true
+    );
+    let mut request = fixture.request("http-pairs");
+    request["diagnostics"] = serde_json::json!({"directions":[],"operations":[],"readouts":[],"residual_pairs":[
+        {"id":"pair","scope":{"layers":{"kind":"all"},"decode":{"kind":"all"}}}
+    ]});
+    let body = request.to_string();
+    let (head, accepted) = server.request("POST", "/v1/lens/jobs", &body);
+    assert!(head.starts_with("HTTP/1.1 202"), "{head} {accepted}");
+    let id = accepted["id"].as_str().unwrap();
+    server.entered.recv_timeout(WAIT).unwrap();
+    server.release.send(()).unwrap();
+    assert_eq!(
+        server.wait_terminal(id)["observations"]["committed_records"],
+        4
+    );
+    let result = format!("/v1/lens/jobs/{id}/result");
+    let page = server.request("GET", &result, "").1;
+    assert_eq!(
+        page["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["kind"] == "residual_pair")
+            .count(),
+        4
+    );
+    server.stop();
+    Arc::get_mut(&mut fixture.profile).unwrap().plain_readouts = false;
+    let mut server = Server::start(&fixture);
+    assert_eq!(
+        server.request("GET", "/v1/lens/capabilities", "").1["residual_pair_capture"],
+        false
+    );
+    let (head, recovered) = server.request("POST", "/v1/lens/jobs", &body);
+    assert!(head.starts_with("HTTP/1.1 200"), "{head} {recovered}");
+    assert_eq!(recovered["id"], id);
+    assert_eq!(server.request("GET", &result, "").1, page);
+    request["idempotency_key"] = serde_json::json!("new-pairs");
+    assert!(
+        server
+            .request("POST", "/v1/lens/jobs", &request.to_string())
+            .0
+            .starts_with("HTTP/1.1 400")
+    );
+    assert_eq!(server.calls.load(Ordering::Acquire), 0);
+    server.stop();
+}
+
+#[test]
 fn fitted_http_pins_registry_identity_and_reopens_original_shared_rows() {
     let mut fixture = native::CpuFixture::new();
     let (_files, registry) = native::registry::tests::fitted_fixture();

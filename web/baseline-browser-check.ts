@@ -16,7 +16,7 @@ await mkdir(output, { recursive: true, mode: 0o700 });
 const env = Object.fromEntries(Object.entries(Bun.env).filter(([key]) => !key.startsWith("QWEN_") && !key.startsWith("GGML_")));
 const stdout = Bun.file(`${output}/server.stdout.log`);
 const server = Bun.spawn([binary, "--exact", "serve::control::tests::browser_baseline_child", "--ignored", "--nocapture"], {
-  cwd: root, env: { ...env, QWEN_LENS_BROWSER_CHILD: "1", QWEN_LENS_BROWSER_WEB_ROOT: `${import.meta.dir}/dist`, QWEN_LENS_BROWSER_READOUTS: Bun.env.LENS_TEST_PLAIN_ONLY === "1" || Bun.env.LENS_TEST_RETENTION === "1" ? "1" : "0", QWEN_LENS_BROWSER_FITTED: Bun.env.LENS_TEST_FITTED_ONLY === "1" || Bun.env.LENS_TEST_OPERATIONS === "1" ? "1" : "0" },
+  cwd: root, env: { ...env, QWEN_LENS_BROWSER_CHILD: "1", QWEN_LENS_BROWSER_WEB_ROOT: `${import.meta.dir}/dist`, QWEN_LENS_BROWSER_READOUTS: Bun.env.LENS_TEST_PLAIN_ONLY === "1" || Bun.env.LENS_TEST_RETENTION === "1" || Bun.env.LENS_TEST_PAIRS === "1" ? "1" : "0", QWEN_LENS_BROWSER_FITTED: Bun.env.LENS_TEST_FITTED_ONLY === "1" || Bun.env.LENS_TEST_OPERATIONS === "1" ? "1" : "0" },
   stdout, stderr: Bun.file(`${output}/server.stderr.log`),
 });
 let browser: ReturnType<typeof Bun.spawn> | undefined;

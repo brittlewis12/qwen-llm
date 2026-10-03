@@ -8,7 +8,7 @@ use qwen_llm::{
     runtime::{LoadedModelConfig, Runtime},
 };
 
-fn vector(value: &Value) -> Result<Vec<f64>> {
+pub(super) fn vector(value: &Value) -> Result<Vec<f64>> {
     value
         .as_array()
         .context("oracle vector")?
@@ -25,7 +25,12 @@ fn tolerance(value: f64) -> f64 {
     1e-3 + 1e-4 * value.abs()
 }
 
-fn distinguish_orders(a: &[f64], b: &[f64], actual_a: &[f64], actual_b: &[f64]) -> Result<()> {
+pub(super) fn distinguish_orders(
+    a: &[f64],
+    b: &[f64],
+    actual_a: &[f64],
+    actual_b: &[f64],
+) -> Result<()> {
     ensure!(
         !a.is_empty()
             && [b.len(), actual_a.len(), actual_b.len()]
@@ -73,7 +78,7 @@ fn order_witness_requires_disjoint_tolerances_and_rejects_swapped_results() {
     assert!(distinguish_orders(&[1.], &[2.], &[2.], &[1.]).is_err());
 }
 
-fn transform(
+pub(super) fn transform(
     mut source: Vec<f64>,
     directions: &std::collections::BTreeMap<&str, Vec<f64>>,
     operations: &[Value],
@@ -109,12 +114,13 @@ fn transform(
 #[ignore = "Metal: QWEN_LENS_ORACLE_MODE=interventions scripts/serve/lens_fitted_check.ts"]
 fn ordered_interventions_cpu_oracle() -> Result<()> {
     crate::shutdown::install()?;
+    let paired = std::env::var("QWEN_LENS_ORACLE_MODE").as_deref() == Ok("pairs");
     let model = std::path::PathBuf::from(std::env::var("QWEN_LENS_TEST_MODEL")?);
     let output = std::path::PathBuf::from(std::env::var("QWEN_LENS_TEST_OUTPUT")?);
     ensure!(!output.exists(), "fresh oracle output required");
     std::fs::create_dir(&output)?;
     let gguf = GgufFile::open(&model)?;
-    let (layer, _) = super::fitted_live::synthetic_assets(&output, &gguf)?;
+    let (layer, last) = super::fitted_live::synthetic_assets(&output, &gguf)?;
     let protocol = crate::prompt_template::identify_qwen_release_for_gguf(&gguf)?
         .template
         .serve_template();
@@ -137,6 +143,9 @@ fn ordered_interventions_cpu_oracle() -> Result<()> {
             ..Default::default()
         },
     )?;
+    if paired {
+        super::paired_live::validate_destinations(&loaded)?;
+    }
     let mut backend = crate::serve::backend::EngineBackend::new(
         loaded,
         "intervention-oracle".into(),
@@ -157,6 +166,11 @@ fn ordered_interventions_cpu_oracle() -> Result<()> {
         "generation":{"max_new_tokens":3,"sampling":{"temperature":0,"top_k":0,"top_p":1,"min_p":0,"seed":7}},
         "diagnostics":{"directions":[],"operations":[],"readouts":[readout]}});
     let direction = |id, normalization| json!({"id":id,"lens":"oracle","row":{"kind":"token_id","token_id":1},"normalization":normalization});
+    let scope = if paired {
+        json!({"layers":{"kind":"values","values":[layer]},"prefill":{"kind":"values","values":[0,1]},"decode":{"kind":"values","values":[0]}})
+    } else {
+        scope
+    };
     let operation = |id, kind, direction, coefficient| json!({"id":id,"scope":scope,"action":{"kind":kind,"direction":direction,"coefficient":coefficient}});
     let actions = vec![
         operation("add", "fixed_add", "raw", 0.25),
@@ -165,9 +179,23 @@ fn ordered_interventions_cpu_oracle() -> Result<()> {
     ];
     let mut ids = Vec::new();
     let mut authored = Vec::new();
-    for kind in ["baseline", "zero", "active", "operation-only", "reordered"] {
+    let kinds = if paired {
+        vec![
+            "baseline",
+            "zero",
+            "active",
+            "operation-only",
+            "reordered",
+            "pair-only",
+        ]
+    } else {
+        vec!["baseline", "zero", "active", "operation-only", "reordered"]
+    };
+    for kind in kinds {
         value["idempotency_key"] = json!(kind);
-        if kind != "baseline" {
+        value["diagnostics"]["directions"] = json!([]);
+        value["diagnostics"]["operations"] = json!([]);
+        if kind != "baseline" && kind != "pair-only" {
             value["diagnostics"]["directions"] =
                 json!([direction("raw", "as_stored"), direction("unit", "unit_l2")]);
             let mut operations = actions.clone();
@@ -181,11 +209,18 @@ fn ordered_interventions_cpu_oracle() -> Result<()> {
             }
             value["diagnostics"]["operations"] = json!(operations);
         }
-        value["diagnostics"]["readouts"] = if kind == "operation-only" {
+        value["diagnostics"]["readouts"] = if kind == "operation-only" || kind == "pair-only" {
             json!([])
         } else {
             json!([readout.clone()])
         };
+        if paired {
+            value["diagnostics"]["residual_pairs"] = if kind == "operation-only" {
+                json!([])
+            } else {
+                json!([{"id":"whole","scope":{"layers":{"kind":"values","values":[layer,last]},"prefill":{"kind":"values","values":[1]},"decode":{"kind":"values","values":[0]}}}])
+            };
+        }
         let prepared = profile
             .prepare(&Request::parse(&value)?)
             .map_err(|e| anyhow::anyhow!("{}", e.error.message))?;
@@ -195,7 +230,10 @@ fn ordered_interventions_cpu_oracle() -> Result<()> {
                 "zero control allocated work"
             );
         }
-        let id = store.accept(kind, &value, true)?.status.id;
+        let id = store
+            .accept_with_archive(kind, &value, true, prepared.readouts.archive_bytes)?
+            .status
+            .id;
         let writer = writer::Writer::spawn(
             store.clone(),
             id.clone(),
@@ -230,6 +268,19 @@ fn ordered_interventions_cpu_oracle() -> Result<()> {
             "oracle requires decode"
         );
         pages.push(store.result(id, None, 128)?.records);
+    }
+    if paired {
+        return super::paired_live::verify(
+            &store,
+            &ids,
+            &pages,
+            &authored,
+            layer,
+            last,
+            profile.hidden,
+            &output,
+            residency_ms,
+        );
     }
     let samples = |records: &[Value]| {
         records

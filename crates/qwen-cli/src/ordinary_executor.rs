@@ -1,7 +1,7 @@
 //! Shared serial token lifecycle. Callers own sampling, forwards, capture,
 //! transport and process shutdown; this module owns their ordering, not policy.
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -15,8 +15,20 @@ pub(crate) fn post_block_forward(
     position: u32,
     needs_logits: bool,
     capture: Option<(&[u32], &qwen_llm::metal::MetalTensor)>,
+    before: Option<(&[u32], &qwen_llm::metal::MetalTensor)>,
     operations: &[qwen_llm::metal::PostBlockIntervention<'_>],
 ) -> Result<Vec<f32>> {
+    if let Some(before) = before {
+        return Ok(forward.single_token_with_post_block_measurements(
+            token,
+            position,
+            session,
+            before,
+            capture.context("paired capture requires an after destination")?,
+            operations,
+            needs_logits,
+        )?);
+    }
     match (capture, needs_logits) {
         (Some((layers, capture)), true) => Ok(forward.single_token_with_post_block_interventions(
             token, position, session, layers, capture, operations,

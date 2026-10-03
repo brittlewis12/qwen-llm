@@ -16,6 +16,7 @@ use qwen_llm::{
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{borrow::Cow, time::Instant};
+mod paired;
 #[cfg(test)]
 mod verification;
 
@@ -26,6 +27,8 @@ pub(super) struct Engine<'a> {
     plan: &'a Plan,
     capture: Option<MetalTensor>,
     layers: Vec<u32>,
+    before: Option<MetalTensor>,
+    before_layers: Vec<u32>,
     staged: &'a super::registry::Staged,
     fitted: Option<qwen_llm::workspace_lens::WorkspaceLensFullReadoutWorkspace<'a>>,
     interventions: &'a super::interventions::Plan,
@@ -41,18 +44,21 @@ impl<'a> Engine<'a> {
         sink: &Sink,
     ) -> Result<Self> {
         let plan = &prepared.readouts;
-        let capture = if plan.max_capture_layers == 0 {
-            None
-        } else {
-            let count = plan
-                .max_capture_layers
-                .checked_mul(loaded.arch().hidden_size as usize)
-                .context("capture elements overflow")?;
-            Some(MetalTensor::zeros_f32(
-                loaded.context(),
-                vec![u64::try_from(count)?],
-            )?)
+        let allocate = |layers: usize| -> Result<Option<MetalTensor>> {
+            Ok(if layers == 0 {
+                None
+            } else {
+                let count = layers
+                    .checked_mul(loaded.arch().hidden_size as usize)
+                    .context("capture elements overflow")?;
+                Some(MetalTensor::zeros_f32(
+                    loaded.context(),
+                    vec![u64::try_from(count)?],
+                )?)
+            })
         };
+        let capture = allocate(plan.max_capture_layers)?;
+        let before = allocate(plan.pairs.max_layers)?;
         let directions = prepared.interventions.prepare(
             loaded,
             &mut sequence,
@@ -77,6 +83,8 @@ impl<'a> Engine<'a> {
             plan,
             capture,
             layers: Vec::new(),
+            before,
+            before_layers: Vec::new(),
             staged,
             fitted,
             interventions: &prepared.interventions,
@@ -92,6 +100,26 @@ impl TokenEngine for Engine<'_> {
         if let Some(event) = self.plan.events.get(&position) {
             self.layers.extend(event.keys().copied());
         }
+        self.before_layers.clear();
+        if let Some(event) = self.plan.pairs.events.get(&position) {
+            self.before_layers.extend(event.keys().copied());
+        }
+        let before = if self.before_layers.is_empty() {
+            None
+        } else {
+            Some(
+                self.before
+                    .as_ref()
+                    .context("missing admitted before capture")?
+                    .view_subrange(
+                        0,
+                        vec![
+                            (self.before_layers.len() * self.loaded.arch().hidden_size as usize)
+                                as u64,
+                        ],
+                    ),
+            )
+        };
         let capture = if self.layers.is_empty() {
             None
         } else {
@@ -130,6 +158,9 @@ impl TokenEngine for Engine<'_> {
             capture
                 .as_ref()
                 .map(|buffer| (self.layers.as_slice(), buffer)),
+            before
+                .as_ref()
+                .map(|buffer| (self.before_layers.as_slice(), buffer)),
             &operations,
         )?;
         self.sequence.advance_by(1)?;
@@ -154,11 +185,24 @@ impl TokenEngine for Engine<'_> {
             self.capture.as_ref().context("missing capture")?,
             self.layers.len() * hidden,
         )?;
+        let before = if self.before_layers.is_empty() {
+            Vec::new()
+        } else {
+            read_capture(
+                self.before.as_ref().context("missing before capture")?,
+                self.before_layers.len() * hidden,
+            )?
+        };
         for (slot, &layer) in self.layers.iter().enumerate() {
             let applied = self.interventions.applied_ids(position, layer);
             let residual = &values[slot * hidden..(slot + 1) * hidden];
-            publish_source(
-                self.plan, token, position, layer, counters, &applied, residual, sink,
+            let before = self
+                .before_layers
+                .binary_search(&layer)
+                .ok()
+                .map(|slot| &before[slot * hidden..(slot + 1) * hidden]);
+            paired::publish(
+                self.plan, token, position, layer, counters, &applied, before, residual, sink,
             )?;
             for lens in self.plan.heads(position, layer).keys().copied() {
                 checkpoint(sink)?;
@@ -731,13 +775,19 @@ mod tests {
             if let Some(event) = self.plan.events.get(&position) {
                 for &layer in event.keys() {
                     let applied = self.interventions.applied_ids(position, layer);
-                    publish_source(
+                    paired::publish(
                         self.plan,
                         token,
                         position,
                         layer,
                         counters,
                         &applied,
+                        self.plan
+                            .pairs
+                            .events
+                            .get(&position)
+                            .and_then(|e| e.get(&layer))
+                            .map(|_| [1., 2.].as_slice()),
                         &[1., 2.],
                         sink,
                     )?;

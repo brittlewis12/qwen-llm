@@ -75,7 +75,7 @@ recovery is explicitly recorded below.
 | R11 | Fitted readouts and direction staging: `serve/native/{registry,interventions}.rs`, `workspace_lens/*` | Fitted producer recovered with CPU/browser and scoped original-forward numerical evidence; direction staging remains R12 | Registered identity, matrix integrity, owner-admitted joined staging/workspace, independent numerical oracle |
 | R12 | Ordered scoped interventions: `serve/native/interventions/*`, `lens_intervention.rs` | Three native operators recovered with CPU/browser and scoped first-site numerical evidence | Exact order/scopes, zero controls, deployed covector semantics, independent transformation checks |
 | R13 | Retained full scores/source arrays: `serve/jobs/arrays.rs`, native observer/writer, `web/retention*` | Producer recovered with CPU/browser and production live integrity/restart evidence | Raw admission, dual-watermark durability, digest/finite/shape checks, offline rank/entropy, no implicit fetch |
-| R14 | Whole-site pre/post capture: `metal_forward/token.rs`, `serve/native/measurements.rs` | Reuse after R12/R13; do not imply per-operation intermediates | Before/after placement, independent layer sets, alias refusal, actual-vector metrics and zero controls |
+| R14 | Whole-site pre/post capture: `metal_forward/token.rs`, `serve/native/measurements.rs` | Producer recovered with CPU/browser qualification; bounded Metal numerical gate pending | Before/after placement, independent layer sets, alias refusal, actual-vector metrics and zero controls |
 | R15 | Bun client and same-origin assets: `web/{build,dev,proxy}.*`, `serve/assets.rs` | Recovered on shared CPU control pool; web-root requires history/current ordinary-family boundary | Bun types/build and real same-port CPU browser/static gates pass; no second production service |
 | R16 | Durable browser submission/history: `web/{api,contract,durable,storage,jobs,history}.*` | Recovered with real baseline producer and historical fixture readers | Persist-before-POST, exact retry, history/reload/copy pass; baseline CPU browser traverses actual Rust store |
 | R17 | Draft and identity safety: `web/{draft,bindings,editor,diagnostics}.*` | Recovered from first submission UI; diagnostic creation remains capability-gated | No silent retarget, saved pinning, copy/edit race and persistence failure pass in fixtures; baseline production route exercised |
@@ -1050,3 +1050,38 @@ confirmed free. Normal memory/lease policy remains in effect, with KV snapshots 
 Evidence: `target/lens-baseline-9819c805-abbe-46ec-93a8-d482887ca29a/`.
 Binary Git blob fingerprint: `d4fa11bee2f73aa8d809befbac5f3112953c7ec1`;
 harness fingerprint: `4e0e4a95db53b8c97edd39c5f45de8d83d06e10e`.
+
+### R14: Original-Forward Whole-Site Pairs
+
+The shared ordinary forward now captures independently selected before layers after
+the block and before its ordered program, then after layers after the whole program.
+Both scatters stay in the same command buffer; no extra forward or generation tail
+is introduced. Existing CLI callers pass no before capture. Writable aligned F32,
+shape/range/layer, session-storage and capture/direction overlap checks precede token
+staging. Disjoint views of a shared allocation remain permitted.
+
+Native pairs have bounded independent scopes, merged after captures and separate
+before storage/readback. Pair-only work adds no readout heads or fitted workspace.
+Archive admission counts unique before arrays plus after arrays shared with retained
+readouts. The writer keeps its existing combined payload budget and FIFO dependency
+ordering: before, after, pair, then any heads. Metrics promote actual F32 components
+to F64 before subtraction; zero before norm has null relative delta. These are local
+whole-program measurements, not per-operation intermediates; earlier interventions
+can already have affected the before state.
+
+CPU gates cover scope limits, independent layer sets, duplicate pair requests,
+shared after arrays, exact archive boundaries, pair-only publication/restart and
+HTTP exact retry after capability loss. A writer-boundary test injects cancellation
+or partial-array failure after a committed before prefix; it exercises the real
+after-array/FIFO dependency path, not the complete paired producer. The actual Rust
+CPU browser gate passes phone authoring/reload, explicit array verification, request
+copy/history and desktop reopening without new jobs or implicit array fetches:
+`web/.browser-test/baseline-af5d9267-ebe1-4215-93c0-5a8dfe03f0e9/`.
+
+The bounded `QWEN_LENS_ORACLE_MODE=pairs` test-binary harness is prepared but not yet
+run. It checks actual retained before vectors at later prefill/decode sites against
+an independent sequential F64 program, rejects the opposite order, requires exact
+unique site/token coordinates, checks no-op/zero controls and unchanged sampling
+and consumption with capture disabled. It also checks invalid capture destinations
+and a valid disjoint shared allocation. Metal scatter placement/synchronization are
+not established by the CPU/browser gates and remain pending this live qualification.

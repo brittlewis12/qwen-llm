@@ -1094,3 +1094,12 @@ this is not passing numerical evidence. The corrected fixture first requires a
 retained read-only head view, then checks capture refusal with F32 shape metadata;
 no deployment weight bytes are modified in that rejection case. Evidence of the
 failed attempt: `target/lens-fitted-c7e9f2a2-ac7f-41b0-9788-89f8888bd59c/`.
+
+The provenance precondition at `7ba3a46b` also refuses this deployment: its ordinary
+head is writable. That second attempt exits in 2.73 seconds before test forwards or
+native jobs, with the lease free (`target/lens-fitted-6e4ba8f0-ef44-4f36-8997-b2ed60d6f67d/`).
+Read-only qualification is therefore separated from deployment-dependent weights:
+the existing library test `hidden_capture_destinations_require_safe_independent_f32_ranges`
+constructs explicit read-only provenance and exercises the same validator. It must
+run with `QWEN_REQUIRE_METAL_TESTS=1`, so unavailable Metal cannot silently pass. The
+loaded-model oracle retains all other full-forward destination and numerical checks.

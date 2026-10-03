@@ -392,6 +392,7 @@ mod tests {
             identity: "CPU parity".into(),
             protocol,
             tokenizer: tokenizer.clone(),
+            vocabulary_size: arch.vocab_size as usize,
             layers: arch.n_layer,
             hidden: arch.hidden_size as usize,
             context: 8192,

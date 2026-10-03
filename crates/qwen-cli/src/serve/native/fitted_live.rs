@@ -245,7 +245,7 @@ fn fitted_original_forward_cpu_oracle() -> Result<()> {
             let witness = &row["generation_logit_witness"];
             ensure!(
                 witness["basis"] == "same_original_forward_generation_logits"
-                    && witness["vocabulary_size"] == profile.tokenizer.n_vocab()
+                    && witness["vocabulary_size"] == profile.vocabulary_size
                     && witness["within_tolerance"] == true
                     && witness["max_abs_error"]
                         .as_f64()

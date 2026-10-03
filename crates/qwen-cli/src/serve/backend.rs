@@ -887,6 +887,7 @@ impl GenerationBackend for EngineBackend {
             identity: format!("runtime_gguf_metadata_v1:{model:016x}:{tokenizer:016x}"),
             protocol,
             tokenizer: std::sync::Arc::clone(&self.tokenizer),
+            vocabulary_size: self.loaded.arch().vocab_size as usize,
             layers: self.loaded.arch().n_layer,
             hidden: self.loaded.arch().hidden_size as usize,
             context: self.context_ceiling,

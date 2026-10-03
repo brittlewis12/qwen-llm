@@ -1,4 +1,37 @@
 use super::*;
+
+#[test]
+fn retained_score_admission_uses_model_output_width_not_tokenizer_size() {
+    let mut fixture = CpuFixture::new();
+    let tokenizer_width = fixture.profile.tokenizer.n_vocab() as usize;
+    let output_width = tokenizer_width + 17;
+    let profile = Arc::get_mut(&mut fixture.profile).unwrap();
+    profile.plain_readouts = true;
+    profile.vocabulary_size = output_width;
+    let mut request = fixture.request("output-width");
+    request["preconditions"]["asset_identities"] = json!({"plain":"cpu-fixture"});
+    request["diagnostics"] = json!({"directions":[],"operations":[],"readouts":[{
+        "id":"scores","lens":"plain","mode":"full_vocabulary","top_k":2,"retain":"scores_and_residual",
+        "scope":{"layers":{"kind":"values","values":[0]},"prefill":{"kind":"values","values":[0]},"decode":null}
+    }]});
+    let prepared = fixture
+        .profile
+        .prepare(&Request::parse(&request).unwrap())
+        .unwrap_or_else(|cause| panic!("{}", cause.error.message));
+    assert_eq!(
+        prepared.readouts.archive_bytes,
+        ((fixture.profile.hidden + output_width) * 4) as u64
+    );
+    let record: Value = serde_json::from_slice(&prepared.record).unwrap();
+    assert_eq!(
+        record["retention_admission"]["vocabulary_size"],
+        output_width
+    );
+    assert_eq!(
+        fixture.profile.tokenizer.n_vocab() as usize,
+        tokenizer_width
+    );
+}
 use crate::serve::jobs::state::{GenerationState, JobState, StopReason};
 use crate::serve::lens_http::input::Request;
 use std::path::PathBuf;
@@ -36,6 +69,7 @@ impl Fixture {
             model_id: "test".into(),
             identity: "cpu-fixture".into(),
             protocol: QwenPromptTemplate::Qwen36,
+            vocabulary_size: tokenizer.n_vocab() as usize,
             tokenizer,
             layers: 2,
             hidden: 2,

@@ -70,6 +70,7 @@ pub(crate) struct Profile {
     pub(crate) identity: String,
     pub(crate) protocol: QwenPromptTemplate,
     pub(crate) tokenizer: Arc<Tokenizer>,
+    pub(crate) vocabulary_size: usize,
     pub(crate) layers: u32,
     pub(crate) hidden: usize,
     pub(crate) context: usize,
@@ -179,7 +180,7 @@ impl Profile {
             self.layers,
             prepared.input.token_ids.len(),
             request.generation.max_new_tokens,
-            self.tokenizer.n_vocab() as usize,
+            self.vocabulary_size,
             self.registry.clone(),
             self.hidden,
         )
@@ -195,7 +196,7 @@ impl Profile {
         )
         .map_err(|cause| ApiError::new(400, "invalid_residual_pair", cause.to_string()))?;
         let readouts = readouts
-            .with_pairs(pairs, self.hidden, self.tokenizer.n_vocab() as usize)
+            .with_pairs(pairs, self.hidden, self.vocabulary_size)
             .map_err(|cause| ApiError::new(400, "invalid_retention", cause.to_string()))?;
         let interventions = interventions::Plan::compile(
             diagnostics
@@ -207,7 +208,7 @@ impl Profile {
             self.layers,
             prepared.input.token_ids.len(),
             request.generation.max_new_tokens,
-            self.tokenizer.n_vocab() as usize,
+            self.vocabulary_size,
             self.hidden,
             self.registry.as_deref(),
         )
@@ -268,7 +269,7 @@ impl Profile {
                 .map(|op| &op.id)
                 .collect::<Vec<_>>()
         );
-        record["retention_admission"] = json!({"hidden_size":self.hidden,"vocabulary_size":self.tokenizer.n_vocab(),
+        record["retention_admission"] = json!({"hidden_size":self.hidden,"vocabulary_size":self.vocabulary_size,
             "raw_bytes_upper":readouts.archive_bytes,"source_arrays_upper":readouts.retained_sources.len(),"score_arrays_upper":readouts.retained_heads.len(),
             "before_arrays_upper":readouts.pairs.sites(),"pair_rows_upper":readouts.pairs.rows});
         record["intervention_admission"] = json!({"applications_upper":interventions.applications,"direction_rows":interventions.direction_rows,"projected_rows":interventions.projected_rows,"matrix_bytes":staging.matrix_bytes});
@@ -314,7 +315,7 @@ impl Admission for NativeAdmission {
             generation_modes.retain(|mode| *mode != "no_thinking");
         }
         json!({"schema_version":1,"available":true,"unavailable_reason":null,
-            "model":{"id":self.profile.model_id,"identity":self.profile.identity,"template":self.profile.protocol.renderer_name(),"layers":self.profile.layers,"vocabulary_size":self.profile.tokenizer.n_vocab(),"hidden_size":self.profile.hidden},
+            "model":{"id":self.profile.model_id,"identity":self.profile.identity,"template":self.profile.protocol.renderer_name(),"layers":self.profile.layers,"vocabulary_size":self.profile.vocabulary_size,"hidden_size":self.profile.hidden},
             "model_identity_kind":"runtime_gguf_metadata_not_content_hash","input_kinds":["messages"],
             "generation_modes":generation_modes,
             "assistant_prefill_channels":["reasoning","final"],"operations":if self.profile.directions_supported() { interventions::OPERATORS.to_vec() } else {vec![]},"readout_modes":if self.profile.plain_readouts { vec!["full_vocabulary"] } else { vec![] },"capture_stage":"post_block_after_operations","request_preconditions":true,
@@ -328,7 +329,7 @@ impl Admission for NativeAdmission {
                 "max_projection_products":interventions::MAX_PROJECTION_PRODUCTS,
                 "max_archive_bytes":super::jobs::store::MAX_ARCHIVE_BYTES,"max_retained_array_bytes":super::jobs::store::MAX_ARRAY_BYTES,
                 "max_residual_pairs":if self.profile.plain_readouts {measurements::MAX_REQUESTS} else {0},"max_residual_pair_rows":measurements::MAX_ROWS,
-                "max_readouts":if self.profile.plain_readouts {readouts::MAX_READOUTS} else {0},"max_top_k":if self.profile.plain_readouts {readouts::MAX_TOP_K.min(self.profile.tokenizer.n_vocab() as usize)} else {0},"max_head_evaluations":readouts::MAX_HEAD_EVALUATIONS,"max_readout_rows":readouts::MAX_ROWS,"max_readout_scores":readouts::MAX_SCORES,"max_readout_label_bytes":readouts::MAX_LABEL_BYTES,"max_queued_jobs":1}})
+                "max_readouts":if self.profile.plain_readouts {readouts::MAX_READOUTS} else {0},"max_top_k":if self.profile.plain_readouts {readouts::MAX_TOP_K.min(self.profile.vocabulary_size)} else {0},"max_head_evaluations":readouts::MAX_HEAD_EVALUATIONS,"max_readout_rows":readouts::MAX_ROWS,"max_readout_scores":readouts::MAX_SCORES,"max_readout_label_bytes":readouts::MAX_LABEL_BYTES,"max_queued_jobs":1}})
     }
     fn assets(&self) -> Value {
         let mut assets = if self.profile.plain_readouts {

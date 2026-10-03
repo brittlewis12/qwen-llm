@@ -166,8 +166,9 @@ impl GenerationBackend for K2Backend<'_, '_> {
         )?;
         let required =
             decode_loop::required_forwards("K2", tokens.len(), maximum, self.prepared.capacity)?;
+        let reserve = sink.transport_reserve_bytes();
         super::transport_memory::admit_resident_transport(
-            sink.transport_reserve_bytes(),
+            reserve,
             qwen_llm::metal::MetalContext::process_limit_bytes_remaining(),
         )?;
         sink.tick().map_err(BackendFailure::Aborted)?;
@@ -183,7 +184,7 @@ impl GenerationBackend for K2Backend<'_, '_> {
             Some(session) => session,
             None => self
                 .model
-                .create_session_with_cpu_reserve(0, sink.transport_reserve_bytes())
+                .create_session_with_cpu_reserve(0, reserve)
                 .map_err(|e| ServeError::server_error(format!("K2 session: {e}")))?,
         };
         let session = self.session.insert(session);

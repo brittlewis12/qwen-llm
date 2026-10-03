@@ -4,8 +4,8 @@
 
 The reconstruction provides a durable baseline API and the preserved Bun/React
 client on `qwen serve`, including scoped plain and registered fitted original-forward
-readouts, ordered scoped interventions and retained source/full-score arrays.
-Before/after paired capture production is not yet recovered.
+readouts, ordered scoped interventions, retained source/full-score arrays and
+whole-site before/after pairs from the original forward.
 Compatible historical records remain inspectable. This is an intermediate workbench,
 not completion of recovery. See [the recovery ledger](LENS-WEB-RECOVERY.md).
 
@@ -16,15 +16,17 @@ qwen serve -m MODEL --lens-data-dir JOB_DIRECTORY
 For the browser, run `bun install --frozen-lockfile` and `bun run build` in `web/`,
 then add `--web-root web/dist` to that same server command. Rust loads the prebuilt
 catalog before the model; it never starts Bun or another production service.
-`--web-root` requires durable history and inherits its current family restriction.
+`--web-root` and durable history are independently optional on every serving family.
+Without history, the client loads with execution/history unavailable.
 The catalog's 64 MiB limit counts payload lengths, not metadata/allocation overhead.
 Symlink checks reject known unsafe paths but are not race-free ancestor confinement.
 API paths cannot become static assets. See [`web/README.md`](../web/README.md) for
 development, draft/retry safeguards and saved diagnostic exploration.
 
-The flag currently requires an ordinary Qwen backend. Native generation requires
-a metadata-qualified Qwen3.6/3.8 House template; unsupported ordinary deployments
-still expose saved history with `available:false`. The server remains loopback-only.
+Native generation requires an ordinary Qwen backend with a metadata-qualified
+Qwen3.6/3.8 House template. Other deployments/families still expose saved history
+with `available:false`; explicit fitted configuration is ordinary-only.
+The server remains loopback-only.
 Lens routes require a loopback/localhost Host and, when supplied, a matching HTTP
 Origin. These checks are not authentication or a remote-access feature.
 

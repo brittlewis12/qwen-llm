@@ -65,7 +65,7 @@ const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const ADMISSION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 struct Workbench {
-    store: Arc<jobs::store::JobStore>,
+    store: Option<Arc<jobs::store::JobStore>>,
     assets: Option<Arc<assets::WebAssets>>,
 }
 
@@ -357,13 +357,9 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     )?;
     let template_style = invocation.template_style;
     ensure!(
-        invocation.lens_data_dir.is_none()
+        invocation.lens_config.is_none()
             || matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe),
-        "--lens-data-dir recovery currently supports ordinary Qwen; other families retain their existing serving path"
-    );
-    ensure!(
-        invocation.web_root.is_none() || invocation.lens_data_dir.is_some(),
-        "--web-root requires --lens-data-dir"
+        "--lens-config requires the ordinary Qwen native executor"
     );
     let assets = invocation
         .web_root
@@ -380,13 +376,13 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         invocation.lens_config.is_none() || template_style == items::TemplateStyle::House,
         "--lens-config requires qualified House native generation"
     );
-    let workbench = invocation
+    let store = invocation
         .lens_data_dir
         .as_deref()
         .map(|root| jobs::store::JobStore::open(root, jobs::store::Limits::default()).map(Arc::new))
         .transpose()
-        .context("open durable Lens history")?
-        .map(|store| Workbench { store, assets });
+        .context("open durable Lens history")?;
+    let workbench = (store.is_some() || assets.is_some()).then_some(Workbench { store, assets });
     if matches!(family, ModelFamily::K2Horizon | ModelFamily::MuseGlimmer) {
         ensure!(
             template_style == items::TemplateStyle::House,
@@ -846,10 +842,10 @@ fn accept_loop_with_workbench(
         local_addr,
         model_id,
         load_ms,
-        workbench.is_some(),
+        workbench.as_ref().is_some_and(|w| w.store.is_some()),
     );
-    let history_enabled = workbench.is_some();
-    let (sender, receiver) = sync_channel(usize::from(history_enabled));
+    let control_enabled = workbench.is_some();
+    let (sender, receiver) = sync_channel(usize::from(control_enabled));
     // Publish initial readiness before the acceptor can observe a connection;
     // otherwise an idle server has a startup window that returns a false 503.
     let ready = Arc::new(AtomicBool::new(true));
@@ -860,20 +856,20 @@ fn accept_loop_with_workbench(
     let admission = activity.admission();
     let gate = control::ExecutionGate::default();
     let acceptor = if let Some(Workbench { store, assets }) = workbench {
-        let native = backend.native_profile()?.map(|profile| {
-            Arc::new(native::NativeAdmission {
-                profile,
-                store: Arc::clone(&store),
-                sender: sender.clone(),
-                gate: gate.clone(),
-                activity: admission.clone(),
-            }) as Arc<dyn lens_http::Admission>
-        });
-        let lens = Arc::new(lens_http::LensApi::new(
-            model_id.into(),
-            Some(store),
-            native,
-        ));
+        let native = if let Some(store) = &store {
+            backend.native_profile()?.map(|profile| {
+                Arc::new(native::NativeAdmission {
+                    profile,
+                    store: Arc::clone(store),
+                    sender: sender.clone(),
+                    gate: gate.clone(),
+                    activity: admission.clone(),
+                }) as Arc<dyn lens_http::Admission>
+            })
+        } else {
+            None
+        };
+        let lens = Arc::new(lens_http::LensApi::new(model_id.into(), store, native));
         backend.set_control_memory_reserve(control::CPU_RESERVE_BYTES);
         match control::spawn(
             listener,
@@ -903,7 +899,7 @@ fn accept_loop_with_workbench(
 
     let result = (|| -> Result<()> {
         loop {
-            if history_enabled {
+            if control_enabled {
                 gate.checkpoint()?;
             }
             if let Some(active) = &mut connection {
@@ -914,7 +910,7 @@ fn accept_loop_with_workbench(
                 continue;
             }
             checkpoint(OwnerCheckpoint::BeforeAdmission)?;
-            if !history_enabled {
+            if !control_enabled {
                 ready.store(true, Ordering::Release);
             }
             let event = match receiver.recv_timeout(ADMISSION_POLL_INTERVAL) {
@@ -929,7 +925,7 @@ fn accept_loop_with_workbench(
             // A signal may arrive while admission is parked in recv_timeout.
             // Never start an admitted request without checking it again.
             checkpoint(OwnerCheckpoint::BeforeHandling)?;
-            if history_enabled {
+            if control_enabled {
                 gate.checkpoint()?;
             }
             match event {

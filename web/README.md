@@ -4,8 +4,8 @@ Preserved React/TypeScript workbench, recovered onto current serving semantics.
 Bun owns development serving/HMR and production builds. No Vite, Next, SSR,
 authentication flow, network assets or second production server. Current recovery
 supports durable baseline generation, scoped plain/fitted readouts and ordered interventions.
-Retained-array production is recovered; paired-capture production remains pending. Saved diagnostics remain
-inspectable without inference.
+Retained arrays and original-forward whole-site paired capture are recovered.
+Saved diagnostics remain inspectable without inference.
 
 ## Run
 
@@ -21,6 +21,10 @@ From the repository root, start the existing resident server:
 ```sh
 qwen serve -m MODEL --lens-data-dir JOB_DIRECTORY --web-root web/dist
 ```
+
+All serving families can expose saved history and assets; native execution remains
+qualified ordinary Qwen only. `--web-root` also works without a history directory,
+with execution/history unavailable rather than an implicit temporary store.
 
 `--web-root` requires `--lens-data-dir`, currently ordinary Qwen only. Native
 generation is limited to metadata-qualified House Qwen3.6/3.8; unsupported

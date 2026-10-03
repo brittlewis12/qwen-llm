@@ -50,6 +50,7 @@ pub(crate) struct FlashNextBackend {
     pub(super) snapshot_cache_plan: super::SnapshotCachePlan,
     /// Deployment default for `x_qwen.template_style` (`--template-style`).
     pub(super) template_style: super::items::TemplateStyle,
+    control_cpu_reserve: u64,
 }
 
 impl FlashNextBackend {
@@ -142,11 +143,15 @@ impl FlashNextBackend {
             cache: SnapshotCache::new(snapshot_cache_plan.bytes, snapshot_cache_plan.policy),
             snapshot_cache_plan,
             template_style: super::items::TemplateStyle::House,
+            control_cpu_reserve: 0,
         })
     }
 }
 
 impl GenerationBackend for FlashNextBackend {
+    fn set_control_memory_reserve(&mut self, bytes: u64) {
+        self.control_cpu_reserve = bytes;
+    }
     fn model_id(&self) -> &str {
         &self.model_id
     }
@@ -232,6 +237,7 @@ impl GenerationBackend for FlashNextBackend {
                     &runner,
                     &prompt_ids[..boundary],
                     "transcript",
+                    self.control_cpu_reserve,
                 ) {
                     transcript_entry = self.cache.entry_for(&prompt_ids[..boundary]);
                 }
@@ -248,7 +254,14 @@ impl GenerationBackend for FlashNextBackend {
             // holds this prompt's reusable prefix.
             if transcript_entry.is_none() {
                 let capture_t0 = Instant::now();
-                capture_snapshot(&mut self.cache, &self.ctx, &runner, &prompt_ids, "prompt");
+                capture_snapshot(
+                    &mut self.cache,
+                    &self.ctx,
+                    &runner,
+                    &prompt_ids,
+                    "prompt",
+                    self.control_cpu_reserve,
+                );
                 capture_ms += capture_t0.elapsed().as_secs_f64() * 1e3;
             }
 
@@ -285,7 +298,14 @@ impl GenerationBackend for FlashNextBackend {
             }) {
                 Ok(consumed) => {
                     let pinned = transcript_entry.filter(|&entry| self.cache.pin(entry));
-                    capture_snapshot(&mut self.cache, &self.ctx, &runner, &consumed, "completed");
+                    capture_snapshot(
+                        &mut self.cache,
+                        &self.ctx,
+                        &runner,
+                        &consumed,
+                        "completed",
+                        self.control_cpu_reserve,
+                    );
                     if let Some(entry) = pinned {
                         self.cache.unpin(entry);
                     }
@@ -365,6 +385,7 @@ fn capture_snapshot(
     runner: &Qwen4ExpTextRunner<'_, '_, '_>,
     tokens: &[u32],
     boundary: &'static str,
+    control_cpu_reserve: u64,
 ) -> bool {
     if cache.max_bytes() == 0 {
         return false;
@@ -385,7 +406,9 @@ fn capture_snapshot(
         return false;
     };
     let signals = ctx.memory_signals();
-    if let Err(reason) = super::snapshot_capture_admission(entry_bytes, signals) {
+    if let Err(reason) =
+        super::snapshot_capture_admission(entry_bytes.saturating_add(control_cpu_reserve), signals)
+    {
         tracing::warn!(
             "serve: qwen4exp {boundary} snapshot denied by memory headroom; reason={reason:?} payload_bytes={payload_bytes} metal_current_bytes={} metal_recommended_bytes={} process_remaining_bytes={:?}",
             signals.current_allocated_bytes,

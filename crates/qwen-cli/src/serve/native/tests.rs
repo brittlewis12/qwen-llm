@@ -72,6 +72,22 @@ impl Fixture {
         let control = self.store.control(&id).unwrap();
         (id, prepared, control)
     }
+    pub(crate) fn settled(&self, key: &str) -> String {
+        let (id, prepared, control) = self.prepare(key);
+        let writer = writer::Writer::spawn(
+            self.store.clone(),
+            id.clone(),
+            control,
+            &prepared,
+            Default::default(),
+        )
+        .unwrap();
+        writer.wait_ready().unwrap();
+        writer
+            .finish(Outcome::interrupted(prepared.counters()))
+            .unwrap();
+        id
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {

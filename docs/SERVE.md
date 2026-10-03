@@ -141,14 +141,15 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
 # --max-tokens; --snapshot-cache-mib is ignored (live-session prefix reuse).
 ```
 
-**Durable diagnostic baseline (ordinary Qwen only).** `--lens-data-dir PATH`
-enables the native `/v1/lens` job/history API on this same server. Qualified House
+**Durable diagnostic workbench.** `--lens-data-dir PATH` enables saved Lens history
+on every serving family. Qualified ordinary House
 Qwen3.6/3.8 deployments accept messages, typed assistant prefills and explicit
-sampling; other ordinary deployments can read history without claiming execution
-support. `--web-root web/dist` serves the prebuilt Bun client and requires
-`--lens-data-dir`; Rust never invokes Bun. Supported passive heads offer plain
-original-forward readouts. Fitted readouts, interventions and retained capture
-producers remain pending; compatible saved diagnostics remain inspectable.
+sampling; other deployments can read history without claiming native execution
+support. `--web-root web/dist` independently serves the prebuilt Bun client;
+Rust never invokes Bun. Supported passive heads offer plain original-forward
+readouts; explicit registered fitted assets enable fitted heads and directions.
+Scoped ordered interventions, retained source/full scores and whole-site before/after
+pairs are recovered. Compatible saved diagnostics remain inspectable.
 Ordinary `/v1/responses` remains available, sharing one execution reservation.
 Accepted native jobs survive client disconnect; history reads never run inference.
 See [Lens Workbench](LENS-WEB.md) for limits, overload, recovery and qualification.

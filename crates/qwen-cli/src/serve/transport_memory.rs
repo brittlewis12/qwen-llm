@@ -7,7 +7,7 @@ use super::items::ServeError;
 pub(super) fn combined_reserve(durable: u64, transport: u64) -> Result<u64, ServeError> {
     durable
         .checked_add(transport)
-        .ok_or_else(|| ServeError::server_error("durable plus transport CPU reservation overflow"))
+        .ok_or_else(|| ServeError::server_error("combined CPU reservation overflow"))
 }
 
 pub(super) fn admit_resident_transport(
@@ -49,5 +49,15 @@ mod tests {
         assert!(admit_resident_transport(100, Some(99)).is_err());
         assert!(admit_resident_transport(100, Some(100)).is_ok());
         assert!(admit_resident_transport(100, Some(0)).is_ok());
+    }
+    #[test]
+    fn resident_control_and_transport_allowances_both_survive_pressure_checks() {
+        let control = super::super::control::CPU_RESERVE_BYTES;
+        let reserve = combined_reserve(control, 128).unwrap();
+        assert!(admit_resident_transport(reserve, Some(control)).is_err());
+        assert!(admit_resident_transport(reserve, Some(128)).is_err());
+        assert!(admit_resident_transport(reserve, Some(reserve)).is_ok());
+        assert!(admit_resident_transport(reserve, None).is_err());
+        assert_eq!(combined_reserve(0, 128).unwrap(), 128);
     }
 }

@@ -120,8 +120,8 @@ pub(crate) struct ServeArgs {
     #[arg(long, requires = "lens_data_dir")]
     lens_config: Option<PathBuf>,
 
-    /// Prebuilt Bun client directory; requires durable Lens history on this server.
-    #[arg(long, requires = "lens_data_dir")]
+    /// Prebuilt Bun client directory, served independently of optional Lens history.
+    #[arg(long)]
     web_root: Option<PathBuf>,
 
     /// Whose conventions prompts follow where serve deliberately departs from
@@ -537,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_web_assets_require_and_preserve_durable_history_configuration() {
+    fn serve_web_assets_are_independent_of_durable_history_configuration() {
         assert!(
             Args::try_parse_from([
                 "qwen",
@@ -547,7 +547,7 @@ mod tests {
                 "--web-root",
                 "web/dist"
             ])
-            .is_err()
+            .is_ok()
         );
         let (_, invocation) = parse(&[
             "qwen",

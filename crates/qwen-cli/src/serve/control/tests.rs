@@ -81,7 +81,7 @@ fn browser_baseline_child() {
         &mut BrowserBackend(Arc::clone(&fixture.profile)),
         &mut None,
         Some(crate::serve::Workbench {
-            store: Arc::clone(&fixture.store),
+            store: Some(Arc::clone(&fixture.store)),
             assets: Some(Arc::new(assets)),
         }),
     )
@@ -95,6 +95,8 @@ fn browser_baseline_child() {
 
 struct Backend {
     profile: Arc<native::Profile>,
+    request: Option<RequestProfile>,
+    control_reserve: u64,
     owner: std::thread::ThreadId,
     entered: Sender<ExecutionGate>,
     release: Receiver<()>,
@@ -103,11 +105,18 @@ struct Backend {
     callbacks: Arc<Mutex<Vec<&'static str>>>,
 }
 impl GenerationBackend for Backend {
+    fn set_control_memory_reserve(&mut self, bytes: u64) {
+        assert_eq!(self.owner, std::thread::current().id());
+        self.control_reserve = bytes;
+    }
+    fn request_profile(&self) -> RequestProfile {
+        self.request.clone().unwrap_or(RequestProfile::UnboundQwen)
+    }
     fn model_id(&self) -> &str {
         "test"
     }
     fn native_profile(&self) -> Result<Option<Arc<native::Profile>>> {
-        Ok(Some(Arc::clone(&self.profile)))
+        Ok(self.request.is_none().then(|| Arc::clone(&self.profile)))
     }
     fn generate_native(
         &mut self,
@@ -147,8 +156,16 @@ impl GenerationBackend for Backend {
     ) -> Result<GenerationOutcome, BackendFailure> {
         assert_eq!(self.owner, std::thread::current().id());
         assert!(sink.transport_reserve_bytes() >= CPU_RESERVE_BYTES);
+        assert_eq!(self.control_reserve, CPU_RESERVE_BYTES);
         self.ordinary.fetch_add(1, Ordering::AcqRel);
-        sink.piece(b"ordinary").map_err(BackendFailure::Aborted)?;
+        sink.piece(
+            if matches!(self.request, Some(RequestProfile::Muse { .. })) {
+                b" to=user<|message|>ordinary"
+            } else {
+                b"ordinary"
+            },
+        )
+        .map_err(BackendFailure::Aborted)?;
         Ok(GenerationOutcome {
             end: crate::serve::output_partition::GenerationEnd::TokenLimit,
             usage: crate::serve::events::Usage {
@@ -165,6 +182,7 @@ impl GenerationBackend for Backend {
     }
     fn shutdown(&mut self) {
         assert_eq!(self.owner, std::thread::current().id());
+        assert_eq!(self.control_reserve, 0);
         self.callbacks.lock().unwrap().push("shutdown");
     }
 }
@@ -187,6 +205,14 @@ impl Server {
         fixture: &native::CpuFixture,
         assets: Option<Arc<crate::serve::assets::WebAssets>>,
     ) -> Self {
+        Self::start_with_profile(fixture, assets, true, None)
+    }
+    fn start_with_profile(
+        fixture: &native::CpuFixture,
+        assets: Option<Arc<crate::serve::assets::WebAssets>>,
+        history: bool,
+        request: Option<RequestProfile>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
@@ -198,6 +224,8 @@ impl Server {
         let callbacks = Arc::new(Mutex::new(Vec::new()));
         let mut backend = Backend {
             profile: Arc::clone(&fixture.profile),
+            request,
+            control_reserve: 0,
             owner: std::thread::current().id(),
             entered: entry_sender,
             release: released,
@@ -214,7 +242,10 @@ impl Server {
                 0.0,
                 &mut backend,
                 &mut None,
-                Some(crate::serve::Workbench { store, assets }),
+                Some(crate::serve::Workbench {
+                    store: history.then_some(store),
+                    assets,
+                }),
                 |_| {
                     anyhow::ensure!(!stopping.load(Ordering::Acquire), "test shutdown");
                     Ok(())
@@ -389,6 +420,85 @@ fn paired_http_history_and_exact_retry_survive_loss_of_capture_capability() {
     );
     assert_eq!(server.calls.load(Ordering::Acquire), 0);
     server.stop();
+}
+
+#[test]
+fn family_profiles_serve_history_or_standalone_assets_without_native_inference() {
+    use crate::serve::items::TemplateStyle;
+    let profiles = [
+        RequestProfile::DeepSeekV4 {
+            style: TemplateStyle::House,
+        },
+        RequestProfile::FlashNext {
+            style: TemplateStyle::House,
+        },
+        RequestProfile::Muse {
+            template: qwen_llm::muse_glimmer::MuseGlimmerChatTemplateProfile::UnslothLaunch,
+            default_max_tokens: 8,
+            eos_token_id: 1,
+            eot_token_id: 2,
+        },
+        RequestProfile::K2 {
+            chat: None,
+            default_max_tokens: 8,
+            capacity: 256,
+            max_piece_bytes: 16,
+        },
+    ];
+    for profile in profiles {
+        for history in [false, true] {
+            let fixture = native::CpuFixture::new();
+            let id = fixture.settled("saved");
+            std::fs::write(fixture.root.join("index.html"), b"client").unwrap();
+            std::fs::write(fixture.root.join("asset-manifest.json"),br#"{"version":1,"entry":"index.html","files":[{"path":"index.html","contentType":"text/html","bytes":6}]}"#).unwrap();
+            let assets = Arc::new(crate::serve::assets::WebAssets::open(&fixture.root).unwrap());
+            let mut server =
+                Server::start_with_profile(&fixture, Some(assets), history, Some(profile.clone()));
+            let mut static_reply = String::new();
+            server
+                .send("GET", "/", "")
+                .read_to_string(&mut static_reply)
+                .unwrap();
+            assert!(static_reply.starts_with("HTTP/1.1 200") && static_reply.ends_with("client"));
+            assert_eq!(
+                server.request("GET", "/v1/lens/capabilities", "").1["available"],
+                false
+            );
+            let (head, jobs) = server.request("GET", "/v1/lens/jobs", "");
+            if history {
+                assert!(head.starts_with("HTTP/1.1 200"), "{head} {jobs}");
+                assert_eq!(jobs["jobs"][0]["id"], id);
+                let (head, retry) = server.request(
+                    "POST",
+                    "/v1/lens/jobs",
+                    &fixture.request("saved").to_string(),
+                );
+                assert!(head.starts_with("HTTP/1.1 200"), "{head} {retry}");
+                assert_eq!(retry["id"], id);
+                assert_eq!(
+                    server
+                        .request("GET", &format!("/v1/lens/jobs/{id}/result"), "")
+                        .1["complete"],
+                    true
+                );
+            } else {
+                assert!(!head.starts_with("HTTP/1.1 200"));
+            }
+            let (head, body) =
+                server.request("POST", "/v1/lens/jobs", &fixture.request("new").to_string());
+            assert!(!head.starts_with("HTTP/1.1 202"), "{head} {body}");
+            let (head, body) = server.request(
+                "POST",
+                "/v1/responses",
+                r#"{"model":"test","input":"hi","max_output_tokens":1}"#,
+            );
+            assert!(head.starts_with("HTTP/1.1 200"), "{head} {body}");
+            assert_eq!(server.calls.load(Ordering::Acquire), 0);
+            assert_eq!(server.ordinary.load(Ordering::Acquire), 1);
+            server.stop();
+            assert_eq!(server.callbacks.lock().unwrap().last(), Some(&"shutdown"));
+        }
+    }
 }
 
 #[test]

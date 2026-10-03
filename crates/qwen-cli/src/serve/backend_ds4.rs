@@ -88,6 +88,7 @@ pub(crate) struct DeepSeekV4Backend {
     durable: Option<Ds4Durable>,
     /// Deployment default for `x_qwen.template_style` (`--template-style`).
     pub(super) template_style: TemplateStyle,
+    control_cpu_reserve: u64,
 }
 
 /// Process-unique, never published: pid + start nanos + a tag.
@@ -191,6 +192,7 @@ impl DeepSeekV4Backend {
             ctx.memory_signals(),
         )?;
         Ok(Self {
+            control_cpu_reserve: 0,
             ctx,
             gguf,
             tokenizer,
@@ -303,6 +305,24 @@ impl DeepSeekV4Backend {
         }
         // A RAM hit captured under the stand-in before the strong identity
         // resolved: same resident weights, so re-attribute a copy.
+        if self.control_cpu_reserve > 0 {
+            let bytes = SnapshotCache::<DeepSeekV4CausalSnapshot>::entry_bytes(
+                snapshot.prefix_tokens().len(),
+                snapshot.payload_bytes(),
+            )?;
+            if super::admit_snapshot_capture(
+                bytes.saturating_add(self.control_cpu_reserve),
+                || self.ctx.memory_signals(),
+                |bytes| self.cache.evict_for(bytes),
+            )
+            .is_err()
+            {
+                tracing::warn!(
+                    "serve: deepseek_v4 snapshot rebinding denied by memory headroom; cold prefilling"
+                );
+                return None;
+            }
+        }
         match snapshot.rebound_to_model(session_id, &self.config) {
             Ok(rebound) => Some((len, Arc::new(rebound), source)),
             Err(error) => {
@@ -329,6 +349,7 @@ impl DeepSeekV4Backend {
             session_capacity,
             ..
         } = self;
+        let reserve = self.control_cpu_reserve;
         let durable = durable.as_ref()?;
         let min_tokens = durable.plan.min_tokens;
         // Strict prefixes only: a snapshot carries no logits.
@@ -356,7 +377,7 @@ impl DeepSeekV4Backend {
                     return false;
                 };
                 if super::admit_snapshot_capture(
-                    entry_bytes,
+                    entry_bytes.saturating_add(reserve),
                     || ctx.memory_signals(),
                     |bytes| cache.evict_for(bytes),
                 )
@@ -440,6 +461,9 @@ fn decoded_text_closed_reasoning(
 }
 
 impl GenerationBackend for DeepSeekV4Backend {
+    fn set_control_memory_reserve(&mut self, bytes: u64) {
+        self.control_cpu_reserve = bytes;
+    }
     fn model_id(&self) -> &str {
         &self.model_id
     }
@@ -793,7 +817,7 @@ impl DeepSeekV4Backend {
         let ctx = &self.ctx;
         let cache = &mut self.cache;
         if let Err((reason, signals)) = super::admit_snapshot_capture(
-            entry_bytes,
+            entry_bytes.saturating_add(self.control_cpu_reserve),
             || ctx.memory_signals(),
             |bytes| cache.evict_for(bytes),
         ) {

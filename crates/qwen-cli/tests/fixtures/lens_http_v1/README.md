@@ -5,12 +5,10 @@ routes or the capabilities of a particular loaded model. Responses use JSON
 except explicit retained-array downloads, which use binary F32LE payloads.
 Capability values and limits are illustrative; clients must use returned values.
 
-Reconstruction scope: baseline and plain readout submission/history are wired;
-fitted assets, interventions and retained/pair capture production are pending.
-The capability-gated browser
-client and static serving are recovered. Diagnostic schema
-descriptions below preserve the original contract for subsequent recovery and for
-reading compatible historical artifacts. They are not current execution claims.
+Baseline, plain/fitted readouts, scoped interventions and retained/pair capture are
+wired on qualified ordinary Qwen deployments. The capability-gated browser, stored
+history and static serving are recovered. Diagnostic schema descriptions also cover
+compatible historical artifacts; illustrative fixtures do not qualify every model.
 
 ## Routes
 
@@ -41,8 +39,8 @@ reading compatible historical artifacts. They are not current execution claims.
   immutable and ordered by seq. Cursors are opaque. At the current live end,
   next_cursor is a resumable cursor and complete=false; only terminal publication
   uses next_cursor=null, complete=true. Empty pages are valid.
-- GET /: prebuilt frontend; root-relative assets from configured `--web-root`,
-  which requires `--lens-data-dir` in this recovery slice. HEAD omits the body.
+- GET /: prebuilt frontend; root-relative assets from independently configured
+  `--web-root`. HEAD omits the body.
 - GET /v1/lens/jobs/{id}/arrays/{record_offset}: verified committed F32LE array,
   `application/octet-stream`. Locator is the descriptor's record-log byte offset,
   not a filename or GPU query. Whole-array reads only; query parameters rejected.
@@ -51,13 +49,13 @@ No preview endpoint in edition 1. No HTTP file paths, model selection, transfer
 overrides, raw prompts, raw tokens, or tool messages in the Lens input schema.
 Ordinary /v1/responses remains its existing independent wire contract.
 
-Current production wiring: `--lens-data-dir` enables stored history on the ordinary
-Qwen server, with native generation for metadata-qualified House Qwen3.6/3.8.
-Supported passive heads advertise `plain`/`full_vocabulary` readouts with no direction
-rows or operators; otherwise `execution.baseline_only=true` and empty assets remain.
-Retention, fitted aliases, operations, directions and pairs are refused. Other
-ordinary deployments
-remain execution-unavailable; other backend families currently refuse the flag.
+Current production wiring: `--lens-data-dir` enables stored history on every serving
+family, with native generation for metadata-qualified ordinary House Qwen3.6/3.8.
+Supported passive heads advertise plain readouts, retention and whole-site pairs.
+Explicit registered fitted assets add fitted readouts and supported direction rows;
+native operators remain `fixed_add`, `residual_l2_fraction`, `projection_ablate`.
+Without a supported passive head, baseline generation and empty assets remain.
+Other deployments remain native-execution-unavailable, not history-unavailable.
 `capabilities_unavailable` is shared with browser tests: unavailable model metadata
 is null, not zero dimensions or invented identities. Full diagnostic fixtures
 remain illustrative. See `docs/LENS-WEB.md` for the actual qualification boundary;

@@ -1133,3 +1133,28 @@ each. Final CPU gates are 338 serving tests and 391 Lens CLI tests (named unmark
 Metal tests excluded); Bun has 55 passing tests, passing types/build, and the combined
 operations/fitted/retention/pairs real CPU browser flow also passes:
 `web/.browser-test/baseline-4486e7c7-0f4b-4f70-8ff2-c64cfe4684c0/`.
+
+### R06/R15: Cross-Family History And Independent Assets
+
+The final behavior audit identifies two formerly narrowed modes: saved history
+alongside DS4/Muse/Flash/K2, and standalone `--web-root`. Both now use the existing
+shared owner/control loop with independently optional store/assets. Unsupported
+native families report unavailable execution but keep saved results and exact-key
+recovery. Fitted configuration still fails early outside ordinary Qwen. No temporary
+store, alternate executor or new service is introduced.
+
+The owner sink already includes the standing control allowance in its request
+reserve. Each family's existing request admission uses it exactly once; K2 keeps
+that same amount for fresh/poisoned replacement sessions. Backend-owned allowances
+cover Flash snapshot capture and DS4 promotion/capture/rebinding paths without a
+request sink. DS4 eviction retry retains the allowance; the new rebinding check only
+runs while control is enabled, preserving the no-workbench path. The allowance
+remains active through worker joins and is cleared before backend shutdown.
+
+CPU integration covers all four family request profiles with history and standalone
+assets, ordinary responses, unavailable native discovery, history/results/exact
+retry and owner callbacks. Exact sink-reserve and pressure-boundary tests prevent
+double-counting control memory. These are control/protocol/admission-policy tests,
+not numerical family inference or real-pressure qualification. DS4's post-session
+reserve check still does not price its session-construction peak. No large model
+load is justified for these CPU-owned behavior changes.

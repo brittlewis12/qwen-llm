@@ -68,9 +68,9 @@ recovery is explicitly recorded below.
 | R04 | Deployment binding and asset verification: `linear_transport{.rs,/deployment.rs,/cpu_fixture.rs}`, `full_lens/access.rs` | Partially recovered: shared CPU deployment binding with existing CLI consumers; native registry integration pending; main's expected-profile checks retained | Binding mismatch refusal, retained payload hashes, CPU-before-Metal admission, no implicit transfer override |
 | R05 | Shared ordinary execution: `ordinary_executor.rs`, `qwen/decode.rs`, `lens_run/execute.rs` | Partially recovered: shared serial decode lifecycle and explicit request cancellation with existing CLI/serve/Lens consumers; prefill and forwarding adapters pending | CLI/serve sampling, cancellation, terminal nonconsumption and telemetry remain equivalent except documented added checkpoints |
 | R06 | Owner queue and CPU HTTP coordination: `serve/{control,queue,request_profile}.rs`, backend/HTTP wiring | Partially recovered: shared one-execution admission plus two CPU control workers for ordinary Qwen history/native traffic; other-family control allowance and live qualification pending | Idle/request-finished/shutdown ownership, busy admission, cancellation/disconnect, JSON/SSE protocols |
-| R07 | Durable job metadata: `serve/jobs/{state,store,preview}.rs` | Recovered with a real baseline producer and routes; distinct from main's durable model snapshots | CPU acceptance/retry, bounded publication, recovery/corruption, history without inference pass; live restart pending |
+| R07 | Durable job metadata: `serve/jobs/{state,store,preview}.rs` | Recovered with a real baseline producer and routes; distinct from main's durable model snapshots | CPU store gates and scoped live Qwen3.6 interruption/restart pass; not KV persistence qualification |
 | R08 | Native request/routes/preconditions: `serve/lens_http/*`, `serve/native/preconditions.rs` | Baseline routes/preconditions recovered; diagnostic admission pending | CPU unknown-field/local HTTP/binding checks and accepted-key recovery pass |
-| R09 | Native baseline and observation lifecycle: `serve/native/{mod,execute,writer}.rs` | Baseline recovered on current resident/cache admission, joined writer; observation production and live qualification pending | CPU disconnected completion, cancellation races, independent outcomes and shutdown pass; real-model qualification pending |
+| R09 | Native baseline and observation lifecycle: `serve/native/{mod,execute,writer}.rs` | Baseline recovered on current resident/cache admission, joined writer; observation production pending | CPU lifecycle and scoped Qwen3.6 live disconnect/decode/interruption/restart pass; broader numerical/pressure qualification pending |
 | R10 | Plain original-forward readouts: `serve/native/{readouts,observe}.rs` | Reuse after R09, not transformer replay | Scope/token coordinates, shared heads, unchanged samples, no terminal fabricated readout; bounded live check |
 | R11 | Fitted readouts and direction staging: `serve/native/{registry,interventions}.rs`, `workspace_lens/*` | Reuse after R04/R09/R10 | Registered identity, matrix integrity, bounded ready-only staging/workspace, independent numerical oracle |
 | R12 | Ordered scoped interventions: `serve/native/interventions/*`, `lens_intervention.rs` | Reuse after R02/R11 | Exact order/scopes, zero controls, deployed covector semantics, independent transformation checks |
@@ -623,3 +623,33 @@ Separately, the opt-in CPU tokenizer matrix passes against the released Qwen3.6
 35B A3B Q4_K_M GGUF: native and CLI prefills have identical token IDs, spans and
 retained input across the tested mode/channel combinations. This qualifies that
 tokenizer/template path, not numerical continuation or other deployments.
+
+### R09: Bounded Live Baseline Lifecycle
+
+The clean release at `b850e3e7` now passes the reviewed owned-server Bun harness on
+Qwen3.6 35B A3B UD-Q4_K_M, using the normal lease/wired-memory/process admission
+gates. The first passing final-prefill fixture stopped on its first sample: valid
+terminal evidence, but not a decode-transition witness. The strengthened committed
+harness uses a reasoning prefill and requires positive generated-token consumption.
+It passes with 16 prompt tokens, samples `[1683, 883, 411]`, two generated tokens
+consumed and the final sample retained unconsumed. A disconnected submission recovers
+the same accepted key and matches those sample records; history reads remain stable
+and ordinary serving succeeds afterward.
+
+A third job is observed active, then the owned server receives SIGTERM. It publishes
+an interrupted status and terminal record before exit; the final counters are
+16 prompt / three sampled / three generated consumed. Restart preserves that exact
+status and the earlier completed records, with three jobs total and no automatic
+retry. Both launches exit with code 143 and no OS-termination signal; no forced
+cleanup was needed. Each model load took about 2.35 seconds. The model lease was
+confirmed unheld afterward. RAM snapshot budget was zero and the durable KV tier
+was off, so this is job durability, not a KV persistence or pressure-stress gate.
+
+Local evidence: `target/lens-baseline-12cc5c4d-0812-4d90-90c1-95993e7cc377/`.
+The tested `qwen` binary has Git blob fingerprint
+`180acf03f915744a3691912d2937a7064d0b09a7`; the harness fingerprint is
+`9b2a753e7fab09f27f77c07157aeb0f79a6369bf`. Generated artifacts/logs stay ignored.
+The final-prefill first-sample-stop run remains in the separate local evidence
+directory `target/lens-baseline-aa75266c-116a-46ce-9e33-d5f37bedf64d/`.
+These checks establish scoped live execution/repeatability and settlement, not
+independent CLI-versus-HTTP numerical equivalence or other-model qualification.

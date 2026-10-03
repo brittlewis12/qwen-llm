@@ -131,8 +131,25 @@ cancellation during execution and startup, active native shutdown, read-only idl
 accounting, publication failures and ordinary serving after native work. Existing
 all-family ordinary protocol and real SIGTERM CPU fixtures remain covered.
 
-These tests do not qualify released-model tokenization, numerical continuation,
-Metal memory pressure or real KV snapshot continuity. Minimal model-backed parity,
-disconnect/retry and restart checks remain pending. Preserved old-worktree live
-evidence is not current-branch qualification. Wire fixtures include historical
-diagnostic extensions; returned capabilities, not those examples, define support.
+The released Qwen3.6 35B A3B Q4_K_M tokenizer also passes the opt-in native/CLI
+prefill matrix on CPU. A clean release built at `b850e3e7` passes the bounded live
+baseline lifecycle check on that model: exact greedy repeatability with consumed
+decode tokens, disconnected exact-key recovery, ordinary serving afterward, and
+active SIGTERM with durable terminal publication before restart. Both server
+launches exit through handled SIGTERM (143, not OS signal termination); history
+and the interrupted status remain unchanged after restart. The lease is released.
+
+```sh
+QWEN_LENS_TEST_MODEL=/path/to/qualified.gguf \
+  bun run scripts/serve/lens_baseline_check.ts
+```
+
+This opt-in script runs Metal, owns exactly its child servers, uses normal memory
+admission and retains local evidence under `target/`. It has a 140-second protocol
+deadline plus a separate 35-second cleanup allowance. A successful exit and final
+PASS line are authoritative; a partial evidence file alone is not a passing gate.
+It intentionally disables RAM/KV snapshot persistence. This is not qualification
+of KV continuity, DFlash, memory pressure, every model family, or independent
+CLI-versus-HTTP numerical parity. Preserved old-worktree evidence remains separate.
+Wire fixtures include historical diagnostic extensions; returned capabilities,
+not those examples, define support.

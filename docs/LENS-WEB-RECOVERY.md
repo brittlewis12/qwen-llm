@@ -72,7 +72,7 @@ recovery is explicitly recorded below.
 | R08 | Native request/routes/preconditions: `serve/lens_http/*`, `serve/native/preconditions.rs` | Baseline routes/preconditions recovered; diagnostic admission pending | CPU unknown-field/local HTTP/binding checks and accepted-key recovery pass |
 | R09 | Native baseline and observation lifecycle: `serve/native/{mod,execute,writer}.rs` | Baseline recovered on current resident/cache admission, joined writer; observation production pending | CPU lifecycle and scoped Qwen3.6 live disconnect/decode/interruption/restart pass; broader numerical/pressure qualification pending |
 | R10 | Plain original-forward readouts: `serve/native/{readouts,observe}.rs` | Producer recovered with browser/current admission; no replay | CPU scopes/lifecycle/publication/HTTP/browser and scoped Qwen3.6 live unchanged-sample/final-layer witness gate pass |
-| R11 | Fitted readouts and direction staging: `serve/native/{registry,interventions}.rs`, `workspace_lens/*` | Fitted producer recovered and CPU-qualified; direction staging remains R12; live oracle pending | Registered identity, matrix integrity, owner-admitted joined staging/workspace, independent numerical oracle |
+| R11 | Fitted readouts and direction staging: `serve/native/{registry,interventions}.rs`, `workspace_lens/*` | Fitted producer recovered with CPU/browser and scoped original-forward numerical evidence; direction staging remains R12 | Registered identity, matrix integrity, owner-admitted joined staging/workspace, independent numerical oracle |
 | R12 | Ordered scoped interventions: `serve/native/interventions/*`, `lens_intervention.rs` | Reuse after R02/R11 | Exact order/scopes, zero controls, deployed covector semantics, independent transformation checks |
 | R13 | Retained full scores/source arrays: `serve/jobs/arrays.rs`, native observer/writer, `web/retention*` | Reuse after R07/R10 | Raw admission, dual-watermark durability, digest/finite/shape checks, offline rank/entropy, no implicit fetch |
 | R14 | Whole-site pre/post capture: `metal_forward/token.rs`, `serve/native/measurements.rs` | Reuse after R12/R13; do not imply per-operation intermediates | Before/after placement, independent layer sets, alias refusal, actual-vector metrics and zero controls |
@@ -899,3 +899,23 @@ uninstrumented production-binary qualification. Its owned-process harness rechec
 absolute deadlines/sticky interruption after evidence reads and cleanup, and owns build
 interruption too. `cx` review requested and received these false-pass corrections before
 commit. R12 interventions, R13 retained arrays and R14 pre/post pairs remain pending.
+
+### R11: Original-Forward Fitted Numerical Qualification
+
+The clean release test executable built at `e93691b0` passes the bounded opt-in
+oracle on Qwen3.6 35B A3B UD-Q4_K_M. Two three-sample jobs use the actual backend
+admission and joined writer staging. The observed job captures prompt position zero
+and consumed decode index zero at layers 19 and 39. Four required F64 transport
+witnesses pass with zero maximum absolute error, including the nonidentity rotated/
+scaled-diagonal matrix at layer 19. Two identity final-layer controls agree with plain
+head rankings/scores. The required final-decode generation witness also reports zero
+error; the no-tail prompt witness remains null. Samples and consumed flags match the
+unobserved baseline, with three samples and two consumed generated tokens in each.
+
+GPU residency is about 6.9 seconds; the child exits normally after about 7.1 seconds.
+The normal lease is confirmed released. No safety controls are overridden. Evidence:
+`target/lens-fitted-8ddc3682-d156-48ca-ae9e-a579661a2d58/`. This is independent transport
+arithmetic over original residuals plus same-tail/generation consistency, not an
+independent quantized output-head oracle, learned-fit quality claim, memory-pressure
+qualification or uninstrumented production-binary test. The test-only witness field
+and F64 verification are absent from production builds.

@@ -115,7 +115,8 @@ failure can make publication fail without rewriting already-completed generation
 
 The store syncs records before publishing their committed watermark. Reopening an
 unfinished job marks it interrupted; it never resumes or reruns inference. Corrupt
-committed content fails closed. Retained-array descriptors can be downloaded and
+committed content detected during recovery disables Lens acceptance while healthy
+history stays readable. Retained-array descriptors can be downloaded and
 verified without inference; baseline jobs without requested retention produce none.
 
 ## Plain Readouts
@@ -360,6 +361,31 @@ The separate Clean completed browser archives action verifies archived job IDs a
 the server and removes only confirmed-terminal archives under the submission Web Lock.
 It preserves the current intent, unresolved/active/unverifiable archives, and server
 history. No automatic cleanup or eviction is enabled.
+
+## Incomplete History Recovery
+
+A job that fails startup recovery is isolated from the readable index and reported
+in capabilities/history, with up to 64 unavailable IDs and an exact unavailable
+count. This includes malformed snapshots/requests, missing or structurally invalid
+committed JSONL records, invalid sequences, array integrity failures and failed
+per-job recovery publication or deletion cleanup. Non-array records now receive the
+same bounded JSONL/sequence scan as archived jobs; this adds startup I/O proportional
+to committed history. It is structural validation, not a checksum of every record.
+
+While any job is unavailable, all Lens submission attempts (including exact retries)
+and server deletions fail with 500 `history_recovery_required`, never `not_accepted`.
+Healthy status, prompts, results and arrays remain readable; ordinary inference is
+unchanged. Reported storage usage excludes unavailable jobs. This conservative policy
+does not guess which accepted identities are safe to forget. Repair stored files
+from trustworthy evidence while stopped, then restart; no inference is replayed.
+
+There is no automatic destructive repair or eviction. Normal recovery can still
+truncate uncommitted tails, publish interruption or resume an already committed
+deletion before a later recovery step fails. Root ownership/locking, root sync,
+inventory-limit and abandoned-acceptance cleanup failures still prevent startup.
+Without a separate acceptance journal, missing job directories or names moved outside
+the recognized job namespace cannot be detected: do not manually remove a damaged
+directory to bypass the refusal. Use the explicit deletion API for healthy history.
 
 ## Publication Failures
 

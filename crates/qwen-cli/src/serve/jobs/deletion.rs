@@ -41,6 +41,9 @@ impl JobStore {
     }
 
     fn delete_inner(&self, id: &str, waiting: impl FnOnce()) -> Result<JobStatus> {
+        if !self.unavailable.is_empty() {
+            return Err(StoreError::RecoveryRequired);
+        }
         let _acceptance = self.acceptance.lock().unwrap();
         let entry = self.entry(id)?;
         let _writer = entry.writer.lock().unwrap();

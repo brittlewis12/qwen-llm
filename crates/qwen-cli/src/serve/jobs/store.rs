@@ -20,7 +20,10 @@ const MAX_ERROR_BYTES: usize = 4096;
 mod arrays;
 #[path = "deletion.rs"]
 mod deletion;
+#[path = "recovery.rs"]
+mod recovery;
 pub(crate) use arrays::{MAX_ARCHIVE_BYTES, MAX_ARRAY_BYTES};
+pub(crate) use recovery::RecoveryReport;
 
 #[derive(Default)]
 struct Faults {
@@ -94,6 +97,7 @@ pub(crate) enum StoreError {
     Conflict,
     Full,
     Deleted,
+    RecoveryRequired,
     Storage(io::Error),
 }
 
@@ -108,6 +112,7 @@ impl std::fmt::Display for StoreError {
                 f.write_str("job payloads were deleted; the accepted retry identity is retained")
             }
             Self::Storage(error) => write!(f, "job storage unavailable: {error}"),
+            Self::RecoveryRequired => f.write_str("history recovery is incomplete; healthy jobs remain readable, but submissions and deletion are disabled until stored jobs are repaired and the server restarted"),
         }
     }
 }
@@ -240,6 +245,7 @@ pub(crate) struct JobStore {
     root: PathBuf,
     limits: Limits,
     entries: RwLock<BTreeMap<String, Arc<Entry>>>,
+    unavailable: std::collections::BTreeSet<std::ffi::OsString>,
     acceptance: Mutex<()>,
     fenced: AtomicBool,
     reserved_bytes: AtomicU64,
@@ -265,6 +271,8 @@ pub(crate) struct HistoryPage {
     pub(crate) request_previews: BTreeMap<String, Option<RequestPreview>>,
     pub(crate) next_cursor: Option<String>,
     pub(crate) storage: StorageUsage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) recovery: Option<RecoveryReport>,
 }
 
 #[derive(Serialize)]
@@ -332,8 +340,10 @@ impl JobStore {
             return Err(io::Error::last_os_error().into());
         }
         let mut entries = BTreeMap::new();
+        let mut unavailable = std::collections::BTreeSet::new();
         let mut keys = std::collections::BTreeSet::new();
         let mut reserved_bytes = 0_u64;
+        let mut encountered_jobs = 0usize;
         for child in fs::read_dir(&root)? {
             let child = child?;
             let name = child.file_name();
@@ -344,118 +354,27 @@ impl JobStore {
                 remove_abandoned_acceptance(&child.path())?;
                 continue;
             }
-            let Some(id) = name.to_str().filter(|name| name.starts_with("job_")) else {
+            let name = name.to_string_lossy();
+            let Some(id) = Some(name.as_ref()).filter(|name| name.starts_with("job_")) else {
                 continue;
             };
-            if !valid_id(id) || !child.file_type()?.is_dir() {
-                return Err(corrupt("invalid job directory"));
+            recovery::count_job(&mut encountered_jobs, limits.max_retry_identities)?;
+            match recovery::load(&child, id, limits, &faults, &mut keys) {
+                Ok(entry) => {
+                    reserved_bytes = reserved_bytes
+                        .checked_add(entry.payload_charge.load(Ordering::Acquire))
+                        .and_then(|bytes| bytes.checked_add((2 * MAX_SNAPSHOT_BYTES) as u64))
+                        .ok_or_else(|| corrupt("job storage accounting overflow"))?;
+                    entries.insert(id.to_owned(), Arc::new(entry));
+                }
+                Err(cause) => {
+                    tracing::error!(
+                        job_id = id,
+                        "Lens history unavailable; acceptance disabled: {cause}"
+                    );
+                    unavailable.insert(child.file_name());
+                }
             }
-            if entries.len() >= limits.max_retry_identities {
-                return Err(invalid(
-                    "retained history exceeds configured job cap; raise the cap to reopen without deleting history",
-                ));
-            }
-            let directory = child.path();
-            let mut snapshot: Snapshot =
-                read_json(&directory.join("status.json"), MAX_SNAPSHOT_BYTES)?;
-            if snapshot.version != 1
-                || snapshot.status.schema_version != 1
-                || snapshot.status.id != id
-                || snapshot.status.runtime.is_some()
-                || snapshot.status.result.url != format!("/v1/lens/jobs/{id}/result")
-                || snapshot.status.result.complete != snapshot.status.state.terminal()
-                || !keys.insert(snapshot.key.clone())
-            {
-                return Err(corrupt("inconsistent job snapshot"));
-            }
-            if snapshot.status.deleted {
-                deletion::recover(&directory, &snapshot, &faults)?;
-                reserved_bytes = reserved_bytes
-                    .checked_add((2 * MAX_SNAPSHOT_BYTES) as u64)
-                    .ok_or_else(|| corrupt("job storage accounting overflow"))?;
-                entries.insert(
-                    id.to_owned(),
-                    Arc::new(Entry {
-                        directory,
-                        request_preview: RwLock::new(None),
-                        state: RwLock::new(snapshot),
-                        writer: Mutex::new(()),
-                        fenced: AtomicBool::new(false),
-                        control: ExecutionControl::default(),
-                        faults: Arc::clone(&faults),
-                        runtime: Mutex::new(RuntimeStatus {
-                            execution_settled: true,
-                            ..Default::default()
-                        }),
-                        payload: RwLock::new(()),
-                        payload_charge: AtomicU64::new(0),
-                    }),
-                );
-                continue;
-            }
-            // Check the immutable request, but do not retain prompt bodies for
-            // the entire history in RAM. Only compact metadata is indexed.
-            let request: Value =
-                read_json(&directory.join("request.json"), limits.max_request_bytes)?;
-            if request_hash(&request)? != snapshot.request_hash {
-                return Err(corrupt("job request digest mismatch"));
-            }
-            arrays::recover(&directory, &snapshot, limits)?;
-            let previous_reserved = reserved_bytes;
-            reserved_bytes = reserved_bytes
-                .checked_add(
-                    fs::metadata(directory.join("request.json"))?
-                        .len()
-                        .checked_add((2 * MAX_SNAPSHOT_BYTES) as u64)
-                        .and_then(|bytes| bytes.checked_add(snapshot.committed_bytes))
-                        .and_then(|bytes| bytes.checked_add(snapshot.archive_committed_bytes))
-                        .ok_or_else(|| corrupt("job storage accounting overflow"))?,
-                )
-                .ok_or_else(|| corrupt("job storage accounting overflow"))?;
-            let records = open_regular(&directory.join("records.jsonl"), true)?;
-            if records.metadata()?.len() < snapshot.committed_bytes {
-                return Err(corrupt("committed result bytes are missing"));
-            }
-            records.set_len(snapshot.committed_bytes)?;
-            records.sync_all()?;
-            if !snapshot.status.state.terminal() {
-                snapshot.status.interrupt();
-                snapshot.status.revision = snapshot
-                    .status
-                    .revision
-                    .checked_add(1)
-                    .ok_or_else(|| corrupt("job revision overflow"))?;
-                snapshot.status.updated_at_ms = now_ms().max(snapshot.status.updated_at_ms);
-                replace_snapshot(&directory, &snapshot_bytes(&snapshot)?, &faults)?;
-                #[cfg(test)]
-                faults.check(FaultPoint::RecoveryPublished)?;
-            }
-            // A previous process may have failed after a rename but before its
-            // directory sync. Adopt even terminal snapshots durably before
-            // exposing recovered history or answering an idempotent retry.
-            #[cfg(test)]
-            faults.check(FaultPoint::RecoveryJobSync)?;
-            File::open(&directory)?.sync_all()?;
-            entries.insert(
-                id.to_owned(),
-                Arc::new(Entry {
-                    directory,
-                    request_preview: RwLock::new(request_preview(&request)),
-                    state: RwLock::new(snapshot),
-                    writer: Mutex::new(()),
-                    fenced: AtomicBool::new(false),
-                    control: ExecutionControl::default(),
-                    faults: Arc::clone(&faults),
-                    runtime: Mutex::new(RuntimeStatus {
-                        execution_settled: true,
-                        ..Default::default()
-                    }),
-                    payload: RwLock::new(()),
-                    payload_charge: AtomicU64::new(
-                        reserved_bytes - previous_reserved - (2 * MAX_SNAPSHOT_BYTES) as u64,
-                    ),
-                }),
-            );
         }
         if entries
             .values()
@@ -472,6 +391,7 @@ impl JobStore {
             root,
             limits,
             entries: RwLock::new(entries),
+            unavailable,
             acceptance: Mutex::new(()),
             fenced: AtomicBool::new(false),
             reserved_bytes: AtomicU64::new(reserved_bytes),
@@ -481,6 +401,9 @@ impl JobStore {
     }
 
     fn entry(&self, id: &str) -> Result<Arc<Entry>> {
+        if self.unavailable.contains(std::ffi::OsStr::new(id)) {
+            return Err(StoreError::RecoveryRequired);
+        }
         self.entries
             .read()
             .unwrap()
@@ -493,6 +416,23 @@ impl JobStore {
         self.limits
     }
 
+    pub(crate) fn recovery_report(&self) -> Option<RecoveryReport> {
+        (!self.unavailable.is_empty()).then(|| RecoveryReport {
+            read_only: true,
+            unavailable_count: self.unavailable.len(),
+            unavailable_jobs: self
+                .unavailable
+                .iter()
+                .take(64)
+                .map(|name| {
+                    name.to_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("{name:?}"))
+                })
+                .collect(),
+        })
+    }
+
     /// Recovery lookup does not depend on the currently loaded model's assets
     /// or capabilities. It never admits new work or consumes queue capacity.
     pub(crate) fn lookup(
@@ -501,6 +441,9 @@ impl JobStore {
         request: &Value,
         observations: bool,
     ) -> Result<Option<JobStatus>> {
+        if !self.unavailable.is_empty() {
+            return Err(StoreError::RecoveryRequired);
+        }
         if self.fenced.load(Ordering::Acquire) {
             return Err(io::Error::other("acceptance publication failed; restart required").into());
         }
@@ -546,6 +489,9 @@ impl JobStore {
         let bytes = encode_bounded(&Canonical(request), self.limits.max_request_bytes)?;
         let hash = blake3::hash(&bytes).to_hex().to_string();
         let _acceptance = self.acceptance.lock().unwrap();
+        if !self.unavailable.is_empty() {
+            return Err(StoreError::RecoveryRequired);
+        }
         if self.fenced.load(Ordering::Acquire) {
             return Err(io::Error::other("acceptance publication failed; restart required").into());
         }
@@ -735,6 +681,7 @@ impl JobStore {
             request_previews,
             next_cursor,
             storage,
+            recovery: self.recovery_report(),
         })
     }
 

@@ -8,7 +8,7 @@ import { InputEditor } from "./editor";
 import { useHistory } from "./jobs";
 import { useStored } from "./storage";
 import { ExecutionViewer } from "./viewer";
-import { HistoryEntry } from "./history";
+import { HistoryEntry, RecoveryNotice } from "./history";
 
 const sections = ["Input", "Execution", "History"] as const;
 const api = createLensApi();
@@ -194,10 +194,11 @@ export function App() {
       </section></div>
       <div id="section-History" hidden={section !== "History"}><section className="panel" aria-labelledby="history-heading"><p className="eyebrow">03 / Record</p><h2 id="history-heading">The server's record.</h2><button type="button" disabled={history.busy} onClick={() => void history.reload()}>Refresh history now</button>
         <p className="muted">Actual jobs refresh every 3 seconds, including while work runs. Older pages are retained and merged by ID/revision.</p>
+        {history.recovery && <RecoveryNotice recovery={history.recovery} />}
         {history.storage && <p>Server storage: {history.storage.retained_jobs} / {history.storage.max_retained_jobs} retained jobs; {(history.storage.reserved_bytes / 1048576).toFixed(1)} / {(history.storage.max_store_bytes / 1048576).toFixed(0)} MiB charged; {history.storage.retry_identities} / {history.storage.max_retry_identities} permanent retry identities.</p>}
         <button type="button" disabled={pruning} onClick={() => void pruneArchives()}>{pruning ? "Checking browser archives..." : "Clean completed browser archives"}</button>
         {archiveNotice && <p role="status">{archiveNotice}</p>}
-         {!history.loaded ? <p>History has not loaded; this is not an empty-server claim.</p> : history.jobs.length === 0 ? <p>The server returned no jobs.</p> : <ol className="history-list">{history.jobs.map(job => <HistoryEntry key={job.id} job={job} preview={history.previews.get(job.id)} open={openJob} remove={history.remove} />)}</ol>}
+         {!history.loaded ? <p>History has not loaded; this is not an empty-server claim.</p> : history.jobs.length === 0 ? <p>{history.recovery ? "No healthy jobs are available on this page." : "The server returned no jobs."}</p> : <ol className="history-list">{history.jobs.map(job => <HistoryEntry key={job.id} job={job} preview={history.previews.get(job.id)} open={openJob} remove={history.recovery ? undefined : history.remove} />)}</ol>}
          {history.cursor !== null && <button type="button" disabled={history.busy} onClick={() => void history.more()}>Load older jobs</button>}
       </section></div>
     </main><footer><span>QWEN LENS / HTTP CONTRACT V1</span><span>Durable jobs. Independent viewers. Native scores.</span></footer>

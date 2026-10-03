@@ -533,7 +533,12 @@ fn missing_committed_bytes_fail_closed() {
         store.append(&id, &[readout()]).unwrap();
     }
     fs::write(root.0.join(id).join("records.jsonl"), []).unwrap();
-    assert!(JobStore::open(&root.0, Limits::default()).is_err());
+    let store = root.open();
+    assert_eq!(store.recovery_report().unwrap().unavailable_count, 1);
+    assert!(matches!(
+        store.accept("truncated", &request(), true),
+        Err(StoreError::RecoveryRequired)
+    ));
 }
 
 #[test]
@@ -879,7 +884,15 @@ fn corrupt_committed_arrays_fail_closed_at_read_and_recovery() {
         }
         assert!(store.array(&id, 0).is_err());
         drop(store);
-        assert!(JobStore::open(&root.0, Limits::default()).is_err());
+        let store = root.open();
+        assert!(matches!(
+            store.status(&id),
+            Err(StoreError::RecoveryRequired)
+        ));
+        assert!(matches!(
+            store.accept("corrupt", &request(), true),
+            Err(StoreError::RecoveryRequired)
+        ));
     }
 }
 
@@ -1173,7 +1186,13 @@ fn recovery_syncs_adopted_terminal_snapshot_before_returning_history() {
     store.fail_once(FaultPoint::SnapshotRenamed);
     assert!(store.finalize(&id, None).is_err());
     drop(store);
-    assert!(JobStore::open_failing_recovery(&root.0, FaultPoint::RecoveryJobSync).is_err());
+    let failed = JobStore::open_failing_recovery(&root.0, FaultPoint::RecoveryJobSync).unwrap();
+    assert!(matches!(
+        failed.status(&id),
+        Err(StoreError::RecoveryRequired)
+    ));
+    assert!(failed.history(None, 10).unwrap().jobs.is_empty());
+    drop(failed);
     let store = root.open();
     let terminal = store.status(&id).unwrap();
     assert_eq!(terminal.state, JobState::Completed);
@@ -1201,7 +1220,13 @@ fn interrupted_recovery_is_idempotent_on_the_next_restart() {
     let store = root.open();
     let id = accepted(&store, "recovery", false);
     drop(store);
-    assert!(JobStore::open_failing_recovery(&root.0, FaultPoint::RecoveryPublished).is_err());
+    let failed = JobStore::open_failing_recovery(&root.0, FaultPoint::RecoveryPublished).unwrap();
+    assert!(matches!(
+        failed.status(&id),
+        Err(StoreError::RecoveryRequired)
+    ));
+    assert!(failed.history(None, 10).unwrap().jobs.is_empty());
+    drop(failed);
     let store = root.open();
     let first = store.status(&id).unwrap();
     assert_eq!(first.state, JobState::Interrupted);

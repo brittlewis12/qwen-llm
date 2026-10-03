@@ -102,6 +102,9 @@ impl From<StoreError> for ApiError {
             StoreError::Conflict => Self::new(409, "idempotency_conflict", error.to_string()),
             StoreError::Full => Self::new(429, "capacity_exceeded", error.to_string()),
             StoreError::Deleted => Self::new(410, "job_deleted", error.to_string()),
+            StoreError::RecoveryRequired => {
+                Self::new(500, "history_recovery_required", error.to_string())
+            }
             // A rename may have succeeded. A 503 would incorrectly tell the
             // browser it is safe to abandon this key and create new work.
             StoreError::Storage(_) => Self::new(500, "storage_unavailable", error.to_string()),
@@ -232,6 +235,15 @@ impl LensApi {
         #[cfg(test)]
         if std::env::var("QWEN_LENS_BROWSER_CHILD").as_deref() == Ok("1") {
             capabilities["fixture_owner"] = std::env::var("QWEN_LENS_BROWSER_NONCE").ok().into();
+        }
+        if let Some(recovery) = self
+            .store
+            .as_ref()
+            .and_then(|store| store.recovery_report())
+        {
+            capabilities["available"] = false.into();
+            capabilities["unavailable_reason"] = "history_recovery_required".into();
+            capabilities["storage_recovery"] = json!(recovery);
         }
         capabilities
     }

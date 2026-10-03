@@ -1,5 +1,11 @@
 import { useState } from "react";
-import { isTerminal, type Job, type RequestPreview } from "./contract";
+import { isTerminal, type Job, type RequestPreview, type RecoveryReport } from "./contract";
+
+export function RecoveryNotice({ recovery }: { recovery: RecoveryReport }) {
+  return <div className="recovery" role="alert"><h3>History recovery required</h3><p>{recovery.unavailable_count} stored jobs could not be recovered. Healthy jobs remain readable. Lens submissions and server deletion are disabled to protect accepted retry identities; ordinary serving is unchanged.</p>
+    <p>Usage below excludes unavailable jobs. Inspect server diagnostics, preserve the files and repair them before restarting. Do not delete a damaged directory merely to bypass this refusal.</p>
+    <details><summary>Unavailable job IDs (up to 64)</summary><ul>{recovery.unavailable_jobs.map(id => <li key={id}><code>{id}</code></li>)}</ul></details></div>;
+}
 
 export function mergeRequestPreviews(previous: ReadonlyMap<string, RequestPreview | null>, incoming?: Record<string, RequestPreview | null>) {
   const next = new Map(previous);

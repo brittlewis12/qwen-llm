@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createLensApi } from "./api";
-import { decodeHistory, decodeJob, decodeResult, isTerminal, type Job, type RequestPreview, type StorageUsage } from "./contract";
+import { decodeHistory, decodeJob, decodeResult, isTerminal, type Job, type RequestPreview, type StorageUsage, type RecoveryReport } from "./contract";
 import { mergeRequestPreviews } from "./history";
 import { RecordAccumulator, startPolling, type Sequenced } from "./records";
 
@@ -67,6 +67,7 @@ export function useJob(id: string, report: Report, pageLimit: number, onDeleted?
 export function useHistory(report: Report) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [storage, setStorage] = useState<StorageUsage | null>(null);
+  const [recovery, setRecovery] = useState<RecoveryReport | null>(null);
   const deleted = useRef(new Set<string>());
   const [previews, setPreviews] = useState(new Map<string, RequestPreview | null>());
   const previewRef = useRef(previews);
@@ -97,6 +98,7 @@ export function useHistory(report: Report) {
       previewRef.current = nextPreviews; setPreviews(nextPreviews);
       merge(page.jobs); setLoaded(true);
       if (page.storage) setStorage(page.storage);
+      setRecovery(page.recovery ?? null);
       if (next !== undefined) seen.current.add(next);
       // Refresh the head without invalidating an in-progress traversal of older pages.
       if (next !== undefined || seen.current.size === 0) setCursor(page.next_cursor);
@@ -126,5 +128,5 @@ export function useHistory(report: Report) {
       const next = new Map(previewRef.current); next.set(job.id, null); previewRef.current = next; setPreviews(next);
     }
   }
-  return { jobs, previews, storage, loaded, busy, cursor, remove, observeDeleted, wasDeleted: (id: string) => deleted.current.has(id), reload: () => load(), more: () => cursor === null ? Promise.resolve() : load(cursor), merge };
+  return { jobs, previews, storage, recovery, loaded, busy, cursor, remove, observeDeleted, wasDeleted: (id: string) => deleted.current.has(id), reload: () => load(), more: () => cursor === null ? Promise.resolve() : load(cursor), merge };
 }

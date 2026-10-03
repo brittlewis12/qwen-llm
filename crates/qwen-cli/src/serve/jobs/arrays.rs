@@ -68,9 +68,6 @@ fn payload(file: &mut File, descriptor: &Descriptor) -> Result<Vec<u8>> {
 }
 
 pub(super) fn recover(directory: &Path, snapshot: &Snapshot, limits: Limits) -> Result<()> {
-    if snapshot.archive_reserved_bytes == 0 && snapshot.archive_committed_bytes == 0 {
-        return Ok(());
-    }
     if snapshot.archive_committed_bytes > snapshot.archive_reserved_bytes
         || snapshot.archive_reserved_bytes > MAX_ARCHIVE_BYTES
         || snapshot
@@ -80,7 +77,9 @@ pub(super) fn recover(directory: &Path, snapshot: &Snapshot, limits: Limits) -> 
     {
         return Err(corrupt("invalid archive watermark/reservation"));
     }
-    let mut arrays = open_regular(&directory.join("arrays.bin"), true)?;
+    let mut arrays = (snapshot.archive_reserved_bytes != 0)
+        .then(|| open_regular(&directory.join("arrays.bin"), true))
+        .transpose()?;
     let records = open_regular(&directory.join("records.jsonl"), false)?;
     let mut reader = BufReader::new(records.take(snapshot.committed_bytes));
     let mut record_offset = 0;
@@ -98,12 +97,20 @@ pub(super) fn recover(directory: &Path, snapshot: &Snapshot, limits: Limits) -> 
         if record.get("seq").and_then(Value::as_u64) != Some(seq) {
             return Err(corrupt("invalid archive record sequence"));
         }
+        if record.get("kind").and_then(Value::as_str).is_none() {
+            return Err(corrupt("committed record kind is missing"));
+        }
         if record.get("kind").and_then(Value::as_str) == Some("retained_array") {
             let desc = descriptor(&record, snapshot, record_offset)?;
             if desc.offset != array_offset {
                 return Err(corrupt("noncontiguous archive payloads"));
             }
-            payload(&mut arrays, &desc)?;
+            payload(
+                arrays
+                    .as_mut()
+                    .ok_or_else(|| corrupt("array record without an archive"))?,
+                &desc,
+            )?;
             array_offset += desc.byte_length as u64;
         }
         record_offset += line.len() as u64;
@@ -112,8 +119,10 @@ pub(super) fn recover(directory: &Path, snapshot: &Snapshot, limits: Limits) -> 
     if array_offset != snapshot.archive_committed_bytes || seq != snapshot.next_seq {
         return Err(corrupt("archive descriptor coverage mismatch"));
     }
-    arrays.set_len(array_offset)?;
-    arrays.sync_all()?;
+    if let Some(arrays) = arrays {
+        arrays.set_len(array_offset)?;
+        arrays.sync_all()?;
+    }
     Ok(())
 }
 

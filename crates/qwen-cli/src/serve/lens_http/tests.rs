@@ -1016,3 +1016,65 @@ fn deleting_payloads_preserves_exact_retry_without_delivery() {
     assert!(queue.pending.lock().unwrap().is_empty());
     assert_eq!(queue.used.load(Ordering::Acquire), 0);
 }
+
+#[test]
+fn damaged_history_serves_healthy_reads_but_never_admits_fresh_or_exact_submissions() {
+    let root = TestRoot::new();
+    let store = root.store();
+    let healthy = store
+        .accept("healthy", &request("healthy"), true)
+        .unwrap()
+        .status
+        .id;
+    store.cancel(&healthy).unwrap();
+    let damaged = store
+        .accept("damaged", &request("damaged"), true)
+        .unwrap()
+        .status
+        .id;
+    drop(store);
+    std::fs::write(root.0.join(&damaged).join("status.json"), b"invalid").unwrap();
+    let store = root.store();
+    let queue = FakeAdmission::new(store.clone());
+    let api = enabled(store, queue.clone());
+    let (headers, history) = roundtrip(api.clone(), "GET", "/v1/lens/jobs", "");
+    assert!(headers.starts_with("HTTP/1.1 200"));
+    assert_eq!(history["jobs"][0]["id"], healthy);
+    assert_eq!(history["recovery"]["unavailable_jobs"], json!([damaged]));
+    let (_, caps) = roundtrip(api.clone(), "GET", "/v1/lens/capabilities", "");
+    assert_eq!(caps["available"], false);
+    assert_eq!(caps["unavailable_reason"], "history_recovery_required");
+    assert!(
+        roundtrip(
+            api.clone(),
+            "GET",
+            &format!("/v1/lens/jobs/{healthy}/request"),
+            ""
+        )
+        .0
+        .starts_with("HTTP/1.1 200")
+    );
+    assert!(
+        roundtrip(api.clone(), "GET", &format!("/v1/lens/jobs/{damaged}"), "")
+            .0
+            .starts_with("HTTP/1.1 500")
+    );
+    for key in ["fresh", "healthy", "damaged"] {
+        let (headers, error) = roundtrip(
+            api.clone(),
+            "POST",
+            "/v1/lens/jobs",
+            &request(key).to_string(),
+        );
+        assert!(headers.starts_with("HTTP/1.1 500"));
+        assert_eq!(error["error"]["code"], "history_recovery_required");
+        assert!(error.get("admission").is_none());
+    }
+    assert!(
+        roundtrip(api, "POST", &format!("/v1/lens/jobs/{healthy}/delete"), "")
+            .0
+            .starts_with("HTTP/1.1 500")
+    );
+    assert_eq!(queue.used.load(Ordering::Acquire), 0);
+    assert!(queue.pending.lock().unwrap().is_empty());
+}

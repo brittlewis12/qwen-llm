@@ -43,6 +43,7 @@ let executionSettled = false;
 let failedJobReads = 0;
 let invalidFailedPrefix = false;
 let failNextDelete = false;
+let historyRecovery = false;
 const archiveScores = new Float32Array(caps.model.vocabulary_size).fill(-4);
 archiveScores[456] = 4.2; archiveScores[42] = 3;
 for (let i = 0; i < 22; i++) archiveScores[100 + i] = -1 - i * .05;
@@ -76,7 +77,7 @@ function status(job: TestJob) {
 }
 const server = liveOrigin ? null : Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
   const url = new URL(request.url);
-  if (url.pathname === "/v1/lens/capabilities") return Response.json(caps);
+  if (url.pathname === "/v1/lens/capabilities") return Response.json(historyRecovery ? { ...caps, available: false, unavailable_reason: "history_recovery_required" } : caps);
   if (url.pathname === "/v1/lens/assets") return Response.json(currentAssets());
   if (url.pathname === "/v1/lens/jobs" && request.method === "POST") {
     const body = await request.text(); posts.push(body);
@@ -105,6 +106,7 @@ const server = liveOrigin ? null : Bun.serve({ hostname: "127.0.0.1", port: 0, a
     const offset = cursor === null ? 0 : all.findIndex(job => job.id === cursor) + 1;
     const selected = all.slice(offset, offset + historyPageSize);
     return Response.json({ schema_version: 1, jobs: selected.map(status), next_cursor: offset + selected.length < all.length ? selected.at(-1)!.id : null,
+      ...(historyRecovery ? { recovery: { read_only: true, unavailable_count: 1, unavailable_jobs: ["job_corrupt"] } } : {}),
       ...(historyPreviews ? { request_previews: Object.fromEntries(selected.map(job => [job.id, job.deleted ? null : requestPreview(job)])) } : {}) });
   }
   const binary = /^\/v1\/lens\/jobs\/([^/]+)\/arrays\/(0|100|200)$/.exec(url.pathname);
@@ -840,6 +842,14 @@ try {
   await click("Retry payload cleanup");
   await wait(`![...document.querySelectorAll('.history-list h3')].some(node => node.textContent === 'job_variant_1')`, "successful cleanup retry removes the row");
   console.log("Partial cleanup passed: tombstone inspection and refresh preserve retry, successful cleanup removes the row.");
+  historyRecovery = true;
+  await click("Refresh history now");
+  await wait(`document.body.textContent.includes('History recovery required') && document.body.textContent.includes('Usage below excludes unavailable jobs')`, "recovery issues remain visible beside healthy history");
+  assert.equal(await evaluate<number>(`[...document.querySelectorAll('.history-list button')].filter(button => /Delete job payloads|Retry payload cleanup/.test(button.textContent)).length`), 0);
+  await evaluate(`[...document.querySelectorAll('.history-list > li')].find(li => li.querySelector('h3')?.textContent === 'job_example').querySelector('button').click()`);
+  await wait(`document.querySelector('.job-id')?.textContent === 'job_example' && document.querySelectorAll('.sample-list span').length > 0`, "healthy saved results remain inspectable during recovery refusal");
+  assert.equal(posts.length, postsBeforeHistory);
+  console.log("Recovery notice passed: healthy history stays inspectable, unavailable IDs are visible, server deletion is disabled.");
   if (runtimeErrors.length) throw new Error(`Browser runtime errors: ${JSON.stringify(runtimeErrors)}`);
   console.log("Browser checks passed: phone editing, durable recovery, paged tokens, tap scores, source-scope pinning, reorder, independent variant/new seed, explicit cancellation, history, reload, desktop/phone bounds. GPU disabled; fixture-only backend.");
   console.log(Bun.env.CAPTURE_SCREENSHOTS !== "1" ? "Screenshot capture not requested; browser interactions and layout bounds checked." : `Screenshots: ${output}/phone-score.png and ${output}/desktop-history.png`);

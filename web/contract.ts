@@ -32,7 +32,8 @@ export type Prepared = Sequenced & { kind: "prepared_input"; token_ids: number[]
 export type ResultPage = { schema_version: 1; job_id: string; records: Sequenced[]; next_cursor: string | null; complete: boolean };
 export type RequestPreview = { message_index: number; message_count: number; text: string; truncated: boolean };
 export type StorageUsage = { retained_jobs: number; retry_identities: number; reserved_bytes: number; max_retained_jobs: number; max_retry_identities: number; max_store_bytes: number };
-export type HistoryPage = { jobs: Job[]; next_cursor: string | null; request_previews?: Record<string, RequestPreview | null>; storage?: StorageUsage };
+export type RecoveryReport = { read_only: true; unavailable_count: number; unavailable_jobs: string[] };
+export type HistoryPage = { jobs: Job[]; next_cursor: string | null; request_previews?: Record<string, RequestPreview | null>; storage?: StorageUsage; recovery?: RecoveryReport };
 export type RetainedArray = Sequenced & { kind: "retained_array"; key: string; quantity: "source_residual" | "source_residual_before" | "readout_logits"; position: number; source_layer: number; phase: "prefill" | "decode"; index: number; input_token_id: number; lens?: string; source_key?: string; applied_operation_ids: string[]; site_operation_ids?: string[]; capture_stage: "post_block_after_operations" | "post_block_before_operations"; provenance: "original_forward"; array: { dtype: "f32le"; length: number; offset: number; byte_length: number; sha256: string; url: string } };
 export type PairMetrics = { norm_before: number; norm_after: number; delta_norm: number; relative_delta: number | null };
 export type ResidualPair = Sequenced & { kind: "residual_pair"; id: string; before_key: string; after_key: string; position: number; source_layer: number; phase: "prefill" | "decode"; index: number; input_token_id: number; applied_operation_ids: string[]; metrics: PairMetrics };
@@ -143,7 +144,15 @@ export function decodeHistory(value: unknown): HistoryPage {
     object(value.storage, "storage");
     requireValue(["retained_jobs", "retry_identities", "reserved_bytes", "max_retained_jobs", "max_retry_identities", "max_store_bytes"].every(key => uint((value.storage as Record<string, unknown>)[key])), "storage usage", value);
   }
+  if (value.recovery !== undefined) {
+    object(value.recovery, "recovery");
+    requireValue(value.recovery.read_only === true && uint(value.recovery.unavailable_count) && value.recovery.unavailable_count > 0
+      && Array.isArray(value.recovery.unavailable_jobs) && value.recovery.unavailable_jobs.length <= 64
+      && value.recovery.unavailable_jobs.length <= value.recovery.unavailable_count
+      && value.recovery.unavailable_jobs.every(id => typeof id === "string" && id.length > 0 && id.length <= 1024), "recovery report", value);
+  }
   return { jobs, next_cursor: value.next_cursor as string | null,
+    ...(value.recovery === undefined ? {} : { recovery: value.recovery as RecoveryReport }),
     ...(value.storage === undefined ? {} : { storage: value.storage as StorageUsage }),
     ...(value.request_previews === undefined ? {} : { request_previews: value.request_previews as Record<string, RequestPreview | null> }) };
 }

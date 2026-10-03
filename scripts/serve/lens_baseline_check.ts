@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 
 // Opt-in Metal check. Owns its server handles; never targets an existing service.
 const model = Bun.env.QWEN_LENS_TEST_MODEL;
+const readouts = Bun.env.QWEN_LENS_TEST_READOUTS === "1";
 if (!model) throw new Error("Set QWEN_LENS_TEST_MODEL to a qualified House Qwen3.6/3.8 GGUF.");
 const root = resolve(import.meta.dir, "../..");
 const output = `${root}/target/lens-baseline-${crypto.randomUUID()}`;
@@ -23,6 +24,7 @@ let timedOut = false;
 let stopping: Promise<{ code: number; signal: string | null }> | undefined;
 const evidence: unknown[] = [];
 const prefill = { channel: "reasoning", text: "Let me" };
+let observed: { id: string; page: any } | undefined;
 
 async function stop() {
   if (stopping) return stopping;
@@ -143,6 +145,62 @@ try {
   assert.deepEqual(samples(second), samples(baseline));
   assert.deepEqual(await result(accepted.id), baseline);
   assert.equal((await json("/v1/lens/jobs", body)).id, accepted.id);
+  if (readouts) {
+    assert(caps.readout_modes.includes("full_vocabulary") && !caps.execution.baseline_only);
+    const catalog = await json("/v1/lens/assets");
+    const plain = catalog.assets.find((asset: any) => asset.alias === "plain");
+    assert(plain?.available && plain.identity === caps.model.identity);
+    const prompt = baseline.records[0].token_ids.length;
+    assert(prompt > 1 && caps.model.layers > 1);
+    const last = caps.model.layers - 1;
+    const middle = Math.floor(last / 2);
+    const authored = JSON.parse(body);
+    authored.idempotency_key = crypto.randomUUID();
+    authored.preconditions.asset_identities = { plain: plain.identity };
+    const phases = { prefill: { kind: "values", values: [0, prompt - 1] }, decode: { kind: "values", values: [0, 1] } };
+    authored.diagnostics = { directions: [], operations: [], readouts: [
+      { id: "multi", lens: "plain", mode: "full_vocabulary", top_k: 5, scope: { layers: { kind: "values", values: [middle, last] }, ...phases } },
+      { id: "shared", lens: "plain", mode: "full_vocabulary", top_k: 2, scope: { layers: { kind: "values", values: [last] }, ...phases } },
+    ] };
+    const job = await json("/v1/lens/jobs", JSON.stringify(authored), 202);
+    const page = await completed(job.id);
+    const stripSequence = (page: any) => samples(page).map(({ seq, ...sample }: any) => sample);
+    assert.deepEqual(stripSequence(page), stripSequence(baseline), "Readouts must not change samples or consumption");
+    assert.deepEqual(page.records[0].token_ids, baseline.records[0].token_ids);
+    const rows = page.records.filter((record: any) => record.kind === "readout");
+    assert.equal(rows.length, 12);
+    const sites = [0, prompt - 1, prompt, prompt + 1];
+    const expected = new Set(sites.flatMap(position => [`multi:${middle}:${position}`, `multi:${last}:${position}`, `shared:${last}:${position}`]));
+    let witnesses = 0;
+    for (const row of rows) {
+      assert(expected.delete(`${row.readout_id}:${row.source_layer}:${row.position}`), "Unexpected or duplicate original-forward row");
+      assert.equal(row.provenance, "original_forward");
+      assert.equal(row.capture_stage, "post_block_after_operations");
+      assert.equal(row.predicts_position, row.position + 1);
+      assert.equal(row.phase, row.position < prompt ? "prefill" : "decode");
+      assert.equal(row.index, row.position < prompt ? row.position : row.position - prompt);
+      assert.equal(row.scores.length, row.readout_id === "multi" ? 5 : 2);
+      assert(row.scores.every((score: any) => Number.isFinite(score.score)));
+      if (row.source_layer === last && row.position !== 0) {
+        const witness = row.generation_logit_witness;
+        assert(witness && witness.within_tolerance === true && Number.isFinite(witness.max_abs_error));
+        assert.equal(witness.basis, "same_original_forward_generation_logits");
+        assert.equal(witness.vocabulary_size, caps.model.vocabulary_size);
+        witnesses++;
+      } else assert.equal(row.generation_logit_witness, null, "No fabricated witness for a no-tail or middle-layer forward");
+      if (row.readout_id === "shared") {
+        assert.equal(row.cost.readout_ms, null);
+        const source = rows.find((other: any) => other.readout_id === "multi" && other.source_layer === last && other.position === row.position);
+        assert.deepEqual(row.scores, source.scores.slice(0, 2));
+      } else assert(Number.isFinite(row.cost.readout_ms));
+    }
+    assert.equal(expected.size, 0);
+    assert.equal(witnesses, 6, "Every expected final-layer witness must exist and pass");
+    assert.equal(page.records[0].readout_admission.head_evaluations_upper, 8);
+    assert.deepEqual(await result(job.id), page);
+    observed = { id: job.id, page };
+    evidence.push({ readout_gate: { expected_rows: 12, shared_heads: 8, passing_witnesses: witnesses, unchanged_sampling: true } });
+  }
   const ordinary = await json("/v1/responses", JSON.stringify({ model: caps.model.id, input: "Say hello.", max_output_tokens: 1, temperature: 0 }));
   assert(["completed", "incomplete"].includes(ordinary.status));
   evidence.push({ ordinary });
@@ -168,6 +226,7 @@ try {
   evidence.push({ observed_active: running, exit });
   await start();
   assert.deepEqual(await result(accepted.id), baseline);
+  if (observed) assert.deepEqual(await result(observed.id), observed.page);
   assert.equal((await json("/v1/lens/jobs", body)).id, accepted.id);
   const resumed = await json("/v1/lens/jobs", interruptedBody);
   assert.equal(resumed.id, active.id);
@@ -176,14 +235,14 @@ try {
   assert(resumed.result.complete);
   assert.deepEqual(resumed, snapshot.status, "Restart must preserve preexisting durable settlement");
   assert.deepEqual(await status(active.id), resumed);
-  assert.equal((await json("/v1/lens/jobs")).jobs.length, 3);
+  assert.equal((await json("/v1/lens/jobs")).jobs.length, readouts ? 4 : 3);
   evidence.push({ recovered_interruption: resumed });
   assert.deepEqual(await stop(), { code: 143, signal: null });
   assert(!forced);
   remaining();
-  await Bun.write(`${output}/evidence.json`, JSON.stringify({ model, launches: launch, passed: true, evidence }, null, 2));
+  await Bun.write(`${output}/evidence.json`, JSON.stringify({ model, readouts, launches: launch, passed: true, evidence }, null, 2));
   remaining();
-  console.log(`PASS: baseline, disconnected exact-key recovery, ordinary serving, active interruption/restart; ${output}`);
+  console.log(`PASS: baseline${readouts ? ", shared original-forward readouts with unchanged samples and six passing witnesses" : ""}, disconnected exact-key recovery, ordinary serving, active interruption/restart; ${output}`);
 } finally {
   clearTimeout(watchdog);
   await stop();

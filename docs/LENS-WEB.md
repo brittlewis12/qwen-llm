@@ -188,8 +188,12 @@ submission, reload, exact byte display, history/copy without new jobs and deskto
 layout. Browser layout assertions do not establish screenshot-based visual review.
 The optional CPU browser command `LENS_TEST_PLAIN_ONLY=1 bun run baseline-browser-check.ts`
 in `web/` also submits actual scoped HTTP readouts and compares visible scores to
-the saved records, using synthetic heads only. Plain-head live numerical parity and
-same-forward witnesses still require their separate bounded model-backed gate.
+the saved records, using synthetic heads only. The separate bounded live gate at
+`3c74f3c9` passes on Qwen3.6 35B A3B UD-Q4_K_M: first/last prompt and consumed decode
+sites at middle/final layers, eight shared heads and 12 exact rows. All six expected
+witness records (three distinct final-layer comparisons) have zero maximum absolute
+error. Sampled IDs and consumption match the baseline exactly; the final unconsumed
+sample has no capture. Observed pages remain identical after restart.
 
 The released Qwen3.6 35B A3B Q4_K_M tokenizer also passes the opt-in native/CLI
 prefill matrix on CPU. A clean release built at `b850e3e7` passes the bounded live
@@ -202,6 +206,9 @@ and the interrupted status remain unchanged after restart. The lease is released
 ```sh
 QWEN_LENS_TEST_MODEL=/path/to/qualified.gguf \
   bun run scripts/serve/lens_baseline_check.ts
+# Add one observed job and require all same-forward witnesses:
+QWEN_LENS_TEST_READOUTS=1 QWEN_LENS_TEST_MODEL=/path/to/qualified.gguf \
+  bun run scripts/serve/lens_baseline_check.ts
 ```
 
 This opt-in script runs Metal, owns exactly its child servers, uses normal memory
@@ -209,7 +216,7 @@ admission and retains local evidence under `target/`. It has a 140-second protoc
 deadline plus a separate 35-second cleanup allowance. A successful exit and final
 PASS line are authoritative; a partial evidence file alone is not a passing gate.
 It intentionally disables RAM/KV snapshot persistence. This is not qualification
-of KV continuity, DFlash, memory pressure, every model family, or independent
-CLI-versus-HTTP numerical parity. Preserved old-worktree evidence remains separate.
+of KV continuity, DFlash, memory pressure, every model family, an independent
+readout oracle or CLI-versus-HTTP numerical parity. Preserved old-worktree evidence remains separate.
 Wire fixtures include historical diagnostic extensions; returned capabilities,
 not those examples, define support.

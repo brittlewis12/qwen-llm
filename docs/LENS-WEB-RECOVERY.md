@@ -71,7 +71,7 @@ recovery is explicitly recorded below.
 | R07 | Durable job metadata: `serve/jobs/{state,store,preview}.rs` | Recovered with a real baseline producer and routes; distinct from main's durable model snapshots | CPU store gates and scoped live Qwen3.6 interruption/restart pass; not KV persistence qualification |
 | R08 | Native request/routes/preconditions: `serve/lens_http/*`, `serve/native/preconditions.rs` | Baseline routes/preconditions recovered; diagnostic admission pending | CPU unknown-field/local HTTP/binding checks and accepted-key recovery pass |
 | R09 | Native baseline and observation lifecycle: `serve/native/{mod,execute,writer}.rs` | Baseline recovered on current resident/cache admission, joined writer; observation production pending | CPU lifecycle and scoped Qwen3.6 live disconnect/decode/interruption/restart pass; broader numerical/pressure qualification pending |
-| R10 | Plain original-forward readouts: `serve/native/{readouts,observe}.rs` | CPU-qualified producer recovered with browser and current admission; no replay | CPU scopes/lifecycle/publication/HTTP/browser pass; bounded live unchanged-sample and final-layer witness gate pending |
+| R10 | Plain original-forward readouts: `serve/native/{readouts,observe}.rs` | Producer recovered with browser/current admission; no replay | CPU scopes/lifecycle/publication/HTTP/browser and scoped Qwen3.6 live unchanged-sample/final-layer witness gate pass |
 | R11 | Fitted readouts and direction staging: `serve/native/{registry,interventions}.rs`, `workspace_lens/*` | Reuse after R04/R09/R10 | Registered identity, matrix integrity, bounded ready-only staging/workspace, independent numerical oracle |
 | R12 | Ordered scoped interventions: `serve/native/interventions/*`, `lens_intervention.rs` | Reuse after R02/R11 | Exact order/scopes, zero controls, deployed covector semantics, independent transformation checks |
 | R13 | Retained full scores/source arrays: `serve/jobs/arrays.rs`, native observer/writer, `web/retention*` | Reuse after R07/R10 | Raw admission, dual-watermark durability, digest/finite/shape checks, offline rank/entropy, no implicit fetch |
@@ -768,3 +768,29 @@ comparison across middle/final layers and original prefill/decode sites, requiri
 all expected witnesses to exist and pass. R11-R14 remain explicitly pending.
 Final `cx` review approves the CPU-qualified producer after the accounting and
 publication-boundary fixes; it does not promote pending live numerical evidence.
+
+### R10: Live Plain Readout Consistency
+
+The clean release built at `3c74f3c9` passes the reviewed bounded readout extension
+on Qwen3.6 35B A3B UD-Q4_K_M. Exactly one observed job is added to the existing
+two-launch lifecycle gate: three sampled tokens, middle/final layers, first/last
+prompt positions and consumed decode indices zero/one, with two overlapping IDs.
+All 12 unique requested rows exist, with eight shared heads and correct phase,
+position/prediction and top-k coordinates. The six required witness records cover
+three distinct final-layer head comparisons; all report `max_abs_error=0`.
+No-tail first-prompt and middle-layer sites correctly have null witnesses.
+
+Sampling and consumed flags match the unobserved baseline after removing only
+record sequence numbers. Shared rows preserve score prefixes and report head cost
+only once. The observed job took about 207 ms (not a performance claim). Ordinary
+serving, disconnected recovery, active interruption, pre-restart publication and
+exact completed/observed-page preservation on restart all pass. Both loads take
+about 2.36 seconds; both owned servers exit through handled SIGTERM, with no forced
+cleanup. The normal GPU lease is confirmed released. KV snapshots remain disabled;
+no safety gates are overridden.
+
+Local evidence: `target/lens-baseline-473dcc46-16de-418a-8ac0-cd1e766517a2/`.
+Tested binary Git blob fingerprint: `9947165448a4567bffb5f207fb2ef45abd711e07`;
+harness fingerprint: `4eb6f567bcc52908a017bf29f3d1c675a578c7a5`.
+This is scoped same-forward consistency and noninterference, not an independent
+numerical oracle, a memory-pressure test or general model-family qualification.

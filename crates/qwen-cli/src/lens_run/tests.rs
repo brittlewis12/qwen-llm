@@ -1225,6 +1225,24 @@ fn sweep_manifest_is_ordered_bounded_and_preserves_signed_zero() {
     let decoded = parse_sweep_manifest_bytes(&bytes).unwrap();
     assert_eq!(decoded.coefficients[2].to_bits(), (-0.0_f32).to_bits());
     assert_eq!(decoded.arms[2].coefficient.to_bits(), (-0.0_f32).to_bits());
+    let mut rounding = serde_json::to_value(&manifest).unwrap();
+    let halfway: serde_json::Value = serde_json::from_str("1.0000000596046447753906251").unwrap();
+    let expected = serde_json::from_value::<f32>(halfway.clone()).unwrap();
+    assert_eq!(expected.to_bits(), 0x3f800001);
+    rounding["coefficients"][1] = halfway.clone();
+    rounding["arms"][1]["coefficient"] = halfway;
+    let rounded = parse_sweep_manifest_bytes(&serde_json::to_vec(&rounding).unwrap()).unwrap();
+    assert_eq!(rounded.coefficients[1].to_bits(), expected.to_bits());
+    assert_eq!(rounded.arms[1].coefficient.to_bits(), expected.to_bits());
+    for pointer in ["/coefficients/0", "/arms/0/coefficient"] {
+        for number in ["1e-50", "-1e-500", "1e40", "1e500"] {
+            let mut value = serde_json::to_value(&manifest).unwrap();
+            *value.pointer_mut(pointer).unwrap() = serde_json::from_str(number).unwrap();
+            let error =
+                parse_sweep_manifest_bytes(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+            assert!(error.to_string().contains("coefficient"), "{error:#}");
+        }
+    }
     let arm_bytes = decoded.arms.iter().map(|arm| arm.byte_length).sum::<u64>();
     let largest_manifest = usize::try_from(MAX_SWEEP_BUNDLE_BYTES - arm_bytes).unwrap();
     validate_sweep_bundle_size(&decoded, largest_manifest).unwrap();
@@ -1311,6 +1329,21 @@ fn sweep_cohort_manifest_roundtrips_and_verifies_child_manifest_integrity() {
     };
     let bytes = serialize_sweep_cohort_manifest(&manifest).unwrap();
     assert_eq!(parse_sweep_cohort_manifest_bytes(&bytes).unwrap(), manifest);
+    let mut rounding = serde_json::to_value(&manifest).unwrap();
+    let halfway: serde_json::Value = serde_json::from_str("1.0000000596046447753906251").unwrap();
+    let expected = serde_json::from_value::<f32>(halfway.clone()).unwrap();
+    assert_eq!(expected.to_bits(), 0x3f800001);
+    rounding["coefficients"][0] = halfway;
+    let rounded =
+        parse_sweep_cohort_manifest_bytes(&serde_json::to_vec(&rounding).unwrap()).unwrap();
+    assert_eq!(rounded.coefficients[0].to_bits(), expected.to_bits());
+    for number in ["1e-50", "-1e-500", "1e40", "1e500"] {
+        let mut value = serde_json::to_value(&manifest).unwrap();
+        value["coefficients"][0] = serde_json::from_str(number).unwrap();
+        let error =
+            parse_sweep_cohort_manifest_bytes(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("coefficient"), "{error:#}");
+    }
     let largest_manifest =
         usize::try_from(MAX_SWEEP_BUNDLE_BYTES - manifest.cumulative_serialized_child_bytes)
             .unwrap();
@@ -2102,6 +2135,55 @@ fn plan_file_parser_accepts_fractional_coefficients() {
     )
     .unwrap();
     assert_eq!(plan.operations[0].action.coefficient(), 0.0001);
+}
+
+#[test]
+fn plan_file_parser_does_not_turn_nonzero_coefficients_into_zero_controls() {
+    let bytes = serde_json::to_string(&sweep_plan()).unwrap();
+    assert!(bytes.contains("\"coefficient\":0.25"));
+    for number in ["1e-50", "-1e-50", "1e-500", "1e40", "1e500"] {
+        let changed = bytes.replace("\"coefficient\":0.25", &format!("\"coefficient\":{number}"));
+        assert!(parse_plan_bytes(changed.as_bytes()).is_err(), "{number}");
+    }
+}
+
+#[test]
+fn sweep_cli_rejects_lossy_zero_controls_without_narrowing_number_syntax() {
+    let parse = |coefficients: &str| {
+        SweepArgsParser::try_parse_from([
+            "test",
+            "--model",
+            "model.gguf",
+            "--plan",
+            "plan.json",
+            "--operation",
+            "swept",
+            "--coefficients",
+            coefficients,
+            "--prompt",
+            "probe",
+            "--output",
+            "sweep",
+        ])
+    };
+    for number in ["1e-50", "-1e-50", "1e-500", "1e40", "1e500", "NaN", "inf"] {
+        assert!(parse(number).is_err(), "{number}");
+    }
+    let spellings = [
+        "0", "-0", "+0", "-0e-999", "+1", ".5", "1.", "1e-40", "-0", "1e-40",
+    ];
+    let parsed = parse(&spellings.join(",")).unwrap().args;
+    assert_eq!(
+        parsed
+            .coefficients
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        spellings
+            .iter()
+            .map(|value| value.parse::<f32>().unwrap().to_bits())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]

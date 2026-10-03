@@ -63,7 +63,7 @@ recovery is explicitly recorded below.
 | ID | Behavior and source | Disposition / dependencies | Required gate |
 | --- | --- | --- | --- |
 | R01 | Bounded regular-file access: `bounded_file.rs`, Lens readers | Shared readers recovered with current CLI consumers; future HTTP reader wiring travels with its consuming slice | CPU symlink/type/length/mutation tests; all reader consumers build |
-| R02 | Shared authored scopes and operation semantics: `lens_scope.rs`, `lens_intervention.rs`, `lens_run/{plan,execute,sweep}.rs` | Partially recovered: current-main scopes/validation, direction/action wire forms and normalization extracted with existing CLI consumers; lowering and behavior changes remain pending | Current CLI wire/binding/normalization/lowering regressions; no new service dependency |
+| R02 | Shared authored scopes and operation semantics: `lens_scope.rs`, `lens_intervention.rs`, `lens_run/{plan,execute,sweep}.rs` | Partially recovered: shared scopes/wire forms/normalization and strict coefficient ingress with existing CLI consumers; shared lowering/action validation remain pending | Current CLI wire/binding/normalization/lowering regressions; no new service dependency |
 | R03 | Typed prefills and annotated input: `lens_input.rs`, `model_request.rs`, `messages.rs`, `open_responses/render.rs`, CLI callers | Partially recovered: ordinary Qwen3.6/3.8 singleton CLI prefills and strict retained context; native input/tool/history integration pending | Exact prompt bytes, token positions, reasoning-only continuation, tools and house/upstream rendering |
 | R04 | Deployment binding and asset verification: `linear_transport{.rs,/deployment.rs,/cpu_fixture.rs}`, `full_lens/access.rs` | Reuse after R01; retain main's expected-profile checks | Binding mismatch refusal, retained payload hashes, CPU-before-Metal admission, no implicit transfer override |
 | R05 | Shared ordinary execution: `ordinary_executor.rs`, `qwen/decode.rs`, `lens_run/execute.rs` | Partially recovered: shared serial decode lifecycle and explicit request cancellation with existing CLI/serve/Lens consumers; prefill and forwarding adapters pending | CLI/serve sampling, cancellation, terminal nonconsumption and telemetry remain equivalent except documented added checkpoints |
@@ -176,6 +176,38 @@ pass with 31. All binaries check successfully. No GPU execution was performed.
 The old tree's numeric selector cardinality helper, stricter coefficient decoder,
 shared operation validation/lowering and native integration are deliberately not
 included in this refactor. They require their own focused recovery and tests.
+
+### R02: Preserve Authored Zero-Control Intent
+
+All five action coefficient decoders now reject overflow and authored nonzero
+numbers that narrow to f32 zero. Arbitrary-precision JSON spelling preserves the
+evidence even when f64 underflows; significand inspection ignores exponent digits.
+The same rule applies to sweep CLI input and sweep/cohort manifest coefficient
+arrays and arms. Existing plan, CLI and artifact readers are the consumers; no
+HTTP scaffolding or kernel changes are included.
+
+Explicit signed/exponent-form zeros and nonzero subnormals remain accepted. Action
+JSON keeps its buffered integer/f64 narrowing; manifest scalar fields keep direct
+Number-to-f32 conversion, and CLI keeps Rust f32 parsing and finite non-JSON
+spellings. Rounding-sensitive fixtures check these existing distinct results
+rather than silently unifying them. The explicit Action decoder also recovers
+acceptance of finite high-precision spellings that tagged serde previously
+rejected; bit equivalence applies to successfully accepted legacy inputs.
+Typed setters, plan finite checks,
+coordinate-swap reflection-scale validation, operation order and enablement are
+unchanged. Previously rounded-zero artifacts cannot recover lexical intent, and
+accepted subnormals are not a numerical-effect or GPU preservation guarantee.
+
+Regression tests first reproduced silent underflow through actual plan-file and
+Clap entry points. Direct and Value-buffered serde paths cover every action;
+manifest readers and the filesystem-backed sweep inspector reject malformed
+coefficients in metadata, source plans and child authored/resolved plans. Signed
+zero serialization/digest and existing sweep tests remain green. Final CPU Lens
+gate passes 382 tests, with nine ignored and the known unmarked Muse Metal test
+explicitly filtered. No model or GPU lease is needed for numeric ingress checks.
+Serving remains at 212 passing tests with 24 ignored and the known unmarked Metal
+context test explicitly filtered. All binaries/tests compile; format and whitespace
+checks pass.
 
 ### R06: Immutable Family Request Semantics
 

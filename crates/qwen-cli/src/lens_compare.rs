@@ -3016,6 +3016,40 @@ mod tests {
     }
 
     #[test]
+    fn inspect_sweep_rejects_nonzero_underflow_in_metadata_and_plans() {
+        for pointer in [
+            "/coefficients/0",
+            "/arms/0/coefficient",
+            "/source_plan/operations/0/action/coefficient",
+            "/authored_plan/operations/0/action/coefficient",
+            "/plan/operations/0/action/coefficient",
+        ] {
+            let root = sweep_fixture(&[0.0], |_, _| {});
+            upgrade_sweep_fixture_to_v3(&root);
+            let number: serde_json::Value = serde_json::from_str("1e-500").unwrap();
+            if pointer.starts_with("/authored_plan/") || pointer.starts_with("/plan/") {
+                rewrite_sweep_child(&root, 0, |value| {
+                    *value.pointer_mut(pointer).unwrap() = number
+                });
+            } else {
+                let path = root.join("manifest.json");
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                *value.pointer_mut(pointer).unwrap() = number;
+                std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+            let error = load_sweep(&root)
+                .err()
+                .expect("nonzero coefficient must not become zero");
+            std::fs::remove_dir_all(root).unwrap();
+            assert!(
+                format!("{error:#}").contains("coefficient overflows or underflows native f32"),
+                "{pointer}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
     fn inspect_sweep_cli_accepts_reference_limit_and_json() {
         let args = InspectSweepArgsParser::try_parse_from([
             "test",

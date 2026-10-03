@@ -189,6 +189,18 @@ operation application is recorded. Its scalar event still uses the same serial
 kernel topology selected by the nonzero source plan, avoiding a zero-control
 topology confound.
 
+Plan action coefficients, sweep CLI coefficients and sweep/cohort manifest
+coefficients reject overflow and authored nonzero numbers that round to native
+`f32` zero. Explicit zero (including signed and exponent-form zero) and nonzero
+subnormals remain valid; a tiny requested intervention must not silently become
+a disabled control. Action JSON retains its buffered integer/`f64` narrowing;
+manifest scalar fields retain direct JSON Number-to-`f32` conversion. CLI
+arguments retain Rust's `f32` parsing, including finite forms such as `+1` and
+`.5`. Other rounding and coordinate-swap reflection-scale checks are unchanged.
+This is parsing qualification, not a promise that GPU arithmetic preserves every
+subnormal or produces a measurable intervention. Previously saved artifacts that
+already rounded a coefficient to zero cannot recover the original spelling.
+
 Single sweeps and resident sweep cohorts share a 512 MiB serialized bundle
 budget. Cohort `auto` prefill currently resolves to the documented serial
 effective policy; callers do not need to restate that implementation choice.

@@ -67,7 +67,8 @@ pub(crate) struct CoefficientSweepArgs {
         long,
         value_delimiter = ',',
         required = true,
-        allow_hyphen_values = true
+        allow_hyphen_values = true,
+        value_parser = crate::lens_intervention::coefficient::parse_cli
     )]
     pub(super) coefficients: Vec<f32>,
 
@@ -310,6 +311,7 @@ pub(crate) struct SweepProducer {
 #[serde(deny_unknown_fields)]
 pub(crate) struct CoefficientSweepArm {
     pub(crate) index: usize,
+    #[serde(deserialize_with = "crate::lens_intervention::coefficient::deserialize")]
     pub(crate) coefficient: f32,
     pub(crate) artifact: String,
     pub(crate) byte_length: u64,
@@ -328,6 +330,7 @@ pub(crate) struct CoefficientSweepManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) source_plan_canonical_json_blake3: Option<String>,
     pub(crate) operation_id: String,
+    #[serde(deserialize_with = "crate::lens_intervention::coefficient::deserialize_many")]
     pub(crate) coefficients: Vec<f32>,
     pub(crate) arms: Vec<CoefficientSweepArm>,
 }
@@ -368,6 +371,7 @@ pub(super) struct SweepCohortManifest {
     pub(super) source_plan_canonical_json_blake3: String,
     pub(super) model_path: PathBuf,
     pub(super) operation_id: String,
+    #[serde(deserialize_with = "crate::lens_intervention::coefficient::deserialize_many")]
     pub(super) coefficients: Vec<f32>,
     pub(super) sampler: RunSampler,
     pub(super) max_new_tokens: usize,

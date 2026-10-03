@@ -4,6 +4,8 @@ use crate::lens_scope::Scope;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod coefficient;
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Normalization {
@@ -58,24 +60,29 @@ pub(crate) struct OperationDefinition {
 pub(crate) enum Action {
     FixedAdd {
         direction: String,
+        #[serde(deserialize_with = "coefficient::deserialize_action")]
         coefficient: f32,
     },
     ResidualL2Fraction {
         direction: String,
+        #[serde(deserialize_with = "coefficient::deserialize_action")]
         coefficient: f32,
     },
     ProjectionAblate {
         direction: String,
+        #[serde(deserialize_with = "coefficient::deserialize_action")]
         coefficient: f32,
     },
     SourceToTarget {
         source: String,
         target: String,
+        #[serde(deserialize_with = "coefficient::deserialize_action")]
         coefficient: f32,
     },
     CoordinateSwap {
         source: String,
         target: String,
+        #[serde(deserialize_with = "coefficient::deserialize_action")]
         coefficient: f32,
     },
 }

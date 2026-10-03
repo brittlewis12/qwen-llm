@@ -266,6 +266,95 @@ fn execute(work: Work, backend: &mut dyn GenerationBackend) {
     drop(sink);
 }
 
+pub(super) struct Connection {
+    incoming: Option<Receiver<Work>>,
+    worker: Worker,
+}
+
+impl Connection {
+    pub(super) fn start(
+        stream: TcpStream,
+        backend: &dyn GenerationBackend,
+        trace: Option<TraceSubscriber>,
+        guard: ActivityGuard,
+    ) -> Result<Self> {
+        let socket = stream.try_clone().context("clone HTTP shutdown handle")?;
+        let control = Arc::new(Control {
+            execution: ExecutionControl::default(),
+            owner: std::thread::current(),
+        });
+        let (sender, incoming) = sync_channel(1);
+        let mut proxy = HttpProxy {
+            model_id: backend.model_id().to_owned(),
+            profile: backend.request_profile(),
+            work: sender,
+            control: Arc::clone(&control),
+            activity: Arc::new(guard),
+        };
+        let cancel = CancelOnDrop(Arc::clone(&control));
+        let thread = std::thread::Builder::new()
+            .name("qwen-http-request".into())
+            .stack_size(WORKER_STACK_BYTES)
+            .spawn(move || {
+                let _cancel = cancel;
+                http::handle_connection(&stream, &mut proxy, trace)
+            })
+            .context("spawn HTTP request worker")?;
+        Ok(Self {
+            incoming: Some(incoming),
+            worker: Worker {
+                socket,
+                control,
+                thread: Some(thread),
+            },
+        })
+    }
+
+    /// Advance only from the resident owner; true means the CPU worker is joined.
+    pub(super) fn advance(
+        &mut self,
+        backend: &mut dyn GenerationBackend,
+        mut checkpoint: impl FnMut() -> Result<()>,
+    ) -> Result<bool> {
+        checkpoint()?;
+        match self
+            .incoming
+            .as_ref()
+            .expect("connection not settled")
+            .recv_timeout(POLL)
+        {
+            Ok(work) => {
+                checkpoint()?;
+                execute(work, backend);
+                Ok(false)
+            }
+            Err(RecvTimeoutError::Timeout) => Ok(false),
+            Err(RecvTimeoutError::Disconnected) => {
+                self.incoming.take();
+                self.worker.join()?;
+                Ok(true)
+            }
+        }
+    }
+
+    pub(super) fn stop_and_join(mut self) -> Result<()> {
+        self.incoming.take();
+        if self.worker.thread.is_some() {
+            self.worker.stop();
+            self.worker.join()?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        // Release queued work before Worker stops sockets and joins the producer.
+        self.incoming.take();
+    }
+}
+
+#[cfg(test)]
 pub(super) fn handle_connection(
     stream: TcpStream,
     backend: &mut dyn GenerationBackend,
@@ -273,53 +362,12 @@ pub(super) fn handle_connection(
     guard: ActivityGuard,
     mut checkpoint: impl FnMut() -> Result<()>,
 ) -> Result<()> {
-    let socket = stream.try_clone().context("clone HTTP shutdown handle")?;
-    let control = Arc::new(Control {
-        execution: ExecutionControl::default(),
-        owner: std::thread::current(),
-    });
-    let (sender, incoming): (_, Receiver<Work>) = sync_channel(1);
-    let mut proxy = HttpProxy {
-        model_id: backend.model_id().to_owned(),
-        profile: backend.request_profile(),
-        work: sender,
-        control: Arc::clone(&control),
-        activity: Arc::new(guard),
-    };
-    let cancel = CancelOnDrop(Arc::clone(&control));
-    let thread = std::thread::Builder::new()
-        .name("qwen-http-request".into())
-        .stack_size(WORKER_STACK_BYTES)
-        .spawn(move || {
-            let _cancel = cancel;
-            http::handle_connection(&stream, &mut proxy, trace)
-        })
-        .context("spawn HTTP request worker")?;
-    let mut worker = Worker {
-        socket,
-        control,
-        thread: Some(thread),
-    };
+    let mut connection = Connection::start(stream, backend, trace, guard)?;
     let result = (|| {
-        loop {
-            checkpoint()?;
-            match incoming.recv_timeout(POLL) {
-                Ok(work) => {
-                    checkpoint()?;
-                    execute(work, backend);
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
-            }
-        }
+        while !connection.advance(backend, &mut checkpoint)? {}
         Ok(())
     })();
-    // Drop queued work and close producers before joining a waiting subscriber.
-    drop(incoming);
-    if result.is_err() {
-        worker.stop();
-    }
-    worker.join()?;
+    connection.stop_and_join()?;
     result
 }
 

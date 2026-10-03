@@ -487,6 +487,29 @@ pass 383 tests with nine ignored and the known unmarked Muse Metal test explicit
 filtered. All binaries/tests compile; formatting and whitespace checks pass.
 No model is loaded onto Metal and no GPU lease is used.
 
+### R06: Owner-Supervised Connection Lifetime
+
+The existing owner loop now owns the ordinary `Connection` explicitly and advances
+dispatch rather than entering a socket-scoped nested loop. Preparation stays on
+the CPU worker and generation stays on the owner. Single-admission/pre-header busy
+behavior, bounded piece acknowledgements, profiles and reserves are unchanged.
+No scheduler, native route or dormant dispatcher accompanies this refactor.
+
+Common teardown closes admission, stops acceptor delivery, releases queued work,
+stops/joins the HTTP worker, joins the acceptor, drains completion callbacks and
+invokes backend shutdown. Explicit settlement surfaces worker panic; RAII remains
+the unwind backstop. On handling failure, completion callbacks now drain after
+acceptor join rather than before teardown, still exactly once on the owner and
+before backend shutdown. The test-only connection wrapper uses the new supervision;
+it is not an independent old implementation.
+
+Two CPU tests cover stopping a started read connection without dispatch and worker
+panic reporting with settled activity. Existing all-family direct-versus-bridged
+protocol, lifecycle and real SIGTERM subprocess fixtures pass. Serving gates pass
+214 tests with 24 ignored and the known unmarked Metal-context test explicitly
+filtered. All binaries/tests compile; format/whitespace checks pass. Durable jobs,
+independent native cancellation and concurrent control traffic remain pending.
+
 ### Next R06 Integration Boundary
 
 The next expansion is concurrent diagnostic/history handling and native owner

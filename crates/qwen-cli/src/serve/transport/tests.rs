@@ -88,6 +88,57 @@ fn bridge_reservation_covers_stack_and_all_live_chunk_slots() {
 }
 
 #[test]
+fn owner_can_settle_a_started_connection_without_dispatching_work() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (stream, _) = listener.accept().unwrap();
+    let mut activity = OwnerActivity::default();
+    let guard = activity.admission().try_admit().unwrap();
+    let backend = Backend(|_: &mut dyn GenerationSink| panic!("no owner dispatch requested"));
+    let connection = Connection::start(stream, &backend, None, guard).unwrap();
+    activity.idle_if_quiet(|| panic!("started connection still owns activity"));
+    connection.stop_and_join().unwrap();
+    let mut completions = 0;
+    activity.drain_finished(|| completions += 1);
+    assert_eq!(completions, 1);
+    assert!(activity.is_settled());
+}
+
+#[test]
+fn explicit_owner_settlement_reports_worker_panic_after_releasing_activity() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (socket, _) = listener.accept().unwrap();
+    let mut activity = OwnerActivity::default();
+    let guard = activity.admission().try_admit().unwrap();
+    let (sender, incoming) = sync_channel(1);
+    let thread = std::thread::spawn(move || {
+        let _guard = guard;
+        let _sender = sender;
+        panic!("worker supervision fixture")
+    });
+    let connection = Connection {
+        incoming: Some(incoming),
+        worker: Worker {
+            socket,
+            control: control(),
+            thread: Some(thread),
+        },
+    };
+    assert!(
+        connection
+            .stop_and_join()
+            .unwrap_err()
+            .to_string()
+            .contains("worker panicked")
+    );
+    let mut completions = 0;
+    activity.drain_finished(|| completions += 1);
+    assert_eq!(completions, 1);
+    assert!(activity.is_settled());
+}
+
+#[test]
 fn full_piece_channel_waits_without_spurious_failure_or_extra_copy() {
     let (pieces, incoming) = sync_channel(1);
     pieces

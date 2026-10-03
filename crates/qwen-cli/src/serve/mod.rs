@@ -741,9 +741,17 @@ fn accept_loop_with_checkpoint(
     let acceptor = spawn_acceptor(listener, sender, accept_ready, accept_stopping)?;
     let mut activity = owner_activity::OwnerActivity::default();
     let admission = activity.admission();
+    let mut connection: Option<transport::Connection> = None;
 
     let result = (|| -> Result<()> {
         loop {
+            if let Some(active) = &mut connection {
+                if active.advance(backend, || checkpoint(OwnerCheckpoint::DuringHandling))? {
+                    connection.take();
+                    activity.drain_finished(|| backend.request_finished());
+                }
+                continue;
+            }
             checkpoint(OwnerCheckpoint::BeforeAdmission)?;
             ready.store(true, Ordering::Release);
             let stream = match receiver.recv_timeout(ADMISSION_POLL_INTERVAL) {
@@ -762,11 +770,9 @@ fn accept_loop_with_checkpoint(
                 .try_admit()
                 .context("HTTP owner admission is closed")?;
             let subscriber = trace.as_ref().map(http::TraceLog::subscriber);
-            let handled = transport::handle_connection(stream, backend, subscriber, guard, || {
-                checkpoint(OwnerCheckpoint::DuringHandling)
-            });
-            activity.drain_finished(|| backend.request_finished());
-            handled?;
+            connection = Some(transport::Connection::start(
+                stream, backend, subscriber, guard,
+            )?);
         }
         Ok(())
     })();
@@ -775,6 +781,7 @@ fn accept_loop_with_checkpoint(
     ready.store(false, Ordering::Release);
     stopping.store(true, Ordering::Release);
     drop(receiver);
+    let worker_result = connection.map_or(Ok(()), transport::Connection::stop_and_join);
     let acceptor_result = acceptor.join();
     activity.drain_finished(|| backend.request_finished());
     ensure!(activity.is_settled(), "HTTP owner activity did not settle");
@@ -784,6 +791,7 @@ fn accept_loop_with_checkpoint(
     if acceptor_result.is_err() {
         return Err(anyhow::anyhow!("HTTP acceptor panicked"));
     }
+    worker_result?;
     result
 }
 

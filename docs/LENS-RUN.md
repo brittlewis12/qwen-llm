@@ -893,6 +893,14 @@ directions. Muse runs consume model-bound selected-token J/R rows for readout
 and all five post-block action kinds. Concurrent or speculative decode and
 prefix caching are not selected silently.
 
+Ordinary Qwen run/sweep arms share serial decode lifecycle ordering with the CLI
+and server. Stop tokens are retained without publication or consumption; the final
+non-stop sample at the token limit is retained without another forward. Process
+shutdown is checked before selection and before/after each transition. A shutdown
+after publication may prevent consuming that token; one after a forward does not
+roll back sequence or capture state. This does not change packed-prefill routing
+or qualify additional cancellation boundaries inside packed work.
+
 ## Flash-Next Capability Boundary
 
 Flash-Next `run` supports one native fixed add and post-add capture per serial

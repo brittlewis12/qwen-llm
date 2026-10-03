@@ -8,7 +8,7 @@ const WAIT: Duration = Duration::from_secs(2);
 
 fn control() -> Arc<Control> {
     Arc::new(Control {
-        cancelled: AtomicBool::new(false),
+        execution: ExecutionControl::default(),
         owner: std::thread::current(),
     })
 }
@@ -258,7 +258,7 @@ fn failed_subscriber_cancels_but_does_not_finish_active_generation() {
         worker.join().unwrap(),
         Err(BackendFailure::Aborted(_))
     ));
-    assert!(control.cancelled.load(Ordering::Acquire));
+    assert!(control.execution.is_cancelled());
     activity.drain_finished(|| panic!("generation is still active"));
     activity.idle_if_quiet(|| panic!("cannot publish idle with in-flight generation"));
     release.send(()).unwrap();
@@ -386,7 +386,7 @@ fn panicking_subscriber_cancels_owner_and_releases_one_activity() {
         }),
     );
     assert!(worker.join().is_err());
-    assert!(control.cancelled.load(Ordering::Acquire));
+    assert!(control.execution.is_cancelled());
     let mut calls = 0;
     activity.drain_finished(|| calls += 1);
     assert_eq!(calls, 1);

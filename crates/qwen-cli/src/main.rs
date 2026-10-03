@@ -33,6 +33,7 @@ mod model_request;
 #[path = "qwen/muse_glimmer.rs"]
 mod muse_glimmer;
 mod open_responses;
+mod ordinary_executor;
 #[path = "qwen/prefill_plan.rs"]
 mod prefill_plan;
 #[path = "qwen/prompt_lookup.rs"]

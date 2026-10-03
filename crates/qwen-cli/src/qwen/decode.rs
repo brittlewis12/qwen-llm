@@ -587,68 +587,46 @@ where
 }
 
 pub(crate) fn generate_serial_state_with_context<Context, State, Select, OnToken, Transition>(
-    mut state: State,
+    state: State,
     max_tokens: usize,
     stop_tokens: &[i32],
     context: &mut Context,
-    mut select: Select,
-    mut on_token: OnToken,
-    mut transition: Transition,
+    select: Select,
+    on_token: OnToken,
+    transition: Transition,
 ) -> Result<GenerationResult>
 where
     Select: FnMut(&mut Context, &State) -> Result<i32>,
     OnToken: FnMut(i32) -> Result<()>,
     Transition: FnMut(&mut Context, i32) -> Result<State>,
 {
-    ensure!(max_tokens > 0, "max_tokens must be >= 1");
-    let wall_t0 = Instant::now();
-    let mut tokens = Vec::with_capacity(max_tokens);
-    let mut first_token_selection_ms = None;
-    let mut first_token_ready_ms = None;
-    let mut first_token_callback_ms = None;
-    let mut transitions = 0usize;
-    let mut transition_ms = 0.0;
-    let mut first_transition_ms = None;
-    let mut stop_reason = None;
-
-    while tokens.len() < max_tokens {
-        shutdown::checkpoint()?;
-        let selection_t0 = Instant::now();
-        let token = select(context, &state)?;
-        first_token_selection_ms.get_or_insert_with(|| selection_t0.elapsed().as_secs_f64() * 1e3);
-        first_token_ready_ms.get_or_insert_with(|| wall_t0.elapsed().as_secs_f64() * 1e3);
-        tokens.push(token);
-
-        if stop_tokens.contains(&token) {
-            stop_reason = Some(StopReason::Eos);
-            break;
-        }
-        on_token(token)?;
-        first_token_callback_ms.get_or_insert_with(|| wall_t0.elapsed().as_secs_f64() * 1e3);
-        if tokens.len() == max_tokens {
-            stop_reason = Some(StopReason::TokenLimit);
-            break;
-        }
-
-        let transition_t0 = Instant::now();
-        state = transition(context, token)?;
-        shutdown::checkpoint()?;
-        let elapsed_ms = transition_t0.elapsed().as_secs_f64() * 1e3;
-        transition_ms += elapsed_ms;
-        first_transition_ms.get_or_insert(elapsed_ms);
-        transitions += 1;
-    }
-
+    use crate::ordinary_executor::{DecodeOptions, TerminalReason, TokenAllocation};
+    let result = crate::ordinary_executor::decode(
+        state,
+        DecodeOptions {
+            max_tokens,
+            stop_tokens,
+            allocation: TokenAllocation::Upfront,
+        },
+        context,
+        shutdown::checkpoint,
+        select,
+        on_token,
+        transition,
+    )?;
     Ok(GenerationResult {
-        tokens,
-        wall_ms: wall_t0.elapsed().as_secs_f64() * 1e3,
-        first_token_selection_ms: first_token_selection_ms.unwrap_or(0.0),
-        first_token_ready_ms,
-        first_token_callback_ms,
-        transitions,
-        transition_ms,
-        first_transition_ms,
-        stop_reason: stop_reason.expect("positive max_tokens must select a terminal token"),
+        tokens: result.tokens,
+        wall_ms: result.wall_ms,
+        first_token_selection_ms: result.first_token_selection_ms,
+        first_token_ready_ms: result.first_token_ready_ms,
+        first_token_callback_ms: result.first_token_callback_ms,
+        transitions: result.transitions,
+        transition_ms: result.transition_ms,
+        first_transition_ms: result.first_transition_ms,
+        stop_reason: match result.stop_reason {
+            TerminalReason::StopToken => StopReason::Eos,
+            TerminalReason::TokenLimit => StopReason::TokenLimit,
+        },
     })
 }
 

@@ -828,38 +828,33 @@ pub(super) fn execute_ordinary_arm(
         packed_span_index == prefill.execution.packed_spans().len(),
         "packed Lens prefill schedule was not fully consumed"
     );
-    let mut generated_token_ids = Vec::new();
-    let mut stop_reason = String::from("max_new_tokens");
-    for generated_index in 0..max_new_tokens {
-        let sampled = sampler.sample(&logits)?.token;
-        generated_token_ids.push(sampled);
-        if stop_tokens.contains(&sampled) {
-            stop_reason = String::from("stop_token");
-            break;
-        }
-        if generated_index + 1 == max_new_tokens {
-            break;
-        }
-        let phase = Phase::Decode(generated_index);
-        schedule.populate(phase, &mut event)?;
-        let position = prompt_token_ids
-            .len()
-            .checked_add(generated_index)
-            .context("decode position overflow")?;
-        logits = forward_event(
-            execution,
-            &schedule,
-            &forward,
-            sampled,
-            u32::try_from(position).context("decode position exceeds runtime addressing")?,
-            &mut sequence,
-            phase,
-            &event,
-            phase_needs_logits(phase, prompt_token_ids.len()),
-            &mut operation_applications,
-            &mut live_readouts,
-        )?;
-    }
+    let (generated_token_ids, stop_reason) = decode_ordinary_tokens(
+        logits,
+        max_new_tokens,
+        stop_tokens,
+        &mut sampler,
+        |generated_index, sampled| {
+            let phase = Phase::Decode(generated_index);
+            schedule.populate(phase, &mut event)?;
+            let position = prompt_token_ids
+                .len()
+                .checked_add(generated_index)
+                .context("decode position overflow")?;
+            forward_event(
+                execution,
+                &schedule,
+                &forward,
+                sampled,
+                u32::try_from(position).context("decode position exceeds runtime addressing")?,
+                &mut sequence,
+                phase,
+                &event,
+                phase_needs_logits(phase, prompt_token_ids.len()),
+                &mut operation_applications,
+                &mut live_readouts,
+            )
+        },
+    )?;
     Ok(RunResult {
         linear_transports: execution
             .plan

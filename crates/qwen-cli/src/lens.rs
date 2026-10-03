@@ -38,6 +38,8 @@ mod muse_lens_run;
 mod muse_published_full_lens;
 mod muse_published_full_lens_artifact;
 mod open_responses;
+#[allow(dead_code)] // Shared with qwen's request control and decode telemetry.
+mod ordinary_executor;
 mod plain_logit_lens;
 #[allow(dead_code)]
 mod prompt_template;

@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) const MAX_NATIVE_HYPER_CAPTURES: usize = 32;
 
 pub(super) const PACKED_PREFILL_MIN_PASSIVE_SPAN_TOKENS: usize = 65;
@@ -131,6 +134,40 @@ pub(super) fn run_sampler(args: &LensRunArgs) -> RunSampler {
         min_p: args.min_p,
         seed: args.seed,
     }
+}
+
+pub(super) fn decode_ordinary_tokens(
+    logits: Vec<f32>,
+    max_new_tokens: usize,
+    stop_tokens: &HashSet<i32>,
+    sampler: &mut Sampler,
+    mut forward: impl FnMut(usize, i32) -> Result<Vec<f32>>,
+) -> Result<(Vec<i32>, String)> {
+    use crate::ordinary_executor::{DecodeOptions, TerminalReason, TokenAllocation};
+    let stops = stop_tokens.iter().copied().collect::<Vec<_>>();
+    let mut index = 0;
+    let result = crate::ordinary_executor::decode(
+        logits,
+        DecodeOptions {
+            max_tokens: max_new_tokens,
+            stop_tokens: &stops,
+            allocation: TokenAllocation::Incremental,
+        },
+        sampler,
+        crate::shutdown::checkpoint,
+        |sampler, logits| Ok(sampler.sample(logits)?.token),
+        |_| Ok(()),
+        |_, token| {
+            let logits = forward(index, token)?;
+            index += 1;
+            Ok(logits)
+        },
+    )?;
+    let reason = match result.stop_reason {
+        TerminalReason::StopToken => "stop_token",
+        TerminalReason::TokenLimit => "max_new_tokens",
+    };
+    Ok((result.tokens, reason.into()))
 }
 
 pub(super) struct PreparedOrdinaryPrefill {

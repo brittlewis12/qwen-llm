@@ -8,11 +8,11 @@ use super::items::{ServeError, ServeRequest};
 use super::owner_activity::ActivityGuard;
 use super::request_profile::RequestProfile;
 use super::trace::TraceSubscriber;
+use crate::ordinary_executor::ExecutionControl;
 use anyhow::{Context, Result};
 use std::io;
 use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::thread::{JoinHandle, Thread};
 use std::time::Duration;
@@ -29,20 +29,20 @@ const BUFFER_RESERVE_BYTES: u64 =
     (WORKER_STACK_BYTES + (PIECE_CAPACITY + 2) * CHUNK_BYTES * 2) as u64;
 
 struct Control {
-    cancelled: AtomicBool,
+    execution: ExecutionControl,
     owner: Thread,
 }
 
 impl Control {
     fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
+        self.execution.cancel();
         self.owner.unpark();
     }
 
     fn checkpoint(&self) -> io::Result<()> {
-        if self.cancelled.load(Ordering::Acquire) {
-            return Err(aborted("HTTP subscriber stopped"));
-        }
+        self.execution
+            .checkpoint()
+            .map_err(|_| aborted("HTTP subscriber stopped"))?;
         crate::shutdown::checkpoint().map_err(|error| aborted(error.to_string()))
     }
 }
@@ -275,7 +275,7 @@ pub(super) fn handle_connection(
 ) -> Result<()> {
     let socket = stream.try_clone().context("clone HTTP shutdown handle")?;
     let control = Arc::new(Control {
-        cancelled: AtomicBool::new(false),
+        execution: ExecutionControl::default(),
         owner: std::thread::current(),
     });
     let (sender, incoming): (_, Receiver<Work>) = sync_channel(1);

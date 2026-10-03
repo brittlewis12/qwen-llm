@@ -66,7 +66,7 @@ recovery is explicitly recorded below.
 | R02 | Shared authored scopes and operation semantics: `lens_scope.rs`, `lens_intervention.rs`, `lens_run/{plan,execute,sweep}.rs` | Partially recovered: current-main scopes/validation, direction/action wire forms and normalization extracted with existing CLI consumers; lowering and behavior changes remain pending | Current CLI wire/binding/normalization/lowering regressions; no new service dependency |
 | R03 | Typed prefills and annotated input: `lens_input.rs`, `model_request.rs`, `messages.rs`, `open_responses/render.rs`, CLI callers | Rework against current renderers; R02 uses existing span types only | Exact prompt bytes, token positions, reasoning-only continuation, tools and house/upstream rendering |
 | R04 | Deployment binding and asset verification: `linear_transport{.rs,/deployment.rs,/cpu_fixture.rs}`, `full_lens/access.rs` | Reuse after R01; retain main's expected-profile checks | Binding mismatch refusal, retained payload hashes, CPU-before-Metal admission, no implicit transfer override |
-| R05 | Shared ordinary execution: `ordinary_executor.rs`, `qwen/decode.rs`, `lens_run/execute.rs` | Rework around main's current decode paths; not an automatic replacement | CLI/serve sampling, cancellation, terminal nonconsumption and telemetry remain equivalent |
+| R05 | Shared ordinary execution: `ordinary_executor.rs`, `qwen/decode.rs`, `lens_run/execute.rs` | Partially recovered: shared serial decode lifecycle and explicit request cancellation with existing CLI/serve/Lens consumers; prefill and forwarding adapters pending | CLI/serve sampling, cancellation, terminal nonconsumption and telemetry remain equivalent except documented added checkpoints |
 | R06 | Owner queue and CPU HTTP coordination: `serve/{control,queue,request_profile}.rs`, backend/HTTP wiring | Partially recovered: ordinary single-admission CPU transport and owner-only generation, with profiles/activity/traces; multi-request/native coordination and live qualification remain pending | Idle/request-finished/shutdown ownership, busy admission, cancellation/disconnect, JSON/SSE protocols |
 | R07 | Durable job metadata: `serve/jobs/{state,store,preview}.rs` | Reuse with R06; distinct from main's durable model snapshots | Exact-key acceptance/retry, bounded publication, recovery and corruption handling, history without inference |
 | R08 | Native request/routes/preconditions: `serve/lens_http/*`, `serve/native/preconditions.rs` | Reuse schema where compatible; R03/R06/R07 | Unknown-field rejection, local HTTP checks, binding coverage, stale rejection before acceptance, accepted-key recovery |
@@ -339,6 +339,52 @@ mode. Serving CPU qualification now passes 212 tests with 24 ignored entries
 (23 existing opt-in tests plus that child fixture); the known unmarked Metal
 context test remains explicitly filtered. Binaries, formatting and whitespace
 checks pass. Live model-backed qualification remains pending.
+
+### R05: Shared Serial Decode Lifecycle
+
+`ordinary_executor.rs` now owns serial selection, stop handling, publication and
+consumption order. Current CLI/serve adapters retain `GenerationResult` fields and
+stop reasons; ordinary Lens run/sweep arms retain their token IDs and exact
+`stop_token` / `max_new_tokens` strings. The mutable sampler/context remains with
+the caller, including sampled-structural transactional telemetry. Qwen retains
+upfront token-vector allocation; Lens retains incremental allocation and early-stop
+memory behavior. Timer placement/field meaning is preserved, not exact elapsed
+milliseconds.
+
+Stop tokens are counted but not published or forwarded. A non-stop sample at the
+token limit is published, then retained without a forward. The helper deliberately
+adds a pre-transition checkpoint to Qwen and decode checkpoints to Lens: shutdown
+after publication can prevent consuming that token; shutdown after a successful
+transition does not roll back sequence, sampler or capture state. Callback errors
+still win before the new checkpoint. Terminal decisions do not gain a late check.
+Production adapters currently supply process-shutdown checkpoints, not an explicit
+request-cancellation check at every decode boundary. Transport still checks local
+cancellation through its sink.
+
+The shared `ExecutionControl` owns explicit cancellation only. Transport composes
+it with the existing process checkpoint, preserving HTTP error mapping, signal
+diagnostics, socket shutdown and owner wakeup. Generic tests inject this control
+into the decode loop; that proves the helper contract, not new per-request CLI
+controls. No lifetime is released merely because cancellation was requested.
+
+Packed prefill, schedule population, checked positions, forward routing, kernels,
+readout/capture ownership and memory admission are untouched. The Lens adapter tests
+exercise transition indices and stop strings; production phase/position mapping
+and `forward_event` arguments are preserved by source comparison, not numerical
+execution in those tests. Shared prefill and original-forward adapters still need
+their own recovery. No job store or HTTP diagnostic route lands here.
+
+CPU gates pass: 11 shared lifecycle tests; two Lens adapter tests; existing greedy,
+seeded, sampled-structural, attributed and GPU-greedy simulation fixtures. The seven
+greedy tests, seeded golden and sampled-structural transaction fixture pass both
+before and after extraction. Serving passes 212 tests with 24 ignored entries;
+Lens passes 364 with nine ignored. Known unmarked Metal tests remain explicitly
+filtered. All binaries, formatting and whitespace checks pass without warnings.
+
+The durable-job dependency check confirmed that the old store assumes this
+execution-control contract and native admission assumes typed input/prefill
+contracts. Recover those with existing consumers before adding a store without a
+producer or routes that cannot submit meaningful work.
 
 ### Next R06 Integration Boundary
 

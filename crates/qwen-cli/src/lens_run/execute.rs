@@ -395,51 +395,33 @@ pub(super) fn forward_event(
         None
     };
     let logits = match route {
-        EventForwardRoute::SerialFullTailCapture => {
+        EventForwardRoute::SerialFullTailCapture | EventForwardRoute::SerialNoTailCapture => {
             let capture = capture
                 .as_ref()
                 .context("active Lens readout has no capture view")?;
-            forward.single_token_with_post_block_interventions(
+            crate::ordinary_executor::post_block_forward(
+                forward,
+                unsafe { sequence.metal_session_mut() },
                 token,
                 position,
-                unsafe { sequence.metal_session_mut() },
-                event.capture_layers(),
-                capture,
+                needs_logits,
+                Some((event.capture_layers(), capture)),
                 &borrowed,
             )?
         }
-        EventForwardRoute::SerialFullTailNoCapture => forward
-            .single_token_with_post_block_interventions_no_capture(
+        EventForwardRoute::SerialFullTailNoCapture | EventForwardRoute::SerialNoTailNoCapture => {
+            crate::ordinary_executor::post_block_forward(
+                forward,
+                unsafe { sequence.metal_session_mut() },
                 token,
                 position,
-                unsafe { sequence.metal_session_mut() },
+                needs_logits,
+                None,
                 &borrowed,
-            )?,
+            )?
+        }
         EventForwardRoute::ProductionFullTail => {
             forward.single_token(token, position, unsafe { sequence.metal_session_mut() })?
-        }
-        EventForwardRoute::SerialNoTailCapture => {
-            let capture = capture
-                .as_ref()
-                .context("active Lens readout has no capture view")?;
-            forward.single_token_with_post_block_interventions_no_tail(
-                token,
-                position,
-                unsafe { sequence.metal_session_mut() },
-                event.capture_layers(),
-                capture,
-                &borrowed,
-            )?;
-            Vec::new()
-        }
-        EventForwardRoute::SerialNoTailNoCapture => {
-            forward.single_token_with_post_block_interventions_no_capture_no_tail(
-                token,
-                position,
-                unsafe { sequence.metal_session_mut() },
-                &borrowed,
-            )?;
-            Vec::new()
         }
         EventForwardRoute::ProductionFullTailDiscardLogits => {
             forward.single_token(token, position, unsafe { sequence.metal_session_mut() })?;

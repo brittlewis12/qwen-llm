@@ -99,22 +99,15 @@ pub(crate) fn run_loaded(
         |token, position, logits| {
             sequence.check_position(position as usize)?;
             sequence.ensure_can_append(1)?;
-            let output = if logits {
-                forward.single_token_with_post_block_interventions_no_capture(
-                    token,
-                    position,
-                    unsafe { sequence.metal_session_mut() },
-                    &[],
-                )?
-            } else {
-                forward.single_token_with_post_block_interventions_no_capture_no_tail(
-                    token,
-                    position,
-                    unsafe { sequence.metal_session_mut() },
-                    &[],
-                )?;
-                Vec::new()
-            };
+            let output = ordinary_executor::post_block_forward(
+                &forward,
+                unsafe { sequence.metal_session_mut() },
+                token,
+                position,
+                logits,
+                None,
+                &[],
+            )?;
             sequence.advance_by(1)?;
             Ok(output)
         },

@@ -706,3 +706,21 @@ The next consuming recovery slice is plain original-forward readouts, followed b
 fitted bindings/interventions and retained/pair capture production. The original
 richer live/oracle scripts remain in the frozen source until their server consumers
 return; the baseline live harness is independently committed and qualified.
+
+### R05/R10: Shared Original-Forward Dispatch
+
+The existing CLI `forward_event` and native baseline now immediately consume one
+small `ordinary_executor::post_block_forward` adapter. Its four branches call the
+same MetalForward methods with the same arguments for capture/no-capture and
+logits/no-tail. Callers retain checkpoints, sequence validation, exactly one advance
+after successful forward and subsequent consumption/observation accounting. CLI
+Production routes remain direct `single_token`, including discard-logits behavior;
+no old `LoadedModel::decode_token` substitution is introduced.
+
+This is a source-equivalent extraction before recovering plain observation, not
+another executor or a new capture capability. The existing route-topology matrix
+remains green. Scoped CPU gates pass: Lens 383 with nine ignored and explicit Muse
+Metal exclusion; serving 292 with 26 ignored and explicit Metal-context exclusion.
+All binaries/tests compile and formatting passes. `cx` verifies method/argument,
+checkpoint/advance and production-route fidelity and approves the small refactor.
+No GPU is used; earlier live evidence remains tied to its tested source build.

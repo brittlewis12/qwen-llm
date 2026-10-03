@@ -6,6 +6,41 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+/// Route diagnostic work through the original token forward. Callers retain
+/// checkpoints, sequence validation/advancement and post-consumption observation.
+pub(crate) fn post_block_forward(
+    forward: &qwen_llm::metal_forward::MetalForward<'_>,
+    session: &mut qwen_llm::metal_forward::MetalSession,
+    token: i32,
+    position: u32,
+    needs_logits: bool,
+    capture: Option<(&[u32], &qwen_llm::metal::MetalTensor)>,
+    operations: &[qwen_llm::metal::PostBlockIntervention<'_>],
+) -> Result<Vec<f32>> {
+    match (capture, needs_logits) {
+        (Some((layers, capture)), true) => Ok(forward.single_token_with_post_block_interventions(
+            token, position, session, layers, capture, operations,
+        )?),
+        (Some((layers, capture)), false) => {
+            forward.single_token_with_post_block_interventions_no_tail(
+                token, position, session, layers, capture, operations,
+            )?;
+            Ok(Vec::new())
+        }
+        (None, true) => Ok(
+            forward.single_token_with_post_block_interventions_no_capture(
+                token, position, session, operations,
+            )?,
+        ),
+        (None, false) => {
+            forward.single_token_with_post_block_interventions_no_capture_no_tail(
+                token, position, session, operations,
+            )?;
+            Ok(Vec::new())
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct ExecutionControl {
     cancelled: Arc<AtomicBool>,

@@ -1,14 +1,13 @@
 # Lens Workbench
 
-## Recovered Now
+## Workbench Capabilities
 
-The reconstruction provides a durable baseline API and the preserved Bun/React
+The workbench provides a durable baseline API and a Bun/React
 client on `qwen serve`, including scoped plain and registered fitted original-forward
 readouts, ordered scoped interventions, retained source/full-score arrays and
 whole-site before/after pairs from the original forward.
-Compatible historical records remain inspectable. The committed reconstruction is
-ready for integration; see [the recovery ledger](LENS-WEB-RECOVERY.md) for exact
-evidence, deliberate policy replacements and remaining product limitations.
+Compatible historical records remain inspectable. The API and browser share the
+same resident server; qualification boundaries are described below.
 
 ```sh
 qwen serve -m MODEL --lens-data-dir JOB_DIRECTORY
@@ -367,8 +366,8 @@ exact restart bytes and handled active-job shutdown. An additional 160-row job a
 16,384 rows within the unchanged writer budgets. Separate fitted/intervention/
 pair test-binary gates establish scoped independent numerical checks, not fit quality
 or every-model coverage. The final CPU browser also exercises combined fitted heads,
-ordered operations, retention and pairs through the actual Rust producer. Full
-evidence paths and exact build boundaries are in the recovery ledger.
+ordered operations, retention and pairs through the actual Rust producer. These
+checks do not establish all-model or all-mode numerical equivalence.
 
 This opt-in script runs Metal, owns exactly its child servers, uses normal memory
 admission and retains local evidence under `target/`. It has a 140-second protocol

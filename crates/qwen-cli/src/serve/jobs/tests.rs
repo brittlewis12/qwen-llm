@@ -7,9 +7,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-struct TestRoot(PathBuf);
+pub(super) struct TestRoot(pub(super) PathBuf);
 impl TestRoot {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
             "qwen-jobs-test-{}-{}-{}",
@@ -22,7 +22,7 @@ impl TestRoot {
         ));
         Self(path)
     }
-    fn open(&self) -> JobStore {
+    pub(super) fn open(&self) -> JobStore {
         JobStore::open(&self.0, Limits::default()).unwrap()
     }
 }
@@ -66,6 +66,206 @@ fn failure() -> JobError {
         code: "observation_failed".into(),
         param: None,
         message: "writer failed".into(),
+    }
+}
+
+#[test]
+fn encoded_batches_match_value_records_and_publish_progress_once() {
+    let root = TestRoot::new();
+    let store = root.open();
+    let a = accepted(&store, "values", true);
+    let b = accepted(&store, "encoded", true);
+    store.start(&a, 2).unwrap();
+    store.start(&b, 2).unwrap();
+    let records = [
+        json!({"kind":"readout","scores":[1.25,-0.0],"text":"line\nquoted\"","token":u64::MAX}),
+        readout(),
+    ];
+    let bytes = records
+        .iter()
+        .map(|r| serde_json::to_vec(r).unwrap())
+        .collect::<Vec<_>>();
+    let progress = Counters {
+        prompt_tokens: 2,
+        consumed_prompt_tokens: 1,
+        ..Default::default()
+    };
+    let revision = store.status(&b).unwrap().revision;
+    store.append(&a, &records).unwrap();
+    store
+        .progress(&a, Phase::Prefill, progress.clone())
+        .unwrap();
+    let status = store
+        .append_encoded_progress(
+            &b,
+            &bytes.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+            Phase::Prefill,
+            progress.clone(),
+        )
+        .unwrap();
+    assert_eq!(status.revision, revision + 1);
+    assert_eq!(status.generation.counters, progress);
+    assert_eq!(status.observations.committed_records, 2);
+    assert_eq!(
+        fs::read(root.0.join(&a).join("records.jsonl")).unwrap(),
+        fs::read(root.0.join(&b).join("records.jsonl")).unwrap()
+    );
+    assert_eq!(
+        store.result(&a, None, 10).unwrap().records,
+        store.result(&b, None, 10).unwrap().records
+    );
+    let c = accepted(&store, "progress-only", false);
+    store.start(&c, 2).unwrap();
+    let status = store
+        .append_encoded_progress(&c, &[], Phase::Prefill, progress)
+        .unwrap();
+    assert_eq!(status.generation.counters.consumed_prompt_tokens, 1);
+    assert!(!status.result.available);
+    assert!(store.result(&c, None, 10).unwrap().records.is_empty());
+}
+
+#[test]
+fn encoded_batch_validation_refuses_framing_and_owned_fields_without_publication() {
+    let root = TestRoot::new();
+    let store = root.open();
+    let id = accepted(&store, "invalid-encoded", true);
+    store.start(&id, 2).unwrap();
+    let status = store.status(&id).unwrap();
+    for bytes in [
+        b"[]".as_slice(),
+        br#"{}"#,
+        br#"{"kind":"readout","seq":null}"#,
+        br#"{"kind":"readout","seq":1}"#,
+        br#"{"kind":"retained_array"}"#,
+        br#"{"kind":"a","kind":"b"}"#,
+        br#"{"kind":"a"}{}"#,
+        b"{\"kind\":\"a\",\n\"value\":1}",
+        br#"{"kind":"a","bad":[}"#,
+    ] {
+        assert!(
+            store
+                .append_encoded_progress(
+                    &id,
+                    &[bytes],
+                    Phase::Prefill,
+                    Counters {
+                        prompt_tokens: 2,
+                        ..Default::default()
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(store.status(&id).unwrap(), status);
+    }
+    assert!(
+        store
+            .append_encoded_progress(
+                &id,
+                &[br#"{"kind":"ok"}"#],
+                Phase::Decode,
+                Counters {
+                    prompt_tokens: 2,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+    );
+    assert!(store.result(&id, None, 10).unwrap().records.is_empty());
+}
+
+#[test]
+fn encoded_limits_include_sequence_digits_and_jsonl_newlines() {
+    let root = TestRoot::new();
+    let raw = br#"{"kind":"test"}"#;
+    let bytes = raw.len() + 9;
+    let store = JobStore::open(
+        &root.0,
+        Limits {
+            max_record_bytes: bytes,
+            max_batch_bytes: bytes,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let id = accepted(&store, "encoded-limits", false);
+    store.start(&id, 2).unwrap();
+    let progress = Counters {
+        prompt_tokens: 2,
+        ..Default::default()
+    };
+    assert!(
+        store
+            .append_encoded_progress(&id, &[raw, raw], Phase::Prefill, progress.clone())
+            .is_err()
+    );
+    for _ in 0..10 {
+        store
+            .append_encoded_progress(&id, &[raw], Phase::Prefill, progress.clone())
+            .unwrap();
+    }
+    assert!(
+        store
+            .append_encoded_progress(&id, &[raw], Phase::Prefill, progress)
+            .is_err()
+    );
+    assert_eq!(
+        fs::metadata(root.0.join(id).join("records.jsonl"))
+            .unwrap()
+            .len(),
+        (10 * bytes) as u64
+    );
+}
+
+#[test]
+fn encoded_batch_faults_keep_records_and_progress_on_the_same_watermark() {
+    for point in [
+        FaultPoint::RecordPartialWrite,
+        FaultPoint::RecordSync,
+        FaultPoint::SnapshotRenamed,
+    ] {
+        let root = TestRoot::new();
+        let store = root.open();
+        let id = accepted(&store, "encoded-fault", true);
+        store.start(&id, 2).unwrap();
+        store.fail_once(point);
+        let records = [
+            br#"{"kind":"readout"}"#.as_slice(),
+            br#"{"kind":"residual_pair"}"#,
+        ];
+        assert!(
+            store
+                .append_encoded_progress(
+                    &id,
+                    &records,
+                    Phase::Prefill,
+                    Counters {
+                        prompt_tokens: 2,
+                        consumed_prompt_tokens: 1,
+                        ..Default::default()
+                    }
+                )
+                .is_err()
+        );
+        assert!(store.result(&id, None, 10).unwrap().records.is_empty());
+        drop(store);
+        let store = root.open();
+        assert_eq!(
+            store.result(&id, None, 10).unwrap().records.len(),
+            if point == FaultPoint::SnapshotRenamed {
+                2
+            } else {
+                0
+            }
+        );
+        assert_eq!(
+            store
+                .status(&id)
+                .unwrap()
+                .generation
+                .counters
+                .consumed_prompt_tokens,
+            u64::from(point == FaultPoint::SnapshotRenamed)
+        );
     }
 }
 

@@ -642,17 +642,7 @@ impl JobStore {
 
     pub(crate) fn progress(&self, id: &str, phase: Phase, counters: Counters) -> Result<JobStatus> {
         self.update(id, |status| {
-            if status.generation.state != GenerationState::Running
-                || !counters.follows(&status.generation.counters)
-                || (status.generation.phase == Some(Phase::Decode) && phase == Phase::Prefill)
-                || (phase == Phase::Decode
-                    && counters.consumed_prompt_tokens != counters.prompt_tokens)
-                || (phase == Phase::Prefill && counters.sampled_tokens != 0)
-            {
-                return Err(invalid("invalid generation progress"));
-            }
-            status.generation.phase = Some(phase);
-            status.generation.counters = counters;
+            apply_progress(status, phase, counters)?;
             Ok(true)
         })
     }
@@ -836,6 +826,49 @@ impl JobStore {
         self.append_locked(&entry, entry.snapshot(), records, None)
     }
 
+    /// Native producer objects are already serialized. Validate without building
+    /// their nested Value trees; publish records and progress in one transaction.
+    pub(crate) fn append_encoded_progress(
+        &self,
+        id: &str,
+        records: &[&[u8]],
+        phase: Phase,
+        counters: Counters,
+    ) -> Result<JobStatus> {
+        let entry = self.entry(id)?;
+        let _writer = entry.writer.lock().unwrap();
+        entry.writable()?;
+        let mut next = entry.snapshot();
+        apply_progress(&mut next.status, phase, counters)?;
+        let mut batch = Vec::new();
+        let mut readouts = 0;
+        for &record in records {
+            let prefix = format!("{{\"seq\":{},", next.next_seq);
+            let size = record
+                .len()
+                .checked_add(prefix.len())
+                .ok_or_else(|| invalid("record size overflow"))?;
+            // Replacing '{' subtracts one byte; the JSONL newline adds it back.
+            if size > self.limits.max_record_bytes
+                || size > self.limits.max_batch_bytes.saturating_sub(batch.len())
+            {
+                return Err(invalid("record batch exceeds byte budget"));
+            }
+            readouts += u64::from(encoded_observation(record)?);
+            batch.extend_from_slice(prefix.as_bytes());
+            batch.extend_from_slice(&record[1..]);
+            batch.push(b'\n');
+            next.next_seq = next
+                .next_seq
+                .checked_add(1)
+                .ok_or_else(|| invalid("record sequence overflow"))?;
+        }
+        if batch.is_empty() {
+            return entry.publish(next);
+        }
+        self.publish_batch(&entry, next, batch, readouts, None)
+    }
+
     fn append_locked(
         &self,
         entry: &Entry,
@@ -884,6 +917,17 @@ impl JobStore {
                 .checked_add(1)
                 .ok_or_else(|| invalid("record sequence overflow"))?;
         }
+        self.publish_batch(entry, next, batch, readouts, payload)
+    }
+
+    fn publish_batch(
+        &self,
+        entry: &Entry,
+        mut next: Snapshot,
+        batch: Vec<u8>,
+        readouts: u64,
+        payload: Option<&[u8]>,
+    ) -> Result<JobStatus> {
         if readouts > 0 && next.status.observations.state == ObservationState::NotRequested {
             return Err(invalid("readout without requested observations"));
         }
@@ -973,10 +1017,10 @@ impl JobStore {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_writer_locked(&self, id: &str, action: impl FnOnce()) {
+    pub(crate) fn with_writer_locked<T>(&self, id: &str, action: impl FnOnce() -> T) -> T {
         let entry = self.entry(id).unwrap();
         let _writer = entry.writer.lock().unwrap();
-        action();
+        action()
     }
 
     #[cfg(test)]
@@ -1226,6 +1270,99 @@ fn remove_abandoned_acceptance(directory: &Path) -> Result<()> {
     }
     fs::remove_dir(directory)?;
     sync_parent(directory)
+}
+
+pub(crate) fn check_progress(
+    previous_phase: Option<Phase>,
+    previous: &Counters,
+    phase: Phase,
+    counters: &Counters,
+) -> Result<()> {
+    if !counters.follows(previous)
+        || (previous_phase == Some(Phase::Decode) && phase == Phase::Prefill)
+        || (phase == Phase::Decode && counters.consumed_prompt_tokens != counters.prompt_tokens)
+        || (phase == Phase::Prefill && counters.sampled_tokens != 0)
+    {
+        return Err(invalid("invalid generation progress"));
+    }
+    Ok(())
+}
+
+fn apply_progress(status: &mut JobStatus, phase: Phase, counters: Counters) -> Result<()> {
+    if status.generation.state != GenerationState::Running {
+        return Err(invalid("invalid generation progress"));
+    }
+    check_progress(
+        status.generation.phase,
+        &status.generation.counters,
+        phase,
+        &counters,
+    )?;
+    status.generation.phase = Some(phase);
+    status.generation.counters = counters;
+    Ok(())
+}
+
+fn encoded_observation(bytes: &[u8]) -> Result<bool> {
+    fn present<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<bool, D::Error> {
+        serde::de::IgnoredAny::deserialize(d).map(|_| true)
+    }
+    #[derive(Deserialize)]
+    struct Envelope {
+        kind: String,
+        #[serde(default, deserialize_with = "present")]
+        seq: bool,
+    }
+    if bytes.first() != Some(&b'{')
+        || bytes.last() != Some(&b'}')
+        || bytes.iter().any(|b| matches!(b, b'\n' | b'\r'))
+    {
+        return Err(invalid("serialized record must be one JSONL object"));
+    }
+    let envelope: Envelope = serde_json::from_slice(bytes)?;
+    if envelope.seq || envelope.kind == "retained_array" {
+        return Err(invalid(
+            "record sequence and array descriptors are store-owned",
+        ));
+    }
+    Ok(matches!(
+        envelope.kind.as_str(),
+        "readout" | "residual_pair"
+    ))
+}
+
+#[cfg(test)]
+#[test]
+fn encoded_sequence_overflow_never_publishes_partial_batch() {
+    let root = super::tests::TestRoot::new();
+    let store = root.open();
+    let id = store
+        .accept("overflow", &serde_json::json!({}), false)
+        .unwrap()
+        .status
+        .id;
+    store.start(&id, 1).unwrap();
+    store.entry(&id).unwrap().state.write().unwrap().next_seq = u64::MAX;
+    assert!(
+        store
+            .append_encoded_progress(
+                &id,
+                &[br#"{"kind":"test"}"#],
+                Phase::Prefill,
+                Counters {
+                    prompt_tokens: 1,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+    );
+    assert_eq!(
+        fs::metadata(root.0.join(&id).join("records.jsonl"))
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(store.entry(&id).unwrap().snapshot().next_seq, u64::MAX);
 }
 
 fn replace_snapshot(directory: &Path, bytes: &[u8], _faults: &Faults) -> Result<()> {

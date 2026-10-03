@@ -263,10 +263,12 @@ writing borrowed immutable bytes. They do not reserve execution. Bodies on stati
 reads are refused before allocation. Client discovery is sequenced; read-only 503s
 receive at most two short retries, never automatic resubmission or cancellation.
 
-Each mutating HTTP request has a completion lifetime; an accepted native job adds
-an independent lifetime through joined publication. Valid read-only Lens routes
-release activity before store/socket I/O, so polling does not reset idle snapshot
-publication. Only the owner invokes idle, request-finished and shutdown callbacks.
+Partial request heads, static/history reads and rejected Host/Origin traffic do not
+claim model activity. Trusted Lens body/preparation work inhibits idle after head
+classification, without resetting the completion timer on rejection or exact retry.
+Durable acceptance promotes an independent native lifetime through joined publication.
+Ordinary parsed requests retain their existing completion behavior, including errors
+and model-list requests. Only the owner invokes maintenance and shutdown callbacks.
 Shutdown closes admission/delivery, interrupts cooperative execution, settles
 connections and joins control/artifact workers before the existing backend flush.
 An individual GPU command is not preemptible. Filesystem operations and writer joins
@@ -280,7 +282,22 @@ Current bounds are explicit, not capability targets:
 - Writer: 128 queued events and 8 MiB of retained record allocation capacity.
 - Result page: 256 records / 2 MiB. History: 4096 jobs / 64 GiB, no silent eviction.
 - Native writer admission allowance: 82 MiB, including stack and publication work.
-- History/assets-enabled control allowance: 512 MiB across both worker slots.
+- History-enabled control allowance: 512 MiB across both worker slots.
+- Standalone-assets control allowance: 16 MiB for classifier/watchdog stacks and buffers.
+
+The writer drains available metadata into bounded batches, with a 4 MiB encoded
+store limit including sequence fields/newlines. Records and their latest validated
+progress share one durable snapshot publication. Array/staging events are FIFO
+barriers; each array retains its independent durability transaction. Already encoded
+metadata is validated without constructing nested JSON value trees. The existing
+82 MiB allowance covers budgeted originals, batch serialization, validation and one
+pending producer record; optional array queue/producer allowances remain separate.
+
+Queue or byte-budget saturation waits cooperatively instead of failing a valid wide
+scope. Waiting retains the same event and permits, checks cancellation/shutdown and
+writer failure every 5ms, and never grows the budgets. An interrupted blocked
+publication reports an explicit artifact error; known generation outcomes remain
+separate. This does not make blocking filesystem calls or writer joins preemptible.
 
 The control allowance covers overlapping bounded request/result JSON trees,
 serialization, prepared-input token/span construction, watchdog/worker stacks,

@@ -1261,3 +1261,60 @@ Final read-only `cx` review gives GO for complete semantic recovery, ready for
 integration against the pinned main. It finds no unaccounted frozen capability loss
 in the reviewed source/docs, while explicitly not rerunning the reported tests or
 approving a merge/push. The final handoff contains only committed source and docs.
+
+## Independent Pre-Merge Review Corrections
+
+A subsequent independent review found operational defects missed by the earlier
+readiness review. The original recovery evidence remains scoped to its recorded
+builds; it did not qualify these failure/performance boundaries.
+
+- `016b3c8f` includes `arrays.bin` in abandoned acceptance cleanup. Fault tests
+  now cover archived/unarchived jobs on both sides of the acceptance rename.
+- `3efee14b` invokes backend shutdown before reporting unsettled owner activity,
+  with a regression proving exactly one flush callback despite accounting failure.
+- `f43e616d` isolates connection clone/spawn failures and HTTP worker panics from
+  owner lifetime, logs/retries transient control accept/readiness failures, and
+  recovers valid gate/submission bookkeeping after poison. Model/maintenance state
+  is not blindly recovered. Injected connection failures are followed by successful
+  ordinary requests; process-shutdown/backend errors remain fatal to the owner.
+- `13db80fc` uses a 16 MiB incremental control allowance for standalone assets,
+  retaining 512 MiB only with history. Explicit watchdog stacks and selected-reserve
+  propagation are tested. `e95ff909` refuses cancellation without a store before
+  parsing its JSON body, so unavailable diagnostic routes do not invalidate that
+  smaller allowance. Neither allowance is a total allocator bound.
+- `26fb8f1d` classifies request heads before acquiring model activity. Trusted
+  preparation inhibits idle but only accepted native work reports completion.
+  Partial heads, history/static reads, rejected Host/Origin, malformed native input
+  and exact retries do not reset idle publication. Tests include actual native
+  preparation rejection and a header handoff before blocked history access.
+
+### Bounded Batched Publication
+
+The writer now batches available metadata rather than syncing every record and
+progress snapshot independently. Already serialized producer objects are validated
+without nested `Value` trees, then published with progress through the store's same
+transaction implementation. Exact sequence/newline sizing, root-owned fields, full
+JSON validation and JSONL framing are checked before writes. Progress-only batches
+publish no fictitious records; every intermediate progress transition is validated.
+
+Batches drain at most 128 events and respect the 4 MiB encoded store limit. Array
+and staging events are FIFO barriers, including any deferred event. Original storage
+and permits remain charged through append. The 8 MiB metadata budget, optional array
+budget and 82 MiB writer admission allowance do not grow; the latter already covers
+the bounded originals/batch buffer, validation and pending producer without batch
+JSON tree amplification. Saturation cooperatively waits on the same event or claim,
+checking stop/failure every 5ms. Interrupted blocked publication reports a separate
+artifact error without rewriting a known generation outcome. Filesystem calls and
+final joins remain non-preemptible.
+
+CPU coverage includes a maximum-admitted actual-producer job (4096 heads, 16384 rows,
+262144 scores) with a deliberately stalled writer; exact completion and bounded
+peak permits are required. Overall batching ratio is only a measurement. A preloaded
+126-record batch plus array/dependent barriers verifies deterministic batching and
+durable prefix recovery. Channel/byte waiting tests inject cancel, shutdown and the
+writer-failure latch; independent real store-fault tests cover actual append failures.
+These do not claim every filesystem-failure/backpressure interleaving. Encoded/value
+record equivalence, progress-only state, invalid intermediate progress, sequence
+digit/overflow limits and snapshot-rename recovery also pass. The wider production
+gate is prepared to exceed 128 readouts and recheck restart; its live evidence is
+recorded separately after the code commit.

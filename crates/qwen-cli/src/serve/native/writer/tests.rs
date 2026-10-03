@@ -2,7 +2,57 @@ use super::*;
 use crate::serve::jobs::state::{Counters, JobState, StopReason};
 use crate::serve::native::{CpuFixture, MAX_TOKEN_PIECE_BYTES, execute};
 
-fn paused(capacity: usize) -> (Sink, Receiver<Event>) {
+pub(super) fn wait_for_backpressure(waits: &AtomicUsize) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while waits.load(Ordering::Acquire) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "producer did not reach backpressure"
+        );
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn bounded_channel_and_byte_waits_observe_cancel_shutdown_and_writer_failure() {
+    for byte_bound in [false, true] {
+        for stop in ["cancel", "shutdown", "writer"] {
+            let (sink, incoming) = paused(1);
+            let hold = if byte_bound {
+                Some(sink.budget.claim(QUEUE_BYTES, QUEUE_BYTES).unwrap())
+            } else {
+                sink.progress(Phase::Prefill, &Counters::default());
+                None
+            };
+            let waits = sink.waits.clone();
+            let budget = sink.budget.clone();
+            let control = sink.control.clone();
+            let gate = sink.server.clone();
+            let failure = sink.failure.clone();
+            let producer = std::thread::spawn(move || {
+                sink.record(json!({"kind":"test"}), Phase::Prefill, &Counters::default());
+                sink
+            });
+            wait_for_backpressure(&waits);
+            match stop {
+                "cancel" => control.cancel(),
+                "shutdown" => gate.close(),
+                _ => {
+                    *failure.lock().unwrap() =
+                        Some(error("artifact_write_failed", "test writer failure"));
+                    control.cancel();
+                }
+            }
+            let sink = producer.join().unwrap();
+            assert!(sink.failure.lock().unwrap().is_some());
+            drop(hold);
+            drop(incoming);
+            assert_eq!(budget.used.load(Ordering::Acquire), 0);
+        }
+    }
+}
+
+pub(super) fn paused(capacity: usize) -> (Sink, Receiver<Event>) {
     let (sender, receiver) = sync_channel(capacity);
     (
         Sink {
@@ -14,6 +64,7 @@ fn paused(capacity: usize) -> (Sink, Receiver<Event>) {
             array_budget: Arc::default(),
             array_limit: ARRAY_QUEUE_BYTES,
             staging_started: AtomicBool::new(false),
+            waits: Arc::default(),
             staging_hook: None,
             after_record: None,
         },
@@ -22,7 +73,7 @@ fn paused(capacity: usize) -> (Sink, Receiver<Event>) {
 }
 
 #[test]
-fn array_permits_cover_dequeued_payload_and_backpressure_blocks_dependent_rows() {
+fn array_permits_cover_dequeued_payload_and_wait_for_storage_release() {
     let (mut sink, incoming) = paused(4);
     sink.array_limit = 8;
     sink.array(
@@ -34,21 +85,20 @@ fn array_permits_cover_dequeued_payload_and_backpressure_blocks_dependent_rows()
     .unwrap();
     let event = incoming.recv().unwrap();
     assert_eq!(sink.array_budget.used.load(Ordering::Acquire), 8);
-    assert!(
+    let waits = sink.waits.clone();
+    let budget = sink.array_budget.clone();
+    let producer = std::thread::spawn(move || {
         sink.array(
             json!({"key":"scores"}),
             &[2.],
             Phase::Prefill,
-            &Counters::default()
+            &Counters::default(),
         )
-        .is_err()
-    );
-    sink.record(
-        json!({"kind":"readout","retained":{"source_key":"source","logits_key":"scores"}}),
-        Phase::Prefill,
-        &Counters::default(),
-    );
-    assert!(incoming.try_recv().is_err());
+        .unwrap();
+        sink
+    });
+    wait_for_backpressure(&waits);
+    assert!(!producer.is_finished());
     let Event::Array(_, payload, _, _, _) = event else {
         panic!("array event")
     };
@@ -56,14 +106,31 @@ fn array_permits_cover_dequeued_payload_and_backpressure_blocks_dependent_rows()
         payload.bytes,
         [1.0f32.to_le_bytes(), (-0.0f32).to_le_bytes()].concat()
     );
-    assert_eq!(sink.array_budget.used.load(Ordering::Acquire), 8);
+    assert_eq!(budget.used.load(Ordering::Acquire), 8);
     drop(payload);
+    let sink = producer.join().unwrap();
+    drop(incoming.recv().unwrap());
     assert_eq!(sink.array_budget.used.load(Ordering::Acquire), 0);
     assert_eq!(sink.array_budget.peak.load(Ordering::Acquire), 8);
 }
 
 #[test]
 fn invalid_arrays_and_disconnected_writer_release_all_byte_permits() {
+    let (mut too_small, _incoming) = paused(1);
+    too_small.array_limit = 4;
+    assert!(
+        too_small
+            .array(
+                json!({"key":"oversized"}),
+                &[1., 2.],
+                Phase::Prefill,
+                &Counters::default()
+            )
+            .is_err()
+    );
+    assert_eq!(too_small.waits.load(Ordering::Acquire), 0);
+    assert_eq!(too_small.budget.used.load(Ordering::Acquire), 0);
+    assert_eq!(too_small.array_budget.used.load(Ordering::Acquire), 0);
     for values in [
         vec![],
         vec![f32::NAN],
@@ -380,7 +447,7 @@ fn owner_unwind_after_handoff_joins_without_fabricating_user_cancellation() {
 }
 
 #[test]
-fn late_record_backpressure_does_not_rewrite_successful_terminal_sampling() {
+fn interrupted_late_publication_does_not_rewrite_successful_terminal_sampling() {
     let (sink, records) = paused(1);
     let prepared = Prepared {
         prompt: vec![0],
@@ -397,6 +464,12 @@ fn late_record_backpressure_does_not_rewrite_successful_terminal_sampling() {
         interventions: Default::default(),
         staging: Default::default(),
     };
+    let control = sink.control.clone();
+    let waits = sink.waits.clone();
+    let cancel = std::thread::spawn(move || {
+        wait_for_backpressure(&waits);
+        control.cancel();
+    });
     let outcome = execute::run_tokens(
         &prepared,
         &sink,
@@ -404,13 +477,14 @@ fn late_record_backpressure_does_not_rewrite_successful_terminal_sampling() {
         |_, _, _| Ok(vec![1.0]),
         |_| Ok(b"x".to_vec()),
     );
+    cancel.join().unwrap();
     assert_eq!(outcome.reason, StopReason::TokenLimit);
     assert_eq!(outcome.counters.sampled_tokens, 1);
     assert_eq!(outcome.counters.consumed_generated_tokens, 0);
     assert!(sink.control.is_cancelled());
     assert_eq!(
         sink.failure.lock().unwrap().as_ref().unwrap().code,
-        "artifact_backpressure"
+        "artifact_publication_interrupted"
     );
     drop(records);
     assert_eq!(sink.budget.used.load(Ordering::Acquire), 0);

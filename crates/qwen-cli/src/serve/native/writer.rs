@@ -8,14 +8,16 @@ use crate::serve::jobs::{
 };
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
+#[cfg(test)]
 use serde_json::json;
 use std::io::{self, Write};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
-    mpsc::{Receiver, SyncSender, sync_channel},
+    mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
 };
 use std::thread::JoinHandle;
+mod worker;
 
 const EVENTS: usize = 128;
 const QUEUE_BYTES: usize = 8 * RECORD_BYTES;
@@ -103,6 +105,7 @@ pub(crate) struct Sink {
     array_budget: Arc<Budget>,
     array_limit: usize,
     staging_started: AtomicBool,
+    waits: Arc<AtomicUsize>,
     #[cfg(test)]
     staging_hook: Option<super::staging::Hook>,
     #[cfg(test)]
@@ -141,14 +144,9 @@ impl Sink {
             payload.capacity() <= crate::serve::jobs::store::MAX_ARRAY_BYTES,
             "retained array allocation exceeds bound"
         );
-        let Some(array_permit) = self
-            .array_budget
-            .claim(payload.capacity(), self.array_limit)
+        let Some(array_permit) =
+            self.claim(&self.array_budget, payload.capacity(), self.array_limit)
         else {
-            self.fail_recording(
-                "artifact_backpressure",
-                "Retained array byte queue is full; publication is incomplete.",
-            );
             return super::checkpoint(self);
         };
         for value in values {
@@ -168,14 +166,43 @@ impl Sink {
     }
 
     fn record_permit(&self, bytes: usize) -> Option<Bytes> {
-        let permit = self.budget.claim(bytes, QUEUE_BYTES);
-        if permit.is_none() {
+        self.claim(&self.budget, bytes, QUEUE_BYTES)
+    }
+
+    fn claim(&self, budget: &Arc<Budget>, bytes: usize, limit: usize) -> Option<Bytes> {
+        if bytes > limit {
             self.fail_recording(
-                "artifact_backpressure",
-                "Retained record byte queue is full.",
+                "artifact_record_too_large",
+                "Artifact allocation exceeds its entire bounded queue budget.",
             );
+            return None;
         }
-        permit
+        loop {
+            if let Some(permit) = budget.claim(bytes, limit) {
+                return Some(permit);
+            }
+            if !self.wait_capacity() {
+                return None;
+            }
+        }
+    }
+
+    fn wait_capacity(&self) -> bool {
+        if self
+            .failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            return false;
+        }
+        if super::checkpoint(self).is_err() {
+            self.fail_recording("artifact_publication_interrupted", "Publication stopped while waiting for bounded writer capacity; saved results may be partial.");
+            return false;
+        }
+        self.waits.fetch_add(1, Ordering::Relaxed);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        true
     }
     pub(in crate::serve) fn stage(
         &self,
@@ -218,20 +245,37 @@ impl Sink {
     pub(super) fn fail_recording(&self, code: &str, message: &str) {
         self.failure
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get_or_insert_with(|| error(code, message));
         self.control.cancel();
     }
-    fn send(&self, event: Event) {
-        if self.sender.try_send(event).is_err() {
-            self.fail_recording(
-                "artifact_backpressure",
-                "The bounded artifact writer stopped or fell behind; publication is incomplete.",
-            );
+    fn send(&self, mut event: Event) {
+        loop {
+            match self.sender.try_send(event) {
+                Ok(()) => return,
+                Err(TrySendError::Full(pending)) => {
+                    event = pending;
+                    if !self.wait_capacity() {
+                        return;
+                    }
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    self.fail_recording(
+                        "artifact_writer_stopped",
+                        "The artifact writer stopped before publication completed.",
+                    );
+                    return;
+                }
+            }
         }
     }
     pub(super) fn record(&self, record: impl Serialize, phase: Phase, counters: &Counters) {
-        if self.failure.lock().unwrap().is_some() {
+        if self
+            .failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
             return;
         }
         let bytes = match encode(&record) {
@@ -297,99 +341,28 @@ impl Writer {
         let worker_budget = Arc::clone(&budget);
         let array_budget = Arc::new(Budget::default());
         let worker_array_budget = array_budget.clone();
+        let waits = Arc::new(AtomicUsize::new(0));
         let array_limit = usize::try_from(
             prepared
                 .readouts
                 .archive_bytes
                 .min(ARRAY_QUEUE_BYTES as u64),
         )?;
-        let worker = std::thread::Builder::new().name("qwen-native-artifacts".into()).stack_size(STACK_BYTES).spawn(move || {
-            let setup = (|| -> Result<Readiness> {
-                if store.start(&id, initial.prompt_tokens)? == crate::serve::jobs::store::Start::Settled {
-                    return Ok(Readiness::Settled);
-                }
-                store.append(&id, &[serde_json::from_slice(&record)?])?;
-                Ok(Readiness::Execute)
-            })();
-            if matches!(setup, Ok(Readiness::Settled)) {
-                let _ = started.send(Ok(Readiness::Settled));
-                return Ok(());
-            }
-            if let Err(cause) = setup {
-                if let Ok(status) = store.status(&id) {
-                    if status.state.terminal() {
-                        let _ = started.send(Ok(Readiness::Settled));
-                        return Ok(());
-                    }
-                    let error = error("artifact_prepare_failed", "Native publication setup failed before model execution.");
-                    if store.finish_generation(&id, crate::serve::jobs::state::StopReason::ExecutionError, status.generation.counters, Some(error.clone())).is_ok() {
-                        let _ = store.finalize(&id, Some(error));
-                    }
-                }
-                let message = format!("prepare native publication: {cause:#}");
-                let _ = started.send(Err(anyhow::anyhow!(message.clone())));
-                return Err(anyhow::anyhow!(message));
-            }
-            let _ = started.send(Ok(Readiness::Execute));
-            let mut last = initial;
-            let mut disk_failed = false;
-            let mut stage_used = false;
-            let mut records_started = false;
-            for event in incoming {
-                let event = match event {
-                    Event::Stage(request) => {
-                        if disk_failed || stage_used || records_started {
-                            request.refuse("staging requires a healthy writer before generation, once per job");
-                        } else {
-                            stage_used = true;
-                            request.run(|| super::execute::preparation_checkpoint(&worker_control, &worker_server),
-                                qwen_llm::metal::MetalContext::process_limit_bytes_remaining);
-                        }
-                        continue;
-                    }
-                    event => event,
-                };
-                if disk_failed { continue; }
-                records_started = true;
-                let result = (|| -> Result<()> {
-                    let (phase, counters) = match event {
-                        Event::Record(bytes, _permit, phase, counters) => {
-                            store.append(&id, &[serde_json::from_slice(&bytes)?])?;
-                            (phase, counters)
-                        }
-                        Event::Progress(phase, counters) => (phase, counters),
-                        Event::Array(record,payload,_metadata_permit,phase,counters) => {
-                            store.append_array(&id,serde_json::from_slice(&record)?,&payload.bytes)?;
-                            (phase,counters)
-                        }
-                        Event::Stage(_) => unreachable!("staging handled before publication"),
-                    };
-                    store.progress(&id, phase, counters.clone())?;
-                    last = counters;
-                    Ok(())
-                })();
-                if let Err(cause) = result {
-                    tracing::error!(job_id = id, "native publication: {cause:#}");
-                    worker_failure.lock().unwrap().get_or_insert_with(|| error("artifact_write_failed", "Native result publication failed; generation outcome is tracked separately."));
-                    worker_control.cancel();
-                    disk_failed = true;
-                }
-            }
-            let outcome = outcome.recv().unwrap_or_else(|_| Outcome::interrupted(last));
-            store.finish_generation(&id, outcome.reason, outcome.counters.clone(), outcome.error.clone())?;
-            if !disk_failed {
-                let terminal = json!({"kind":"generation_terminal","state":outcome.state_name(),"stop_reason":outcome.reason,
-                    "sampled_tokens":outcome.counters.sampled_tokens,"consumed_generated_tokens":outcome.counters.consumed_generated_tokens,
-                    "error":outcome.error,"artifact_writer":{"peak_record_bytes":worker_budget.peak.load(Ordering::Acquire),"peak_array_bytes":worker_array_budget.peak.load(Ordering::Acquire)},
-                    "cost":{"wall_ms":outcome.wall_ms,"prefill_ms":null,"decode_ms":null,"readout_ms":null}});
-                if let Err(cause) = store.append(&id, &[terminal]) {
-                    tracing::error!(job_id = id, "native terminal record: {cause:#}");
-                    worker_failure.lock().unwrap().get_or_insert_with(|| error("artifact_write_failed", "Terminal record publication failed."));
-                }
-            }
-            store.finalize(&id, worker_failure.lock().unwrap().clone())?;
-            Ok(())
-        }).context("spawn native artifact writer")?;
+        let state = worker::State {
+            store,
+            id,
+            control: worker_control,
+            server: worker_server,
+            failure: worker_failure,
+            budget: worker_budget,
+            array_budget: worker_array_budget,
+            waits: waits.clone(),
+        };
+        let worker = std::thread::Builder::new()
+            .name("qwen-native-artifacts".into())
+            .stack_size(STACK_BYTES)
+            .spawn(move || state.run(record, initial, incoming, started, outcome))
+            .context("spawn native artifact writer")?;
         Ok(Self {
             sink: Some(Sink {
                 control,
@@ -400,6 +373,7 @@ impl Writer {
                 array_budget,
                 array_limit,
                 staging_started: AtomicBool::new(false),
+                waits,
                 #[cfg(test)]
                 staging_hook: None,
                 #[cfg(test)]
@@ -461,5 +435,7 @@ impl Drop for Writer {
     }
 }
 
+#[cfg(test)]
+mod batching_tests;
 #[cfg(test)]
 mod tests;

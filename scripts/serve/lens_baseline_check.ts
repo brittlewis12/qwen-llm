@@ -7,7 +7,8 @@ import { createHash } from "node:crypto";
 // Opt-in Metal check. Owns its server handles; never targets an existing service.
 const model = Bun.env.QWEN_LENS_TEST_MODEL;
 const retention = Bun.env.QWEN_LENS_TEST_RETENTION === "1";
-const readouts = Bun.env.QWEN_LENS_TEST_READOUTS === "1" || retention;
+const wide = Bun.env.QWEN_LENS_TEST_WIDE === "1";
+const readouts = Bun.env.QWEN_LENS_TEST_READOUTS === "1" || retention || wide;
 if (!model) throw new Error("Set QWEN_LENS_TEST_MODEL to a qualified House Qwen3.6/3.8 GGUF.");
 const root = resolve(import.meta.dir, "../..");
 const output = `${root}/target/lens-baseline-${crypto.randomUUID()}`;
@@ -27,6 +28,7 @@ let stopping: Promise<{ code: number; signal: string | null }> | undefined;
 const evidence: unknown[] = [];
 const prefill = { channel: "reasoning", text: "Let me" };
 let observed: { id: string; page: any } | undefined;
+let wideObserved: { id: string; page: any } | undefined;
 const archived = new Map<string, Uint8Array>();
 
 async function array(record: any) {
@@ -108,7 +110,7 @@ async function start() {
 }
 const terminal = (job: any) => ["completed", "cancelled", "failed", "interrupted"].includes(job.state);
 const status = (id: string) => json(`/v1/lens/jobs/${id}`);
-const result = (id: string) => json(`/v1/lens/jobs/${id}/result`);
+const result = (id: string) => json(`/v1/lens/jobs/${id}/result?limit=256`);
 function request(identity: string, max = 3) {
   return JSON.stringify({ schema_version: 1, idempotency_key: crypto.randomUUID(),
     input: { kind: "messages", messages: [{ role: "user", content: "Name an animal." }],
@@ -260,6 +262,37 @@ try {
     assert.deepEqual(await result(job.id), page);
     observed = { id: job.id, page };
     evidence.push({ readout_gate: { expected_rows: 12, shared_heads: 8, passing_witnesses: witnesses, unchanged_sampling: true } });
+    if (wide) {
+      const layers = [...Array.from({ length: Math.min(39, last) }, (_, i) => i), last];
+      assert(layers.length * sites.length > 128, "Wide fixture must exceed the event queue capacity");
+      const wider = JSON.parse(body);
+      wider.idempotency_key = crypto.randomUUID();
+      wider.preconditions.asset_identities = { plain: plain.identity };
+      wider.diagnostics = { directions: [], operations: [], readouts: [
+        { id: "wide", lens: "plain", mode: "full_vocabulary", top_k: 2, scope: { layers: { kind: "values", values: layers }, ...phases } },
+      ] };
+      const accepted = await json("/v1/lens/jobs", JSON.stringify(wider), 202);
+      const page = await completed(accepted.id);
+      assert.deepEqual(stripSequence(page), stripSequence(baseline));
+      const expected = new Set(sites.flatMap(position => layers.map(layer => `${position}:${layer}`)));
+      let witnesses = 0;
+      for (const row of page.records.filter((r: any) => r.kind === "readout")) {
+        assert.equal(row.readout_id, "wide");
+        assert(expected.delete(`${row.position}:${row.source_layer}`), "Duplicate or unexpected wide site");
+        assert.equal(row.phase, row.position < prompt ? "prefill" : "decode");
+        assert.equal(row.index, row.position < prompt ? row.position : row.position - prompt);
+        assert.equal(row.scores.length, 2);
+        assert(row.scores.every((s: any) => Number.isFinite(s.score)));
+        if (row.source_layer === last && row.position !== 0) {
+          assert.equal(row.generation_logit_witness?.within_tolerance, true); witnesses++;
+        }
+      }
+      assert.equal(expected.size, 0); assert.equal(witnesses, 3);
+      const writer = page.records.at(-1).artifact_writer;
+      assert(writer.peak_record_bytes <= 8 * 1024 * 1024);
+      wideObserved = { id: accepted.id, page };
+      evidence.push({ wide_gate: { rows: layers.length * sites.length, unchanged_sampling: true, passing_witnesses: witnesses, writer } });
+    }
   }
   const ordinary = await json("/v1/responses", JSON.stringify({ model: caps.model.id, input: "Say hello.", max_output_tokens: 1, temperature: 0 }));
   assert(["completed", "incomplete"].includes(ordinary.status));
@@ -287,6 +320,7 @@ try {
   await start();
   assert.deepEqual(await result(accepted.id), baseline);
   if (observed) assert.deepEqual(await result(observed.id), observed.page);
+  if (wideObserved) assert.deepEqual(await result(wideObserved.id), wideObserved.page);
   if (retention) {
     for (const record of observed!.page.records.filter((r: any) => r.kind === "retained_array")) {
       assert.deepEqual(await array(record), archived.get(record.array.url), "Retained bytes changed across restart");
@@ -300,14 +334,14 @@ try {
   assert(resumed.result.complete);
   assert.deepEqual(resumed, snapshot.status, "Restart must preserve preexisting durable settlement");
   assert.deepEqual(await status(active.id), resumed);
-  assert.equal((await json("/v1/lens/jobs")).jobs.length, readouts ? 4 : 3);
+  assert.equal((await json("/v1/lens/jobs")).jobs.length, (readouts ? 4 : 3) + Number(wide));
   evidence.push({ recovered_interruption: resumed });
   assert.deepEqual(await stop(), { code: 143, signal: null });
   assert(!forced);
   remaining();
-  await Bun.write(`${output}/evidence.json`, JSON.stringify({ model, readouts, retention, launches: launch, passed: true, evidence }, null, 2));
+  await Bun.write(`${output}/evidence.json`, JSON.stringify({ model, readouts, retention, wide, launches: launch, passed: true, evidence }, null, 2));
   remaining();
-  console.log(`PASS: baseline${readouts ? ", shared original-forward readouts with unchanged samples and six passing witnesses" : ""}${retention ? ", retained bytes/ranks verified across restart" : ""}, disconnected exact-key recovery, ordinary serving, active interruption/restart; ${output}`);
+  console.log(`PASS: baseline${readouts ? ", shared original-forward readouts with unchanged samples and six passing witnesses" : ""}${retention ? ", retained bytes/ranks verified across restart" : ""}${wide ? ", wide-scope records and restart verified" : ""}, disconnected exact-key recovery, ordinary serving, active interruption/restart; ${output}`);
 } finally {
   clearTimeout(watchdog);
   await stop();

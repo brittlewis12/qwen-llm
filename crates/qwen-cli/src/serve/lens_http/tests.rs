@@ -267,13 +267,13 @@ fn handle_api(stream: TcpStream, api: Arc<LensApi>) -> io::Result<()> {
         model_id: "test-model".into(),
         request: crate::serve::request_profile::RequestProfile::UnboundQwen,
         lens: api,
+        classified: None,
         gate: Default::default(),
         activity: activity.admission(),
         sender,
         trace: None,
     };
-    let guard = activity.admission().try_admit().unwrap();
-    let result = crate::serve::control::handle(stream, &profile, Some(guard));
+    let result = crate::serve::control::handle(stream, &profile);
     activity.drain_finished(|| {});
     assert!(activity.is_settled());
     result

@@ -711,7 +711,10 @@ fn local_control_stop_interrupts_active_native_and_joins_before_backend_shutdown
         events.iter().filter(|event| **event == "shutdown").count(),
         1
     );
-    assert!(events.iter().filter(|event| **event == "finished").count() >= 2);
+    assert_eq!(
+        events.iter().filter(|event| **event == "finished").count(),
+        1
+    );
     let mut response = Vec::new();
     if let Err(cause) = unfinished.read_to_end(&mut response) {
         assert!(matches!(
@@ -754,6 +757,7 @@ fn disconnected_startup_probe_does_not_close_the_control_service() {
     let acceptor = spawn(
         listener,
         Profile {
+            classified: None,
             assets: None,
             model_id: "test".into(),
             request: RequestProfile::UnboundQwen,
@@ -789,9 +793,10 @@ fn disconnected_startup_probe_does_not_close_the_control_service() {
 fn history_releases_activity_before_waiting_for_store_access() {
     let fixture = native::CpuFixture::new();
     let mut activity = owner_activity::OwnerActivity::default();
-    let guard = activity.admission().try_admit().unwrap();
     let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
+    let (classified, parsed) = std::sync::mpsc::sync_channel(1);
     let profile = Profile {
+        classified: Some(classified),
         assets: None,
         model_id: "test".into(),
         request: RequestProfile::UnboundQwen,
@@ -814,9 +819,8 @@ fn history_releases_activity_before_waiting_for_store_access() {
     let (stream, _) = listener.accept().unwrap();
     let mut worker = None;
     fixture.store.with_history_locked(|| {
-        worker = Some(std::thread::spawn(move || {
-            handle(stream, &profile, Some(guard))
-        }));
+        worker = Some(std::thread::spawn(move || handle(stream, &profile)));
+        parsed.recv_timeout(WAIT).unwrap();
         let deadline = std::time::Instant::now() + WAIT;
         while !activity.is_settled() && std::time::Instant::now() < deadline {
             std::thread::yield_now();
@@ -918,9 +922,9 @@ fn blocked_static_write_releases_activity_and_shutdown_joins_its_worker() {
         );
     }
     let socket = stream.try_clone().unwrap();
-    let guard = activity.admission().try_admit().unwrap();
     let profile = Profile {
         model_id: "test".into(),
+        classified: None,
         request: RequestProfile::UnboundQwen,
         lens: Arc::new(LensApi::new(
             "test".into(),
@@ -935,9 +939,7 @@ fn blocked_static_write_releases_activity_and_shutdown_joins_its_worker() {
     };
     let mut worker = Worker {
         socket,
-        thread: Some(std::thread::spawn(move || {
-            handle(stream, &profile, Some(guard))
-        })),
+        thread: Some(std::thread::spawn(move || handle(stream, &profile))),
     };
     let mut prefix = [0u8; 16];
     client.read_exact(&mut prefix).unwrap();
@@ -1022,4 +1024,111 @@ fn execution_bookkeeping_remains_usable_after_mutex_poison() {
     drop(gate.reserve().unwrap());
     gate.close();
     assert!(gate.reserve().is_err());
+}
+#[test]
+fn partial_heads_and_rejected_lens_traffic_do_not_debounce_idle() {
+    for (method, path, host, body, inhibits) in [
+        ("GET", "/v1/lens/jobs", "localhost", "", false),
+        ("GET", "/v1/lens/jobs", "phone.tailnet.test", "", false),
+        (
+            "GET",
+            "/v1/lens/jobs",
+            "localhost\r\norigin: http://untrusted.invalid",
+            "",
+            false,
+        ),
+        ("POST", "/v1/lens/jobs", "localhost", "{}", true),
+        ("POST", "/v1/lens/jobs", "phone.tailnet.test", "{}", false),
+        (
+            "POST",
+            "/v1/lens/jobs",
+            "localhost\r\norigin: http://untrusted.invalid",
+            "{}",
+            false,
+        ),
+    ] {
+        let fixture = native::CpuFixture::new();
+        let mut activity = owner_activity::OwnerActivity::default();
+        let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
+        let profile = Profile {
+            classified: None,
+            model_id: "test".into(),
+            request: RequestProfile::UnboundQwen,
+            lens: Arc::new(LensApi::new(
+                "test".into(),
+                Some(fixture.store.clone()),
+                None,
+            )),
+            assets: None,
+            gate: Default::default(),
+            activity: activity.admission(),
+            sender,
+            trace: None,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client.set_read_timeout(Some(WAIT)).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let worker = std::thread::spawn(move || handle(stream, &profile));
+        write!(client, "{method} {path} HTTP/1.1\r\nhost: {host}\r\n").unwrap();
+        let mut idle = false;
+        activity.idle_if_quiet(|| idle = true);
+        assert!(idle);
+        write!(client, "content-length: {}\r\n\r\n", body.len()).unwrap();
+        if inhibits {
+            let deadline = std::time::Instant::now() + WAIT;
+            while activity.is_settled() && std::time::Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            assert!(!activity.is_settled());
+            activity.idle_if_quiet(|| panic!("body preparation must inhibit idle"));
+        }
+        client.write_all(body.as_bytes()).unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        worker.join().unwrap().unwrap();
+        assert!(response.starts_with("HTTP/1.1"));
+        activity.drain_finished(|| panic!("Lens read/rejection must not reset idle timer"));
+        assert!(activity.is_settled());
+    }
+}
+#[test]
+fn native_rejection_and_exact_retry_do_not_add_owner_completions() {
+    let fixture = native::CpuFixture::new();
+    let saved = fixture.settled("saved-idle");
+    let mut server = Server::start(&fixture);
+    let mut invalid = fixture.request("invalid-idle");
+    invalid["diagnostics"] =
+        serde_json::json!({"readouts":[{"id":"invalid"}],"operations":[],"directions":[]});
+    assert!(
+        server
+            .request("POST", "/v1/lens/jobs", &invalid.to_string())
+            .0
+            .starts_with("HTTP/1.1 400")
+    );
+    let (head, retry) = server.request(
+        "POST",
+        "/v1/lens/jobs",
+        &fixture.request("saved-idle").to_string(),
+    );
+    assert!(head.starts_with("HTTP/1.1 200"));
+    assert_eq!(retry["id"], saved);
+    assert!(
+        server
+            .request("GET", "/v1/models", "")
+            .0
+            .starts_with("HTTP/1.1 200")
+    );
+    server.stop();
+    assert_eq!(server.calls.load(Ordering::Acquire), 0);
+    assert_eq!(
+        server
+            .callbacks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| **e == "finished")
+            .count(),
+        1
+    );
 }

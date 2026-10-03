@@ -136,6 +136,8 @@ pub(super) struct Profile {
     pub(super) activity: owner_activity::Admission,
     pub(super) sender: SyncSender<Event>,
     pub(super) trace: Option<TraceFactory>,
+    #[cfg(test)]
+    pub(super) classified: Option<SyncSender<()>>,
 }
 
 struct Worker {
@@ -201,11 +203,8 @@ fn error_reply(mut stream: &TcpStream, status: u16, message: &str) -> io::Result
     stream.write_all(&body)
 }
 
-pub(super) fn handle(
-    stream: TcpStream,
-    profile: &Profile,
-    mut activity: Option<owner_activity::ActivityGuard>,
-) -> io::Result<()> {
+pub(super) fn handle(stream: TcpStream, profile: &Profile) -> io::Result<()> {
+    let mut activity = None;
     let mut execution = None;
     let request =
         http::read_http_request_with_admission(&stream, Duration::from_secs(30), |head, length| {
@@ -216,8 +215,16 @@ pub(super) fn handle(
                 if head.method == "GET" && length != 0 {
                     return Err(io::Error::other(Refused::GetBody));
                 }
-                if profile.lens.is_read_only(head) {
-                    activity.take().expect("HTTP activity").release_read_only();
+                if !profile.lens.is_read_only(head)
+                    && profile.lens.trusted(head)
+                    && head.method == "POST"
+                {
+                    activity = Some(
+                        profile
+                            .activity
+                            .try_prepare()
+                            .ok_or_else(|| io::Error::other(Refused::Busy))?,
+                    );
                 }
             } else if profile
                 .assets
@@ -227,10 +234,6 @@ pub(super) fn handle(
                 if length != 0 {
                     return Err(io::Error::other(Refused::GetBody));
                 }
-                activity
-                    .take()
-                    .expect("static HTTP activity")
-                    .release_read_only();
             } else {
                 execution = Some(
                     profile
@@ -238,6 +241,16 @@ pub(super) fn handle(
                         .reserve()
                         .map_err(|_| io::Error::other(Refused::Busy))?,
                 );
+                activity = Some(
+                    profile
+                        .activity
+                        .try_admit()
+                        .ok_or_else(|| io::Error::other(Refused::Busy))?,
+                );
+            }
+            #[cfg(test)]
+            if let Some(classified) = &profile.classified {
+                let _ = classified.try_send(());
             }
             Ok(())
         });
@@ -342,9 +355,6 @@ pub(super) fn spawn(
                                 let _ = http::write_busy_response(&stream);
                                 continue;
                             }
-                            let Some(activity) = profile.activity.try_admit() else {
-                                break;
-                            };
                             let socket = match stream.try_clone() {
                                 Ok(socket) => socket,
                                 Err(cause) => {
@@ -357,7 +367,7 @@ pub(super) fn spawn(
                             let thread = std::thread::Builder::new()
                                 .name("qwen-http-control-request".into())
                                 .stack_size(STACK_BYTES)
-                                .spawn(move || handle(stream, &profile, Some(activity)));
+                                .spawn(move || handle(stream, &profile));
                             let thread = match thread {
                                 Ok(thread) => thread,
                                 Err(cause) => {

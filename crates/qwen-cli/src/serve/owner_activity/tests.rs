@@ -41,7 +41,7 @@ fn read_only_release_does_not_complete_or_release_twice() {
     let mut owner = OwnerActivity::default();
     let admission = owner.admission();
     let ordinary = admission.try_admit().unwrap();
-    admission.try_admit().unwrap().release_read_only();
+    drop(admission.try_prepare().unwrap());
     owner.drain_finished(|| panic!("read-only activity is not a request completion"));
     owner.idle_if_quiet(|| panic!("ordinary activity remains active"));
     drop(ordinary);
@@ -135,4 +135,20 @@ fn poisoned_accounting_fails_closed_and_drop_does_not_panic() {
     assert_eq!(calls, 1);
     owner.idle_if_quiet(|| panic!("poison must not become idle"));
     assert!(!owner.is_settled());
+}
+#[test]
+fn only_promoted_preparation_reports_model_work_completion() {
+    let mut owner = OwnerActivity::default();
+    let admission = owner.admission();
+    let preparation = admission.try_prepare().unwrap();
+    owner.idle_if_quiet(|| panic!("preparation active"));
+    drop(preparation);
+    owner.drain_finished(|| panic!("rejected preparation"));
+    let mut preparation = admission.try_prepare().unwrap();
+    preparation.mark_work();
+    drop(preparation);
+    let mut count = 0;
+    owner.drain_finished(|| count += 1);
+    assert_eq!(count, 1);
+    assert!(owner.is_settled());
 }

@@ -20,10 +20,19 @@ pub(super) struct OwnerActivity {
 pub(super) struct ActivityGuard {
     admission: Admission,
     finished: bool,
+    completes: bool,
 }
 
 impl Admission {
     pub(super) fn try_admit(&self) -> Option<ActivityGuard> {
+        self.try_admit_kind(true)
+    }
+
+    pub(super) fn try_prepare(&self) -> Option<ActivityGuard> {
+        self.try_admit_kind(false)
+    }
+
+    fn try_admit_kind(&self, completes: bool) -> Option<ActivityGuard> {
         let mut state = self.0.lock().ok()?;
         if state.closed {
             return None;
@@ -32,6 +41,7 @@ impl Admission {
         Some(ActivityGuard {
             admission: self.clone(),
             finished: false,
+            completes,
         })
     }
 
@@ -42,12 +52,9 @@ impl Admission {
 }
 
 impl ActivityGuard {
-    /// Only explicitly classified read-only diagnostics bypass completion.
-    /// Ordinary HTTP handling, including errors and GET /v1/models, does not.
-    pub(super) fn release_read_only(mut self) {
-        self.finish(false);
+    pub(super) fn mark_work(&mut self) {
+        self.completes = true;
     }
-
     fn finish(&mut self, completed: bool) {
         if self.finished {
             return;
@@ -69,7 +76,7 @@ impl ActivityGuard {
 
 impl Drop for ActivityGuard {
     fn drop(&mut self) {
-        self.finish(true);
+        self.finish(self.completes);
     }
 }
 

@@ -350,7 +350,7 @@ impl Admission for NativeAdmission {
             .gate
             .reserve()
             .map_err(|message| ApiError::new(429, "queue_full", message))?;
-        let activity = self.activity.try_admit().ok_or_else(|| {
+        let activity = self.activity.try_prepare().ok_or_else(|| {
             ApiError::new(503, "server_stopping", "Model owner admission is closed")
         })?;
         let prepared = self.profile.prepare(request)?;
@@ -379,10 +379,11 @@ impl ReservedSubmission for Reservation {
         let Self {
             prepared,
             slot,
-            activity,
+            mut activity,
             sender,
             store,
         } = *self;
+        activity.mark_work();
         let writer = writer::Writer::spawn(store, job.id, job.control, &prepared, slot.gate())
             .map_err(|cause| cause.to_string())?;
         let gate = slot.gate();

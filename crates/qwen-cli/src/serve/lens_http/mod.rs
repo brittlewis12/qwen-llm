@@ -129,6 +129,9 @@ impl LensApi {
     pub(super) fn history_enabled(&self) -> bool {
         self.store.is_some()
     }
+    pub(super) fn trusted(&self, request: &HttpRequest) -> bool {
+        local_browser_boundary(request).is_ok()
+    }
     pub(super) fn matches(path: &str) -> bool {
         let path = path.split('?').next().unwrap_or_default();
         path == "/v1/lens" || path.starts_with("/v1/lens/")

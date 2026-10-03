@@ -572,3 +572,22 @@ fn prefill_observation_failure_keeps_consumption_and_prevents_sampling() {
         || r["kind"] == "readout"
         || r["kind"] == "residual_pair"));
 }
+#[test]
+fn rejected_native_preparation_releases_activity_without_completion() {
+    let fixture = Fixture::new();
+    let mut activity = crate::serve::owner_activity::OwnerActivity::default();
+    let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
+    let admission = NativeAdmission {
+        profile: fixture.profile.clone(),
+        store: fixture.store.clone(),
+        sender,
+        gate: Default::default(),
+        activity: activity.admission(),
+    };
+    let mut value = fixture.request("bad-preparation");
+    value["diagnostics"] = json!({"readouts":[{"id":"invalid"}],"operations":[],"directions":[]});
+    assert!(admission.reserve(&Request::parse(&value).unwrap()).is_err());
+    assert!(activity.is_settled());
+    activity.drain_finished(|| panic!("rejected native preparation must not debounce idle"));
+    assert!(admission.gate.reserve().is_ok());
+}

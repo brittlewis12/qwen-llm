@@ -882,6 +882,8 @@ fn accept_loop_with_workbench(
                 activity: admission.clone(),
                 sender,
                 trace: trace.as_ref().map(http::TraceLog::factory),
+                #[cfg(test)]
+                classified: None,
             },
             accept_stopping,
         ) {

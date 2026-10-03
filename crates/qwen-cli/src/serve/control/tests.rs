@@ -9,6 +9,75 @@ use std::sync::{
 
 const WAIT: Duration = Duration::from_secs(5);
 
+#[test]
+#[ignore = "CPU browser fixture; invoked by web/baseline-browser-check.ts"]
+fn browser_baseline_child() {
+    assert_eq!(std::env::var("QWEN_LENS_BROWSER_CHILD").as_deref(), Ok("1"));
+    crate::shutdown::install().unwrap();
+    let fixture = native::CpuFixture::new();
+    let assets = crate::serve::assets::WebAssets::open(std::path::Path::new(
+        &std::env::var("QWEN_LENS_BROWSER_WEB_ROOT").unwrap(),
+    ))
+    .unwrap();
+    struct BrowserBackend(Arc<native::Profile>);
+    impl GenerationBackend for BrowserBackend {
+        fn model_id(&self) -> &str {
+            "test"
+        }
+        fn native_profile(&self) -> Result<Option<Arc<native::Profile>>> {
+            Ok(Some(Arc::clone(&self.0)))
+        }
+        fn generate_native(
+            &mut self,
+            prepared: &native::Prepared,
+            sink: &native::Sink,
+        ) -> native::Outcome {
+            native::run_tokens(
+                prepared,
+                sink,
+                &[],
+                |_, _, _| {
+                    let mut logits = vec![0.0; 261];
+                    logits[120] = 100.0;
+                    Ok(logits)
+                },
+                |_| Ok(b"x".to_vec()),
+            )
+        }
+        fn generate(
+            &mut self,
+            _: &ServeRequest,
+            _: &str,
+            _: &mut dyn GenerationSink,
+        ) -> Result<GenerationOutcome, BackendFailure> {
+            panic!("browser baseline must use native jobs")
+        }
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    println!(
+        "qwen-lens-browser-ready:http://{}",
+        listener.local_addr().unwrap()
+    );
+    std::io::stdout().flush().unwrap();
+    let cause = crate::serve::accept_loop(
+        listener,
+        "test",
+        0.0,
+        &mut BrowserBackend(Arc::clone(&fixture.profile)),
+        &mut None,
+        Some(crate::serve::Workbench {
+            store: Arc::clone(&fixture.store),
+            assets: Some(Arc::new(assets)),
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        cause.to_string().contains("termination signal 15"),
+        "{cause:#}"
+    );
+    println!("qwen-lens-browser-stopped");
+}
+
 struct Backend {
     profile: Arc<native::Profile>,
     owner: std::thread::ThreadId,
@@ -92,6 +161,12 @@ struct Server {
 }
 impl Server {
     fn start(fixture: &native::CpuFixture) -> Self {
+        Self::start_with_assets(fixture, None)
+    }
+    fn start_with_assets(
+        fixture: &native::CpuFixture,
+        assets: Option<Arc<crate::serve::assets::WebAssets>>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
@@ -113,13 +188,13 @@ impl Server {
         let store = Arc::clone(&fixture.store);
         let thread = std::thread::spawn(move || {
             backend.owner = std::thread::current().id();
-            crate::serve::accept_loop_with_history(
+            crate::serve::accept_loop_with_workbench(
                 listener,
                 "test",
                 0.0,
                 &mut backend,
                 &mut None,
-                Some(store),
+                Some(crate::serve::Workbench { store, assets }),
                 |_| {
                     anyhow::ensure!(!stopping.load(Ordering::Acquire), "test shutdown");
                     Ok(())
@@ -333,6 +408,7 @@ fn disconnected_startup_probe_does_not_close_the_control_service() {
     let acceptor = spawn(
         listener,
         Profile {
+            assets: None,
             model_id: "test".into(),
             request: RequestProfile::UnboundQwen,
             lens: Arc::new(LensApi::new(
@@ -370,6 +446,7 @@ fn history_releases_activity_before_waiting_for_store_access() {
     let guard = activity.admission().try_admit().unwrap();
     let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
     let profile = Profile {
+        assets: None,
         model_id: "test".into(),
         request: RequestProfile::UnboundQwen,
         lens: Arc::new(LensApi::new(
@@ -409,6 +486,122 @@ fn history_releases_activity_before_waiting_for_store_access() {
     worker.unwrap().join().unwrap().unwrap();
     assert!(response.starts_with("HTTP/1.1 200"));
     activity.drain_finished(|| panic!("read-only history must not debounce idle publication"));
+}
+
+#[test]
+fn static_assets_share_the_busy_owner_port_without_reserving_execution() {
+    let fixture = native::CpuFixture::new();
+    std::fs::write(fixture.root.join("index.html"), b"client").unwrap();
+    std::fs::write(fixture.root.join("asset-manifest.json"), br#"{"version":1,"entry":"index.html","files":[{"path":"index.html","contentType":"text/html","bytes":6}]}"#).unwrap();
+    let assets = Arc::new(crate::serve::assets::WebAssets::open(&fixture.root).unwrap());
+    let mut server = Server::start_with_assets(&fixture, Some(assets));
+    let (_, accepted) = server.request(
+        "POST",
+        "/v1/lens/jobs",
+        &fixture.request("static-busy").to_string(),
+    );
+    let id = accepted["id"].as_str().unwrap();
+    server.entered.recv_timeout(WAIT).unwrap();
+    for method in ["GET", "HEAD"] {
+        let mut response = String::new();
+        server
+            .send(method, "/?history=ignored", "")
+            .read_to_string(&mut response)
+            .unwrap();
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert!(head.contains("content-length: 6"));
+        assert_eq!(body, if method == "GET" { "client" } else { "" });
+    }
+    let (head, caps) = server.request("GET", "/v1/lens/capabilities", "");
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert_eq!(caps["execution"]["baseline_only"], true);
+    let mut invalid = TcpStream::connect(server.address).unwrap();
+    invalid.set_read_timeout(Some(WAIT)).unwrap();
+    invalid
+        .write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\ncontent-length: 100\r\n\r\n")
+        .unwrap();
+    let mut response = String::new();
+    invalid.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 400"));
+    server.request("POST", &format!("/v1/lens/jobs/{id}/cancel"), "{}");
+    server.release.send(()).unwrap();
+    server.wait_terminal(id);
+    for path in ["/v1", "/v1/unknown", "/missing.js"] {
+        let (head, error) = server.request("GET", path, "");
+        assert!(head.starts_with("HTTP/1.1 404"), "{head} {error}");
+    }
+    assert_eq!(server.ordinary.load(Ordering::Acquire), 0);
+    server.stop();
+}
+
+#[test]
+fn blocked_static_write_releases_activity_and_shutdown_joins_its_worker() {
+    use std::os::fd::AsRawFd;
+    let fixture = native::CpuFixture::new();
+    let length = 4 * 1024 * 1024;
+    std::fs::write(fixture.root.join("index.html"), vec![b'x'; length]).unwrap();
+    std::fs::write(fixture.root.join("asset-manifest.json"), serde_json::to_vec(&serde_json::json!({
+        "version":1,"entry":"index.html","files":[{"path":"index.html","contentType":"text/html","bytes":length}]
+    })).unwrap()).unwrap();
+    let assets = Arc::new(crate::serve::assets::WebAssets::open(&fixture.root).unwrap());
+    let activity = owner_activity::OwnerActivity::default();
+    let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
+    let gate = ExecutionGate::default();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    client.set_read_timeout(Some(WAIT)).unwrap();
+    client
+        .write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\n\r\n")
+        .unwrap();
+    let (stream, _) = listener.accept().unwrap();
+    for (socket, option) in [(&client, libc::SO_RCVBUF), (&stream, libc::SO_SNDBUF)] {
+        let bytes: libc::c_int = 4096;
+        // These owned sockets must backpressure well before the 4 MiB payload.
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    socket.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    option,
+                    (&bytes as *const libc::c_int).cast(),
+                    std::mem::size_of_val(&bytes) as libc::socklen_t,
+                )
+            },
+            0
+        );
+    }
+    let socket = stream.try_clone().unwrap();
+    let guard = activity.admission().try_admit().unwrap();
+    let profile = Profile {
+        model_id: "test".into(),
+        request: RequestProfile::UnboundQwen,
+        lens: Arc::new(LensApi::new(
+            "test".into(),
+            Some(Arc::clone(&fixture.store)),
+            None,
+        )),
+        assets: Some(assets),
+        gate: gate.clone(),
+        activity: activity.admission(),
+        sender,
+        trace: None,
+    };
+    let mut worker = Worker {
+        socket,
+        thread: Some(std::thread::spawn(move || {
+            handle(stream, &profile, Some(guard))
+        })),
+    };
+    let mut prefix = [0u8; 16];
+    client.read_exact(&mut prefix).unwrap();
+    assert_eq!(&prefix[..12], b"HTTP/1.1 200");
+    assert!(activity.is_settled());
+    assert!(gate.reserve().is_ok());
+    assert!(!worker.thread.as_ref().unwrap().is_finished());
+    worker.stop();
+    worker.join().unwrap();
+    assert!(activity.is_settled());
 }
 
 #[test]

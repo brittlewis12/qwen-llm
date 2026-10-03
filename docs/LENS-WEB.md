@@ -2,14 +2,24 @@
 
 ## Recovered Now
 
-The reconstruction currently provides a durable baseline API on `qwen serve`.
-The browser client, original-forward readouts, fitted assets, interventions and
-retained capture production are not yet recovered. This is an intermediate usable
-API slice, not completion of the workbench. See [the recovery ledger](LENS-WEB-RECOVERY.md).
+The reconstruction provides a durable baseline API and the preserved Bun/React
+client on `qwen serve`. Original-forward readouts, fitted assets, interventions and
+retained capture production are not yet recovered. Compatible historical records
+remain inspectable in the client. This is an intermediate usable baseline workbench,
+not completion of recovery. See [the recovery ledger](LENS-WEB-RECOVERY.md).
 
 ```sh
 qwen serve -m MODEL --lens-data-dir JOB_DIRECTORY
 ```
+
+For the browser, run `bun install --frozen-lockfile` and `bun run build` in `web/`,
+then add `--web-root web/dist` to that same server command. Rust loads the prebuilt
+catalog before the model; it never starts Bun or another production service.
+`--web-root` requires durable history and inherits its current family restriction.
+The catalog's 64 MiB limit counts payload lengths, not metadata/allocation overhead.
+Symlink checks reject known unsafe paths but are not race-free ancestor confinement.
+API paths cannot become static assets. See [`web/README.md`](../web/README.md) for
+development, draft/retry safeguards and saved diagnostic exploration.
 
 The flag currently requires an ordinary Qwen backend. Native generation requires
 a metadata-qualified Qwen3.6/3.8 House template; unsupported ordinary deployments
@@ -88,6 +98,10 @@ an ordinary request receives 503 before its body is read. With history enabled,
 two bounded CPU classifier workers read headers and handle history/retry/cancel
 while the owner runs inference. With history disabled, existing pre-header busy
 behavior is unchanged. This is not multi-model scheduling or concurrent inference.
+Static GET/HEAD requests share that CPU pool and release read-only activity before
+writing borrowed immutable bytes. They do not reserve execution. Bodies on static
+reads are refused before allocation. Client discovery is sequenced; read-only 503s
+receive at most two short retries, never automatic resubmission or cancellation.
 
 Each mutating HTTP request has a completion lifetime; an accepted native job adds
 an independent lifetime through joined publication. Valid read-only Lens routes
@@ -130,6 +144,12 @@ mock forwards. They cover disconnect/retry/history without extra forwards,
 cancellation during execution and startup, active native shutdown, read-only idle
 accounting, publication failures and ordinary serving after native work. Existing
 all-family ordinary protocol and real SIGTERM CPU fixtures remain covered.
+
+The recovered client passes Bun types/tests/build and GPU-disabled historical
+browser fixtures. A separate CPU-owned Rust child exercises the production assets,
+two-worker control pool, durable store and native writer through mobile baseline
+submission, reload, exact byte display, history/copy without new jobs and desktop
+layout. Browser layout assertions do not establish screenshot-based visual review.
 
 The released Qwen3.6 35B A3B Q4_K_M tokenizer also passes the opt-in native/CLI
 prefill matrix on CPU. A clean release built at `b850e3e7` passes the bounded live

@@ -76,10 +76,10 @@ recovery is explicitly recorded below.
 | R12 | Ordered scoped interventions: `serve/native/interventions/*`, `lens_intervention.rs` | Reuse after R02/R11 | Exact order/scopes, zero controls, deployed covector semantics, independent transformation checks |
 | R13 | Retained full scores/source arrays: `serve/jobs/arrays.rs`, native observer/writer, `web/retention*` | Reuse after R07/R10 | Raw admission, dual-watermark durability, digest/finite/shape checks, offline rank/entropy, no implicit fetch |
 | R14 | Whole-site pre/post capture: `metal_forward/token.rs`, `serve/native/measurements.rs` | Reuse after R12/R13; do not imply per-operation intermediates | Before/after placement, independent layer sets, alias refusal, actual-vector metrics and zero controls |
-| R15 | Bun client and same-origin assets: `web/{build,dev,proxy}.*`, `serve/assets.rs` | Reuse with main's HTTP surface; R06/R08 | Local serving/proxy policy, manifest paths, production bundle and mobile/desktop loading |
-| R16 | Durable browser submission/history: `web/{api,contract,durable,storage,jobs,history}.*` | Reuse with R07-R09/R15 | Persist-before-POST, identical recovery bytes, explicit cancellation, partial pages, other-client history |
-| R17 | Draft and identity safety: `web/{draft,bindings,editor,diagnostics}.*` | Reuse with R03/R08/R16; required from first submission UI | No silent retarget, exact scope pinning, historical copy, async-edit preservation and failed persistence |
-| R18 | Direct manipulation workbench: `web/{viewer,token-navigation,token-navigator,App,styles}.*` | Reuse after associated readout/intervention/retention slices | Saved-token/layer/candidate selection, missing-data distinctions, stable refresh, scoped staging, phone parity |
+| R15 | Bun client and same-origin assets: `web/{build,dev,proxy}.*`, `serve/assets.rs` | Recovered on shared CPU control pool; web-root requires history/current ordinary-family boundary | Bun types/build and real same-port CPU browser/static gates pass; no second production service |
+| R16 | Durable browser submission/history: `web/{api,contract,durable,storage,jobs,history}.*` | Recovered with real baseline producer and historical fixture readers | Persist-before-POST, exact retry, history/reload/copy pass; baseline CPU browser traverses actual Rust store |
+| R17 | Draft and identity safety: `web/{draft,bindings,editor,diagnostics}.*` | Recovered from first submission UI; diagnostic creation remains capability-gated | No silent retarget, saved pinning, copy/edit race and persistence failure pass in fixtures; baseline production route exercised |
+| R18 | Direct manipulation workbench: `web/{viewer,token-navigation,token-navigator,App,styles}.*` | Historical navigation/readers recovered; new diagnostic production remains R10-R14 pending | Phone/desktop historical fixture manipulation and actual baseline browser pass; not live diagnostic qualification |
 | R19 | Evidence and qualification: native CPU/live tests, HTTP fixtures, `web/*check.ts`, docs | Rework gates to current main; preserve old evidence separately | No old-base pass promoted to current-main qualification; bounded live checks where numerical, lifecycle, cache/durability or memory-admission changes require them |
 
 CLI comparison/output/sweep changes must be accounted for under R02-R05, not
@@ -126,8 +126,8 @@ The preserved implementation last passed 238 serve tests (19 opt-in ignored),
 bounded numerical evidence, including a failed process exit later diagnosed as a
 test-witness precision mismatch and independently checked from saved arrays.
 Those are reference evidence only. The baseline Lens HTTP executor/history is now
-recovered with scoped CPU evidence; the browser and diagnostic execution remain
-pending.
+recovered with scoped CPU/live evidence; the browser is recovered with actual
+baseline and historical-fixture gates. New diagnostic execution remains pending.
 
 After recovery, interaction design and usable information density remain the
 primary product focus. This repair is not authorization for new feature scope.
@@ -653,3 +653,56 @@ The final-prefill first-sample-stop run remains in the separate local evidence
 directory `target/lens-baseline-aa75266c-116a-46ce-9e33-d5f37bedf64d/`.
 These checks establish scoped live execution/repeatability and settlement, not
 independent CLI-versus-HTTP numerical equivalence or other-model qualification.
+
+### R15-R18: Baseline Browser And Historical Exploration
+
+The preserved React/TypeScript client is recovered with Bun-native HTML serving,
+HMR and production bundling, retaining its established design rather than replacing
+it with another interface. `--web-root` mounts immutable prebuilt assets on the
+existing CPU control pool; it requires `--lens-data-dir` and the current ordinary
+Qwen family boundary. One `Workbench { store, assets }` configuration replaces the
+old optional history argument; no duplicate owner loop or service is introduced.
+Assets load before model admission and serve borrowed bytes. Their 64 MiB catalog
+limit counts payload lengths, not total allocation overhead; path checks do not
+promise race-free ancestor confinement. `/v1` and its descendants cannot be assets.
+
+Static GET/HEAD classification precedes execution reservation, refuses bodies and
+releases activity before writing while retaining socket ownership through worker
+join. CPU tests cover serving during native work, API precedence/missing assets,
+early body refusal, idle release during blocked writes, socket shutdown/join and
+CLI configuration requirements. Ordinary routes and history retain the same gate.
+
+The client preserves exact-key persistence/recovery, independent job history,
+identity-bound drafts, asynchronous-edit protection and explicit cancellation.
+Discovery now sequences capabilities/assets; GET-only 503 handling has two bounded
+retries to coexist with polling in the two-worker pool. POSTs are never retried as
+reads. Explicit `execution.baseline_only` is decoded and contradictory diagnostic
+claims refused, with fallback for historical responses lacking that field.
+
+Historical token/layer/candidate navigation, retained-array readers and contextual
+draft pinning return with the same client. Compatible stored diagnostics are useful
+without new capture production. Unsupported copied plans stay intact and blocked;
+no operation is silently removed. This does not qualify the server's unrecovered
+plain/fitted/intervention/pair producers or restore the old numerical evidence.
+
+All 55 preserved/updated Bun tests, typecheck and production build pass. The
+GPU-disabled historical browser fixture passes mobile interaction, exact retry,
+binding changes, late pages, pinning, retention, older history and desktop bounds.
+A new CPU-owned Rust test child serves the actual production bundle and uses real
+native preparation/store/writer with synthetic forwards. Browser submit/reload,
+exact sampled-byte output, copied prefill/sampling, unchanged history and desktop
+reopening pass under the real two-worker pool. No GPU lease is used for this slice;
+layout/interaction assertions are not screenshot visual qualification.
+
+Final gates pass: 292 serving CPU tests, 26 ignored (including the new browser
+child fixture), with the known unmarked Metal test explicitly excluded; 13 CLI
+tests; all binaries/tests compile; format and whitespace checks. Both browser
+flows pass again after `cx` requested deterministic socket-buffer backpressure and
+immediate, idempotent interruption cleanup/escalation for owned browser children.
+Final adversarial review approves this slice. The actual-server browser evidence
+is local at `web/.browser-test/baseline-4e5ab048-21b9-4f47-8954-368aa72a5863/`.
+
+The next consuming recovery slice is plain original-forward readouts, followed by
+fitted bindings/interventions and retained/pair capture production. The original
+richer live/oracle scripts remain in the frozen source until their server consumers
+return; the baseline live harness is independently committed and qualified.

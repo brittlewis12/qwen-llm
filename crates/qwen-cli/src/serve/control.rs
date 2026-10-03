@@ -120,6 +120,7 @@ pub(super) struct Profile {
     pub(super) model_id: String,
     pub(super) request: RequestProfile,
     pub(super) lens: Arc<LensApi>,
+    pub(super) assets: Option<Arc<super::assets::WebAssets>>,
     pub(super) gate: ExecutionGate,
     pub(super) activity: owner_activity::Admission,
     pub(super) sender: SyncSender<Event>,
@@ -166,7 +167,7 @@ impl std::fmt::Display for Refused {
         f.write_str(match self {
             Self::Busy => "server is processing another request",
             Self::TooLarge => "Lens request exceeds advertised body limit",
-            Self::GetBody => "Lens GET does not accept a body",
+            Self::GetBody => "Read-only Lens and static requests do not accept a body",
         })
     }
 }
@@ -207,6 +208,18 @@ pub(super) fn handle(
                 if profile.lens.is_read_only(head) {
                     activity.take().expect("HTTP activity").release_read_only();
                 }
+            } else if profile
+                .assets
+                .as_ref()
+                .is_some_and(|assets| assets.matches(&head.method, &head.path))
+            {
+                if length != 0 {
+                    return Err(io::Error::other(Refused::GetBody));
+                }
+                activity
+                    .take()
+                    .expect("static HTTP activity")
+                    .release_read_only();
             } else {
                 execution = Some(
                     profile
@@ -247,6 +260,11 @@ pub(super) fn handle(
     if LensApi::matches(&request.path) {
         profile.lens.handle(&request, &stream)?;
         return Ok(());
+    }
+    if let Some(assets) = &profile.assets {
+        if assets.serve(&request.method, &request.path, &stream)? {
+            return Ok(());
+        }
     }
     let trace = profile.trace.as_ref().map(TraceFactory::subscriber);
     let connection = transport::Connection::prepared(

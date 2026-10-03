@@ -15,6 +15,7 @@
 //! maintenance on complete request lifetimes, and [`trace`] owns the shared log.
 #![allow(dead_code)] // consumed incrementally; the HTTP slice wires the rest
 
+mod assets;
 pub(crate) mod backend;
 pub(crate) mod backend_ds4;
 pub(crate) mod backend_k2;
@@ -62,6 +63,11 @@ use std::time::{Duration, Instant};
 
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const ADMISSION_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+struct Workbench {
+    store: Arc<jobs::store::JobStore>,
+    assets: Option<Arc<assets::WebAssets>>,
+}
 
 pub(crate) const DEFAULT_SERVE_MAX_CONTEXT_TOKENS: usize = 262_144;
 pub(crate) const DEFAULT_SERVE_MAX_TOKENS: usize = 65_536;
@@ -355,12 +361,24 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             || matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe),
         "--lens-data-dir recovery currently supports ordinary Qwen; other families retain their existing serving path"
     );
-    let history = invocation
+    ensure!(
+        invocation.web_root.is_none() || invocation.lens_data_dir.is_some(),
+        "--web-root requires --lens-data-dir"
+    );
+    let assets = invocation
+        .web_root
+        .as_deref()
+        .map(assets::WebAssets::open)
+        .transpose()
+        .context("open prebuilt Lens client")?
+        .map(Arc::new);
+    let workbench = invocation
         .lens_data_dir
         .as_deref()
         .map(|root| jobs::store::JobStore::open(root, jobs::store::Limits::default()).map(Arc::new))
         .transpose()
-        .context("open durable Lens history")?;
+        .context("open durable Lens history")?
+        .map(|store| Workbench { store, assets });
     if matches!(family, ModelFamily::K2Horizon | ModelFamily::MuseGlimmer) {
         ensure!(
             template_style == items::TemplateStyle::House,
@@ -406,7 +424,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 load_ms,
                 &mut backend,
                 &mut trace,
-                history,
+                workbench,
             );
         }
         ModelFamily::Qwen35
@@ -479,7 +497,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 load_ms,
                 &mut backend,
                 &mut trace,
-                history,
+                workbench,
             )
         }
         ModelFamily::DeepSeek4 => {
@@ -518,7 +536,14 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 }
             }
             crate::shutdown::checkpoint()?;
-            accept_loop(listener, &model_id, 0.0, &mut backend, &mut trace, history)
+            accept_loop(
+                listener,
+                &model_id,
+                0.0,
+                &mut backend,
+                &mut trace,
+                workbench,
+            )
         }
         ModelFamily::Qwen4Exp => {
             if let Some(failure) =
@@ -559,7 +584,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 load_ms,
                 &mut backend,
                 &mut trace,
-                history,
+                workbench,
             )
         }
         ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {
@@ -649,7 +674,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 load_ms,
                 &mut backend,
                 &mut trace,
-                history,
+                workbench,
             )
         }
     }
@@ -744,11 +769,17 @@ fn accept_loop(
     load_ms: f64,
     backend: &mut dyn http::GenerationBackend,
     trace: &mut Option<http::TraceLog>,
-    history: Option<Arc<jobs::store::JobStore>>,
+    workbench: Option<Workbench>,
 ) -> Result<()> {
-    accept_loop_with_history(listener, model_id, load_ms, backend, trace, history, |_| {
-        crate::shutdown::checkpoint()
-    })
+    accept_loop_with_workbench(
+        listener,
+        model_id,
+        load_ms,
+        backend,
+        trace,
+        workbench,
+        |_| crate::shutdown::checkpoint(),
+    )
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -766,18 +797,18 @@ fn accept_loop_with_checkpoint(
     trace: &mut Option<http::TraceLog>,
     checkpoint: impl FnMut(OwnerCheckpoint) -> Result<()>,
 ) -> Result<()> {
-    accept_loop_with_history(
+    accept_loop_with_workbench(
         listener, model_id, load_ms, backend, trace, None, checkpoint,
     )
 }
 
-fn accept_loop_with_history(
+fn accept_loop_with_workbench(
     listener: TcpListener,
     model_id: &str,
     load_ms: f64,
     backend: &mut dyn http::GenerationBackend,
     trace: &mut Option<http::TraceLog>,
-    history: Option<Arc<jobs::store::JobStore>>,
+    workbench: Option<Workbench>,
     mut checkpoint: impl FnMut(OwnerCheckpoint) -> Result<()>,
 ) -> Result<()> {
     let local_addr = listener
@@ -789,9 +820,9 @@ fn accept_loop_with_history(
         local_addr,
         model_id,
         load_ms,
-        history.is_some(),
+        workbench.is_some(),
     );
-    let history_enabled = history.is_some();
+    let history_enabled = workbench.is_some();
     let (sender, receiver) = sync_channel(usize::from(history_enabled));
     // Publish initial readiness before the acceptor can observe a connection;
     // otherwise an idle server has a startup window that returns a false 503.
@@ -802,7 +833,7 @@ fn accept_loop_with_history(
     let mut activity = owner_activity::OwnerActivity::default();
     let admission = activity.admission();
     let gate = control::ExecutionGate::default();
-    let acceptor = if let Some(store) = history {
+    let acceptor = if let Some(Workbench { store, assets }) = workbench {
         let native = backend.native_profile()?.map(|profile| {
             Arc::new(native::NativeAdmission {
                 profile,
@@ -824,6 +855,7 @@ fn accept_loop_with_history(
                 model_id: model_id.into(),
                 request: backend.request_profile(),
                 lens,
+                assets,
                 gate: gate.clone(),
                 activity: admission.clone(),
                 sender,

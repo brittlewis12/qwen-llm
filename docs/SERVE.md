@@ -128,7 +128,7 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
   [--snapshot-half-life-secs 600] [--durable-snapshot-dir PATH|off] \
   [--durable-snapshot-max-mib auto|MIB] [--durable-snapshot-min-tokens 1024] \
   [--durable-idle-publish-secs 30] [--durable-shutdown-secs 30] \
-  [--lens-data-dir PATH]
+  [--lens-data-dir PATH] [--web-root web/dist]
 # Qwen: without --max-context-tokens the admission ceiling is the smaller of the
 # 262,144 hard default and the GGUF's declared context length; --drafter is
 # accepted for dense targets only (an MoE target fails startup rather than
@@ -145,7 +145,9 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
 enables the native `/v1/lens` job/history API on this same server. Qualified House
 Qwen3.6/3.8 deployments accept messages, typed assistant prefills and explicit
 sampling; other ordinary deployments can read history without claiming execution
-support. Readouts, interventions and the browser client are still being recovered.
+support. `--web-root web/dist` serves the prebuilt Bun client and requires
+`--lens-data-dir`; Rust never invokes Bun. Readout/intervention producers are still
+being recovered, while compatible saved diagnostics remain inspectable.
 Ordinary `/v1/responses` remains available, sharing one execution reservation.
 Accepted native jobs survive client disconnect; history reads never run inference.
 See [Lens Workbench](LENS-WEB.md) for limits, overload, recovery and qualification.
@@ -460,7 +462,7 @@ test harness; it does not qualify the production CLI's signal-derived exit code.
 Live Metal pressure, performance, cache continuity and model-backed signal/durable
 shutdown remain pending. This earlier ordinary-bridge milestone does not establish
 Lens qualification. The subsequent [durable baseline slice](LENS-WEB.md) adds
-concurrent history/native routes; its browser client is still pending recovery.
+concurrent history/native routes and the capability-gated Bun browser client.
 
 ## K2 Horizon Raw Profile
 

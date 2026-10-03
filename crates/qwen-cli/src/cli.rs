@@ -116,6 +116,10 @@ pub(crate) struct ServeArgs {
     #[arg(long)]
     lens_data_dir: Option<PathBuf>,
 
+    /// Prebuilt Bun client directory; requires durable Lens history on this server.
+    #[arg(long, requires = "lens_data_dir")]
+    web_root: Option<PathBuf>,
+
     /// Whose conventions prompts follow where serve deliberately departs from
     /// a release chat template (Qwen and DeepSeek V4). `house`: past turns
     /// render as they were generated whatever the current thinking mode, and
@@ -191,6 +195,7 @@ pub(crate) struct ServeInvocation {
     pub(crate) drafter: Option<PathBuf>,
     pub(crate) trace_sse: Option<PathBuf>,
     pub(crate) lens_data_dir: Option<PathBuf>,
+    pub(crate) web_root: Option<PathBuf>,
     pub(crate) template_style: crate::open_responses::items::TemplateStyle,
 }
 
@@ -466,6 +471,7 @@ pub(crate) fn normalize(args: &mut Args) -> Invocation {
             drafter: serve.drafter,
             trace_sse: serve.trace_sse,
             lens_data_dir: serve.lens_data_dir,
+            web_root: serve.web_root,
             template_style: serve.template_style,
         }),
         Command::Run(run) => {
@@ -522,6 +528,36 @@ mod tests {
         let invocation = normalize(&mut args);
         invocation.apply_option_overrides(&mut args);
         (args, invocation)
+    }
+
+    #[test]
+    fn serve_web_assets_require_and_preserve_durable_history_configuration() {
+        assert!(
+            Args::try_parse_from([
+                "qwen",
+                "serve",
+                "-m",
+                "model.gguf",
+                "--web-root",
+                "web/dist"
+            ])
+            .is_err()
+        );
+        let (_, invocation) = parse(&[
+            "qwen",
+            "serve",
+            "-m",
+            "model.gguf",
+            "--web-root",
+            "web/dist",
+            "--lens-data-dir",
+            "jobs",
+        ]);
+        let Invocation::Serve(serve) = invocation else {
+            panic!("expected serve")
+        };
+        assert_eq!(serve.web_root.as_deref(), Some(Path::new("web/dist")));
+        assert_eq!(serve.lens_data_dir.as_deref(), Some(Path::new("jobs")));
     }
 
     #[test]

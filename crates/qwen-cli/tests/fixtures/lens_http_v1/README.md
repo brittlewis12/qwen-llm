@@ -6,7 +6,8 @@ except explicit retained-array downloads, which use binary F32LE payloads.
 Capability values and limits are illustrative; clients must use returned values.
 
 Reconstruction scope: baseline submission/history is wired; readouts, fitted assets,
-interventions, capture production and the browser client are pending. Their schema
+interventions and capture production are pending. The capability-gated browser
+client and static serving are recovered. Diagnostic schema
 descriptions below preserve the original contract for subsequent recovery and for
 reading compatible historical artifacts. They are not current execution claims.
 
@@ -39,7 +40,8 @@ reading compatible historical artifacts. They are not current execution claims.
   immutable and ordered by seq. Cursors are opaque. At the current live end,
   next_cursor is a resumable cursor and complete=false; only terminal publication
   uses next_cursor=null, complete=true. Empty pages are valid.
-- GET /: prebuilt frontend and `--web-root` are pending recovery.
+- GET /: prebuilt frontend; root-relative assets from configured `--web-root`,
+  which requires `--lens-data-dir` in this recovery slice. HEAD omits the body.
 - GET /v1/lens/jobs/{id}/arrays/{record_offset}: verified committed F32LE array,
   `application/octet-stream`. Locator is the descriptor's record-log byte offset,
   not a filename or GPU query. Whole-array reads only; query parameters rejected.
@@ -60,7 +62,7 @@ old-worktree live evidence does not qualify this reconstruction.
 
 Native Lens routes require a localhost/loopback Host. If Origin is present it
 must match that local HTTP authority; headerless CLI clients remain supported.
-The preserved Bun dev proxy, pending recovery, validates its own browser origin.
+The Bun dev proxy validates its own browser origin before forwarding to Rust.
 These are local browser request checks, not an authentication or remote-access
 feature.
 

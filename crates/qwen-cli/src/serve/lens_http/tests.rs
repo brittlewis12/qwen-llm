@@ -263,6 +263,7 @@ fn handle_api(stream: TcpStream, api: Arc<LensApi>) -> io::Result<()> {
     let mut activity = crate::serve::owner_activity::OwnerActivity::default();
     let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
     let profile = crate::serve::control::Profile {
+        assets: None,
         model_id: "test-model".into(),
         request: crate::serve::request_profile::RequestProfile::UnboundQwen,
         lens: api,

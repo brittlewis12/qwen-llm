@@ -474,3 +474,28 @@ fn busy_and_shutdown_cover_reading_generation_backpressure_and_response_writing(
         assert!(observed.try_recv().is_err());
     }
 }
+#[test]
+fn unsettled_accounting_still_flushes_backend_shutdown() {
+    struct Backend(usize);
+    impl http::GenerationBackend for Backend {
+        fn model_id(&self) -> &str {
+            "shutdown-test"
+        }
+        fn generate(
+            &mut self,
+            _: &crate::serve::items::ServeRequest,
+            _: &str,
+            _: &mut dyn http::GenerationSink,
+        ) -> std::result::Result<http::GenerationOutcome, http::BackendFailure> {
+            unreachable!()
+        }
+        fn shutdown(&mut self) {
+            self.0 += 1;
+        }
+    }
+    let activity = owner_activity::OwnerActivity::default();
+    let _outstanding = activity.admission().try_admit().unwrap();
+    let mut backend = Backend(0);
+    assert!(shutdown_owner(&mut backend, &activity).is_err());
+    assert_eq!(backend.0, 1);
+}

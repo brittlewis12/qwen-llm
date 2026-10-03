@@ -958,14 +958,24 @@ fn accept_loop_with_workbench(
     let worker_result = connection.map_or(Ok(()), transport::Connection::stop_and_join);
     let acceptor_result = acceptor.join();
     activity.drain_finished(|| backend.request_finished());
-    ensure!(activity.is_settled(), "HTTP owner activity did not settle");
-    backend.set_control_memory_reserve(0);
     // Stop accepting before the bounded durable flush, so clients see a
     // closed port rather than a stalled server during shutdown.
-    backend.shutdown();
+    let settlement = shutdown_owner(backend, &activity);
     acceptor_result.map_err(|_| anyhow::anyhow!("HTTP acceptor panicked"))??;
     worker_result?;
+    settlement?;
     result
+}
+
+fn shutdown_owner(
+    backend: &mut dyn http::GenerationBackend,
+    activity: &owner_activity::OwnerActivity,
+) -> Result<()> {
+    let settled = activity.is_settled();
+    backend.set_control_memory_reserve(0);
+    backend.shutdown();
+    ensure!(settled, "HTTP owner activity did not settle");
+    Ok(())
 }
 
 #[cfg(test)]

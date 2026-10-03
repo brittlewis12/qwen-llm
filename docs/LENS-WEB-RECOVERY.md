@@ -73,7 +73,7 @@ recovery is explicitly recorded below.
 | R09 | Native baseline and observation lifecycle: `serve/native/{mod,execute,writer}.rs` | Baseline recovered on current resident/cache admission, joined writer; observation production pending | CPU lifecycle and scoped Qwen3.6 live disconnect/decode/interruption/restart pass; broader numerical/pressure qualification pending |
 | R10 | Plain original-forward readouts: `serve/native/{readouts,observe}.rs` | Producer recovered with browser/current admission; no replay | CPU scopes/lifecycle/publication/HTTP/browser and scoped Qwen3.6 live unchanged-sample/final-layer witness gate pass |
 | R11 | Fitted readouts and direction staging: `serve/native/{registry,interventions}.rs`, `workspace_lens/*` | Fitted producer recovered with CPU/browser and scoped original-forward numerical evidence; direction staging remains R12 | Registered identity, matrix integrity, owner-admitted joined staging/workspace, independent numerical oracle |
-| R12 | Ordered scoped interventions: `serve/native/interventions/*`, `lens_intervention.rs` | Reuse after R02/R11 | Exact order/scopes, zero controls, deployed covector semantics, independent transformation checks |
+| R12 | Ordered scoped interventions: `serve/native/interventions/*`, `lens_intervention.rs` | Three native operators recovered and CPU/browser-qualified; live first-site oracle pending | Exact order/scopes, zero controls, deployed covector semantics, independent transformation checks |
 | R13 | Retained full scores/source arrays: `serve/jobs/arrays.rs`, native observer/writer, `web/retention*` | Reuse after R07/R10 | Raw admission, dual-watermark durability, digest/finite/shape checks, offline rank/entropy, no implicit fetch |
 | R14 | Whole-site pre/post capture: `metal_forward/token.rs`, `serve/native/measurements.rs` | Reuse after R12/R13; do not imply per-operation intermediates | Before/after placement, independent layer sets, alias refusal, actual-vector metrics and zero controls |
 | R15 | Bun client and same-origin assets: `web/{build,dev,proxy}.*`, `serve/assets.rs` | Recovered on shared CPU control pool; web-root requires history/current ordinary-family boundary | Bun types/build and real same-port CPU browser/static gates pass; no second production service |
@@ -935,3 +935,44 @@ and lazy lookup behavior. Lens CPU gate: 391 pass, nine ignored plus explicit un
 Muse Metal exclusion; all binaries/tests/fmt/whitespace pass. `cx` approves this
 independently consumed refactor. No GPU used; native intervention production remains
 the next consuming R12 slice, not implied by shared lowering alone.
+
+### R12: Ordered Scoped Native Interventions
+
+The existing server now admits fixed addition, residual-L2-relative addition and
+projection attenuation from registered token-ID deployed-logit-numerator directions.
+CPU selected-output qualification, not plain-head availability alone, controls discovery.
+Source-to-target, coordinate-swap and alternate covector conventions remain native
+capability refusals; shared CLI behavior is preserved. Scope cardinality is checked
+before expansion. Zero controls validate fully but create no applications or prepared
+rows. Order is transformer layer order, then authored operation order at each layer.
+
+A combined staging plan deduplicates matrices across readouts/interventions and admits
+host staging once. Operation-only jobs traverse the same admission/staging path without
+allocating a fitted-readout workspace. Retained GPU directions and separately aligned
+selection/projection buffers are priced alongside readout buffers, conservatively summing
+partly separate lifetimes. Host copies, normalization/upload/record construction and
+existing durable/control/writer allowances are retained. Projection uses unified
+checkpoints before/between GPU calls and publications. Preparation cancellation remains
+typed cancellation, not an execution failure. Applied records follow successful forward
+and known consumption; readouts report the site's authored applied IDs.
+
+CPU tests cover ordered events, shared projection with distinct normalization rows,
+zero validation without allocations, operation-only preparation/publication, shared
+matrix admission and failed-forward refusal. Serving CPU gate: 322 pass, 28 ignored
+plus explicit known Metal exclusion; Lens 391 pass, nine ignored plus explicit Muse
+exclusion; all binaries/tests/types compile. Bun 55 tests/build pass. Actual Rust CPU
+browser evidence `web/.browser-test/baseline-44fdf064-292e-487f-835d-c59224f685e7/` covers
+phone direction pinning, operation creation/reordering, decode scopes, submission,
+same-site application/readout provenance and saved-copy/history with desktop parity.
+Its forwards/projections are synthetic; it is not numerical qualification.
+
+The opt-in release-test oracle adds five short jobs: baseline, zero, active, operation-only
+and reordered. Test-only source values borrow existing original captures. At the first
+intervened site (prefill zero, one middle layer, no earlier intervention), baseline is
+a valid pre-operation reference. Sequential F64 transforms must match the active and
+reordered observations; CPU references must have disjoint tolerance bands and each
+observed order must reject the opposite reference. A CPU regression rejects overlapping
+bands. Six projection witness records represent three projections with two normalization
+variants each. Operation-only equivalence checks sampled records, not uncaptured residuals.
+Live evidence is pending at this checkpoint; test-only vectors/witnesses are absent from
+production. R13 retained arrays and R14 whole-site paired capture remain pending.

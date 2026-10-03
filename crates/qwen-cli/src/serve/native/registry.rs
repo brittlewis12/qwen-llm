@@ -117,12 +117,14 @@ impl Registry {
             .iter()
             .any(|(_, t)| t.manifest().model.exact_binding.is_some());
         let deployment = CpuDeployment::from_gguf(gguf, ExecutionMode::Scalar, exact, checkpoint)?;
-        Self::bind(opened, deployment, checkpoint)
+        let directions = qwen_llm::workspace_lens::validate_opened_output_head(gguf, true).is_ok();
+        Self::bind(opened, deployment, directions, checkpoint)
     }
 
     fn bind(
         opened: Vec<(AssetConfig, VerifiedTransport)>,
         deployment: CpuDeployment,
+        directions: bool,
         checkpoint: &mut impl FnMut() -> Result<()>,
     ) -> Result<Self> {
         let mut assets = BTreeMap::new();
@@ -136,7 +138,7 @@ impl Registry {
                 "identity":transport.manifest_digest()?,"identity_kind":"blake3_compact_json_sorted_objects_array_order_preserved",
                 "payload_blake3":transport.payload_blake3(),"available":true,"unavailable_reason":null,
                 "method":m.transport.method,"source_layers":m.transport.source_layers,"target_layer":m.transport.target_layer,
-                "readout_modes":["full_vocabulary"],"direction_rows":[],"direction_covectors":[],
+                "readout_modes":["full_vocabulary"],"direction_rows":if directions {vec!["token_id"]} else {vec![]},"direction_covectors":if directions {vec!["deployed_logit_numerator"]} else {vec![]},
                 "transfer":binding["status"],"binding":binding,
                 "score_semantics":{"kind":"logit","softmax_applied":false,"normalization":"deployed_output_rmsnorm_and_lm_head",
                     "candidate_universe":"full_model_vocabulary","generation_distribution":false}});

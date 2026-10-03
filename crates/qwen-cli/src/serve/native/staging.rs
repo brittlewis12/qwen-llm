@@ -1,9 +1,6 @@
 //! One owner-authorized setup command on the existing joined artifact worker.
 
-use super::{
-    readouts::Plan,
-    registry::{MatrixKey, Registry, Staged},
-};
+use super::registry::{MatrixKey, Registry, STAGING_OVERHEAD_BYTES, Staged};
 use anyhow::{Context, Result, ensure};
 use std::{
     collections::BTreeSet,
@@ -13,6 +10,38 @@ use std::{
         mpsc::{Receiver, SyncSender, sync_channel},
     },
 };
+
+#[derive(Default)]
+pub(crate) struct Plan {
+    pub(crate) registry: Option<Arc<Registry>>,
+    pub(crate) keys: BTreeSet<MatrixKey>,
+    pub(crate) matrix_bytes: u64,
+}
+impl Plan {
+    pub(crate) fn new(registry: Option<Arc<Registry>>, keys: BTreeSet<MatrixKey>) -> Result<Self> {
+        let matrix_bytes = if keys.is_empty() {
+            0
+        } else {
+            registry
+                .as_ref()
+                .context("missing diagnostic registry")?
+                .matrix_bytes(&keys)?
+        };
+        Ok(Self {
+            registry,
+            keys,
+            matrix_bytes,
+        })
+    }
+    pub(crate) fn cpu_bytes(&self) -> Result<u64> {
+        if self.keys.is_empty() {
+            return Ok(0);
+        }
+        self.matrix_bytes
+            .checked_add(STAGING_OVERHEAD_BYTES)
+            .context("staging memory overflow")
+    }
+}
 
 pub(super) struct Request {
     registry: Arc<Registry>,
@@ -43,14 +72,14 @@ pub(super) fn request(
     plan: &Plan,
     reserve: u64,
 ) -> Result<(Request, Receiver<Result<Staged>>, WaitGuard)> {
-    ensure!(!plan.matrices.is_empty(), "empty staging command");
+    ensure!(!plan.keys.is_empty(), "empty staging command");
     let registry = plan
         .registry
         .as_ref()
         .context("missing staging registry")?
         .clone();
     ensure!(
-        registry.matrix_bytes(&plan.matrices)? == plan.matrix_bytes,
+        registry.matrix_bytes(&plan.keys)? == plan.matrix_bytes,
         "staging plan changed"
     );
     ensure!(
@@ -66,7 +95,7 @@ pub(super) fn request(
     Ok((
         Request {
             registry,
-            keys: plan.matrices.clone(),
+            keys: plan.keys.clone(),
             matrix_bytes: plan.matrix_bytes,
             reserve,
             abandoned: abandoned.clone(),
@@ -117,10 +146,16 @@ mod tests {
         let (files, registry) = super::super::registry::tests::fitted_fixture();
         let value = json!({"id":"a","lens":"fit","mode":"full_vocabulary","top_k":1,
             "scope":{"layers":{"kind":"values","values":[0,2]},"prefill":{"kind":"values","values":[0]}}});
-        (
-            files,
-            Plan::compile_with_registry(&[value], 3, 1, 1, 32, Some(registry)).unwrap(),
+        let readouts = super::super::readouts::Plan::compile_with_registry(
+            &[value],
+            3,
+            1,
+            1,
+            32,
+            Some(registry.clone()),
         )
+        .unwrap();
+        (files, Plan::new(Some(registry), readouts.matrices).unwrap())
     }
 
     #[test]

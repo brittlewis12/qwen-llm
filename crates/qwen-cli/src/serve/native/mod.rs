@@ -3,6 +3,9 @@
 mod execute;
 #[cfg(test)]
 mod fitted_live;
+#[cfg(test)]
+mod intervention_live;
+mod interventions;
 mod observe;
 pub(crate) mod preconditions;
 mod readouts;
@@ -45,10 +48,10 @@ pub(crate) fn with_staged(
 ) -> Outcome {
     let staged = (|| {
         checkpoint(sink)?;
-        let staged = if prepared.readouts.matrices.is_empty() {
+        let staged = if prepared.staging.keys.is_empty() {
             registry::Staged::default()
         } else {
-            sink.stage(&prepared.readouts, reserve)?
+            sink.stage(&prepared.staging, reserve)?
         };
         checkpoint(sink)?;
         Ok(staged)
@@ -79,6 +82,8 @@ pub(crate) struct Prepared {
     pub(crate) max_tokens: usize,
     pub(super) record: Vec<u8>,
     pub(super) readouts: readouts::Plan,
+    pub(super) interventions: interventions::Plan,
+    pub(super) staging: staging::Plan,
 }
 impl Prepared {
     pub(crate) fn counters(&self) -> Counters {
@@ -100,6 +105,15 @@ impl Prepared {
 }
 
 impl Profile {
+    fn directions_supported(&self) -> bool {
+        self.registry.as_ref().is_some_and(|r| {
+            r.metadata().any(|a| {
+                a["direction_rows"]
+                    .as_array()
+                    .is_some_and(|rows| !rows.is_empty())
+            })
+        })
+    }
     fn check_preconditions(&self, request: &Request) -> Result<(), ApiError> {
         preconditions::check(request, &self.identity, |alias| {
             if self.plain_readouts && alias == "plain" {
@@ -125,13 +139,15 @@ impl Profile {
                 "The resident deployment has no qualified no-thinking mode.",
             ));
         }
-        if request.diagnostics.as_ref().is_some_and(|d| {
-            !d.directions.is_empty() || !d.operations.is_empty() || !d.residual_pairs.is_empty()
-        }) {
+        if request
+            .diagnostics
+            .as_ref()
+            .is_some_and(|d| !d.residual_pairs.is_empty())
+        {
             return Err(ApiError::new(
                 400,
                 "unsupported_capability",
-                "Directions, operations and residual pairs are not recovered; they are not silently ignored.",
+                "Residual pair production is not recovered; it is not silently ignored.",
             ));
         }
         let prepared = request
@@ -163,6 +179,31 @@ impl Profile {
             self.registry.clone(),
         )
         .map_err(|cause| ApiError::new(400, "invalid_readout", cause.to_string()))?;
+        let diagnostics = request.diagnostics.as_ref();
+        let interventions = interventions::Plan::compile(
+            diagnostics
+                .map(|d| d.directions.as_slice())
+                .unwrap_or_default(),
+            diagnostics
+                .map(|d| d.operations.as_slice())
+                .unwrap_or_default(),
+            self.layers,
+            prepared.input.token_ids.len(),
+            request.generation.max_new_tokens,
+            self.tokenizer.n_vocab() as usize,
+            self.hidden,
+            self.registry.as_deref(),
+        )
+        .map_err(|cause| ApiError::new(400, "invalid_intervention", cause.to_string()))?;
+        let staging = staging::Plan::new(
+            self.registry.clone(),
+            readouts
+                .matrices
+                .union(&interventions.matrices)
+                .cloned()
+                .collect(),
+        )
+        .map_err(|cause| ApiError::new(400, "invalid_diagnostic_staging", cause.to_string()))?;
         // Bound serialization before materializing a Value tree of token bytes
         // and spans. A small authored request can otherwise amplify substantially.
         let bytes = writer::encode(&prepared.record(request.prefill()))
@@ -172,6 +213,9 @@ impl Profile {
         record["model_identity_kind"] = "runtime_gguf_metadata_not_content_hash".into();
         record["requested_preconditions"] = json!(request.preconditions);
         record["asset_identities"] = json!({});
+        for (alias, asset) in &interventions.assets {
+            record["asset_identities"][alias] = asset["identity"].clone();
+        }
         for readout in &readouts.readouts {
             record["asset_identities"][&readout.lens] = if readout.lens == "plain" {
                 self.identity.clone().into()
@@ -189,10 +233,24 @@ impl Profile {
                 .readouts
                 .iter()
                 .map(|r| json!({"id":r.id,"kind":"readout","scope":r.scope}))
+                .chain(
+                    interventions
+                        .operations
+                        .iter()
+                        .map(|op| json!({"id":op.id,"kind":"operation","scope":op.scope}))
+                )
                 .collect::<Vec<_>>()
         );
         record["readout_admission"] = json!({"head_evaluations_upper":readouts.head_evaluations,"output_rows_upper":readouts.output_rows,"output_scores_upper":readouts.output_scores});
-        record["effective_operation_ids"] = json!([]);
+        record["effective_operation_ids"] = json!(
+            interventions
+                .operations
+                .iter()
+                .filter(|op| crate::lens_intervention::operation_enabled(op))
+                .map(|op| &op.id)
+                .collect::<Vec<_>>()
+        );
+        record["intervention_admission"] = json!({"applications_upper":interventions.applications,"direction_rows":interventions.direction_rows,"projected_rows":interventions.projected_rows,"matrix_bytes":staging.matrix_bytes});
         record["sampling"] = json!(request.generation.sampling);
         record["execution"] = json!({"prefill":"serial","decode":"serial","cache":"isolated_diagnostic","forward":"post_block_serial","sampler_version":qwen_llm::sampling::SAMPLER_ALGORITHM_VERSION});
         let record = writer::encode(&record)
@@ -203,6 +261,8 @@ impl Profile {
             max_tokens: request.generation.max_new_tokens,
             record,
             readouts,
+            interventions,
+            staging,
         })
     }
 }
@@ -236,9 +296,14 @@ impl Admission for NativeAdmission {
             "model":{"id":self.profile.model_id,"identity":self.profile.identity,"template":self.profile.protocol.renderer_name(),"layers":self.profile.layers,"vocabulary_size":self.profile.tokenizer.n_vocab(),"hidden_size":self.profile.hidden},
             "model_identity_kind":"runtime_gguf_metadata_not_content_hash","input_kinds":["messages"],
             "generation_modes":generation_modes,
-            "assistant_prefill_channels":["reasoning","final"],"operations":[],"readout_modes":if self.profile.plain_readouts { vec!["full_vocabulary"] } else { vec![] },"capture_stage":"post_block_after_operations","request_preconditions":true,
+            "assistant_prefill_channels":["reasoning","final"],"operations":if self.profile.directions_supported() { interventions::OPERATORS.to_vec() } else {vec![]},"readout_modes":if self.profile.plain_readouts { vec!["full_vocabulary"] } else { vec![] },"capture_stage":"post_block_after_operations","request_preconditions":true,
             "execution":{"prefill":"serial","decode":"serial","cache":"isolated_diagnostic","baseline_only":!self.profile.plain_readouts},
-            "limits":{"max_new_tokens":self.profile.max_tokens,"max_context_tokens":self.profile.context,"max_token_piece_bytes":MAX_TOKEN_PIECE_BYTES,"max_directions":0,"max_operations":0,"max_readouts":if self.profile.plain_readouts {readouts::MAX_READOUTS} else {0},"max_top_k":if self.profile.plain_readouts {readouts::MAX_TOP_K.min(self.profile.tokenizer.n_vocab() as usize)} else {0},"max_head_evaluations":readouts::MAX_HEAD_EVALUATIONS,"max_readout_rows":readouts::MAX_ROWS,"max_readout_scores":readouts::MAX_SCORES,"max_readout_label_bytes":readouts::MAX_LABEL_BYTES,"max_queued_jobs":1}})
+            "limits":{"max_new_tokens":self.profile.max_tokens,"max_context_tokens":self.profile.context,"max_token_piece_bytes":MAX_TOKEN_PIECE_BYTES,
+                "max_directions":if self.profile.directions_supported() {interventions::MAX_DIRECTIONS} else {0},
+                "max_operations":if self.profile.directions_supported() {interventions::MAX_OPERATIONS} else {0},
+                "max_operation_applications":interventions::MAX_APPLICATIONS,"max_direction_rows":interventions::MAX_DIRECTION_ROWS,
+                "max_projection_products":interventions::MAX_PROJECTION_PRODUCTS,
+                "max_readouts":if self.profile.plain_readouts {readouts::MAX_READOUTS} else {0},"max_top_k":if self.profile.plain_readouts {readouts::MAX_TOP_K.min(self.profile.tokenizer.n_vocab() as usize)} else {0},"max_head_evaluations":readouts::MAX_HEAD_EVALUATIONS,"max_readout_rows":readouts::MAX_ROWS,"max_readout_scores":readouts::MAX_SCORES,"max_readout_label_bytes":readouts::MAX_LABEL_BYTES,"max_queued_jobs":1}})
     }
     fn assets(&self) -> Value {
         let mut assets = if self.profile.plain_readouts {

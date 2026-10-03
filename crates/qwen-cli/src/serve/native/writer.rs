@@ -87,7 +87,7 @@ pub(crate) struct Sink {
 impl Sink {
     pub(in crate::serve) fn stage(
         &self,
-        plan: &super::readouts::Plan,
+        plan: &super::staging::Plan,
         reserve: u64,
     ) -> Result<super::registry::Staged> {
         super::checkpoint(self)?;

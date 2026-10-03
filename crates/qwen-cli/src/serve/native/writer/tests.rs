@@ -73,7 +73,7 @@ fn staging_transfers_once_and_writer_remains_available_for_normal_settlement() {
             assert!(
                 writer
                     .sink()
-                    .stage(&prepared.readouts, STAGING_RESERVE)
+                    .stage(&prepared.staging, STAGING_RESERVE)
                     .is_err()
             );
             execute::run_tokens(
@@ -154,7 +154,7 @@ fn publication_failure_cannot_discard_a_waiting_staging_response() {
         .sink()
         .record(json!({"kind":"test"}), Phase::Prefill, &prepared.counters());
     let (request, response, _guard) =
-        crate::serve::native::staging::request(&prepared.readouts, STAGING_RESERVE).unwrap();
+        crate::serve::native::staging::request(&prepared.staging, STAGING_RESERVE).unwrap();
     writer
         .sink()
         .sender
@@ -236,6 +236,8 @@ fn late_record_backpressure_does_not_rewrite_successful_terminal_sampling() {
         max_tokens: 1,
         record: Vec::new(),
         readouts: Default::default(),
+        interventions: Default::default(),
+        staging: Default::default(),
     };
     let outcome = execute::run_tokens(
         &prepared,
@@ -272,6 +274,8 @@ fn borrowed_sample_records_are_bounded_without_a_byte_array_value_tree() {
             max_tokens: 1,
             record: Vec::new(),
             readouts: Default::default(),
+            interventions: Default::default(),
+            staging: Default::default(),
         };
         let outcome = execute::run_tokens(
             &prepared,

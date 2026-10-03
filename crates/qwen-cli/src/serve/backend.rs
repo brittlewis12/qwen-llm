@@ -892,6 +892,16 @@ impl GenerationBackend for EngineBackend {
             super::native::checkpoint(sink)?;
             let capacity = prepared.capacity()?;
             let (readout_gpu, readout_cpu) = prepared.readouts.memory_bytes(&self.loaded)?;
+            let (direction_gpu, direction_cpu) =
+                prepared.interventions.memory_bytes(&self.loaded)?;
+            let readout_gpu = readout_gpu
+                .checked_add(direction_gpu)
+                .context("diagnostic GPU admission overflow")?;
+            let staging_cpu = prepared.staging.cpu_bytes()?;
+            let readout_cpu = readout_cpu
+                .checked_add(direction_cpu)
+                .and_then(|n| n.checked_add(staging_cpu))
+                .context("diagnostic CPU admission overflow")?;
             with_native_admission(
                 self.durable_reserved_bytes(),
                 readout_gpu,

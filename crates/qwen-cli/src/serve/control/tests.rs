@@ -351,7 +351,7 @@ fn fitted_http_pins_registry_identity_and_reopens_original_shared_rows() {
         .iter()
         .find(|a| a["alias"] == "fit")
         .unwrap();
-    assert_eq!(fit["direction_rows"], serde_json::json!([]));
+    assert_eq!(fit["direction_rows"], serde_json::json!(["token_id"]));
     let mut request = fixture.request("http-fit");
     request["preconditions"]["asset_identities"] =
         serde_json::json!({"plain":"cpu-fixture","fit":"stale"});

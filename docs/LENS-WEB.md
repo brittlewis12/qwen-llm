@@ -4,7 +4,8 @@
 
 The reconstruction provides a durable baseline API and the preserved Bun/React
 client on `qwen serve`, including scoped plain and registered fitted original-forward
-readouts. Interventions and retained capture production are not yet recovered.
+readouts and ordered scoped interventions. Retained arrays and before/after capture
+production are not yet recovered.
 Compatible historical records remain inspectable. This is an intermediate workbench,
 not completion of recovery. See [the recovery ledger](LENS-WEB-RECOVERY.md).
 
@@ -124,7 +125,7 @@ aligned capture/head buffer. Host allowance includes capture readback, transport
 vector, all three simultaneously live previous/new/observer logit arrays, bounded
 ranking/labels/serialization, plus existing durable/control/writer reservations.
 Eviction retry retains the same complete allowances; denial precedes capture setup.
-`retain`, directions, operations and residual pairs remain refused.
+`retain` and residual pairs remain refused.
 
 ## Fitted Readouts
 
@@ -162,6 +163,39 @@ already-staged bytes can be conservatively counted again, causing over-refusal u
 pressure. Up to 512 MiB of unique alias/layer matrices may be staged per job. This cap
 does not include the other allowances. Staging failure settles without model forwards;
 filesystem calls remain cooperatively cancellable, not deadline-bounded.
+
+## Scoped Interventions
+
+Registered assets whose deployed output head supports selected-token covectors also
+offer token-ID directions. Pin directions in the browser, then add/reorder `fixed_add`,
+`residual_l2_fraction` or `projection_ablate` operations. The same authored scope fields
+select layers and consumed prefill/decode positions. Operations execute in transformer
+layer order, preserving authored array order within each layer. Operation-only jobs
+need no readouts; adding observation does not add transformer passes.
+
+Directions compute the transport transpose times the deployed, gamma-folded LM-head
+row (`deployed_logit_numerator`). This is not the gradient of a normalized logit, and
+is not the raw LM-head-row convention used by some other tools. Fixed addition allows
+`as_stored` or `unit_l2`; residual-relative addition and projection attenuation require
+`unit_l2`. Relative scaling uses the current residual norm, including preceding
+operations. Projection subtracts the coefficient times the current projection onto
+that unit direction. Source-to-target, coordinate-swap and other covector choices
+remain unsupported natively; their existing CLI behavior is unchanged.
+
+Zero coefficients validate references, scopes and normalization but produce no events,
+matrix staging or direction uploads. Unused direction identities remain pinned. Matrix
+staging is deduplicated across interventions and fitted readouts; GPU readout workspace
+is allocated only for actual fitted readouts. Full owner admission includes retained
+direction rows, aligned projection/selection scratch and host preparation/publication
+buffers. The conservative estimate sums preparation and readout phases; it can
+over-refuse compared with exact phase-peak accounting.
+
+Saved `direction_prepared` records identify semantics, normalization, binding and vector
+digest; `operation_application` records follow successful consumption, in applied order.
+Readouts carry the operation IDs applied at that site. Failed forward never fabricates
+successful applications; later recording failure does not imply model-state rollback.
+Limits currently allow 1024 definitions/operations, 4096 prepared direction rows,
+16384 applications, 256 MiB of direction vectors and 1,073,741,824 projection products.
 
 ## Bounds And Lifecycle
 

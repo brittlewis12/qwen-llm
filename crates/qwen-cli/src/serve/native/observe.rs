@@ -28,15 +28,19 @@ pub(super) struct Engine<'a> {
     layers: Vec<u32>,
     staged: &'a super::registry::Staged,
     fitted: Option<qwen_llm::workspace_lens::WorkspaceLensFullReadoutWorkspace<'a>>,
+    interventions: &'a super::interventions::Plan,
+    directions: super::interventions::PreparedDirections,
 }
 impl<'a> Engine<'a> {
     pub(super) fn new(
         loaded: &'a LoadedModel,
         tokenizer: &'a Tokenizer,
         mut sequence: Sequence,
-        plan: &'a Plan,
+        prepared: &'a super::Prepared,
         staged: &'a super::registry::Staged,
+        sink: &Sink,
     ) -> Result<Self> {
+        let plan = &prepared.readouts;
         let capture = if plan.max_capture_layers == 0 {
             None
         } else {
@@ -49,6 +53,14 @@ impl<'a> Engine<'a> {
                 vec![u64::try_from(count)?],
             )?)
         };
+        let directions = prepared.interventions.prepare(
+            loaded,
+            &mut sequence,
+            staged,
+            sink,
+            prepared.prompt.len(),
+        )?;
+        checkpoint(sink)?;
         let fitted = if plan.matrices.is_empty() {
             None
         } else {
@@ -67,6 +79,8 @@ impl<'a> Engine<'a> {
             layers: Vec::new(),
             staged,
             fitted,
+            interventions: &prepared.interventions,
+            directions,
         })
     }
 }
@@ -89,6 +103,24 @@ impl TokenEngine for Engine<'_> {
                     .view_subrange(0, vec![count as u64]),
             )
         };
+        let mut operations = Vec::new();
+        if let Some(event) = self.interventions.events.get(&position) {
+            for (&layer, indices) in event {
+                for &index in indices {
+                    operations.push(crate::lens_intervention::lower(
+                        &self.interventions.operations[index].action,
+                        layer,
+                        |id| {
+                            self.directions
+                                .rows
+                                .get(&(id.to_owned(), layer))
+                                .context("missing prepared direction")
+                        },
+                        || anyhow::bail!("unsupported native reflection"),
+                    )?);
+                }
+            }
+        }
         let output = crate::ordinary_executor::post_block_forward(
             &self.loaded.forward(),
             unsafe { self.sequence.metal_session_mut() },
@@ -98,7 +130,7 @@ impl TokenEngine for Engine<'_> {
             capture
                 .as_ref()
                 .map(|buffer| (self.layers.as_slice(), buffer)),
-            &[],
+            &operations,
         )?;
         self.sequence.advance_by(1)?;
         Ok(output)
@@ -111,6 +143,8 @@ impl TokenEngine for Engine<'_> {
         counters: &Counters,
         sink: &Sink,
     ) -> Result<()> {
+        self.interventions
+            .publish_applications(position, counters, sink)?;
         if !self.plan.events.contains_key(&position) {
             return Ok(());
         }
@@ -121,6 +155,7 @@ impl TokenEngine for Engine<'_> {
             self.layers.len() * hidden,
         )?;
         for (slot, &layer) in self.layers.iter().enumerate() {
+            let applied = self.interventions.applied_ids(position, layer);
             for lens in self.plan.heads(position, layer).keys().copied() {
                 checkpoint(sink)?;
                 let start = Instant::now();
@@ -164,8 +199,11 @@ impl TokenEngine for Engine<'_> {
                         position,
                         layer,
                         lens,
+                        applied_operation_ids: &applied,
                         #[cfg(test)]
                         transport_witness,
+                        #[cfg(test)]
+                        source_values: Some(residual),
                         counters,
                         generation_logits: (lens == "plain"
                             && layer + 1 == self.loaded.arch().n_layer
@@ -187,8 +225,11 @@ struct HeadSite<'a> {
     position: u32,
     layer: u32,
     lens: &'a str,
+    applied_operation_ids: &'a [&'a str],
     #[cfg(test)]
     transport_witness: Option<Value>,
+    #[cfg(test)]
+    source_values: Option<&'a [f32]>,
     counters: &'a Counters,
     generation_logits: Option<&'a [f32]>,
 }
@@ -206,8 +247,11 @@ fn publish_head(
         position,
         layer,
         lens,
+        applied_operation_ids,
         #[cfg(test)]
         transport_witness,
+        #[cfg(test)]
+        source_values,
         counters,
         generation_logits,
     } = site;
@@ -296,7 +340,7 @@ fn publish_head(
                 binding_status: asset.and_then(|v| v["transfer"].as_str()),
                 method: asset.and_then(|v| v["method"].as_str()),
                 capture_stage: "post_block_after_operations",
-                applied_operation_ids: &[],
+                applied_operation_ids,
                 provenance: "original_forward",
                 score_kind: "logit",
                 candidate_universe: "full_vocabulary",
@@ -304,6 +348,8 @@ fn publish_head(
                 generation_logit_witness: witness.as_ref(),
                 #[cfg(test)]
                 test_transport_witness: transport_witness.as_ref(),
+                #[cfg(test)]
+                test_source_values: source_values,
                 retained: None,
                 cost: Cost {
                     readout_ms: (ordinal == 0).then_some(elapsed),
@@ -359,6 +405,9 @@ struct ReadoutRecord<'a> {
     #[cfg(test)]
     #[serde(skip_serializing_if = "Option::is_none")]
     test_transport_witness: Option<&'a Value>,
+    #[cfg(test)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    test_source_values: Option<&'a [f32]>,
     retained: Option<&'a Value>,
     cost: Cost<'a>,
 }
@@ -428,6 +477,7 @@ mod tests {
 
     struct Synthetic<'a> {
         plan: &'a Plan,
+        interventions: &'a super::super::interventions::Plan,
         tokenizer: &'a Tokenizer,
         forwards: usize,
         heads: usize,
@@ -453,8 +503,11 @@ mod tests {
                 self.forwards as u64,
                 counters.consumed_prompt_tokens + counters.consumed_generated_tokens
             );
+            self.interventions
+                .publish_applications(position, counters, sink)?;
             if let Some(event) = self.plan.events.get(&position) {
                 for &layer in event.keys() {
+                    let applied = self.interventions.applied_ids(position, layer);
                     for lens in self.plan.heads(position, layer).keys().copied() {
                         checkpoint(sink)?;
                         if lens != "plain" {
@@ -473,7 +526,9 @@ mod tests {
                                 position,
                                 layer,
                                 lens,
+                                applied_operation_ids: &applied,
                                 transport_witness: None,
+                                source_values: None,
                                 counters,
                                 generation_logits: (lens == "plain"
                                     && layer == 1
@@ -502,10 +557,11 @@ mod tests {
         super::super::with_staged(
             prepared,
             sink,
-            prepared.readouts.matrix_bytes + super::super::registry::STAGING_OVERHEAD_BYTES,
+            prepared.staging.matrix_bytes + super::super::registry::STAGING_OVERHEAD_BYTES,
             |staged| {
                 let mut engine = Synthetic {
                     plan: &prepared.readouts,
+                    interventions: &prepared.interventions,
                     tokenizer,
                     forwards: 0,
                     heads: 0,
@@ -557,6 +613,7 @@ mod tests {
         writer.wait_ready().unwrap();
         let mut engine = Synthetic {
             plan: &prepared.readouts,
+            interventions: &prepared.interventions,
             tokenizer: &fixture.profile.tokenizer,
             forwards: 0,
             heads: 0,
@@ -645,6 +702,7 @@ mod tests {
             writer.wait_ready().unwrap();
             let mut engine = Synthetic {
                 plan: &prepared.readouts,
+                interventions: &prepared.interventions,
                 tokenizer: &fixture.profile.tokenizer,
                 forwards: 0,
                 heads: 0,
@@ -740,7 +798,9 @@ mod tests {
                     position: 0,
                     layer: 0,
                     lens: "plain",
+                    applied_operation_ids: &[],
                     transport_witness: None,
+                    source_values: None,
                     counters: &counters,
                     generation_logits: None,
                 },

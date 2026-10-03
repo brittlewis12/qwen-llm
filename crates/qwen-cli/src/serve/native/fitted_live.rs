@@ -10,7 +10,7 @@ use qwen_llm::{
 use sha2::{Digest, Sha256};
 use std::{path::Path, time::Instant};
 
-fn synthetic_assets(root: &Path, gguf: &GgufFile) -> Result<(u32, u32)> {
+pub(super) fn synthetic_assets(root: &Path, gguf: &GgufFile) -> Result<(u32, u32)> {
     let arch = qwen_llm::loader::Model::from_gguf(gguf)?.arch;
     ensure!(
         arch.n_layer > 2 && arch.hidden_size > 2,

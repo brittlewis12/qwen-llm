@@ -256,9 +256,10 @@ try {
   await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   if (liveOrigin && Bun.env.LENS_TEST_BASELINE_ONLY === "1") {
     await send("Page.navigate", { url: liveOrigin });
-    const fitted = Bun.env.LENS_TEST_FITTED_ONLY === "1";
+    const operations = Bun.env.LENS_TEST_OPERATIONS === "1";
+    const fitted = Bun.env.LENS_TEST_FITTED_ONLY === "1" || operations;
     const plain = Bun.env.LENS_TEST_PLAIN_ONLY === "1" || fitted;
-    await wait(`document.body.textContent.includes(${JSON.stringify(plain ? "Readouts available" : "Baseline available")})`, "discovery alongside history polling");
+    await wait(`document.body.textContent.includes(${JSON.stringify(fitted ? "Lens available" : plain ? "Readouts available" : "Baseline available")})`, "discovery alongside history polling");
     await setInput("#message-0", "Name an animal.");
     await setInput("#generation-mode", "no_thinking");
     await evaluate(`document.querySelector('label.check input').click()`);
@@ -280,6 +281,25 @@ try {
       await evaluate(`(() => { const input = document.querySelectorAll('.scope-editor select')[2]; Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(input, 'values'); input.dispatchEvent(new Event('change', { bubbles: true })); })()`);
     }
     await wait(`![...document.querySelectorAll('button')].find(b => b.textContent === 'Run experiment').disabled`, "baseline run enabled");
+    if (operations) {
+      await setInput(".scope-editor .selector-editor input:not([type=checkbox])", "2");
+      await evaluate(`document.querySelector('.scope-editor .selector-editor input:not([type=checkbox])').dispatchEvent(new FocusEvent('focusout', { bubbles: true }))`);
+      await evaluate(`([...document.querySelectorAll('summary')].find(s => s.textContent.startsWith('Pinned directions'))).click()`);
+      await evaluate(`(() => { const input = [...document.querySelectorAll('label')].find(l => l.textContent.startsWith('Registered alias')).querySelector('select'); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(input, 'fit'); input.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+      await click("Pin direction");
+      await click("Add Fixed add");
+      await click("Add Projection ablate");
+      for (const order of [1, 2]) {
+        const row = `document.querySelector('button[aria-label="Move operation ${order} up"]').closest('.operation-row')`;
+        await evaluate(`(${row}).querySelector('details').open = true`);
+        for (const [index, value] of [[1, "none"], [2, "values"]] as const) {
+          await evaluate(`(() => { const input = (${row}).querySelectorAll('.scope-editor select')[${index}]; Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(input, ${JSON.stringify(value)}); input.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+        }
+      }
+      await evaluate(`document.querySelector('button[aria-label="Move operation 2 up"]').click()`);
+      await wait(`JSON.parse(localStorage.getItem('qwen-lens.draft.v1')).operations[0].document.action.kind === 'projection_ablate'`, "phone authored operation reordering");
+      await wait(`![...document.querySelectorAll('button')].find(b => b.textContent === 'Run experiment').disabled`, "intervention submission enabled");
+    }
     await click("Run experiment");
     await wait(`!!document.querySelector('.job-id')?.textContent`, "durable baseline acceptance");
     const jobId = await evaluate<string>(`document.querySelector('.job-id').textContent`);
@@ -289,6 +309,11 @@ try {
     await wait(`document.querySelector('.job-status')?.textContent.includes('completed')`, "baseline completed independently of viewer");
     const recorded = decodeResult(await (await fetch(`${liveOrigin}/v1/lens/jobs/${jobId}/result`)).json());
     assert(recorded.complete);
+    if (operations) {
+      const applied = recorded.records.filter((r: any) => r.kind === "operation_application") as any[];
+      assert.equal(applied.length, 2);
+      assert.deepEqual(applied.map(r => [r.action.kind, r.phase, r.index, r.order]), [["projection_ablate", "decode", 0, 0], ["fixed_add", "decode", 0, 1]]);
+    }
     const output = new TextDecoder().decode(new Uint8Array(recorded.records.filter(isSample).flatMap(sample => sample.piece_bytes)));
     assert(output.length > 0);
     const matches = `document.querySelector('.sampled-output')?.checkVisibility() && document.querySelector('.sampled-output').textContent === ${JSON.stringify(output)}`;
@@ -297,9 +322,11 @@ try {
       const rows = recorded.records.filter(isReadout);
       assert.equal(rows.length, 1);
       assert.equal(rows[0]!.lens, fitted ? "fit" : "plain");
-      assert.equal(rows[0]!.phase, "decode"); assert.equal(rows[0]!.index, 0); assert.equal(rows[0]!.source_layer, 0);
-      await wait(`!!document.querySelector('button[aria-label="Inspect saved layer 0"]')`, "saved plain layer");
-      await evaluate(`document.querySelector('button[aria-label="Inspect saved layer 0"]').click()`);
+      const layer = operations ? 2 : 0;
+      assert.equal(rows[0]!.phase, "decode"); assert.equal(rows[0]!.index, 0); assert.equal(rows[0]!.source_layer, layer);
+      if (operations) assert.deepEqual(rows[0]!.applied_operation_ids, recorded.records.filter((r: any) => r.kind === "operation_application").map((r: any) => r.id));
+      await wait(`!!document.querySelector('button[aria-label="Inspect saved layer ${layer}"]')`, "saved readout layer");
+      await evaluate(`document.querySelector('button[aria-label="Inspect saved layer ${layer}"]').click()`);
       if (fitted) await wait(`document.querySelector('.score-panel')?.textContent.includes('source_deployment_equivalence_unverified') && document.querySelector('.score-panel')?.textContent.includes('not the final generation distribution')`, "saved fitted provenance");
       const expected = rows[0]!.scores.map(score => [String(score.score), `Token ${score.token_id} / row ${score.row_id}`]);
       await wait(`JSON.stringify([...document.querySelectorAll('.score-panel .scores > li')].map(node => [node.querySelector('.score-value').textContent, node.querySelector('p.muted').textContent])) === ${JSON.stringify(JSON.stringify(expected))}`, "plain displayed scores equal actual saved records");
@@ -311,6 +338,7 @@ try {
     assert.equal(copied.prefix.text, "  Answer:\n");
     assert.equal(copied.generation.sampling.temperature, 0.8);
     assert.equal(copied.readouts.length, plain ? 1 : 0);
+    if (operations) assert.deepEqual(copied.operations.map((r: any) => r.document.action.kind), ["projection_ablate", "fixed_add"]);
     await click("03 History");
     await click("Refresh history now");
     await wait(`document.querySelector('.history-list')?.textContent.includes(${JSON.stringify(jobId)})`, "mobile server history");

@@ -140,23 +140,14 @@ pub(crate) fn run_loaded(
         Ok(value) => value,
         Err(cause) => return classify(prepared.counters(), cause, None),
     };
-    let mut engine = match super::observe::Engine::new(
-        loaded,
-        tokenizer,
-        sequence,
-        &prepared.readouts,
-        staged,
-    ) {
-        Ok(engine) => engine,
-        Err(cause) => {
-            tracing::error!("native readout preparation failed: {cause:#}");
-            return Outcome::failed(
-                prepared.counters(),
-                "diagnostic_preparation_failed",
-                "Readout preparation failed before any model forward.",
-            );
-        }
-    };
+    let mut engine =
+        match super::observe::Engine::new(loaded, tokenizer, sequence, prepared, staged, sink) {
+            Ok(engine) => engine,
+            Err(cause) => {
+                tracing::error!("native readout preparation failed: {cause:#}");
+                return Outcome::diagnostic_preparation_failed(prepared.counters(), cause);
+            }
+        };
     run_engine(prepared, sink, &stops, &mut engine, |token| {
         let bytes = tokenizer.try_decode_piece_bytes_exact(token)?;
         ensure!(

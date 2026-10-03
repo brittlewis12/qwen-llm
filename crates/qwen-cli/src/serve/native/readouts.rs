@@ -1,6 +1,6 @@
 //! CPU planning for bounded original-forward plain readouts.
 
-use super::registry::{MatrixKey, Registry, STAGING_OVERHEAD_BYTES};
+use super::registry::{MatrixKey, Registry};
 use crate::lens_scope::Scope;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -263,14 +263,6 @@ impl Plan {
             .checked_add(hidden)
             .and_then(|n| vocab.checked_mul(3).and_then(|v| n.checked_add(v)))
             .and_then(|n| n.checked_add(2 * super::RECORD_BYTES as u64))
-            .and_then(|n| n.checked_add(self.matrix_bytes))
-            .and_then(|n| {
-                n.checked_add(if self.matrices.is_empty() {
-                    0
-                } else {
-                    STAGING_OVERHEAD_BYTES
-                })
-            })
             .context("readout CPU bytes overflow")?;
         Ok((gpu, cpu))
     }
@@ -333,10 +325,7 @@ mod tests {
                 .map(|n| n.div_ceil(256) * 256)
                 .sum::<u64>()
         );
-        assert_eq!(
-            cpu,
-            8 + 8 + 3 * 128 + 2 * super::super::RECORD_BYTES as u64 + 8 + STAGING_OVERHEAD_BYTES
-        );
+        assert_eq!(cpu, 8 + 8 + 3 * 128 + 2 * super::super::RECORD_BYTES as u64);
     }
     fn readout(id: &str) -> Value {
         json!({"id":id,"lens":"plain","mode":"full_vocabulary","top_k":2,

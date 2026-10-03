@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 
 // Owns one opt-in Metal test process; never targets an existing server.
 const model = Bun.env.QWEN_LENS_TEST_MODEL;
+const mode = Bun.env.QWEN_LENS_ORACLE_MODE ?? "readouts";
+assert(["readouts", "interventions"].includes(mode), "Unknown oracle mode");
 if (!model) throw new Error("Set QWEN_LENS_TEST_MODEL to a qualified House Qwen3.6/3.8 GGUF.");
 const root = resolve(import.meta.dir, "../..");
 const output = `${root}/target/lens-fitted-${crypto.randomUUID()}`;
@@ -42,7 +44,8 @@ try {
   assert.equal(typeof binary, "string");
   settlement = undefined;
   deadline = Date.now() + 120_000;
-  const test = child = Bun.spawn([binary, "--exact", "serve::native::fitted_live::fitted_original_forward_cpu_oracle", "--ignored", "--nocapture"], {
+  const testName = mode === "readouts" ? "serve::native::fitted_live::fitted_original_forward_cpu_oracle" : "serve::native::intervention_live::ordered_interventions_cpu_oracle";
+  const test = child = Bun.spawn([binary, "--exact", testName, "--ignored", "--nocapture"], {
     cwd: root, env: { ...env, QWEN_LENS_TEST_MODEL: model, QWEN_LENS_TEST_OUTPUT: `${output}/oracle`, QWEN_METAL_LEASE_WAIT: "1" },
     stdout: Bun.file(`${output}/stdout.log`), stderr: Bun.file(`${output}/stderr.log`),
   });
@@ -51,10 +54,18 @@ try {
   check();
   const witnesses = await Bun.file(`${output}/oracle/witnesses.json`).json();
   check();
-  assert.equal(witnesses.witness_count, 4);
-  assert.equal(witnesses.identity_controls, 2);
-  assert.equal(witnesses.unchanged_sampling, true);
-  assert.equal(witnesses.passing_generation_witnesses, 1);
+  if (mode === "readouts") {
+    assert.equal(witnesses.witness_count, 4);
+    assert.equal(witnesses.identity_controls, 2);
+    assert.equal(witnesses.unchanged_sampling, true);
+    assert.equal(witnesses.passing_generation_witnesses, 1);
+  } else {
+    assert.equal(witnesses.zero_control_equal, true);
+    assert.equal(witnesses.operation_only_samples_equal, true);
+    assert.equal(witnesses.projection_witness_records, 6);
+    assert.equal(witnesses.transformation_sites_checked, 2);
+    assert.equal(witnesses.noncommuting_order_distinguished, true);
+  }
 } finally {
   try { await stop(); }
   finally {
@@ -63,4 +74,4 @@ try {
   }
 }
 check();
-console.log(`PASS: four independent original-forward transport witnesses, two identity-head controls, generation witness and unchanged samples; ${output}`);
+console.log(`PASS: ${mode} original-forward numerical oracle; ${output}`);

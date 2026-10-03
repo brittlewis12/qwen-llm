@@ -28,7 +28,7 @@ fn registry_binds_before_metal_and_rehashes_retained_selected_matrices() {
     let (f, registry) = fitted_fixture();
     let metadata = registry.asset("fit").unwrap();
     assert_eq!(metadata["target_layer"], 1);
-    assert_eq!(metadata["direction_rows"], json!([]));
+    assert_eq!(metadata["direction_rows"], json!(["token_id"]));
     assert_eq!(metadata["binding"]["binding_phase"], "cpu_before_metal");
     assert_eq!(
         metadata["binding"]["status"],

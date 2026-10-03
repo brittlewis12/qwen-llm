@@ -794,3 +794,28 @@ Tested binary Git blob fingerprint: `9947165448a4567bffb5f207fb2ef45abd711e07`;
 harness fingerprint: `4eb6f567bcc52908a017bf29f3d1c675a578c7a5`.
 This is scoped same-forward consistency and noninterference, not an independent
 numerical oracle, a memory-pressure test or general model-family qualification.
+
+### R04/R11: Cancellable Verified Transport Preparation
+
+Shared data-only transport open/profile/read APIs now accept explicit cooperative
+checkpoints, with existing unchecked entry points retaining no-op behavior. Current
+ordinary, Muse and K2 CLI consumers supply shutdown checks before allocation, bounded
+payload reads and verified-result publication. K2 expected geometry/target checks
+still precede payload access. Retained descriptors, finite/identity validation,
+matrix/whole hashes and successful binding records are unchanged.
+
+Exact CPU binding uses the library's cancellable retained-byte verifier through a
+shared adapter that preserves the original checkpoint diagnostic. No partial matrix,
+content identity or deployment descriptor is returned after cancellation. Published
+legacy formats and payload readers are unchanged; their shared deployment preflight
+also gains entry/exit shutdown checks. Checkpoints cannot interrupt an already-blocked
+filesystem syscall and do not establish a shutdown deadline.
+
+Tests cancel at every observed open/read/binding checkpoint, including immediately
+before publication; interrupt a multi-chunk scan and successfully re-read the same
+descriptor; and compare successful binding JSON bytes. Existing profile-before-payload,
+path replacement and binding regressions pass. Lens CPU gate: 388 pass, nine ignored,
+with the known unmarked Muse Metal test explicitly excluded. All binaries/tests,
+formatting and whitespace checks pass. No GPU used. `cx` gives GO for this independently
+consumed prerequisite, not for pending registry staging or fitted execution. Fetched
+main remains `8bc9e6b739e953023a1f2ffc5dc3379c22758e00`.

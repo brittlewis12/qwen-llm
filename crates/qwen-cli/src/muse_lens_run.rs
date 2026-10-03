@@ -413,7 +413,9 @@ fn load_generic_muse_artifact(
     let mut values = Vec::new();
     values.try_reserve_exact(count)?;
     for &layer in source_layers {
-        let matrix = access.data.read_matrix(layer)?;
+        let matrix = access
+            .data
+            .read_matrix_checked(layer, &mut crate::shutdown::checkpoint)?;
         let projected =
             loaded.project_f16_transport_lens_covectors(context, &matrix, &covectors)?;
         ensure!(

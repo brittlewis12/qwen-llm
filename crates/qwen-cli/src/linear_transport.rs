@@ -15,6 +15,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const SCAN_BUFFER_BYTES: usize = 1024 * 1024;
+
 #[derive(Debug, clap::Args)]
 pub struct VerifyFullArgs {
     #[arg(long)]
@@ -145,18 +147,40 @@ impl VerifiedTransport {
         &self.payload_blake3
     }
     pub fn open(directory: &Path) -> Result<Self> {
-        Self::open_inner(directory, None)
+        Self::open_checked(directory, &mut || Ok(()))
+    }
+
+    /// Cooperative checkpoints cannot interrupt an already-blocked filesystem call.
+    pub fn open_checked(
+        directory: &Path,
+        checkpoint: &mut impl FnMut() -> Result<()>,
+    ) -> Result<Self> {
+        Self::open_inner(directory, None, checkpoint)
     }
 
     pub fn open_with_expected_profile(
         directory: &Path,
         profile: ExpectedProfile<'_>,
     ) -> Result<Self> {
-        Self::open_inner(directory, Some(profile))
+        Self::open_with_expected_profile_checked(directory, profile, &mut || Ok(()))
     }
 
-    fn open_inner(directory: &Path, profile: Option<ExpectedProfile<'_>>) -> Result<Self> {
+    pub fn open_with_expected_profile_checked(
+        directory: &Path,
+        profile: ExpectedProfile<'_>,
+        checkpoint: &mut impl FnMut() -> Result<()>,
+    ) -> Result<Self> {
+        Self::open_inner(directory, Some(profile), checkpoint)
+    }
+
+    fn open_inner(
+        directory: &Path,
+        profile: Option<ExpectedProfile<'_>>,
+        checkpoint: &mut impl FnMut() -> Result<()>,
+    ) -> Result<Self> {
+        checkpoint()?;
         for component in directory.ancestors().filter(|p| !p.as_os_str().is_empty()) {
+            checkpoint()?;
             ensure!(
                 !std::fs::symlink_metadata(component)?
                     .file_type()
@@ -164,11 +188,14 @@ impl VerifiedTransport {
                 "symlink artifact directory"
             );
         }
+        checkpoint()?;
         let (mut file, length) = super::open_regular_file(&directory.join("lens.json"))?;
         ensure!(length <= 1024 * 1024, "manifest exceeds 1 MiB limit");
         let mut bytes = Vec::new();
+        checkpoint()?;
         (&mut file).take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
         ensure!(bytes.len() <= 1024 * 1024, "manifest grew beyond limit");
+        checkpoint()?;
         let original = serde_json::from_slice::<Unique>(&bytes)?.0;
         for key in ["exact_binding", "source_checkpoint", "source_tokenizer"] {
             ensure!(
@@ -263,6 +290,7 @@ impl VerifiedTransport {
                 "invalid exact binding"
             );
         }
+        checkpoint()?;
         let (file, length) = super::open_regular_file(&directory.join("transport.f16le"))?;
         ensure!(length as u64 == total, "payload length mismatch");
         let mut result = Self {
@@ -275,7 +303,7 @@ impl VerifiedTransport {
         let mut sha = Sha256::new();
         let mut blake = blake3::Hasher::new();
         for i in 0..sources.len() {
-            result.scan(i, |chunk| {
+            result.scan(i, checkpoint, |chunk| {
                 sha.update(chunk);
                 blake.update(chunk);
             })?;
@@ -285,9 +313,16 @@ impl VerifiedTransport {
             "whole payload SHA256 mismatch"
         );
         result.payload_blake3 = blake.finalize().to_hex().to_string();
+        checkpoint()?;
         Ok(result)
     }
-    fn scan(&mut self, index: usize, mut consume: impl FnMut(&[u8])) -> Result<()> {
+    fn scan(
+        &mut self,
+        index: usize,
+        checkpoint: &mut impl FnMut() -> Result<()>,
+        mut consume: impl FnMut(&[u8]),
+    ) -> Result<()> {
+        checkpoint()?;
         ensure!(
             self.file.metadata()?.len() == self.manifest.payload.byte_length,
             "payload length changed"
@@ -300,10 +335,12 @@ impl VerifiedTransport {
             .identity_layers
             .contains(&self.manifest.transport.source_layers[index]);
         let h = u64::from(self.manifest.model.hidden_size);
-        let mut buffer = vec![0u8; 1024 * 1024];
+        checkpoint()?;
+        let mut buffer = vec![0u8; SCAN_BUFFER_BYTES];
         let mut offset = 0;
         let mut sha = Sha256::new();
         while offset < self.matrix_bytes {
+            checkpoint()?;
             let n = (self.matrix_bytes - offset).min(buffer.len() as u64) as usize;
             let chunk = &mut buffer[..n];
             self.file.read_exact(chunk)?;
@@ -326,10 +363,20 @@ impl VerifiedTransport {
             format!("{:x}", sha.finalize()) == self.manifest.payload.matrix_sha256[index],
             "matrix SHA256 mismatch"
         );
+        checkpoint()?;
         Ok(())
     }
     /// Bytes are returned only after rehashing; partial scan output never executes.
     pub fn read_matrix(&mut self, layer: u32) -> Result<Vec<u8>> {
+        self.read_matrix_checked(layer, &mut || Ok(()))
+    }
+
+    pub fn read_matrix_checked(
+        &mut self,
+        layer: u32,
+        checkpoint: &mut impl FnMut() -> Result<()>,
+    ) -> Result<Vec<u8>> {
+        checkpoint()?;
         let index = self
             .manifest
             .transport
@@ -338,8 +385,10 @@ impl VerifiedTransport {
             .position(|&l| l == layer)
             .ok_or_else(|| anyhow::anyhow!("source layer absent"))?;
         let mut bytes = Vec::new();
+        checkpoint()?;
         bytes.try_reserve_exact(usize::try_from(self.matrix_bytes)?)?;
-        self.scan(index, |chunk| bytes.extend_from_slice(chunk))?;
+        self.scan(index, checkpoint, |chunk| bytes.extend_from_slice(chunk))?;
+        checkpoint()?;
         Ok(bytes)
     }
     pub fn bind(
@@ -382,7 +431,8 @@ impl VerifiedTransport {
     }
 }
 pub fn verify_full(args: VerifyFullArgs) -> Result<()> {
-    let artifact = VerifiedTransport::open(&args.full_lens)?;
+    let artifact =
+        VerifiedTransport::open_checked(&args.full_lens, &mut crate::shutdown::checkpoint)?;
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
@@ -398,6 +448,7 @@ pub fn verify_full(args: VerifyFullArgs) -> Result<()> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use serde_json::json;
     use std::io::Write;
     pub(crate) struct Fixture(pub(crate) PathBuf);
     impl Drop for Fixture {
@@ -442,6 +493,106 @@ pub(crate) mod tests {
         edit(&mut value);
         std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
     }
+
+    #[test]
+    fn cancelled_open_never_publishes_verified_transport() {
+        let f = fixture("cancel-open", 2, 123);
+        let mut checks = 0;
+        let baseline = VerifiedTransport::open_checked(&f.0, &mut || {
+            checks += 1;
+            Ok(())
+        })
+        .unwrap();
+        for stop in 1..=checks {
+            let mut count = 0;
+            let result = VerifiedTransport::open_checked(&f.0, &mut || {
+                count += 1;
+                ensure!(count != stop, "cancel-open-{stop}");
+                Ok(())
+            });
+            assert_eq!(
+                result.err().unwrap().to_string(),
+                format!("cancel-open-{stop}")
+            );
+            assert_eq!(count, stop);
+        }
+        let repeated = VerifiedTransport::open(&f.0).unwrap();
+        assert_eq!(baseline.payload_blake3(), repeated.payload_blake3());
+        assert_eq!(baseline.original_manifest(), repeated.original_manifest());
+        let missing = f.0.join("missing");
+        assert_eq!(
+            VerifiedTransport::open_checked(&missing, &mut || anyhow::bail!("cancel-before-io"))
+                .err()
+                .unwrap()
+                .to_string(),
+            "cancel-before-io"
+        );
+    }
+
+    #[test]
+    fn cancelled_matrix_reads_discard_partial_bytes_and_allow_verified_reread() {
+        let f = fixture("cancel-read", 2, 123);
+        let mut data = VerifiedTransport::open(&f.0).unwrap();
+        let mut checks = 0;
+        let baseline = data
+            .read_matrix_checked(0, &mut || {
+                checks += 1;
+                Ok(())
+            })
+            .unwrap();
+        for stop in 1..=checks {
+            let mut count = 0;
+            let result = data.read_matrix_checked(0, &mut || {
+                count += 1;
+                ensure!(count != stop, "cancel-read-{stop}");
+                Ok(())
+            });
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                format!("cancel-read-{stop}")
+            );
+            assert_eq!(count, stop);
+            assert_eq!(data.read_matrix(0).unwrap(), baseline);
+        }
+    }
+
+    #[test]
+    fn scan_checks_between_bounded_chunks_and_before_returning_last_chunk() {
+        use std::cell::Cell;
+        let f = fixture("chunk-cancel", 2, 123);
+        let hidden = 1024;
+        let matrix = vec![0u8; hidden * hidden * 2];
+        assert_eq!(matrix.len(), 2 * SCAN_BUFFER_BYTES);
+        modify(&f, |m| {
+            m["model"]["hidden_size"] = json!(hidden);
+            m["transport"]["source_layers"] = json!([0]);
+            m["payload"]["shape"] = json!([1, hidden, hidden]);
+            m["payload"]["byte_length"] = json!(matrix.len());
+            let sha = format!("{:x}", Sha256::digest(&matrix));
+            m["payload"]["sha256"] = json!(sha);
+            m["payload"]["matrix_sha256"] = json!([sha]);
+        });
+        std::fs::write(f.0.join("transport.f16le"), &matrix).unwrap();
+        let mut data = VerifiedTransport::open(&f.0).unwrap();
+        for stop_after in [1, 2] {
+            let consumed = Cell::new(0);
+            let result = data.scan(
+                0,
+                &mut || {
+                    ensure!(consumed.get() < stop_after, "cancel-after-chunk");
+                    Ok(())
+                },
+                |chunk| {
+                    assert_eq!(chunk.len(), SCAN_BUFFER_BYTES);
+                    consumed.set(consumed.get() + 1);
+                },
+            );
+            assert_eq!(result.unwrap_err().to_string(), "cancel-after-chunk");
+            assert_eq!(consumed.get(), stop_after);
+            assert_eq!(data.read_matrix(0).unwrap(), matrix);
+        }
+    }
+
     #[test]
     fn expected_runtime_profile_rejects_before_payload_access() {
         let f = fixture("profile", 2, 123);

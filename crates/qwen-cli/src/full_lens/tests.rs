@@ -341,6 +341,77 @@ fn shared_data_access_preserves_unknown_recipes_geometry_order_and_claims() {
 }
 
 #[test]
+fn cpu_binding_checkpoints_preserve_diagnostics_and_successful_binding_bytes() {
+    use crate::linear_transport::{
+        VerifiedTransport,
+        deployment::{CpuDeployment, verified_content_checked},
+    };
+    let fixture = crate::linear_transport::tests::fixture("cancel-binding", 2, 91);
+    let path = fixture.0.join("model.gguf");
+    write_cpu_gguf(&path, "qwen35", 2, "test-tokenizer", false);
+    let gguf = GgufFile::open(&path).unwrap();
+    let reference =
+        qwen_llm::checkpoint_identity::verified_checkpoint_content_identity(&gguf).unwrap();
+    let tokenizer = format!(
+        "{:016x}",
+        qwen_llm::runtime::tokenizer_metadata_identity(&gguf)
+    );
+    crate::linear_transport::tests::modify(&fixture, |value| {
+        value["model"]["exact_binding"] = serde_json::json!({
+            "gguf_content_blake3":hex(&reference.content_id),"tokenizer_metadata_id":tokenizer
+        });
+    });
+    let data = VerifiedTransport::open(&fixture.0).unwrap();
+    let binding = FullAccess::open(&fixture.0, false)
+        .unwrap()
+        .bind_opened(&gguf, FullExecutionMode::Scalar, None, false)
+        .unwrap()
+        .runtime_binding
+        .clone()
+        .unwrap();
+    for exact in [false, true] {
+        let mut checks = 0;
+        let baseline =
+            CpuDeployment::from_gguf(&gguf, FullExecutionMode::Scalar, exact, &mut || {
+                checks += 1;
+                Ok(())
+            })
+            .unwrap();
+        if exact {
+            assert_eq!(
+                serde_json::to_vec(&baseline.bind(&data, false).unwrap()).unwrap(),
+                serde_json::to_vec(&binding).unwrap()
+            );
+        }
+        for stop in 1..=checks {
+            let mut count = 0;
+            let result =
+                CpuDeployment::from_gguf(&gguf, FullExecutionMode::Scalar, exact, &mut || {
+                    count += 1;
+                    ensure!(count != stop, "binding-checkpoint-{stop}");
+                    Ok(())
+                });
+            assert_eq!(
+                result.err().unwrap().to_string(),
+                format!("binding-checkpoint-{stop}")
+            );
+            assert_eq!(count, stop);
+        }
+    }
+    let checked = verified_content_checked(&gguf, &mut || Ok(())).unwrap();
+    assert_eq!(checked.content_id, reference.content_id);
+    assert_eq!(checked.bytes_hashed, reference.bytes_hashed);
+    assert_eq!(
+        verified_content_checked(&gguf, &mut || anyhow::bail!(
+            "original checkpoint diagnostic"
+        ))
+        .unwrap_err()
+        .to_string(),
+        "original checkpoint diagnostic"
+    );
+}
+
+#[test]
 fn exact_binding_hashes_retained_bytes_despite_sidecars_and_poisoned_auto_cache() {
     use qwen_llm::checkpoint_identity::{
         checkpoint_content_identity_without_weight_hashing, verified_checkpoint_content_identity,

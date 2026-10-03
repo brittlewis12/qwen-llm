@@ -1,5 +1,5 @@
+use crate::linear_transport::deployment::verified_content_checked;
 use anyhow::{Context, Result};
-use qwen_llm::checkpoint_identity::verified_checkpoint_content_identity;
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::muse_glimmer::MuseGlimmerModel;
 use serde_json::{Value, json};
@@ -17,7 +17,10 @@ impl GenericAccess {
         _cache: Option<&Path>,
         allow: bool,
     ) -> Result<Self> {
-        let data = crate::linear_transport::VerifiedTransport::open(directory)?;
+        let data = crate::linear_transport::VerifiedTransport::open_checked(
+            directory,
+            &mut crate::shutdown::checkpoint,
+        )?;
         let bound = MuseGlimmerModel::from_gguf(gguf)
             .context("bind generic transport to actual Muse GGUF")?;
         let config = &bound.config;
@@ -30,9 +33,7 @@ impl GenericAccess {
         );
         let locator = retained_file_locator(gguf)?;
         let (content, content_bytes_hashed) = if data.manifest().model.exact_binding.is_some() {
-            crate::shutdown::checkpoint()?;
-            let identity = verified_checkpoint_content_identity(gguf)?;
-            crate::shutdown::checkpoint()?;
+            let identity = verified_content_checked(gguf, &mut crate::shutdown::checkpoint)?;
             (
                 Some(crate::hex(&identity.content_id)),
                 identity.bytes_hashed,
@@ -125,6 +126,7 @@ mod tests {
         use qwen_llm::checkpoint_identity::{
             CheckpointIdentityCache, checkpoint_content_identity,
             checkpoint_content_identity_without_weight_hashing,
+            verified_checkpoint_content_identity,
         };
         let f = fixture("future-fit", 2, 123);
         let mut bytes = b"GGUF".to_vec();

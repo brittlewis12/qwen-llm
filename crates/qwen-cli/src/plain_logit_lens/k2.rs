@@ -140,7 +140,7 @@ impl Prepared {
             let source_residual = &capture.residuals[index * 4096..(index + 1) * 4096];
             let (residual, logits) = if let Some(data) = transport.as_mut() {
                 let matrix = qwen_llm::k2_horizon_runtime::K2LinearF16::from_target_source_le(
-                    data.read_matrix(layer)?,
+                    data.read_matrix_checked(layer, &mut crate::shutdown::checkpoint)?,
                 )?;
                 let readout = session.readout_linear_f16(&matrix, source_residual)?;
                 (std::borrow::Cow::Owned(readout.residual), readout.logits)

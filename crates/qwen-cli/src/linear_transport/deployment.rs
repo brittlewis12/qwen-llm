@@ -5,6 +5,29 @@ use anyhow::{Context, Result, ensure};
 use qwen_llm::{gguf::GgufFile, runtime::LoadedModel};
 use serde_json::{Value, json};
 
+pub(crate) fn verified_content_checked(
+    gguf: &GgufFile,
+    checkpoint: &mut impl FnMut() -> Result<()>,
+) -> Result<qwen_llm::checkpoint_identity::CheckpointContentReport> {
+    let mut cancelled = None;
+    let result = qwen_llm::checkpoint_identity::verified_checkpoint_content_identity_with_cancel(
+        gguf,
+        || match checkpoint() {
+            Ok(()) => false,
+            Err(cause) => {
+                cancelled = Some(cause);
+                true
+            }
+        },
+    );
+    if let Some(cause) = cancelled {
+        return Err(cause);
+    }
+    let result = result?;
+    checkpoint()?;
+    Ok(result)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ExecutionMode {
     Scalar,
@@ -21,7 +44,13 @@ pub(crate) struct CpuDeployment {
 }
 
 impl CpuDeployment {
-    pub(crate) fn from_gguf(gguf: &GgufFile, mode: ExecutionMode, exact: bool) -> Result<Self> {
+    pub(crate) fn from_gguf(
+        gguf: &GgufFile,
+        mode: ExecutionMode,
+        exact: bool,
+        checkpoint: &mut impl FnMut() -> Result<()>,
+    ) -> Result<Self> {
+        checkpoint()?;
         let bound = qwen_llm::loader::Model::from_gguf(gguf)
             .context("bind CPU Qwen geometry and tensor inventory")?;
         let arch = bound.arch;
@@ -32,8 +61,7 @@ impl CpuDeployment {
         qwen_llm::workspace_lens::validate_opened_output_head(gguf, mode != ExecutionMode::Scalar)?;
         let identity = qwen_llm::runtime::opened_gguf_lightweight_identity_parts(gguf)?;
         let (content, content_bytes_hashed) = if exact {
-            let verified =
-                qwen_llm::checkpoint_identity::verified_checkpoint_content_identity(gguf)?;
+            let verified = verified_content_checked(gguf, checkpoint)?;
             let content = verified
                 .content_id
                 .iter()
@@ -43,6 +71,7 @@ impl CpuDeployment {
         } else {
             (None, 0)
         };
+        checkpoint()?;
         Ok(Self {
             architecture: gguf
                 .get_str("general.architecture")

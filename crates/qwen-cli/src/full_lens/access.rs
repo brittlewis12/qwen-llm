@@ -57,7 +57,8 @@ impl FullAccess {
     pub(crate) fn open(directory: &Path, trace: bool) -> Result<Self> {
         validate_artifact_directory(directory, "full transport")?;
         if Self::is_data_directory(directory)? {
-            let data = VerifiedTransport::open(directory)?;
+            let data =
+                VerifiedTransport::open_checked(directory, &mut crate::shutdown::checkpoint)?;
             let m = data.manifest();
             let transport = FullTransport {
                 method: m.transport.method.clone(),
@@ -133,7 +134,9 @@ impl FullAccess {
     pub(super) fn read_matrix(&mut self, layer: u32) -> Result<Vec<u8>> {
         let bytes = self.matrix_bytes()?;
         match &mut self.storage {
-            Storage::Data(data) => data.read_matrix(layer),
+            Storage::Data(data) => {
+                data.read_matrix_checked(layer, &mut crate::shutdown::checkpoint)
+            }
             Storage::Legacy {
                 manifest,
                 file,
@@ -202,7 +205,12 @@ impl FullAccess {
                 validate_deployed_geometry(manifest, gguf, model.arch)?
             }
         }
-        let descriptor = CpuDeployment::from_gguf(gguf, mode, self.requires_exact_binding())?;
+        let descriptor = CpuDeployment::from_gguf(
+            gguf,
+            mode,
+            self.requires_exact_binding(),
+            &mut crate::shutdown::checkpoint,
+        )?;
         self.bind_cpu(Some(&descriptor), allow)
     }
     pub(crate) fn acknowledge_transfer(&self, allow: bool) -> Result<()> {

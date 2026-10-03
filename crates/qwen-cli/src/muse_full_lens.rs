@@ -630,7 +630,9 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
     for &layer in &layers {
         let started = Instant::now();
         let (matrix, matrix_blake3) = if let ReadArtifact::Generic(a) = &mut read_artifact {
-            let matrix = a.data.read_matrix(layer)?;
+            let matrix = a
+                .data
+                .read_matrix_checked(layer, &mut crate::shutdown::checkpoint)?;
             let digest = blake3::hash(&matrix).to_hex().to_string();
             (matrix, digest)
         } else {
@@ -1143,7 +1145,8 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
     for &layer in &layers {
         let started = Instant::now();
         let matrix = if let Some(a) = &mut generic {
-            a.data.read_matrix(layer)?
+            a.data
+                .read_matrix_checked(layer, &mut crate::shutdown::checkpoint)?
         } else {
             let manifest = manifest.as_ref().expect("legacy manifest");
             let descriptor = manifest

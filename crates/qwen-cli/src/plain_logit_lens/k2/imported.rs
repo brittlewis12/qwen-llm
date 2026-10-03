@@ -1,7 +1,7 @@
 //! K2 data-only transport policy. Never falls through to legacy Qwen/Muse assets.
 use super::*;
+use crate::linear_transport::deployment::verified_content_checked;
 use crate::linear_transport::{ExpectedProfile, VerifiedTransport};
-use qwen_llm::checkpoint_identity::verified_checkpoint_content_identity;
 
 pub(crate) fn read(mut args: ReadFullArgs, gguf: GgufFile) -> Result<()> {
     crate::validate_token_build_identity(
@@ -18,7 +18,7 @@ pub(crate) fn read(mut args: ReadFullArgs, gguf: GgufFile) -> Result<()> {
     );
     let config = K2HorizonConfig::from_gguf(&gguf)?;
     let directory = args.full_lens.as_ref().unwrap().clone();
-    let mut data = VerifiedTransport::open_with_expected_profile(
+    let mut data = VerifiedTransport::open_with_expected_profile_checked(
         &directory,
         ExpectedProfile {
             architecture: "k2-horizon",
@@ -27,6 +27,7 @@ pub(crate) fn read(mut args: ReadFullArgs, gguf: GgufFile) -> Result<()> {
             vocab_size: config.vocab_size,
             target_layer: config.layer_count - 1,
         },
+        &mut crate::shutdown::checkpoint,
     )
     .context("open K2 data-only linear transport")?;
     select_layers(&mut args, &data)?;
@@ -35,11 +36,9 @@ pub(crate) fn read(mut args: ReadFullArgs, gguf: GgufFile) -> Result<()> {
         data.manifest().model.exact_binding.is_some() || args.allow_unvalidated_transfer,
         "source/deployment equivalence unverified; require --allow-unvalidated-transfer"
     );
-    crate::shutdown::checkpoint()?;
     // Exact imported bindings never inherit cached/downloader-declared roots.
     // Even explicit unverified transfer records the actual deployed byte identity.
-    let content = verified_checkpoint_content_identity(&gguf)?;
-    crate::shutdown::checkpoint()?;
+    let content = verified_content_checked(&gguf, &mut crate::shutdown::checkpoint)?;
     let tokenizer = format!(
         "{:016x}",
         qwen_llm::runtime::tokenizer_metadata_identity(&gguf)

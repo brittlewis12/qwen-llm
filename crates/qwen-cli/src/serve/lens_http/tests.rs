@@ -601,6 +601,11 @@ fn unavailable_capabilities_are_explicit_and_never_claim_zero_layer_models() {
     assert_eq!(caps["model"]["layers"], Value::Null);
     let (_, assets) = roundtrip(Arc::clone(&api), "GET", "/v1/lens/assets", "");
     assert_eq!(assets["assets"], json!([]));
+    for body in ["not JSON", "[]", "{}"] {
+        let (headers, error) = roundtrip(api.clone(), "POST", "/v1/lens/jobs/missing/cancel", body);
+        assert!(headers.starts_with("HTTP/1.1 503"));
+        assert_eq!(error["error"]["code"], "history_not_configured");
+    }
     let (headers, error) = roundtrip(api, "GET", "/v1/lens/jobs", "");
     assert!(headers.starts_with("HTTP/1.1 503"));
     assert_eq!(error["error"]["code"], "history_not_configured");

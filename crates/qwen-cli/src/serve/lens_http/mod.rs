@@ -319,13 +319,14 @@ impl LensApi {
                     }
                     ("POST", "cancel") => {
                         no_query(query)?;
+                        let store = self.store()?;
                         if !request.body.is_empty()
                             && serde_json::from_slice::<Value>(&request.body).ok()
                                 != Some(json!({}))
                         {
                             return Err(ApiError::invalid("Cancellation body must be empty or {}"));
                         }
-                        Reply::ok(self.store()?.cancel(id)?)
+                        Reply::ok(store.cancel(id)?)
                     }
                     _ => Err(ApiError::new(
                         404,

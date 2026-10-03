@@ -58,7 +58,7 @@ opaque key and attempt history. Web Locks serialize cross-tab creation. Persiste
 must succeed before transmission; uncertain outcomes reuse identical bytes/key.
 Only a matching-key `admission.state=not_accepted` response permits a corrected
 request under a new key. Generic overload after a lost response remains uncertain.
-Submission/cancellation is never automatically retried as a read. Read-only 503s
+Submission/cancellation is never automatically retried as a read. Read-only 502/503/504s
 receive at most two short retries; discovery is sequenced to coexist with history
 polling in the two-worker pool. Persistent failures remain in the error ledger.
 
@@ -120,6 +120,19 @@ bun run browser-check.ts
 bun run baseline-browser-check.ts
 LENS_TEST_PLAIN_ONLY=1 bun run baseline-browser-check.ts
 ```
+
+For an existing Tailscale Serve route already targeting an unused loopback port,
+test without changing its configuration:
+
+```sh
+LENS_TEST_PROXY_ORIGIN=https://machine.tailnet.ts.net:8443 \
+  LENS_TEST_PROXY_ADDR=127.0.0.1:4141 bun run baseline-browser-check.ts
+```
+
+The harness binds only its owned synthetic CPU child, verifies a per-run nonce
+through the proxy before any browser submission, and closes that child afterward.
+It does not load a model or configure Tailscale. Transient HTTP responses are saved
+in the run's `transport.json`; a passing gate does not mean transport never retried.
 
 The historical browser check serves explicit fixture derivatives and exercises
 phone editing, lost-ack recovery, identical retries, stale binding/rebinding,

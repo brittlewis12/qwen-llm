@@ -37,6 +37,7 @@ pub(crate) struct InfoArgs {
 }
 
 #[derive(Debug, ClapArgs)]
+#[command(group(clap::ArgGroup::new("workbench").args(["lens_data_dir", "web_root"]).multiple(true)))]
 pub(crate) struct ServeArgs {
     /// Supported Qwen, DeepSeek V4, Muse Glimmer, or dense K2 GGUF (K2: raw only).
     #[arg(short = 'm', long)]
@@ -124,6 +125,10 @@ pub(crate) struct ServeArgs {
     #[arg(long)]
     web_root: Option<PathBuf>,
 
+    /// Additional exact browser origin for a trusted reverse proxy (repeatable).
+    #[arg(long, value_name = "ORIGIN", requires = "workbench", value_parser = crate::serve::lens_http::access::BrowserOrigin::parse)]
+    lens_allowed_origin: Vec<crate::serve::lens_http::access::BrowserOrigin>,
+
     /// Whose conventions prompts follow where serve deliberately departs from
     /// a release chat template (Qwen and DeepSeek V4). `house`: past turns
     /// render as they were generated whatever the current thinking mode, and
@@ -201,6 +206,7 @@ pub(crate) struct ServeInvocation {
     pub(crate) lens_data_dir: Option<PathBuf>,
     pub(crate) lens_config: Option<PathBuf>,
     pub(crate) web_root: Option<PathBuf>,
+    pub(crate) lens_allowed_origin: Vec<crate::serve::lens_http::access::BrowserOrigin>,
     pub(crate) template_style: crate::open_responses::items::TemplateStyle,
 }
 
@@ -478,6 +484,7 @@ pub(crate) fn normalize(args: &mut Args) -> Invocation {
             lens_data_dir: serve.lens_data_dir,
             lens_config: serve.lens_config,
             web_root: serve.web_root,
+            lens_allowed_origin: serve.lens_allowed_origin,
             template_style: serve.template_style,
         }),
         Command::Run(run) => {
@@ -564,6 +571,54 @@ mod tests {
         };
         assert_eq!(serve.web_root.as_deref(), Some(Path::new("web/dist")));
         assert_eq!(serve.lens_data_dir.as_deref(), Some(Path::new("jobs")));
+    }
+
+    #[test]
+    fn proxy_origins_require_a_workbench_and_validate_before_loading() {
+        for origin in ["https://host/path", "https://*.ts.net", "null"] {
+            assert!(
+                Args::try_parse_from([
+                    "qwen",
+                    "serve",
+                    "-m",
+                    "missing.gguf",
+                    "--web-root",
+                    "web/dist",
+                    "--lens-allowed-origin",
+                    origin
+                ])
+                .is_err()
+            );
+        }
+        assert!(
+            Args::try_parse_from([
+                "qwen",
+                "serve",
+                "-m",
+                "missing.gguf",
+                "--lens-allowed-origin",
+                "https://host.ts.net"
+            ])
+            .is_err()
+        );
+        for flag in ["--web-root", "--lens-data-dir"] {
+            let (_, invocation) = parse(&[
+                "qwen",
+                "serve",
+                "-m",
+                "missing.gguf",
+                flag,
+                "directory",
+                "--lens-allowed-origin",
+                "https://host.ts.net",
+                "--lens-allowed-origin",
+                "https://host.ts.net:8443",
+            ]);
+            let Invocation::Serve(serve) = invocation else {
+                panic!("expected serve")
+            };
+            assert_eq!(serve.lens_allowed_origin.len(), 2);
+        }
     }
 
     #[test]

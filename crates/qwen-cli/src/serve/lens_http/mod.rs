@@ -5,6 +5,7 @@
 //! cannot be turned into a pre-admission rejection or a fresh execution.
 
 use super::http::HttpRequest;
+pub(crate) mod access;
 pub(crate) mod input;
 use super::jobs::state::{JobError, JobStatus};
 use super::jobs::store::{JobStore, Limits, StoreError};
@@ -46,6 +47,7 @@ pub(crate) struct LensApi {
     store: Option<Arc<JobStore>>,
     admission: Option<Arc<dyn Admission>>,
     submissions: Mutex<()>,
+    access: access::BrowserAccess,
 }
 
 pub(crate) struct ApiError {
@@ -130,7 +132,7 @@ impl LensApi {
         self.store.is_some()
     }
     pub(super) fn trusted(&self, request: &HttpRequest) -> bool {
-        local_browser_boundary(request).is_ok()
+        self.access.check(request).is_ok()
     }
     pub(super) fn matches(path: &str) -> bool {
         let path = path.split('?').next().unwrap_or_default();
@@ -145,7 +147,7 @@ impl LensApi {
     }
 
     pub(super) fn is_read_only(&self, request: &HttpRequest) -> bool {
-        if request.method != "GET" || local_browser_boundary(request).is_err() {
+        if request.method != "GET" || !self.trusted(request) {
             return false;
         }
         let path = request.path.split('?').next().unwrap_or_default();
@@ -176,7 +178,13 @@ impl LensApi {
             store,
             admission,
             submissions: Mutex::new(()),
+            access: access::BrowserAccess::default(),
         }
+    }
+
+    pub(super) fn with_access(mut self, access: access::BrowserAccess) -> Self {
+        self.access = access;
+        self
     }
 
     fn store(&self) -> Result<&JobStore, ApiError> {
@@ -219,6 +227,10 @@ impl LensApi {
         ] {
             capabilities["limits"][key] = value.into();
         }
+        #[cfg(test)]
+        if std::env::var("QWEN_LENS_BROWSER_CHILD").as_deref() == Ok("1") {
+            capabilities["fixture_owner"] = std::env::var("QWEN_LENS_BROWSER_NONCE").ok().into();
+        }
         capabilities
     }
 
@@ -227,7 +239,9 @@ impl LensApi {
         if path != "/v1/lens" && !path.starts_with("/v1/lens/") {
             return Ok(false);
         }
-        let reply = local_browser_boundary(request)
+        let reply = self
+            .access
+            .check(request)
             .and_then(|()| self.dispatch(request))
             .unwrap_or_else(|error| {
                 let mut body = json!({"error": error.error});
@@ -424,70 +438,6 @@ impl LensApi {
             binary: None,
         })
     }
-}
-
-fn local_browser_boundary(request: &HttpRequest) -> Result<(), ApiError> {
-    let authority = request
-        .host
-        .as_deref()
-        .and_then(local_authority)
-        .ok_or_else(|| {
-            ApiError::new(
-                403,
-                "untrusted_host",
-                "Lens history requires a localhost or loopback Host",
-            )
-        })?;
-    if let Some(origin) = &request.origin {
-        let origin = origin.strip_prefix("http://").and_then(local_authority);
-        if origin.as_ref() != Some(&authority) {
-            return Err(ApiError::new(
-                403,
-                "untrusted_origin",
-                "Cross-origin browser access to Lens history is not allowed",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn local_authority(authority: &str) -> Option<(String, u16)> {
-    let (host, port) = if let Some(ipv6) = authority.strip_prefix('[') {
-        let (host, suffix) = ipv6.split_once(']')?;
-        let ip: std::net::Ipv6Addr = host.parse().ok()?;
-        if !ip.is_loopback() {
-            return None;
-        }
-        (
-            ip.to_string(),
-            if suffix.is_empty() {
-                None
-            } else {
-                Some(suffix.strip_prefix(':')?)
-            },
-        )
-    } else {
-        let (host, port) = authority
-            .split_once(':')
-            .map_or((authority, None), |(host, port)| (host, Some(port)));
-        let name = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
-        if name != "localhost"
-            && !name
-                .parse::<std::net::Ipv4Addr>()
-                .is_ok_and(|ip| ip.is_loopback())
-        {
-            return None;
-        }
-        (name, port)
-    };
-    let port = match port {
-        None => 80,
-        Some(port) if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) => {
-            port.parse().ok()?
-        }
-        _ => return None,
-    };
-    Some((host, port))
 }
 
 fn no_query(query: &str) -> Result<(), ApiError> {

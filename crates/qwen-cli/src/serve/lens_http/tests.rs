@@ -775,6 +775,101 @@ fn rebinding_hosts_and_foreign_origins_cannot_read_prompts_or_cancel() {
 }
 
 #[test]
+fn proxy_origins_share_the_dispatch_and_activity_boundary() {
+    use super::access::{BrowserAccess, BrowserOrigin};
+    let root = TestRoot::new();
+    let api = Arc::new(
+        LensApi::new("test".into(), Some(root.store()), None).with_access(BrowserAccess::new(
+            vec![
+                BrowserOrigin::parse("https://machine.tail.ts.net").unwrap(),
+                BrowserOrigin::parse("https://other.tail.ts.net:8443").unwrap(),
+            ],
+        )),
+    );
+    for (host, origin, allowed) in [
+        (
+            "machine.tail.ts.net",
+            Some("https://machine.tail.ts.net"),
+            true,
+        ),
+        (
+            "MACHINE.tail.ts.net:443",
+            Some("https://machine.tail.ts.net"),
+            true,
+        ),
+        (
+            "machine.tail.ts.net",
+            Some("https://machine.tail.ts.net:443"),
+            true,
+        ),
+        ("machine.tail.ts.net", None, true),
+        (
+            "other.tail.ts.net:8443",
+            Some("https://other.tail.ts.net:8443"),
+            true,
+        ),
+        (
+            "other.tail.ts.net",
+            Some("https://other.tail.ts.net:8443"),
+            false,
+        ),
+        (
+            "machine.tail.ts.net:80",
+            Some("https://machine.tail.ts.net"),
+            false,
+        ),
+        (
+            "machine.tail.ts.net",
+            Some("http://machine.tail.ts.net"),
+            false,
+        ),
+        (
+            "machine.tail.ts.net",
+            Some("https://other.tail.ts.net:8443"),
+            false,
+        ),
+        ("localhost", Some("https://machine.tail.ts.net"), false),
+        ("machine.tail.ts.net.evil.example", None, false),
+        ("machine.tail.ts.net", Some("null"), false),
+        (
+            "machine.tail.ts.net",
+            Some("https://machine.tail.ts.net https://evil.example"),
+            false,
+        ),
+        ("localhost:8737", Some("http://localhost:8737"), true),
+    ] {
+        let request = HttpRequest {
+            method: "GET".into(),
+            path: "/v1/lens/jobs".into(),
+            host: Some(host.into()),
+            origin: origin.map(str::to_owned),
+            body: Vec::new(),
+        };
+        assert_eq!(api.trusted(&request), allowed, "{host} {origin:?}");
+        assert_eq!(api.is_read_only(&request), allowed);
+        let (headers, _) =
+            roundtrip_headers(Arc::clone(&api), "GET", &request.path, "", host, origin);
+        assert!(
+            headers.starts_with(if allowed {
+                "HTTP/1.1 200"
+            } else {
+                "HTTP/1.1 403"
+            }),
+            "{headers}"
+        );
+    }
+    let (headers, _) = roundtrip_headers(
+        api,
+        "GET",
+        "/v1/lens/jobs",
+        "",
+        "evil.example\r\nX-Forwarded-Host: machine.tail.ts.net\r\nX-Forwarded-Proto: https",
+        None,
+    );
+    assert!(headers.starts_with("HTTP/1.1 403"));
+}
+
+#[test]
 fn cancellation_racing_failed_delivery_returns_the_accepted_terminal_job() {
     let root = TestRoot::new();
     let store = root.store();

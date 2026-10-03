@@ -68,7 +68,13 @@ fn browser_baseline_child() {
             panic!("browser baseline must use native jobs")
         }
     }
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = std::env::var("QWEN_LENS_BROWSER_ADDR").unwrap_or_else(|_| "127.0.0.1:0".into());
+    let listener = crate::serve::bind_loopback(&address).unwrap();
+    let allowed = std::env::var("QWEN_LENS_BROWSER_ORIGIN")
+        .ok()
+        .map(|value| crate::serve::lens_http::access::BrowserOrigin::parse(&value).unwrap())
+        .into_iter()
+        .collect();
     println!(
         "qwen-lens-browser-ready:http://{}",
         listener.local_addr().unwrap()
@@ -83,6 +89,7 @@ fn browser_baseline_child() {
         Some(crate::serve::Workbench {
             store: Some(Arc::clone(&fixture.store)),
             assets: Some(Arc::new(assets)),
+            access: crate::serve::lens_http::access::BrowserAccess::new(allowed),
         }),
     )
     .unwrap_err();
@@ -251,6 +258,7 @@ impl Server {
                 Some(crate::serve::Workbench {
                     store: history.then_some(store),
                     assets,
+                    access: crate::serve::lens_http::access::BrowserAccess::default(),
                 }),
                 |_| {
                     anyhow::ensure!(!stopping.load(Ordering::Acquire), "test shutdown");

@@ -27,13 +27,15 @@ describe("authoritative Lens v1 fixtures", () => {
     expect(() => decodeCapabilities({ ...value, residual_pair_capture: true })).toThrow("contradiction");
     expect(isBaselineOnly(decodeCapabilities({ ...value, execution: { baseline_only: false } }))).toBe(false);
   });
-  test("only reads retry transient control saturation and failures remain bounded", async () => {
+  test.each([502, 503, 504])("only reads retry transient HTTP %i and failures remain bounded", async (status) => {
     let calls = 0;
-    const api = createLensApi(async () => ++calls < 3 ? new Response("busy", { status: 503 }) : Response.json(capabilities));
+    const paths: string[] = [];
+    const api = createLensApi(async path => { paths.push(path); return ++calls < 3 ? new Response("transient", { status }) : Response.json(capabilities); });
     expect(await api.capabilities()).toEqual(capabilities);
     expect(calls).toBe(3);
+    expect(new Set(paths).size).toBe(1);
     calls = 0;
-    const busy = createLensApi(async () => { calls++; return new Response("busy", { status: 503 }); });
+    const busy = createLensApi(async () => { calls++; return new Response("transient", { status }); });
     await expect(busy.assets()).rejects.toBeInstanceOf(ApiHttpError);
     expect(calls).toBe(3);
     calls = 0;
@@ -42,6 +44,18 @@ describe("authoritative Lens v1 fixtures", () => {
     calls = 0;
     await expect(busy.cancel("job_example")).rejects.toBeInstanceOf(ApiHttpError);
     expect(calls).toBe(1);
+  });
+  test("read retries preserve cursors and do not retry malformed success or permanent failures", async () => {
+    const paths: string[] = [];
+    const api = createLensApi(async path => { paths.push(path); return paths.length === 1 ? new Response("proxy", { status: 502 }) : Response.json(result); });
+    expect(await api.result("job_example", "cursor", 17)).toEqual(result);
+    expect(paths).toEqual(["/v1/lens/jobs/job_example/result?cursor=cursor&limit=17", "/v1/lens/jobs/job_example/result?cursor=cursor&limit=17"]);
+    for (const response of [new Response("invalid json"), new Response("forbidden", { status: 403 }), new Response("error", { status: 500 })]) {
+      let calls = 0;
+      const failing = createLensApi(async () => { calls++; return response; });
+      await expect(failing.jobs()).rejects.toThrow();
+      expect(calls).toBe(1);
+    }
   });
   test("plain readout capabilities admit scoped observations without interventions", () => {
     const caps = decodeCapabilities({ ...capabilities, operations: [], readout_modes: ["full_vocabulary"],

@@ -14,9 +14,15 @@ assert.equal(typeof binary, "string", "Cargo must identify the exact CPU test ex
 const output = `${import.meta.dir}/.browser-test/baseline-${crypto.randomUUID()}`;
 await mkdir(output, { recursive: true, mode: 0o700 });
 const env = Object.fromEntries(Object.entries(Bun.env).filter(([key]) => !key.startsWith("QWEN_") && !key.startsWith("GGML_")));
+const proxyOrigin = Bun.env.LENS_TEST_PROXY_ORIGIN;
+const proxyAddress = Bun.env.LENS_TEST_PROXY_ADDR;
+const nonce = crypto.randomUUID();
+assert.equal(Boolean(proxyOrigin), Boolean(proxyAddress), "Proxy origin and loopback address must be specified together");
+const proxyEnv = proxyOrigin && proxyAddress
+  ? { QWEN_LENS_BROWSER_ADDR: proxyAddress, QWEN_LENS_BROWSER_ORIGIN: proxyOrigin } : {};
 const stdout = Bun.file(`${output}/server.stdout.log`);
 const server = Bun.spawn([binary, "--exact", "serve::control::tests::browser_baseline_child", "--ignored", "--nocapture"], {
-  cwd: root, env: { ...env, QWEN_LENS_BROWSER_CHILD: "1", QWEN_LENS_BROWSER_WEB_ROOT: `${import.meta.dir}/dist`, QWEN_LENS_BROWSER_READOUTS: Bun.env.LENS_TEST_PLAIN_ONLY === "1" || Bun.env.LENS_TEST_RETENTION === "1" || Bun.env.LENS_TEST_PAIRS === "1" ? "1" : "0", QWEN_LENS_BROWSER_FITTED: Bun.env.LENS_TEST_FITTED_ONLY === "1" || Bun.env.LENS_TEST_OPERATIONS === "1" ? "1" : "0" },
+  cwd: root, env: { ...env, ...proxyEnv, QWEN_LENS_BROWSER_CHILD: "1", QWEN_LENS_BROWSER_NONCE: nonce, QWEN_LENS_BROWSER_WEB_ROOT: `${import.meta.dir}/dist`, QWEN_LENS_BROWSER_READOUTS: Bun.env.LENS_TEST_PLAIN_ONLY === "1" || Bun.env.LENS_TEST_RETENTION === "1" || Bun.env.LENS_TEST_PAIRS === "1" ? "1" : "0", QWEN_LENS_BROWSER_FITTED: Bun.env.LENS_TEST_FITTED_ONLY === "1" || Bun.env.LENS_TEST_OPERATIONS === "1" ? "1" : "0" },
   stdout, stderr: Bun.file(`${output}/server.stderr.log`),
 });
 let browser: ReturnType<typeof Bun.spawn> | undefined;
@@ -53,9 +59,13 @@ try {
     if (!origin) await Bun.sleep(50);
   }
   assert(origin, "Owned CPU server did not announce its listener");
+  const witness = await fetch(`${proxyOrigin ?? origin}/v1/lens/capabilities`, { signal: AbortSignal.timeout(10_000) });
+  assert(witness.ok, "CPU fixture ownership witness must be readable before browser submissions");
+  assert.equal((await witness.json() as { fixture_owner?: string }).fixture_owner, nonce, "Proxy must reach this exact owned CPU fixture");
+  assert.equal(server.exitCode, null, "Owned CPU fixture must still be alive");
   assert(!interrupted && !timedOut);
   browser = Bun.spawn(["bun", "run", "browser-check.ts"], { cwd: import.meta.dir,
-    env: { ...env, LENS_BASELINE_ORIGIN: origin, LENS_TEST_BASELINE_ONLY: "1" }, stdout: "inherit", stderr: "inherit" });
+    env: { ...env, LENS_BASELINE_ORIGIN: proxyOrigin ?? origin, LENS_TEST_BASELINE_ONLY: "1", LENS_TEST_EVIDENCE_DIR: output }, stdout: "inherit", stderr: "inherit" });
   assert.equal(await browser.exited, 0);
   assert(!timedOut && !interrupted, "CPU browser protocol interrupted or deadline expired");
 } finally {

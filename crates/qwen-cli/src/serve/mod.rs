@@ -27,7 +27,7 @@ pub(crate) mod durable;
 pub(crate) mod events;
 pub(crate) mod http;
 mod jobs;
-mod lens_http;
+pub(crate) mod lens_http;
 mod native;
 pub(crate) mod outcome;
 pub(crate) mod output_partition;
@@ -67,6 +67,7 @@ const ADMISSION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 struct Workbench {
     store: Option<Arc<jobs::store::JobStore>>,
     assets: Option<Arc<assets::WebAssets>>,
+    access: lens_http::access::BrowserAccess,
 }
 
 pub(crate) const DEFAULT_SERVE_MAX_CONTEXT_TOKENS: usize = 262_144;
@@ -357,6 +358,12 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     )?;
     let template_style = invocation.template_style;
     ensure!(
+        invocation.lens_allowed_origin.is_empty()
+            || invocation.lens_data_dir.is_some()
+            || invocation.web_root.is_some(),
+        "--lens-allowed-origin requires --lens-data-dir or --web-root"
+    );
+    ensure!(
         invocation.lens_config.is_none()
             || matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe),
         "--lens-config requires the ordinary Qwen native executor"
@@ -382,7 +389,11 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         .map(|root| jobs::store::JobStore::open(root, jobs::store::Limits::default()).map(Arc::new))
         .transpose()
         .context("open durable Lens history")?;
-    let workbench = (store.is_some() || assets.is_some()).then_some(Workbench { store, assets });
+    let workbench = (store.is_some() || assets.is_some()).then_some(Workbench {
+        store,
+        assets,
+        access: lens_http::access::BrowserAccess::new(invocation.lens_allowed_origin.clone()),
+    });
     if matches!(family, ModelFamily::K2Horizon | ModelFamily::MuseGlimmer) {
         ensure!(
             template_style == items::TemplateStyle::House,
@@ -855,7 +866,12 @@ fn accept_loop_with_workbench(
     let mut activity = owner_activity::OwnerActivity::default();
     let admission = activity.admission();
     let gate = control::ExecutionGate::default();
-    let acceptor = if let Some(Workbench { store, assets }) = workbench {
+    let acceptor = if let Some(Workbench {
+        store,
+        assets,
+        access,
+    }) = workbench
+    {
         let native = if let Some(store) = &store {
             backend.native_profile()?.map(|profile| {
                 Arc::new(native::NativeAdmission {
@@ -869,7 +885,8 @@ fn accept_loop_with_workbench(
         } else {
             None
         };
-        let lens = Arc::new(lens_http::LensApi::new(model_id.into(), store, native));
+        let lens =
+            Arc::new(lens_http::LensApi::new(model_id.into(), store, native).with_access(access));
         backend.set_control_memory_reserve(control::cpu_reserve(lens.history_enabled()));
         match control::spawn(
             listener,

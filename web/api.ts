@@ -29,9 +29,9 @@ export function createLensApi(transport: Transport = fetch) {
     for (let attempt = 0; ; attempt++) {
       try { return await requestJson(path, { cache: "no-store" }, transport); }
       catch (error) {
-        // Two server control slots can briefly overlap during discovery/polling.
+        // Control saturation and reverse-proxy failures can interrupt reads.
         // Only retry reads; submissions retain their explicit durable-key flow.
-        if (!(error instanceof ApiHttpError) || error.response.status !== 503 || attempt >= 2) throw error;
+        if (!(error instanceof ApiHttpError) || ![502, 503, 504].includes(error.response.status) || attempt >= 2) throw error;
         await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
       }
     }

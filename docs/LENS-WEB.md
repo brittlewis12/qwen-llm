@@ -28,7 +28,30 @@ Qwen3.6/3.8 House template. Other deployments/families still expose saved histor
 with `available:false`; explicit fitted configuration is ordinary-only.
 The server remains loopback-only.
 Lens routes require a loopback/localhost Host and, when supplied, a matching HTTP
-Origin. These checks are not authentication or a remote-access feature.
+Origin by default. For HTTPS through `tailscale serve`, explicitly allow the browser
+origin while keeping the backend bound to loopback:
+
+```sh
+qwen serve -m MODEL --addr 127.0.0.1:8737 --lens-data-dir JOB_DIRECTORY \
+  --web-root web/dist --lens-allowed-origin https://machine.tailnet.ts.net
+tailscale serve --bg http://127.0.0.1:8737
+```
+
+Use the HTTPS origin reported by your Tailscale setup, with no trailing slash or
+path. Repeat `--lens-allowed-origin` for additional exact origins; non-default ports
+must be included. The proxy must preserve the original Host (as Tailscale Serve
+does). A supplied Origin must match both the configured scheme and the request Host;
+forwarded headers do not grant access. No-Origin clients are allowed at a permitted
+Host. These checks are not authentication: Tailscale and its access policy control
+who can reach the proxy. This does not change ordinary `/v1/responses` access.
+
+The browser retries failed GETs at most twice for HTTP 502, 503 or 504, retaining the
+same path/cursor. Submission and cancellation POSTs are never automatically retried.
+The real Tailscale HTTPS CPU-fixture browser gate passes submission, reload, history
+and phone/desktop navigation, including recovery from an observed transient 502.
+This does not guarantee overload response delivery: the bounded acceptor currently
+sends busy responses before reading requests, and early socket closure can lose that
+response through a proxy. Bounded server-side response teardown remains a follow-up.
 
 The same resident owner continues to serve `/v1/responses`. Native jobs use its
 serial post-block forward path with fresh isolated sequence state: no prefix

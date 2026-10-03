@@ -10,7 +10,10 @@ import { residualMetrics } from "./retention";
 const liveOrigin = Bun.env.LENS_BASELINE_ORIGIN;
 if (liveOrigin) {
   const url = new URL(liveOrigin);
-  if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.origin !== liveOrigin) throw new Error("Live browser check requires an explicit loopback origin.");
+  const loopback = url.protocol === "http:" && url.hostname === "127.0.0.1";
+  const ownedProxy = url.protocol === "https:" && Bun.env.LENS_TEST_PROXY_ORIGIN === liveOrigin
+    && Boolean(Bun.env.LENS_TEST_PROXY_ADDR) && Bun.env.LENS_TEST_BASELINE_ONLY === "1";
+  if ((!loopback && !ownedProxy) || url.origin !== liveOrigin) throw new Error("Live browser check requires loopback or an explicit CPU-fixture proxy origin.");
 }
 const fixtures = `${import.meta.dir}/../crates/qwen-cli/tests/fixtures/lens_http_v1`;
 const load = (name: string) => Bun.file(`${fixtures}/${name}.json`).json();
@@ -210,6 +213,7 @@ try {
   let nextId = 0;
   const runtimeErrors: unknown[] = [];
   const arrayRequests: string[] = [];
+  const transientResponses: { status: number; url: string }[] = [];
   let screencastFrame: ((data: string) => void) | null = null;
   function send(method: string, params: Record<string, unknown> = {}): Promise<any> {
     if (stopping) return Promise.reject(new Error("Browser check interrupted"));
@@ -227,6 +231,9 @@ try {
       if (message.error) request.reject(new Error(JSON.stringify(message.error))); else request.resolve(message.result);
     } else if (message.method === "Runtime.exceptionThrown") runtimeErrors.push(message.params);
     else if (message.method === "Network.requestWillBeSent" && /\/v1\/lens\/jobs\/[^/]+\/arrays\//.test(message.params.request.url)) arrayRequests.push(message.params.request.url);
+    else if (message.method === "Network.responseReceived" && [502, 503, 504].includes(message.params.response.status)) {
+      transientResponses.push({ status: message.params.response.status, url: message.params.response.url });
+    }
     else if (message.method === "Page.javascriptDialogOpening") void send("Page.handleJavaScriptDialog", { accept: true });
     else if (message.method === "Page.screencastFrame") { screencastFrame?.(message.params.data); void send("Page.screencastFrameAck", { sessionId: message.params.sessionId }); }
   };
@@ -390,7 +397,10 @@ try {
     await wait(matches, "desktop reopens the same output");
     assert(!await evaluate<boolean>(`document.documentElement.scrollWidth > innerWidth`), "desktop baseline overflow");
     assert.deepEqual(await (await fetch(`${liveOrigin}/v1/lens/jobs`)).json(), before);
-    assert.equal(await evaluate<number>(`document.querySelectorAll('.error-ledger details').length`), 0, "real control-pool startup must not strand discovery or report transient read saturation");
+    if (Bun.env.LENS_TEST_EVIDENCE_DIR) await Bun.write(`${Bun.env.LENS_TEST_EVIDENCE_DIR}/transport.json`, JSON.stringify(transientResponses, null, 2));
+    console.log(`Observed ${transientResponses.length} transient HTTP responses; retries remain bounded.`);
+    assert.equal(await evaluate<number>(`document.querySelectorAll('.error-ledger details').length`), 0,
+      `real control-pool startup must not strand discovery or report transient read saturation: ${await evaluate<string>("document.querySelector('.error-ledger')?.textContent ?? ''")}`);
     console.log(`${fitted ? "Fitted readout" : plain ? "Plain readout" : "Baseline"} browser passed: actual same-port assets/store/producer, phone prefill/sampling/submit/reload/copy/history, exact records, desktop parity, no extra jobs. Job ${jobId}`);
   } else if (liveOrigin) {
     const fittedAlias = Bun.env.LENS_TEST_FITTED_ALIAS;

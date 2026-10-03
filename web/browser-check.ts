@@ -256,7 +256,8 @@ try {
   await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   if (liveOrigin && Bun.env.LENS_TEST_BASELINE_ONLY === "1") {
     await send("Page.navigate", { url: liveOrigin });
-    await wait(`document.body.textContent.includes('Baseline available')`, "baseline discovery alongside history polling");
+    const plain = Bun.env.LENS_TEST_PLAIN_ONLY === "1";
+    await wait(`document.body.textContent.includes(${JSON.stringify(plain ? "Readouts available" : "Baseline available")})`, "discovery alongside history polling");
     await setInput("#message-0", "Name an animal.");
     await setInput("#generation-mode", "no_thinking");
     await evaluate(`document.querySelector('label.check input').click()`);
@@ -266,7 +267,13 @@ try {
       const id = await evaluate<string>(`[...document.querySelectorAll('label')].find(label => label.textContent === ${JSON.stringify(label)}).htmlFor`);
       await setInput(`[id=${JSON.stringify(id)}]`, value!);
     }
-    assert(await evaluate<boolean>(`[...document.querySelectorAll('button')].filter(b => ['Add readout', 'Add direction', 'Add operation'].includes(b.textContent)).every(b => b.disabled)`));
+    assert(await evaluate<boolean>(`[...document.querySelectorAll('button')].filter(b => ${JSON.stringify(plain ? ["Add direction", "Add operation"] : ["Add readout", "Add direction", "Add operation"])}.includes(b.textContent)).every(b => b.disabled)`));
+    if (plain) {
+      await click("Add readout");
+      await wait(`document.querySelectorAll('.scope-editor select').length === 3`, "plain numeric scopes");
+      await evaluate(`(() => { const input = document.querySelectorAll('.scope-editor select')[1]; Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(input, 'none'); input.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+      await evaluate(`(() => { const input = document.querySelectorAll('.scope-editor select')[2]; Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(input, 'values'); input.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    }
     await wait(`![...document.querySelectorAll('button')].find(b => b.textContent === 'Run experiment').disabled`, "baseline run enabled");
     await click("Run experiment");
     await wait(`!!document.querySelector('.job-id')?.textContent`, "durable baseline acceptance");
@@ -281,13 +288,22 @@ try {
     assert(output.length > 0);
     const matches = `document.querySelector('.sampled-output')?.checkVisibility() && document.querySelector('.sampled-output').textContent === ${JSON.stringify(output)}`;
     await wait(matches, "displayed output matches durable sampled bytes");
+    if (plain) {
+      const rows = recorded.records.filter(isReadout);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]!.phase, "decode"); assert.equal(rows[0]!.index, 0); assert.equal(rows[0]!.source_layer, 0);
+      await wait(`!!document.querySelector('button[aria-label="Inspect saved layer 0"]')`, "saved plain layer");
+      await evaluate(`document.querySelector('button[aria-label="Inspect saved layer 0"]').click()`);
+      const expected = rows[0]!.scores.map(score => [String(score.score), `Token ${score.token_id} / row ${score.row_id}`]);
+      await wait(`JSON.stringify([...document.querySelectorAll('.score-panel .scores > li')].map(node => [node.querySelector('.score-value').textContent, node.querySelector('p.muted').textContent])) === ${JSON.stringify(JSON.stringify(expected))}`, "plain displayed scores equal actual saved records");
+    }
     const before = await (await fetch(`${liveOrigin}/v1/lens/jobs`)).json();
     await click("Run again: prepare same seed");
     await wait(`document.body.textContent.includes(${JSON.stringify(`Copied ${jobId} with the same seed`)})`, "copy saved request without inference");
     const copied = await evaluate<any>(`JSON.parse(localStorage.getItem('qwen-lens.draft.v1'))`);
     assert.equal(copied.prefix.text, "  Answer:\n");
     assert.equal(copied.generation.sampling.temperature, 0.8);
-    assert.equal(copied.readouts.length, 0);
+    assert.equal(copied.readouts.length, plain ? 1 : 0);
     await click("03 History");
     await click("Refresh history now");
     await wait(`document.querySelector('.history-list')?.textContent.includes(${JSON.stringify(jobId)})`, "mobile server history");
@@ -298,7 +314,7 @@ try {
     assert(!await evaluate<boolean>(`document.documentElement.scrollWidth > innerWidth`), "desktop baseline overflow");
     assert.deepEqual(await (await fetch(`${liveOrigin}/v1/lens/jobs`)).json(), before);
     assert.equal(await evaluate<number>(`document.querySelectorAll('.error-ledger details').length`), 0, "real control-pool startup must not strand discovery or report transient read saturation");
-    console.log(`Baseline browser passed: actual same-port assets/store/producer, phone prefill/sampling/submit/reload/copy/history, exact output, desktop parity, no extra jobs. Job ${jobId}`);
+    console.log(`${plain ? "Plain readout" : "Baseline"} browser passed: actual same-port assets/store/producer, phone prefill/sampling/submit/reload/copy/history, exact records, desktop parity, no extra jobs. Job ${jobId}`);
   } else if (liveOrigin) {
     const fittedAlias = Bun.env.LENS_TEST_FITTED_ALIAS;
     const sourceLayer = fittedAlias ? 46 : 0;

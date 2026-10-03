@@ -122,7 +122,7 @@ async function completed(id: string) {
 try {
   await start();
   const caps = await json("/v1/lens/capabilities");
-  assert(caps.available && caps.execution.baseline_only);
+  assert(caps.available && caps.input_kinds.includes("messages"));
   const body = request(caps.model.identity);
   const accepted = await json("/v1/lens/jobs", body, 202);
   const baseline = await completed(accepted.id);

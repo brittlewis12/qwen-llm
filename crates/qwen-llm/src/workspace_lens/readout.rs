@@ -1968,7 +1968,8 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
 }
 
 impl WorkspaceLensFullVocabularyLogitsWithVector {
-    fn into_topk(
+    /// Rank already-computed logits without another head or transformer pass.
+    pub fn into_topk(
         self,
         top_k: usize,
     ) -> Result<WorkspaceLensFullVocabularyReadoutWithVector, WorkspaceLensError> {

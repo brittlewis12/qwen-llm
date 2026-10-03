@@ -3,9 +3,9 @@
 ## Recovered Now
 
 The reconstruction provides a durable baseline API and the preserved Bun/React
-client on `qwen serve`. Original-forward readouts, fitted assets, interventions and
-retained capture production are not yet recovered. Compatible historical records
-remain inspectable in the client. This is an intermediate usable baseline workbench,
+client on `qwen serve`, including scoped plain original-forward readouts. Fitted
+assets, interventions and retained capture production are not yet recovered.
+Compatible historical records remain inspectable. This is an intermediate workbench,
 not completion of recovery. See [the recovery ledger](LENS-WEB-RECOVERY.md).
 
 ```sh
@@ -37,9 +37,10 @@ upstream-style native rendering are deliberately refused rather than approximate
 ## Submit And Inspect
 
 Read `GET /v1/lens/capabilities` and `GET /v1/lens/assets` first. Capabilities
-advertise baseline-only execution, supported generation modes, context and byte
-limits; assets are empty. Model identity describes GGUF metadata, not a weight
-content hash. New clients should supply it as a precondition:
+advertise supported generation modes, context and byte limits. A supported passive
+output head adds the `plain` alias and `full_vocabulary` readouts; otherwise baseline
+generation remains available with empty assets. Model identity describes GGUF
+metadata, not a weight content hash. New clients should supply it as a precondition:
 
 ```json
 {
@@ -59,7 +60,7 @@ content hash. New clients should supply it as a precondition:
 }
 ```
 
-POST this JSON to `/v1/lens/jobs`. Unknown fields and nonempty diagnostics are
+POST this JSON to `/v1/lens/jobs`. Unknown fields and unsupported diagnostics are
 rejected, not ignored. Temperature zero explicitly requests greedy sampling;
 positive values that narrow to zero are refused. Prefill text is exact prompt
 context, never newly generated output. All template/mode combinations are checked.
@@ -89,6 +90,41 @@ The store syncs records before publishing their committed watermark. Reopening a
 unfinished job marks it interrupted; it never resumes or reruns inference. Corrupt
 committed content fails closed. Compatible historical retained-array descriptors
 can be downloaded and verified, but new baseline jobs produce no such arrays.
+
+## Plain Readouts
+
+When discovery offers `plain`, add readouts in the browser or a request's
+`diagnostics.readouts`, with empty `directions` and `operations`. Each readout has
+`id`, `lens:"plain"`, `mode:"full_vocabulary"`, `top_k` and a numeric `scope`:
+`layers` plus `prefill` and/or `decode` selectors. Selectors are `all`, sorted unique
+`values`, or inclusive `range`. Omitted phases mean no observation in that phase.
+Include `plain` with its advertised identity in `preconditions.asset_identities`.
+
+Source layers are post-block residuals; prefill/decode indices name consumed input
+tokens, not the position they predict. The final sampled token is never forwarded
+merely to fill a requested readout. Residuals come from the original forward, then
+the existing output head evaluates them without a transformer replay. The original
+generation logits remain the sampler's input. One head and maximum-k ranking serves
+overlapping IDs at a given position/layer; each ID retains its requested top-k row.
+Only the first row reports head cost, with shared position/layer identity on all.
+
+Final-layer observations get a same-forward generation-logit witness only when that
+forward actually produced generation logits. Earlier no-tail prompt positions do
+not acquire extra tails for comparison. A failing tolerance witness stays visible;
+it is not passing qualification. Failed forward, failed observation and interrupted
+publication remain distinct. Successful consumption is recorded before observation;
+an observation failure never rewrites it as unknown forward consumption.
+
+Admission bounds 1024 readouts, top-k up to min(1024, vocabulary), 4096 distinct
+heads, 16384 rows and 262144 scores. Cardinality is checked before expanding `all`.
+Per-head aggregate raw token-label bytes are capped at 64 KiB before lossy display
+decoding; overflow fails publication explicitly rather than truncating labels or
+scores. Records use bounded borrowed serialization. GPU admission prices each
+aligned capture/head buffer. Host allowance includes capture readback, transported
+vector, all three simultaneously live previous/new/observer logit arrays, bounded
+ranking/labels/serialization, plus existing durable/control/writer reservations.
+Eviction retry retains the same complete allowances; denial precedes capture setup.
+`retain`, fitted aliases, directions, operations and residual pairs remain refused.
 
 ## Bounds And Lifecycle
 
@@ -150,6 +186,10 @@ browser fixtures. A separate CPU-owned Rust child exercises the production asset
 two-worker control pool, durable store and native writer through mobile baseline
 submission, reload, exact byte display, history/copy without new jobs and desktop
 layout. Browser layout assertions do not establish screenshot-based visual review.
+The optional CPU browser command `LENS_TEST_PLAIN_ONLY=1 bun run baseline-browser-check.ts`
+in `web/` also submits actual scoped HTTP readouts and compares visible scores to
+the saved records, using synthetic heads only. Plain-head live numerical parity and
+same-forward witnesses still require their separate bounded model-backed gate.
 
 The released Qwen3.6 35B A3B Q4_K_M tokenizer also passes the opt-in native/CLI
 prefill matrix on CPU. A clean release built at `b850e3e7` passes the bounded live

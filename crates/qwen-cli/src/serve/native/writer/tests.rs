@@ -11,6 +11,7 @@ fn paused(capacity: usize) -> (Sink, Receiver<Event>) {
             sender,
             failure: Arc::default(),
             budget: Arc::default(),
+            after_record: None,
         },
         receiver,
     )
@@ -30,6 +31,7 @@ fn late_record_backpressure_does_not_rewrite_successful_terminal_sampling() {
         },
         max_tokens: 1,
         record: Vec::new(),
+        readouts: Default::default(),
     };
     let outcome = execute::run_tokens(
         &prepared,
@@ -65,6 +67,7 @@ fn borrowed_sample_records_are_bounded_without_a_byte_array_value_tree() {
             },
             max_tokens: 1,
             record: Vec::new(),
+            readouts: Default::default(),
         };
         let outcome = execute::run_tokens(
             &prepared,

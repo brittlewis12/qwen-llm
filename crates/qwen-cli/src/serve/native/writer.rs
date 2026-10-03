@@ -77,6 +77,8 @@ pub(crate) struct Sink {
     sender: SyncSender<Event>,
     failure: Arc<Mutex<Option<JobError>>>,
     budget: Arc<Budget>,
+    #[cfg(test)]
+    after_record: Option<Box<dyn Fn(&Sink) + Send>>,
 }
 impl Sink {
     pub(super) fn fail_recording(&self, code: &str, message: &str) {
@@ -133,6 +135,10 @@ impl Sink {
             phase,
             counters.clone(),
         ));
+        #[cfg(test)]
+        if let Some(hook) = &self.after_record {
+            hook(self);
+        }
     }
     pub(super) fn progress(&self, phase: Phase, counters: &Counters) {
         self.send(Event::Progress(phase, counters.clone()));
@@ -247,6 +253,8 @@ impl Writer {
                 sender,
                 failure,
                 budget,
+                #[cfg(test)]
+                after_record: None,
             }),
             terminal: Some(terminal),
             ready,
@@ -255,6 +263,10 @@ impl Writer {
     }
     pub(super) fn sink(&self) -> &Sink {
         self.sink.as_ref().expect("writer not settled")
+    }
+    #[cfg(test)]
+    pub(super) fn after_record(&mut self, hook: impl Fn(&Sink) + Send + 'static) {
+        self.sink.as_mut().unwrap().after_record = Some(Box::new(hook));
     }
     pub(super) fn wait_ready(&self) -> Result<Readiness> {
         self.ready

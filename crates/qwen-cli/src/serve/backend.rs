@@ -530,6 +530,29 @@ fn admit_with_pressure_relief<P, E>(
     Ok((plan, admission))
 }
 
+fn with_native_admission<T>(
+    durable: u64,
+    readout_gpu: u64,
+    readout_cpu: u64,
+    admit: impl FnMut(u64, u64) -> anyhow::Result<qwen_llm::metal::MetalMemoryAdmission>,
+    release: impl FnMut(u64) -> bool,
+    execute: impl FnOnce() -> T,
+) -> anyhow::Result<T> {
+    let cpu = durable
+        .checked_add(super::control::CPU_RESERVE_BYTES)
+        .and_then(|bytes| bytes.checked_add(super::native::CPU_UPPER_BYTES))
+        .and_then(|bytes| bytes.checked_add(readout_cpu))
+        .context("native CPU reserve overflow")?;
+    let (_, admission) =
+        admit_with_pressure_relief(None::<((), u64)>, readout_gpu, cpu, admit, release)?;
+    anyhow::ensure!(
+        admission.admitted,
+        "native memory admission denied: {}",
+        admission.reason.as_str()
+    );
+    Ok(execute())
+}
+
 fn allocate_serve_request_state(
     loaded: &LoadedModel,
     prompt_tokens: usize,
@@ -834,6 +857,7 @@ impl GenerationBackend for EngineBackend {
             context: self.context_ceiling,
             max_tokens: self.context_ceiling,
             no_thinking_supported: self.no_thinking_supported,
+            plain_readouts: self.loaded.validate_passive_workspace_lens_output().is_ok(),
         })))
     }
 
@@ -842,38 +866,32 @@ impl GenerationBackend for EngineBackend {
         prepared: &super::native::Prepared,
         sink: &super::native::Sink,
     ) -> super::native::Outcome {
-        let admission = (|| -> anyhow::Result<()> {
+        let result = (|| -> anyhow::Result<super::native::Outcome> {
             super::native::checkpoint(sink)?;
             let capacity = prepared.capacity()?;
-            let cpu = self
-                .durable_reserved_bytes()
-                .checked_add(super::control::CPU_RESERVE_BYTES)
-                .and_then(|bytes| bytes.checked_add(super::native::CPU_UPPER_BYTES))
-                .context("native CPU reserve overflow")?;
-            let (_, admission) = admit_with_pressure_relief(
-                None::<((), u64)>,
-                0,
-                cpu,
-                |_, reserved| {
-                    self.loaded
+            let (readout_gpu, readout_cpu) = prepared.readouts.memory_bytes(&self.loaded)?;
+            with_native_admission(
+                self.durable_reserved_bytes(),
+                readout_gpu,
+                readout_cpu,
+                |gpu, reserved| {
+                    Ok(self
+                        .loaded
                         .qwen_execution_memory_admission_with_additional_bytes(
-                            1, capacity, 0, 0, reserved,
-                        )
+                            1, capacity, 0, gpu, reserved,
+                        )?)
                 },
                 |deficit| !self.loaded.evict_prefix_cache_for(deficit).is_empty(),
-            )?;
-            anyhow::ensure!(
-                admission.admitted,
-                "native memory admission denied: {}",
-                admission.reason.as_str()
-            );
-            Ok(())
+                || super::native::run_loaded(&self.loaded, &self.tokenizer, prepared, sink),
+            )
         })();
-        if let Err(cause) = admission {
-            tracing::error!("native admission: {cause:#}");
-            return super::native::Outcome::preparation_failed(prepared.counters(), cause);
+        match result {
+            Ok(outcome) => outcome,
+            Err(cause) => {
+                tracing::error!("native admission: {cause:#}");
+                super::native::Outcome::preparation_failed(prepared.counters(), cause)
+            }
         }
-        super::native::run_loaded(&self.loaded, &self.tokenizer, prepared, sink)
     }
 
     fn model_id(&self) -> &str {
@@ -2165,6 +2183,53 @@ impl EngineBackend {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_readout_admission_keeps_all_reserves_and_precedes_capture_allocation() {
+        use qwen_llm::metal::{MetalMemorySignals, evaluate_metal_memory_admission_with_cpu_bytes};
+        for release_succeeds in [false, true] {
+            let reserved = super::super::control::CPU_RESERVE_BYTES
+                + super::super::native::CPU_UPPER_BYTES
+                + 23
+                + 41;
+            let remaining = std::cell::Cell::new(reserved);
+            let mut prices = Vec::new();
+            let allocations = std::cell::Cell::new(0);
+            let result = super::with_native_admission(
+                23,
+                17,
+                41,
+                |gpu, cpu| {
+                    prices.push((gpu, cpu));
+                    Ok(evaluate_metal_memory_admission_with_cpu_bytes(
+                        gpu,
+                        cpu,
+                        0,
+                        MetalMemorySignals {
+                            recommended_max_bytes: u64::MAX,
+                            current_allocated_bytes: 0,
+                            process_limit_remaining_bytes: Some(remaining.get()),
+                        },
+                        false,
+                    ))
+                },
+                |deficit| {
+                    assert_eq!(deficit, 17);
+                    remaining.set(reserved + 17);
+                    release_succeeds
+                },
+                || {
+                    allocations.set(allocations.get() + 1);
+                },
+            );
+            assert_eq!(result.is_ok(), release_succeeds);
+            assert_eq!(allocations.get(), usize::from(release_succeeds));
+            assert_eq!(
+                prices,
+                vec![(17, reserved); if release_succeeds { 2 } else { 1 }]
+            );
+        }
+    }
+
     #[test]
     fn optional_dflash_cannot_allocate_from_standing_control_headroom() {
         use qwen_llm::metal::MetalMemorySignals;

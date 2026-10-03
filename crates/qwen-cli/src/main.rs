@@ -33,6 +33,8 @@ mod jsonl;
 mod k2_horizon;
 #[allow(dead_code, unused_imports)] // CLI input adapters share native request semantics.
 mod lens_input;
+#[allow(dead_code)] // Rendered selector binding is used by the Lens CLI binary.
+mod lens_scope;
 mod messages;
 mod model_request;
 #[path = "qwen/muse_glimmer.rs"]

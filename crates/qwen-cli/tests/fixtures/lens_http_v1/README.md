@@ -5,8 +5,9 @@ routes or the capabilities of a particular loaded model. Responses use JSON
 except explicit retained-array downloads, which use binary F32LE payloads.
 Capability values and limits are illustrative; clients must use returned values.
 
-Reconstruction scope: baseline submission/history is wired; readouts, fitted assets,
-interventions and capture production are pending. The capability-gated browser
+Reconstruction scope: baseline and plain readout submission/history are wired;
+fitted assets, interventions and retained/pair capture production are pending.
+The capability-gated browser
 client and static serving are recovered. Diagnostic schema
 descriptions below preserve the original contract for subsequent recovery and for
 reading compatible historical artifacts. They are not current execution claims.
@@ -52,8 +53,10 @@ Ordinary /v1/responses remains its existing independent wire contract.
 
 Current production wiring: `--lens-data-dir` enables stored history on the ordinary
 Qwen server, with native generation for metadata-qualified House Qwen3.6/3.8.
-It advertises `execution.baseline_only=true`, empty assets/operations/readout modes,
-and refuses nonempty diagnostics before acceptance. Other ordinary deployments
+Supported passive heads advertise `plain`/`full_vocabulary` readouts with no direction
+rows or operators; otherwise `execution.baseline_only=true` and empty assets remain.
+Retention, fitted aliases, operations, directions and pairs are refused. Other
+ordinary deployments
 remain execution-unavailable; other backend families currently refuse the flag.
 `capabilities_unavailable` is shared with browser tests: unavailable model metadata
 is null, not zero dimensions or invented identities. Full diagnostic fixtures

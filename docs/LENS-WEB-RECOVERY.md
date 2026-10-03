@@ -71,7 +71,7 @@ recovery is explicitly recorded below.
 | R07 | Durable job metadata: `serve/jobs/{state,store,preview}.rs` | Recovered with a real baseline producer and routes; distinct from main's durable model snapshots | CPU store gates and scoped live Qwen3.6 interruption/restart pass; not KV persistence qualification |
 | R08 | Native request/routes/preconditions: `serve/lens_http/*`, `serve/native/preconditions.rs` | Baseline routes/preconditions recovered; diagnostic admission pending | CPU unknown-field/local HTTP/binding checks and accepted-key recovery pass |
 | R09 | Native baseline and observation lifecycle: `serve/native/{mod,execute,writer}.rs` | Baseline recovered on current resident/cache admission, joined writer; observation production pending | CPU lifecycle and scoped Qwen3.6 live disconnect/decode/interruption/restart pass; broader numerical/pressure qualification pending |
-| R10 | Plain original-forward readouts: `serve/native/{readouts,observe}.rs` | Reuse after R09, not transformer replay | Scope/token coordinates, shared heads, unchanged samples, no terminal fabricated readout; bounded live check |
+| R10 | Plain original-forward readouts: `serve/native/{readouts,observe}.rs` | CPU-qualified producer recovered with browser and current admission; no replay | CPU scopes/lifecycle/publication/HTTP/browser pass; bounded live unchanged-sample and final-layer witness gate pending |
 | R11 | Fitted readouts and direction staging: `serve/native/{registry,interventions}.rs`, `workspace_lens/*` | Reuse after R04/R09/R10 | Registered identity, matrix integrity, bounded ready-only staging/workspace, independent numerical oracle |
 | R12 | Ordered scoped interventions: `serve/native/interventions/*`, `lens_intervention.rs` | Reuse after R02/R11 | Exact order/scopes, zero controls, deployed covector semantics, independent transformation checks |
 | R13 | Retained full scores/source arrays: `serve/jobs/arrays.rs`, native observer/writer, `web/retention*` | Reuse after R07/R10 | Raw admission, dual-watermark durability, digest/finite/shape checks, offline rank/entropy, no implicit fetch |
@@ -724,3 +724,47 @@ Metal exclusion; serving 292 with 26 ignored and explicit Metal-context exclusio
 All binaries/tests compile and formatting passes. `cx` verifies method/argument,
 checkpoint/advance and production-route fidelity and approves the small refactor.
 No GPU is used; earlier live evidence remains tied to its tested source build.
+
+### R10: Plain Original-Forward Producer
+
+Qualified passive output heads expose `plain`/`full_vocabulary` on the same resident
+server. Failed head qualification leaves baseline generation available. Discovery,
+preconditions and prepared asset metadata share the same model identity; no direction
+capability is advertised. Retention, fitted aliases, interventions and residual
+pairs remain refused until their consuming recovery slices.
+
+Numeric scope cardinality is checked before expansion, preserving inclusive ranges
+and excluding unreachable final samples. Per-site capture occurs in the original
+post-block forward through the committed shared adapter. Consumption and consumed
+sample publication precede observation. Separate heads cannot alter the original
+sampler logits. One head/ranking serves overlapping readout IDs, with requested
+top-k counts, shared-cost attribution and conditional same-forward final-layer
+witnesses. No extra prompt tails or transformer replay are added.
+
+The preserved combined-memory estimate was replaced with separate aligned GPU
+buffers and CPU peak accounting. Adversarial review caught the previous generation
+logits remaining live during transition; all three previous/new/observer host arrays
+are now explicit. Current native admission retains those allowances and durable,
+control and writer reservations on eviction retry. A tested allocation callback
+cannot run on denial. Existing passive-head inner admission remains intact.
+The library's `into_topk` only changes visibility; current O(k) ranking and bit/tie
+semantics are reused. Score records use bounded borrowed serialization; aggregate
+raw label bytes are checked before lossy string allocation, without truncation.
+
+CPU tests cover huge/unreachable selectors, cardinality/expansion, shared heads,
+failed forward versus failed observation, known consumption, writer/control stop
+between overlapping IDs, joined settlement, exact/overflow label bounds and invalid
+UTF-8/escaped labels. Actual HTTP submission traverses reservation/acceptance/owner/
+publication and reopens identical saved results without extra calls. A GPU-disabled
+browser submits decode-scoped plain readouts through the actual Rust control/store
+path with synthetic heads and verifies the displayed IDs/scores on phone and desktop.
+Local browser evidence is `web/.browser-test/baseline-e7961fc0-5ce0-41d6-8073-402b74c52593/`.
+
+Current gates: 303 serving CPU tests pass, 26 ignored plus explicit unmarked Metal
+exclusion; Lens 384 pass, nine ignored plus explicit Muse exclusion; two scalar-head
+CPU ranking tests; Bun 55 tests/typecheck/build; binaries/tests/fmt/whitespace clean.
+No GPU was used for this slice. The next gate is a minimal same-seed baseline/plain
+comparison across middle/final layers and original prefill/decode sites, requiring
+all expected witnesses to exist and pass. R11-R14 remain explicitly pending.
+Final `cx` review approves the CPU-qualified producer after the accounting and
+publication-boundary fixes; it does not promote pending live numerical evidence.

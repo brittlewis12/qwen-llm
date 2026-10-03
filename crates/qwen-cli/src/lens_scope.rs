@@ -102,18 +102,29 @@ impl Selector {
         }
     }
 
-    pub(crate) fn expand(&self, upper_bound: u32, name: &str) -> Result<Vec<u32>> {
+    pub(crate) fn numeric_len(&self, upper_bound: u32, name: &str) -> Result<usize> {
         self.validate(name, false)?;
+        let (length, last) = match self {
+            Self::All => (u64::from(upper_bound), upper_bound.checked_sub(1)),
+            Self::Values { values } => (values.len() as u64, values.last().copied()),
+            Self::Range { start, end } => (u64::from(*end) - u64::from(*start) + 1, Some(*end)),
+            Self::RenderedSpans { .. } => unreachable!("validation rejects unresolved selectors"),
+        };
+        ensure!(
+            last.is_none_or(|last| last < upper_bound),
+            "{name} contains a value outside 0..{upper_bound}"
+        );
+        usize::try_from(length).map_err(Into::into)
+    }
+
+    pub(crate) fn expand(&self, upper_bound: u32, name: &str) -> Result<Vec<u32>> {
+        self.numeric_len(upper_bound, name)?;
         let values = match self {
             Self::All => (0..upper_bound).collect(),
             Self::Values { values } => values.clone(),
             Self::Range { start, end } => (*start..=*end).collect(),
             Self::RenderedSpans { .. } => unreachable!("validation rejects unresolved selectors"),
         };
-        ensure!(
-            values.iter().all(|&value| value < upper_bound),
-            "{name} contains a value outside 0..{upper_bound}"
-        );
         Ok(values)
     }
 }
@@ -213,4 +224,43 @@ pub(crate) enum RenderedSpanOccurrence {
 pub(crate) enum RenderedSpanEdge {
     Start,
     End,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn numeric_cardinality_matches_inclusive_expansion_without_allocating_all() {
+        for upper in 0..8 {
+            let mut selectors = vec![Selector::All];
+            for start in 0..8 {
+                selectors.push(Selector::Values {
+                    values: vec![start],
+                });
+                for end in start..8 {
+                    selectors.push(Selector::Range { start, end });
+                }
+            }
+            for selector in selectors {
+                let count = selector.numeric_len(upper, "test");
+                let values = selector.expand(upper, "test");
+                assert_eq!(count.is_ok(), values.is_ok());
+                if let (Ok(count), Ok(values)) = (count, values) {
+                    assert_eq!(count, values.len());
+                }
+            }
+        }
+        assert_eq!(
+            Selector::All.numeric_len(u32::MAX, "huge").unwrap(),
+            u32::MAX as usize
+        );
+        assert!(
+            Selector::Range {
+                start: 1,
+                end: u32::MAX
+            }
+            .numeric_len(u32::MAX, "huge")
+            .is_err()
+        );
+    }
 }

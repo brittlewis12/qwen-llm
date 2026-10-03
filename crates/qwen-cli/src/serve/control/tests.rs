@@ -14,7 +14,9 @@ const WAIT: Duration = Duration::from_secs(5);
 fn browser_baseline_child() {
     assert_eq!(std::env::var("QWEN_LENS_BROWSER_CHILD").as_deref(), Ok("1"));
     crate::shutdown::install().unwrap();
-    let fixture = native::CpuFixture::new();
+    let mut fixture = native::CpuFixture::new();
+    Arc::get_mut(&mut fixture.profile).unwrap().plain_readouts =
+        std::env::var("QWEN_LENS_BROWSER_READOUTS").as_deref() == Ok("1");
     let assets = crate::serve::assets::WebAssets::open(std::path::Path::new(
         &std::env::var("QWEN_LENS_BROWSER_WEB_ROOT").unwrap(),
     ))
@@ -32,6 +34,9 @@ fn browser_baseline_child() {
             prepared: &native::Prepared,
             sink: &native::Sink,
         ) -> native::Outcome {
+            if self.0.plain_readouts {
+                return native::run_cpu_readouts(prepared, sink, &self.0.tokenizer);
+            }
             native::run_tokens(
                 prepared,
                 sink,
@@ -101,6 +106,11 @@ impl GenerationBackend for Backend {
     ) -> native::Outcome {
         assert_eq!(self.owner, std::thread::current().id());
         self.calls.fetch_add(1, Ordering::AcqRel);
+        if self.profile.plain_readouts {
+            self.entered.send(sink.server.clone()).unwrap();
+            self.release.recv_timeout(WAIT).unwrap();
+            return native::run_cpu_readouts(prepared, sink, &self.profile.tokenizer);
+        }
         native::run_tokens(
             prepared,
             sink,
@@ -270,6 +280,49 @@ impl Drop for Server {
             let _ = thread.join();
         }
     }
+}
+
+#[test]
+fn qualified_plain_http_submission_reaches_the_shared_owner_and_saved_results() {
+    let mut fixture = native::CpuFixture::new();
+    Arc::get_mut(&mut fixture.profile).unwrap().plain_readouts = true;
+    let mut server = Server::start(&fixture);
+    let (_, caps) = server.request("GET", "/v1/lens/capabilities", "");
+    assert_eq!(caps["execution"]["baseline_only"], false);
+    let mut request = fixture.request("http-plain");
+    request["preconditions"]["asset_identities"] = serde_json::json!({"plain":"cpu-fixture"});
+    request["diagnostics"] = serde_json::json!({"directions":[],"operations":[],"readouts":[
+        {"id":"plain-read","lens":"plain","mode":"full_vocabulary","top_k":2,"scope":{"layers":{"kind":"all"},"decode":{"kind":"all"}}}
+    ]});
+    let body = request.to_string();
+    let (head, accepted) = server.request("POST", "/v1/lens/jobs", &body);
+    assert!(head.starts_with("HTTP/1.1 202"), "{head} {accepted}");
+    let id = accepted["id"].as_str().unwrap();
+    server.entered.recv_timeout(WAIT).unwrap();
+    server.release.send(()).unwrap();
+    let status = server.wait_terminal(id);
+    assert_eq!(status["state"], "completed");
+    assert_eq!(status["observations"]["committed_records"], 4);
+    let (_, page) = server.request("GET", &format!("/v1/lens/jobs/{id}/result"), "");
+    let rows = page["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "readout")
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 4);
+    assert!(rows.iter().all(|r| r["readout_id"] == "plain-read"
+        && r["phase"] == "decode"
+        && r["scores"][0]["token_id"] == 120));
+    assert_eq!(server.request("POST", "/v1/lens/jobs", &body).1["id"], id);
+    assert_eq!(
+        server
+            .request("GET", &format!("/v1/lens/jobs/{id}/result"), "")
+            .1,
+        page
+    );
+    assert_eq!(server.calls.load(Ordering::Acquire), 1);
+    server.stop();
 }
 
 #[test]

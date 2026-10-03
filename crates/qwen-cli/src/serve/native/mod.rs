@@ -1,11 +1,15 @@
 //! Cache-isolated native baseline execution on the existing resident owner.
 
 mod execute;
+mod observe;
 pub(crate) mod preconditions;
+mod readouts;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 pub(crate) use execute::run_tokens;
+#[cfg(test)]
+pub(crate) use observe::run_cpu_readouts;
 #[cfg(test)]
 pub(crate) use tests::Fixture as CpuFixture;
 mod writer;
@@ -39,6 +43,7 @@ pub(crate) struct Profile {
     pub(crate) context: usize,
     pub(crate) max_tokens: usize,
     pub(crate) no_thinking_supported: bool,
+    pub(crate) plain_readouts: bool,
 }
 
 pub(crate) struct Prepared {
@@ -46,6 +51,7 @@ pub(crate) struct Prepared {
     pub(crate) sampling: SamplingConfig,
     pub(crate) max_tokens: usize,
     pub(super) record: Vec<u8>,
+    pub(super) readouts: readouts::Plan,
 }
 impl Prepared {
     pub(crate) fn counters(&self) -> Counters {
@@ -67,8 +73,13 @@ impl Prepared {
 }
 
 impl Profile {
+    fn check_preconditions(&self, request: &Request) -> Result<(), ApiError> {
+        preconditions::check(request, &self.identity, |alias| {
+            (self.plain_readouts && alias == "plain").then_some(self.identity.as_str())
+        })
+    }
     pub(crate) fn prepare(&self, request: &Request) -> Result<Prepared, ApiError> {
-        preconditions::check(request, &self.identity, |_| None)?;
+        self.check_preconditions(request)?;
         if matches!(
             request.input,
             super::lens_http::input::Input::Messages {
@@ -84,15 +95,12 @@ impl Profile {
             ));
         }
         if request.diagnostics.as_ref().is_some_and(|d| {
-            !d.directions.is_empty()
-                || !d.operations.is_empty()
-                || !d.readouts.is_empty()
-                || !d.residual_pairs.is_empty()
+            !d.directions.is_empty() || !d.operations.is_empty() || !d.residual_pairs.is_empty()
         }) {
             return Err(ApiError::new(
                 400,
                 "unsupported_capability",
-                "Only baseline generation is recovered; diagnostic requests are not silently ignored.",
+                "Directions, operations and residual pairs are not recovered; they are not silently ignored.",
             ));
         }
         let prepared = request
@@ -103,6 +111,26 @@ impl Profile {
                 self.max_tokens,
             )
             .map_err(|cause| ApiError::new(400, "invalid_request", cause.to_string()))?;
+        let values = request
+            .diagnostics
+            .as_ref()
+            .map(|d| d.readouts.as_slice())
+            .unwrap_or_default();
+        if !values.is_empty() && !self.plain_readouts {
+            return Err(ApiError::new(
+                400,
+                "unsupported_capability",
+                "The resident model has no qualified passive readout head.",
+            ));
+        }
+        let readouts = readouts::Plan::compile(
+            values,
+            self.layers,
+            prepared.input.token_ids.len(),
+            request.generation.max_new_tokens,
+            self.tokenizer.n_vocab() as usize,
+        )
+        .map_err(|cause| ApiError::new(400, "invalid_readout", cause.to_string()))?;
         // Bound serialization before materializing a Value tree of token bytes
         // and spans. A small authored request can otherwise amplify substantially.
         let bytes = writer::encode(&prepared.record(request.prefill()))
@@ -112,7 +140,17 @@ impl Profile {
         record["model_identity_kind"] = "runtime_gguf_metadata_not_content_hash".into();
         record["requested_preconditions"] = json!(request.preconditions);
         record["asset_identities"] = json!({});
-        record["resolved_scopes"] = json!([]);
+        if !readouts.readouts.is_empty() {
+            record["asset_identities"]["plain"] = self.identity.clone().into();
+        }
+        record["resolved_scopes"] = json!(
+            readouts
+                .readouts
+                .iter()
+                .map(|r| json!({"id":r.id,"kind":"readout","scope":r.scope}))
+                .collect::<Vec<_>>()
+        );
+        record["readout_admission"] = json!({"head_evaluations_upper":readouts.head_evaluations,"output_rows_upper":readouts.output_rows,"output_scores_upper":readouts.output_scores});
         record["effective_operation_ids"] = json!([]);
         record["sampling"] = json!(request.generation.sampling);
         record["execution"] = json!({"prefill":"serial","decode":"serial","cache":"isolated_diagnostic","forward":"post_block_serial","sampler_version":qwen_llm::sampling::SAMPLER_ALGORITHM_VERSION});
@@ -123,6 +161,7 @@ impl Profile {
             sampling: request.generation.sampling.config(),
             max_tokens: request.generation.max_new_tokens,
             record,
+            readouts,
         })
     }
 }
@@ -156,15 +195,23 @@ impl Admission for NativeAdmission {
             "model":{"id":self.profile.model_id,"identity":self.profile.identity,"template":self.profile.protocol.renderer_name(),"layers":self.profile.layers,"vocabulary_size":self.profile.tokenizer.n_vocab(),"hidden_size":self.profile.hidden},
             "model_identity_kind":"runtime_gguf_metadata_not_content_hash","input_kinds":["messages"],
             "generation_modes":generation_modes,
-            "assistant_prefill_channels":["reasoning","final"],"operations":[],"readout_modes":[],"capture_stage":"post_block_after_operations","request_preconditions":true,
-            "execution":{"prefill":"serial","decode":"serial","cache":"isolated_diagnostic","baseline_only":true},
-            "limits":{"max_new_tokens":self.profile.max_tokens,"max_context_tokens":self.profile.context,"max_token_piece_bytes":MAX_TOKEN_PIECE_BYTES,"max_directions":0,"max_operations":0,"max_readouts":0,"max_top_k":0,"max_queued_jobs":1}})
+            "assistant_prefill_channels":["reasoning","final"],"operations":[],"readout_modes":if self.profile.plain_readouts { vec!["full_vocabulary"] } else { vec![] },"capture_stage":"post_block_after_operations","request_preconditions":true,
+            "execution":{"prefill":"serial","decode":"serial","cache":"isolated_diagnostic","baseline_only":!self.profile.plain_readouts},
+            "limits":{"max_new_tokens":self.profile.max_tokens,"max_context_tokens":self.profile.context,"max_token_piece_bytes":MAX_TOKEN_PIECE_BYTES,"max_directions":0,"max_operations":0,"max_readouts":if self.profile.plain_readouts {readouts::MAX_READOUTS} else {0},"max_top_k":if self.profile.plain_readouts {readouts::MAX_TOP_K.min(self.profile.tokenizer.n_vocab() as usize)} else {0},"max_head_evaluations":readouts::MAX_HEAD_EVALUATIONS,"max_readout_rows":readouts::MAX_ROWS,"max_readout_scores":readouts::MAX_SCORES,"max_readout_label_bytes":readouts::MAX_LABEL_BYTES,"max_queued_jobs":1}})
     }
     fn assets(&self) -> Value {
-        json!({"schema_version":1,"model_identity":self.profile.identity,"assets":[]})
+        let assets = if self.profile.plain_readouts {
+            vec![
+                json!({"alias":"plain","kind":"plain_logit_lens","identity":self.profile.identity,"available":true,"unavailable_reason":null,
+                "source_layers":(0..self.profile.layers).collect::<Vec<_>>(),"target_layer":null,"readout_modes":["full_vocabulary"],"direction_rows":[],"transfer":"identity"}),
+            ]
+        } else {
+            vec![]
+        };
+        json!({"schema_version":1,"model_identity":self.profile.identity,"assets":assets})
     }
     fn reserve(&self, request: &Request) -> Result<Box<dyn ReservedSubmission>, ApiError> {
-        preconditions::check(request, &self.profile.identity, |_| None)?;
+        self.profile.check_preconditions(request)?;
         let slot = self
             .gate
             .reserve()

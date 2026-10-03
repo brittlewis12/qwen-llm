@@ -146,8 +146,9 @@ enables the native `/v1/lens` job/history API on this same server. Qualified Hou
 Qwen3.6/3.8 deployments accept messages, typed assistant prefills and explicit
 sampling; other ordinary deployments can read history without claiming execution
 support. `--web-root web/dist` serves the prebuilt Bun client and requires
-`--lens-data-dir`; Rust never invokes Bun. Readout/intervention producers are still
-being recovered, while compatible saved diagnostics remain inspectable.
+`--lens-data-dir`; Rust never invokes Bun. Supported passive heads offer plain
+original-forward readouts. Fitted readouts, interventions and retained capture
+producers remain pending; compatible saved diagnostics remain inspectable.
 Ordinary `/v1/responses` remains available, sharing one execution reservation.
 Accepted native jobs survive client disconnect; history reads never run inference.
 See [Lens Workbench](LENS-WEB.md) for limits, overload, recovery and qualification.

@@ -3,8 +3,9 @@
 Preserved React/TypeScript workbench, recovered onto current serving semantics.
 Bun owns development serving/HMR and production builds. No Vite, Next, SSR,
 authentication flow, network assets or second production server. Current recovery
-supports durable baseline generation; server readout/intervention producers are
-still pending. Compatible saved diagnostics remain inspectable without inference.
+supports durable baseline generation and scoped plain readouts; fitted/intervention
+and retained-capture producers remain pending. Compatible saved diagnostics remain
+inspectable without inference.
 
 ## Run
 
@@ -114,6 +115,7 @@ bun test
 bun run build
 bun run browser-check.ts
 bun run baseline-browser-check.ts
+LENS_TEST_PLAIN_ONLY=1 bun run baseline-browser-check.ts
 ```
 
 The historical browser check serves explicit fixture derivatives and exercises
@@ -129,6 +131,9 @@ Only token forwards are synthetic CPU work. It checks mobile prefill/sampling,
 actual submission/reload, recorded-byte output, history/copy without new jobs and
 desktop parity under the real two-worker pool. It then signals only its owned
 child, whose test harness verifies settlement. No model or GPU lease is used.
+Plain mode additionally submits a decode-scoped readout and checks visible token
+IDs/scores against the actual saved records. Its heads remain synthetic; it is not
+a numerical Metal-head qualification.
 
 Browser profiles/logs stay in ignored `.browser-test/`. Layout and interaction
 assertions are not screenshot-based visual review. Optional screenshot capture

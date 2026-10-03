@@ -19,6 +19,37 @@ pub(crate) struct Outcome {
     pub(crate) error: Option<JobError>,
     pub(crate) wall_ms: Option<f64>,
 }
+
+pub(super) trait TokenEngine {
+    fn forward(&mut self, token: i32, position: u32, logits: bool) -> Result<Vec<f32>>;
+    fn observe(
+        &mut self,
+        _token: i32,
+        _position: u32,
+        _logits: &[f32],
+        _counters: &Counters,
+        _sink: &Sink,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
+fn observe(
+    engine: &mut impl TokenEngine,
+    token: i32,
+    position: u32,
+    logits: &[f32],
+    counters: &Counters,
+    sink: &Sink,
+) -> Result<()> {
+    if let Err(cause) = engine.observe(token, position, logits, counters, sink) {
+        checkpoint(sink)?;
+        tracing::error!("native readout failed after successful consumption: {cause:#}");
+        sink.fail_recording("readout_failed", "Readout failed after the original forward; consumed tokens remain recorded. See server diagnostics.");
+        sink.control.checkpoint()?;
+    }
+    Ok(())
+}
 impl Outcome {
     pub(crate) fn preparation_failed(counters: Counters, cause: anyhow::Error) -> Self {
         let mut outcome = classify(counters, cause, None);
@@ -87,39 +118,30 @@ pub(crate) fn run_loaded(
             loaded.gguf().stop_token_ids()?,
         ))
     })();
-    let (mut sequence, stops) = match setup {
+    let (sequence, stops) = match setup {
         Ok(value) => value,
         Err(cause) => return classify(prepared.counters(), cause, None),
     };
-    let forward = loaded.forward();
-    run_tokens(
-        prepared,
-        sink,
-        &stops,
-        |token, position, logits| {
-            sequence.check_position(position as usize)?;
-            sequence.ensure_can_append(1)?;
-            let output = ordinary_executor::post_block_forward(
-                &forward,
-                unsafe { sequence.metal_session_mut() },
-                token,
-                position,
-                logits,
-                None,
-                &[],
-            )?;
-            sequence.advance_by(1)?;
-            Ok(output)
-        },
-        |token| {
-            let bytes = tokenizer.try_decode_piece_bytes_exact(token)?;
-            ensure!(
-                bytes.len() <= super::MAX_TOKEN_PIECE_BYTES,
-                "native token piece exceeds retained-record bound"
-            );
-            Ok(bytes.to_vec())
-        },
-    )
+    let mut engine =
+        match super::observe::Engine::new(loaded, tokenizer, sequence, &prepared.readouts) {
+            Ok(engine) => engine,
+            Err(cause) => {
+                tracing::error!("native readout preparation failed: {cause:#}");
+                return Outcome::failed(
+                    prepared.counters(),
+                    "diagnostic_preparation_failed",
+                    "Readout preparation failed before any model forward.",
+                );
+            }
+        };
+    run_engine(prepared, sink, &stops, &mut engine, |token| {
+        let bytes = tokenizer.try_decode_piece_bytes_exact(token)?;
+        ensure!(
+            bytes.len() <= super::MAX_TOKEN_PIECE_BYTES,
+            "native token piece exceeds retained-record bound"
+        );
+        Ok(bytes.to_vec())
+    })
 }
 
 fn classify(counters: Counters, cause: anyhow::Error, wall_ms: Option<f64>) -> Outcome {
@@ -201,11 +223,28 @@ fn publish_sample(
     );
 }
 
+#[cfg(test)]
 pub(crate) fn run_tokens(
     prepared: &Prepared,
     sink: &Sink,
     stops: &[i32],
-    mut forward: impl FnMut(i32, u32, bool) -> Result<Vec<f32>>,
+    forward: impl FnMut(i32, u32, bool) -> Result<Vec<f32>>,
+    piece: impl FnMut(i32) -> Result<Vec<u8>>,
+) -> Outcome {
+    struct Forward<F>(F);
+    impl<F: FnMut(i32, u32, bool) -> Result<Vec<f32>>> TokenEngine for Forward<F> {
+        fn forward(&mut self, token: i32, position: u32, logits: bool) -> Result<Vec<f32>> {
+            (self.0)(token, position, logits)
+        }
+    }
+    run_engine(prepared, sink, stops, &mut Forward(forward), piece)
+}
+
+pub(super) fn run_engine(
+    prepared: &Prepared,
+    sink: &Sink,
+    stops: &[i32],
+    engine: &mut impl TokenEngine,
     mut piece: impl FnMut(i32) -> Result<Vec<u8>>,
 ) -> Outcome {
     struct State {
@@ -234,11 +273,19 @@ pub(crate) fn run_tokens(
         for (position, &token) in prepared.prompt.iter().enumerate() {
             checkpoint(sink)?;
             let last = position + 1 == prepared.prompt.len();
-            logits = forward(token, u32::try_from(position)?, last)?;
+            logits = engine.forward(token, u32::try_from(position)?, last)?;
             state.counters.consumed_prompt_tokens += 1;
             if last || (position + 1) % 16 == 0 {
                 sink.progress(Phase::Prefill, &state.counters);
             }
+            observe(
+                engine,
+                token,
+                u32::try_from(position)?,
+                &logits,
+                &state.counters,
+                sink,
+            )?;
         }
         let summary = ordinary_executor::decode(
             logits,
@@ -273,11 +320,12 @@ pub(crate) fn run_tokens(
                     state.counters.prompt_tokens + state.counters.consumed_generated_tokens;
                 let position = u32::try_from(position)?;
                 state.attempted = true;
-                let logits = forward(token, position, true)?;
+                let logits = engine.forward(token, position, true)?;
                 state.counters.consumed_generated_tokens += 1;
                 if let Some(pending) = state.pending.take() {
                     publish_sample(sink, pending, &state.counters, true, false);
                 }
+                observe(engine, token, position, &logits, &state.counters, sink)?;
                 Ok(logits)
             },
         )?;

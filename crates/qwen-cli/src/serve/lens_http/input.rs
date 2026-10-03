@@ -397,6 +397,7 @@ mod tests {
             context: 8192,
             max_tokens: 4096,
             no_thinking_supported: true,
+            plain_readouts: false,
         };
         for mode in [LensMessageMode::Thinking, LensMessageMode::NoThinking] {
             for prefill in [

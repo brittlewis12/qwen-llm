@@ -11,6 +11,9 @@ pub(crate) struct Fixture {
 }
 impl Fixture {
     pub(crate) fn new() -> Self {
+        Self::with_extra_tokens(&[])
+    }
+    pub(crate) fn with_extra_tokens(extra_tokens: &[String]) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
             "qwen-native-baseline-{}-{}",
@@ -19,7 +22,7 @@ impl Fixture {
         ));
         std::fs::create_dir(&root).unwrap();
         let model = root.join("tokenizer.gguf");
-        write_byte_tokenizer(&model);
+        write_byte_tokenizer(&model, extra_tokens);
         let gguf = qwen_llm::gguf::GgufFile::open(&model).unwrap();
         let tokenizer = Arc::new(Tokenizer::from_gguf(&gguf).unwrap());
         let store = Arc::new(
@@ -39,6 +42,7 @@ impl Fixture {
             context: 4096,
             max_tokens: 16,
             no_thinking_supported: true,
+            plain_readouts: false,
         });
         Self {
             root,
@@ -76,7 +80,7 @@ impl Drop for Fixture {
 
 // Real native tokenizer implementation over a synthetic byte vocabulary, not
 // evidence about a released model's tokenizer or numerical generation.
-fn write_byte_tokenizer(path: &std::path::Path) {
+fn write_byte_tokenizer(path: &std::path::Path, extra_tokens: &[String]) {
     fn string(bytes: &mut Vec<u8>, text: &str) {
         bytes.extend_from_slice(&(text.len() as u64).to_le_bytes());
         bytes.extend_from_slice(text.as_bytes());
@@ -120,6 +124,7 @@ fn write_byte_tokenizer(path: &std::path::Path) {
         .into_iter()
         .map(str::to_owned),
     );
+    tokens.extend(extra_tokens.iter().cloned());
     for (key, values) in [
         ("tokenizer.ggml.tokens", tokens.as_slice()),
         ("tokenizer.ggml.merges", &[][..]),
@@ -140,7 +145,14 @@ fn write_byte_tokenizer(path: &std::path::Path) {
     types.extend_from_slice(&5u32.to_le_bytes());
     types.extend_from_slice(&(tokens.len() as u64).to_le_bytes());
     for index in 0..tokens.len() {
-        types.extend_from_slice(&(if index < 256 { 1i32 } else { 3i32 }).to_le_bytes());
+        types.extend_from_slice(
+            &(if (256..261).contains(&index) {
+                3i32
+            } else {
+                1i32
+            })
+            .to_le_bytes(),
+        );
     }
     entries.push(types);
     let mut bytes = b"GGUF".to_vec();
@@ -158,6 +170,83 @@ fn logits() -> Vec<f32> {
     let mut values = vec![0.0; 261];
     values[b'x' as usize] = 10.0;
     values
+}
+
+#[test]
+fn plain_discovery_preconditions_and_admission_agree_without_enabling_other_diagnostics() {
+    use crate::serve::lens_http::Admission;
+    let mut fixture = Fixture::new();
+    let make = |profile: Arc<Profile>| {
+        let (sender, _) = std::sync::mpsc::sync_channel(1);
+        NativeAdmission {
+            profile,
+            store: Arc::clone(&fixture.store),
+            sender,
+            gate: Default::default(),
+            activity: Default::default(),
+        }
+    };
+    assert_eq!(
+        make(Arc::clone(&fixture.profile)).capabilities()["execution"]["baseline_only"],
+        true
+    );
+    assert_eq!(
+        make(Arc::clone(&fixture.profile)).assets()["assets"],
+        json!([])
+    );
+    Arc::get_mut(&mut fixture.profile).unwrap().plain_readouts = true;
+    let admission = make(Arc::clone(&fixture.profile));
+    assert_eq!(
+        admission.capabilities()["readout_modes"],
+        json!(["full_vocabulary"])
+    );
+    assert_eq!(admission.capabilities()["operations"], json!([]));
+    assert_eq!(admission.assets()["assets"][0]["direction_rows"], json!([]));
+    let mut request = fixture.request("qualified-plain");
+    request["diagnostics"] = json!({"directions":[],"operations":[],"readouts":[{"id":"r","lens":"plain","mode":"full_vocabulary","top_k":2,
+        "scope":{"layers":{"kind":"all"},"decode":{"kind":"all"}}}]});
+    assert!(
+        fixture
+            .profile
+            .prepare(&Request::parse(&request).unwrap())
+            .is_err()
+    );
+    request["preconditions"]["asset_identities"] = json!({"plain":"wrong-model"});
+    assert_eq!(
+        fixture
+            .profile
+            .prepare(&Request::parse(&request).unwrap())
+            .err()
+            .unwrap()
+            .status,
+        412
+    );
+    request["preconditions"]["asset_identities"] = json!({"plain":"cpu-fixture"});
+    let prepared = fixture
+        .profile
+        .prepare(&Request::parse(&request).unwrap())
+        .ok()
+        .unwrap();
+    let record: Value = serde_json::from_slice(&prepared.record).unwrap();
+    assert_eq!(record["asset_identities"]["plain"], "cpu-fixture");
+    assert_eq!(record["resolved_scopes"][0]["kind"], "readout");
+    for field in ["directions", "operations", "residual_pairs"] {
+        let mut unsupported = request.clone();
+        unsupported["diagnostics"][field] = json!([{}]);
+        assert!(
+            fixture
+                .profile
+                .prepare(&Request::parse(&unsupported).unwrap())
+                .is_err()
+        );
+    }
+    request["diagnostics"]["readouts"][0]["retain"] = json!("scores_and_residual");
+    assert!(
+        fixture
+            .profile
+            .prepare(&Request::parse(&request).unwrap())
+            .is_err()
+    );
 }
 
 #[test]
@@ -317,5 +406,99 @@ fn failed_forward_and_unavailable_piece_keep_sample_identity_without_claiming_co
                 "forward_failed_consumption_unknown"
             }
         );
+    }
+}
+
+#[test]
+fn observer_failure_keeps_successful_consumption_and_does_not_fabricate_failed_forward() {
+    use execute::TokenEngine;
+    for fail_forward in [false, true] {
+        let fixture = Fixture::new();
+        let (id, prepared, control) = fixture.prepare("observe-failure");
+        let writer = writer::Writer::spawn(
+            Arc::clone(&fixture.store),
+            id.clone(),
+            control,
+            &prepared,
+            Default::default(),
+        )
+        .unwrap();
+        writer.wait_ready().unwrap();
+        struct Engine {
+            prompt: usize,
+            fail_forward: bool,
+            observed: usize,
+        }
+        impl TokenEngine for Engine {
+            fn forward(&mut self, _: i32, position: u32, _: bool) -> anyhow::Result<Vec<f32>> {
+                ensure!(
+                    !self.fail_forward || (position as usize) < self.prompt,
+                    "failed forward"
+                );
+                Ok(logits())
+            }
+            fn observe(
+                &mut self,
+                _: i32,
+                position: u32,
+                _: &[f32],
+                counters: &Counters,
+                _: &Sink,
+            ) -> anyhow::Result<()> {
+                self.observed += 1;
+                if position as usize >= self.prompt {
+                    assert_eq!(counters.consumed_generated_tokens, 1);
+                    anyhow::bail!("failed observation after successful consumption");
+                }
+                Ok(())
+            }
+        }
+        let mut engine = Engine {
+            prompt: prepared.prompt.len(),
+            fail_forward,
+            observed: 0,
+        };
+        let outcome = execute::run_engine(&prepared, writer.sink(), &[], &mut engine, |_| {
+            Ok(b"x".to_vec())
+        });
+        assert_eq!(outcome.counters.sampled_tokens, 1);
+        assert_eq!(
+            outcome.counters.consumed_generated_tokens,
+            u64::from(!fail_forward)
+        );
+        assert_eq!(
+            engine.observed,
+            prepared.prompt.len() + usize::from(!fail_forward)
+        );
+        writer.finish(outcome).unwrap();
+        let page = serde_json::to_value(fixture.store.result(&id, None, 64).unwrap()).unwrap();
+        let sample = page["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["kind"] == "sampled_token" || r["kind"] == "unresolved_sample")
+            .unwrap();
+        assert_eq!(
+            sample["kind"],
+            if fail_forward {
+                "unresolved_sample"
+            } else {
+                "sampled_token"
+            }
+        );
+        if !fail_forward {
+            assert_eq!(sample["consumed"], true);
+            assert_eq!(
+                fixture
+                    .store
+                    .status(&id)
+                    .unwrap()
+                    .result
+                    .error
+                    .unwrap()
+                    .code,
+                "readout_failed"
+            );
+        }
     }
 }

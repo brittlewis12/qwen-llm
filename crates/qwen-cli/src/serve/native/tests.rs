@@ -242,12 +242,12 @@ fn plain_discovery_preconditions_and_admission_agree_without_enabling_other_diag
         );
     }
     request["diagnostics"]["readouts"][0]["retain"] = json!("scores_and_residual");
-    assert!(
-        fixture
-            .profile
-            .prepare(&Request::parse(&request).unwrap())
-            .is_err()
-    );
+    let retained = fixture
+        .profile
+        .prepare(&Request::parse(&request).unwrap())
+        .ok()
+        .unwrap();
+    assert!(retained.readouts.archive_bytes > 0);
 }
 
 #[test]

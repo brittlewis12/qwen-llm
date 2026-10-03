@@ -177,6 +177,7 @@ impl Profile {
             request.generation.max_new_tokens,
             self.tokenizer.n_vocab() as usize,
             self.registry.clone(),
+            self.hidden,
         )
         .map_err(|cause| ApiError::new(400, "invalid_readout", cause.to_string()))?;
         let diagnostics = request.diagnostics.as_ref();
@@ -250,6 +251,8 @@ impl Profile {
                 .map(|op| &op.id)
                 .collect::<Vec<_>>()
         );
+        record["retention_admission"] = json!({"hidden_size":self.hidden,"vocabulary_size":self.tokenizer.n_vocab(),
+            "raw_bytes_upper":readouts.archive_bytes,"source_arrays_upper":readouts.retained_sources.len(),"score_arrays_upper":readouts.retained_heads.len()});
         record["intervention_admission"] = json!({"applications_upper":interventions.applications,"direction_rows":interventions.direction_rows,"projected_rows":interventions.projected_rows,"matrix_bytes":staging.matrix_bytes});
         record["sampling"] = json!(request.generation.sampling);
         record["execution"] = json!({"prefill":"serial","decode":"serial","cache":"isolated_diagnostic","forward":"post_block_serial","sampler_version":qwen_llm::sampling::SAMPLER_ALGORITHM_VERSION});
@@ -298,11 +301,13 @@ impl Admission for NativeAdmission {
             "generation_modes":generation_modes,
             "assistant_prefill_channels":["reasoning","final"],"operations":if self.profile.directions_supported() { interventions::OPERATORS.to_vec() } else {vec![]},"readout_modes":if self.profile.plain_readouts { vec!["full_vocabulary"] } else { vec![] },"capture_stage":"post_block_after_operations","request_preconditions":true,
             "execution":{"prefill":"serial","decode":"serial","cache":"isolated_diagnostic","baseline_only":!self.profile.plain_readouts},
+            "readout_retention_modes":if self.profile.plain_readouts {vec!["scores_and_residual"]} else {vec![]},
             "limits":{"max_new_tokens":self.profile.max_tokens,"max_context_tokens":self.profile.context,"max_token_piece_bytes":MAX_TOKEN_PIECE_BYTES,
                 "max_directions":if self.profile.directions_supported() {interventions::MAX_DIRECTIONS} else {0},
                 "max_operations":if self.profile.directions_supported() {interventions::MAX_OPERATIONS} else {0},
                 "max_operation_applications":interventions::MAX_APPLICATIONS,"max_direction_rows":interventions::MAX_DIRECTION_ROWS,
                 "max_projection_products":interventions::MAX_PROJECTION_PRODUCTS,
+                "max_archive_bytes":super::jobs::store::MAX_ARCHIVE_BYTES,"max_retained_array_bytes":super::jobs::store::MAX_ARRAY_BYTES,
                 "max_readouts":if self.profile.plain_readouts {readouts::MAX_READOUTS} else {0},"max_top_k":if self.profile.plain_readouts {readouts::MAX_TOP_K.min(self.profile.tokenizer.n_vocab() as usize)} else {0},"max_head_evaluations":readouts::MAX_HEAD_EVALUATIONS,"max_readout_rows":readouts::MAX_ROWS,"max_readout_scores":readouts::MAX_SCORES,"max_readout_label_bytes":readouts::MAX_LABEL_BYTES,"max_queued_jobs":1}})
     }
     fn assets(&self) -> Value {
@@ -347,6 +352,9 @@ struct Reservation {
     store: Arc<JobStore>,
 }
 impl ReservedSubmission for Reservation {
+    fn archive_bytes(&self) -> u64 {
+        self.prepared.readouts.archive_bytes
+    }
     fn enqueue(self: Box<Self>, job: AcceptedJob) -> Result<(), String> {
         let Self {
             prepared,

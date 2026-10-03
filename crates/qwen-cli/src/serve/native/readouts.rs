@@ -24,7 +24,7 @@ pub(crate) struct Readout {
     pub(crate) scope: Scope,
     pub(crate) top_k: usize,
     #[serde(default)]
-    retain: Option<String>,
+    pub(crate) retain: Option<String>,
 }
 
 #[derive(Default)]
@@ -39,6 +39,9 @@ pub(crate) struct Plan {
     pub(crate) registry: Option<Arc<Registry>>,
     pub(crate) matrices: BTreeSet<MatrixKey>,
     pub(crate) matrix_bytes: u64,
+    pub(crate) retained_sources: BTreeSet<(u32, u32)>,
+    pub(crate) retained_heads: BTreeSet<(u32, u32, String)>,
+    pub(crate) archive_bytes: u64,
 }
 
 impl Plan {
@@ -50,7 +53,7 @@ impl Plan {
         max_tokens: usize,
         vocab: usize,
     ) -> Result<Self> {
-        Self::compile_with_registry(values, layers, prompt, max_tokens, vocab, None)
+        Self::compile_with_registry(values, layers, prompt, max_tokens, vocab, None, 1)
     }
 
     pub(crate) fn compile_with_registry(
@@ -60,6 +63,7 @@ impl Plan {
         max_tokens: usize,
         vocab: usize,
         registry: Option<Arc<Registry>>,
+        hidden: usize,
     ) -> Result<Self> {
         ensure!(values.len() <= MAX_READOUTS, "too many readout requests");
         ensure!(
@@ -79,8 +83,11 @@ impl Plan {
         for value in values {
             let readout: Readout = serde_json::from_value(value.clone())?;
             ensure!(
-                readout.retain.is_none(),
-                "readout retention production is not recovered"
+                readout
+                    .retain
+                    .as_deref()
+                    .is_none_or(|r| r == "scores_and_residual"),
+                "unsupported readout retention mode"
             );
             ensure!(
                 !readout.id.is_empty() && readout.id.len() <= 256 && ids.insert(readout.id.clone()),
@@ -172,6 +179,11 @@ impl Plan {
             {
                 let event = plan.events.entry(position).or_default();
                 for &layer in &selected_layers {
+                    if readout.retain.is_some() {
+                        plan.retained_sources.insert((position, layer));
+                        plan.retained_heads
+                            .insert((position, layer, readout.lens.clone()));
+                    }
                     if !event.get(&layer).is_some_and(|indices| {
                         indices
                             .iter()
@@ -188,6 +200,32 @@ impl Plan {
                 plan.max_capture_layers = plan.max_capture_layers.max(event.len());
             }
             plan.readouts.push(readout);
+        }
+        if !plan.retained_heads.is_empty() {
+            let bytes = |count: usize| -> Result<u64> {
+                let bytes = count
+                    .checked_mul(4)
+                    .context("retained array bytes overflow")?;
+                ensure!(
+                    bytes > 0 && bytes <= crate::serve::jobs::store::MAX_ARRAY_BYTES,
+                    "retained array exceeds byte limit"
+                );
+                Ok(bytes as u64)
+            };
+            let source_bytes = bytes(hidden)?;
+            let score_bytes = bytes(vocab)?;
+            plan.archive_bytes = source_bytes
+                .checked_mul(plan.retained_sources.len() as u64)
+                .and_then(|n| {
+                    score_bytes
+                        .checked_mul(plan.retained_heads.len() as u64)?
+                        .checked_add(n)
+                })
+                .context("retention byte overflow")?;
+            ensure!(
+                plan.archive_bytes <= crate::serve::jobs::store::MAX_ARCHIVE_BYTES,
+                "retained archive exceeds raw byte budget"
+            );
         }
         Ok(plan)
     }
@@ -263,6 +301,19 @@ impl Plan {
             .checked_add(hidden)
             .and_then(|n| vocab.checked_mul(3).and_then(|v| n.checked_add(v)))
             .and_then(|n| n.checked_add(2 * super::RECORD_BYTES as u64))
+            .and_then(|n| {
+                n.checked_add(
+                    self.archive_bytes
+                        .min(super::writer::ARRAY_QUEUE_BYTES as u64),
+                )
+            })
+            .and_then(|n| {
+                n.checked_add(if self.archive_bytes == 0 {
+                    0
+                } else {
+                    crate::serve::jobs::store::MAX_ARRAY_BYTES as u64
+                })
+            })
             .context("readout CPU bytes overflow")?;
         Ok((gpu, cpu))
     }
@@ -272,6 +323,65 @@ impl Plan {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn retention_deduplicates_selected_heads_and_prices_exact_raw_boundaries() {
+        let row = |id, lens, retain| {
+            json!({"id":id,"lens":lens,"mode":"full_vocabulary","top_k":1,"retain":retain,
+            "scope":{"layers":{"kind":"values","values":[0]},"prefill":{"kind":"all"}}})
+        };
+        let (_files, registry) = super::super::registry::tests::fitted_fixture();
+        let plan = Plan::compile_with_registry(
+            &[
+                row("a", "plain", Some("scores_and_residual")),
+                row("b", "plain", Some("scores_and_residual")),
+                row("c", "plain", None),
+                row("fit", "fit", Some("scores_and_residual")),
+            ],
+            3,
+            2,
+            1,
+            32,
+            Some(registry),
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                plan.retained_sources.len(),
+                plan.retained_heads.len(),
+                plan.archive_bytes
+            ),
+            (2, 4, 2 * 8 + 4 * 128)
+        );
+        let one = row("all", "plain", Some("scores_and_residual"));
+        let vocab = crate::serve::jobs::store::MAX_ARRAY_BYTES / 4 - 2;
+        let exact = Plan::compile_with_registry(&[one.clone()], 1, 8, 1, vocab, None, 2).unwrap();
+        assert_eq!(
+            exact.archive_bytes,
+            crate::serve::jobs::store::MAX_ARCHIVE_BYTES
+        );
+        let no_retention = Plan::compile(&[row("all", "plain", None)], 1, 8, 1, vocab).unwrap();
+        let (_, retained_cpu) = exact.price(2, vocab, Ok).unwrap();
+        let (_, baseline_cpu) = no_retention.price(2, vocab, Ok).unwrap();
+        assert_eq!(
+            retained_cpu - baseline_cpu,
+            (super::super::writer::ARRAY_QUEUE_BYTES + crate::serve::jobs::store::MAX_ARRAY_BYTES)
+                as u64
+        );
+        assert!(Plan::compile_with_registry(&[one.clone()], 1, 9, 1, vocab, None, 2).is_err());
+        assert!(
+            Plan::compile_with_registry(
+                &[one],
+                1,
+                1,
+                1,
+                crate::serve::jobs::store::MAX_ARRAY_BYTES / 4 + 1,
+                None,
+                2
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn fitted_heads_deduplicate_matrices_and_price_all_overlapping_buffers() {
         let (_files, registry) = super::super::registry::tests::fitted_fixture();
@@ -290,6 +400,7 @@ mod tests {
             2,
             32,
             Some(registry),
+            2,
         )
         .unwrap();
         assert_eq!(
@@ -365,7 +476,7 @@ mod tests {
         unreachable["scope"] = json!({"layers":{"kind":"all"},"decode":{"kind":"all"}});
         assert!(Plan::compile(&[unreachable], 4, 3, 1, 10).is_err());
         for (field, value) in [
-            ("retain", json!("scores_and_residual")),
+            ("retain", json!("unknown")),
             ("lens", json!("fitted")),
             ("top_k", json!(0)),
         ] {

@@ -2,10 +2,12 @@ import { strict as assert } from "node:assert";
 import { mkdir } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { resolve } from "node:path";
+import { createHash } from "node:crypto";
 
 // Opt-in Metal check. Owns its server handles; never targets an existing service.
 const model = Bun.env.QWEN_LENS_TEST_MODEL;
-const readouts = Bun.env.QWEN_LENS_TEST_READOUTS === "1";
+const retention = Bun.env.QWEN_LENS_TEST_RETENTION === "1";
+const readouts = Bun.env.QWEN_LENS_TEST_READOUTS === "1" || retention;
 if (!model) throw new Error("Set QWEN_LENS_TEST_MODEL to a qualified House Qwen3.6/3.8 GGUF.");
 const root = resolve(import.meta.dir, "../..");
 const output = `${root}/target/lens-baseline-${crypto.randomUUID()}`;
@@ -25,6 +27,19 @@ let stopping: Promise<{ code: number; signal: string | null }> | undefined;
 const evidence: unknown[] = [];
 const prefill = { channel: "reasoning", text: "Let me" };
 let observed: { id: string; page: any } | undefined;
+const archived = new Map<string, Uint8Array>();
+
+async function array(record: any) {
+  const response = await fetch(origin + record.array.url, { signal: AbortSignal.timeout(remaining()) });
+  assert.equal(response.status, 200);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  remaining();
+  assert.equal(bytes.length, record.array.byte_length);
+  assert.equal(bytes.length, record.array.length * 4);
+  assert.equal(record.array.dtype, "f32le");
+  assert.equal(createHash("sha256").update(bytes).digest("hex"), record.array.sha256);
+  return bytes;
+}
 
 async function stop() {
   if (stopping) return stopping;
@@ -162,6 +177,10 @@ try {
       { id: "multi", lens: "plain", mode: "full_vocabulary", top_k: 5, scope: { layers: { kind: "values", values: [middle, last] }, ...phases } },
       { id: "shared", lens: "plain", mode: "full_vocabulary", top_k: 2, scope: { layers: { kind: "values", values: [last] }, ...phases } },
     ] };
+    if (retention) {
+      assert(caps.readout_retention_modes.includes("scores_and_residual"));
+      authored.diagnostics.readouts[0].retain = "scores_and_residual";
+    }
     const job = await json("/v1/lens/jobs", JSON.stringify(authored), 202);
     const page = await completed(job.id);
     const stripSequence = (page: any) => samples(page).map(({ seq, ...sample }: any) => sample);
@@ -197,6 +216,47 @@ try {
     assert.equal(expected.size, 0);
     assert.equal(witnesses, 6, "Every expected final-layer witness must exist and pass");
     assert.equal(page.records[0].readout_admission.head_evaluations_upper, 8);
+    if (retention) {
+      const arrays = page.records.filter((r: any) => r.kind === "retained_array");
+      assert.equal(arrays.length, 16);
+      assert.equal(new Set(arrays.map((r: any) => r.key)).size, 16);
+      let total = 0;
+      for (const record of arrays) {
+        const bytes = await array(record);
+        archived.set(record.array.url, bytes);
+        total += bytes.length;
+        assert.equal(record.array.length, record.quantity === "source_residual" ? caps.model.hidden_size : caps.model.vocabulary_size);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        for (let i = 0; i < record.array.length; i++) assert(Number.isFinite(view.getFloat32(i * 4, true)));
+      }
+      assert.equal(total, page.records[0].retention_admission.raw_bytes_upper);
+      for (const row of rows) {
+        if (row.readout_id === "shared") { assert.equal(row.retained, null, "Nonretaining ID must not acquire a retained reference"); continue; }
+        const source = arrays.find((a: any) => a.key === row.retained.source_key);
+        const logits = arrays.find((a: any) => a.key === row.retained.logits_key);
+        assert(source && logits && source.seq < logits.seq && logits.seq < row.seq);
+        assert.equal(source.quantity, "source_residual"); assert.equal(logits.quantity, "readout_logits");
+        for (const key of ["position", "source_layer", "phase", "index", "input_token_id"]) {
+          assert.equal(source[key], row[key]); assert.equal(logits[key], row[key]);
+        }
+        assert.equal(logits.source_key, source.key); assert.equal(logits.lens, row.lens);
+        const bytes = archived.get(logits.array.url)!;
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const ranks = row.scores.map(() => 1);
+        for (let token = 0; token < logits.array.length; token++) {
+          const value = view.getFloat32(token * 4, true);
+          row.scores.forEach((score: any, index: number) => {
+            const expected = view.getFloat32(score.token_id * 4, true);
+            if (value > expected || (value === expected && token < score.token_id)) ranks[index]++;
+          });
+        }
+        row.scores.forEach((score: any, index: number) => {
+          assert.equal(view.getFloat32(score.token_id * 4, true), Math.fround(score.score));
+          assert.equal(ranks[index], index + 1);
+        });
+      }
+      evidence.push({ retention_gate: { arrays: arrays.length, raw_bytes: total, verified_sha256: true, full_vocabulary_rank_checked: true } });
+    }
     assert.deepEqual(await result(job.id), page);
     observed = { id: job.id, page };
     evidence.push({ readout_gate: { expected_rows: 12, shared_heads: 8, passing_witnesses: witnesses, unchanged_sampling: true } });
@@ -227,6 +287,11 @@ try {
   await start();
   assert.deepEqual(await result(accepted.id), baseline);
   if (observed) assert.deepEqual(await result(observed.id), observed.page);
+  if (retention) {
+    for (const record of observed!.page.records.filter((r: any) => r.kind === "retained_array")) {
+      assert.deepEqual(await array(record), archived.get(record.array.url), "Retained bytes changed across restart");
+    }
+  }
   assert.equal((await json("/v1/lens/jobs", body)).id, accepted.id);
   const resumed = await json("/v1/lens/jobs", interruptedBody);
   assert.equal(resumed.id, active.id);
@@ -240,9 +305,9 @@ try {
   assert.deepEqual(await stop(), { code: 143, signal: null });
   assert(!forced);
   remaining();
-  await Bun.write(`${output}/evidence.json`, JSON.stringify({ model, readouts, launches: launch, passed: true, evidence }, null, 2));
+  await Bun.write(`${output}/evidence.json`, JSON.stringify({ model, readouts, retention, launches: launch, passed: true, evidence }, null, 2));
   remaining();
-  console.log(`PASS: baseline${readouts ? ", shared original-forward readouts with unchanged samples and six passing witnesses" : ""}, disconnected exact-key recovery, ordinary serving, active interruption/restart; ${output}`);
+  console.log(`PASS: baseline${readouts ? ", shared original-forward readouts with unchanged samples and six passing witnesses" : ""}${retention ? ", retained bytes/ranks verified across restart" : ""}, disconnected exact-key recovery, ordinary serving, active interruption/restart; ${output}`);
 } finally {
   clearTimeout(watchdog);
   await stop();

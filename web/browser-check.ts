@@ -209,6 +209,7 @@ try {
   });
   let nextId = 0;
   const runtimeErrors: unknown[] = [];
+  const arrayRequests: string[] = [];
   let screencastFrame: ((data: string) => void) | null = null;
   function send(method: string, params: Record<string, unknown> = {}): Promise<any> {
     if (stopping) return Promise.reject(new Error("Browser check interrupted"));
@@ -225,6 +226,7 @@ try {
       clearTimeout(request.timer); pending.delete(message.id);
       if (message.error) request.reject(new Error(JSON.stringify(message.error))); else request.resolve(message.result);
     } else if (message.method === "Runtime.exceptionThrown") runtimeErrors.push(message.params);
+    else if (message.method === "Network.requestWillBeSent" && /\/v1\/lens\/jobs\/[^/]+\/arrays\//.test(message.params.request.url)) arrayRequests.push(message.params.request.url);
     else if (message.method === "Page.javascriptDialogOpening") void send("Page.handleJavaScriptDialog", { accept: true });
     else if (message.method === "Page.screencastFrame") { screencastFrame?.(message.params.data); void send("Page.screencastFrameAck", { sessionId: message.params.sessionId }); }
   };
@@ -252,13 +254,14 @@ try {
   }
   const click = (text: string) => evaluate(`(() => { const button = [...document.querySelectorAll('button')].find(b => b.textContent === ${JSON.stringify(text)} && b.getClientRects().length); if (!button || button.disabled) throw new Error('Button unavailable: ' + ${JSON.stringify(text)}); button.click(); })()`);
   const setInput = (selector: string, value: string) => evaluate(`(() => { const input = document.querySelector(${JSON.stringify(selector)}); const proto = input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : input.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(proto, 'value').set.call(input, ${JSON.stringify(value)}); input.dispatchEvent(new Event(input.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })); })()`);
-  await send("Page.enable"); await send("Runtime.enable");
+  await send("Page.enable"); await send("Runtime.enable"); await send("Network.enable");
   await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   if (liveOrigin && Bun.env.LENS_TEST_BASELINE_ONLY === "1") {
     await send("Page.navigate", { url: liveOrigin });
     const operations = Bun.env.LENS_TEST_OPERATIONS === "1";
+    const retention = Bun.env.LENS_TEST_RETENTION === "1";
     const fitted = Bun.env.LENS_TEST_FITTED_ONLY === "1" || operations;
-    const plain = Bun.env.LENS_TEST_PLAIN_ONLY === "1" || fitted;
+    const plain = Bun.env.LENS_TEST_PLAIN_ONLY === "1" || fitted || retention;
     await wait(`document.body.textContent.includes(${JSON.stringify(fitted ? "Lens available" : plain ? "Readouts available" : "Baseline available")})`, "discovery alongside history polling");
     await setInput("#message-0", "Name an animal.");
     await setInput("#generation-mode", "no_thinking");
@@ -272,6 +275,7 @@ try {
     assert(await evaluate<boolean>(`[...document.querySelectorAll('button')].filter(b => ${JSON.stringify(plain ? ["Add direction", "Add operation"] : ["Add readout", "Add direction", "Add operation"])}.includes(b.textContent)).every(b => b.disabled)`));
     if (plain) {
       await click("Add readout");
+      if (retention) await evaluate(`(() => { const label = [...document.querySelectorAll('label')].find(l => l.textContent === 'Retain full scores and source residuals'); label.querySelector('input').click(); })()`);
       if (fitted) {
         await evaluate(`(() => { const input = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Readout alias')).querySelector('select'); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(input, 'fit'); input.dispatchEvent(new Event('change', { bubbles: true })); })()`);
         await wait(`document.body.textContent.includes('source_deployment_equivalence_unverified')`, "fitted binding disclosure");
@@ -330,6 +334,26 @@ try {
       if (fitted) await wait(`document.querySelector('.score-panel')?.textContent.includes('source_deployment_equivalence_unverified') && document.querySelector('.score-panel')?.textContent.includes('not the final generation distribution')`, "saved fitted provenance");
       const expected = rows[0]!.scores.map(score => [String(score.score), `Token ${score.token_id} / row ${score.row_id}`]);
       await wait(`JSON.stringify([...document.querySelectorAll('.score-panel .scores > li')].map(node => [node.querySelector('.score-value').textContent, node.querySelector('p.muted').textContent])) === ${JSON.stringify(JSON.stringify(expected))}`, "plain displayed scores equal actual saved records");
+      if (retention) {
+        assert.equal(arrayRequests.length, 0, "Browser must not fetch retained arrays implicitly");
+        const arrays = recorded.records.filter(isRetainedArray);
+        assert.equal(arrays.length, 2);
+        const logits = arrays.find(a => a.quantity === "readout_logits")!;
+        const bytes = await (await fetch(`${liveOrigin}${logits.array.url}`)).arrayBuffer();
+        const view = new DataView(bytes);
+        const excluded = new Set(rows[0]!.scores.map(s => s.token_id));
+        let token = 0; while (excluded.has(token)) token++;
+        const score = view.getFloat32(token * 4, true);
+        let rank = 1;
+        for (let i = 0; i < logits.array.length; i++) { const other = view.getFloat32(i * 4, true); if (other > score || (other === score && i < token)) rank++; }
+        await evaluate(`document.querySelector('.saved-measurements > summary').click()`);
+        await click("Load retained scores / no inference");
+        await wait(`!!document.querySelector('.retained-token')`, "explicit retained score load");
+        const id = await evaluate<string>(`[...document.querySelectorAll('label')].find(l => l.textContent === 'Retained vocabulary token ID').htmlFor`);
+        await setInput(`[id=${JSON.stringify(id)}]`, String(token));
+        await wait(`Number(document.querySelector('[data-field=rank]')?.textContent) === ${rank} && Number(document.querySelector('[data-field=score]')?.textContent) === ${score}`, "outside-top-k rank and score from saved bytes");
+        assert(arrayRequests.some(url => url.endsWith(logits.array.url)), "Explicit load reaches saved array endpoint");
+      }
     }
     const before = await (await fetch(`${liveOrigin}/v1/lens/jobs`)).json();
     await click("Run again: prepare same seed");
@@ -338,6 +362,7 @@ try {
     assert.equal(copied.prefix.text, "  Answer:\n");
     assert.equal(copied.generation.sampling.temperature, 0.8);
     assert.equal(copied.readouts.length, plain ? 1 : 0);
+    if (retention) assert.equal(copied.readouts[0].retain, "scores_and_residual");
     if (operations) assert.deepEqual(copied.operations.map((r: any) => r.document.action.kind), ["projection_ablate", "fixed_add"]);
     await click("03 History");
     await click("Refresh history now");

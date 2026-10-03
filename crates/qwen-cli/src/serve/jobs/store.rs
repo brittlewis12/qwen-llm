@@ -18,7 +18,7 @@ const MAX_ERROR_BYTES: usize = 4096;
 
 #[path = "arrays.rs"]
 mod arrays;
-pub(crate) use arrays::MAX_ARCHIVE_BYTES;
+pub(crate) use arrays::{MAX_ARCHIVE_BYTES, MAX_ARRAY_BYTES};
 
 #[derive(Default)]
 struct Faults {
@@ -973,7 +973,7 @@ impl JobStore {
     }
 
     #[cfg(test)]
-    pub(super) fn with_writer_locked(&self, id: &str, action: impl FnOnce()) {
+    pub(crate) fn with_writer_locked(&self, id: &str, action: impl FnOnce()) {
         let entry = self.entry(id).unwrap();
         let _writer = entry.writer.lock().unwrap();
         action();

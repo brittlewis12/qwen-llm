@@ -11,12 +11,170 @@ fn paused(capacity: usize) -> (Sink, Receiver<Event>) {
             sender,
             failure: Arc::default(),
             budget: Arc::default(),
+            array_budget: Arc::default(),
+            array_limit: ARRAY_QUEUE_BYTES,
             staging_started: AtomicBool::new(false),
             staging_hook: None,
             after_record: None,
         },
         receiver,
     )
+}
+
+#[test]
+fn array_permits_cover_dequeued_payload_and_backpressure_blocks_dependent_rows() {
+    let (mut sink, incoming) = paused(4);
+    sink.array_limit = 8;
+    sink.array(
+        json!({"key":"source","quantity":"source_residual"}),
+        &[1., -0.],
+        Phase::Prefill,
+        &Counters::default(),
+    )
+    .unwrap();
+    let event = incoming.recv().unwrap();
+    assert_eq!(sink.array_budget.used.load(Ordering::Acquire), 8);
+    assert!(
+        sink.array(
+            json!({"key":"scores"}),
+            &[2.],
+            Phase::Prefill,
+            &Counters::default()
+        )
+        .is_err()
+    );
+    sink.record(
+        json!({"kind":"readout","retained":{"source_key":"source","logits_key":"scores"}}),
+        Phase::Prefill,
+        &Counters::default(),
+    );
+    assert!(incoming.try_recv().is_err());
+    let Event::Array(_, payload, _, _, _) = event else {
+        panic!("array event")
+    };
+    assert_eq!(
+        payload.bytes,
+        [1.0f32.to_le_bytes(), (-0.0f32).to_le_bytes()].concat()
+    );
+    assert_eq!(sink.array_budget.used.load(Ordering::Acquire), 8);
+    drop(payload);
+    assert_eq!(sink.array_budget.used.load(Ordering::Acquire), 0);
+    assert_eq!(sink.array_budget.peak.load(Ordering::Acquire), 8);
+}
+
+#[test]
+fn invalid_arrays_and_disconnected_writer_release_all_byte_permits() {
+    for values in [
+        vec![],
+        vec![f32::NAN],
+        vec![f32::INFINITY],
+        vec![0.; crate::serve::jobs::store::MAX_ARRAY_BYTES / 4 + 1],
+    ] {
+        let (sink, _incoming) = paused(1);
+        assert!(
+            sink.array(
+                json!({"key":"bad"}),
+                &values,
+                Phase::Prefill,
+                &Counters::default()
+            )
+            .is_err()
+        );
+        assert_eq!(sink.array_budget.used.load(Ordering::Acquire), 0);
+    }
+    let (sink, incoming) = paused(1);
+    drop(incoming);
+    assert!(
+        sink.array(
+            json!({"key":"gone"}),
+            &[1.],
+            Phase::Prefill,
+            &Counters::default()
+        )
+        .is_err()
+    );
+    assert_eq!(sink.array_budget.used.load(Ordering::Acquire), 0);
+    assert_eq!(sink.budget.used.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn stalled_store_write_keeps_dequeued_array_charged_until_storage_finishes() {
+    let fixture = CpuFixture::new();
+    let request = fixture.request("array-hold");
+    let mut prepared = fixture
+        .profile
+        .prepare(&crate::serve::lens_http::input::Request::parse(&request).unwrap())
+        .ok()
+        .unwrap();
+    prepared.readouts.archive_bytes = 8;
+    let id = fixture
+        .store
+        .accept_with_archive("array-hold", &request, true, 8)
+        .unwrap()
+        .status
+        .id;
+    let writer = Writer::spawn(
+        fixture.store.clone(),
+        id.clone(),
+        fixture.store.control(&id).unwrap(),
+        &prepared,
+        Default::default(),
+    )
+    .unwrap();
+    writer.wait_ready().unwrap();
+    let budget = writer.sink().array_budget.clone();
+    std::thread::scope(|scope| {
+        let (locked, ready) = sync_channel(1);
+        let (release, wait) = sync_channel(1);
+        let store = &fixture.store;
+        let id = &id;
+        let hold = scope.spawn(move || {
+            store.with_writer_locked(id, || {
+                locked.send(()).unwrap();
+                wait.recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+            })
+        });
+        ready
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        writer
+            .sink()
+            .array(
+                json!({"key":"held","quantity":"source_residual"}),
+                &[1., 2.],
+                Phase::Prefill,
+                &prepared.counters(),
+            )
+            .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut queued = 0;
+        while queued < EVENTS {
+            assert!(
+                std::time::Instant::now() < until,
+                "writer must dequeue the first array"
+            );
+            if writer
+                .sink()
+                .sender
+                .try_send(Event::Progress(Phase::Prefill, prepared.counters()))
+                .is_ok()
+            {
+                queued += 1;
+            } else {
+                std::thread::yield_now();
+            }
+        }
+        // An array plus EVENTS messages cannot fit: the array is now in the
+        // blocked store call, not merely retained by the channel.
+        assert_eq!(budget.used.load(Ordering::Acquire), 8);
+        release.send(()).unwrap();
+        hold.join().unwrap();
+    });
+    writer
+        .finish(Outcome::interrupted(prepared.counters()))
+        .unwrap();
+    assert_eq!(budget.used.load(Ordering::Acquire), 0);
 }
 
 fn fitted_job() -> (

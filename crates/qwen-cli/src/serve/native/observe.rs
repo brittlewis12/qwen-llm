@@ -156,6 +156,10 @@ impl TokenEngine for Engine<'_> {
         )?;
         for (slot, &layer) in self.layers.iter().enumerate() {
             let applied = self.interventions.applied_ids(position, layer);
+            let residual = &values[slot * hidden..(slot + 1) * hidden];
+            publish_source(
+                self.plan, token, position, layer, counters, &applied, residual, sink,
+            )?;
             for lens in self.plan.heads(position, layer).keys().copied() {
                 checkpoint(sink)?;
                 let start = Instant::now();
@@ -288,6 +292,18 @@ fn publish_head(
         .map(|&i| plan.readouts[i].top_k)
         .max()
         .context("empty readout event")?;
+    let source_key = format!("source-{position}-{layer}");
+    let logits_key = format!("logits-{position}-{layer}-{lens}");
+    if plan
+        .retained_heads
+        .contains(&(position, layer, lens.to_owned()))
+    {
+        sink.array(json!({"key":logits_key,"quantity":"readout_logits","lens":lens,"source_key":source_key,
+            "phase":phase,"index":index,"position":position,"source_layer":layer,"input_token_id":token,
+            "target_layer":asset.map(|a|&a["target_layer"]),"asset_identity":asset.map(|a|&a["identity"]),
+            "score_kind":"logit","candidate_universe":"full_vocabulary","capture_stage":"post_block_after_operations",
+            "applied_operation_ids":applied_operation_ids,"provenance":"original_forward"}),&full.logits,phase,counters)?;
+    }
     let top = full.into_topk(max_k)?;
     let mut label_bytes = 0usize;
     for score in &top.readout.scores {
@@ -350,7 +366,10 @@ fn publish_head(
                 test_transport_witness: transport_witness.as_ref(),
                 #[cfg(test)]
                 test_source_values: source_values,
-                retained: None,
+                retained: readout.retain.as_ref().map(|_| Retained {
+                    source_key: &source_key,
+                    logits_key: &logits_key,
+                }),
                 cost: Cost {
                     readout_ms: (ordinal == 0).then_some(elapsed),
                     shared_head_position: position,
@@ -408,8 +427,41 @@ struct ReadoutRecord<'a> {
     #[cfg(test)]
     #[serde(skip_serializing_if = "Option::is_none")]
     test_source_values: Option<&'a [f32]>,
-    retained: Option<&'a Value>,
+    retained: Option<Retained<'a>>,
     cost: Cost<'a>,
+}
+
+#[derive(Serialize)]
+struct Retained<'a> {
+    source_key: &'a str,
+    logits_key: &'a str,
+}
+
+fn publish_source(
+    plan: &Plan,
+    token: i32,
+    position: u32,
+    layer: u32,
+    counters: &Counters,
+    applied: &[&str],
+    residual: &[f32],
+    sink: &Sink,
+) -> Result<()> {
+    if !plan.retained_sources.contains(&(position, layer)) {
+        return Ok(());
+    }
+    let phase = if u64::from(position) < counters.prompt_tokens {
+        Phase::Prefill
+    } else {
+        Phase::Decode
+    };
+    let index = if phase == Phase::Prefill {
+        u64::from(position)
+    } else {
+        u64::from(position) - counters.prompt_tokens
+    };
+    sink.array(json!({"key":format!("source-{position}-{layer}"),"quantity":"source_residual","phase":phase,"index":index,"position":position,
+        "source_layer":layer,"input_token_id":token,"capture_stage":"post_block_after_operations","applied_operation_ids":applied,"provenance":"original_forward"}),residual,phase,counters)
 }
 
 fn read_capture(capture: &MetalTensor, count: usize) -> Result<Vec<f32>> {
@@ -475,6 +527,177 @@ mod tests {
     use crate::serve::native::{CpuFixture, execute, writer};
     use std::sync::Arc;
 
+    #[test]
+    fn retained_producer_deduplicates_arrays_and_only_links_requesting_rows() {
+        let mut fixture = CpuFixture::new();
+        let (_files, registry) = super::super::registry::tests::fitted_fixture();
+        let profile = Arc::get_mut(&mut fixture.profile).unwrap();
+        profile.plain_readouts = true;
+        profile.registry = Some(registry.clone());
+        let mut request = fixture.request("arrays");
+        request["preconditions"]["asset_identities"] =
+            json!({"plain":"cpu-fixture","fit":registry.asset("fit").unwrap()["identity"]});
+        let readout = |id, lens, retain| {
+            json!({"id":id,"lens":lens,"mode":"full_vocabulary","top_k":2,"retain":retain,
+            "scope":{"layers":{"kind":"values","values":[0]},"prefill":{"kind":"values","values":[0]},"decode":{"kind":"values","values":[0]}}})
+        };
+        request["diagnostics"] = json!({"directions":[],"operations":[],"readouts":[readout("none","plain",None),readout("a","plain",Some("scores_and_residual")),readout("b","plain",Some("scores_and_residual")),readout("fit","fit",Some("scores_and_residual"))]});
+        let prepared = fixture
+            .profile
+            .prepare(&crate::serve::lens_http::input::Request::parse(&request).unwrap())
+            .ok()
+            .unwrap();
+        let id = fixture
+            .store
+            .accept_with_archive("arrays", &request, true, prepared.readouts.archive_bytes)
+            .unwrap()
+            .status
+            .id;
+        let writer = writer::Writer::spawn(
+            fixture.store.clone(),
+            id.clone(),
+            fixture.store.control(&id).unwrap(),
+            &prepared,
+            Default::default(),
+        )
+        .unwrap();
+        writer.wait_ready().unwrap();
+        let outcome = run_cpu_readouts(&prepared, writer.sink(), &fixture.profile.tokenizer);
+        writer.finish(outcome).unwrap();
+        let page = fixture.store.result(&id, None, 128).unwrap();
+        let arrays = page
+            .records
+            .iter()
+            .filter(|r| r["kind"] == "retained_array")
+            .collect::<Vec<_>>();
+        assert_eq!(arrays.len(), 6);
+        let total = arrays
+            .iter()
+            .map(|r| r["array"]["byte_length"].as_u64().unwrap())
+            .sum::<u64>();
+        assert_eq!(total, prepared.readouts.archive_bytes);
+        for array in &arrays {
+            let offset = array["array"]["url"]
+                .as_str()
+                .unwrap()
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let bytes = fixture.store.array(&id, offset).unwrap();
+            let values = bytes
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect::<Vec<_>>();
+            if array["quantity"] == "source_residual" {
+                assert_eq!(values, [1., 2.]);
+            } else {
+                assert_eq!(values.len(), fixture.profile.tokenizer.n_vocab() as usize);
+                assert_eq!(values[120], 10.);
+                assert_eq!(values[1], 0.);
+            }
+        }
+        for row in page.records.iter().filter(|r| r["kind"] == "readout") {
+            if row["readout_id"] == "none" {
+                assert!(row["retained"].is_null());
+                continue;
+            }
+            for field in ["source_key", "logits_key"] {
+                let array = arrays
+                    .iter()
+                    .find(|a| a["key"] == row["retained"][field])
+                    .unwrap();
+                assert!(array["seq"].as_u64().unwrap() < row["seq"].as_u64().unwrap());
+            }
+        }
+        let replacement = Arc::new(
+            crate::serve::jobs::store::JobStore::open(
+                &fixture.root.join("replacement"),
+                crate::serve::jobs::store::Limits::default(),
+            )
+            .unwrap(),
+        );
+        drop(std::mem::replace(&mut fixture.store, replacement));
+        let reopened = crate::serve::jobs::store::JobStore::open(
+            &fixture.root.join("jobs"),
+            crate::serve::jobs::store::Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            reopened.result(&id, None, 128).unwrap().records,
+            page.records
+        );
+    }
+
+    #[test]
+    fn failed_array_write_discards_dependent_records_and_recovers_committed_prefix() {
+        let mut fixture = CpuFixture::new();
+        Arc::get_mut(&mut fixture.profile).unwrap().plain_readouts = true;
+        let mut request = fixture.request("array-failure");
+        request["preconditions"]["asset_identities"] = json!({"plain":"cpu-fixture"});
+        request["diagnostics"] = json!({"directions":[],"operations":[],"readouts":[{"id":"retained","lens":"plain","mode":"full_vocabulary","top_k":2,"retain":"scores_and_residual","scope":{"layers":{"kind":"values","values":[0]},"prefill":{"kind":"values","values":[0]}}}]});
+        let prepared = fixture
+            .profile
+            .prepare(&crate::serve::lens_http::input::Request::parse(&request).unwrap())
+            .ok()
+            .unwrap();
+        let id = fixture
+            .store
+            .accept_with_archive(
+                "array-failure",
+                &request,
+                true,
+                prepared.readouts.archive_bytes,
+            )
+            .unwrap()
+            .status
+            .id;
+        let writer = writer::Writer::spawn(
+            fixture.store.clone(),
+            id.clone(),
+            fixture.store.control(&id).unwrap(),
+            &prepared,
+            Default::default(),
+        )
+        .unwrap();
+        writer.wait_ready().unwrap();
+        fixture
+            .store
+            .fail_once(crate::serve::jobs::store::FaultPoint::ArrayPartialWrite);
+        let outcome = run_cpu_readouts(&prepared, writer.sink(), &fixture.profile.tokenizer);
+        writer.finish(outcome).unwrap();
+        let status = fixture.store.status(&id).unwrap();
+        assert!(status.result.complete);
+        assert!(status.result.error.is_some());
+        let records = fixture.store.result(&id, None, 128).unwrap().records;
+        assert!(
+            !records
+                .iter()
+                .any(|r| r["kind"] == "retained_array" || r["kind"] == "readout")
+        );
+        let replacement = Arc::new(
+            crate::serve::jobs::store::JobStore::open(
+                &fixture.root.join("replacement"),
+                crate::serve::jobs::store::Limits::default(),
+            )
+            .unwrap(),
+        );
+        drop(std::mem::replace(&mut fixture.store, replacement));
+        let reopened = crate::serve::jobs::store::JobStore::open(
+            &fixture.root.join("jobs"),
+            crate::serve::jobs::store::Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(reopened.result(&id, None, 128).unwrap().records, records);
+        assert_eq!(
+            std::fs::metadata(fixture.root.join("jobs").join(id).join("arrays.bin"))
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
     struct Synthetic<'a> {
         plan: &'a Plan,
         interventions: &'a super::super::interventions::Plan,
@@ -508,6 +731,16 @@ mod tests {
             if let Some(event) = self.plan.events.get(&position) {
                 for &layer in event.keys() {
                     let applied = self.interventions.applied_ids(position, layer);
+                    publish_source(
+                        self.plan,
+                        token,
+                        position,
+                        layer,
+                        counters,
+                        &applied,
+                        &[1., 2.],
+                        sink,
+                    )?;
                     for lens in self.plan.heads(position, layer).keys().copied() {
                         checkpoint(sink)?;
                         if lens != "plain" {

@@ -153,6 +153,7 @@ mod tests {
             1,
             32,
             Some(registry.clone()),
+            2,
         )
         .unwrap();
         (files, Plan::new(Some(registry), readouts.matrices).unwrap())

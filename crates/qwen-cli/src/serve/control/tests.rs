@@ -416,6 +416,37 @@ fn fitted_http_pins_registry_identity_and_reopens_original_shared_rows() {
 }
 
 #[test]
+fn retained_archive_overflow_is_refused_before_durable_acceptance() {
+    let tokens = (0..4096)
+        .map(|i| format!("retained-extra-{i}"))
+        .collect::<Vec<_>>();
+    let mut fixture = native::CpuFixture::with_extra_tokens(&tokens);
+    Arc::get_mut(&mut fixture.profile).unwrap().plain_readouts = true;
+    let mut server = Server::start(&fixture);
+    let mut request = fixture.request("archive-overflow");
+    request["input"]["messages"][0]["content"] = serde_json::json!("a".repeat(1200));
+    request["preconditions"]["asset_identities"] = serde_json::json!({"plain":"cpu-fixture"});
+    request["diagnostics"] = serde_json::json!({"directions":[],"operations":[],"readouts":[
+        {"id":"all","lens":"plain","mode":"full_vocabulary","top_k":1,"retain":"scores_and_residual",
+            "scope":{"layers":{"kind":"all"},"prefill":{"kind":"all"}}}]});
+    let (head, reply) = server.request("POST", "/v1/lens/jobs", &request.to_string());
+    assert!(head.starts_with("HTTP/1.1 400"), "{head} {reply}");
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("retained archive"),
+        "{reply}"
+    );
+    assert_eq!(
+        server.request("GET", "/v1/lens/jobs", "").1["jobs"],
+        serde_json::json!([])
+    );
+    assert_eq!(server.calls.load(Ordering::Acquire), 0);
+    server.stop();
+}
+
+#[test]
 fn accepted_job_outlives_socket_and_history_retry_cancel_share_the_resident_owner() {
     let fixture = native::CpuFixture::new();
     let mut server = Server::start(&fixture);

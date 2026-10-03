@@ -4,7 +4,7 @@ Preserved React/TypeScript workbench, recovered onto current serving semantics.
 Bun owns development serving/HMR and production builds. No Vite, Next, SSR,
 authentication flow, network assets or second production server. Current recovery
 supports durable baseline generation, scoped plain/fitted readouts and ordered interventions.
-Retained-array and paired-capture producers remain pending. Compatible saved diagnostics remain
+Retained-array production is recovered; paired-capture production remains pending. Saved diagnostics remain
 inspectable without inference.
 
 ## Run
@@ -140,6 +140,9 @@ checks alias selection, saved fitted provenance and the same phone/desktop flow.
 `LENS_TEST_OPERATIONS=1 bun run baseline-browser-check.ts` also pins a direction,
 creates/reorders operations, sets decode scopes and compares saved application order
 with same-site readout provenance. Numerical forward/projection work remains synthetic.
+Add `LENS_TEST_RETENTION=1` to verify explicit array loading, an outside-top-k token's
+rank/score, retained copy state and exact saved joins. Browser network events assert
+that arrays are not fetched before the explicit load action.
 
 Browser profiles/logs stay in ignored `.browser-test/`. Layout and interaction
 assertions are not screenshot-based visual review. Optional screenshot capture

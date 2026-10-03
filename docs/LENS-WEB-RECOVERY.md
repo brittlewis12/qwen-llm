@@ -74,7 +74,7 @@ recovery is explicitly recorded below.
 | R10 | Plain original-forward readouts: `serve/native/{readouts,observe}.rs` | Producer recovered with browser/current admission; no replay | CPU scopes/lifecycle/publication/HTTP/browser and scoped Qwen3.6 live unchanged-sample/final-layer witness gate pass |
 | R11 | Fitted readouts and direction staging: `serve/native/{registry,interventions}.rs`, `workspace_lens/*` | Fitted producer recovered with CPU/browser and scoped original-forward numerical evidence; direction staging remains R12 | Registered identity, matrix integrity, owner-admitted joined staging/workspace, independent numerical oracle |
 | R12 | Ordered scoped interventions: `serve/native/interventions/*`, `lens_intervention.rs` | Three native operators recovered with CPU/browser and scoped first-site numerical evidence | Exact order/scopes, zero controls, deployed covector semantics, independent transformation checks |
-| R13 | Retained full scores/source arrays: `serve/jobs/arrays.rs`, native observer/writer, `web/retention*` | Reuse after R07/R10 | Raw admission, dual-watermark durability, digest/finite/shape checks, offline rank/entropy, no implicit fetch |
+| R13 | Retained full scores/source arrays: `serve/jobs/arrays.rs`, native observer/writer, `web/retention*` | Producer recovered and CPU/browser-qualified; production live integrity/restart gate pending | Raw admission, dual-watermark durability, digest/finite/shape checks, offline rank/entropy, no implicit fetch |
 | R14 | Whole-site pre/post capture: `metal_forward/token.rs`, `serve/native/measurements.rs` | Reuse after R12/R13; do not imply per-operation intermediates | Before/after placement, independent layer sets, alias refusal, actual-vector metrics and zero controls |
 | R15 | Bun client and same-origin assets: `web/{build,dev,proxy}.*`, `serve/assets.rs` | Recovered on shared CPU control pool; web-root requires history/current ordinary-family boundary | Bun types/build and real same-port CPU browser/static gates pass; no second production service |
 | R16 | Durable browser submission/history: `web/{api,contract,durable,storage,jobs,history}.*` | Recovered with real baseline producer and historical fixture readers | Persist-before-POST, exact retry, history/reload/copy pass; baseline CPU browser traverses actual Rust store |
@@ -994,3 +994,42 @@ seconds. The lease is confirmed free, without safety overrides. Evidence:
 `target/lens-fitted-d209965a-1f1d-4e9c-ab6a-a2e0683e0964/`. These are instrumented
 release-test results at one qualified first site, not arbitrary later-site paired
 evidence, fit-quality claims or general model-family qualification.
+
+### R13: Retained Original Source And Full-Score Production
+
+Readouts may now request `scores_and_residual` retention. Original post-block sources
+deduplicate by position/layer; full logits deduplicate by position/layer/alias. Only
+requesting readout IDs receive retained references, even when a head is shared. Exact
+raw upper admission is four bytes per scalar, bounded to 4 MiB per array and 32 MiB
+per job before durable acceptance. Prepared input saves widths, array counts and byte
+upper bounds. Early stops may publish fewer arrays without inventing unconsumed sites.
+
+Serialization borrows the existing captured source and full logits before top-k;
+no float Value trees, new GPU buffers or replay are introduced. A typed Array event
+uses the existing FIFO and metadata budget. A separate payload-capacity budget covers
+up to 16 MiB queued/in active storage writes. RAII drops payload storage before its
+permit. Optional memory admission adds the smaller of raw upper/queue budget plus a
+4 MiB producer allowance; nonretaining jobs retain previous pricing. These are
+conservative future allowances, not total allocator bounds.
+
+The existing store owns array descriptors, SHA256 and binary/JSON committed watermarks.
+Source, logits and dependent rows are FIFO-ordered separate transactions. A committed
+source-only prefix is valid if later publication fails. Enqueue failure stops production,
+latched disk failure discards dependent events, and generation/publication outcomes
+remain independent. The original arrays reader/recovery path is reused unchanged.
+
+CPU gates cover mixed plain/fitted shared arrays and per-ID references, exact boundary
+pricing, actual HTTP rejection before acceptance, invalid/nonfinite payloads, disconnect,
+partial-array failure/restart and a stalled real store write. The stalled test fills the
+channel to prove the array is dequeued while its bytes remain charged. Serving: 330 pass,
+28 ignored plus the explicit known Metal exclusion; binaries/tests compile. Bun 55
+tests/types/build pass. CPU-owned Rust browser evidence
+`web/.browser-test/baseline-50a63064-a99b-4ba5-934f-531c6c72ecff/` proves no implicit array
+network requests, explicit outside-top-k rank/score lookup, retained-copy state and
+history/desktop parity without new jobs; numerical heads remain synthetic.
+
+`cx` approves the CPU-qualified producer. The existing bounded production-server gate
+now has an opt-in retention mode checking 16 arrays, SHA256/finite/shape/coordinate joins,
+full-vocabulary ranks against top-k, unchanged samples and exact bytes after restart.
+Live verification is pending at this checkpoint. That gate establishes integrity and
+top-k correspondence, not independent correctness of every retained numeric value.

@@ -4,8 +4,8 @@
 
 The reconstruction provides a durable baseline API and the preserved Bun/React
 client on `qwen serve`, including scoped plain and registered fitted original-forward
-readouts and ordered scoped interventions. Retained arrays and before/after capture
-production are not yet recovered.
+readouts, ordered scoped interventions and retained source/full-score arrays.
+Before/after paired capture production is not yet recovered.
 Compatible historical records remain inspectable. This is an intermediate workbench,
 not completion of recovery. See [the recovery ledger](LENS-WEB-RECOVERY.md).
 
@@ -89,8 +89,8 @@ failure can make publication fail without rewriting already-completed generation
 
 The store syncs records before publishing their committed watermark. Reopening an
 unfinished job marks it interrupted; it never resumes or reruns inference. Corrupt
-committed content fails closed. Compatible historical retained-array descriptors
-can be downloaded and verified, but new baseline jobs produce no such arrays.
+committed content fails closed. Retained-array descriptors can be downloaded and
+verified without inference; baseline jobs without requested retention produce none.
 
 ## Plain Readouts
 
@@ -125,7 +125,7 @@ aligned capture/head buffer. Host allowance includes capture readback, transport
 vector, all three simultaneously live previous/new/observer logit arrays, bounded
 ranking/labels/serialization, plus existing durable/control/writer reservations.
 Eviction retry retains the same complete allowances; denial precedes capture setup.
-`retain` and residual pairs remain refused.
+Residual pair production remains refused.
 
 ## Fitted Readouts
 
@@ -196,6 +196,34 @@ Readouts carry the operation IDs applied at that site. Failed forward never fabr
 successful applications; later recording failure does not imply model-state rollback.
 Limits currently allow 1024 definitions/operations, 4096 prepared direction rows,
 16384 applications, 256 MiB of direction vectors and 1,073,741,824 projection products.
+
+## Retained Measurements
+
+Enable "Retain full scores and source residuals" on a readout, or set
+`"retain":"scores_and_residual"`. The original captured post-block residual is saved,
+including interventions applied there; fitted transported vectors do not replace it.
+Full pre-softmax logits are saved before top-k reduction. Source arrays deduplicate
+by position/layer and score arrays by position/layer/alias. Other readout IDs sharing
+the same head still have no retained reference unless they requested retention.
+
+Raw archive admission is exact for the maximum reachable requested sites: four bytes
+per retained scalar, at most 4 MiB per array and 32 MiB per job. Excess is rejected
+before acceptance, never truncated. Early termination may consume less than this upper
+reservation. Raw bytes are separate from JSON/result budgets and total process memory.
+Optional memory admission includes the bounded 16 MiB payload queue (including its
+active write) and a 4 MiB producer allowance. This is not a total allocator bound.
+
+The joined writer syncs each F32LE payload and its descriptor before publishing their
+watermarks. SHA256, length and finite values are validated on download/recovery. The
+source, scores and dependent readout are ordered, but are separate transactions: a
+durable source-only prefix is valid if later publication fails. Inspect the independent
+result/observation error rather than treating generation completion as artifact success.
+
+Saved readouts expose an explicit "Load retained scores / no inference" action. Only
+then does the client fetch the array; token queries outside the original top-k, rank
+and distribution summaries use those saved bytes. Reloading, history navigation and
+reopening arrays never submit new work. Unretained or uncaptured sites cannot be
+reconstructed from top-k rows alone.
 
 ## Bounds And Lifecycle
 

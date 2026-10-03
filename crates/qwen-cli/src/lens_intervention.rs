@@ -2,6 +2,7 @@
 
 use crate::lens_scope::Scope;
 use anyhow::{Result, ensure};
+use qwen_llm::{metal::MetalTensor, metal_forward::PostBlockIntervention};
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod coefficient;
@@ -149,6 +150,97 @@ pub(crate) fn action_requires_unit_l2(action: &Action) -> bool {
     )
 }
 
+pub(crate) fn validate_action(
+    id: &str,
+    action: &Action,
+    mut direction: impl FnMut(&str) -> Result<Option<Normalization>>,
+) -> Result<()> {
+    ensure!(
+        action.coefficient().is_finite(),
+        "operation {id} coefficient must be finite"
+    );
+    if let Action::CoordinateSwap {
+        source,
+        target,
+        coefficient,
+    } = action
+    {
+        ensure!(
+            source != target,
+            "coordinate-swap operation {id} requires distinct source and target directions"
+        );
+        ensure!(
+            (2.0 * coefficient).is_finite(),
+            "coordinate-swap operation {id} coefficient overflows its reflection scale"
+        );
+    }
+    // Resolve every reference before normalization, preserving CLI error precedence.
+    let directions = action
+        .direction_ids()
+        .map(|name| direction(name).map(|normalization| (name, normalization)))
+        .collect::<Result<Vec<_>>>()?;
+    if action_requires_unit_l2(action) {
+        for (name, normalization) in directions {
+            if let Some(normalization) = normalization {
+                ensure!(
+                    normalization == Normalization::UnitL2,
+                    "operation {id} requires unit_l2 direction {name}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn lower<'a>(
+    action: &Action,
+    layer: u32,
+    mut direction: impl FnMut(&str) -> Result<&'a MetalTensor>,
+    reflection: impl FnOnce() -> Result<&'a MetalTensor>,
+) -> Result<PostBlockIntervention<'a>> {
+    Ok(match action {
+        Action::FixedAdd {
+            direction: id,
+            coefficient,
+        } => PostBlockIntervention::Fixed {
+            layer,
+            direction: direction(id)?,
+            coefficient: *coefficient,
+        },
+        Action::ResidualL2Fraction {
+            direction: id,
+            coefficient,
+        } => PostBlockIntervention::ResidualL2Relative {
+            layer,
+            direction: direction(id)?,
+            coefficient: *coefficient,
+        },
+        Action::ProjectionAblate {
+            direction: id,
+            coefficient,
+        } => PostBlockIntervention::Projection {
+            layer,
+            direction: direction(id)?,
+            coefficient: *coefficient,
+        },
+        Action::SourceToTarget {
+            source,
+            target,
+            coefficient,
+        } => PostBlockIntervention::SourceToTarget {
+            layer,
+            source: direction(source)?,
+            target: direction(target)?,
+            coefficient: *coefficient,
+        },
+        Action::CoordinateSwap { coefficient, .. } => PostBlockIntervention::Projection {
+            layer,
+            direction: reflection()?,
+            coefficient: 2.0 * coefficient,
+        },
+    })
+}
+
 pub(crate) fn normalize_direction(
     mut row: Vec<f32>,
     normalization: Normalization,
@@ -182,4 +274,130 @@ pub(crate) fn normalize_direction(
 
 pub(crate) fn operation_enabled(operation: &OperationDefinition) -> bool {
     operation.action.coefficient() != 0.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_validation_preserves_reference_precedence_and_deferred_native_normalization() {
+        let action = Action::SourceToTarget {
+            source: "a".into(),
+            target: "missing".into(),
+            coefficient: 0.0,
+        };
+        let mut calls = Vec::new();
+        let error = validate_action("op", &action, |name| {
+            calls.push(name.to_owned());
+            ensure!(name != "missing", "unknown {name}");
+            Ok(Some(Normalization::AsStored))
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "unknown missing");
+        assert_eq!(calls, ["a", "missing"]);
+        assert!(validate_action("op", &action, |_| Ok(None)).is_ok());
+        assert_eq!(
+            validate_action("op", &action, |_| Ok(Some(Normalization::AsStored)))
+                .unwrap_err()
+                .to_string(),
+            "operation op requires unit_l2 direction a"
+        );
+        assert!(validate_action("op", &action, |_| Ok(Some(Normalization::UnitL2))).is_ok());
+        let fixed = Action::FixedAdd {
+            direction: "a".into(),
+            coefficient: -0.0,
+        };
+        assert!(validate_action("op", &fixed, |_| Ok(Some(Normalization::AsStored))).is_ok());
+        assert!(validate_action("op", &fixed, |_| anyhow::bail!("missing")).is_err());
+    }
+
+    #[test]
+    fn shared_validation_refuses_invalid_scales_before_direction_lookup() {
+        let lookup =
+            |_: &str| -> Result<Option<Normalization>> { panic!("invalid action must fail first") };
+        let fixed = Action::FixedAdd {
+            direction: "a".into(),
+            coefficient: f32::NAN,
+        };
+        assert_eq!(
+            validate_action("op", &fixed, lookup)
+                .unwrap_err()
+                .to_string(),
+            "operation op coefficient must be finite"
+        );
+        for (source, target, coefficient, expected) in [
+            (
+                "a",
+                "a",
+                1.0,
+                "requires distinct source and target directions",
+            ),
+            (
+                "a",
+                "b",
+                f32::MAX,
+                "coefficient overflows its reflection scale",
+            ),
+        ] {
+            let action = Action::CoordinateSwap {
+                source: source.into(),
+                target: target.into(),
+                coefficient,
+            };
+            assert_eq!(
+                validate_action("op", &action, lookup)
+                    .unwrap_err()
+                    .to_string(),
+                format!("coordinate-swap operation op {expected}")
+            );
+        }
+    }
+
+    #[test]
+    fn lowering_keeps_family_lookup_errors_and_reflections_lazy() {
+        for action in [
+            Action::FixedAdd {
+                direction: "d".into(),
+                coefficient: 1.0,
+            },
+            Action::ResidualL2Fraction {
+                direction: "d".into(),
+                coefficient: 1.0,
+            },
+            Action::ProjectionAblate {
+                direction: "d".into(),
+                coefficient: 1.0,
+            },
+            Action::SourceToTarget {
+                source: "d".into(),
+                target: "t".into(),
+                coefficient: 1.0,
+            },
+        ] {
+            let error = lower(
+                &action,
+                2,
+                |id| anyhow::bail!("family row {id} missing"),
+                || panic!("reflection not requested"),
+            )
+            .err()
+            .unwrap();
+            assert_eq!(error.to_string(), "family row d missing");
+        }
+        let action = Action::CoordinateSwap {
+            source: "s".into(),
+            target: "t".into(),
+            coefficient: 0.5,
+        };
+        let error = lower(
+            &action,
+            2,
+            |_| panic!("use prepared reflection only"),
+            || anyhow::bail!("family reflection missing"),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.to_string(), "family reflection missing");
+    }
 }

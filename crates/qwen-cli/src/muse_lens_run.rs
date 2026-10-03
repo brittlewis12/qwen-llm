@@ -1044,53 +1044,15 @@ fn action_to_intervention<'a>(
             .and_then(|prepared| prepared.rows.get(&layer))
             .with_context(|| format!("Muse direction {id} has no uploaded row for layer {layer}"))
     };
-    Ok(match action {
-        Action::FixedAdd {
-            direction: id,
-            coefficient,
-        } => PostBlockIntervention::Fixed {
-            layer,
-            direction: direction(id)?,
-            coefficient: *coefficient,
-        },
-        Action::ResidualL2Fraction {
-            direction: id,
-            coefficient,
-        } => PostBlockIntervention::ResidualL2Relative {
-            layer,
-            direction: direction(id)?,
-            coefficient: *coefficient,
-        },
-        Action::ProjectionAblate {
-            direction: id,
-            coefficient,
-        } => PostBlockIntervention::Projection {
-            layer,
-            direction: direction(id)?,
-            coefficient: *coefficient,
-        },
-        Action::SourceToTarget {
-            source,
-            target,
-            coefficient,
-        } => PostBlockIntervention::SourceToTarget {
-            layer,
-            source: direction(source)?,
-            target: direction(target)?,
-            coefficient: *coefficient,
-        },
-        Action::CoordinateSwap { coefficient, .. } => PostBlockIntervention::Projection {
-            layer,
-            direction: coordinate_swaps
-                .get(operation_id)
-                .and_then(|prepared| prepared.rows.get(&layer))
-                .with_context(|| {
-                    format!(
-                        "coordinate swap {operation_id} has no reflection direction at layer {layer}"
-                    )
-                })?,
-            coefficient: 2.0 * *coefficient,
-        },
+    crate::lens_intervention::lower(action, layer, direction, || {
+        coordinate_swaps
+            .get(operation_id)
+            .and_then(|prepared| prepared.rows.get(&layer))
+            .with_context(|| {
+                format!(
+                    "coordinate swap {operation_id} has no reflection direction at layer {layer}"
+                )
+            })
     })
 }
 

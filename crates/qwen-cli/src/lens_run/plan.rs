@@ -1,9 +1,11 @@
 //! Lens plan schema, validation, and intervention lowering.
 
 use super::*;
+#[cfg(test)]
+pub(crate) use crate::lens_intervention::action_requires_unit_l2;
 pub(crate) use crate::lens_intervention::{
     Action, DirectionRow, DirectionTargetCovector, LensRowDirectionDefinition, OperationDefinition,
-    action_requires_unit_l2, normalize_direction, operation_enabled,
+    normalize_direction, operation_enabled,
 };
 
 pub(super) const MAX_PLAN_BYTES: usize = 16 * 1024 * 1024;
@@ -471,51 +473,15 @@ pub(super) fn validate_plan(plan: &LensPlan) -> Result<()> {
         operation
             .scope
             .validate(&format!("operation {} scope", operation.id), plan.version)?;
-        let coefficient = operation.action.coefficient();
-        ensure!(
-            coefficient.is_finite(),
-            "operation {} coefficient must be finite",
-            operation.id,
-        );
-        if let Action::CoordinateSwap {
-            source,
-            target,
-            coefficient,
-        } = &operation.action
-        {
-            ensure!(
-                source != target,
-                "coordinate-swap operation {} requires distinct source and target directions",
-                operation.id
-            );
-            ensure!(
-                (2.0 * *coefficient).is_finite(),
-                "coordinate-swap operation {} coefficient overflows its reflection scale",
-                operation.id
-            );
-        }
-        for direction in operation.action.direction_ids() {
+        crate::lens_intervention::validate_action(&operation.id, &operation.action, |direction| {
             ensure!(
                 direction_ids.contains(direction),
                 "operation {} references unknown direction {}",
                 operation.id,
                 direction
             );
-        }
-        if action_requires_unit_l2(&operation.action) {
-            for direction in operation.action.direction_ids() {
-                if let Some(normalization) =
-                    direction_normalization.get(direction).copied().flatten()
-                {
-                    ensure!(
-                        normalization == Normalization::UnitL2,
-                        "operation {} requires unit_l2 direction {}",
-                        operation.id,
-                        direction
-                    );
-                }
-            }
-        }
+            Ok(direction_normalization.get(direction).copied().flatten())
+        })?;
     }
     for readout in &plan.readouts {
         readout
@@ -1235,52 +1201,14 @@ pub(super) fn action_to_intervention<'a>(
             .and_then(|prepared| prepared.rows.get(&layer))
             .with_context(|| format!("direction {id} has no uploaded row for layer {layer}"))
     };
-    Ok(match action {
-        Action::FixedAdd {
-            direction: id,
-            coefficient,
-        } => PostBlockIntervention::Fixed {
-            layer,
-            direction: direction(id)?,
-            coefficient: *coefficient,
-        },
-        Action::ResidualL2Fraction {
-            direction: id,
-            coefficient,
-        } => PostBlockIntervention::ResidualL2Relative {
-            layer,
-            direction: direction(id)?,
-            coefficient: *coefficient,
-        },
-        Action::ProjectionAblate {
-            direction: id,
-            coefficient,
-        } => PostBlockIntervention::Projection {
-            layer,
-            direction: direction(id)?,
-            coefficient: *coefficient,
-        },
-        Action::SourceToTarget {
-            source,
-            target,
-            coefficient,
-        } => PostBlockIntervention::SourceToTarget {
-            layer,
-            source: direction(source)?,
-            target: direction(target)?,
-            coefficient: *coefficient,
-        },
-        Action::CoordinateSwap { coefficient, .. } => PostBlockIntervention::Projection {
-            layer,
-            direction: coordinate_swaps
-                .get(operation_id)
-                .and_then(|prepared| prepared.rows.get(&layer))
-                .with_context(|| {
-                    format!(
-                        "coordinate swap {operation_id} has no reflection direction at layer {layer}"
-                    )
-                })?,
-            coefficient: 2.0 * *coefficient,
-        },
+    crate::lens_intervention::lower(action, layer, direction, || {
+        coordinate_swaps
+            .get(operation_id)
+            .and_then(|prepared| prepared.rows.get(&layer))
+            .with_context(|| {
+                format!(
+                    "coordinate swap {operation_id} has no reflection direction at layer {layer}"
+                )
+            })
     })
 }

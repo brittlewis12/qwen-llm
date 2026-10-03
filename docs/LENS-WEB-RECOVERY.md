@@ -919,3 +919,19 @@ arithmetic over original residuals plus same-tail/generation consistency, not an
 independent quantized output-head oracle, learned-fit quality claim, memory-pressure
 qualification or uninstrumented production-binary test. The test-only witness field
 and F64 verification are absent from production builds.
+
+### R02/R12: Shared Action Validation And Lowering
+
+Existing ordinary and Muse CLI consumers now use shared action validation/lowering
+in `lens_intervention`, instead of parallel five-case lowering matches. Scope checks
+still precede action checks; finite and coordinate-swap validation, all reference
+checks before normalization, family-specific missing-row diagnostics and lazy
+reflection lookup retain their order. Native-hyper normalization may remain `None`
+until binding as before. Coefficient decoding, normalization arithmetic and family
+row preparation are unchanged. Zero coefficients still validate references.
+
+Three new CPU regressions cover error precedence, scale checks, deferred normalization
+and lazy lookup behavior. Lens CPU gate: 391 pass, nine ignored plus explicit unmarked
+Muse Metal exclusion; all binaries/tests/fmt/whitespace pass. `cx` approves this
+independently consumed refactor. No GPU used; native intervention production remains
+the next consuming R12 slice, not implied by shared lowering alone.

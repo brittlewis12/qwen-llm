@@ -65,7 +65,7 @@ recovery is explicitly recorded below.
 | R01 | Bounded regular-file access: `bounded_file.rs`, Lens readers | Shared readers recovered with current CLI consumers; future HTTP reader wiring travels with its consuming slice | CPU symlink/type/length/mutation tests; all reader consumers build |
 | R02 | Shared authored scopes and operation semantics: `lens_scope.rs`, `lens_intervention.rs`, `lens_run/{plan,execute,sweep}.rs` | Partially recovered: shared scopes/wire forms/normalization and strict coefficient ingress with existing CLI consumers; shared lowering/action validation remain pending | Current CLI wire/binding/normalization/lowering regressions; no new service dependency |
 | R03 | Typed prefills and annotated input: `lens_input.rs`, `model_request.rs`, `messages.rs`, `open_responses/render.rs`, CLI callers | Partially recovered: ordinary Qwen3.6/3.8 singleton CLI prefills and strict retained context; native input/tool/history integration pending | Exact prompt bytes, token positions, reasoning-only continuation, tools and house/upstream rendering |
-| R04 | Deployment binding and asset verification: `linear_transport{.rs,/deployment.rs,/cpu_fixture.rs}`, `full_lens/access.rs` | Reuse after R01; retain main's expected-profile checks | Binding mismatch refusal, retained payload hashes, CPU-before-Metal admission, no implicit transfer override |
+| R04 | Deployment binding and asset verification: `linear_transport{.rs,/deployment.rs,/cpu_fixture.rs}`, `full_lens/access.rs` | Partially recovered: shared CPU deployment binding with existing CLI consumers; native registry integration pending; main's expected-profile checks retained | Binding mismatch refusal, retained payload hashes, CPU-before-Metal admission, no implicit transfer override |
 | R05 | Shared ordinary execution: `ordinary_executor.rs`, `qwen/decode.rs`, `lens_run/execute.rs` | Partially recovered: shared serial decode lifecycle and explicit request cancellation with existing CLI/serve/Lens consumers; prefill and forwarding adapters pending | CLI/serve sampling, cancellation, terminal nonconsumption and telemetry remain equivalent except documented added checkpoints |
 | R06 | Owner queue and CPU HTTP coordination: `serve/{control,queue,request_profile}.rs`, backend/HTTP wiring | Partially recovered: ordinary single-admission CPU transport and owner-only generation, with profiles/activity/traces; multi-request/native coordination and live qualification remain pending | Idle/request-finished/shutdown ownership, busy admission, cancellation/disconnect, JSON/SSE protocols |
 | R07 | Durable job metadata: `serve/jobs/{state,store,preview}.rs` | Reuse with R06; distinct from main's durable model snapshots | Exact-key acceptance/retry, bounded publication, recovery and corruption handling, history without inference |
@@ -467,6 +467,25 @@ qualification remain pending. Final gates: 376 Lens tests pass with nine ignored
 212 serving tests pass with 24 ignored. Both known unmarked Metal fixtures are
 explicitly filtered. All binaries/tests compile, formatting and whitespace pass.
 No model or GPU lease was used.
+
+### R04: Shared CPU Deployment Binding
+
+`linear_transport/deployment.rs` now owns current-main's deployment geometry,
+output-head/mode checks, lightweight identity, optional retained-byte hashing,
+binding record and loaded-identity check. Existing read/trace/run consumers still
+enter through `FullAccess`; legacy published-import behavior is unchanged.
+Validation order, binding-record insertion order, hexadecimal identity formatting,
+claim labels and transfer opt-in remain intact. The constructor no longer accepts
+an already ignored cache argument; the CLI facade retains its existing signature.
+No expected-profile checks move or disappear, and payload opening/scanning is
+unchanged. This is not native registry recovery or new deployment qualification.
+
+A byte-level binding-record golden passes before and after extraction. Existing
+CPU geometry/head/family, MoE scalar/projection-versus-packed, exact-binding refusal,
+override and retained-byte-versus-poisoned-cache tests remain green. Lens CPU gates
+pass 383 tests with nine ignored and the known unmarked Muse Metal test explicitly
+filtered. All binaries/tests compile; formatting and whitespace checks pass.
+No model is loaded onto Metal and no GPU lease is used.
 
 ### Next R06 Integration Boundary
 

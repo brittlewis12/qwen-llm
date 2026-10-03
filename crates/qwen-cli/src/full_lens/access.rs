@@ -1,6 +1,8 @@
 //! Shared retained-file access for published imports and data-only producers.
 use super::*;
 use crate::linear_transport::VerifiedTransport;
+use crate::linear_transport::deployment::CpuDeployment;
+pub(crate) use crate::linear_transport::deployment::ExecutionMode as FullExecutionMode;
 
 enum Storage {
     Legacy {
@@ -16,13 +18,6 @@ pub(crate) struct FullAccess {
     pub(super) transport: FullTransport,
     pub(super) payload: FullPayload,
     pub(super) runtime_binding: Option<serde_json::Value>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FullExecutionMode {
-    Scalar,
-    Packed,
-    Projection,
 }
 
 /// Retains the verified payload and the CPU binding to the GGUF subsequently loaded.
@@ -47,62 +42,9 @@ impl BoundFullAccess {
         match &self.access.storage {
             Storage::Legacy { manifest, .. } => validate_deployed_model(manifest, loaded),
             Storage::Data(_) => {
-                let identity = loaded.workspace_lens_identity();
-                ensure!(
-                    self.deployment_identity
-                        == Some((identity.model_locator_id, identity.tokenizer_metadata_id)),
-                    "loaded deployment differs from CPU-bound retained GGUF"
-                );
-                loaded.validate_passive_workspace_lens_output()?;
-                Ok(())
+                CpuDeployment::validate_loaded_identity(self.deployment_identity, loaded)
             }
         }
-    }
-}
-
-pub(crate) struct CpuFullDeployment {
-    architecture: String,
-    arch: qwen_llm::model::Arch,
-    identity: (u64, u64),
-    content: Option<String>,
-    content_bytes_hashed: u64,
-}
-impl CpuFullDeployment {
-    pub(crate) fn from_gguf(
-        gguf: &GgufFile,
-        mode: FullExecutionMode,
-        exact: bool,
-        _cache: Option<&Path>,
-    ) -> Result<Self> {
-        let bound = qwen_llm::loader::Model::from_gguf(gguf)
-            .context("bind CPU Qwen geometry and tensor inventory")?;
-        let arch = bound.arch;
-        ensure!(
-            mode != FullExecutionMode::Packed || arch.kind == qwen_llm::model::ArchKind::Dense,
-            "packed capture is not exposed by the workspace-lens facade for ordinary MoE; use scalar read-full"
-        );
-        qwen_llm::workspace_lens::validate_opened_output_head(
-            gguf,
-            mode != FullExecutionMode::Scalar,
-        )?;
-        let identity = qwen_llm::runtime::opened_gguf_lightweight_identity_parts(gguf)?;
-        let (content, content_bytes_hashed) = if exact {
-            let verified =
-                qwen_llm::checkpoint_identity::verified_checkpoint_content_identity(gguf)?;
-            (Some(hex(&verified.content_id)), verified.bytes_hashed)
-        } else {
-            (None, 0)
-        };
-        Ok(Self {
-            architecture: gguf
-                .get_str("general.architecture")
-                .context("missing runtime architecture")?
-                .into(),
-            arch,
-            identity,
-            content,
-            content_bytes_hashed,
-        })
     }
 }
 
@@ -223,31 +165,13 @@ impl FullAccess {
     }
     pub(crate) fn bind_cpu(
         mut self,
-        deployment: Option<&CpuFullDeployment>,
+        deployment: Option<&CpuDeployment>,
         allow: bool,
     ) -> Result<BoundFullAccess> {
         let mut deployment_identity = None;
         if let Storage::Data(data) = &self.storage {
             let d = deployment.context("generic transport requires CPU deployment preflight")?;
-            let tokenizer = format!("{:016x}", d.identity.1);
-            let status = data.bind(
-                &d.architecture,
-                d.arch.n_layer,
-                d.arch.hidden_size,
-                d.arch.vocab_size,
-                d.content.as_deref().unwrap_or(""),
-                &tokenizer,
-                true,
-                allow,
-            )?;
-            self.runtime_binding = Some(
-                serde_json::json!({"status":status, "architecture":d.architecture,
-                "n_layers":d.arch.n_layer,"hidden_size":d.arch.hidden_size,"vocab_size":d.arch.vocab_size,
-                "gguf_content_blake3":d.content,"tokenizer_metadata_id":tokenizer,
-                "qualification":"producer_claims_only", "binding_phase":"cpu_before_metal",
-                "content_identity_provenance": if d.content.is_some() { "retained_bytes_hashed" } else { "not_verified" },
-                "content_bytes_hashed": d.content_bytes_hashed}),
-            );
+            self.runtime_binding = Some(d.bind(data, allow)?);
             deployment_identity = Some(d.identity);
         }
         Ok(BoundFullAccess {
@@ -259,7 +183,7 @@ impl FullAccess {
         self,
         gguf: &GgufFile,
         mode: FullExecutionMode,
-        cache: Option<&Path>,
+        _cache: Option<&Path>,
         allow: bool,
     ) -> Result<BoundFullAccess> {
         let model = qwen_llm::loader::Model::from_gguf(gguf)?;
@@ -278,8 +202,7 @@ impl FullAccess {
                 validate_deployed_geometry(manifest, gguf, model.arch)?
             }
         }
-        let descriptor =
-            CpuFullDeployment::from_gguf(gguf, mode, self.requires_exact_binding(), cache)?;
+        let descriptor = CpuDeployment::from_gguf(gguf, mode, self.requires_exact_binding())?;
         self.bind_cpu(Some(&descriptor), allow)
     }
     pub(crate) fn acknowledge_transfer(&self, allow: bool) -> Result<()> {

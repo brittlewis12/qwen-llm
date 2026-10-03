@@ -1,4 +1,6 @@
 //! Strict data-only transport opener; qualification is producer metadata only.
+pub(crate) mod deployment;
+
 use anyhow::{Result, ensure};
 use serde::{
     Deserialize, Serialize,

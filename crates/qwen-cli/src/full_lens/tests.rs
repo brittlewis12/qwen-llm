@@ -199,6 +199,30 @@ fn cpu_binding_rejects_geometry_head_and_family_before_metal() {
 }
 
 #[test]
+fn cpu_binding_record_preserves_geometry_identity_and_claim_qualification() {
+    let fixture = crate::linear_transport::tests::fixture("record-fixture", 2, 19);
+    let model = fixture.0.join("model.gguf");
+    write_cpu_gguf(&model, "qwen35", 2, "fixture-tokenizer", false);
+    let gguf = GgufFile::open(&model).unwrap();
+    let (_, tokenizer) = qwen_llm::runtime::opened_gguf_lightweight_identity_parts(&gguf).unwrap();
+    let bound = FullAccess::open(&fixture.0, true)
+        .unwrap()
+        .bind_opened(&gguf, FullExecutionMode::Scalar, None, true)
+        .unwrap();
+    let expected = serde_json::json!({
+        "status":"source_deployment_equivalence_unverified", "architecture":"qwen35",
+        "n_layers":3,"hidden_size":2,"vocab_size":32,
+        "gguf_content_blake3":null,"tokenizer_metadata_id":format!("{tokenizer:016x}"),
+        "qualification":"producer_claims_only", "binding_phase":"cpu_before_metal",
+        "content_identity_provenance":"not_verified", "content_bytes_hashed":0,
+    });
+    assert_eq!(
+        serde_json::to_vec(bound.runtime_binding.as_ref().unwrap()).unwrap(),
+        serde_json::to_vec(&expected).unwrap()
+    );
+}
+
+#[test]
 fn cpu_exact_binding_uses_native_identity_and_rejects_override_mismatches() {
     let fixture = crate::linear_transport::tests::fixture("exact-cpu-fit", 2, 12);
     let model = fixture.0.join("model.gguf");

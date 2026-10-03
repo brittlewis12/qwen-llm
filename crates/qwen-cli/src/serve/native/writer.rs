@@ -97,6 +97,7 @@ struct ArrayPayload {
 const _: () = assert!(EVENTS * std::mem::size_of::<Event>() < RECORD_BYTES);
 
 pub(crate) struct Sink {
+    publication: Option<(Arc<JobStore>, String)>,
     pub(crate) control: ExecutionControl,
     pub(in crate::serve) server: crate::serve::control::ExecutionGate,
     sender: SyncSender<Event>,
@@ -243,10 +244,15 @@ impl Sink {
         }
     }
     pub(super) fn fail_recording(&self, code: &str, message: &str) {
-        self.failure
+        let failure = self
+            .failure
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get_or_insert_with(|| error(code, message));
+            .get_or_insert_with(|| error(code, message))
+            .clone();
+        if let Some((store, id)) = &self.publication {
+            store.publication_failed(id, failure);
+        }
         self.control.cancel();
     }
     fn send(&self, mut event: Event) {
@@ -304,6 +310,8 @@ impl Sink {
 }
 
 pub(super) struct Writer {
+    store: Arc<JobStore>,
+    id: String,
     sink: Option<Sink>,
     terminal: Option<SyncSender<Outcome>>,
     ready: Receiver<Result<Readiness>>,
@@ -349,8 +357,8 @@ impl Writer {
                 .min(ARRAY_QUEUE_BYTES as u64),
         )?;
         let state = worker::State {
-            store,
-            id,
+            store: Arc::clone(&store),
+            id: id.clone(),
             control: worker_control,
             server: worker_server,
             failure: worker_failure,
@@ -358,13 +366,27 @@ impl Writer {
             array_budget: worker_array_budget,
             waits: waits.clone(),
         };
+        let failure_store = Arc::clone(&store);
+        let failure_id = id.clone();
         let worker = std::thread::Builder::new()
             .name("qwen-native-artifacts".into())
             .stack_size(STACK_BYTES)
-            .spawn(move || state.run(record, initial, incoming, started, outcome))
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                    state.run(record, initial, incoming, started, outcome)))
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("native writer panicked")));
+                if result.is_err() {
+                    failure_store.publication_failed(&failure_id, error("artifact_writer_stopped",
+                        "The artifact writer stopped without durable completion. See server diagnostics; inference was not retried."));
+                }
+                result
+            })
             .context("spawn native artifact writer")?;
         Ok(Self {
+            store: Arc::clone(&store),
+            id: id.clone(),
             sink: Some(Sink {
+                publication: Some((store, id)),
                 control,
                 server,
                 sender,
@@ -406,6 +428,14 @@ impl Writer {
         self.join()
     }
     pub(super) fn finish(mut self, outcome: Outcome) -> Result<()> {
+        self.store.execution_outcome(
+            &self.id,
+            crate::serve::jobs::state::RuntimeGeneration {
+                stop_reason: outcome.reason,
+                counters: outcome.counters.clone(),
+                error: outcome.error.clone(),
+            },
+        );
         let result = self
             .terminal
             .take()
@@ -418,9 +448,16 @@ impl Writer {
     }
     fn join(&mut self) -> Result<()> {
         if let Some(worker) = self.worker.take() {
-            worker
+            let result = worker
                 .join()
-                .map_err(|_| anyhow::anyhow!("native writer panicked"))??;
+                .map_err(|_| anyhow::anyhow!("native writer panicked"))
+                .and_then(|result| result);
+            if result.is_err() {
+                self.store.publication_failed(&self.id, error("artifact_writer_stopped",
+                    "The artifact writer stopped without durable completion. See server diagnostics; inference was not retried."));
+            }
+            self.store.execution_settled(&self.id);
+            result?;
         }
         Ok(())
     }

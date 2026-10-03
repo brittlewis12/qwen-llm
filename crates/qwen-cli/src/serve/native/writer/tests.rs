@@ -56,6 +56,7 @@ pub(super) fn paused(capacity: usize) -> (Sink, Receiver<Event>) {
     let (sender, receiver) = sync_channel(capacity);
     (
         Sink {
+            publication: None,
             control: ExecutionControl::default(),
             server: Default::default(),
             sender,
@@ -406,6 +407,19 @@ fn staging_worker_panic_disconnects_wait_and_restart_settles_without_execution()
         });
     assert_eq!(outcome.reason, StopReason::ExecutionError);
     assert!(writer.finish(outcome).is_err());
+    let status = fixture.store.status(&id).unwrap();
+    assert_eq!(status.state, JobState::Running);
+    let runtime = status.runtime.as_ref().unwrap();
+    assert!(runtime.execution_settled);
+    assert_eq!(
+        runtime.publication_error.as_ref().unwrap().code,
+        "artifact_writer_stopped"
+    );
+    assert_eq!(
+        runtime.generation.as_ref().unwrap().stop_reason,
+        StopReason::ExecutionError
+    );
+    assert_eq!(fixture.store.history(None, 10).unwrap().jobs[0], status);
     let replacement = Arc::new(
         JobStore::open(
             &fixture.root.join("replacement"),
@@ -420,6 +434,99 @@ fn staging_worker_panic_disconnects_wait_and_restart_settles_without_execution()
     )
     .unwrap();
     assert_eq!(reopened.status(&id).unwrap().state, JobState::Interrupted);
+    assert!(reopened.status(&id).unwrap().runtime.is_none());
+}
+
+#[test]
+fn terminal_publication_failure_exposes_known_outcome_without_claiming_durability() {
+    let (fixture, _files, prepared, writer, id) = fitted_job();
+    let mut counters = prepared.counters();
+    counters.consumed_prompt_tokens = counters.prompt_tokens;
+    counters.sampled_tokens = 1;
+    fixture
+        .store
+        .fail_once(crate::serve::jobs::store::FaultPoint::SnapshotRenamed);
+    assert!(
+        writer
+            .finish(Outcome {
+                reason: StopReason::TokenLimit,
+                counters: counters.clone(),
+                error: None,
+                wall_ms: None
+            })
+            .is_err()
+    );
+    let status = fixture.store.status(&id).unwrap();
+    assert_eq!(status.state, JobState::Running);
+    assert!(!status.result.complete);
+    let runtime = status.runtime.unwrap();
+    assert!(runtime.execution_settled);
+    assert_eq!(
+        runtime.generation.unwrap(),
+        crate::serve::jobs::state::RuntimeGeneration {
+            stop_reason: StopReason::TokenLimit,
+            counters,
+            error: None,
+        }
+    );
+    let persisted: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(fixture.root.join("jobs").join(&id).join("status.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(persisted["status"].get("runtime").is_none());
+    assert_eq!(persisted["status"]["generation"]["state"], "completed");
+    assert_eq!(
+        fixture.store.result(&id, None, 10).unwrap().records.len(),
+        1
+    );
+}
+
+#[test]
+fn blocked_producer_reports_publication_failure_before_writer_can_settle() {
+    let (fixture, _files, prepared, writer, id) = fitted_job();
+    let control = writer.sink().control.clone();
+    let waits = writer.sink().waits.clone();
+    let counters = prepared.counters();
+    let mut producer = None;
+    let (before_release, history) = fixture.store.with_writer_locked(&id, || {
+        producer = Some(std::thread::spawn(move || {
+            for _ in 0..2 * EVENTS + 4 {
+                writer
+                    .sink()
+                    .record(json!({"kind":"test"}), Phase::Prefill, &counters);
+            }
+            writer
+        }));
+        wait_for_backpressure(&waits);
+        control.cancel();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let status = fixture.store.status(&id).unwrap();
+            if status.runtime.is_some() {
+                break (status, fixture.store.history(None, 10).unwrap());
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "failure was not visible while storage stalled"
+            );
+            std::thread::yield_now();
+        }
+    });
+    let writer = producer.unwrap().join().unwrap();
+    writer
+        .finish(Outcome::interrupted(prepared.counters()))
+        .unwrap();
+    let runtime = before_release.runtime.as_ref().unwrap();
+    assert!(!runtime.execution_settled);
+    assert_eq!(
+        runtime.publication_error.as_ref().unwrap().code,
+        "artifact_publication_interrupted"
+    );
+    assert_eq!(history.jobs[0], before_release);
+    let status = fixture.store.status(&id).unwrap();
+    assert!(status.state.terminal());
+    assert!(status.result.error.is_some());
+    assert!(status.runtime.is_none());
 }
 
 #[test]

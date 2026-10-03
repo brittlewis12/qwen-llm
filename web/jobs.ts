@@ -28,27 +28,31 @@ export function useJob(id: string, report: Report, pageLimit: number) {
       if (job.id !== id) throw new Error(`Requested job ${id}, received ${job.id}`);
       if (!active) return;
       if (!latest || job.revision >= latest.revision) latest = job;
-      for (const [source, error] of [["generation", job.generation.error], ["observations", job.observations.error], ["result publication", job.result.error]] as const) {
+      for (const [source, error] of [["generation", job.generation.error], ["observations", job.observations.error], ["result publication", job.result.error], ["runtime publication", job.runtime?.publication_error ?? null]] as const) {
         if (error !== null) {
           const key = `${source}:${JSON.stringify(error)}`;
           if (!observedErrors.has(key)) { observedErrors.add(key); reportRef.current(`${id} ${source}`, error); }
         }
       }
       setState({ id, job: latest, records: records.values(), complete });
+      let drained = complete || !latest.result.available;
       if (latest.result.available && !complete) {
         // A small per-tick work budget is a display scheduling choice, never a capture limit.
         for (let pageIndex = 0; pageIndex < 4; pageIndex++) {
           const cursor = records.cursor;
-          const page = decodeResult(await api.result(id, cursor, pageLimit));
-          if (page.job_id !== id) throw new Error(`Result page belongs to ${page.job_id}, not ${id}`);
-          if (!active) return;
-          records.append(page.records, cursor, page.next_cursor ?? undefined);
-          complete = page.complete;
-          setState({ id, job: latest, records: records.values(), complete });
-          if (complete || page.records.length === 0) break;
+          try {
+            const page = decodeResult(await api.result(id, cursor, pageLimit));
+            if (page.job_id !== id) throw new Error(`Result page belongs to ${page.job_id}, not ${id}`);
+            if (!active) return;
+            records.append(page.records, cursor, page.next_cursor ?? undefined);
+            complete = page.complete;
+            drained = complete || page.records.length === 0;
+            setState({ id, job: latest, records: records.values(), complete });
+            if (drained) break;
+          } catch (error) { if (latest.runtime?.execution_settled) done = true; throw error; }
         }
       }
-      done = isTerminal(latest) && (complete || !latest.result.available);
+      done = latest.runtime ? latest.runtime.execution_settled && drained : isTerminal(latest) && (complete || !latest.result.available);
     }, error => reportRef.current(`Observe ${id}`, error));
     return () => { active = false; stop(); };
   }, [id, paused, refresh, pageLimit]);

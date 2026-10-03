@@ -21,6 +21,8 @@ export type Job = {
   generation: { state: "pending" | "running" | "completed" | "cancelled" | "failed" | "interrupted"; phase: "prefill" | "decode" | null; prompt_tokens: number; consumed_prompt_tokens: number; sampled_tokens: number; consumed_generated_tokens: number; stop_reason: string | null; error: unknown };
   observations: { state: "pending" | "writing" | "complete" | "partial" | "failed" | "not_requested"; committed_records: number; error: unknown };
   result: { available: boolean; complete: boolean; url: string; error: unknown };
+  runtime?: { publication_error: { code: string; message: string }; execution_settled: boolean;
+    generation: { stop_reason: string; counters: { prompt_tokens: number; consumed_prompt_tokens: number; sampled_tokens: number; consumed_generated_tokens: number }; error: unknown } | null };
 };
 export type Score = { token_id: number | null; row_id: number; label: string | null; score: number };
 export type Readout = Sequenced & { kind: "readout"; readout_id: string; lens: string; phase: "prefill" | "decode"; index: number; position: number; input_token_id: number; predicts_position: number; source_layer: number; target_layer: number | null; capture_stage: string; applied_operation_ids: string[]; provenance: string; score_kind: string; candidate_universe: string; scores: Score[]; cost: { readout_ms: number | null } };
@@ -98,6 +100,18 @@ export function decodeJob(value: unknown): Job {
     && uint(value.observations.committed_records) && "error" in value.observations, "observations", value);
   requireValue(typeof value.result.available === "boolean" && typeof value.result.complete === "boolean" && "error" in value.result && typeof value.result.url === "string"
     && value.result.url.startsWith("/v1/lens/jobs/") && !/[\\\u0000-\u0020]/.test(value.result.url), "result", value);
+  if (value.runtime !== undefined) {
+    object(value.runtime, "runtime"); object(value.runtime.publication_error, "runtime.publication_error");
+    requireValue(typeof value.runtime.execution_settled === "boolean"
+      && typeof value.runtime.publication_error.code === "string" && typeof value.runtime.publication_error.message === "string", "runtime", value);
+    if (value.runtime.generation !== null) {
+      object(value.runtime.generation, "runtime.generation"); object(value.runtime.generation.counters, "runtime.generation.counters");
+      const outcome = value.runtime.generation;
+      requireValue(["stop_token", "token_limit", "cancelled", "execution_error", "server_restart"].includes(String(outcome.stop_reason))
+        && ["prompt_tokens", "consumed_prompt_tokens", "sampled_tokens", "consumed_generated_tokens"].every(key => uint((outcome.counters as Record<string, unknown>)[key]))
+        && "error" in outcome, "runtime.generation", value);
+    }
+  }
   return value as unknown as Job;
 }
 export function decodeHistory(value: unknown): HistoryPage {

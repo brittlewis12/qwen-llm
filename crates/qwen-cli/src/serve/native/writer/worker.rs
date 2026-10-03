@@ -17,6 +17,8 @@ pub(super) struct State {
 
 impl State {
     fn fail(&self, message: &str) {
+        self.store
+            .publication_failed(&self.id, error("artifact_write_failed", message));
         self.failure
             .lock()
             .unwrap_or_else(|e| e.into_inner())

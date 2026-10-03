@@ -930,3 +930,44 @@ fn only_pre_acceptance_decisions_provide_a_keyed_rejection() {
         assert!(error.not_accepted("rejected").rejection.is_none());
     }
 }
+
+#[test]
+fn undelivered_job_is_settled_even_if_failure_publication_fails() {
+    let root = TestRoot::new();
+    let store = root.store();
+    let queue = FakeAdmission::new(Arc::clone(&store));
+    queue.fail_delivery.store(true, Ordering::Release);
+    let (entered, waiting) = std::sync::mpsc::sync_channel(1);
+    let (release, held) = std::sync::mpsc::sync_channel(1);
+    *queue.paused_delivery.lock().unwrap() = Some((entered, held));
+    let api = enabled(Arc::clone(&store), Arc::clone(&queue));
+    let submit_api = Arc::clone(&api);
+    let submission = std::thread::spawn(move || {
+        roundtrip(
+            submit_api,
+            "POST",
+            "/v1/lens/jobs",
+            &request("failed-dispatch").to_string(),
+        )
+    });
+    let id = waiting
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    store.fail_once(crate::serve::jobs::store::FaultPoint::SnapshotRenamed);
+    release.send(()).unwrap();
+    assert!(submission.join().unwrap().0.starts_with("HTTP/1.1 500"));
+    let status = store.status(&id).unwrap();
+    assert_eq!(status.state, JobState::Queued);
+    assert!(status.runtime.unwrap().execution_settled);
+    assert!(queue.pending.lock().unwrap().is_empty());
+    let (headers, retry) = roundtrip(
+        api,
+        "POST",
+        "/v1/lens/jobs",
+        &request("failed-dispatch").to_string(),
+    );
+    assert!(headers.starts_with("HTTP/1.1 500"));
+    assert!(retry.get("admission").is_none());
+    assert!(queue.pending.lock().unwrap().is_empty());
+    assert_eq!(queue.used.load(Ordering::Acquire), 0);
+}

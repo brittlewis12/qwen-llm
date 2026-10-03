@@ -154,6 +154,24 @@ pub(crate) struct JobStatus {
     pub(crate) generation: Generation,
     pub(crate) observations: Observations,
     pub(crate) result: ResultStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) runtime: Option<RuntimeStatus>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RuntimeStatus {
+    pub(crate) publication_error: Option<JobError>,
+    pub(crate) execution_settled: bool,
+    pub(crate) generation: Option<RuntimeGeneration>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RuntimeGeneration {
+    pub(crate) stop_reason: StopReason,
+    pub(crate) counters: Counters,
+    pub(crate) error: Option<JobError>,
 }
 
 impl JobStatus {
@@ -168,6 +186,7 @@ impl JobStatus {
             },
             id,
             revision: 0,
+            runtime: None,
             created_at_ms: now,
             updated_at_ms: now,
             state: JobState::Queued,

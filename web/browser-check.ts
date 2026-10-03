@@ -38,6 +38,10 @@ let historyPreviews = true;
 let corruptPreview = false;
 let arrayReads = 0;
 let navigationStage = 0;
+let publicationFailed = false;
+let executionSettled = false;
+let failedJobReads = 0;
+let invalidFailedPrefix = false;
 const archiveScores = new Float32Array(caps.model.vocabulary_size).fill(-4);
 archiveScores[456] = 4.2; archiveScores[42] = 3;
 for (let i = 0; i < 22; i++) archiveScores[100 + i] = -1 - i * .05;
@@ -58,6 +62,10 @@ const currentAssets = () => ({ ...assets, assets: assets.assets.map((asset: any)
 function status(job: TestJob) {
   const completed = job.ordinal === 0 && job.emptyPages > 0 && navigationStage === 3;
   return { ...statusFixture, id: job.id, revision: 18 + job.emptyPages + (job.cancelled ? 20 : 0),
+    ...(publicationFailed && job.id === "job_external_client" ? { runtime: {
+      publication_error: { code: "artifact_writer_stopped", message: "Fixture publication failure" }, execution_settled: executionSettled,
+      generation: { stop_reason: "token_limit", counters: { prompt_tokens: 16, consumed_prompt_tokens: 16, sampled_tokens: 3, consumed_generated_tokens: 2 }, error: null },
+    } } : {}),
     state: job.cancelled ? "cancelled" : completed ? "completed" : "running", cancel_requested: job.cancelled,
     generation: { ...statusFixture.generation, state: job.cancelled ? "cancelled" : completed ? "completed" : "running", stop_reason: job.cancelled ? "cancelled" : completed ? "token_limit" : null },
     observations: { ...statusFixture.observations, state: job.cancelled ? "partial" : completed ? "complete" : "writing" },
@@ -105,11 +113,15 @@ const server = liveOrigin ? null : Bun.serve({ hostname: "127.0.0.1", port: 0, a
   }
   const match = /^\/v1\/lens\/jobs\/([^/]+)(\/result|\/cancel|\/request)?$/.exec(url.pathname);
   if (match) {
+    if (publicationFailed && match[1] === "job_external_client" && (!match[2] || match[2] === "/result")) failedJobReads++;
     const job = [...jobs.values()].find(job => job.id === match[1]);
     if (!job) return Response.json(errorFixture, { status: 404 });
     if (match[2] === "/request") { requestReads++; if (heldRequest) await heldRequest; return Response.json({ schema_version: 1, job_id: job.id, request: JSON.parse(job.body) }); }
     if (match[2] === "/cancel") { cancelCount++; job.cancelled = true; return Response.json(status(job)); }
     if (match[2] === "/result") {
+      if (invalidFailedPrefix && job.id === "job_external_client") return Response.json({
+        schema_version: 1, job_id: job.id, records: [{ ...resultFixture.records[0], prompt_text: "retained before invalid cursor", prompt_bytes: [...new TextEncoder().encode("retained before invalid cursor")] }], next_cursor: "stuck", complete: false,
+      });
       const records = structuredClone(resultFixture.records);
       const prepared = records.find((record: { kind: string }) => record.kind === "prepared_input");
       if (job.ordinal === 0) records.find((record: any) => record.kind === "readout").scores.push({ token_id: 42, row_id: 42, label: " alternative", score: 3 }, ...Array.from({ length: 22 }, (_, i) => ({ token_id: 100 + i, row_id: 100 + i, label: ` candidate${i}`, score: archiveScores[100 + i] })));
@@ -779,6 +791,23 @@ try {
   assert.equal(posts.length, postsBeforeHistory);
   assert.equal(requestReads, requestReadsBeforeHistory);
   console.log("Prompt history passed: phone previews, exact Unicode truncation, escaped markup, older-page retention, another client's job, old-server refresh and immutable-preview conflict; no POST or per-row request reads.");
+  corruptPreview = false; publicationFailed = true;
+  await evaluate(`[...document.querySelectorAll('.history-list > li')].find(li => li.querySelector('h3')?.textContent === 'job_external_client').querySelector('button').click()`);
+  await wait(`document.querySelector('.job-id')?.textContent === 'job_external_client' && document.body.textContent.includes('Waiting for execution and writer to settle')`, "publication failure remains distinct from saved running state");
+  executionSettled = true;
+  await wait(`document.body.textContent.includes('Execution and writer settled.') && document.body.textContent.includes('In-memory outcome')`, "settled writer failure displays non-durable outcome");
+  await Bun.sleep(1200);
+  const settledReads = failedJobReads;
+  await Bun.sleep(3300);
+  assert.equal(failedJobReads, settledReads, "settled failed publication must stop polling after committed prefix is drained");
+  invalidFailedPrefix = true;
+  await click("Reconnect / reread stored records");
+  await wait(`document.body.textContent.includes('Result cursor did not advance') && document.body.textContent.includes('retained before invalid cursor')`, "invalid cursor preserves already accepted prefix");
+  const invalidReads = failedJobReads;
+  await Bun.sleep(3300);
+  assert.equal(failedJobReads, invalidReads, "settled failure must stop polling even when prefix validation fails");
+  assert.equal(posts.length, postsBeforeHistory);
+  console.log("Publication failure passed: visible stale snapshot and in-memory outcome, committed prefix drained, polling settles without new inference.");
   if (runtimeErrors.length) throw new Error(`Browser runtime errors: ${JSON.stringify(runtimeErrors)}`);
   console.log("Browser checks passed: phone editing, durable recovery, paged tokens, tap scores, source-scope pinning, reorder, independent variant/new seed, explicit cancellation, history, reload, desktop/phone bounds. GPU disabled; fixture-only backend.");
   console.log(Bun.env.CAPTURE_SCREENSHOTS !== "1" ? "Screenshot capture not requested; browser interactions and layout bounds checked." : `Screenshots: ${output}/phone-score.png and ${output}/desktop-history.png`);

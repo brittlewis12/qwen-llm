@@ -25,7 +25,7 @@ export function HistoryPreview({ preview }: { preview: RequestPreview | null | u
 
 export function HistoryEntry({ job, preview, open }: { job: Job; preview: RequestPreview | null | undefined; open: (job: Job, slot: "baseline" | "variant") => void }) {
   return <li><HistoryPreview preview={preview} /><div className="row-heading"><div><h3>{job.id}</h3>
-    <p>{job.state} / generation {job.generation.state} / observations {job.observations.state}</p>
+    <p>{job.runtime ? `Publication failed / ${job.runtime.execution_settled ? "settled" : "settling"} / saved state ${job.state}` : `${job.state} / generation ${job.generation.state} / observations ${job.observations.state}`}</p>
     <p className="muted">{new Date(job.created_at_ms).toLocaleString()} / revision {job.revision}</p></div>
     <div className="actions"><button type="button" onClick={() => open(job, "baseline")}>Open baseline</button>
       <button type="button" onClick={() => open(job, "variant")}>Open variant</button></div></div></li>;

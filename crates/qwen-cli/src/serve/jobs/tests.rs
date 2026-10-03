@@ -558,8 +558,15 @@ fn failed_snapshot_publication_fences_job_without_changing_visible_records() {
     let status = store.status(&id).unwrap();
     fs::create_dir(root.0.join(&id).join(".status.next")).unwrap();
     assert!(store.append(&id, &[readout()]).is_err());
-    assert!(store.status(&id).is_err());
-    assert_eq!(store.history(None, 10).unwrap().jobs[0], status);
+    let mut live = store.status(&id).unwrap();
+    assert_eq!(store.history(None, 10).unwrap().jobs[0], live);
+    let runtime = live.runtime.take().unwrap();
+    assert_eq!(
+        runtime.publication_error.unwrap().code,
+        "artifact_write_failed"
+    );
+    assert!(!runtime.execution_settled);
+    assert_eq!(live, status);
     assert!(store.result(&id, None, 10).unwrap().records.is_empty());
     assert!(store.control(&id).unwrap().checkpoint().is_err());
     assert!(store.append(&id, &[readout()]).is_err());
@@ -1143,7 +1150,7 @@ fn renamed_snapshot_failure_keeps_old_visibility_and_recovers_new_watermark() {
         .generation;
     store.fail_once(FaultPoint::SnapshotRenamed);
     assert!(store.append(&id, &[readout()]).is_err());
-    assert!(store.status(&id).is_err());
+    assert!(store.status(&id).unwrap().runtime.is_some());
     assert!(store.result(&id, None, 10).unwrap().records.is_empty());
     assert!(store.append(&id, &[readout()]).is_err());
     drop(store);

@@ -165,11 +165,30 @@ struct Entry {
     fenced: AtomicBool,
     control: ExecutionControl,
     faults: Arc<Faults>,
+    runtime: Mutex<super::state::RuntimeStatus>,
 }
 
 impl Entry {
     fn snapshot(&self) -> Snapshot {
         self.state.read().unwrap().clone()
+    }
+
+    fn status(&self) -> JobStatus {
+        let mut status = self.snapshot().status;
+        let runtime = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+        if runtime.publication_error.is_some() {
+            status.runtime = Some(runtime.clone());
+        }
+        status
+    }
+
+    fn publication_failed(&self, error: JobError) {
+        self.runtime
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .publication_error
+            .get_or_insert(error);
+        self.control.cancel();
     }
 
     // Hold writer, not state, across IO: status reads remain CPU-only even if
@@ -184,7 +203,10 @@ impl Entry {
         let bytes = snapshot_bytes(&next)?;
         if let Err(error) = replace_snapshot(&self.directory, &bytes, &self.faults) {
             self.fenced.store(true, Ordering::Release);
-            self.control.cancel();
+            self.publication_failed(JobError {
+                r#type: "server_error".into(), code: "artifact_write_failed".into(), param: None,
+                message: "Publication failed; the displayed durable snapshot may be stale. Restart is required to reconcile disk state.".into(),
+            });
             return Err(error);
         }
         let status = next.status.clone();
@@ -316,6 +338,7 @@ impl JobStore {
             if snapshot.version != 1
                 || snapshot.status.schema_version != 1
                 || snapshot.status.id != id
+                || snapshot.status.runtime.is_some()
                 || snapshot.status.result.url != format!("/v1/lens/jobs/{id}/result")
                 || snapshot.status.result.complete != snapshot.status.state.terminal()
                 || !keys.insert(snapshot.key.clone())
@@ -374,6 +397,7 @@ impl JobStore {
                     fenced: AtomicBool::new(false),
                     control: ExecutionControl::default(),
                     faults: Arc::clone(&faults),
+                    runtime: Mutex::default(),
                 }),
             );
         }
@@ -536,6 +560,7 @@ impl JobStore {
                 fenced: AtomicBool::new(false),
                 control: ExecutionControl::default(),
                 faults: Arc::clone(&self.faults),
+                runtime: Mutex::default(),
             }),
         );
         Ok(Accepted {
@@ -546,8 +571,35 @@ impl JobStore {
 
     pub(crate) fn status(&self, id: &str) -> Result<JobStatus> {
         let entry = self.entry(id)?;
-        entry.writable()?;
-        Ok(entry.snapshot().status)
+        Ok(entry.status())
+    }
+
+    pub(crate) fn publication_failed(&self, id: &str, error: JobError) {
+        if let Ok(entry) = self.entry(id) {
+            entry.publication_failed(error);
+        }
+    }
+
+    pub(crate) fn execution_outcome(&self, id: &str, generation: super::state::RuntimeGeneration) {
+        if let Ok(entry) = self.entry(id) {
+            entry
+                .runtime
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .generation = Some(generation);
+        }
+    }
+
+    pub(crate) fn execution_settled(&self, id: &str) {
+        if let Ok(entry) = self.entry(id) {
+            let durable_terminal =
+                entry.snapshot().status.state.terminal() && !entry.fenced.load(Ordering::Acquire);
+            let mut runtime = entry.runtime.lock().unwrap_or_else(|e| e.into_inner());
+            runtime.execution_settled = true;
+            if durable_terminal {
+                runtime.publication_error = None;
+            }
+        }
     }
 
     pub(crate) fn request(&self, id: &str) -> Result<Value> {
@@ -577,7 +629,7 @@ impl JobStore {
             .take(limit)
             .map(|(id, entry)| {
                 request_previews.insert(id.clone(), entry.request_preview.clone());
-                entry.snapshot().status
+                entry.status()
             })
             .collect();
         let next_cursor = selected

@@ -335,6 +335,18 @@ cancellation when part of that allowance is already in use. Both workers can als
 be occupied by slow clients or filesystem access. Cancellation remains cooperative,
 not a guaranteed always-available priority lane. No memory safety override is used.
 
+## Publication Failures
+
+Publication failures have a process-local `runtime` overlay in status and history.
+The normal state, revision and counters remain the last confirmed durable snapshot;
+the overlay separately reports publication failure, whether execution and its writer
+have settled, and any known in-memory generation outcome. It is never written into
+the durable snapshot. The browser labels stale state, reads the committed prefix and
+stops polling after settlement and prefix exhaustion (or an unreadable prefix).
+Restart reconciles disk state normally and removes this process-local overlay;
+neither failure reporting nor restart reruns inference. A healthy durable terminal
+publication supersedes the overlay. Filesystem operations can still block settlement.
+
 ## Qualification
 
 CPU tests exercise real sockets, the owner loop, the store and joined publication,

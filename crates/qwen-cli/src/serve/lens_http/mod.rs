@@ -426,9 +426,9 @@ impl LensApi {
                     "The model queue stopped after acceptance; this execution was not retried."
                         .into(),
             };
-            store
-                .fail_dispatch(&id, error)
-                .map_err(ApiError::after_acceptance)?;
+            let publication = store.fail_dispatch(&id, error);
+            store.execution_settled(&id);
+            publication.map_err(ApiError::after_acceptance)?;
         }
         let status: JobStatus = store.status(&id).map_err(ApiError::after_acceptance)?;
         Ok(Reply {

@@ -12,7 +12,10 @@ import { TokenNavigator } from "./token-navigator";
 import { sameSite, type TokenSite } from "./token-navigation";
 
 export function JobStatus({ job }: { job: Job }) {
-  return <div className="job-status"><div className="row-heading"><strong>{job.state}</strong><span>{job.generation.sampled_tokens} sampled / {job.observations.committed_records} observations</span></div><details><summary>Generation, observation & cancellation status</summary>
+  return <div className="job-status"><div className="row-heading"><strong>{job.runtime ? "Publication failed" : job.state}</strong><span>{job.generation.sampled_tokens} sampled / {job.observations.committed_records} observations</span></div>
+    {job.runtime && <div role="alert"><p>{job.runtime.execution_settled ? "Execution and writer settled." : "Waiting for execution and writer to settle."} The durable snapshot below may be stale; restart is required to reconcile storage. No inference is retried.</p>
+      <p>{job.runtime.publication_error.message}</p>{job.runtime.generation && <p>In-memory outcome (not a durability acknowledgment): {job.runtime.generation.stop_reason}; {job.runtime.generation.counters.sampled_tokens} sampled, {job.runtime.generation.counters.consumed_generated_tokens} consumed.</p>}</div>}
+    <details><summary>{job.runtime ? "Last confirmed durable snapshot" : "Generation, observation & cancellation status"}</summary>
     <dl className="metadata"><dt>Generation</dt><dd>{job.generation.state} / {job.generation.phase ?? "no active phase"}</dd><dt>Observations</dt><dd>{job.observations.state}</dd>
       <dt>Prompt consumed</dt><dd>{job.generation.consumed_prompt_tokens} / {job.generation.prompt_tokens}</dd><dt>Generated</dt><dd>{job.generation.sampled_tokens} sampled / {job.generation.consumed_generated_tokens} consumed</dd>
        <dt>Stop reason</dt><dd>{job.generation.stop_reason ?? "Not reported"}</dd><dt>Cancel requested</dt><dd>{job.cancel_requested ? "Yes / not a GPU completion acknowledgment" : "No"}</dd></dl></details>
@@ -171,7 +174,7 @@ export function ExecutionViewer({ id, caps, assets, draft, update, report, copyR
   }
   if (!id) return <p>Select a server job from History or submit an experiment. No job is currently selected.</p>;
   return <div><p className="job-id">{id}</p><div className="actions"><button type="button" onClick={view.reconnect}>Reconnect / reread stored records</button><label className="check"><input type="checkbox" checked={view.paused} onChange={event => view.setPaused(event.target.checked)} />Pause this viewer</label>
-    <button type="button" disabled={!job || isTerminal(job) || job.cancel_requested || cancelling} onClick={() => void cancel()}>{cancelling ? "Requesting cancellation..." : "Request job cancellation"}</button></div>
+    <button type="button" disabled={!job || isTerminal(job) || job.runtime?.execution_settled || job.cancel_requested || cancelling} onClick={() => void cancel()}>{cancelling ? "Requesting cancellation..." : "Request job cancellation"}</button></div>
     <p className="muted">Read-only polling and pause never cancel work. Reconnect rereads immutable records from zero with sequence deduplication, without inference.</p>
     {job ? <JobStatus job={job} /> : <p role="status">Waiting for an actual job status. See request errors if retrieval fails.</p>}
     <div className="actions"><button type="button" onClick={() => copyRun(id, false)}>Run again: prepare same seed</button><button type="button" onClick={() => copyRun(id, true)}>Run again: prepare new seed</button></div>

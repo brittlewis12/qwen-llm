@@ -1,5 +1,8 @@
 use serde_json::Value;
 
+#[allow(dead_code)] // Currently consumed by qwen-lens; shared with future native input.
+pub(crate) mod prefill;
+
 /// Origin of the model-facing system message before wire protocols converge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SystemSource {

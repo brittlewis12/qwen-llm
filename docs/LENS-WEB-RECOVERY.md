@@ -64,7 +64,7 @@ recovery is explicitly recorded below.
 | --- | --- | --- | --- |
 | R01 | Bounded regular-file access: `bounded_file.rs`, Lens readers | Shared readers recovered with current CLI consumers; future HTTP reader wiring travels with its consuming slice | CPU symlink/type/length/mutation tests; all reader consumers build |
 | R02 | Shared authored scopes and operation semantics: `lens_scope.rs`, `lens_intervention.rs`, `lens_run/{plan,execute,sweep}.rs` | Partially recovered: current-main scopes/validation, direction/action wire forms and normalization extracted with existing CLI consumers; lowering and behavior changes remain pending | Current CLI wire/binding/normalization/lowering regressions; no new service dependency |
-| R03 | Typed prefills and annotated input: `lens_input.rs`, `model_request.rs`, `messages.rs`, `open_responses/render.rs`, CLI callers | Rework against current renderers; R02 uses existing span types only | Exact prompt bytes, token positions, reasoning-only continuation, tools and house/upstream rendering |
+| R03 | Typed prefills and annotated input: `lens_input.rs`, `model_request.rs`, `messages.rs`, `open_responses/render.rs`, CLI callers | Partially recovered: ordinary Qwen3.6/3.8 singleton CLI prefills and strict retained context; native input/tool/history integration pending | Exact prompt bytes, token positions, reasoning-only continuation, tools and house/upstream rendering |
 | R04 | Deployment binding and asset verification: `linear_transport{.rs,/deployment.rs,/cpu_fixture.rs}`, `full_lens/access.rs` | Reuse after R01; retain main's expected-profile checks | Binding mismatch refusal, retained payload hashes, CPU-before-Metal admission, no implicit transfer override |
 | R05 | Shared ordinary execution: `ordinary_executor.rs`, `qwen/decode.rs`, `lens_run/execute.rs` | Partially recovered: shared serial decode lifecycle and explicit request cancellation with existing CLI/serve/Lens consumers; prefill and forwarding adapters pending | CLI/serve sampling, cancellation, terminal nonconsumption and telemetry remain equivalent except documented added checkpoints |
 | R06 | Owner queue and CPU HTTP coordination: `serve/{control,queue,request_profile}.rs`, backend/HTTP wiring | Partially recovered: ordinary single-admission CPU transport and owner-only generation, with profiles/activity/traces; multi-request/native coordination and live qualification remain pending | Idle/request-finished/shutdown ownership, busy admission, cancellation/disconnect, JSON/SSE protocols |
@@ -385,6 +385,56 @@ The durable-job dependency check confirmed that the old store assumes this
 execution-control contract and native admission assumes typed input/prefill
 contracts. Recover those with existing consumers before adding a store without a
 producer or routes that cannot submit meaningful work.
+
+### R03: Typed CLI Prefill And Retained Input
+
+Ordinary Qwen3.6/3.8 `run --user/--messages` now accepts a strict typed
+`--assistant-prefill` with reasoning/final channel and exact text. Current-main's
+resolved renderer/mode defines the starting state. A shared transition definition
+supplies both closing bytes and structural spans; the complete prompt is tokenized
+once and passed through the existing exact aligner. Prefill remains prompt input,
+not completed history or generated output. Nonempty content has its own assistant
+span, no message index, and nullable token bounds when a boundary crosses tokens.
+
+Family admission precedes runtime dispatch; a compatible-looking protocol cannot
+admit Flash, Muse, DS4 or K2. Unsupported protocols, modes and structural markers
+fail closed. The complete retained rendered text has a 16 MiB limit. Cohorts,
+sweeps, raw/token-ID input, Open Responses and HTTP prefills remain unrecovered;
+no unused native renderer or route accompanies this CLI slice.
+
+Prefilled v5 artifacts retain optional `generation_input`, including exact text,
+bytes, token IDs, rendering, typed intent and output initial state. Writer and
+strict reader share context validation: schema/runtime/source, template/mode,
+top-level agreement, text/bytes, token-ID digest, byte coverage/attribution,
+nullable/nonoverlapping token bounds and canonical generation suffix. Comparison
+and sweep-context comparison include the retained record. Writer/reader retain
+the existing 256 MiB artifact limit. This is offline consistency, not text
+authentication, retokenization or model qualification.
+
+Missing context is refused when prefill spans or a nonstandard generation closure
+remain. Empty reasoning prefills and empty final prefills in no-thinking mode
+leave no distinguishable bytes: deleting their records cannot be detected as
+such, though comparison rejects retained-intent mismatch. Unprefilled output omits
+the new field. New readers accept old artifacts; old strict readers reject
+populated extensions. No schema-version bump claims bidirectional compatibility.
+
+The adversarially requested reasoning-history matrix exposed an existing metadata
+mismatch: the shared Qwen renderer emits historical reasoning as `message_content`
+with assistant/thinking attribution, while the Lens validator refused it. The
+validator now accepts that exact source-attributed case; nonassistant or unindexed
+reasoning content still fails. This fixes reader acceptance without changing prompt
+bytes or the absent-prefill preparation path.
+
+CPU fixtures cover both protocols and all resolved modes, whitespace/empty content,
+legacy reasoning history, writer-to-strict-reader roundtrips, malformed/deleted
+records, channel transitions, identical-token intent mismatch, nullable boundaries
+and exact selector binding. Unsupported-family tests traverse the actual CLI run
+preflight with CPU GGUF descriptors. Byte-position token fixtures qualify plumbing,
+not a real tokenizer or numerical continuation. Real-tokenizer and bounded live
+qualification remain pending. Final gates: 376 Lens tests pass with nine ignored;
+212 serving tests pass with 24 ignored. Both known unmarked Metal fixtures are
+explicitly filtered. All binaries/tests compile, formatting and whitespace pass.
+No model or GPU lease was used.
 
 ### Next R06 Integration Boundary
 

@@ -318,6 +318,8 @@ pub(crate) enum MessageRenderSpanKind {
     ThinkingChannelStartMarker,
     ThinkingChannelEndMarker,
     ReasoningInstructionContent,
+    #[allow(dead_code)] // Constructed by qwen-lens's typed generation input.
+    AssistantPrefillContent,
     ContentSeparator,
 }
 
@@ -334,6 +336,7 @@ impl MessageRenderSpanKind {
             Self::ThinkingChannelStartMarker => "thinking_channel_start_marker",
             Self::ThinkingChannelEndMarker => "thinking_channel_end_marker",
             Self::ReasoningInstructionContent => "reasoning_instruction_content",
+            Self::AssistantPrefillContent => "assistant_prefill_content",
             Self::ContentSeparator => "content_separator",
         }
     }
@@ -1765,6 +1768,7 @@ mod tests {
                     assert!(text.bytes().all(|byte| byte == b'\n'));
                 }
                 MessageRenderSpanKind::MessageContent
+                | MessageRenderSpanKind::AssistantPrefillContent
                 | MessageRenderSpanKind::ReasoningInstructionContent => {}
             }
             if matches!(

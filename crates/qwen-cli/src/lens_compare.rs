@@ -704,6 +704,7 @@ fn ensure_sweep_run_context(reference: &RunDocument, candidate: &RunDocument) ->
             && reference.input_source == candidate.input_source
             && reference.add_special_tokens == candidate.add_special_tokens
             && reference.rendering == candidate.rendering
+            && reference.generation_input == candidate.generation_input
             && reference.position_bindings == candidate.position_bindings
             && reference.max_new_tokens == candidate.max_new_tokens
             && reference.execution == candidate.execution,
@@ -1600,6 +1601,8 @@ struct RunDocument {
     add_special_tokens: Option<bool>,
     #[serde(default)]
     rendering: Option<LensInputRendering>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation_input: Option<crate::lens_input::GenerationInputRecord>,
     prompt_token_ids: Vec<i32>,
     generated_token_ids: Vec<i32>,
     sampler: RunSampler,
@@ -1625,6 +1628,10 @@ fn parse_run_bytes(bytes: &[u8], path: &Path) -> Result<RunDocument> {
         .with_context(|| format!("validate run JSON {}", path.display()))?;
     Ok(document)
 }
+
+#[cfg(test)]
+#[path = "lens_compare/prefill_tests.rs"]
+mod prefill_tests;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1665,6 +1672,15 @@ struct RunPublishedMatrixBinding {
 
 impl RunDocument {
     fn validate(&self) -> Result<()> {
+        crate::lens_input::validate_generation_input(
+            self.generation_input.as_ref(),
+            self.schema_version,
+            &self.runtime_kind,
+            &self.input_source,
+            self.add_special_tokens,
+            &self.prompt_token_ids,
+            self.rendering.as_ref(),
+        )?;
         ensure!(
             self.schema == "qwen.lens.run" && matches!(self.schema_version, 1 | 2 | 3 | 4 | 5),
             "unsupported run schema/version"
@@ -2307,7 +2323,8 @@ fn compare_runs(left: &RunDocument, right: &RunDocument, limit: usize) -> Result
     ensure!(
         left.input_source == right.input_source
             && left.add_special_tokens == right.add_special_tokens
-            && left.rendering == right.rendering,
+            && left.rendering == right.rendering
+            && left.generation_input == right.generation_input,
         "run input rendering context differs"
     );
     ensure!(
@@ -2742,6 +2759,7 @@ mod tests {
             .unwrap()
             .clone();
         RunDocument {
+            generation_input: None,
             linear_transports: Vec::new(),
             schema: "qwen.lens.run".into(),
             schema_version: 3,
@@ -3467,6 +3485,7 @@ mod tests {
             .unwrap()
             .clone();
         let mut document = RunDocument {
+            generation_input: None,
             linear_transports: Vec::new(),
             schema: "qwen.lens.run".into(),
             schema_version: 4,
@@ -3853,6 +3872,7 @@ mod tests {
     fn run_document(generated: Vec<i32>, scores: Vec<RunScore>) -> RunDocument {
         let max_new_tokens = generated.len().max(1);
         RunDocument {
+            generation_input: None,
             linear_transports: Vec::new(),
             schema: "qwen.lens.run".into(),
             schema_version: 1,

@@ -138,6 +138,13 @@ pub(crate) struct LensRenderedSpan {
     pub(crate) token_end: Option<usize>,
 }
 
+mod generation;
+pub(crate) use generation::{
+    GenerationInputRecord, prepare_qwen_model_generation_input, validate_generation_input,
+};
+#[cfg(test)]
+pub(crate) use generation::{byte_token_generation_fixture, byte_token_prefill_fixture};
+
 pub(crate) fn is_structural_lens_span(kind: &str) -> bool {
     matches!(
         kind,
@@ -170,6 +177,7 @@ pub(crate) fn is_known_lens_span(kind: &str) -> bool {
             | "system_metadata_content"
             | "tool_definition_content"
             | "assistant_reasoning_content"
+            | "assistant_prefill_content"
             | "tool_call_content"
             | "tool_result_content"
             | "content_separator"
@@ -373,10 +381,14 @@ fn valid_qwen_span_metadata(span: &LensRenderedSpan) -> bool {
     }
     let source_or_synthetic_system = span.message_index.is_some() || role == Some("system");
     match span.kind.as_str() {
+        "assistant_prefill_content" => span.message_index.is_none() && role == Some("assistant"),
         "message_start_marker" | "role" | "message_end_marker" => {
             source_or_synthetic_system && channel.is_none()
         }
-        "message_content" => span.message_index.is_some() && channel.is_none(),
+        "message_content" => {
+            span.message_index.is_some()
+                && (channel.is_none() || (role == Some("assistant") && channel == Some("thinking")))
+        }
         "reasoning_instruction_content" => {
             source_or_synthetic_system && role == Some("system") && channel == Some("thinking")
         }

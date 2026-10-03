@@ -137,6 +137,7 @@ pub(super) fn run_qwen4exp(
         plan_path,
         bound_plan,
         &prepared_input,
+        None,
         result,
         RunExecution::runtime_serial(
             args.prefill_execution,

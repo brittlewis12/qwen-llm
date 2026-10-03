@@ -236,6 +236,162 @@ fn test_args() -> LensRunArgs {
 }
 
 #[test]
+fn typed_prefill_cli_requires_single_structured_input_and_strict_intent() {
+    let parse = |input: &str, prefill: &str| {
+        RunArgsParser::try_parse_from([
+            "test",
+            "--model",
+            "model.gguf",
+            "--plan",
+            "plan.json",
+            input,
+            "input",
+            "--assistant-prefill",
+            prefill,
+        ])
+    };
+    for input in ["--user", "--messages"] {
+        for channel in ["reasoning", "final"] {
+            let prefill = format!(r#"{{"channel":"{channel}","text":"  Answer:\n"}}"#);
+            let args = parse(input, &prefill).unwrap().args;
+            validate_run_args(&args).unwrap();
+            assert_eq!(args.assistant_prefill.unwrap().text, "  Answer:\n");
+        }
+    }
+    for input in [
+        "--prompt",
+        "--token-ids",
+        "--open-responses",
+        "--requests-jsonl",
+    ] {
+        assert!(parse(input, r#"{"channel":"final","text":""}"#).is_err());
+    }
+    for prefill in [
+        r#"{"channel":"thinking","text":"x"}"#,
+        r#"{"channel":"final","text":"x","extra":true}"#,
+        r#"{"channel":"final","text":"<|im_end|>"}"#,
+        r#"{"channel":"final"}"#,
+    ] {
+        assert!(parse("--user", prefill).is_err());
+    }
+    let mut args = test_args();
+    assert!(args.assistant_prefill.is_none());
+    args.assistant_prefill =
+        Some(parse_assistant_prefill(r#"{"channel":"final","text":""}"#).unwrap());
+    assert!(validate_run_args(&args).is_err());
+}
+
+#[test]
+fn typed_prefill_refuses_nonordinary_families_before_tokenizer_or_runtime() {
+    let root = temporary_direction_path().with_extension("prefill");
+    std::fs::create_dir(&root).unwrap();
+    let plan = root.join("plan.json");
+    std::fs::write(&plan, serde_json::to_vec(&minimal_plan()).unwrap()).unwrap();
+    for family in [
+        ModelFamily::Qwen4Exp,
+        ModelFamily::MuseGlimmer,
+        ModelFamily::DeepSeek4,
+        ModelFamily::K2Horizon,
+    ] {
+        let model = root.join("model.gguf");
+        crate::full_lens::write_cpu_gguf(
+            &model,
+            family.architecture_name(),
+            2,
+            "not-a-tokenizer",
+            false,
+        );
+        let mut args = test_args();
+        args.model = model;
+        args.plan = plan.clone();
+        args.prompt = None;
+        args.user = Some("probe".into());
+        args.assistant_prefill =
+            Some(parse_assistant_prefill(r#"{"channel":"final","text":""}"#).unwrap());
+        let error = run(args).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("typed assistant prefill supports ordinary Qwen only"),
+            "{family:?}: {error:#}"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+pub(crate) fn generation_run_bytes(
+    protocol: crate::prompt_template::QwenPromptTemplate,
+    mode: Option<LensMessageMode>,
+    prefill: Option<&crate::model_request::prefill::AssistantPrefill>,
+) -> Vec<u8> {
+    let (input, record) = crate::lens_input::byte_token_generation_fixture(protocol, mode, prefill);
+    let plan = minimal_plan();
+    let bound = bind_plan_positions(&plan, &input.rendering, input.token_ids.len()).unwrap();
+    let result = RunResult {
+        linear_transports: Vec::new(),
+        prompt_token_ids: input.token_ids.clone(),
+        generated_token_ids: vec![7],
+        decoded_text: "continuation only".into(),
+        stop_reason: "max_new_tokens".into(),
+        operation_applications: Vec::new(),
+        live_readouts: Vec::new(),
+        native_hyper_captures: Vec::new(),
+    };
+    let mut output = build_run_output(
+        Path::new("model.gguf"),
+        run_sampler(&test_args()),
+        1,
+        "ordinary_qwen",
+        Path::new("/plan.json"),
+        bound,
+        &input,
+        result,
+        RunExecution::runtime_serial(PrefillExecution::Serial, RunSerialReason::RequestedSerial),
+        None,
+    );
+    output.generation_input = record;
+    let bytes = serialize_run_output(&output).unwrap();
+    output.generation_input = None;
+    if prefill.is_some_and(|prefill| {
+        !prefill.text.is_empty()
+            || (prefill.channel == crate::model_request::prefill::AssistantPrefillChannel::Final
+                && mode != Some(LensMessageMode::NoThinking))
+    }) {
+        assert!(serialize_run_output(&output).is_err());
+    }
+    bytes
+}
+
+#[test]
+fn typed_prefill_selectors_bind_only_exact_content_ranges() {
+    let plan = semantic_readout_plan(json!({
+        "kind":"rendered_spans",
+        "selectors":[{"span_kind":"assistant_prefill_content","role":"assistant","edge":"end"}]
+    }));
+    validate_plan(&plan).unwrap();
+    for channel in ["reasoning", "final"] {
+        let prefill =
+            serde_json::from_value(json!({"channel":channel,"text":"  Answer:\n"})).unwrap();
+        let (mut input, _) = crate::lens_input::byte_token_prefill_fixture(&prefill);
+        let bound = bind_plan_positions(&plan, &input.rendering, input.token_ids.len()).unwrap();
+        assert_eq!(
+            bound.position_bindings[0].resolved_index as usize,
+            input.token_ids.len() - 1
+        );
+        assert!(
+            bound.position_bindings[0]
+                .matched_span
+                .message_index
+                .is_none()
+        );
+        let content = input.rendering.spans.last_mut().unwrap();
+        content.token_start = None;
+        content.token_end = None;
+        assert!(bind_plan_positions(&plan, &input.rendering, input.token_ids.len()).is_err());
+    }
+}
+
+#[test]
 fn run_cli_uses_contextual_default_and_accepts_explicit_json_output() {
     let defaults = test_args();
     assert_eq!(defaults.format, None);
@@ -1264,6 +1420,7 @@ fn run_artifact_serializes_envelope_exact_plan_and_score_semantics() {
     let plan = minimal_plan();
     let plan_digest = canonical_plan_blake3(&plan).unwrap();
     let artifact = RunOutput {
+        generation_input: None,
         linear_transports: Vec::new(),
         schema: RUN_SCHEMA,
         schema_version: RUN_SCHEMA_VERSION,
@@ -1315,6 +1472,7 @@ fn run_artifact_serializes_envelope_exact_plan_and_score_semantics() {
         execution_binding: None,
     };
     let value = serde_json::to_value(&artifact).unwrap();
+    assert!(value.get("generation_input").is_none());
     assert_eq!(value["schema"], RUN_SCHEMA);
     assert_eq!(value["schema_version"], 5);
     assert_eq!(value["input_source"], "prompt");
@@ -1449,6 +1607,7 @@ fn summary_contains_required_counts_text_and_artifact_path() {
     let plan = minimal_plan();
     let plan_digest = canonical_plan_blake3(&plan).unwrap();
     let artifact = RunOutput {
+        generation_input: None,
         linear_transports: Vec::new(),
         schema: RUN_SCHEMA,
         schema_version: RUN_SCHEMA_VERSION,

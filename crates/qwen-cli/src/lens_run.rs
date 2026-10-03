@@ -61,6 +61,8 @@ pub(crate) use output::*;
 pub(crate) use plan::*;
 #[allow(unused_imports)]
 pub(crate) use sweep::*;
+#[cfg(test)]
+pub(crate) use tests::generation_run_bytes;
 
 const MAX_LENSES: usize = 64;
 const MAX_READOUTS: usize = 1024;
@@ -131,6 +133,11 @@ pub(crate) struct LensRunArgs {
         conflicts_with_all = ["prompt", "token_ids", "open_responses", "requests_jsonl"]
     )]
     pub(crate) message_mode: Option<LensMessageMode>,
+
+    /// Typed unfinished assistant content: {"channel":"reasoning|final","text":"..."}.
+    #[arg(long, value_name = "JSON", value_parser = parse_assistant_prefill,
+        conflicts_with_all = ["prompt", "token_ids", "open_responses", "requests_jsonl"])]
+    pub(crate) assistant_prefill: Option<crate::model_request::prefill::AssistantPrefill>,
 
     /// Disable tokenizer-configured specials for --prompt.
     #[arg(
@@ -206,6 +213,15 @@ impl LensRunArgs {
 pub(crate) enum RunStdoutFormat {
     Summary,
     Json,
+}
+
+fn parse_assistant_prefill(
+    value: &str,
+) -> std::result::Result<crate::model_request::prefill::AssistantPrefill, String> {
+    let prefill: crate::model_request::prefill::AssistantPrefill =
+        serde_json::from_str(value).map_err(|error| error.to_string())?;
+    prefill.validate_qwen().map_err(|error| error.to_string())?;
+    Ok(prefill)
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -343,6 +359,10 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
     })?;
     if family != ModelFamily::Qwen35 && family != ModelFamily::Qwen35Moe {
         ensure!(
+            args.assistant_prefill.is_none(),
+            "typed assistant prefill supports ordinary Qwen only"
+        );
+        ensure!(
             args.open_responses.is_none(),
             "--open-responses supports ordinary Qwen only; {} is not supported",
             family.architecture_name()
@@ -381,7 +401,21 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
     let full_transports = open_full_transports(&plan, plan_dir)?;
 
     let tokenizer = Tokenizer::from_gguf(&gguf).context("load model tokenizer")?;
-    let prepared_input = prepare_qwen_model_input(args.input_spec(), family, &gguf, &tokenizer)?;
+    let (prepared_input, generation_input) = if let Some(prefill) = &args.assistant_prefill {
+        let (input, record) = crate::lens_input::prepare_qwen_model_generation_input(
+            args.input_spec(),
+            prefill,
+            family,
+            &gguf,
+            &tokenizer,
+        )?;
+        (input, Some(record))
+    } else {
+        (
+            prepare_qwen_model_input(args.input_spec(), family, &gguf, &tokenizer)?,
+            None,
+        )
+    };
     let prompt_token_ids = &prepared_input.token_ids;
     ensure!(
         prompt_token_ids
@@ -462,6 +496,7 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         &plan_path,
         bound_plan,
         &prepared_input,
+        generation_input,
         result,
         prefill.execution,
         None,
@@ -470,6 +505,13 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
 }
 
 fn validate_run_args(args: &LensRunArgs) -> Result<()> {
+    if let Some(prefill) = &args.assistant_prefill {
+        ensure!(
+            (args.user.is_some() || args.messages.is_some()) && args.requests_jsonl.is_none(),
+            "--assistant-prefill requires --user or --messages, not cohort or raw input"
+        );
+        prefill.validate_qwen()?;
+    }
     ensure!(args.max_new_tokens > 0, "--max-new-tokens must be positive");
     if args.requests_jsonl.is_some() {
         ensure!(

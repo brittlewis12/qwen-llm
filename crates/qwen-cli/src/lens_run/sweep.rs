@@ -181,6 +181,7 @@ impl CoefficientSweepArgs {
             open_responses: self.open_responses.clone(),
             requests_jsonl: None,
             message_mode: self.message_mode,
+            assistant_prefill: None,
             no_special_tokens: self.no_special_tokens,
             max_new_tokens: self.max_new_tokens,
             prefill_execution: self.prefill_execution,

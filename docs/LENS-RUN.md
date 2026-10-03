@@ -35,6 +35,49 @@ equivalence remains auditable. Request generation/sampling fields and narrowed
 Sampling defaults to greedy. `--temperature`, `--top-k`, `--top-p`, `--min-p`,
 and `--seed` expose the existing deterministic native sampler.
 
+### Typed Assistant Prefill
+
+Ordinary Qwen3.6 and Qwen3.8 singleton runs with `--user` or `--messages` accept
+an unfinished assistant prefix, separate from completed assistant history:
+
+```sh
+qwen-lens run --model /path/to/model.gguf --plan /path/to/plan.json \
+  --user "Name one animal" \
+  --assistant-prefill '{"channel":"final","text":"The animal is "}' \
+  --max-new-tokens 8 --output /path/to/run.json
+```
+
+The strict JSON object requires `channel` (`reasoning` or `final`) and `text`.
+Whitespace and empty text are preserved. Reasoning content requires an open
+thinking mode; final content closes thinking once when necessary, or appends
+directly in `--message-mode no-thinking`. Structural protocol markers in prefill
+text are refused. The whole rendered prompt is tokenized once without added
+specials; the prefix is prompt input, not newly generated text or a history turn.
+The complete rendered prompt on this path is limited to 16 MiB, not just the
+prefill text. The model's token context bound still applies.
+
+Nonempty prefix text has an `assistant_prefill_content` span with assistant role
+and no message index. Reasoning prefills use the `thinking` channel. Byte spans
+remain exact; token ranges are null if content boundaries cross tokens, and
+rendered-span selectors refuse such inexact targets rather than guessing.
+
+Prefilled v5 artifacts additionally retain `generation_input`: exact rendered
+text/bytes, input tokens/rendering, typed prefill, template and output initial
+state. `prompt_digest` is SHA-256 of little-endian i32 token IDs, not a text digest
+or authentication claim. Offline readers check internal consistency and the
+canonical generation suffix; they do not retokenize or verify the model.
+Comparison requires matching retained generation context, even if tokens match.
+Deleting an empty reasoning prefill's record, or an empty final prefill's record
+in no-thinking mode, cannot be distinguished from legacy input by bytes alone.
+
+Unprefilled artifacts omit this field and retain their existing shape. New
+readers accept older artifacts; older strict readers reject the populated
+extension. This does not add prefills to cohorts, sweeps, raw/token-ID inputs,
+Open Responses, other model families, or HTTP serving. Native HTTP input wiring
+remains a separate recovery step.
+
+### Execution And Output
+
 `--prefill-execution auto` is the default. For ordinary dense Qwen, it packs
 maximal non-final prompt spans of at least 65 tokens that contain no operation
 or readout event. Packed blocks are capped at 1,024 tokens; active events, the

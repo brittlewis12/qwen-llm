@@ -275,6 +275,7 @@ pub(crate) fn run(
         plan_path,
         bound_plan,
         &prepared_input,
+        None,
         RunResult {
             linear_transports,
             prompt_token_ids: prompt_ids.to_vec(),
@@ -1235,6 +1236,7 @@ mod tests {
             open_responses: None,
             requests_jsonl: None,
             message_mode: None,
+            assistant_prefill: None,
             no_special_tokens: false,
             max_new_tokens: 1,
             prefill_execution: super::super::lens_run::PrefillExecution::Auto,

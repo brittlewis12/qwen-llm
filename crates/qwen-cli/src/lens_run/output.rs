@@ -249,6 +249,8 @@ pub(crate) struct RunOutput {
     pub(super) input_source: &'static str,
     pub(super) add_special_tokens: Option<bool>,
     pub(super) rendering: LensInputRendering,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) generation_input: Option<crate::lens_input::GenerationInputRecord>,
     pub(super) prompt_token_ids: Vec<i32>,
     pub(super) generated_token_ids: Vec<i32>,
     pub(super) sampler: RunSampler,
@@ -356,12 +358,13 @@ pub(crate) fn emit_run_output(
     plan_path: &Path,
     bound_plan: BoundLensPlan,
     prepared_input: &PreparedLensInput,
+    generation_input: Option<crate::lens_input::GenerationInputRecord>,
     result: RunResult,
     execution: RunExecution,
     execution_binding: Option<RunExecutionBinding>,
     output_path: Option<&Path>,
 ) -> Result<()> {
-    let artifact = build_run_output(
+    let mut artifact = build_run_output(
         &args.model,
         run_sampler(args),
         args.max_new_tokens,
@@ -373,6 +376,7 @@ pub(crate) fn emit_run_output(
         execution,
         execution_binding,
     );
+    artifact.generation_input = generation_input;
     let stdout_format = effective_run_stdout_format(args.format, output_path.is_some());
     let bytes = if output_path.is_some() || stdout_format == RunStdoutFormat::Json {
         Some(serialize_run_output(&artifact)?)
@@ -424,6 +428,7 @@ pub(super) fn build_run_output(
         input_source: prepared_input.source,
         add_special_tokens: prepared_input.add_special_tokens,
         rendering: prepared_input.rendering.clone(),
+        generation_input: None,
         prompt_token_ids: result.prompt_token_ids,
         generated_token_ids: result.generated_token_ids,
         sampler,
@@ -439,6 +444,15 @@ pub(super) fn build_run_output(
 }
 
 pub(super) fn validate_run_output(artifact: &RunOutput) -> Result<()> {
+    crate::lens_input::validate_generation_input(
+        artifact.generation_input.as_ref(),
+        artifact.schema_version,
+        artifact.runtime_kind,
+        artifact.input_source,
+        artifact.add_special_tokens,
+        &artifact.prompt_token_ids,
+        Some(&artifact.rendering),
+    )?;
     if artifact.execution.schedule_basis() == RunExecutionScheduleBasis::EffectivePlan {
         artifact.execution.validate_against_plan(
             artifact.runtime_kind,

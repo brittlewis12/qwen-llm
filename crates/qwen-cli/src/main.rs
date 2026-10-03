@@ -4,7 +4,10 @@
 mod admission;
 #[path = "qwen/args.rs"]
 mod args;
+#[allow(dead_code)] // Shared artifact readers also consumed by qwen-lens.
+mod bounded_file;
 mod cli;
+use bounded_file::read_regular_file_bounded;
 mod concurrent_jsonl;
 #[path = "qwen/decode.rs"]
 mod decode;
@@ -28,6 +31,8 @@ mod fixed_cohort_jsonl;
 mod jsonl;
 #[path = "qwen/k2_horizon.rs"]
 mod k2_horizon;
+#[allow(dead_code, unused_imports)] // CLI input adapters share native request semantics.
+mod lens_input;
 mod messages;
 mod model_request;
 #[path = "qwen/muse_glimmer.rs"]

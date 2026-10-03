@@ -20,10 +20,14 @@ pub(crate) mod backend_ds4;
 pub(crate) mod backend_k2;
 pub(crate) mod backend_muse;
 pub(crate) mod backend_qwen4exp;
+mod control;
 pub(crate) mod decode_loop;
 pub(crate) mod durable;
 pub(crate) mod events;
 pub(crate) mod http;
+mod jobs;
+mod lens_http;
+mod native;
 pub(crate) mod outcome;
 pub(crate) mod output_partition;
 mod owner_activity;
@@ -346,6 +350,17 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         invocation.snapshot_cache_mib,
     )?;
     let template_style = invocation.template_style;
+    ensure!(
+        invocation.lens_data_dir.is_none()
+            || matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe),
+        "--lens-data-dir recovery currently supports ordinary Qwen; other families retain their existing serving path"
+    );
+    let history = invocation
+        .lens_data_dir
+        .as_deref()
+        .map(|root| jobs::store::JobStore::open(root, jobs::store::Limits::default()).map(Arc::new))
+        .transpose()
+        .context("open durable Lens history")?;
     if matches!(family, ModelFamily::K2Horizon | ModelFamily::MuseGlimmer) {
         ensure!(
             template_style == items::TemplateStyle::House,
@@ -385,7 +400,14 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             let load_ms = started.elapsed().as_secs_f64() * 1e3;
             tracing::info!(target: "qwen_diag", "serve limits: family=k2_horizon raw_input_string_only capacity={} snapshot_cache_bytes=0", prepared.capacity);
             let mut backend = backend_k2::K2Backend::new(&model, prepared, model_id.clone());
-            return accept_loop(listener, &model_id, load_ms, &mut backend, &mut trace);
+            return accept_loop(
+                listener,
+                &model_id,
+                load_ms,
+                &mut backend,
+                &mut trace,
+                history,
+            );
         }
         ModelFamily::Qwen35
         | ModelFamily::Qwen35Moe
@@ -451,7 +473,14 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             let math_options = backend.math_options();
             tracing::info!(target: "qwen_diag", "serve limits: family=muse_glimmer max_context_tokens={} default_max_tokens={} snapshot_cache_bytes=0 matrix_prefill={} split_decode={}", context_limit, default_max_tokens, math_options.matrix_prefill, math_options.split_decode);
             crate::shutdown::checkpoint()?;
-            accept_loop(listener, &model_id, load_ms, &mut backend, &mut trace)
+            accept_loop(
+                listener,
+                &model_id,
+                load_ms,
+                &mut backend,
+                &mut trace,
+                history,
+            )
         }
         ModelFamily::DeepSeek4 => {
             // DS4 sizes its session from a forward budget fixed at startup, so
@@ -489,7 +518,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 }
             }
             crate::shutdown::checkpoint()?;
-            accept_loop(listener, &model_id, 0.0, &mut backend, &mut trace)
+            accept_loop(listener, &model_id, 0.0, &mut backend, &mut trace, history)
         }
         ModelFamily::Qwen4Exp => {
             if let Some(failure) =
@@ -524,7 +553,14 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
             tracing::info!(target: "qwen_diag", "serve limits: family=qwen4exp max_context_tokens={context_limit} default_max_tokens={default_max_tokens} {}", backend.snapshot_cache_plan);
             crate::shutdown::checkpoint()?;
-            accept_loop(listener, &model_id, load_ms, &mut backend, &mut trace)
+            accept_loop(
+                listener,
+                &model_id,
+                load_ms,
+                &mut backend,
+                &mut trace,
+                history,
+            )
         }
         ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {
             // The same release identity `qwen run` resolves; serve must not render
@@ -607,7 +643,14 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             }
             crate::shutdown::checkpoint()?;
 
-            accept_loop(listener, &model_id, load_ms, &mut backend, &mut trace)
+            accept_loop(
+                listener,
+                &model_id,
+                load_ms,
+                &mut backend,
+                &mut trace,
+                history,
+            )
         }
     }
 }
@@ -651,10 +694,10 @@ fn wait_for_connection(listener: &TcpListener) -> std::io::Result<()> {
 
 fn spawn_acceptor(
     listener: TcpListener,
-    sender: SyncSender<std::net::TcpStream>,
+    sender: SyncSender<control::Event>,
     ready: Arc<AtomicBool>,
     stopping: Arc<AtomicBool>,
-) -> Result<JoinHandle<()>> {
+) -> Result<JoinHandle<Result<()>>> {
     listener
         .set_nonblocking(true)
         .context("configure nonblocking HTTP acceptor")?;
@@ -669,7 +712,7 @@ fn spawn_acceptor(
                             continue;
                         }
                         if ready.swap(false, Ordering::AcqRel) {
-                            if sender.send(stream).is_err() {
+                            if sender.send(control::Event::Incoming(stream)).is_err() {
                                 break;
                             }
                         } else if let Err(error) = http::write_busy_response(&stream) {
@@ -688,6 +731,7 @@ fn spawn_acceptor(
                     }
                 }
             }
+            Ok(())
         })
         .context("spawn HTTP acceptor")
 }
@@ -700,8 +744,9 @@ fn accept_loop(
     load_ms: f64,
     backend: &mut dyn http::GenerationBackend,
     trace: &mut Option<http::TraceLog>,
+    history: Option<Arc<jobs::store::JobStore>>,
 ) -> Result<()> {
-    accept_loop_with_checkpoint(listener, model_id, load_ms, backend, trace, |_| {
+    accept_loop_with_history(listener, model_id, load_ms, backend, trace, history, |_| {
         crate::shutdown::checkpoint()
     })
 }
@@ -719,6 +764,20 @@ fn accept_loop_with_checkpoint(
     load_ms: f64,
     backend: &mut dyn http::GenerationBackend,
     trace: &mut Option<http::TraceLog>,
+    checkpoint: impl FnMut(OwnerCheckpoint) -> Result<()>,
+) -> Result<()> {
+    accept_loop_with_history(
+        listener, model_id, load_ms, backend, trace, None, checkpoint,
+    )
+}
+
+fn accept_loop_with_history(
+    listener: TcpListener,
+    model_id: &str,
+    load_ms: f64,
+    backend: &mut dyn http::GenerationBackend,
+    trace: &mut Option<http::TraceLog>,
+    history: Option<Arc<jobs::store::JobStore>>,
     mut checkpoint: impl FnMut(OwnerCheckpoint) -> Result<()>,
 ) -> Result<()> {
     let local_addr = listener
@@ -726,25 +785,69 @@ fn accept_loop_with_checkpoint(
         .map_or_else(|_| "<unknown>".to_owned(), |addr| addr.to_string());
     tracing::info!(
         target: "qwen_diag",
-        "serve: listening on http://{} model={} load_ms={:.1} (serial; POST /v1/responses, GET /v1/models)",
+        "serve: listening on http://{} model={} load_ms={:.1} lens_history={} (serial; POST /v1/responses, GET /v1/models)",
         local_addr,
         model_id,
         load_ms,
+        history.is_some(),
     );
-    let (sender, receiver) = sync_channel(0);
+    let history_enabled = history.is_some();
+    let (sender, receiver) = sync_channel(usize::from(history_enabled));
     // Publish initial readiness before the acceptor can observe a connection;
     // otherwise an idle server has a startup window that returns a false 503.
     let ready = Arc::new(AtomicBool::new(true));
     let accept_ready = Arc::clone(&ready);
     let stopping = Arc::new(AtomicBool::new(false));
     let accept_stopping = Arc::clone(&stopping);
-    let acceptor = spawn_acceptor(listener, sender, accept_ready, accept_stopping)?;
     let mut activity = owner_activity::OwnerActivity::default();
     let admission = activity.admission();
+    let gate = control::ExecutionGate::default();
+    let acceptor = if let Some(store) = history {
+        let native = backend.native_profile()?.map(|profile| {
+            Arc::new(native::NativeAdmission {
+                profile,
+                store: Arc::clone(&store),
+                sender: sender.clone(),
+                gate: gate.clone(),
+                activity: admission.clone(),
+            }) as Arc<dyn lens_http::Admission>
+        });
+        let lens = Arc::new(lens_http::LensApi::new(
+            model_id.into(),
+            Some(store),
+            native,
+        ));
+        backend.set_control_memory_reserve(control::CPU_RESERVE_BYTES);
+        match control::spawn(
+            listener,
+            control::Profile {
+                model_id: model_id.into(),
+                request: backend.request_profile(),
+                lens,
+                gate: gate.clone(),
+                activity: admission.clone(),
+                sender,
+                trace: trace.as_ref().map(http::TraceLog::factory),
+            },
+            accept_stopping,
+        ) {
+            Ok(acceptor) => acceptor,
+            Err(cause) => {
+                backend.set_control_memory_reserve(0);
+                backend.shutdown();
+                return Err(cause);
+            }
+        }
+    } else {
+        spawn_acceptor(listener, sender, accept_ready, accept_stopping)?
+    };
     let mut connection: Option<transport::Connection> = None;
 
     let result = (|| -> Result<()> {
         loop {
+            if history_enabled {
+                gate.checkpoint()?;
+            }
             if let Some(active) = &mut connection {
                 if active.advance(backend, || checkpoint(OwnerCheckpoint::DuringHandling))? {
                     connection.take();
@@ -753,9 +856,11 @@ fn accept_loop_with_checkpoint(
                 continue;
             }
             checkpoint(OwnerCheckpoint::BeforeAdmission)?;
-            ready.store(true, Ordering::Release);
-            let stream = match receiver.recv_timeout(ADMISSION_POLL_INTERVAL) {
-                Ok(stream) => stream,
+            if !history_enabled {
+                ready.store(true, Ordering::Release);
+            }
+            let event = match receiver.recv_timeout(ADMISSION_POLL_INTERVAL) {
+                Ok(event) => event,
                 Err(RecvTimeoutError::Timeout) => {
                     activity.drain_finished(|| backend.request_finished());
                     activity.idle_if_quiet(|| backend.idle());
@@ -766,18 +871,33 @@ fn accept_loop_with_checkpoint(
             // A signal may arrive while admission is parked in recv_timeout.
             // Never start an admitted request without checking it again.
             checkpoint(OwnerCheckpoint::BeforeHandling)?;
-            let guard = admission
-                .try_admit()
-                .context("HTTP owner admission is closed")?;
-            let subscriber = trace.as_ref().map(http::TraceLog::subscriber);
-            connection = Some(transport::Connection::start(
-                stream, backend, subscriber, guard,
-            )?);
+            if history_enabled {
+                gate.checkpoint()?;
+            }
+            match event {
+                control::Event::Incoming(stream) => {
+                    let guard = admission
+                        .try_admit()
+                        .context("HTTP owner admission is closed")?;
+                    let subscriber = trace.as_ref().map(http::TraceLog::subscriber);
+                    connection = Some(transport::Connection::start(
+                        stream, backend, subscriber, guard,
+                    )?);
+                }
+                control::Event::Prepared(prepared) => connection = Some(prepared),
+                control::Event::Native(job) => {
+                    if let Err(cause) = job.run(backend) {
+                        tracing::error!("native job publication failed: {cause:#}");
+                    }
+                }
+            }
+            activity.drain_finished(|| backend.request_finished());
         }
         Ok(())
     })();
 
     admission.close();
+    gate.close();
     ready.store(false, Ordering::Release);
     stopping.store(true, Ordering::Release);
     drop(receiver);
@@ -785,12 +905,11 @@ fn accept_loop_with_checkpoint(
     let acceptor_result = acceptor.join();
     activity.drain_finished(|| backend.request_finished());
     ensure!(activity.is_settled(), "HTTP owner activity did not settle");
+    backend.set_control_memory_reserve(0);
     // Stop accepting before the bounded durable flush, so clients see a
     // closed port rather than a stalled server during shutdown.
     backend.shutdown();
-    if acceptor_result.is_err() {
-        return Err(anyhow::anyhow!("HTTP acceptor panicked"));
-    }
+    acceptor_result.map_err(|_| anyhow::anyhow!("HTTP acceptor panicked"))??;
     worker_result?;
     result
 }
@@ -946,7 +1065,7 @@ mod tests {
             &acceptor,
             "acceptor did not observe its stop flag without a wake connection",
         );
-        assert!(acceptor.join().is_ok());
+        acceptor.join().unwrap().unwrap();
         drop(TcpListener::bind(address).unwrap());
     }
 
@@ -992,7 +1111,7 @@ mod tests {
         drop(receiver);
         drop(admitted);
         drop(client);
-        acceptor.join().unwrap();
+        acceptor.join().unwrap().unwrap();
     }
 
     #[test]
@@ -1022,7 +1141,7 @@ mod tests {
         drop(admitted);
         drop(client);
         assert_thread_finishes(&acceptor, "readiness wait did not stop");
-        acceptor.join().unwrap();
+        acceptor.join().unwrap().unwrap();
     }
 
     #[test]

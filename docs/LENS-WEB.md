@@ -1,0 +1,138 @@
+# Lens Workbench
+
+## Recovered Now
+
+The reconstruction currently provides a durable baseline API on `qwen serve`.
+The browser client, original-forward readouts, fitted assets, interventions and
+retained capture production are not yet recovered. This is an intermediate usable
+API slice, not completion of the workbench. See [the recovery ledger](LENS-WEB-RECOVERY.md).
+
+```sh
+qwen serve -m MODEL --lens-data-dir JOB_DIRECTORY
+```
+
+The flag currently requires an ordinary Qwen backend. Native generation requires
+a metadata-qualified Qwen3.6/3.8 House template; unsupported ordinary deployments
+still expose saved history with `available:false`. The server remains loopback-only.
+Lens routes require a loopback/localhost Host and, when supplied, a matching HTTP
+Origin. These checks are not authentication or a remote-access feature.
+
+The same resident owner continues to serve `/v1/responses`. Native jobs use its
+serial post-block forward path with fresh isolated sequence state: no prefix
+restore, ordinary cache publication, speculative draft or redundant model pass.
+Neither API requires another model server. Input rendering/tokenization and typed
+prefill transitions are shared with the Lens CLI. Raw input, tool messages and
+upstream-style native rendering are deliberately refused rather than approximated.
+
+## Submit And Inspect
+
+Read `GET /v1/lens/capabilities` and `GET /v1/lens/assets` first. Capabilities
+advertise baseline-only execution, supported generation modes, context and byte
+limits; assets are empty. Model identity describes GGUF metadata, not a weight
+content hash. New clients should supply it as a precondition:
+
+```json
+{
+  "schema_version": 1,
+  "idempotency_key": "one-stable-key-for-this-submission",
+  "input": {
+    "kind": "messages",
+    "messages": [{"role": "user", "content": "Name an animal."}],
+    "generation_mode": "thinking",
+    "assistant_prefill": {"channel": "final", "text": "Answer: "}
+  },
+  "generation": {
+    "max_new_tokens": 3,
+    "sampling": {"temperature": 0, "top_k": 0, "top_p": 1, "min_p": 0, "seed": 7}
+  },
+  "preconditions": {"model_identity": "COPY_FROM_CAPABILITIES", "asset_identities": {}}
+}
+```
+
+POST this JSON to `/v1/lens/jobs`. Unknown fields and nonempty diagnostics are
+rejected, not ignored. Temperature zero explicitly requests greedy sampling;
+positive values that narrow to zero are refused. Prefill text is exact prompt
+context, never newly generated output. All template/mode combinations are checked.
+
+Acceptance is persisted before dispatch and acknowledged with 202/Location. Save
+the exact request/key before sending. If acknowledgement is lost, resend it:
+identical normalized content returns the existing job, even if current discovery
+or capacity changed. Different content under that key is a 409 conflict. Only a
+matching-key `admission.state=not_accepted` response proves non-acceptance; generic
+503/network/storage errors do not authorize creating a new key.
+
+- `GET /v1/lens/jobs`: paginated cross-client history and last-user previews.
+- `GET /v1/lens/jobs/{id}`: status, progress and independent publication outcome.
+- `GET /v1/lens/jobs/{id}/request`: saved authored request, without retokenization.
+- `GET /v1/lens/jobs/{id}/result`: bounded immutable record pages with opaque cursors.
+- `POST /v1/lens/jobs/{id}/cancel`: empty body or `{}`; explicit cooperative cancel.
+
+Disconnect and history navigation never cancel accepted native work. Result pages
+retain exact prepared prompt text/bytes/token IDs/spans, sampling, sampled pieces,
+known consumption and terminal outcome. Stop/token-limit samples remain unconsumed.
+A failed forward reports unknown consumption, not a fabricated capture; a failed
+piece decode retains the sampled token ID without inventing bytes. `result.complete`
+means publication ended, not that every requested artifact was saved. Disk/queue
+failure can make publication fail without rewriting already-completed generation.
+
+The store syncs records before publishing their committed watermark. Reopening an
+unfinished job marks it interrupted; it never resumes or reruns inference. Corrupt
+committed content fails closed. Compatible historical retained-array descriptors
+can be downloaded and verified, but new baseline jobs produce no such arrays.
+
+## Bounds And Lifecycle
+
+One execution reservation covers ordinary preparation/response cleanup or a native
+job through writer completion. A new native request receives 429 while it is busy;
+an ordinary request receives 503 before its body is read. With history enabled,
+two bounded CPU classifier workers read headers and handle history/retry/cancel
+while the owner runs inference. With history disabled, existing pre-header busy
+behavior is unchanged. This is not multi-model scheduling or concurrent inference.
+
+Each mutating HTTP request has a completion lifetime; an accepted native job adds
+an independent lifetime through joined publication. Valid read-only Lens routes
+release activity before store/socket I/O, so polling does not reset idle snapshot
+publication. Only the owner invokes idle, request-finished and shutdown callbacks.
+Shutdown closes admission/delivery, interrupts cooperative execution, settles
+connections and joins control/artifact workers before the existing backend flush.
+An individual GPU command is not preemptible. Filesystem operations and writer joins
+have no deadline: a stalled filesystem can delay shutdown beyond the model-snapshot
+flush allowance. No new detached writer hides that limitation.
+
+Current bounds are explicit, not capability targets:
+
+- Request body: 1 MiB. Prepared/sample record: under 1 MiB including framing.
+- Token piece: 104755 bytes, derived from worst-case retained JSON expansion.
+- Writer: 128 queued events and 8 MiB of retained record allocation capacity.
+- Result page: 256 records / 2 MiB. History: 4096 jobs / 64 GiB, no silent eviction.
+- Native writer admission allowance: 82 MiB, including stack and publication work.
+- History-enabled control allowance: 512 MiB across both worker slots.
+
+The control allowance covers overlapping bounded request/result JSON trees,
+serialization, prepared-input token/span construction, watchdog/worker stacks,
+ordinary handoff and native writer setup. It is a conservative future-allocation
+allowance, not an allocator-enforced total bound. Qwen admission and pressure-relief
+retry retain it alongside durable-snapshot reservations; capture/spill and optional
+DFlash capture/state checks retain it too. Optional DFlash capture is admitted
+before allocation and falls back to uncaptured serial execution on refusal.
+
+Admission also asks for the full control allowance as fresh process headroom at
+startup and each connection. This can conservatively return 503 for history or
+cancellation when part of that allowance is already in use. Both workers can also
+be occupied by slow clients or filesystem access. Cancellation remains cooperative,
+not a guaranteed always-available priority lane. No memory safety override is used.
+
+## Qualification
+
+CPU tests exercise real sockets, the owner loop, the store and joined publication,
+using the actual tokenizer implementation over a synthetic byte vocabulary and
+mock forwards. They cover disconnect/retry/history without extra forwards,
+cancellation during execution and startup, active native shutdown, read-only idle
+accounting, publication failures and ordinary serving after native work. Existing
+all-family ordinary protocol and real SIGTERM CPU fixtures remain covered.
+
+These tests do not qualify released-model tokenization, numerical continuation,
+Metal memory pressure or real KV snapshot continuity. Minimal model-backed parity,
+disconnect/retry and restart checks remain pending. Preserved old-worktree live
+evidence is not current-branch qualification. Wire fixtures include historical
+diagnostic extensions; returned capabilities, not those examples, define support.

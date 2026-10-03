@@ -9,6 +9,7 @@ const WAIT: Duration = Duration::from_secs(2);
 fn control() -> Arc<Control> {
     Arc::new(Control {
         execution: ExecutionControl::default(),
+        server: None,
         owner: std::thread::current(),
     })
 }
@@ -49,6 +50,7 @@ fn pipeline() -> (OwnerActivity, HttpProxy, Receiver<Work>) {
     (
         activity,
         HttpProxy {
+            extra_cpu_reserve: 0,
             model_id: "test".into(),
             profile: RequestProfile::UnboundQwen,
             work,
@@ -118,6 +120,7 @@ fn explicit_owner_settlement_reports_worker_panic_after_releasing_activity() {
         panic!("worker supervision fixture")
     });
     let connection = Connection {
+        _execution: None,
         incoming: Some(incoming),
         worker: Worker {
             socket,
@@ -151,6 +154,7 @@ fn full_piece_channel_waits_without_spurious_failure_or_extra_copy() {
         .unwrap();
     let (_, processed) = sync_channel(1);
     let mut sink = OwnerSink {
+        extra_cpu_reserve: 0,
         pieces,
         processed,
         control: control(),
@@ -190,6 +194,7 @@ fn cancellation_wakes_full_channel_without_consuming_queued_output() {
     let (_, processed) = sync_channel(1);
     let control = control();
     let mut sink = OwnerSink {
+        extra_cpu_reserve: 0,
         pieces,
         processed,
         control: Arc::clone(&control),

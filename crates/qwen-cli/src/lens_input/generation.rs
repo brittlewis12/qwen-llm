@@ -105,8 +105,92 @@ pub(crate) fn prepare_qwen_model_generation_input(
     );
     let messages = acquire_structured_messages(spec.user, spec.system, spec.messages)?;
     let protocol = detect_qwen_message_protocol(family, gguf)?;
-    let (rendered, mode, output_state) =
-        render_generation(&messages, protocol, spec.message_mode, prefill)?;
+    let prepared = prepare_generation(
+        &messages,
+        protocol,
+        spec.message_mode,
+        Some(prefill),
+        tokenizer,
+    )?;
+    let record = record(
+        &prepared.input,
+        prepared.prompt_text,
+        prefill.clone(),
+        prepared.output_state,
+    );
+    validate_record(
+        &record,
+        &prepared.input.token_ids,
+        &prepared.input.rendering,
+    )?;
+    Ok((prepared.input, record))
+}
+
+pub(crate) struct PreparedLensGenerationInput {
+    pub(crate) input: PreparedLensInput,
+    prompt_text: String,
+    output_state: QwenGeneration,
+}
+
+impl PreparedLensGenerationInput {
+    #[allow(dead_code)] // Native publication is in the separate qwen binary.
+    pub(crate) fn record<'a>(
+        &'a self,
+        prefill: Option<&'a AssistantPrefill>,
+    ) -> impl Serialize + 'a {
+        #[derive(Serialize)]
+        struct Record<'a> {
+            kind: &'static str,
+            token_ids: &'a [i32],
+            rendering: &'a LensInputRendering,
+            prompt_text: &'a str,
+            prompt_bytes: &'a [u8],
+            prompt_digest: String,
+            template: &'a str,
+            assistant_prefill: Option<&'a AssistantPrefill>,
+            output_initial_state: &'static str,
+        }
+        Record {
+            kind: "prepared_input",
+            token_ids: &self.input.token_ids,
+            rendering: &self.input.rendering,
+            prompt_text: &self.prompt_text,
+            prompt_bytes: self.prompt_text.as_bytes(),
+            prompt_digest: qwen_llm::tokenizer::token_ids_sha256_i32le(&self.input.token_ids),
+            template: &self.input.rendering.renderer,
+            assistant_prefill: prefill,
+            output_initial_state: state_name(self.output_state),
+        }
+    }
+}
+
+#[allow(dead_code)] // Native ingress is in the separate qwen binary.
+pub(crate) fn prepare_qwen_generation_messages_bytes(
+    bytes: &[u8],
+    source: &str,
+    mode: Option<LensMessageMode>,
+    prefill: Option<&AssistantPrefill>,
+    protocol: QwenPromptTemplate,
+    tokenizer: &Tokenizer,
+) -> Result<PreparedLensGenerationInput> {
+    let text = std::str::from_utf8(bytes).context("messages must be UTF-8")?;
+    let messages = parse_strict_ordinary_chat_input(text, source)?;
+    prepare_generation(&messages, protocol, mode, prefill, tokenizer)
+}
+
+fn prepare_generation(
+    messages: &[ChatMessage],
+    protocol: QwenPromptTemplate,
+    mode: Option<LensMessageMode>,
+    prefill: Option<&AssistantPrefill>,
+    tokenizer: &Tokenizer,
+) -> Result<PreparedLensGenerationInput> {
+    let (rendered, mode, output_state) = if let Some(prefill) = prefill {
+        render_generation(messages, protocol, mode, prefill)?
+    } else {
+        let (rendered, _, mode) = render_qwen_structured_messages(messages, protocol, mode)?;
+        (rendered, mode, initial_state(protocol, mode)?)
+    };
     ensure!(
         rendered.text.len() <= MAX_OPEN_RESPONSES_BYTES,
         "generation input exceeds retained-text limit"
@@ -127,9 +211,11 @@ pub(crate) fn prepare_qwen_model_generation_input(
             spans,
         },
     };
-    let record = record(&input, rendered.text, prefill.clone(), output_state);
-    validate_record(&record, &input.token_ids, &input.rendering)?;
-    Ok((input, record))
+    Ok(PreparedLensGenerationInput {
+        input,
+        prompt_text: rendered.text,
+        output_state,
+    })
 }
 
 fn record(

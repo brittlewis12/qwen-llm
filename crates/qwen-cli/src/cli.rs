@@ -112,6 +112,10 @@ pub(crate) struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     trace_sse: Option<PathBuf>,
 
+    /// Private durable Lens job history; native execution currently supports ordinary Qwen.
+    #[arg(long)]
+    lens_data_dir: Option<PathBuf>,
+
     /// Whose conventions prompts follow where serve deliberately departs from
     /// a release chat template (Qwen and DeepSeek V4). `house`: past turns
     /// render as they were generated whatever the current thinking mode, and
@@ -186,6 +190,7 @@ pub(crate) struct ServeInvocation {
     pub(crate) durable: crate::serve::durable::DurableSnapshotConfig,
     pub(crate) drafter: Option<PathBuf>,
     pub(crate) trace_sse: Option<PathBuf>,
+    pub(crate) lens_data_dir: Option<PathBuf>,
     pub(crate) template_style: crate::open_responses::items::TemplateStyle,
 }
 
@@ -460,6 +465,7 @@ pub(crate) fn normalize(args: &mut Args) -> Invocation {
             },
             drafter: serve.drafter,
             trace_sse: serve.trace_sse,
+            lens_data_dir: serve.lens_data_dir,
             template_style: serve.template_style,
         }),
         Command::Run(run) => {

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "model_identity": "example-content-identity",
+  "assets": [
+    {"alias": "plain", "kind": "plain", "identity": "example-content-identity", "available": true, "unavailable_reason": null, "source_layers": [12, 31], "target_layer": null, "readout_modes": ["selected", "full_vocabulary"], "direction_rows": ["token_id"], "transfer": "model_native"},
+    {"alias": "fitted", "kind": "published_full_transport", "identity": "example-artifact-identity", "available": true, "unavailable_reason": null, "source_layers": [12], "target_layer": 31, "readout_modes": ["selected", "full_vocabulary"], "direction_rows": ["token_id"], "transfer": "validated"}
+  ]
+}

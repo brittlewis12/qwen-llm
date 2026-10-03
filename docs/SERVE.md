@@ -127,7 +127,8 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
   [--snapshot-idle-ttl-secs 3600] [--snapshot-max-age-secs 86400] \
   [--snapshot-half-life-secs 600] [--durable-snapshot-dir PATH|off] \
   [--durable-snapshot-max-mib auto|MIB] [--durable-snapshot-min-tokens 1024] \
-  [--durable-idle-publish-secs 30] [--durable-shutdown-secs 30]
+  [--durable-idle-publish-secs 30] [--durable-shutdown-secs 30] \
+  [--lens-data-dir PATH]
 # Qwen: without --max-context-tokens the admission ceiling is the smaller of the
 # 262,144 hard default and the GGUF's declared context length; --drafter is
 # accepted for dense targets only (an MoE target fails startup rather than
@@ -139,6 +140,16 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
 # K2 requires explicit --max-context-tokens (within checkpoint context) and
 # --max-tokens; --snapshot-cache-mib is ignored (live-session prefix reuse).
 ```
+
+**Durable diagnostic baseline (ordinary Qwen only).** `--lens-data-dir PATH`
+enables the native `/v1/lens` job/history API on this same server. Qualified House
+Qwen3.6/3.8 deployments accept messages, typed assistant prefills and explicit
+sampling; other ordinary deployments can read history without claiming execution
+support. Readouts, interventions and the browser client are still being recovered.
+Ordinary `/v1/responses` remains available, sharing one execution reservation.
+Accepted native jobs survive client disconnect; history reads never run inference.
+See [Lens Workbench](LENS-WEB.md) for limits, overload, recovery and qualification.
+This job directory is separate from reusable model snapshots.
 
 **Snapshot cache policy (Qwen and DS4).** Both RAM caches share one policy
 (`qwen_llm::snapshot_policy`), logged on the `serve limits:` line:
@@ -447,8 +458,9 @@ one completion callback runs, workers settle, and the listener closes before
 backend shutdown. The fixture checks the termination error and exits through the
 test harness; it does not qualify the production CLI's signal-derived exit code.
 Live Metal pressure, performance, cache continuity and model-backed signal/durable
-shutdown remain pending. Concurrent history/native routes and the Lens web client
-are not provided by this milestone.
+shutdown remain pending. This earlier ordinary-bridge milestone does not establish
+Lens qualification. The subsequent [durable baseline slice](LENS-WEB.md) adds
+concurrent history/native routes; its browser client is still pending recovery.
 
 ## K2 Horizon Raw Profile
 

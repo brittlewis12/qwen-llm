@@ -18,7 +18,9 @@ use anyhow::Context as _;
 use objc2_metal::MTLBuffer;
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::loader::{Model, open_dflash_drafter};
-use qwen_llm::metal::{MetalTensor, evaluate_metal_memory_admission};
+#[cfg(test)]
+use qwen_llm::metal::evaluate_metal_memory_admission;
+use qwen_llm::metal::{MetalTensor, evaluate_metal_memory_admission_with_cpu_bytes};
 use qwen_llm::metal_dflash::{
     MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession, MetalDFlashVerifyScratch,
     PrefillScratchConfig, dflash_capture_window_complete, dflash_capture_window_limit,
@@ -53,6 +55,30 @@ const DFLASH_PREFIX_REPLAY_MAX_TOKENS: usize = 4096;
 const DFLASH_PREFIX_REPLAY_MIN_SAMPLED_ENTRIES: usize = 2;
 const DFLASH_PREFIX_REPLAY_MIN_SAMPLED_TOKENS: usize = 32;
 type DflashPromptCapture = (MetalTensor, usize, usize, usize, Option<usize>);
+
+fn allocate_admitted_dflash<T>(
+    bytes: u64,
+    cpu_reserved: u64,
+    signals: qwen_llm::metal::MetalMemorySignals,
+    allocate: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let admission = evaluate_metal_memory_admission_with_cpu_bytes(
+        bytes,
+        cpu_reserved,
+        DFLASH_FIXED_SCRATCH_RESERVE_BYTES,
+        signals,
+        true,
+    );
+    anyhow::ensure!(
+        admission.admitted,
+        "reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
+        admission.reason.as_str(),
+        admission.required_bytes,
+        admission.working_set_headroom_bytes,
+        admission.signals.process_limit_remaining_bytes,
+    );
+    allocate()
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DflashPrefixReplayKey {
@@ -197,7 +223,8 @@ impl ServeError {
 
 pub(crate) struct EngineBackend {
     loaded: LoadedModel,
-    tokenizer: Tokenizer,
+    tokenizer: std::sync::Arc<Tokenizer>,
+    control_cpu_reserve: u64,
     model_id: String,
     default_max_tokens: usize,
     max_context_tokens: Option<usize>,
@@ -268,7 +295,8 @@ impl EngineBackend {
         };
         Ok(Self {
             loaded,
-            tokenizer,
+            tokenizer: std::sync::Arc::new(tokenizer),
+            control_cpu_reserve: 0,
             model_id,
             default_max_tokens,
             max_context_tokens,
@@ -781,6 +809,73 @@ fn prefill_remaining(
 }
 
 impl GenerationBackend for EngineBackend {
+    fn set_control_memory_reserve(&mut self, bytes: u64) {
+        self.control_cpu_reserve = bytes;
+    }
+
+    fn native_profile(&self) -> anyhow::Result<Option<std::sync::Arc<super::native::Profile>>> {
+        if self.template_style != super::items::TemplateStyle::House {
+            return Ok(None);
+        }
+        let protocol = match self.template {
+            QwenTemplate::Qwen36 => crate::prompt_template::QwenPromptTemplate::Qwen36,
+            QwenTemplate::Qwen38 => crate::prompt_template::QwenPromptTemplate::Qwen38,
+            _ => return Ok(None),
+        };
+        let (model, tokenizer) =
+            qwen_llm::runtime::opened_gguf_lightweight_identity_parts(self.loaded.gguf())?;
+        Ok(Some(std::sync::Arc::new(super::native::Profile {
+            model_id: self.model_id.clone(),
+            identity: format!("runtime_gguf_metadata_v1:{model:016x}:{tokenizer:016x}"),
+            protocol,
+            tokenizer: std::sync::Arc::clone(&self.tokenizer),
+            layers: self.loaded.arch().n_layer,
+            hidden: self.loaded.arch().hidden_size as usize,
+            context: self.context_ceiling,
+            max_tokens: self.context_ceiling,
+            no_thinking_supported: self.no_thinking_supported,
+        })))
+    }
+
+    fn generate_native(
+        &mut self,
+        prepared: &super::native::Prepared,
+        sink: &super::native::Sink,
+    ) -> super::native::Outcome {
+        let admission = (|| -> anyhow::Result<()> {
+            super::native::checkpoint(sink)?;
+            let capacity = prepared.capacity()?;
+            let cpu = self
+                .durable_reserved_bytes()
+                .checked_add(super::control::CPU_RESERVE_BYTES)
+                .and_then(|bytes| bytes.checked_add(super::native::CPU_UPPER_BYTES))
+                .context("native CPU reserve overflow")?;
+            let (_, admission) = admit_with_pressure_relief(
+                None::<((), u64)>,
+                0,
+                cpu,
+                |_, reserved| {
+                    self.loaded
+                        .qwen_execution_memory_admission_with_additional_bytes(
+                            1, capacity, 0, 0, reserved,
+                        )
+                },
+                |deficit| !self.loaded.evict_prefix_cache_for(deficit).is_empty(),
+            )?;
+            anyhow::ensure!(
+                admission.admitted,
+                "native memory admission denied: {}",
+                admission.reason.as_str()
+            );
+            Ok(())
+        })();
+        if let Err(cause) = admission {
+            tracing::error!("native admission: {cause:#}");
+            return super::native::Outcome::preparation_failed(prepared.counters(), cause);
+        }
+        super::native::run_loaded(&self.loaded, &self.tokenizer, prepared, sink)
+    }
+
     fn model_id(&self) -> &str {
         &self.model_id
     }
@@ -1148,12 +1243,31 @@ impl GenerationBackend for EngineBackend {
                 } else {
                     Some(window_limit)
                 };
-                let capture_columns = ring_columns.unwrap_or(prompt_ids.len()) + ext;
+                let capture_columns = ring_columns
+                    .unwrap_or(prompt_ids.len())
+                    .checked_add(ext)
+                    .ok_or_else(|| {
+                        ServeError::server_error("DFlash capture column count overflow")
+                    })?;
                 let capture_elements =
                     capture_columns.checked_mul(n_features).ok_or_else(|| {
                         ServeError::server_error("DFlash capture element count overflow")
                     })?;
-                match MetalTensor::zeros_f32(self.loaded.context(), vec![capture_elements as u64]) {
+                let allocation = (|| -> anyhow::Result<MetalTensor> {
+                    let elements = u64::try_from(capture_elements)?;
+                    let bytes = elements
+                        .checked_mul(size_of::<f32>() as u64)
+                        .context("DFlash capture byte count overflow")?;
+                    let context = self.loaded.context();
+                    let priced = context
+                        .shared_buffer_size_and_align(bytes)
+                        .context("price DFlash capture allocation")?
+                        .size;
+                    allocate_admitted_dflash(priced, cpu_reserved, context.memory_signals(), || {
+                        Ok(MetalTensor::zeros_f32(context, vec![elements])?)
+                    })
+                })();
+                match allocation {
                     Ok(dst) => {
                         // Seed the leading part of the window from the
                         // checkpoint's capture tail (restored-request
@@ -1199,7 +1313,7 @@ impl GenerationBackend for EngineBackend {
                     }
                     Err(error) => {
                         tracing::warn!(
-                            "serve: optional DFlash capture allocation failed; continuing without capture: {error:#}"
+                            "serve: optional DFlash capture admission/allocation failed; continuing without capture: {error:#}"
                         );
                         None
                     }
@@ -1317,21 +1431,12 @@ impl GenerationBackend for EngineBackend {
                     .and_then(|bytes| bytes.checked_add(layer_scratch_bytes))
                     .and_then(|bytes| bytes.checked_add(sampled_logits_bytes))
                     .context("DFlash optional byte total overflow")?;
-                let admission = evaluate_metal_memory_admission(
+                allocate_admitted_dflash(
                     optional_bytes,
-                    DFLASH_FIXED_SCRATCH_RESERVE_BYTES,
+                    cpu_reserved,
                     self.loaded.context().memory_signals(),
-                    true,
-                );
-                anyhow::ensure!(
-                    admission.admitted,
-                    "reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
-                    admission.reason.as_str(),
-                    admission.required_bytes,
-                    admission.working_set_headroom_bytes,
-                    admission.signals.process_limit_remaining_bytes,
-                );
-                Ok((n_features, session_capacity))
+                    || Ok((n_features, session_capacity)),
+                )
             })()
             .map_err(|error| {
                 tracing::warn!(
@@ -1849,7 +1954,9 @@ impl EngineBackend {
         // Plus the durable writer's in-flight decode copy, which the memory
         // signals may not show yet.
         if let Err((reason, signals)) = super::admit_snapshot_capture(
-            estimate.saturating_add(self.durable_reserved_bytes()),
+            estimate
+                .saturating_add(self.durable_reserved_bytes())
+                .saturating_add(self.control_cpu_reserve),
             || self.loaded.context().memory_signals(),
             |bytes| self.loaded.evict_prefix_cache_for(bytes),
         ) {
@@ -2058,6 +2165,31 @@ impl EngineBackend {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn optional_dflash_cannot_allocate_from_standing_control_headroom() {
+        use qwen_llm::metal::MetalMemorySignals;
+        let bytes = 4096;
+        let reserve = super::super::control::CPU_RESERVE_BYTES;
+        let remaining = bytes + super::DFLASH_FIXED_SCRATCH_RESERVE_BYTES + 1;
+        let signals = MetalMemorySignals {
+            recommended_max_bytes: u64::MAX,
+            current_allocated_bytes: 0,
+            process_limit_remaining_bytes: Some(remaining),
+        };
+        assert!(
+            super::allocate_admitted_dflash::<()>(bytes, reserve, signals, || {
+                panic!("capture must not allocate when it would spend the control reserve")
+            })
+            .is_err()
+        );
+        assert!(super::allocate_admitted_dflash(bytes, 0, signals, || Ok(())).is_ok());
+        let signals = MetalMemorySignals {
+            process_limit_remaining_bytes: Some(remaining + reserve),
+            ..signals
+        };
+        assert!(super::allocate_admitted_dflash(bytes, reserve, signals, || Ok(())).is_ok());
+    }
+
     use super::*;
 
     #[test]

@@ -31,6 +31,7 @@ const BUFFER_RESERVE_BYTES: u64 =
 struct Control {
     execution: ExecutionControl,
     owner: Thread,
+    server: Option<super::control::ExecutionGate>,
 }
 
 impl Control {
@@ -40,6 +41,11 @@ impl Control {
     }
 
     fn checkpoint(&self) -> io::Result<()> {
+        if let Some(server) = &self.server {
+            server
+                .checkpoint()
+                .map_err(|cause| aborted(cause.to_string()))?;
+        }
         self.execution
             .checkpoint()
             .map_err(|_| aborted("HTTP subscriber stopped"))?;
@@ -65,12 +71,14 @@ struct Work {
     terminal: SyncSender<Result<GenerationOutcome, BackendFailure>>,
     control: Arc<Control>,
     _activity: Arc<ActivityGuard>,
+    extra_cpu_reserve: u64,
 }
 
 struct OwnerSink {
     pieces: SyncSender<Piece>,
     processed: Receiver<()>,
     control: Arc<Control>,
+    extra_cpu_reserve: u64,
 }
 
 struct Piece {
@@ -102,7 +110,7 @@ impl OwnerSink {
 
 impl GenerationSink for OwnerSink {
     fn transport_reserve_bytes(&self) -> u64 {
-        BUFFER_RESERVE_BYTES
+        BUFFER_RESERVE_BYTES + self.extra_cpu_reserve
     }
 
     fn piece(&mut self, bytes: &[u8]) -> io::Result<()> {
@@ -150,6 +158,7 @@ struct HttpProxy {
     work: SyncSender<Work>,
     control: Arc<Control>,
     activity: Arc<ActivityGuard>,
+    extra_cpu_reserve: u64,
 }
 
 impl GenerationBackend for HttpProxy {
@@ -187,6 +196,7 @@ impl GenerationBackend for HttpProxy {
                 terminal,
                 control: Arc::clone(&self.control),
                 _activity: Arc::clone(&self.activity),
+                extra_cpu_reserve: self.extra_cpu_reserve,
             })
             .map_err(|_| ServeError::server_error("HTTP model owner unavailable"))?;
         loop {
@@ -255,6 +265,7 @@ fn execute(work: Work, backend: &mut dyn GenerationBackend) {
         pieces: work.pieces,
         processed: work.processed,
         control: work.control,
+        extra_cpu_reserve: work.extra_cpu_reserve,
     };
     let result = match sink.tick() {
         Ok(()) => backend.generate_prepared(work.prepared, &mut sink),
@@ -269,6 +280,7 @@ fn execute(work: Work, backend: &mut dyn GenerationBackend) {
 pub(super) struct Connection {
     incoming: Option<Receiver<Work>>,
     worker: Worker,
+    _execution: Option<super::control::ExecutionPermit>,
 }
 
 impl Connection {
@@ -278,18 +290,68 @@ impl Connection {
         trace: Option<TraceSubscriber>,
         guard: ActivityGuard,
     ) -> Result<Self> {
+        Self::spawn(
+            stream,
+            backend.model_id().to_owned(),
+            backend.request_profile(),
+            trace,
+            guard,
+            None,
+            None,
+        )
+    }
+
+    pub(super) fn prepared(
+        stream: TcpStream,
+        model_id: String,
+        profile: RequestProfile,
+        trace: Option<TraceSubscriber>,
+        guard: ActivityGuard,
+        request: http::HttpRequest,
+        execution: super::control::ExecutionPermit,
+    ) -> Result<Self> {
+        Self::spawn(
+            stream,
+            model_id,
+            profile,
+            trace,
+            guard,
+            Some(request),
+            Some(execution),
+        )
+    }
+
+    fn spawn(
+        stream: TcpStream,
+        model_id: String,
+        profile: RequestProfile,
+        trace: Option<TraceSubscriber>,
+        guard: ActivityGuard,
+        request: Option<http::HttpRequest>,
+        execution: Option<super::control::ExecutionPermit>,
+    ) -> Result<Self> {
         let socket = stream.try_clone().context("clone HTTP shutdown handle")?;
         let control = Arc::new(Control {
             execution: ExecutionControl::default(),
-            owner: std::thread::current(),
+            server: execution
+                .as_ref()
+                .map(super::control::ExecutionPermit::gate),
+            owner: execution
+                .as_ref()
+                .map_or_else(std::thread::current, super::control::ExecutionPermit::owner),
         });
         let (sender, incoming) = sync_channel(1);
         let mut proxy = HttpProxy {
-            model_id: backend.model_id().to_owned(),
-            profile: backend.request_profile(),
+            model_id,
+            profile,
             work: sender,
             control: Arc::clone(&control),
             activity: Arc::new(guard),
+            extra_cpu_reserve: if execution.is_some() {
+                super::control::CPU_RESERVE_BYTES
+            } else {
+                0
+            },
         };
         let cancel = CancelOnDrop(Arc::clone(&control));
         let thread = std::thread::Builder::new()
@@ -297,11 +359,15 @@ impl Connection {
             .stack_size(WORKER_STACK_BYTES)
             .spawn(move || {
                 let _cancel = cancel;
-                http::handle_connection(&stream, &mut proxy, trace)
+                match request {
+                    Some(request) => http::handle_request(&stream, &mut proxy, trace, request),
+                    None => http::handle_connection(&stream, &mut proxy, trace),
+                }
             })
             .context("spawn HTTP request worker")?;
         Ok(Self {
             incoming: Some(incoming),
+            _execution: execution,
             worker: Worker {
                 socket,
                 control,

@@ -64,13 +64,13 @@ recovery is explicitly recorded below.
 | --- | --- | --- | --- |
 | R01 | Bounded regular-file access: `bounded_file.rs`, Lens readers | Shared readers recovered with current CLI consumers; future HTTP reader wiring travels with its consuming slice | CPU symlink/type/length/mutation tests; all reader consumers build |
 | R02 | Shared authored scopes and operation semantics: `lens_scope.rs`, `lens_intervention.rs`, `lens_run/{plan,execute,sweep}.rs` | Partially recovered: shared scopes/wire forms/normalization and strict coefficient ingress with existing CLI consumers; shared lowering/action validation remain pending | Current CLI wire/binding/normalization/lowering regressions; no new service dependency |
-| R03 | Typed prefills and annotated input: `lens_input.rs`, `model_request.rs`, `messages.rs`, `open_responses/render.rs`, CLI callers | Partially recovered: ordinary Qwen3.6/3.8 singleton CLI prefills and strict retained context; native input/tool/history integration pending | Exact prompt bytes, token positions, reasoning-only continuation, tools and house/upstream rendering |
+| R03 | Typed prefills and annotated input: `lens_input.rs`, `model_request.rs`, `messages.rs`, `open_responses/render.rs`, CLI callers | Partially recovered: ordinary Qwen3.6/3.8 singleton CLI and native House prefills with exact retained context; tool/upstream and browser integration pending | Exact prompt bytes, token positions, reasoning-only continuation, tools and house/upstream rendering |
 | R04 | Deployment binding and asset verification: `linear_transport{.rs,/deployment.rs,/cpu_fixture.rs}`, `full_lens/access.rs` | Partially recovered: shared CPU deployment binding with existing CLI consumers; native registry integration pending; main's expected-profile checks retained | Binding mismatch refusal, retained payload hashes, CPU-before-Metal admission, no implicit transfer override |
 | R05 | Shared ordinary execution: `ordinary_executor.rs`, `qwen/decode.rs`, `lens_run/execute.rs` | Partially recovered: shared serial decode lifecycle and explicit request cancellation with existing CLI/serve/Lens consumers; prefill and forwarding adapters pending | CLI/serve sampling, cancellation, terminal nonconsumption and telemetry remain equivalent except documented added checkpoints |
-| R06 | Owner queue and CPU HTTP coordination: `serve/{control,queue,request_profile}.rs`, backend/HTTP wiring | Partially recovered: ordinary single-admission CPU transport and owner-only generation, with profiles/activity/traces; multi-request/native coordination and live qualification remain pending | Idle/request-finished/shutdown ownership, busy admission, cancellation/disconnect, JSON/SSE protocols |
-| R07 | Durable job metadata: `serve/jobs/{state,store,preview}.rs` | Reuse with R06; distinct from main's durable model snapshots | Exact-key acceptance/retry, bounded publication, recovery and corruption handling, history without inference |
-| R08 | Native request/routes/preconditions: `serve/lens_http/*`, `serve/native/preconditions.rs` | Reuse schema where compatible; R03/R06/R07 | Unknown-field rejection, local HTTP checks, binding coverage, stale rejection before acceptance, accepted-key recovery |
-| R09 | Native baseline and observation lifecycle: `serve/native/{mod,execute,writer}.rs` | Rework admission around current resident/cache budgets; R05-R08 | Disconnected completion, cancellation, independent outcomes, bounded writer, isolated diagnostic state |
+| R06 | Owner queue and CPU HTTP coordination: `serve/{control,queue,request_profile}.rs`, backend/HTTP wiring | Partially recovered: shared one-execution admission plus two CPU control workers for ordinary Qwen history/native traffic; other-family control allowance and live qualification pending | Idle/request-finished/shutdown ownership, busy admission, cancellation/disconnect, JSON/SSE protocols |
+| R07 | Durable job metadata: `serve/jobs/{state,store,preview}.rs` | Recovered with a real baseline producer and routes; distinct from main's durable model snapshots | CPU acceptance/retry, bounded publication, recovery/corruption, history without inference pass; live restart pending |
+| R08 | Native request/routes/preconditions: `serve/lens_http/*`, `serve/native/preconditions.rs` | Baseline routes/preconditions recovered; diagnostic admission pending | CPU unknown-field/local HTTP/binding checks and accepted-key recovery pass |
+| R09 | Native baseline and observation lifecycle: `serve/native/{mod,execute,writer}.rs` | Baseline recovered on current resident/cache admission, joined writer; observation production and live qualification pending | CPU disconnected completion, cancellation races, independent outcomes and shutdown pass; real-model qualification pending |
 | R10 | Plain original-forward readouts: `serve/native/{readouts,observe}.rs` | Reuse after R09, not transformer replay | Scope/token coordinates, shared heads, unchanged samples, no terminal fabricated readout; bounded live check |
 | R11 | Fitted readouts and direction staging: `serve/native/{registry,interventions}.rs`, `workspace_lens/*` | Reuse after R04/R09/R10 | Registered identity, matrix integrity, bounded ready-only staging/workspace, independent numerical oracle |
 | R12 | Ordered scoped interventions: `serve/native/interventions/*`, `lens_intervention.rs` | Reuse after R02/R11 | Exact order/scopes, zero controls, deployed covector semantics, independent transformation checks |
@@ -125,8 +125,9 @@ The preserved implementation last passed 238 serve tests (19 opt-in ignored),
 53 Bun tests and browser/build checks on its old integration. It also holds prior
 bounded numerical evidence, including a failed process exit later diagnosed as a
 test-witness precision mismatch and independently checked from saved arrays.
-Those are reference evidence only. No Lens HTTP executor or web UI is recovered
-on this branch yet.
+Those are reference evidence only. The baseline Lens HTTP executor/history is now
+recovered with scoped CPU evidence; the browser and diagnostic execution remain
+pending.
 
 After recovery, interaction design and usable information density remain the
 primary product focus. This repair is not authorization for new feature scope.
@@ -510,12 +511,12 @@ protocol, lifecycle and real SIGTERM subprocess fixtures pass. Serving gates pas
 filtered. All binaries/tests compile; format/whitespace checks pass. Durable jobs,
 independent native cancellation and concurrent control traffic remain pending.
 
-### Next R06 Integration Boundary
+### R06 Integration Requirements
 
-The next expansion is concurrent diagnostic/history handling and native owner
-work. Its queue, activity lifetime, cancellation, transport memory admission and
-worker settlement must remain one coherent implementation. Reuse the owner bridge;
-do not add another service or restore the old readiness/dispatcher hop.
+Concurrent diagnostic/history handling and native owner work must keep queue,
+activity lifetime, cancellation, memory admission and worker settlement coherent.
+Reuse the owner bridge; do not add another service or restore the old
+readiness/dispatcher hop. The recovered baseline below is the first consumer.
 
 The old piece-buffer allowance is not a total transport budget. Account for request
 bodies, parsed/rendered forms, queued work, generation output, response assembly,
@@ -536,3 +537,66 @@ Include socket-registration/closure races and read watchdogs in that settlement.
 CPU tests can qualify coordination and policy decisions, not real Metal pressure,
 cache continuity or durable snapshot persistence. Bounded live checks remain
 pending; never override memory safety to obtain them.
+
+### R06-R09: Durable Baseline On The Resident Owner
+
+`qwen serve --lens-data-dir` now has a real cache-isolated baseline producer,
+durable acceptance/history and same-port native routes. The flag initially requires
+ordinary Qwen; execution requires metadata-qualified House Qwen3.6/3.8. Unsupported
+ordinary deployments expose history without claiming execution. Nonempty diagnostic
+plans are refused. No fitted registry, readout head or browser is implied.
+
+One execution gate covers ordinary preparation/response cleanup or a native job
+through writer join. Two bounded CPU classifiers handle history, exact-key retry
+and explicit cancellation while the owner runs. Ordinary traffic is refused before
+body upload when execution is busy; history-disabled pre-header behavior remains.
+Delivery and closure share one gate lock, and failed events are dropped outside it.
+Local control closure reaches owner dispatch and ordinary/native checkpoints.
+Mutating HTTP and independent native work have separate completion lifetimes;
+valid read-only history releases activity before storage/socket I/O. Owner-only
+maintenance callbacks and current durable snapshot shutdown remain in place.
+
+Preparation shares CLI rendering, exact tokenization/alignment and typed prefill
+semantics. The borrowed record is size-bounded before building its JSON Value tree.
+Native decode shares the serial lifecycle, distinguishes request cancellation from
+server interruption, and retains sampled versus consumed tokens without replay.
+Piece bounds and borrowed serialization prevent sampled-byte Value amplification.
+The joined CPU writer owns all execution-time job disk publication, with independent
+terminal delivery and recording failure. Store start settles early cancellation
+under its transition lock, including cancellation signalled before its publication.
+Writer setup failure cannot become model success. Dropping undispatched work closes
+publication as interrupted, rather than pretending it was an explicit user cancel.
+
+Admission retains a conservative 512 MiB control allowance plus durable pending
+bytes; native admission also reserves 82 MiB for writer/publication work. The same
+allowance survives pressure-relief retry, snapshot capture/spill and both optional
+DFlash checks. Capture allocation now follows admission rather than consuming
+reserved headroom first; refusal keeps the serial fallback. These are conservative
+allowances, not allocator-enforced bounds. Full fresh-headroom checks per connection
+can refuse history/cancel even after some allowance is already in use. Filesystem
+operations and joined writers are not deadline-bounded. See `docs/LENS-WEB.md` for
+the complete current lifecycle and availability limitations.
+
+Store recovery retains compatible saved array reads but does not advertise new
+capture production. Schema fixtures preserve historical diagnostic extensions as
+illustrations, explicitly separated from current capabilities. Model identity is
+metadata-based, not content authentication. No arbitrary HTTP model/path loading,
+alternate service, resumed inference or client-owned execution lifetime is added.
+
+CPU gates: 285 serving tests pass with 25 opt-in/child entries ignored; the known
+unmarked Metal-context test is explicitly excluded. Lens passes 383 with nine
+ignored and its unmarked Muse Metal test explicitly excluded. Synthetic tokenizer
+and mock-forward tests traverse real sockets/owner/store/writer for disconnect,
+retry, read-only access without new forwards, cancellation, subsequent ordinary
+serving, local stop during active native work, and publication failures. Coordinated
+tests cover the pre-publication cancellation race and idle release while history
+waits on store access. Existing real SIGTERM ordinary CPU fixture remains covered.
+These are not released-model numerical, GPU pressure or KV snapshot qualifications.
+No GPU lease was used. Origin/main was fetched again and remains the pinned base.
+All binaries/tests compile without warnings; formatting and whitespace pass.
+Iterative `cx` review found and then cleared the startup-cancellation race and
+pre-admission DFlash allocation; final review approves this CPU-qualified slice.
+
+Next: recover the preserved Bun baseline submission/history client with binding
+and draft safety, before adding plain original-forward readouts. Then restore
+fitted assets/interventions and retained/pair exploration in their consuming slices.

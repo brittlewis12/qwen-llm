@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "available": false,
+  "unavailable_reason": "diagnostic_executor_not_connected",
+  "model": {"id": "example-model", "identity": null, "template": null, "layers": null, "vocabulary_size": null},
+  "input_kinds": [],
+  "generation_modes": [],
+  "assistant_prefill_channels": [],
+  "operations": [],
+  "readout_modes": [],
+  "capture_stage": "post_block_after_operations",
+  "limits": {
+    "max_body_bytes": 1048576, "max_new_tokens": 0, "max_context_tokens": 0,
+    "max_operations": 0, "max_directions": 0, "max_readouts": 0, "max_top_k": 0,
+    "max_queued_jobs": 32, "max_retained_jobs": 4096, "max_history_bytes": 68719476736,
+    "max_result_page_records": 256, "max_result_page_bytes": 2097152
+  }
+}

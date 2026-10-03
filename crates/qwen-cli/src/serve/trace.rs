@@ -36,6 +36,9 @@ pub(crate) struct TraceSubscriber {
     request_id: String,
 }
 
+#[derive(Clone)]
+pub(super) struct TraceFactory(SharedSender);
+
 impl TraceLog {
     pub(crate) fn open(path: &Path) -> io::Result<Self> {
         use std::os::fd::AsRawFd;
@@ -101,13 +104,23 @@ impl TraceLog {
     }
 
     pub(crate) fn subscriber(&self) -> TraceSubscriber {
+        self.factory().subscriber()
+    }
+
+    pub(super) fn factory(&self) -> TraceFactory {
+        TraceFactory(Arc::clone(&self.sender))
+    }
+}
+
+impl TraceFactory {
+    pub(super) fn subscriber(&self) -> TraceSubscriber {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
         TraceSubscriber {
-            sender: Arc::clone(&self.sender),
+            sender: Arc::clone(&self.0),
             request_id: format!(
                 "trace_{:x}_{now:x}_{:x}",
                 std::process::id(),

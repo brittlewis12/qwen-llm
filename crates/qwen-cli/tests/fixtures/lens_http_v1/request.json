@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "idempotency_key": "example-baseline-1",
+  "preconditions": {"model_identity": "example-content-identity", "asset_identities": {"plain": "example-content-identity"}},
+  "input": {
+    "kind": "messages",
+    "messages": [{"role": "user", "content": "Explain why the sky is blue."}],
+    "generation_mode": "no_thinking",
+    "assistant_prefill": {"channel": "final", "text": "The main reason is"}
+  },
+  "generation": {
+    "max_new_tokens": 64,
+    "sampling": {"temperature": 0, "top_k": 200, "top_p": 1, "min_p": 0.05, "seed": 42}
+  },
+  "diagnostics": {
+    "directions": [{"id": "d1", "lens": "plain", "row": {"kind": "token_id", "token_id": 123}, "normalization": "unit_l2"}],
+    "operations": [{"id": "op1", "scope": {"layers": {"kind": "values", "values": [12]}, "decode": {"kind": "all"}}, "action": {"kind": "fixed_add", "direction": "d1", "coefficient": 0.25}}],
+    "readouts": [{"id": "r1", "lens": "plain", "mode": "full_vocabulary", "scope": {"layers": {"kind": "values", "values": [12]}, "decode": {"kind": "all"}}, "top_k": 10}]
+  }
+}

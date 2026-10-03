@@ -66,6 +66,21 @@ pub(crate) struct GenerationOutcome {
 
 pub(crate) trait GenerationBackend {
     fn model_id(&self) -> &str;
+    fn set_control_memory_reserve(&mut self, _bytes: u64) {}
+    fn native_profile(&self) -> anyhow::Result<Option<Arc<super::native::Profile>>> {
+        Ok(None)
+    }
+    fn generate_native(
+        &mut self,
+        prepared: &super::native::Prepared,
+        _sink: &super::native::Sink,
+    ) -> super::native::Outcome {
+        super::native::Outcome::failed(
+            prepared.counters(),
+            "unsupported_capability",
+            "The resident backend has no native diagnostic executor.",
+        )
+    }
     fn request_profile(&self) -> super::request_profile::RequestProfile {
         super::request_profile::RequestProfile::UnboundQwen
     }
@@ -197,6 +212,8 @@ impl From<ServeError> for BackendFailure {
 pub(crate) struct HttpRequest {
     pub(crate) method: String,
     pub(crate) path: String,
+    pub(crate) host: Option<String>,
+    pub(crate) origin: Option<String>,
     pub(crate) body: Vec<u8>,
 }
 
@@ -294,6 +311,13 @@ fn read_bounded_line<R: BufRead>(reader: &mut R, limit: usize) -> io::Result<Opt
 
 /// Read one request. `Ok(None)` on clean EOF before a request line.
 pub(crate) fn read_http_request<R: BufRead>(reader: &mut R) -> io::Result<Option<HttpRequest>> {
+    read_http_request_admitted(reader, |_, _| Ok(()))
+}
+
+fn read_http_request_admitted<R: BufRead>(
+    reader: &mut R,
+    mut admit: impl FnMut(&HttpRequest, usize) -> io::Result<()>,
+) -> io::Result<Option<HttpRequest>> {
     let request_line_bytes = match read_bounded_line(reader, MAX_REQUEST_LINE_BYTES)? {
         Some(line) => line,
         None => return Ok(None),
@@ -323,6 +347,8 @@ pub(crate) fn read_http_request<R: BufRead>(reader: &mut R) -> io::Result<Option
 
     let mut content_length: Option<usize> = None;
     let mut host_count = 0_usize;
+    let mut host = None;
+    let mut origin = None;
     let mut header_bytes = request_line_bytes.len();
     loop {
         let line = read_bounded_line(reader, MAX_HEADER_BYTES.saturating_sub(header_bytes))?
@@ -387,23 +413,39 @@ pub(crate) fn read_http_request<R: BufRead>(reader: &mut R) -> io::Result<Option
             if !valid_host_authority(value) {
                 return Err(transport_error("host is not a valid authority"));
             }
+            host = Some(String::from_utf8_lossy(value).into_owned());
+        } else if name.eq_ignore_ascii_case(b"origin") {
+            if origin.is_some() {
+                return Err(transport_error("duplicate origin header"));
+            }
+            origin = Some(String::from_utf8_lossy(value).into_owned());
         }
     }
     if version == "HTTP/1.1" && host_count != 1 {
         return Err(transport_error("HTTP/1.1 requires exactly one host header"));
     }
 
-    let mut body = Vec::new();
-    if method == "POST" {
-        let length =
-            content_length.ok_or_else(|| transport_error("POST requires content-length"))?;
+    let length = if method == "POST" {
+        content_length.ok_or_else(|| transport_error("POST requires content-length"))?
+    } else {
+        content_length.unwrap_or(0)
+    };
+    let mut request = HttpRequest {
+        method,
+        path,
+        host,
+        origin,
+        body: Vec::new(),
+    };
+    admit(&request, length)?;
+    if request.method == "POST" {
         if length > MAX_BODY_BYTES {
             return Err(transport_error("request body exceeds limit"));
         }
-        body.resize(length, 0);
-        reader.read_exact(&mut body)?;
+        request.body.resize(length, 0);
+        reader.read_exact(&mut request.body)?;
     }
-    Ok(Some(HttpRequest { method, path, body }))
+    Ok(Some(request))
 }
 
 fn write_json_response(stream: &mut &TcpStream, status: u16, body: &Value) -> io::Result<()> {
@@ -430,6 +472,14 @@ fn read_http_request_with_deadline(
     stream: &TcpStream,
     deadline: Duration,
 ) -> io::Result<Option<HttpRequest>> {
+    read_http_request_with_admission(stream, deadline, |_, _| Ok(()))
+}
+
+pub(super) fn read_http_request_with_admission(
+    stream: &TcpStream,
+    deadline: Duration,
+    admit: impl FnMut(&HttpRequest, usize) -> io::Result<()>,
+) -> io::Result<Option<HttpRequest>> {
     let watchdog_stream = stream.try_clone()?;
     let (cancel_sender, cancel_receiver) = sync_channel::<()>(0);
     let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -445,7 +495,7 @@ fn read_http_request_with_deadline(
                 let _ = watchdog_stream.shutdown(Shutdown::Read);
             }
         })?;
-    let result = read_http_request(&mut BufReader::new(stream));
+    let result = read_http_request_admitted(&mut BufReader::new(stream), admit);
     let _ = cancel_sender.send(());
     watchdog
         .join()
@@ -660,6 +710,16 @@ pub(crate) fn handle_connection(
         }
     };
 
+    handle_request(stream, backend, trace, request)
+}
+
+pub(super) fn handle_request(
+    stream: &TcpStream,
+    backend: &mut dyn GenerationBackend,
+    trace: Option<TraceSubscriber>,
+    request: HttpRequest,
+) -> io::Result<()> {
+    let mut writer = stream;
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/v1/models") => write_json_response(
             &mut writer,

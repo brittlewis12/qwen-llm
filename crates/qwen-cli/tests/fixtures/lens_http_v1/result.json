@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "job_id": "job_example",
+  "records": [
+    {"seq": 0, "kind": "prepared_input", "token_ids": [1, 2], "rendering": {"renderer": "qwen_open_responses_annotated_v1", "generation_mode": "no_thinking", "spans": []}, "prompt_digest": "example-prompt-digest", "model_identity": "example-content-identity", "model_identity_kind": "runtime_gguf_metadata_not_content_hash", "asset_identities": {"plain": "example-content-identity"}, "sampling": {"temperature": 0, "top_k": 200, "top_p": 1, "min_p": 0.05, "seed": 42}, "resolved_scopes": [], "execution": {"decode": "serial", "cache": "isolated_diagnostic", "prefill": "serial"}},
+    {"seq": 1, "kind": "sampled_token", "index": 0, "token_id": 123, "piece_bytes": [32, 108, 105, 103, 104, 116], "text": " light", "consumed": true},
+    {"seq": 2, "kind": "operation_application", "id": "op1", "layer": 12, "phase": "decode", "index": 0, "position": 2, "order": 0},
+    {"seq": 3, "kind": "readout", "readout_id": "r1", "lens": "plain", "phase": "decode", "index": 0, "position": 2, "input_token_id": 123, "predicts_position": 3, "source_layer": 12, "target_layer": null, "capture_stage": "post_block_after_operations", "applied_operation_ids": ["op1"], "provenance": "original_forward", "score_kind": "logit", "candidate_universe": "full_vocabulary", "scores": [{"token_id": 456, "row_id": 456, "label": " scatters", "score": 4.2}], "cost": {"readout_ms": 2.4}},
+    {"seq": 4, "kind": "sampled_token", "index": 1, "token_id": 456, "piece_bytes": [32, 115, 99, 97, 116, 116, 101, 114, 115], "text": " scatters", "consumed": false},
+    {"seq": 5, "kind": "generation_terminal", "state": "completed", "stop_reason": "token_limit", "sampled_tokens": 2, "consumed_generated_tokens": 1, "error": null, "cost": {"wall_ms": 20.5, "prefill_ms": 8.1, "decode_ms": 9.2, "readout_ms": 2.4}}
+  ],
+  "next_cursor": null,
+  "complete": true
+}

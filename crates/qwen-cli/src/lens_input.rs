@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 const MAX_OPEN_RESPONSES_BYTES: usize = 16 * 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum LensMessageMode {
     Auto,
@@ -142,6 +142,9 @@ mod generation;
 pub(crate) use generation::{
     GenerationInputRecord, prepare_qwen_model_generation_input, validate_generation_input,
 };
+#[allow(unused_imports)]
+// Native consumers compile in qwen; CLI consumers compile in qwen-lens.
+pub(crate) use generation::{PreparedLensGenerationInput, prepare_qwen_generation_messages_bytes};
 #[cfg(test)]
 pub(crate) use generation::{byte_token_generation_fixture, byte_token_prefill_fixture};
 

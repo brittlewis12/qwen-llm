@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "model": {"id": "example-model", "identity": "example-content-identity", "template": "qwen3.8", "layers": 32, "vocabulary_size": 151936, "hidden_size": 3},
+  "available": true,
+  "unavailable_reason": null,
+  "preview": false,
+  "request_preconditions": true,
+  "readout_retention_modes": ["scores_and_residual"],
+  "residual_pair_capture": true,
+  "input_kinds": ["messages"],
+  "generation_modes": ["auto", "no_thinking", "low", "medium", "high", "xhigh"],
+  "assistant_prefill_channels": ["reasoning", "final"],
+  "operations": ["fixed_add", "residual_l2_fraction", "projection_ablate", "source_to_target", "coordinate_swap"],
+  "readout_modes": ["selected", "full_vocabulary"],
+  "capture_stage": "post_block_after_operations",
+  "execution": {"decode": "serial", "cache": "isolated_diagnostic", "original_forward": true},
+  "limits": {"max_body_bytes": 1048576, "max_new_tokens": 4096, "max_context_tokens": 32768, "max_operations": 64, "max_directions": 64, "max_readouts": 32, "max_top_k": 128, "max_queued_jobs": 8, "max_result_page_records": 128, "max_result_page_bytes": 1048576, "max_archive_bytes": 33554432, "max_array_bytes": 4194304, "max_residual_pairs": 1024, "max_residual_pair_rows": 16384},
+  "idempotency": {"retention": "job_lifetime", "restart_policy": "interrupt_unfinished"}
+}

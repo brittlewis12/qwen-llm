@@ -10,6 +10,7 @@ fn gpu_k2_tools_roundtrip_all_formats_json_sse() {
     let path = std::env::var("K2_GGUF").unwrap();
     let source = GgufFile::open(&path).unwrap();
     let invocation = crate::cli::ServeInvocation {
+        lens_data_dir: None,
         model: path.into(),
         addr: "127.0.0.1:0".into(),
         max_tokens: Some(512),
@@ -139,6 +140,7 @@ fn gpu_verified_k2_chat_http_matches_raw_and_releases_sessions() {
     let path = std::env::var("K2_GGUF").expect("K2_GGUF");
     let source = GgufFile::open(&path).unwrap();
     let invocation = crate::cli::ServeInvocation {
+        lens_data_dir: None,
         model: path.into(),
         addr: "127.0.0.1:0".into(),
         max_tokens: Some(8),
@@ -312,6 +314,7 @@ fn cpu_downloaded_startup_rejects_options_before_listener_or_metal() {
         ),
     ] {
         let invocation = crate::cli::ServeInvocation {
+            lens_data_dir: None,
             model: path.clone().into(),
             addr: "invalid-listen-address".into(),
             max_tokens: maximum,
@@ -428,6 +431,7 @@ fn gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests() {
     let path = std::env::var("K2_GGUF").expect("K2_GGUF");
     let source = GgufFile::open(&path).unwrap();
     let invocation = crate::cli::ServeInvocation {
+        lens_data_dir: None,
         model: path.into(),
         addr: "127.0.0.1:0".into(),
         max_tokens: Some(8),
@@ -610,6 +614,7 @@ fn gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one() {
     assert_eq!(summary["status"], "passed");
     assert!(capacity >= 258);
     let invocation = crate::cli::ServeInvocation {
+        lens_data_dir: None,
         model: path.into(),
         addr: "127.0.0.1:0".into(),
         max_tokens: Some(1),

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "job_example",
+  "revision": 18,
+  "created_at_ms": 1789257600000,
+  "updated_at_ms": 1789257601000,
+  "state": "running",
+  "cancel_requested": false,
+  "generation": {"state": "running", "phase": "decode", "prompt_tokens": 38, "consumed_prompt_tokens": 38, "sampled_tokens": 9, "consumed_generated_tokens": 8, "stop_reason": null, "error": null},
+  "observations": {"state": "writing", "committed_records": 16, "error": null},
+  "result": {"available": true, "complete": false, "url": "/v1/lens/jobs/job_example/result", "error": null}
+}

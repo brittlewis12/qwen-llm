@@ -1,0 +1,4 @@
+{
+  "schema_version": 1,
+  "error": {"type": "invalid_request_error", "code": "idempotency_conflict", "param": "idempotency_key", "message": "This key is already bound to a different request."}
+}

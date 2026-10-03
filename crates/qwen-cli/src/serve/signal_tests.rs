@@ -91,7 +91,7 @@ fn bridge_signal_child() {
         shutdown: 0,
     };
     marker(&format!("ready {address}"));
-    let error = accept_loop(listener, "test", 0.0, &mut backend, &mut None).unwrap_err();
+    let error = accept_loop(listener, "test", 0.0, &mut backend, &mut None, None).unwrap_err();
     assert!(
         error
             .to_string()

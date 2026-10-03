@@ -432,7 +432,9 @@ impl EngineBackend {
                 continue;
             };
             if let Err(reason) = super::super::snapshot_capture_admission(
-                write_copy_bytes(&prepared).saturating_add(self.durable_reserved_bytes()),
+                write_copy_bytes(&prepared)
+                    .saturating_add(self.durable_reserved_bytes())
+                    .saturating_add(self.control_cpu_reserve),
                 self.loaded.context().memory_signals(),
             ) {
                 tracing::info!(
@@ -501,7 +503,9 @@ impl EngineBackend {
             let bytes = prepared.snapshot_bytes();
             // Do not start a write without headroom for the copy it decodes.
             if let Err(reason) = super::super::snapshot_capture_admission(
-                write_copy_bytes(&prepared).saturating_add(self.durable_reserved_bytes()),
+                write_copy_bytes(&prepared)
+                    .saturating_add(self.durable_reserved_bytes())
+                    .saturating_add(self.control_cpu_reserve),
                 self.loaded.context().memory_signals(),
             ) {
                 durable.idle.borrow_mut().since = Instant::now();
@@ -568,7 +572,9 @@ impl EngineBackend {
                     return false;
                 }
                 if super::super::admit_snapshot_capture(
-                    blob_bytes.saturating_add(self.durable_reserved_bytes()),
+                    blob_bytes
+                        .saturating_add(self.durable_reserved_bytes())
+                        .saturating_add(self.control_cpu_reserve),
                     || self.loaded.context().memory_signals(),
                     |bytes| self.loaded.evict_prefix_cache_for(bytes),
                 )

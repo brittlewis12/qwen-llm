@@ -6,6 +6,11 @@ The Lens workbench was developed as uncommitted changes in `feat/lens-web`.
 That branch contains no feature commits and is not an integration deliverable.
 This document records an honest reconstruction, not recovered development history.
 
+Recovery is now complete as a committed reconstruction on `reconstruct/lens-web`,
+with the explicit policy replacements and qualification limits recorded below.
+It is not merged or pushed. The original worktree and preservation package remain
+untouched; this branch, not `feat/lens-web`, is the integration deliverable.
+
 Reconstruction starts at main `8bc9e6b739e953023a1f2ffc5dc3379c22758e00` on
 `reconstruct/lens-web`. The original worktree remains an untouched reference at
 `2d158a71271c2e9522f745df062fdde4e153c935`, including its staged, unstaged and
@@ -56,31 +61,30 @@ in this reconstruction's source commits.
 ## Behavioral Ledger
 
 Paths below refer to the preserved source tree unless marked as current main.
-`reuse` means a salvage candidate, not a claim of completion; `rework` identifies
-integration that cannot be copied wholesale. Rows remain pending unless a partial
-recovery is explicitly recorded below.
+The table is the current disposition. Dated/checkpoint prose later in this document
+records what was pending at that checkpoint, not outstanding work today.
 
 | ID | Behavior and source | Disposition / dependencies | Required gate |
 | --- | --- | --- | --- |
-| R01 | Bounded regular-file access: `bounded_file.rs`, Lens readers | Shared readers recovered with current CLI consumers; future HTTP reader wiring travels with its consuming slice | CPU symlink/type/length/mutation tests; all reader consumers build |
-| R02 | Shared authored scopes and operation semantics: `lens_scope.rs`, `lens_intervention.rs`, `lens_run/{plan,execute,sweep}.rs` | Partially recovered: shared scopes/wire forms/normalization and strict coefficient ingress with existing CLI consumers; shared lowering/action validation remain pending | Current CLI wire/binding/normalization/lowering regressions; no new service dependency |
-| R03 | Typed prefills and annotated input: `lens_input.rs`, `model_request.rs`, `messages.rs`, `open_responses/render.rs`, CLI callers | Partially recovered: ordinary Qwen3.6/3.8 singleton CLI and native House prefills with exact retained context; tool/upstream and browser integration pending | Exact prompt bytes, token positions, reasoning-only continuation, tools and house/upstream rendering |
-| R04 | Deployment binding and asset verification: `linear_transport{.rs,/deployment.rs,/cpu_fixture.rs}`, `full_lens/access.rs` | Partially recovered: shared CPU deployment binding with existing CLI consumers; native registry integration pending; main's expected-profile checks retained | Binding mismatch refusal, retained payload hashes, CPU-before-Metal admission, no implicit transfer override |
-| R05 | Shared ordinary execution: `ordinary_executor.rs`, `qwen/decode.rs`, `lens_run/execute.rs` | Partially recovered: shared serial decode lifecycle and explicit request cancellation with existing CLI/serve/Lens consumers; prefill and forwarding adapters pending | CLI/serve sampling, cancellation, terminal nonconsumption and telemetry remain equivalent except documented added checkpoints |
-| R06 | Owner queue and CPU HTTP coordination: `serve/{control,queue,request_profile}.rs`, backend/HTTP wiring | Partially recovered: shared one-execution admission plus two CPU control workers for ordinary Qwen history/native traffic; other-family control allowance and live qualification pending | Idle/request-finished/shutdown ownership, busy admission, cancellation/disconnect, JSON/SSE protocols |
+| R01 | Bounded regular-file access: `bounded_file.rs`, Lens readers | Recovered with CLI, registry, history and static consumers | CPU symlink/type/length/mutation and reader-consumer gates pass |
+| R02 | Shared authored scopes and operation semantics: `lens_scope.rs`, `lens_intervention.rs`, `lens_run/{plan,execute,sweep}.rs` | Recovered: scopes, normalization, strict coefficient ingress, shared validation/lowering | CLI wire/binding/normalization/lowering and native tests pass |
+| R03 | Typed prefills and annotated input: `lens_input.rs`, `model_request.rs`, `messages.rs`, renderer/CLI callers | Recovered across ordinary singleton CLI, native House inputs and browser; strict artifact context comparison retained | Exact bytes/spans, CPU real-tokenizer native/CLI matrix, live native prefill and browser pass; no tool/cohort/raw prefill expansion |
+| R04 | Deployment binding and asset verification: `linear_transport{.rs,/deployment.rs,/cpu_fixture.rs}`, `full_lens/access.rs` | Recovered with retained-source registry/staging; current-main expected-profile checks retained | CPU binding/integrity/cancellation and scoped fitted numerical gates pass |
+| R05 | Shared ordinary execution: `ordinary_executor.rs`, `qwen/decode.rs`, `lens_run/execute.rs` | Recovered decode, bounded prefill and post-block adapters; obsolete generic production dispatch replaced by current routing | CLI/serve/native CPU gates and final production baseline pass; added checkpoints documented |
+| R06 | Owner queue and CPU HTTP coordination: `serve/{control,queue,request_profile}.rs`, backend/HTTP wiring | Reworked for current lifecycle across all families; explicit single-execution/two-control-worker policy replaces old eight-reservation/sixteen-worker queue | All-family CPU protocols/lifecycle/reserves and scoped ordinary live gates pass; not cross-family numerical/pressure qualification |
 | R07 | Durable job metadata: `serve/jobs/{state,store,preview}.rs` | Recovered with a real baseline producer and routes; distinct from main's durable model snapshots | CPU store gates and scoped live Qwen3.6 interruption/restart pass; not KV persistence qualification |
-| R08 | Native request/routes/preconditions: `serve/lens_http/*`, `serve/native/preconditions.rs` | Baseline routes/preconditions recovered; diagnostic admission pending | CPU unknown-field/local HTTP/binding checks and accepted-key recovery pass |
-| R09 | Native baseline and observation lifecycle: `serve/native/{mod,execute,writer}.rs` | Baseline recovered on current resident/cache admission, joined writer; observation production pending | CPU lifecycle and scoped Qwen3.6 live disconnect/decode/interruption/restart pass; broader numerical/pressure qualification pending |
+| R08 | Native request/routes/preconditions: `serve/lens_http/*`, `serve/native/preconditions.rs` | Recovered baseline and diagnostic admission, exact retry before current capability checks | CPU unknown-field/local HTTP/binding, unavailable-family retry and live accepted-key recovery pass |
+| R09 | Native baseline and observation lifecycle: `serve/native/{mod,execute,writer}.rs` | Recovered on current owner/admission with joined staging/array writer and no inference replay | CPU lifecycle/publication failures and scoped original-forward/live restart gates pass |
 | R10 | Plain original-forward readouts: `serve/native/{readouts,observe}.rs` | Producer recovered with browser/current admission; no replay | CPU scopes/lifecycle/publication/HTTP/browser and scoped Qwen3.6 live unchanged-sample/final-layer witness gate pass |
-| R11 | Fitted readouts and direction staging: `serve/native/{registry,interventions}.rs`, `workspace_lens/*` | Fitted producer recovered with CPU/browser and scoped original-forward numerical evidence; direction staging remains R12 | Registered identity, matrix integrity, owner-admitted joined staging/workspace, independent numerical oracle |
+| R11 | Fitted readouts and direction staging: `serve/native/{registry,interventions}.rs`, `workspace_lens/*` | Recovered fitted producer and shared direction staging; R12 qualifies operations | Registered identity, matrix integrity, owner-admitted joined staging/workspace and independent numerical oracle pass |
 | R12 | Ordered scoped interventions: `serve/native/interventions/*`, `lens_intervention.rs` | Three native operators recovered with CPU/browser and scoped first-site numerical evidence | Exact order/scopes, zero controls, deployed covector semantics, independent transformation checks |
 | R13 | Retained full scores/source arrays: `serve/jobs/arrays.rs`, native observer/writer, `web/retention*` | Producer recovered with CPU/browser and production live integrity/restart evidence | Raw admission, dual-watermark durability, digest/finite/shape checks, offline rank/entropy, no implicit fetch |
 | R14 | Whole-site pre/post capture: `metal_forward/token.rs`, `serve/native/measurements.rs` | Producer recovered with CPU/browser and bounded actual-before Metal numerical evidence | Before/after placement, independent layer sets, alias refusal, actual-vector metrics and zero controls |
-| R15 | Bun client and same-origin assets: `web/{build,dev,proxy}.*`, `serve/assets.rs` | Recovered on shared CPU control pool; web-root requires history/current ordinary-family boundary | Bun types/build and real same-port CPU browser/static gates pass; no second production service |
+| R15 | Bun client and same-origin assets: `web/{build,dev,proxy}.*`, `serve/assets.rs` | Recovered with independent optional history/assets across serving families | Bun types/build and real same-port CPU browser/static gates pass; no second production service |
 | R16 | Durable browser submission/history: `web/{api,contract,durable,storage,jobs,history}.*` | Recovered with real baseline producer and historical fixture readers | Persist-before-POST, exact retry, history/reload/copy pass; baseline CPU browser traverses actual Rust store |
-| R17 | Draft and identity safety: `web/{draft,bindings,editor,diagnostics}.*` | Recovered from first submission UI; diagnostic creation remains capability-gated | No silent retarget, saved pinning, copy/edit race and persistence failure pass in fixtures; baseline production route exercised |
-| R18 | Direct manipulation workbench: `web/{viewer,token-navigation,token-navigator,App,styles}.*` | Historical navigation/readers recovered; new diagnostic production remains R10-R14 pending | Phone/desktop historical fixture manipulation and actual baseline browser pass; not live diagnostic qualification |
-| R19 | Evidence and qualification: native CPU/live tests, HTTP fixtures, `web/*check.ts`, docs | Rework gates to current main; preserve old evidence separately | No old-base pass promoted to current-main qualification; bounded live checks where numerical, lifecycle, cache/durability or memory-admission changes require them |
+| R17 | Draft and identity safety: `web/{draft,bindings,editor,diagnostics}.*` | Recovered across baseline/diagnostics; creation remains capability-gated | No silent retarget, saved pinning, copy/edit races and persistence failure pass in fixtures; actual diagnostic HTTP/browser paths exercised |
+| R18 | Direct manipulation workbench: `web/{viewer,token-navigation,token-navigator,App,styles}.*` | Recovered historical and newly produced diagnostic navigation, pinning/reordering, retained queries and pair inspection | Phone/desktop historical fixtures and actual Rust CPU producer browser gates pass; numerical gates separately scoped |
+| R19 | Evidence and qualification: native CPU/live tests, HTTP fixtures, `web/*check.ts`, docs | Replaced obsolete fixture-specific process harnesses with owned bounded current-main gates; old evidence preserved | Exact-build evidence and limitations recorded; no old-base pass promoted to current qualification |
 
 CLI comparison/output/sweep changes must be accounted for under R02-R05, not
 dropped because they are outside `web/`. Documentation and fixtures travel with
@@ -125,9 +129,8 @@ The preserved implementation last passed 238 serve tests (19 opt-in ignored),
 53 Bun tests and browser/build checks on its old integration. It also holds prior
 bounded numerical evidence, including a failed process exit later diagnosed as a
 test-witness precision mismatch and independently checked from saved arrays.
-Those are reference evidence only. The baseline Lens HTTP executor/history is now
-recovered with scoped CPU/live evidence; the browser is recovered with actual
-baseline and historical-fixture gates. New diagnostic execution remains pending.
+Those are reference evidence only. Current recovery has its own CPU/browser,
+production lifecycle/retention and test-instrumented numerical gates recorded below.
 
 After recovery, interaction design and usable information density remain the
 primary product focus. This repair is not authorization for new feature scope.
@@ -1178,3 +1181,83 @@ native prefill observation retaining known consumption without further forwards 
 sampling. No new inference capability or scheduler is introduced. Final production
 baseline requalification will cover this build, not claim DFlash or restored-prefix
 numerical qualification from a cache-isolated native test.
+
+## Final Recovery Audit And Handoff
+
+The audited deliverable is the semantic commit series rooted at
+`8bc9e6b739e953023a1f2ffc5dc3379c22758e00`, not the original dirty branch. A final
+fetch still resolves `origin/main` to that base. No merge, push, amend or edits to
+the preserved worktree/package occurred. The tree is clean before this final
+documentation reconciliation; generated bundles and test evidence remain ignored.
+
+The final inventory covers the frozen tracked changes and untracked source groups:
+
+- CLI comparison/output/sweep changes are recovered, including optional retained
+  `generation_input`, writer/strict-reader agreement and comparison-context checks.
+  Sweeps/cohorts did not gain typed prefills in the frozen implementation; they are
+  not missing recovered features. Nonordinary run dispatch retains current-main
+  families and their existing artifact defaults.
+- `assistant_prefill_tests.rs` is superseded by the consumed generation/input and
+  comparison test modules. The production-unused `GenerationInput`/renderer wrapper in
+  `open_responses/render.rs` is replaced by shared preparation using the current
+  annotated renderer, not a second rendering authority. Frozen native tools,
+  tool-prefill, raw input and upstream-style selection were also unavailable.
+- Shared transport verification and the full-head readout workspace are consumed
+  by CLI and native jobs. Current expected-profile and passive-head constraints
+  remain; owned writer staging replaces the old readiness/dispatcher handoff.
+- Frozen `serve/queue.rs` is intentionally replaced, not copied. The old sixteen
+  HTTP workers/eight work reservations become two bounded control workers and one
+  exclusive execution reservation. There is no multi-job backlog: new work is
+  refused while busy, but accepted-key retries/history/cancel remain independent.
+  This trades burst buffering for explicit owner lifetime and bounded preparation
+  memory. It is a deliberate policy change, not an equivalent queue-depth claim.
+- All-family ordinary profiles, history, standalone assets, traces and native
+  original-forward producers have consuming paths and gates. The reconstructed
+  owner retains current-main idle/request-finished/shutdown and snapshot semantics
+  instead of reinstalling the obsolete frozen accept loop.
+- The Bun client, fixtures, saved history, direct token/layer/score navigation,
+  pinned directions, scope editing/reordering, variants, cancellation, retained
+  queries and pair inspection are recovered. No desktop-only replacement is added.
+- Frozen `web/live-check.ts`, `web/fitted-oracle-check.ts` and
+  `web/residual-evidence-check.ts` remain preserved reference harnesses. Their
+  numerical/integrity/lifecycle assertions are covered by the current owned
+  `scripts/serve/lens_baseline_check.ts`, `scripts/serve/lens_fitted_check.ts`,
+  Rust numerical oracles and actual-producer CPU browser checks. Old private
+  fixtures/evidence are not copied into source or promoted to current proof.
+
+### Final Build Gates
+
+Production code `6ff11bc3` passes the bounded Qwen3.6 35B A3B UD-Q4_K_M retained
+baseline gate: unchanged samples/consumption, six required same-forward witnesses,
+16 arrays totaling 8,011,776 bytes, full-vocabulary rank/integrity checks, exact
+results/array bytes after restart, disconnected exact-key recovery, ordinary serving
+and active-job interruption. Both owned servers exit through handled SIGTERM with
+no forced cleanup; the lease is confirmed free. Model load times are 2368.1ms and
+2377.2ms. Evidence:
+`target/lens-baseline-d65bf072-d14e-4246-8f85-3432fc817b67/`.
+Production binary Git blob fingerprint: `3270b0f97797b82ce00933b5d9063f105b8afa07`;
+harness fingerprint: `4e0e4a95db53b8c97edd39c5f45de8d83d06e10e`.
+
+Final CPU checks pass 342 serving tests (28 opt-in ignored), 394 Lens tests (nine
+opt-in ignored), 14 shared lifecycle tests and 14 CLI tests. The known unmarked
+Metal cases are explicitly excluded, not silently treated as CPU evidence. All
+binaries/tests compile and formatting/whitespace checks pass. Bun passes 55 tests
+with 327 assertions, types and build. The final actual-Rust combined diagnostic
+browser gate passes at phone/desktop widths:
+`web/.browser-test/baseline-2c166911-8082-47b8-a6e2-86d4b09b8cba/`.
+The full historical browser fixture suite also passes identity/persistence races,
+token/layer/score manipulation, pagination, history and layout bounds without GPU.
+
+Independent fitted/intervention/paired numerical evidence remains scoped to the
+specific clean builds documented at R11/R12/R14; the final production baseline is
+not a substitute for those or a claim that they were all rerun on the final build.
+This recovery does not qualify every family numerically, DFlash/restored-prefix/KV
+persistence, real memory pressure, fit quality, visual screenshots or CLI/HTTP
+numerical equivalence across all modes. Those boundaries do not hide unrecovered
+source or a feature-sized dirty worktree. Subsequent work returns to interaction
+design and usable information density, not further capability expansion by default.
+
+Final read-only `cx` review gives GO for complete semantic recovery, ready for
+integration against the pinned main. It finds no unaccounted frozen capability loss
+in the reviewed source/docs, while explicitly not rerunning the reported tests or
+approving a merge/push. The final handoff contains only committed source and docs.

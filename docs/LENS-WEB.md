@@ -6,8 +6,9 @@ The reconstruction provides a durable baseline API and the preserved Bun/React
 client on `qwen serve`, including scoped plain and registered fitted original-forward
 readouts, ordered scoped interventions, retained source/full-score arrays and
 whole-site before/after pairs from the original forward.
-Compatible historical records remain inspectable. This is an intermediate workbench,
-not completion of recovery. See [the recovery ledger](LENS-WEB-RECOVERY.md).
+Compatible historical records remain inspectable. The committed reconstruction is
+ready for integration; see [the recovery ledger](LENS-WEB-RECOVERY.md) for exact
+evidence, deliberate policy replacements and remaining product limitations.
 
 ```sh
 qwen serve -m MODEL --lens-data-dir JOB_DIRECTORY
@@ -127,7 +128,6 @@ aligned capture/head buffer. Host allowance includes capture readback, transport
 vector, all three simultaneously live previous/new/observer logit arrays, bounded
 ranking/labels/serialization, plus existing durable/control/writer reservations.
 Eviction retry retains the same complete allowances; denial precedes capture setup.
-Residual pair production remains refused.
 
 ## Fitted Readouts
 
@@ -227,13 +227,36 @@ and distribution summaries use those saved bytes. Reloading, history navigation 
 reopening arrays never submit new work. Unretained or uncaptured sites cannot be
 reconstructed from top-k rows alone.
 
+## Whole-Site Before/After Pairs
+
+Use "Add residual pair capture", or add a `diagnostics.residual_pairs` entry:
+
+```json
+{"id":"change","scope":{"layers":{"kind":"values","values":[19]},"decode":{"kind":"values","values":[0]}}}
+```
+
+The original forward captures just before and after the complete ordered post-block
+program at each selected site. Scopes are independent of operations and readouts;
+pair-only and no-operation/zero-control requests work without readout heads. Earlier
+interventions may already have affected the before state. These are not independent
+baseline comparisons or per-operation intermediate vectors.
+
+Pairs always retain both residual arrays, sharing the after array with retaining
+readouts at the same site. They use the same raw archive limits and add separate
+before capture/readback memory. At most 1024 pair requests and 16384 pair rows are
+admitted. Saved metrics include before/after norms, delta norm and relative delta
+(null for zero before norm). "Verify measured change / no inference" explicitly
+loads the saved arrays to recompute the metrics; history navigation never does so
+implicitly. Arrays precede dependent pair records, but publication is not atomic
+across the entire measurement.
+
 ## Bounds And Lifecycle
 
 One execution reservation covers ordinary preparation/response cleanup or a native
 job through writer completion. A new native request receives 429 while it is busy;
-an ordinary request receives 503 before its body is read. With history enabled,
+an ordinary request receives 503 before its body is read. With history or assets enabled,
 two bounded CPU classifier workers read headers and handle history/retry/cancel
-while the owner runs inference. With history disabled, existing pre-header busy
+while the owner runs inference. With both disabled, existing pre-header busy
 behavior is unchanged. This is not multi-model scheduling or concurrent inference.
 Static GET/HEAD requests share that CPU pool and release read-only activity before
 writing borrowed immutable bytes. They do not reserve execution. Bodies on static
@@ -257,7 +280,7 @@ Current bounds are explicit, not capability targets:
 - Writer: 128 queued events and 8 MiB of retained record allocation capacity.
 - Result page: 256 records / 2 MiB. History: 4096 jobs / 64 GiB, no silent eviction.
 - Native writer admission allowance: 82 MiB, including stack and publication work.
-- History-enabled control allowance: 512 MiB across both worker slots.
+- History/assets-enabled control allowance: 512 MiB across both worker slots.
 
 The control allowance covers overlapping bounded request/result JSON trees,
 serialization, prepared-input token/span construction, watchdog/worker stacks,
@@ -310,7 +333,18 @@ QWEN_LENS_TEST_MODEL=/path/to/qualified.gguf \
 # Add one observed job and require all same-forward witnesses:
 QWEN_LENS_TEST_READOUTS=1 QWEN_LENS_TEST_MODEL=/path/to/qualified.gguf \
   bun run scripts/serve/lens_baseline_check.ts
+# Also verify retained full arrays and byte-identical reopening after restart:
+QWEN_LENS_TEST_RETENTION=1 QWEN_LENS_TEST_MODEL=/path/to/qualified.gguf \
+  bun run scripts/serve/lens_baseline_check.ts
 ```
+
+The final production code at `6ff11bc3` passes the retained baseline gate on the same
+Qwen3.6 fixture, including all six witnesses, unchanged samples, 16 retained arrays,
+exact restart bytes and handled active-job shutdown. Separate fitted/intervention/
+pair test-binary gates establish scoped independent numerical checks, not fit quality
+or every-model coverage. The final CPU browser also exercises combined fitted heads,
+ordered operations, retention and pairs through the actual Rust producer. Full
+evidence paths and exact build boundaries are in the recovery ledger.
 
 This opt-in script runs Metal, owns exactly its child servers, uses normal memory
 admission and retains local evidence under `target/`. It has a 140-second protocol

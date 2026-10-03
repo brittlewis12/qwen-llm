@@ -26,9 +26,8 @@ All serving families can expose saved history and assets; native execution remai
 qualified ordinary Qwen only. `--web-root` also works without a history directory,
 with execution/history unavailable rather than an implicit temporary store.
 
-`--web-root` requires `--lens-data-dir`, currently ordinary Qwen only. Native
-generation is limited to metadata-qualified House Qwen3.6/3.8; unsupported
-ordinary deployments retain readable history. Open the server's loopback URL.
+Native generation is limited to metadata-qualified ordinary House Qwen3.6/3.8;
+unsupported deployments retain readable history. Open the server's loopback URL.
 Rust never invokes Bun. It loads immutable assets before model admission; the
 manifest has a 64 MiB payload catalog limit, not a total allocation bound. API
 paths cannot be shadowed; missing assets never receive an HTML fallback. Static
@@ -147,6 +146,9 @@ with same-site readout provenance. Numerical forward/projection work remains syn
 Add `LENS_TEST_RETENTION=1` to verify explicit array loading, an outside-top-k token's
 rank/score, retained copy state and exact saved joins. Browser network events assert
 that arrays are not fetched before the explicit load action.
+`LENS_TEST_PAIRS=1` includes retention and additionally authors a pair scope, verifies
+saved before/after metrics explicitly and checks request copying. It can be combined
+with `LENS_TEST_OPERATIONS=1` for the complete recovered diagnostic browser flow.
 
 Browser profiles/logs stay in ignored `.browser-test/`. Layout and interaction
 assertions are not screenshot-based visual review. Optional screenshot capture
@@ -154,7 +156,8 @@ has historically stalled in this Chromium; it is not required by these checks.
 
 For the separate bounded real-model lifecycle gate, run
 `scripts/serve/lens_baseline_check.ts` from the repository root as described in
-`docs/LENS-WEB.md`. Original richer live/oracle harnesses remain preserved in the
-frozen worktree and return with their producing server slices. Their old evidence
-does not qualify this branch. JS-unsafe u64 seeds, raw input, expanded operator
+`docs/LENS-WEB.md`. The bounded test-binary `scripts/serve/lens_fitted_check.ts` has
+readout, intervention and pair oracle modes. Original fixture-specific harnesses
+remain preserved rather than restoring their outdated process orchestration; their
+old evidence does not qualify this branch. JS-unsafe u64 seeds, raw input, expanded operator
 families, automatic discovery and richer plots are not added by this recovery.

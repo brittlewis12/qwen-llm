@@ -301,7 +301,10 @@ pub(super) fn spawn(
                     }
                     match listener.accept() {
                         Ok((stream, _)) => {
-                            http::configure_stream(&stream)?;
+                            if let Err(cause) = http::configure_stream(&stream) {
+                                tracing::info!("HTTP control socket configuration failed: {cause}");
+                                continue;
+                            }
                             if workers.len() >= MAX_WORKERS || admit_memory().is_err() {
                                 let _ = http::write_busy_response(&stream);
                                 continue;

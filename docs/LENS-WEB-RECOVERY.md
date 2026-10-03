@@ -600,3 +600,26 @@ pre-admission DFlash allocation; final review approves this CPU-qualified slice.
 Next: recover the preserved Bun baseline submission/history client with binding
 and draft safety, before adding plain original-forward readouts. Then restore
 fitted assets/interventions and retained/pair exploration in their consuming slices.
+
+### R06: Disconnected Startup Probe
+
+The first clean-release live baseline attempt exposed a macOS socket lifecycle
+regression: configuring a reset connection already queued during model startup
+returned `EINVAL`, and the control acceptor propagated it as service failure.
+A second short launch with a backtrace located the exact configuration call. Both
+processes exited and released their normal Metal lease; no memory gates were
+overridden and no job execution is qualified by those failed launches.
+
+Control now logs and discards only that connection, before acquiring activity or
+execution ownership, matching the existing ordinary acceptor. Service-level errors
+still close the shared gate and settle workers. A real reset-before-accept CPU test
+fails against the original propagation and passes after the fix; it checks a later
+successful request, settled activity and released listener. Serving now passes
+286 CPU tests with 25 ignored and the known Metal test excluded. Compile/format
+gates pass. `cx` approves this focused correction and identified live-harness
+witness/timeout improvements before another model launch.
+
+Separately, the opt-in CPU tokenizer matrix passes against the released Qwen3.6
+35B A3B Q4_K_M GGUF: native and CLI prefills have identical token IDs, spans and
+retained input across the tested mode/channel combinations. This qualifies that
+tokenizer/template path, not numerical continuation or other deployments.

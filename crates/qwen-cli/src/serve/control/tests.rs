@@ -302,6 +302,68 @@ fn local_control_stop_interrupts_active_native_and_joins_before_backend_shutdown
 }
 
 #[test]
+fn disconnected_startup_probe_does_not_close_the_control_service() {
+    use std::os::fd::AsRawFd;
+    let fixture = native::CpuFixture::new();
+    let mut activity = owner_activity::OwnerActivity::default();
+    let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
+    let gate = ExecutionGate::default();
+    let stopping = Arc::new(AtomicBool::new(false));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let probe = TcpStream::connect(address).unwrap();
+    let linger = libc::linger {
+        l_onoff: 1,
+        l_linger: 0,
+    };
+    // Own this probe descriptor and reset only its connection before acceptance.
+    assert_eq!(
+        unsafe {
+            libc::setsockopt(
+                probe.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                (&linger as *const libc::linger).cast(),
+                std::mem::size_of_val(&linger) as libc::socklen_t,
+            )
+        },
+        0
+    );
+    drop(probe);
+    let acceptor = spawn(
+        listener,
+        Profile {
+            model_id: "test".into(),
+            request: RequestProfile::UnboundQwen,
+            lens: Arc::new(LensApi::new(
+                "test".into(),
+                Some(Arc::clone(&fixture.store)),
+                None,
+            )),
+            gate: gate.clone(),
+            activity: activity.admission(),
+            sender,
+            trace: None,
+        },
+        Arc::clone(&stopping),
+    )
+    .unwrap();
+    let mut client = TcpStream::connect(address).unwrap();
+    client.set_read_timeout(Some(WAIT)).unwrap();
+    let mut response = String::new();
+    let read = client
+        .write_all(b"GET /v1/lens/capabilities HTTP/1.1\r\nhost: localhost\r\n\r\n")
+        .and_then(|()| client.read_to_string(&mut response));
+    stopping.store(true, Ordering::Release);
+    acceptor.join().unwrap().unwrap();
+    read.unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    activity.drain_finished(|| {});
+    assert!(activity.is_settled());
+    drop(TcpListener::bind(address).unwrap());
+}
+
+#[test]
 fn history_releases_activity_before_waiting_for_store_access() {
     let fixture = native::CpuFixture::new();
     let mut activity = owner_activity::OwnerActivity::default();

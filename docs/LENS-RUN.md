@@ -73,8 +73,9 @@ in no-thinking mode, cannot be distinguished from legacy input by bytes alone.
 Unprefilled artifacts omit this field and retain their existing shape. New
 readers accept older artifacts; older strict readers reject the populated
 extension. This does not add prefills to cohorts, sweeps, raw/token-ID inputs,
-Open Responses, other model families, or HTTP serving. Native HTTP input wiring
-remains a separate recovery step.
+Open Responses or other model families. The separate native
+[`/v1/lens/jobs` API](LENS-WEB.md) now shares these House-template prefill semantics;
+ordinary `/v1/responses` is unchanged.
 
 ### Execution And Output
 

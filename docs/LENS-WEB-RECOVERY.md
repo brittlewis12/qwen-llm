@@ -1085,3 +1085,12 @@ unique site/token coordinates, checks no-op/zero controls and unchanged sampling
 and consumption with capture disabled. It also checks invalid capture destinations
 and a valid disjoint shared allocation. Metal scatter placement/synchronization are
 not established by the CPU/browser gates and remain pending this live qualification.
+
+The first bounded live attempt at `907f18ab` stops during destination validation
+after 2.89 seconds, before any native test job. The fixture incorrectly assumes a
+materialized output-normalization tensor is read-only. It is writable, so that call
+is not an invalid-destination test. The owned process exits and releases the lease;
+this is not passing numerical evidence. The corrected fixture first requires a
+retained read-only head view, then checks capture refusal with F32 shape metadata;
+no deployment weight bytes are modified in that rejection case. Evidence of the
+failed attempt: `target/lens-fitted-c7e9f2a2-ac7f-41b0-9788-89f8888bd59c/`.

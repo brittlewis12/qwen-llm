@@ -104,7 +104,12 @@ pub(super) fn validate_destinations(loaded: &LoadedModel) -> Result<()> {
                     false
                 )
                 .is_err(),
-            "invalid capture accepted"
+            "invalid capture accepted: before {:?} {:?} offset={}, after offset={}, layers={layers:?}, operations={}",
+            b.dtype,
+            b.shape,
+            b.offset,
+            a.offset,
+            ops.len()
         );
         Ok(())
     };
@@ -123,8 +128,16 @@ pub(super) fn validate_destinations(loaded: &LoadedModel) -> Result<()> {
     rejected(&outside, &after, &[0], &[])?;
     let half = MetalTensor::zeros_f16(loaded.context(), vec![h])?;
     rejected(&half, &after, &[0], &[])?;
-    // Retained deployment weights cannot become writable capture destinations.
-    rejected(&forward.model.output_norm, &after, &[0], &[])?;
+    // Normalization weights can be materialized as writable F32; use a retained
+    // read-only head view and validate provenance before attempting any forward.
+    let mut readonly = forward.model.lm_head.clone();
+    ensure!(
+        !readonly.is_writable(),
+        "oracle requires a retained read-only head"
+    );
+    readonly.dtype = qwen_llm::tensor::GgmlType::F32;
+    readonly.shape = vec![h];
+    rejected(&readonly, &after, &[0], &[])?;
     for tensor in [&before, &after] {
         rejected(
             &before,

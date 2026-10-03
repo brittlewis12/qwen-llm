@@ -60,5 +60,6 @@ export function createLensApi(transport: Transport = fetch) {
       method: "POST", headers: { "Content-Type": "application/json" }, body,
     }, transport),
     cancel: (id: string) => requestJson(`${jobPath(id)}/cancel`, { method: "POST" }, transport),
+    delete: (id: string) => requestJson(`${jobPath(id)}/delete`, { method: "POST" }, transport),
   };
 }

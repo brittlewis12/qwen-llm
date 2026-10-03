@@ -103,6 +103,7 @@ matching-key `admission.state=not_accepted` response proves non-acceptance; gene
 - `GET /v1/lens/jobs/{id}/request`: saved authored request, without retokenization.
 - `GET /v1/lens/jobs/{id}/result`: bounded immutable record pages with opaque cursors.
 - `POST /v1/lens/jobs/{id}/cancel`: empty body or `{}`; explicit cooperative cancel.
+- `POST /v1/lens/jobs/{id}/delete`: empty body or `{}`; delete a settled terminal job's payloads, retaining its retry identity.
 
 Disconnect and history navigation never cancel accepted native work. Result pages
 retain exact prepared prompt text/bytes/token IDs/spans, sampling, sampled pieces,
@@ -302,7 +303,8 @@ Current bounds are explicit, not capability targets:
 - Request body: 1 MiB. Prepared/sample record: under 1 MiB including framing.
 - Token piece: 104755 bytes, derived from worst-case retained JSON expansion.
 - Writer: 128 queued events and 8 MiB of retained record allocation capacity.
-- Result page: 256 records / 2 MiB. History: 4096 jobs / 64 GiB, no silent eviction.
+- Result page: 256 records / 2 MiB. History: 4096 retained jobs / 64 GiB charged
+  storage and 65,536 permanent retry identities, including deleted jobs; no silent eviction.
 - Native writer admission allowance: 82 MiB, including stack and publication work.
 - History-enabled control allowance: 512 MiB across both worker slots.
 - Standalone-assets control allowance: 16 MiB for classifier/watchdog stacks and buffers.
@@ -334,6 +336,30 @@ startup and each connection. This can conservatively return 503 for history or
 cancellation when part of that allowance is already in use. Both workers can also
 be occupied by slow clients or filesystem access. Cancellation remains cooperative,
 not a guaranteed always-available priority lane. No memory safety override is used.
+
+## History Cleanup
+
+History shows charged storage and both retention/identity limits. Delete job payloads
+explicitly removes a confirmed terminal job's prompt, records and arrays only after
+its execution and writer have settled. The server first publishes and syncs a compact
+tombstone containing its accepted key, request hash, observation flag and terminal
+outcome. Exact submission retries return `deleted:true` without new inference;
+conflicting bodies still return 409. Payload endpoints return 410 `job_deleted`.
+
+Logical deletion precedes physical cleanup. A failed cleanup stays charged and can
+be retried for the same job; unfinished cleanup remains visible in history. Restart
+resumes cleanup before exposing the tombstone. Payload readers already in progress
+finish before deletion; later readers see deletion rather than missing-file errors.
+Retry identities never expire silently; exhausting their separate bound refuses new
+acceptance even if payload storage is free. Existing jobs require no migration.
+
+Deleting through History invalidates that browser's cached viewer. Completed viewers
+do not poll forever: reopen a history entry or use Reconnect to discover deletion by
+another client. A paginated history cache does not infer deletion from a missing row.
+The separate Clean completed browser archives action verifies archived job IDs against
+the server and removes only confirmed-terminal archives under the submission Web Lock.
+It preserves the current intent, unresolved/active/unverifiable archives, and server
+history. No automatic cleanup or eviction is enabled.
 
 ## Publication Failures
 

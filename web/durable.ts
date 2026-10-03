@@ -1,5 +1,6 @@
 import { isObject } from "./draft";
 import { ApiHttpError } from "./api";
+import { decodeJob, isTerminal } from "./contract";
 
 export interface StoragePort {
   getItem(key: string): string | null;
@@ -34,6 +35,23 @@ export function readIntent(storage: StoragePort): Intent | null {
   const body: unknown = JSON.parse(value.body);
   if (!isObject(body) || body.schema_version !== 1 || body.idempotency_key !== value.key) throw new Error("Submission key/body mismatch; recovery blocked.");
   return value as Intent;
+}
+
+export async function pruneCompletedArchives(storage: Storage, lookup: (id: string) => Promise<unknown>) {
+  const keys = Array.from({ length: storage.length }, (_, i) => storage.key(i)).filter((key): key is string => key?.startsWith(`${INTENT_KEY}.archive.`) === true);
+  let removed = 0;
+  let kept = 0;
+  for (const key of keys) {
+    const raw = storage.getItem(key);
+    try {
+      const intent = readIntent({ getItem: () => raw, setItem: () => { throw new Error("read only"); } });
+      if (!intent?.jobId) { kept++; continue; }
+      const job = decodeJob(await lookup(intent.jobId));
+      if (job.id !== intent.jobId || !isTerminal(job) || job.runtime || storage.getItem(key) !== raw) { kept++; continue; }
+      storage.removeItem(key); removed++;
+    } catch { kept++; }
+  }
+  return { removed, kept };
 }
 
 export class DurableSubmission {

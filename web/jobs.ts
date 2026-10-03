@@ -1,18 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { createLensApi } from "./api";
-import { decodeHistory, decodeJob, decodeResult, isTerminal, type Job, type RequestPreview } from "./contract";
+import { decodeHistory, decodeJob, decodeResult, isTerminal, type Job, type RequestPreview, type StorageUsage } from "./contract";
 import { mergeRequestPreviews } from "./history";
 import { RecordAccumulator, startPolling, type Sequenced } from "./records";
 
 const api = createLensApi();
 export type Report = (context: string, error: unknown) => void;
 
-export function useJob(id: string, report: Report, pageLimit: number) {
+export function useJob(id: string, report: Report, pageLimit: number, onDeleted?: (job: Job) => void) {
   const [state, setState] = useState<{ id: string; job: Job | null; records: Sequenced[]; complete: boolean }>({ id, job: null, records: [], complete: false });
   const [paused, setPaused] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const reportRef = useRef(report);
   reportRef.current = report;
+  const deletedRef = useRef(onDeleted); deletedRef.current = onDeleted;
   useEffect(() => {
     if (!id || paused) return;
     let active = true;
@@ -28,6 +29,10 @@ export function useJob(id: string, report: Report, pageLimit: number) {
       if (job.id !== id) throw new Error(`Requested job ${id}, received ${job.id}`);
       if (!active) return;
       if (!latest || job.revision >= latest.revision) latest = job;
+      if (latest.deleted) {
+        deletedRef.current?.(latest);
+        setState({ id, job: latest, records: [], complete: true }); done = true; return;
+      }
       for (const [source, error] of [["generation", job.generation.error], ["observations", job.observations.error], ["result publication", job.result.error], ["runtime publication", job.runtime?.publication_error ?? null]] as const) {
         if (error !== null) {
           const key = `${source}:${JSON.stringify(error)}`;
@@ -61,6 +66,8 @@ export function useJob(id: string, report: Report, pageLimit: number) {
 
 export function useHistory(report: Report) {
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [storage, setStorage] = useState<StorageUsage | null>(null);
+  const deleted = useRef(new Set<string>());
   const [previews, setPreviews] = useState(new Map<string, RequestPreview | null>());
   const previewRef = useRef(previews);
   const [loaded, setLoaded] = useState(false);
@@ -73,7 +80,7 @@ export function useHistory(report: Report) {
   reportRef.current = report;
   const merge = (incoming: Job[]) => setJobs(previous => {
     const map = new Map(previous.map(job => [job.id, job]));
-    for (const job of incoming) if (!map.has(job.id) || map.get(job.id)!.revision <= job.revision) map.set(job.id, job);
+    for (const job of incoming) if (!deleted.current.has(job.id) && (!map.has(job.id) || map.get(job.id)!.revision <= job.revision)) map.set(job.id, job);
     return [...map.values()].sort((a, b) => b.created_at_ms - a.created_at_ms || a.id.localeCompare(b.id));
   });
   async function load(next?: string) {
@@ -84,9 +91,12 @@ export function useHistory(report: Report) {
       const page = decodeHistory(await api.jobs(next));
       if (next !== undefined && page.next_cursor !== null && (page.next_cursor === next || seen.current.has(page.next_cursor))) throw new Error("History cursor did not advance.");
       if (!alive.current) return;
-      const nextPreviews = mergeRequestPreviews(previewRef.current, page.request_previews);
+      const previous = new Map(previewRef.current);
+      for (const job of page.jobs) if (job.deleted) previous.delete(job.id);
+      const nextPreviews = mergeRequestPreviews(previous, page.request_previews);
       previewRef.current = nextPreviews; setPreviews(nextPreviews);
       merge(page.jobs); setLoaded(true);
+      if (page.storage) setStorage(page.storage);
       if (next !== undefined) seen.current.add(next);
       // Refresh the head without invalidating an in-progress traversal of older pages.
       if (next !== undefined || seen.current.size === 0) setCursor(page.next_cursor);
@@ -98,5 +108,23 @@ export function useHistory(report: Report) {
     const stop = startPolling(() => load(), error => reportRef.current("History polling", error), 3000);
     return () => { alive.current = false; stop(); };
   }, []);
-  return { jobs, previews, loaded, busy, cursor, reload: () => load(), more: () => cursor === null ? Promise.resolve() : load(cursor), merge };
+  async function remove(id: string) {
+    const job = decodeJob(await api.delete(id));
+    if (job.id !== id || !job.deleted) throw new Error("Server did not confirm the requested job deletion");
+    markDeleted(id);
+    await load();
+  }
+  function markDeleted(id: string) {
+    if (deleted.current.has(id)) return;
+    deleted.current.add(id);
+    setJobs(previous => previous.filter(job => job.id !== id));
+    const next = new Map(previewRef.current); next.delete(id); previewRef.current = next; setPreviews(next);
+  }
+  function observeDeleted(job: Job) {
+    merge([job]);
+    if (!deleted.current.has(job.id)) {
+      const next = new Map(previewRef.current); next.set(job.id, null); previewRef.current = next; setPreviews(next);
+    }
+  }
+  return { jobs, previews, storage, loaded, busy, cursor, remove, observeDeleted, wasDeleted: (id: string) => deleted.current.has(id), reload: () => load(), more: () => cursor === null ? Promise.resolve() : load(cursor), merge };
 }

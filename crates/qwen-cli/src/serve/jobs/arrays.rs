@@ -167,7 +167,11 @@ impl JobStore {
 
     pub(crate) fn array(&self, id: &str, record_offset: u64) -> Result<Vec<u8>> {
         let entry = self.entry(id)?;
+        let _payload = entry.payload.read().unwrap();
         let snapshot = entry.snapshot();
+        if snapshot.status.deleted {
+            return Err(StoreError::Deleted);
+        }
         if record_offset >= snapshot.committed_bytes {
             return Err(StoreError::NotFound);
         }

@@ -18,3 +18,12 @@ test("runtime publication failure does not replace durable state or claim comple
   expect(() => decodeJob({ ...saved, runtime: { ...runtime, publication_error: null } })).toThrow("runtime.publication_error");
   expect(decodeJob(saved).runtime).toBeUndefined();
 });
+
+test("logical deletion does not claim physical cleanup or allow a running tombstone", () => {
+  const deleted = { ...saved, state: "completed", deleted: true, result: { ...saved.result, available: false, complete: true } };
+  const job = decodeJob(deleted);
+  const html = renderToStaticMarkup(<JobStatus job={job} />);
+  expect(html).toContain("Physical cleanup may still need retrying");
+  expect(() => decodeJob({ ...deleted, state: "running" })).toThrow("deleted job");
+  expect(() => decodeJob({ ...deleted, result: { ...deleted.result, available: true } })).toThrow("deleted job");
+});

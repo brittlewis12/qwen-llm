@@ -971,3 +971,48 @@ fn undelivered_job_is_settled_even_if_failure_publication_fails() {
     assert!(queue.pending.lock().unwrap().is_empty());
     assert_eq!(queue.used.load(Ordering::Acquire), 0);
 }
+
+#[test]
+fn deleting_payloads_preserves_exact_retry_without_delivery() {
+    let root = TestRoot::new();
+    let store = root.store();
+    let queue = FakeAdmission::new(Arc::clone(&store));
+    let api = enabled(Arc::clone(&store), Arc::clone(&queue));
+    let body = request("deleted").to_string();
+    let (_, accepted) = roundtrip(Arc::clone(&api), "POST", "/v1/lens/jobs", &body);
+    let job = queue.take();
+    let id = accepted["id"].as_str().unwrap();
+    assert_eq!(job.id, id);
+    store.cancel(id).unwrap();
+    store.execution_settled(id);
+    let (headers, deleted) = roundtrip(
+        Arc::clone(&api),
+        "POST",
+        &format!("/v1/lens/jobs/{id}/delete"),
+        "",
+    );
+    assert!(headers.starts_with("HTTP/1.1 200"));
+    assert_eq!(deleted["deleted"], true);
+    for suffix in ["request", "result", "arrays/0"] {
+        let (headers, error) = roundtrip(
+            Arc::clone(&api),
+            "GET",
+            &format!("/v1/lens/jobs/{id}/{suffix}"),
+            "",
+        );
+        assert!(headers.starts_with("HTTP/1.1 410"));
+        assert_eq!(error["error"]["code"], "job_deleted");
+    }
+    let (headers, retry) = roundtrip(Arc::clone(&api), "POST", "/v1/lens/jobs", &body);
+    assert!(headers.starts_with("HTTP/1.1 200"));
+    assert_eq!(retry, deleted);
+    let mut changed = request("deleted");
+    changed["generation"]["max_new_tokens"] = 5.into();
+    assert!(
+        roundtrip(api, "POST", "/v1/lens/jobs", &changed.to_string())
+            .0
+            .starts_with("HTTP/1.1 409")
+    );
+    assert!(queue.pending.lock().unwrap().is_empty());
+    assert_eq!(queue.used.load(Ordering::Acquire), 0);
+}

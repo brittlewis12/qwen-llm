@@ -12,6 +12,7 @@ import { TokenNavigator } from "./token-navigator";
 import { sameSite, type TokenSite } from "./token-navigation";
 
 export function JobStatus({ job }: { job: Job }) {
+  if (job.deleted) return <div className="job-status"><strong>Job logically deleted</strong><p>Prompt, results and arrays are unavailable through the API. Physical cleanup may still need retrying after an interruption. The accepted retry identity remains; old submissions cannot run inference again.</p></div>;
   return <div className="job-status"><div className="row-heading"><strong>{job.runtime ? "Publication failed" : job.state}</strong><span>{job.generation.sampled_tokens} sampled / {job.observations.committed_records} observations</span></div>
     {job.runtime && <div role="alert"><p>{job.runtime.execution_settled ? "Execution and writer settled." : "Waiting for execution and writer to settle."} The durable snapshot below may be stale; restart is required to reconcile storage. No inference is retried.</p>
       <p>{job.runtime.publication_error.message}</p>{job.runtime.generation && <p>In-memory outcome (not a durability acknowledgment): {job.runtime.generation.stop_reason}; {job.runtime.generation.counters.sampled_tokens} sampled, {job.runtime.generation.counters.consumed_generated_tokens} consumed.</p>}</div>}
@@ -153,8 +154,8 @@ export function TraceViewer({ records, complete, caps, assets, draft, update, re
   </section>;
 }
 
-export function ExecutionViewer({ id, caps, assets, draft, update, report, copyRun, reviewDraft }: { id: string; caps: Capabilities | null; assets: Asset[]; draft: Draft; update: (draft: Draft) => boolean; report: Report; copyRun: (id: string, newSeed: boolean) => void; reviewDraft?: () => void }) {
-  const view = useJob(id, report, Math.max(1, Math.min(64, caps?.limits.max_result_page_records ?? 64)));
+export function ExecutionViewer({ id, caps, assets, draft, update, report, copyRun, reviewDraft, onDeleted }: { id: string; caps: Capabilities | null; assets: Asset[]; draft: Draft; update: (draft: Draft) => boolean; report: Report; copyRun: (id: string, newSeed: boolean) => void; reviewDraft?: () => void; onDeleted?: (job: Job) => void }) {
+  const view = useJob(id, report, Math.max(1, Math.min(64, caps?.limits.max_result_page_records ?? 64)), onDeleted);
   const [cancelling, setCancelling] = useState(false);
   const [cancelStatus, setCancelStatus] = useState<Job | null>(null);
   const [inspectSeq, setInspectSeq] = useState(0);
@@ -177,7 +178,7 @@ export function ExecutionViewer({ id, caps, assets, draft, update, report, copyR
     <button type="button" disabled={!job || isTerminal(job) || job.runtime?.execution_settled || job.cancel_requested || cancelling} onClick={() => void cancel()}>{cancelling ? "Requesting cancellation..." : "Request job cancellation"}</button></div>
     <p className="muted">Read-only polling and pause never cancel work. Reconnect rereads immutable records from zero with sequence deduplication, without inference.</p>
     {job ? <JobStatus job={job} /> : <p role="status">Waiting for an actual job status. See request errors if retrieval fails.</p>}
-    <div className="actions"><button type="button" onClick={() => copyRun(id, false)}>Run again: prepare same seed</button><button type="button" onClick={() => copyRun(id, true)}>Run again: prepare new seed</button></div>
+    <div className="actions"><button type="button" disabled={job?.deleted} onClick={() => copyRun(id, false)}>Run again: prepare same seed</button><button type="button" disabled={job?.deleted} onClick={() => copyRun(id, true)}>Run again: prepare new seed</button></div>
     <div className="explore-shortcuts" aria-label="Explore this run"><a href="#saved-tokens-heading">Tokens & context</a><a href="#trace-heading">Layers & scores</a></div>
     <div className="exploration-layout"><div className="exploration-source">
     <section><h3>Prepared input / exact server record</h3>{prepared ? <>{prepared.prompt_text === undefined ? <p className="notice">This record does not retain prompt text/bytes. Exact token IDs remain available; no local template rendering is substituted.</p> : <details><summary>Exact rendered prompt, including assistant prefill</summary><pre className="generated-output">{prepared.prompt_text}</pre></details>}<details><summary>Exact prepared token IDs and server metadata</summary><pre>{JSON.stringify(prepared, null, 2)}</pre></details></> : <p>No prepared_input record loaded yet.</p>}</section>

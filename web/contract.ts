@@ -17,6 +17,7 @@ export type Capabilities = {
 export type Asset = { alias: string; kind: string; identity: string; available: boolean; unavailable_reason: string | null; source_layers: number[]; target_layer: number | null; readout_modes: string[]; direction_rows: string[]; transfer: string };
 export type JobState = "queued" | "running" | "finalizing" | "completed" | "cancelled" | "failed" | "interrupted";
 export type Job = {
+  deleted?: boolean;
   schema_version: 1; id: string; revision: number; created_at_ms: number; updated_at_ms: number; state: JobState; cancel_requested: boolean;
   generation: { state: "pending" | "running" | "completed" | "cancelled" | "failed" | "interrupted"; phase: "prefill" | "decode" | null; prompt_tokens: number; consumed_prompt_tokens: number; sampled_tokens: number; consumed_generated_tokens: number; stop_reason: string | null; error: unknown };
   observations: { state: "pending" | "writing" | "complete" | "partial" | "failed" | "not_requested"; committed_records: number; error: unknown };
@@ -30,7 +31,8 @@ export type Sample = Sequenced & { kind: "sampled_token"; index: number; token_i
 export type Prepared = Sequenced & { kind: "prepared_input"; token_ids: number[]; rendering: Record<string, unknown>; prompt_text?: string; prompt_bytes?: number[]; resolved_scopes: { id: string; kind: "operation" | "readout"; scope: Scope }[]; residual_pair_scopes?: { id: string; scope: Scope }[] };
 export type ResultPage = { schema_version: 1; job_id: string; records: Sequenced[]; next_cursor: string | null; complete: boolean };
 export type RequestPreview = { message_index: number; message_count: number; text: string; truncated: boolean };
-export type HistoryPage = { jobs: Job[]; next_cursor: string | null; request_previews?: Record<string, RequestPreview | null> };
+export type StorageUsage = { retained_jobs: number; retry_identities: number; reserved_bytes: number; max_retained_jobs: number; max_retry_identities: number; max_store_bytes: number };
+export type HistoryPage = { jobs: Job[]; next_cursor: string | null; request_previews?: Record<string, RequestPreview | null>; storage?: StorageUsage };
 export type RetainedArray = Sequenced & { kind: "retained_array"; key: string; quantity: "source_residual" | "source_residual_before" | "readout_logits"; position: number; source_layer: number; phase: "prefill" | "decode"; index: number; input_token_id: number; lens?: string; source_key?: string; applied_operation_ids: string[]; site_operation_ids?: string[]; capture_stage: "post_block_after_operations" | "post_block_before_operations"; provenance: "original_forward"; array: { dtype: "f32le"; length: number; offset: number; byte_length: number; sha256: string; url: string } };
 export type PairMetrics = { norm_before: number; norm_after: number; delta_norm: number; relative_delta: number | null };
 export type ResidualPair = Sequenced & { kind: "residual_pair"; id: string; before_key: string; after_key: string; position: number; source_layer: number; phase: "prefill" | "decode"; index: number; input_token_id: number; applied_operation_ids: string[]; metrics: PairMetrics };
@@ -92,6 +94,7 @@ export function decodeJob(value: unknown): Job {
   requireValue(typeof value.id === "string" && !!value.id && uint(value.revision) && uint(value.created_at_ms) && uint(value.updated_at_ms)
     && ["queued", "running", "finalizing", "completed", "cancelled", "failed", "interrupted"].includes(String(value.state)) && typeof value.cancel_requested === "boolean", "job", value);
   const generation = value.generation;
+  requireValue(value.deleted === undefined || typeof value.deleted === "boolean", "deleted", value);
   requireValue(["pending", "running", "completed", "cancelled", "failed", "interrupted"].includes(String(generation.state))
     && (generation.phase === null || ["prefill", "decode"].includes(String(generation.phase)))
     && ["prompt_tokens", "consumed_prompt_tokens", "sampled_tokens", "consumed_generated_tokens"].every(key => uint(generation[key]))
@@ -100,6 +103,7 @@ export function decodeJob(value: unknown): Job {
     && uint(value.observations.committed_records) && "error" in value.observations, "observations", value);
   requireValue(typeof value.result.available === "boolean" && typeof value.result.complete === "boolean" && "error" in value.result && typeof value.result.url === "string"
     && value.result.url.startsWith("/v1/lens/jobs/") && !/[\\\u0000-\u0020]/.test(value.result.url), "result", value);
+  requireValue(value.deleted !== true || (["completed", "cancelled", "failed", "interrupted"].includes(String(value.state)) && value.result.complete && !value.result.available && value.runtime === undefined), "deleted job", value);
   if (value.runtime !== undefined) {
     object(value.runtime, "runtime"); object(value.runtime.publication_error, "runtime.publication_error");
     requireValue(typeof value.runtime.execution_settled === "boolean"
@@ -135,7 +139,12 @@ export function decodeHistory(value: unknown): HistoryPage {
       requireValue(!preview.truncated || scalars === 240, "request preview truncation", value);
     }
   }
+  if (value.storage !== undefined) {
+    object(value.storage, "storage");
+    requireValue(["retained_jobs", "retry_identities", "reserved_bytes", "max_retained_jobs", "max_retry_identities", "max_store_bytes"].every(key => uint((value.storage as Record<string, unknown>)[key])), "storage usage", value);
+  }
   return { jobs, next_cursor: value.next_cursor as string | null,
+    ...(value.storage === undefined ? {} : { storage: value.storage as StorageUsage }),
     ...(value.request_previews === undefined ? {} : { request_previews: value.request_previews as Record<string, RequestPreview | null> }) };
 }
 export function decodeSelector(value: unknown): Selector {

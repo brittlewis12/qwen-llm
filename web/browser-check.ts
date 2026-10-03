@@ -23,7 +23,7 @@ await mkdir(output, { recursive: true });
 const profile = `${output}/profile-${crypto.randomUUID()}`;
 const manifest = await Bun.file(`${import.meta.dir}/dist/asset-manifest.json`).json();
 const assetPaths = new Set<string>(manifest.files.map((file: { path: string }) => `/${file.path}`));
-type TestJob = { id: string; key: string; body: string; ordinal: number; cancelled: boolean; emptyPages: number };
+type TestJob = { id: string; key: string; body: string; ordinal: number; cancelled: boolean; emptyPages: number; deleted?: boolean; cleanupPending?: boolean };
 const jobs = new Map<string, TestJob>();
 const posts: string[] = [];
 let cancelCount = 0;
@@ -42,6 +42,7 @@ let publicationFailed = false;
 let executionSettled = false;
 let failedJobReads = 0;
 let invalidFailedPrefix = false;
+let failNextDelete = false;
 const archiveScores = new Float32Array(caps.model.vocabulary_size).fill(-4);
 archiveScores[456] = 4.2; archiveScores[42] = 3;
 for (let i = 0; i < 22; i++) archiveScores[100 + i] = -1 - i * .05;
@@ -62,6 +63,7 @@ const currentAssets = () => ({ ...assets, assets: assets.assets.map((asset: any)
 function status(job: TestJob) {
   const completed = job.ordinal === 0 && job.emptyPages > 0 && navigationStage === 3;
   return { ...statusFixture, id: job.id, revision: 18 + job.emptyPages + (job.cancelled ? 20 : 0),
+    ...(job.deleted ? { deleted: true } : {}),
     ...(publicationFailed && job.id === "job_external_client" ? { runtime: {
       publication_error: { code: "artifact_writer_stopped", message: "Fixture publication failure" }, execution_settled: executionSettled,
       generation: { stop_reason: "token_limit", counters: { prompt_tokens: 16, consumed_prompt_tokens: 16, sampled_tokens: 3, consumed_generated_tokens: 2 }, error: null },
@@ -69,7 +71,7 @@ function status(job: TestJob) {
     state: job.cancelled ? "cancelled" : completed ? "completed" : "running", cancel_requested: job.cancelled,
     generation: { ...statusFixture.generation, state: job.cancelled ? "cancelled" : completed ? "completed" : "running", stop_reason: job.cancelled ? "cancelled" : completed ? "token_limit" : null },
     observations: { ...statusFixture.observations, state: job.cancelled ? "partial" : completed ? "complete" : "writing" },
-    result: { available: true, complete: completed || job.cancelled, url: `/v1/lens/jobs/${job.id}/result`, error: null },
+    result: { available: !job.deleted, complete: completed || job.cancelled, url: `/v1/lens/jobs/${job.id}/result`, error: null },
   };
 }
 const server = liveOrigin ? null : Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
@@ -98,12 +100,12 @@ const server = liveOrigin ? null : Bun.serve({ hostname: "127.0.0.1", port: 0, a
     return Response.json(status(job), { status: existing ? 200 : 202 });
   }
   if (url.pathname === "/v1/lens/jobs") {
-    const all = [...jobs.values()].sort((a, b) => b.ordinal - a.ordinal);
+    const all = [...jobs.values()].filter(job => !job.deleted || job.cleanupPending).sort((a, b) => b.ordinal - a.ordinal);
     const cursor = url.searchParams.get("cursor");
     const offset = cursor === null ? 0 : all.findIndex(job => job.id === cursor) + 1;
     const selected = all.slice(offset, offset + historyPageSize);
     return Response.json({ schema_version: 1, jobs: selected.map(status), next_cursor: offset + selected.length < all.length ? selected.at(-1)!.id : null,
-      ...(historyPreviews ? { request_previews: Object.fromEntries(selected.map(job => [job.id, requestPreview(job)])) } : {}) });
+      ...(historyPreviews ? { request_previews: Object.fromEntries(selected.map(job => [job.id, job.deleted ? null : requestPreview(job)])) } : {}) });
   }
   const binary = /^\/v1\/lens\/jobs\/([^/]+)\/arrays\/(0|100|200)$/.exec(url.pathname);
   if (binary) {
@@ -111,11 +113,18 @@ const server = liveOrigin ? null : Bun.serve({ hostname: "127.0.0.1", port: 0, a
     arrayReads++;
     return new Response(binary[2] === "0" ? sourceBytes : binary[2] === "100" ? scoreBytes : beforeBytes, { headers: { "content-type": "application/octet-stream" } });
   }
-  const match = /^\/v1\/lens\/jobs\/([^/]+)(\/result|\/cancel|\/request)?$/.exec(url.pathname);
+  const match = /^\/v1\/lens\/jobs\/([^/]+)(\/result|\/cancel|\/request|\/delete)?$/.exec(url.pathname);
   if (match) {
     if (publicationFailed && match[1] === "job_external_client" && (!match[2] || match[2] === "/result")) failedJobReads++;
     const job = [...jobs.values()].find(job => job.id === match[1]);
     if (!job) return Response.json(errorFixture, { status: 404 });
+    if (match[2] === "/delete") {
+      if (!["completed", "cancelled"].includes(status(job).state)) return Response.json(errorFixture, { status: 400 });
+      job.deleted = true; job.cleanupPending = failNextDelete;
+      if (failNextDelete) { failNextDelete = false; return Response.json({ error: { code: "cleanup_failed", message: "Injected cleanup failure after tombstone" } }, { status: 500 }); }
+      return Response.json(status(job));
+    }
+    if (job.deleted && match[2]) return Response.json({ error: { code: "job_deleted" } }, { status: 410 });
     if (match[2] === "/request") { requestReads++; if (heldRequest) await heldRequest; return Response.json({ schema_version: 1, job_id: job.id, request: JSON.parse(job.body) }); }
     if (match[2] === "/cancel") { cancelCount++; job.cancelled = true; return Response.json(status(job)); }
     if (match[2] === "/result") {
@@ -413,6 +422,17 @@ try {
     console.log(`Observed ${transientResponses.length} transient HTTP responses; retries remain bounded.`);
     assert.equal(await evaluate<number>(`document.querySelectorAll('.error-ledger details').length`), 0,
       `real control-pool startup must not strand discovery or report transient read saturation: ${await evaluate<string>("document.querySelector('.error-ledger')?.textContent ?? ''")}`);
+    const savedRequest = await (await fetch(`${liveOrigin}/v1/lens/jobs/${jobId}/request`)).json() as { request: unknown };
+    await click("03 History");
+    await click("Delete job payloads");
+    await wait(`document.querySelectorAll('.history-list > li').length === 0`, "terminal history deletion finishes");
+    await click("02 Execution");
+    await wait(`document.body.textContent.includes('Job logically deleted') && document.querySelectorAll('.sample-list span').length === 0`, "deletion invalidates the already completed viewer");
+    const retryDeleted = await fetch(`${liveOrigin}/v1/lens/jobs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(savedRequest.request) });
+    assert.equal(retryDeleted.status, 200);
+    assert.equal((await retryDeleted.json() as { deleted: boolean }).deleted, true);
+    assert.equal((await fetch(`${liveOrigin}/v1/lens/jobs/${jobId}/result`)).status, 410);
+    console.log("Actual store deletion passed: completed viewer cleared, exact retry returns a tombstone, payload reads return 410.");
     console.log(`${fitted ? "Fitted readout" : plain ? "Plain readout" : "Baseline"} browser passed: actual same-port assets/store/producer, phone prefill/sampling/submit/reload/copy/history, exact records, desktop parity, no extra jobs. Job ${jobId}`);
   } else if (liveOrigin) {
     const fittedAlias = Bun.env.LENS_TEST_FITTED_ALIAS;
@@ -808,6 +828,18 @@ try {
   assert.equal(failedJobReads, invalidReads, "settled failure must stop polling even when prefix validation fails");
   assert.equal(posts.length, postsBeforeHistory);
   console.log("Publication failure passed: visible stale snapshot and in-memory outcome, committed prefix drained, polling settles without new inference.");
+  failNextDelete = true;
+  await click("03 History");
+  await evaluate(`[...document.querySelectorAll('.history-list > li')].find(li => li.querySelector('h3')?.textContent === 'job_variant_1').querySelectorAll('button')[2].click()`);
+  await wait(`document.body.textContent.includes('Injected cleanup failure after tombstone')`, "partial cleanup remains an explicit error");
+  await evaluate(`[...document.querySelectorAll('.history-list > li')].find(li => li.querySelector('h3')?.textContent === 'job_variant_1').querySelector('button').click()`);
+  await wait(`document.body.textContent.includes('Job logically deleted')`, "opening a tombstone does not claim physical cleanup");
+  await click("03 History");
+  await click("Refresh history now");
+  await wait(`[...document.querySelectorAll('button')].some(button => button.textContent === 'Retry payload cleanup')`, "opening and refreshing preserves pending cleanup action");
+  await click("Retry payload cleanup");
+  await wait(`![...document.querySelectorAll('.history-list h3')].some(node => node.textContent === 'job_variant_1')`, "successful cleanup retry removes the row");
+  console.log("Partial cleanup passed: tombstone inspection and refresh preserve retry, successful cleanup removes the row.");
   if (runtimeErrors.length) throw new Error(`Browser runtime errors: ${JSON.stringify(runtimeErrors)}`);
   console.log("Browser checks passed: phone editing, durable recovery, paged tokens, tap scores, source-scope pinning, reorder, independent variant/new seed, explicit cancellation, history, reload, desktop/phone bounds. GPU disabled; fixture-only backend.");
   console.log(Bun.env.CAPTURE_SCREENSHOTS !== "1" ? "Screenshot capture not requested; browser interactions and layout bounds checked." : `Screenshots: ${output}/phone-score.png and ${output}/desktop-history.png`);

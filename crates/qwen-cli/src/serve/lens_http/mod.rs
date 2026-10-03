@@ -101,6 +101,7 @@ impl From<StoreError> for ApiError {
             StoreError::NotFound => Self::new(404, "unknown_job", "Unknown job"),
             StoreError::Conflict => Self::new(409, "idempotency_conflict", error.to_string()),
             StoreError::Full => Self::new(429, "capacity_exceeded", error.to_string()),
+            StoreError::Deleted => Self::new(410, "job_deleted", error.to_string()),
             // A rename may have succeeded. A 503 would incorrectly tell the
             // browser it is safe to abandon this key and create new work.
             StoreError::Storage(_) => Self::new(500, "storage_unavailable", error.to_string()),
@@ -221,6 +222,7 @@ impl LensApi {
             ("max_body_bytes", limits.max_request_bytes as u64),
             ("max_queued_jobs", queue_limit),
             ("max_retained_jobs", limits.max_retained_jobs as u64),
+            ("max_retry_identities", limits.max_retry_identities as u64),
             ("max_history_bytes", limits.max_store_bytes),
             ("max_result_page_records", limits.max_page_records as u64),
             ("max_result_page_bytes", limits.max_page_bytes as u64),
@@ -331,16 +333,20 @@ impl LensApi {
                                 .result(id, page.cursor.as_deref(), page.limit)?,
                         )
                     }
-                    ("POST", "cancel") => {
+                    ("POST", "cancel" | "delete") => {
                         no_query(query)?;
                         let store = self.store()?;
                         if !request.body.is_empty()
                             && serde_json::from_slice::<Value>(&request.body).ok()
                                 != Some(json!({}))
                         {
-                            return Err(ApiError::invalid("Cancellation body must be empty or {}"));
+                            return Err(ApiError::invalid("Control body must be empty or {}"));
                         }
-                        Reply::ok(store.cancel(id)?)
+                        Reply::ok(if action == "delete" {
+                            store.delete(id)?
+                        } else {
+                            store.cancel(id)?
+                        })
                     }
                     _ => Err(ApiError::new(
                         404,
@@ -537,6 +543,7 @@ fn write_reply(mut stream: &TcpStream, reply: Reply) -> io::Result<()> {
         403 => "Forbidden",
         404 => "Not Found",
         409 => "Conflict",
+        410 => "Gone",
         412 => "Precondition Failed",
         413 => "Content Too Large",
         429 => "Too Many Requests",

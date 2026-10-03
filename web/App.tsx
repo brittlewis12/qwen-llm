@@ -3,7 +3,7 @@ import { ApiHttpError, createLensApi } from "./api";
 import { decodeJob, decodeResult, isPrepared, isBaselineOnly, type Asset, type Capabilities, type Job } from "./contract";
 import { decodeDiscovery, reconcileBinding, rebindToCurrent, recoverLegacyBinding, requireUnchangedDraft } from "./bindings";
 import { DRAFT_KEY, SELECTION_KEY, draftFromSavedRequest, emptySelection, newDraft, parseDraft, parseSelection, submissionConfig, validateCapabilities } from "./draft";
-import { DurableSubmission, readIntent, type Intent } from "./durable";
+import { DurableSubmission, readIntent, pruneCompletedArchives, type Intent } from "./durable";
 import { InputEditor } from "./editor";
 import { useHistory } from "./jobs";
 import { useStored } from "./storage";
@@ -17,6 +17,7 @@ type Failure = { at: string; context: string; message: string; headers?: [string
 
 export function App() {
   const [section, setSection] = useState<Section>("Input");
+  const [viewVersion, setViewVersion] = useState(0);
   const reviewFocus = useRef(false);
   useEffect(() => {
     if (section === "Input" && reviewFocus.current) {
@@ -40,6 +41,19 @@ export function App() {
   const alive = useRef(true);
   const [selectionText, setSelectionText] = useState(selected.value[selected.value.view]);
   const [notice, setNotice] = useState("");
+  const [pruning, setPruning] = useState(false);
+  const [archiveNotice, setArchiveNotice] = useState("");
+  async function pruneArchives() {
+    if (pruning) return;
+    setPruning(true);
+    try {
+      if (!navigator.locks) throw new Error("Web Locks are required for cross-tab-safe cleanup.");
+      const reads = createLensApi((path, init) => fetch(path, { ...init, signal: AbortSignal.timeout(10_000) }));
+      const result = await navigator.locks.request("qwen-lens-submission-v1", () => pruneCompletedArchives(localStorage, reads.job));
+      setArchiveNotice(`Removed ${result.removed} completed browser archives; kept ${result.kept} active, unresolved, changed or unverifiable archives. Current submission and server history are unchanged.`);
+    } catch (error) { setArchiveNotice(String(error)); }
+    finally { setPruning(false); }
+  }
   const latestDraft = useRef(draft.value);
   latestDraft.current = draft.value;
   function updateDraft(next: typeof draft.value) {
@@ -88,7 +102,7 @@ export function App() {
   if (intent && !intent.jobId && !intent.rejected) validation.push("An unresolved durable submission exists. Recover its exact request first.");
 
   function openJob(job: Job, slot = selected.value.view) {
-    if (selected.update({ ...selected.value, [slot]: job.id, view: slot })) setSection("Execution");
+    if (selected.update({ ...selected.value, [slot]: job.id, view: slot })) { setSection("Execution"); setViewVersion(value => value + 1); }
     history.merge([job]);
   }
   async function submit(retry: boolean) {
@@ -176,11 +190,14 @@ export function App() {
       <div id="section-Execution" hidden={section !== "Execution"}><section className="panel" aria-labelledby="execution-heading"><p className="eyebrow">02 / Explore</p><h2 id="execution-heading">Follow a token. Test a direction.</h2>
         <div className="actions" aria-label="Comparison selection">{(["baseline", "variant"] as const).map(view => <button key={view} type="button" aria-pressed={selected.value.view === view} onClick={() => selected.update({ ...selected.value, view })}>{view === "baseline" ? "Baseline" : "Variant"}{selected.value[view] ? ` / ${selected.value[view]}` : " / not selected"}</button>)}</div>
         <details className="open-job-details"><summary>Open a job by ID</summary><form onSubmit={event => { event.preventDefault(); selected.update({ ...selected.value, [selected.value.view]: selectionText.trim() }); }}><label htmlFor="selected-job">{selected.value.view} job ID</label><div className="inline-form"><input id="selected-job" value={selectionText} onChange={event => setSelectionText(event.target.value)} /><button type="submit">Open job</button></div></form></details>
-        <ExecutionViewer key={selected.value[selected.value.view]} id={selected.value[selected.value.view]} caps={capabilities} assets={assets} draft={draft.value} update={updateDraft} report={report} copyRun={copyRun} reviewDraft={() => { reviewFocus.current = true; setSection("Input"); }} />
+        <ExecutionViewer key={`${selected.value[selected.value.view]}:${viewVersion}:${history.wasDeleted(selected.value[selected.value.view])}`} id={selected.value[selected.value.view]} caps={capabilities} assets={assets} draft={draft.value} update={updateDraft} report={report} copyRun={copyRun} onDeleted={history.observeDeleted} reviewDraft={() => { reviewFocus.current = true; setSection("Input"); }} />
       </section></div>
       <div id="section-History" hidden={section !== "History"}><section className="panel" aria-labelledby="history-heading"><p className="eyebrow">03 / Record</p><h2 id="history-heading">The server's record.</h2><button type="button" disabled={history.busy} onClick={() => void history.reload()}>Refresh history now</button>
         <p className="muted">Actual jobs refresh every 3 seconds, including while work runs. Older pages are retained and merged by ID/revision.</p>
-         {!history.loaded ? <p>History has not loaded; this is not an empty-server claim.</p> : history.jobs.length === 0 ? <p>The server returned no jobs.</p> : <ol className="history-list">{history.jobs.map(job => <HistoryEntry key={job.id} job={job} preview={history.previews.get(job.id)} open={openJob} />)}</ol>}
+        {history.storage && <p>Server storage: {history.storage.retained_jobs} / {history.storage.max_retained_jobs} retained jobs; {(history.storage.reserved_bytes / 1048576).toFixed(1)} / {(history.storage.max_store_bytes / 1048576).toFixed(0)} MiB charged; {history.storage.retry_identities} / {history.storage.max_retry_identities} permanent retry identities.</p>}
+        <button type="button" disabled={pruning} onClick={() => void pruneArchives()}>{pruning ? "Checking browser archives..." : "Clean completed browser archives"}</button>
+        {archiveNotice && <p role="status">{archiveNotice}</p>}
+         {!history.loaded ? <p>History has not loaded; this is not an empty-server claim.</p> : history.jobs.length === 0 ? <p>The server returned no jobs.</p> : <ol className="history-list">{history.jobs.map(job => <HistoryEntry key={job.id} job={job} preview={history.previews.get(job.id)} open={openJob} remove={history.remove} />)}</ol>}
          {history.cursor !== null && <button type="button" disabled={history.busy} onClick={() => void history.more()}>Load older jobs</button>}
       </section></div>
     </main><footer><span>QWEN LENS / HTTP CONTRACT V1</span><span>Durable jobs. Independent viewers. Native scores.</span></footer>

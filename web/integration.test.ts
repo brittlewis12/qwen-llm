@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { ApiHttpError, createLensApi } from "./api";
 import { decodeAssets, decodeCapabilities, decodeHistory, decodeJob, decodeResult, isBaselineOnly, isReadout } from "./contract";
 import { draftFromBody, draftFromSavedRequest, layerValues, moveRow, newDraft, parseDraft, sourceScope, submissionConfig, validateCapabilities } from "./draft";
-import { DurableSubmission, INTENT_KEY, readIntent, type StoragePort } from "./durable";
+import { DurableSubmission, INTENT_KEY, readIntent, pruneCompletedArchives, type StoragePort } from "./durable";
 import { RecordAccumulator, startPolling, type Sequenced } from "./records";
 import { cellAvailability } from "./viewer";
 import { forwardRequest, proxyConfig, proxyTarget } from "./proxy";
@@ -15,7 +15,33 @@ class MemoryStorage implements StoragePort {
   fail = false;
   getItem(key: string) { return this.values.get(key) ?? null; }
   setItem(key: string, value: string) { if (this.fail) throw new Error("Storage quota"); this.values.set(key, value); }
+  get length() { return this.values.size; }
+  key(index: number) { return [...this.values.keys()][index] ?? null; }
+  removeItem(key: string) { if (this.fail) throw new Error("Storage unavailable"); this.values.delete(key); }
+  clear() { this.values.clear(); }
 }
+
+test("browser archive cleanup protects current, unresolved, active and unverifiable submissions", async () => {
+  const storage = new MemoryStorage();
+  storage.setItem(INTENT_KEY, "current recovery bytes untouched");
+  for (const key of ["done", "active", "pending", "missing", "changed"]) storage.setItem(`${INTENT_KEY}.archive.${key}`, JSON.stringify({
+    version: 1, key, body: JSON.stringify({ schema_version: 1, idempotency_key: key }), createdAt: "now", jobId: key === "pending" ? null : key, attempts: [],
+  }));
+  const calls: string[] = [];
+  const result = await pruneCompletedArchives(storage, async id => {
+    calls.push(id);
+    if (id === "missing") throw new Error("Unavailable");
+    if (id === "changed") storage.setItem(`${INTENT_KEY}.archive.changed`, "changed during verification");
+    return { ...status, id, state: id === "active" ? "running" : "completed" };
+  });
+  expect(result).toEqual({ removed: 1, kept: 4 });
+  expect(calls).not.toContain("pending");
+  expect(storage.getItem(INTENT_KEY)).toBe("current recovery bytes untouched");
+  expect(storage.getItem(`${INTENT_KEY}.archive.done`)).toBeNull();
+  expect(storage.getItem(`${INTENT_KEY}.archive.pending`)).not.toBeNull();
+  storage.fail = true;
+  expect(await pruneCompletedArchives(storage, async id => ({ ...status, id, state: "completed" }))).toEqual({ removed: 0, kept: 4 });
+});
 
 describe("authoritative Lens v1 fixtures", () => {
   test("explicit baseline-only declarations are decoded and contradictory capabilities refused", () => {
@@ -43,6 +69,9 @@ describe("authoritative Lens v1 fixtures", () => {
     expect(calls).toBe(1);
     calls = 0;
     await expect(busy.cancel("job_example")).rejects.toBeInstanceOf(ApiHttpError);
+    expect(calls).toBe(1);
+    calls = 0;
+    await expect(busy.delete("job_example")).rejects.toBeInstanceOf(ApiHttpError);
     expect(calls).toBe(1);
   });
   test("read retries preserve cursors and do not retry malformed success or permanent failures", async () => {

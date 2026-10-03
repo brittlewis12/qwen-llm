@@ -156,6 +156,8 @@ pub(crate) struct JobStatus {
     pub(crate) result: ResultStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) runtime: Option<RuntimeStatus>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) deleted: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,6 +189,7 @@ impl JobStatus {
             id,
             revision: 0,
             runtime: None,
+            deleted: false,
             created_at_ms: now,
             updated_at_ms: now,
             state: JobState::Queued,

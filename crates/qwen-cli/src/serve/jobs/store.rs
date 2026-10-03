@@ -18,6 +18,8 @@ const MAX_ERROR_BYTES: usize = 4096;
 
 #[path = "arrays.rs"]
 mod arrays;
+#[path = "deletion.rs"]
+mod deletion;
 pub(crate) use arrays::{MAX_ARCHIVE_BYTES, MAX_ARRAY_BYTES};
 
 #[derive(Default)]
@@ -39,6 +41,7 @@ pub(crate) enum FaultPoint {
     RecoveryPublished,
     RecoveryJobSync,
     RecoveryRootSync,
+    DeletePayload,
 }
 
 #[cfg(test)]
@@ -57,6 +60,7 @@ impl Faults {
 pub(crate) struct Limits {
     pub(crate) max_active_jobs: usize,
     pub(crate) max_retained_jobs: usize,
+    pub(crate) max_retry_identities: usize,
     pub(crate) max_store_bytes: u64,
     pub(crate) max_request_bytes: usize,
     pub(crate) max_record_bytes: usize,
@@ -71,6 +75,7 @@ impl Default for Limits {
         Self {
             max_active_jobs: 32,
             max_retained_jobs: 4096,
+            max_retry_identities: 65536,
             max_store_bytes: 64 * 1024 * 1024 * 1024,
             max_request_bytes: 1024 * 1024,
             max_record_bytes: 1024 * 1024,
@@ -88,6 +93,7 @@ pub(crate) enum StoreError {
     NotFound,
     Conflict,
     Full,
+    Deleted,
     Storage(io::Error),
 }
 
@@ -98,6 +104,9 @@ impl std::fmt::Display for StoreError {
             Self::NotFound => f.write_str("unknown job"),
             Self::Conflict => f.write_str("idempotency key already names a different request"),
             Self::Full => f.write_str("durable job capacity reached"),
+            Self::Deleted => {
+                f.write_str("job payloads were deleted; the accepted retry identity is retained")
+            }
             Self::Storage(error) => write!(f, "job storage unavailable: {error}"),
         }
     }
@@ -159,13 +168,15 @@ struct Snapshot {
 
 struct Entry {
     directory: PathBuf,
-    request_preview: Option<RequestPreview>,
+    request_preview: RwLock<Option<RequestPreview>>,
     state: RwLock<Snapshot>,
     writer: Mutex<()>,
     fenced: AtomicBool,
     control: ExecutionControl,
     faults: Arc<Faults>,
     runtime: Mutex<super::state::RuntimeStatus>,
+    payload: RwLock<()>,
+    payload_charge: AtomicU64,
 }
 
 impl Entry {
@@ -253,6 +264,17 @@ pub(crate) struct HistoryPage {
     pub(crate) jobs: Vec<JobStatus>,
     pub(crate) request_previews: BTreeMap<String, Option<RequestPreview>>,
     pub(crate) next_cursor: Option<String>,
+    pub(crate) storage: StorageUsage,
+}
+
+#[derive(Serialize)]
+pub(crate) struct StorageUsage {
+    retained_jobs: usize,
+    retry_identities: usize,
+    reserved_bytes: u64,
+    max_retained_jobs: usize,
+    max_retry_identities: usize,
+    max_store_bytes: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -272,6 +294,7 @@ impl JobStore {
     fn open_inner(root: &Path, limits: Limits, faults: Arc<Faults>) -> Result<Self> {
         if limits.max_active_jobs == 0
             || limits.max_retained_jobs == 0
+            || limits.max_retry_identities < limits.max_retained_jobs
             || limits.max_store_bytes < (2 * MAX_SNAPSHOT_BYTES) as u64
             || limits.max_page_records == 0
             || limits.max_record_bytes == 0
@@ -327,7 +350,7 @@ impl JobStore {
             if !valid_id(id) || !child.file_type()?.is_dir() {
                 return Err(corrupt("invalid job directory"));
             }
-            if entries.len() >= limits.max_retained_jobs {
+            if entries.len() >= limits.max_retry_identities {
                 return Err(invalid(
                     "retained history exceeds configured job cap; raise the cap to reopen without deleting history",
                 ));
@@ -345,6 +368,31 @@ impl JobStore {
             {
                 return Err(corrupt("inconsistent job snapshot"));
             }
+            if snapshot.status.deleted {
+                deletion::recover(&directory, &snapshot, &faults)?;
+                reserved_bytes = reserved_bytes
+                    .checked_add((2 * MAX_SNAPSHOT_BYTES) as u64)
+                    .ok_or_else(|| corrupt("job storage accounting overflow"))?;
+                entries.insert(
+                    id.to_owned(),
+                    Arc::new(Entry {
+                        directory,
+                        request_preview: RwLock::new(None),
+                        state: RwLock::new(snapshot),
+                        writer: Mutex::new(()),
+                        fenced: AtomicBool::new(false),
+                        control: ExecutionControl::default(),
+                        faults: Arc::clone(&faults),
+                        runtime: Mutex::new(RuntimeStatus {
+                            execution_settled: true,
+                            ..Default::default()
+                        }),
+                        payload: RwLock::new(()),
+                        payload_charge: AtomicU64::new(0),
+                    }),
+                );
+                continue;
+            }
             // Check the immutable request, but do not retain prompt bodies for
             // the entire history in RAM. Only compact metadata is indexed.
             let request: Value =
@@ -353,6 +401,7 @@ impl JobStore {
                 return Err(corrupt("job request digest mismatch"));
             }
             arrays::recover(&directory, &snapshot, limits)?;
+            let previous_reserved = reserved_bytes;
             reserved_bytes = reserved_bytes
                 .checked_add(
                     fs::metadata(directory.join("request.json"))?
@@ -391,15 +440,30 @@ impl JobStore {
                 id.to_owned(),
                 Arc::new(Entry {
                     directory,
-                    request_preview: request_preview(&request),
+                    request_preview: RwLock::new(request_preview(&request)),
                     state: RwLock::new(snapshot),
                     writer: Mutex::new(()),
                     fenced: AtomicBool::new(false),
                     control: ExecutionControl::default(),
                     faults: Arc::clone(&faults),
-                    runtime: Mutex::default(),
+                    runtime: Mutex::new(RuntimeStatus {
+                        execution_settled: true,
+                        ..Default::default()
+                    }),
+                    payload: RwLock::new(()),
+                    payload_charge: AtomicU64::new(
+                        reserved_bytes - previous_reserved - (2 * MAX_SNAPSHOT_BYTES) as u64,
+                    ),
                 }),
             );
+        }
+        if entries
+            .values()
+            .filter(|entry| !entry.snapshot().status.deleted)
+            .count()
+            > limits.max_retained_jobs
+        {
+            return Err(invalid("retained history exceeds configured job cap"));
         }
         #[cfg(test)]
         faults.check(FaultPoint::RecoveryRootSync)?;
@@ -486,6 +550,7 @@ impl JobStore {
             return Err(io::Error::other("acceptance publication failed; restart required").into());
         }
         let mut active = 0;
+        let mut retained = 0;
         for entry in self.entries.read().unwrap().values() {
             let snapshot = entry.snapshot();
             if snapshot.key == key {
@@ -502,9 +567,11 @@ impl JobStore {
                 };
             }
             active += usize::from(!snapshot.status.state.terminal());
+            retained += usize::from(!snapshot.status.deleted);
         }
         if active >= self.limits.max_active_jobs
-            || self.entries.read().unwrap().len() >= self.limits.max_retained_jobs
+            || retained >= self.limits.max_retained_jobs
+            || self.entries.read().unwrap().len() >= self.limits.max_retry_identities
         {
             return Err(StoreError::Full);
         }
@@ -554,13 +621,15 @@ impl JobStore {
             id,
             Arc::new(Entry {
                 directory,
-                request_preview: request_preview(request),
+                request_preview: RwLock::new(request_preview(request)),
                 state: RwLock::new(snapshot),
                 writer: Mutex::new(()),
                 fenced: AtomicBool::new(false),
                 control: ExecutionControl::default(),
                 faults: Arc::clone(&self.faults),
                 runtime: Mutex::default(),
+                payload: RwLock::new(()),
+                payload_charge: AtomicU64::new(bytes.len() as u64 + archive_bytes),
             }),
         );
         Ok(Accepted {
@@ -603,8 +672,13 @@ impl JobStore {
     }
 
     pub(crate) fn request(&self, id: &str) -> Result<Value> {
+        let entry = self.entry(id)?;
+        let _payload = entry.payload.read().unwrap();
+        if entry.snapshot().status.deleted {
+            return Err(StoreError::Deleted);
+        }
         read_json(
-            &self.entry(id)?.directory.join("request.json"),
+            &entry.directory.join("request.json"),
             self.limits.max_request_bytes,
         )
     }
@@ -619,17 +693,37 @@ impl JobStore {
             return Err(invalid("invalid history cursor"));
         }
         let entries = self.entries.read().unwrap();
-        let mut selected = entries
-            .iter()
-            .rev()
-            .filter(|(id, _)| cursor.is_none_or(|cursor| id.as_str() < cursor));
+        let storage = StorageUsage {
+            retained_jobs: entries
+                .values()
+                .filter(|entry| !entry.snapshot().status.deleted)
+                .count(),
+            retry_identities: entries.len(),
+            reserved_bytes: self.reserved_bytes.load(Ordering::Acquire),
+            max_retained_jobs: self.limits.max_retained_jobs,
+            max_retry_identities: self.limits.max_retry_identities,
+            max_store_bytes: self.limits.max_store_bytes,
+        };
+        let mut selected = entries.iter().rev().filter(|(id, entry)| {
+            cursor.is_none_or(|cursor| id.as_str() < cursor)
+                && (!entry.snapshot().status.deleted
+                    || entry.payload_charge.load(Ordering::Acquire) != 0)
+        });
         let mut request_previews = BTreeMap::new();
         let jobs: Vec<_> = selected
             .by_ref()
             .take(limit)
             .map(|(id, entry)| {
-                request_previews.insert(id.clone(), entry.request_preview.clone());
-                entry.status()
+                let status = entry.status();
+                request_previews.insert(
+                    id.clone(),
+                    if status.deleted {
+                        None
+                    } else {
+                        entry.request_preview.read().unwrap().clone()
+                    },
+                );
+                status
             })
             .collect();
         let next_cursor = selected
@@ -640,6 +734,7 @@ impl JobStore {
             jobs,
             request_previews,
             next_cursor,
+            storage,
         })
     }
 
@@ -998,6 +1093,9 @@ impl JobStore {
             return Err(StoreError::Full);
         }
         self.reserve_bytes(batch.len() as u64)?;
+        entry
+            .payload_charge
+            .fetch_add(batch.len() as u64, Ordering::AcqRel);
         let write = (|| -> Result<()> {
             if let Some(bytes) = payload {
                 let mut file = open_regular(&entry.directory.join("arrays.bin"), true)?;
@@ -1094,7 +1192,11 @@ impl JobStore {
     ) -> Result<ResultPage> {
         self.check_page_limit(limit)?;
         let entry = self.entry(id)?;
+        let _payload = entry.payload.read().unwrap();
         let snapshot = entry.snapshot();
+        if snapshot.status.deleted {
+            return Err(StoreError::Deleted);
+        }
         let (mut offset, mut seq) = parse_cursor(id, cursor)?;
         if offset > snapshot.committed_bytes
             || seq > snapshot.next_seq

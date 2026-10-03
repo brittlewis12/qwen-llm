@@ -25,6 +25,17 @@ const STACK_BYTES: usize = 2 * 1024 * 1024;
 // An ordinary request owns the sole execution slot before body allocation, so
 // another ordinary preparation cannot grow behind an executing native job.
 pub(super) const CPU_RESERVE_BYTES: u64 = MAX_WORKERS as u64 * 256 * 1024 * 1024;
+// Static/unavailable-Lens classification has no prepared diagnostics or history
+// Value trees. Ordinary preparation owns the execution slot before its body is read.
+pub(super) const STATIC_CPU_RESERVE_BYTES: u64 =
+    MAX_WORKERS as u64 * (STACK_BYTES + http::READ_WATCHDOG_STACK_BYTES + 4 * 1024 * 1024) as u64;
+pub(super) fn cpu_reserve(history: bool) -> u64 {
+    if history {
+        CPU_RESERVE_BYTES
+    } else {
+        STATIC_CPU_RESERVE_BYTES
+    }
+}
 
 #[derive(Default)]
 struct GateState {
@@ -275,6 +286,7 @@ pub(super) fn handle(
         activity.take().expect("ordinary HTTP activity"),
         request,
         execution.take().expect("ordinary execution reservation"),
+        cpu_reserve(profile.lens.history_enabled()),
     )
     .map_err(io::Error::other)?;
     profile
@@ -283,9 +295,9 @@ pub(super) fn handle(
         .map_err(io::Error::other)
 }
 
-pub(super) fn admit_memory() -> Result<()> {
+pub(super) fn admit_memory(bytes: u64) -> Result<()> {
     super::transport_memory::admit_resident_transport(
-        CPU_RESERVE_BYTES,
+        bytes,
         qwen_llm::metal::MetalContext::process_limit_bytes_remaining(),
     )
     .map_err(|cause| anyhow::anyhow!("{}", cause.message))
@@ -296,7 +308,8 @@ pub(super) fn spawn(
     profile: Profile,
     stopping: Arc<AtomicBool>,
 ) -> Result<JoinHandle<Result<()>>> {
-    admit_memory()?;
+    let reserve = cpu_reserve(profile.lens.history_enabled());
+    admit_memory(reserve)?;
     listener.set_nonblocking(true)?;
     let profile = Arc::new(profile);
     std::thread::Builder::new()
@@ -325,7 +338,7 @@ pub(super) fn spawn(
                                 tracing::info!("HTTP control socket configuration failed: {cause}");
                                 continue;
                             }
-                            if workers.len() >= MAX_WORKERS || admit_memory().is_err() {
+                            if workers.len() >= MAX_WORKERS || admit_memory(reserve).is_err() {
                                 let _ = http::write_busy_response(&stream);
                                 continue;
                             }

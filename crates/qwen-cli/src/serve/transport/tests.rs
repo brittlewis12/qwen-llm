@@ -91,7 +91,11 @@ fn bridge_reservation_covers_stack_and_all_live_chunk_slots() {
 
 #[test]
 fn owner_sink_includes_control_allowance_exactly_once() {
-    for extra_cpu_reserve in [0, super::super::control::CPU_RESERVE_BYTES] {
+    for extra_cpu_reserve in [
+        0,
+        super::super::control::STATIC_CPU_RESERVE_BYTES,
+        super::super::control::CPU_RESERVE_BYTES,
+    ] {
         let (pieces, _) = sync_channel(1);
         let (_, processed) = sync_channel(1);
         let sink = OwnerSink {

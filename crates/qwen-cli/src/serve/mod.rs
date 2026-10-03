@@ -870,7 +870,7 @@ fn accept_loop_with_workbench(
             None
         };
         let lens = Arc::new(lens_http::LensApi::new(model_id.into(), store, native));
-        backend.set_control_memory_reserve(control::CPU_RESERVE_BYTES);
+        backend.set_control_memory_reserve(control::cpu_reserve(lens.history_enabled()));
         match control::spawn(
             listener,
             control::Profile {

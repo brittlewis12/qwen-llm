@@ -30,6 +30,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_REQUEST_LINE_BYTES: usize = 8 * 1024;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
+pub(super) const READ_WATCHDOG_STACK_BYTES: usize = 2 * 1024 * 1024;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(35);
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -485,6 +486,7 @@ pub(super) fn read_http_request_with_admission(
     let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watchdog_timed_out = std::sync::Arc::clone(&timed_out);
     let watchdog = std::thread::Builder::new()
+        .stack_size(READ_WATCHDOG_STACK_BYTES)
         .name("qwen-http-read-deadline".into())
         .spawn(move || {
             if matches!(

@@ -97,6 +97,7 @@ struct Backend {
     profile: Arc<native::Profile>,
     request: Option<RequestProfile>,
     control_reserve: u64,
+    expected_control_reserve: u64,
     owner: std::thread::ThreadId,
     entered: Sender<ExecutionGate>,
     release: Receiver<()>,
@@ -107,6 +108,7 @@ struct Backend {
 impl GenerationBackend for Backend {
     fn set_control_memory_reserve(&mut self, bytes: u64) {
         assert_eq!(self.owner, std::thread::current().id());
+        assert!(bytes == 0 || bytes == self.expected_control_reserve);
         self.control_reserve = bytes;
     }
     fn request_profile(&self) -> RequestProfile {
@@ -155,8 +157,11 @@ impl GenerationBackend for Backend {
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
         assert_eq!(self.owner, std::thread::current().id());
-        assert!(sink.transport_reserve_bytes() >= CPU_RESERVE_BYTES);
-        assert_eq!(self.control_reserve, CPU_RESERVE_BYTES);
+        assert_eq!(
+            sink.transport_reserve_bytes(),
+            transport::BUFFER_RESERVE_BYTES + self.control_reserve
+        );
+        assert!([CPU_RESERVE_BYTES, STATIC_CPU_RESERVE_BYTES].contains(&self.control_reserve));
         self.ordinary.fetch_add(1, Ordering::AcqRel);
         sink.piece(
             if matches!(self.request, Some(RequestProfile::Muse { .. })) {
@@ -226,6 +231,7 @@ impl Server {
             profile: Arc::clone(&fixture.profile),
             request,
             control_reserve: 0,
+            expected_control_reserve: cpu_reserve(history),
             owner: std::thread::current().id(),
             entered: entry_sender,
             release: released,
@@ -980,6 +986,7 @@ fn failed_delivery_drops_connection_and_execution_permit_outside_gate_lock() {
                 body: br#"{"model":"test","input":"hi"}"#.to_vec(),
             },
             gate.reserve().unwrap(),
+            CPU_RESERVE_BYTES,
         )
         .unwrap();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);

@@ -126,6 +126,9 @@ impl Reply {
 }
 
 impl LensApi {
+    pub(super) fn history_enabled(&self) -> bool {
+        self.store.is_some()
+    }
     pub(super) fn matches(path: &str) -> bool {
         let path = path.split('?').next().unwrap_or_default();
         path == "/v1/lens" || path.starts_with("/v1/lens/")

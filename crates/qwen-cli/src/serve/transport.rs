@@ -25,7 +25,7 @@ const WORKER_STACK_BYTES: usize = 2 * 1024 * 1024;
 // payload size for allocator slack and small channel/control metadata. Request
 // storage is shared, not copied. Reserve the worker's complete configured stack
 // too: pages not yet touched may be absent from the process memory signal.
-const BUFFER_RESERVE_BYTES: u64 =
+pub(super) const BUFFER_RESERVE_BYTES: u64 =
     (WORKER_STACK_BYTES + (PIECE_CAPACITY + 2) * CHUNK_BYTES * 2) as u64;
 
 struct Control {
@@ -321,6 +321,7 @@ impl Connection {
             guard,
             None,
             None,
+            0,
         )
     }
 
@@ -332,6 +333,7 @@ impl Connection {
         guard: ActivityGuard,
         request: http::HttpRequest,
         execution: super::control::ExecutionPermit,
+        extra_cpu_reserve: u64,
     ) -> Result<Self> {
         Self::spawn(
             stream,
@@ -341,6 +343,7 @@ impl Connection {
             guard,
             Some(request),
             Some(execution),
+            extra_cpu_reserve,
         )
     }
 
@@ -352,6 +355,7 @@ impl Connection {
         guard: ActivityGuard,
         request: Option<http::HttpRequest>,
         execution: Option<super::control::ExecutionPermit>,
+        extra_cpu_reserve: u64,
     ) -> Result<Self> {
         #[cfg(test)]
         let fault = START_FAULT.take();
@@ -377,11 +381,7 @@ impl Connection {
             work: sender,
             control: Arc::clone(&control),
             activity: Arc::new(guard),
-            extra_cpu_reserve: if execution.is_some() {
-                super::control::CPU_RESERVE_BYTES
-            } else {
-                0
-            },
+            extra_cpu_reserve,
         };
         let cancel = CancelOnDrop(Arc::clone(&control));
         #[cfg(test)]

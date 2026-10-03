@@ -75,7 +75,7 @@ recovery is explicitly recorded below.
 | R11 | Fitted readouts and direction staging: `serve/native/{registry,interventions}.rs`, `workspace_lens/*` | Fitted producer recovered with CPU/browser and scoped original-forward numerical evidence; direction staging remains R12 | Registered identity, matrix integrity, owner-admitted joined staging/workspace, independent numerical oracle |
 | R12 | Ordered scoped interventions: `serve/native/interventions/*`, `lens_intervention.rs` | Three native operators recovered with CPU/browser and scoped first-site numerical evidence | Exact order/scopes, zero controls, deployed covector semantics, independent transformation checks |
 | R13 | Retained full scores/source arrays: `serve/jobs/arrays.rs`, native observer/writer, `web/retention*` | Producer recovered with CPU/browser and production live integrity/restart evidence | Raw admission, dual-watermark durability, digest/finite/shape checks, offline rank/entropy, no implicit fetch |
-| R14 | Whole-site pre/post capture: `metal_forward/token.rs`, `serve/native/measurements.rs` | Producer recovered with CPU/browser qualification; bounded Metal numerical gate pending | Before/after placement, independent layer sets, alias refusal, actual-vector metrics and zero controls |
+| R14 | Whole-site pre/post capture: `metal_forward/token.rs`, `serve/native/measurements.rs` | Producer recovered with CPU/browser and bounded actual-before Metal numerical evidence | Before/after placement, independent layer sets, alias refusal, actual-vector metrics and zero controls |
 | R15 | Bun client and same-origin assets: `web/{build,dev,proxy}.*`, `serve/assets.rs` | Recovered on shared CPU control pool; web-root requires history/current ordinary-family boundary | Bun types/build and real same-port CPU browser/static gates pass; no second production service |
 | R16 | Durable browser submission/history: `web/{api,contract,durable,storage,jobs,history}.*` | Recovered with real baseline producer and historical fixture readers | Persist-before-POST, exact retry, history/reload/copy pass; baseline CPU browser traverses actual Rust store |
 | R17 | Draft and identity safety: `web/{draft,bindings,editor,diagnostics}.*` | Recovered from first submission UI; diagnostic creation remains capability-gated | No silent retarget, saved pinning, copy/edit race and persistence failure pass in fixtures; baseline production route exercised |
@@ -1103,3 +1103,33 @@ the existing library test `hidden_capture_destinations_require_safe_independent_
 constructs explicit read-only provenance and exercises the same validator. It must
 run with `QWEN_REQUIRE_METAL_TESTS=1`, so unavailable Metal cannot silently pass. The
 loaded-model oracle retains all other full-forward destination and numerical checks.
+
+### R14: Actual-Before Numerical Qualification
+
+The clean release test executable at `ffe19faa` passes the bounded pairs gate on
+Qwen3.6 35B A3B UD-Q4_K_M, with six three-sample jobs and 10,093ms model residency.
+Four later intervention sites (prefill index 1 and decode index 0, in both authored
+orders) match the independent F64 transform of their actual archived before vector.
+Maximum absolute errors are `1.2449929513991265e-6`, `2.0419374635594068e-8`,
+`2.845585221677993e-6` and `3.282920157943181e-8`; every actual result rejects the
+opposite-order reference with disjoint tolerance bands. Twenty exact unique pair
+sites pass coordinate/token joins and independently recomputed metrics. No-op and
+zero-control arrays match; capture does not change same-program samples or consumed
+counts; pair-only work matches baseline samples without evaluating readout heads.
+
+The same owned process checks full-forward shape/dtype/alignment/range/layer,
+capture/capture, capture/direction/source/target and session aliases, then accepts
+disjoint capture/direction views of one allocation with no generation tail. It exits
+normally, without deadline escalation. Evidence:
+`target/lens-fitted-0fe0e5a8-bad2-4592-9297-fea988af312e/`.
+This is a test-instrumented original-forward numerical gate, not an uninstrumented
+production deployment or fitted-asset quality claim.
+
+Separately, the exact existing library capture-validator test passes in 0.04 seconds
+with `QWEN_REQUIRE_METAL_TESTS=1`, covering explicit read-only provenance rather than
+assuming deployment weights are read-only. Both children use normal lease/memory
+policy with inherited safety overrides removed; the lease is confirmed free after
+each. Final CPU gates are 338 serving tests and 391 Lens CLI tests (named unmarked
+Metal tests excluded); Bun has 55 passing tests, passing types/build, and the combined
+operations/fitted/retention/pairs real CPU browser flow also passes:
+`web/.browser-test/baseline-4486e7c7-0f4b-4f70-8ff2-c64cfe4684c0/`.

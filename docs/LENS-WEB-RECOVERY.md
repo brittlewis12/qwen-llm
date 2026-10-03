@@ -837,3 +837,17 @@ excluded. Runtime CPU tests: 39 pass, 33 ignored. Binary/test compilation, forma
 and whitespace checks pass. `cx` approves the focused loader change. Clean-release
 live baseline/plain-readout requalification is pending; registry and fitted execution
 remain pending, not implied by this retained-source prerequisite.
+
+The clean release at `892807d6` subsequently passes the unchanged bounded live
+baseline/plain gate on Qwen3.6 35B A3B UD-Q4_K_M: all 12 original-forward rows, eight
+shared heads and six required witness records pass; observed sampling remains
+identical. Disconnected exact-key recovery, ordinary serving, active interruption,
+pre-restart terminal publication and exact saved results after restart also pass.
+Both owned servers exit through handled SIGTERM, without forced cleanup. The normal
+GPU lease is confirmed released. RAM snapshots and durable KV remain off, with no
+safety overrides. This requalifies startup/lifecycle consistency, not path-replacement
+fault injection or fitted execution.
+
+Local evidence: `target/lens-baseline-baa78f07-db9d-4030-8550-9def3c2af09f/`.
+Tested binary Git blob fingerprint: `1ca3a930ec9e1dbed92dc2ac99a15b7b1c287420`;
+unchanged harness fingerprint: `4eb6f567bcc52908a017bf29f3d1c675a578c7a5`.

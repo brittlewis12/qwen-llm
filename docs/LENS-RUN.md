@@ -957,6 +957,10 @@ after publication may prevent consuming that token; one after a forward does not
 roll back sequence or capture state. This does not change packed-prefill routing
 or qualify additional cancellation boundaries inside packed work.
 
+SIGINT and SIGTERM request cooperative shutdown in these ordinary run/sweep arms.
+Prefill also checks shutdown before each step. Neither check preempts an in-flight
+GPU command, and interruption does not promise a complete partial run artifact.
+
 ## Flash-Next Capability Boundary
 
 Flash-Next `run` supports one native fixed add and post-add capture per serial

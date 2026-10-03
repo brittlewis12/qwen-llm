@@ -353,11 +353,18 @@ QWEN_LENS_TEST_READOUTS=1 QWEN_LENS_TEST_MODEL=/path/to/qualified.gguf \
 # Also verify retained full arrays and byte-identical reopening after restart:
 QWEN_LENS_TEST_RETENTION=1 QWEN_LENS_TEST_MODEL=/path/to/qualified.gguf \
   bun run scripts/serve/lens_baseline_check.ts
+# Also check a wider scoped job producing more than 128 readouts:
+QWEN_LENS_TEST_WIDE=1 QWEN_LENS_TEST_RETENTION=1 \
+  QWEN_LENS_TEST_MODEL=/path/to/qualified.gguf \
+  bun run scripts/serve/lens_baseline_check.ts
 ```
 
-The final production code at `6ff11bc3` passes the retained baseline gate on the same
-Qwen3.6 fixture, including all six witnesses, unchanged samples, 16 retained arrays,
-exact restart bytes and handled active-job shutdown. Separate fitted/intervention/
+The reviewed production code at `30bc6779` passes the retained baseline gate on the
+same Qwen3.6 fixture: all six witnesses, unchanged samples, 16 retained arrays,
+exact restart bytes and handled active-job shutdown. An additional 160-row job across
+40 layers passes exact-coordinate, final-layer witness and restart checks, publishing
+14 metadata batches. A separately stalled maximum-admitted CPU producer completes
+16,384 rows within the unchanged writer budgets. Separate fitted/intervention/
 pair test-binary gates establish scoped independent numerical checks, not fit quality
 or every-model coverage. The final CPU browser also exercises combined fitted heads,
 ordered operations, retention and pairs through the actual Rust producer. Full

@@ -8,8 +8,9 @@ This document records an honest reconstruction, not recovered development histor
 
 Recovery is now complete as a committed reconstruction on `reconstruct/lens-web`,
 with the explicit policy replacements and qualification limits recorded below.
-It is not merged or pushed. The original worktree and preservation package remain
-untouched; this branch, not `feat/lens-web`, is the integration deliverable.
+The original worktree and preservation package remain untouched; this commit series,
+not `feat/lens-web`, is the integration deliverable. The pre-merge corrections and
+their qualification are recorded at the end of this ledger.
 
 Reconstruction starts at main `8bc9e6b739e953023a1f2ffc5dc3379c22758e00` on
 `reconstruct/lens-web`. The original worktree remains an untouched reference at
@@ -1315,6 +1316,54 @@ durable prefix recovery. Channel/byte waiting tests inject cancel, shutdown and 
 writer-failure latch; independent real store-fault tests cover actual append failures.
 These do not claim every filesystem-failure/backpressure interleaving. Encoded/value
 record equivalence, progress-only state, invalid intermediate progress, sequence
-digit/overflow limits and snapshot-rename recovery also pass. The wider production
-gate is prepared to exceed 128 readouts and recheck restart; its live evidence is
-recorded separately after the code commit.
+digit/overflow limits and snapshot-rename recovery also pass.
+
+### Reviewed Candidate Qualification
+
+The clean production build at `30bc6779` passes the bounded retained baseline and
+wide-scope gate on Qwen3.6 35B A3B UD-Q4_K_M. The additional wide job records 160
+readouts across 40 layers and four prompt/decode sites, with exact unique coordinates
+and three final-layer witnesses. It publishes 14 metadata batches, peaks at 31,872
+charged metadata bytes and records no backpressure waits. The separate deliberately
+stalled maximum-admitted CPU producer proves waiting under saturation; its 16,384
+rows publish in 130 metadata batches in the recorded run, not a timing guarantee.
+
+The live gate also verifies unchanged greedy samples/consumption, six shared-readout
+witnesses, 16 retained arrays totaling 8,011,776 bytes, full-vocabulary rank/integrity,
+disconnected exact retry, ordinary serving and active-job interruption. Wide pages
+and retained bytes are identical after restart. Both owned servers exit through
+handled SIGTERM without forced cleanup; the GPU lease is released. Model load times
+are 6463.0ms and 2594.2ms. Evidence:
+`target/lens-baseline-3248265f-5f1c-400b-a7d1-780bc46c9344/`.
+Production binary Git blob fingerprint: `190e137df193e68f0651a72909709c8b0cd2ed0f`;
+harness fingerprint: `903eb83533b23b9f6ed19c4f70ffd9de0d12c4d2`.
+
+The full CPU CLI gate passes 1,485 tests, with the two known unmarked Metal cases
+explicitly skipped and 50 opt-in tests ignored. Serving alone passes 358 tests;
+writer coverage passes 17. All binaries/tests compile, and formatting/whitespace
+checks pass. Bun passes 55 tests with 327 assertions, types and build. The actual
+Rust combined diagnostic browser gate passes at 390px and 1280px:
+`web/.browser-test/baseline-b212af50-574e-4274-96b3-3944a6c3d660/`.
+The browser harness now requests orderly CDP browser closure before its bounded
+signal fallback; forced cleanup still fails qualification. Earlier failed cleanup
+attempts are not counted as passes.
+
+The current strict CLI comparator accepts all 48 saved September survey run
+artifacts checked read-only (37 completed and 11 staged runs), without inference.
+This is corpus-scoped compatibility evidence, not acceptance of every legacy input.
+The missing-context guard concerns prompt rendering after the generated-assistant
+start marker, not a blanket rejection of closing-thinking tokens in generated text.
+
+These checks address the six pre-merge findings, not every hardening suggestion.
+Deferred work includes retention/pruning and configurable store limits, per-job
+corruption isolation, stronger terminal recovery after writer/storage failure,
+architecture-based archive sizing, bounded browser archives, CSP/frame protection
+and an explicit allowed-host policy for optional non-local access. Local Host/Origin
+checks remain unchanged. Filesystem calls and writer joins can block cooperative
+shutdown and are not deadline-bound. No new throughput A/B benchmark or all-family
+numerical claim is implied by this qualification.
+
+The final read-only `cx` review gives GO for a plain fast-forward after committing
+this evidence and rechecking main ancestry and unrelated-file collisions. It reviewed
+the fixes, documentation and evidence summary without rerunning the gates. No push
+or removal of the original preservation copies is part of this integration.

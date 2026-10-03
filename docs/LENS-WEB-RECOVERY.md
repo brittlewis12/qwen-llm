@@ -74,7 +74,7 @@ recovery is explicitly recorded below.
 | R10 | Plain original-forward readouts: `serve/native/{readouts,observe}.rs` | Producer recovered with browser/current admission; no replay | CPU scopes/lifecycle/publication/HTTP/browser and scoped Qwen3.6 live unchanged-sample/final-layer witness gate pass |
 | R11 | Fitted readouts and direction staging: `serve/native/{registry,interventions}.rs`, `workspace_lens/*` | Fitted producer recovered with CPU/browser and scoped original-forward numerical evidence; direction staging remains R12 | Registered identity, matrix integrity, owner-admitted joined staging/workspace, independent numerical oracle |
 | R12 | Ordered scoped interventions: `serve/native/interventions/*`, `lens_intervention.rs` | Three native operators recovered with CPU/browser and scoped first-site numerical evidence | Exact order/scopes, zero controls, deployed covector semantics, independent transformation checks |
-| R13 | Retained full scores/source arrays: `serve/jobs/arrays.rs`, native observer/writer, `web/retention*` | Producer recovered and CPU/browser-qualified; production live integrity/restart gate pending | Raw admission, dual-watermark durability, digest/finite/shape checks, offline rank/entropy, no implicit fetch |
+| R13 | Retained full scores/source arrays: `serve/jobs/arrays.rs`, native observer/writer, `web/retention*` | Producer recovered with CPU/browser and production live integrity/restart evidence | Raw admission, dual-watermark durability, digest/finite/shape checks, offline rank/entropy, no implicit fetch |
 | R14 | Whole-site pre/post capture: `metal_forward/token.rs`, `serve/native/measurements.rs` | Reuse after R12/R13; do not imply per-operation intermediates | Before/after placement, independent layer sets, alias refusal, actual-vector metrics and zero controls |
 | R15 | Bun client and same-origin assets: `web/{build,dev,proxy}.*`, `serve/assets.rs` | Recovered on shared CPU control pool; web-root requires history/current ordinary-family boundary | Bun types/build and real same-port CPU browser/static gates pass; no second production service |
 | R16 | Durable browser submission/history: `web/{api,contract,durable,storage,jobs,history}.*` | Recovered with real baseline producer and historical fixture readers | Persist-before-POST, exact retry, history/reload/copy pass; baseline CPU browser traverses actual Rust store |
@@ -1033,3 +1033,20 @@ now has an opt-in retention mode checking 16 arrays, SHA256/finite/shape/coordin
 full-vocabulary ranks against top-k, unchanged samples and exact bytes after restart.
 Live verification is pending at this checkpoint. That gate establishes integrity and
 top-k correspondence, not independent correctness of every retained numeric value.
+
+### R13: Production Retained-Array Integrity And Restart
+
+The clean production server at `23e7b8fa` passes the bounded retained-data extension
+on Qwen3.6 35B A3B UD-Q4_K_M. The observed job saves eight source arrays and eight full
+score arrays, totaling exactly 8,011,776 raw bytes. Every payload passes length, SHA256,
+finite-value, width and coordinate checks. Saved top-k values round-trip to their F32
+payloads and have the expected ranks over the complete vocabulary. Nonretaining IDs
+remain unlinked. Samples/consumption match baseline and all six required generation
+witness records pass. Every array and result page is identical after restart, without
+new inference; disconnected retry, ordinary serving and active-job shutdown still pass.
+
+Both owned servers exit via handled SIGTERM without forced cleanup; the lease is
+confirmed free. Normal memory/lease policy remains in effect, with KV snapshots off.
+Evidence: `target/lens-baseline-9819c805-abbe-46ec-93a8-d482887ca29a/`.
+Binary Git blob fingerprint: `d4fa11bee2f73aa8d809befbac5f3112953c7ec1`;
+harness fingerprint: `4e0e4a95db53b8c97edd39c5f45de8d83d06e10e`.

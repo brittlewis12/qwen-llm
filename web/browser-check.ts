@@ -774,7 +774,18 @@ try {
   console.log(Bun.env.CAPTURE_SCREENSHOTS !== "1" ? "Screenshot capture not requested; browser interactions and layout bounds checked." : `Screenshots: ${output}/phone-score.png and ${output}/desktop-history.png`);
   }
   if (runtimeErrors.length) throw new Error(`Browser runtime errors: ${JSON.stringify(runtimeErrors)}`);
+} catch (cause) {
+  console.error("Browser workflow failed before cleanup:", cause);
+  throw cause;
 } finally {
+  if (!stopping && browser.exitCode === null && socket?.readyState === WebSocket.OPEN) {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      socket.send(JSON.stringify({ id: -1, method: "Browser.close" }));
+      await Promise.race([browser.exited, new Promise<void>(resolve => { timeout = setTimeout(resolve, 2000); })]);
+    } catch { /* The owned-process signal fallback still runs. */ }
+    finally { if (timeout) clearTimeout(timeout); }
+  }
   stopBrowser();
   try {
     await browser.exited;

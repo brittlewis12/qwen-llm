@@ -177,6 +177,54 @@ pub(super) fn validate_post_block_intervention_tensor(
     Ok(())
 }
 
+/// Residual-writer output inside the dense serial forward. An operation here
+/// edits one module's contribution before its residual add, so a projection
+/// with coefficient `a` matches the weight edit `W' = (I - a v v^T) W`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModuleSite {
+    /// Token embedding row, before block 0 reads it. The operation layer must be 0.
+    Embedding,
+    /// Attention or GDN mixer output, before the post-mixer residual add.
+    MixerOutput,
+    /// FFN down-projection output, before the post-FFN residual add.
+    FfnOutput,
+}
+
+/// One caller-ordered operation at a module site of `op`'s layer.
+#[derive(Clone, Copy)]
+pub struct ModuleIntervention<'a> {
+    pub site: ModuleSite,
+    pub op: PostBlockIntervention<'a>,
+}
+
+fn intervention_layer(op: &PostBlockIntervention<'_>) -> u32 {
+    match op {
+        PostBlockIntervention::Fixed { layer, .. }
+        | PostBlockIntervention::ResidualL2Relative { layer, .. }
+        | PostBlockIntervention::Projection { layer, .. }
+        | PostBlockIntervention::SourceToTarget { layer, .. } => *layer,
+    }
+}
+
+impl MetalForward<'_> {
+    fn encode_module_interventions(
+        &self,
+        enc: &KernelEncoder,
+        output: &MetalTensor,
+        module: &[ModuleIntervention<'_>],
+        site: ModuleSite,
+        layer: usize,
+    ) -> Result<(), MfError> {
+        for intervention in module
+            .iter()
+            .filter(|m| m.site == site && intervention_layer(&m.op) as usize == layer)
+        {
+            encode_post_block_intervention_f32(self.ctx, enc, output, &intervention.op)?;
+        }
+        Ok(())
+    }
+}
+
 pub(super) fn validate_hidden_capture_destination(
     site: &str,
     destination: &MetalTensor,
@@ -1179,6 +1227,7 @@ impl<'a> MetalForward<'a> {
             post_block_dst,
             pre_ffn_dst,
             interventions,
+            &[],
             allow_moe,
             run_tail,
             None,
@@ -1206,9 +1255,43 @@ impl<'a> MetalForward<'a> {
             Some(after.1),
             None,
             interventions,
+            &[],
             true,
             run_tail,
             Some(before),
+        )
+    }
+
+    /// Original dense forward with module-site and post-block operations.
+    /// Module operations edit a writer's output before its residual add;
+    /// post-block operations follow each block. Both keep caller order per site.
+    #[allow(clippy::too_many_arguments)]
+    pub fn single_token_with_interventions(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        capture: Option<(&[u32], &MetalTensor)>,
+        post_block: &[PostBlockIntervention<'_>],
+        module: &[ModuleIntervention<'_>],
+        run_tail: bool,
+    ) -> Result<Vec<f32>, MfError> {
+        let (layers, destination) = match capture {
+            Some((layers, destination)) => (layers, Some(destination)),
+            None => (&[][..], None),
+        };
+        self.single_token_with_hidden_sites_and_before(
+            token_id,
+            position,
+            session,
+            layers,
+            destination,
+            None,
+            post_block,
+            module,
+            true,
+            run_tail,
+            None,
         )
     }
 
@@ -1222,6 +1305,7 @@ impl<'a> MetalForward<'a> {
         post_block_dst: Option<&MetalTensor>,
         pre_ffn_dst: Option<&MetalTensor>,
         interventions: &[PostBlockIntervention<'_>],
+        module: &[ModuleIntervention<'_>],
         allow_moe: bool,
         run_tail: bool,
         before: Option<(&[u32], &MetalTensor)>,
@@ -1356,7 +1440,28 @@ impl<'a> MetalForward<'a> {
             }
             before_range = Some(range);
         }
-        for (op_index, intervention) in interventions.iter().enumerate() {
+        if !module.is_empty() && self.model.arch.kind == ArchKind::Moe {
+            return Err(MfError::Metal(MetalError::BadShape {
+                kernel: "single_token_with_interventions",
+                detail: "module-site interventions require a dense model".into(),
+            }));
+        }
+        for (op_index, module_op) in module.iter().enumerate() {
+            if module_op.site == ModuleSite::Embedding && intervention_layer(&module_op.op) != 0 {
+                return Err(MfError::Metal(MetalError::BadShape {
+                    kernel: "single_token_with_interventions",
+                    detail: format!(
+                        "module intervention {op_index} at the embedding must use layer 0"
+                    ),
+                }));
+            }
+        }
+        // Module operations share the post-block validation; indices continue after them.
+        for (op_index, intervention) in interventions
+            .iter()
+            .chain(module.iter().map(|module_op| &module_op.op))
+            .enumerate()
+        {
             let (layer, coefficient) = match intervention {
                 PostBlockIntervention::Fixed {
                     layer, coefficient, ..
@@ -1451,6 +1556,8 @@ impl<'a> MetalForward<'a> {
             1,
             h,
         )?;
+        // s.x holds only the embedding row here, so this edits the embedding output.
+        self.encode_module_interventions(&enc, &session.x, module, ModuleSite::Embedding, 0)?;
 
         // Per-block, capturing at requested layer indices AFTER each
         // block's residual #2 (s.x is the post-FFN residual, exactly
@@ -1494,6 +1601,7 @@ impl<'a> MetalForward<'a> {
                     position,
                     session,
                     pre_ffn_capture,
+                    module,
                 )?;
             }
             if let Some((layers, destination)) = before {
@@ -2377,20 +2485,21 @@ impl<'a> MetalForward<'a> {
         position: u32,
         s: &mut MetalSession,
     ) -> Result<(), MfError> {
-        self.encode_block_impl(enc, il, block, gdn_idx, attn_idx, position, s, None)
+        self.encode_block_impl(enc, il, block, gdn_idx, attn_idx, position, s, None, &[])
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn encode_block_impl(
         &self,
         enc: &KernelEncoder,
-        _il: usize,
+        il: usize,
         block: &MetalBlock,
         gdn_idx: &mut usize,
         attn_idx: &mut usize,
         position: u32,
         s: &mut MetalSession,
         pre_ffn_capture: Option<(&MetalTensor, &[usize])>,
+        module: &[ModuleIntervention<'_>],
     ) -> Result<(), MfError> {
         s.ensure_usable()?;
         // Pre-mixer norm.
@@ -2413,8 +2522,9 @@ impl<'a> MetalForward<'a> {
                 self.encode_attn(enc, a, i, position, s)?;
             }
         }
+        self.encode_module_interventions(enc, &s.mixer_out, module, ModuleSite::MixerOutput, il)?;
 
-        self.encode_post_mixer_ffn_impl(enc, block, s, pre_ffn_capture)?;
+        self.encode_post_mixer_ffn_impl(enc, block, s, pre_ffn_capture, il, module)?;
         Ok(())
     }
 
@@ -2453,15 +2563,18 @@ impl<'a> MetalForward<'a> {
         block: &MetalBlock,
         s: &mut MetalSession,
     ) -> Result<(), MfError> {
-        self.encode_post_mixer_ffn_impl(enc, block, s, None)
+        self.encode_post_mixer_ffn_impl(enc, block, s, None, 0, &[])
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn encode_post_mixer_ffn_impl(
         &self,
         enc: &KernelEncoder,
         block: &MetalBlock,
         s: &mut MetalSession,
         pre_ffn_capture: Option<(&MetalTensor, &[usize])>,
+        layer: usize,
+        module: &[ModuleIntervention<'_>],
     ) -> Result<(), MfError> {
         let arch = &self.model.arch;
         let h = arch.hidden_size as usize;
@@ -2503,6 +2616,7 @@ impl<'a> MetalForward<'a> {
             encode_scatter_offset_f32(self.ctx, enc, &s.ffn_inner, &inner_dst, 0, f)?;
         }
         encode_mat_vec_dispatch(self.ctx, enc, d_w, &s.ffn_inner, &s.ffn_out, f, h)?;
+        self.encode_module_interventions(enc, &s.ffn_out, module, ModuleSite::FfnOutput, layer)?;
 
         // Residual #2: x += ffn_out.
         encode_add_inplace_f32(self.ctx, enc, &s.x, &s.ffn_out)?;

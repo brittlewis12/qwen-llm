@@ -4793,6 +4793,150 @@ fn dense_intervention_no_tail_matches_full_tail() {
 }
 
 #[test]
+fn dense_module_sites_are_placed_and_validated() {
+    let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
+    if !std::path::Path::new(model_path).exists() {
+        eprintln!("[dense-module-sites] skipped - fixture missing");
+        return;
+    }
+    let Some(context) = metal_test_context() else {
+        return;
+    };
+    let gguf = GgufFile::open(model_path).expect("open");
+    let model = Model::from_gguf(&gguf).expect("load");
+    let metal_model = MetalModel::load(&context, &gguf, &model).expect("metal load");
+    let forward = MetalForward::new(&context, &metal_model);
+    let h = model.arch.hidden_size as usize;
+    let layer = 5u32;
+    let token = 9419;
+
+    let raw: Vec<f32> = (0..h)
+        .map(|i| ((i * 13 + 7) % 29) as f32 / 14.0 - 1.0)
+        .collect();
+    let norm = raw.iter().map(|v| v * v).sum::<f32>().sqrt();
+    let unit: Vec<f32> = raw.iter().map(|v| v / norm).collect();
+    let tensor = |values: &[f32]| {
+        MetalTensor::from_bytes(
+            &context,
+            bytemuck::cast_slice(values),
+            vec![h as u64],
+            GgmlType::F32,
+        )
+        .expect("direction")
+    };
+    let direction = tensor(&raw);
+    let unit_direction = tensor(&unit);
+    let run = |post_block: &[PostBlockIntervention<'_>], module: &[ModuleIntervention<'_>]| {
+        let mut session = MetalSession::fresh(&context, &metal_model, 16).unwrap();
+        forward.single_token_with_interventions(
+            token,
+            0,
+            &mut session,
+            None,
+            post_block,
+            module,
+            true,
+        )
+    };
+    let max_abs = |a: &[f32], b: &[f32]| {
+        a.iter()
+            .zip(b)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max)
+    };
+    let fixed = PostBlockIntervention::Fixed {
+        layer,
+        direction: &direction,
+        coefficient: 0.25,
+    };
+    let projection = |layer| PostBlockIntervention::Projection {
+        layer,
+        direction: &unit_direction,
+        coefficient: 1.0,
+    };
+    let at = |site, op| ModuleIntervention { site, op };
+
+    // An empty module program is the existing post-block path, bit for bit.
+    let baseline = run(&[], &[]).expect("baseline");
+    let mut legacy_session = MetalSession::fresh(&context, &metal_model, 16).unwrap();
+    let legacy = forward
+        .single_token_with_post_block_interventions_no_capture(token, 0, &mut legacy_session, &[])
+        .expect("legacy");
+    assert_eq!(
+        bytemuck::cast_slice::<f32, u32>(&baseline),
+        bytemuck::cast_slice::<f32, u32>(&legacy),
+        "empty module program must match the post-block path"
+    );
+
+    // Nothing reads the residual between the FFN output and the post-block site,
+    // so the two differ only by F32 reassociation of the same additions.
+    let post_fixed = run(&[fixed], &[]).expect("post-block fixed");
+    let ffn_fixed = run(&[], &[at(ModuleSite::FfnOutput, fixed)]).expect("ffn fixed");
+    // The FFN reads the mixer output, so the same add there is a different edit.
+    let mixer_fixed = run(&[], &[at(ModuleSite::MixerOutput, fixed)]).expect("mixer fixed");
+    let effect = max_abs(&post_fixed, &baseline);
+    let reassociation = max_abs(&ffn_fixed, &post_fixed);
+    let placement = max_abs(&mixer_fixed, &post_fixed);
+    eprintln!(
+        "[dense-module-sites] effect={effect:e} ffn-vs-post={reassociation:e} mixer-vs-post={placement:e}"
+    );
+    assert!(effect > 1e-2, "fixed add must move logits: {effect}");
+    assert!(
+        reassociation <= 1e-2 * effect,
+        "ffn-output add must match post-block add up to rounding: {reassociation} vs effect {effect}"
+    );
+    assert!(
+        placement >= 100.0 * reassociation.max(1e-6),
+        "mixer-output add must run before the FFN reads the residual: {placement}"
+    );
+
+    // Projection is idempotent at the embedding, and it acts on the embedding row.
+    let embed_once = run(&[], &[at(ModuleSite::Embedding, projection(0))]).expect("embed once");
+    let embed_twice = run(
+        &[],
+        &[
+            at(ModuleSite::Embedding, projection(0)),
+            at(ModuleSite::Embedding, projection(0)),
+        ],
+    )
+    .expect("embed twice");
+    assert!(
+        max_abs(&embed_once, &baseline) > 1e-4,
+        "embedding projection must act"
+    );
+    assert!(
+        max_abs(&embed_once, &embed_twice) <= 1e-4,
+        "embedding projection must be idempotent: {}",
+        max_abs(&embed_once, &embed_twice)
+    );
+
+    // Validation: embedding layer, layer bounds and session aliasing are refused.
+    assert!(run(&[], &[at(ModuleSite::Embedding, projection(1))]).is_err());
+    let past_end = metal_model.blocks.len() as u32;
+    assert!(run(&[], &[at(ModuleSite::MixerOutput, projection(past_end))]).is_err());
+    let mut alias_session = MetalSession::fresh(&context, &metal_model, 16).unwrap();
+    let aliased_direction = alias_session.ffn_out.clone();
+    let alias_fixed = PostBlockIntervention::Fixed {
+        layer,
+        direction: &aliased_direction,
+        coefficient: 0.25,
+    };
+    let aliased = forward.single_token_with_interventions(
+        token,
+        0,
+        &mut alias_session,
+        None,
+        &[],
+        &[at(ModuleSite::FfnOutput, alias_fixed)],
+        true,
+    );
+    assert!(
+        aliased.is_err(),
+        "session-aliased module direction must be refused"
+    );
+}
+
+#[test]
 fn ordinary_moe_serial_post_block_fixed_add_seam() {
     let model_path = crate::test_fixtures::A3B_Q4_K_M.path();
     if !std::path::Path::new(model_path).exists() {

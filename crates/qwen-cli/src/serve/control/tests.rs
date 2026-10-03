@@ -996,3 +996,23 @@ fn failed_delivery_drops_connection_and_execution_permit_outside_gate_lock() {
         assert!(activity.is_settled());
     }
 }
+#[test]
+fn execution_bookkeeping_remains_usable_after_mutex_poison() {
+    let gate = ExecutionGate::default();
+    let other = gate.clone();
+    assert!(
+        std::thread::spawn(move || {
+            let _guard = other.0.lock().unwrap();
+            panic!("injected bookkeeping panic");
+        })
+        .join()
+        .is_err()
+    );
+    gate.checkpoint().unwrap();
+    let permit = gate.reserve().unwrap();
+    assert!(gate.reserve().is_err());
+    drop(permit);
+    drop(gate.reserve().unwrap());
+    gate.close();
+    assert!(gate.reserve().is_err());
+}

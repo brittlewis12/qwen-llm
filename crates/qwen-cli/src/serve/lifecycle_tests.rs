@@ -499,3 +499,47 @@ fn unsettled_accounting_still_flushes_backend_shutdown() {
     assert!(shutdown_owner(&mut backend, &activity).is_err());
     assert_eq!(backend.0, 1);
 }
+
+#[test]
+fn connection_setup_and_worker_failures_leave_owner_available() {
+    for fault in [
+        transport::StartFault::Clone,
+        transport::StartFault::Spawn,
+        transport::StartFault::WorkerPanic,
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (events, observed) = channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
+        let owner = std::thread::spawn(move || {
+            let mut backend = LifecycleBackend {
+                events,
+                owner: std::thread::current().id(),
+                address,
+                fail_render: false,
+                generation_gate: None,
+                idle_stop: None,
+            };
+            transport::inject_start_fault(fault);
+            accept_loop_with_workbench(listener, "test", 0., &mut backend, &mut None, None, |_| {
+                ensure!(!stopping.load(Ordering::Acquire), "test done");
+                Ok(())
+            })
+        });
+        let mut first = connect(address);
+        first.write_all(post().as_bytes()).unwrap();
+        let _ = first.read_to_string(&mut String::new());
+        assert_eq!(first_non_idle(&observed), Event::Finished);
+        let mut next = connect(address);
+        next.write_all(post().as_bytes()).unwrap();
+        let mut response = String::new();
+        next.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert_eq!(first_non_idle(&observed), Event::Generate);
+        assert_eq!(first_non_idle(&observed), Event::Finished);
+        stop.store(true, Ordering::Release);
+        assert!(owner.join().unwrap().is_err());
+        assert_eq!(first_non_idle(&observed), Event::Shutdown);
+    }
+}

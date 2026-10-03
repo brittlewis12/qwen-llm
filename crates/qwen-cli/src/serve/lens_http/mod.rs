@@ -360,7 +360,10 @@ impl LensApi {
             });
         // Serialize submissions, not metadata or the model queue. This makes
         // recovery of a concurrent duplicate independent of free queue slots.
-        let _submissions = self.submissions.lock().unwrap();
+        let _submissions = self
+            .submissions
+            .lock()
+            .unwrap_or_else(|cause| cause.into_inner());
         if let Some(status) = store.lookup(key, &request, observations)? {
             return Reply::ok(status);
         }

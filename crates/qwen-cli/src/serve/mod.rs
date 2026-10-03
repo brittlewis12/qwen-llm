@@ -903,7 +903,16 @@ fn accept_loop_with_workbench(
                 gate.checkpoint()?;
             }
             if let Some(active) = &mut connection {
-                if active.advance(backend, || checkpoint(OwnerCheckpoint::DuringHandling))? {
+                let settled =
+                    match active.advance(backend, || checkpoint(OwnerCheckpoint::DuringHandling)) {
+                        Ok(settled) => settled,
+                        Err(cause) if cause.is::<transport::WorkerPanicked>() => {
+                            tracing::warn!("serve: HTTP worker failed: {cause:#}");
+                            true
+                        }
+                        Err(cause) => return Err(cause),
+                    };
+                if settled {
                     connection.take();
                     activity.drain_finished(|| backend.request_finished());
                 }
@@ -934,9 +943,13 @@ fn accept_loop_with_workbench(
                         .try_admit()
                         .context("HTTP owner admission is closed")?;
                     let subscriber = trace.as_ref().map(http::TraceLog::subscriber);
-                    connection = Some(transport::Connection::start(
-                        stream, backend, subscriber, guard,
-                    )?);
+                    match transport::Connection::start(stream, backend, subscriber, guard) {
+                        Ok(started) => connection = Some(started),
+                        Err(cause) => {
+                            tracing::warn!("serve: HTTP connection setup failed: {cause:#}");
+                            std::thread::sleep(ACCEPT_POLL_INTERVAL);
+                        }
+                    }
                 }
                 control::Event::Prepared(prepared) => connection = Some(prepared),
                 control::Event::Native(job) => {

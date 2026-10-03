@@ -231,6 +231,15 @@ struct Worker {
     thread: Option<JoinHandle<io::Result<()>>>,
 }
 
+#[derive(Debug)]
+pub(super) struct WorkerPanicked;
+impl std::fmt::Display for WorkerPanicked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HTTP request worker panicked")
+    }
+}
+impl std::error::Error for WorkerPanicked {}
+
 impl Worker {
     fn stop(&self) {
         self.control.cancel();
@@ -243,7 +252,7 @@ impl Worker {
             .take()
             .expect("worker joined once")
             .join()
-            .map_err(|_| anyhow::anyhow!("HTTP request worker panicked"))?;
+            .map_err(|_| WorkerPanicked)?;
         if let Err(error) = result {
             tracing::info!(target: "qwen_diag", "serve: connection aborted: {error}");
         }
@@ -281,6 +290,20 @@ pub(super) struct Connection {
     incoming: Option<Receiver<Work>>,
     worker: Worker,
     _execution: Option<super::control::ExecutionPermit>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum StartFault {
+    Clone,
+    Spawn,
+    WorkerPanic,
+}
+#[cfg(test)]
+std::thread_local! { static START_FAULT: std::cell::Cell<Option<StartFault>> = const { std::cell::Cell::new(None) }; }
+#[cfg(test)]
+pub(super) fn inject_start_fault(fault: StartFault) {
+    START_FAULT.set(Some(fault));
 }
 
 impl Connection {
@@ -330,6 +353,13 @@ impl Connection {
         request: Option<http::HttpRequest>,
         execution: Option<super::control::ExecutionPermit>,
     ) -> Result<Self> {
+        #[cfg(test)]
+        let fault = START_FAULT.take();
+        #[cfg(test)]
+        anyhow::ensure!(
+            fault != Some(StartFault::Clone),
+            "injected socket clone failure"
+        );
         let socket = stream.try_clone().context("clone HTTP shutdown handle")?;
         let control = Arc::new(Control {
             execution: ExecutionControl::default(),
@@ -354,11 +384,21 @@ impl Connection {
             },
         };
         let cancel = CancelOnDrop(Arc::clone(&control));
+        #[cfg(test)]
+        anyhow::ensure!(
+            fault != Some(StartFault::Spawn),
+            "injected thread spawn failure"
+        );
         let thread = std::thread::Builder::new()
             .name("qwen-http-request".into())
             .stack_size(WORKER_STACK_BYTES)
             .spawn(move || {
                 let _cancel = cancel;
+                #[cfg(test)]
+                assert!(
+                    fault != Some(StartFault::WorkerPanic),
+                    "injected HTTP worker panic"
+                );
                 match request {
                     Some(request) => http::handle_request(&stream, &mut proxy, trace, request),
                     None => http::handle_connection(&stream, &mut proxy, trace),

@@ -52,7 +52,7 @@ impl std::fmt::Display for ServerStopped {
 impl std::error::Error for ServerStopped {}
 impl ExecutionGate {
     pub(super) fn checkpoint(&self) -> Result<(), ServerStopped> {
-        let state = self.0.lock().map_err(|_| ServerStopped)?;
+        let state = self.0.lock().unwrap_or_else(|cause| cause.into_inner());
         if state.closed {
             Err(ServerStopped)
         } else {
@@ -60,7 +60,7 @@ impl ExecutionGate {
         }
     }
     pub(super) fn reserve(&self) -> Result<ExecutionPermit, &'static str> {
-        let mut state = self.0.lock().map_err(|_| "execution admission failed")?;
+        let mut state = self.0.lock().unwrap_or_else(|cause| cause.into_inner());
         if state.closed {
             return Err("model queue is stopping");
         }
@@ -81,7 +81,7 @@ impl ExecutionGate {
         sender: &SyncSender<Event>,
         event: Event,
     ) -> Result<(), &'static str> {
-        let state = self.0.lock().map_err(|_| "execution admission failed")?;
+        let state = self.0.lock().unwrap_or_else(|cause| cause.into_inner());
         if state.closed {
             drop(state);
             drop(event);
@@ -312,7 +312,9 @@ pub(super) fn spawn(
                             .as_ref()
                             .is_some_and(JoinHandle::is_finished)
                         {
-                            workers.swap_remove(index).join()?;
+                            if let Err(cause) = workers.swap_remove(index).join() {
+                                tracing::warn!("HTTP control worker failed: {cause:#}");
+                            }
                         } else {
                             index += 1;
                         }
@@ -330,21 +332,42 @@ pub(super) fn spawn(
                             let Some(activity) = profile.activity.try_admit() else {
                                 break;
                             };
-                            let socket = stream.try_clone()?;
+                            let socket = match stream.try_clone() {
+                                Ok(socket) => socket,
+                                Err(cause) => {
+                                    tracing::warn!("HTTP control socket clone failed: {cause}");
+                                    std::thread::sleep(super::ACCEPT_POLL_INTERVAL);
+                                    continue;
+                                }
+                            };
                             let profile = Arc::clone(&profile);
                             let thread = std::thread::Builder::new()
                                 .name("qwen-http-control-request".into())
                                 .stack_size(STACK_BYTES)
-                                .spawn(move || handle(stream, &profile, Some(activity)))?;
+                                .spawn(move || handle(stream, &profile, Some(activity)));
+                            let thread = match thread {
+                                Ok(thread) => thread,
+                                Err(cause) => {
+                                    tracing::warn!("HTTP control worker spawn failed: {cause}");
+                                    std::thread::sleep(super::ACCEPT_POLL_INTERVAL);
+                                    continue;
+                                }
+                            };
                             workers.push(Worker {
                                 socket,
                                 thread: Some(thread),
                             });
                         }
                         Err(cause) if cause.kind() == io::ErrorKind::WouldBlock => {
-                            super::wait_for_connection(&listener)?
+                            if let Err(cause) = super::wait_for_connection(&listener) {
+                                tracing::warn!("HTTP control listener wait failed: {cause}");
+                                std::thread::sleep(super::ACCEPT_POLL_INTERVAL);
+                            }
                         }
-                        Err(cause) => return Err(cause.into()),
+                        Err(cause) => {
+                            tracing::warn!("HTTP control accept failed: {cause}");
+                            std::thread::sleep(super::ACCEPT_POLL_INTERVAL);
+                        }
                     }
                 }
                 Ok(())

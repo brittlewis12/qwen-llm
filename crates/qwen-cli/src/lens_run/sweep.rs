@@ -779,56 +779,59 @@ pub(super) fn execute_ordinary_arm(
     })?;
     let mut operation_applications = Vec::new();
     let mut live_readouts = Vec::new();
-    let mut logits = Vec::new();
-
     let mut packed_span_index = 0usize;
-    let mut index = 0usize;
-    while index < prompt_token_ids.len() {
-        if let Some(span) = prefill
-            .execution
-            .packed_spans()
-            .get(packed_span_index)
-            .copied()
-            && span.start == index
-        {
-            let scratch = prefill
-                .scratch
-                .as_mut()
-                .context("packed Lens prefill schedule has no scratch")?;
-            loaded
-                .prefill_prompt_only(
-                    &mut sequence,
-                    scratch,
-                    &prompt_token_ids[span.start..span.end],
-                )
-                .with_context(|| {
-                    format!(
-                        "execute packed passive Lens prefill span {}..{}",
-                        span.start, span.end
+    let logits = crate::ordinary_executor::prefill(
+        0,
+        prompt_token_ids.len(),
+        |index| {
+            crate::shutdown::checkpoint()?;
+            if let Some(span) = prefill
+                .execution
+                .packed_spans()
+                .get(packed_span_index)
+                .copied()
+                && span.start == index
+            {
+                let scratch = prefill
+                    .scratch
+                    .as_mut()
+                    .context("packed Lens prefill schedule has no scratch")?;
+                loaded
+                    .prefill_prompt_only(
+                        &mut sequence,
+                        scratch,
+                        &prompt_token_ids[span.start..span.end],
                     )
-                })?;
-            index = span.end;
-            packed_span_index += 1;
-            continue;
-        }
-        let token = prompt_token_ids[index];
-        let phase = Phase::Prefill(index);
-        schedule.populate(phase, &mut event)?;
-        logits = forward_event(
-            execution,
-            &schedule,
-            &forward,
-            token,
-            u32::try_from(index).context("prefill position exceeds runtime addressing")?,
-            &mut sequence,
-            phase,
-            &event,
-            phase_needs_logits(phase, prompt_token_ids.len()),
-            &mut operation_applications,
-            &mut live_readouts,
-        )?;
-        index += 1;
-    }
+                    .with_context(|| {
+                        format!(
+                            "execute packed passive Lens prefill span {}..{}",
+                            span.start, span.end
+                        )
+                    })?;
+                packed_span_index += 1;
+                return Ok((span.end, None));
+            }
+            let token = prompt_token_ids[index];
+            let phase = Phase::Prefill(index);
+            schedule.populate(phase, &mut event)?;
+            let logits = forward_event(
+                execution,
+                &schedule,
+                &forward,
+                token,
+                u32::try_from(index).context("prefill position exceeds runtime addressing")?,
+                &mut sequence,
+                phase,
+                &event,
+                phase_needs_logits(phase, prompt_token_ids.len()),
+                &mut operation_applications,
+                &mut live_readouts,
+            )?;
+            Ok((index + 1, Some(logits)))
+        },
+        || anyhow::anyhow!("Lens prefill policy made invalid sequence progress"),
+    )?
+    .context("Lens prefill did not produce final logits")?;
     ensure!(
         packed_span_index == prefill.execution.packed_spans().len(),
         "packed Lens prefill schedule was not fully consumed"

@@ -709,147 +709,161 @@ fn prefill_remaining(
     dflash_capture: &mut Option<DflashPromptCapture>,
     sink: &mut dyn GenerationSink,
 ) -> Result<Option<Vec<f32>>, BackendFailure> {
-    let mut prompt_logits = None;
-    while sequence.position() < prompt_ids.len() {
-        sink.tick().map_err(BackendFailure::Aborted)?;
-        let start = sequence.position();
-        let remaining = prompt_ids.len() - start;
-        // The per-token multi-hidden API is currently dense-only. MoE
-        // speculative requests keep the packed capture path even for a short
-        // prompt rather than entering DFlash with missing context.
-        let serial_capture_supported = loaded.arch().kind == qwen_llm::model::ArchKind::Dense;
-        let single_chunk = scratch
-            .as_ref()
-            .is_some_and(|s| s.prefill_scratch_plan().is_single_chunk());
-        if !single_chunk
-            && use_serial_tail(
-                remaining,
-                serial_tail_max(loaded.arch().kind),
-                dflash_capture.is_some(),
-                serial_capture_supported,
-            )
-        {
-            for (offset, &token) in prompt_ids[start..].iter().enumerate() {
-                let position = start + offset;
-                let position_u32 = u32::try_from(position)
-                    .map_err(|_| ServeError::server_error("position overflow"))?;
-                let skip_tail = serial_capture_supported && position + 1 < prompt_ids.len();
-                let logits = match (dflash_head, dflash_capture.as_mut()) {
-                    (Some(head), Some((dst, capture_start, captured, n_features, _ring)))
-                        if position >= *capture_start =>
-                    {
-                        let capture_offset = dflash_prompt_capture_offset(position, *capture_start)
-                            .expect("guarded prompt capture position");
-                        let view = dst.view_subrange(
-                            (capture_offset * *n_features) as u64,
-                            vec![*n_features as u64],
-                        );
-                        let logits = if skip_tail {
-                            forward
-                                .single_token_with_multi_hidden_no_tail(
-                                    token,
-                                    position_u32,
-                                    unsafe { sequence.metal_session_mut() },
-                                    &head.target_layer_ids,
-                                    &view,
-                                )
-                                .map(|()| None)
-                        } else {
-                            forward
-                                .single_token_with_multi_hidden(
-                                    token,
-                                    position_u32,
-                                    unsafe { sequence.metal_session_mut() },
-                                    &head.target_layer_ids,
-                                    &view,
-                                )
-                                .map(Some)
+    crate::ordinary_executor::prefill(
+        sequence.position(),
+        prompt_ids.len(),
+        |start| {
+            sink.tick().map_err(BackendFailure::Aborted)?;
+            let remaining = prompt_ids.len() - start;
+            // The per-token multi-hidden API is currently dense-only. MoE
+            // speculative requests keep the packed capture path even for a short
+            // prompt rather than entering DFlash with missing context.
+            let serial_capture_supported = loaded.arch().kind == qwen_llm::model::ArchKind::Dense;
+            let single_chunk = scratch
+                .as_ref()
+                .is_some_and(|s| s.prefill_scratch_plan().is_single_chunk());
+            if !single_chunk
+                && use_serial_tail(
+                    remaining,
+                    serial_tail_max(loaded.arch().kind),
+                    dflash_capture.is_some(),
+                    serial_capture_supported,
+                )
+            {
+                let mut prompt_logits = None;
+                for (offset, &token) in prompt_ids[start..].iter().enumerate() {
+                    let position = start + offset;
+                    let position_u32 = u32::try_from(position)
+                        .map_err(|_| ServeError::server_error("position overflow"))?;
+                    let skip_tail = serial_capture_supported && position + 1 < prompt_ids.len();
+                    let logits = match (dflash_head, dflash_capture.as_mut()) {
+                        (Some(head), Some((dst, capture_start, captured, n_features, _ring)))
+                            if position >= *capture_start =>
+                        {
+                            let capture_offset =
+                                dflash_prompt_capture_offset(position, *capture_start)
+                                    .expect("guarded prompt capture position");
+                            let view = dst.view_subrange(
+                                (capture_offset * *n_features) as u64,
+                                vec![*n_features as u64],
+                            );
+                            let logits = if skip_tail {
+                                forward
+                                    .single_token_with_multi_hidden_no_tail(
+                                        token,
+                                        position_u32,
+                                        unsafe { sequence.metal_session_mut() },
+                                        &head.target_layer_ids,
+                                        &view,
+                                    )
+                                    .map(|()| None)
+                            } else {
+                                forward
+                                    .single_token_with_multi_hidden(
+                                        token,
+                                        position_u32,
+                                        unsafe { sequence.metal_session_mut() },
+                                        &head.target_layer_ids,
+                                        &view,
+                                    )
+                                    .map(Some)
+                            }
+                            .map_err(|error| {
+                                ServeError::server_error(format!(
+                                    "serial tail capture prefill: {error:#}"
+                                ))
+                            })?;
+                            sequence.advance_by(1).map_err(|error| {
+                                ServeError::server_error(format!("advance: {error:#}"))
+                            })?;
+                            *captured += 1;
+                            logits
                         }
-                        .map_err(|error| {
-                            ServeError::server_error(format!(
-                                "serial tail capture prefill: {error:#}"
-                            ))
-                        })?;
-                        sequence.advance_by(1).map_err(|error| {
-                            ServeError::server_error(format!("advance: {error:#}"))
-                        })?;
-                        *captured += 1;
-                        logits
-                    }
-                    _ if skip_tail => loaded
-                        .prefill_token_prompt_only(sequence, token)
-                        .map(|()| None)
-                        .map_err(|error| {
-                            ServeError::server_error(format!("serial no-tail prefill: {error:#}"))
-                        })?,
-                    _ => loaded
-                        .decode_token(sequence, token)
-                        .map(Some)
-                        .map_err(|error| {
-                            ServeError::server_error(format!("serial tail prefill: {error:#}"))
-                        })?,
-                };
-                prompt_logits = logits;
+                        _ if skip_tail => loaded
+                            .prefill_token_prompt_only(sequence, token)
+                            .map(|()| None)
+                            .map_err(|error| {
+                                ServeError::server_error(format!(
+                                    "serial no-tail prefill: {error:#}"
+                                ))
+                            })?,
+                        _ => loaded
+                            .decode_token(sequence, token)
+                            .map(Some)
+                            .map_err(|error| {
+                                ServeError::server_error(format!("serial tail prefill: {error:#}"))
+                            })?,
+                    };
+                    prompt_logits = logits;
+                }
+                return Ok((sequence.position(), prompt_logits));
             }
-            break;
-        }
-        let end = prompt_ids.len().min(start + chunk);
-        let (logits, _span_ms) = match dflash_capture.as_mut() {
-            Some((dst, capture_start, captured, n_features, _ring)) => {
-                let head = dflash_head.expect("capture window buffer implies a drafter head");
-                // The request's capture base is fixed at allocation, so a
-                // prefill split at the transcript boundary captures both
-                // segments into one consistent window.
-                let wstart = *capture_start;
-                let scratch = scratch.as_mut().ok_or_else(|| {
-                    ServeError::server_error("uncached prefill has no scratch allocation")
-                })?;
-                if end <= wstart {
-                    crate::prefill_span(forward, sequence, scratch, &prompt_ids[start..end], start)
-                        .map_err(|error| ServeError::server_error(format!("prefill: {error:#}")))?
-                } else {
-                    let cstart = start.max(wstart);
-                    if cstart > start {
+            let end = prompt_ids.len().min(start + chunk);
+            let (logits, _span_ms) = match dflash_capture.as_mut() {
+                Some((dst, capture_start, captured, n_features, _ring)) => {
+                    let head = dflash_head.expect("capture window buffer implies a drafter head");
+                    // The request's capture base is fixed at allocation, so a
+                    // prefill split at the transcript boundary captures both
+                    // segments into one consistent window.
+                    let wstart = *capture_start;
+                    let scratch = scratch.as_mut().ok_or_else(|| {
+                        ServeError::server_error("uncached prefill has no scratch allocation")
+                    })?;
+                    if end <= wstart {
                         crate::prefill_span(
                             forward,
                             sequence,
                             scratch,
-                            &prompt_ids[start..cstart],
+                            &prompt_ids[start..end],
                             start,
                         )
-                        .map_err(|error| ServeError::server_error(format!("prefill: {error:#}")))?;
+                        .map_err(|error| ServeError::server_error(format!("prefill: {error:#}")))?
+                    } else {
+                        let cstart = start.max(wstart);
+                        if cstart > start {
+                            crate::prefill_span(
+                                forward,
+                                sequence,
+                                scratch,
+                                &prompt_ids[start..cstart],
+                                start,
+                            )
+                            .map_err(|error| {
+                                ServeError::server_error(format!("prefill: {error:#}"))
+                            })?;
+                        }
+                        let view = dst.view_subrange(
+                            ((cstart - wstart) * *n_features) as u64,
+                            vec![((end - cstart) * *n_features) as u64],
+                        );
+                        let out = crate::prefill_span_with_capture(
+                            forward,
+                            sequence,
+                            scratch,
+                            &prompt_ids[cstart..end],
+                            cstart,
+                            &head.target_layer_ids,
+                            &view,
+                        )
+                        .map_err(|error| {
+                            ServeError::server_error(format!("capture prefill: {error:#}"))
+                        })?;
+                        *captured += end - cstart;
+                        out
                     }
-                    let view = dst.view_subrange(
-                        ((cstart - wstart) * *n_features) as u64,
-                        vec![((end - cstart) * *n_features) as u64],
-                    );
-                    let out = crate::prefill_span_with_capture(
-                        forward,
-                        sequence,
-                        scratch,
-                        &prompt_ids[cstart..end],
-                        cstart,
-                        &head.target_layer_ids,
-                        &view,
-                    )
-                    .map_err(|error| {
-                        ServeError::server_error(format!("capture prefill: {error:#}"))
-                    })?;
-                    *captured += end - cstart;
-                    out
                 }
-            }
-            None => {
-                let scratch = scratch.as_mut().ok_or_else(|| {
-                    ServeError::server_error("uncached prefill has no scratch allocation")
-                })?;
-                crate::prefill_span(forward, sequence, scratch, &prompt_ids[start..end], start)
-                    .map_err(|error| ServeError::server_error(format!("prefill: {error:#}")))?
-            }
-        };
-        prompt_logits = Some(logits);
-    }
-    Ok(prompt_logits)
+                None => {
+                    let scratch = scratch.as_mut().ok_or_else(|| {
+                        ServeError::server_error("uncached prefill has no scratch allocation")
+                    })?;
+                    crate::prefill_span(forward, sequence, scratch, &prompt_ids[start..end], start)
+                        .map_err(|error| ServeError::server_error(format!("prefill: {error:#}")))?
+                }
+            };
+            Ok((sequence.position(), Some(logits)))
+        },
+        || ServeError::server_error("prefill policy made invalid sequence progress").into(),
+    )
 }
 
 impl GenerationBackend for EngineBackend {

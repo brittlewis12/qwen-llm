@@ -1158,3 +1158,23 @@ double-counting control memory. These are control/protocol/admission-policy test
 not numerical family inference or real-pressure qualification. DS4's post-session
 reserve check still does not price its session-construction peak. No large model
 load is justified for these CPU-owned behavior changes.
+
+### R05: Bounded Shared Prefill Progress
+
+The final consumed extraction recovers the small bounded prefill loop across
+ordinary CLI/sweep arms, native jobs and ordinary serving. It owns monotonic progress
+and final-step output, not scheduling, checkpoints, model routing or consumption.
+Serve keeps packed spans, restored-prefix/no-work behavior, DFlash capture windows
+and serial-tail decisions; CLI keeps current `forward_event` dispatch rather than
+restoring the obsolete generic production dispatcher. Native consumption and
+observation remain after successful forward and before sampling. CLI additionally
+checks process shutdown before each prefill step, as the preserved consumer did.
+
+Invalid initial/progress bounds fail rather than looping; a no-output final CLI or
+native step cannot reuse stale logits. Obsolete step output drops before the next
+closure, avoiding an unnecessary old-logit overlap through a serial tail. CPU tests
+cover no-work restore, mixed spans, output lifetime, progress failures and failed
+native prefill observation retaining known consumption without further forwards or
+sampling. No new inference capability or scheduler is introduced. Final production
+baseline requalification will cover this build, not claim DFlash or restored-prefix
+numerical qualification from a cache-isolated native test.

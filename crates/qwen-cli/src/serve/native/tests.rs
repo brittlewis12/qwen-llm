@@ -519,3 +519,56 @@ fn observer_failure_keeps_successful_consumption_and_does_not_fabricate_failed_f
         }
     }
 }
+
+#[test]
+fn prefill_observation_failure_keeps_consumption_and_prevents_sampling() {
+    let fixture = Fixture::new();
+    let (id, prepared, control) = fixture.prepare("prefill-observe-failure");
+    let writer = writer::Writer::spawn(
+        fixture.store.clone(),
+        id.clone(),
+        control,
+        &prepared,
+        Default::default(),
+    )
+    .unwrap();
+    writer.wait_ready().unwrap();
+    struct Engine {
+        forwards: usize,
+    }
+    impl execute::TokenEngine for Engine {
+        fn forward(&mut self, _: i32, position: u32, tail: bool) -> Result<Vec<f32>> {
+            assert_eq!(position, 0);
+            assert!(!tail);
+            self.forwards += 1;
+            Ok(Vec::new())
+        }
+        fn observe(
+            &mut self,
+            _: i32,
+            position: u32,
+            _: &[f32],
+            counters: &Counters,
+            _: &Sink,
+        ) -> Result<()> {
+            assert_eq!(position, 0);
+            assert_eq!(counters.consumed_prompt_tokens, 1);
+            anyhow::bail!("injected prefill observer failure")
+        }
+    }
+    let mut engine = Engine { forwards: 0 };
+    let outcome = execute::run_engine(&prepared, writer.sink(), &[], &mut engine, |_| {
+        panic!("no sampling after failed observation")
+    });
+    assert_eq!(engine.forwards, 1);
+    assert_eq!(outcome.counters.consumed_prompt_tokens, 1);
+    assert_eq!(outcome.counters.sampled_tokens, 0);
+    writer.finish(outcome).unwrap();
+    let status = fixture.store.status(&id).unwrap();
+    assert_eq!(status.result.error.unwrap().code, "readout_failed");
+    assert!(status.result.complete);
+    let page = fixture.store.result(&id, None, 64).unwrap();
+    assert!(!page.records.iter().any(|r| r["kind"] == "sampled_token"
+        || r["kind"] == "readout"
+        || r["kind"] == "residual_pair"));
+}

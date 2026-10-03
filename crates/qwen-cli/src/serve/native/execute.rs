@@ -3,7 +3,7 @@ use crate::ordinary_executor::{
     self, DecodeOptions, ExecutionCancelled, TerminalReason, TokenAllocation,
 };
 use crate::serve::jobs::state::{Counters, JobError, Phase, StopReason};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use qwen_llm::{
     runtime::{LoadedModel, SequenceConfig},
     sampling::Sampler,
@@ -283,24 +283,31 @@ pub(super) fn run_engine(
             !prepared.prompt.is_empty() && prepared.max_tokens > 0,
             "empty native generation"
         );
-        let mut logits = Vec::new();
-        for (position, &token) in prepared.prompt.iter().enumerate() {
-            checkpoint(sink)?;
-            let last = position + 1 == prepared.prompt.len();
-            logits = engine.forward(token, u32::try_from(position)?, last)?;
-            state.counters.consumed_prompt_tokens += 1;
-            if last || (position + 1) % 16 == 0 {
-                sink.progress(Phase::Prefill, &state.counters);
-            }
-            observe(
-                engine,
-                token,
-                u32::try_from(position)?,
-                &logits,
-                &state.counters,
-                sink,
-            )?;
-        }
+        let logits = ordinary_executor::prefill(
+            0,
+            prepared.prompt.len(),
+            |position| {
+                let token = prepared.prompt[position];
+                checkpoint(sink)?;
+                let last = position + 1 == prepared.prompt.len();
+                let logits = engine.forward(token, u32::try_from(position)?, last)?;
+                state.counters.consumed_prompt_tokens += 1;
+                if last || (position + 1) % 16 == 0 {
+                    sink.progress(Phase::Prefill, &state.counters);
+                }
+                observe(
+                    engine,
+                    token,
+                    u32::try_from(position)?,
+                    &logits,
+                    &state.counters,
+                    sink,
+                )?;
+                Ok((position + 1, Some(logits)))
+            },
+            || anyhow::anyhow!("native prefill made invalid progress"),
+        )?
+        .context("native prefill did not produce final logits")?;
         let summary = ordinary_executor::decode(
             logits,
             DecodeOptions {

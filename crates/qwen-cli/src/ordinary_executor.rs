@@ -107,6 +107,30 @@ pub(crate) enum TerminalReason {
     TokenLimit,
 }
 
+/// Advance through bounded prefill steps. Callers own the consumed spans,
+/// forward policy and checkpoints; only the last step's output is returned.
+pub(crate) fn prefill<State, Error>(
+    mut position: usize,
+    prompt_len: usize,
+    mut step: impl FnMut(usize) -> std::result::Result<(usize, Option<State>), Error>,
+    invalid_progress: impl Fn() -> Error,
+) -> std::result::Result<Option<State>, Error> {
+    if position > prompt_len {
+        return Err(invalid_progress());
+    }
+    let mut state = None;
+    while position < prompt_len {
+        drop(state.take());
+        let (next, output) = step(position)?;
+        if next <= position || next > prompt_len {
+            return Err(invalid_progress());
+        }
+        position = next;
+        state = output;
+    }
+    Ok(state)
+}
+
 #[derive(Debug)]
 pub(crate) struct DecodeSummary {
     pub(crate) tokens: Vec<i32>,

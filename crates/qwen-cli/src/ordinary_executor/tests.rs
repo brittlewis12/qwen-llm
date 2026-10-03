@@ -2,6 +2,108 @@ use super::*;
 use qwen_llm::sampling::{Sampler, SamplingConfig};
 use std::cell::{Cell, RefCell};
 
+#[test]
+fn prefill_preserves_restored_prefix_and_last_step_output_without_extra_work() {
+    let mut spans = Vec::new();
+    let result = prefill(
+        2,
+        8,
+        |position| {
+            let (next, output) = match position {
+                2 => (5, None),
+                5 => (7, Some("intermediate")),
+                7 => (8, Some("final")),
+                _ => panic!("unexpected position"),
+            };
+            spans.push((position, next));
+            Ok((next, output))
+        },
+        || "invalid",
+    )
+    .unwrap();
+    assert_eq!(spans, [(2, 5), (5, 7), (7, 8)]);
+    assert_eq!(result, Some("final"));
+    for end in [0, 8] {
+        assert_eq!(
+            prefill::<(), _>(end, end, |_| panic!("already restored"), || "invalid").unwrap(),
+            None
+        );
+    }
+    assert_eq!(
+        prefill(
+            0,
+            2,
+            |p| Ok((p + 1, (p == 0).then_some("stale"))),
+            || "invalid"
+        )
+        .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn prefill_rejects_invalid_progress_and_does_not_retry_failed_steps() {
+    assert_eq!(
+        prefill::<(), _>(3, 2, |_| panic!("invalid initial bound"), || "invalid"),
+        Err("invalid")
+    );
+    for next in [0, 1, 4] {
+        let mut calls = 0;
+        assert_eq!(
+            prefill::<(), _>(
+                1,
+                3,
+                |_| {
+                    calls += 1;
+                    Ok((next, None))
+                },
+                || "invalid"
+            ),
+            Err("invalid")
+        );
+        assert_eq!(calls, 1);
+    }
+    let mut consumed = Vec::new();
+    let result = prefill::<(), _>(
+        0,
+        3,
+        |position| {
+            if position == 1 {
+                return Err("cancelled");
+            }
+            consumed.push(position);
+            Ok((position + 1, None))
+        },
+        || "invalid",
+    );
+    assert_eq!(result, Err("cancelled"));
+    assert_eq!(consumed, [0]);
+}
+
+#[test]
+fn prefill_releases_obsolete_output_before_next_step() {
+    struct Output<'a>(&'a Cell<usize>);
+    impl Drop for Output<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+    let dropped = Cell::new(0);
+    let output = prefill(
+        0,
+        3,
+        |position| {
+            assert_eq!(dropped.get(), position);
+            Ok((position + 1, Some(Output(&dropped))))
+        },
+        || "invalid",
+    )
+    .unwrap();
+    assert_eq!(dropped.get(), 2);
+    drop(output);
+    assert_eq!(dropped.get(), 3);
+}
+
 fn options(max_tokens: usize, stop_tokens: &[i32]) -> DecodeOptions<'_> {
     DecodeOptions {
         max_tokens,

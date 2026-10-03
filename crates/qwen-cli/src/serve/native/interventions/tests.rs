@@ -91,6 +91,17 @@ fn zero_controls_validate_without_staging_or_scope_expansion() {
         .unwrap()
         .remove("prefill");
     assert!(Plan::compile(&dirs, &[unreachable], 3, 2, 1, 32, 2, Some(&registry)).is_err());
+    for site in ["embedding", "mixer_output", "ffn_output"] {
+        let mut module = operation("module", "fixed_add", 1.0);
+        module["site"] = json!(site);
+        let error = Plan::compile(&dirs, &[module], 3, 2, 3, 32, 2, Some(&registry))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("post_block site"), "{error:#}");
+    }
+    let mut explicit = operation("explicit", "fixed_add", 1.0);
+    explicit["site"] = json!("post_block");
+    assert!(Plan::compile(&dirs, &[explicit], 3, 2, 3, 32, 2, Some(&registry)).is_ok());
 }
 
 #[test]

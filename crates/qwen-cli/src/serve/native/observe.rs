@@ -162,6 +162,7 @@ impl TokenEngine for Engine<'_> {
                 .as_ref()
                 .map(|buffer| (self.before_layers.as_slice(), buffer)),
             &operations,
+            &[],
         )?;
         self.sequence.advance_by(1)?;
         Ok(output)

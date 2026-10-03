@@ -340,6 +340,7 @@ pub(super) fn forward_event(
     needs_logits: bool,
     operation_applications: &mut Vec<OperationApplication>,
     live_readouts: &mut Vec<LiveReadout>,
+    direction_readouts: &mut Vec<LiveDirectionReadout>,
 ) -> Result<Vec<f32>> {
     crate::shutdown::checkpoint()?;
     let mut interventions = Vec::new();
@@ -356,16 +357,15 @@ pub(super) fn forward_event(
                 &execution.directions,
                 &execution.coordinate_swaps,
             )?;
-            interventions.push((operation.id.clone(), layer, intervention));
+            interventions.push((operation.id.clone(), layer, operation.site, intervention));
         }
     }
-    let borrowed = interventions
-        .iter()
-        .map(|(_, _, op)| *op)
-        .collect::<Vec<_>>();
+    let (borrowed, module) = crate::lens_intervention::split_interventions(
+        interventions.iter().map(|(_, _, site, op)| (*site, *op)),
+    );
     sequence.check_position(position as usize)?;
     sequence.ensure_can_append(1)?;
-    let has_readouts = !event.readout_indices().is_empty();
+    let has_readouts = event.has_readouts();
     let route = event_forward_route(
         needs_logits,
         execution.capture.is_some(),
@@ -408,6 +408,7 @@ pub(super) fn forward_event(
                 Some((event.capture_layers(), capture)),
                 None,
                 &borrowed,
+                &module,
             )?
         }
         EventForwardRoute::SerialFullTailNoCapture | EventForwardRoute::SerialNoTailNoCapture => {
@@ -420,6 +421,7 @@ pub(super) fn forward_event(
                 None,
                 None,
                 &borrowed,
+                &module,
             )?
         }
         EventForwardRoute::ProductionFullTail => {
@@ -432,12 +434,13 @@ pub(super) fn forward_event(
     };
     sequence.advance_by(1)?;
 
-    for (id, layer, _) in &interventions {
+    for (id, layer, site, _) in &interventions {
         operation_applications.push(OperationApplication {
             id: id.clone(),
             layer: *layer,
             phase: phase.label(),
             index: phase.index(),
+            site: *site,
         });
     }
     if let Some(capture) = capture.as_ref() {
@@ -466,6 +469,39 @@ pub(super) fn forward_event(
                     phase: phase.label(),
                     index: phase.index(),
                     scores: scores.2,
+                });
+            }
+        }
+        for &definition_index in event.direction_readout_indices() {
+            let readout = &schedule.plan().direction_readouts[definition_index];
+            for (slot, &layer) in event.capture_layers().iter().enumerate() {
+                if !schedule.direction_readout_selects_layer(definition_index, layer) {
+                    continue;
+                }
+                let row = &values[slot * execution.hidden_size..(slot + 1) * execution.hidden_size];
+                let direction = execution
+                    .directions
+                    .get(&readout.direction)
+                    .and_then(|prepared| prepared.rows.get(&layer))
+                    .with_context(|| {
+                        format!(
+                            "direction readout {} has no prepared row at layer {layer}",
+                            readout.id
+                        )
+                    })?;
+                let (dot, h_norm_l2, v_norm_l2) = direction_readout_scalars(
+                    row,
+                    &read_f32_tensor(direction, execution.hidden_size),
+                )?;
+                direction_readouts.push(LiveDirectionReadout {
+                    id: readout.id.clone(),
+                    direction: readout.direction.clone(),
+                    source_layer: layer,
+                    phase: phase.label(),
+                    index: phase.index(),
+                    dot,
+                    h_norm_l2,
+                    v_norm_l2,
                 });
             }
         }

@@ -2,7 +2,10 @@
 
 use crate::lens_scope::Scope;
 use anyhow::{Result, ensure};
-use qwen_llm::{metal::MetalTensor, metal_forward::PostBlockIntervention};
+use qwen_llm::{
+    metal::MetalTensor,
+    metal_forward::{ModuleIntervention, ModuleSite, PostBlockIntervention},
+};
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod coefficient;
@@ -54,6 +57,72 @@ pub(crate) struct OperationDefinition {
     pub(crate) id: String,
     pub(crate) scope: Scope,
     pub(crate) action: Action,
+    #[serde(default, skip_serializing_if = "OperationSite::is_post_block")]
+    pub(crate) site: OperationSite,
+}
+
+/// Where an operation edits the residual stream. Module sites edit a residual
+/// writer's output before its add; the selected layer names the block.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OperationSite {
+    #[default]
+    PostBlock,
+    Embedding,
+    MixerOutput,
+    FfnOutput,
+}
+
+impl OperationSite {
+    pub(crate) fn is_post_block(&self) -> bool {
+        *self == Self::PostBlock
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::PostBlock => "post_block",
+            Self::Embedding => "embedding",
+            Self::MixerOutput => "mixer_output",
+            Self::FfnOutput => "ffn_output",
+        }
+    }
+
+    pub(crate) fn module_site(self) -> Option<ModuleSite> {
+        match self {
+            Self::PostBlock => None,
+            Self::Embedding => Some(ModuleSite::Embedding),
+            Self::MixerOutput => Some(ModuleSite::MixerOutput),
+            Self::FfnOutput => Some(ModuleSite::FfnOutput),
+        }
+    }
+}
+
+/// Split lowered operations by site, preserving caller order within each list.
+pub(crate) fn split_by_site<T>(
+    sited: impl IntoIterator<Item = (OperationSite, T)>,
+) -> (Vec<T>, Vec<(ModuleSite, T)>) {
+    let mut post_block = Vec::new();
+    let mut module = Vec::new();
+    for (site, item) in sited {
+        match site.module_site() {
+            None => post_block.push(item),
+            Some(site) => module.push((site, item)),
+        }
+    }
+    (post_block, module)
+}
+
+pub(crate) fn split_interventions<'a>(
+    sited: impl IntoIterator<Item = (OperationSite, PostBlockIntervention<'a>)>,
+) -> (Vec<PostBlockIntervention<'a>>, Vec<ModuleIntervention<'a>>) {
+    let (post_block, module) = split_by_site(sited);
+    (
+        post_block,
+        module
+            .into_iter()
+            .map(|(site, op)| ModuleIntervention { site, op })
+            .collect(),
+    )
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -399,5 +468,54 @@ mod tests {
         .err()
         .unwrap();
         assert_eq!(error.to_string(), "family reflection missing");
+    }
+
+    #[test]
+    fn site_is_optional_on_the_wire_and_splits_in_authored_order() {
+        let authored = serde_json::json!({
+            "id":"op",
+            "scope":{"layers":{"kind":"values","values":[0]},"prefill":{"kind":"all"},"decode":null},
+            "action":{"kind":"fixed_add","direction":"d","coefficient":1.0}
+        });
+        let implicit: OperationDefinition = serde_json::from_value(authored.clone()).unwrap();
+        assert_eq!(implicit.site, OperationSite::PostBlock);
+        assert_eq!(serde_json::to_value(&implicit).unwrap(), authored);
+        for (wire, site) in [
+            ("post_block", OperationSite::PostBlock),
+            ("embedding", OperationSite::Embedding),
+            ("mixer_output", OperationSite::MixerOutput),
+            ("ffn_output", OperationSite::FfnOutput),
+        ] {
+            let mut explicit = authored.clone();
+            explicit["site"] = wire.into();
+            let parsed: OperationDefinition = serde_json::from_value(explicit).unwrap();
+            assert_eq!(parsed.site, site);
+            assert_eq!(
+                serde_json::to_value(&parsed).unwrap().get("site").is_some(),
+                site != OperationSite::PostBlock
+            );
+        }
+        let mut unknown = authored;
+        unknown["site"] = "attention".into();
+        assert!(serde_json::from_value::<OperationDefinition>(unknown).is_err());
+
+        let (post_block, module) = split_by_site([
+            (OperationSite::FfnOutput, "f0"),
+            (OperationSite::PostBlock, "p0"),
+            (OperationSite::MixerOutput, "m0"),
+            (OperationSite::FfnOutput, "f1"),
+            (OperationSite::PostBlock, "p1"),
+            (OperationSite::Embedding, "e0"),
+        ]);
+        assert_eq!(post_block, ["p0", "p1"]);
+        assert_eq!(
+            module,
+            [
+                (ModuleSite::FfnOutput, "f0"),
+                (ModuleSite::MixerOutput, "m0"),
+                (ModuleSite::FfnOutput, "f1"),
+                (ModuleSite::Embedding, "e0"),
+            ]
+        );
     }
 }

@@ -779,6 +779,7 @@ pub(super) fn execute_ordinary_arm(
     })?;
     let mut operation_applications = Vec::new();
     let mut live_readouts = Vec::new();
+    let mut direction_readouts = Vec::new();
     let mut packed_span_index = 0usize;
     let logits = crate::ordinary_executor::prefill(
         0,
@@ -826,6 +827,7 @@ pub(super) fn execute_ordinary_arm(
                 phase_needs_logits(phase, prompt_token_ids.len()),
                 &mut operation_applications,
                 &mut live_readouts,
+                &mut direction_readouts,
             )?;
             Ok((index + 1, Some(logits)))
         },
@@ -860,6 +862,7 @@ pub(super) fn execute_ordinary_arm(
                 phase_needs_logits(phase, prompt_token_ids.len()),
                 &mut operation_applications,
                 &mut live_readouts,
+                &mut direction_readouts,
             )
         },
     )?;
@@ -888,6 +891,8 @@ pub(super) fn execute_ordinary_arm(
         operation_applications,
         live_readouts,
         native_hyper_captures: Vec::new(),
+        raw_directions: execution.raw_directions.clone(),
+        direction_readouts,
     })
 }
 

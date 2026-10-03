@@ -130,6 +130,8 @@ pub(super) fn run_qwen4exp(
         operation_applications,
         live_readouts: Vec::new(),
         native_hyper_captures,
+        raw_directions: Vec::new(),
+        direction_readouts: Vec::new(),
     };
     emit_run_output(
         args,
@@ -153,6 +155,7 @@ pub(super) fn prepare_qwen4exp_execution_plan(
     plan_dir: &Path,
     config: &Qwen4ExpConfig,
 ) -> Result<Qwen4ExpExecutionPlan> {
+    refuse_ordinary_only_features(&plan, "Flash-Next")?;
     ensure!(
         plan.lenses.is_empty(),
         "Flash-Next Lens plans cannot use ordinary J/R or template lenses"
@@ -353,6 +356,7 @@ pub(super) fn qwen4exp_forward_event(
         layer,
         phase: phase.label(),
         index: phase.index(),
+        site: OperationSite::PostBlock,
     });
     native_hyper_captures.push(NativeHyperCapture {
         operation_id: operation.id.clone(),
@@ -372,6 +376,7 @@ pub(super) fn qwen4exp_forward_event(
 }
 
 pub(super) fn validate_flash_artifact_plan(plan: &LensPlan) -> Result<()> {
+    refuse_ordinary_only_features(plan, "Flash-Next")?;
     ensure!(
         plan.lenses.is_empty()
             && plan.readouts.is_empty()

@@ -3,7 +3,7 @@
 use super::registry::{MatrixKey, Registry};
 use crate::lens_intervention::{
     self, Action, DirectionRow, DirectionTargetCovector, LensRowDirectionDefinition,
-    OperationDefinition, operation_enabled,
+    OperationDefinition, OperationSite, operation_enabled,
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
@@ -143,6 +143,10 @@ impl Plan {
                     && operation.id.len() <= 256
                     && ids.insert(operation.id.clone()),
                 "operation IDs must be unique, nonempty and bounded"
+            );
+            ensure!(
+                operation.site == OperationSite::PostBlock,
+                "native operations support only the post_block site"
             );
             ensure!(
                 matches!(

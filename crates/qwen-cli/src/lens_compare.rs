@@ -1616,6 +1616,11 @@ struct RunDocument {
     live_readouts: Vec<RunReadout>,
     #[serde(default)]
     native_hyper_captures: Vec<serde_json::Value>,
+    // Ordinary-only additive records; retained for parsing, not compared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    raw_directions: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    direction_readouts: Vec<serde_json::Value>,
     #[serde(default)]
     execution_binding: Option<RunExecutionBinding>,
 }
@@ -2024,6 +2029,7 @@ impl RunDocument {
                 .with_context(|| format!("run records unknown operation {}", application.id))?;
             ensure!(
                 operation.action.coefficient() != 0.0
+                    && application.site.unwrap_or_default() == operation.site
                     && sweep_scope_matches(
                         &operation.scope,
                         &application.phase,
@@ -2156,6 +2162,8 @@ struct RunOperationApplication {
     layer: u32,
     phase: String,
     index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    site: Option<lens_run::OperationSite>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2798,6 +2806,7 @@ mod tests {
                     layer: 1,
                     phase: "prefill".into(),
                     index: 0,
+                    site: None,
                 }]
             },
             requested_live_readouts,
@@ -2820,6 +2829,8 @@ mod tests {
                 }],
             }],
             native_hyper_captures: Vec::new(),
+            raw_directions: Vec::new(),
+            direction_readouts: Vec::new(),
             execution_binding: None,
         }
     }
@@ -3550,6 +3561,8 @@ mod tests {
             requested_live_readouts,
             live_readouts: Vec::new(),
             native_hyper_captures: Vec::new(),
+            raw_directions: Vec::new(),
+            direction_readouts: Vec::new(),
             execution_binding: None,
         };
         document.validate().unwrap();
@@ -3778,6 +3791,7 @@ mod tests {
                     layer: 1,
                     phase: "prefill".into(),
                     index: 0,
+                    site: None,
                 });
         });
         assert!(load_sweep(&root).is_err());
@@ -3948,6 +3962,8 @@ mod tests {
                 scores,
             }],
             native_hyper_captures: Vec::new(),
+            raw_directions: Vec::new(),
+            direction_readouts: Vec::new(),
             execution_binding: None,
         }
     }

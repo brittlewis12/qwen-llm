@@ -1,9 +1,9 @@
 use super::lens_input::prepare_muse_input;
 use super::lens_run::{
     Action, DirectionDefinition, DirectionRow, LensDefinition, LensPlan, LensRunArgs, LiveReadout,
-    LiveScore, OperationApplication, RunExecution, RunExecutionBinding, RunPublishedLensBinding,
-    RunPublishedMatrixBinding, RunResult, RunSerialReason, Scope, Selector, bind_plan_positions,
-    emit_run_output,
+    LiveScore, OperationApplication, OperationSite, RunExecution, RunExecutionBinding,
+    RunPublishedLensBinding, RunPublishedMatrixBinding, RunResult, RunSerialReason, Scope,
+    Selector, bind_plan_positions, emit_run_output, refuse_ordinary_only_features,
 };
 use super::muse_lens_artifact as artifact;
 use super::muse_published_full_lens_artifact as published;
@@ -285,6 +285,8 @@ pub(crate) fn run(
             operation_applications,
             live_readouts,
             native_hyper_captures: Vec::new(),
+            raw_directions: Vec::new(),
+            direction_readouts: Vec::new(),
         },
         RunExecution::runtime_serial(
             args.prefill_execution,
@@ -482,7 +484,7 @@ fn required_lens_layers(plan: &LensPlan, lens_id: &str, layer_count: u32) -> Res
             DirectionDefinition::LensRow(direction) => {
                 Some((direction.id.as_str(), direction.lens.as_str()))
             }
-            DirectionDefinition::NativeHyper(_) => None,
+            DirectionDefinition::NativeHyper(_) | DirectionDefinition::Raw(_) => None,
         })
         .collect::<HashMap<_, _>>();
     let mut layers = BTreeSet::new();
@@ -689,7 +691,7 @@ fn prepare_execution_plan(
         .iter()
         .filter_map(|definition| match definition {
             DirectionDefinition::LensRow(direction) => Some((direction.id.as_str(), direction)),
-            DirectionDefinition::NativeHyper(_) => None,
+            DirectionDefinition::NativeHyper(_) | DirectionDefinition::Raw(_) => None,
         })
         .collect::<HashMap<_, _>>();
     let mut directions = HashMap::new();
@@ -848,6 +850,7 @@ fn validate_readout_source_subset(
 
 fn validate_plan(plan: &LensPlan, args: &LensRunArgs) -> Result<()> {
     let _ = args;
+    refuse_ordinary_only_features(plan, "Muse Glimmer")?;
     ensure!(
         !plan.operations.is_empty() || !plan.readouts.is_empty(),
         "Muse Lens plans require at least one operation or readout"
@@ -996,6 +999,7 @@ fn forward_event(
             layer: *layer,
             phase: event.label(),
             index: event.index(),
+            site: OperationSite::PostBlock,
         }
     }));
     if let Some(captured) = captured {
@@ -1293,6 +1297,26 @@ mod tests {
         assert!(validate_plan(&template, &args).is_err());
         let label: LensPlan = serde_json::from_value(json!({"version":1,"lenses":[{"kind":"native_selected","id":"x","artifact":"a"}],"directions":[{"id":"d","lens":"x","row":{"kind":"label","label":"no"},"normalization":"unit_l2"}],"operations":[{"id":"o","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}},"action":{"kind":"fixed_add","direction":"d","coefficient":1.0}}],"readouts":[]})).unwrap();
         assert!(validate_plan(&label, &args).is_err());
+
+        // Ordinary-only features fail before Muse lowering can skip them.
+        let raw: LensPlan = serde_json::from_value(json!({"version":1,"lenses":[{"kind":"native_selected","id":"x","artifact":"a"}],
+            "directions":[{"id":"r","source":{"kind":"raw_residual_f32le","path":"r.f32le","layout":"shared"},"normalization":"unit_l2"}],
+            "operations":[{"id":"o","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}},"action":{"kind":"fixed_add","direction":"r","coefficient":1.0}}],
+            "readouts":[]})).unwrap();
+        let error = validate_plan(&raw, &args).unwrap_err();
+        assert!(
+            error.to_string().contains("raw_residual_f32le"),
+            "{error:#}"
+        );
+        let mut module = serde_json::to_value(&plan).unwrap();
+        module["operations"][0]["site"] = "ffn_output".into();
+        let module: LensPlan = serde_json::from_value(module).unwrap();
+        let error = validate_plan(&module, &args).unwrap_err();
+        assert!(error.to_string().contains("site ffn_output"), "{error:#}");
+        let mut dot = serde_json::to_value(&plan).unwrap();
+        dot["direction_readouts"] = json!([{"id":"dot","direction":"a","scope":{"layers":{"kind":"values","values":[50]},"prefill":{"kind":"all"}}}]);
+        let dot: LensPlan = serde_json::from_value(dot).unwrap();
+        assert!(validate_plan(&dot, &args).is_err());
     }
 
     #[test]

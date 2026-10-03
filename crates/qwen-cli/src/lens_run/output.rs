@@ -263,6 +263,10 @@ pub(crate) struct RunOutput {
     pub(super) live_readouts: Vec<LiveReadout>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(super) native_hyper_captures: Vec<NativeHyperCapture>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) raw_directions: Vec<RawDirectionBinding>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) direction_readouts: Vec<LiveDirectionReadout>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) execution_binding: Option<RunExecutionBinding>,
 }
@@ -316,6 +320,8 @@ pub(crate) struct RunResult {
     pub(crate) operation_applications: Vec<OperationApplication>,
     pub(crate) live_readouts: Vec<LiveReadout>,
     pub(crate) native_hyper_captures: Vec<NativeHyperCapture>,
+    pub(crate) raw_directions: Vec<RawDirectionBinding>,
+    pub(crate) direction_readouts: Vec<LiveDirectionReadout>,
 }
 
 #[derive(Debug, Serialize)]
@@ -439,6 +445,8 @@ pub(super) fn build_run_output(
         operation_applications: result.operation_applications,
         live_readouts: result.live_readouts,
         native_hyper_captures: result.native_hyper_captures,
+        raw_directions: result.raw_directions,
+        direction_readouts: result.direction_readouts,
         execution_binding,
     }
 }

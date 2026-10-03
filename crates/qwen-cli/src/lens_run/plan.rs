@@ -5,7 +5,7 @@ use super::*;
 pub(crate) use crate::lens_intervention::action_requires_unit_l2;
 pub(crate) use crate::lens_intervention::{
     Action, DirectionRow, DirectionTargetCovector, LensRowDirectionDefinition, OperationDefinition,
-    normalize_direction, operation_enabled,
+    OperationSite, normalize_direction, operation_enabled,
 };
 
 pub(super) const MAX_PLAN_BYTES: usize = 16 * 1024 * 1024;
@@ -27,6 +27,8 @@ pub(crate) struct LensPlan {
     pub(crate) operations: Vec<OperationDefinition>,
     #[serde(default)]
     pub(crate) readouts: Vec<ReadoutDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) direction_readouts: Vec<DirectionReadoutDefinition>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -69,6 +71,50 @@ impl LensDefinition {
 pub(crate) enum DirectionDefinition {
     LensRow(LensRowDirectionDefinition),
     NativeHyper(NativeHyperDirectionDefinition),
+    // Last: untagged parsing tries the older shapes first, unchanged.
+    Raw(RawDirectionDefinition),
+}
+
+/// Operator-supplied residual-coordinate vector(s). Only hidden size and layer
+/// bounds are checked; nothing binds the payload to a model identity.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawDirectionDefinition {
+    pub(crate) id: String,
+    pub(crate) source: RawDirectionSource,
+    pub(crate) normalization: Normalization,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum RawDirectionSource {
+    RawResidualF32le {
+        path: PathBuf,
+        layout: RawDirectionLayout,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layers: Option<Vec<u32>>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RawDirectionLayout {
+    /// One vector usable at every layer.
+    Shared,
+    /// One vector per listed layer, layer-major in listed order.
+    PerLayer,
+}
+
+impl RawDirectionSource {
+    pub(super) fn parts(&self) -> (&Path, RawDirectionLayout, Option<&[u32]>) {
+        match self {
+            Self::RawResidualF32le {
+                path,
+                layout,
+                layers,
+            } => (path, *layout, layers.as_deref()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -89,25 +135,37 @@ impl DirectionDefinition {
         match self {
             Self::LensRow(direction) => &direction.id,
             Self::NativeHyper(direction) => &direction.id,
+            Self::Raw(direction) => &direction.id,
         }
     }
 
     pub(super) fn lens_row(&self) -> Option<&LensRowDirectionDefinition> {
         match self {
             Self::LensRow(direction) => Some(direction),
-            Self::NativeHyper(_) => None,
+            Self::NativeHyper(_) | Self::Raw(_) => None,
         }
     }
 
     pub(super) fn native_hyper(&self) -> Option<&NativeHyperDirectionDefinition> {
         match self {
-            Self::LensRow(_) => None,
             Self::NativeHyper(direction) => Some(direction),
+            Self::LensRow(_) | Self::Raw(_) => None,
+        }
+    }
+
+    pub(super) fn raw(&self) -> Option<&RawDirectionDefinition> {
+        match self {
+            Self::Raw(direction) => Some(direction),
+            Self::LensRow(_) | Self::NativeHyper(_) => None,
         }
     }
 
     pub(super) fn normalization(&self) -> Option<Normalization> {
-        self.lens_row().map(|direction| direction.normalization)
+        match self {
+            Self::LensRow(direction) => Some(direction.normalization),
+            Self::Raw(direction) => Some(direction.normalization),
+            Self::NativeHyper(_) => None,
+        }
     }
 }
 
@@ -132,6 +190,12 @@ pub(crate) fn bind_plan_positions(
         .chain(
             authored
                 .readouts
+                .iter()
+                .map(|readout| readout.scope.rendered_selector_count()),
+        )
+        .chain(
+            authored
+                .direction_readouts
                 .iter()
                 .map(|readout| readout.scope.rendered_selector_count()),
         )
@@ -172,6 +236,16 @@ pub(crate) fn bind_plan_positions(
             &mut position_bindings,
         )?;
     }
+    for readout in &mut resolved.direction_readouts {
+        bind_scope_prefill(
+            &mut readout.scope,
+            "direction_readout",
+            &readout.id,
+            rendering,
+            prompt_len,
+            &mut position_bindings,
+        )?;
+    }
     Ok(BoundLensPlan {
         authored: authored.clone(),
         resolved,
@@ -195,7 +269,9 @@ pub(super) fn validate_plan_position_selectors(plan: &LensPlan) -> Result<()> {
         "Lens plan version must be 1 or 2"
     );
     ensure!(
-        plan.operations.len() <= MAX_OPERATIONS && plan.readouts.len() <= MAX_READOUTS,
+        plan.operations.len() <= MAX_OPERATIONS
+            && plan.readouts.len() <= MAX_READOUTS
+            && plan.direction_readouts.len() <= MAX_READOUTS,
         "Lens plan has too many operations or readouts"
     );
     for operation in &plan.operations {
@@ -207,6 +283,12 @@ pub(super) fn validate_plan_position_selectors(plan: &LensPlan) -> Result<()> {
         readout
             .scope
             .validate(&format!("readout {} scope", readout.id), plan.version)?;
+    }
+    for readout in &plan.direction_readouts {
+        readout.scope.validate(
+            &format!("direction readout {} scope", readout.id),
+            plan.version,
+        )?;
     }
     Ok(())
 }
@@ -321,10 +403,199 @@ pub(crate) struct OperationApplication {
     pub(crate) layer: u32,
     pub(crate) phase: &'static str,
     pub(crate) index: usize,
+    #[serde(skip_serializing_if = "OperationSite::is_post_block")]
+    pub(crate) site: OperationSite,
 }
 
 pub(super) struct PreparedDirection {
     pub(super) rows: BTreeMap<u32, MetalTensor>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RawDirectionBinding {
+    pub(crate) id: String,
+    pub(crate) path: PathBuf,
+    pub(crate) layout: RawDirectionLayout,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) layers: Option<Vec<u32>>,
+    pub(crate) payload_bytes: u64,
+    pub(crate) payload_blake3: String,
+    pub(crate) semantics: &'static str,
+}
+
+pub(super) struct LoadedRawDirection {
+    /// None for shared layout; otherwise the strictly increasing listed layers.
+    layers: Option<Vec<u32>>,
+    /// Normalized vectors, one per listed layer or one shared vector.
+    rows: Vec<Vec<f32>>,
+    pub(super) binding: RawDirectionBinding,
+}
+
+impl LoadedRawDirection {
+    pub(super) fn row(&self, layer: u32) -> Option<&[f32]> {
+        match &self.layers {
+            None => self.rows.first().map(Vec::as_slice),
+            Some(layers) => layers
+                .binary_search(&layer)
+                .ok()
+                .map(|slot| self.rows[slot].as_slice()),
+        }
+    }
+}
+
+pub(super) fn validate_raw_direction_syntax(direction: &RawDirectionDefinition) -> Result<()> {
+    let id = &direction.id;
+    let (path, layout, layers) = direction.source.parts();
+    ensure!(
+        !path.as_os_str().is_empty(),
+        "raw direction {id} path must not be empty"
+    );
+    match (layout, layers) {
+        (RawDirectionLayout::Shared, None) => {}
+        (RawDirectionLayout::Shared, Some(_)) => {
+            bail!("raw direction {id} with shared layout must not declare layers")
+        }
+        (RawDirectionLayout::PerLayer, None) => {
+            bail!("raw direction {id} with per_layer layout requires layers")
+        }
+        (RawDirectionLayout::PerLayer, Some(layers)) => ensure!(
+            !layers.is_empty() && layers.windows(2).all(|pair| pair[0] < pair[1]),
+            "raw direction {id} layers must be nonempty and strictly increasing"
+        ),
+    }
+    Ok(())
+}
+
+/// Reads one exact-length little-endian F32 payload without following symlinks.
+pub(super) fn load_raw_direction(
+    direction: &RawDirectionDefinition,
+    plan_dir: &Path,
+    n_layer: u32,
+    hidden_size: usize,
+) -> Result<LoadedRawDirection> {
+    validate_raw_direction_syntax(direction)?;
+    let id = &direction.id;
+    let (path, layout, layers) = direction.source.parts();
+    if let Some(layers) = layers {
+        ensure!(
+            layers.iter().all(|&layer| layer < n_layer),
+            "raw direction {id} layers must be below model layer count {n_layer}"
+        );
+    }
+    ensure!(hidden_size > 0, "raw direction {id} hidden size is zero");
+    let row_bytes = hidden_size
+        .checked_mul(std::mem::size_of::<f32>())
+        .context("raw direction row byte count overflow")?;
+    let expected_bytes = row_bytes
+        .checked_mul(layers.map_or(1, <[u32]>::len))
+        .context("raw direction byte count overflow")?;
+    let bytes = crate::read_regular_file_exact(&resolve_plan_path(plan_dir, path), expected_bytes)
+        .with_context(|| format!("read raw direction {id} from {}", path.display()))?;
+    let payload_blake3 = blake3::hash(&bytes).to_hex().to_string();
+    let rows = bytes
+        .chunks_exact(row_bytes)
+        .enumerate()
+        .map(|(slot, chunk)| {
+            let values = chunk
+                .chunks_exact(4)
+                .map(|value| f32::from_le_bytes(value.try_into().unwrap()))
+                .collect::<Vec<_>>();
+            let label = match layers {
+                Some(layers) => format!("{id} layer {}", layers[slot]),
+                None => id.clone(),
+            };
+            normalize_direction(values, direction.normalization, &label)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(LoadedRawDirection {
+        layers: layers.map(<[u32]>::to_vec),
+        rows,
+        binding: RawDirectionBinding {
+            id: id.clone(),
+            path: path.to_path_buf(),
+            layout,
+            layers: layers.map(<[u32]>::to_vec),
+            payload_bytes: u64::try_from(expected_bytes).context("raw direction byte count")?,
+            payload_blake3,
+            semantics: "operator_raw_vector",
+        },
+    })
+}
+
+/// Loads every declared raw direction and checks each referencing layer.
+pub(super) fn load_raw_directions(
+    plan: &LensPlan,
+    plan_dir: &Path,
+    n_layer: u32,
+    hidden_size: usize,
+) -> Result<HashMap<String, LoadedRawDirection>> {
+    let mut loaded = HashMap::new();
+    for direction in plan.directions.iter().filter_map(DirectionDefinition::raw) {
+        let raw = load_raw_direction(direction, plan_dir, n_layer, hidden_size)?;
+        ensure!(loaded.insert(direction.id.clone(), raw).is_none());
+    }
+    for operation in &plan.operations {
+        ensure_raw_rows(
+            &loaded,
+            "operation",
+            &operation.id,
+            &operation.scope,
+            &operation.action.direction_ids().collect::<Vec<_>>(),
+            n_layer,
+        )?;
+    }
+    for readout in &plan.direction_readouts {
+        ensure_raw_rows(
+            &loaded,
+            "direction readout",
+            &readout.id,
+            &readout.scope,
+            &[readout.direction.as_str()],
+            n_layer,
+        )?;
+    }
+    Ok(loaded)
+}
+
+fn ensure_raw_rows(
+    loaded: &HashMap<String, LoadedRawDirection>,
+    kind: &str,
+    owner: &str,
+    scope: &Scope,
+    ids: &[&str],
+    n_layer: u32,
+) -> Result<()> {
+    let layers = scope
+        .layers
+        .expand(n_layer, &format!("{kind} {owner} layers"))?;
+    for &id in ids {
+        let Some(raw) = loaded.get(id) else {
+            continue;
+        };
+        for &layer in &layers {
+            ensure!(
+                raw.row(layer).is_some(),
+                "{kind} {owner} selects layer {layer} absent from per_layer raw direction {id}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Module-site operations are implemented by the dense engine only.
+pub(super) fn validate_ordinary_sites(plan: &LensPlan, kind: ArchKind) -> Result<()> {
+    if kind == ArchKind::Dense {
+        return Ok(());
+    }
+    for operation in &plan.operations {
+        ensure!(
+            operation.site == OperationSite::PostBlock,
+            "operation {} site {} requires an ordinary dense Qwen model; MoE supports post_block only",
+            operation.id,
+            operation.site.as_str()
+        );
+    }
+    Ok(())
 }
 
 pub(super) struct ExecutionPlan {
@@ -335,6 +606,7 @@ pub(super) struct ExecutionPlan {
     pub(super) n_layer: u32,
     pub(super) hidden_size: usize,
     pub(super) capture: Option<MetalTensor>,
+    pub(super) raw_directions: Vec<RawDirectionBinding>,
 }
 
 pub(super) struct PreparedNativeHyperDirection {
@@ -369,11 +641,12 @@ pub(super) fn validate_plan(plan: &LensPlan) -> Result<()> {
     );
     ensure!(
         !plan.lenses.is_empty()
+            || !plan.direction_readouts.is_empty()
             || plan
                 .directions
                 .iter()
-                .any(|direction| direction.native_hyper().is_some()),
-        "Lens plan must declare at least one lens or native hyper direction"
+                .any(|direction| direction.lens_row().is_none()),
+        "Lens plan must declare at least one lens, raw or native hyper direction, or direction readout"
     );
     ensure!(plan.lenses.len() <= MAX_LENSES, "too many lenses");
     ensure!(
@@ -385,6 +658,10 @@ pub(super) fn validate_plan(plan: &LensPlan) -> Result<()> {
         "too many operations"
     );
     ensure!(plan.readouts.len() <= MAX_READOUTS, "too many readouts");
+    ensure!(
+        plan.direction_readouts.len() <= MAX_READOUTS,
+        "too many direction readouts"
+    );
     unique_ids(plan.lenses.iter().map(LensDefinition::id), "lens")?;
     unique_ids(
         plan.directions.iter().map(DirectionDefinition::id),
@@ -395,6 +672,10 @@ pub(super) fn validate_plan(plan: &LensPlan) -> Result<()> {
         "operation",
     )?;
     unique_ids(plan.readouts.iter().map(|item| item.id.as_str()), "readout")?;
+    unique_ids(
+        plan.direction_readouts.iter().map(|item| item.id.as_str()),
+        "direction readout",
+    )?;
     for lens in &plan.lenses {
         if let LensDefinition::PublishedFullTransport { id, token_ids, .. } = lens {
             let unique = token_ids.iter().copied().collect::<HashSet<_>>();
@@ -467,6 +748,7 @@ pub(super) fn validate_plan(plan: &LensPlan) -> Result<()> {
                     direction.id
                 );
             }
+            DirectionDefinition::Raw(direction) => validate_raw_direction_syntax(direction)?,
         }
     }
     for operation in &plan.operations {
@@ -482,6 +764,35 @@ pub(super) fn validate_plan(plan: &LensPlan) -> Result<()> {
             );
             Ok(direction_normalization.get(direction).copied().flatten())
         })?;
+        if operation.site == OperationSite::Embedding {
+            let layer_zero = match &operation.scope.layers {
+                Selector::Values { values } => values.as_slice() == [0],
+                Selector::Range { start, end } => *start == 0 && *end == 0,
+                Selector::All | Selector::RenderedSpans { .. } => false,
+            };
+            ensure!(
+                layer_zero,
+                "operation {} at the embedding site must select exactly layer 0",
+                operation.id
+            );
+        }
+    }
+    for readout in &plan.direction_readouts {
+        readout.scope.validate(
+            &format!("direction readout {} scope", readout.id),
+            plan.version,
+        )?;
+        ensure!(
+            direction_ids.contains(readout.direction.as_str()),
+            "direction readout {} references unknown direction {}",
+            readout.id,
+            readout.direction
+        );
+        ensure!(
+            direction_normalization[readout.direction.as_str()].is_some(),
+            "direction readout {} requires a lens-row or raw direction",
+            readout.id
+        );
     }
     for readout in &plan.readouts {
         readout
@@ -529,7 +840,34 @@ pub(crate) fn validate_run_artifact_plan(plan: &LensPlan, runtime_kind: &str) ->
     }
 }
 
+/// Raw directions, module sites, and direction readouts run on ordinary Qwen only.
+pub(crate) fn refuse_ordinary_only_features(plan: &LensPlan, runtime: &str) -> Result<()> {
+    if let Some(direction) = plan.directions.iter().find_map(DirectionDefinition::raw) {
+        bail!(
+            "{runtime} does not support raw_residual_f32le direction {}; raw directions are ordinary-Qwen only",
+            direction.id
+        );
+    }
+    if let Some(operation) = plan
+        .operations
+        .iter()
+        .find(|operation| operation.site != OperationSite::PostBlock)
+    {
+        bail!(
+            "{runtime} does not support operation {} site {}; module sites are ordinary dense Qwen only",
+            operation.id,
+            operation.site.as_str()
+        );
+    }
+    ensure!(
+        plan.direction_readouts.is_empty(),
+        "{runtime} does not support direction_readouts; they are ordinary-Qwen only"
+    );
+    Ok(())
+}
+
 pub(super) fn validate_muse_artifact_plan(plan: &LensPlan) -> Result<()> {
+    refuse_ordinary_only_features(plan, "Muse Glimmer")?;
     ensure!(
         !plan.operations.is_empty() || !plan.readouts.is_empty(),
         "Muse run artifact plan requires an operation or readout"
@@ -555,13 +893,15 @@ pub(super) fn validate_muse_artifact_plan(plan: &LensPlan) -> Result<()> {
 
 pub(super) fn validate_ordinary_plan(plan: &LensPlan) -> Result<()> {
     ensure!(
-        !plan.lenses.is_empty(),
-        "ordinary Qwen Lens plans must declare at least one lens"
+        !plan.lenses.is_empty()
+            || !plan.directions.is_empty()
+            || !plan.direction_readouts.is_empty(),
+        "ordinary Qwen Lens plans must declare at least one lens, raw direction, or direction readout"
     );
     ensure!(
         plan.directions
             .iter()
-            .all(|direction| direction.lens_row().is_some()),
+            .all(|direction| direction.native_hyper().is_none()),
         "native hyper directions are supported only by Flash-Next"
     );
     Ok(())
@@ -635,6 +975,7 @@ pub(super) fn open_full_transports(
 pub(super) struct BoundPlanArtifacts {
     full: HashMap<String, crate::full_lens::BoundFullAccess>,
     ready: HashMap<String, PreparedLens>,
+    raw: HashMap<String, LoadedRawDirection>,
 }
 
 fn prepare_cpu_lens(
@@ -748,17 +1089,22 @@ pub(super) fn bind_full_transports(
         .iter()
         .map(|direction| (direction.id(), direction))
         .collect::<HashMap<_, _>>();
-    for operation in &plan.operations {
-        let layers = operation
-            .scope
-            .layers
-            .expand(arch.n_layer, "operation.layers")?;
-        for id in operation.action.direction_ids() {
-            let direction = directions
+    validate_ordinary_sites(plan, arch.kind)?;
+    let raw = load_raw_directions(plan, plan_dir, arch.n_layer, arch.hidden_size as usize)?;
+    for (scope, ids) in direction_uses(plan) {
+        let layers = scope.layers.expand(arch.n_layer, "direction use layers")?;
+        for id in ids {
+            let direction = match directions
                 .get(id)
                 .context("unknown direction in CPU plan preflight")?
-                .lens_row()
-                .context("ordinary runtime requires lens-row directions")?;
+            {
+                DirectionDefinition::LensRow(direction) => direction,
+                // Raw rows were loaded and layer-checked above.
+                DirectionDefinition::Raw(_) => continue,
+                DirectionDefinition::NativeHyper(_) => {
+                    bail!("ordinary runtime cannot use native hyper direction {id}")
+                }
+            };
             for &layer in &layers {
                 ensure!(
                     has_layer(&direction.lens, layer),
@@ -770,7 +1116,23 @@ pub(super) fn bind_full_transports(
             }
         }
     }
-    Ok(BoundPlanArtifacts { full: bound, ready })
+    Ok(BoundPlanArtifacts {
+        full: bound,
+        ready,
+        raw,
+    })
+}
+
+/// Every scope that consumes prepared direction rows, with its direction IDs.
+fn direction_uses(plan: &LensPlan) -> impl Iterator<Item = (&Scope, Vec<&str>)> {
+    plan.operations
+        .iter()
+        .map(|operation| (&operation.scope, operation.action.direction_ids().collect()))
+        .chain(
+            plan.direction_readouts
+                .iter()
+                .map(|readout| (&readout.scope, vec![readout.direction.as_str()])),
+        )
 }
 
 pub(super) fn prepare_execution_plan(
@@ -788,19 +1150,24 @@ pub(super) fn prepare_execution_plan(
     let mut direction_layers: BTreeMap<&str, BTreeSet<u32>> = BTreeMap::new();
     let mut required_lens_layers: HashMap<&str, BTreeSet<u32>> = HashMap::new();
     let mut raw_lens_layers: HashMap<&str, BTreeSet<u32>> = HashMap::new();
-    for operation in &plan.operations {
-        let layers = operation
-            .scope
-            .layers
-            .expand(arch.n_layer, "operation.layers")?;
-        for direction_id in operation.action.direction_ids() {
-            let direction = direction_defs[direction_id].lens_row().with_context(|| {
-                format!("ordinary runtime cannot load native hyper direction {direction_id}")
-            })?;
+    validate_ordinary_sites(plan, arch.kind)?;
+    for (scope, ids) in direction_uses(plan) {
+        let layers = scope.layers.expand(arch.n_layer, "direction use layers")?;
+        for direction_id in ids {
+            let definition = direction_defs
+                .get(direction_id)
+                .with_context(|| format!("unknown direction {direction_id}"))?;
+            ensure!(
+                definition.native_hyper().is_none(),
+                "ordinary runtime cannot load native hyper direction {direction_id}"
+            );
             direction_layers
                 .entry(direction_id)
                 .or_default()
                 .extend(layers.iter().copied());
+            let Some(direction) = definition.lens_row() else {
+                continue;
+            };
             required_lens_layers
                 .entry(direction.lens.as_str())
                 .or_default()
@@ -826,6 +1193,15 @@ pub(super) fn prepare_execution_plan(
             .or_default()
             .extend(layers.iter().copied());
         readout_layers.extend(layers);
+    }
+    // Direction readouts share the post-block capture with lens readouts.
+    for readout in &plan.direction_readouts {
+        readout_layers.extend(
+            readout
+                .scope
+                .layers
+                .expand(arch.n_layer, "direction_readout.layers")?,
+        );
     }
     ensure_projected_full_direction_bank_budget(
         plan,
@@ -914,15 +1290,26 @@ pub(super) fn prepare_execution_plan(
 
     let mut directions = HashMap::new();
     for (direction_id, layers) in direction_layers {
-        let definition = direction_defs[direction_id];
-        let definition = definition.lens_row().with_context(|| {
-            format!("ordinary runtime cannot load native hyper direction {direction_id}")
-        })?;
-        let prepared_lens = &lenses[&definition.lens];
         let mut rows = BTreeMap::new();
         for layer in layers {
-            let raw = direction_row(prepared_lens, definition, layer)?;
-            let normalized = normalize_direction(raw, definition.normalization, direction_id)?;
+            let normalized = match direction_defs[direction_id] {
+                DirectionDefinition::LensRow(definition) => normalize_direction(
+                    direction_row(&lenses[&definition.lens], definition, layer)?,
+                    definition.normalization,
+                    direction_id,
+                )?,
+                DirectionDefinition::Raw(_) => full_transports
+                    .raw
+                    .get(direction_id)
+                    .and_then(|raw| raw.row(layer))
+                    .with_context(|| {
+                        format!("raw direction {direction_id} has no row for layer {layer}")
+                    })?
+                    .to_vec(),
+                DirectionDefinition::NativeHyper(_) => {
+                    bail!("ordinary runtime cannot load native hyper direction {direction_id}")
+                }
+            };
             let tensor = MetalTensor::from_bytes(
                 loaded.context(),
                 bytemuck::cast_slice(&normalized),
@@ -948,6 +1335,18 @@ pub(super) fn prepare_execution_plan(
             vec![(capture_layers.len() * arch.hidden_size as usize) as u64],
         )?)
     };
+    let raw_directions = plan
+        .directions
+        .iter()
+        .filter_map(DirectionDefinition::raw)
+        .map(|direction| {
+            full_transports
+                .raw
+                .get(&direction.id)
+                .map(|raw| raw.binding.clone())
+                .with_context(|| format!("raw direction {} was not loaded", direction.id))
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok(ExecutionPlan {
         plan: plan.clone(),
         lenses,
@@ -956,6 +1355,7 @@ pub(super) fn prepare_execution_plan(
         n_layer: arch.n_layer,
         hidden_size: arch.hidden_size as usize,
         capture,
+        raw_directions,
     })
 }
 
@@ -1140,6 +1540,9 @@ pub(crate) fn validate_reachable_scopes(
         validate_scope_reachable(&operation.scope, prefill_bound, decode_bound, &operation.id)?;
     }
     for readout in &plan.readouts {
+        validate_scope_reachable(&readout.scope, prefill_bound, decode_bound, &readout.id)?;
+    }
+    for readout in &plan.direction_readouts {
         validate_scope_reachable(&readout.scope, prefill_bound, decode_bound, &readout.id)?;
     }
     Ok(())

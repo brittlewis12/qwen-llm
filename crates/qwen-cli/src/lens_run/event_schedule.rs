@@ -138,6 +138,7 @@ pub(super) struct CompiledEvent {
     operation_indices: Vec<usize>,
     operation_topology_indices: Vec<usize>,
     readout_indices: Vec<usize>,
+    direction_readout_indices: Vec<usize>,
     capture_layers: Vec<u32>,
 }
 
@@ -160,6 +161,15 @@ impl CompiledEvent {
         &self.readout_indices
     }
 
+    pub(super) fn direction_readout_indices(&self) -> &[usize] {
+        &self.direction_readout_indices
+    }
+
+    /// Lens or direction readouts need this event's post-block capture.
+    pub(super) fn has_readouts(&self) -> bool {
+        !self.readout_indices.is_empty() || !self.direction_readout_indices.is_empty()
+    }
+
     pub(super) fn capture_layers(&self) -> &[u32] {
         &self.capture_layers
     }
@@ -168,6 +178,7 @@ impl CompiledEvent {
 pub(super) struct CompiledEventSchedule {
     operations: Vec<ScheduledDefinition>,
     readouts: Vec<ScheduledDefinition>,
+    direction_readouts: Vec<ScheduledDefinition>,
     layer_count: u32,
 }
 
@@ -195,9 +206,21 @@ impl CompiledEventSchedule {
             });
         }
 
+        let mut direction_readouts = Vec::new();
+        direction_readouts
+            .try_reserve_exact(plan.direction_readouts.len())
+            .context("allocate compiled Lens direction readout schedule")?;
+        for readout in &plan.direction_readouts {
+            direction_readouts.push(ScheduledDefinition {
+                id: readout.id.clone(),
+                scope: CompiledScope::compile(&readout.scope, layer_count)?,
+            });
+        }
+
         Ok(Self {
             operations,
             readouts,
+            direction_readouts,
             layer_count,
         })
     }
@@ -208,7 +231,8 @@ impl CompiledEventSchedule {
     ) -> Result<BoundEventSchedule<'schedule, 'plan>> {
         ensure!(
             self.operations.len() == plan.operations.len()
-                && self.readouts.len() == plan.readouts.len(),
+                && self.readouts.len() == plan.readouts.len()
+                && self.direction_readouts.len() == plan.direction_readouts.len(),
             "Lens plan shape changed after event schedule compilation"
         );
         for (compiled, operation) in self.operations.iter().zip(&plan.operations) {
@@ -221,6 +245,12 @@ impl CompiledEventSchedule {
             ensure!(
                 compiled.id == readout.id && compiled.scope.matches(&readout.scope),
                 "Lens readout topology changed after event schedule compilation"
+            );
+        }
+        for (compiled, readout) in self.direction_readouts.iter().zip(&plan.direction_readouts) {
+            ensure!(
+                compiled.id == readout.id && compiled.scope.matches(&readout.scope),
+                "Lens direction readout topology changed after event schedule compilation"
             );
         }
         Ok(BoundEventSchedule {
@@ -251,6 +281,10 @@ impl BoundEventSchedule<'_, '_> {
             .try_reserve_exact(self.schedule.readouts.len())
             .context("allocate Lens event readout indices")?;
         event
+            .direction_readout_indices
+            .try_reserve_exact(self.schedule.direction_readouts.len())
+            .context("allocate Lens event direction readout indices")?;
+        event
             .capture_layers
             .try_reserve_exact(
                 usize::try_from(self.schedule.layer_count)
@@ -264,6 +298,7 @@ impl BoundEventSchedule<'_, '_> {
         event.operation_indices.clear();
         event.operation_topology_indices.clear();
         event.readout_indices.clear();
+        event.direction_readout_indices.clear();
         event.capture_layers.clear();
 
         for (definition_index, compiled) in self.schedule.operations.iter().enumerate() {
@@ -279,13 +314,23 @@ impl BoundEventSchedule<'_, '_> {
                 event.readout_indices.push(definition_index);
             }
         }
+        for (definition_index, compiled) in self.schedule.direction_readouts.iter().enumerate() {
+            if compiled.scope.phase_matches(phase)? {
+                event.direction_readout_indices.push(definition_index);
+            }
+        }
         for layer in 0..self.schedule.layer_count {
-            if event.readout_indices.iter().any(|&definition_index| {
-                self.schedule.readouts[definition_index]
-                    .scope
-                    .layers
-                    .contains(layer)
-            }) {
+            let selects = |indices: &[usize], definitions: &[ScheduledDefinition]| {
+                indices
+                    .iter()
+                    .any(|&index| definitions[index].scope.layers.contains(layer))
+            };
+            if selects(&event.readout_indices, &self.schedule.readouts)
+                || selects(
+                    &event.direction_readout_indices,
+                    &self.schedule.direction_readouts,
+                )
+            {
                 event.capture_layers.push(layer);
             }
         }
@@ -317,7 +362,12 @@ impl BoundEventSchedule<'_, '_> {
                 }
             }
             let mut has_readout = false;
-            for compiled in &self.schedule.readouts {
+            for compiled in self
+                .schedule
+                .readouts
+                .iter()
+                .chain(&self.schedule.direction_readouts)
+            {
                 if compiled.scope.phase_matches(phase)? {
                     has_readout = true;
                     break;
@@ -363,13 +413,25 @@ impl BoundEventSchedule<'_, '_> {
             .layers
             .contains(layer)
     }
+
+    pub(super) fn direction_readout_selects_layer(
+        &self,
+        definition_index: usize,
+        layer: u32,
+    ) -> bool {
+        self.schedule.direction_readouts[definition_index]
+            .scope
+            .layers
+            .contains(layer)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lens_run::{
-        Action, LensDefinition, OperationDefinition, ReadoutDefinition, scope_matches,
+        Action, DirectionReadoutDefinition, LensDefinition, OperationDefinition, OperationSite,
+        ReadoutDefinition, scope_matches,
     };
     use std::path::PathBuf;
 
@@ -394,6 +456,7 @@ mod tests {
                         direction: "a".into(),
                         coefficient: 1.0,
                     },
+                    site: OperationSite::PostBlock,
                 },
                 OperationDefinition {
                     id: "wide".into(),
@@ -406,6 +469,7 @@ mod tests {
                         direction: "b".into(),
                         coefficient: 1.0,
                     },
+                    site: OperationSite::FfnOutput,
                 },
                 OperationDefinition {
                     id: "disabled".into(),
@@ -418,6 +482,7 @@ mod tests {
                         direction: "c".into(),
                         coefficient: -0.0,
                     },
+                    site: OperationSite::MixerOutput,
                 },
             ],
             readouts: vec![
@@ -442,6 +507,7 @@ mod tests {
                     top_k: 1,
                 },
             ],
+            direction_readouts: Vec::new(),
         }
     }
 
@@ -602,6 +668,50 @@ mod tests {
                 PassivePrefillSpan { start: 4, end: 6 },
             ]
         );
+    }
+
+    #[test]
+    fn direction_readouts_join_the_capture_union_and_block_passive_spans() {
+        let mut source = plan();
+        source.operations.clear();
+        source.readouts.truncate(1);
+        source.direction_readouts.push(DirectionReadoutDefinition {
+            id: "dot".into(),
+            direction: "a".into(),
+            scope: Scope {
+                layers: Selector::Values { values: vec![1, 2] },
+                prefill: Some(Selector::Values { values: vec![1, 4] }),
+                decode: None,
+            },
+        });
+        let compiled = CompiledEventSchedule::compile(&source, 3).unwrap();
+        let schedule = compiled.bind(&source).unwrap();
+        let mut event = schedule.new_event().unwrap();
+        schedule.populate(Phase::Prefill(1), &mut event).unwrap();
+        assert_eq!(event.readout_indices(), [0]);
+        assert_eq!(event.direction_readout_indices(), [0]);
+        assert_eq!(event.capture_layers(), [0, 1, 2]);
+        assert!(schedule.direction_readout_selects_layer(0, 1));
+        assert!(!schedule.direction_readout_selects_layer(0, 0));
+        schedule.populate(Phase::Prefill(4), &mut event).unwrap();
+        assert!(event.readout_indices().is_empty() && event.has_readouts());
+        assert_eq!(event.capture_layers(), [1, 2]);
+        schedule.populate(Phase::Decode(0), &mut event).unwrap();
+        assert!(!event.has_readouts() && event.capture_layers().is_empty());
+        assert_eq!(
+            schedule.passive_prefill_spans(8, 1).unwrap(),
+            vec![
+                PassivePrefillSpan { start: 0, end: 1 },
+                PassivePrefillSpan { start: 2, end: 4 },
+                PassivePrefillSpan { start: 5, end: 7 },
+            ]
+        );
+
+        let mut stale = source.clone();
+        stale.direction_readouts[0].scope.layers = Selector::Values { values: vec![0] };
+        assert!(compiled.bind(&stale).is_err());
+        stale.direction_readouts.clear();
+        assert!(compiled.bind(&stale).is_err());
     }
 
     #[test]

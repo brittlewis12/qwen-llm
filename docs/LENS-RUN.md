@@ -770,6 +770,78 @@ addition also accepts `as_stored`.
 {"kind":"coordinate_swap","source":"concept-a","target":"concept-b","coefficient":1.0}
 ```
 
+### Raw Residual Directions
+
+Ordinary Qwen plans may also supply operator vectors directly, without a lens:
+
+```json
+{"id": "refusal", "source": {"kind": "raw_residual_f32le", "path": "dir.f32le", "layout": "shared"}, "normalization": "unit_l2"}
+{"id": "per_layer", "source": {"kind": "raw_residual_f32le", "path": "dirs.f32le", "layout": "per_layer", "layers": [10, 20, 30]}, "normalization": "as_stored"}
+```
+
+The payload is little-endian F32 in residual (hidden-size) coordinates, read
+as a regular non-symlink file of exact length relative to the plan file.
+`shared` holds one `hidden_size` vector usable at any layer and must omit
+`layers`. `per_layer` holds `layers.len() * hidden_size` values, layer-major in
+the listed order; `layers` is required, nonempty, strictly increasing, and
+below the model layer count, and every operation or direction-readout layer
+using the direction must be listed. Every vector must be finite with nonzero
+norm. `normalization` and the `unit_l2` action requirements behave as for lens
+rows, and raw directions work with every action, including
+`source_to_target` and `coordinate_swap`.
+
+There is no model identity binding: only hidden size and layer bounds are
+checked, so the operator owns the claim that the vector belongs to this model.
+The run artifact records each raw direction in `raw_directions` as
+`{id, path (as authored), layout, layers?, payload_bytes, payload_blake3,
+semantics: "operator_raw_vector"}`. A plan may contain only raw directions and
+no lenses. Muse and Flash-Next refuse raw directions.
+
+### Operation Sites
+
+An operation may name an optional `site` (default `post_block`, which is
+omitted from serialized plans and records, so existing plans and digests are
+unchanged):
+
+```json
+{"id": "ablate-ffn", "site": "ffn_output", "scope": {"layers": {"kind": "all"}, "prefill": {"kind": "all"}, "decode": {"kind": "all"}},
+ "action": {"kind": "projection_ablate", "direction": "refusal", "coefficient": 1.0}}
+```
+
+Module sites edit one residual writer's output before its residual add, at the
+block named by the selected layer: `embedding` edits the token embedding row
+before block 0 and must select exactly layer 0; `mixer_output` edits the
+attention or GDN output before the post-mixer add; `ffn_output` edits the FFN
+down-projection output before the post-FFN add. The action formulas apply with
+`x` the writer output (so `residual_l2_fraction` scales by that output's norm).
+Projection with coefficient 1 and a unit direction at `embedding` plus every
+layer's `mixer_output` and `ffn_output` is the activation form of a unit
+weight ablation `W <- (I - v v^T) W` on every residual writer.
+
+Module sites are ordinary dense Qwen only. MoE runs, Muse, Flash-Next, and
+native serve jobs refuse them before model work. They use the same serial event
+scheduling as post-block operations, zero-coefficient controls emit no work,
+and operation-application records carry `site` only when it is not
+`post_block`.
+
+### Direction Readouts
+
+`direction_readouts` (optional, omitted when empty) report scalar projections
+without a lens:
+
+```json
+"direction_readouts": [{"id": "r_dot", "direction": "refusal", "scope": {"layers": {"kind": "values", "values": [20]}, "prefill": {"kind": "all"}}}]
+```
+
+They capture the post-block residual `h` at the same stage as live readouts
+(after that layer's post-block operations) and share their capture schedule.
+For each reached site the run emits, in `direction_readouts`,
+`{id, direction, source_layer, phase, index, dot, h_norm_l2, v_norm_l2}` where
+`v` is the direction's prepared row at that layer after its declared
+normalization and all three scalars are accumulated in F64. Lens-row and raw
+directions are accepted; a plan may contain only direction readouts. They are
+ordinary-Qwen only.
+
 ### Muse Glimmer
 
 Muse uses the same plan actions and scope semantics with model-bound
@@ -777,7 +849,8 @@ Muse uses the same plan actions and scope semantics with model-bound
 accepts token-ID directions, passive readouts, or operations without readouts;
 `--identity-cache` is required. Published plans read and project only referenced
 source layers and require `allow_unvalidated_transfer: true`. Template lenses,
-native-hyper directions, and Open Responses remain unsupported for Muse. Raw
+native-hyper and raw residual directions, module operation sites, direction
+readouts, and Open Responses remain unsupported for Muse. Raw
 text, literal token IDs, and exact ATEM-rendered `--user`/`--messages` inputs are
 supported.
 

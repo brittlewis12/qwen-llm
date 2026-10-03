@@ -17,8 +17,13 @@ pub(crate) fn post_block_forward(
     capture: Option<(&[u32], &qwen_llm::metal::MetalTensor)>,
     before: Option<(&[u32], &qwen_llm::metal::MetalTensor)>,
     operations: &[qwen_llm::metal::PostBlockIntervention<'_>],
+    module: &[qwen_llm::metal_forward::ModuleIntervention<'_>],
 ) -> Result<Vec<f32>> {
     if let Some(before) = before {
+        ensure!(
+            module.is_empty(),
+            "paired post-block measurements do not support module-site operations"
+        );
         return Ok(forward.single_token_with_post_block_measurements(
             token,
             position,
@@ -28,6 +33,18 @@ pub(crate) fn post_block_forward(
             operations,
             needs_logits,
         )?);
+    }
+    if !module.is_empty() {
+        let logits = forward.single_token_with_interventions(
+            token,
+            position,
+            session,
+            capture,
+            operations,
+            module,
+            needs_logits,
+        )?;
+        return Ok(if needs_logits { logits } else { Vec::new() });
     }
     match (capture, needs_logits) {
         (Some((layers, capture)), true) => Ok(forward.single_token_with_post_block_interventions(

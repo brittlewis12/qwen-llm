@@ -233,6 +233,15 @@ pub(crate) struct ReadoutDefinition {
     pub(crate) top_k: usize,
 }
 
+/// Scalar residual readout against one plan direction; no lens is involved.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DirectionReadoutDefinition {
+    pub(crate) id: String,
+    pub(crate) direction: String,
+    pub(crate) scope: Scope,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PositionBinding {
@@ -292,6 +301,43 @@ pub(crate) struct LiveReadout {
     pub(crate) phase: &'static str,
     pub(crate) index: usize,
     pub(crate) scores: Vec<LiveScore>,
+}
+
+/// `dot = h.v` with the post-block residual `h` and the prepared direction row
+/// `v` (after its declared normalization), all accumulated in f64.
+#[derive(Debug, Serialize)]
+pub(crate) struct LiveDirectionReadout {
+    pub(crate) id: String,
+    pub(crate) direction: String,
+    pub(crate) source_layer: u32,
+    pub(crate) phase: &'static str,
+    pub(crate) index: usize,
+    pub(crate) dot: f64,
+    pub(crate) h_norm_l2: f64,
+    pub(crate) v_norm_l2: f64,
+}
+
+pub(crate) fn direction_readout_scalars(
+    residual: &[f32],
+    direction: &[f32],
+) -> Result<(f64, f64, f64)> {
+    ensure!(
+        !residual.is_empty() && residual.len() == direction.len(),
+        "direction readout residual and direction widths differ"
+    );
+    let (mut dot, mut h_squared, mut v_squared) = (0.0f64, 0.0f64, 0.0f64);
+    for (&h, &v) in residual.iter().zip(direction) {
+        let (h, v) = (f64::from(h), f64::from(v));
+        dot += h * v;
+        h_squared += h * h;
+        v_squared += v * v;
+    }
+    // JSON would publish a non-finite score as null; refuse it instead.
+    ensure!(
+        dot.is_finite() && h_squared.is_finite() && v_squared.is_finite(),
+        "direction readout produced a non-finite value"
+    );
+    Ok((dot, h_squared.sqrt(), v_squared.sqrt()))
 }
 
 #[derive(Debug, Serialize)]

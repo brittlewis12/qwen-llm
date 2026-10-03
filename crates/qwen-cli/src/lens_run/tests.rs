@@ -336,6 +336,8 @@ pub(crate) fn generation_run_bytes(
         operation_applications: Vec::new(),
         live_readouts: Vec::new(),
         native_hyper_captures: Vec::new(),
+        raw_directions: Vec::new(),
+        direction_readouts: Vec::new(),
     };
     let mut output = build_run_output(
         Path::new("model.gguf"),
@@ -1502,6 +1504,8 @@ fn run_artifact_serializes_envelope_exact_plan_and_score_semantics() {
             scores: Vec::new(),
         }],
         native_hyper_captures: Vec::new(),
+        raw_directions: Vec::new(),
+        direction_readouts: Vec::new(),
         execution_binding: None,
     };
     let value = serde_json::to_value(&artifact).unwrap();
@@ -1680,9 +1684,12 @@ fn summary_contains_required_counts_text_and_artifact_path() {
             layer: 1,
             phase: "prefill",
             index: 0,
+            site: OperationSite::PostBlock,
         }],
         live_readouts: Vec::new(),
         native_hyper_captures: Vec::new(),
+        raw_directions: Vec::new(),
+        direction_readouts: Vec::new(),
         execution_binding: None,
     };
     assert_eq!(
@@ -2693,4 +2700,498 @@ fn flash_decode_schedule_and_capture_metadata_are_explicit() {
     assert!(encoded.get("normalization").is_none());
     assert_eq!(encoded["shape"], json!([4, 2560]));
     std::fs::remove_file(path).unwrap();
+}
+
+fn raw_plan(direction: serde_json::Value, operations: serde_json::Value) -> LensPlan {
+    serde_json::from_value(json!({
+        "version": 1,
+        "lenses": [],
+        "directions": [direction],
+        "operations": operations,
+        "readouts": []
+    }))
+    .unwrap()
+}
+
+fn raw_operation(kind: &str, layers: serde_json::Value, site: Option<&str>) -> serde_json::Value {
+    let mut operation = json!({
+        "id": "op",
+        "scope": {"layers": layers, "prefill": {"kind": "all"}},
+        "action": {"kind": kind, "direction": "raw", "coefficient": 1.0}
+    });
+    if let Some(site) = site {
+        operation["site"] = json!(site);
+    }
+    operation
+}
+
+fn shared_raw(normalization: &str) -> serde_json::Value {
+    json!({
+        "id": "raw",
+        "source": {"kind": "raw_residual_f32le", "path": "dir.f32le", "layout": "shared"},
+        "normalization": normalization
+    })
+}
+
+#[test]
+fn raw_direction_syntax_is_additive_strict_and_runtime_scoped() {
+    let shared = raw_plan(shared_raw("unit_l2"), json!([]));
+    validate_plan(&shared).unwrap();
+    validate_ordinary_plan(&shared).unwrap();
+    let raw = shared.directions[0].raw().unwrap();
+    assert_eq!(raw.normalization, Normalization::UnitL2);
+    assert_eq!(
+        shared.directions[0].normalization(),
+        Some(Normalization::UnitL2)
+    );
+    assert_eq!(
+        serde_json::to_value(&shared).unwrap()["directions"][0],
+        shared_raw("unit_l2")
+    );
+    let per_layer = json!({
+        "id": "raw",
+        "source": {"kind": "raw_residual_f32le", "path": "dirs.f32le", "layout": "per_layer", "layers": [0, 2]},
+        "normalization": "as_stored"
+    });
+    let parsed = raw_plan(per_layer.clone(), json!([]));
+    validate_plan(&parsed).unwrap();
+    assert_eq!(
+        parsed.directions[0].raw().unwrap().source.parts().2,
+        Some(&[0, 2][..])
+    );
+    assert_eq!(
+        serde_json::to_value(&parsed).unwrap()["directions"][0],
+        per_layer
+    );
+
+    // Older shapes still parse as themselves.
+    let native = native_hyper_plan(Path::new("x.f32le"), json!([]));
+    assert!(native.directions[0].native_hyper().is_some());
+    assert!(minimal_plan().directions.is_empty());
+    assert!(sweep_plan().directions[0].lens_row().is_some());
+
+    let invalid = |source: serde_json::Value| {
+        let mut direction = shared_raw("unit_l2");
+        direction["source"] = source;
+        serde_json::from_value::<LensPlan>(json!({
+            "version": 1, "lenses": [], "directions": [direction], "operations": [], "readouts": []
+        }))
+        .map_err(anyhow::Error::from)
+        .and_then(|plan| validate_plan(&plan))
+    };
+    for source in [
+        json!({"kind":"raw_residual_f32le","path":"d","layout":"shared","layers":[0]}),
+        json!({"kind":"raw_residual_f32le","path":"d","layout":"shared","layers":[]}),
+        json!({"kind":"raw_residual_f32le","path":"d","layout":"per_layer"}),
+        json!({"kind":"raw_residual_f32le","path":"d","layout":"per_layer","layers":[]}),
+        json!({"kind":"raw_residual_f32le","path":"d","layout":"per_layer","layers":[1,1]}),
+        json!({"kind":"raw_residual_f32le","path":"d","layout":"per_layer","layers":[2,1]}),
+        json!({"kind":"raw_residual_f32le","path":"","layout":"shared"}),
+        json!({"kind":"raw_residual_f32le","path":"d","layout":"stacked"}),
+        json!({"kind":"raw_residual_f32le","path":"d","layout":"shared","extra":1}),
+        json!({"kind":"raw_residual_f16le","path":"d","layout":"shared"}),
+    ] {
+        assert!(invalid(source.clone()).is_err(), "{source}");
+    }
+
+    // Unit-L2 action requirements apply to raw directions.
+    let layer = json!({"kind":"values","values":[1]});
+    for (kind, normalization, valid) in [
+        ("projection_ablate", "as_stored", false),
+        ("residual_l2_fraction", "as_stored", false),
+        ("projection_ablate", "unit_l2", true),
+        ("fixed_add", "as_stored", true),
+    ] {
+        let plan = raw_plan(
+            shared_raw(normalization),
+            json!([raw_operation(kind, layer.clone(), None)]),
+        );
+        assert_eq!(
+            validate_plan(&plan).is_ok(),
+            valid,
+            "{kind} {normalization}"
+        );
+    }
+
+    // Muse and Flash-Next refuse raw directions explicitly.
+    let steer = raw_plan(
+        shared_raw("unit_l2"),
+        json!([raw_operation("fixed_add", layer, None)]),
+    );
+    for runtime in ["muse_glimmer", "flash_next"] {
+        let error = validate_run_artifact_plan(&steer, runtime).unwrap_err();
+        assert!(
+            error.to_string().contains("raw_residual_f32le"),
+            "{error:#}"
+        );
+    }
+    validate_run_artifact_plan(&steer, "ordinary_qwen").unwrap();
+    let error = prepare_qwen4exp_execution_plan(
+        steer,
+        Path::new("/"),
+        &Qwen4ExpConfig::flash_next_reference(),
+    )
+    .err()
+    .unwrap();
+    assert!(
+        error.to_string().contains("raw_residual_f32le"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn operation_sites_are_default_invisible_layer_checked_and_dense_only() {
+    let layer = |values: serde_json::Value| json!({"kind":"values","values":values});
+    let post_block = raw_plan(
+        shared_raw("unit_l2"),
+        json!([raw_operation("fixed_add", layer(json!([1])), None)]),
+    );
+    assert_eq!(post_block.operations[0].site, OperationSite::PostBlock);
+    let encoded = serde_json::to_value(&post_block).unwrap();
+    assert!(encoded["operations"][0].get("site").is_none());
+
+    for (site, layers, valid) in [
+        ("embedding", layer(json!([0])), true),
+        ("embedding", json!({"kind":"range","start":0,"end":0}), true),
+        ("embedding", layer(json!([1])), false),
+        ("embedding", layer(json!([0, 1])), false),
+        ("embedding", json!({"kind":"all"}), false),
+        ("mixer_output", json!({"kind":"all"}), true),
+        ("ffn_output", layer(json!([0, 2])), true),
+        ("post_block", layer(json!([2])), true),
+    ] {
+        let plan = raw_plan(
+            shared_raw("unit_l2"),
+            json!([raw_operation("projection_ablate", layers, Some(site))]),
+        );
+        assert_eq!(validate_plan(&plan).is_ok(), valid, "{site}");
+        if valid {
+            let encoded = serde_json::to_value(&plan).unwrap();
+            assert_eq!(
+                encoded["operations"][0].get("site").is_some(),
+                site != "post_block"
+            );
+            assert_eq!(serde_json::from_value::<LensPlan>(encoded).unwrap(), plan);
+        }
+    }
+
+    let module = raw_plan(
+        shared_raw("unit_l2"),
+        json!([raw_operation(
+            "fixed_add",
+            layer(json!([1])),
+            Some("ffn_output")
+        )]),
+    );
+    validate_plan(&module).unwrap();
+    validate_ordinary_sites(&module, ArchKind::Dense).unwrap();
+    let error = validate_ordinary_sites(&module, ArchKind::Moe).unwrap_err();
+    assert!(error.to_string().contains("MoE supports post_block only"));
+    validate_ordinary_sites(&post_block, ArchKind::Moe).unwrap();
+
+    let lens_module: LensPlan = {
+        let mut plan = serde_json::to_value(sweep_plan()).unwrap();
+        plan["operations"][0]["site"] = json!("mixer_output");
+        serde_json::from_value(plan).unwrap()
+    };
+    validate_plan(&lens_module).unwrap();
+    for runtime in ["muse_glimmer", "flash_next"] {
+        let error = validate_run_artifact_plan(&lens_module, runtime).unwrap_err();
+        assert!(error.to_string().contains("site mixer_output"), "{error:#}");
+    }
+
+    let application = |site| {
+        serde_json::to_value(OperationApplication {
+            id: "op".into(),
+            layer: 1,
+            phase: "prefill",
+            index: 0,
+            site,
+        })
+        .unwrap()
+    };
+    assert!(application(OperationSite::PostBlock).get("site").is_none());
+    assert_eq!(application(OperationSite::FfnOutput)["site"], "ffn_output");
+}
+
+#[test]
+fn raw_direction_payloads_are_exact_finite_nonzero_and_layer_bound() {
+    const HIDDEN: usize = 4;
+    const LAYERS: u32 = 3;
+    let root = temporary_direction_path().with_extension("raw");
+    std::fs::create_dir(&root).unwrap();
+    let write = |name: &str, values: &[f32]| {
+        std::fs::write(root.join(name), bytemuck::cast_slice(values)).unwrap();
+    };
+    let definition = |source: serde_json::Value, normalization: &str| {
+        serde_json::from_value::<RawDirectionDefinition>(json!({
+            "id": "raw", "source": source, "normalization": normalization
+        }))
+        .unwrap()
+    };
+    let shared = |path: &str| json!({"kind":"raw_residual_f32le","path":path,"layout":"shared"});
+    let per_layer = |path: &str, layers: serde_json::Value| json!({"kind":"raw_residual_f32le","path":path,"layout":"per_layer","layers":layers});
+
+    let shared_values = [3.0_f32, 0.0, 4.0, 0.0];
+    write("shared.f32le", &shared_values);
+    let loaded = load_raw_direction(
+        &definition(shared("shared.f32le"), "unit_l2"),
+        &root,
+        LAYERS,
+        HIDDEN,
+    )
+    .unwrap();
+    for layer in 0..LAYERS {
+        assert_eq!(loaded.row(layer).unwrap(), [0.6, 0.0, 0.8, 0.0]);
+    }
+    let binding = serde_json::to_value(&loaded.binding).unwrap();
+    assert_eq!(
+        binding,
+        json!({
+            "id": "raw",
+            "path": "shared.f32le",
+            "layout": "shared",
+            "payload_bytes": 16,
+            "payload_blake3": blake3::hash(bytemuck::cast_slice(&shared_values)).to_hex().as_str(),
+            "semantics": "operator_raw_vector"
+        })
+    );
+    let stored = load_raw_direction(
+        &definition(shared("shared.f32le"), "as_stored"),
+        &root,
+        LAYERS,
+        HIDDEN,
+    )
+    .unwrap();
+    assert_eq!(stored.row(1).unwrap(), shared_values);
+
+    let stacked = [1.0_f32, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0];
+    write("stacked.f32le", &stacked);
+    let loaded = load_raw_direction(
+        &definition(per_layer("stacked.f32le", json!([0, 2])), "as_stored"),
+        &root,
+        LAYERS,
+        HIDDEN,
+    )
+    .unwrap();
+    assert_eq!(loaded.row(0).unwrap(), &stacked[..4]);
+    assert_eq!(loaded.row(2).unwrap(), &stacked[4..]);
+    assert!(loaded.row(1).is_none());
+    assert_eq!(
+        serde_json::to_value(&loaded.binding).unwrap()["layers"],
+        json!([0, 2])
+    );
+
+    let rejects = |source: serde_json::Value| {
+        load_raw_direction(&definition(source, "unit_l2"), &root, LAYERS, HIDDEN).is_err()
+    };
+    // Wrong length in both directions.
+    assert!(rejects(per_layer("shared.f32le", json!([0, 2]))));
+    assert!(rejects(shared("stacked.f32le")));
+    // Out-of-range layer.
+    assert!(rejects(per_layer("stacked.f32le", json!([0, 3]))));
+    // Missing, non-finite, and zero-norm payloads.
+    assert!(rejects(shared("missing.f32le")));
+    for bad in [
+        [f32::NAN, 0.0, 0.0, 1.0],
+        [f32::INFINITY, 0.0, 0.0, 1.0],
+        [0.0; 4],
+    ] {
+        write("bad.f32le", &bad);
+        assert!(rejects(shared("bad.f32le")));
+    }
+    write("zero-row.f32le", &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    assert!(rejects(per_layer("zero-row.f32le", json!([0, 1]))));
+    std::os::unix::fs::symlink(root.join("shared.f32le"), root.join("link.f32le")).unwrap();
+    assert!(rejects(shared("link.f32le")));
+
+    // Every referencing operation or direction-readout layer must exist.
+    let plan = |layers: serde_json::Value, readout_layers: serde_json::Value| {
+        let mut plan = raw_plan(
+            json!({
+                "id": "raw",
+                "source": per_layer("stacked.f32le", json!([0, 2])),
+                "normalization": "as_stored"
+            }),
+            json!([raw_operation("fixed_add", layers, None)]),
+        );
+        plan.direction_readouts.push(DirectionReadoutDefinition {
+            id: "dot".into(),
+            direction: "raw".into(),
+            scope: serde_json::from_value(
+                json!({"layers": readout_layers, "prefill": {"kind": "all"}}),
+            )
+            .unwrap(),
+        });
+        validate_plan(&plan).unwrap();
+        plan
+    };
+    let values = |values: serde_json::Value| json!({"kind":"values","values":values});
+    let loaded = load_raw_directions(
+        &plan(values(json!([0, 2])), values(json!([2]))),
+        &root,
+        LAYERS,
+        HIDDEN,
+    )
+    .unwrap();
+    assert_eq!(loaded.len(), 1);
+    for (operation, readout) in [
+        (values(json!([1])), values(json!([2]))),
+        (json!({"kind":"all"}), values(json!([0]))),
+        (values(json!([0])), values(json!([1]))),
+    ] {
+        let error = load_raw_directions(&plan(operation, readout), &root, LAYERS, HIDDEN)
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("absent from per_layer raw direction raw"),
+            "{error:#}"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn direction_readout_only_plans_validate_bind_and_serialize_additively() {
+    let mut plan = raw_plan(shared_raw("as_stored"), json!([]));
+    plan.direction_readouts = serde_json::from_value(json!([{
+        "id": "r_dot",
+        "direction": "raw",
+        "scope": {"layers": {"kind":"values","values":[1, 2]}, "prefill": {"kind":"all"}, "decode": {"kind":"all"}}
+    }]))
+    .unwrap();
+    validate_plan(&plan).unwrap();
+    validate_ordinary_plan(&plan).unwrap();
+    validate_reachable_scopes(&plan, 3, 2).unwrap();
+    let encoded = serde_json::to_value(&plan).unwrap();
+    assert_eq!(encoded["direction_readouts"][0]["id"], "r_dot");
+    assert_eq!(serde_json::from_value::<LensPlan>(encoded).unwrap(), plan);
+
+    // A direction readout alone justifies an otherwise lens-free plan.
+    let only_readout: LensPlan = serde_json::from_value(json!({
+        "version": 2, "lenses": [], "directions": [shared_raw("unit_l2")], "operations": [], "readouts": [],
+        "direction_readouts": [{"id":"r","direction":"raw","scope":{"layers":{"kind":"all"},"prefill":{"kind":"all"}}}]
+    }))
+    .unwrap();
+    validate_plan(&only_readout).unwrap();
+
+    let mut duplicate = plan.clone();
+    duplicate
+        .direction_readouts
+        .push(duplicate.direction_readouts[0].clone());
+    assert!(validate_plan(&duplicate).is_err());
+    let mut unknown = plan.clone();
+    unknown.direction_readouts[0].direction = "missing".into();
+    assert!(validate_plan(&unknown).is_err());
+    let mut native = native_hyper_plan(Path::new("x.f32le"), json!([]));
+    native.direction_readouts = plan.direction_readouts.clone();
+    native.direction_readouts[0].direction = "hyper".into();
+    assert!(validate_plan(&native).is_err());
+    let mut unreachable = plan.clone();
+    unreachable.direction_readouts[0].scope.prefill = Some(Selector::Values { values: vec![9] });
+    assert!(validate_reachable_scopes(&unreachable, 3, 2).is_err());
+
+    // Rendered spans bind for direction readouts like other scopes.
+    let mut semantic = semantic_readout_plan(json!({
+        "kind":"rendered_spans",
+        "selectors":[{"span_kind":"message_content","role":"user","edge":"end"}]
+    }));
+    semantic
+        .directions
+        .push(serde_json::from_value(shared_raw("unit_l2")).unwrap());
+    semantic
+        .direction_readouts
+        .push(DirectionReadoutDefinition {
+            id: "semantic_dot".into(),
+            direction: "raw".into(),
+            scope: semantic.readouts[0].scope.clone(),
+        });
+    validate_plan(&semantic).unwrap();
+    let rendering = LensInputRendering {
+        renderer: "qwen_chatml_messages_v1".into(),
+        generation_mode: Some("auto".into()),
+        spans: vec![rendered_span(
+            "message_content",
+            Some(0),
+            "user",
+            None,
+            Some((2, 5)),
+        )],
+    };
+    let bound = bind_plan_positions(&semantic, &rendering, 8).unwrap();
+    assert_eq!(
+        bound.resolved.direction_readouts[0].scope.prefill,
+        Some(Selector::Values { values: vec![4] })
+    );
+    assert!(
+        bound
+            .position_bindings
+            .iter()
+            .any(|binding| binding.owner_kind == "direction_readout")
+    );
+
+    for runtime in ["muse_glimmer", "flash_next"] {
+        let error = refuse_ordinary_only_features(&only_readout, runtime)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("raw_residual_f32le"));
+    }
+    let mut lens_readout = minimal_plan();
+    lens_readout.direction_readouts = only_readout.direction_readouts.clone();
+    lens_readout.directions.push(
+        serde_json::from_value(json!({
+            "id":"raw","lens":"j","row":{"kind":"token_id","token_id":1},"normalization":"unit_l2"
+        }))
+        .unwrap(),
+    );
+    validate_plan(&lens_readout).unwrap();
+    let error = refuse_ordinary_only_features(&lens_readout, "Muse Glimmer")
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("direction_readouts"));
+}
+
+#[test]
+fn direction_readout_scalars_match_an_f64_oracle() {
+    let (dot, h, v) = direction_readout_scalars(&[3.0, 4.0], &[1.0, 0.0]).unwrap();
+    assert_eq!((dot, h, v), (3.0, 5.0, 1.0));
+    let residual = (0..257)
+        .map(|index| ((index * 37 % 101) as f32 - 50.0) * 0.173)
+        .collect::<Vec<_>>();
+    let direction = (0..257)
+        .map(|index| ((index * 11 % 29) as f32 - 14.0) * 1.0e-3)
+        .collect::<Vec<_>>();
+    let mut oracle = [0.0f64; 3];
+    for index in 0..residual.len() {
+        let h = residual[index] as f64;
+        let v = direction[index] as f64;
+        oracle[0] += h * v;
+        oracle[1] += h * h;
+        oracle[2] += v * v;
+    }
+    let (dot, h_norm, v_norm) = direction_readout_scalars(&residual, &direction).unwrap();
+    assert_eq!(dot.to_bits(), oracle[0].to_bits());
+    assert_eq!(h_norm.to_bits(), oracle[1].sqrt().to_bits());
+    assert_eq!(v_norm.to_bits(), oracle[2].sqrt().to_bits());
+    assert!(direction_readout_scalars(&[1.0], &[1.0, 2.0]).is_err());
+    assert!(direction_readout_scalars(&[], &[]).is_err());
+
+    let record = serde_json::to_value(LiveDirectionReadout {
+        id: "r_dot".into(),
+        direction: "raw".into(),
+        source_layer: 3,
+        phase: "decode",
+        index: 1,
+        dot: -0.5,
+        h_norm_l2: 2.0,
+        v_norm_l2: 1.0,
+    })
+    .unwrap();
+    assert_eq!(
+        record,
+        json!({"id":"r_dot","direction":"raw","source_layer":3,"phase":"decode","index":1,
+            "dot":-0.5,"h_norm_l2":2.0,"v_norm_l2":1.0})
+    );
 }

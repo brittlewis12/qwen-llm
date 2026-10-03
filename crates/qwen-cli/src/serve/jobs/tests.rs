@@ -892,30 +892,42 @@ fn retained_job_and_aggregate_byte_budgets_refuse_without_eviction() {
 
 #[test]
 fn acceptance_faults_recover_on_the_correct_side_of_rename() {
-    for point in [FaultPoint::AcceptanceStaged, FaultPoint::AcceptanceRenamed] {
-        let root = TestRoot::new();
-        let store = root.open();
-        store.fail_once(point);
-        assert!(store.accept("uncertain", &request(), true).is_err());
-        assert!(store.accept("uncertain", &request(), true).is_err());
-        assert!(store.history(None, 10).unwrap().jobs.is_empty());
-        drop(store);
-        let store = root.open();
-        let retry = store.accept("uncertain", &request(), true).unwrap();
-        if point == FaultPoint::AcceptanceStaged {
-            assert!(retry.created);
-        } else {
-            assert!(!retry.created);
-            assert_eq!(retry.status.state, JobState::Interrupted);
+    for archive_bytes in [0, 16] {
+        for point in [FaultPoint::AcceptanceStaged, FaultPoint::AcceptanceRenamed] {
+            let root = TestRoot::new();
+            let store = root.open();
+            store.fail_once(point);
+            assert!(
+                store
+                    .accept_with_archive("uncertain", &request(), true, archive_bytes)
+                    .is_err()
+            );
+            assert!(
+                store
+                    .accept_with_archive("uncertain", &request(), true, archive_bytes)
+                    .is_err()
+            );
+            assert!(store.history(None, 10).unwrap().jobs.is_empty());
+            drop(store);
+            let store = root.open();
+            let retry = store
+                .accept_with_archive("uncertain", &request(), true, archive_bytes)
+                .unwrap();
+            if point == FaultPoint::AcceptanceStaged {
+                assert!(retry.created);
+            } else {
+                assert!(!retry.created);
+                assert_eq!(retry.status.state, JobState::Interrupted);
+            }
+            assert_eq!(store.history(None, 10).unwrap().jobs.len(), 1);
+            assert!(!fs::read_dir(&root.0).unwrap().any(|child| {
+                child
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".pending-")
+            }));
         }
-        assert_eq!(store.history(None, 10).unwrap().jobs.len(), 1);
-        assert!(!fs::read_dir(&root.0).unwrap().any(|child| {
-            child
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".pending-")
-        }));
     }
 }
 

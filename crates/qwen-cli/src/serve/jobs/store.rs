@@ -1213,7 +1213,7 @@ fn remove_abandoned_acceptance(directory: &Path) -> Result<()> {
     for child in &children {
         if !matches!(
             child.file_name().to_str(),
-            Some("request.json" | "status.json" | "records.jsonl")
+            Some("request.json" | "status.json" | "records.jsonl" | "arrays.bin")
         ) || !child.file_type()?.is_file()
         {
             return Err(corrupt(

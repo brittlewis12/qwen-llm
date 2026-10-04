@@ -11,11 +11,83 @@ fn oracle_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(ORACLE_DEFAULT))
 }
 
+const CKPT_V1_MANIFEST: &str = include_str!("../../../../scripts/reference/glm53/ckpt-v1.json");
+const QUAL_V1_MANIFEST: &str = include_str!("../../../../scripts/reference/glm53/qual-v1.json");
+const SPARSE_V1_MANIFEST: &str = include_str!("../../../../scripts/reference/glm53/sparse-v1.json");
+const SPARSE_V2_MANIFEST: &str = include_str!("../../../../scripts/reference/glm53/sparse-v2.json");
+
+/// Oracle evidence named by a reference manifest. Before a test reads `name`
+/// from `dir`, its byte length and SHA-256 must equal the manifest's, and a
+/// capture file's record count must equal the manifest's `records`, so a
+/// replay is bound to the recorded producer run (hashed once per process).
+fn verified(manifest: &str, dir: &std::path::Path, name: &str) -> PathBuf {
+    use sha2::Digest;
+    use std::io::Read;
+    static VERIFIED: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let path = dir.join(name);
+    if VERIFIED.lock().unwrap().contains(&path) {
+        return path;
+    }
+    let manifest: serde_json::Value = serde_json::from_str(manifest).unwrap();
+    let entry = &manifest["files"][name];
+    let bytes = entry["bytes"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("{name}: no byte length in the manifest"));
+    let sha256 = entry["sha256"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{name}: no SHA-256 in the manifest"));
+    let length = std::fs::metadata(&path)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+        .len();
+    assert_eq!(length, bytes, "{name}: size differs from the manifest");
+    let mut file = std::fs::File::open(&path).unwrap();
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = vec![0u8; 8 << 20];
+    loop {
+        let n = file.read(&mut buffer).unwrap();
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+    let digest: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(digest, sha256, "{name}: SHA-256 differs from the manifest");
+    if let Some(records) = entry["records"].as_u64() {
+        assert_eq!(
+            capture_record_count(&path),
+            records as usize,
+            "{name}: record count differs from the manifest"
+        );
+    }
+    VERIFIED.lock().unwrap().insert(path.clone());
+    path
+}
+
+/// Records in a GLMCAP01 file (headers only; payloads skipped).
+fn capture_record_count(path: &std::path::Path) -> usize {
+    let bytes = std::fs::read(path).unwrap();
+    assert_eq!(&bytes[..8], b"GLMCAP01");
+    let u32_at = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+    let mut offset = 8;
+    let mut count = 0;
+    while offset < bytes.len() {
+        let name_len = u32_at(offset + 12) as usize;
+        offset += 16 + name_len + 4 + 32;
+        let n = i64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap()) as usize;
+        offset += 8 + n;
+        count += 1;
+    }
+    assert_eq!(offset, bytes.len(), "truncated capture record");
+    count
+}
+
 fn checkpoint_tokens() -> Vec<u32> {
-    let manifest: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../scripts/reference/glm53/ckpt-v1.json"
-    ))
-    .unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(CKPT_V1_MANIFEST).unwrap();
     manifest["tokens"]
         .as_array()
         .unwrap()
@@ -297,13 +369,13 @@ fn checkpoint_v1_matches_llama_cpp_oracle() {
         load.elapsed().as_secs_f64()
     );
     let tokens = checkpoint_tokens();
-    let reference = read_reference_logits(&oracle_dir().join("logits.bin"));
+    let reference = read_reference_logits(&verified(CKPT_V1_MANIFEST, &oracle_dir(), "logits.bin"));
     let captures = read_captures(
-        &oracle_dir().join("default.bin.captures"),
+        &verified(CKPT_V1_MANIFEST, &oracle_dir(), "default.bin.captures"),
         &["l_out", "hc_attn_post", "indexer_k"],
     );
     let state_captures = read_captures(
-        &oracle_dir().join("state.bin.captures"),
+        &verified(CKPT_V1_MANIFEST, &oracle_dir(), "state.bin.captures"),
         &["new_state", "indexer_pool_k"],
     );
     assert_eq!(reference.len(), tokens.len());
@@ -427,7 +499,7 @@ fn packed_prefill_matches_serial_and_oracle_on_checkpoint_v1() {
     let gguf = GgufFile::open(&path).unwrap();
     let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
     let tokens = checkpoint_tokens();
-    let reference = read_reference_logits(&oracle_dir().join("logits.bin"));
+    let reference = read_reference_logits(&verified(CKPT_V1_MANIFEST, &oracle_dir(), "logits.bin"));
     let mut serial = Glm5NextSession::new(&ctx, &weights, 256).expect("serial session");
     let mut serial_logits = Vec::new();
     for &token in &tokens {
@@ -819,6 +891,32 @@ fn sparse_qualification_text() -> String {
     text
 }
 
+/// Over 4,300 tokens: the qualification passages and three rounds of the
+/// extra passages, for long-context checks where selection excludes about
+/// half of the visible pools (sparse-v2).
+fn long_qualification_text() -> String {
+    let mut text = QUALIFICATION_TEXT.to_string();
+    for _ in 0..3 {
+        for passage in SPARSE_EXTRA_PASSAGES {
+            text.push_str("\n\n");
+            text.push_str(passage);
+        }
+    }
+    text
+}
+
+/// Prints the token ids of [`long_qualification_text`] for oracle runs (CPU
+/// only; requires GLM53_GGUF for the tokenizer).
+#[test]
+#[ignore = "CPU-only helper; requires GLM53_GGUF"]
+fn print_long_qualification_tokens() {
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let gguf = GgufFile::open(&path).unwrap();
+    let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
+    let tokens = tokenizer.encode(&long_qualification_text(), false).unwrap();
+    eprintln!("long qualification tokens ({}): {tokens:?}", tokens.len());
+}
+
 /// Prints the token ids of [`sparse_qualification_text`] for oracle runs
 /// (CPU only; requires GLM53_GGUF for the tokenizer).
 #[test]
@@ -1009,8 +1107,12 @@ fn packed_fast_qualifies_across_chunkings_with_teacher_forcing() {
 
     // llama.cpp's own batched-vs-serial envelope on these tokens (context).
     let (mut serial_ref, mut batch_ref) = (
-        ReferenceStream::open(&qual_oracle_dir().join("serial.bin")),
-        ReferenceStream::open(&qual_oracle_dir().join("batch.bin")),
+        ReferenceStream::open(&verified(
+            QUAL_V1_MANIFEST,
+            &qual_oracle_dir(),
+            "serial.bin",
+        )),
+        ReferenceStream::open(&verified(QUAL_V1_MANIFEST, &qual_oracle_dir(), "batch.bin")),
     );
     assert_eq!(serial_ref.remaining, CAPACITY);
     let envelope: Vec<f64> = tokens
@@ -1051,7 +1153,11 @@ fn packed_fast_qualifies_across_chunkings_with_teacher_forcing() {
     const ORACLE_TIE_POSITION: usize = 156;
     const ORACLE_PRE_TIE_KL: f64 = 1e-8;
     const ORACLE_KL: f64 = 1e-2;
-    let mut serial_ref = ReferenceStream::open(&qual_oracle_dir().join("serial.bin"));
+    let mut serial_ref = ReferenceStream::open(&verified(
+        QUAL_V1_MANIFEST,
+        &qual_oracle_dir(),
+        "serial.bin",
+    ));
     let mut oracle_kls = Vec::with_capacity(CAPACITY);
     let mut oracle_top1 = 0;
     {
@@ -1302,12 +1408,12 @@ fn sparse_oracle_dir() -> PathBuf {
 /// Executed MLA block indices of the release (every fourth block from 3).
 const MLA_BLOCKS: [u32; 11] = [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43];
 
-/// Component replay of sparse selection on llama.cpp's own inputs (sparse-v1
-/// captures at positions 2050-2060, all 11 MLA blocks): the native 32-head
-/// scorer runs on the captured `indexer_q` (rounded to F16 in the kernel's
-/// contract), `indexer_weights` and `indexer_pool_k`, and the native selector
-/// on both llama.cpp's and the native scores. Bounds were frozen before the
-/// first observation:
+/// Component replay of sparse selection on llama.cpp's own inputs: the
+/// native 32-head scorer runs on the captured `indexer_q` (rounded to F16 in
+/// the kernel's contract), `indexer_weights` and `indexer_pool_k`, and the
+/// native selector on both llama.cpp's and the native scores, at every
+/// captured step in all 11 MLA blocks. Bounds were frozen before the first
+/// observation:
 /// - scores within 1e-5 of the row's largest magnitude;
 /// - selection on llama.cpp's scores contains every strict winner and no
 ///   strict loser (llama.cpp fills threshold ties in atomic order);
@@ -1315,14 +1421,12 @@ const MLA_BLOCKS: [u32; 11] = [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43];
 ///   gap exceeds twice the measured score error, else agrees on every pool
 ///   beyond twice that error from the threshold (two scores can move in
 ///   opposite directions); every set has 512 distinct visible pools;
-/// - at position 2050 (visible length 2051) llama.cpp selects every visible
-///   pool (dense equivalence).
-#[test]
-#[ignore = "requires the sparse-v1 llama.cpp captures and Metal"]
-fn sparse_selection_replays_llama_cpp_indexer_captures() {
-    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
-        return;
-    };
+/// - at visible lengths up to 2051 llama.cpp selects every visible pool
+///   (dense equivalence).
+///
+/// Returns (worst relative score error, sparse selections checked).
+fn replay_indexer_captures(manifest: &str, dir: &std::path::Path, steps: &[u32]) -> (f64, usize) {
+    let ctx = MetalContext::new().expect("Metal context");
     let names = [
         "indexer_q",
         "indexer_weights",
@@ -1330,12 +1434,12 @@ fn sparse_selection_replays_llama_cpp_indexer_captures() {
         "indexer_score",
         "indexer_top_k",
     ];
-    let captures = read_captures(&sparse_oracle_dir().join("capture.bin.captures"), &names);
+    let captures = read_captures(&verified(manifest, dir, "capture.bin.captures"), &names);
     const TOP: usize = 512;
     let (h, d) = (32usize, 128usize);
     let mut worst_score_error = 0.0f64;
     let mut exclusions = 0usize;
-    for step in 2050u32..=2060 {
+    for &step in steps {
         let visible_pools = (step as usize + 1) / 4;
         for &layer in &MLA_BLOCKS {
             let get = |name: &str| {
@@ -1527,8 +1631,40 @@ fn sparse_selection_replays_llama_cpp_indexer_captures() {
         }
     }
     eprintln!(
-        "replayed 11 positions x 11 MLA blocks: worst relative score error {worst_score_error:.3e}, {exclusions} sparse selections"
+        "replayed {} positions x 11 MLA blocks: worst relative score error {worst_score_error:.3e}, {exclusions} sparse selections",
+        steps.len()
     );
+    (worst_score_error, exclusions)
+}
+
+/// [`replay_indexer_captures`] at the frontier (sparse-v1, positions
+/// 2050-2060: the dense-equivalent control and ten sparse positions).
+#[test]
+#[ignore = "requires the sparse-v1 llama.cpp captures and Metal"]
+fn sparse_selection_replays_llama_cpp_indexer_captures() {
+    let steps: Vec<u32> = (2050..=2060).collect();
+    let (_, sparse) = replay_indexer_captures(SPARSE_V1_MANIFEST, &sparse_oracle_dir(), &steps);
+    assert_eq!(sparse, 10 * MLA_BLOCKS.len());
+}
+
+const SPARSE_V2_DEFAULT: &str =
+    "/Volumes/wdblack/weights-archive/.fetch/analysis/runs/glm53-oracle/sparse-v2";
+
+fn sparse_v2_dir() -> PathBuf {
+    std::env::var_os("GLM53_SPARSE_V2_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(SPARSE_V2_DEFAULT))
+}
+
+/// [`replay_indexer_captures`] deep in the sparse range (sparse-v2,
+/// positions 4063, 4064, 4079, 4095: about 1016-1024 visible pools, half
+/// excluded).
+#[test]
+#[ignore = "requires the sparse-v2 llama.cpp captures and Metal"]
+fn sparse_selection_replays_llama_cpp_captures_near_4096() {
+    let steps = [4063, 4064, 4079, 4095];
+    let (_, sparse) = replay_indexer_captures(SPARSE_V2_MANIFEST, &sparse_v2_dir(), &steps);
+    assert_eq!(sparse, steps.len() * MLA_BLOCKS.len());
 }
 
 /// Decode across the sparse frontier against llama.cpp (sparse-v1): Exact
@@ -1581,9 +1717,17 @@ fn sparse_decode_crosses_the_frontier_against_llama_cpp() {
         start.elapsed().as_secs_f64() * 1e3 / (total - PREFIX) as f64
     );
     // native[i] is the logits at position PREFIX - 1 + i.
-    let mut reference = ReferenceStream::open(&sparse_oracle_dir().join("serial.bin"));
+    let mut reference = ReferenceStream::open(&verified(
+        SPARSE_V1_MANIFEST,
+        &sparse_oracle_dir(),
+        "serial.bin",
+    ));
     assert_eq!(reference.remaining, total);
-    let mut captured = ReferenceStream::open(&sparse_oracle_dir().join("capture.bin"));
+    let mut captured = ReferenceStream::open(&verified(
+        SPARSE_V1_MANIFEST,
+        &sparse_oracle_dir(),
+        "capture.bin",
+    ));
     let mut failures = Vec::new();
     let mut top1 = 0;
     let mut rows = Vec::new();
@@ -1833,7 +1977,11 @@ fn packed_sparse_prefill_matches_llama_cpp_at_the_prompt_end() {
         .map(|t| t as u32)
         .collect();
     const REGRET: f64 = 0.2;
-    let mut reference = ReferenceStream::open(&sparse_oracle_dir().join("serial.bin"));
+    let mut reference = ReferenceStream::open(&verified(
+        SPARSE_V1_MANIFEST,
+        &sparse_oracle_dir(),
+        "serial.bin",
+    ));
     assert_eq!(reference.remaining, tokens.len());
     let mut expected = Vec::new();
     for (position, &token) in tokens.iter().enumerate() {
@@ -1864,7 +2012,11 @@ fn packed_sparse_prefill_matches_llama_cpp_at_the_prompt_end() {
     // one-row microbatch at chunk offset 3); then every entry point refuses
     // another token without moving or poisoning the session.
     const FRONTIER: usize = 2052;
-    let mut reference = ReferenceStream::open(&sparse_oracle_dir().join("serial.bin"));
+    let mut reference = ReferenceStream::open(&verified(
+        SPARSE_V1_MANIFEST,
+        &sparse_oracle_dir(),
+        "serial.bin",
+    ));
     let mut at_frontier = Vec::new();
     for _ in 0..FRONTIER {
         at_frontier = reference.next().2;
@@ -1923,5 +2075,124 @@ fn packed_sparse_prefill_matches_llama_cpp_at_the_prompt_end() {
         "a failed selection must poison the session"
     );
     assert!(broken.forward(&ctx, tokens[0]).is_err());
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Negative controls for manifest-bound oracle evidence (CPU only): a size,
+/// SHA-256 or record-count mismatch is refused; matching metadata passes.
+#[test]
+fn oracle_evidence_refuses_manifest_mismatches() {
+    use sha2::Digest;
+    let dir = std::env::temp_dir().join(format!("glm53-manifest-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // One GLMCAP01 record: step, layer, occurrence, name, dtype, ne, payload.
+    let mut capture = b"GLMCAP01".to_vec();
+    for v in [7u32, 3, 0, 4] {
+        capture.extend_from_slice(&v.to_le_bytes());
+    }
+    capture.extend_from_slice(b"name");
+    capture.extend_from_slice(&0u32.to_le_bytes());
+    capture.extend_from_slice(&[0u8; 32]);
+    capture.extend_from_slice(&4i64.to_le_bytes());
+    capture.extend_from_slice(&1.0f32.to_le_bytes());
+    std::fs::write(dir.join("a.captures"), &capture).unwrap();
+    let digest: String = sha2::Sha256::digest(&capture)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let manifest = |bytes: usize, sha: &str, records: usize| {
+        format!(
+            r#"{{"files": {{"a.captures": {{"bytes": {bytes}, "sha256": "{sha}", "records": {records}}}}}}}"#
+        )
+    };
+    let refused = |m: String| {
+        let dir = dir.clone();
+        std::panic::catch_unwind(move || drop(verified(&m, &dir, "a.captures"))).is_err()
+    };
+    assert!(refused(manifest(capture.len() + 1, &digest, 1)), "size");
+    assert!(refused(manifest(capture.len(), &"0".repeat(64), 1)), "hash");
+    assert!(refused(manifest(capture.len(), &digest, 2)), "records");
+    assert_eq!(capture_record_count(&dir.join("a.captures")), 1);
+    verified(&manifest(capture.len(), &digest, 1), &dir, "a.captures");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Long-context sparse execution against llama.cpp (sparse-v2): packed
+/// prefill of 4064 tokens (Exact and Fast, 512-row chunks), then 32
+/// teacher-forced decode steps (positions 4064-4095), each position's logits
+/// against llama.cpp serial decode. About 1016 pools are visible and
+/// selection keeps 512. Bounds frozen before the first observation: Exact KL
+/// <= 1e-2, Fast KL <= 2e-2, choice regret <= 0.2 both ways, at every
+/// position from the prompt end on.
+#[test]
+#[ignore = "loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, the sparse-v2 oracle and an idle GPU"]
+fn sparse_long_context_matches_llama_cpp_near_4096() {
+    let _lease = production_lease();
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let ctx = MetalContext::new().expect("Metal context");
+    let gguf = GgufFile::open(&path).unwrap();
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
+    const TOTAL: usize = 4096;
+    const PROMPT: usize = 4064;
+    const REGRET: f64 = 0.2;
+    let tokens: Vec<u32> = tokenizer
+        .encode(&long_qualification_text(), false)
+        .unwrap()
+        .into_iter()
+        .take(TOTAL)
+        .map(|t| t as u32)
+        .collect();
+    assert_eq!(tokens.len(), TOTAL);
+    // Reference logits from the prompt end on.
+    let mut reference = ReferenceStream::open(&verified(
+        SPARSE_V2_MANIFEST,
+        &sparse_v2_dir(),
+        "serial.bin",
+    ));
+    assert_eq!(reference.remaining, TOTAL);
+    let mut expected = Vec::new();
+    for (position, &token) in tokens.iter().enumerate() {
+        let (p, t, logits) = reference.next();
+        assert_eq!((p as usize, t), (position, token), "token {position}");
+        if position + 1 >= PROMPT {
+            expected.push(logits);
+        }
+    }
+    let mut failures = Vec::new();
+    for (lineage, bound) in [(PackedLineage::Exact, 1e-2), (PackedLineage::Fast, 2e-2)] {
+        let mut session = Glm5NextSession::with_prefill_rows(&ctx, &weights, TOTAL, 512).unwrap();
+        session.set_packed_lineage(lineage);
+        let start = std::time::Instant::now();
+        let mut native = vec![session.prefill_packed(&ctx, &tokens[..PROMPT]).unwrap()];
+        let prefill_s = start.elapsed().as_secs_f64();
+        for &token in &tokens[PROMPT..] {
+            native.push(session.forward(&ctx, token).unwrap());
+        }
+        // native[i] and expected[i] are the logits at position PROMPT - 1 + i.
+        assert_eq!(native.len(), expected.len());
+        let mut kls = Vec::with_capacity(native.len());
+        let mut top1 = 0;
+        for (i, (e, n)) in expected.iter().zip(&native).enumerate() {
+            let kl = kl_divergence(e, n);
+            let (a, b) = choice_regret(e, n);
+            top1 += usize::from(argmax(e) == argmax(n));
+            kls.push(kl);
+            if !within(kl, bound) || !within(f64::from(a), REGRET) || !within(f64::from(b), REGRET)
+            {
+                failures.push(format!(
+                    "{lineage:?} position {}: kl {kl:.3e} regret {a:.3}/{b:.3}",
+                    PROMPT - 1 + i
+                ));
+            }
+        }
+        let (worst, at) = worst(kls.iter().copied());
+        eprintln!(
+            "{lineage:?}: prefill {PROMPT} in {prefill_s:.1} s; prompt-end KL {:.3e}; worst KL {worst:.3e} at {}; top-1 {top1}/{}",
+            kls[0],
+            PROMPT - 1 + at,
+            native.len()
+        );
+    }
     assert!(failures.is_empty(), "{failures:#?}");
 }

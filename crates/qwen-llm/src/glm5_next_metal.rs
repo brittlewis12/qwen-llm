@@ -8,14 +8,15 @@
 //! Reference semantics: llama.cpp `src/models/glm5-next.cpp`.
 
 use crate::gguf::GgufFile;
+use crate::glm5_next::memory::{self, BufferSpec, BufferType};
 use crate::glm5_next::{
-    ExecutionMode, FfnTensors, Glm5NextBlock, Glm5NextConfig, Glm5NextError, Glm5NextMemoryLedger,
-    Glm5NextModel, MixerKind, MixerTensors,
+    ExecutionMode, FfnKind, FfnTensors, Glm5NextBlock, Glm5NextConfig, Glm5NextError,
+    Glm5NextMemoryLedger, Glm5NextModel, MixerKind, MixerTensors,
 };
 use crate::metal::{
-    KdaDecode, KernelEncoder, LATENT_NO_SINK, LearnedRoute, MetalContext, MetalError,
-    MetalGgufBacking, MetalTensor, ROUTE_STATUS_READY, RetainedStorageDisposition, RouteScore,
-    encode_add_f32, encode_all_slots_down, encode_all_slots_gate_up_swiglu, encode_clamped_swiglu,
+    KdaDecode, KernelEncoder, LearnedRoute, MetalContext, MetalError, MetalGgufBacking,
+    MetalTensor, ROUTE_STATUS_READY, RetainedStorageDisposition, RouteScore, encode_add_f32,
+    encode_all_slots_down, encode_all_slots_gate_up_swiglu, encode_clamped_swiglu,
     encode_get_rows_f32, encode_indexer_append, encode_kda_decode, encode_latent_attention,
     encode_mat_vec_q8_0_grouped_f32, encode_mhc4_collapse, encode_mhc4_controls, encode_mhc4_post,
     encode_mhc4_repeat, encode_moe_weighted_sum_f32, encode_rms_norm_mul_f32, encode_route_learned,
@@ -294,33 +295,186 @@ struct Scratch {
     logits: MetalTensor,
 }
 
-fn zeros(ctx: &MetalContext, shape: &[u64]) -> Result<MetalTensor> {
-    Ok(MetalTensor::zeros_f32(ctx, shape.to_vec())?)
+/// Session buffers realized from one ledger spec list. Each buffer must be
+/// taken by name exactly once, so the ledger and the session cannot drift:
+/// a missing name, a duplicate or an untaken buffer is an error.
+struct SpecBuffers {
+    owner: &'static str,
+    buffers: HashMap<&'static str, MetalTensor>,
 }
 
-fn filled(ctx: &MetalContext, value: f32, shape: &[u64]) -> Result<MetalTensor> {
-    let n = shape.iter().product::<u64>() as usize;
-    Ok(MetalTensor::from_bytes(
-        ctx,
-        bytemuck::cast_slice(&vec![value; n]),
-        shape.to_vec(),
-        GgmlType::F32,
-    )?)
+impl SpecBuffers {
+    /// Allocates every spec byte-zeroed (or filled), after checking that the
+    /// device's allocation upper bound does not exceed the ledger's price.
+    fn allocate(ctx: &MetalContext, owner: &'static str, specs: &[BufferSpec]) -> Result<Self> {
+        let mut buffers = HashMap::with_capacity(specs.len());
+        for spec in specs {
+            let device = ctx
+                .price_shared_buffer_upper(spec.bytes())
+                .map_err(|e| Glm5NextMetalError::Invalid(format!("{owner}.{}: {e}", spec.name)))?
+                .priced_upper_bytes;
+            if device > spec.priced_bytes() {
+                return invalid(format!(
+                    "{owner}.{}: device prices {device} bytes, ledger {}",
+                    spec.name,
+                    spec.priced_bytes()
+                ));
+            }
+            let dtype = match spec.dtype {
+                BufferType::F32 => GgmlType::F32,
+                BufferType::F16 => GgmlType::F16,
+                BufferType::I32 => GgmlType::I32,
+            };
+            let tensor = if spec.fill == 0.0 {
+                MetalTensor::zeros_dtype_unstaged(ctx, spec.shape.clone(), dtype)?
+            } else if dtype == GgmlType::F32 {
+                let n = spec.shape.iter().product::<u64>() as usize;
+                MetalTensor::from_bytes(
+                    ctx,
+                    bytemuck::cast_slice(&vec![spec.fill; n]),
+                    spec.shape.clone(),
+                    dtype,
+                )?
+            } else {
+                return invalid(format!("{owner}.{}: fill requires F32", spec.name));
+            };
+            if buffers.insert(spec.name, tensor).is_some() {
+                return invalid(format!("{owner}.{}: duplicate buffer spec", spec.name));
+            }
+        }
+        Ok(Self { owner, buffers })
+    }
+
+    fn take(&mut self, name: &str) -> Result<MetalTensor> {
+        self.buffers.remove(name).ok_or_else(|| {
+            Glm5NextMetalError::Invalid(format!("{}.{name}: no such buffer spec", self.owner))
+        })
+    }
+
+    fn finish(self) -> Result<()> {
+        if self.buffers.is_empty() {
+            return Ok(());
+        }
+        let mut unused: Vec<_> = self.buffers.into_keys().collect();
+        unused.sort_unstable();
+        invalid(format!("{}: unused buffer specs {unused:?}", self.owner))
+    }
 }
 
-fn zeros_typed(
-    ctx: &MetalContext,
-    dtype: GgmlType,
-    shape: &[u64],
-    element_bytes: usize,
-) -> Result<MetalTensor> {
-    let n = shape.iter().product::<u64>() as usize;
-    Ok(MetalTensor::from_bytes(
-        ctx,
-        &vec![0u8; n * element_bytes],
-        shape.to_vec(),
-        dtype,
-    )?)
+impl Scratch {
+    fn new(ctx: &MetalContext, c: &Glm5NextConfig) -> Result<Self> {
+        let mut b = SpecBuffers::allocate(ctx, "decode_scratch", &memory::decode_scratch_specs(c))?;
+        let s = Self {
+            token: b.take("token")?,
+            embedding: b.take("embedding")?,
+            residual: [b.take("residual_a")?, b.take("residual_b")?],
+            ones: b.take("ones")?,
+            quarter: b.take("quarter")?,
+            no_sink: b.take("no_sink")?,
+            normalized: b.take("normalized")?,
+            mixes: b.take("mixes")?,
+            pre: b.take("pre")?,
+            post: b.take("post")?,
+            comb: b.take("comb")?,
+            collapsed: b.take("collapsed")?,
+            normed: b.take("normed")?,
+            block_out: b.take("block_out")?,
+            q: b.take("q")?,
+            k: b.take("k")?,
+            v: b.take("v")?,
+            rank_a: b.take("rank_a")?,
+            raw_gate: b.take("raw_gate")?,
+            raw_beta: b.take("raw_beta")?,
+            rank_b: b.take("rank_b")?,
+            output_gate: b.take("output_gate")?,
+            kda_out: b.take("kda_out")?,
+            query_a: b.take("query_a")?,
+            query_r: b.take("query_r")?,
+            query: b.take("query")?,
+            latent_raw: b.take("latent_raw")?,
+            latent: b.take("latent")?,
+            query_latent: b.take("query_latent")?,
+            output_latent: b.take("output_latent")?,
+            heads_out: b.take("heads_out")?,
+            index_key: b.take("index_key")?,
+            index_gate: b.take("index_gate")?,
+            dense_gate: b.take("dense_gate")?,
+            dense_up: b.take("dense_up")?,
+            router: b.take("router")?,
+            expert_inner: b.take("expert_inner")?,
+            expert_out: b.take("expert_out")?,
+            routed: b.take("routed")?,
+            shared_gate: b.take("shared_gate")?,
+            shared_up: b.take("shared_up")?,
+            shared: b.take("shared")?,
+            final_hidden: b.take("final_hidden")?,
+            final_normed: b.take("final_normed")?,
+            logits: b.take("logits")?,
+        };
+        b.finish()?;
+        Ok(s)
+    }
+}
+
+impl LayerState {
+    fn new(
+        ctx: &MetalContext,
+        c: &Glm5NextConfig,
+        mixer: MixerKind,
+        capacity: u64,
+    ) -> Result<Self> {
+        let state = match mixer {
+            MixerKind::Kda => {
+                let mut b = SpecBuffers::allocate(ctx, "kda_state", &memory::kda_state_specs(c))?;
+                let state = Self::Kda {
+                    conv: b.take("conv")?,
+                    state: b.take("state")?,
+                };
+                b.finish()?;
+                state
+            }
+            MixerKind::Mla => {
+                let specs = memory::mla_state_specs(c, capacity);
+                let mut b = SpecBuffers::allocate(ctx, "mla_state", &specs)?;
+                let state = Self::Mla {
+                    latent: b.take("latent")?,
+                    pending: b.take("pending")?,
+                    pooled: b.take("pooled")?,
+                };
+                b.finish()?;
+                state
+            }
+        };
+        Ok(state)
+    }
+}
+
+impl RouteRecord {
+    /// One record per MoE block (`None` for dense FFN blocks); `rows` is
+    /// `None` for decode and the chunk size for packed prefill.
+    fn for_blocks(
+        ctx: &MetalContext,
+        c: &Glm5NextConfig,
+        rows: Option<u64>,
+    ) -> Result<Vec<Option<Self>>> {
+        let specs = memory::route_specs(c, rows);
+        c.blocks
+            .iter()
+            .map(|block| {
+                if block.ffn != FfnKind::Moe {
+                    return Ok(None);
+                }
+                let mut b = SpecBuffers::allocate(ctx, "route", &specs)?;
+                let record = Self {
+                    ids: b.take("ids")?,
+                    weights: b.take("weights")?,
+                    status: b.take("status")?,
+                };
+                b.finish()?;
+                Ok(Some(record))
+            })
+            .collect()
+    }
 }
 
 /// Host copy of a session-owned shared-storage tensor of `dtype` with 4-byte
@@ -414,18 +568,21 @@ pub struct Glm5NextSession<'w> {
     s: Scratch,
     packed: Option<packed::PackedScratch>,
     ledger: Glm5NextMemoryLedger,
+    /// Device allocation delta observed while building the session buffers.
+    allocated_bytes: u64,
 }
 
 impl<'w> Glm5NextSession<'w> {
     /// Allocates all session state for `capacity` positions (dense range only)
-    /// after admitting the ledger's session and decode terms.
+    /// after admitting the ledger's session terms (decode-only).
     pub fn new(ctx: &MetalContext, weights: &'w Glm5NextWeights, capacity: usize) -> Result<Self> {
         Self::with_prefill_rows(ctx, weights, capacity, 0)
     }
 
     /// Like [`Self::new`], also allocating packed-prefill scratch for chunks of
-    /// up to `prefill_rows` tokens (0: serial prefill only). The ledger prices
-    /// the packed activations before allocation.
+    /// up to `prefill_rows` tokens (0: serial prefill only). Every buffer is
+    /// built from the ledger's spec lists, and the device allocation delta must
+    /// stay within the ledger's session-buffer price.
     pub fn with_prefill_rows(
         ctx: &MetalContext,
         weights: &'w Glm5NextWeights,
@@ -446,7 +603,7 @@ impl<'w> Glm5NextSession<'w> {
             c,
             weights.retained_bytes,
             capacity as u64,
-            prefill_rows.max(1) as u64,
+            prefill_rows as u64,
         )?;
         let session_bytes = ledger.peak_bytes() - weights.retained_bytes;
         // Admission and the allocations it prices form one transaction.
@@ -459,100 +616,25 @@ impl<'w> Glm5NextSession<'w> {
                 admission.reason
             ));
         }
-        let h = c.hidden_size as u64;
-        let width = c.kda_width() as u64;
-        let heads = c.head_count as u64;
-        let d = c.kda_head_dim as u64;
-        let pools = capacity.div_ceil(c.indexer_pool as usize) as u64;
-        let mut layers = Vec::with_capacity(c.blocks.len());
-        let mut routes = Vec::with_capacity(c.blocks.len());
-        for block in &c.blocks {
-            layers.push(match block.mixer {
-                MixerKind::Kda => LayerState::Kda {
-                    conv: zeros(ctx, &[width, 3, 3])?,
-                    state: zeros(ctx, &[d, d, heads])?,
-                },
-                MixerKind::Mla => LayerState::Mla {
-                    latent: zeros_typed(
-                        ctx,
-                        GgmlType::F16,
-                        &[c.kv_lora_rank as u64, capacity as u64],
-                        2,
-                    )?,
-                    pending: zeros_typed(
-                        ctx,
-                        GgmlType::F16,
-                        &[c.indexer_head_dim as u64, 2, c.indexer_pool as u64],
-                        2,
-                    )?,
-                    pooled: zeros_typed(
-                        ctx,
-                        GgmlType::F16,
-                        &[c.indexer_head_dim as u64, pools.max(1)],
-                        2,
-                    )?,
-                },
-            });
-            routes.push(match block.ffn {
-                crate::glm5_next::FfnKind::Dense => None,
-                crate::glm5_next::FfnKind::Moe => Some(RouteRecord {
-                    ids: zeros_typed(ctx, GgmlType::I32, &[c.expert_used_count as u64], 4)?,
-                    weights: zeros(ctx, &[c.expert_used_count as u64])?,
-                    status: zeros_typed(ctx, GgmlType::I32, &[1], 4)?,
-                }),
-            });
-        }
-        let k = c.expert_used_count as u64;
-        let s = Scratch {
-            token: zeros_typed(ctx, GgmlType::I32, &[1], 4)?,
-            embedding: zeros(ctx, &[h])?,
-            residual: [zeros(ctx, &[h, 4])?, zeros(ctx, &[h, 4])?],
-            ones: filled(ctx, 1.0, &[c.hc_width() as u64])?,
-            quarter: filled(ctx, 0.25, &[4])?,
-            no_sink: filled(ctx, LATENT_NO_SINK, &[heads])?,
-            normalized: zeros(ctx, &[c.hc_width() as u64])?,
-            mixes: zeros(ctx, &[c.hc_mix_count() as u64])?,
-            pre: zeros(ctx, &[4])?,
-            post: zeros(ctx, &[4])?,
-            comb: zeros(ctx, &[4, 4])?,
-            collapsed: zeros(ctx, &[h])?,
-            normed: zeros(ctx, &[h])?,
-            block_out: zeros(ctx, &[h])?,
-            q: zeros(ctx, &[width])?,
-            k: zeros(ctx, &[width])?,
-            v: zeros(ctx, &[width])?,
-            rank_a: zeros(ctx, &[d])?,
-            raw_gate: zeros(ctx, &[width])?,
-            raw_beta: zeros(ctx, &[heads])?,
-            rank_b: zeros(ctx, &[d])?,
-            output_gate: zeros(ctx, &[width])?,
-            kda_out: zeros(ctx, &[width])?,
-            query_a: zeros(ctx, &[c.q_lora_rank as u64])?,
-            query_r: zeros(ctx, &[c.q_lora_rank as u64])?,
-            query: zeros(ctx, &[c.mla_width() as u64])?,
-            latent_raw: zeros(ctx, &[c.kv_lora_rank as u64])?,
-            latent: zeros(ctx, &[c.kv_lora_rank as u64])?,
-            query_latent: zeros(ctx, &[c.kv_lora_rank as u64, heads, 1])?,
-            output_latent: zeros(ctx, &[c.kv_lora_rank as u64, heads, 1])?,
-            heads_out: zeros(ctx, &[c.mla_width() as u64])?,
-            index_key: zeros(ctx, &[c.indexer_head_dim as u64])?,
-            index_gate: zeros(ctx, &[c.indexer_head_dim as u64])?,
-            dense_gate: zeros(ctx, &[c.dense_ffn_size as u64])?,
-            dense_up: zeros(ctx, &[c.dense_ffn_size as u64])?,
-            router: zeros(ctx, &[c.expert_count as u64])?,
-            expert_inner: zeros(ctx, &[c.expert_ffn_size as u64, k])?,
-            expert_out: zeros(ctx, &[h, k])?,
-            routed: zeros(ctx, &[h])?,
-            shared_gate: zeros(ctx, &[c.shared_expert_ffn_size as u64])?,
-            shared_up: zeros(ctx, &[c.shared_expert_ffn_size as u64])?,
-            shared: zeros(ctx, &[h])?,
-            final_hidden: zeros(ctx, &[h])?,
-            final_normed: zeros(ctx, &[h])?,
-            logits: zeros(ctx, &[c.vocab_size as u64])?,
-        };
+        // Every buffer below comes from the spec lists the ledger priced.
+        let before = ctx.current_allocated_size();
+        let layers = c
+            .blocks
+            .iter()
+            .map(|block| LayerState::new(ctx, c, block.mixer, capacity as u64))
+            .collect::<Result<Vec<_>>>()?;
+        let routes = RouteRecord::for_blocks(ctx, c, None)?;
+        let s = Scratch::new(ctx, c)?;
         let packed = (prefill_rows > 0)
             .then(|| packed::PackedScratch::new(ctx, c, prefill_rows))
             .transpose()?;
+        let observed = ctx.current_allocated_size().saturating_sub(before);
+        if observed > ledger.session_buffer_bytes() {
+            return invalid(format!(
+                "session allocated {observed} bytes, ledger priced {}",
+                ledger.session_buffer_bytes()
+            ));
+        }
         Ok(Self {
             weights,
             capacity,
@@ -563,6 +645,7 @@ impl<'w> Glm5NextSession<'w> {
             s,
             packed,
             ledger,
+            allocated_bytes: observed,
         })
     }
 
@@ -579,6 +662,12 @@ impl<'w> Glm5NextSession<'w> {
 
     pub fn ledger(&self) -> &Glm5NextMemoryLedger {
         &self.ledger
+    }
+
+    /// Device bytes the session buffers took (at most the ledger's
+    /// [`Glm5NextMemoryLedger::session_buffer_bytes`]).
+    pub fn allocated_bytes(&self) -> u64 {
+        self.allocated_bytes
     }
 
     /// Decode one token at the next position; returns full-vocabulary logits.

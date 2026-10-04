@@ -82,72 +82,56 @@ pub(super) struct PackedScratch {
 impl PackedScratch {
     pub(super) fn new(ctx: &MetalContext, c: &Glm5NextConfig, rows: usize) -> Result<Self> {
         let r = rows as u64;
-        let h = c.hidden_size as u64;
-        let w = c.kda_width() as u64;
-        let heads = c.head_count as u64;
-        let d = c.kda_head_dim as u64;
-        let kv = c.kv_lora_rank as u64;
-        let k = c.expert_used_count as u64;
-        let e = c.expert_count as u64;
-        let f = |shape: &[u64]| zeros(ctx, shape);
-        let routes = c
-            .blocks
-            .iter()
-            .map(|block| match block.ffn {
-                crate::glm5_next::FfnKind::Dense => Ok(None),
-                crate::glm5_next::FfnKind::Moe => Ok(Some(RouteRecord {
-                    ids: zeros_typed(ctx, GgmlType::I32, &[k, r], 4)?,
-                    weights: zeros(ctx, &[k, r])?,
-                    status: zeros_typed(ctx, GgmlType::I32, &[r], 4)?,
-                })),
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Self {
+        let specs = memory::packed_scratch_specs(c, r);
+        let mut b = SpecBuffers::allocate(ctx, "packed_scratch", &specs)?;
+        let scratch = Self {
             rows,
             lineage: PackedLineage::Fast,
-            token: zeros_typed(ctx, GgmlType::I32, &[r], 4)?,
-            embedding: f(&[h, r])?,
-            residual: [f(&[h, 4, r])?, f(&[h, 4, r])?],
-            normalized: f(&[c.hc_width() as u64, r])?,
-            mixes: f(&[c.hc_mix_count() as u64, r])?,
-            pre: f(&[4, r])?,
-            post: f(&[4, r])?,
-            comb: f(&[4, 4, r])?,
-            collapsed: f(&[h, r])?,
-            normed: f(&[h, r])?,
-            block_out: f(&[h, r])?,
-            q: f(&[w, r])?,
-            k: f(&[w, r])?,
-            v: f(&[w, r])?,
-            rank_a: f(&[d, r])?,
-            raw_gate: f(&[w, r])?,
-            raw_beta: f(&[heads, r])?,
-            rank_b: f(&[d, r])?,
-            output_gate: f(&[w, r])?,
-            kda_out: f(&[w, r])?,
-            query_a: f(&[c.q_lora_rank as u64, r])?,
-            query_r: f(&[c.q_lora_rank as u64, r])?,
-            query: f(&[c.mla_width() as u64, r])?,
-            latent_raw: f(&[kv, r])?,
-            latent: f(&[kv, r])?,
-            query_latent: f(&[kv, heads, r])?,
-            output_latent: f(&[kv, heads, r])?,
-            heads_out: f(&[c.mla_width() as u64, r])?,
-            index_key: f(&[c.indexer_head_dim as u64, r])?,
-            index_gate: f(&[c.indexer_head_dim as u64, r])?,
-            dense_gate: f(&[c.dense_ffn_size as u64, r])?,
-            dense_up: f(&[c.dense_ffn_size as u64, r])?,
-            router: f(&[e, r])?,
-            counts: zeros_typed(ctx, GgmlType::I32, &[e], 4)?,
-            slots: zeros_typed(ctx, GgmlType::I32, &[e * r], 4)?,
-            inner: f(&[c.expert_ffn_size as u64, k * r])?,
-            slot_out: f(&[h, k * r])?,
-            routed: f(&[h, r])?,
-            shared_gate: f(&[c.shared_expert_ffn_size as u64, r])?,
-            shared_up: f(&[c.shared_expert_ffn_size as u64, r])?,
-            shared: f(&[h, r])?,
-            routes,
-        })
+            token: b.take("token")?,
+            embedding: b.take("embedding")?,
+            residual: [b.take("residual_a")?, b.take("residual_b")?],
+            normalized: b.take("normalized")?,
+            mixes: b.take("mixes")?,
+            pre: b.take("pre")?,
+            post: b.take("post")?,
+            comb: b.take("comb")?,
+            collapsed: b.take("collapsed")?,
+            normed: b.take("normed")?,
+            block_out: b.take("block_out")?,
+            q: b.take("q")?,
+            k: b.take("k")?,
+            v: b.take("v")?,
+            rank_a: b.take("rank_a")?,
+            raw_gate: b.take("raw_gate")?,
+            raw_beta: b.take("raw_beta")?,
+            rank_b: b.take("rank_b")?,
+            output_gate: b.take("output_gate")?,
+            kda_out: b.take("kda_out")?,
+            query_a: b.take("query_a")?,
+            query_r: b.take("query_r")?,
+            query: b.take("query")?,
+            latent_raw: b.take("latent_raw")?,
+            latent: b.take("latent")?,
+            query_latent: b.take("query_latent")?,
+            output_latent: b.take("output_latent")?,
+            heads_out: b.take("heads_out")?,
+            index_key: b.take("index_key")?,
+            index_gate: b.take("index_gate")?,
+            dense_gate: b.take("dense_gate")?,
+            dense_up: b.take("dense_up")?,
+            router: b.take("router")?,
+            counts: b.take("counts")?,
+            slots: b.take("slots")?,
+            inner: b.take("inner")?,
+            slot_out: b.take("slot_out")?,
+            routed: b.take("routed")?,
+            shared_gate: b.take("shared_gate")?,
+            shared_up: b.take("shared_up")?,
+            shared: b.take("shared")?,
+            routes: RouteRecord::for_blocks(ctx, c, Some(r))?,
+        };
+        b.finish()?;
+        Ok(scratch)
     }
 }
 

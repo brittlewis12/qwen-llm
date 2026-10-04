@@ -390,51 +390,70 @@ fn term(l: &Glm5NextMemoryLedger, name: &str) -> u64 {
         .1
 }
 
+/// 16 KiB Metal allocation granules.
+const G: u64 = memory::ALLOCATION_GRANULE;
+
+/// Hand-derived from the release geometry (h 4096, 64 heads, KDA width 8192,
+/// MLA width 16384, 288 experts, top-8, 34 KDA / 11 MLA / 42 MoE executed
+/// blocks), one granule-rounded buffer at a time, independent of the spec
+/// functions so a layout change must update these numbers deliberately.
 #[test]
 fn ledger_terms_match_release_geometry() {
     let c = config();
-    assert_eq!(memory::row_activation_floats(&c), 240_256);
     let l = Glm5NextMemoryLedger::new(&c, 100 * GIB, 32_768, 512).unwrap();
     assert_eq!((l.capacity(), l.prefill_rows()), (32_768, 512));
+    // KDA: conv [8192,3,3] F32 = 18 G, S [128,128,64] F32 = 256 G.
+    let kda = 34 * (18 + 256) * G;
+    // MLA: latents [512,32768] F16 = 2048 G, pending ring 1 G, pools
+    // [128,8192] F16 = 128 G.
+    let mla = 11 * (2048 + 1 + 128) * G;
+    // 46 decode buffers; every sub-granule vector costs one granule; logits
+    // [154880] F32 = 38 G.
+    let decode = 135 * G;
+    // ids, weights, status: one granule each per MoE block.
+    let routes = 42 * 3 * G;
+    // 512-row packed activations (largest: query/output latents 4096 G each,
+    // slot outputs 4096 G).
+    let packed = 38_041 * G;
     for (name, bytes) in [
-        ("recurrent_state", 136 << 20),
-        ("conv_state", 34 * 3 * 3 * 8192 * 4),
-        ("latent_cache", 352 << 20),
-        ("pooled_keys", 22 << 20),
-        ("pending_pool", 11 * 4 * 2 * 128 * 2),
-        ("decode_activations", 240_256 * 4),
-        ("decode_routing", (2 * 288 + 2 * 8 + 1) * 4),
-        ("decode_attention_partials", 64 * 16 * 514 * 4),
-        ("prefill_activations", 240_256 * 512 * 4),
-        ("prefill_selection", (8192 + 2051) * 512 * 4),
-        ("prefill_routing", (2 * 288 + 2 * 8 + 1) * 512 * 4),
-        ("logits", 154_880 * 4),
+        ("retained_weights", 100 * GIB),
+        ("kda_state", kda),
+        ("mla_state", mla),
+        ("decode_scratch", decode),
+        ("decode_routes", routes),
+        ("packed_scratch", packed),
+        ("packed_routes", routes),
         ("reserve", memory::DYNAMIC_RESERVE_BYTES),
+        ("session_state", kda + mla),
+        (
+            "session_buffers",
+            kda + mla + decode + routes + packed + routes,
+        ),
     ] {
         assert_eq!(term(&l, name), bytes, "{name}");
     }
-    let state: u64 = [
-        "recurrent_state",
-        "conv_state",
-        "latent_cache",
-        "pooled_keys",
-        "pending_pool",
-    ]
-    .iter()
-    .map(|n| term(&l, n))
-    .sum();
-    assert_eq!(l.session_state_bytes(), state);
+    let buffers = kda + mla + decode + 2 * routes + packed;
+    assert_eq!(l.session_state_bytes(), kda + mla);
+    assert_eq!(l.session_buffer_bytes(), buffers);
     let p = l.phase_peaks();
     assert_eq!(p.resident, 100 * GIB);
-    assert_eq!(p.session, 100 * GIB + state + memory::DYNAMIC_RESERVE_BYTES);
-    assert!(p.session < p.decode && p.decode < p.prefill);
-    assert_eq!(l.peak_bytes(), p.prefill);
+    assert_eq!(
+        p.session,
+        100 * GIB + buffers + memory::DYNAMIC_RESERVE_BYTES
+    );
+    assert_eq!(l.peak_bytes(), p.session);
     // Native compact cache: 11.69 KiB/token versus llama.cpp's 19.25 KiB.
-    let per_token = (term(&l, "latent_cache") + term(&l, "pooled_keys")) as f64 / 32_768.0;
+    let per_token = (mla - 11 * G) as f64 / 32_768.0;
     assert!((per_token / 1024.0 - 11.6875).abs() < 1e-9, "{per_token}");
+
+    // Decode-only prices no packed scratch and no packed routes.
+    let d = Glm5NextMemoryLedger::new(&c, 100 * GIB, 32_768, 0).unwrap();
+    assert_eq!(term(&d, "packed_scratch") + term(&d, "packed_routes"), 0);
+    assert_eq!(d.session_buffer_bytes(), buffers - packed - routes);
+    assert_eq!(d.peak_bytes(), l.peak_bytes() - packed - routes);
+
     assert!(Glm5NextMemoryLedger::new(&c, 0, 0, 512).is_err());
-    assert!(Glm5NextMemoryLedger::new(&c, 0, 1 << 21, 512).is_err());
-    assert!(Glm5NextMemoryLedger::new(&c, 0, 16, 0).is_err());
+    assert!(Glm5NextMemoryLedger::new(&c, 0, (1 << 20) + 1, 512).is_err());
     // Unrepresentable totals are errors, not wrapped or panicking sums.
     assert!(matches!(
         Glm5NextMemoryLedger::new(&c, u64::MAX - 1, 16, 1),
@@ -443,25 +462,62 @@ fn ledger_terms_match_release_geometry() {
 }
 
 #[test]
+fn buffer_specs_are_unique_nonempty_and_granule_priced() {
+    let c = config();
+    for (owner, specs) in [
+        ("decode", memory::decode_scratch_specs(&c)),
+        ("packed", memory::packed_scratch_specs(&c, 1)),
+        ("route", memory::route_specs(&c, None)),
+        ("route_rows", memory::route_specs(&c, Some(3))),
+        ("kda", memory::kda_state_specs(&c)),
+        ("mla", memory::mla_state_specs(&c, 1)),
+    ] {
+        let mut names: Vec<_> = specs.iter().map(|s| s.name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), specs.len(), "{owner}: duplicate names");
+        for s in &specs {
+            assert!(s.bytes() > 0, "{owner}.{}", s.name);
+            assert!(s.priced_bytes() >= s.bytes());
+            assert!(s.priced_bytes().is_multiple_of(G));
+            assert!(s.priced_bytes() - s.bytes() < G);
+        }
+    }
+    // Partial pools round up: 2051 visible positions publish 512 complete
+    // pools plus one in progress.
+    let mla = memory::mla_state_specs(&c, 2051);
+    let pooled = mla.iter().find(|s| s.name == "pooled").unwrap();
+    assert_eq!(pooled.shape, vec![128, 513]);
+}
+
+#[test]
 fn max_capacity_is_the_largest_fitting_context() {
     let c = config();
     let retained = 109 * GIB + GIB / 2;
     let budget = 112 * GIB;
-    let cap = Glm5NextMemoryLedger::max_capacity(&c, retained, 512, budget)
-        .unwrap()
-        .unwrap();
-    let at = |n| {
-        Glm5NextMemoryLedger::new(&c, retained, n, 512)
+    for rows in [0, 512] {
+        let cap = Glm5NextMemoryLedger::max_capacity(&c, retained, rows, budget)
             .unwrap()
-            .peak_bytes()
+            .unwrap();
+        let at = |n| {
+            Glm5NextMemoryLedger::new(&c, retained, n, rows)
+                .unwrap()
+                .peak_bytes()
+        };
+        assert!(at(cap) <= budget);
+        assert!(cap == u64::from(c.context_length) || at(cap + 1) > budget);
+        assert!(cap >= 32_768, "{cap}");
+        assert_eq!(
+            Glm5NextMemoryLedger::max_capacity(&c, budget, rows, budget).unwrap(),
+            None
+        );
+    }
+    let cap = |rows| {
+        Glm5NextMemoryLedger::max_capacity(&c, retained, rows, budget)
+            .unwrap()
+            .unwrap()
     };
-    assert!(at(cap) <= budget);
-    assert!(cap == u64::from(c.context_length) || at(cap + 1) > budget);
-    assert!(cap >= 32_768, "{cap}");
-    assert_eq!(
-        Glm5NextMemoryLedger::max_capacity(&c, budget, 512, budget).unwrap(),
-        None
-    );
+    assert!(cap(0) > cap(512));
 }
 
 /// Real artifact census: header-only, no weights read, no GPU. Requires
@@ -522,15 +578,16 @@ fn release_artifact_census_and_allocation_plan() {
     assert!(overhead < 64 << 20, "window overhead {overhead}");
 
     let budget = 112 * GIB;
-    for rows in [128, 256, 512] {
+    for rows in [0, 128, 256, 512] {
         let cap = Glm5NextMemoryLedger::max_capacity(&model.config, retained, rows, budget)
             .unwrap()
             .unwrap();
         let l = Glm5NextMemoryLedger::new(&model.config, retained, cap.min(32_768), rows).unwrap();
         eprintln!(
-            "rows={rows} max_capacity={cap} (planning bound) peaks@{}={:?}",
+            "rows={rows} max_capacity={cap} (planning bound) peaks@{}={:?} terms={:?}",
             l.capacity(),
-            l.phase_peaks()
+            l.phase_peaks(),
+            l.terms()
         );
         assert!(cap >= 4096);
     }

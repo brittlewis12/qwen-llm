@@ -228,9 +228,11 @@ fn checkpoint_v1_matches_llama_cpp_oracle() {
     {
         let mut session = Glm5NextSession::new(&ctx, &weights, 256).expect("session");
         eprintln!(
-            "allocated with one session: {} bytes (ledger decode peak {})",
+            "allocated with one session: {} bytes (ledger session peak {}); session buffers {} of {} priced",
             ctx.current_allocated_size(),
-            session.ledger().phase_peaks().decode
+            session.ledger().phase_peaks().session,
+            session.allocated_bytes(),
+            session.ledger().session_buffer_bytes()
         );
         let mut worst_kl = 0.0f64;
         for (position, &token) in tokens.iter().enumerate() {
@@ -524,6 +526,11 @@ fn packed_fast_matches_exact_over_a_grouped_block_and_tail() {
     let mut sessions = Vec::new();
     for lineage in [PackedLineage::Exact, PackedLineage::Fast] {
         let mut session = Glm5NextSession::with_prefill_rows(&ctx, &weights, 512, 512).unwrap();
+        eprintln!(
+            "packed session buffers: {} of {} priced",
+            session.allocated_bytes(),
+            session.ledger().session_buffer_bytes()
+        );
         session.set_packed_lineage(lineage);
         let start = std::time::Instant::now();
         let logits = session.prefill_packed(&ctx, tokens).unwrap();

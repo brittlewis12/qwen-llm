@@ -390,8 +390,22 @@ fn term(l: &Glm5NextMemoryLedger, name: &str) -> u64 {
         .1
 }
 
-/// 16 KiB Metal allocation granules.
-const G: u64 = memory::ALLOCATION_GRANULE;
+/// 16 KiB pages of the device-free Apple silicon pricing profile.
+const G: u64 = memory::APPLE_16K_GRANULE;
+
+/// Ledger under the device-free Apple silicon profile.
+fn ledger(
+    c: &Glm5NextConfig,
+    retained: u64,
+    capacity: u64,
+    rows: u64,
+) -> Result<Glm5NextMemoryLedger> {
+    Glm5NextMemoryLedger::new(c, retained, capacity, rows, &memory::apple_16k_price)
+}
+
+fn max_capacity(c: &Glm5NextConfig, retained: u64, rows: u64, budget: u64) -> Option<u64> {
+    Glm5NextMemoryLedger::max_capacity(c, retained, rows, budget, &memory::apple_16k_price).unwrap()
+}
 
 /// Hand-derived from the release geometry (h 4096, 64 heads, KDA width 8192,
 /// MLA width 16384, 288 experts, top-8, 34 KDA / 11 MLA / 42 MoE executed
@@ -400,7 +414,7 @@ const G: u64 = memory::ALLOCATION_GRANULE;
 #[test]
 fn ledger_terms_match_release_geometry() {
     let c = config();
-    let l = Glm5NextMemoryLedger::new(&c, 100 * GIB, 32_768, 512).unwrap();
+    let l = ledger(&c, 100 * GIB, 32_768, 512).unwrap();
     assert_eq!((l.capacity(), l.prefill_rows()), (32_768, 512));
     // KDA: conv [8192,3,3] F32 = 18 G, S [128,128,64] F32 = 256 G.
     let kda = 34 * (18 + 256) * G;
@@ -447,16 +461,49 @@ fn ledger_terms_match_release_geometry() {
     assert!((per_token / 1024.0 - 11.6875).abs() < 1e-9, "{per_token}");
 
     // Decode-only prices no packed scratch and no packed routes.
-    let d = Glm5NextMemoryLedger::new(&c, 100 * GIB, 32_768, 0).unwrap();
+    let d = ledger(&c, 100 * GIB, 32_768, 0).unwrap();
     assert_eq!(term(&d, "packed_scratch") + term(&d, "packed_routes"), 0);
     assert_eq!(d.session_buffer_bytes(), buffers - packed - routes);
     assert_eq!(d.peak_bytes(), l.peak_bytes() - packed - routes);
 
-    assert!(Glm5NextMemoryLedger::new(&c, 0, 0, 512).is_err());
-    assert!(Glm5NextMemoryLedger::new(&c, 0, (1 << 20) + 1, 512).is_err());
+    // 513 rows: ids and weights [8, 513] cross into a second granule.
+    let r513 = ledger(&c, 100 * GIB, 32_768, 513).unwrap();
+    assert_eq!(term(&r513, "packed_routes"), 42 * (2 + 2 + 1) * G);
+    assert!(term(&r513, "packed_scratch") > packed);
+
+    assert!(ledger(&c, 0, 0, 512).is_err());
+    assert!(ledger(&c, 0, (1 << 20) + 1, 512).is_err());
+    // A chunk never exceeds the session; absurd rows are refused, not
+    // wrapped.
+    assert!(matches!(
+        ledger(&c, 0, 16, 17),
+        Err(Glm5NextError::InvalidMetadata { .. })
+    ));
+    assert!(matches!(
+        ledger(&c, 0, 16, 1 << 62),
+        Err(Glm5NextError::InvalidMetadata { .. })
+    ));
+    assert!(ledger(&c, 0, 1 << 20, 1 << 20).is_ok());
+    // Spec sizes and sums are checked even when called directly.
+    let absurd = memory::packed_scratch_specs(&c, 1 << 62);
+    assert!(absurd.iter().any(|s| s.bytes().is_none()));
+    assert!(matches!(
+        memory::priced(&absurd, &memory::apple_16k_price),
+        Err(Glm5NextError::Overflow(_))
+    ));
+    // A device that cannot allocate a buffer refuses the session by name;
+    // prices that cannot be summed overflow.
+    let no_large = |bytes: u64| (bytes <= 1 << 20).then_some(bytes);
+    let refused = Glm5NextMemoryLedger::new(&c, 0, 32_768, 0, &no_large).unwrap_err();
+    assert!(refused.to_string().contains("buffer"), "{refused}");
+    let huge = |_: u64| Some(u64::MAX / 2);
+    assert!(matches!(
+        Glm5NextMemoryLedger::new(&c, 0, 16, 0, &huge),
+        Err(Glm5NextError::Overflow(_))
+    ));
     // Unrepresentable totals are errors, not wrapped or panicking sums.
     assert!(matches!(
-        Glm5NextMemoryLedger::new(&c, u64::MAX - 1, 16, 1),
+        ledger(&c, u64::MAX - 1, 16, 1),
         Err(Glm5NextError::Overflow(_))
     ));
 }
@@ -477,10 +524,12 @@ fn buffer_specs_are_unique_nonempty_and_granule_priced() {
         names.dedup();
         assert_eq!(names.len(), specs.len(), "{owner}: duplicate names");
         for s in &specs {
-            assert!(s.bytes() > 0, "{owner}.{}", s.name);
-            assert!(s.priced_bytes() >= s.bytes());
-            assert!(s.priced_bytes().is_multiple_of(G));
-            assert!(s.priced_bytes() - s.bytes() < G);
+            let bytes = s.bytes().unwrap();
+            let priced = s.priced_bytes(&memory::apple_16k_price).unwrap();
+            assert!(bytes > 0, "{owner}.{}", s.name);
+            assert!(priced >= bytes);
+            assert!(priced.is_multiple_of(G));
+            assert!(priced - bytes < G);
         }
     }
     // Partial pools round up: 2051 visible positions publish 512 complete
@@ -496,27 +545,14 @@ fn max_capacity_is_the_largest_fitting_context() {
     let retained = 109 * GIB + GIB / 2;
     let budget = 112 * GIB;
     for rows in [0, 512] {
-        let cap = Glm5NextMemoryLedger::max_capacity(&c, retained, rows, budget)
-            .unwrap()
-            .unwrap();
-        let at = |n| {
-            Glm5NextMemoryLedger::new(&c, retained, n, rows)
-                .unwrap()
-                .peak_bytes()
-        };
+        let cap = max_capacity(&c, retained, rows, budget).unwrap();
+        let at = |n| ledger(&c, retained, n, rows).unwrap().peak_bytes();
         assert!(at(cap) <= budget);
         assert!(cap == u64::from(c.context_length) || at(cap + 1) > budget);
         assert!(cap >= 32_768, "{cap}");
-        assert_eq!(
-            Glm5NextMemoryLedger::max_capacity(&c, budget, rows, budget).unwrap(),
-            None
-        );
+        assert_eq!(max_capacity(&c, budget, rows, budget), None);
     }
-    let cap = |rows| {
-        Glm5NextMemoryLedger::max_capacity(&c, retained, rows, budget)
-            .unwrap()
-            .unwrap()
-    };
+    let cap = |rows| max_capacity(&c, retained, rows, budget).unwrap();
     assert!(cap(0) > cap(512));
 }
 
@@ -579,10 +615,8 @@ fn release_artifact_census_and_allocation_plan() {
 
     let budget = 112 * GIB;
     for rows in [0, 128, 256, 512] {
-        let cap = Glm5NextMemoryLedger::max_capacity(&model.config, retained, rows, budget)
-            .unwrap()
-            .unwrap();
-        let l = Glm5NextMemoryLedger::new(&model.config, retained, cap.min(32_768), rows).unwrap();
+        let cap = max_capacity(&model.config, retained, rows, budget).unwrap();
+        let l = ledger(&model.config, retained, cap.min(32_768), rows).unwrap();
         eprintln!(
             "rows={rows} max_capacity={cap} (planning bound) peaks@{}={:?} terms={:?}",
             l.capacity(),

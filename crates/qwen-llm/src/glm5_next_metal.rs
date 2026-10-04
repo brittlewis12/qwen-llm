@@ -295,6 +295,16 @@ struct Scratch {
     logits: MetalTensor,
 }
 
+/// Ledger pricer for live sessions: the device's shared-buffer allocation
+/// upper bound.
+fn device_price(ctx: &MetalContext) -> impl Fn(u64) -> Option<u64> + '_ {
+    |bytes| {
+        ctx.price_shared_buffer_upper(bytes)
+            .ok()
+            .map(|p| p.priced_upper_bytes)
+    }
+}
+
 /// Session buffers realized from one ledger spec list. Each buffer must be
 /// taken by name exactly once, so the ledger and the session cannot drift:
 /// a missing name, a duplicate or an untaken buffer is an error.
@@ -304,22 +314,11 @@ struct SpecBuffers {
 }
 
 impl SpecBuffers {
-    /// Allocates every spec byte-zeroed (or filled), after checking that the
-    /// device's allocation upper bound does not exceed the ledger's price.
+    /// Allocates every spec byte-zeroed (or filled). The caller has admitted
+    /// the ledger, which priced these same specs with [`device_price`].
     fn allocate(ctx: &MetalContext, owner: &'static str, specs: &[BufferSpec]) -> Result<Self> {
         let mut buffers = HashMap::with_capacity(specs.len());
         for spec in specs {
-            let device = ctx
-                .price_shared_buffer_upper(spec.bytes())
-                .map_err(|e| Glm5NextMetalError::Invalid(format!("{owner}.{}: {e}", spec.name)))?
-                .priced_upper_bytes;
-            if device > spec.priced_bytes() {
-                return invalid(format!(
-                    "{owner}.{}: device prices {device} bytes, ledger {}",
-                    spec.name,
-                    spec.priced_bytes()
-                ));
-            }
             let dtype = match spec.dtype {
                 BufferType::F32 => GgmlType::F32,
                 BufferType::F16 => GgmlType::F16,
@@ -568,8 +567,8 @@ pub struct Glm5NextSession<'w> {
     s: Scratch,
     packed: Option<packed::PackedScratch>,
     ledger: Glm5NextMemoryLedger,
-    /// Device allocation delta observed while building the session buffers.
-    allocated_bytes: u64,
+    /// Net device-counter change across buffer construction (diagnostic).
+    observed_allocation_delta: u64,
 }
 
 impl<'w> Glm5NextSession<'w> {
@@ -580,9 +579,9 @@ impl<'w> Glm5NextSession<'w> {
     }
 
     /// Like [`Self::new`], also allocating packed-prefill scratch for chunks of
-    /// up to `prefill_rows` tokens (0: serial prefill only). Every buffer is
-    /// built from the ledger's spec lists, and the device allocation delta must
-    /// stay within the ledger's session-buffer price.
+    /// up to `prefill_rows` tokens (0: serial prefill only; at most
+    /// `capacity`). Every buffer is built from the ledger's spec lists, which
+    /// the ledger prices with the device before admission.
     pub fn with_prefill_rows(
         ctx: &MetalContext,
         weights: &'w Glm5NextWeights,
@@ -604,6 +603,7 @@ impl<'w> Glm5NextSession<'w> {
             weights.retained_bytes,
             capacity as u64,
             prefill_rows as u64,
+            &device_price(ctx),
         )?;
         let session_bytes = ledger.peak_bytes() - weights.retained_bytes;
         // Admission and the allocations it prices form one transaction.
@@ -628,13 +628,9 @@ impl<'w> Glm5NextSession<'w> {
         let packed = (prefill_rows > 0)
             .then(|| packed::PackedScratch::new(ctx, c, prefill_rows))
             .transpose()?;
-        let observed = ctx.current_allocated_size().saturating_sub(before);
-        if observed > ledger.session_buffer_bytes() {
-            return invalid(format!(
-                "session allocated {observed} bytes, ledger priced {}",
-                ledger.session_buffer_bytes()
-            ));
-        }
+        // Diagnostic only: the device counter also moves with unrelated
+        // allocations and frees elsewhere in the process.
+        let observed_allocation_delta = ctx.current_allocated_size().saturating_sub(before);
         Ok(Self {
             weights,
             capacity,
@@ -645,7 +641,7 @@ impl<'w> Glm5NextSession<'w> {
             s,
             packed,
             ledger,
-            allocated_bytes: observed,
+            observed_allocation_delta,
         })
     }
 
@@ -664,10 +660,13 @@ impl<'w> Glm5NextSession<'w> {
         &self.ledger
     }
 
-    /// Device bytes the session buffers took (at most the ledger's
-    /// [`Glm5NextMemoryLedger::session_buffer_bytes`]).
-    pub fn allocated_bytes(&self) -> u64 {
-        self.allocated_bytes
+    /// Net change of the device's allocated-size counter while the session
+    /// buffers were built. A diagnostic, not owned bytes: unrelated
+    /// allocations or frees in the process move the same counter. In an
+    /// isolated process it is bounded by
+    /// [`Glm5NextMemoryLedger::session_buffer_bytes`].
+    pub fn observed_allocation_delta(&self) -> u64 {
+        self.observed_allocation_delta
     }
 
     /// Decode one token at the next position; returns full-vocabulary logits.

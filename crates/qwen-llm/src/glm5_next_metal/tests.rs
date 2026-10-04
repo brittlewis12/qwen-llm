@@ -228,12 +228,11 @@ fn checkpoint_v1_matches_llama_cpp_oracle() {
     {
         let mut session = Glm5NextSession::new(&ctx, &weights, 256).expect("session");
         eprintln!(
-            "allocated with one session: {} bytes (ledger session peak {}); session buffers {} of {} priced",
+            "allocated with one session: {} bytes (ledger session peak {})",
             ctx.current_allocated_size(),
             session.ledger().phase_peaks().session,
-            session.allocated_bytes(),
-            session.ledger().session_buffer_bytes()
         );
+        assert_allocation_within_ledger(&session);
         let mut worst_kl = 0.0f64;
         for (position, &token) in tokens.iter().enumerate() {
             assert_eq!(reference[position].0, token);
@@ -456,30 +455,30 @@ fn packed_prefill_matches_serial_and_oracle_on_checkpoint_v1() {
         mixed.set_packed_lineage(lineage);
         let logits = mixed.prefill_packed(&ctx, &tokens[..11]).unwrap();
         check(&format!("{lineage:?} mixed prefill"), 10, &logits, lineage);
-        // Whole-request refusals execute nothing: position, poison flag and
-        // every state byte are unchanged, and decode continues as if the
-        // requests never happened (Exact: bitwise against serial below).
-        let before = state_bits(&mixed);
+        // Whole-request refusals execute nothing, and decode continues as if
+        // the requests never happened (Exact: bitwise against serial below).
+        // With 8-row chunks, "bad token after a full chunk" is the case a
+        // per-chunk check would have half-executed.
         let vocab = weights.config.vocab_size;
         let overrun = vec![tokens[11]; 256 - 11 + 1];
+        let mut after_chunk = vec![tokens[11]; 8];
+        after_chunk.push(vocab);
         for (label, request) in [
             ("empty", &[][..]),
             ("bad tail token", &[tokens[11], tokens[12], vocab][..]),
             ("bad head token", &[vocab, tokens[11]][..]),
+            ("bad token after a full chunk", &after_chunk[..]),
             ("capacity overrun", &overrun[..]),
         ] {
-            for packed in [true, false] {
-                let result = if packed {
-                    mixed.prefill_packed(&ctx, request)
-                } else {
-                    mixed.prefill(&ctx, request)
-                };
-                assert!(result.is_err(), "{label} (packed {packed}) was accepted");
-                assert_eq!(mixed.position(), 11, "{label}: position moved");
-                assert!(!mixed.poisoned, "{label}: refusal poisoned the session");
-            }
+            assert_refused(&mut mixed, &format!("packed {label}"), |s| {
+                s.prefill_packed(&ctx, request)
+            });
+            assert_refused(&mut mixed, &format!("serial {label}"), |s| {
+                s.prefill(&ctx, request)
+            });
         }
-        assert!(state_bits(&mixed) == before, "refusals changed state");
+        assert_refused(&mut mixed, "forward bad token", |s| s.forward(&ctx, vocab));
+        assert_refused(&mut mixed, "advance bad token", |s| s.advance(&ctx, vocab));
         for (position, &token) in tokens.iter().enumerate().skip(11) {
             let logits = mixed.forward(&ctx, token).unwrap();
             check(
@@ -489,7 +488,54 @@ fn packed_prefill_matches_serial_and_oracle_on_checkpoint_v1() {
                 lineage,
             );
         }
+        // Exactly full: a 12-position session takes 12 tokens, then refuses
+        // every further token on every entry point.
+        let mut full = Glm5NextSession::with_prefill_rows(&ctx, &weights, 12, 8).unwrap();
+        full.set_packed_lineage(lineage);
+        let logits = full.prefill_packed(&ctx, &tokens[..12]).unwrap();
+        check(&format!("{lineage:?} full prefill"), 11, &logits, lineage);
+        assert_eq!(full.position(), 12);
+        let next = &tokens[12..13];
+        assert_refused(&mut full, "full forward", |s| s.forward(&ctx, next[0]));
+        assert_refused(&mut full, "full advance", |s| s.advance(&ctx, next[0]));
+        assert_refused(&mut full, "full prefill", |s| s.prefill(&ctx, next));
+        assert_refused(&mut full, "full packed", |s| s.prefill_packed(&ctx, next));
     }
+    // Without packed scratch, prefill_packed falls back to the serial path,
+    // which refuses the whole request too.
+    let vocab = weights.config.vocab_size;
+    assert_refused(&mut serial, "fallback bad token", |s| {
+        s.prefill_packed(&ctx, &[tokens[0], tokens[1], vocab])
+    });
+}
+
+/// In this isolated test process nothing else allocates or frees Metal memory
+/// while a session is built, so the device-counter delta is the session's own
+/// allocation and must fit the device-priced ledger.
+fn assert_allocation_within_ledger(session: &Glm5NextSession<'_>) {
+    let (observed, priced) = (
+        session.observed_allocation_delta(),
+        session.ledger().session_buffer_bytes(),
+    );
+    eprintln!(
+        "session buffers: observed {observed} of {priced} priced ({:.1}%)",
+        100.0 * observed as f64 / priced as f64
+    );
+    assert!(observed <= priced, "observed {observed} > priced {priced}");
+}
+
+/// `request` is refused and leaves the position, the poison flag and every
+/// state bit unchanged.
+fn assert_refused<'w, T>(
+    session: &mut Glm5NextSession<'w>,
+    label: &str,
+    request: impl FnOnce(&mut Glm5NextSession<'w>) -> Result<T>,
+) {
+    let (position, before) = (session.position(), state_bits(session));
+    assert!(request(session).is_err(), "{label} was accepted");
+    assert_eq!(session.position(), position, "{label}: position moved");
+    assert!(!session.poisoned, "{label}: refusal poisoned the session");
+    assert!(state_bits(session) == before, "{label}: state changed");
 }
 
 /// Fast packed prefill over 200 tokens (one 128-row grouped block plus a
@@ -526,11 +572,7 @@ fn packed_fast_matches_exact_over_a_grouped_block_and_tail() {
     let mut sessions = Vec::new();
     for lineage in [PackedLineage::Exact, PackedLineage::Fast] {
         let mut session = Glm5NextSession::with_prefill_rows(&ctx, &weights, 512, 512).unwrap();
-        eprintln!(
-            "packed session buffers: {} of {} priced",
-            session.allocated_bytes(),
-            session.ledger().session_buffer_bytes()
-        );
+        assert_allocation_within_ledger(&session);
         session.set_packed_lineage(lineage);
         let start = std::time::Instant::now();
         let logits = session.prefill_packed(&ctx, tokens).unwrap();

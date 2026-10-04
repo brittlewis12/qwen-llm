@@ -3,8 +3,10 @@
 //! The trunk leaves about 2.5 GiB of the 112 GiB Metal working set, so the
 //! ledger prices exactly what the session allocates: the native session builds
 //! every buffer from the [`BufferSpec`] lists below, and the ledger sums the
-//! same lists (rounded to the Metal allocation granule) before allocation.
-//! Retained weights come from the real retained-window plan.
+//! same lists through a [`BufferPricer`] before allocation. Live sessions price
+//! with the device; planning without a device uses the named
+//! [`apple_16k_price`] profile. All size arithmetic is checked. Retained
+//! weights come from the real retained-window plan.
 //!
 //! Layout: F32 recurrent/conv state; an append-only F16 cache of MLA latents
 //! and completed pooled indexer keys plus a 4-slot pending ring; decode scratch
@@ -16,8 +18,22 @@ use super::{FfnKind, Glm5NextConfig, Glm5NextError, MixerKind, Result};
 
 /// Command buffers, argument tables and allocator slack.
 pub const DYNAMIC_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
-/// Metal shared-buffer allocation granule priced per buffer.
-pub const ALLOCATION_GRANULE: u64 = 16 * 1024;
+/// Page granule of the device-free Apple silicon pricing profile.
+pub const APPLE_16K_GRANULE: u64 = 16 * 1024;
+
+/// Allocation price of one buffer of `logical_bytes`, or `None` when the
+/// buffer cannot be allocated (or its price is unrepresentable).
+pub type BufferPricer<'a> = &'a dyn Fn(u64) -> Option<u64>;
+
+/// Device-free planning profile for Apple silicon with 16 KiB pages and
+/// shared buffers priced at page granularity (M4 Max measured within it).
+/// Live admission prices with the device instead
+/// (`MetalContext::price_shared_buffer_upper`).
+pub fn apple_16k_price(logical_bytes: u64) -> Option<u64> {
+    logical_bytes
+        .max(1)
+        .checked_next_multiple_of(APPLE_16K_GRANULE)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BufferType {
@@ -63,18 +79,29 @@ impl BufferSpec {
         }
     }
 
-    pub fn bytes(&self) -> u64 {
-        self.shape.iter().product::<u64>() * self.dtype.bytes()
+    /// Logical bytes, or `None` if the shape's byte size overflows.
+    pub fn bytes(&self) -> Option<u64> {
+        self.shape
+            .iter()
+            .try_fold(self.dtype.bytes(), |acc, &dim| acc.checked_mul(dim))
     }
 
-    /// Bytes charged against the working set (rounded to the granule).
-    pub fn priced_bytes(&self) -> u64 {
-        self.bytes().max(1).div_ceil(ALLOCATION_GRANULE) * ALLOCATION_GRANULE
+    /// Price under `price`, with overflow and unallocatable sizes as errors.
+    pub fn priced_bytes(&self, price: BufferPricer<'_>) -> Result<u64> {
+        let bytes = self.bytes().ok_or(Glm5NextError::Overflow("buffer size"))?;
+        price(bytes).ok_or_else(|| Glm5NextError::Unsupported {
+            key: format!("buffer {}", self.name),
+            detail: format!("{bytes} bytes cannot be allocated on this device"),
+        })
     }
 }
 
-fn priced(specs: &[BufferSpec]) -> u64 {
-    specs.iter().map(BufferSpec::priced_bytes).sum()
+/// Checked sum of the priced specs.
+pub fn priced(specs: &[BufferSpec], price: BufferPricer<'_>) -> Result<u64> {
+    specs.iter().try_fold(0u64, |acc, spec| {
+        acc.checked_add(spec.priced_bytes(price)?)
+            .ok_or(Glm5NextError::Overflow("buffer prices"))
+    })
 }
 
 use BufferType::{F16, F32, I32};
@@ -138,7 +165,9 @@ pub fn decode_scratch_specs(c: &Glm5NextConfig) -> Vec<BufferSpec> {
     ]
 }
 
-/// Packed-prefill scratch for chunks of up to `rows` tokens.
+/// Packed-prefill scratch for chunks of up to `rows` tokens. Products of
+/// dimensions saturate, so an absurd `rows` fails [`BufferSpec::bytes`]
+/// instead of wrapping to a small shape.
 pub fn packed_scratch_specs(c: &Glm5NextConfig, rows: u64) -> Vec<BufferSpec> {
     let r = rows;
     let h = c.hidden_size as u64;
@@ -185,9 +214,13 @@ pub fn packed_scratch_specs(c: &Glm5NextConfig, rows: u64) -> Vec<BufferSpec> {
         z("dense_up", F32, &[c.dense_ffn_size as u64, r]),
         z("router", F32, &[e, r]),
         z("counts", I32, &[e]),
-        z("slots", I32, &[e * r]),
-        z("inner", F32, &[c.expert_ffn_size as u64, k * r]),
-        z("slot_out", F32, &[h, k * r]),
+        z("slots", I32, &[e.saturating_mul(r)]),
+        z(
+            "inner",
+            F32,
+            &[c.expert_ffn_size as u64, k.saturating_mul(r)],
+        ),
+        z("slot_out", F32, &[h, k.saturating_mul(r)]),
         z("routed", F32, &[h, r]),
         z("shared_gate", F32, &[c.shared_expert_ffn_size as u64, r]),
         z("shared_up", F32, &[c.shared_expert_ffn_size as u64, r]),
@@ -257,12 +290,15 @@ pub struct Glm5NextPhasePeaks {
 }
 
 impl Glm5NextMemoryLedger {
-    /// `prefill_rows == 0` prices a decode-only session.
+    /// Prices a session of `capacity` positions whose packed chunks hold up
+    /// to `prefill_rows` tokens (`0`: decode-only; at most `capacity`), with
+    /// every buffer priced by `price`.
     pub fn new(
         config: &Glm5NextConfig,
         retained_weight_bytes: u64,
         capacity: u64,
         prefill_rows: u64,
+        price: BufferPricer<'_>,
     ) -> Result<Self> {
         config.validate_release()?;
         if capacity == 0 || capacity > u64::from(config.context_length) {
@@ -274,22 +310,28 @@ impl Glm5NextMemoryLedger {
                 ),
             });
         }
+        if prefill_rows > capacity {
+            return Err(Glm5NextError::InvalidMetadata {
+                key: "prefill_rows".into(),
+                detail: format!("{prefill_rows} exceeds the session capacity {capacity}"),
+            });
+        }
         let c = config;
         let overflow = || Glm5NextError::Overflow("memory ledger");
         let kda = c.block_count(MixerKind::Kda) as u64;
         let mla = c.block_count(MixerKind::Mla) as u64;
         let moe = c.blocks.iter().filter(|b| b.ffn == FfnKind::Moe).count() as u64;
         let times = |n: u64, bytes: u64| n.checked_mul(bytes).ok_or_else(overflow);
-        let kda_state = times(kda, priced(&kda_state_specs(c)))?;
-        let mla_state = times(mla, priced(&mla_state_specs(c, capacity)))?;
-        let decode_scratch = priced(&decode_scratch_specs(c));
-        let decode_routes = times(moe, priced(&route_specs(c, None)))?;
+        let kda_state = times(kda, priced(&kda_state_specs(c), price)?)?;
+        let mla_state = times(mla, priced(&mla_state_specs(c, capacity), price)?)?;
+        let decode_scratch = priced(&decode_scratch_specs(c), price)?;
+        let decode_routes = times(moe, priced(&route_specs(c, None), price)?)?;
         let (packed_scratch, packed_routes) = if prefill_rows == 0 {
             (0, 0)
         } else {
             (
-                priced(&packed_scratch_specs(c, prefill_rows)),
-                times(moe, priced(&route_specs(c, Some(prefill_rows))))?,
+                priced(&packed_scratch_specs(c, prefill_rows), price)?,
+                times(moe, priced(&route_specs(c, Some(prefill_rows)), price)?)?,
             )
         };
         let sum = |terms: &[u64]| -> Result<u64> {
@@ -373,24 +415,24 @@ impl Glm5NextMemoryLedger {
         self.peaks.session
     }
 
-    /// Largest capacity whose peak fits `budget_bytes`, or `None` if even one
-    /// position does not fit.
+    /// Largest capacity (at least `prefill_rows`, and at least 1) whose peak
+    /// fits `budget_bytes`, or `None` if the smallest one does not fit.
     pub fn max_capacity(
         config: &Glm5NextConfig,
         retained_weight_bytes: u64,
         prefill_rows: u64,
         budget_bytes: u64,
+        price: BufferPricer<'_>,
     ) -> Result<Option<u64>> {
         let fits = |capacity: u64| -> Result<bool> {
-            Ok(
-                Self::new(config, retained_weight_bytes, capacity, prefill_rows)?.peak_bytes()
-                    <= budget_bytes,
-            )
+            let ledger = Self::new(config, retained_weight_bytes, capacity, prefill_rows, price)?;
+            Ok(ledger.peak_bytes() <= budget_bytes)
         };
-        if !fits(1)? {
+        let smallest = prefill_rows.max(1);
+        if !fits(smallest)? {
             return Ok(None);
         }
-        let (mut lo, mut hi) = (1u64, u64::from(config.context_length));
+        let (mut lo, mut hi) = (smallest, u64::from(config.context_length));
         while lo < hi {
             let mid = lo + (hi - lo).div_ceil(2);
             if fits(mid)? {

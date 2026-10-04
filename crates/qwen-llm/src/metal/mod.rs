@@ -301,6 +301,7 @@ mod moe_grouped_generic;
 mod norm;
 mod research;
 mod rope;
+mod routing;
 mod tensor;
 #[cfg(test)]
 mod test_support;
@@ -326,6 +327,7 @@ pub use moe_grouped_generic::*;
 pub use norm::*;
 pub use research::*;
 pub use rope::*;
+pub use routing::*;
 pub use tensor::*;
 pub use testing::*;
 pub use vjp::*;

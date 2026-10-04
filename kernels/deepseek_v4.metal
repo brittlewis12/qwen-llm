@@ -52,6 +52,12 @@ constant int DS4_ROUTE_NONFINITE_BIAS = -2;
 constant int DS4_ROUTE_INVALID_TOKEN = -3;
 constant int DS4_ROUTE_INVALID_EXPERT = -4;
 constant int DS4_ROUTE_NONFINITE_WEIGHT = -6;
+constant int DS4_ROUTE_INVALID_SHAPE = -7;
+
+// Learned single-token routing supports up to 16 simdgroups (512 experts, one
+// thread each) and top-k 16.
+constant uint ROUTE_MAX_GROUPS = 16;
+constant uint ROUTE_MAX_TOP_K = 16;
 
 constant int DS4_PACKED_ROUTE_STALE_ROUTE = -101;
 constant int DS4_PACKED_ROUTE_FAILED_ROUTE = -102;
@@ -94,26 +100,44 @@ inline void ds4_route_initialize(
     }
 }
 
-kernel void kernel_deepseek_v4_route_learned(
-        constant ds4_route_args & args [[buffer(0)]],
-        device const float * logits [[buffer(1)]],
-        device const float * correction_bias [[buffer(2)]],
-        device int * expert_ids [[buffer(3)]],
-        device float * weights [[buffer(4)]],
-        device int * status [[buffer(5)]],
-        uint tid [[thread_position_in_threadgroup]],
-        ushort sgitg [[simdgroup_index_in_threadgroup]],
-        ushort tiisg [[thread_index_in_simdgroup]]) {
-    threadgroup float group_scores[8];
-    threadgroup uint group_ids[8];
-    threadgroup uint selected_ids[6];
-    threadgroup uint route_error;
+struct route_score_sqrt_softplus {
+    static inline float apply(float x) { return ds4_router_score_exact(x); }
+};
+
+struct route_score_sigmoid {
+    static inline float apply(float x) { return 1.0f / (1.0f + exp(-x)); }
+};
+
+// One thread per expert: select the top-k of `score(logit) + bias` (lowest id
+// wins ties), then weight each selected expert by its unbiased score divided by
+// max(sum, 2^-14), times `routed_scale`.
+template <typename Score>
+inline void route_learned_impl(
+        constant ds4_route_args & args,
+        device const float * logits,
+        device const float * correction_bias,
+        device int * expert_ids,
+        device float * weights,
+        device int * status,
+        threadgroup float * group_scores,
+        threadgroup uint * group_ids,
+        threadgroup uint * selected_ids,
+        threadgroup uint & route_error,
+        uint tid,
+        ushort sgitg,
+        ushort tiisg,
+        ushort n_groups) {
     ds4_route_initialize(args, expert_ids, weights, status, tid);
+    if (args.top_k == 0 || args.top_k > ROUTE_MAX_TOP_K || args.top_k > args.expert_count ||
+        n_groups > ROUTE_MAX_GROUPS || args.expert_count > uint(n_groups) * 32u) {
+        if (tid == 0) status[0] = DS4_ROUTE_INVALID_SHAPE;
+        return;
+    }
     const bool active = tid < args.expert_count;
     const float logit = active ? logits[tid] : 0.0f;
     const float bias = active ? correction_bias[tid] : 0.0f;
     const float unbiased_score = active && isfinite(logit)
-        ? ds4_router_score_exact(logit)
+        ? Score::apply(logit)
         : 0.0f;
     float selection_score = unbiased_score + bias;
     const uint local_error = !active ? 0u
@@ -123,7 +147,7 @@ kernel void kernel_deepseek_v4_route_learned(
     if (tiisg == 0) group_ids[sgitg] = simd_error;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (sgitg == 0) {
-        const uint group_error = tiisg < 8 ? group_ids[tiisg] : 0u;
+        const uint group_error = tiisg < n_groups ? group_ids[tiisg] : 0u;
         const uint reduced_error = simd_max(group_error);
         if (tiisg == 0) route_error = reduced_error;
     }
@@ -148,8 +172,8 @@ kernel void kernel_deepseek_v4_route_learned(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if (sgitg == 0) {
-            const float candidate_score = tiisg < 8 ? group_scores[tiisg] : -INFINITY;
-            const uint candidate_id = tiisg < 8 ? group_ids[tiisg] : UINT_MAX;
+            const float candidate_score = tiisg < n_groups ? group_scores[tiisg] : -INFINITY;
+            const uint candidate_id = tiisg < n_groups ? group_ids[tiisg] : UINT_MAX;
             const float best_score = simd_max(candidate_score);
             const uint best_id = simd_min(
                 candidate_score == best_score ? candidate_id : UINT_MAX
@@ -164,10 +188,10 @@ kernel void kernel_deepseek_v4_route_learned(
     }
 
     if (tid == 0) {
-        float selected_weights[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        float selected_weights[ROUTE_MAX_TOP_K] = {};
         float sum = 0.0f;
         for (uint slot = 0; slot < args.top_k; ++slot) {
-            selected_weights[slot] = ds4_router_score_exact(logits[selected_ids[slot]]);
+            selected_weights[slot] = Score::apply(logits[selected_ids[slot]]);
             sum += selected_weights[slot];
         }
         const float denominator = max(sum, 6.1035156e-5f);
@@ -182,6 +206,32 @@ kernel void kernel_deepseek_v4_route_learned(
         status[0] = DS4_ROUTE_READY;
     }
 }
+
+#define ROUTE_LEARNED_KERNEL(NAME, SCORE)                                         \
+    kernel void NAME(                                                             \
+            constant ds4_route_args & args [[buffer(0)]],                         \
+            device const float * logits [[buffer(1)]],                            \
+            device const float * correction_bias [[buffer(2)]],                   \
+            device int * expert_ids [[buffer(3)]],                                \
+            device float * weights [[buffer(4)]],                                 \
+            device int * status [[buffer(5)]],                                    \
+            uint tid [[thread_position_in_threadgroup]],                          \
+            ushort sgitg [[simdgroup_index_in_threadgroup]],                      \
+            ushort tiisg [[thread_index_in_simdgroup]],                           \
+            ushort n_groups [[simdgroups_per_threadgroup]]) {                     \
+        threadgroup float group_scores[ROUTE_MAX_GROUPS];                         \
+        threadgroup uint group_ids[ROUTE_MAX_GROUPS];                             \
+        threadgroup uint selected_ids[ROUTE_MAX_TOP_K];                           \
+        threadgroup uint route_error;                                             \
+        route_learned_impl<SCORE>(args, logits, correction_bias, expert_ids,      \
+            weights, status, group_scores, group_ids, selected_ids, route_error, \
+            tid, sgitg, tiisg, n_groups);                                         \
+    }
+
+// DeepSeek V4: sqrt(softplus(logit)).
+ROUTE_LEARNED_KERNEL(kernel_deepseek_v4_route_learned, route_score_sqrt_softplus)
+// GLM-5.3: sigmoid(logit).
+ROUTE_LEARNED_KERNEL(kernel_route_learned_sigmoid, route_score_sigmoid)
 
 kernel void kernel_deepseek_v4_route_hash(
         constant ds4_route_args & args [[buffer(0)]],

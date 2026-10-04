@@ -360,22 +360,25 @@ impl DeepSeekV4MoeScratch {
         record: &DeepSeekV4RouteRecord,
     ) -> Result<(), DeepSeekV4MetalError> {
         let c = self.config;
-        validate_f32(
-            correction_bias,
-            &[c.expert_count as u64],
-            false,
-            "GPU router correction bias",
-        )?;
-        self.encode_route_gpu(
+        self.validate_scratch()?;
+        record.validate(c)?;
+        let route = LearnedRoute {
+            experts: c.expert_count,
+            top_k: c.top_k,
+            score: RouteScore::SqrtSoftplus,
+            routed_scale: c.routed_scale,
+        };
+        encode_route_learned(
             ctx,
             enc,
+            &route,
+            &self.logits,
             correction_bias,
-            0,
-            c.expert_count,
-            "kernel_deepseek_v4_route_learned",
-            DEEPSEEK_V4_ROUTE_MAX_EXPERTS,
-            record,
-        )
+            &record.expert_ids,
+            &record.weights,
+            &record.status,
+        )?;
+        Ok(())
     }
 
     pub(super) fn encode_route_hash_gpu(

@@ -290,6 +290,17 @@ impl Glm5NextSession<'_> {
         logits.ok_or_else(|| Glm5NextMetalError::Invalid("missing prefill logits".into()))
     }
 
+    /// Packed sparse selector statuses `[MLA block][chunk row]` (tests).
+    #[cfg(test)]
+    pub(super) fn packed_sparse_statuses(&self) -> Result<(Vec<i32>, usize)> {
+        let sp = self
+            .packed
+            .as_ref()
+            .and_then(|p| p.sparse.as_ref())
+            .ok_or_else(|| Glm5NextMetalError::Invalid("no packed sparse scratch".into()))?;
+        Ok((read_i32(&sp.select_status)?, sp.rows))
+    }
+
     /// Positions left in the dense range (visible length below the sparse
     /// frontier) from the current position.
     fn dense_rows_remaining(&self) -> usize {
@@ -329,7 +340,12 @@ impl Glm5NextSession<'_> {
             let visible: Vec<i32> = (0..sp.rows)
                 .map(|r| (self.position + r + 1).min(self.capacity) as i32)
                 .collect();
-            let pools: Vec<i32> = visible.iter().map(|&l| l / pool as i32).collect();
+            #[allow(unused_mut)]
+            let mut pools: Vec<i32> = visible.iter().map(|&l| l / pool as i32).collect();
+            #[cfg(test)]
+            if let Some(row) = self.corrupt_sparse_row.take() {
+                pools[row] = 0;
+            }
             write_i32(&sp.visible_rows, &visible)?;
             write_i32(&sp.visible_pools, &pools)?;
             // Unwritten slots fail the check below.

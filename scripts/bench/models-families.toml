@@ -74,8 +74,9 @@ tg_depths = [0, 8192]
 
 # The pinned llama.cpp (b11182) predates GLM5-Next support (upstream #27773,
 # 2026-09-30); llama.cpp comparisons for this model use the GLM oracle pin
-# (docs/bench/2026-10-04-glm53-*). Context stays below the sparse-attention
-# frontier (visible length 2052) until P4, so tg runs at depth 0 only.
+# (docs/bench/2026-10-04-glm53-*). Depth 4096 decodes in the sparse range
+# (visible length 2052 and up) after an untimed packed fill that crosses the
+# frontier; timed pp4096 is in docs/bench/2026-10-04-glm53-p4-sparse.
 [[models]]
 tag = "glm53-flash"
 display = "GLM-5.3-Flash"
@@ -84,4 +85,4 @@ kind = "moe"
 quant = "UD-IQ3_XXS"
 path = "/Volumes/wdblack/weights-archive/glm-5.3-flash-ud-iq3_xxs/glm5-next/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf"
 lcpp = false
-tg_depths = [0]
+tg_depths = [0, 4096]

@@ -1064,7 +1064,10 @@ fn packed_fast_qualifies_across_chunkings_with_teacher_forcing() {
             oracle_kls.push(kl_divergence(&expected, &last));
             oracle_top1 += usize::from(argmax(&expected) == argmax(&last));
         }
-        assert!(last == reference_prefill, "exact packed != serial logits");
+        assert!(
+            logit_bits(&[last]) == logit_bits(std::slice::from_ref(&reference_prefill)),
+            "exact packed != serial logits"
+        );
         assert!(
             state_bits(&serial) == reference_bits,
             "exact packed != serial state"
@@ -1310,7 +1313,8 @@ const MLA_BLOCKS: [u32; 11] = [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43];
 ///   strict loser (llama.cpp fills threshold ties in atomic order);
 /// - selection on native scores equals llama.cpp's set when the 512th/513th
 ///   gap exceeds twice the measured score error, else agrees on every pool
-///   beyond that error from the threshold;
+///   beyond twice that error from the threshold (two scores can move in
+///   opposite directions); every set has 512 distinct visible pools;
 /// - at position 2050 (visible length 2051) llama.cpp selects every visible
 ///   pool (dense equivalence).
 #[test]
@@ -1483,11 +1487,17 @@ fn sparse_selection_replays_llama_cpp_indexer_captures() {
                 assert_eq!(read_i32(&counts).unwrap()[0], TOP as i32, "{label}");
                 read_i32(&ids).unwrap().into_iter().collect()
             };
+            // A selection: exactly 512 distinct visible pools, containing
+            // every pool above the threshold band and none below it.
             let respects = |set: &std::collections::BTreeSet<i32>, band: f32| {
-                reference.iter().enumerate().all(|(pool, &s)| {
-                    let inside = set.contains(&(pool as i32));
-                    !(s > threshold + band && !inside) && !(s < threshold - band && inside)
-                })
+                set.len() == TOP
+                    && set
+                        .iter()
+                        .all(|&id| id >= 0 && (id as usize) < visible_pools)
+                    && reference.iter().enumerate().all(|(pool, &s)| {
+                        let inside = set.contains(&(pool as i32));
+                        !(s > threshold + band && !inside) && !(s < threshold - band && inside)
+                    })
             };
             assert!(respects(&llama_set, 0.0), "{label}: llama.cpp set");
             let on_llama = select(reference);
@@ -1507,8 +1517,10 @@ fn sparse_selection_replays_llama_cpp_indexer_captures() {
                     threshold - next
                 );
             } else {
+                // Two scores may each move by the measured error in opposite
+                // directions, so membership is ambiguous within 2 errors.
                 assert!(
-                    respects(&on_native, error),
+                    respects(&on_native, 2.0 * error),
                     "{label}: native scores near the threshold"
                 );
             }
@@ -1747,7 +1759,7 @@ fn packed_sparse_prefill_matches_serial_across_the_frontier() {
     };
     for (rows, prefix) in [(512usize, 0usize), (100, 37), (64, 3)] {
         let (session, logits, ms) = packed_run(PackedLineage::Exact, rows, prefix);
-        let equal = logits == serial_logits;
+        let equal = logit_bits(&[logits]) == logit_bits(std::slice::from_ref(&serial_logits));
         let state = state_bits(&session) == serial_bits;
         eprintln!(
             "exact rows {rows} prefix {prefix}: {ms:.0} ms; logits equal {equal}, state equal {state}"
@@ -1801,7 +1813,10 @@ fn packed_sparse_prefill_matches_serial_across_the_frontier() {
 /// Packed prefill of sparse-v1's 2093 tokens (crossing the frontier inside
 /// the fifth 512-row chunk) against llama.cpp serial at position 2092.
 /// Bounds frozen before the first observation: Exact KL <= 1e-2, Fast KL
-/// <= 2e-2, choice regret <= 0.2 both ways.
+/// <= 2e-2, choice regret <= 0.2 both ways. Also: a session of capacity
+/// exactly 2052 (KL <= 1e-2 at 2051, then every entry point refuses), and an
+/// injected selection failure that must fail and poison the chunk with
+/// per-(block, row) statuses intact.
 #[test]
 #[ignore = "loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, the sparse-v1 oracle and an idle GPU"]
 fn packed_sparse_prefill_matches_llama_cpp_at_the_prompt_end() {
@@ -1844,5 +1859,69 @@ fn packed_sparse_prefill_matches_llama_cpp_at_the_prompt_end() {
             ));
         }
     }
+
+    // Capacity exactly 2052: the last prompt row is the first sparse row (a
+    // one-row microbatch at chunk offset 3); then every entry point refuses
+    // another token without moving or poisoning the session.
+    const FRONTIER: usize = 2052;
+    let mut reference = ReferenceStream::open(&sparse_oracle_dir().join("serial.bin"));
+    let mut at_frontier = Vec::new();
+    for _ in 0..FRONTIER {
+        at_frontier = reference.next().2;
+    }
+    let mut full = Glm5NextSession::with_prefill_rows(&ctx, &weights, FRONTIER, 512).unwrap();
+    full.set_packed_lineage(PackedLineage::Exact);
+    let logits = full.prefill_packed(&ctx, &tokens[..FRONTIER]).unwrap();
+    let kl = kl_divergence(&at_frontier, &logits);
+    eprintln!(
+        "capacity {FRONTIER}: exact packed vs llama.cpp at {}: kl {kl:.3e}",
+        FRONTIER - 1
+    );
+    if !within(kl, 1e-2) {
+        failures.push(format!("capacity {FRONTIER}: kl {kl:.3e}"));
+    }
+    let next = &tokens[FRONTIER..FRONTIER + 1];
+    assert_refused(&mut full, "full forward", |s| s.forward(&ctx, next[0]));
+    assert_refused(&mut full, "full advance", |s| s.advance(&ctx, next[0]));
+    assert_refused(&mut full, "full prefill", |s| s.prefill(&ctx, next));
+    assert_refused(&mut full, "full packed", |s| s.prefill_packed(&ctx, next));
+    drop(full);
+
+    // An injected selection failure (zero visible pools for chunk row 10 of
+    // the chunk crossing the frontier) fails the chunk in MLA block 0 and
+    // poisons the session; the statuses show exactly that row failing in
+    // every block while every other sparse row succeeds.
+    let mut broken = Glm5NextSession::with_prefill_rows(&ctx, &weights, tokens.len(), 512).unwrap();
+    broken.prefill_packed(&ctx, &tokens[..2048]).unwrap();
+    broken.corrupt_sparse_row = Some(10);
+    let error = broken
+        .prefill_packed(&ctx, &tokens[2048..])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("MLA block 0 row 10 sparse selection failed with status 1"),
+        "{error}"
+    );
+    let (statuses, rows) = broken.packed_sparse_statuses().unwrap();
+    let sparse_rows = 3..tokens.len() - 2048;
+    for block in 0..MLA_BLOCKS.len() {
+        for row in sparse_rows.clone() {
+            let expected = if row == 10 {
+                1
+            } else {
+                crate::metal::SELECT_STATUS_OK
+            };
+            assert_eq!(
+                statuses[block * rows + row],
+                expected,
+                "block {block} row {row}"
+            );
+        }
+    }
+    assert!(
+        broken.poisoned,
+        "a failed selection must poison the session"
+    );
+    assert!(broken.forward(&ctx, tokens[0]).is_err());
     assert!(failures.is_empty(), "{failures:#?}");
 }

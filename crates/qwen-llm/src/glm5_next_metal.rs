@@ -1,5 +1,7 @@
-//! Native Metal decode for GLM-5.3-Flash: serial tokens with dense attention
-//! (visible length below the sparse frontier, 2052).
+//! Native Metal execution for GLM-5.3-Flash: serial decode and packed
+//! prefill (`packed`), with dense latent attention below visible length 2052
+//! and sparse DSA selection (indexer scores, top-512 pools plus the
+//! incomplete pool's tail, selected attention) from there on.
 //!
 //! Composition only: every operation is a family-neutral, allocation-free
 //! encoder in [`crate::metal`]. One command buffer per token; per-layer route
@@ -646,6 +648,10 @@ pub struct Glm5NextSession<'w> {
     ledger: Glm5NextMemoryLedger,
     /// Net device-counter change across buffer construction (diagnostic).
     observed_allocation_delta: u64,
+    /// Test hook: the next packed chunk sees zero visible pools for this
+    /// chunk row, so its sparse selection fails in every MLA block.
+    #[cfg(test)]
+    corrupt_sparse_row: Option<usize>,
 }
 
 impl<'w> Glm5NextSession<'w> {
@@ -722,6 +728,8 @@ impl<'w> Glm5NextSession<'w> {
             packed,
             ledger,
             observed_allocation_delta,
+            #[cfg(test)]
+            corrupt_sparse_row: None,
         })
     }
 

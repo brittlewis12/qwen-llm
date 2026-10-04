@@ -205,12 +205,12 @@ pub(crate) fn with_family_bench<R>(
             body(&mut bench)
         }
         ModelFamily::Glm5Next => {
-            let frontier = qwen_llm::glm5_next::Glm5NextConfig::from_gguf(gguf)
+            let context = qwen_llm::glm5_next::Glm5NextConfig::from_gguf(gguf)
                 .context("bind GLM-5.3-Flash configuration")?
-                .sparse_frontier() as usize;
+                .context_length as usize;
             ensure!(
-                extent.forwards < frontier,
-                "GLM-5.3-Flash rows must stay below visible length {frontier} until sparse attention lands (need {})",
+                extent.forwards <= context,
+                "GLM-5.3-Flash rows must stay within the checkpoint context {context} (need {})",
                 extent.forwards
             );
             let weights = Glm5NextWeights::load(ctx, gguf).context("load GLM-5.3-Flash weights")?;

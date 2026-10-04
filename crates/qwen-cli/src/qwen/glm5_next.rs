@@ -1,7 +1,8 @@
-//! GLM-5.3-Flash: bounded raw serial generation in the dense attention range
-//! (visible length below 2052). Chat templating, serve, lens and sparse
-//! selection are not implemented; every other surface refuses rather than
-//! falling through to Qwen protocols.
+//! GLM-5.3-Flash: bounded raw generation up to the checkpoint context
+//! (dense attention below visible length 2052, sparse DSA selection from
+//! there on) within device memory. Chat templating, serve and lens are not
+//! implemented; every other surface refuses rather than falling through to
+//! Qwen protocols.
 
 use super::*;
 use qwen_llm::glm5_next::{self, ExecutionMode, Glm5NextModel};
@@ -11,21 +12,23 @@ use serde_json::{Value, json};
 const FAMILY: &str = "GLM-5.3-Flash";
 
 /// Header-only artifact admission: strict binding, serial-decode weight
-/// coverage and the stop set. Not device or numerical qualification.
+/// coverage and the stop set; returns the checkpoint context. Not device or
+/// numerical qualification.
 fn artifact_admission(gguf: &GgufFile) -> std::result::Result<u32, glm5_next::Glm5NextError> {
     let model = Glm5NextModel::from_gguf(gguf)?;
     model.validate_execution(ExecutionMode::SerialDecode)?;
     glm5_next::generation_stops(gguf, model.config.vocab_size)?;
-    Ok(model.config.sparse_frontier())
+    Ok(model.config.context_length)
 }
 
 pub(crate) fn capability_projection(gguf: &GgufFile) -> Result<Value> {
     let admission = artifact_admission(gguf);
     let run = match &admission {
-        Ok(frontier) => json!({
+        Ok(context) => json!({
             "status": "conditional", "implementation_status": "partial", "scope": "raw_only",
             "artifact_admission": {"status": "passed"},
-            "capacity_policy": format!("dense_attention_range_below_{frontier}_and_device_memory"),
+            "capacity_policy": format!("checkpoint_context_{context}_and_device_memory"),
+            "attention": "dense_below_2052_sparse_dsa_from_2052",
             "prefill": "packed_fast", "native_tokenizer": true, "latent_cache": "f16",
         }),
         Err(error) => json!({
@@ -99,8 +102,9 @@ fn prepare_raw(
     }
 }
 
-/// Forwards for the request, bounded by the dense attention range.
-fn capacity(args: &Args, prompt_tokens: usize, frontier: u32) -> Result<usize> {
+/// Forwards for the request, bounded by the checkpoint context (device
+/// memory is admitted when the session is created).
+fn capacity(args: &Args, prompt_tokens: usize, context: u32) -> Result<usize> {
     let required = required_forwards(FAMILY, prompt_tokens, args.tokens, None)?;
     let capacity = args.max_context_tokens.unwrap_or(required);
     ensure!(
@@ -108,8 +112,8 @@ fn capacity(args: &Args, prompt_tokens: usize, frontier: u32) -> Result<usize> {
         "{FAMILY} requires {required} forwards; requested capacity {capacity} is smaller"
     );
     ensure!(
-        capacity < frontier as usize,
-        "{FAMILY} currently supports visible lengths below {frontier} (sparse attention is not implemented); this request needs {capacity}"
+        capacity <= context as usize,
+        "{FAMILY} supports at most {context} positions (checkpoint context); this request needs {capacity}"
     );
     Ok(capacity)
 }
@@ -122,7 +126,7 @@ pub(crate) fn run_raw(
 ) -> Result<()> {
     let request_t0 = Instant::now();
     let (text, source) = prepare_raw(invocation, args, explicit)?;
-    let frontier = artifact_admission(gguf).with_context(|| format!("admit {FAMILY} artifact"))?;
+    let context = artifact_admission(gguf).with_context(|| format!("admit {FAMILY} artifact"))?;
     let vocab_size = glm5_next::RELEASE_VOCAB_SIZE;
     let tokenizer_t0 = Instant::now();
     let tokenizer = Tokenizer::from_gguf(gguf).context("build GLM-5.3 native tokenizer")?;
@@ -134,7 +138,7 @@ pub(crate) fn run_raw(
         .enumerate()
         .map(|(i, id)| checked_token_id(id, vocab_size, &format!("prompt[{i}]")))
         .collect::<Result<Vec<_>>>()?;
-    let capacity = capacity(args, tokens.len(), frontier)?;
+    let capacity = capacity(args, tokens.len(), context)?;
     let stops = glm5_next::generation_stops(gguf, vocab_size)?;
     let mut sampler = Sampler::new(cli_sampling_config(args)?)?;
     shutdown::checkpoint()?;
@@ -263,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn capacity_stays_in_the_dense_range() {
+    fn capacity_stays_within_the_checkpoint_context() {
         let (args, ..) = parse(&[
             "qwen",
             "run",
@@ -274,9 +278,11 @@ mod tests {
             "-n",
             "16",
         ]);
-        assert_eq!(capacity(&args, 10, 2052).unwrap(), 25);
-        let error = capacity(&args, 2040, 2052).unwrap_err().to_string();
-        assert!(error.contains("below 2052"), "{error}");
+        assert_eq!(capacity(&args, 10, 1 << 20).unwrap(), 25);
+        // Past the sparse frontier is admitted; past the checkpoint is not.
+        assert_eq!(capacity(&args, 4000, 1 << 20).unwrap(), 4015);
+        let error = capacity(&args, 2040, 2048).unwrap_err().to_string();
+        assert!(error.contains("at most 2048"), "{error}");
         let (args, ..) = parse(&[
             "qwen",
             "run",
@@ -289,6 +295,6 @@ mod tests {
             "--max-context-tokens",
             "20",
         ]);
-        assert!(capacity(&args, 10, 2052).is_err());
+        assert!(capacity(&args, 10, 1 << 20).is_err());
     }
 }

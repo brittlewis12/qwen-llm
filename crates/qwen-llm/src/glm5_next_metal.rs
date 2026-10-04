@@ -403,6 +403,7 @@ pub struct Glm5NextSession<'w> {
     layers: Vec<LayerState>,
     routes: Vec<Option<RouteRecord>>,
     s: Scratch,
+    packed: Option<packed::PackedScratch>,
     ledger: Glm5NextMemoryLedger,
 }
 
@@ -410,6 +411,18 @@ impl<'w> Glm5NextSession<'w> {
     /// Allocates all session state for `capacity` positions (dense range only)
     /// after admitting the ledger's session and decode terms.
     pub fn new(ctx: &MetalContext, weights: &'w Glm5NextWeights, capacity: usize) -> Result<Self> {
+        Self::with_prefill_rows(ctx, weights, capacity, 0)
+    }
+
+    /// Like [`Self::new`], also allocating packed-prefill scratch for chunks of
+    /// up to `prefill_rows` tokens (0: serial prefill only). The ledger prices
+    /// the packed activations before allocation.
+    pub fn with_prefill_rows(
+        ctx: &MetalContext,
+        weights: &'w Glm5NextWeights,
+        capacity: usize,
+        prefill_rows: usize,
+    ) -> Result<Self> {
         let c = &weights.config;
         let frontier = c.sparse_frontier() as usize;
         if capacity == 0 || capacity >= frontier {
@@ -417,8 +430,13 @@ impl<'w> Glm5NextSession<'w> {
                 "capacity {capacity} must be within the dense range 1..{frontier} until sparse selection lands"
             ));
         }
-        let ledger = Glm5NextMemoryLedger::new(c, weights.retained_bytes, capacity as u64, 1)?;
-        let session_bytes = ledger.phase_peaks().decode - weights.retained_bytes;
+        let ledger = Glm5NextMemoryLedger::new(
+            c,
+            weights.retained_bytes,
+            capacity as u64,
+            prefill_rows.max(1) as u64,
+        )?;
+        let session_bytes = ledger.peak_bytes() - weights.retained_bytes;
         // Admission and the allocations it prices form one transaction.
         let _allocation = ctx.begin_allocation_transaction();
         let admission =
@@ -520,6 +538,9 @@ impl<'w> Glm5NextSession<'w> {
             final_normed: zeros(ctx, &[h])?,
             logits: zeros(ctx, &[c.vocab_size as u64])?,
         };
+        let packed = (prefill_rows > 0)
+            .then(|| packed::PackedScratch::new(ctx, c, prefill_rows))
+            .transpose()?;
         Ok(Self {
             weights,
             capacity,
@@ -528,8 +549,16 @@ impl<'w> Glm5NextSession<'w> {
             layers,
             routes,
             s,
+            packed,
             ledger,
         })
+    }
+
+    /// Selects the packed-prefill arithmetic (no effect without packed scratch).
+    pub fn set_packed_lineage(&mut self, lineage: PackedLineage) {
+        if let Some(packed) = self.packed.as_mut() {
+            packed.lineage = lineage;
+        }
     }
 
     pub fn position(&self) -> usize {
@@ -1103,6 +1132,9 @@ fn matvec(
     crate::metal_forward::encode_mat_vec_dispatch(ctx, enc, weight, x, y, n_in, n_out)?;
     Ok(())
 }
+
+mod packed;
+pub use packed::PackedLineage;
 
 #[cfg(test)]
 mod tests;

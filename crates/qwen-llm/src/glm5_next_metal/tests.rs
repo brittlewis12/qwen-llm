@@ -315,3 +315,134 @@ fn checkpoint_v1_matches_llama_cpp_oracle() {
         ctx.current_allocated_size()
     );
 }
+
+/// Packed prefill against the same oracle. Exact lineage (decode kernels per
+/// row) must reproduce the serial session: one 15-row chunk, 4-row chunks
+/// (pools and recurrent state continue across chunks), and packed prefill of
+/// 11 tokens followed by serial decode. Fast lineage (half-staged batched
+/// projections and grouped experts, as in llama.cpp's batched prefill) must
+/// keep top-1 and stay within a frozen KL and state envelope.
+#[test]
+#[ignore = "loads the 109.5 GiB GLM-5.3 trunk; requires GLM53_GGUF, the ckpt-v1 oracle and an idle GPU"]
+fn packed_prefill_matches_serial_and_oracle_on_checkpoint_v1() {
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let ctx = MetalContext::new().expect("Metal context (production lease)");
+    let gguf = GgufFile::open(&path).unwrap();
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let tokens = checkpoint_tokens();
+    let reference = read_reference_logits(&oracle_dir().join("logits.bin"));
+    let mut serial = Glm5NextSession::new(&ctx, &weights, 256).expect("serial session");
+    let mut serial_logits = Vec::new();
+    for &token in &tokens {
+        serial_logits.push(serial.forward(&ctx, token).unwrap());
+    }
+    let check = |label: &str, position: usize, logits: &[f32], lineage: PackedLineage| {
+        assert_finite(label, logits);
+        let expected = &reference[position].1;
+        let kl = kl_divergence(expected, logits);
+        let drift = logits
+            .iter()
+            .zip(&serial_logits[position])
+            .map(|(a, e)| (a - e).abs())
+            .fold(0.0f32, f32::max);
+        eprintln!(
+            "{label} pos {position:2}: kl vs llama.cpp {kl:.3e} max|dlogit| vs serial {drift:.3e}"
+        );
+        assert_eq!(
+            argmax(logits),
+            argmax(expected),
+            "{label} pos {position}: top-1"
+        );
+        match lineage {
+            PackedLineage::Exact => assert!(drift <= 1e-6, "{label} pos {position}: drift {drift}"),
+            PackedLineage::Fast => assert!(
+                kl.is_finite() && kl < 1e-3,
+                "{label} pos {position}: KL {kl}"
+            ),
+        }
+    };
+    // Fast envelope: llama.cpp's own batched prefill on this artifact differs
+    // from its serial decode by KL up to 1.7e-2 and max |dlogit| up to 1.56
+    // (ckpt-v1, glm53_oracle --batch); Fast must stay tighter on logits. KDA
+    // state amplifies input rounding (block 18 turns 5e-4 input error into
+    // 2e-2 state error while Exact, same kernel, is bitwise), so the Fast
+    // state bound only catches gross faults.
+    let state_bound = |lineage| match lineage {
+        PackedLineage::Exact => 1e-6,
+        PackedLineage::Fast => 2.5e-1,
+    };
+    for lineage in [PackedLineage::Exact, PackedLineage::Fast] {
+        for rows in [16usize, 4] {
+            let mut packed = Glm5NextSession::with_prefill_rows(&ctx, &weights, 256, rows).unwrap();
+            packed.set_packed_lineage(lineage);
+            let start = std::time::Instant::now();
+            let logits = packed.prefill_packed(&ctx, &tokens).unwrap();
+            eprintln!(
+                "{lineage:?} rows {rows}: {:.1} ms for {} tokens",
+                start.elapsed().as_secs_f64() * 1e3,
+                tokens.len()
+            );
+            check(&format!("{lineage:?} rows {rows}"), 14, &logits, lineage);
+            assert_eq!(packed.position(), tokens.len());
+            let bound = state_bound(lineage);
+            for (layer, (a, b)) in packed.layers.iter().zip(&serial.layers).enumerate() {
+                let error = match (a, b) {
+                    (
+                        LayerState::Kda {
+                            state: sa,
+                            conv: ca,
+                        },
+                        LayerState::Kda {
+                            state: sb,
+                            conv: cb,
+                        },
+                    ) => {
+                        let es = relative_error(&read_f32(sa).unwrap(), &read_f32(sb).unwrap());
+                        let ec = relative_error(&read_f32(ca).unwrap(), &read_f32(cb).unwrap());
+                        if lineage == PackedLineage::Fast && rows == 16 {
+                            eprintln!("  layer {layer:2}: kda state {es:.3e} conv {ec:.3e}");
+                        }
+                        es.max(ec)
+                    }
+                    (
+                        LayerState::Mla {
+                            pooled: pa,
+                            latent: la,
+                            ..
+                        },
+                        LayerState::Mla {
+                            pooled: pb,
+                            latent: lb,
+                            ..
+                        },
+                    ) => relative_error(
+                        &read_f16(pa).unwrap()[..3 * 128],
+                        &read_f16(pb).unwrap()[..3 * 128],
+                    )
+                    .max(relative_error(
+                        &read_f16(la).unwrap()[..15 * 512],
+                        &read_f16(lb).unwrap()[..15 * 512],
+                    )),
+                    _ => unreachable!("layer kinds match"),
+                };
+                assert!(
+                    error <= bound,
+                    "{lineage:?} rows {rows} layer {layer}: state {error:.3e}"
+                );
+            }
+        }
+        let mut mixed = Glm5NextSession::with_prefill_rows(&ctx, &weights, 256, 8).unwrap();
+        mixed.set_packed_lineage(lineage);
+        let logits = mixed.prefill_packed(&ctx, &tokens[..11]).unwrap();
+        check(&format!("{lineage:?} mixed prefill"), 10, &logits, lineage);
+        for (position, &token) in tokens.iter().enumerate().skip(11) {
+            let logits = mixed.forward(&ctx, token).unwrap();
+            check(
+                &format!("{lineage:?} mixed decode"),
+                position,
+                &logits,
+                lineage,
+            );
+        }
+    }
+}

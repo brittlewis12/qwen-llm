@@ -135,6 +135,7 @@ int main(int argc, char ** argv) {
         }
         std::string captures;
         std::string steps;
+        bool batched = false;
         while (!args.empty() && args[0].rfind("--", 0) == 0) {
             const std::string flag = args[0];
             args.erase(args.begin());
@@ -142,6 +143,8 @@ int main(int argc, char ** argv) {
                 captures = kDefaultCaptures;
             } else if (flag == "--capture-checkpoint") {
                 captures = std::string(kDefaultCaptures) + "," + kCheckpointExtra;
+            } else if (flag == "--batch") {
+                batched = true;
             } else if ((flag == "--capture" || flag == "--steps") && !args.empty()) {
                 (flag == "--capture" ? captures : steps) = args[0];
                 args.erase(args.begin());
@@ -151,7 +154,7 @@ int main(int argc, char ** argv) {
         }
         if (args.size() < 3) {
             throw std::runtime_error(
-                "usage: glm53_oracle [--capture NAME,... | --capture-default | --capture-checkpoint] "
+                "usage: glm53_oracle [--batch] [--capture NAME,... | --capture-default | --capture-checkpoint] "
                 "[--steps I,...] MODEL OUTPUT ID... (1..4096 IDs)");
         }
         const std::string model_path = args[0];
@@ -173,6 +176,7 @@ int main(int argc, char ** argv) {
             state->steps.insert(value);
         }
         if (!steps.empty() && state->names.empty()) throw std::runtime_error("--steps requires a capture set");
+        if (batched && !state->names.empty()) throw std::runtime_error("--batch does not support captures");
 
         llama_backend_init();
         auto mp = llama_model_default_params();
@@ -185,8 +189,9 @@ int main(int argc, char ** argv) {
 
         auto cp = llama_context_default_params();
         cp.n_ctx = std::max(256u, (count + 255u) / 256u * 256u);
-        cp.n_batch = 1;
-        cp.n_ubatch = 1;
+        // --batch: one llama_decode over every ID (batched prompt kernels).
+        cp.n_batch = batched ? count : 1;
+        cp.n_ubatch = batched ? count : 1;
         cp.n_seq_max = 1;
         cp.n_threads = 4;
         cp.n_threads_batch = 4;
@@ -214,18 +219,7 @@ int main(int argc, char ** argv) {
         output.write("GLMREF01", 8);
         write_u32(output, static_cast<uint32_t>(vocab));
         write_u32(output, count);
-        auto batch = llama_batch_init(1, 0, 1);
-        batch.n_tokens = 1;
-        batch.n_seq_id[0] = 1;
-        batch.seq_id[0][0] = 0;
-        batch.logits[0] = true;
-        for (uint32_t i = 0; i < count; ++i) {
-            state->step = i;
-            batch.token[0] = tokens[i];
-            batch.pos[0] = static_cast<llama_pos>(i);
-            if (llama_decode(context.get(), batch) != 0) throw std::runtime_error("decode failed");
-            if (!state->error.empty()) throw std::runtime_error(state->error);
-            const float * logits = llama_get_logits_ith(context.get(), -1);
+        const auto write_logits = [&](uint32_t i, const float * logits) {
             if (!logits) throw std::runtime_error("missing logits");
             write_u32(output, i);
             write_u32(output, static_cast<uint32_t>(tokens[i]));
@@ -234,6 +228,32 @@ int main(int argc, char ** argv) {
                 uint32_t bits;
                 std::memcpy(&bits, &logits[j], sizeof(bits));
                 write_u32(output, bits);
+            }
+        };
+        auto batch = llama_batch_init(batched ? static_cast<int32_t>(count) : 1, 0, 1);
+        if (batched) {
+            batch.n_tokens = static_cast<int32_t>(count);
+            for (uint32_t i = 0; i < count; ++i) {
+                batch.token[i] = tokens[i];
+                batch.pos[i] = static_cast<llama_pos>(i);
+                batch.n_seq_id[i] = 1;
+                batch.seq_id[i][0] = 0;
+                batch.logits[i] = true;
+            }
+            if (llama_decode(context.get(), batch) != 0) throw std::runtime_error("decode failed");
+            for (uint32_t i = 0; i < count; ++i) write_logits(i, llama_get_logits_ith(context.get(), static_cast<int32_t>(i)));
+        } else {
+            batch.n_tokens = 1;
+            batch.n_seq_id[0] = 1;
+            batch.seq_id[0][0] = 0;
+            batch.logits[0] = true;
+            for (uint32_t i = 0; i < count; ++i) {
+                state->step = i;
+                batch.token[0] = tokens[i];
+                batch.pos[0] = static_cast<llama_pos>(i);
+                if (llama_decode(context.get(), batch) != 0) throw std::runtime_error("decode failed");
+                if (!state->error.empty()) throw std::runtime_error(state->error);
+                write_logits(i, llama_get_logits_ith(context.get(), -1));
             }
         }
         llama_batch_free(batch);
@@ -250,7 +270,8 @@ int main(int argc, char ** argv) {
         manifest << "{\n  \"identity\": {\"revision\": \"" << GLM53_REFERENCE_REVISION << "\", \"wrapper_sha256\": \""
                  << GLM53_WRAPPER_SHA256 << "\", \"cmake_sha256\": \"" << GLM53_CMAKE_SHA256 << "\"},\n"
                  << "  \"model\": \"" << json_escape(model_path) << "\",\n"
-                 << "  \"context\": {\"n_ctx\": " << cp.n_ctx << ", \"n_batch\": 1, \"n_ubatch\": 1, "
+                 << "  \"context\": {\"n_ctx\": " << cp.n_ctx << ", \"n_batch\": " << cp.n_batch
+                 << ", \"n_ubatch\": " << cp.n_ubatch << ", "
                  << "\"type_k\": \"f16\", \"type_v\": \"f16\", \"flash_attn\": false, \"n_seq_max\": 1, "
                  << "\"fused_ops\": \"library defaults\"},\n  \"tokens\": [";
         for (uint32_t i = 0; i < count; ++i) manifest << (i ? ", " : "") << tokens[i];

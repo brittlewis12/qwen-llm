@@ -164,18 +164,39 @@ pub fn encode_mat_mat_q8_0_grouped_f32(
             ),
         ));
     }
-    let in_width = n_in * groups;
-    let out_width = n_out * groups;
-    let elements = (n_in * n_out * groups) as u64;
-    if weight.n_elements() != elements {
+    let overflow = || bad_shape(K, "dimension product overflows");
+    let in_width = n_in.checked_mul(groups).ok_or_else(overflow)?;
+    let out_width = n_out.checked_mul(groups).ok_or_else(overflow)?;
+    // `groups` contiguous [n_in, n_out] Q8_0 matrices, viewed per group
+    // ([n_in, n_out, groups]) or flat ([n_in, n_out * groups]), inside the
+    // weight's buffer. The kernel reads each block's half scale through a
+    // typed pointer, so the base must be 2-byte aligned.
+    let (block, block_bytes) = GgmlType::Q8_0.storage_layout().ok_or_else(overflow)?;
+    let shapes = [
+        [n_in as u64, n_out as u64, groups as u64].to_vec(),
+        [n_in as u64, out_width as u64].to_vec(),
+    ];
+    if !shapes.contains(&weight.shape) {
         return Err(bad_shape(
             K,
             format!(
-                "weight has {} elements, expected {elements}",
-                weight.n_elements()
+                "weight must be {:?} or {:?}, got {:?}",
+                shapes[0], shapes[1], weight.shape
             ),
         ));
     }
+    let bytes = (n_in as u64 / block)
+        .checked_mul(block_bytes)
+        .and_then(|row| row.checked_mul(out_width as u64))
+        .ok_or_else(overflow)?;
+    let end = weight.offset.checked_add(bytes);
+    if weight.n_bytes() != bytes || end.is_none_or(|end| end > weight.buffer.length() as u64) {
+        return Err(bad_shape(
+            K,
+            format!("weight is not {groups} contiguous Q8_0 matrices inside its buffer"),
+        ));
+    }
+    check_alignment(K, weight, 2, "weight")?;
     check_tensor(
         K,
         input,
@@ -481,5 +502,71 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The grouped Q8_0 weight contract: per-group or flat (DS4) views of
+    /// the same bytes give identical results; any other shape, a view past
+    /// its buffer, a misaligned base and overflowing dimensions are refused.
+    #[test]
+    fn grouped_q8_mat_mat_refuses_invalid_weight_views() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        const ROWS: usize = 128;
+        let (n_in, n_out) = (256usize, 512usize);
+        let (bytes, _) = synthetic_q8_0_bank(n_in, n_out * H);
+        let view = |prefix: usize, suffix: usize, shape: Vec<u64>| {
+            offset_tensor(&ctx, prefix, &bytes, suffix, shape, GgmlType::Q8_0)
+        };
+        let grouped = view(256, 64, vec![n_in as u64, n_out as u64, H as u64]);
+        let flat = view(256, 64, vec![n_in as u64, (n_out * H) as u64]);
+        let x: Vec<f32> = (0..n_in * H * ROWS)
+            .map(|i| ((i * 29 % 97) as f32 - 48.0) * 0.02)
+            .collect();
+        let x_t = f32_tensor(&ctx, &x, vec![(n_in * H) as u64, ROWS as u64]);
+        let output = || {
+            f32_tensor(
+                &ctx,
+                &vec![0.0; n_out * H * ROWS],
+                vec![(n_out * H) as u64, ROWS as u64],
+            )
+        };
+        let (y_grouped, y_flat) = (output(), output());
+        run(&ctx, |enc| {
+            for (weight, y) in [(&grouped, &y_grouped), (&flat, &y_flat)] {
+                encode_mat_mat_q8_0_grouped_f32(&ctx, enc, weight, &x_t, y, n_in, n_out, H, ROWS)
+                    .unwrap();
+            }
+        });
+        assert!(tensor_f32_at_offset(&y_grouped) == tensor_f32_at_offset(&y_flat));
+
+        let y = output();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        let refuse = |weight: &MetalTensor, groups: usize, needle: &str| {
+            let err = encode_mat_mat_q8_0_grouped_f32(
+                &ctx, &enc, weight, &x_t, &y, n_in, n_out, groups, ROWS,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains(needle), "{err}");
+        };
+        refuse(
+            &view(256, 64, vec![(n_in * H) as u64, n_out as u64]),
+            H,
+            "weight must be",
+        );
+        let past_end = MetalTensor {
+            offset: grouped.offset + 128,
+            ..grouped.clone()
+        };
+        refuse(&past_end, H, "inside its buffer");
+        refuse(
+            &view(257, 64, vec![n_in as u64, n_out as u64, H as u64]),
+            H,
+            "not 2-byte aligned",
+        );
+        refuse(&grouped, usize::MAX / 2, "overflow");
+        enc.end();
     }
 }

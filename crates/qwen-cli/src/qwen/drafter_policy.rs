@@ -216,6 +216,7 @@ mod tests {
             Some(ModelFamily::DeepSeek4),
             Some(ModelFamily::MuseGlimmer),
             Some(ModelFamily::K2Horizon),
+            Some(ModelFamily::Glm5Next),
         ] {
             for lane in [Lane::CliSingleTurn, Lane::Serve] {
                 assert_eq!(
@@ -255,6 +256,7 @@ mod tests {
             ModelFamily::MuseGlimmer,
             ModelFamily::Qwen4Exp,
             ModelFamily::K2Horizon,
+            ModelFamily::Glm5Next,
         ] {
             for lane in [Lane::CliSingleTurn, Lane::Serve] {
                 let decision = resolve_drafter(Some(family), lane, true);

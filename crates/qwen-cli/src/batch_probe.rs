@@ -265,6 +265,10 @@ fn capabilities(family: ModelFamily) -> Vec<ModeCapability> {
             "unsupported",
             "K2 Horizon queue-overlap probing is not implemented",
         ),
+        ModelFamily::Glm5Next => (
+            "unsupported",
+            "GLM-5.3-Flash queue-overlap probing is not implemented",
+        ),
     };
     vec![
         ModeCapability {
@@ -1271,7 +1275,10 @@ pub fn run(args: QueueOverlapProbeArgs, build: Value) -> Result<()> {
     let family = ModelFamily::detect(&gguf).context("unsupported queue-overlap model family")?;
     if matches!(
         family,
-        ModelFamily::Qwen4Exp | ModelFamily::MuseGlimmer | ModelFamily::K2Horizon
+        ModelFamily::Qwen4Exp
+            | ModelFamily::MuseGlimmer
+            | ModelFamily::K2Horizon
+            | ModelFamily::Glm5Next
     ) {
         bail!(
             "queue-overlap probing is not supported for {}",
@@ -1281,7 +1288,10 @@ pub fn run(args: QueueOverlapProbeArgs, build: Value) -> Result<()> {
     let ctx = MetalContext::new().context("create queue-overlap Metal context")?;
     let rows = match family {
         ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => run_qwen(&ctx, &gguf, &args)?,
-        ModelFamily::Qwen4Exp | ModelFamily::MuseGlimmer | ModelFamily::K2Horizon => {
+        ModelFamily::Qwen4Exp
+        | ModelFamily::MuseGlimmer
+        | ModelFamily::K2Horizon
+        | ModelFamily::Glm5Next => {
             unreachable!("unsupported families fail before Metal init")
         }
         ModelFamily::DeepSeek4 => run_deepseek(&ctx, &gguf, &args)?.0,
@@ -1291,7 +1301,10 @@ pub fn run(args: QueueOverlapProbeArgs, build: Value) -> Result<()> {
             "monolithic_encode_single_token_argmax",
             "single_host_thread_encode_all_then_commit_all",
         ),
-        ModelFamily::Qwen4Exp | ModelFamily::MuseGlimmer | ModelFamily::K2Horizon => {
+        ModelFamily::Qwen4Exp
+        | ModelFamily::MuseGlimmer
+        | ModelFamily::K2Horizon
+        | ModelFamily::Glm5Next => {
             unreachable!("unsupported families fail before Metal init")
         }
         ModelFamily::DeepSeek4 => (

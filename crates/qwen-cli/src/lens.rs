@@ -601,6 +601,7 @@ fn run() -> Result<()> {
     tracing_init::install_default_subscriber();
     let command = Cli::parse().command;
     validate_k2_command(&command)?;
+    validate_glm5_next_command(&command)?;
     match command {
         Command::Compare(args) => lens_compare::run(args),
         Command::Inspect(args) => lens_inspect::run(args),
@@ -635,6 +636,30 @@ fn validate_k2_command(command: &Command) -> Result<()> {
             qwen_llm::model_family::ModelFamily::detect(&gguf)
                 != Some(qwen_llm::model_family::ModelFamily::K2Horizon),
             "K2 Horizon supports only read-full here; local fitting, trace, run, and sweep are not implemented"
+        );
+    }
+    Ok(())
+}
+
+/// GLM-5.3-Flash has no lens runtime yet; refuse every model-reading command
+/// before any Qwen or Muse path interprets it.
+fn validate_glm5_next_command(command: &Command) -> Result<()> {
+    let path = match command {
+        Command::TraceFull(args) => Some(&args.model),
+        Command::LensRun(args) => Some(&args.model),
+        Command::CoefficientSweep(args) => Some(&args.model),
+        Command::CompareTransfer(args) => Some(&args.model),
+        Command::FitRows(args) => Some(&args.model),
+        Command::FitTokens(args) => Some(&args.model),
+        Command::ReadFull(args) => Some(&args.model),
+        _ => None,
+    };
+    if let Some(path) = path {
+        let gguf = qwen_llm::gguf::GgufFile::open(path)?;
+        ensure!(
+            qwen_llm::model_family::ModelFamily::detect(&gguf)
+                != Some(qwen_llm::model_family::ModelFamily::Glm5Next),
+            "GLM-5.3-Flash has no lens runtime yet"
         );
     }
     Ok(())

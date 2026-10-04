@@ -203,6 +203,11 @@ pub(crate) const K2_RAW_SINGLE_TURN: LaneAdmission = LaneAdmission {
     supported: &[O::MaxContextTokens, O::RequestStatsJsonl],
 };
 
+pub(crate) const GLM5_NEXT_RAW_SINGLE_TURN: LaneAdmission = LaneAdmission {
+    envelope: "GLM-5.3-Flash currently supports bounded raw serial single-turn generation only",
+    supported: &[O::MaxContextTokens, O::RequestStatsJsonl],
+};
+
 /// Durable tuning admits here and binds against `--durable-prefix-cache`
 /// in the lane; preserve-thinking binds against the reasoning tier.
 pub(crate) const DEEPSEEK_V4_SINGLE_TURN: LaneAdmission = LaneAdmission {

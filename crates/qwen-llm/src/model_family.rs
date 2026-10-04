@@ -8,6 +8,7 @@ pub enum ModelFamily {
     DeepSeek4,
     MuseGlimmer,
     K2Horizon,
+    Glm5Next,
 }
 
 impl ModelFamily {
@@ -20,13 +21,18 @@ impl ModelFamily {
         Self::DeepSeek4,
         Self::MuseGlimmer,
         Self::K2Horizon,
+        Self::Glm5Next,
     ];
 
     /// Bump when adding a family; the exhaustive match in the closedness test
     /// is what tells you to update this value and `ALL`.
-    pub const FAMILY_COUNT: usize = 6;
+    pub const FAMILY_COUNT: usize = 7;
 
     pub fn from_architecture_name(name: &str) -> Option<Self> {
+        // The original unsloth shard spells GLM-5.3 without the hyphen.
+        if name == crate::glm5_next::LEGACY_ARCHITECTURE_NAME {
+            return Some(Self::Glm5Next);
+        }
         Self::ALL
             .iter()
             .copied()
@@ -50,6 +56,7 @@ impl ModelFamily {
             Self::DeepSeek4 => "deepseek_v4",
             Self::MuseGlimmer => "muse_glimmer",
             Self::K2Horizon => "k2_horizon",
+            Self::Glm5Next => "glm5_next",
         }
     }
 
@@ -61,6 +68,7 @@ impl ModelFamily {
             Self::DeepSeek4 => "deepseek4",
             Self::MuseGlimmer => crate::muse_glimmer::ARCHITECTURE_NAME,
             Self::K2Horizon => crate::k2_horizon::ARCHITECTURE_NAME,
+            Self::Glm5Next => crate::glm5_next::ARCHITECTURE_NAME,
         }
     }
 }
@@ -91,6 +99,13 @@ mod tests {
             Some(ModelFamily::K2Horizon)
         );
         assert_eq!(ModelFamily::K2Horizon.record_label(), "k2_horizon");
+        for name in ["glm5-next", "glm5next"] {
+            assert_eq!(
+                ModelFamily::from_architecture_name(name),
+                Some(ModelFamily::Glm5Next)
+            );
+        }
+        assert_eq!(ModelFamily::Glm5Next.architecture_name(), "glm5-next");
     }
 
     /// Families in `ALL` round-trip through their architecture names, and
@@ -118,7 +133,8 @@ mod tests {
                 | ModelFamily::Qwen4Exp
                 | ModelFamily::DeepSeek4
                 | ModelFamily::MuseGlimmer
-                | ModelFamily::K2Horizon => {}
+                | ModelFamily::K2Horizon
+                | ModelFamily::Glm5Next => {}
             }
         }
         assert_eq!(ModelFamily::ALL.len(), ModelFamily::FAMILY_COUNT);

@@ -442,6 +442,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 workbench,
             );
         }
+        ModelFamily::Glm5Next => unreachable!("GLM-5.3-Flash has no serve backend (refused above)"),
         ModelFamily::Qwen35
         | ModelFamily::Qwen35Moe
         | ModelFamily::Qwen4Exp
@@ -480,6 +481,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
 
     match family {
         ModelFamily::K2Horizon => unreachable!("K2 Horizon returned above"),
+        ModelFamily::Glm5Next => unreachable!("GLM-5.3-Flash has no serve backend (refused above)"),
         ModelFamily::MuseGlimmer => {
             let math_options = backend_muse::read_math_options()?;
             let config = qwen_llm::muse_glimmer::MuseGlimmerConfig::from_gguf(&gguf)
@@ -1103,7 +1105,12 @@ mod tests {
                 profile(*family).serve_backend,
                 "{family:?}"
             );
-            assert!(profile(*family).serve_backend, "{family:?}");
+            // Every family serves except GLM-5.3-Flash, whose backend is not built yet.
+            assert_eq!(
+                profile(*family).serve_backend,
+                *family != ModelFamily::Glm5Next,
+                "{family:?}"
+            );
         }
         assert!(!supports_serve_family(None));
     }

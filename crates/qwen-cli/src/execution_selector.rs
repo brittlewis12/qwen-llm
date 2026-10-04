@@ -362,7 +362,8 @@ pub(super) fn select_qwen(input: QwenSelectionInput) -> ExecutionSelection {
             ModelFamily::Qwen4Exp
             | ModelFamily::DeepSeek4
             | ModelFamily::MuseGlimmer
-            | ModelFamily::K2Horizon,
+            | ModelFamily::K2Horizon
+            | ModelFamily::Glm5Next,
         )
         | None => serial("unsupported_family", "not_evaluated", input.moe_plan),
     }

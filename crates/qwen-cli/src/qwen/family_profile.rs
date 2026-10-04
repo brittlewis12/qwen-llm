@@ -100,6 +100,16 @@ static K2_HORIZON: FamilyProfile = FamilyProfile {
     capabilities: k2_capabilities,
 };
 
+static GLM5_NEXT: FamilyProfile = FamilyProfile {
+    family: ModelFamily::Glm5Next,
+    display: "GLM-5.3-Flash",
+    drafter: DrafterSupport::Unsupported("family_no_speculation"),
+    fixed_cohort: FixedCohort::None,
+    serve_backend: false,
+    serve_warmth: ServeWarmth::LiveSession,
+    capabilities: glm5_next_capabilities,
+};
+
 pub(crate) fn profile(family: ModelFamily) -> &'static FamilyProfile {
     let profile = match family {
         ModelFamily::Qwen35 => &QWEN35,
@@ -108,6 +118,7 @@ pub(crate) fn profile(family: ModelFamily) -> &'static FamilyProfile {
         ModelFamily::DeepSeek4 => &DEEPSEEK4,
         ModelFamily::MuseGlimmer => &MUSE_GLIMMER,
         ModelFamily::K2Horizon => &K2_HORIZON,
+        ModelFamily::Glm5Next => &GLM5_NEXT,
     };
     debug_assert_eq!(profile.family, family);
     profile
@@ -258,6 +269,10 @@ fn k2_capabilities(gguf: &GgufFile) -> Result<Value> {
         "template": capabilities["template"].clone(),
         "execution": capabilities["execution"].clone(),
     }))
+}
+
+fn glm5_next_capabilities(gguf: &GgufFile) -> Result<Value> {
+    crate::glm5_next::capability_projection(gguf)
 }
 
 #[cfg(test)]

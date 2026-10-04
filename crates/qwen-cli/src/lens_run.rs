@@ -395,6 +395,9 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         ModelFamily::K2Horizon => bail!(
             "qwen-lens run supports ordinary Qwen, Muse Glimmer, or Flash-Next; K2 Horizon is not supported by `qwen-lens run`; use its native `qwen-lens read-full --logit-lens` lane"
         ),
+        ModelFamily::Glm5Next => bail!(
+            "qwen-lens run supports ordinary Qwen, Muse Glimmer, or Flash-Next; GLM-5.3-Flash has no lens runtime yet"
+        ),
         ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {}
     }
     validate_ordinary_plan(&plan)?;

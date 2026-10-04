@@ -13,6 +13,7 @@ use crate::family_options::{
 };
 use anyhow::{bail, ensure};
 use qwen_llm::deepseek_v4_metal::{DeepSeekV4MetalResidency, DeepSeekV4Session};
+use qwen_llm::glm5_next_metal::{Glm5NextSession, Glm5NextWeights};
 use qwen_llm::k2_horizon_runtime::{K2LoadedModel, K2Session};
 use qwen_llm::model_family::ModelFamily;
 use qwen_llm::muse_glimmer_runtime::{MuseGlimmerLoadedModel, MuseGlimmerTextRunner};
@@ -203,8 +204,75 @@ pub(crate) fn with_family_bench<R>(
             };
             body(&mut bench)
         }
+        ModelFamily::Glm5Next => {
+            let frontier = qwen_llm::glm5_next::Glm5NextConfig::from_gguf(gguf)
+                .context("bind GLM-5.3-Flash configuration")?
+                .sparse_frontier() as usize;
+            ensure!(
+                extent.forwards < frontier,
+                "GLM-5.3-Flash rows must stay below visible length {frontier} until sparse attention lands (need {})",
+                extent.forwards
+            );
+            let weights = Glm5NextWeights::load(ctx, gguf).context("load GLM-5.3-Flash weights")?;
+            let mut bench = Glm5NextBench {
+                ctx,
+                vocab: weights.config.vocab_size as usize,
+                weights: &weights,
+                capacity: extent.forwards,
+                session: None,
+            };
+            body(&mut bench)
+        }
         ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {
             bail!("Qwen models bind through the Qwen runtime path, not the family adapter")
+        }
+    }
+}
+
+struct Glm5NextBench<'ctx, 'w> {
+    ctx: &'ctx MetalContext,
+    weights: &'w Glm5NextWeights,
+    session: Option<Glm5NextSession<'w>>,
+    capacity: usize,
+    vocab: usize,
+}
+
+impl<'w> Glm5NextBench<'_, 'w> {
+    fn session(&mut self) -> Result<&mut Glm5NextSession<'w>> {
+        self.session
+            .as_mut()
+            .context("GLM bench used before begin_rep")
+    }
+}
+
+impl FamilyBench for Glm5NextBench<'_, '_> {
+    fn vocab_size(&self) -> usize {
+        self.vocab
+    }
+    /// A fresh session (recurrent state, latent cache, pools) per rep, as
+    /// `qwen run` creates one per request.
+    fn begin_rep(&mut self) -> Result<()> {
+        self.session = None;
+        self.session = Some(Glm5NextSession::new(self.ctx, self.weights, self.capacity)?);
+        Ok(())
+    }
+    /// Production prompt path: serial tokens without the head, the last with
+    /// logits.
+    fn prefill(&mut self, ids: &[u32]) -> Result<()> {
+        let ctx = self.ctx;
+        std::hint::black_box(self.session()?.prefill(ctx, ids)?);
+        Ok(())
+    }
+    fn decode(&mut self, id: u32) -> Result<()> {
+        let ctx = self.ctx;
+        std::hint::black_box(self.session()?.forward(ctx, id)?);
+        Ok(())
+    }
+    fn semantics(&self) -> FamilySemantics {
+        FamilySemantics {
+            prefill_mode: "serial_advance+last_logits",
+            decode_mode: "serial+logits_copy+route_status_checks",
+            prefill_chunk: None,
         }
     }
 }

@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, HashSet};
 pub mod coverage;
 pub mod memory;
 
-pub use coverage::{CoverageRow, RoleCoverage, Support, TensorRole};
+pub use coverage::{CoverageRow, ExecutionMode, RoleCoverage, Support, TensorRole};
 pub use memory::{Glm5NextMemoryLedger, Glm5NextPhasePeaks};
 
 /// Architecture spelled by llama.cpp and unsloth's rewritten shard.
@@ -581,7 +581,8 @@ impl<'a> Glm5NextModel<'a> {
     /// Retained no-copy windows for the executed tensors, and the Metal bytes
     /// they cost (window lengths plus copy fallbacks). The planner bridges gaps
     /// between requested tensors when a window fits, so the caller must check
-    /// actual ranges, not only which tensors were requested.
+    /// actual ranges, not only which tensors were requested. Planning only:
+    /// residency must first pass [`Self::validate_execution`].
     pub fn plan_retained(
         &self,
         gguf: &GgufFile,

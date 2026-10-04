@@ -1,48 +1,46 @@
 //! Allocation ledger for one GLM-5.3 session.
 //!
-//! The trunk leaves about 2.5 GiB of the 112 GiB Metal working set, so this
-//! ledger is the allocation contract rather than an estimate to revisit later:
-//! the native session derives its buffers from these terms and must verify
-//! that actual allocations stay within them. Retained weights come from the
-//! real retained-window plan, not the tensor census.
+//! The trunk leaves about 2.5 GiB of the 112 GiB Metal working set. These terms
+//! are planning bounds the native session must allocate within; the session
+//! packet replaces the aggregate activation term with named, priced requests
+//! and lifetimes, and verifies actual allocations against them. Retained
+//! weights come from the real retained-window plan, not the tensor census.
 //!
 //! Layout assumptions: F32 recurrent/conv state; an append-only F16 cache of
 //! MLA latents and completed pooled indexer keys (historical key/gate rows are
-//! not retained); last-position logits only; scratch shared across blocks and
-//! sized per packed row. Attention and selection use online/top-k kernels with
-//! no `[rows, context]` score matrix except the indexer's per-pool scores.
+//! not retained); last-position logits only; one scratch region shared across
+//! blocks and sized for the larger of decode and prefill. Prefill attention is
+//! online per row (no split partials); decode may split over context. No
+//! `[rows, context]` score matrix exists except the indexer's per-pool scores.
 
 use super::{Glm5NextConfig, Glm5NextError, MixerKind, Result};
 
 /// Command buffers, argument tables and allocator slack.
 pub const DYNAMIC_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
+/// Context splits budgeted for single-token latent attention.
+pub const DECODE_ATTENTION_SPLITS: u64 = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Glm5NextMemoryLedger {
-    pub capacity: u64,
-    pub prefill_rows: u64,
-    pub retained_weight_bytes: u64,
-    /// KDA S matrices: blocks x heads x d x d, F32.
-    pub recurrent_state_bytes: u64,
-    /// KDA q/k/v conv tails: blocks x 3 x (kernel - 1) x width, F32.
-    pub conv_state_bytes: u64,
-    /// MLA latent rows: blocks x capacity x kv_lora_rank, F16.
-    pub latent_cache_bytes: u64,
-    /// Completed pooled indexer keys: blocks x pools x indexer dim, F16.
-    pub pooled_key_bytes: u64,
-    /// Incomplete pool key|gate rows: blocks x pool x 2 x indexer dim, F16.
-    pub pending_pool_bytes: u64,
-    /// Activations for one row, shared across blocks.
-    pub decode_scratch_bytes: u64,
-    /// Activations for `prefill_rows` packed rows, shared across blocks.
-    pub prefill_scratch_bytes: u64,
-    /// Indexer pool scores and selected ids for one row.
-    pub decode_selection_bytes: u64,
-    /// Indexer pool scores and selected ids for `prefill_rows` rows.
-    pub prefill_selection_bytes: u64,
-    /// Last-position F32 logits.
-    pub logits_bytes: u64,
-    pub reserve_bytes: u64,
+    capacity: u64,
+    prefill_rows: u64,
+    retained_weight_bytes: u64,
+    recurrent_state: u64,
+    conv_state: u64,
+    latent_cache: u64,
+    pooled_keys: u64,
+    pending_pool: u64,
+    decode_activations: u64,
+    decode_selection: u64,
+    decode_routing: u64,
+    decode_attention_partials: u64,
+    prefill_activations: u64,
+    prefill_selection: u64,
+    prefill_routing: u64,
+    logits: u64,
+    reserve: u64,
+    session_state: u64,
+    peaks: Glm5NextPhasePeaks,
 }
 
 /// Cumulative Metal bytes at each lifetime phase (reserve included after load).
@@ -80,71 +78,137 @@ impl Glm5NextMemoryLedger {
         let c = config;
         let kda = c.block_count(MixerKind::Kda) as u64;
         let mla = c.block_count(MixerKind::Mla) as u64;
+        let heads = u64::from(c.head_count);
         let head_dim = u64::from(c.kda_head_dim);
         let pool = u64::from(c.indexer_pool);
         let index_dim = u64::from(c.indexer_head_dim);
+        let kv = u64::from(c.kv_lora_rank);
         let pools = capacity.div_ceil(pool);
         let row = row_activation_floats(c);
         let selection_row = pools + u64::from(c.selection_width());
+        // Route ids/weights/status plus per-expert slot counts and maps.
+        let routing_row = 2 * u64::from(c.expert_count) + 2 * u64::from(c.expert_used_count) + 1;
         let m = |terms: &[u64]| -> Result<u64> {
             terms
                 .iter()
                 .try_fold(1u64, |acc, &t| acc.checked_mul(t))
                 .ok_or(Glm5NextError::Overflow("memory ledger"))
         };
-        Ok(Self {
+        let mut ledger = Self {
             capacity,
             prefill_rows,
             retained_weight_bytes,
-            recurrent_state_bytes: m(&[kda, u64::from(c.head_count), head_dim, head_dim, 4])?,
-            conv_state_bytes: m(&[
+            recurrent_state: m(&[kda, heads, head_dim, head_dim, 4])?,
+            conv_state: m(&[
                 kda,
                 3,
                 u64::from(c.kda_conv_kernel) - 1,
                 u64::from(c.kda_width()),
                 4,
             ])?,
-            latent_cache_bytes: m(&[mla, capacity, u64::from(c.kv_lora_rank), 2])?,
-            pooled_key_bytes: m(&[mla, pools, index_dim, 2])?,
-            pending_pool_bytes: m(&[mla, pool, 2, index_dim, 2])?,
-            decode_scratch_bytes: m(&[row, 4])?,
-            prefill_scratch_bytes: m(&[row, prefill_rows, 4])?,
-            decode_selection_bytes: m(&[selection_row, 4])?,
-            prefill_selection_bytes: m(&[selection_row, prefill_rows, 4])?,
-            logits_bytes: m(&[u64::from(c.vocab_size), 4])?,
-            reserve_bytes: DYNAMIC_RESERVE_BYTES,
-        })
+            latent_cache: m(&[mla, capacity, kv, 2])?,
+            pooled_keys: m(&[mla, pools, index_dim, 2])?,
+            pending_pool: m(&[mla, pool, 2, index_dim, 2])?,
+            decode_activations: m(&[row, 4])?,
+            decode_selection: m(&[selection_row, 4])?,
+            decode_routing: m(&[routing_row, 4])?,
+            decode_attention_partials: m(&[heads, DECODE_ATTENTION_SPLITS, kv + 2, 4])?,
+            prefill_activations: m(&[row, prefill_rows, 4])?,
+            prefill_selection: m(&[selection_row, prefill_rows, 4])?,
+            prefill_routing: m(&[routing_row, prefill_rows, 4])?,
+            logits: m(&[u64::from(c.vocab_size), 4])?,
+            reserve: DYNAMIC_RESERVE_BYTES,
+            session_state: 0,
+            peaks: Glm5NextPhasePeaks {
+                resident: 0,
+                session: 0,
+                prefill: 0,
+                decode: 0,
+            },
+        };
+        let sum = |terms: &[u64]| -> Result<u64> {
+            terms
+                .iter()
+                .try_fold(0u64, |acc, &t| acc.checked_add(t))
+                .ok_or(Glm5NextError::Overflow("memory ledger"))
+        };
+        let l = &ledger;
+        let session_state = sum(&[
+            l.recurrent_state,
+            l.conv_state,
+            l.latent_cache,
+            l.pooled_keys,
+            l.pending_pool,
+        ])?;
+        let session = sum(&[retained_weight_bytes, session_state, l.reserve])?;
+        let prefill = sum(&[
+            session,
+            l.prefill_activations,
+            l.prefill_selection,
+            l.prefill_routing,
+            l.logits,
+        ])?;
+        let decode = sum(&[
+            session,
+            l.decode_activations,
+            l.decode_selection,
+            l.decode_routing,
+            l.decode_attention_partials,
+            l.logits,
+        ])?;
+        ledger.session_state = session_state;
+        ledger.peaks = Glm5NextPhasePeaks {
+            resident: retained_weight_bytes,
+            session,
+            prefill,
+            decode,
+        };
+        Ok(ledger)
+    }
+
+    pub fn capacity(&self) -> u64 {
+        self.capacity
+    }
+
+    pub fn prefill_rows(&self) -> u64 {
+        self.prefill_rows
+    }
+
+    /// Named terms in bytes, for reports and the session's allocation checks.
+    pub fn terms(&self) -> [(&'static str, u64); 16] {
+        [
+            ("retained_weights", self.retained_weight_bytes),
+            ("recurrent_state", self.recurrent_state),
+            ("conv_state", self.conv_state),
+            ("latent_cache", self.latent_cache),
+            ("pooled_keys", self.pooled_keys),
+            ("pending_pool", self.pending_pool),
+            ("decode_activations", self.decode_activations),
+            ("decode_selection", self.decode_selection),
+            ("decode_routing", self.decode_routing),
+            ("decode_attention_partials", self.decode_attention_partials),
+            ("prefill_activations", self.prefill_activations),
+            ("prefill_selection", self.prefill_selection),
+            ("prefill_routing", self.prefill_routing),
+            ("logits", self.logits),
+            ("reserve", self.reserve),
+            ("session_state", self.session_state),
+        ]
     }
 
     /// Bytes owned by a live session independent of the phase.
     pub fn session_state_bytes(&self) -> u64 {
-        self.recurrent_state_bytes
-            + self.conv_state_bytes
-            + self.latent_cache_bytes
-            + self.pooled_key_bytes
-            + self.pending_pool_bytes
+        self.session_state
     }
 
     pub fn phase_peaks(&self) -> Glm5NextPhasePeaks {
-        let session = self.retained_weight_bytes + self.session_state_bytes() + self.reserve_bytes;
-        Glm5NextPhasePeaks {
-            resident: self.retained_weight_bytes,
-            session,
-            prefill: session
-                + self.prefill_scratch_bytes
-                + self.prefill_selection_bytes
-                + self.logits_bytes,
-            decode: session
-                + self.decode_scratch_bytes
-                + self.decode_selection_bytes
-                + self.logits_bytes,
-        }
+        self.peaks
     }
 
-    /// The largest phase peak; admission compares this with the device budget.
+    /// The largest phase peak; one scratch region serves both phases, so this
+    /// is what admission compares with the device budget.
     pub fn peak_bytes(&self) -> u64 {
-        let p = self.phase_peaks();
-        p.prefill.max(p.decode)
+        self.peaks.prefill.max(self.peaks.decode)
     }
 
     /// Largest capacity whose peak fits `budget_bytes`, or `None` if even one
@@ -179,7 +243,7 @@ impl Glm5NextMemoryLedger {
 
 /// F32 activations live at once for one packed row. Sub-blocks run in order and
 /// share scratch across blocks; mixer and FFN scratch are counted separately
-/// (not aliased) so the ledger stays conservative.
+/// (not aliased) so the bound stays conservative.
 pub(crate) fn row_activation_floats(c: &Glm5NextConfig) -> u64 {
     let h = u64::from(c.hidden_size);
     let hc = 3 * u64::from(c.hc_width()) + 2 * h + 2 * u64::from(c.hc_mix_count());

@@ -5,8 +5,13 @@
 //! execute a role at a dtype, for single-token decode and for packed prefill.
 //! A role/dtype pair absent from the table has no path, and binding refuses it
 //! before residency rather than falling back to an F32 expansion. `Pending`
-//! names a known adaptation inside an existing path; runnable dispatch requires
-//! none to remain.
+//! names a known adaptation inside an existing path, and
+//! [`Glm5NextModel::validate_execution`] refuses a mode while any of its cells
+//! is pending. Weight coverage is not graph capability: routing, KDA, latent
+//! attention and selection are separate implementation gates.
+//!
+//! Entries are recipes for existing kernel families at this release's shapes;
+//! shape-specific GPU fixtures land with the encoders that use them.
 
 use super::Glm5NextModel;
 use crate::tensor::GgmlType;
@@ -59,6 +64,29 @@ pub struct RoleCoverage {
     pub prefill: Support,
 }
 
+/// Execution phase that a residency/session must be able to run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionMode {
+    /// One token per forward (prefill also serial).
+    SerialDecode,
+    /// Serial decode plus packed multi-row prefill.
+    PackedPrefill,
+}
+
+impl RoleCoverage {
+    /// First pending requirement for `mode`, if any.
+    pub fn pending_for(self, mode: ExecutionMode) -> Option<&'static str> {
+        let pending = |s: Support| match s {
+            Support::Pending(reason) => Some(reason),
+            Support::Kernel(_) => None,
+        };
+        match mode {
+            ExecutionMode::SerialDecode => pending(self.decode),
+            ExecutionMode::PackedPrefill => pending(self.decode).or(pending(self.prefill)),
+        }
+    }
+}
+
 const fn both(kernel: &'static str) -> RoleCoverage {
     RoleCoverage {
         decode: Support::Kernel(kernel),
@@ -75,6 +103,8 @@ const CLAMP_EPILOGUE: &str = "generic grouped fused SwiGLU is unclamped (moe.met
      kernel_moe_swiglu_grouped_slots_n16_generic); add the DS4 clamp epilogue";
 const IQ4_XS_INDEXED: &str = "DS4 indexed expert decode lacks IQ4_XS \
      (deepseek_v4_metal/moe.rs); bridge kernel_moe_down_iq4_xs_f32_fast";
+const GROUPED_Q8_TAIL: &str = "kernel_mat_mat_q8_0_f32_r2c16k64_grouped requires \
+     rows % 128 == 0 (deepseek_v4_metal/prefill.rs); add a tail path";
 
 /// Coverage of `role` stored as `dtype`, or `None` when no path exists.
 pub fn coverage(role: TensorRole, dtype: GgmlType) -> Option<RoleCoverage> {
@@ -86,18 +116,24 @@ pub fn coverage(role: TensorRole, dtype: GgmlType) -> Option<RoleCoverage> {
         }
         (R::Head, T::Q6_K | T::Q8_0 | T::Q4_K | T::Q5_K | T::F16 | T::BF16) => both(DENSE),
         (R::Vector | R::Conv, T::F32) => both("elementwise / kernel_ssm_conv_silu_f32"),
+        // Unweighted RMSNorm over [hidden * streams], the Q8_0 projection to the
+        // 24 mixes, then controls; controls alone consume projected F32 mixes.
         (R::HyperMix, T::Q8_0) => split(
-            Support::Kernel("kernel_deepseek_v4_hc_controls"),
-            Support::Kernel("kernel_deepseek_v4_hc_controls_batch"),
+            Support::Kernel("rms_norm + mat_vec_q8_0 + kernel_deepseek_v4_hc_controls"),
+            Support::Kernel("rms_norm + mat_mat_q8_0 + kernel_deepseek_v4_hc_controls_batch"),
         ),
         (
             R::Projection,
             T::Q8_0 | T::Q6_K | T::Q5_K | T::Q4_K | T::IQ4_XS | T::F16 | T::BF16 | T::F32,
         ) => both(DENSE),
-        (R::F32Projection, T::F32) => both("kernel_mat_vec_f32_f32 / kernel_mat_mat_f32_f32"),
+        // Logits only: sigmoid top-8 routing is a separate graph capability.
+        (R::F32Projection, T::F32) => split(
+            Support::Kernel("kernel_mat_vec_f32_f32"),
+            Support::Kernel("kernel_mat_mat_f32_f32_router_e8p32"),
+        ),
         (R::LatentAbsorb, T::Q8_0) => split(
             Support::Kernel("kernel_mat_vec_q8_0_f32_lcpp_grouped"),
-            Support::Kernel("kernel_mat_mat_q8_0_f32_r2c16k64_grouped"),
+            Support::Pending(GROUPED_Q8_TAIL),
         ),
         // Expert entries list only dtypes verified on both paths; other
         // artifacts add theirs with evidence.
@@ -149,11 +185,33 @@ impl Glm5NextModel<'_> {
         cells.into_values().collect()
     }
 
-    /// Cells that still need an adaptation before runnable dispatch.
+    /// Cells that still need an adaptation in some mode.
     pub fn pending_coverage(&self) -> Vec<CoverageRow> {
         self.coverage()
             .into_iter()
             .filter(|row| row.coverage.decode.is_pending() || row.coverage.prefill.is_pending())
             .collect()
+    }
+
+    /// Residency/session admission gate: refuses `mode` while any executed
+    /// weight cell is pending for it. Callers must run this before allocating.
+    pub fn validate_execution(&self, mode: ExecutionMode) -> super::Result<()> {
+        let blocked = self
+            .coverage()
+            .into_iter()
+            .filter_map(|row| {
+                row.coverage
+                    .pending_for(mode)
+                    .map(|reason| format!("{:?} {:?}: {reason}", row.role, row.dtype))
+            })
+            .collect::<Vec<_>>();
+        if blocked.is_empty() {
+            Ok(())
+        } else {
+            Err(super::Glm5NextError::Unsupported {
+                key: format!("execution mode {mode:?}"),
+                detail: blocked.join("; "),
+            })
+        }
     }
 }

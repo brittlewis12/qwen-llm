@@ -366,6 +366,7 @@ fn coverage_matrix_names_remaining_adaptations() {
         pending,
         [
             // Cells order by role, then ggml type id (IQ3_S 21 < IQ2_S 22).
+            (TensorRole::LatentAbsorb, GgmlType::Q8_0, 22),
             (TensorRole::ExpertGateUp, GgmlType::IQ3_S, 2),
             (TensorRole::ExpertGateUp, GgmlType::IQ2_S, 82),
             (TensorRole::ExpertDown, GgmlType::IQ4_XS, 3),
@@ -377,28 +378,88 @@ fn coverage_matrix_names_remaining_adaptations() {
 }
 
 #[test]
+fn execution_gate_is_phase_specific() {
+    let tensors = release_tensors();
+    let model = Glm5NextModel::bind(config(), &tensors).unwrap();
+    let decode = model
+        .validate_execution(ExecutionMode::SerialDecode)
+        .unwrap_err()
+        .to_string();
+    assert!(decode.contains("ExpertDown IQ4_XS"), "{decode}");
+    assert!(!decode.contains("ExpertGateUp"), "{decode}");
+    assert!(!decode.contains("LatentAbsorb"), "{decode}");
+    let prefill = model
+        .validate_execution(ExecutionMode::PackedPrefill)
+        .unwrap_err()
+        .to_string();
+    for cell in [
+        "LatentAbsorb Q8_0",
+        "ExpertGateUp IQ3_S",
+        "ExpertGateUp IQ2_S",
+        "ExpertDown IQ4_XS",
+    ] {
+        assert!(prefill.contains(cell), "{cell} not in {prefill}");
+    }
+}
+
+fn term(l: &Glm5NextMemoryLedger, name: &str) -> u64 {
+    l.terms()
+        .iter()
+        .find(|(n, _)| *n == name)
+        .unwrap_or_else(|| panic!("no ledger term {name}"))
+        .1
+}
+
+#[test]
 fn ledger_terms_match_release_geometry() {
     let c = config();
     assert_eq!(memory::row_activation_floats(&c), 240_256);
     let l = Glm5NextMemoryLedger::new(&c, 100 * GIB, 32_768, 512).unwrap();
-    assert_eq!(l.recurrent_state_bytes, 136 << 20);
-    assert_eq!(l.conv_state_bytes, 34 * 3 * 3 * 8192 * 4);
-    assert_eq!(l.latent_cache_bytes, 352 << 20);
-    assert_eq!(l.pooled_key_bytes, 22 << 20);
-    assert_eq!(l.pending_pool_bytes, 11 * 4 * 2 * 128 * 2);
-    assert_eq!(l.prefill_scratch_bytes, 240_256 * 512 * 4);
-    assert_eq!(l.prefill_selection_bytes, (8192 + 2051) * 512 * 4);
-    assert_eq!(l.logits_bytes, 154_880 * 4);
+    assert_eq!((l.capacity(), l.prefill_rows()), (32_768, 512));
+    for (name, bytes) in [
+        ("recurrent_state", 136 << 20),
+        ("conv_state", 34 * 3 * 3 * 8192 * 4),
+        ("latent_cache", 352 << 20),
+        ("pooled_keys", 22 << 20),
+        ("pending_pool", 11 * 4 * 2 * 128 * 2),
+        ("decode_activations", 240_256 * 4),
+        ("decode_routing", (2 * 288 + 2 * 8 + 1) * 4),
+        ("decode_attention_partials", 64 * 16 * 514 * 4),
+        ("prefill_activations", 240_256 * 512 * 4),
+        ("prefill_selection", (8192 + 2051) * 512 * 4),
+        ("prefill_routing", (2 * 288 + 2 * 8 + 1) * 512 * 4),
+        ("logits", 154_880 * 4),
+        ("reserve", memory::DYNAMIC_RESERVE_BYTES),
+    ] {
+        assert_eq!(term(&l, name), bytes, "{name}");
+    }
+    let state: u64 = [
+        "recurrent_state",
+        "conv_state",
+        "latent_cache",
+        "pooled_keys",
+        "pending_pool",
+    ]
+    .iter()
+    .map(|n| term(&l, n))
+    .sum();
+    assert_eq!(l.session_state_bytes(), state);
     let p = l.phase_peaks();
     assert_eq!(p.resident, 100 * GIB);
-    assert!(p.resident < p.session && p.session < p.decode && p.decode < p.prefill);
+    assert_eq!(p.session, 100 * GIB + state + memory::DYNAMIC_RESERVE_BYTES);
+    assert!(p.session < p.decode && p.decode < p.prefill);
     assert_eq!(l.peak_bytes(), p.prefill);
     // Native compact cache: 11.69 KiB/token versus llama.cpp's 19.25 KiB.
-    let per_token = (l.latent_cache_bytes + l.pooled_key_bytes) as f64 / 32_768.0;
+    let per_token = (term(&l, "latent_cache") + term(&l, "pooled_keys")) as f64 / 32_768.0;
     assert!((per_token / 1024.0 - 11.6875).abs() < 1e-9, "{per_token}");
     assert!(Glm5NextMemoryLedger::new(&c, 0, 0, 512).is_err());
     assert!(Glm5NextMemoryLedger::new(&c, 0, 1 << 21, 512).is_err());
     assert!(Glm5NextMemoryLedger::new(&c, 0, 16, 0).is_err());
+    // Unrepresentable totals are errors, not wrapped or panicking sums.
+    assert!(matches!(
+        Glm5NextMemoryLedger::new(&c, u64::MAX - 1, 16, 1),
+        Err(Glm5NextError::Overflow(_))
+    ));
 }
 
 #[test]
@@ -452,7 +513,12 @@ fn release_artifact_census_and_allocation_plan() {
             row.coverage.prefill
         );
     }
-    assert_eq!(model.pending_coverage().len(), 3);
+    assert_eq!(model.pending_coverage().len(), 4);
+    assert!(
+        model
+            .validate_execution(ExecutionMode::SerialDecode)
+            .is_err()
+    );
 
     // M4 Max: 16 KiB pages. The per-buffer cap is a conservative assumption;
     // a real load uses the device's maxBufferLength.
@@ -481,8 +547,8 @@ fn release_artifact_census_and_allocation_plan() {
             .unwrap();
         let l = Glm5NextMemoryLedger::new(&model.config, retained, cap.min(32_768), rows).unwrap();
         eprintln!(
-            "rows={rows} max_capacity={cap} peaks@{}={:?}",
-            l.capacity,
+            "rows={rows} max_capacity={cap} (planning bound) peaks@{}={:?}",
+            l.capacity(),
             l.phase_peaks()
         );
         assert!(cap >= 4096);

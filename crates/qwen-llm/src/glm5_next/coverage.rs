@@ -101,8 +101,6 @@ const fn split(decode: Support, prefill: Support) -> RoleCoverage {
 const DENSE: &str = "dense mat_vec / mat_mat";
 const CLAMP_EPILOGUE: &str = "generic grouped fused SwiGLU is unclamped (moe.metal \
      kernel_moe_swiglu_grouped_slots_n16_generic); add the DS4 clamp epilogue";
-const IQ4_XS_INDEXED: &str = "DS4 indexed expert decode lacks IQ4_XS \
-     (deepseek_v4_metal/moe.rs); bridge kernel_moe_down_iq4_xs_f32_fast";
 const GROUPED_Q8_TAIL: &str = "kernel_mat_mat_q8_0_f32_r2c16k64_grouped requires \
      rows % 128 == 0 (deepseek_v4_metal/prefill.rs); add a tail path";
 
@@ -135,18 +133,19 @@ pub fn coverage(role: TensorRole, dtype: GgmlType) -> Option<RoleCoverage> {
             Support::Kernel("kernel_mat_vec_q8_0_f32_lcpp_grouped"),
             Support::Pending(GROUPED_Q8_TAIL),
         ),
-        // Expert entries list only dtypes verified on both paths; other
+        // Expert entries list only dtypes verified on both paths (decode via
+        // metal::expert's all-slot encoders, GPU-tested at GLM widths); other
         // artifacts add theirs with evidence.
         (R::ExpertGateUp, T::IQ2_S | T::IQ3_S) => split(
-            Support::Kernel("DS4 indexed expert mat_vec + clamped SwiGLU"),
+            Support::Kernel("encode_all_slots_gate_up_swiglu"),
             Support::Pending(CLAMP_EPILOGUE),
         ),
-        (R::ExpertDown, T::IQ2_S | T::IQ3_S) => split(
-            Support::Kernel("DS4 indexed expert mat_vec"),
+        (R::ExpertDown, T::IQ3_S) => split(
+            Support::Kernel("encode_all_slots_down (all_slots_down_iq3_s)"),
             Support::Kernel("kernel_moe_grouped_slots_mm_generic"),
         ),
         (R::ExpertDown, T::IQ4_XS) => split(
-            Support::Pending(IQ4_XS_INDEXED),
+            Support::Kernel("encode_all_slots_down (moe_down_iq4_xs_fast)"),
             Support::Kernel("kernel_moe_down_iq4_xs_f32_grouped_slots"),
         ),
         _ => return None,

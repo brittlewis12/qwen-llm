@@ -369,9 +369,10 @@ fn coverage_matrix_names_remaining_adaptations() {
             (TensorRole::LatentAbsorb, GgmlType::Q8_0, 22),
             (TensorRole::ExpertGateUp, GgmlType::IQ3_S, 2),
             (TensorRole::ExpertGateUp, GgmlType::IQ2_S, 82),
-            (TensorRole::ExpertDown, GgmlType::IQ4_XS, 3),
         ]
     );
+    // Trunk IQ2_S down has no verified all-slot path.
+    assert!(coverage::coverage(TensorRole::ExpertDown, GgmlType::IQ2_S).is_none());
     // Absent pairs have no path rather than an implicit F32 expansion.
     assert!(coverage::coverage(TensorRole::ExpertGateUp, GgmlType::Q8_0).is_none());
     assert!(coverage::coverage(TensorRole::LatentAbsorb, GgmlType::Q6_K).is_none());
@@ -381,13 +382,9 @@ fn coverage_matrix_names_remaining_adaptations() {
 fn execution_gate_is_phase_specific() {
     let tensors = release_tensors();
     let model = Glm5NextModel::bind(config(), &tensors).unwrap();
-    let decode = model
+    model
         .validate_execution(ExecutionMode::SerialDecode)
-        .unwrap_err()
-        .to_string();
-    assert!(decode.contains("ExpertDown IQ4_XS"), "{decode}");
-    assert!(!decode.contains("ExpertGateUp"), "{decode}");
-    assert!(!decode.contains("LatentAbsorb"), "{decode}");
+        .unwrap();
     let prefill = model
         .validate_execution(ExecutionMode::PackedPrefill)
         .unwrap_err()
@@ -396,10 +393,10 @@ fn execution_gate_is_phase_specific() {
         "LatentAbsorb Q8_0",
         "ExpertGateUp IQ3_S",
         "ExpertGateUp IQ2_S",
-        "ExpertDown IQ4_XS",
     ] {
         assert!(prefill.contains(cell), "{cell} not in {prefill}");
     }
+    assert!(!prefill.contains("ExpertDown"), "{prefill}");
 }
 
 fn term(l: &Glm5NextMemoryLedger, name: &str) -> u64 {
@@ -513,12 +510,10 @@ fn release_artifact_census_and_allocation_plan() {
             row.coverage.prefill
         );
     }
-    assert_eq!(model.pending_coverage().len(), 4);
-    assert!(
-        model
-            .validate_execution(ExecutionMode::SerialDecode)
-            .is_err()
-    );
+    assert_eq!(model.pending_coverage().len(), 3);
+    model
+        .validate_execution(ExecutionMode::SerialDecode)
+        .unwrap();
 
     // M4 Max: 16 KiB pages. The per-buffer cap is a conservative assumption;
     // a real load uses the device's maxBufferLength.

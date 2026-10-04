@@ -50,10 +50,11 @@ use crate::gguf::{GgufError, GgufFile};
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalGgufBacking, MetalMemoryAdmission,
     MetalMemorySignals, MetalTensor, MetalTensorProvenance, MetalTimestampSampleBuffer,
-    RetainedStorageDisposition, RetainedStorageFallback, RetainedStoragePlan, encode_get_rows_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rms_norm_mul_rows_f32,
-    encode_scatter_offset_f32_to_f16, evaluate_metal_memory_admission, host_page_size_bytes,
-    plan_retained_storage,
+    RetainedStorageDisposition, RetainedStorageFallback, RetainedStoragePlan,
+    encode_clamped_swiglu, encode_get_rows_f32, encode_mhc4_collapse, encode_mhc4_controls,
+    encode_mhc4_post, encode_mhc4_repeat, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
+    encode_rms_norm_mul_rows_f32, encode_scatter_offset_f32_to_f16,
+    evaluate_metal_memory_admission, host_page_size_bytes, plan_retained_storage,
 };
 use crate::tensor::{GgmlType, ggml_type_layout};
 use objc2::rc::Retained;

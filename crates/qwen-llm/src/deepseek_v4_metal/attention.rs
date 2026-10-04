@@ -1091,31 +1091,7 @@ impl DeepSeekV4HyperConnectionScratch {
         embedding: &MetalTensor,
         residual: &MetalTensor,
     ) -> Result<(), DeepSeekV4MetalError> {
-        require_serial(enc, "deepseek_v4_hc_repeat")?;
-        validate_f32(embedding, &[self.hidden_size as u64], false, "embedding")?;
-        validate_f32(
-            residual,
-            &[self.hidden_size as u64, DEEPSEEK_V4_CONNECTION_COUNT as u64],
-            true,
-            "residual",
-        )?;
-        let pso = ctx.pipeline("kernel_deepseek_v4_hc_repeat")?;
-        enc.set_pipeline(&pso);
-        enc.set_bytes(0, &u32_hidden(self.hidden_size)?);
-        enc.set_tensor(1, embedding);
-        enc.set_tensor(2, residual);
-        enc.dispatch(
-            MTLSize {
-                width: residual_len(self.hidden_size)?.div_ceil(256),
-                height: 1,
-                depth: 1,
-            },
-            MTLSize {
-                width: 256,
-                height: 1,
-                depth: 1,
-            },
-        );
+        encode_mhc4_repeat(ctx, enc, self.hidden_size, embedding, residual)?;
         Ok(())
     }
 
@@ -1176,46 +1152,25 @@ impl DeepSeekV4HyperConnectionScratch {
             )?;
         }
 
-        let pso = ctx.pipeline("kernel_deepseek_v4_hc_controls")?;
-        enc.set_pipeline(&pso);
-        enc.set_bytes(0, &hc_eps);
-        enc.set_tensor(1, &self.mixes);
-        enc.set_tensor(2, scale);
-        enc.set_tensor(3, base);
-        enc.set_tensor(4, &self.pre);
-        enc.set_tensor(5, &self.post);
-        enc.set_tensor(6, &self.combination);
-        enc.dispatch(
-            MTLSize {
-                width: 1,
-                height: 1,
-                depth: 1,
-            },
-            MTLSize {
-                width: 1,
-                height: 1,
-                depth: 1,
-            },
-        );
-
-        let pso = ctx.pipeline("kernel_deepseek_v4_hc_collapse")?;
-        enc.set_pipeline(&pso);
-        enc.set_bytes(0, &u32_hidden(self.hidden_size)?);
-        enc.set_tensor(1, residual);
-        enc.set_tensor(2, &self.pre);
-        enc.set_tensor(3, &self.collapsed);
-        enc.dispatch(
-            MTLSize {
-                width: self.hidden_size.div_ceil(256),
-                height: 1,
-                depth: 1,
-            },
-            MTLSize {
-                width: 256,
-                height: 1,
-                depth: 1,
-            },
-        );
+        encode_mhc4_controls(
+            ctx,
+            enc,
+            hc_eps,
+            &self.mixes,
+            scale,
+            base,
+            &self.pre,
+            &self.post,
+            &self.combination,
+        )?;
+        encode_mhc4_collapse(
+            ctx,
+            enc,
+            self.hidden_size,
+            residual,
+            &self.pre,
+            &self.collapsed,
+        )?;
         Ok(())
     }
 
@@ -1229,37 +1184,17 @@ impl DeepSeekV4HyperConnectionScratch {
         residual: &MetalTensor,
         output: &MetalTensor,
     ) -> Result<(), DeepSeekV4MetalError> {
-        require_serial(enc, "deepseek_v4_hc_post")?;
-        validate_f32(
-            block_output,
-            &[self.hidden_size as u64],
-            false,
-            "block output",
-        )?;
-        let shape = [self.hidden_size as u64, DEEPSEEK_V4_CONNECTION_COUNT as u64];
-        validate_f32(residual, &shape, false, "residual")?;
-        validate_f32(output, &shape, true, "post residual")?;
         self.validate_scratch()?;
-        let pso = ctx.pipeline("kernel_deepseek_v4_hc_post")?;
-        enc.set_pipeline(&pso);
-        enc.set_bytes(0, &u32_hidden(self.hidden_size)?);
-        enc.set_tensor(1, block_output);
-        enc.set_tensor(2, residual);
-        enc.set_tensor(3, &self.post);
-        enc.set_tensor(4, &self.combination);
-        enc.set_tensor(5, output);
-        enc.dispatch(
-            MTLSize {
-                width: residual_len(self.hidden_size)?.div_ceil(256),
-                height: 1,
-                depth: 1,
-            },
-            MTLSize {
-                width: 256,
-                height: 1,
-                depth: 1,
-            },
-        );
+        encode_mhc4_post(
+            ctx,
+            enc,
+            self.hidden_size,
+            block_output,
+            residual,
+            &self.post,
+            &self.combination,
+            output,
+        )?;
         Ok(())
     }
 

@@ -1946,6 +1946,7 @@ pub(super) fn deepseek_v4_all_slots_args(
     })
 }
 
+/// DS4 error adapter for the shared [`encode_clamped_swiglu`].
 pub(super) fn encode_ds4_clamped_swiglu(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1954,36 +1955,7 @@ pub(super) fn encode_ds4_clamped_swiglu(
     output: &MetalTensor,
     clamp: f32,
 ) -> Result<(), DeepSeekV4MetalError> {
-    let n = gate.n_elements() as usize;
-    validate_f32(gate, &[n as u64], false, "DS4 SwiGLU gate")?;
-    validate_f32(up, &[n as u64], false, "DS4 SwiGLU up")?;
-    validate_f32(output, &[n as u64], true, "DS4 SwiGLU output")?;
-    let n = u32::try_from(n)
-        .map_err(|_| DeepSeekV4MetalError::Invalid("DS4 SwiGLU width exceeds u32".into()))?;
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Args {
-        n: u32,
-        clamp: f32,
-    }
-    let pso = ctx.pipeline("kernel_deepseek_v4_clamped_swiglu")?;
-    enc.set_pipeline(&pso);
-    enc.set_bytes(0, &Args { n, clamp });
-    enc.set_tensor(1, gate);
-    enc.set_tensor(2, up);
-    enc.set_tensor(3, output);
-    enc.dispatch(
-        MTLSize {
-            width: (n as usize).div_ceil(256),
-            height: 1,
-            depth: 1,
-        },
-        MTLSize {
-            width: 256,
-            height: 1,
-            depth: 1,
-        },
-    );
+    encode_clamped_swiglu(ctx, enc, gate, up, output, clamp)?;
     Ok(())
 }
 

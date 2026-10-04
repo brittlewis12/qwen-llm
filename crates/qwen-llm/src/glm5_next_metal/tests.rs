@@ -1617,3 +1617,63 @@ fn sparse_decode_crosses_the_frontier_against_llama_cpp() {
     );
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+/// Timing runs hold the production lease but must not run under Metal API
+/// validation, which distorts timing.
+fn perf_lease() -> impl Sized {
+    assert!(
+        std::env::var_os("MTL_DEBUG_LAYER").is_none(),
+        "timing runs must not enable MTL_DEBUG_LAYER"
+    );
+    crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease")
+}
+
+/// Decode cost on either side of the sparse frontier: Fast packed prefill to
+/// position 2040, then per-token wall time for teacher-forced decode of
+/// positions 2040-2050 (dense, visible length up to 2051) and 2051-2092
+/// (sparse). Reports medians; no bound (timing, not qualification).
+#[test]
+#[ignore = "timing; loads the 109.5 GiB GLM-5.3 trunk; requires GLM53_GGUF, no MTL_DEBUG_LAYER, an idle GPU"]
+fn sparse_decode_cost_across_the_frontier() {
+    let _lease = perf_lease();
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let ctx = MetalContext::new().expect("Metal context");
+    let gguf = GgufFile::open(&path).unwrap();
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
+    let tokens: Vec<u32> = tokenizer
+        .encode(&sparse_qualification_text(), false)
+        .unwrap()
+        .into_iter()
+        .map(|t| t as u32)
+        .collect();
+    const START: usize = 2040;
+    let mut session =
+        Glm5NextSession::with_prefill_rows(&ctx, &weights, tokens.len(), 510).unwrap();
+    session.prefill_packed(&ctx, &tokens[..START]).unwrap();
+    let frontier = weights.config.sparse_frontier() as usize;
+    let (mut dense, mut sparse) = (Vec::new(), Vec::new());
+    for (offset, &token) in tokens[START..].iter().enumerate() {
+        let position = START + offset;
+        let t = std::time::Instant::now();
+        session.forward(&ctx, token).unwrap();
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        if position + 1 >= frontier {
+            sparse.push(ms);
+        } else {
+            dense.push(ms);
+        }
+    }
+    let median = |v: &mut Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    let (d, s) = (median(&mut dense), median(&mut sparse));
+    eprintln!(
+        "decode median: dense {d:.2} ms ({} tokens), sparse {s:.2} ms ({} tokens), +{:.2} ms ({:+.1}%)",
+        dense.len(),
+        sparse.len(),
+        s - d,
+        100.0 * (s - d) / d
+    );
+}

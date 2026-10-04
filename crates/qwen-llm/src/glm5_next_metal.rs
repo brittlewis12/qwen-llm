@@ -77,6 +77,8 @@ impl Glm5NextWeights {
         model.validate_execution(ExecutionMode::SerialDecode)?;
         let (page, max_buffer) = retained_geometry(ctx)?;
         let (plan, retained_bytes) = model.plan_retained(gguf, page, max_buffer)?;
+        // Admission and the allocations it prices form one transaction.
+        let _allocation = ctx.begin_allocation_transaction();
         let admission =
             evaluate_metal_memory_admission(retained_bytes, 0, ctx.memory_signals(), true);
         if !admission.admitted {
@@ -254,42 +256,76 @@ fn zeros_typed(
     )?)
 }
 
-/// Host copy of an F32 tensor after its command completed (shared storage).
-pub fn read_f32(tensor: &MetalTensor) -> Vec<f32> {
+/// Host copy of a session-owned shared-storage tensor of `dtype` with 4-byte
+/// elements. Callers are synchronized session code: no command writing the
+/// tensor may be in flight.
+fn read_elements<T: bytemuck::Pod>(tensor: &MetalTensor, dtype: GgmlType) -> Result<Vec<T>> {
     let n = tensor.n_elements() as usize;
-    // SAFETY: shared-storage buffer, offset and length validated at creation,
-    // and no command writing it is in flight when callers read.
-    unsafe {
+    let bytes = n
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or_else(|| Glm5NextMetalError::Invalid("read size overflow".into()))?;
+    let end = tensor.offset.checked_add(bytes as u64);
+    if tensor.dtype != dtype
+        || std::mem::size_of::<T>() != 4
+        || !tensor.offset.is_multiple_of(4)
+        || end.is_none_or(|end| end > tensor.buffer.length() as u64)
+    {
+        return invalid(format!(
+            "cannot read {:?} {:?} at offset {} as {dtype:?}",
+            tensor.dtype, tensor.shape, tensor.offset
+        ));
+    }
+    // SAFETY: shared-storage buffer; dtype, alignment and range checked above;
+    // the caller guarantees no in-flight writer.
+    let slice = unsafe {
         std::slice::from_raw_parts(
             tensor
                 .buffer
                 .contents()
                 .as_ptr()
                 .cast::<u8>()
-                .add(tensor.offset as usize)
-                .cast::<f32>(),
-            n,
+                .add(tensor.offset as usize),
+            bytes,
         )
-        .to_vec()
-    }
+    };
+    Ok(bytemuck::cast_slice(slice).to_vec())
 }
 
-fn read_i32(tensor: &MetalTensor) -> Vec<i32> {
+fn read_f32(tensor: &MetalTensor) -> Result<Vec<f32>> {
+    read_elements(tensor, GgmlType::F32)
+}
+
+fn read_i32(tensor: &MetalTensor) -> Result<Vec<i32>> {
+    read_elements(tensor, GgmlType::I32)
+}
+
+/// F16 session tensor promoted to F32 (diagnostics and tests).
+#[cfg(test)]
+fn read_f16(tensor: &MetalTensor) -> Result<Vec<f32>> {
     let n = tensor.n_elements() as usize;
-    // SAFETY: as in `read_f32`.
-    unsafe {
+    let end = tensor.offset.checked_add(2 * n as u64);
+    if tensor.dtype != GgmlType::F16
+        || !tensor.offset.is_multiple_of(2)
+        || end.is_none_or(|end| end > tensor.buffer.length() as u64)
+    {
+        return invalid("cannot read tensor as F16");
+    }
+    // SAFETY: as in `read_elements`.
+    let slice = unsafe {
         std::slice::from_raw_parts(
             tensor
                 .buffer
                 .contents()
                 .as_ptr()
                 .cast::<u8>()
-                .add(tensor.offset as usize)
-                .cast::<i32>(),
-            n,
+                .add(tensor.offset as usize),
+            2 * n,
         )
-        .to_vec()
-    }
+    };
+    Ok(bytemuck::cast_slice::<u8, u16>(slice)
+        .iter()
+        .map(|&bits| half::f16::from_bits(bits).to_f32())
+        .collect())
 }
 
 /// Intermediate a [`Glm5NextSession::forward_observed`] caller may inspect.
@@ -325,6 +361,8 @@ impl<'w> Glm5NextSession<'w> {
         }
         let ledger = Glm5NextMemoryLedger::new(c, weights.retained_bytes, capacity as u64, 1)?;
         let session_bytes = ledger.phase_peaks().decode - weights.retained_bytes;
+        // Admission and the allocations it prices form one transaction.
+        let _allocation = ctx.begin_allocation_transaction();
         let admission =
             evaluate_metal_memory_admission(session_bytes, 0, ctx.memory_signals(), true);
         if !admission.admitted {
@@ -471,28 +509,23 @@ impl<'w> Glm5NextSession<'w> {
                 self.position, self.capacity
             ));
         }
-        let result = self.encode_token(ctx, token, probes, observer);
-        match result {
-            Ok(()) => {
-                for (layer, route) in self.routes.iter().enumerate() {
-                    if let Some(route) = route {
-                        let status = read_i32(&route.status)[0];
-                        if status != ROUTE_STATUS_READY {
-                            self.poisoned = true;
-                            return invalid(format!(
-                                "block {layer} route failed with status {status}"
-                            ));
-                        }
-                    }
+        // Poisoned until the token completes and validates: recurrent state
+        // mutates on the GPU, so any failure or unwind past this point leaves
+        // the session unusable rather than silently at the old position.
+        self.poisoned = true;
+        self.encode_token(ctx, token, probes, observer)?;
+        for (layer, route) in self.routes.iter().enumerate() {
+            if let Some(route) = route {
+                let status = read_i32(&route.status)?[0];
+                if status != ROUTE_STATUS_READY {
+                    return invalid(format!("block {layer} route failed with status {status}"));
                 }
-                self.position += 1;
-                Ok(read_f32(&self.s.logits))
-            }
-            Err(error) => {
-                self.poisoned = true;
-                Err(error)
             }
         }
+        let logits = read_f32(&self.s.logits)?;
+        self.position += 1;
+        self.poisoned = false;
+        Ok(logits)
     }
 
     fn encode_token(
@@ -562,7 +595,7 @@ impl<'w> Glm5NextSession<'w> {
                 enc.end();
                 command.commit();
                 wait_completed(&command)?;
-                observer(Glm5NextProbe::AttentionResidual, index, &read_f32(b));
+                observer(Glm5NextProbe::AttentionResidual, index, &read_f32(b)?);
                 command = ctx
                     .queue
                     .commandBuffer()
@@ -700,7 +733,7 @@ impl<'w> Glm5NextSession<'w> {
                 enc.end();
                 command.commit();
                 wait_completed(&command)?;
-                observer(Glm5NextProbe::BlockResidual, index, &read_f32(a));
+                observer(Glm5NextProbe::BlockResidual, index, &read_f32(a)?);
                 command = ctx
                     .queue
                     .commandBuffer()

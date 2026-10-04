@@ -12,7 +12,9 @@
 use super::checks::{bad_shape, check_alignment, check_disjoint, check_tensor, require_serial};
 use super::*;
 
-/// Sink logit that contributes no softmax mass for any finite score.
+/// Sink logit that contributes negligible softmax mass whenever some visible
+/// row scores far above it (always true for real scores, which are O(10));
+/// finite because the metallib builds with fast math.
 pub const LATENT_NO_SINK: f32 = -1.0e30;
 pub const LATENT_HEADS: usize = 64;
 pub const LATENT_WIDTH: usize = 512;

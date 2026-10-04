@@ -114,9 +114,72 @@ fn argmax(x: &[f32]) -> usize {
         .0
 }
 
+fn assert_finite(label: &str, values: &[f32]) {
+    assert!(
+        values.iter().all(|v| v.is_finite()),
+        "{label}: non-finite values"
+    );
+}
+
+/// Compares native recurrent and indexer state after `position` with the
+/// llama.cpp state capture (KDA `new_state`; the first complete pools of
+/// `indexer_pool_k`; the pending key of the current position vs `indexer_k`).
+fn compare_state(
+    session: &Glm5NextSession<'_>,
+    position: usize,
+    state_captures: &BTreeMap<(String, u32, u32, u32), Vec<f32>>,
+    default_captures: &BTreeMap<(String, u32, u32, u32), Vec<f32>>,
+) {
+    let step = position as u32;
+    let complete_pools = (position + 1) / 4;
+    for (layer, state) in session.layers.iter().enumerate() {
+        let key = |name: &str| (name.to_string(), step, layer as u32, 0);
+        match state {
+            LayerState::Kda { state, .. } => {
+                let native = read_f32(state).unwrap();
+                let reference = state_captures
+                    .get(&key("new_state"))
+                    .unwrap_or_else(|| panic!("missing new_state step {step} layer {layer}"));
+                assert_finite("native KDA state", &native);
+                let error = relative_error(&native, reference);
+                assert!(
+                    error < 1e-3,
+                    "step {step} layer {layer} KDA state rel {error:.3e}"
+                );
+            }
+            LayerState::Mla {
+                pending, pooled, ..
+            } => {
+                let reference = state_captures
+                    .get(&key("indexer_pool_k"))
+                    .unwrap_or_else(|| panic!("missing indexer_pool_k step {step} layer {layer}"));
+                let native = read_f16(pooled).unwrap();
+                let rows = complete_pools * 128;
+                let error = relative_error(&native[..rows], &reference[..rows]);
+                assert!(
+                    error < 2e-3,
+                    "step {step} layer {layer} pooled rel {error:.3e}"
+                );
+                let slot = position % 4;
+                let pending = read_f16(pending).unwrap();
+                let key_row = &pending[slot * 256..slot * 256 + 128];
+                let reference_key = default_captures
+                    .get(&key("indexer_k"))
+                    .unwrap_or_else(|| panic!("missing indexer_k step {step} layer {layer}"));
+                let error = relative_error(key_row, reference_key);
+                assert!(
+                    error < 2e-3,
+                    "step {step} layer {layer} pending key rel {error:.3e}"
+                );
+            }
+        }
+    }
+}
+
 /// The P2 end-to-end checkpoint: the ckpt-v1 token IDs through all 45 blocks,
-/// compared with the same-artifact llama.cpp oracle (logits per position and
-/// per-block residual streams), plus peak allocation and token latency.
+/// compared with the same-artifact llama.cpp oracle: logits per position, every
+/// block's residual streams, KDA state and indexer pools at steps 3/7/14, and
+/// unobserved-path parity; reports peak allocation and token latency.
 #[test]
 #[ignore = "loads the 109.5 GiB GLM-5.3 trunk; requires GLM53_GGUF, the ckpt-v1 oracle and an idle GPU"]
 fn checkpoint_v1_matches_llama_cpp_oracle() {
@@ -131,82 +194,124 @@ fn checkpoint_v1_matches_llama_cpp_oracle() {
         load.elapsed().as_secs_f64()
     );
     let tokens = checkpoint_tokens();
-    let mut session = Glm5NextSession::new(&ctx, &weights, 256).expect("session");
     let reference = read_reference_logits(&oracle_dir().join("logits.bin"));
     let captures = read_captures(
         &oracle_dir().join("default.bin.captures"),
-        &["l_out", "hc_attn_post"],
+        &["l_out", "hc_attn_post", "indexer_k"],
+    );
+    let state_captures = read_captures(
+        &oracle_dir().join("state.bin.captures"),
+        &["new_state", "indexer_pool_k"],
     );
     assert_eq!(reference.len(), tokens.len());
-    let mut worst_kl = 0.0f64;
-    let mut top1 = 0;
+    let blocks = weights.blocks.len();
+    let mut observed_logits = Vec::with_capacity(tokens.len());
+    {
+        let mut session = Glm5NextSession::new(&ctx, &weights, 256).expect("session");
+        eprintln!(
+            "allocated with one session: {} bytes (ledger decode peak {})",
+            ctx.current_allocated_size(),
+            session.ledger().phase_peaks().decode
+        );
+        let mut worst_kl = 0.0f64;
+        for (position, &token) in tokens.iter().enumerate() {
+            assert_eq!(reference[position].0, token);
+            let mut residuals = Vec::with_capacity(2 * blocks);
+            let logits = session
+                .forward_observed(
+                    &ctx,
+                    token,
+                    &[
+                        Glm5NextProbe::AttentionResidual,
+                        Glm5NextProbe::BlockResidual,
+                    ],
+                    &mut |probe, block, values| {
+                        let name = match probe {
+                            Glm5NextProbe::AttentionResidual => "hc_attn_post",
+                            Glm5NextProbe::BlockResidual => "l_out",
+                        };
+                        let expected = captures
+                            .get(&(name.to_string(), position as u32, block as u32, 0))
+                            .unwrap_or_else(|| {
+                                panic!("missing {name} capture pos {position} block {block}")
+                            });
+                        assert_finite(name, values);
+                        residuals.push((name, block, relative_error(values, expected)));
+                    },
+                )
+                .unwrap_or_else(|e| panic!("position {position}: {e}"));
+            assert_eq!(
+                residuals.len(),
+                2 * blocks,
+                "position {position}: residual probes"
+            );
+            let expected = &reference[position].1;
+            assert_finite("native logits", &logits);
+            assert_eq!(logits.len(), expected.len());
+            let kl = kl_divergence(expected, &logits);
+            assert!(kl.is_finite(), "position {position}: KL {kl}");
+            let max_abs = logits
+                .iter()
+                .zip(expected)
+                .map(|(a, e)| (a - e).abs())
+                .fold(0.0f32, f32::max);
+            let worst = residuals
+                .iter()
+                .cloned()
+                .fold(("", 0, 0.0f64), |w, e| if e.2 > w.2 { e } else { w });
+            eprintln!(
+                "pos {position:2} token {token:6}: kl {kl:.3e} max|dlogit| {max_abs:.3e} worst residual {}@{} {:.3e}",
+                worst.0, worst.1, worst.2
+            );
+            assert_eq!(
+                argmax(&logits),
+                argmax(expected),
+                "position {position}: top-1"
+            );
+            assert!(kl < 1e-6, "position {position}: KL {kl}");
+            assert!(
+                max_abs < 2e-3,
+                "position {position}: max |dlogit| {max_abs}"
+            );
+            assert!(
+                worst.2 < 1e-4,
+                "position {position}: residual {}@{} {}",
+                worst.0,
+                worst.1,
+                worst.2
+            );
+            worst_kl = worst_kl.max(kl);
+            if matches!(position, 3 | 7 | 14) {
+                compare_state(&session, position, &state_captures, &captures);
+                eprintln!("pos {position:2}: KDA state, pools and pending key match");
+            }
+            observed_logits.push(logits);
+        }
+        eprintln!(
+            "observed path: top-1 {}/{} worst KL {worst_kl:.3e}",
+            tokens.len(),
+            tokens.len()
+        );
+    }
+    // Unobserved path: one command per token, same logits; latency.
+    let mut session = Glm5NextSession::new(&ctx, &weights, 256).expect("timing session");
+    let start = std::time::Instant::now();
     for (position, &token) in tokens.iter().enumerate() {
-        assert_eq!(reference[position].0, token);
-        let mut block_errors = Vec::new();
-        let start = std::time::Instant::now();
-        let logits = session
-            .forward_observed(
-                &ctx,
-                token,
-                &[
-                    Glm5NextProbe::AttentionResidual,
-                    Glm5NextProbe::BlockResidual,
-                ],
-                &mut |probe, block, values| {
-                    let (name, occurrence) = match probe {
-                        Glm5NextProbe::AttentionResidual => ("hc_attn_post", 0),
-                        Glm5NextProbe::BlockResidual => ("l_out", 0),
-                    };
-                    if let Some(expected) =
-                        captures.get(&(name.to_string(), position as u32, block as u32, occurrence))
-                    {
-                        block_errors.push((name, block, relative_error(values, expected)));
-                    }
-                },
-            )
-            .unwrap_or_else(|e| panic!("position {position}: {e}"));
-        let elapsed = start.elapsed();
-        let expected = &reference[position].1;
-        let kl = kl_divergence(expected, &logits);
-        let max_abs = logits
+        let logits = session.forward(&ctx, token).unwrap();
+        let drift = logits
             .iter()
-            .zip(expected)
+            .zip(&observed_logits[position])
             .map(|(a, e)| (a - e).abs())
             .fold(0.0f32, f32::max);
-        let agree = argmax(&logits) == argmax(expected);
-        top1 += usize::from(agree);
-        worst_kl = worst_kl.max(kl);
-        let worst_block = block_errors
-            .iter()
-            .cloned()
-            .fold(("", 0, 0.0f64), |w, e| if e.2 > w.2 { e } else { w });
-        eprintln!(
-            "pos {position:2} token {token:6}: top1 {} kl {kl:.3e} max|dlogit| {max_abs:.3e} worst residual {}@{} {:.3e} ({:.1} ms observed)",
-            if agree { "ok" } else { "MISS" },
-            worst_block.0,
-            worst_block.1,
-            worst_block.2,
-            elapsed.as_secs_f64() * 1e3
+        assert!(
+            drift <= 1e-6,
+            "position {position}: unobserved drift {drift}"
         );
-        if position == 0 {
-            for (name, block, error) in &block_errors {
-                eprintln!("  pos0 {name} block {block:2}: rel {error:.3e}");
-            }
-        }
-    }
-    // Unobserved token latency and peak allocation.
-    let mut timing_session = Glm5NextSession::new(&ctx, &weights, 256).expect("timing session");
-    let start = std::time::Instant::now();
-    for &token in &tokens {
-        timing_session.forward(&ctx, token).unwrap();
     }
     eprintln!(
-        "unobserved: {:.1} ms/token; allocated {} bytes; ledger decode peak {}",
+        "unobserved: {:.1} ms/token over {} tokens; allocated {} bytes",
         start.elapsed().as_secs_f64() * 1e3 / tokens.len() as f64,
-        ctx.current_allocated_size(),
-        session.ledger().phase_peaks().decode
+        tokens.len(),
+        ctx.current_allocated_size()
     );
-    eprintln!("top1 {top1}/{} worst KL {worst_kl:.3e}", tokens.len());
-    assert_eq!(top1, tokens.len(), "greedy top-1 disagreement");
-    assert!(worst_kl < 5e-3, "KL {worst_kl}");
 }

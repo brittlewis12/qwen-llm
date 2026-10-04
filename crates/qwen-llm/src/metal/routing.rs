@@ -126,6 +126,8 @@ pub fn encode_route_learned(
             &[(logits, "logits"), (bias, "selection bias")],
         )?;
     }
+    super::checks::check_disjoint(KERNEL, ids, &[(weights, "weights"), (status, "status")])?;
+    super::checks::check_disjoint(KERNEL, weights, &[(status, "status")])?;
     let kernel = route.score.kernel();
     let pso = ctx.pipeline(kernel)?;
     let threads = route.threads();

@@ -1,6 +1,6 @@
-use anyhow::{Context, Result};
-use serde_json::{Value, json};
-use std::time::{Duration, Instant};
+//! K2 request phases for the shared [`crate::lane_timing`] accumulator.
+
+use crate::lane_timing::{LanePhases, LaneReport, LaneTiming};
 
 #[derive(Clone, Copy)]
 pub(super) enum Phase {
@@ -15,87 +15,44 @@ pub(super) enum Phase {
     SessionSetup,
     ResidentExecution,
 }
-const PHASES: [(Phase, &str); 10] = [
-    (Phase::ArtifactLayout, "artifact_layout"),
-    (Phase::TokenizerConstruction, "tokenizer_construction"),
-    (Phase::ArtifactVerification, "artifact_verification"),
-    (Phase::InputAcquisition, "input_acquisition"),
-    (Phase::Rendering, "rendering"),
-    (Phase::RequestPreparation, "request_preparation"),
-    (Phase::Encoding, "encoding"),
-    (Phase::ModelLoad, "model_load"),
-    (Phase::SessionSetup, "session_setup"),
-    (Phase::ResidentExecution, "resident_execution"),
-];
 
-#[derive(Default)]
-pub(super) struct Timing {
-    phases: [Duration; 10],
-}
-pub(super) struct Report {
-    pub(super) loaded_request_ms: f64,
-    pub(super) load_ms: f64,
-    pub(super) encoding_ms: f64,
-    pub(super) json: Value,
+impl LanePhases for Phase {
+    const FAMILY: &'static str = "K2";
+    const PHASES: &'static [(Self, &'static str)] = &[
+        (Phase::ArtifactLayout, "artifact_layout"),
+        (Phase::TokenizerConstruction, "tokenizer_construction"),
+        (Phase::ArtifactVerification, "artifact_verification"),
+        (Phase::InputAcquisition, "input_acquisition"),
+        (Phase::Rendering, "rendering"),
+        (Phase::RequestPreparation, "request_preparation"),
+        (Phase::Encoding, "encoding"),
+        (Phase::ModelLoad, "model_load"),
+        (Phase::SessionSetup, "session_setup"),
+        (Phase::ResidentExecution, "resident_execution"),
+    ];
+    const LOADED_REQUEST: &'static [Self] = &[
+        Phase::Encoding,
+        Phase::RequestPreparation,
+        Phase::ResidentExecution,
+    ];
+    const LOAD: &'static [Self] = &[Phase::ModelLoad, Phase::SessionSetup];
+    const ENCODING: Self = Phase::Encoding;
+    const LOADED_REQUEST_POLICY: &'static str =
+        "sum_encoding_request_preparation_resident_execution_not_continuous_wall";
+    const END_TO_END_BOUNDARY: &'static str = "k2_run_entry_through_generator_return_excludes_initial_gguf_open_final_formatting_stats_serialization";
+    fn index(self) -> usize {
+        self as usize
+    }
 }
 
-impl Timing {
-    pub(super) fn record(&mut self, phase: Phase, elapsed: Duration) -> Result<()> {
-        let duration = &mut self.phases[phase as usize];
-        *duration = duration
-            .checked_add(elapsed)
-            .context("K2 timing phase overflow")?;
-        Ok(())
-    }
-    pub(super) fn measure<T>(
-        &mut self,
-        phase: Phase,
-        operation: impl FnOnce() -> Result<T>,
-    ) -> Result<T> {
-        let start = Instant::now();
-        let result = operation();
-        self.record(phase, start.elapsed())?;
-        result
-    }
-    fn sum(&self, phases: impl IntoIterator<Item = Phase>) -> Result<Duration> {
-        phases.into_iter().try_fold(Duration::ZERO, |total, p| {
-            total
-                .checked_add(self.phases[p as usize])
-                .context("K2 timing total overflow")
-        })
-    }
-    pub(super) fn finish(self, end_to_end: Duration) -> Result<Report> {
-        let accounted = self.sum(PHASES.map(|(p, _)| p))?;
-        let residual = end_to_end
-            .checked_sub(accounted)
-            .context("K2 timing phases overlap or exceed lane wall")?;
-        let loaded_request = self.sum([
-            Phase::Encoding,
-            Phase::RequestPreparation,
-            Phase::ResidentExecution,
-        ])?;
-        let load = self.sum([Phase::ModelLoad, Phase::SessionSetup])?;
-        let ms = |d: Duration| d.as_secs_f64() * 1e3;
-        let phases: serde_json::Map<String, Value> = PHASES
-            .into_iter()
-            .map(|(p, name)| (name.into(), json!(ms(self.phases[p as usize]))))
-            .collect();
-        Ok(Report {
-            loaded_request_ms: ms(loaded_request),
-            load_ms: ms(load),
-            encoding_ms: ms(self.phases[Phase::Encoding as usize]),
-            json: json!({"schema_version":1,"unit":"milliseconds",
-                "loaded_request_policy":"sum_encoding_request_preparation_resident_execution_not_continuous_wall",
-                "end_to_end_boundary":"k2_run_entry_through_generator_return_excludes_initial_gguf_open_final_formatting_stats_serialization",
-                "phases_ms":phases,"loaded_request_ms":ms(loaded_request),
-                "end_to_end_lane_ms":ms(end_to_end),"unclassified_host_overhead_ms":ms(residual)}),
-        })
-    }
-}
+pub(super) type Timing = LaneTiming<Phase>;
+#[allow(dead_code)]
+pub(super) type Report = LaneReport;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     fn example(extra: Option<Phase>) -> Report {
         let mut timing = Timing::default();
         for phase in [

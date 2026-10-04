@@ -33,6 +33,8 @@ mod glm5_next;
 mod jsonl;
 #[path = "qwen/k2_horizon.rs"]
 mod k2_horizon;
+#[path = "qwen/lane_timing.rs"]
+mod lane_timing;
 #[allow(dead_code, unused_imports)] // CLI input adapters share native request semantics.
 mod lens_input;
 #[allow(dead_code)] // Shared actions also include CLI-only operators.

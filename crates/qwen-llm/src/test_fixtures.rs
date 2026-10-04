@@ -114,6 +114,13 @@ pub const QWEN4EXP_Q3_K_XL: Fixture = Fixture {
     default_path: "/Users/tito/models/Qwen3.8-Flash-Next-UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf",
 };
 
+/// GLM-5.3-Flash UD-IQ3_XXS (first, metadata-only shard of four).
+pub const GLM53_FLASH_UD_IQ3_XXS: Fixture = Fixture {
+    id: "glm-5.3-flash-ud-iq3_xxs",
+    env: &["GLM53_GGUF"],
+    default_path: "/Volumes/wdblack/weights-archive/glm-5.3-flash-ud-iq3_xxs/glm5-next/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+};
+
 /// Spiritbuun DFlash drafter for Qwen3.6 (v1 drafter convention).
 pub const DFLASH_DRAFT_36_Q8_0: Fixture = Fixture {
     id: "dflash-draft-3.6-q8_0",
@@ -382,6 +389,7 @@ mod tests {
             MUSE_GLIMMER_Q8_0,
             DEEPSEEK_V4_IQ3_XXS,
             QWEN4EXP_Q3_K_XL,
+            GLM53_FLASH_UD_IQ3_XXS,
             DFLASH_DRAFT_36_Q8_0,
         ];
         let mut ids = all.iter().map(|f| f.id).collect::<Vec<_>>();

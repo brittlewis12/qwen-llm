@@ -45,6 +45,18 @@ fn letter(chars: &[CharInfo], pos: usize) -> bool {
 /// The pinned HF Split regex, before byte encoding. Unlike Qwen35, numbers
 /// group up to three, letter runs include joiners, and punctuation may eat marks.
 pub(super) fn pretokenize(text: &str) -> Vec<&str> {
+    split_llama3_shaped(text, letter)
+}
+
+/// Scalar form of the llama3-shaped HF Split regex
+/// `(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?L+|\p{N}{1,3}|
+/// ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+`, where the letter
+/// class `L` is `letter(chars, pos)` (false past the end). The punctuation
+/// class is fixed to `[^\s\p{L}\p{N}]` regardless of `L`.
+pub(super) fn split_llama3_shaped(
+    text: &str,
+    letter: impl Fn(&[CharInfo], usize) -> bool,
+) -> Vec<&str> {
     let chars: Vec<_> = text
         .char_indices()
         .map(|(start, ch)| CharInfo {
@@ -213,6 +225,7 @@ mod tests {
             add_bos: false,
             add_eos: false,
             pretokenizer: PretokenizerKind::K2Horizon,
+            whole_piece_ids: None,
         };
         assert_eq!(tokenizer.encode("\u{e9}", false).unwrap(), [256]);
         assert_eq!(tokenizer.encode("e\u{301}", false).unwrap(), [0xc3, 0xa9]);

@@ -2,7 +2,8 @@
 //!
 //! Qwen 3.5/3.6 uses the Qwen35 pretokenizer and a 248,320-entry vocabulary.
 //! DeepSeek V4 uses the JoyAI/DeepSeek-V3 pretokenizer and a 129,280-entry
-//! vocabulary. Both consume token, type, and merge arrays directly from GGUF.
+//! vocabulary. GLM-5.3-Flash uses the `glm4` pretokenizer with HF
+//! `ignore_merges`. All consume token, type, and merge arrays directly from GGUF.
 //!
 //! ## Implementation choice
 //!
@@ -835,6 +836,7 @@ impl Drop for LlamaCppTokenizer {
 
 pub type Tokenizer = NativeTokenizer;
 
+mod glm4;
 mod k2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -842,6 +844,9 @@ enum PretokenizerKind {
     Qwen35,
     JoyAi,
     K2Horizon,
+    /// GLM-4/5 `glm4`: llama3-shaped split with letter class `\p{L}`, plus
+    /// HF `ignore_merges` (see [`NativeTokenizer::whole_piece_ids`]).
+    Glm4,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -908,6 +913,10 @@ pub struct NativeTokenizer {
     add_bos: bool,
     add_eos: bool,
     pretokenizer: PretokenizerKind,
+    /// HF `ignore_merges`: exact byte content of every normal vocabulary
+    /// token. A pre-token equal to one of these is emitted as that id without
+    /// BPE. `None` for families whose BPE model does not ignore merges.
+    whole_piece_ids: Option<HashMap<Box<[u8]>, i32>>,
 }
 
 impl NativeTokenizer {
@@ -926,6 +935,7 @@ impl NativeTokenizer {
             }
             (Some("deepseek4"), "gpt2", "joyai-llm") => PretokenizerKind::JoyAi,
             (Some("k2-horizon"), "gpt2", "k2-horizon") => PretokenizerKind::K2Horizon,
+            (Some("glm5-next" | "glm5next"), "gpt2", "glm4") => PretokenizerKind::Glm4,
             _ => {
                 return Err(TokError::UnsupportedNativeTokenizer {
                     model: model.to_string(),
@@ -934,7 +944,7 @@ impl NativeTokenizer {
             }
         };
 
-        let token_texts = required_string_array(g, "tokenizer.ggml.tokens")?;
+        let token_texts = required_full_string_array(g, "tokenizer.ggml.tokens")?;
         let token_types = required_i64_array(g, "tokenizer.ggml.token_type")?;
         if token_texts.len() != token_types.len() {
             return Err(TokError::BadMetadata(format!(
@@ -974,7 +984,7 @@ impl NativeTokenizer {
             byte_token_ids[byte as usize] = token;
         }
 
-        let merges = required_string_array(g, "tokenizer.ggml.merges")?;
+        let merges = required_full_string_array(g, "tokenizer.ggml.merges")?;
         let mut pair_merges = HashMap::default();
         pair_merges.reserve(merges.len());
         let mut merged_text = String::new();
@@ -1018,7 +1028,7 @@ impl NativeTokenizer {
 
         let default_special = match pretokenizer {
             PretokenizerKind::Qwen35 => Some(11),
-            PretokenizerKind::JoyAi | PretokenizerKind::K2Horizon => None,
+            PretokenizerKind::JoyAi | PretokenizerKind::K2Horizon | PretokenizerKind::Glm4 => None,
         };
         let bos = optional_token_id(g, "tokenizer.ggml.bos_token_id")?.or(default_special);
         // The tokenizer interface has one canonical EOS while GGUF generation
@@ -1059,6 +1069,8 @@ impl NativeTokenizer {
         let special_matcher = SpecialMatcher::new(&special_tokens);
 
         let decoded_piece_bytes = (0..id_to_token.len()).map(|_| OnceLock::new()).collect();
+        let whole_piece_ids =
+            (pretokenizer == PretokenizerKind::Glm4).then(|| whole_piece_ids(&id_to_token));
 
         Ok(Self {
             id_to_token,
@@ -1071,6 +1083,7 @@ impl NativeTokenizer {
             add_bos,
             add_eos,
             pretokenizer,
+            whole_piece_ids,
         })
     }
 
@@ -1137,8 +1150,15 @@ impl NativeTokenizer {
             PretokenizerKind::Qwen35 => qwen35_pretokenize(text),
             PretokenizerKind::JoyAi => joyai_pretokenize(text),
             PretokenizerKind::K2Horizon => k2::pretokenize(text),
+            PretokenizerKind::Glm4 => glm4::pretokenize(text),
         };
         for piece in pieces {
+            if let Some(whole) = &self.whole_piece_ids
+                && let Some(&id) = whole.get(piece.as_bytes())
+            {
+                out.push(id);
+                continue;
+            }
             self.encode_bpe_piece(piece.as_bytes(), out);
         }
         Ok(())
@@ -1896,6 +1916,25 @@ fn decode_token_bytes_uncached(data: &NativeToken) -> Vec<u8> {
     out
 }
 
+/// Byte content of each normal token whose text is entirely byte-level
+/// encoded. Matches HF, which consults only the model vocabulary; added
+/// tokens never reach BPE because they are partitioned out first.
+fn whole_piece_ids(tokens: &[NativeToken]) -> HashMap<Box<[u8]>, i32> {
+    let mut out = HashMap::default();
+    out.reserve(tokens.len());
+    for (id, token) in tokens.iter().enumerate() {
+        if token.attr != TokenAttr::Normal {
+            continue;
+        }
+        let bytes: Option<Box<[u8]>> = token.text.chars().map(unicode_to_byte).collect();
+        if let Some(bytes) = bytes {
+            // Token texts are unique and the byte-level map is injective.
+            out.insert(bytes, id as i32);
+        }
+    }
+    out
+}
+
 fn split_merge(merge: &str) -> Result<(&str, &str), TokError> {
     let bytes = merge.as_bytes();
     let Some(rel) = bytes.iter().skip(1).position(|&b| b == b' ') else {
@@ -1936,6 +1975,13 @@ fn required_string_array<'a>(g: &'a GgufFile, key: &str) -> Result<Vec<&'a str>,
         out.push(s);
     }
     Ok(out)
+}
+
+/// Untruncated string array (GLM-5.3 declares 321,649 merges; the gguf-rs
+/// metadata view keeps only 300,000).
+fn required_full_string_array<'a>(g: &'a GgufFile, key: &str) -> Result<Vec<&'a str>, TokError> {
+    g.get_string_array_full(key)?
+        .ok_or_else(|| TokError::BadMetadata(format!("missing array metadata key {key:?}")))
 }
 
 fn required_i64_array(g: &GgufFile, key: &str) -> Result<Vec<i64>, TokError> {
@@ -2029,6 +2075,12 @@ fn validate_special_addition_config(
     {
         return Err(TokError::BadMetadata(
             "K2 single-sequence encoding requires BOS=0, EOS=1, add_bos=true, add_eos=false; paired SEP is not a trailing EOS".into(),
+        ));
+    }
+    if pretokenizer == PretokenizerKind::Glm4 && (add_bos || add_eos) {
+        return Err(TokError::BadMetadata(
+            "GLM tokenizer never inserts BOS/EOS; the chat renderer emits [gMASK]<sop> explicitly"
+                .into(),
         ));
     }
     if pretokenizer == PretokenizerKind::JoyAi && (bos.is_none() || eos.is_none()) {

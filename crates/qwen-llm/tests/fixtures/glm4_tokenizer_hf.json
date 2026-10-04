@@ -1,0 +1,4149 @@
+{
+ "generator": "tokenizers==0.23.2",
+ "source": "/Volumes/wdblack/weights-archive/glm-5.3-flash-fp8",
+ "tokenizer_sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+ "tokenizer_config_sha256": "98b1271574f41abf89427ae2dda030d94dc9478f0edc5a8bd240db213c6fd5fc",
+ "normalizer": null,
+ "pre_tokenizer": {
+  "type": "Sequence",
+  "pretokenizers": [
+   {
+    "type": "Split",
+    "pattern": {
+     "Regex": "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+    },
+    "behavior": "Isolated",
+    "invert": false
+   },
+   {
+    "type": "ByteLevel",
+    "add_prefix_space": false,
+    "trim_offsets": true,
+    "use_regex": false
+   }
+  ]
+ },
+ "post_processor": {
+  "type": "ByteLevel",
+  "add_prefix_space": true,
+  "trim_offsets": false,
+  "use_regex": true
+ },
+ "decoder": {
+  "type": "ByteLevel",
+  "add_prefix_space": true,
+  "trim_offsets": true,
+  "use_regex": true
+ },
+ "model_options": {
+  "type": "BPE",
+  "dropout": null,
+  "unk_token": null,
+  "continuing_subword_prefix": null,
+  "end_of_word_suffix": null,
+  "fuse_unk": false,
+  "byte_fallback": false,
+  "ignore_merges": true
+ },
+ "vocab_size": 154820,
+ "special_config": {
+  "add_bos_token": null,
+  "add_eos_token": null,
+  "bos_token": null,
+  "eos_token": "<|endoftext|>",
+  "pad_token": "<|endoftext|>"
+ },
+ "added_tokens": [
+  {
+   "id": 154820,
+   "content": "<|endoftext|>",
+   "special": true
+  },
+  {
+   "id": 154821,
+   "content": "[MASK]",
+   "special": true
+  },
+  {
+   "id": 154822,
+   "content": "[gMASK]",
+   "special": true
+  },
+  {
+   "id": 154823,
+   "content": "[sMASK]",
+   "special": true
+  },
+  {
+   "id": 154824,
+   "content": "<sop>",
+   "special": true
+  },
+  {
+   "id": 154825,
+   "content": "<eop>",
+   "special": true
+  },
+  {
+   "id": 154826,
+   "content": "<|system|>",
+   "special": true
+  },
+  {
+   "id": 154827,
+   "content": "<|user|>",
+   "special": true
+  },
+  {
+   "id": 154828,
+   "content": "<|assistant|>",
+   "special": true
+  },
+  {
+   "id": 154829,
+   "content": "<|observation|>",
+   "special": true
+  },
+  {
+   "id": 154830,
+   "content": "<|begin_of_image|>",
+   "special": true
+  },
+  {
+   "id": 154831,
+   "content": "<|end_of_image|>",
+   "special": true
+  },
+  {
+   "id": 154832,
+   "content": "<|begin_of_video|>",
+   "special": true
+  },
+  {
+   "id": 154833,
+   "content": "<|end_of_video|>",
+   "special": true
+  },
+  {
+   "id": 154834,
+   "content": "<|begin_of_audio|>",
+   "special": true
+  },
+  {
+   "id": 154835,
+   "content": "<|end_of_audio|>",
+   "special": true
+  },
+  {
+   "id": 154836,
+   "content": "<|begin_of_transcription|>",
+   "special": true
+  },
+  {
+   "id": 154837,
+   "content": "<|end_of_transcription|>",
+   "special": true
+  },
+  {
+   "id": 154838,
+   "content": "<|code_prefix|>",
+   "special": false
+  },
+  {
+   "id": 154839,
+   "content": "<|code_middle|>",
+   "special": false
+  },
+  {
+   "id": 154840,
+   "content": "<|code_suffix|>",
+   "special": false
+  },
+  {
+   "id": 154841,
+   "content": "<think>",
+   "special": false
+  },
+  {
+   "id": 154842,
+   "content": "</think>",
+   "special": false
+  },
+  {
+   "id": 154843,
+   "content": "<tool_call>",
+   "special": false
+  },
+  {
+   "id": 154844,
+   "content": "</tool_call>",
+   "special": false
+  },
+  {
+   "id": 154845,
+   "content": "<tool_response>",
+   "special": false
+  },
+  {
+   "id": 154846,
+   "content": "</tool_response>",
+   "special": false
+  },
+  {
+   "id": 154847,
+   "content": "<arg_key>",
+   "special": false
+  },
+  {
+   "id": 154848,
+   "content": "</arg_key>",
+   "special": false
+  },
+  {
+   "id": 154849,
+   "content": "<arg_value>",
+   "special": false
+  },
+  {
+   "id": 154850,
+   "content": "</arg_value>",
+   "special": false
+  },
+  {
+   "id": 154851,
+   "content": "/nothink",
+   "special": false
+  },
+  {
+   "id": 154852,
+   "content": "<|begin_of_box|>",
+   "special": false
+  },
+  {
+   "id": 154853,
+   "content": "<|end_of_box|>",
+   "special": false
+  },
+  {
+   "id": 154854,
+   "content": "<|image|>",
+   "special": false
+  },
+  {
+   "id": 154855,
+   "content": "<|video|>",
+   "special": false
+  }
+ ],
+ "cases": [
+  {
+   "text": "",
+   "pieces": [],
+   "ids": [],
+   "ids_with_special": [],
+   "decoded": ""
+  },
+  {
+   "text": "Hello, world!",
+   "pieces": [
+    "Hello",
+    ",",
+    " world",
+    "!"
+   ],
+   "ids": [
+    9703,
+    11,
+    1879,
+    0
+   ],
+   "ids_with_special": [
+    9703,
+    11,
+    1879,
+    0
+   ],
+   "decoded": "Hello, world!"
+  },
+  {
+   "text": "The capital of France is Paris.",
+   "pieces": [
+    "The",
+    " capital",
+    " of",
+    " France",
+    " is",
+    " Paris",
+    "."
+   ],
+   "ids": [
+    785,
+    6722,
+    315,
+    9621,
+    374,
+    12089,
+    13
+   ],
+   "ids_with_special": [
+    785,
+    6722,
+    315,
+    9621,
+    374,
+    12089,
+    13
+   ],
+   "decoded": "The capital of France is Paris."
+  },
+  {
+   "text": "I'm I'M we'd WE'VE it'll They're can't DON'T",
+   "pieces": [
+    "I",
+    "'m",
+    " I",
+    "'M",
+    " we",
+    "'d",
+    " WE",
+    "'VE",
+    " it",
+    "'ll",
+    " They",
+    "'re",
+    " can",
+    "'t",
+    " DON",
+    "'T"
+   ],
+   "ids": [
+    40,
+    2776,
+    358,
+    27511,
+    582,
+    4172,
+    19640,
+    6,
+    4491,
+    432,
+    3278,
+    2379,
+    2299,
+    646,
+    944,
+    44017,
+    17302
+   ],
+   "ids_with_special": [
+    40,
+    2776,
+    358,
+    27511,
+    582,
+    4172,
+    19640,
+    6,
+    4491,
+    432,
+    3278,
+    2379,
+    2299,
+    646,
+    944,
+    44017,
+    17302
+   ],
+   "decoded": "I'm I'M we'd WE'VE it'll They're can't DON'T"
+  },
+  {
+   "text": "'\u017f 'S 'RE 'VE 'LL",
+   "pieces": [
+    "'\u017f",
+    " '",
+    "S",
+    " '",
+    "RE",
+    " '",
+    "VE",
+    " '",
+    "LL"
+   ],
+   "ids": [
+    6,
+    153000,
+    364,
+    50,
+    364,
+    787,
+    364,
+    4491,
+    364,
+    4086
+   ],
+   "ids_with_special": [
+    6,
+    153000,
+    364,
+    50,
+    364,
+    787,
+    364,
+    4491,
+    364,
+    4086
+   ],
+   "decoded": "'\u017f 'S 'RE 'VE 'LL"
+  },
+  {
+   "text": "'\u017ftop 'Stop it'\u017f",
+   "pieces": [
+    "'\u017f",
+    "top",
+    " '",
+    "Stop",
+    " it",
+    "'\u017f"
+   ],
+   "ids": [
+    6,
+    153000,
+    3481,
+    364,
+    10669,
+    432,
+    6,
+    153000
+   ],
+   "ids_with_special": [
+    6,
+    153000,
+    3481,
+    364,
+    10669,
+    432,
+    6,
+    153000
+   ],
+   "decoded": "'\u017ftop 'Stop it'\u017f"
+  },
+  {
+   "text": "'\u212a 'I\u0307 'D",
+   "pieces": [
+    "'\u212a",
+    " '",
+    "I",
+    "\u0307",
+    " '",
+    "D"
+   ],
+   "ids": [
+    6,
+    14924,
+    103,
+    364,
+    40,
+    151463,
+    364,
+    35
+   ],
+   "ids_with_special": [
+    6,
+    14924,
+    103,
+    364,
+    40,
+    151463,
+    364,
+    35
+   ],
+   "decoded": "'\u212a 'I\u0307 'D"
+  },
+  {
+   "text": "rock'n'roll o'clock ''' '",
+   "pieces": [
+    "rock",
+    "'n",
+    "'roll",
+    " o",
+    "'clock",
+    " '''",
+    " '"
+   ],
+   "ids": [
+    20478,
+    43536,
+    6,
+    1100,
+    297,
+    61970,
+    11451,
+    364
+   ],
+   "ids_with_special": [
+    20478,
+    43536,
+    6,
+    1100,
+    297,
+    61970,
+    11451,
+    364
+   ],
+   "decoded": "rock'n'roll o'clock ''' '"
+  },
+  {
+   "text": "1234567890 1234 12 1",
+   "pieces": [
+    "123",
+    "456",
+    "789",
+    "0",
+    " ",
+    "123",
+    "4",
+    " ",
+    "12",
+    " ",
+    "1"
+   ],
+   "ids": [
+    108714,
+    100461,
+    21,
+    100928,
+    24,
+    15,
+    220,
+    108714,
+    19,
+    220,
+    98886,
+    220,
+    16
+   ],
+   "ids_with_special": [
+    108714,
+    100461,
+    21,
+    100928,
+    24,
+    15,
+    220,
+    108714,
+    19,
+    220,
+    98886,
+    220,
+    16
+   ],
+   "decoded": "1234567890 1234 12 1"
+  },
+  {
+   "text": "x\u00b2+y\u00b2 \u00bd \u00be \u2153 \u216b \u2460\u2461\u2462",
+   "pieces": [
+    "x",
+    "\u00b2",
+    "+y",
+    "\u00b2",
+    " ",
+    "\u00bd",
+    " ",
+    "\u00be",
+    " ",
+    "\u2153",
+    " ",
+    "\u216b",
+    " ",
+    "\u2460\u2461\u2462"
+   ],
+   "ids": [
+    87,
+    29346,
+    42765,
+    29346,
+    220,
+    25981,
+    220,
+    66904,
+    220,
+    69942,
+    241,
+    220,
+    69942,
+    104,
+    220,
+    103410,
+    103527,
+    104801
+   ],
+   "ids_with_special": [
+    87,
+    29346,
+    42765,
+    29346,
+    220,
+    25981,
+    220,
+    66904,
+    220,
+    69942,
+    241,
+    220,
+    69942,
+    104,
+    220,
+    103410,
+    103527,
+    104801
+   ],
+   "decoded": "x\u00b2+y\u00b2 \u00bd \u00be \u2153 \u216b \u2460\u2461\u2462"
+  },
+  {
+   "text": "\u0661\u0662\u0663\u0664\u0665 \u0966\u0967\u0968\u0969",
+   "pieces": [
+    "\u0661\u0662\u0663",
+    "\u0664\u0665",
+    " ",
+    "\u0966\u0967\u0968",
+    "\u0969"
+   ],
+   "ids": [
+    152464,
+    152465,
+    152466,
+    152467,
+    152468,
+    220,
+    151432,
+    151433,
+    151434,
+    151435
+   ],
+   "ids_with_special": [
+    152464,
+    152465,
+    152466,
+    152467,
+    152468,
+    220,
+    151432,
+    151433,
+    151434,
+    151435
+   ],
+   "decoded": "\u0661\u0662\u0663\u0664\u0665 \u0966\u0967\u0968\u0969"
+  },
+  {
+   "text": "\uff13\uff0e\uff11\uff14\uff11\uff15\uff19 \uff11\uff12\uff13\uff14",
+   "pieces": [
+    "\uff13",
+    "\uff0e",
+    "\uff11\uff14\uff11",
+    "\uff15\uff19",
+    " ",
+    "\uff11\uff12\uff13",
+    "\uff14"
+   ],
+   "ids": [
+    33355,
+    58476,
+    20069,
+    45333,
+    20069,
+    43248,
+    66505,
+    220,
+    20069,
+    24842,
+    33355,
+    45333
+   ],
+   "ids_with_special": [
+    33355,
+    58476,
+    20069,
+    45333,
+    20069,
+    43248,
+    66505,
+    220,
+    20069,
+    24842,
+    33355,
+    45333
+   ],
+   "decoded": "\uff13\uff0e\uff11\uff14\uff11\uff15\uff19 \uff11\uff12\uff13\uff14"
+  },
+  {
+   "text": "v1.2.3-rc4 0x1F 3.14e-10",
+   "pieces": [
+    "v",
+    "1",
+    ".",
+    "2",
+    ".",
+    "3",
+    "-rc",
+    "4",
+    " ",
+    "0",
+    "x",
+    "1",
+    "F",
+    " ",
+    "3",
+    ".",
+    "14",
+    "e",
+    "-",
+    "10"
+   ],
+   "ids": [
+    85,
+    16,
+    13,
+    17,
+    13,
+    18,
+    12,
+    1287,
+    19,
+    220,
+    15,
+    87,
+    16,
+    37,
+    220,
+    18,
+    13,
+    99367,
+    68,
+    12,
+    98668
+   ],
+   "ids_with_special": [
+    85,
+    16,
+    13,
+    17,
+    13,
+    18,
+    12,
+    1287,
+    19,
+    220,
+    15,
+    87,
+    16,
+    37,
+    220,
+    18,
+    13,
+    99367,
+    68,
+    12,
+    98668
+   ],
+   "decoded": "v1.2.3-rc4 0x1F 3.14e-10"
+  },
+  {
+   "text": "\u4f60\u597d\u4e16\u754c\uff0c\u4eca\u5929\u5929\u6c14\u5f88\u597d\u3002",
+   "pieces": [
+    "\u4f60\u597d\u4e16\u754c",
+    "\uff0c\u4eca\u5929\u5929\u6c14\u5f88\u597d",
+    "\u3002"
+   ],
+   "ids": [
+    109377,
+    99011,
+    3837,
+    99637,
+    101791,
+    101145,
+    1773
+   ],
+   "ids_with_special": [
+    109377,
+    99011,
+    3837,
+    99637,
+    101791,
+    101145,
+    1773
+   ],
+   "decoded": "\u4f60\u597d\u4e16\u754c\uff0c\u4eca\u5929\u5929\u6c14\u5f88\u597d\u3002"
+  },
+  {
+   "text": "\u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8\u300c\u3053\u3093\u306b\u3061\u306f\u300d\uff01",
+   "pieces": [
+    "\u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8",
+    "\u300c\u3053\u3093\u306b\u3061\u306f",
+    "\u300d\uff01"
+   ],
+   "ids": [
+    99799,
+    131513,
+    15755,
+    56451,
+    61369,
+    70008,
+    12874,
+    88277,
+    10424,
+    6313
+   ],
+   "ids_with_special": [
+    99799,
+    131513,
+    15755,
+    56451,
+    61369,
+    70008,
+    12874,
+    88277,
+    10424,
+    6313
+   ],
+   "decoded": "\u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8\u300c\u3053\u3093\u306b\u3061\u306f\u300d\uff01"
+  },
+  {
+   "text": "\ud55c\uad6d\uc5b4 \ud14d\uc2a4\ud2b8\uc785\ub2c8\ub2e4.",
+   "pieces": [
+    "\ud55c\uad6d\uc5b4",
+    " \ud14d\uc2a4\ud2b8\uc785\ub2c8\ub2e4",
+    "."
+   ],
+   "ids": [
+    23508,
+    130419,
+    30953,
+    10759,
+    43849,
+    52836,
+    78318,
+    13
+   ],
+   "ids_with_special": [
+    23508,
+    130419,
+    30953,
+    10759,
+    43849,
+    52836,
+    78318,
+    13
+   ],
+   "decoded": "\ud55c\uad6d\uc5b4 \ud14d\uc2a4\ud2b8\uc785\ub2c8\ub2e4."
+  },
+  {
+   "text": "\uff08\u5168\u89d2\u62ec\u53f7\uff09\u3010\u6807\u9898\u3011\uff1a\u5185\u5bb9\uff1b\u201c\u5f15\u53f7\u201d",
+   "pieces": [
+    "\uff08\u5168\u89d2\u62ec\u53f7",
+    "\uff09\u3010",
+    "\u6807\u9898",
+    "\u3011\uff1a",
+    "\u5185\u5bb9",
+    "\uff1b\u201c",
+    "\u5f15\u53f7",
+    "\u201d"
+   ],
+   "ids": [
+    9904,
+    98402,
+    99025,
+    99231,
+    98760,
+    7552,
+    10899,
+    104342,
+    112922,
+    99098,
+    114553,
+    98662,
+    98760,
+    854
+   ],
+   "ids_with_special": [
+    9904,
+    98402,
+    99025,
+    99231,
+    98760,
+    7552,
+    10899,
+    104342,
+    112922,
+    99098,
+    114553,
+    98662,
+    98760,
+    854
+   ],
+   "decoded": "\uff08\u5168\u89d2\u62ec\u53f7\uff09\u3010\u6807\u9898\u3011\uff1a\u5185\u5bb9\uff1b\u201c\u5f15\u53f7\u201d"
+  },
+  {
+   "text": "\u0915\u093f\u0924\u093e\u092c \u0928\u092e\u0938\u094d\u0924\u0947 \u0926\u0941\u0928\u093f\u092f\u093e",
+   "pieces": [
+    "\u0915",
+    "\u093f\u0924",
+    "\u093e\u092c",
+    " \u0928\u092e\u0938",
+    "\u094d\u0924",
+    "\u0947",
+    " \u0926",
+    "\u0941\u0928",
+    "\u093f\u092f",
+    "\u093e"
+   ],
+   "ids": [
+    64234,
+    42069,
+    97,
+    31280,
+    105,
+    14913,
+    101,
+    86522,
+    77740,
+    30366,
+    97,
+    34200,
+    14913,
+    99,
+    72094,
+    59678,
+    42069,
+    107,
+    23801
+   ],
+   "ids_with_special": [
+    64234,
+    42069,
+    97,
+    31280,
+    105,
+    14913,
+    101,
+    86522,
+    77740,
+    30366,
+    97,
+    34200,
+    14913,
+    99,
+    72094,
+    59678,
+    42069,
+    107,
+    23801
+   ],
+   "decoded": "\u0915\u093f\u0924\u093e\u092c \u0928\u092e\u0938\u094d\u0924\u0947 \u0926\u0941\u0928\u093f\u092f\u093e"
+  },
+  {
+   "text": "\u0939\u093f\u0928\u094d\u0926\u0940 \u092e\u0947\u0902 \u0932\u093f\u0916\u093e \u0917\u092f\u093e \u0935\u093e\u0915\u094d\u092f\u0964",
+   "pieces": [
+    "\u0939",
+    "\u093f\u0928",
+    "\u094d\u0926",
+    "\u0940",
+    " \u092e",
+    "\u0947\u0902",
+    " \u0932",
+    "\u093f\u0916",
+    "\u093e",
+    " \u0917\u092f",
+    "\u093e",
+    " \u0935",
+    "\u093e\u0915",
+    "\u094d\u092f",
+    "\u0964"
+   ],
+   "ids": [
+    93158,
+    42069,
+    101,
+    30366,
+    99,
+    43397,
+    90457,
+    54418,
+    224,
+    14913,
+    110,
+    42069,
+    244,
+    23801,
+    14913,
+    245,
+    151388,
+    23801,
+    14913,
+    113,
+    31280,
+    243,
+    30366,
+    107,
+    151430
+   ],
+   "ids_with_special": [
+    93158,
+    42069,
+    101,
+    30366,
+    99,
+    43397,
+    90457,
+    54418,
+    224,
+    14913,
+    110,
+    42069,
+    244,
+    23801,
+    14913,
+    245,
+    151388,
+    23801,
+    14913,
+    113,
+    31280,
+    243,
+    30366,
+    107,
+    151430
+   ],
+   "decoded": "\u0939\u093f\u0928\u094d\u0926\u0940 \u092e\u0947\u0902 \u0932\u093f\u0916\u093e \u0917\u092f\u093e \u0935\u093e\u0915\u094d\u092f\u0964"
+  },
+  {
+   "text": "cafe\u0301 caf\u00e9 e\u0301\u0301 A\u030a\u0323",
+   "pieces": [
+    "cafe",
+    "\u0301",
+    " caf\u00e9",
+    " e",
+    "\u0301\u0301",
+    " A",
+    "\u030a\u0323"
+   ],
+   "ids": [
+    924,
+    1859,
+    53481,
+    51609,
+    384,
+    53481,
+    53481,
+    362,
+    151466,
+    151491
+   ],
+   "ids_with_special": [
+    924,
+    1859,
+    53481,
+    51609,
+    384,
+    53481,
+    53481,
+    362,
+    151466,
+    151491
+   ],
+   "decoded": "cafe\u0301 caf\u00e9 e\u0301\u0301 A\u030a\u0323"
+  },
+  {
+   "text": "\u0301\u0308!a",
+   "pieces": [
+    "\u0301\u0308!",
+    "a"
+   ],
+   "ids": [
+    53481,
+    151464,
+    0,
+    64
+   ],
+   "ids_with_special": [
+    53481,
+    151464,
+    0,
+    64
+   ],
+   "decoded": "\u0301\u0308!a"
+  },
+  {
+   "text": "!\u0301! abc",
+   "pieces": [
+    "!\u0301!",
+    " abc"
+   ],
+   "ids": [
+    0,
+    53481,
+    0,
+    38812
+   ],
+   "ids_with_special": [
+    0,
+    53481,
+    0,
+    38812
+   ],
+   "decoded": "!\u0301! abc"
+  },
+  {
+   "text": "a\u0301b\u0327c \u0301x",
+   "pieces": [
+    "a",
+    "\u0301b",
+    "\u0327c",
+    " \u0301",
+    "x"
+   ],
+   "ids": [
+    64,
+    53481,
+    65,
+    151495,
+    66,
+    220,
+    53481,
+    87
+   ],
+   "ids_with_special": [
+    64,
+    53481,
+    65,
+    151495,
+    66,
+    220,
+    53481,
+    87
+   ],
+   "decoded": "a\u0301b\u0327c \u0301x"
+  },
+  {
+   "text": "\u0645\u0631\u062d\u0628\u0627 \u0628\u0627\u0644\u0639\u0627\u0644\u0645",
+   "pieces": [
+    "\u0645\u0631\u062d\u0628\u0627",
+    " \u0628\u0627\u0644\u0639\u0627\u0644\u0645"
+   ],
+   "ids": [
+    128593,
+    29710,
+    132131,
+    127893,
+    23161,
+    129360
+   ],
+   "ids_with_special": [
+    128593,
+    29710,
+    132131,
+    127893,
+    23161,
+    129360
+   ],
+   "decoded": "\u0645\u0631\u062d\u0628\u0627 \u0628\u0627\u0644\u0639\u0627\u0644\u0645"
+  },
+  {
+   "text": "\u0e2a\u0e27\u0e31\u0e2a\u0e14\u0e35\u0e04\u0e23\u0e31\u0e1a",
+   "pieces": [
+    "\u0e2a\u0e27",
+    "\u0e31\u0e2a\u0e14",
+    "\u0e35\u0e04\u0e23",
+    "\u0e31\u0e1a"
+   ],
+   "ids": [
+    35470,
+    37019,
+    23208,
+    35470,
+    36839,
+    28221,
+    40105,
+    22230,
+    82856
+   ],
+   "ids_with_special": [
+    35470,
+    37019,
+    23208,
+    35470,
+    36839,
+    28221,
+    40105,
+    22230,
+    82856
+   ],
+   "decoded": "\u0e2a\u0e27\u0e31\u0e2a\u0e14\u0e35\u0e04\u0e23\u0e31\u0e1a"
+  },
+  {
+   "text": "\u05e9\u05c1\u05b8\u05dc\u05d5\u05b9\u05dd",
+   "pieces": [
+    "\u05e9",
+    "\u05c1\u05b8",
+    "\u05dc\u05d5",
+    "\u05b9\u05dd"
+   ],
+   "ids": [
+    58010,
+    147,
+    223,
+    146,
+    116,
+    48974,
+    31560,
+    146,
+    117,
+    147,
+    251
+   ],
+   "ids_with_special": [
+    58010,
+    147,
+    223,
+    146,
+    116,
+    48974,
+    31560,
+    146,
+    117,
+    147,
+    251
+   ],
+   "decoded": "\u05e9\u05c1\u05b8\u05dc\u05d5\u05b9\u05dd"
+  },
+  {
+   "text": "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66 family \ud83d\udc69\ud83c\udffd\u200d\ud83d\udd2c \u2764\ufe0f \ud83c\uddfa\ud83c\uddf8",
+   "pieces": [
+    "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66",
+    " family",
+    " \ud83d\udc69\ud83c\udffd\u200d\ud83d\udd2c",
+    " \u2764\ufe0f",
+    " \ud83c\uddfa\ud83c\uddf8"
+   ],
+   "ids": [
+    151928,
+    124564,
+    151929,
+    124564,
+    151927,
+    124564,
+    151926,
+    2997,
+    61370,
+    102,
+    151821,
+    124564,
+    152124,
+    69945,
+    30423,
+    11157,
+    229,
+    118,
+    9281,
+    229,
+    116
+   ],
+   "ids_with_special": [
+    151928,
+    124564,
+    151929,
+    124564,
+    151927,
+    124564,
+    151926,
+    2997,
+    61370,
+    102,
+    151821,
+    124564,
+    152124,
+    69945,
+    30423,
+    11157,
+    229,
+    118,
+    9281,
+    229,
+    116
+   ],
+   "decoded": "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66 family \ud83d\udc69\ud83c\udffd\u200d\ud83d\udd2c \u2764\ufe0f \ud83c\uddfa\ud83c\uddf8"
+  },
+  {
+   "text": "x\ud83d\udc69\u200d\ud83d\udcbby",
+   "pieces": [
+    "x",
+    "\ud83d\udc69\u200d\ud83d\udcbb",
+    "y"
+   ],
+   "ids": [
+    87,
+    151929,
+    124564,
+    152011,
+    88
+   ],
+   "ids_with_special": [
+    87,
+    151929,
+    124564,
+    152011,
+    88
+   ],
+   "decoded": "x\ud83d\udc69\u200d\ud83d\udcbby"
+  },
+  {
+   "text": "a\u200cb\u200dc",
+   "pieces": [
+    "a",
+    "\u200cb",
+    "\u200dc"
+   ],
+   "ids": [
+    64,
+    88623,
+    65,
+    124564,
+    66
+   ],
+   "ids_with_special": [
+    64,
+    88623,
+    65,
+    124564,
+    66
+   ],
+   "decoded": "a\u200cb\u200dc"
+  },
+  {
+   "text": " \u200d!",
+   "pieces": [
+    " \u200d!"
+   ],
+   "ids": [
+    636,
+    235,
+    0
+   ],
+   "ids_with_special": [
+    636,
+    235,
+    0
+   ],
+   "decoded": " \u200d!"
+  },
+  {
+   "text": "\t  leading \r\n\n trailing  ",
+   "pieces": [
+    "\t ",
+    " leading",
+    " \r\n\n",
+    " trailing",
+    "  "
+   ],
+   "ids": [
+    3677,
+    6388,
+    220,
+    80169,
+    27654,
+    256
+   ],
+   "ids_with_special": [
+    3677,
+    6388,
+    220,
+    80169,
+    27654,
+    256
+   ],
+   "decoded": "\t  leading \r\n\n trailing  "
+  },
+  {
+   "text": "a\u00a0b\u2028c\u0085d\u3000e",
+   "pieces": [
+    "a",
+    "\u00a0b",
+    "\u2028c",
+    "\u0085d",
+    "\u3000e"
+   ],
+   "ids": [
+    64,
+    4102,
+    65,
+    378,
+    101,
+    66,
+    126,
+    227,
+    67,
+    22382,
+    68
+   ],
+   "ids_with_special": [
+    64,
+    4102,
+    65,
+    378,
+    101,
+    66,
+    126,
+    227,
+    67,
+    22382,
+    68
+   ],
+   "decoded": "a\u00a0b\u2028c\u0085d\u3000e"
+  },
+  {
+   "text": "line1\nline2\r\nline3\n\n\n",
+   "pieces": [
+    "line",
+    "1",
+    "\n",
+    "line",
+    "2",
+    "\r\n",
+    "line",
+    "3",
+    "\n\n\n"
+   ],
+   "ids": [
+    1056,
+    16,
+    198,
+    1056,
+    17,
+    319,
+    1056,
+    18,
+    1406
+   ],
+   "ids_with_special": [
+    1056,
+    16,
+    198,
+    1056,
+    17,
+    319,
+    1056,
+    18,
+    1406
+   ],
+   "decoded": "line1\nline2\r\nline3\n\n\n"
+  },
+  {
+   "text": "   ",
+   "pieces": [
+    "   "
+   ],
+   "ids": [
+    262
+   ],
+   "ids_with_special": [
+    262
+   ],
+   "decoded": "   "
+  },
+  {
+   "text": "\n",
+   "pieces": [
+    "\n"
+   ],
+   "ids": [
+    198
+   ],
+   "ids_with_special": [
+    198
+   ],
+   "decoded": "\n"
+  },
+  {
+   "text": "x  \n  y\t\t\tz   ",
+   "pieces": [
+    "x",
+    "  \n",
+    " ",
+    " y",
+    "\t\t",
+    "\tz",
+    "   "
+   ],
+   "ids": [
+    87,
+    2303,
+    220,
+    379,
+    298,
+    20786,
+    262
+   ],
+   "ids_with_special": [
+    87,
+    2303,
+    220,
+    379,
+    298,
+    20786,
+    262
+   ],
+   "decoded": "x  \n  y\t\t\tz   "
+  },
+  {
+   "text": "\u2009thin\u2003em\u200bzwsp\u180emvs\u00a0\u00a0nbsp",
+   "pieces": [
+    "\u2009thin",
+    "\u2003em",
+    "\u200bzwsp",
+    "\u180emvs",
+    "\u00a0",
+    "\u00a0nbsp"
+   ],
+   "ids": [
+    134137,
+    63218,
+    103245,
+    336,
+    15680,
+    30659,
+    2154,
+    157,
+    254,
+    236,
+    76,
+    11557,
+    4102,
+    4102,
+    5674
+   ],
+   "ids_with_special": [
+    134137,
+    63218,
+    103245,
+    336,
+    15680,
+    30659,
+    2154,
+    157,
+    254,
+    236,
+    76,
+    11557,
+    4102,
+    4102,
+    5674
+   ],
+   "decoded": "\u2009thin\u2003em\u200bzwsp\u180emvs\u00a0\u00a0nbsp"
+  },
+  {
+   "text": "\u0000a\u0000\u0001\u007f",
+   "pieces": [
+    "\u0000a",
+    "\u0000\u0001\u007f"
+   ],
+   "ids": [
+    188,
+    64,
+    188,
+    189,
+    221
+   ],
+   "ids_with_special": [
+    188,
+    64,
+    188,
+    189,
+    221
+   ],
+   "decoded": "\u0000a\u0000\u0001\u007f"
+  },
+  {
+   "text": "def fib(n):\n    return n if n < 2 else fib(n-1) + fib(n-2)\n",
+   "pieces": [
+    "def",
+    " fib",
+    "(n",
+    "):\n",
+    "   ",
+    " return",
+    " n",
+    " if",
+    " n",
+    " <",
+    " ",
+    "2",
+    " else",
+    " fib",
+    "(n",
+    "-",
+    "1",
+    ")",
+    " +",
+    " fib",
+    "(n",
+    "-",
+    "2",
+    ")\n"
+   ],
+   "ids": [
+    750,
+    15789,
+    1445,
+    982,
+    262,
+    470,
+    308,
+    421,
+    308,
+    366,
+    220,
+    17,
+    770,
+    15789,
+    1445,
+    12,
+    16,
+    8,
+    488,
+    15789,
+    1445,
+    12,
+    17,
+    340
+   ],
+   "ids_with_special": [
+    750,
+    15789,
+    1445,
+    982,
+    262,
+    470,
+    308,
+    421,
+    308,
+    366,
+    220,
+    17,
+    770,
+    15789,
+    1445,
+    12,
+    16,
+    8,
+    488,
+    15789,
+    1445,
+    12,
+    17,
+    340
+   ],
+   "decoded": "def fib(n):\n    return n if n < 2 else fib(n-1) + fib(n-2)\n"
+  },
+  {
+   "text": "```rust\nfn main() {\n    println!(\"{}\", 1 + 2);\n}\n```",
+   "pieces": [
+    "```",
+    "rust",
+    "\n",
+    "fn",
+    " main",
+    "()",
+    " {\n",
+    "   ",
+    " println",
+    "!(\"{}\",",
+    " ",
+    "1",
+    " +",
+    " ",
+    "2",
+    ");\n",
+    "}\n",
+    "```"
+   ],
+   "ids": [
+    73022,
+    35609,
+    198,
+    8821,
+    1887,
+    368,
+    341,
+    262,
+    13742,
+    79236,
+    220,
+    16,
+    488,
+    220,
+    17,
+    317,
+    532,
+    73022
+   ],
+   "ids_with_special": [
+    73022,
+    35609,
+    198,
+    8821,
+    1887,
+    368,
+    341,
+    262,
+    13742,
+    79236,
+    220,
+    16,
+    488,
+    220,
+    17,
+    317,
+    532,
+    73022
+   ],
+   "decoded": "```rust\nfn main() {\n    println!(\"{}\", 1 + 2);\n}\n```"
+  },
+  {
+   "text": "json: {\"tools\":[{\"name\":\"search\",\"parameters\":{\"query\":\"hi\"}}]}",
+   "pieces": [
+    "json",
+    ":",
+    " {\"",
+    "tools",
+    "\":[{\"",
+    "name",
+    "\":\"",
+    "search",
+    "\",\"",
+    "parameters",
+    "\":{\"",
+    "query",
+    "\":\"",
+    "hi",
+    "\"}}]}"
+   ],
+   "ids": [
+    2236,
+    25,
+    5212,
+    15906,
+    66096,
+    606,
+    3252,
+    1836,
+    2198,
+    13777,
+    22260,
+    1631,
+    3252,
+    6023,
+    30849,
+    13980
+   ],
+   "ids_with_special": [
+    2236,
+    25,
+    5212,
+    15906,
+    66096,
+    606,
+    3252,
+    1836,
+    2198,
+    13777,
+    22260,
+    1631,
+    3252,
+    6023,
+    30849,
+    13980
+   ],
+   "decoded": "json: {\"tools\":[{\"name\":\"search\",\"parameters\":{\"query\":\"hi\"}}]}"
+  },
+  {
+   "text": "<div class=\"x\">&nbsp;</div> // comment /* c */",
+   "pieces": [
+    "<div",
+    " class",
+    "=\"",
+    "x",
+    "\">&",
+    "nbsp",
+    ";</",
+    "div",
+    ">",
+    " //",
+    " comment",
+    " /*",
+    " c",
+    " */"
+   ],
+   "ids": [
+    2626,
+    536,
+    428,
+    87,
+    13357,
+    5674,
+    11342,
+    611,
+    29,
+    442,
+    3980,
+    1391,
+    272,
+    639
+   ],
+   "ids_with_special": [
+    2626,
+    536,
+    428,
+    87,
+    13357,
+    5674,
+    11342,
+    611,
+    29,
+    442,
+    3980,
+    1391,
+    272,
+    639
+   ],
+   "decoded": "<div class=\"x\">&nbsp;</div> // comment /* c */"
+  },
+  {
+   "text": "if (a != b && c >= d) { x->y = z::w; }\n\treturn;",
+   "pieces": [
+    "if",
+    " (",
+    "a",
+    " !=",
+    " b",
+    " &&",
+    " c",
+    " >=",
+    " d",
+    ")",
+    " {",
+    " x",
+    "->",
+    "y",
+    " =",
+    " z",
+    "::",
+    "w",
+    ";",
+    " }\n",
+    "\treturn",
+    ";"
+   ],
+   "ids": [
+    333,
+    320,
+    64,
+    961,
+    293,
+    1009,
+    272,
+    2604,
+    294,
+    8,
+    314,
+    856,
+    405,
+    88,
+    284,
+    1147,
+    486,
+    86,
+    26,
+    456,
+    853,
+    26
+   ],
+   "ids_with_special": [
+    333,
+    320,
+    64,
+    961,
+    293,
+    1009,
+    272,
+    2604,
+    294,
+    8,
+    314,
+    856,
+    405,
+    88,
+    284,
+    1147,
+    486,
+    86,
+    26,
+    456,
+    853,
+    26
+   ],
+   "decoded": "if (a != b && c >= d) { x->y = z::w; }\n\treturn;"
+  },
+  {
+   "text": "kohol",
+   "pieces": [
+    "kohol"
+   ],
+   "ids": [
+    136215
+   ],
+   "ids_with_special": [
+    136215
+   ],
+   "decoded": "kohol",
+   "ids_without_ignore_merges": [
+    74,
+    2267,
+    337
+   ]
+  },
+  {
+   "text": " kohol",
+   "pieces": [
+    " kohol"
+   ],
+   "ids": [
+    139403,
+    337
+   ],
+   "ids_with_special": [
+    139403,
+    337
+   ],
+   "decoded": " kohol"
+  },
+  {
+   "text": "wirkungen",
+   "pieces": [
+    "wirkungen"
+   ],
+   "ids": [
+    145448
+   ],
+   "ids_with_special": [
+    145448
+   ],
+   "decoded": "wirkungen",
+   "ids_without_ignore_merges": [
+    86,
+    14127,
+    11590
+   ]
+  },
+  {
+   "text": "tiquetas",
+   "pieces": [
+    "tiquetas"
+   ],
+   "ids": [
+    140838
+   ],
+   "ids_with_special": [
+    140838
+   ],
+   "decoded": "tiquetas",
+   "ids_without_ignore_merges": [
+    83,
+    5011,
+    35738
+   ]
+  },
+  {
+   "text": "ramientas",
+   "pieces": [
+    "ramientas"
+   ],
+   "ids": [
+    137378
+   ],
+   "ids_with_special": [
+    137378
+   ],
+   "decoded": "ramientas",
+   "ids_without_ignore_merges": [
+    2396,
+    1167,
+    300
+   ]
+  },
+  {
+   "text": "kohol wirkungen tiquetas ramientas",
+   "pieces": [
+    "kohol",
+    " wirkungen",
+    " tiquetas",
+    " ramientas"
+   ],
+   "ids": [
+    136215,
+    50041,
+    11590,
+    259,
+    5011,
+    35738,
+    17797,
+    1167,
+    300
+   ],
+   "ids_with_special": [
+    136215,
+    50041,
+    11590,
+    259,
+    5011,
+    35738,
+    17797,
+    1167,
+    300
+   ],
+   "decoded": "kohol wirkungen tiquetas ramientas",
+   "ids_without_ignore_merges": [
+    74,
+    2267,
+    337,
+    50041,
+    11590,
+    259,
+    5011,
+    35738,
+    17797,
+    1167,
+    300
+   ]
+  },
+  {
+   "text": "Herramientas etiquetas Auswirkungen alkohol",
+   "pieces": [
+    "Herramientas",
+    " etiquetas",
+    " Auswirkungen",
+    " alkohol"
+   ],
+   "ids": [
+    39,
+    615,
+    65845,
+    300,
+    60517,
+    35738,
+    19965,
+    86,
+    14127,
+    11590,
+    143435
+   ],
+   "ids_with_special": [
+    39,
+    615,
+    65845,
+    300,
+    60517,
+    35738,
+    19965,
+    86,
+    14127,
+    11590,
+    143435
+   ],
+   "decoded": "Herramientas etiquetas Auswirkungen alkohol",
+   "ids_without_ignore_merges": [
+    39,
+    615,
+    65845,
+    300,
+    60517,
+    35738,
+    19965,
+    86,
+    14127,
+    11590,
+    57502,
+    2267,
+    337
+   ]
+  },
+  {
+   "text": "[gMASK]<sop><|system|>You are helpful.<|user|>Hi<|assistant|><think></think>Hello",
+   "pieces": [
+    "[gMASK",
+    "]<",
+    "sop",
+    "><|",
+    "system",
+    "|>",
+    "You",
+    " are",
+    " helpful",
+    ".<|",
+    "user",
+    "|>",
+    "Hi",
+    "<|",
+    "assistant",
+    "|><",
+    "think",
+    "></",
+    "think",
+    ">Hello"
+   ],
+   "ids": [
+    154822,
+    154824,
+    154826,
+    2610,
+    525,
+    10945,
+    13,
+    154827,
+    13041,
+    154828,
+    154841,
+    154842,
+    9703
+   ],
+   "ids_with_special": [
+    154822,
+    154824,
+    154826,
+    2610,
+    525,
+    10945,
+    13,
+    154827,
+    13041,
+    154828,
+    154841,
+    154842,
+    9703
+   ],
+   "decoded": "[gMASK]<sop><|system|>You are helpful.<|user|>Hi<|assistant|><think></think>Hello"
+  },
+  {
+   "text": "<|assistant|><think>reason</think><tool_call>search<arg_key>q</arg_key><arg_value>hi</arg_value></tool_call>",
+   "pieces": [
+    "<|",
+    "assistant",
+    "|><",
+    "think",
+    ">reason",
+    "</",
+    "think",
+    "><",
+    "tool",
+    "_call",
+    ">search",
+    "<arg",
+    "_key",
+    ">q",
+    "</",
+    "arg",
+    "_key",
+    "><",
+    "arg",
+    "_value",
+    ">hi",
+    "</",
+    "arg",
+    "_value",
+    "></",
+    "tool",
+    "_call",
+    ">"
+   ],
+   "ids": [
+    154828,
+    154841,
+    19857,
+    154842,
+    154843,
+    1836,
+    154847,
+    80,
+    154848,
+    154849,
+    6023,
+    154850,
+    154844
+   ],
+   "ids_with_special": [
+    154828,
+    154841,
+    19857,
+    154842,
+    154843,
+    1836,
+    154847,
+    80,
+    154848,
+    154849,
+    6023,
+    154850,
+    154844
+   ],
+   "decoded": "<|assistant|><think>reason</think><tool_call>search<arg_key>q</arg_key><arg_value>hi</arg_value></tool_call>"
+  },
+  {
+   "text": "<|observation|><tool_response>ok</tool_response><|assistant|>",
+   "pieces": [
+    "<|",
+    "observation",
+    "|><",
+    "tool",
+    "_response",
+    ">ok",
+    "</",
+    "tool",
+    "_response",
+    "><|",
+    "assistant",
+    "|>"
+   ],
+   "ids": [
+    154829,
+    154845,
+    562,
+    154846,
+    154828
+   ],
+   "ids_with_special": [
+    154829,
+    154845,
+    562,
+    154846,
+    154828
+   ],
+   "decoded": "<|observation|><tool_response>ok</tool_response><|assistant|>"
+  },
+  {
+   "text": "<|endoftext|><|endoftext|>",
+   "pieces": [
+    "<|",
+    "endoftext",
+    "|><|",
+    "endoftext",
+    "|>"
+   ],
+   "ids": [
+    154820,
+    154820
+   ],
+   "ids_with_special": [
+    154820,
+    154820
+   ],
+   "decoded": "<|endoftext|><|endoftext|>"
+  },
+  {
+   "text": "text<|user|>more /nothink",
+   "pieces": [
+    "text",
+    "<|",
+    "user",
+    "|>",
+    "more",
+    " /",
+    "nothink"
+   ],
+   "ids": [
+    1318,
+    154827,
+    6384,
+    220,
+    154851
+   ],
+   "ids_with_special": [
+    1318,
+    154827,
+    6384,
+    220,
+    154851
+   ],
+   "decoded": "text<|user|>more /nothink"
+  },
+  {
+   "text": "[MASK][sMASK]<eop><|begin_of_image|><|image|><|end_of_image|>",
+   "pieces": [
+    "[MASK",
+    "][",
+    "sMASK",
+    "]<",
+    "eop",
+    "><|",
+    "begin",
+    "_of",
+    "_image",
+    "|><|",
+    "image",
+    "|><|",
+    "end",
+    "_of",
+    "_image",
+    "|>"
+   ],
+   "ids": [
+    154821,
+    154823,
+    154825,
+    154830,
+    154854,
+    154831
+   ],
+   "ids_with_special": [
+    154821,
+    154823,
+    154825,
+    154830,
+    154854,
+    154831
+   ],
+   "decoded": "[MASK][sMASK]<eop><|begin_of_image|><|image|><|end_of_image|>"
+  },
+  {
+   "text": "<|code_prefix|>a<|code_suffix|>b<|code_middle|>",
+   "pieces": [
+    "<|",
+    "code",
+    "_prefix",
+    "|>",
+    "a",
+    "<|",
+    "code",
+    "_suffix",
+    "|>",
+    "b",
+    "<|",
+    "code",
+    "_middle",
+    "|>"
+   ],
+   "ids": [
+    154838,
+    64,
+    154840,
+    65,
+    154839
+   ],
+   "ids_with_special": [
+    154838,
+    64,
+    154840,
+    65,
+    154839
+   ],
+   "decoded": "<|code_prefix|>a<|code_suffix|>b<|code_middle|>"
+  },
+  {
+   "text": "<think <think>> </think > <|user| [PAD154856]",
+   "pieces": [
+    "<think",
+    " <",
+    "think",
+    ">>",
+    " </",
+    "think",
+    " >",
+    " <|",
+    "user",
+    "|",
+    " [",
+    "PAD",
+    "154",
+    "856",
+    "]"
+   ],
+   "ids": [
+    13699,
+    766,
+    220,
+    154841,
+    29,
+    690,
+    26779,
+    861,
+    81959,
+    872,
+    91,
+    508,
+    43567,
+    124211,
+    23,
+    101917,
+    60
+   ],
+   "ids_with_special": [
+    13699,
+    766,
+    220,
+    154841,
+    29,
+    690,
+    26779,
+    861,
+    81959,
+    872,
+    91,
+    508,
+    43567,
+    124211,
+    23,
+    101917,
+    60
+   ],
+   "decoded": "<think <think>> </think > <|user| [PAD154856]"
+  },
+  {
+   "text": " <|user|> \n<think>\n",
+   "pieces": [
+    " <|",
+    "user",
+    "|>",
+    " \n",
+    "<think",
+    ">\n"
+   ],
+   "ids": [
+    220,
+    154827,
+    715,
+    154841,
+    198
+   ],
+   "ids_with_special": [
+    220,
+    154827,
+    715,
+    154841,
+    198
+   ],
+   "decoded": " <|user|> \n<think>\n"
+  },
+  {
+   "text": "Mixed \u4e2d\u6587 and English 123 with \u00e9mojis \ud83d\ude42!",
+   "pieces": [
+    "Mixed",
+    " \u4e2d\u6587",
+    " and",
+    " English",
+    " ",
+    "123",
+    " with",
+    " \u00e9mojis",
+    " \ud83d\ude42!"
+   ],
+   "ids": [
+    85715,
+    117604,
+    323,
+    6364,
+    220,
+    108714,
+    448,
+    3958,
+    6355,
+    82042,
+    27392,
+    0
+   ],
+   "ids_with_special": [
+    85715,
+    117604,
+    323,
+    6364,
+    220,
+    108714,
+    448,
+    3958,
+    6355,
+    82042,
+    27392,
+    0
+   ],
+   "decoded": "Mixed \u4e2d\u6587 and English 123 with \u00e9mojis \ud83d\ude42!"
+  },
+  {
+   "text": "::\t\ud83d\ude42\u0915\u093f\u00a0}\u0301",
+   "pieces": [
+    "::",
+    "\t",
+    "\ud83d\ude42\u0915",
+    "\u093f",
+    "\u00a0",
+    "}\u0301"
+   ],
+   "ids": [
+    486,
+    197,
+    152402,
+    64234,
+    38643,
+    4102,
+    92,
+    53481
+   ],
+   "ids_with_special": [
+    486,
+    197,
+    152402,
+    64234,
+    38643,
+    4102,
+    92,
+    53481
+   ],
+   "decoded": "::\t\ud83d\ude42\u0915\u093f\u00a0}\u0301"
+  },
+  {
+   "text": "<think>Z<think>",
+   "pieces": [
+    "<think",
+    ">Z",
+    "<think",
+    ">"
+   ],
+   "ids": [
+    154841,
+    57,
+    154841
+   ],
+   "ids_with_special": [
+    154841,
+    57,
+    154841
+   ],
+   "decoded": "<think>Z<think>"
+  },
+  {
+   "text": "  \n  [gMASK]<sop>\u0301a{\u3000",
+   "pieces": [
+    "  \n",
+    " ",
+    " [",
+    "gMASK",
+    "]<",
+    "sop",
+    ">\u0301",
+    "a",
+    "{",
+    "\u3000"
+   ],
+   "ids": [
+    2303,
+    256,
+    154822,
+    154824,
+    53481,
+    64,
+    90,
+    22382
+   ],
+   "ids_with_special": [
+    2303,
+    256,
+    154822,
+    154824,
+    53481,
+    64,
+    90,
+    22382
+   ],
+   "decoded": "  \n  [gMASK]<sop>\u0301a{\u3000"
+  },
+  {
+   "text": "a \u200da   1",
+   "pieces": [
+    "a",
+    " \u200d",
+    "a",
+    "  ",
+    " ",
+    "1"
+   ],
+   "ids": [
+    64,
+    636,
+    235,
+    64,
+    256,
+    220,
+    16
+   ],
+   "ids_with_special": [
+    64,
+    636,
+    235,
+    64,
+    256,
+    220,
+    16
+   ],
+   "decoded": "a \u200da   1"
+  },
+  {
+   "text": "\u00a0\u0915\u093fZa  \"\u3002'\u017ftiquetas 's{\n\u200d's",
+   "pieces": [
+    "\u00a0\u0915",
+    "\u093fZa",
+    " ",
+    " \"\u3002'",
+    "\u017ftiquetas",
+    " '",
+    "s",
+    "{\n",
+    "\u200d'",
+    "s"
+   ],
+   "ids": [
+    4102,
+    64234,
+    38643,
+    148260,
+    220,
+    330,
+    1773,
+    6,
+    153000,
+    83,
+    5011,
+    35738,
+    364,
+    82,
+    515,
+    124564,
+    6,
+    82
+   ],
+   "ids_with_special": [
+    4102,
+    64234,
+    38643,
+    148260,
+    220,
+    330,
+    1773,
+    6,
+    153000,
+    83,
+    5011,
+    35738,
+    364,
+    82,
+    515,
+    124564,
+    6,
+    82
+   ],
+   "decoded": "\u00a0\u0915\u093fZa  \"\u3002'\u017ftiquetas 's{\n\u200d's"
+  },
+  {
+   "text": "<think>12345Z",
+   "pieces": [
+    "<think",
+    ">",
+    "123",
+    "45",
+    "Z"
+   ],
+   "ids": [
+    154841,
+    108714,
+    100461,
+    57
+   ],
+   "ids_with_special": [
+    154841,
+    108714,
+    100461,
+    57
+   ],
+   "decoded": "<think>12345Z"
+  },
+  {
+   "text": "\r\n's'LLZ\u3002ZZ\u0301\u00b2\u4e2d\u6587  Z\t<think><|user|>kohole\u0301\uff11\uff12\u0915\u093f::12345tiquetas\u0915\u093fa",
+   "pieces": [
+    "\r\n",
+    "'s",
+    "'LL",
+    "Z",
+    "\u3002ZZ",
+    "\u0301",
+    "\u00b2",
+    "\u4e2d\u6587",
+    " ",
+    " Z",
+    "\t",
+    "<think",
+    "><|",
+    "user",
+    "|>",
+    "kohole",
+    "\u0301",
+    "\uff11\uff12",
+    "\u0915",
+    "\u093f::",
+    "123",
+    "45",
+    "tiquetas\u0915",
+    "\u093fa"
+   ],
+   "ids": [
+    319,
+    594,
+    6,
+    4086,
+    57,
+    1773,
+    33374,
+    53481,
+    29346,
+    102169,
+    220,
+    1863,
+    197,
+    154841,
+    154827,
+    74,
+    2267,
+    1263,
+    53481,
+    20069,
+    24842,
+    64234,
+    38643,
+    486,
+    108714,
+    100461,
+    83,
+    5011,
+    35738,
+    64234,
+    38643,
+    64
+   ],
+   "ids_with_special": [
+    319,
+    594,
+    6,
+    4086,
+    57,
+    1773,
+    33374,
+    53481,
+    29346,
+    102169,
+    220,
+    1863,
+    197,
+    154841,
+    154827,
+    74,
+    2267,
+    1263,
+    53481,
+    20069,
+    24842,
+    64234,
+    38643,
+    486,
+    108714,
+    100461,
+    83,
+    5011,
+    35738,
+    64234,
+    38643,
+    64
+   ],
+   "decoded": "\r\n's'LLZ\u3002ZZ\u0301\u00b2\u4e2d\u6587  Z\t<think><|user|>kohole\u0301\uff11\uff12\u0915\u093f::12345tiquetas\u0915\u093fa"
+  },
+  {
+   "text": "1234512345\u00a0kohol\u00b2'LL\t\"\"<think>BarBar[gMASK]'s\r\n->\u00b2Z}",
+   "pieces": [
+    "123",
+    "451",
+    "234",
+    "5",
+    "\u00a0kohol",
+    "\u00b2",
+    "'LL",
+    "\t",
+    "\"\"<",
+    "think",
+    ">BarBar",
+    "[gMASK",
+    "]'",
+    "s",
+    "\r\n",
+    "->",
+    "\u00b2",
+    "Z",
+    "}"
+   ],
+   "ids": [
+    108714,
+    100461,
+    16,
+    99619,
+    19,
+    20,
+    4102,
+    74,
+    2267,
+    337,
+    29346,
+    6,
+    4086,
+    197,
+    3014,
+    154841,
+    3428,
+    3428,
+    154822,
+    594,
+    319,
+    405,
+    29346,
+    57,
+    92
+   ],
+   "ids_with_special": [
+    108714,
+    100461,
+    16,
+    99619,
+    19,
+    20,
+    4102,
+    74,
+    2267,
+    337,
+    29346,
+    6,
+    4086,
+    197,
+    3014,
+    154841,
+    3428,
+    3428,
+    154822,
+    594,
+    319,
+    405,
+    29346,
+    57,
+    92
+   ],
+   "decoded": "1234512345\u00a0kohol\u00b2'LL\t\"\"<think>BarBar[gMASK]'s\r\n->\u00b2Z}"
+  },
+  {
+   "text": "\u00a0\uff11\uff12\r\ne\u0301[gMASK]\ud83d\ude42  \r\n'LL12345\t<think><think>",
+   "pieces": [
+    "\u00a0",
+    "\uff11\uff12",
+    "\r\n",
+    "e",
+    "\u0301[",
+    "gMASK",
+    "]\ud83d\ude42",
+    "  \r\n",
+    "'LL",
+    "123",
+    "45",
+    "\t",
+    "<think",
+    "><",
+    "think",
+    ">"
+   ],
+   "ids": [
+    4102,
+    20069,
+    24842,
+    319,
+    68,
+    53481,
+    154822,
+    152402,
+    10414,
+    6,
+    4086,
+    108714,
+    100461,
+    197,
+    154841,
+    154841
+   ],
+   "ids_with_special": [
+    4102,
+    20069,
+    24842,
+    319,
+    68,
+    53481,
+    154822,
+    152402,
+    10414,
+    6,
+    4086,
+    108714,
+    100461,
+    197,
+    154841,
+    154841
+   ],
+   "decoded": "\u00a0\uff11\uff12\r\ne\u0301[gMASK]\ud83d\ude42  \r\n'LL12345\t<think><think>"
+  },
+  {
+   "text": "\u200d\u0915\u093f\"\u200d\t\u4e2d\u6587\uff11\uff12  \u200d\u200d\n<think>\ne\u0301\ud83d\ude42[gMASK]1",
+   "pieces": [
+    "\u200d\u0915",
+    "\u093f\"\u200d",
+    "\t\u4e2d\u6587",
+    "\uff11\uff12",
+    " ",
+    " \u200d\u200d\n",
+    "<think",
+    ">\n",
+    "e",
+    "\u0301\ud83d\ude42[",
+    "gMASK",
+    "]",
+    "1"
+   ],
+   "ids": [
+    124564,
+    64234,
+    38643,
+    1,
+    124564,
+    197,
+    102169,
+    20069,
+    24842,
+    220,
+    636,
+    235,
+    124564,
+    198,
+    154841,
+    198,
+    68,
+    53481,
+    152402,
+    154822,
+    16
+   ],
+   "ids_with_special": [
+    124564,
+    64234,
+    38643,
+    1,
+    124564,
+    197,
+    102169,
+    20069,
+    24842,
+    220,
+    636,
+    235,
+    124564,
+    198,
+    154841,
+    198,
+    68,
+    53481,
+    152402,
+    154822,
+    16
+   ],
+   "decoded": "\u200d\u0915\u093f\"\u200d\t\u4e2d\u6587\uff11\uff12  \u200d\u200d\n<think>\ne\u0301\ud83d\ude42[gMASK]1"
+  },
+  {
+   "text": "\u0915\u093f{\u200dBarkohol\r\ne\u0301's\r\n'LL\u200d<|user|>}",
+   "pieces": [
+    "\u0915",
+    "\u093f{\u200d",
+    "Barkohol",
+    "\r\n",
+    "e",
+    "\u0301'",
+    "s",
+    "\r\n",
+    "'LL",
+    "\u200d<|",
+    "user",
+    "|>}"
+   ],
+   "ids": [
+    64234,
+    38643,
+    90,
+    124564,
+    33,
+    838,
+    2267,
+    337,
+    319,
+    68,
+    53481,
+    6,
+    82,
+    319,
+    6,
+    4086,
+    124564,
+    154827,
+    92
+   ],
+   "ids_with_special": [
+    64234,
+    38643,
+    90,
+    124564,
+    33,
+    838,
+    2267,
+    337,
+    319,
+    68,
+    53481,
+    6,
+    82,
+    319,
+    6,
+    4086,
+    124564,
+    154827,
+    92
+   ],
+   "decoded": "\u0915\u093f{\u200dBarkohol\r\ne\u0301's\r\n'LL\u200d<|user|>}"
+  },
+  {
+   "text": "\u0301'LL's\u0915\u093fZ\u4e2d\u6587\u00b21's\u3000'\u017f\u00b2 'LL's\n",
+   "pieces": [
+    "\u0301'",
+    "LL",
+    "'s",
+    "\u0915",
+    "\u093fZ\u4e2d\u6587",
+    "\u00b21",
+    "'s",
+    "\u3000",
+    "'\u017f",
+    "\u00b2",
+    " '",
+    "LL",
+    "'s",
+    "\n"
+   ],
+   "ids": [
+    53481,
+    6,
+    4086,
+    594,
+    64234,
+    38643,
+    57,
+    102169,
+    29346,
+    16,
+    594,
+    22382,
+    6,
+    153000,
+    29346,
+    364,
+    4086,
+    594,
+    198
+   ],
+   "ids_with_special": [
+    53481,
+    6,
+    4086,
+    594,
+    64234,
+    38643,
+    57,
+    102169,
+    29346,
+    16,
+    594,
+    22382,
+    6,
+    153000,
+    29346,
+    364,
+    4086,
+    594,
+    198
+   ],
+   "decoded": "\u0301'LL's\u0915\u093fZ\u4e2d\u6587\u00b21's\u3000'\u017f\u00b2 'LL's\n"
+  },
+  {
+   "text": "\u00b2\t  \u00a0tiquetas1<think>->\u3002tiquetas",
+   "pieces": [
+    "\u00b2",
+    "\t  ",
+    "\u00a0tiquetas",
+    "1",
+    "<think",
+    ">->\u3002",
+    "tiquetas"
+   ],
+   "ids": [
+    29346,
+    8688,
+    4102,
+    83,
+    5011,
+    35738,
+    16,
+    154841,
+    405,
+    1773,
+    140838
+   ],
+   "ids_with_special": [
+    29346,
+    8688,
+    4102,
+    83,
+    5011,
+    35738,
+    16,
+    154841,
+    405,
+    1773,
+    140838
+   ],
+   "decoded": "\u00b2\t  \u00a0tiquetas1<think>->\u3002tiquetas",
+   "ids_without_ignore_merges": [
+    29346,
+    8688,
+    4102,
+    83,
+    5011,
+    35738,
+    16,
+    154841,
+    405,
+    1773,
+    83,
+    5011,
+    35738
+   ]
+  },
+  {
+   "text": "->\n\u0301kohol\"kohol\u0301",
+   "pieces": [
+    "->\n",
+    "\u0301kohol",
+    "\"kohol",
+    "\u0301"
+   ],
+   "ids": [
+    83777,
+    53481,
+    74,
+    2267,
+    337,
+    62470,
+    2267,
+    337,
+    53481
+   ],
+   "ids_with_special": [
+    83777,
+    53481,
+    74,
+    2267,
+    337,
+    62470,
+    2267,
+    337,
+    53481
+   ],
+   "decoded": "->\n\u0301kohol\"kohol\u0301"
+  },
+  {
+   "text": "\uff11\uff12a\uff11\uff12",
+   "pieces": [
+    "\uff11\uff12",
+    "a",
+    "\uff11\uff12"
+   ],
+   "ids": [
+    20069,
+    24842,
+    64,
+    20069,
+    24842
+   ],
+   "ids_with_special": [
+    20069,
+    24842,
+    64,
+    20069,
+    24842
+   ],
+   "decoded": "\uff11\uff12a\uff11\uff12"
+  },
+  {
+   "text": "\u3002\u3000\u4e2d\u6587\u0301-><sop>e\u0301",
+   "pieces": [
+    "\u3002",
+    "\u3000\u4e2d\u6587",
+    "\u0301-><",
+    "sop",
+    ">e",
+    "\u0301"
+   ],
+   "ids": [
+    1773,
+    22382,
+    102169,
+    53481,
+    405,
+    154824,
+    68,
+    53481
+   ],
+   "ids_with_special": [
+    1773,
+    22382,
+    102169,
+    53481,
+    405,
+    154824,
+    68,
+    53481
+   ],
+   "decoded": "\u3002\u3000\u4e2d\u6587\u0301-><sop>e\u0301"
+  },
+  {
+   "text": "tiquetas\r\n\u00b2Z\u200d\u4e2d\u6587<sop>\u0301 'LL\ud83d\ude42::}foo\uff11\uff12<|user|>",
+   "pieces": [
+    "tiquetas",
+    "\r\n",
+    "\u00b2",
+    "Z",
+    "\u200d\u4e2d\u6587",
+    "<sop",
+    ">\u0301",
+    " '",
+    "LL",
+    "\ud83d\ude42::}",
+    "foo",
+    "\uff11\uff12",
+    "<|",
+    "user",
+    "|>"
+   ],
+   "ids": [
+    140838,
+    319,
+    29346,
+    57,
+    124564,
+    102169,
+    154824,
+    53481,
+    364,
+    4086,
+    152402,
+    486,
+    92,
+    7974,
+    20069,
+    24842,
+    154827
+   ],
+   "ids_with_special": [
+    140838,
+    319,
+    29346,
+    57,
+    124564,
+    102169,
+    154824,
+    53481,
+    364,
+    4086,
+    152402,
+    486,
+    92,
+    7974,
+    20069,
+    24842,
+    154827
+   ],
+   "decoded": "tiquetas\r\n\u00b2Z\u200d\u4e2d\u6587<sop>\u0301 'LL\ud83d\ude42::}foo\uff11\uff12<|user|>",
+   "ids_without_ignore_merges": [
+    83,
+    5011,
+    35738,
+    319,
+    29346,
+    57,
+    124564,
+    102169,
+    154824,
+    53481,
+    364,
+    4086,
+    152402,
+    486,
+    92,
+    7974,
+    20069,
+    24842,
+    154827
+   ]
+  },
+  {
+   "text": "\u4e2d\u6587'sBar\u0301koholfookohol\u4e2d\u6587[gMASK]1<|user|>tiquetas",
+   "pieces": [
+    "\u4e2d\u6587",
+    "'s",
+    "Bar",
+    "\u0301koholfookohol\u4e2d\u6587",
+    "[gMASK",
+    "]",
+    "1",
+    "<|",
+    "user",
+    "|>",
+    "tiquetas"
+   ],
+   "ids": [
+    102169,
+    594,
+    3428,
+    53481,
+    74,
+    2267,
+    337,
+    824,
+    562,
+    2267,
+    337,
+    102169,
+    154822,
+    16,
+    154827,
+    140838
+   ],
+   "ids_with_special": [
+    102169,
+    594,
+    3428,
+    53481,
+    74,
+    2267,
+    337,
+    824,
+    562,
+    2267,
+    337,
+    102169,
+    154822,
+    16,
+    154827,
+    140838
+   ],
+   "decoded": "\u4e2d\u6587'sBar\u0301koholfookohol\u4e2d\u6587[gMASK]1<|user|>tiquetas",
+   "ids_without_ignore_merges": [
+    102169,
+    594,
+    3428,
+    53481,
+    74,
+    2267,
+    337,
+    824,
+    562,
+    2267,
+    337,
+    102169,
+    154822,
+    16,
+    154827,
+    83,
+    5011,
+    35738
+   ]
+  },
+  {
+   "text": " [gMASK]'LL\u3000",
+   "pieces": [
+    " [",
+    "gMASK",
+    "]'",
+    "LL",
+    "\u3000"
+   ],
+   "ids": [
+    220,
+    154822,
+    6,
+    4086,
+    22382
+   ],
+   "ids_with_special": [
+    220,
+    154822,
+    6,
+    4086,
+    22382
+   ],
+   "decoded": " [gMASK]'LL\u3000"
+  },
+  {
+   "text": "\uff11\uff12[gMASK][gMASK]<|user|>Bar::  12345\u00b2\"}\u3002}\t<sop>akohol\uff11\uff12kohol\u3002",
+   "pieces": [
+    "\uff11\uff12",
+    "[gMASK",
+    "][",
+    "gMASK",
+    "]<|",
+    "user",
+    "|>",
+    "Bar",
+    "::",
+    " ",
+    " ",
+    "123",
+    "45\u00b2",
+    "\"}\u3002}",
+    "\t",
+    "<sop",
+    ">akohol",
+    "\uff11\uff12",
+    "kohol",
+    "\u3002"
+   ],
+   "ids": [
+    20069,
+    24842,
+    154822,
+    154822,
+    154827,
+    3428,
+    486,
+    220,
+    220,
+    108714,
+    100461,
+    29346,
+    9204,
+    1773,
+    92,
+    197,
+    154824,
+    585,
+    2267,
+    337,
+    20069,
+    24842,
+    136215,
+    1773
+   ],
+   "ids_with_special": [
+    20069,
+    24842,
+    154822,
+    154822,
+    154827,
+    3428,
+    486,
+    220,
+    220,
+    108714,
+    100461,
+    29346,
+    9204,
+    1773,
+    92,
+    197,
+    154824,
+    585,
+    2267,
+    337,
+    20069,
+    24842,
+    136215,
+    1773
+   ],
+   "decoded": "\uff11\uff12[gMASK][gMASK]<|user|>Bar::  12345\u00b2\"}\u3002}\t<sop>akohol\uff11\uff12kohol\u3002",
+   "ids_without_ignore_merges": [
+    20069,
+    24842,
+    154822,
+    154822,
+    154827,
+    3428,
+    486,
+    220,
+    220,
+    108714,
+    100461,
+    29346,
+    9204,
+    1773,
+    92,
+    197,
+    154824,
+    585,
+    2267,
+    337,
+    20069,
+    24842,
+    74,
+    2267,
+    337,
+    1773
+   ]
+  },
+  {
+   "text": "::e\u0301'LL{\n's  '\u017f<think>\u200d{\u3000 \uff11\uff12 \u0915\u093f",
+   "pieces": [
+    "::",
+    "e",
+    "\u0301'",
+    "LL",
+    "{\n",
+    "'s",
+    " ",
+    " '",
+    "\u017f",
+    "<think",
+    ">\u200d{",
+    "\u3000",
+    " ",
+    "\uff11\uff12",
+    " \u0915",
+    "\u093f"
+   ],
+   "ids": [
+    486,
+    68,
+    53481,
+    6,
+    4086,
+    515,
+    594,
+    220,
+    364,
+    153000,
+    154841,
+    124564,
+    90,
+    22382,
+    220,
+    20069,
+    24842,
+    47512,
+    38643
+   ],
+   "ids_with_special": [
+    486,
+    68,
+    53481,
+    6,
+    4086,
+    515,
+    594,
+    220,
+    364,
+    153000,
+    154841,
+    124564,
+    90,
+    22382,
+    220,
+    20069,
+    24842,
+    47512,
+    38643
+   ],
+   "decoded": "::e\u0301'LL{\n's  '\u017f<think>\u200d{\u3000 \uff11\uff12 \u0915\u093f"
+  },
+  {
+   "text": "foo\t",
+   "pieces": [
+    "foo",
+    "\t"
+   ],
+   "ids": [
+    7974,
+    197
+   ],
+   "ids_with_special": [
+    7974,
+    197
+   ],
+   "decoded": "foo\t"
+  },
+  {
+   "text": "a12345tiquetas",
+   "pieces": [
+    "a",
+    "123",
+    "45",
+    "tiquetas"
+   ],
+   "ids": [
+    64,
+    108714,
+    100461,
+    140838
+   ],
+   "ids_with_special": [
+    64,
+    108714,
+    100461,
+    140838
+   ],
+   "decoded": "a12345tiquetas",
+   "ids_without_ignore_merges": [
+    64,
+    108714,
+    100461,
+    83,
+    5011,
+    35738
+   ]
+  },
+  {
+   "text": "foo\u00a0\u0915\u093f\u00b2<|user|>}\r\na's\u3000{[gMASK]12345\n",
+   "pieces": [
+    "foo",
+    "\u00a0\u0915",
+    "\u093f",
+    "\u00b2",
+    "<|",
+    "user",
+    "|>}\r\n",
+    "a",
+    "'s",
+    "\u3000",
+    "{[",
+    "gMASK",
+    "]",
+    "123",
+    "45",
+    "\n"
+   ],
+   "ids": [
+    7974,
+    4102,
+    64234,
+    38643,
+    29346,
+    154827,
+    1771,
+    64,
+    594,
+    22382,
+    90,
+    154822,
+    108714,
+    100461,
+    198
+   ],
+   "ids_with_special": [
+    7974,
+    4102,
+    64234,
+    38643,
+    29346,
+    154827,
+    1771,
+    64,
+    594,
+    22382,
+    90,
+    154822,
+    108714,
+    100461,
+    198
+   ],
+   "decoded": "foo\u00a0\u0915\u093f\u00b2<|user|>}\r\na's\u3000{[gMASK]12345\n"
+  },
+  {
+   "text": "Z's\u200d\r\n12345",
+   "pieces": [
+    "Z",
+    "'s",
+    "\u200d\r\n",
+    "123",
+    "45"
+   ],
+   "ids": [
+    57,
+    594,
+    124564,
+    319,
+    108714,
+    100461
+   ],
+   "ids_with_special": [
+    57,
+    594,
+    124564,
+    319,
+    108714,
+    100461
+   ],
+   "decoded": "Z's\u200d\r\n12345"
+  },
+  {
+   "text": "::\u00a0foo\u4e2d\u6587\u00a0e\u0301\u00b2foo'LL{\"\r\n\"'\u017ftiquetas\u00b2 \u00b2::",
+   "pieces": [
+    "::",
+    "\u00a0foo\u4e2d\u6587",
+    "\u00a0e",
+    "\u0301",
+    "\u00b2",
+    "foo",
+    "'LL",
+    "{\"\r\n",
+    "\"'",
+    "\u017ftiquetas",
+    "\u00b2",
+    " ",
+    "\u00b2",
+    "::"
+   ],
+   "ids": [
+    486,
+    4102,
+    7974,
+    102169,
+    4102,
+    68,
+    53481,
+    29346,
+    7974,
+    6,
+    4086,
+    4913,
+    319,
+    20541,
+    153000,
+    83,
+    5011,
+    35738,
+    29346,
+    220,
+    29346,
+    486
+   ],
+   "ids_with_special": [
+    486,
+    4102,
+    7974,
+    102169,
+    4102,
+    68,
+    53481,
+    29346,
+    7974,
+    6,
+    4086,
+    4913,
+    319,
+    20541,
+    153000,
+    83,
+    5011,
+    35738,
+    29346,
+    220,
+    29346,
+    486
+   ],
+   "decoded": "::\u00a0foo\u4e2d\u6587\u00a0e\u0301\u00b2foo'LL{\"\r\n\"'\u017ftiquetas\u00b2 \u00b2::"
+  },
+  {
+   "text": "'stiquetas\ud83d\ude42{a::\"\u4e2d\u6587\r\n}\u200d->\n1\ud83d\ude42e\u0301<sop>\u3002\"a",
+   "pieces": [
+    "'s",
+    "tiquetas",
+    "\ud83d\ude42{",
+    "a",
+    "::\"",
+    "\u4e2d\u6587",
+    "\r\n",
+    "}\u200d->\n",
+    "1",
+    "\ud83d\ude42e",
+    "\u0301<",
+    "sop",
+    ">\u3002\"",
+    "a"
+   ],
+   "ids": [
+    594,
+    140838,
+    152402,
+    90,
+    64,
+    486,
+    1,
+    102169,
+    319,
+    92,
+    124564,
+    83777,
+    16,
+    152402,
+    68,
+    53481,
+    154824,
+    99783,
+    64
+   ],
+   "ids_with_special": [
+    594,
+    140838,
+    152402,
+    90,
+    64,
+    486,
+    1,
+    102169,
+    319,
+    92,
+    124564,
+    83777,
+    16,
+    152402,
+    68,
+    53481,
+    154824,
+    99783,
+    64
+   ],
+   "decoded": "'stiquetas\ud83d\ude42{a::\"\u4e2d\u6587\r\n}\u200d->\n1\ud83d\ude42e\u0301<sop>\u3002\"a",
+   "ids_without_ignore_merges": [
+    594,
+    83,
+    5011,
+    35738,
+    152402,
+    90,
+    64,
+    486,
+    1,
+    102169,
+    319,
+    92,
+    124564,
+    83777,
+    16,
+    152402,
+    68,
+    53481,
+    154824,
+    99783,
+    64
+   ]
+  },
+  {
+   "text": "\t\u00a0\uff11\uff12\u4e2d\u6587kohol1fooa\r\n'LL\u0301\t::\u00b2[gMASK]    <sop>\r\n",
+   "pieces": [
+    "\t",
+    "\u00a0",
+    "\uff11\uff12",
+    "\u4e2d\u6587kohol",
+    "1",
+    "fooa",
+    "\r\n",
+    "'LL",
+    "\u0301",
+    "\t",
+    "::",
+    "\u00b2",
+    "[gMASK",
+    "]",
+    "   ",
+    " <",
+    "sop",
+    ">\r\n"
+   ],
+   "ids": [
+    197,
+    4102,
+    20069,
+    24842,
+    102169,
+    74,
+    2267,
+    337,
+    16,
+    7974,
+    64,
+    319,
+    6,
+    4086,
+    53481,
+    197,
+    486,
+    29346,
+    154822,
+    257,
+    154824,
+    319
+   ],
+   "ids_with_special": [
+    197,
+    4102,
+    20069,
+    24842,
+    102169,
+    74,
+    2267,
+    337,
+    16,
+    7974,
+    64,
+    319,
+    6,
+    4086,
+    53481,
+    197,
+    486,
+    29346,
+    154822,
+    257,
+    154824,
+    319
+   ],
+   "decoded": "\t\u00a0\uff11\uff12\u4e2d\u6587kohol1fooa\r\n'LL\u0301\t::\u00b2[gMASK]    <sop>\r\n"
+  },
+  {
+   "text": "\u3002'\u017f  Z{\r\n}  kohol",
+   "pieces": [
+    "\u3002'",
+    "\u017f",
+    " ",
+    " Z",
+    "{\r\n",
+    "}",
+    " ",
+    " kohol"
+   ],
+   "ids": [
+    1773,
+    6,
+    153000,
+    220,
+    1863,
+    1666,
+    92,
+    220,
+    139403,
+    337
+   ],
+   "ids_with_special": [
+    1773,
+    6,
+    153000,
+    220,
+    1863,
+    1666,
+    92,
+    220,
+    139403,
+    337
+   ],
+   "decoded": "\u3002'\u017f  Z{\r\n}  kohol"
+  },
+  {
+   "text": "a->Bar->\ud83d\ude42\u0915\u093f\u3002foo->a\u4e2d\u6587\uff11\uff12\u0301\te\u0301\ud83d\ude42\n\"<|user|><think>",
+   "pieces": [
+    "a",
+    "->",
+    "Bar",
+    "->\ud83d\ude42",
+    "\u0915",
+    "\u093f\u3002",
+    "foo",
+    "->",
+    "a\u4e2d\u6587",
+    "\uff11\uff12",
+    "\u0301",
+    "\te",
+    "\u0301\ud83d\ude42\n",
+    "\"<|",
+    "user",
+    "|><",
+    "think",
+    ">"
+   ],
+   "ids": [
+    64,
+    405,
+    3428,
+    405,
+    152402,
+    64234,
+    38643,
+    1773,
+    7974,
+    405,
+    64,
+    102169,
+    20069,
+    24842,
+    53481,
+    7727,
+    53481,
+    152402,
+    198,
+    1,
+    154827,
+    154841
+   ],
+   "ids_with_special": [
+    64,
+    405,
+    3428,
+    405,
+    152402,
+    64234,
+    38643,
+    1773,
+    7974,
+    405,
+    64,
+    102169,
+    20069,
+    24842,
+    53481,
+    7727,
+    53481,
+    152402,
+    198,
+    1,
+    154827,
+    154841
+   ],
+   "decoded": "a->Bar->\ud83d\ude42\u0915\u093f\u3002foo->a\u4e2d\u6587\uff11\uff12\u0301\te\u0301\ud83d\ude42\n\"<|user|><think>"
+  },
+  {
+   "text": "'s->  e\u0301\u3002\u4e2d\u6587\u200d\ud83d\ude42 12345\u3002\u3000e\u0301<think>Z 12345\u00b2",
+   "pieces": [
+    "'s",
+    "->",
+    " ",
+    " e",
+    "\u0301\u3002",
+    "\u4e2d\u6587",
+    "\u200d\ud83d\ude42",
+    " ",
+    "123",
+    "45",
+    "\u3002",
+    "\u3000e",
+    "\u0301<",
+    "think",
+    ">Z",
+    " ",
+    "123",
+    "45\u00b2"
+   ],
+   "ids": [
+    594,
+    405,
+    220,
+    384,
+    53481,
+    1773,
+    102169,
+    124564,
+    152402,
+    220,
+    108714,
+    100461,
+    1773,
+    22382,
+    68,
+    53481,
+    154841,
+    57,
+    220,
+    108714,
+    100461,
+    29346
+   ],
+   "ids_with_special": [
+    594,
+    405,
+    220,
+    384,
+    53481,
+    1773,
+    102169,
+    124564,
+    152402,
+    220,
+    108714,
+    100461,
+    1773,
+    22382,
+    68,
+    53481,
+    154841,
+    57,
+    220,
+    108714,
+    100461,
+    29346
+   ],
+   "decoded": "'s->  e\u0301\u3002\u4e2d\u6587\u200d\ud83d\ude42 12345\u3002\u3000e\u0301<think>Z 12345\u00b2"
+  },
+  {
+   "text": "::\t's\u200dkohol",
+   "pieces": [
+    "::",
+    "\t",
+    "'s",
+    "\u200dkohol"
+   ],
+   "ids": [
+    486,
+    197,
+    594,
+    124564,
+    74,
+    2267,
+    337
+   ],
+   "ids_with_special": [
+    486,
+    197,
+    594,
+    124564,
+    74,
+    2267,
+    337
+   ],
+   "decoded": "::\t's\u200dkohol"
+  }
+ ]
+}

@@ -114,6 +114,61 @@ pub fn kda_decode_step(
     out
 }
 
+/// DSA indexer key/gate width and pool length.
+pub const INDEXER_DIM: usize = 128;
+pub const INDEXER_POOL: usize = 4;
+
+/// One token of indexer cache maintenance (llama.cpp glm5-next
+/// build_kpool_select): `key = LayerNorm(raw_key) * weight + bias` and
+/// `raw_gate` are rounded to F16 into slot `position % 4` of `pending`
+/// (`[slot][key | gate][128]`). When the slot completes a pool, `pooled[pool]`
+/// = F16 of `sum_j softmax_j(gate_j + ape[j]) * key_j` per channel, computed
+/// from the F16 rows. `ape` is `[4][128]`; `pooled` is `[pools][128]`.
+#[allow(clippy::too_many_arguments)]
+pub fn indexer_append_step(
+    position: usize,
+    raw_key: &[f32],
+    raw_gate: &[f32],
+    weight: &[f32],
+    bias: &[f32],
+    ape: &[f32],
+    eps: f32,
+    pending: &mut [half::f16],
+    pooled: &mut [half::f16],
+) {
+    const D: usize = INDEXER_DIM;
+    assert_eq!(pending.len(), INDEXER_POOL * 2 * D);
+    let mean = raw_key.iter().map(|&x| x as f64).sum::<f64>() / D as f64;
+    let variance = raw_key
+        .iter()
+        .map(|&x| (x as f64 - mean).powi(2))
+        .sum::<f64>()
+        / D as f64;
+    let inv = 1.0 / (variance + eps as f64).sqrt();
+    let slot = position % INDEXER_POOL;
+    for c in 0..D {
+        let key = (raw_key[c] as f64 - mean) * inv * weight[c] as f64 + bias[c] as f64;
+        pending[slot * 2 * D + c] = half::f16::from_f64(key);
+        pending[slot * 2 * D + D + c] = half::f16::from_f32(raw_gate[c]);
+    }
+    if slot != INDEXER_POOL - 1 {
+        return;
+    }
+    let pool = position / INDEXER_POOL;
+    for c in 0..D {
+        let logits: Vec<f64> = (0..INDEXER_POOL)
+            .map(|j| pending[j * 2 * D + D + c].to_f64() + ape[j * D + c] as f64)
+            .collect();
+        let max = logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let weights: Vec<f64> = logits.iter().map(|l| (l - max).exp()).collect();
+        let total: f64 = weights.iter().sum();
+        let acc: f64 = (0..INDEXER_POOL)
+            .map(|j| weights[j] * pending[j * 2 * D + c].to_f64())
+            .sum();
+        pooled[pool * D + c] = half::f16::from_f64(acc / total);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

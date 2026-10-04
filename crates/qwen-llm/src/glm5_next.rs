@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, HashSet};
 
 pub mod coverage;
 pub mod memory;
+pub mod oracle;
 
 pub use coverage::{CoverageRow, ExecutionMode, RoleCoverage, Support, TensorRole};
 pub use memory::{Glm5NextMemoryLedger, Glm5NextPhasePeaks};

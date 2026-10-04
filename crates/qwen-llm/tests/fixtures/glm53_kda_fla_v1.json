@@ -1,0 +1,26 @@
+{
+ "generator": "scripts/reference/generate_glm53_kda_fixture.py",
+ "fla_revision": "3e52d5abb6ad85312846f39c3e946c2e9881a823",
+ "fla_precision": "naive_recurrent_kda casts to float32 internally",
+ "torch": "2.14.1",
+ "heads": 2,
+ "head_dim": 128,
+ "tokens": 3,
+ "lower_bound": -5.0,
+ "norm_eps": 1e-05,
+ "layout": {
+  "out": [
+   0,
+   768
+  ],
+  "state": [
+   768,
+   33536
+  ],
+  "conv_state": [
+   33536,
+   35840
+  ]
+ },
+ "f32_sha256": "e0cad3c2217f321e34842ef5e9aa1428970b02ebc106c917290f1ccd47008cc1"
+}

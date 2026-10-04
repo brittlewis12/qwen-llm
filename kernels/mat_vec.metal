@@ -1981,35 +1981,39 @@ kernel void kernel_deepseek_v4_indexed_mat_vec_iq3_xxs_f32_fast(
     }
 }
 
-kernel void kernel_deepseek_v4_indexed_mat_vec_iq3_s_f32_fast(
-        constant ds4_indexed_mat_vec_args & args [[buffer(0)]],
-        device const uchar * weight [[buffer(1)]],
-        device const float * x [[buffer(2)]],
-        device const int * expert_ids [[buffer(3)]],
-        device const int * route_status [[buffer(4)]],
-        device float * y [[buffer(5)]],
-        uint tgpig [[threadgroup_position_in_grid]],
-        ushort tiisg [[thread_index_in_simdgroup]],
-        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+// One IQ3_S expert projection row block (four rows per simdgroup, two
+// simdgroups per threadgroup). `x` and `y` are this slot's input and output;
+// rows of an invalid or unready route are written as zero.
+inline void ds4_iq3_s_expert_rows(
+        uint n_in,
+        uint n_out,
+        uint n_expert,
+        int expert,
+        bool ready,
+        device const uchar * weight,
+        device const float * x,
+        device float * y,
+        uint tgx,
+        ushort tiisg,
+        ushort sgitg) {
     const short NR0 = 4;
     const short NSG = 2;
-    const uint first_row = (tgpig * NSG + uint(sgitg)) * NR0;
-    if (first_row >= args.n_out) return;
-    const int expert = expert_ids[args.slot];
-    if (route_status[0] != 1 || expert < 0 || uint(expert) >= args.n_expert) {
+    const uint first_row = (tgx * NSG + uint(sgitg)) * NR0;
+    if (first_row >= n_out) return;
+    if (!ready || expert < 0 || uint(expert) >= n_expert) {
         if (tiisg == 0) {
             for (short row = 0; row < NR0; ++row) {
                 const uint out_row = first_row + uint(row);
-                if (out_row < args.n_out) y[out_row] = 0.0f;
+                if (out_row < n_out) y[out_row] = 0.0f;
             }
         }
         return;
     }
 
-    const uint nb = args.n_in / 256u;
+    const uint nb = n_in / 256u;
     const uint nb32 = nb * 8u;
     const ulong row_stride = (ulong)nb * 110u;
-    const ulong expert_stride = (ulong)args.n_out * row_stride;
+    const ulong expert_stride = (ulong)n_out * row_stride;
     device const uchar * expert_weight = weight + (ulong)expert * expert_stride;
     const uint ix = uint(tiisg);
     device const float * y4 = x + 32u * ix;
@@ -2022,7 +2026,7 @@ kernel void kernel_deepseek_v4_indexed_mat_vec_iq3_s_f32_fast(
         const uint ib = ib32 & 7u;
         for (short row = 0; row < NR0; ++row) {
             const uint out_row = first_row + uint(row);
-            if (out_row >= args.n_out) continue;
+            if (out_row >= n_out) continue;
             device const uchar * blk = expert_weight + (ulong)out_row * row_stride
                                                     + (ulong)ibl * 110u;
             const float db = float(((device const half *)blk)[0]);
@@ -2060,10 +2064,43 @@ kernel void kernel_deepseek_v4_indexed_mat_vec_iq3_s_f32_fast(
 
     for (short row = 0; row < NR0; ++row) {
         const uint out_row = first_row + uint(row);
-        if (out_row >= args.n_out) continue;
+        if (out_row >= n_out) continue;
         const float total = simd_sum(sumf[row]);
         if (tiisg == 0) y[out_row] = total;
     }
+}
+
+kernel void kernel_deepseek_v4_indexed_mat_vec_iq3_s_f32_fast(
+        constant ds4_indexed_mat_vec_args & args [[buffer(0)]],
+        device const uchar * weight [[buffer(1)]],
+        device const float * x [[buffer(2)]],
+        device const int * expert_ids [[buffer(3)]],
+        device const int * route_status [[buffer(4)]],
+        device float * y [[buffer(5)]],
+        uint tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    ds4_iq3_s_expert_rows(args.n_in, args.n_out, args.n_expert, expert_ids[args.slot],
+        route_status[0] == 1, weight, x, y, tgpig, tiisg, sgitg);
+}
+
+// Every routed slot in one dispatch: grid.y is the slot; `inner` and `y` are
+// slot-strided `[n_in, top_k]` and `[n_out, top_k]`.
+kernel void kernel_deepseek_v4_all_slots_down_iq3_s_f32_fast(
+        constant ds4_all_slots_args & args [[buffer(0)]],
+        device const uchar * weight [[buffer(1)]],
+        device const float * inner [[buffer(2)]],
+        device const int * expert_ids [[buffer(3)]],
+        device const int * route_status [[buffer(4)]],
+        device float * y [[buffer(5)]],
+        uint2 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const uint slot = tgpig.y;
+    const bool in_route = slot < args.top_k;
+    ds4_iq3_s_expert_rows(args.n_in, args.n_out, args.n_expert,
+        in_route ? expert_ids[slot] : -1, in_route && route_status[0] == 1, weight,
+        inner + (ulong)slot * args.n_in, y + (ulong)slot * args.n_out, tgpig.x, tiisg, sgitg);
 }
 
 kernel void kernel_deepseek_v4_indexed_mat_vec_q3_K_f32(

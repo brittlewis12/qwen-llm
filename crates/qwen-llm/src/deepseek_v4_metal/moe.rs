@@ -1609,93 +1609,22 @@ pub(super) fn encode_ds4_all_slots_gate_up_swiglu(
     expert_count: usize,
     clamp: f32,
 ) -> Result<(), DeepSeekV4MetalError> {
-    const NAME: &str = "DeepSeek V4 all-slot gate/up SwiGLU";
-    require_serial(enc, NAME)?;
-    if !clamp.is_finite() || clamp <= 0.0 {
-        return invalid(format!("{NAME} clamp must be finite and positive"));
-    }
-    validate_i32(
+    // DS4 routes exactly six slots; the shared encoder owns validation.
+    encode_all_slots_gate_up_swiglu(
+        ctx,
+        enc,
+        gate_bank,
+        up_bank,
+        input,
         expert_ids,
-        &[DEEPSEEK_V4_ROUTE_MAX_TOP_K as u64],
-        false,
-        &format!("{NAME} expert IDs"),
-    )?;
-    validate_i32(route_status, &[1], false, &format!("{NAME} route status"))?;
-    validate_expert_bank(gate_bank, n_in, n_out, expert_count, "all-slot gate bank")?;
-    validate_expert_bank(up_bank, n_in, n_out, expert_count, "all-slot up bank")?;
-    validate_f32(input, &[n_in as u64], false, &format!("{NAME} input"))?;
-    validate_f32(
+        route_status,
         output,
-        &[n_out as u64, DEEPSEEK_V4_ROUTE_MAX_TOP_K as u64],
-        true,
-        &format!("{NAME} output"),
-    )?;
-    if gate_bank.dtype != up_bank.dtype {
-        return invalid(format!(
-            "{NAME} requires matching gate/up dtypes, got {:?} and {:?}",
-            gate_bank.dtype, up_bank.dtype
-        ));
-    }
-    let kernel = match gate_bank.dtype {
-        GgmlType::IQ2_XS => "kernel_deepseek_v4_all_slots_swiglu_iq2_xs_f32_fast",
-        GgmlType::IQ2_S => "kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast",
-        GgmlType::IQ3_XXS => "kernel_deepseek_v4_all_slots_swiglu_iq3_xxs_f32_fast",
-        GgmlType::IQ3_S => "kernel_deepseek_v4_all_slots_swiglu_iq3_s_f32_fast",
-        GgmlType::Q3_K => "kernel_deepseek_v4_all_slots_swiglu_q3_K_f32",
-        dtype => return invalid(format!("{NAME} does not support {dtype:?}")),
-    };
-    if !n_in.is_multiple_of(256) {
-        return invalid(format!("{NAME} input width {n_in} is not divisible by 256"));
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Args {
-        n_in: u32,
-        n_out: u32,
-        n_expert: u32,
-        top_k: u32,
-        clamp: f32,
-    }
-    let args = Args {
-        n_in: u32::try_from(n_in)
-            .map_err(|_| DeepSeekV4MetalError::Invalid(format!("{NAME} n_in exceeds u32")))?,
-        n_out: u32::try_from(n_out)
-            .map_err(|_| DeepSeekV4MetalError::Invalid(format!("{NAME} n_out exceeds u32")))?,
-        n_expert: u32::try_from(expert_count).map_err(|_| {
-            DeepSeekV4MetalError::Invalid(format!("{NAME} expert count exceeds u32"))
-        })?,
-        top_k: DEEPSEEK_V4_ROUTE_MAX_TOP_K as u32,
+        n_in,
+        n_out,
+        expert_count,
+        DEEPSEEK_V4_ROUTE_MAX_TOP_K,
         clamp,
-    };
-    let pso = ctx.pipeline(kernel)?;
-    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 64 {
-        return invalid(format!(
-            "{kernel} requires SIMD width 32 and 64 threads, got width {} max {}",
-            pso.threadExecutionWidth(),
-            pso.maxTotalThreadsPerThreadgroup()
-        ));
-    }
-    enc.set_pipeline(&pso);
-    enc.set_bytes(0, &args);
-    enc.set_tensor(1, gate_bank);
-    enc.set_tensor(2, up_bank);
-    enc.set_tensor(3, input);
-    enc.set_tensor(4, expert_ids);
-    enc.set_tensor(5, route_status);
-    enc.set_tensor(6, output);
-    enc.set_threadgroup_memory(0, 16 * std::mem::size_of::<f32>());
-    enc.dispatch(
-        MTLSize {
-            width: n_out.div_ceil(8),
-            height: DEEPSEEK_V4_ROUTE_MAX_TOP_K,
-            depth: 1,
-        },
-        MTLSize {
-            width: 64,
-            height: 1,
-            depth: 1,
-        },
-    );
+    )?;
     Ok(())
 }
 
@@ -1712,91 +1641,19 @@ pub(super) fn encode_ds4_all_slots_down(
     n_out: usize,
     expert_count: usize,
 ) -> Result<(), DeepSeekV4MetalError> {
-    const NAME: &str = "DeepSeek V4 all-slot down";
-    require_serial(enc, NAME)?;
-    validate_i32(
-        expert_ids,
-        &[DEEPSEEK_V4_ROUTE_MAX_TOP_K as u64],
-        false,
-        &format!("{NAME} expert IDs"),
-    )?;
-    validate_i32(route_status, &[1], false, &format!("{NAME} route status"))?;
-    validate_expert_bank(bank, n_in, n_out, expert_count, "all-slot down bank")?;
-    validate_f32(
+    encode_all_slots_down(
+        ctx,
+        enc,
+        bank,
         input,
-        &[n_in as u64, DEEPSEEK_V4_ROUTE_MAX_TOP_K as u64],
-        false,
-        &format!("{NAME} input"),
-    )?;
-    validate_f32(
+        expert_ids,
+        route_status,
         output,
-        &[n_out as u64, DEEPSEEK_V4_ROUTE_MAX_TOP_K as u64],
-        true,
-        &format!("{NAME} output"),
+        n_in,
+        n_out,
+        expert_count,
+        DEEPSEEK_V4_ROUTE_MAX_TOP_K,
     )?;
-    let (kernel, rows_per_group, threads_per_group, block_size) = match bank.dtype {
-        GgmlType::IQ3_XXS => (
-            "kernel_deepseek_v4_all_slots_down_iq3_xxs_f32_fast",
-            8,
-            64,
-            256,
-        ),
-        GgmlType::MXFP4 => ("kernel_deepseek_v4_all_slots_down_mxfp4_f32", 4, 128, 32),
-        GgmlType::Q4_K => ("kernel_deepseek_v4_all_slots_down_q4_K_f32", 4, 64, 256),
-        dtype => return invalid(format!("{NAME} does not support {dtype:?}")),
-    };
-    if !n_in.is_multiple_of(block_size) {
-        return invalid(format!(
-            "{NAME} input width {n_in} is not divisible by {block_size}"
-        ));
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Args {
-        n_in: u32,
-        n_out: u32,
-        n_expert: u32,
-        top_k: u32,
-        clamp: f32,
-    }
-    let args = Args {
-        n_in: u32::try_from(n_in)
-            .map_err(|_| DeepSeekV4MetalError::Invalid(format!("{NAME} n_in exceeds u32")))?,
-        n_out: u32::try_from(n_out)
-            .map_err(|_| DeepSeekV4MetalError::Invalid(format!("{NAME} n_out exceeds u32")))?,
-        n_expert: u32::try_from(expert_count).map_err(|_| {
-            DeepSeekV4MetalError::Invalid(format!("{NAME} expert count exceeds u32"))
-        })?,
-        top_k: DEEPSEEK_V4_ROUTE_MAX_TOP_K as u32,
-        clamp: 0.0,
-    };
-    let pso = ctx.pipeline(kernel)?;
-    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < threads_per_group {
-        return invalid(format!(
-            "{kernel} requires SIMD width 32 and {threads_per_group} threads, got width {} max {}",
-            pso.threadExecutionWidth(),
-            pso.maxTotalThreadsPerThreadgroup()
-        ));
-    }
-    enc.set_pipeline(&pso);
-    enc.set_bytes(0, &args);
-    enc.set_tensor(1, bank);
-    enc.set_tensor(2, input);
-    enc.set_tensor(3, expert_ids);
-    enc.set_tensor(4, route_status);
-    enc.set_tensor(5, output);
-    enc.dispatch(
-        MTLSize {
-            width: n_out.div_ceil(rows_per_group),
-            height: DEEPSEEK_V4_ROUTE_MAX_TOP_K,
-            depth: 1,
-        },
-        MTLSize {
-            width: threads_per_group,
-            height: 1,
-            depth: 1,
-        },
-    );
     Ok(())
 }
 

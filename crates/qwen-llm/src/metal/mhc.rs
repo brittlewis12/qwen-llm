@@ -22,12 +22,7 @@ pub const MHC_MIXES: usize = 24;
 /// softmax, with epsilon added after it).
 pub const MHC_SINKHORN_ITERATIONS: usize = 20;
 
-fn bad(kernel: &'static str, detail: impl Into<String>) -> MetalError {
-    MetalError::BadShape {
-        kernel,
-        detail: detail.into(),
-    }
-}
+use super::checks::{bad_shape as bad, check_tensor, require_serial};
 
 fn check_f32(
     kernel: &'static str,
@@ -36,36 +31,7 @@ fn check_f32(
     writable: bool,
     name: &str,
 ) -> Result<(), MetalError> {
-    if tensor.dtype != GgmlType::F32 || tensor.shape != shape {
-        return Err(bad(
-            kernel,
-            format!(
-                "{name} must be F32 {shape:?}, got {:?} {:?}",
-                tensor.dtype, tensor.shape
-            ),
-        ));
-    }
-    if writable && !tensor.is_writable() {
-        return Err(bad(kernel, format!("{name} must be writable")));
-    }
-    if !tensor.offset.is_multiple_of(4) {
-        return Err(bad(kernel, format!("{name} offset is not F32-aligned")));
-    }
-    let end = tensor
-        .offset
-        .checked_add(tensor.n_bytes())
-        .ok_or_else(|| bad(kernel, format!("{name} range overflow")))?;
-    if end > tensor.buffer.length() as u64 {
-        return Err(bad(kernel, format!("{name} exceeds its buffer")));
-    }
-    Ok(())
-}
-
-fn require_serial(kernel: &'static str, enc: &KernelEncoder) -> Result<(), MetalError> {
-    if enc.is_concurrent() {
-        return Err(bad(kernel, "requires ordered serial dispatches"));
-    }
-    Ok(())
+    check_tensor(kernel, tensor, GgmlType::F32, shape, writable, name)
 }
 
 /// `hidden` as u32 and the flattened residual length, both nonzero and u32.

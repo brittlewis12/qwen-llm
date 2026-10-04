@@ -74,11 +74,10 @@ impl LearnedRoute {
     }
 }
 
+const KERNEL: &str = "route_learned";
+
 fn bad(detail: impl Into<String>) -> MetalError {
-    MetalError::BadShape {
-        kernel: "route_learned",
-        detail: detail.into(),
-    }
+    super::checks::bad_shape(KERNEL, detail)
 }
 
 fn check(
@@ -88,26 +87,7 @@ fn check(
     writable: bool,
     name: &str,
 ) -> Result<(), MetalError> {
-    if tensor.dtype != dtype || tensor.shape != shape {
-        return Err(bad(format!(
-            "{name} must be {dtype:?} {shape:?}, got {:?} {:?}",
-            tensor.dtype, tensor.shape
-        )));
-    }
-    if writable && !tensor.is_writable() {
-        return Err(bad(format!("{name} must be writable")));
-    }
-    if !tensor.offset.is_multiple_of(4) {
-        return Err(bad(format!("{name} offset is not 4-byte aligned")));
-    }
-    let end = tensor
-        .offset
-        .checked_add(tensor.n_bytes())
-        .ok_or_else(|| bad(format!("{name} range overflow")))?;
-    if end > tensor.buffer.length() as u64 {
-        return Err(bad(format!("{name} exceeds its buffer")));
-    }
-    Ok(())
+    super::checks::check_tensor(KERNEL, tensor, dtype, shape, writable, name)
 }
 
 /// Encode one learned routing decision from `logits` and `bias` (F32

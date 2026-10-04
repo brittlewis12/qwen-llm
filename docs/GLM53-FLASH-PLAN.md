@@ -3,9 +3,23 @@
 Implementation map for adding GLM-5.3-Flash (`glm5-next` in llama.cpp) as a native
 family. The semantic reference is llama.cpp `src/models/glm5-next.cpp` at upstream
 `42d958167` (line numbers below refer to that tree; upstream through `11fe02151` has
-no further `glm5-next` changes). Status: planning; no family code yet. Earlier
-research (2026-08-28 gap analysis, 2026-08-29 schedule) and a `cx` adversarial review
-(2026-10-03) are folded in.
+no further `glm5-next` changes). Earlier research (2026-08-28 gap analysis,
+2026-08-29 schedule) and `cx` adversarial reviews at each packet are folded in.
+
+## Status (2026-10-04)
+
+- P1 done: strict binder, role x dtype coverage with a phase-specific execution
+  gate, memory ledger, native `glm4` tokenizer (HF and llama-tokenize parity),
+  same-artifact oracle harness and the ckpt-v1 reference capture
+  (`scripts/reference/glm53/ckpt-v1.json`).
+- P2 engine checkpoint passed (`glm5_next_metal`, serial decode, dense range):
+  ckpt-v1 top-1 15/15, worst KL 2.9e-11, block residuals <= 2e-5, KDA state,
+  indexer pools and pending keys match llama.cpp at steps 3/7/14; 39 ms/token
+  (llama.cpp tg128 on the same artifact: 22.6 tok/s); one session allocates
+  117.72 GB within the 118.25 GB ledger. Shared encoders lifted from DS4 (mHC,
+  clamp, routing, all-slot experts) keep DS4 output identical on the real asset.
+- Remaining P2: thin family/run/bench integration (fail-closed profile, token-ID
+  run, matched-context benchmark). Then P3 packed prefill, P4 sparse selection.
 
 ## Artifact
 

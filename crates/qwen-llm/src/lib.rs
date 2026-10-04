@@ -43,6 +43,7 @@ pub mod durable_store;
 pub mod env_flag;
 pub mod forward;
 pub mod gguf;
+pub mod glm5_next;
 pub mod k2_horizon;
 pub mod k2_horizon_chat;
 pub mod k2_horizon_metal;

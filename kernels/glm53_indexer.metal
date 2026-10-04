@@ -117,3 +117,46 @@ kernel void kernel_glm53_indexer_append_rows(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 }
+
+struct glm53_indexer_expand_args {
+    uint top_pools;   // pool-id slots per query (512)
+    uint row_slots;   // row-id slots per query (>= 4 * top_pools + 3)
+    uint query_count;
+};
+
+// Sparse selection for one batch of queries: expand each query's selected
+// pools (ascending pool ids from the selector, -1 padded, `pool_counts` valid)
+// into their four chronological latent rows, then append the tail of the
+// incomplete pool (the newest `visible % 4` rows, chronologically). A pool id
+// outside the query's visible prefix (visible / 4 pools) yields -1. Unused
+// slots are -1; `row_counts = 4 * pools + tail`. One thread per output slot.
+kernel void kernel_glm53_indexer_expand_selection(
+        constant glm53_indexer_expand_args & args [[buffer(0)]],
+        device const int * pool_ids [[buffer(1)]],
+        device const int * pool_counts [[buffer(2)]],
+        device const int * visible_rows [[buffer(3)]],
+        device int * row_ids [[buffer(4)]],
+        device int * row_counts [[buffer(5)]],
+        uint2 gid [[thread_position_in_grid]]) {
+    const uint slot = gid.x;
+    const uint query = gid.y;
+    if (query >= args.query_count || slot >= args.row_slots) return;
+    const int visible_i = visible_rows[query];
+    const uint visible = visible_i > 0 ? uint(visible_i) : 0u;
+    const uint visible_pools = visible / IDX_POOL;
+    const int count_i = pool_counts[query];
+    const uint pools = count_i > 0 ? min(uint(count_i), args.top_pools) : 0u;
+    const uint tail = visible % IDX_POOL;
+    const uint expanded = pools * IDX_POOL;
+    int row = -1;
+    if (slot < expanded) {
+        const int id = pool_ids[query * args.top_pools + slot / IDX_POOL];
+        if (id >= 0 && uint(id) < visible_pools) {
+            row = id * int(IDX_POOL) + int(slot % IDX_POOL);
+        }
+    } else if (slot < expanded + tail) {
+        row = int(visible - tail + (slot - expanded));
+    }
+    row_ids[query * args.row_slots + slot] = row;
+    if (slot == 0u) row_counts[query] = int(expanded + tail);
+}

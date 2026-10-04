@@ -203,6 +203,111 @@ fn encode(
     Ok(())
 }
 
+/// Buffers for [`encode_indexer_expand_selection`] over `queries` queries.
+pub struct IndexerSelection<'a> {
+    /// I32 `[top_pools, queries]`: ascending selected pool ids, -1 padded.
+    pub pool_ids: &'a MetalTensor,
+    /// I32 `[queries]`: valid pool ids per query.
+    pub pool_counts: &'a MetalTensor,
+    /// I32 `[queries]`: visible latent rows (visible length) per query.
+    pub visible_rows: &'a MetalTensor,
+    /// I32 `[row_slots, queries]`: latent rows to attend, -1 padded.
+    pub row_ids: &'a MetalTensor,
+    /// I32 `[queries]`: `4 * pools + visible % 4`.
+    pub row_counts: &'a MetalTensor,
+}
+
+/// Expands each query's selected pools into their four chronological latent
+/// rows and appends the incomplete pool's tail (`visible % 4` newest rows,
+/// chronologically), as llama.cpp's `kpool_select_tail` selection (whose set
+/// this is; llama.cpp's gather order is by descending pool score). Pool ids
+/// outside a query's visible prefix become -1.
+pub fn encode_indexer_expand_selection(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    b: &IndexerSelection<'_>,
+    top_pools: usize,
+    row_slots: usize,
+    queries: usize,
+) -> Result<(), MetalError> {
+    const K: &str = "indexer_expand_selection";
+    require_serial(K, enc)?;
+    let needed = top_pools
+        .checked_mul(INDEXER_POOL)
+        .and_then(|rows| rows.checked_add(INDEXER_POOL - 1));
+    if top_pools == 0 || queries == 0 || needed.is_none_or(|needed| row_slots < needed) {
+        return Err(bad_shape(
+            K,
+            format!("{row_slots} row slots cannot hold {top_pools} pools plus a tail"),
+        ));
+    }
+    for elements in [
+        row_slots.checked_mul(queries),
+        top_pools.checked_mul(queries),
+    ] {
+        if elements.and_then(|e| u32::try_from(e).ok()).is_none() {
+            return Err(bad_shape(K, "element counts exceed 32-bit shader offsets"));
+        }
+    }
+    let (p, r, q) = (top_pools as u64, row_slots as u64, queries as u64);
+    check_tensor(K, b.pool_ids, GgmlType::I32, &[p, q], false, "pool ids")?;
+    check_tensor(K, b.pool_counts, GgmlType::I32, &[q], false, "pool counts")?;
+    check_tensor(
+        K,
+        b.visible_rows,
+        GgmlType::I32,
+        &[q],
+        false,
+        "visible rows",
+    )?;
+    check_tensor(K, b.row_ids, GgmlType::I32, &[r, q], true, "row ids")?;
+    check_tensor(K, b.row_counts, GgmlType::I32, &[q], true, "row counts")?;
+    let inputs = [
+        (b.pool_ids, "pool ids"),
+        (b.pool_counts, "pool counts"),
+        (b.visible_rows, "visible rows"),
+    ];
+    check_disjoint(K, b.row_ids, &inputs)?;
+    check_disjoint(K, b.row_counts, &inputs)?;
+    check_disjoint(K, b.row_ids, &[(b.row_counts, "row counts")])?;
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        top_pools: u32,
+        row_slots: u32,
+        query_count: u32,
+    }
+    let pso = ctx.pipeline("kernel_glm53_indexer_expand_selection")?;
+    let width = pso.maxTotalThreadsPerThreadgroup().min(256);
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            top_pools: top_pools as u32,
+            row_slots: row_slots as u32,
+            query_count: queries as u32,
+        },
+    );
+    enc.set_tensor(1, b.pool_ids);
+    enc.set_tensor(2, b.pool_counts);
+    enc.set_tensor(3, b.visible_rows);
+    enc.set_tensor(4, b.row_ids);
+    enc.set_tensor(5, b.row_counts);
+    enc.dispatch(
+        MTLSize {
+            width: row_slots.div_ceil(width),
+            height: queries,
+            depth: 1,
+        },
+        MTLSize {
+            width,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::test_support::offset_tensor;
@@ -447,5 +552,97 @@ mod tests {
                 "pooled after {position}"
             );
         }
+    }
+
+    /// Selected pools expand to their four chronological rows, followed by
+    /// the `visible % 4` tail rows; short selections pad with -1 and pool
+    /// ids outside the visible prefix become -1 (every tail length 0-3).
+    #[test]
+    fn expand_selection_matches_cpu_contract_for_every_tail() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        const POOLS: usize = 512;
+        const SLOTS: usize = 2_051;
+        let visible = [2_052i32, 2_053, 2_054, 2_055, 4_099, 3_000];
+        let q = visible.len();
+        let mut ids = vec![-1i32; POOLS * q];
+        let mut counts = vec![POOLS as i32; q];
+        for (query, &v) in visible.iter().enumerate() {
+            let visible_pools = v as usize / 4;
+            // Ascending, spread over the visible prefix.
+            for slot in 0..POOLS {
+                ids[query * POOLS + slot] = (slot * visible_pools / POOLS) as i32;
+            }
+        }
+        counts[4] = 510; // short selection: two padded slots
+        ids[4 * POOLS + 510] = -1;
+        ids[4 * POOLS + 511] = -1;
+        ids[5 * POOLS + 7] = 750; // beyond 3000 / 4 = 750 visible pools
+        let tensor = |v: &[i32], shape: Vec<u64>| {
+            offset_tensor(&ctx, 16, bytemuck::cast_slice(v), 16, shape, GgmlType::I32)
+        };
+        let ids_t = tensor(&ids, vec![POOLS as u64, q as u64]);
+        let counts_t = tensor(&counts, vec![q as u64]);
+        let visible_t = tensor(&visible, vec![q as u64]);
+        let rows_t = tensor(&vec![9i32; SLOTS * q], vec![SLOTS as u64, q as u64]);
+        let row_counts_t = tensor(&vec![9i32; q], vec![q as u64]);
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        encode_indexer_expand_selection(
+            &ctx,
+            &enc,
+            &IndexerSelection {
+                pool_ids: &ids_t,
+                pool_counts: &counts_t,
+                visible_rows: &visible_t,
+                row_ids: &rows_t,
+                row_counts: &row_counts_t,
+            },
+            POOLS,
+            SLOTS,
+            q,
+        )
+        .unwrap();
+        enc.end();
+        command.commit();
+        wait_completed(&command).unwrap();
+        let read = |t: &MetalTensor| -> Vec<i32> {
+            let bytes = super::super::test_support::tensor_backing_bytes(t);
+            let start = t.offset as usize;
+            bytemuck::cast_slice::<u8, i32>(&bytes[start..start + 4 * t.n_elements() as usize])
+                .to_vec()
+        };
+        let (rows, row_counts) = (read(&rows_t), read(&row_counts_t));
+        for (query, &v) in visible.iter().enumerate() {
+            let (v, pools) = (v as usize, counts[query] as usize);
+            let tail = v % 4;
+            let mut want = vec![-1i32; SLOTS];
+            for slot in 0..pools * 4 {
+                let id = ids[query * POOLS + slot / 4];
+                if id >= 0 && (id as usize) < v / 4 {
+                    want[slot] = id * 4 + (slot % 4) as i32;
+                }
+            }
+            for j in 0..tail {
+                want[pools * 4 + j] = (v - tail + j) as i32;
+            }
+            assert_eq!(
+                &rows[query * SLOTS..(query + 1) * SLOTS],
+                &want[..],
+                "query {query}"
+            );
+            assert_eq!(
+                row_counts[query] as usize,
+                pools * 4 + tail,
+                "query {query}"
+            );
+        }
+        // The invalid pool id produced four -1 rows, nothing out of range.
+        assert!(
+            rows[5 * SLOTS + 28..5 * SLOTS + 32]
+                .iter()
+                .all(|&r| r == -1)
+        );
     }
 }

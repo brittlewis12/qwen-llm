@@ -4016,103 +4016,29 @@ pub(super) fn encode_lightning_indexer_scores_f16_matrix(
     max_dispatched_rows: usize,
     query_count: usize,
 ) -> Result<(), DeepSeekV4MetalError> {
-    const KERNEL: &str = "kernel_deepseek_v4_lightning_indexer_scores_f16_matrix_ceiling";
+    // DS4 policy: its indexer is 64 heads of width 128. Geometry, bindings
+    // and dispatch are the family-neutral encoder's.
     if head_count != 64 || head_dim != 128 {
         return invalid(format!(
-            "{KERNEL} requires 64 heads of width 128, got {head_count}x{head_dim}"
+            "matrix-ceiling indexer requires 64 heads of width 128, got {head_count}x{head_dim}"
         ));
     }
-    for (name, value) in [
-        ("indexer row capacity", row_capacity),
-        ("indexer maximum dispatched rows", max_dispatched_rows),
-        ("indexer query count", query_count),
-    ] {
-        if value == 0 || u32::try_from(value).is_err() {
-            return invalid(format!("{name} must be nonzero and fit u32"));
-        }
-    }
-    if max_dispatched_rows > row_capacity {
-        return invalid(format!(
-            "matrix-ceiling indexer maximum dispatched rows {max_dispatched_rows} exceed row capacity {row_capacity}"
-        ));
-    }
-    validate_lightning_indexer_score_offsets(head_count, head_dim, row_capacity, query_count)?;
-    validate_f16(
-        queries,
-        &[head_dim as u64, head_count as u64, query_count as u64],
-        false,
-        "matrix-ceiling indexer queries",
-    )?;
-    validate_f32(
-        head_weights,
-        &[head_count as u64, query_count as u64],
-        false,
-        "matrix-ceiling indexer head weights",
-    )?;
-    validate_f16(
-        keys,
-        &[head_dim as u64, row_capacity as u64],
-        false,
-        "matrix-ceiling indexer keys",
-    )?;
-    validate_i32(
-        visible_counts,
-        &[query_count as u64],
-        false,
-        "matrix-ceiling indexer visible counts",
-    )?;
-    validate_f32(
-        scores,
-        &[row_capacity as u64, query_count as u64],
-        true,
-        "matrix-ceiling indexer scores",
-    )?;
-
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Args {
-        head_count: u32,
-        head_dim: u32,
-        row_capacity: u32,
-        query_count: u32,
-    }
-
-    let pso = ctx.pipeline(KERNEL)?;
-    validate_cooperative_lightning_score_geometry(
-        KERNEL,
-        pso.threadExecutionWidth(),
-        pso.maxTotalThreadsPerThreadgroup(),
-        ctx.device.maxThreadgroupMemoryLength(),
-    )?;
-    enc.set_pipeline(&pso);
-    enc.set_bytes(
-        0,
-        &Args {
-            head_count: head_count as u32,
-            head_dim: head_dim as u32,
-            row_capacity: row_capacity as u32,
-            query_count: query_count as u32,
+    crate::metal::encode_lightning_scores_f16_matrix(
+        ctx,
+        enc,
+        &crate::metal::LightningScores {
+            queries,
+            head_weights,
+            keys,
+            visible_counts,
+            scores,
         },
-    );
-    enc.set_tensor(1, queries);
-    enc.set_tensor(2, head_weights);
-    enc.set_tensor(3, keys);
-    enc.set_tensor(4, visible_counts);
-    enc.set_tensor(5, scores);
-    enc.set_threadgroup_memory(0, 8 * 128 * std::mem::size_of::<u16>());
-    enc.set_threadgroup_memory(1, 8 * 64 * std::mem::size_of::<f32>());
-    enc.dispatch(
-        MTLSize {
-            width: max_dispatched_rows.div_ceil(8),
-            height: query_count,
-            depth: 1,
-        },
-        MTLSize {
-            width: 256,
-            height: 1,
-            depth: 1,
-        },
-    );
+        head_count,
+        head_dim,
+        row_capacity,
+        max_dispatched_rows,
+        query_count,
+    )?;
     Ok(())
 }
 
@@ -5563,101 +5489,21 @@ pub(super) fn encode_select_top_k_radix4_ids_f32(
     top_k: usize,
     query_count: usize,
 ) -> Result<(), DeepSeekV4MetalError> {
-    if row_capacity == 0
-        || max_visible_rows <= top_k
-        || max_visible_rows > row_capacity
-        || top_k == 0
-        || top_k > row_capacity
-        || query_count == 0
-        || [row_capacity, top_k, query_count]
-            .into_iter()
-            .any(|value| u32::try_from(value).is_err())
-    {
-        return invalid("maskless radix4 selector requires parallel selection geometry");
-    }
-    let score_elements = checked_mul(
+    crate::metal::encode_select_top_k_ids(
+        ctx,
+        enc,
+        &crate::metal::TopKSelection {
+            scores,
+            visible_counts,
+            ids: cache_order_ids,
+            counts: selected_counts,
+            status,
+        },
         row_capacity,
+        max_visible_rows,
+        top_k,
         query_count,
-        "maskless radix4 selector score elements",
     )?;
-    let id_elements = checked_mul(top_k, query_count, "maskless radix4 selector ID elements")?;
-    if u32::try_from(score_elements).is_err() || u32::try_from(id_elements).is_err() {
-        return invalid("maskless radix4 selector buffer offsets exceed u32");
-    }
-    validate_f32(
-        scores,
-        &[row_capacity as u64, query_count as u64],
-        false,
-        "maskless radix4 selector scores",
-    )?;
-    validate_i32(
-        visible_counts,
-        &[query_count as u64],
-        false,
-        "maskless radix4 selector visible counts",
-    )?;
-    validate_i32(
-        cache_order_ids,
-        &[top_k as u64, query_count as u64],
-        true,
-        "maskless radix4 selector cache-order IDs",
-    )?;
-    validate_i32(
-        selected_counts,
-        &[query_count as u64],
-        true,
-        "maskless radix4 selector counts",
-    )?;
-    validate_i32(
-        status,
-        &[query_count as u64],
-        true,
-        "maskless radix4 selector status",
-    )?;
-
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Args {
-        row_capacity: u32,
-        top_k: u32,
-        query_count: u32,
-        emit_ranked: u32,
-    }
-    let pso = ctx.pipeline("kernel_deepseek_v4_select_top_k_radix4_ids_f32")?;
-    validate_parallel_selector_pipeline(
-        pso.threadExecutionWidth(),
-        pso.maxTotalThreadsPerThreadgroup(),
-    )?;
-    enc.set_pipeline(&pso);
-    enc.set_bytes(
-        0,
-        &Args {
-            row_capacity: row_capacity as u32,
-            top_k: top_k as u32,
-            query_count: query_count as u32,
-            emit_ranked: 0,
-        },
-    );
-    enc.set_tensor(1, scores);
-    enc.set_tensor(2, visible_counts);
-    enc.set_tensor(3, cache_order_ids);
-    enc.set_tensor(4, selected_counts);
-    enc.set_tensor(5, status);
-    const THREADGROUP_WIDTH: usize = 256;
-    enc.set_threadgroup_memory(0, THREADGROUP_WIDTH * std::mem::size_of::<u32>());
-    enc.set_threadgroup_memory(1, THREADGROUP_WIDTH * std::mem::size_of::<u32>());
-    enc.dispatch(
-        MTLSize {
-            width: query_count,
-            height: 1,
-            depth: 1,
-        },
-        MTLSize {
-            width: THREADGROUP_WIDTH,
-            height: 1,
-            depth: 1,
-        },
-    );
     Ok(())
 }
 
@@ -5886,6 +5732,51 @@ pub(super) fn encode_cooperative_selected_sink_attention_f16(
         "cooperative selected attention output",
     )?;
 
+    if direct_load && !online {
+        return invalid("direct row loading requires online selected attention");
+    }
+    let scale = 1.0 / (config.head_dim as f32).sqrt();
+    if online {
+        if config.head_count != 64
+            || config.head_dim != DEEPSEEK_V4_HCA_TILE_ROWS
+            || selected_slots != DEEPSEEK_V4_CSA_TOP_K
+        {
+            return invalid(
+                "online selected attention requires 64 heads x 512 dimensions and top-512 rows",
+            );
+        }
+        crate::metal::encode_online_selected_attention_f16(
+            ctx,
+            enc,
+            &crate::metal::SelectedAttention {
+                queries,
+                raw_cache,
+                raw_cache_before_chunk,
+                compressed_cache,
+                selected_ids,
+                selected_counts,
+                visible_counts,
+                sinks,
+                output,
+            },
+            crate::metal::SelectedAttentionShape {
+                head_count: config.head_count,
+                query_count,
+                query_token_offset,
+                token_count,
+                chunk_start_position: chunk_start_position as usize,
+                window: DEEPSEEK_V4_LOCAL_WINDOW,
+                raw_cache_is_chunk: raw_cache_layout.is_chunk() != 0,
+                selected_slots,
+                compressed_capacity,
+                scale,
+                direct: direct_load,
+            },
+        )?;
+        return Ok(());
+    }
+
+    // Legacy kernel: one thread per row (window + selected), DS4 decode only.
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
@@ -5905,47 +5796,10 @@ pub(super) fn encode_cooperative_selected_sink_attention_f16(
         .ok_or_else(|| {
             DeepSeekV4MetalError::Invalid("cooperative selected maximum row count overflow".into())
         })?;
-    if direct_load && !online {
-        return invalid("direct row loading requires online selected attention");
-    }
-    let (kernel, threadgroup_width, threadgroup_bytes) = if online {
-        if config.head_count != 64
-            || config.head_dim != DEEPSEEK_V4_HCA_TILE_ROWS
-            || selected_slots != DEEPSEEK_V4_CSA_TOP_K
-        {
-            return invalid(
-                "online selected attention requires 64 heads x 512 dimensions and top-512 rows",
-            );
-        }
-        (
-            if direct_load {
-                "kernel_deepseek_v4_online_packed_selected_sink_attention_f16_direct"
-            } else {
-                "kernel_deepseek_v4_online_packed_selected_sink_attention_f16"
-            },
-            DEEPSEEK_V4_ONLINE_HCA_THREADS,
-            if direct_load {
-                0
-            } else {
-                DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES
-            },
-        )
-    } else {
-        (
-            "kernel_deepseek_v4_packed_selected_sink_attention_f16",
-            config.head_dim.max(maximum_rows),
-            (maximum_rows + 1) * std::mem::size_of::<f32>(),
-        )
-    };
-    let pso = ctx.pipeline(kernel)?;
-    if online {
-        validate_deepseek_v4_online_hca_launch_geometry(
-            pso.threadExecutionWidth(),
-            pso.maxTotalThreadsPerThreadgroup(),
-            ctx.device.maxThreadgroupMemoryLength(),
-            threadgroup_bytes,
-        )?;
-    } else if pso.maxTotalThreadsPerThreadgroup() < threadgroup_width {
+    let threadgroup_width = config.head_dim.max(maximum_rows);
+    let threadgroup_bytes = (maximum_rows + 1) * std::mem::size_of::<f32>();
+    let pso = ctx.pipeline("kernel_deepseek_v4_packed_selected_sink_attention_f16")?;
+    if pso.maxTotalThreadsPerThreadgroup() < threadgroup_width {
         return invalid(format!(
             "cooperative selected attention pipeline supports {} threads, requires {threadgroup_width}",
             pso.maxTotalThreadsPerThreadgroup()
@@ -5964,7 +5818,7 @@ pub(super) fn encode_cooperative_selected_sink_attention_f16(
             selected_slots: selected_slots as u32,
             compressed_capacity: compressed_capacity as u32,
             raw_cache_is_chunk: raw_cache_layout.is_chunk(),
-            scale: 1.0 / (config.head_dim as f32).sqrt(),
+            scale,
         },
     );
     enc.set_tensor(1, queries);
@@ -5976,9 +5830,7 @@ pub(super) fn encode_cooperative_selected_sink_attention_f16(
     enc.set_tensor(7, visible_counts);
     enc.set_tensor(8, sinks);
     enc.set_tensor(9, output);
-    if threadgroup_bytes != 0 {
-        enc.set_threadgroup_memory(0, threadgroup_bytes);
-    }
+    enc.set_threadgroup_memory(0, threadgroup_bytes);
     enc.dispatch(
         MTLSize {
             width: query_count,

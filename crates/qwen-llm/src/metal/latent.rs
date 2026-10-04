@@ -129,6 +129,256 @@ pub fn encode_latent_attention(
     Ok(())
 }
 
+/// Buffers for [`encode_online_selected_attention_f16`].
+pub struct SelectedAttention<'a> {
+    /// F32 `[512 * heads, token_count]`: query rows of every chunk token.
+    pub queries: &'a MetalTensor,
+    /// F16 raw-window cache (ring of `window` rows, or the chunk's rows when
+    /// `raw_cache_is_chunk`); unused when `window == 0` (bind any F16 cache).
+    pub raw_cache: &'a MetalTensor,
+    /// F16 ring holding rows before the chunk (chunk layout only).
+    pub raw_cache_before_chunk: &'a MetalTensor,
+    /// F16 `[512, compressed_capacity]`: rows addressed by `selected_ids`.
+    pub compressed_cache: &'a MetalTensor,
+    /// I32 `[selected_slots, query_count]`; ids below 0 or at/after a query's
+    /// visible count are skipped.
+    pub selected_ids: &'a MetalTensor,
+    /// I32 `[query_count]`: slots in use per query.
+    pub selected_counts: &'a MetalTensor,
+    /// I32 `[query_count]`: compressed rows visible to each query.
+    pub visible_counts: &'a MetalTensor,
+    /// F32 `[heads]`: one sink logit per head ([`LATENT_NO_SINK`]: none).
+    pub sinks: &'a MetalTensor,
+    /// F32 like `queries`; only the queried tokens' rows are written.
+    pub output: &'a MetalTensor,
+}
+
+/// Geometry for [`encode_online_selected_attention_f16`].
+#[derive(Clone, Copy, Debug)]
+pub struct SelectedAttentionShape {
+    pub head_count: usize,
+    pub query_count: usize,
+    /// First queried token within the chunk's `token_count` query rows.
+    pub query_token_offset: usize,
+    pub token_count: usize,
+    pub chunk_start_position: usize,
+    /// Most recent raw rows each query attends before its selected rows.
+    pub window: usize,
+    pub raw_cache_is_chunk: bool,
+    pub selected_slots: usize,
+    pub compressed_capacity: usize,
+    pub scale: f32,
+    /// Read rows straight from device memory instead of staging them.
+    pub direct: bool,
+}
+
+/// Online-softmax attention of each query over its raw window (the newest
+/// `window` positions) and then its selected compressed rows, in slot order,
+/// one simdgroup per (query, head), head width 512, accumulated in F32. The
+/// raw-cache layout is the caller's contract (DS4 validates it before
+/// delegating); GLM passes `window = 0` and its latent cache as the
+/// compressed cache.
+pub fn encode_online_selected_attention_f16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    b: &SelectedAttention<'_>,
+    g: SelectedAttentionShape,
+) -> Result<(), MetalError> {
+    const K: &str = "online_selected_attention";
+    require_serial(K, enc)?;
+    let overflow = || bad_shape(K, "geometry exceeds 32-bit shader offsets");
+    let width = LATENT_WIDTH;
+    let query_width = g.head_count.checked_mul(width).ok_or_else(overflow)?;
+    let query_end = g
+        .query_token_offset
+        .checked_add(g.query_count)
+        .filter(|&end| end <= g.token_count)
+        .ok_or_else(|| bad_shape(K, "queried tokens exceed the chunk"))?;
+    if g.head_count == 0
+        || g.query_count == 0
+        || g.selected_slots == 0
+        || g.compressed_capacity == 0
+        || !g.scale.is_finite()
+        || g.scale <= 0.0
+    {
+        return Err(bad_shape(K, "empty geometry or invalid scale"));
+    }
+    // Every shader offset below must fit 32 bits.
+    let fits = |v: Option<usize>| v.and_then(|v| u32::try_from(v).ok()).is_some();
+    if !fits(query_width.checked_mul(g.token_count))
+        || !fits(g.compressed_capacity.checked_mul(width))
+        || !fits(g.selected_slots.checked_mul(g.query_count))
+        || !fits(g.chunk_start_position.checked_add(query_end))
+        || !fits(Some(g.window))
+    {
+        return Err(overflow());
+    }
+    let (q_shape, tokens) = (query_width as u64, g.token_count as u64);
+    check_tensor(
+        K,
+        b.queries,
+        GgmlType::F32,
+        &[q_shape, tokens],
+        false,
+        "queries",
+    )?;
+    check_tensor(
+        K,
+        b.output,
+        GgmlType::F32,
+        &[q_shape, tokens],
+        true,
+        "output",
+    )?;
+    check_alignment(K, b.queries, 16, "queries")?;
+    check_alignment(K, b.output, 16, "output")?;
+    let rows = [width as u64, g.compressed_capacity as u64];
+    check_tensor(
+        K,
+        b.compressed_cache,
+        GgmlType::F16,
+        &rows,
+        false,
+        "compressed cache",
+    )?;
+    check_alignment(K, b.compressed_cache, 8, "compressed cache")?;
+    for (cache, name) in [
+        (b.raw_cache, "raw cache"),
+        (b.raw_cache_before_chunk, "raw cache before chunk"),
+    ] {
+        let elements = cache.n_elements();
+        if cache.dtype != GgmlType::F16 || !elements.is_multiple_of(width as u64) {
+            return Err(bad_shape(K, format!("{name} must be F16 rows of 512")));
+        }
+        check_tensor(K, cache, GgmlType::F16, &cache.shape.clone(), false, name)?;
+        check_alignment(K, cache, 8, name)?;
+    }
+    let (slots, queries) = (g.selected_slots as u64, g.query_count as u64);
+    check_tensor(
+        K,
+        b.selected_ids,
+        GgmlType::I32,
+        &[slots, queries],
+        false,
+        "selected ids",
+    )?;
+    check_tensor(
+        K,
+        b.selected_counts,
+        GgmlType::I32,
+        &[queries],
+        false,
+        "selected counts",
+    )?;
+    check_tensor(
+        K,
+        b.visible_counts,
+        GgmlType::I32,
+        &[queries],
+        false,
+        "visible counts",
+    )?;
+    check_tensor(
+        K,
+        b.sinks,
+        GgmlType::F32,
+        &[g.head_count as u64],
+        false,
+        "sinks",
+    )?;
+    check_disjoint(
+        K,
+        b.output,
+        &[
+            (b.queries, "queries"),
+            (b.raw_cache, "raw cache"),
+            (b.raw_cache_before_chunk, "raw cache before chunk"),
+            (b.compressed_cache, "compressed cache"),
+            (b.selected_ids, "selected ids"),
+            (b.selected_counts, "selected counts"),
+            (b.visible_counts, "visible counts"),
+            (b.sinks, "sinks"),
+        ],
+    )?;
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        head_count: u32,
+        head_dim: u32,
+        query_count: u32,
+        query_token_offset: u32,
+        chunk_start_position: u32,
+        window: u32,
+        selected_slots: u32,
+        compressed_capacity: u32,
+        raw_cache_is_chunk: u32,
+        scale: f32,
+    }
+    let (kernel, staged_bytes) = if g.direct {
+        (
+            "kernel_deepseek_v4_online_packed_selected_sink_attention_f16_direct",
+            0,
+        )
+    } else {
+        (
+            "kernel_deepseek_v4_online_packed_selected_sink_attention_f16",
+            width * 2,
+        )
+    };
+    let pso = ctx.pipeline(kernel)?;
+    if pso.threadExecutionWidth() != 32
+        || pso.maxTotalThreadsPerThreadgroup() < 32
+        || ctx.device.maxThreadgroupMemoryLength() < staged_bytes
+    {
+        return Err(bad_shape(
+            K,
+            "needs one 32-lane simdgroup per (query, head)",
+        ));
+    }
+    let u = |v: usize, name: &str| super::checks::to_u32(K, v, name);
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            head_count: u(g.head_count, "heads")?,
+            head_dim: u(width, "head dim")?,
+            query_count: u(g.query_count, "queries")?,
+            query_token_offset: u(g.query_token_offset, "query offset")?,
+            chunk_start_position: u(g.chunk_start_position, "chunk start")?,
+            window: u(g.window, "window")?,
+            selected_slots: u(g.selected_slots, "selected slots")?,
+            compressed_capacity: u(g.compressed_capacity, "compressed capacity")?,
+            raw_cache_is_chunk: u32::from(g.raw_cache_is_chunk),
+            scale: g.scale,
+        },
+    );
+    enc.set_tensor(1, b.queries);
+    enc.set_tensor(2, b.raw_cache);
+    enc.set_tensor(3, b.raw_cache_before_chunk);
+    enc.set_tensor(4, b.compressed_cache);
+    enc.set_tensor(5, b.selected_ids);
+    enc.set_tensor(6, b.selected_counts);
+    enc.set_tensor(7, b.visible_counts);
+    enc.set_tensor(8, b.sinks);
+    enc.set_tensor(9, b.output);
+    if staged_bytes != 0 {
+        enc.set_threadgroup_memory(0, staged_bytes);
+    }
+    enc.dispatch(
+        MTLSize {
+            width: g.query_count,
+            height: g.head_count,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Group-axis Q8_0 mat-mat over `rows` tokens with F32 activations and F32
 /// simdgroup accumulation: for each token and group `g`,
 /// `output[g * n_out..][..n_out] = W_g * input[g * n_in..][..n_in]`, with
@@ -568,5 +818,235 @@ mod tests {
         );
         refuse(&grouped, usize::MAX / 2, "overflow");
         enc.end();
+    }
+
+    /// CPU softmax over exactly `rows` (no sink) for one query token.
+    fn selected_reference(q: &[f32], cache: &[half::f16], rows: &[usize], scale: f32) -> Vec<f32> {
+        let mut out = vec![0.0f32; W * H];
+        for h in 0..H {
+            let qh = &q[h * W..][..W];
+            let scores: Vec<f64> = rows
+                .iter()
+                .map(|&j| {
+                    qh.iter()
+                        .zip(&cache[j * W..(j + 1) * W])
+                        .map(|(q, c)| *q as f64 * c.to_f64())
+                        .sum::<f64>()
+                        * scale as f64
+                })
+                .collect();
+            let max = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let weights: Vec<f64> = scores.iter().map(|s| (s - max).exp()).collect();
+            let total: f64 = weights.iter().sum();
+            for d in 0..W {
+                let o: f64 = rows
+                    .iter()
+                    .zip(&weights)
+                    .map(|(&j, w)| w * cache[j * W + d].to_f64())
+                    .sum();
+                out[h * W + d] = (o / total) as f32;
+            }
+        }
+        out
+    }
+
+    /// Selected latent attention (online direct kernel, window 0, no sink)
+    /// equals a CPU softmax over exactly the selected rows: 2051 ascending
+    /// rows of a larger visible prefix, a distinctive excluded row that would
+    /// dominate if attended, -1 padding with full and partial counts, a
+    /// nonzero query offset into a larger chunk; and it equals dense latent
+    /// attention when the selection is the whole visible prefix.
+    #[test]
+    fn selected_latent_attention_matches_reference_and_dense_equivalence() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        const CAP: usize = 2_300;
+        const SLOTS: usize = 2_051;
+        const TOKENS: usize = 5;
+        const START: usize = 2_100;
+        const OFFSET: usize = 2;
+        const QUERIES: usize = 3;
+        let scale = 1.0 / 16.0;
+        let mut state = 0x1234_5678u32;
+        let mut noise = |scale: f32| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            ((state >> 8) as f32 / 16_777_216.0 - 0.5) * 2.0 * scale
+        };
+        let q: Vec<f32> = (0..W * H * TOKENS).map(|_| noise(1.0)).collect();
+        let mut cache: Vec<half::f16> = (0..W * CAP)
+            .map(|_| half::f16::from_f32(noise(0.5)))
+            .collect();
+        // Row 1500 aligns with head 0 of the first queried token.
+        const EXCLUDED: usize = 1_500;
+        for d in 0..W {
+            let sign = q[(OFFSET * H) * W + d].signum();
+            cache[EXCLUDED * W + d] = half::f16::from_f32(0.9 * sign);
+        }
+        let mut ids = vec![-1i32; SLOTS * QUERIES];
+        let mut counts = vec![0i32; QUERIES];
+        let mut visible = vec![0i32; QUERIES];
+        let mut selections = Vec::new();
+        for query in 0..QUERIES {
+            let l = START + OFFSET + query + 1;
+            visible[query] = l as i32;
+            // Keep 2051 rows (2040 for the last query), dropping EXCLUDED
+            // and an even spread of others.
+            let keep = if query == QUERIES - 1 { 2_040 } else { SLOTS };
+            let mut rows: Vec<usize> = (0..l).filter(|&r| r != EXCLUDED).collect();
+            let drop = rows.len() - keep;
+            let stride = rows.len() / drop;
+            rows = rows
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| !(i % stride == 0 && i / stride < drop))
+                .map(|(_, r)| r)
+                .collect();
+            assert_eq!(rows.len(), keep);
+            for (slot, &r) in rows.iter().enumerate() {
+                ids[query * SLOTS + slot] = r as i32;
+            }
+            // The last query keeps its -1 padding inside the counted slots.
+            counts[query] = SLOTS as i32;
+            selections.push(rows);
+        }
+        let i32_t = |v: &[i32], shape: Vec<u64>| {
+            offset_tensor(&ctx, 16, bytemuck::cast_slice(v), 16, shape, GgmlType::I32)
+        };
+        let q_t = f32_tensor(&ctx, &q, vec![(W * H) as u64, TOKENS as u64]);
+        let cache_t = offset_tensor(
+            &ctx,
+            64,
+            bytemuck::cast_slice(&cache),
+            64,
+            vec![W as u64, CAP as u64],
+            GgmlType::F16,
+        );
+        let ids_t = i32_t(&ids, vec![SLOTS as u64, QUERIES as u64]);
+        let counts_t = i32_t(&counts, vec![QUERIES as u64]);
+        let visible_t = i32_t(&visible, vec![QUERIES as u64]);
+        let sinks_t = f32_tensor(&ctx, &[LATENT_NO_SINK; H], vec![H as u64]);
+        let out_t = f32_tensor(
+            &ctx,
+            &vec![7.0; W * H * TOKENS],
+            vec![(W * H) as u64, TOKENS as u64],
+        );
+        run(&ctx, |enc| {
+            encode_online_selected_attention_f16(
+                &ctx,
+                enc,
+                &SelectedAttention {
+                    queries: &q_t,
+                    raw_cache: &cache_t,
+                    raw_cache_before_chunk: &cache_t,
+                    compressed_cache: &cache_t,
+                    selected_ids: &ids_t,
+                    selected_counts: &counts_t,
+                    visible_counts: &visible_t,
+                    sinks: &sinks_t,
+                    output: &out_t,
+                },
+                SelectedAttentionShape {
+                    head_count: H,
+                    query_count: QUERIES,
+                    query_token_offset: OFFSET,
+                    token_count: TOKENS,
+                    chunk_start_position: START,
+                    window: 0,
+                    raw_cache_is_chunk: false,
+                    selected_slots: SLOTS,
+                    compressed_capacity: CAP,
+                    scale,
+                    direct: true,
+                },
+            )
+            .unwrap();
+        });
+        let out = tensor_f32_at_offset(&out_t);
+        assert!(
+            out[..OFFSET * W * H].iter().all(|&v| v == 7.0),
+            "unqueried tokens written"
+        );
+        for (query, rows) in selections.iter().enumerate() {
+            let token = OFFSET + query;
+            let qt = &q[token * W * H..(token + 1) * W * H];
+            let want = selected_reference(qt, &cache, rows, scale);
+            let got = &out[token * W * H..(token + 1) * W * H];
+            let worst = got
+                .iter()
+                .zip(&want)
+                .map(|(g, e)| (g - e).abs())
+                .fold(0.0f32, f32::max);
+            assert!(worst <= 2e-5, "query {query}: max |diff| {worst}");
+            if query == 0 {
+                // The fixture discriminates: attending EXCLUDED changes head 0.
+                let mut with = rows.clone();
+                with.push(EXCLUDED);
+                let wrong = selected_reference(qt, &cache, &with, scale);
+                let moved = wrong[..W]
+                    .iter()
+                    .zip(&got[..W])
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(moved > 0.1, "excluded row is not distinctive ({moved})");
+            }
+        }
+
+        // Dense equivalence: selecting the whole visible prefix equals dense
+        // latent attention (below the sparse frontier).
+        const P: usize = 2_000;
+        let q1 = f32_tensor(&ctx, &q[..W * H], vec![W as u64, H as u64, 1]);
+        let dense_t = f32_tensor(&ctx, &vec![0.0; W * H], vec![W as u64, H as u64, 1]);
+        let mut all = vec![-1i32; SLOTS];
+        for (slot, id) in all.iter_mut().enumerate().take(P + 1) {
+            *id = slot as i32;
+        }
+        let all_t = i32_t(&all, vec![SLOTS as u64, 1]);
+        let one = |v: i32| i32_t(&[v], vec![1]);
+        let (count1, visible1) = (one((P + 1) as i32), one((P + 1) as i32));
+        let q1_flat = f32_tensor(&ctx, &q[..W * H], vec![(W * H) as u64, 1]);
+        let sel_t = f32_tensor(&ctx, &vec![0.0; W * H], vec![(W * H) as u64, 1]);
+        run(&ctx, |enc| {
+            encode_latent_attention(&ctx, enc, &q1, &cache_t, &sinks_t, &dense_t, P, 1, scale)
+                .unwrap();
+            encode_online_selected_attention_f16(
+                &ctx,
+                enc,
+                &SelectedAttention {
+                    queries: &q1_flat,
+                    raw_cache: &cache_t,
+                    raw_cache_before_chunk: &cache_t,
+                    compressed_cache: &cache_t,
+                    selected_ids: &all_t,
+                    selected_counts: &count1,
+                    visible_counts: &visible1,
+                    sinks: &sinks_t,
+                    output: &sel_t,
+                },
+                SelectedAttentionShape {
+                    head_count: H,
+                    query_count: 1,
+                    query_token_offset: 0,
+                    token_count: 1,
+                    chunk_start_position: P,
+                    window: 0,
+                    raw_cache_is_chunk: false,
+                    selected_slots: SLOTS,
+                    compressed_capacity: CAP,
+                    scale,
+                    direct: true,
+                },
+            )
+            .unwrap();
+        });
+        let (dense, selected) = (tensor_f32_at_offset(&dense_t), tensor_f32_at_offset(&sel_t));
+        let worst = dense
+            .iter()
+            .zip(&selected)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst <= 1e-5, "dense vs full selection: {worst}");
     }
 }

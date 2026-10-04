@@ -3074,22 +3074,25 @@ kernel void kernel_deepseek_v4_lightning_indexer_scores_f16_tiled_f32(
     }
 }
 
-// Queries are rounded to F16 once outside this kernel; eight simdgroups compute
-// the 64x8 head/row dot tile with matrix instructions and retain F32 head-weight
-// reduction. This is distinct from the official FP4 numerical contract.
-[[max_total_threads_per_threadgroup(256)]]
-kernel void kernel_deepseek_v4_lightning_indexer_scores_f16_matrix_ceiling(
-        constant ds4_indexer_score_args & args [[buffer(0)]],
-        device const half * queries [[buffer(1)]],
-        device const float * head_weights [[buffer(2)]],
-        device const half * keys [[buffer(3)]],
-        device const int * visible_counts [[buffer(4)]],
-        device float * scores [[buffer(5)]],
-        threadgroup half * staged_keys [[threadgroup(0)]],
-        threadgroup float * head_dots [[threadgroup(1)]],
-        uint2 group [[threadgroup_position_in_grid]],
-        ushort thread_index [[thread_index_in_threadgroup]],
-        ushort simdgroup [[simdgroup_index_in_threadgroup]]) {
+// Queries are rounded to F16 once outside this kernel; HEADS / 8 simdgroups
+// compute the HEADSx8 head/row dot tile with matrix instructions (half
+// operands, F32 accumulation) and retain the F32 head-weight reduction in head
+// order. This is distinct from the official FP4 numerical contract. DS4 uses
+// 64 heads; GLM-5.3's pooled indexer uses 32.
+template <uint HEADS>
+inline void lightning_indexer_scores_f16_matrix_impl(
+        constant ds4_indexer_score_args & args,
+        device const half * queries,
+        device const float * head_weights,
+        device const half * keys,
+        device const int * visible_counts,
+        device float * scores,
+        threadgroup half * staged_keys,
+        threadgroup float * head_dots,
+        uint2 group,
+        ushort thread_index,
+        ushort simdgroup) {
+    constexpr uint threads = HEADS / 8u * 32u;
     const uint rows_per_group = 8u;
     const uint row_base = group.x * rows_per_group;
     const uint query = group.y;
@@ -3097,7 +3100,7 @@ kernel void kernel_deepseek_v4_lightning_indexer_scores_f16_matrix_ceiling(
 
     // Store K transposed as [dimension, local row], which is the right-hand
     // 128x8 operand consumed by simdgroup matrix multiplication.
-    for (uint element = uint(thread_index); element < 8u * 128u; element += 256u) {
+    for (uint element = uint(thread_index); element < 8u * 128u; element += threads) {
         const uint local_row = element / 128u;
         const uint dimension = element - local_row * 128u;
         const uint row = row_base + local_row;
@@ -3109,7 +3112,7 @@ kernel void kernel_deepseek_v4_lightning_indexer_scores_f16_matrix_ceiling(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     const uint head_base = uint(simdgroup) * 8u;
-    const uint query_base = query * 64u * 128u + head_base * 128u;
+    const uint query_base = query * HEADS * 128u + head_base * 128u;
     simdgroup_float8x8 dots = make_filled_simdgroup_matrix<float, 8>(0.0f);
     for (uint dimension = 0u; dimension < 128u; dimension += 8u) {
         simdgroup_half8x8 query_tile;
@@ -3129,9 +3132,9 @@ kernel void kernel_deepseek_v4_lightning_indexer_scores_f16_matrix_ceiling(
             if (visible < 0 || row >= uint(visible)) {
                 scores[score_index] = -INFINITY;
             } else {
-                const uint weight_base = query * 64u;
+                const uint weight_base = query * HEADS;
                 float score = 0.0f;
-                for (uint head = 0u; head < 64u; ++head) {
+                for (uint head = 0u; head < HEADS; ++head) {
                     score += max(head_dots[head * 8u + local_row], 0.0f)
                         * head_weights[weight_base + head];
                 }
@@ -3139,6 +3142,42 @@ kernel void kernel_deepseek_v4_lightning_indexer_scores_f16_matrix_ceiling(
             }
         }
     }
+}
+
+[[max_total_threads_per_threadgroup(256)]]
+kernel void kernel_deepseek_v4_lightning_indexer_scores_f16_matrix_ceiling(
+        constant ds4_indexer_score_args & args [[buffer(0)]],
+        device const half * queries [[buffer(1)]],
+        device const float * head_weights [[buffer(2)]],
+        device const half * keys [[buffer(3)]],
+        device const int * visible_counts [[buffer(4)]],
+        device float * scores [[buffer(5)]],
+        threadgroup half * staged_keys [[threadgroup(0)]],
+        threadgroup float * head_dots [[threadgroup(1)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        ushort thread_index [[thread_index_in_threadgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]]) {
+    lightning_indexer_scores_f16_matrix_impl<64u>(
+        args, queries, head_weights, keys, visible_counts, scores,
+        staged_keys, head_dots, group, thread_index, simdgroup);
+}
+
+[[max_total_threads_per_threadgroup(128)]]
+kernel void kernel_lightning_indexer_scores_f16_matrix_h32(
+        constant ds4_indexer_score_args & args [[buffer(0)]],
+        device const half * queries [[buffer(1)]],
+        device const float * head_weights [[buffer(2)]],
+        device const half * keys [[buffer(3)]],
+        device const int * visible_counts [[buffer(4)]],
+        device float * scores [[buffer(5)]],
+        threadgroup half * staged_keys [[threadgroup(0)]],
+        threadgroup float * head_dots [[threadgroup(1)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        ushort thread_index [[thread_index_in_threadgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]]) {
+    lightning_indexer_scores_f16_matrix_impl<32u>(
+        args, queries, head_weights, keys, visible_counts, scores,
+        staged_keys, head_dots, group, thread_index, simdgroup);
 }
 
 // Test-only packed-semantic shadow. Values and scales are separate raw-byte

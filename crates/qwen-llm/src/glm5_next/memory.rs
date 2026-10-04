@@ -12,9 +12,8 @@
 //! and completed pooled indexer keys plus a 4-slot pending ring; decode scratch
 //! and optional packed-prefill scratch, both resident for the session's life;
 //! per-MoE-block route records for each; last-position logits only; and,
-//! for sessions that reach the sparse frontier, single-token sparse-selection
-//! scratch (packed sparse microbatch scratch joins it with packed sparse
-//! prefill).
+//! for sessions that reach the sparse frontier, single-token and packed
+//! (microbatched) sparse-selection scratch.
 
 use super::{FfnKind, Glm5NextConfig, Glm5NextError, MixerKind, Result};
 
@@ -292,6 +291,36 @@ pub fn sparse_decode_specs(c: &Glm5NextConfig, capacity: u64) -> Vec<BufferSpec>
     ]
 }
 
+/// Sparse rows of one packed chunk run in microbatches of at most this many
+/// queries, reusing the score, selection and expansion scratch.
+pub const PACKED_SPARSE_QUERIES: u64 = 64;
+
+/// Packed-prefill sparse-selection scratch for chunks of up to `rows` tokens
+/// in a session of `capacity` positions: chunk-wide indexer queries, head
+/// weights and per-row visibility; microbatch scores, selected pools and
+/// expanded rows for [`PACKED_SPARSE_QUERIES`] queries; and one sticky
+/// selector status per (MLA block, chunk row).
+pub fn packed_sparse_specs(c: &Glm5NextConfig, capacity: u64, rows: u64) -> Vec<BufferSpec> {
+    let pools = capacity.div_ceil(c.indexer_pool as u64).max(1);
+    let (ih, id) = (c.indexer_head_count as u64, c.indexer_head_dim as u64);
+    let mla = c.block_count(MixerKind::Mla) as u64;
+    let s = rows.min(PACKED_SPARSE_QUERIES);
+    let z = BufferSpec::zeros;
+    vec![
+        z("index_query", F32, &[id * ih, rows]),
+        z("index_query_f16", F16, &[id, ih, rows]),
+        z("index_weights", F32, &[ih, rows]),
+        z("visible_pools", I32, &[rows]),
+        z("visible_rows", I32, &[rows]),
+        z("scores", F32, &[pools, s]),
+        z("pool_ids", I32, &[c.selected_pool_count() as u64, s]),
+        z("pool_counts", I32, &[s]),
+        z("row_ids", I32, &[c.selection_width() as u64, s]),
+        z("row_counts", I32, &[s]),
+        z("select_status", I32, &[mla.max(1).saturating_mul(rows)]),
+    ]
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Glm5NextMemoryLedger {
     capacity: u64,
@@ -303,6 +332,7 @@ pub struct Glm5NextMemoryLedger {
     decode_routes: u64,
     sparse_decode: u64,
     packed_scratch: u64,
+    packed_sparse: u64,
     packed_routes: u64,
     reserve: u64,
     session_state: u64,
@@ -359,6 +389,11 @@ impl Glm5NextMemoryLedger {
         } else {
             0
         };
+        let packed_sparse = if prefill_rows > 0 && capacity >= u64::from(c.sparse_frontier()) {
+            priced(&packed_sparse_specs(c, capacity, prefill_rows), price)?
+        } else {
+            0
+        };
         let (packed_scratch, packed_routes) = if prefill_rows == 0 {
             (0, 0)
         } else {
@@ -381,6 +416,7 @@ impl Glm5NextMemoryLedger {
             decode_routes,
             sparse_decode,
             packed_scratch,
+            packed_sparse,
             packed_routes,
             DYNAMIC_RESERVE_BYTES,
         ])?;
@@ -394,6 +430,7 @@ impl Glm5NextMemoryLedger {
             decode_routes,
             sparse_decode,
             packed_scratch,
+            packed_sparse,
             packed_routes,
             reserve: DYNAMIC_RESERVE_BYTES,
             session_state,
@@ -413,7 +450,7 @@ impl Glm5NextMemoryLedger {
     }
 
     /// Named terms in bytes, for reports and allocation checks.
-    pub fn terms(&self) -> [(&'static str, u64); 11] {
+    pub fn terms(&self) -> [(&'static str, u64); 12] {
         [
             ("retained_weights", self.retained_weight_bytes),
             ("kda_state", self.kda_state),
@@ -422,6 +459,7 @@ impl Glm5NextMemoryLedger {
             ("decode_routes", self.decode_routes),
             ("sparse_decode", self.sparse_decode),
             ("packed_scratch", self.packed_scratch),
+            ("packed_sparse", self.packed_sparse),
             ("packed_routes", self.packed_routes),
             ("reserve", self.reserve),
             ("session_state", self.session_state),

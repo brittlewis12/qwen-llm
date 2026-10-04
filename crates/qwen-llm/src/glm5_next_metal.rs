@@ -705,7 +705,7 @@ impl<'w> Glm5NextSession<'w> {
             .then(|| SparseScratch::new(ctx, c, capacity as u64))
             .transpose()?;
         let packed = (prefill_rows > 0)
-            .then(|| packed::PackedScratch::new(ctx, c, prefill_rows))
+            .then(|| packed::PackedScratch::new(ctx, c, prefill_rows, capacity))
             .transpose()?;
         // Diagnostic only: the device counter also moves with unrelated
         // allocations and frees elsewhere in the process.

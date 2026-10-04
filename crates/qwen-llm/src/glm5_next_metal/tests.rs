@@ -1677,3 +1677,172 @@ fn sparse_decode_cost_across_the_frontier() {
         100.0 * (s - d) / d
     );
 }
+
+/// Packed prefill across the sparse frontier. Bounds frozen before the first
+/// observation:
+/// 1. Exact packed == serial decode bitwise (last logits and every state
+///    bit) over 2400 tokens for chunkings 512 (frontier 3 rows into a chunk,
+///    then 349 sparse rows in six microbatches reusing scratch), a 37-token
+///    prefix then 100-row chunks (the crossing chunk starts mid-pool at
+///    2037), and a 3-token prefix then 64-row chunks.
+/// 2. Fast packed with 512- and 128-row chunks is bitwise identical, and
+///    within qual-v1's ceilings of Exact (KL <= 2e-2, choice regret <= 0.2)
+///    at the last prompt position and over 8 teacher-forced continuation
+///    steps.
+#[test]
+#[ignore = "loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, the sparse-v1 oracle and an idle GPU"]
+fn packed_sparse_prefill_matches_serial_across_the_frontier() {
+    let _lease = production_lease();
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let ctx = MetalContext::new().expect("Metal context");
+    let gguf = GgufFile::open(&path).unwrap();
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
+    let mut text = sparse_qualification_text();
+    for passage in SPARSE_EXTRA_PASSAGES {
+        text.push_str("\n\n");
+        text.push_str(passage);
+    }
+    let all: Vec<u32> = tokenizer
+        .encode(&text, false)
+        .unwrap()
+        .into_iter()
+        .map(|t| t as u32)
+        .collect();
+    const PROMPT: usize = 2400;
+    const CONTINUATION: usize = 8;
+    assert!(
+        all.len() >= PROMPT + CONTINUATION,
+        "only {} tokens",
+        all.len()
+    );
+    let (prompt, continuation) = (&all[..PROMPT], &all[PROMPT..PROMPT + CONTINUATION]);
+    let capacity = PROMPT + CONTINUATION;
+    let mut failures = Vec::new();
+
+    // Serial reference.
+    let start = std::time::Instant::now();
+    let (serial_logits, serial_bits) = {
+        let mut serial = Glm5NextSession::new(&ctx, &weights, capacity).unwrap();
+        let logits = serial.prefill(&ctx, prompt).unwrap();
+        (logits, state_bits(&serial))
+    };
+    eprintln!(
+        "serial: {PROMPT} tokens in {:.1} s",
+        start.elapsed().as_secs_f64()
+    );
+
+    // 1. Exact packed == serial.
+    let packed_run = |lineage: PackedLineage, rows: usize, prefix: usize| {
+        let mut session =
+            Glm5NextSession::with_prefill_rows(&ctx, &weights, capacity, rows).unwrap();
+        session.set_packed_lineage(lineage);
+        let start = std::time::Instant::now();
+        if prefix > 0 {
+            session.prefill_packed(&ctx, &prompt[..prefix]).unwrap();
+        }
+        let logits = session.prefill_packed(&ctx, &prompt[prefix..]).unwrap();
+        let ms = start.elapsed().as_secs_f64() * 1e3;
+        (session, logits, ms)
+    };
+    for (rows, prefix) in [(512usize, 0usize), (100, 37), (64, 3)] {
+        let (session, logits, ms) = packed_run(PackedLineage::Exact, rows, prefix);
+        let equal = logits == serial_logits;
+        let state = state_bits(&session) == serial_bits;
+        eprintln!(
+            "exact rows {rows} prefix {prefix}: {ms:.0} ms; logits equal {equal}, state equal {state}"
+        );
+        if !equal || !state {
+            failures.push(format!("exact rows {rows} prefix {prefix} != serial"));
+        }
+    }
+
+    // 2. Fast: chunk invariance and the envelope against Exact.
+    const KL: f64 = 2e-2;
+    const REGRET: f64 = 0.2;
+    let continue_run = |mut session: Glm5NextSession<'_>, first: Vec<f32>| {
+        let mut steps = vec![first];
+        for &token in continuation {
+            steps.push(session.forward(&ctx, token).unwrap());
+        }
+        steps
+    };
+    let (exact_session, exact_logits, _) = packed_run(PackedLineage::Exact, 512, 0);
+    let exact = continue_run(exact_session, exact_logits);
+    let mut fast_bits = Vec::new();
+    for rows in [512usize, 128] {
+        let (session, logits, ms) = packed_run(PackedLineage::Fast, rows, 0);
+        let fast = continue_run(session, logits);
+        let label = format!("fast rows {rows}");
+        let mut line = Vec::new();
+        for (step, (e, f)) in exact.iter().zip(&fast).enumerate() {
+            let kl = kl_divergence(e, f);
+            let (a, b) = choice_regret(e, f);
+            line.push(format!("{kl:.1e}"));
+            if !within(kl, KL) || !within(f64::from(a), REGRET) || !within(f64::from(b), REGRET) {
+                failures.push(format!(
+                    "{label} step {step}: kl {kl:.3e} regret {a:.3}/{b:.3}"
+                ));
+            }
+        }
+        eprintln!(
+            "{label}: prefill {ms:.0} ms; KL vs exact by step: {}",
+            line.join(" ")
+        );
+        fast_bits.push(logit_bits(&fast));
+    }
+    if fast_bits[0] != fast_bits[1] {
+        failures.push("fast 512 and 128 chunkings differ".into());
+    }
+
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Packed prefill of sparse-v1's 2093 tokens (crossing the frontier inside
+/// the fifth 512-row chunk) against llama.cpp serial at position 2092.
+/// Bounds frozen before the first observation: Exact KL <= 1e-2, Fast KL
+/// <= 2e-2, choice regret <= 0.2 both ways.
+#[test]
+#[ignore = "loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, the sparse-v1 oracle and an idle GPU"]
+fn packed_sparse_prefill_matches_llama_cpp_at_the_prompt_end() {
+    let _lease = production_lease();
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let ctx = MetalContext::new().expect("Metal context");
+    let gguf = GgufFile::open(&path).unwrap();
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
+    let tokens: Vec<u32> = tokenizer
+        .encode(&sparse_qualification_text(), false)
+        .unwrap()
+        .into_iter()
+        .map(|t| t as u32)
+        .collect();
+    const REGRET: f64 = 0.2;
+    let mut reference = ReferenceStream::open(&sparse_oracle_dir().join("serial.bin"));
+    assert_eq!(reference.remaining, tokens.len());
+    let mut expected = Vec::new();
+    for (position, &token) in tokens.iter().enumerate() {
+        let (p, t, logits) = reference.next();
+        assert_eq!((p as usize, t), (position, token), "token {position}");
+        expected = logits;
+    }
+    let mut failures = Vec::new();
+    for (lineage, bound) in [(PackedLineage::Exact, 1e-2), (PackedLineage::Fast, 2e-2)] {
+        let mut session =
+            Glm5NextSession::with_prefill_rows(&ctx, &weights, tokens.len(), 512).unwrap();
+        session.set_packed_lineage(lineage);
+        let logits = session.prefill_packed(&ctx, &tokens).unwrap();
+        const ORACLE_POSITION: usize = 2092;
+        let kl = kl_divergence(&expected, &logits);
+        let (a, b) = choice_regret(&expected, &logits);
+        eprintln!(
+            "{lineage:?} packed vs llama.cpp at {ORACLE_POSITION}: kl {kl:.3e} regret {a:.3}/{b:.3}"
+        );
+        if !within(kl, bound) || !within(f64::from(a), REGRET) || !within(f64::from(b), REGRET) {
+            failures.push(format!(
+                "{lineage:?} vs llama.cpp: kl {kl:.3e} regret {a:.3}/{b:.3}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}

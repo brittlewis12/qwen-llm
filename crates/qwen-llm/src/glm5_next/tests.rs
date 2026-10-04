@@ -486,6 +486,10 @@ fn ledger_terms_match_release_geometry() {
     // Sparse decode (capacity reaches the frontier): eleven sub-granule
     // buffers plus [8192] F32 pool scores (2 G).
     let sparse = 12 * G;
+    // Packed sparse (512 rows, 64-query microbatches): queries 512 + 256 G,
+    // weights 4 G, visibility 2 G, scores [8192, 64] 128 G, pools 8 + 1 G,
+    // rows [2051, 64] 33 + 1 G, statuses [11 x 512] 2 G.
+    let packed_sparse = 947 * G;
     for (name, bytes) in [
         ("retained_weights", 100 * GIB),
         ("kda_state", kda),
@@ -494,17 +498,18 @@ fn ledger_terms_match_release_geometry() {
         ("decode_routes", routes),
         ("sparse_decode", sparse),
         ("packed_scratch", packed),
+        ("packed_sparse", packed_sparse),
         ("packed_routes", routes),
         ("reserve", memory::DYNAMIC_RESERVE_BYTES),
         ("session_state", kda + mla),
         (
             "session_buffers",
-            kda + mla + decode + routes + sparse + packed + routes,
+            kda + mla + decode + routes + sparse + packed + packed_sparse + routes,
         ),
     ] {
         assert_eq!(term(&l, name), bytes, "{name}");
     }
-    let buffers = kda + mla + decode + 2 * routes + sparse + packed;
+    let buffers = kda + mla + decode + 2 * routes + sparse + packed + packed_sparse;
     assert_eq!(l.session_state_bytes(), kda + mla);
     assert_eq!(l.session_buffer_bytes(), buffers);
     let p = l.phase_peaks();
@@ -521,8 +526,15 @@ fn ledger_terms_match_release_geometry() {
     // Decode-only prices no packed scratch and no packed routes.
     let d = ledger(&c, 100 * GIB, 32_768, 0).unwrap();
     assert_eq!(term(&d, "packed_scratch") + term(&d, "packed_routes"), 0);
-    assert_eq!(d.session_buffer_bytes(), buffers - packed - routes);
-    assert_eq!(d.peak_bytes(), l.peak_bytes() - packed - routes);
+    assert_eq!(term(&d, "packed_sparse"), 0);
+    assert_eq!(
+        d.session_buffer_bytes(),
+        buffers - packed - packed_sparse - routes
+    );
+    assert_eq!(
+        d.peak_bytes(),
+        l.peak_bytes() - packed - packed_sparse - routes
+    );
     // Sparse scratch exists exactly from the frontier on.
     assert_eq!(term(&ledger(&c, 0, 2051, 0).unwrap(), "sparse_decode"), 0);
     assert!(term(&ledger(&c, 0, 2052, 0).unwrap(), "sparse_decode") > 0);
@@ -579,6 +591,7 @@ fn buffer_specs_are_unique_nonempty_and_granule_priced() {
         ("route_rows", memory::route_specs(&c, Some(3))),
         ("kda", memory::kda_state_specs(&c)),
         ("sparse", memory::sparse_decode_specs(&c, 2052)),
+        ("packed_sparse", memory::packed_sparse_specs(&c, 2052, 3)),
         ("mla", memory::mla_state_specs(&c, 1)),
     ] {
         let mut names: Vec<_> = specs.iter().map(|s| s.name).collect();

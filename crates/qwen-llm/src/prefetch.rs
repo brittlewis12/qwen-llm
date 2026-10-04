@@ -114,6 +114,20 @@ pub fn prefetch_file(
 /// retained descriptor (e.g. `GgufShard`) avoid the path reopen and its
 /// TOCTOU exposure.
 pub fn prefetch_fd(file: &File, workers: usize, chunk_bytes: usize) -> io::Result<PrefetchReport> {
+    let len = file.metadata()?.len();
+    prefetch_fd_range(file, 0, len, workers, chunk_bytes)
+}
+
+/// Warm the page cache for bytes `start..end` of an open file with the same
+/// parallel striped `pread` as [`prefetch_fd`] (e.g. only the retained
+/// windows of a shard).
+pub fn prefetch_fd_range(
+    file: &File,
+    start: u64,
+    end: u64,
+    workers: usize,
+    chunk_bytes: usize,
+) -> io::Result<PrefetchReport> {
     if workers == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -127,7 +141,14 @@ pub fn prefetch_fd(file: &File, workers: usize, chunk_bytes: usize) -> io::Resul
         ));
     }
 
-    let len = file.metadata()?.len();
+    let file_len = file.metadata()?.len();
+    if start > end || end > file_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("range {start}..{end} outside file length {file_len}"),
+        ));
+    }
+    let len = end - start;
     if len == 0 {
         return Ok(PrefetchReport {
             bytes: 0,
@@ -148,12 +169,14 @@ pub fn prefetch_fd(file: &File, workers: usize, chunk_bytes: usize) -> io::Resul
     let started = Instant::now();
     std::thread::scope(|s| -> io::Result<()> {
         let mut handles = Vec::with_capacity(workers);
+        let range_start = start;
         for w in 0..workers {
             let start = (w as u64) * stripe;
             if start >= len {
                 break;
             }
-            let end = (start + stripe).min(len);
+            let end = range_start + (start + stripe).min(len);
+            let start = range_start + start;
             handles.push(s.spawn(move || -> io::Result<()> {
                 let mut scratch = vec![0u8; chunk_bytes];
                 let mut offset = start;
@@ -201,6 +224,20 @@ pub fn prefetch_fd(file: &File, workers: usize, chunk_bytes: usize) -> io::Resul
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn range_prefetch_reads_exactly_the_requested_bytes() {
+        let path = std::env::temp_dir().join(format!("qwen-prefetch-range-{}", std::process::id()));
+        std::fs::write(&path, vec![7u8; 1 << 20]).unwrap();
+        let file = File::open(&path).unwrap();
+        let report = prefetch_fd_range(&file, 4096, 4096 + 300_000, 3, 64 * 1024).unwrap();
+        assert_eq!(report.bytes, 300_000);
+        assert_eq!(prefetch_fd_range(&file, 10, 10, 2, 4096).unwrap().bytes, 0);
+        assert!(prefetch_fd_range(&file, 0, (1 << 20) + 1, 2, 4096).is_err());
+        assert!(prefetch_fd_range(&file, 20, 10, 2, 4096).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
     use super::*;
     use std::io::Write;
     use std::path::PathBuf;

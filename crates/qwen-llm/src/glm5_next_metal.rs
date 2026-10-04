@@ -58,6 +58,64 @@ fn retained_geometry(ctx: &MetalContext) -> Result<(usize, usize)> {
     ))
 }
 
+/// What [`prefetch_retained`] did.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RetainedPrefetch {
+    pub windows: usize,
+    pub cold_windows: usize,
+    pub bytes_read: u64,
+    pub wall: std::time::Duration,
+}
+
+/// Warms the page cache for retained windows whose sampled residency is below
+/// `threshold`, with parallel reads, before the zero-copy weights are first
+/// touched. Only executed tensors' windows are considered, so the never-read
+/// NextN tail neither triggers nor receives prefetch.
+pub fn prefetch_retained(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    threshold: f64,
+) -> Result<RetainedPrefetch> {
+    let started = std::time::Instant::now();
+    let model = Glm5NextModel::from_gguf(gguf)?;
+    let (page, max_buffer) = retained_geometry(ctx)?;
+    let (plan, _) = model.plan_retained(gguf, page, max_buffer)?;
+    let mut report = RetainedPrefetch {
+        windows: plan.windows.len(),
+        ..Default::default()
+    };
+    for window in &plan.windows {
+        let shard = gguf
+            .shards
+            .get(window.shard_idx)
+            .ok_or_else(|| Glm5NextMetalError::Invalid("missing retained shard".into()))?;
+        let start = window.mmap_offset as usize;
+        let end = start
+            .checked_add(window.length)
+            .filter(|&end| end <= shard.mmap.len())
+            .ok_or_else(|| Glm5NextMetalError::Invalid("window outside its shard".into()))?;
+        let resident =
+            crate::cache_probe::probe_mapped_range_residency_sampled(&shard.mmap[start..end])
+                .map(|r| r.resident_fraction())
+                .unwrap_or(0.0);
+        if resident >= threshold {
+            continue;
+        }
+        let read = crate::prefetch::prefetch_fd_range(
+            &shard.file,
+            start as u64,
+            end as u64,
+            crate::prefetch::DEFAULT_WORKERS,
+            crate::prefetch::DEFAULT_CHUNK_BYTES,
+        )
+        .map_err(|e| Glm5NextMetalError::Invalid(format!("prefetch: {e}")))?;
+        report.cold_windows += 1;
+        report.bytes_read += read.bytes;
+    }
+    report.wall = started.elapsed();
+    Ok(report)
+}
+
 /// Executed weights as read-only views of retained no-copy GGUF windows.
 pub struct Glm5NextWeights {
     pub config: Glm5NextConfig,
@@ -487,6 +545,25 @@ impl<'w> Glm5NextSession<'w> {
         self.forward_observed(ctx, token, &[], &mut |_, _, _| {})
     }
 
+    /// Advance one token without the output head (prompt positions whose
+    /// logits are unused; skips the head's 0.5 GB weight read).
+    pub fn advance(&mut self, ctx: &MetalContext, token: u32) -> Result<()> {
+        self.step(ctx, token, false, &[], &mut |_, _, _| {})?;
+        Ok(())
+    }
+
+    /// Serial prefill: advance every token but the last, then return the last
+    /// token's logits.
+    pub fn prefill(&mut self, ctx: &MetalContext, tokens: &[u32]) -> Result<Vec<f32>> {
+        let Some((&last, head)) = tokens.split_last() else {
+            return invalid("prefill requires at least one token");
+        };
+        for &token in head {
+            self.advance(ctx, token)?;
+        }
+        self.forward(ctx, last)
+    }
+
     /// Like [`Self::forward`], committing once per block and reporting the
     /// requested probes after each block (diagnostics; same arithmetic).
     pub fn forward_observed(
@@ -496,6 +573,19 @@ impl<'w> Glm5NextSession<'w> {
         probes: &[Glm5NextProbe],
         observer: &mut dyn FnMut(Glm5NextProbe, usize, &[f32]),
     ) -> Result<Vec<f32>> {
+        Ok(self
+            .step(ctx, token, true, probes, observer)?
+            .expect("logits requested"))
+    }
+
+    fn step(
+        &mut self,
+        ctx: &MetalContext,
+        token: u32,
+        logits: bool,
+        probes: &[Glm5NextProbe],
+        observer: &mut dyn FnMut(Glm5NextProbe, usize, &[f32]),
+    ) -> Result<Option<Vec<f32>>> {
         if self.poisoned {
             return invalid("session is poisoned by an earlier failed token");
         }
@@ -513,7 +603,7 @@ impl<'w> Glm5NextSession<'w> {
         // mutates on the GPU, so any failure or unwind past this point leaves
         // the session unusable rather than silently at the old position.
         self.poisoned = true;
-        self.encode_token(ctx, token, probes, observer)?;
+        self.encode_token(ctx, token, logits, probes, observer)?;
         for (layer, route) in self.routes.iter().enumerate() {
             if let Some(route) = route {
                 let status = read_i32(&route.status)?[0];
@@ -522,7 +612,7 @@ impl<'w> Glm5NextSession<'w> {
                 }
             }
         }
-        let logits = read_f32(&self.s.logits)?;
+        let logits = logits.then(|| read_f32(&self.s.logits)).transpose()?;
         self.position += 1;
         self.poisoned = false;
         Ok(logits)
@@ -532,6 +622,7 @@ impl<'w> Glm5NextSession<'w> {
         &self,
         ctx: &MetalContext,
         token: u32,
+        logits: bool,
         probes: &[Glm5NextProbe],
         observer: &mut dyn FnMut(Glm5NextProbe, usize, &[f32]),
     ) -> Result<()> {
@@ -741,25 +832,27 @@ impl<'w> Glm5NextSession<'w> {
                 enc = KernelEncoder::begin(&command);
             }
         }
-        // Head: mean of the four streams, output norm, logits.
-        encode_mhc4_collapse(ctx, &enc, h, &s.residual[0], &s.quarter, &s.final_hidden)?;
-        encode_rms_norm_mul_f32(
-            ctx,
-            &enc,
-            &s.final_hidden,
-            &w.output_norm,
-            &s.final_normed,
-            c.rms_epsilon,
-        )?;
-        matvec(
-            ctx,
-            &enc,
-            &w.output,
-            &s.final_normed,
-            &s.logits,
-            h,
-            c.vocab_size as usize,
-        )?;
+        if logits {
+            // Head: mean of the four streams, output norm, logits.
+            encode_mhc4_collapse(ctx, &enc, h, &s.residual[0], &s.quarter, &s.final_hidden)?;
+            encode_rms_norm_mul_f32(
+                ctx,
+                &enc,
+                &s.final_hidden,
+                &w.output_norm,
+                &s.final_normed,
+                c.rms_epsilon,
+            )?;
+            matvec(
+                ctx,
+                &enc,
+                &w.output,
+                &s.final_normed,
+                &s.logits,
+                h,
+                c.vocab_size as usize,
+            )?;
+        }
         enc.end();
         command.commit();
         wait_completed(&command)?;

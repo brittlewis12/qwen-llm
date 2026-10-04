@@ -225,6 +225,11 @@ pub fn probe_fd_residency_sampled(file: &File) -> io::Result<ResidencyReport> {
     }
     let _mapping = Mapping { addr, len };
 
+    sampled_residency(addr, len)
+}
+
+/// Sampled `mincore` over `len` bytes of an existing page-aligned mapping.
+fn sampled_residency(addr: *mut libc::c_void, len: usize) -> io::Result<ResidencyReport> {
     let page = host_page_size();
     let total_pages = len.div_ceil(page);
     let sample_budget = SAMPLED_RESIDENCY_WINDOWS * SAMPLED_RESIDENCY_PAGES_PER_WINDOW;
@@ -251,6 +256,23 @@ pub fn probe_fd_residency_sampled(file: &File) -> io::Result<ResidencyReport> {
             resident_pages,
         })
     }
+}
+
+/// Sampled residency of a range inside an existing read-only mapping (e.g. a
+/// retained GGUF window), without creating another mapping. The range is
+/// widened to whole host pages.
+pub fn probe_mapped_range_residency_sampled(bytes: &[u8]) -> io::Result<ResidencyReport> {
+    if bytes.is_empty() {
+        return Ok(ResidencyReport {
+            total_pages: 0,
+            resident_pages: 0,
+        });
+    }
+    let page = host_page_size();
+    let start = bytes.as_ptr() as usize;
+    let aligned = start / page * page;
+    let len = bytes.len() + (start - aligned);
+    sampled_residency(aligned as *mut libc::c_void, len)
 }
 
 fn mincore_at(addr: *mut libc::c_void, len: usize) -> io::Result<ResidencyReport> {

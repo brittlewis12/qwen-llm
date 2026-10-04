@@ -411,6 +411,29 @@ impl Glm5NextConfig {
 // Typed views of one block's tensors, generic over the element: binding uses
 // `&TensorDesc`; a Metal residency maps them to its own tensor handles.
 
+/// End-of-generation ids: EOS, EOT (`<|user|>`) and EOM (`<|observation|>`),
+/// matching the release `generation_config.eos_token_id`. All three must be
+/// declared and inside the vocabulary (`GgufFile::stop_token_ids` omits EOM,
+/// which other families treat as an ordinary token).
+pub fn generation_stops(gguf: &GgufFile, vocab_size: u32) -> Result<Vec<i32>> {
+    ["eos", "eot", "eom"]
+        .into_iter()
+        .map(|kind| {
+            let key = format!("tokenizer.ggml.{kind}_token_id");
+            let id = gguf
+                .get_u64(&key)
+                .ok_or_else(|| Glm5NextError::MissingMetadata(key.clone()))?;
+            if id >= u64::from(vocab_size) {
+                return Err(invalid(
+                    &key,
+                    format!("{id} outside vocabulary {vocab_size}"),
+                ));
+            }
+            Ok(id as i32)
+        })
+        .collect()
+}
+
 #[derive(Debug)]
 pub struct HyperConnectionTensors<T> {
     pub mix: T,

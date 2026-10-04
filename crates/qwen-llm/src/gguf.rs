@@ -516,6 +516,60 @@ impl GgufFile {
             .ok_or_else(|| GgufError::Decode(format!("metadata key {key:?} is not an array")))
     }
 
+    /// Every element of a string-array metadata value, read from the primary
+    /// shard's mapped header.
+    ///
+    /// The gguf-rs view in [`Self::model`] retains at most 300,000 items per
+    /// array and silently drops the rest (and `get_array_len` reports the
+    /// retained count). Use this for arrays that may be longer, such as
+    /// tokenizer merges. `Ok(None)` when the key is absent; `Err` when the
+    /// value is not an array of UTF-8 strings.
+    pub fn get_string_array_full(&self, key: &str) -> Result<Option<Vec<&str>>, GgufError> {
+        let mmap = self.primary_shard().mmap_bytes();
+        // Magic, version (v3), and table counts were validated at open.
+        let mut p = 8usize;
+        let _num_tensors = read_u64(mmap, &mut p)?;
+        let num_kv = read_u64(mmap, &mut p)?;
+        for _ in 0..num_kv {
+            let key_len = read_u64(mmap, &mut p)? as usize;
+            bounds_check(mmap, p, key_len)?;
+            let is_key = &mmap[p..p + key_len] == key.as_bytes();
+            p += key_len;
+            let value_type = read_u32(mmap, &mut p)?;
+            if !is_key {
+                skip_value(mmap, &mut p, value_type, 3)?;
+                continue;
+            }
+            let item_type = if value_type == 9 {
+                read_u32(mmap, &mut p)?
+            } else {
+                value_type
+            };
+            if value_type != 9 || item_type != 8 {
+                return Err(GgufError::Decode(format!(
+                    "metadata key {key:?} is not a string array"
+                )));
+            }
+            let len = read_u64(mmap, &mut p)?;
+            if len > MAX_ARRAY_LEN {
+                return Err(GgufError::Decode(format!(
+                    "metadata key {key:?} array length {len} exceeds {MAX_ARRAY_LEN}"
+                )));
+            }
+            let mut out = Vec::with_capacity(len as usize);
+            for idx in 0..len {
+                let start = p;
+                skip_string(mmap, &mut p)?;
+                let text = std::str::from_utf8(&mmap[start + 8..p]).map_err(|e| {
+                    GgufError::Decode(format!("metadata key {key:?}[{idx}] is not UTF-8: {e}"))
+                })?;
+                out.push(text);
+            }
+            return Ok(Some(out));
+        }
+        Ok(None)
+    }
+
     /// Convenience: lookup an array-of-u64 typed metadata value by key.
     /// Returns `Ok(None)` if the key is missing, and `Err` if the key exists
     /// but is not a pure array of u64 values.
@@ -1594,6 +1648,7 @@ mod tests {
         U64(&'a str, u64),
         U64Array(&'a str, &'a [u64]),
         I32(&'a str, i32),
+        StrArray(&'a str, &'a [&'a str]),
     }
 
     struct TestTensor<'a> {
@@ -1648,6 +1703,15 @@ mod tests {
                     push_string(&mut b, key);
                     b.extend_from_slice(&5u32.to_le_bytes());
                     b.extend_from_slice(&value.to_le_bytes());
+                }
+                TestKv::StrArray(key, values) => {
+                    push_string(&mut b, key);
+                    b.extend_from_slice(&9u32.to_le_bytes());
+                    b.extend_from_slice(&8u32.to_le_bytes());
+                    b.extend_from_slice(&(values.len() as u64).to_le_bytes());
+                    for value in *values {
+                        push_string(&mut b, value);
+                    }
                 }
             }
         }
@@ -1708,8 +1772,8 @@ mod tests {
                     bytes.extend_from_slice(&5u32.to_le_bytes());
                     bytes.extend_from_slice(&value.to_le_bytes());
                 }
-                TestKv::U64(_, _) | TestKv::U64Array(_, _) => {
-                    unreachable!("split metadata has no u64 values")
+                TestKv::U64(_, _) | TestKv::U64Array(_, _) | TestKv::StrArray(_, _) => {
+                    unreachable!("split metadata has no u64 or array values")
                 }
             }
         }
@@ -2598,6 +2662,39 @@ mod tests {
             Err(GgufError::Decode(_))
         ));
         let _ = std::fs::remove_file(&out_of_range_path);
+    }
+
+    #[test]
+    fn full_string_array_is_not_capped_like_gguf_rs_view() {
+        let mut merges = vec!["a b"; 300_000];
+        merges.push("last one");
+        let path = write_temp(&build_test_gguf(
+            &[
+                TestKv::U64("tokenizer.ggml.eos_token_id", 1),
+                TestKv::StrArray("tokenizer.ggml.merges", &merges),
+                TestKv::StrArray("empty", &[]),
+            ],
+            &[],
+        ));
+        let g = GgufFile::open(&path).unwrap();
+        // The gguf-rs view silently keeps only the first 300,000 items.
+        assert_eq!(
+            g.get_array_len("tokenizer.ggml.merges").unwrap(),
+            Some(300_000)
+        );
+        let full = g
+            .get_string_array_full("tokenizer.ggml.merges")
+            .unwrap()
+            .unwrap();
+        assert_eq!(full.len(), 300_001);
+        assert_eq!((full[0], full[300_000]), ("a b", "last one"));
+        assert_eq!(g.get_string_array_full("empty").unwrap(), Some(vec![]));
+        assert_eq!(g.get_string_array_full("missing").unwrap(), None);
+        assert!(
+            g.get_string_array_full("tokenizer.ggml.eos_token_id")
+                .is_err()
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

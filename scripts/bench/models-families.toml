@@ -2,8 +2,9 @@
 # for the cross-family qwen-llm vs llama.cpp baseline. `scripts/bench/models.toml`
 # remains the Qwen size ladder.
 #
-# `lcpp = false`: upstream llama.cpp has no implementation of the
-# architecture, so the cell is reported rather than measured.
+# `lcpp = false`: the pinned llama.cpp (llama-cpp.lock.json) has no
+# implementation of the architecture, so the cell is reported rather than
+# measured.
 # `tg_depths`: context depths for tg rows (llama-bench -d); long-context
 # depths go to the models used for long sessions.
 
@@ -70,3 +71,17 @@ quant = "Q4_K_M"
 path = "~/models/K2-Horizon-7B-Q4_K_M.gguf"
 lcpp = false
 tg_depths = [0, 8192]
+
+# The pinned llama.cpp (b11182) predates GLM5-Next support (upstream #27773,
+# 2026-09-30); llama.cpp comparisons for this model use the GLM oracle pin
+# (docs/bench/2026-10-04-glm53-*). Context stays below the sparse-attention
+# frontier (visible length 2052) until P4, so tg runs at depth 0 only.
+[[models]]
+tag = "glm53-flash"
+display = "GLM-5.3-Flash"
+family = "glm5_next"
+kind = "moe"
+quant = "UD-IQ3_XXS"
+path = "/Volumes/wdblack/weights-archive/glm-5.3-flash-ud-iq3_xxs/glm5-next/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf"
+lcpp = false
+tg_depths = [0]

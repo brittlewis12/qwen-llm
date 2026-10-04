@@ -12,14 +12,29 @@ no further `glm5-next` changes). Earlier research (2026-08-28 gap analysis,
   gate, memory ledger, native `glm4` tokenizer (HF and llama-tokenize parity),
   same-artifact oracle harness and the ckpt-v1 reference capture
   (`scripts/reference/glm53/ckpt-v1.json`).
-- P2 engine checkpoint passed (`glm5_next_metal`, serial decode, dense range):
-  ckpt-v1 top-1 15/15, worst KL 2.9e-11, block residuals <= 2e-5, KDA state,
-  indexer pools and pending keys match llama.cpp at steps 3/7/14; 39 ms/token
-  (llama.cpp tg128 on the same artifact: 22.6 tok/s); one session allocates
-  117.72 GB within the 118.25 GB ledger. Shared encoders lifted from DS4 (mHC,
-  clamp, routing, all-slot experts) keep DS4 output identical on the real asset.
-- Remaining P2: thin family/run/bench integration (fail-closed profile, token-ID
-  run, matched-context benchmark). Then P3 packed prefill, P4 sparse selection.
+- P2 done (`glm5_next_metal`, serial decode, dense range): ckpt-v1 top-1 15/15,
+  worst KL 2.9e-11, block residuals <= 2e-5; KDA state, indexer pools and pending
+  keys match llama.cpp at steps 3/7/14. `ModelFamily::Glm5Next` with raw-prompt
+  `run` and `qwen-bench` lanes. Shared encoders lifted from DS4 (mHC, clamp,
+  routing, all-slot experts) keep DS4 output identical on the real asset.
+- P3 done (packed prefill; `docs/bench/2026-10-04-glm53-p3-packed-prefill/`, A-B-B-A
+  against llama.cpp on the same file): pp512 207.5-209.7 vs 212.8-222.7 tok/s,
+  pp1024 190-193 vs 200-203, tg128 27.7 vs 22.2-22.9. Fast lineage (half-staged
+  mat-mat and grouped experts) is the default; Exact (decode kernels per row)
+  equals serial decode bitwise and is the equivalence reference.
+- Hardening after the P3 review: whole-request validation (a refused request
+  executes nothing); session buffers built from the ledger's spec lists and priced
+  with the device before admission (observed allocation 98.4% decode-only, 99.6%
+  with 512 prefill rows); checked ledger arithmetic.
+- Long-context qualification (qual-v1, `scripts/reference/glm53/qual-v1.json`, 591
+  positions): native serial matches llama.cpp serial to KL <= 1.1e-9 until an exact
+  router-score tie at position 156 that the two break differently (native: lowest
+  expert id), top-1 591/591. Fast vs Exact: KL <= 9.1e-3, top-1 flips only at
+  margins <= 0.06, tighter than llama.cpp's own batched-vs-serial divergence on the
+  same tokens (prompt-end KL 8.6e-3, worst 4.2e-2). Chunk size is arithmetic-neutral
+  (512 = 128 and 64 = 97 bitwise).
+- Next: P4 sparse selection (lifts the 2051-position cap), cheap prefill experiments
+  (Q6_K N64 threshold, strict router) and compact grouped-expert scheduling, then P5.
 
 ## Artifact
 
@@ -202,8 +217,10 @@ prefill scratch (`deepseek_v4_metal/prefill.rs:1444`) would cost about 2.25 GiB 
 widths (mHC buffers [16384, B], absorbed queries/latent output [64, 512, B], routed
 outputs [4096, 8, B]); full logits for 4096 positions would add 2.36 GiB. Therefore:
 
-- A phase-lifetime allocation ledger (resident load, session create, first prefill,
-  steady decode) with measured peaks.
+- An allocation ledger built from the same named buffer specs the session
+  allocates (state, decode scratch, optional packed scratch, route records, all
+  session-resident), priced with the device before admission plus a 512 MiB
+  reserve; the 16 KiB page profile is the device-free planning bound.
 - Bounded prefill microbatches and scratch shared across layers.
 - Last-position logits by default; full-logit captures are diagnostic only.
 - Metal vs CPU budgets kept distinct for staging, captures and future snapshots

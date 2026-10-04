@@ -1,0 +1,33 @@
+{
+  "name": "glm53-ckpt-v1",
+  "purpose": "First end-to-end checkpoint: 8 nonrepeated IDs then 7 fixed continuation IDs, serial from position 0. Pools complete at visible lengths 4, 8 and 12.",
+  "prompt_text": "[gMASK]<sop>The capital of France is Paris, and the capital of Japan is",
+  "tokens": [154822, 154824, 785, 6722, 315, 9621, 374, 12089, 11, 323, 279, 6722, 315, 6323, 374],
+  "artifact": {
+    "repo": "unsloth/GLM-5.3-Flash-GGUF",
+    "revision": "621d456e93e926e4b52f85cff5f634358c1828f9",
+    "file": "glm5-next/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+    "trunk_bytes": 117558078712
+  },
+  "producer": {
+    "tool": "scripts/reference/glm53/main.cpp",
+    "llama_cpp_revision": "e845373ff0b2b0998d673282bec05ee2f4e20106",
+    "wrapper_sha256": "fef90dd58e71fbb02a4b98ad3de03b0eef0af0fe7961c74163b577eb56e27a05",
+    "cmake_sha256": "4ea93ce27078a2dc43d6acd5df5f76aef85af557f5c96da5126c1154ecf6e3a0",
+    "device": "Apple M4 Max 128 GB, Metal, all layers offloaded",
+    "context": {"n_ctx": 256, "n_batch": 1, "n_ubatch": 1, "type_k": "f16", "type_v": "f16", "flash_attn": false, "fused_ops": "library defaults"}
+  },
+  "location": "/Volumes/wdblack/weights-archive/.fetch/analysis/runs/glm53-oracle/ckpt-v1",
+  "files": {
+    "logits.bin": {"bytes": 9292936, "sha256": "70defd4d93ac761f4b21936ea18c78fed175f240631ed746aaa7f4a2907737b5", "run": "logits only"},
+    "default.bin": {"bytes": 9292936, "sha256": "70defd4d93ac761f4b21936ea18c78fed175f240631ed746aaa7f4a2907737b5", "run": "--capture-default, all 15 steps"},
+    "default.bin.captures": {"bytes": 293913713, "sha256": "c852f8ee08a538e6717dab74636bdf845df7e94a3241673fb20e3eff347845ac", "records": 15120},
+    "state.bin": {"bytes": 9292936, "sha256": "ff0bf54e2716d5ad02068d9589a4e9f1d0b7ef1337918f750b0ab541f2fc07dc", "run": "--capture new_state,indexer_pool_k_new,indexer_pool_k --steps 3,7,14"},
+    "state.bin.captures": {"bytes": 428929310, "sha256": "0e690d54ac7aaf07c89888c934b3e74f0ebd8c4f97746a95dc161016a8432296", "records": 168}
+  },
+  "observations": [
+    "Greedy next tokens are ' Paris' after 'France is' and ' Tokyo' after 'Japan is'.",
+    "The default capture profile leaves logits bit-identical to the logits-only run.",
+    "Capturing new_state perturbs logits from the first captured step: max |dlogit| 1.5e-4, KL <= 2e-7, top-1 unchanged at all 15 positions. Compare native logits with logits.bin; use state.bin.captures only for state comparisons within that tolerance."
+  ]
+}

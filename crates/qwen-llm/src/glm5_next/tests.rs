@@ -260,10 +260,63 @@ fn metadata_fails_closed() {
                 m.insert("general.architecture".into(), json!("glm4moe"));
             }),
         ),
+        (
+            "without the incomplete pool's tail",
+            Box::new(|m| {
+                m.insert(
+                    "glm5-next.attention.indexer.kpool_select_tail".into(),
+                    json!(false),
+                );
+            }),
+        ),
+        (
+            "expected bool",
+            Box::new(|m| {
+                m.insert(
+                    "glm5-next.attention.indexer.kpool_select_tail".into(),
+                    json!(1),
+                );
+            }),
+        ),
+        (
+            "shared indexer layers",
+            Box::new(|m| {
+                let mut types = vec![1u64; 46];
+                types[7] = 0;
+                m.insert("glm5-next.attention.indexer.types".into(), json!(types));
+            }),
+        ),
+        (
+            "shared indexer layers",
+            Box::new(|m| {
+                m.insert("glm5-next.attention.indexer.types".into(), json!(0));
+            }),
+        ),
+        (
+            "expected 46 (stored) or 45 (executed)",
+            Box::new(|m| {
+                m.insert(
+                    "glm5-next.attention.indexer.types".into(),
+                    json!(vec![1u64; 11]),
+                );
+            }),
+        ),
     ];
     for (needle, f) in cases {
         let err = mutate(&*f);
         assert!(err.contains(needle), "{needle:?} not in {err:?}");
+    }
+    // Explicitly stated defaults are the implemented semantics.
+    for (key, value) in [
+        ("glm5-next.attention.indexer.kpool_select_tail", json!(true)),
+        ("glm5-next.attention.indexer.types", json!(1)),
+        ("glm5-next.attention.indexer.types", json!(vec![1u64; 46])),
+        ("glm5-next.attention.indexer.types", json!(vec![1u64; 45])),
+    ] {
+        let mut m = release_metadata(ARCHITECTURE_NAME);
+        m.insert(key.into(), value.clone());
+        Glm5NextConfig::from_metadata(&m)
+            .unwrap_or_else(|e| panic!("{key} = {value} refused: {e}"));
     }
     // A key from the other spelling's namespace is not interpreted.
     let mut m = release_metadata(LEGACY_ARCHITECTURE_NAME);

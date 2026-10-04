@@ -226,6 +226,7 @@ impl Glm5NextConfig {
                 "routed and shared clamps differ",
             ));
         }
+        validate_indexer_selection(metadata, ns, stored_block_count, executed)?;
 
         let config = Self {
             architecture: architecture.to_string(),
@@ -1128,6 +1129,10 @@ fn validate_metadata_features(metadata: &BTreeMap<String, Value>, ns: Namespace<
         "attention.indexer.key_length",
         "attention.indexer.top_k",
         "attention.indexer.kpool",
+        // Validated by validate_indexer_selection (only the implemented
+        // semantics are accepted).
+        "attention.indexer.kpool_select_tail",
+        "attention.indexer.types",
         "rope.dimension_count",
         "expert_count",
         "expert_used_count",
@@ -1164,6 +1169,63 @@ fn validate_metadata_features(metadata: &BTreeMap<String, Value>, ns: Namespace<
                 key,
                 "unrecognized or unsupported architecture metadata",
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Sparse selection as implemented: the incomplete pool's tail is selected
+/// (`kpool_select_tail`, llama.cpp default true when absent) and every MLA
+/// layer runs its own indexer (`indexer.types`, default all full when absent;
+/// a scalar or one entry per stored or executed block, 1 = full). Explicit
+/// alternatives are refused rather than silently executed with the defaults.
+fn validate_indexer_selection(
+    metadata: &BTreeMap<String, Value>,
+    ns: Namespace<'_>,
+    stored_blocks: u32,
+    executed_blocks: u32,
+) -> Result<()> {
+    let tail = ns.key("attention.indexer.kpool_select_tail");
+    if let Some(value) = metadata.get(&tail) {
+        match value.as_bool() {
+            Some(true) => {}
+            Some(false) => {
+                return Err(unsupported(
+                    &tail,
+                    "selection without the incomplete pool's tail is not implemented",
+                ));
+            }
+            None => return Err(invalid(&tail, "expected bool")),
+        }
+    }
+    let types = ns.key("attention.indexer.types");
+    if let Some(value) = metadata.get(&types) {
+        let entries: Vec<&Value> = match value.as_array() {
+            Some(array) => {
+                let len = array.len();
+                if len != stored_blocks as usize && len != executed_blocks as usize {
+                    return Err(invalid(
+                        &types,
+                        format!(
+                            "{len} entries; expected {stored_blocks} (stored) or {executed_blocks} (executed) blocks"
+                        ),
+                    ));
+                }
+                array.iter().collect()
+            }
+            None => vec![value],
+        };
+        for entry in entries {
+            match entry.as_u64() {
+                Some(1) => {}
+                Some(_) => {
+                    return Err(unsupported(
+                        &types,
+                        "shared indexer layers (reusing a previous selection) are not implemented",
+                    ));
+                }
+                None => return Err(invalid(&types, "expected unsigned integers")),
+            }
         }
     }
     Ok(())

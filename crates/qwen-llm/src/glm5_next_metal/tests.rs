@@ -176,6 +176,25 @@ fn compare_state(
     }
 }
 
+/// Bit patterns of every layer's persistent state (KDA conv and S; MLA
+/// latents, pending ring and pools).
+fn state_bits(session: &Glm5NextSession<'_>) -> Vec<Vec<u32>> {
+    let f32_bits = |t| read_f32(t).unwrap().iter().map(|v| v.to_bits()).collect();
+    let f16_bits = |t| read_f16(t).unwrap().iter().map(|v| v.to_bits()).collect();
+    session
+        .layers
+        .iter()
+        .flat_map(|layer| match layer {
+            LayerState::Kda { conv, state } => vec![f32_bits(conv), f32_bits(state)],
+            LayerState::Mla {
+                latent,
+                pending,
+                pooled,
+            } => vec![f16_bits(latent), f16_bits(pending), f16_bits(pooled)],
+        })
+        .collect()
+}
+
 /// The P2 end-to-end checkpoint: the ckpt-v1 token IDs through all 45 blocks,
 /// compared with the same-artifact llama.cpp oracle: logits per position, every
 /// block's residual streams, KDA state and indexer pools at steps 3/7/14, and
@@ -435,6 +454,30 @@ fn packed_prefill_matches_serial_and_oracle_on_checkpoint_v1() {
         mixed.set_packed_lineage(lineage);
         let logits = mixed.prefill_packed(&ctx, &tokens[..11]).unwrap();
         check(&format!("{lineage:?} mixed prefill"), 10, &logits, lineage);
+        // Whole-request refusals execute nothing: position, poison flag and
+        // every state byte are unchanged, and decode continues as if the
+        // requests never happened (Exact: bitwise against serial below).
+        let before = state_bits(&mixed);
+        let vocab = weights.config.vocab_size;
+        let overrun = vec![tokens[11]; 256 - 11 + 1];
+        for (label, request) in [
+            ("empty", &[][..]),
+            ("bad tail token", &[tokens[11], tokens[12], vocab][..]),
+            ("bad head token", &[vocab, tokens[11]][..]),
+            ("capacity overrun", &overrun[..]),
+        ] {
+            for packed in [true, false] {
+                let result = if packed {
+                    mixed.prefill_packed(&ctx, request)
+                } else {
+                    mixed.prefill(&ctx, request)
+                };
+                assert!(result.is_err(), "{label} (packed {packed}) was accepted");
+                assert_eq!(mixed.position(), 11, "{label}: position moved");
+                assert!(!mixed.poisoned, "{label}: refusal poisoned the session");
+            }
+        }
+        assert!(state_bits(&mixed) == before, "refusals changed state");
         for (position, &token) in tokens.iter().enumerate().skip(11) {
             let logits = mixed.forward(&ctx, token).unwrap();
             check(

@@ -241,9 +241,7 @@ impl Glm5NextSession<'_> {
         let Some(rows) = self.packed.as_ref().map(|p| p.rows) else {
             return self.prefill(ctx, tokens);
         };
-        if tokens.is_empty() {
-            return invalid("prefill requires at least one token");
-        }
+        self.validate_request(tokens)?;
         let chunks: Vec<&[u32]> = tokens.chunks(rows).collect();
         let last = chunks.len() - 1;
         let mut logits = None;

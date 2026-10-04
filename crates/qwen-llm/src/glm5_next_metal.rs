@@ -596,6 +596,7 @@ impl<'w> Glm5NextSession<'w> {
     /// Serial prefill: advance every token but the last, then return the last
     /// token's logits.
     pub fn prefill(&mut self, ctx: &MetalContext, tokens: &[u32]) -> Result<Vec<f32>> {
+        self.validate_request(tokens)?;
         let Some((&last, head)) = tokens.split_last() else {
             return invalid("prefill requires at least one token");
         };
@@ -603,6 +604,33 @@ impl<'w> Glm5NextSession<'w> {
             self.advance(ctx, token)?;
         }
         self.forward(ctx, last)
+    }
+
+    /// Refuses a whole multi-token request before any token executes, so a
+    /// bad token or capacity overrun never leaves a partially advanced prefix.
+    fn validate_request(&self, tokens: &[u32]) -> Result<()> {
+        if self.poisoned {
+            return invalid("session is poisoned by an earlier failed token");
+        }
+        if tokens.is_empty() {
+            return invalid("prefill requires at least one token");
+        }
+        let vocab = self.weights.config.vocab_size;
+        if let Some((index, &token)) = tokens.iter().enumerate().find(|(_, t)| **t >= vocab) {
+            return invalid(format!(
+                "token[{index}] = {token} outside vocabulary {vocab}"
+            ));
+        }
+        let end = self.position.checked_add(tokens.len());
+        if end.is_none_or(|end| end > self.capacity) {
+            return invalid(format!(
+                "{} tokens from position {} exceed capacity {}",
+                tokens.len(),
+                self.position,
+                self.capacity
+            ));
+        }
+        Ok(())
     }
 
     /// Like [`Self::forward`], committing once per block and reporting the

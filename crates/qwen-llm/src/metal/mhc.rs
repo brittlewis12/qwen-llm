@@ -60,6 +60,24 @@ fn dispatch_linear(enc: &KernelEncoder, threads: usize) {
     );
 }
 
+/// Control outputs share no byte with the inputs or with each other.
+fn check_controls_disjoint(
+    kernel: &'static str,
+    mixes: &MetalTensor,
+    scale: &MetalTensor,
+    base: &MetalTensor,
+    pre: &MetalTensor,
+    post: &MetalTensor,
+    comb: &MetalTensor,
+) -> Result<(), MetalError> {
+    let inputs = [(mixes, "mixes"), (scale, "scale"), (base, "base")];
+    check_disjoint(kernel, pre, &inputs)?;
+    check_disjoint(kernel, post, &inputs)?;
+    check_disjoint(kernel, comb, &inputs)?;
+    check_disjoint(kernel, pre, &[(post, "post"), (comb, "combination")])?;
+    check_disjoint(kernel, post, &[(comb, "combination")])
+}
+
 /// Repeat one `[hidden]` row into all four residual streams.
 pub fn encode_mhc4_repeat(
     ctx: &MetalContext,
@@ -111,6 +129,7 @@ pub fn encode_mhc4_controls(
     check_f32(K, pre, &[4], true, "pre")?;
     check_f32(K, post, &[4], true, "post")?;
     check_f32(K, comb, &[4, 4], true, "combination")?;
+    check_controls_disjoint(K, mixes, scale, base, pre, post, comb)?;
     let pso = ctx.pipeline("kernel_deepseek_v4_hc_controls")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(0, &eps);
@@ -145,6 +164,7 @@ pub fn encode_mhc4_collapse(
     check_f32(K, residual, &[hidden as u64, 4], false, "residual")?;
     check_f32(K, pre, &[4], false, "pre")?;
     check_f32(K, output, &[hidden as u64], true, "output")?;
+    check_disjoint(K, output, &[(residual, "residual"), (pre, "pre")])?;
     let pso = ctx.pipeline("kernel_deepseek_v4_hc_collapse")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(0, &h);
@@ -277,6 +297,7 @@ pub fn encode_mhc4_controls_rows(
     check_f32(K, pre, &[4, r], true, "pre")?;
     check_f32(K, post, &[4, r], true, "post")?;
     check_f32(K, comb, &[4, 4, r], true, "combination")?;
+    check_controls_disjoint(K, mixes, scale, base, pre, post, comb)?;
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
@@ -326,6 +347,7 @@ pub fn encode_mhc4_collapse_rows(
     check_f32(K, residual, &[hidden as u64, 4, r], false, "residual")?;
     check_f32(K, pre, &[4, r], false, "pre")?;
     check_f32(K, output, &[hidden as u64, r], true, "output")?;
+    check_disjoint(K, output, &[(residual, "residual"), (pre, "pre")])?;
     let pso = ctx.pipeline("kernel_deepseek_v4_hc_collapse_batch")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(
@@ -637,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn post_and_swiglu_refuse_unsafe_aliasing() {
+    fn mhc_and_swiglu_refuse_unsafe_aliasing() {
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
@@ -661,6 +683,72 @@ mod tests {
         let err = encode_clamped_swiglu(&ctx, &enc, &gate, &up, &shifted, 10.0).unwrap_err();
         assert!(err.to_string().contains("partially overlaps gate"), "{err}");
         encode_clamped_swiglu(&ctx, &enc, &gate, &up, &gate, 10.0).unwrap();
+
+        // Controls: outputs share no byte with the inputs or each other.
+        let mixes = tensor(&ctx, &[0.1; 24], vec![24]);
+        let scale = tensor(&ctx, &[1.0; 3], vec![3]);
+        let base = tensor(&ctx, &[0.0; 24], vec![24]);
+        let pre = tensor(&ctx, &[0.0; 4], vec![4]);
+        let in_mixes = mixes.view_subrange(4, vec![4]);
+        let controls = |pre: &MetalTensor, post: &MetalTensor, comb: &MetalTensor| {
+            encode_mhc4_controls(&ctx, &enc, 1e-6, &mixes, &scale, &base, pre, post, comb)
+                .map(|()| String::new())
+                .unwrap_or_else(|e| e.to_string())
+        };
+        let refused = |message: String, name: &str| {
+            assert!(
+                message.contains(&format!("output aliases {name}")),
+                "{message}"
+            );
+        };
+        refused(controls(&in_mixes, &post, &comb), "mixes");
+        refused(controls(&pre, &pre, &comb), "post");
+        let shared = tensor(&ctx, &[0.0; 20], vec![20]);
+        let (post_s, comb_s) = (
+            shared.view_subrange(0, vec![4]),
+            shared.view_subrange(2, vec![4, 4]),
+        );
+        refused(controls(&pre, &post_s, &comb_s), "combination");
+        assert_eq!(controls(&pre, &post, &comb), "");
+        let rows = |pre: &MetalTensor, post: &MetalTensor| {
+            let mixes = mixes.view_subrange(0, vec![24, 1]);
+            encode_mhc4_controls_rows(
+                &ctx,
+                &enc,
+                1,
+                1e-6,
+                &mixes,
+                &scale,
+                &base,
+                pre,
+                post,
+                &comb.view_subrange(0, vec![4, 4, 1]),
+            )
+            .map(|()| String::new())
+            .unwrap_or_else(|e| e.to_string())
+        };
+        let (pre_rows, post_rows) = (
+            pre.view_subrange(0, vec![4, 1]),
+            post.view_subrange(0, vec![4, 1]),
+        );
+        refused(rows(&pre_rows, &pre_rows), "post");
+        assert_eq!(rows(&pre_rows, &post_rows), "");
+
+        // Collapse: the output is disjoint from the residual and pre.
+        let first_stream = residual.view_subrange(0, vec![H as u64]);
+        let err = encode_mhc4_collapse(&ctx, &enc, H, &residual, &pre, &first_stream).unwrap_err();
+        refused(err.to_string(), "residual");
+        let err = encode_mhc4_collapse_rows(
+            &ctx,
+            &enc,
+            H,
+            1,
+            &residual.view_subrange(0, vec![H as u64, 4, 1]),
+            &pre_rows,
+            &first_stream.view_subrange(0, vec![H as u64, 1]),
+        )
+        .unwrap_err();
+        refused(err.to_string(), "residual");
     }
 
     /// Rows variants equal the single-row encoders row by row (5 rows, GLM

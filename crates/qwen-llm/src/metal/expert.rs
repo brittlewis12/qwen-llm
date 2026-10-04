@@ -338,10 +338,10 @@ pub struct GroupedExperts<'a> {
 
 /// Expert-major routed experts for packed prefill: bucket routes by expert,
 /// fused gate/up with the clamped SwiGLU epilogue, grouped down, and the
-/// weighted sum over each row's slots. Each expert's weights are read once per
-/// call instead of once per routed token. Invalid route ids (failed rows) are
-/// dropped by bucketing; callers must check per-row route status after the
-/// command, as for decode.
+/// weighted sum over each row's slots. Expert weights are read once per tile
+/// of routed tokens instead of once per routed token. Invalid route ids
+/// (failed rows) are dropped by bucketing; callers must check per-row route
+/// status after the command, as for decode.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_grouped_routed_experts(
     ctx: &MetalContext,
@@ -387,6 +387,14 @@ pub fn encode_grouped_routed_experts(
     check_expert_bank(K, b.gate_bank, hidden, ffn, experts, "gate bank")?;
     check_expert_bank(K, b.up_bank, hidden, ffn, experts, "up bank")?;
     check_expert_bank(K, b.down_bank, ffn, hidden, experts, "down bank")?;
+    // The grouped tiles load activation rows as float2x4 / float4 (16 bytes).
+    for (tensor, name) in [
+        (b.input, "input"),
+        (b.inner, "inner"),
+        (b.slot_out, "slot outputs"),
+    ] {
+        check_alignment(K, tensor, 16, name)?;
+    }
     let inputs = [
         (b.input, "input"),
         (b.ids, "expert ids"),
@@ -835,6 +843,51 @@ mod tests {
                 &read_f32(&packed),
                 &reference,
             );
+            // The tiles' 16-byte activation loads refuse a 4-byte offset.
+            let shifted = |t: &MetalTensor| {
+                let data = vec![0u8; t.n_elements() as usize * 4];
+                offset_tensor(&ctx, 4, &data, 0, t.shape.clone(), GgmlType::F32)
+            };
+            let (input_4, inner_4, slot_out_4) =
+                (shifted(&input), shifted(&inner), shifted(&slot_out));
+            for (name, input, inner, slot_out) in [
+                ("input", &input_4, &inner, &slot_out),
+                ("inner", &input, &inner_4, &slot_out),
+                ("slot outputs", &input, &inner, &slot_out_4),
+            ] {
+                let command = ctx.queue.commandBuffer().unwrap();
+                let enc = KernelEncoder::begin(&command);
+                let err = encode_grouped_routed_experts(
+                    &ctx,
+                    &enc,
+                    &GroupedExperts {
+                        gate_bank: &gate,
+                        up_bank: &up,
+                        down_bank: &down,
+                        input,
+                        ids: &ids,
+                        weights: &weights,
+                        counts: &counts,
+                        slots: &slots,
+                        inner,
+                        slot_out,
+                        output: &packed,
+                    },
+                    HIDDEN,
+                    FFN,
+                    EXPERTS,
+                    TOP_K,
+                    ROWS,
+                    10.0,
+                )
+                .unwrap_err();
+                let message = err.to_string();
+                assert!(
+                    message.contains(&format!("{name} offset 4 is not 16-byte aligned")),
+                    "{message}"
+                );
+                enc.end();
+            }
         }
     }
 

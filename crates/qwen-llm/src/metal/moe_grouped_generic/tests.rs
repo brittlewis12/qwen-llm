@@ -194,13 +194,27 @@ fn moe_grouped_generic_mapping_matches_metal_source() {
             assert_eq!(args.get(3).copied(), expected_epi, "{name}: epilogue");
         }
     }
+    for &dtype in MOE_GROUPED_CLAMPED_SWIGLU_DTYPES {
+        let name = clamped_swiglu_pipeline_name(dtype).unwrap();
+        let l = moe_grouped_generic_layout(dtype).unwrap();
+        let needle = format!("[[host_name(\"{name}\")]]");
+        let lines: Vec<&str> = MOE_METAL.lines().filter(|s| s.contains(&needle)).collect();
+        assert_eq!(lines.len(), 1, "expected exactly one instantiation of {name}");
+        assert!(
+            lines[0].contains("kernel_moe_swiglu_clamped_grouped_slots_n16_generic<")
+                && lines[0].contains(&format!("qt_dequantize_{}>", l.suffix)),
+            "{name}: {}",
+            lines[0]
+        );
+    }
     let instantiated = MOE_METAL
         .lines()
         .filter(|s| s.contains("[[host_name(\"") && s.contains("_grouped_slots_generic\")]]"))
         .count();
     assert_eq!(
         instantiated,
-        MOE_GROUPED_GENERIC_LAYOUTS.len() * MoeGroupedGenericRole::ALL.len(),
+        MOE_GROUPED_GENERIC_LAYOUTS.len() * MoeGroupedGenericRole::ALL.len()
+            + MOE_GROUPED_CLAMPED_SWIGLU_DTYPES.len(),
         "moe.metal has generic instantiations without a Rust mapping entry"
     );
 }

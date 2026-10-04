@@ -367,8 +367,6 @@ fn coverage_matrix_names_remaining_adaptations() {
         [
             // Cells order by role, then ggml type id (IQ3_S 21 < IQ2_S 22).
             (TensorRole::LatentAbsorb, GgmlType::Q8_0, 22),
-            (TensorRole::ExpertGateUp, GgmlType::IQ3_S, 2),
-            (TensorRole::ExpertGateUp, GgmlType::IQ2_S, 82),
         ]
     );
     // Trunk IQ2_S down has no verified all-slot path.
@@ -389,14 +387,8 @@ fn execution_gate_is_phase_specific() {
         .validate_execution(ExecutionMode::PackedPrefill)
         .unwrap_err()
         .to_string();
-    for cell in [
-        "LatentAbsorb Q8_0",
-        "ExpertGateUp IQ3_S",
-        "ExpertGateUp IQ2_S",
-    ] {
-        assert!(prefill.contains(cell), "{cell} not in {prefill}");
-    }
-    assert!(!prefill.contains("ExpertDown"), "{prefill}");
+    assert!(prefill.contains("LatentAbsorb Q8_0"), "{prefill}");
+    assert!(!prefill.contains("Expert"), "{prefill}");
 }
 
 fn term(l: &Glm5NextMemoryLedger, name: &str) -> u64 {
@@ -510,7 +502,7 @@ fn release_artifact_census_and_allocation_plan() {
             row.coverage.prefill
         );
     }
-    assert_eq!(model.pending_coverage().len(), 3);
+    assert_eq!(model.pending_coverage().len(), 1);
     model
         .validate_execution(ExecutionMode::SerialDecode)
         .unwrap();

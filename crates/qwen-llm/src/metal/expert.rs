@@ -313,6 +313,175 @@ pub fn encode_all_slots_down(
     Ok(())
 }
 
+/// Buffers for [`encode_grouped_routed_experts`] over `rows` tokens.
+pub struct GroupedExperts<'a> {
+    /// Routed expert banks; gate and up share a dtype.
+    pub gate_bank: &'a MetalTensor,
+    pub up_bank: &'a MetalTensor,
+    pub down_bank: &'a MetalTensor,
+    /// Normalized FFN input, F32 `[hidden, rows]`.
+    pub input: &'a MetalTensor,
+    /// Routes from [`encode_route_learned_rows`]: I32 ids and F32 weights
+    /// `[top_k, rows]`.
+    pub ids: &'a MetalTensor,
+    pub weights: &'a MetalTensor,
+    /// Scratch: I32 per-expert counts `[experts]` and expert-major slots
+    /// `[experts * rows]`; F32 slot activations `[ffn, top_k * rows]` and slot
+    /// outputs `[hidden, top_k * rows]`.
+    pub counts: &'a MetalTensor,
+    pub slots: &'a MetalTensor,
+    pub inner: &'a MetalTensor,
+    pub slot_out: &'a MetalTensor,
+    /// Weighted routed output, F32 `[hidden, rows]`.
+    pub output: &'a MetalTensor,
+}
+
+/// Expert-major routed experts for packed prefill: bucket routes by expert,
+/// fused gate/up with the clamped SwiGLU epilogue, grouped down, and the
+/// weighted sum over each row's slots. Each expert's weights are read once per
+/// call instead of once per routed token. Invalid route ids (failed rows) are
+/// dropped by bucketing; callers must check per-row route status after the
+/// command, as for decode.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_grouped_routed_experts(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    b: &GroupedExperts<'_>,
+    hidden: usize,
+    ffn: usize,
+    experts: usize,
+    top_k: usize,
+    rows: usize,
+    clamp: f32,
+) -> Result<(), MetalError> {
+    const K: &str = "grouped_routed_experts";
+    require_serial(K, enc)?;
+    if rows == 0 || top_k == 0 || top_k > ROUTE_MAX_TOP_K {
+        return Err(bad_shape(
+            K,
+            "rows and top-k must be positive (top-k <= 16)",
+        ));
+    }
+    let (h, f, e, k, r) = (
+        hidden as u64,
+        ffn as u64,
+        experts as u64,
+        top_k as u64,
+        rows as u64,
+    );
+    check_tensor(K, b.input, GgmlType::F32, &[h, r], false, "input")?;
+    check_tensor(K, b.ids, GgmlType::I32, &[k, r], false, "expert ids")?;
+    check_tensor(K, b.weights, GgmlType::F32, &[k, r], false, "weights")?;
+    check_tensor(K, b.counts, GgmlType::I32, &[e], true, "counts")?;
+    check_tensor(K, b.slots, GgmlType::I32, &[e * r], true, "slots")?;
+    check_tensor(K, b.inner, GgmlType::F32, &[f, k * r], true, "inner")?;
+    check_tensor(
+        K,
+        b.slot_out,
+        GgmlType::F32,
+        &[h, k * r],
+        true,
+        "slot outputs",
+    )?;
+    check_tensor(K, b.output, GgmlType::F32, &[h, r], true, "output")?;
+    check_expert_bank(K, b.gate_bank, hidden, ffn, experts, "gate bank")?;
+    check_expert_bank(K, b.up_bank, hidden, ffn, experts, "up bank")?;
+    check_expert_bank(K, b.down_bank, ffn, hidden, experts, "down bank")?;
+    let inputs = [
+        (b.input, "input"),
+        (b.ids, "expert ids"),
+        (b.weights, "weights"),
+        (b.gate_bank, "gate bank"),
+        (b.up_bank, "up bank"),
+        (b.down_bank, "down bank"),
+    ];
+    let scratch = [
+        (b.counts, "counts"),
+        (b.slots, "slots"),
+        (b.inner, "inner"),
+        (b.slot_out, "slot outputs"),
+        (b.output, "output"),
+    ];
+    for (i, (written, name)) in scratch.iter().enumerate() {
+        check_disjoint(K, written, &inputs).map_err(|e| bad_shape(K, format!("{name}: {e}")))?;
+        for (other, other_name) in &scratch[i + 1..] {
+            if super::checks::overlaps(written, other) {
+                return Err(bad_shape(K, format!("{name} aliases {other_name}")));
+            }
+        }
+    }
+    let flat = |t: &MetalTensor| MetalTensor {
+        shape: vec![t.n_elements()],
+        ..t.clone()
+    };
+    encode_moe_route_bucket_slots_f32(
+        ctx,
+        enc,
+        &flat(b.ids),
+        b.counts,
+        b.slots,
+        experts,
+        rows,
+        top_k,
+    )?;
+    encode_moe_swiglu_clamped_f32_grouped_slots_generic(
+        ctx,
+        enc,
+        b.gate_bank,
+        b.up_bank,
+        &flat(b.input),
+        b.counts,
+        b.slots,
+        &flat(b.inner),
+        hidden,
+        ffn,
+        experts,
+        top_k,
+        rows,
+        clamp,
+    )?;
+    if b.down_bank.dtype == GgmlType::IQ4_XS {
+        encode_moe_down_iq4_xs_f32_grouped_slots(
+            ctx,
+            enc,
+            b.down_bank,
+            &flat(b.inner),
+            b.counts,
+            b.slots,
+            &flat(b.slot_out),
+            ffn,
+            hidden,
+            experts,
+            rows,
+        )?;
+    } else {
+        encode_moe_down_f32_grouped_slots_generic(
+            ctx,
+            enc,
+            b.down_bank,
+            &flat(b.inner),
+            b.counts,
+            b.slots,
+            &flat(b.slot_out),
+            ffn,
+            hidden,
+            experts,
+            rows,
+        )?;
+    }
+    encode_moe_weighted_sum_packed_f32(
+        ctx,
+        enc,
+        &flat(b.slot_out),
+        &flat(b.weights),
+        &flat(b.output),
+        hidden,
+        top_k,
+        rows,
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{assert_moe_oracle_close, dequant_expert, offset_tensor};
@@ -529,5 +698,178 @@ mod tests {
             .unwrap();
         });
         assert!(read_f32(&out).iter().all(|&v| v == 0.0));
+    }
+
+    /// Packed grouped experts over 24 rows (GLM widths, 12-expert banks,
+    /// top-8, routes from the rows router) against the per-row all-slot decode
+    /// composition on the same routes, for IQ3_S and IQ4_XS down.
+    #[test]
+    fn grouped_routed_experts_match_per_row_decode_composition() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        const ROWS: usize = 24;
+        let route = LearnedRoute {
+            experts: EXPERTS,
+            top_k: TOP_K,
+            score: RouteScore::Sigmoid,
+            routed_scale: 2.5,
+        };
+        let x = values(HIDDEN * ROWS, 3);
+        let logits: Vec<f32> = (0..EXPERTS * ROWS)
+            .map(|i| ((i * 29 + i / 7) % 53) as f32 * 0.09 - 2.0)
+            .collect();
+        let bias = vec![0.0f32; EXPERTS];
+        let gate_bytes = synthetic_bank(GgmlType::IQ2_S, HIDDEN, FFN, 3);
+        let up_bytes = synthetic_bank(GgmlType::IQ2_S, HIDDEN, FFN, 5);
+        let gate = bank(&ctx, &gate_bytes, GgmlType::IQ2_S, HIDDEN, FFN);
+        let up = bank(&ctx, &up_bytes, GgmlType::IQ2_S, HIDDEN, FFN);
+        let r = ROWS as u64;
+        let (h, f, k, e) = (HIDDEN as u64, FFN as u64, TOP_K as u64, EXPERTS as u64);
+        let input = f32_tensor(&ctx, &x, vec![h, r]);
+        let logits_t = f32_tensor(&ctx, &logits, vec![e, r]);
+        let bias_t = f32_tensor(&ctx, &bias, vec![e]);
+        let ids = offset_tensor(
+            &ctx,
+            16,
+            bytemuck::cast_slice(&vec![0i32; TOP_K * ROWS]),
+            16,
+            vec![k, r],
+            GgmlType::I32,
+        );
+        let weights = f32_tensor(&ctx, &vec![0.0; TOP_K * ROWS], vec![k, r]);
+        let status = offset_tensor(
+            &ctx,
+            16,
+            bytemuck::cast_slice(&vec![0i32; ROWS]),
+            16,
+            vec![r],
+            GgmlType::I32,
+        );
+        for down_dtype in [GgmlType::IQ3_S, GgmlType::IQ4_XS] {
+            let down_bytes = synthetic_bank(down_dtype, FFN, HIDDEN, 7);
+            let down = bank(&ctx, &down_bytes, down_dtype, FFN, HIDDEN);
+            let counts = offset_tensor(
+                &ctx,
+                16,
+                bytemuck::cast_slice(&vec![0i32; EXPERTS]),
+                16,
+                vec![e],
+                GgmlType::I32,
+            );
+            let slots = offset_tensor(
+                &ctx,
+                16,
+                bytemuck::cast_slice(&vec![0i32; EXPERTS * ROWS]),
+                16,
+                vec![e * r],
+                GgmlType::I32,
+            );
+            let inner = f32_tensor(&ctx, &vec![0.0; FFN * TOP_K * ROWS], vec![f, k * r]);
+            let slot_out = f32_tensor(&ctx, &vec![0.0; HIDDEN * TOP_K * ROWS], vec![h, k * r]);
+            let packed = f32_tensor(&ctx, &vec![0.0; HIDDEN * ROWS], vec![h, r]);
+            run(&ctx, |enc| {
+                encode_route_learned_rows(
+                    &ctx, enc, &route, ROWS, &logits_t, &bias_t, &ids, &weights, &status,
+                )
+                .unwrap();
+                encode_grouped_routed_experts(
+                    &ctx,
+                    enc,
+                    &GroupedExperts {
+                        gate_bank: &gate,
+                        up_bank: &up,
+                        down_bank: &down,
+                        input: &input,
+                        ids: &ids,
+                        weights: &weights,
+                        counts: &counts,
+                        slots: &slots,
+                        inner: &inner,
+                        slot_out: &slot_out,
+                        output: &packed,
+                    },
+                    HIDDEN,
+                    FFN,
+                    EXPERTS,
+                    TOP_K,
+                    ROWS,
+                    10.0,
+                )
+                .unwrap();
+            });
+            // Per-row decode composition on the same routes.
+            let all_ids = super::super::test_support::tensor_backing_bytes(&ids);
+            let all_ids: &[i32] = bytemuck::cast_slice(&all_ids[16..16 + 4 * TOP_K * ROWS]);
+            let all_weights = read_f32(&weights);
+            let mut reference = Vec::with_capacity(HIDDEN * ROWS);
+            for row in 0..ROWS {
+                let row_ids = i32_tensor(&ctx, &all_ids[row * TOP_K..(row + 1) * TOP_K]);
+                let ready = i32_tensor(&ctx, &[ROUTE_STATUS_READY]);
+                let row_x = f32_tensor(&ctx, &x[row * HIDDEN..(row + 1) * HIDDEN], vec![h]);
+                let row_inner = f32_tensor(&ctx, &vec![0.0; FFN * TOP_K], vec![f, k]);
+                let row_out = f32_tensor(&ctx, &vec![0.0; HIDDEN * TOP_K], vec![h, k]);
+                run(&ctx, |enc| {
+                    encode_all_slots_gate_up_swiglu(
+                        &ctx, enc, &gate, &up, &row_x, &row_ids, &ready, &row_inner, HIDDEN, FFN,
+                        EXPERTS, TOP_K, 10.0,
+                    )
+                    .unwrap();
+                    encode_all_slots_down(
+                        &ctx, enc, &down, &row_inner, &row_ids, &ready, &row_out, FFN, HIDDEN,
+                        EXPERTS, TOP_K,
+                    )
+                    .unwrap();
+                });
+                let slots_out = read_f32(&row_out);
+                for d in 0..HIDDEN {
+                    reference.push(
+                        (0..TOP_K)
+                            .map(|s| all_weights[row * TOP_K + s] * slots_out[s * HIDDEN + d])
+                            .sum::<f32>(),
+                    );
+                }
+            }
+            assert_moe_oracle_close_loose(
+                &format!("{down_dtype:?} grouped"),
+                &read_f32(&packed),
+                &reference,
+            );
+        }
+    }
+
+    /// Grouped kernels stage activations in half: cosine and max-relative
+    /// bounds as in the existing grouped-kernel tests.
+    fn assert_moe_oracle_close_loose(label: &str, actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len());
+        assert!(actual.iter().all(|v| v.is_finite()), "{label}: non-finite");
+        let dot: f64 = actual
+            .iter()
+            .zip(expected)
+            .map(|(a, e)| *a as f64 * *e as f64)
+            .sum();
+        let na = actual
+            .iter()
+            .map(|v| (*v as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let ne = expected
+            .iter()
+            .map(|v| (*v as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let cos = dot / (na * ne).max(1e-30);
+        let ref_max = expected.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let max_abs = actual
+            .iter()
+            .zip(expected)
+            .map(|(a, e)| (a - e).abs())
+            .fold(0.0f32, f32::max);
+        eprintln!("[{label}] cos={cos:.7} max|delta|={max_abs:.3e} ref_max={ref_max:.3e}");
+        assert!(cos >= 0.9999, "{label}: cos {cos}");
+        assert!(
+            max_abs <= 1e-2 * ref_max + 1e-4,
+            "{label}: max {max_abs} ref {ref_max}"
+        );
     }
 }

@@ -178,6 +178,93 @@ pub fn encode_route_learned(
     Ok(())
 }
 
+/// [`encode_route_learned`] for `rows` independent rows in one dispatch:
+/// `logits` F32 `[experts, rows]`, `ids` I32 and `weights` F32 `[top_k,
+/// rows]`, `status` I32 `[rows]`. Each row uses the single-row arithmetic.
+/// Sigmoid scoring only (the packed DeepSeek V4 router is separate).
+#[allow(clippy::too_many_arguments)]
+pub fn encode_route_learned_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    route: &LearnedRoute,
+    rows: usize,
+    logits: &MetalTensor,
+    bias: &MetalTensor,
+    ids: &MetalTensor,
+    weights: &MetalTensor,
+    status: &MetalTensor,
+) -> Result<(), MetalError> {
+    if enc.is_concurrent() {
+        return Err(bad("requires ordered serial dispatches"));
+    }
+    route.validate()?;
+    if rows == 0 || route.score != RouteScore::Sigmoid {
+        return Err(bad(
+            "rows routing needs at least one row and sigmoid scoring",
+        ));
+    }
+    let (experts, top_k, r) = (route.experts as u64, route.top_k as u64, rows as u64);
+    check(logits, GgmlType::F32, &[experts, r], false, "logits")?;
+    check(bias, GgmlType::F32, &[experts], false, "selection bias")?;
+    check(ids, GgmlType::I32, &[top_k, r], true, "expert ids")?;
+    check(weights, GgmlType::F32, &[top_k, r], true, "weights")?;
+    check(status, GgmlType::I32, &[r], true, "status")?;
+    for written in [ids, weights, status] {
+        super::checks::check_disjoint(
+            KERNEL,
+            written,
+            &[(logits, "logits"), (bias, "selection bias")],
+        )?;
+    }
+    super::checks::check_disjoint(KERNEL, ids, &[(weights, "weights"), (status, "status")])?;
+    super::checks::check_disjoint(KERNEL, weights, &[(status, "status")])?;
+    let pso = ctx.pipeline("kernel_route_learned_sigmoid_rows")?;
+    let threads = route.threads();
+    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < threads {
+        return Err(bad(
+            "rows router needs 32-lane simdgroups and one thread per expert",
+        ));
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        expert_count: u32,
+        top_k: u32,
+        token_id: u32,
+        vocab_size: u32,
+        routed_scale: f32,
+    }
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            expert_count: experts as u32,
+            top_k: top_k as u32,
+            token_id: 0,
+            vocab_size: 0,
+            routed_scale: route.routed_scale,
+        },
+    );
+    enc.set_tensor(1, logits);
+    enc.set_tensor(2, bias);
+    enc.set_tensor(3, ids);
+    enc.set_tensor(4, weights);
+    enc.set_tensor(5, status);
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: rows,
+            depth: 1,
+        },
+        MTLSize {
+            width: threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::test_support::offset_tensor;
@@ -466,5 +553,88 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("aliases logits"), "{err}");
+    }
+
+    /// Rows routing equals single-row routing on every row, including rows
+    /// whose winners sit in experts 256-287 and a row with a non-finite logit.
+    #[test]
+    fn rows_route_matches_single_row_route() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        const ROWS: usize = 9;
+        let mut logits: Vec<f32> = (0..288 * ROWS)
+            .map(|i| ((i * 37 + i / 288 * 11) % 101) as f32 * 0.05 - 2.5)
+            .collect();
+        for (k, i) in [256, 263, 270, 277, 284, 287, 260, 281]
+            .into_iter()
+            .enumerate()
+        {
+            logits[3 * 288 + i] = 8.0 - k as f32 * 0.5;
+        }
+        logits[7 * 288 + 5] = f32::NAN;
+        let bias: Vec<f32> = (0..288).map(|i| ((i * 3) % 7) as f32 * 0.01).collect();
+        let logits_t = offset_tensor(
+            &ctx,
+            16,
+            bytemuck::cast_slice(&logits),
+            16,
+            vec![288, ROWS as u64],
+            GgmlType::F32,
+        );
+        let bias_t = f32_tensor(&ctx, &bias);
+        let ids_t = offset_tensor(
+            &ctx,
+            16,
+            bytemuck::cast_slice(&vec![-9i32; 8 * ROWS]),
+            16,
+            vec![8, ROWS as u64],
+            GgmlType::I32,
+        );
+        let weights_t = offset_tensor(
+            &ctx,
+            16,
+            bytemuck::cast_slice(&vec![0.0f32; 8 * ROWS]),
+            16,
+            vec![8, ROWS as u64],
+            GgmlType::F32,
+        );
+        let status_t = offset_tensor(
+            &ctx,
+            16,
+            bytemuck::cast_slice(&vec![-9i32; ROWS]),
+            16,
+            vec![ROWS as u64],
+            GgmlType::I32,
+        );
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        encode_route_learned_rows(
+            &ctx, &enc, &GLM, ROWS, &logits_t, &bias_t, &ids_t, &weights_t, &status_t,
+        )
+        .unwrap();
+        enc.end();
+        command.commit();
+        wait_completed(&command).unwrap();
+        let (ids, weights, status) = (
+            read::<i32>(&ids_t),
+            read::<f32>(&weights_t),
+            read::<i32>(&status_t),
+        );
+        for row in 0..ROWS {
+            let (want_status, want_ids, want_weights) =
+                run(&ctx, &GLM, &logits[row * 288..(row + 1) * 288], &bias);
+            assert_eq!(status[row], want_status, "row {row} status");
+            if want_status == ROUTE_STATUS_READY {
+                assert_eq!(&ids[row * 8..(row + 1) * 8], &want_ids[..], "row {row} ids");
+                assert_eq!(
+                    &weights[row * 8..(row + 1) * 8],
+                    &want_weights[..],
+                    "row {row} weights"
+                );
+            }
+        }
+        assert_eq!(status[7], ROUTE_STATUS_NONFINITE_LOGIT);
+        assert!(ids[24..32].iter().all(|&i| i >= 256));
     }
 }

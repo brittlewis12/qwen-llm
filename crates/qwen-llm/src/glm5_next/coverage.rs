@@ -99,8 +99,6 @@ const fn split(decode: Support, prefill: Support) -> RoleCoverage {
 }
 
 const DENSE: &str = "dense mat_vec / mat_mat";
-const CLAMP_EPILOGUE: &str = "generic grouped fused SwiGLU is unclamped (moe.metal \
-     kernel_moe_swiglu_grouped_slots_n16_generic); add the DS4 clamp epilogue";
 const GROUPED_Q8_TAIL: &str = "kernel_mat_mat_q8_0_f32_r2c16k64_grouped requires \
      rows % 128 == 0 (deepseek_v4_metal/prefill.rs); add a tail path";
 
@@ -138,15 +136,15 @@ pub fn coverage(role: TensorRole, dtype: GgmlType) -> Option<RoleCoverage> {
         // artifacts add theirs with evidence.
         (R::ExpertGateUp, T::IQ2_S | T::IQ3_S) => split(
             Support::Kernel("encode_all_slots_gate_up_swiglu"),
-            Support::Pending(CLAMP_EPILOGUE),
+            Support::Kernel("encode_grouped_routed_experts (clamped grouped SwiGLU)"),
         ),
         (R::ExpertDown, T::IQ3_S) => split(
             Support::Kernel("encode_all_slots_down (all_slots_down_iq3_s)"),
-            Support::Kernel("kernel_moe_grouped_slots_mm_generic"),
+            Support::Kernel("encode_grouped_routed_experts (grouped generic down)"),
         ),
         (R::ExpertDown, T::IQ4_XS) => split(
             Support::Kernel("encode_all_slots_down (moe_down_iq4_xs_fast)"),
-            Support::Kernel("kernel_moe_down_iq4_xs_f32_grouped_slots"),
+            Support::Kernel("encode_grouped_routed_experts (moe_down_iq4_xs grouped)"),
         ),
         _ => return None,
     })

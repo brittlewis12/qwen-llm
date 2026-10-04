@@ -6986,20 +6986,23 @@ kernel void kernel_moe_grouped_slots_mm_generic(
 
 // Fused gate+up SwiGLU for same-dtype gate/up banks:
 //   dst[slot, :] = silu(W_gate_e * x[slot / topk]) * (W_up_e * x[slot / topk])
+// With CLAMP (DeepSeek V4 / GLM-5.3 contract):
+//   dst[slot, :] = silu(min(g, limit)) * clamp(u, -limit, limit)
 template <int BYTES, short NL,
-          void (*DEQ)(device const uchar *, short, thread half4x4 &)>
-kernel void kernel_moe_swiglu_grouped_slots_n16_generic(
-        constant moe_group_q4k_args & args [[buffer(0)]],
-        device const uchar * srcA_gate     [[buffer(1)]],
-        device const uchar * srcA_up       [[buffer(2)]],
-        device const float * srcB          [[buffer(3)]],
-        device const int   * counts        [[buffer(4)]],
-        device const int   * ids           [[buffer(5)]],
-        device       float * dst           [[buffer(6)]],
-        threadgroup  uchar * shmem         [[threadgroup(0)]],
-        uint3  tgpig [[threadgroup_position_in_grid]],
-        ushort tiitg [[thread_index_in_threadgroup]],
-        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+          void (*DEQ)(device const uchar *, short, thread half4x4 &), bool CLAMP>
+inline void moe_swiglu_grouped_slots_n16_body(
+        constant moe_group_q4k_args & args,
+        device const uchar * srcA_gate,
+        device const uchar * srcA_up,
+        device const float * srcB,
+        device const int   * counts,
+        device const int   * ids,
+        device       float * dst,
+        threadgroup  uchar * shmem,
+        uint3  tgpig,
+        ushort tiitg,
+        ushort sgitg,
+        float  limit) {
     threadgroup half * sa_g = (threadgroup half *)(shmem);
     threadgroup half * sa_u = (threadgroup half *)(shmem + 4096);
     threadgroup half * sb   = (threadgroup half *)(shmem + 8192);
@@ -7146,14 +7149,54 @@ kernel void kernel_moe_swiglu_grouped_slots_n16_generic(
             const float u_val = temp_str_u[(8 * tile_i + mr) + c * NR0_MM];
             const int slot = ids[(ulong)im * args.n_tokens + global_n];
             if (slot >= 0 && slot < slot_limit) {
-                dst[global_m + (ulong)slot * args.ffn] = moe_silu_f(g_val) * u_val;
+                dst[global_m + (ulong)slot * args.ffn] = CLAMP
+                    ? moe_silu_f(min(g_val, limit)) * clamp(u_val, -limit, limit)
+                    : moe_silu_f(g_val) * u_val;
             }
         }
     }
 }
 
+template <int BYTES, short NL,
+          void (*DEQ)(device const uchar *, short, thread half4x4 &)>
+kernel void kernel_moe_swiglu_grouped_slots_n16_generic(
+        constant moe_group_q4k_args & args [[buffer(0)]],
+        device const uchar * srcA_gate     [[buffer(1)]],
+        device const uchar * srcA_up       [[buffer(2)]],
+        device const float * srcB          [[buffer(3)]],
+        device const int   * counts        [[buffer(4)]],
+        device const int   * ids           [[buffer(5)]],
+        device       float * dst           [[buffer(6)]],
+        threadgroup  uchar * shmem         [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    moe_swiglu_grouped_slots_n16_body<BYTES, NL, DEQ, false>(
+        args, srcA_gate, srcA_up, srcB, counts, ids, dst, shmem, tgpig, tiitg, sgitg, 0.0f);
+}
+
+template <int BYTES, short NL,
+          void (*DEQ)(device const uchar *, short, thread half4x4 &)>
+kernel void kernel_moe_swiglu_clamped_grouped_slots_n16_generic(
+        constant moe_group_q4k_args & args [[buffer(0)]],
+        device const uchar * srcA_gate     [[buffer(1)]],
+        device const uchar * srcA_up       [[buffer(2)]],
+        device const float * srcB          [[buffer(3)]],
+        device const int   * counts        [[buffer(4)]],
+        device const int   * ids           [[buffer(5)]],
+        device       float * dst           [[buffer(6)]],
+        constant     float & limit         [[buffer(7)]],
+        threadgroup  uchar * shmem         [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    moe_swiglu_grouped_slots_n16_body<BYTES, NL, DEQ, true>(
+        args, srcA_gate, srcA_up, srcB, counts, ids, dst, shmem, tgpig, tiitg, sgitg, limit);
+}
+
 typedef decltype(kernel_moe_grouped_slots_mm_generic<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K, 0>) moe_grouped_slots_mm_generic_t;
 typedef decltype(kernel_moe_swiglu_grouped_slots_n16_generic<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K>) moe_swiglu_grouped_slots_generic_t;
+typedef decltype(kernel_moe_swiglu_clamped_grouped_slots_n16_generic<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K>) moe_swiglu_clamped_grouped_slots_generic_t;
 
 // One line per (role, dtype). Every host_name here must have a matching
 // entry in moe_grouped_generic.rs (enforced by a CPU test).
@@ -7205,3 +7248,8 @@ template [[host_name("kernel_moe_swiglu_f16_f32_grouped_slots_generic")]] kernel
 template [[host_name("kernel_moe_down_bf16_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_BF16_BYTES, QT_BF16_NL, qt_dequantize_bf16, 0>;
 template [[host_name("kernel_moe_up_silu_mul_bf16_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_BF16_BYTES, QT_BF16_NL, qt_dequantize_bf16, 1>;
 template [[host_name("kernel_moe_swiglu_bf16_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_BF16_BYTES, QT_BF16_NL, qt_dequantize_bf16>;
+
+// Clamped fused SwiGLU (DeepSeek V4 / GLM-5.3), for the expert dtypes those
+// releases use; add a line per dtype with evidence.
+template [[host_name("kernel_moe_swiglu_clamped_iq2_s_f32_grouped_slots_generic")]] kernel moe_swiglu_clamped_grouped_slots_generic_t kernel_moe_swiglu_clamped_grouped_slots_n16_generic<QT_IQ2_S_BYTES, QT_IQ2_S_NL, qt_dequantize_iq2_s>;
+template [[host_name("kernel_moe_swiglu_clamped_iq3_s_f32_grouped_slots_generic")]] kernel moe_swiglu_clamped_grouped_slots_generic_t kernel_moe_swiglu_clamped_grouped_slots_n16_generic<QT_IQ3_S_BYTES, QT_IQ3_S_NL, qt_dequantize_iq3_s>;

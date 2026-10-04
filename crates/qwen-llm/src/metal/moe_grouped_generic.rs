@@ -444,10 +444,49 @@ pub fn encode_moe_swiglu_f32_grouped_slots_generic_range(
         );
     }
 
-    let l = generic_layout_for(KERNEL, w_gate, n_hidden, n_ffn, n_expert)?;
-    generic_layout_for(KERNEL, w_up, n_hidden, n_ffn, n_expert)?;
-    let name = moe_grouped_generic_pipeline_name(MoeGroupedGenericRole::Swiglu, w_gate.dtype)
-        .expect("layout lookup succeeded above");
+    encode_fused_swiglu(
+        ctx, enc, KERNEL, w_gate, w_up, x_pack, counts, ids, inner, n_hidden, n_ffn, n_expert,
+        topk, n_tokens, min_count, max_count, None,
+    )
+}
+
+/// Same-dtype fused gate/up dispatch; `clamp` selects the clamped epilogue
+/// `silu(min(g, c)) * clamp(u, -c, c)`.
+#[allow(clippy::too_many_arguments)]
+fn encode_fused_swiglu(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    kernel: &'static str,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+    min_count: u32,
+    max_count: u32,
+    clamp: Option<f32>,
+) -> Result<(), MetalError> {
+    let l = generic_layout_for(kernel, w_gate, n_hidden, n_ffn, n_expert)?;
+    generic_layout_for(kernel, w_up, n_hidden, n_ffn, n_expert)?;
+    let name = match clamp {
+        None => moe_grouped_generic_pipeline_name(MoeGroupedGenericRole::Swiglu, w_gate.dtype)
+            .expect("layout lookup succeeded above"),
+        Some(_) => {
+            clamped_swiglu_pipeline_name(w_gate.dtype).ok_or_else(|| MetalError::BadShape {
+                kernel,
+                detail: format!(
+                    "no clamped grouped SwiGLU instantiation for {:?}",
+                    w_gate.dtype
+                ),
+            })?
+        }
+    };
     let pso = ctx.pipeline(&name)?;
     enc.set_pipeline(&pso);
     #[repr(C)]
@@ -483,6 +522,9 @@ pub fn encode_moe_swiglu_f32_grouped_slots_generic_range(
     enc.set_tensor(4, counts);
     enc.set_tensor(5, ids);
     enc.set_tensor(6, inner);
+    if let Some(clamp) = clamp {
+        enc.set_bytes(7, &clamp);
+    }
     enc.set_threadgroup_memory(0, 16384);
     enc.dispatch(
         MTLSize {
@@ -497,6 +539,94 @@ pub fn encode_moe_swiglu_f32_grouped_slots_generic_range(
         },
     );
     Ok(())
+}
+
+/// Dtypes with a clamped fused grouped SwiGLU instantiation (the expert
+/// dtypes of the GLM-5.3 release).
+pub const MOE_GROUPED_CLAMPED_SWIGLU_DTYPES: &[GgmlType] = &[GgmlType::IQ2_S, GgmlType::IQ3_S];
+
+pub fn clamped_swiglu_pipeline_name(dtype: GgmlType) -> Option<String> {
+    MOE_GROUPED_CLAMPED_SWIGLU_DTYPES
+        .contains(&dtype)
+        .then(|| moe_grouped_generic_layout(dtype))
+        .flatten()
+        .map(|l| {
+            format!(
+                "kernel_moe_swiglu_clamped_{}_f32_grouped_slots_generic",
+                l.suffix
+            )
+        })
+}
+
+/// Grouped expert-major fused gate/up with the clamped SwiGLU epilogue
+/// (DeepSeek V4 / GLM-5.3): `inner[slot] = silu(min(g, clamp)) *
+/// clamp(u, -clamp, clamp)` for every routed slot. Same layouts as
+/// [`encode_moe_swiglu_f32_grouped_slots_generic`]; gate and up must share a
+/// dtype listed in [`MOE_GROUPED_CLAMPED_SWIGLU_DTYPES`].
+#[allow(clippy::too_many_arguments)]
+pub fn encode_moe_swiglu_clamped_f32_grouped_slots_generic(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+    clamp: f32,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "moe_swiglu_clamped_grouped_slots_generic";
+    if !clamp.is_finite() || clamp <= 0.0 {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("clamp must be finite and positive, got {clamp}"),
+        });
+    }
+    if w_gate.dtype != w_up.dtype {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("gate/up dtypes differ: {:?}/{:?}", w_gate.dtype, w_up.dtype),
+        });
+    }
+    if topk == 0
+        || n_ffn == 0
+        || n_tokens == 0
+        || n_expert == 0
+        || x_pack.n_elements() as usize != n_tokens * n_hidden
+        || counts.n_elements() as usize != n_expert
+        || ids.n_elements() as usize != n_expert * n_tokens
+        || inner.n_elements() as usize != n_tokens * topk * n_ffn
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "degenerate shape or x/counts/ids/inner size mismatch".into(),
+        });
+    }
+    encode_fused_swiglu(
+        ctx,
+        enc,
+        KERNEL,
+        w_gate,
+        w_up,
+        x_pack,
+        counts,
+        ids,
+        inner,
+        n_hidden,
+        n_ffn,
+        n_expert,
+        topk,
+        n_tokens,
+        // Full count range; the kernel compares max_count as int.
+        0,
+        i32::MAX as u32,
+        Some(clamp),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

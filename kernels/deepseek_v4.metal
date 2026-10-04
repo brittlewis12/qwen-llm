@@ -233,6 +233,34 @@ ROUTE_LEARNED_KERNEL(kernel_deepseek_v4_route_learned, route_score_sqrt_softplus
 // GLM-5.3: sigmoid(logit).
 ROUTE_LEARNED_KERNEL(kernel_route_learned_sigmoid, route_score_sigmoid)
 
+// Independent rows: threadgroup y routes row y of logits [rows][E] into
+// ids/weights [rows][top_k] and status [rows], with the single-row arithmetic.
+#define ROUTE_LEARNED_ROWS_KERNEL(NAME, SCORE)                                    \
+    kernel void NAME(                                                             \
+            constant ds4_route_args & args [[buffer(0)]],                         \
+            device const float * logits [[buffer(1)]],                            \
+            device const float * correction_bias [[buffer(2)]],                   \
+            device int * expert_ids [[buffer(3)]],                                \
+            device float * weights [[buffer(4)]],                                 \
+            device int * status [[buffer(5)]],                                    \
+            uint2 tgpig [[threadgroup_position_in_grid]],                         \
+            uint tid [[thread_index_in_threadgroup]],                             \
+            ushort sgitg [[simdgroup_index_in_threadgroup]],                      \
+            ushort tiisg [[thread_index_in_simdgroup]],                           \
+            ushort n_groups [[simdgroups_per_threadgroup]]) {                     \
+        threadgroup float group_scores[ROUTE_MAX_GROUPS];                         \
+        threadgroup uint group_ids[ROUTE_MAX_GROUPS];                             \
+        threadgroup uint selected_ids[ROUTE_MAX_TOP_K];                           \
+        threadgroup uint route_error;                                             \
+        const uint row = tgpig.y;                                                 \
+        route_learned_impl<SCORE>(args, logits + (ulong)row * args.expert_count,  \
+            correction_bias, expert_ids + (ulong)row * args.top_k,                \
+            weights + (ulong)row * args.top_k, status + row, group_scores,        \
+            group_ids, selected_ids, route_error, tid, sgitg, tiisg, n_groups);   \
+    }
+
+ROUTE_LEARNED_ROWS_KERNEL(kernel_route_learned_sigmoid_rows, route_score_sigmoid)
+
 kernel void kernel_deepseek_v4_route_hash(
         constant ds4_route_args & args [[buffer(0)]],
         device const float * logits [[buffer(1)]],

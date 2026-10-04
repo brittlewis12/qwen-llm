@@ -47,7 +47,8 @@ fn read_reference_logits(path: &std::path::Path) -> Vec<(u32, Vec<f32>)> {
     out
 }
 
-/// GLMCAP01 F32 records keyed by (name, step, layer, occurrence).
+/// GLMCAP01 F32 (and I32, as exact F32) records keyed by (name, step,
+/// layer, occurrence).
 fn read_captures(
     path: &std::path::Path,
     wanted: &[&str],
@@ -72,7 +73,16 @@ fn read_captures(
         offset += 4 + 32;
         let n = i64_at(offset) as usize;
         offset += 8;
-        if dtype == 0 && wanted.contains(&name.as_str()) {
+        if dtype == 26 && wanted.contains(&name.as_str()) {
+            // I32 records (selected ids) are small integers, exact in F32.
+            let values = bytes[offset..offset + n]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| i32::from_le_bytes(*b) as f32)
+                .collect();
+            out.insert((name, step, layer, occurrence), values);
+        } else if dtype == 0 && wanted.contains(&name.as_str()) {
             let values = bytes[offset..offset + n]
                 .as_chunks::<4>()
                 .0
@@ -709,6 +719,120 @@ const QUALIFICATION_TEXT: &str = "[gMASK]<sop>The history of maritime trade begi
     clocks now count the oscillations of caesium atoms so steadily that they would drift by less \
     than a second over millions of years.";
 
+/// Twelve more unrelated passages: with [`QUALIFICATION_TEXT`] over 2,100
+/// tokens, for gates across the sparse frontier.
+const SPARSE_EXTRA_PASSAGES: &[&str] = &[
+    "Volcanoes form where molten rock reaches the surface. At mid-ocean ridges the plates \
+        pull apart and basalt wells up quietly, building new sea floor at roughly the rate \
+        fingernails grow. Where one plate dives beneath another, water carried down with it \
+        lowers the melting point of the mantle, and sticky, gas-rich magma rises to feed \
+        explosive cones. Hot spots such as the one beneath Hawaii stay roughly fixed while the \
+        plate slides over them, leaving a chain of islands that grow older and lower with \
+        distance. Ash from large eruptions can circle the globe and cool the climate for a \
+        year or two.",
+    "A violin is a carefully balanced box of spruce and maple. The arched top vibrates when \
+        the strings are bowed, and a small post of wood wedged inside carries vibrations to \
+        the back. Makers in northern Italy refined the shape centuries ago, choosing timber by \
+        its stiffness and weight and varnishing it with recipes that are still debated. \
+        Players change the sound by the speed, pressure and position of the bow, and by \
+        pressing the strings against the fingerboard to shorten their vibrating length. A \
+        well-made instrument responds evenly across its range and projects to the back of a \
+        large hall.",
+    "Coral reefs are built by tiny animals that live in partnership with algae. The algae \
+        live inside the coral tissue and supply sugars from photosynthesis, while the coral \
+        provides shelter and nutrients. Over thousands of years the animals deposit limestone \
+        skeletons that accumulate into reefs large enough to see from space. Reefs shelter a \
+        quarter of all marine species despite covering a tiny fraction of the ocean floor. \
+        When water becomes too warm the coral expels its algae and turns white, and if the \
+        heat persists the colony starves.",
+    "The printing press transformed how ideas travelled. Before movable type, books were \
+        copied by hand and a single volume could take months to finish. Casting individual \
+        letters in metal allowed pages to be composed, printed, broken up and reused, so that \
+        hundreds of identical copies could be made in the time a scribe needed for one. \
+        Pamphlets, newspapers and scientific journals followed, and literacy spread as reading \
+        material became cheaper. Standardised spelling and grammar emerged partly because \
+        printers needed consistent rules for their compositors.",
+    "Bridges carry loads in a few basic ways. A beam bridge bends, with its top in \
+        compression and its bottom in tension. An arch pushes outward against its abutments \
+        and keeps its stones squeezed together, which is why Roman arches still stand without \
+        mortar. Suspension bridges hang the deck from cables draped over tall towers and \
+        anchored in heavy blocks at each end, while cable-stayed bridges run straight cables \
+        from the towers to the deck. Engineers must also account for wind, temperature changes \
+        that make steel expand and contract, and the rhythm of traffic and footsteps.",
+    "Migratory birds cover astonishing distances. Arctic terns fly from the far north to \
+        the Antarctic and back each year, seeing more daylight than any other animal. Many \
+        songbirds travel at night, navigating by the stars, by the earth's magnetic field and \
+        by landmarks such as coastlines and mountain ranges. Before departure they eat heavily \
+        and may nearly double their weight, then burn the fat as fuel during long flights over \
+        open water or desert. Wetlands and forests along the way serve as refuelling stops, \
+        and their loss can break a route that has been used for millennia.",
+    "Tea began as a medicinal drink in China and became a daily habit across much of the \
+        world. The leaves of a single species of camellia produce green, black, white and \
+        oolong teas depending on how long they are allowed to oxidise before being heated and \
+        dried. Trade in tea shaped empires: caravans carried compressed bricks across \
+        mountains, and clipper ships raced to bring the first harvest of the season to \
+        European ports. In many cultures preparing and serving tea is a ritual of hospitality, \
+        with its own utensils, gestures and etiquette.",
+    "Mapmakers have always faced the problem of flattening a round world. Every projection \
+        distorts something: areas, angles, distances or directions. The familiar Mercator map \
+        keeps compass bearings true, which made it invaluable to sailors, but it inflates \
+        regions near the poles so that Greenland appears as large as Africa. Equal-area \
+        projections correct the sizes at the cost of shapes. Modern satellite surveys and \
+        global positioning have made measurements far more precise, yet choosing a projection \
+        still depends on what the map is meant to show.",
+    "Cheese is a way of preserving milk. Bacteria convert the milk sugar into acid, and an \
+        enzyme called rennet makes the proteins clump into curds that separate from the watery \
+        whey. Cutting, heating and pressing the curds controls how much moisture remains, \
+        which determines whether the cheese will be soft and fresh or hard and suitable for \
+        long ageing. During ripening, moulds and bacteria break down fats and proteins into \
+        hundreds of flavour compounds. Caves with steady temperature and humidity have been \
+        used for centuries to age the finest wheels.",
+    "Lighthouses guided ships long before radio and satellites. Early towers burned wood or \
+        coal fires at the top, later replaced by oil lamps with polished reflectors. The \
+        invention of the Fresnel lens, with its rings of glass prisms, allowed a modest flame \
+        to be seen more than twenty miles out to sea. Each lighthouse flashed its own pattern \
+        so that sailors could identify it on a chart. Keepers lived in isolation, trimming \
+        wicks, winding clockwork and recording the weather, until automation made the job \
+        unnecessary in most places.",
+    "Sleep is not simply a pause in activity. During the night the brain cycles through \
+        stages of light and deep sleep and periods of rapid eye movement, when most vivid \
+        dreaming occurs. Deep sleep appears to help consolidate memories and clear waste \
+        products from brain tissue, while dreaming sleep may help process emotions. Hormones \
+        that regulate appetite, growth and stress follow rhythms tied to the sleep cycle. Even \
+        a few nights of short sleep can slow reaction times and impair judgement as much as \
+        moderate alcohol consumption.",
+    "Glassmaking turns sand into something transparent. Silica melts only at very high \
+        temperatures, so ancient glassmakers added soda or potash to lower the melting point \
+        and lime to make the result durable. Glassblowers gather a blob of molten glass on the \
+        end of a hollow pipe and inflate it like a balloon, shaping it with tools and gravity \
+        before it cools. Window glass was once made by spinning a disc or blowing a long \
+        cylinder and flattening it; today most flat glass is made by floating molten glass on \
+        a bath of liquid tin, which leaves both surfaces perfectly smooth.",
+];
+
+fn sparse_qualification_text() -> String {
+    let mut text = QUALIFICATION_TEXT.to_string();
+    for passage in SPARSE_EXTRA_PASSAGES {
+        text.push_str("\n\n");
+        text.push_str(passage);
+    }
+    text
+}
+
+/// Prints the token ids of [`sparse_qualification_text`] for oracle runs
+/// (CPU only; requires GLM53_GGUF for the tokenizer).
+#[test]
+#[ignore = "CPU-only helper; requires GLM53_GGUF"]
+fn print_sparse_qualification_tokens() {
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let gguf = GgufFile::open(&path).unwrap();
+    let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
+    let tokens = tokenizer
+        .encode(&sparse_qualification_text(), false)
+        .unwrap();
+    eprintln!("sparse qualification tokens ({}): {tokens:?}", tokens.len());
+}
+
 /// Valid persistent state after `visible` positions, by kind and layer: KDA
 /// S and conv tails; MLA latent rows `[0, visible)`, completed pools
 /// `[0, visible / 4)`, and the pending ring's live slots (the incomplete
@@ -1161,4 +1285,335 @@ fn comparison_helpers_refuse_nonfinite_and_mismatched_inputs() {
     assert!(refused(|| short.errors(&state(2.0, vec![]))));
     let errors = state(2.0, vec![]).errors(&state(2.0, vec![]));
     assert!(errors.iter().all(|(_, e, _)| *e == 0.0));
+}
+
+const SPARSE_ORACLE_DEFAULT: &str =
+    "/Volumes/wdblack/weights-archive/.fetch/analysis/runs/glm53-oracle/sparse-v1";
+
+fn sparse_oracle_dir() -> PathBuf {
+    std::env::var_os("GLM53_SPARSE_ORACLE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(SPARSE_ORACLE_DEFAULT))
+}
+
+/// Executed MLA block indices of the release (every fourth block from 3).
+const MLA_BLOCKS: [u32; 11] = [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43];
+
+/// Component replay of sparse selection on llama.cpp's own inputs (sparse-v1
+/// captures at positions 2050-2060, all 11 MLA blocks): the native 32-head
+/// scorer runs on the captured `indexer_q` (rounded to F16 in the kernel's
+/// contract), `indexer_weights` and `indexer_pool_k`, and the native selector
+/// on both llama.cpp's and the native scores. Bounds were frozen before the
+/// first observation:
+/// - scores within 1e-5 of the row's largest magnitude;
+/// - selection on llama.cpp's scores contains every strict winner and no
+///   strict loser (llama.cpp fills threshold ties in atomic order);
+/// - selection on native scores equals llama.cpp's set when the 512th/513th
+///   gap exceeds twice the measured score error, else agrees on every pool
+///   beyond that error from the threshold;
+/// - at position 2050 (visible length 2051) llama.cpp selects every visible
+///   pool (dense equivalence).
+#[test]
+#[ignore = "requires the sparse-v1 llama.cpp captures and Metal"]
+fn sparse_selection_replays_llama_cpp_indexer_captures() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    let names = [
+        "indexer_q",
+        "indexer_weights",
+        "indexer_pool_k",
+        "indexer_score",
+        "indexer_top_k",
+    ];
+    let captures = read_captures(&sparse_oracle_dir().join("capture.bin.captures"), &names);
+    const TOP: usize = 512;
+    let (h, d) = (32usize, 128usize);
+    let mut worst_score_error = 0.0f64;
+    let mut exclusions = 0usize;
+    for step in 2050u32..=2060 {
+        let visible_pools = (step as usize + 1) / 4;
+        for &layer in &MLA_BLOCKS {
+            let get = |name: &str| {
+                captures
+                    .get(&(name.to_string(), step, layer, 0))
+                    .unwrap_or_else(|| panic!("missing {name} step {step} layer {layer}"))
+            };
+            let (q, w, pool_k, llama_scores, llama_top) = (
+                get("indexer_q"),
+                get("indexer_weights"),
+                get("indexer_pool_k"),
+                get("indexer_score"),
+                get("indexer_top_k"),
+            );
+            let label = format!("step {step} layer {layer}");
+            let pools = pool_k.len() / d;
+            assert!(
+                pools >= visible_pools && llama_scores.len() == pools,
+                "{label}"
+            );
+            assert_eq!(
+                (q.len(), w.len(), llama_top.len()),
+                (h * d, h, TOP),
+                "{label}"
+            );
+            assert_finite(&label, &llama_scores[..visible_pools]);
+            assert!(
+                llama_scores[visible_pools..]
+                    .iter()
+                    .all(|s| *s == f32::NEG_INFINITY),
+                "{label}: invisible pools must be masked"
+            );
+            // Pooled keys are F16 cache values: exact through F16.
+            let keys: Vec<half::f16> = pool_k.iter().map(|&v| half::f16::from_f32(v)).collect();
+            assert!(
+                keys[..visible_pools * d]
+                    .iter()
+                    .zip(pool_k)
+                    .all(|(k, v)| k.to_f32() == *v),
+                "{label}: pooled keys are not F16 values"
+            );
+            let queries: Vec<half::f16> = q.iter().map(|&v| half::f16::from_f32(v)).collect();
+            let tensor = |bytes: &[u8], shape: Vec<u64>, dtype| {
+                crate::metal::MetalTensor::from_bytes(&ctx, bytes, shape, dtype).unwrap()
+            };
+            let q_t = tensor(
+                bytemuck::cast_slice(&queries),
+                vec![d as u64, h as u64, 1],
+                GgmlType::F16,
+            );
+            let w_t = tensor(bytemuck::cast_slice(w), vec![h as u64, 1], GgmlType::F32);
+            let k_t = tensor(
+                bytemuck::cast_slice(&keys),
+                vec![d as u64, pools as u64],
+                GgmlType::F16,
+            );
+            let v_t = tensor(
+                bytemuck::cast_slice(&[visible_pools as i32]),
+                vec![1],
+                GgmlType::I32,
+            );
+            let s_t = MetalTensor::zeros_f32(&ctx, vec![pools as u64, 1]).unwrap();
+            let run = |encode: &dyn Fn(&KernelEncoder)| {
+                let command = ctx.queue.commandBuffer().unwrap();
+                let enc = KernelEncoder::begin(&command);
+                encode(&enc);
+                enc.end();
+                command.commit();
+                crate::metal::wait_completed(&command).unwrap();
+            };
+            run(&|enc| {
+                crate::metal::encode_lightning_scores_f16_matrix(
+                    &ctx,
+                    enc,
+                    &crate::metal::LightningScores {
+                        queries: &q_t,
+                        head_weights: &w_t,
+                        keys: &k_t,
+                        visible_counts: &v_t,
+                        scores: &s_t,
+                    },
+                    h,
+                    d,
+                    pools,
+                    visible_pools,
+                    1,
+                )
+                .unwrap()
+            });
+            let native = read_f32(&s_t).unwrap();
+            let native = &native[..visible_pools];
+            let reference = &llama_scores[..visible_pools];
+            let scale = reference
+                .iter()
+                .fold(0.0f32, |m, v| m.max(v.abs()))
+                .max(1e-30);
+            let error = max_abs_diff(native, reference);
+            worst_score_error = worst_score_error.max(f64::from(error / scale));
+            assert!(
+                within(f64::from(error / scale), 1e-5),
+                "{label}: score error {error} (scale {scale})"
+            );
+            let llama_set: std::collections::BTreeSet<i32> =
+                llama_top.iter().map(|&v| v as i32).collect();
+            if visible_pools <= TOP {
+                let all: std::collections::BTreeSet<i32> = (0..visible_pools as i32).collect();
+                assert_eq!(llama_set, all, "{label}: dense range selects every pool");
+                continue;
+            }
+            exclusions += 1;
+            // Threshold from llama.cpp's scores.
+            let mut sorted: Vec<f32> = reference.to_vec();
+            sorted.sort_by(|a, b| b.total_cmp(a));
+            let (threshold, next) = (sorted[TOP - 1], sorted[TOP]);
+            let select = |scores: &[f32]| -> std::collections::BTreeSet<i32> {
+                let mut padded = scores.to_vec();
+                padded.resize(pools, f32::NEG_INFINITY);
+                let s_t = tensor(
+                    bytemuck::cast_slice(&padded),
+                    vec![pools as u64, 1],
+                    GgmlType::F32,
+                );
+                let ids = MetalTensor::zeros_i32(&ctx, vec![TOP as u64, 1]).unwrap();
+                let counts = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+                let status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+                run(&|enc| {
+                    crate::metal::encode_select_top_k_ids(
+                        &ctx,
+                        enc,
+                        &crate::metal::TopKSelection {
+                            scores: &s_t,
+                            visible_counts: &v_t,
+                            ids: &ids,
+                            counts: &counts,
+                            status: &status,
+                        },
+                        pools,
+                        visible_pools,
+                        TOP,
+                        1,
+                    )
+                    .unwrap()
+                });
+                assert_eq!(
+                    read_i32(&status).unwrap()[0],
+                    crate::metal::SELECT_STATUS_OK,
+                    "{label}"
+                );
+                assert_eq!(read_i32(&counts).unwrap()[0], TOP as i32, "{label}");
+                read_i32(&ids).unwrap().into_iter().collect()
+            };
+            let respects = |set: &std::collections::BTreeSet<i32>, band: f32| {
+                reference.iter().enumerate().all(|(pool, &s)| {
+                    let inside = set.contains(&(pool as i32));
+                    !(s > threshold + band && !inside) && !(s < threshold - band && inside)
+                })
+            };
+            assert!(respects(&llama_set, 0.0), "{label}: llama.cpp set");
+            let on_llama = select(reference);
+            assert!(
+                respects(&on_llama, 0.0),
+                "{label}: native selection of llama.cpp scores"
+            );
+            if threshold > next {
+                assert_eq!(on_llama, llama_set, "{label}: untied threshold");
+            }
+            let on_native = select(native);
+            if threshold - next > 2.0 * error {
+                assert_eq!(
+                    on_native,
+                    llama_set,
+                    "{label}: native scores, gap {}",
+                    threshold - next
+                );
+            } else {
+                assert!(
+                    respects(&on_native, error),
+                    "{label}: native scores near the threshold"
+                );
+            }
+        }
+    }
+    eprintln!(
+        "replayed 11 positions x 11 MLA blocks: worst relative score error {worst_score_error:.3e}, {exclusions} sparse selections"
+    );
+}
+
+/// Decode across the sparse frontier against llama.cpp (sparse-v1): Exact
+/// packed prefill of 2048 tokens (dense), then teacher-forced decode of
+/// positions 2048-2092 (dense through 2050, sparse selection from 2051: the
+/// first exclusion, every tail length and ten new pools), each position's
+/// logits against llama.cpp serial decode. Bounds frozen before the first
+/// observation, at qual-v1's overall ceilings: KL <= 1e-2 and choice regret
+/// <= 0.2 in both directions at every position. Also reports llama.cpp's
+/// own observer effect (captured vs uncaptured logits at 2050-2060).
+#[test]
+#[ignore = "loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, the sparse-v1 oracle and an idle GPU"]
+fn sparse_decode_crosses_the_frontier_against_llama_cpp() {
+    let _lease = production_lease();
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let ctx = MetalContext::new().expect("Metal context");
+    let gguf = GgufFile::open(&path).unwrap();
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
+    let tokens: Vec<u32> = tokenizer
+        .encode(&sparse_qualification_text(), false)
+        .unwrap()
+        .into_iter()
+        .map(|t| t as u32)
+        .collect();
+    const PREFIX: usize = 2048;
+    let total = tokens.len();
+    assert!(total >= PREFIX + 40, "only {total} tokens");
+    const KL: f64 = 1e-2;
+    const REGRET: f64 = 0.2;
+
+    let mut session = Glm5NextSession::with_prefill_rows(&ctx, &weights, total, 512).unwrap();
+    session.set_packed_lineage(PackedLineage::Exact);
+    assert_allocation_within_ledger(&session);
+    let start = std::time::Instant::now();
+    let prefix_logits = session.prefill_packed(&ctx, &tokens[..PREFIX]).unwrap();
+    eprintln!(
+        "exact packed prefill: {PREFIX} tokens in {:.1} s",
+        start.elapsed().as_secs_f64()
+    );
+    let mut native = vec![prefix_logits];
+    let start = std::time::Instant::now();
+    for &token in &tokens[PREFIX..] {
+        native.push(session.forward(&ctx, token).unwrap());
+    }
+    eprintln!(
+        "decode {} -> {}: {:.1} ms/token",
+        PREFIX,
+        total,
+        start.elapsed().as_secs_f64() * 1e3 / (total - PREFIX) as f64
+    );
+    // native[i] is the logits at position PREFIX - 1 + i.
+    let mut reference = ReferenceStream::open(&sparse_oracle_dir().join("serial.bin"));
+    assert_eq!(reference.remaining, total);
+    let mut captured = ReferenceStream::open(&sparse_oracle_dir().join("capture.bin"));
+    let mut failures = Vec::new();
+    let mut top1 = 0;
+    let mut rows = Vec::new();
+    for position in 0..total {
+        let (p, t, expected) = reference.next();
+        let (_, _, with_captures) = captured.next();
+        assert_eq!(
+            (p as usize, t),
+            (position, tokens[position]),
+            "token {position}"
+        );
+        if (2050..=2060).contains(&position) {
+            rows.push(format!(
+                "{position}:{:.1e}",
+                kl_divergence(&expected, &with_captures)
+            ));
+        }
+        if position + 1 < PREFIX {
+            continue;
+        }
+        let logits = &native[position + 1 - PREFIX];
+        let kl = kl_divergence(&expected, logits);
+        let (forward, reverse) = choice_regret(&expected, logits);
+        top1 += usize::from(argmax(&expected) == argmax(logits));
+        let sparse = position + 1 >= weights.config.sparse_frontier() as usize;
+        eprintln!(
+            "pos {position} ({}): kl {kl:.3e} regret {forward:.3}/{reverse:.3}",
+            if sparse { "sparse" } else { "dense" }
+        );
+        if !within(kl, KL)
+            || !within(f64::from(forward), REGRET)
+            || !within(f64::from(reverse), REGRET)
+        {
+            failures.push(format!(
+                "pos {position}: kl {kl:.3e} regret {forward:.3}/{reverse:.3}"
+            ));
+        }
+    }
+    eprintln!(
+        "top-1 {top1}/{}; llama.cpp captured vs uncaptured KL: {}",
+        native.len(),
+        rows.join(" ")
+    );
+    assert!(failures.is_empty(), "{failures:#?}");
 }

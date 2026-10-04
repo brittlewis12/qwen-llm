@@ -483,24 +483,28 @@ fn ledger_terms_match_release_geometry() {
     // 512-row packed activations (largest: query/output latents 4096 G each,
     // slot outputs 4096 G).
     let packed = 38_041 * G;
+    // Sparse decode (capacity reaches the frontier): eleven sub-granule
+    // buffers plus [8192] F32 pool scores (2 G).
+    let sparse = 12 * G;
     for (name, bytes) in [
         ("retained_weights", 100 * GIB),
         ("kda_state", kda),
         ("mla_state", mla),
         ("decode_scratch", decode),
         ("decode_routes", routes),
+        ("sparse_decode", sparse),
         ("packed_scratch", packed),
         ("packed_routes", routes),
         ("reserve", memory::DYNAMIC_RESERVE_BYTES),
         ("session_state", kda + mla),
         (
             "session_buffers",
-            kda + mla + decode + routes + packed + routes,
+            kda + mla + decode + routes + sparse + packed + routes,
         ),
     ] {
         assert_eq!(term(&l, name), bytes, "{name}");
     }
-    let buffers = kda + mla + decode + 2 * routes + packed;
+    let buffers = kda + mla + decode + 2 * routes + sparse + packed;
     assert_eq!(l.session_state_bytes(), kda + mla);
     assert_eq!(l.session_buffer_bytes(), buffers);
     let p = l.phase_peaks();
@@ -519,6 +523,9 @@ fn ledger_terms_match_release_geometry() {
     assert_eq!(term(&d, "packed_scratch") + term(&d, "packed_routes"), 0);
     assert_eq!(d.session_buffer_bytes(), buffers - packed - routes);
     assert_eq!(d.peak_bytes(), l.peak_bytes() - packed - routes);
+    // Sparse scratch exists exactly from the frontier on.
+    assert_eq!(term(&ledger(&c, 0, 2051, 0).unwrap(), "sparse_decode"), 0);
+    assert!(term(&ledger(&c, 0, 2052, 0).unwrap(), "sparse_decode") > 0);
 
     // 513 rows: ids and weights [8, 513] cross into a second granule.
     let r513 = ledger(&c, 100 * GIB, 32_768, 513).unwrap();
@@ -571,6 +578,7 @@ fn buffer_specs_are_unique_nonempty_and_granule_priced() {
         ("route", memory::route_specs(&c, None)),
         ("route_rows", memory::route_specs(&c, Some(3))),
         ("kda", memory::kda_state_specs(&c)),
+        ("sparse", memory::sparse_decode_specs(&c, 2052)),
         ("mla", memory::mla_state_specs(&c, 1)),
     ] {
         let mut names: Vec<_> = specs.iter().map(|s| s.name).collect();

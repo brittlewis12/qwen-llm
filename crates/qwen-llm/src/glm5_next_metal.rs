@@ -448,6 +448,81 @@ impl LayerState {
     }
 }
 
+/// Decode sparse-selection scratch (sessions that reach the sparse
+/// frontier), shared by every MLA block except `select_status`, which holds
+/// one sticky slot per MLA block. Selection reuses the other buffers block
+/// after block on the serial encoder: each block's attention consumes them
+/// before the next block's selection overwrites them.
+struct SparseScratch {
+    index_query: MetalTensor,
+    index_query_f16: MetalTensor,
+    index_weights: MetalTensor,
+    scores: MetalTensor,
+    pool_ids: MetalTensor,
+    pool_counts: MetalTensor,
+    visible_pools: MetalTensor,
+    visible_rows: MetalTensor,
+    row_ids: MetalTensor,
+    row_counts: MetalTensor,
+    select_status: MetalTensor,
+}
+
+impl SparseScratch {
+    fn new(ctx: &MetalContext, c: &Glm5NextConfig, capacity: u64) -> Result<Self> {
+        let specs = memory::sparse_decode_specs(c, capacity);
+        let mut b = SpecBuffers::allocate(ctx, "sparse_decode", &specs)?;
+        let s = Self {
+            index_query: b.take("index_query")?,
+            index_query_f16: b.take("index_query_f16")?,
+            index_weights: b.take("index_weights")?,
+            scores: b.take("scores")?,
+            pool_ids: b.take("pool_ids")?,
+            pool_counts: b.take("pool_counts")?,
+            visible_pools: b.take("visible_pools")?,
+            visible_rows: b.take("visible_rows")?,
+            row_ids: b.take("row_ids")?,
+            row_counts: b.take("row_counts")?,
+            select_status: b.take("select_status")?,
+        };
+        b.finish()?;
+        Ok(s)
+    }
+
+    /// Status slot of the `mla_index`-th MLA block.
+    fn status(&self, mla_index: usize) -> MetalTensor {
+        self.select_status.view_subrange(mla_index as u64, vec![1])
+    }
+}
+
+/// Writes I32 values into a shared-storage I32 tensor. Callers are
+/// synchronized session code: no command touching it may be in flight.
+fn write_i32(tensor: &MetalTensor, values: &[i32]) -> Result<()> {
+    let end = tensor.offset.checked_add(4 * values.len() as u64);
+    if tensor.dtype != GgmlType::I32
+        || tensor.n_elements() != values.len() as u64
+        || !tensor.offset.is_multiple_of(4)
+        || end.is_none_or(|end| end > tensor.buffer.length() as u64)
+    {
+        return invalid("cannot write I32 values into this tensor");
+    }
+    // SAFETY: shared storage; dtype, length, alignment and range checked;
+    // the caller guarantees no in-flight command uses the tensor.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            values.as_ptr(),
+            tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize)
+                .cast::<i32>(),
+            values.len(),
+        );
+    }
+    Ok(())
+}
+
 impl RouteRecord {
     /// One record per MoE block (`None` for dense FFN blocks); `rows` is
     /// `None` for decode and the chunk size for packed prefill.
@@ -565,6 +640,8 @@ pub struct Glm5NextSession<'w> {
     layers: Vec<LayerState>,
     routes: Vec<Option<RouteRecord>>,
     s: Scratch,
+    /// Present when `capacity` reaches the sparse frontier.
+    sparse: Option<SparseScratch>,
     packed: Option<packed::PackedScratch>,
     ledger: Glm5NextMemoryLedger,
     /// Net device-counter change across buffer construction (diagnostic).
@@ -572,8 +649,9 @@ pub struct Glm5NextSession<'w> {
 }
 
 impl<'w> Glm5NextSession<'w> {
-    /// Allocates all session state for `capacity` positions (dense range only)
-    /// after admitting the ledger's session terms (decode-only).
+    /// Allocates all session state for `capacity` positions after admitting
+    /// the ledger's session terms (decode-only). From the sparse frontier
+    /// (visible length 2052) on, attention runs over the indexer's selection.
     pub fn new(ctx: &MetalContext, weights: &'w Glm5NextWeights, capacity: usize) -> Result<Self> {
         Self::with_prefill_rows(ctx, weights, capacity, 0)
     }
@@ -592,12 +670,10 @@ impl<'w> Glm5NextSession<'w> {
         if prefill_rows > 0 && !weights.packed_prefill_admitted {
             return invalid("packed prefill is not admitted for these weights' dtypes");
         }
-        let frontier = c.sparse_frontier() as usize;
-        if capacity == 0 || capacity >= frontier {
-            return invalid(format!(
-                "capacity {capacity} must be within the dense range 1..{frontier} until sparse selection lands"
-            ));
+        if capacity == 0 {
+            return invalid("capacity must be positive");
         }
+        let sparse_capacity = capacity >= c.sparse_frontier() as usize;
         let ledger = Glm5NextMemoryLedger::new(
             c,
             weights.retained_bytes,
@@ -625,6 +701,9 @@ impl<'w> Glm5NextSession<'w> {
             .collect::<Result<Vec<_>>>()?;
         let routes = RouteRecord::for_blocks(ctx, c, None)?;
         let s = Scratch::new(ctx, c)?;
+        let sparse = sparse_capacity
+            .then(|| SparseScratch::new(ctx, c, capacity as u64))
+            .transpose()?;
         let packed = (prefill_rows > 0)
             .then(|| packed::PackedScratch::new(ctx, c, prefill_rows))
             .transpose()?;
@@ -639,6 +718,7 @@ impl<'w> Glm5NextSession<'w> {
             layers,
             routes,
             s,
+            sparse,
             packed,
             ledger,
             observed_allocation_delta,
@@ -760,6 +840,21 @@ impl<'w> Glm5NextSession<'w> {
         // mutates on the GPU, so any failure or unwind past this point leaves
         // the session unusable rather than silently at the old position.
         self.poisoned = true;
+        let visible = self.position + 1;
+        let sparse = visible >= c.sparse_frontier() as usize;
+        if sparse {
+            let s = self.sparse.as_ref().ok_or_else(|| {
+                Glm5NextMetalError::Invalid("sparse position without sparse scratch".into())
+            })?;
+            write_i32(
+                &s.visible_pools,
+                &[(visible / c.indexer_pool as usize) as i32],
+            )?;
+            write_i32(&s.visible_rows, &[visible as i32])?;
+            // Unwritten slots fail the check below.
+            let mla = c.block_count(MixerKind::Mla);
+            write_i32(&s.select_status, &vec![-1; mla])?;
+        }
         self.encode_token(ctx, token, logits, probes, observer)?;
         for (layer, route) in self.routes.iter().enumerate() {
             if let Some(route) = route {
@@ -767,6 +862,18 @@ impl<'w> Glm5NextSession<'w> {
                 if status != ROUTE_STATUS_READY {
                     return invalid(format!("block {layer} route failed with status {status}"));
                 }
+            }
+        }
+        if sparse {
+            let statuses = read_i32(&self.sparse.as_ref().expect("checked").select_status)?;
+            if let Some((index, status)) = statuses
+                .iter()
+                .enumerate()
+                .find(|(_, s)| **s != crate::metal::SELECT_STATUS_OK)
+            {
+                return invalid(format!(
+                    "MLA block {index} sparse selection failed with status {status}"
+                ));
             }
         }
         let logits = logits.then(|| read_f32(&self.s.logits)).transpose()?;
@@ -805,6 +912,7 @@ impl<'w> Glm5NextSession<'w> {
         let mut enc = KernelEncoder::begin(&command);
         encode_get_rows_f32(ctx, &enc, &w.embedding, &s.token, &s.embedding, 1, h)?;
         encode_mhc4_repeat(ctx, &enc, h, &s.embedding, &s.residual[0])?;
+        let mut mla_index = 0;
         for (index, block) in w.blocks.iter().enumerate() {
             let (a, b) = (&s.residual[0], &s.residual[1]);
             // Attention sub-block: a -> b.
@@ -835,7 +943,10 @@ impl<'w> Glm5NextSession<'w> {
                         pending,
                         pooled,
                     },
-                ) => self.encode_mla(ctx, &enc, mla, latent, pending, pooled)?,
+                ) => {
+                    self.encode_mla(ctx, &enc, mla, latent, pending, pooled, mla_index)?;
+                    mla_index += 1;
+                }
                 _ => return invalid(format!("block {index} state does not match its mixer")),
             }
             encode_mhc4_post(ctx, &enc, h, &s.block_out, a, &s.post, &s.comb, b)?;
@@ -1136,6 +1247,7 @@ impl<'w> Glm5NextSession<'w> {
         latent: &MetalTensor,
         pending: &MetalTensor,
         pooled: &MetalTensor,
+        mla_index: usize,
     ) -> Result<()> {
         let c = &self.weights.config;
         let s = &self.s;
@@ -1181,37 +1293,9 @@ impl<'w> Glm5NextSession<'w> {
             kv,
             heads,
         )?;
-        encode_latent_attention(
-            ctx,
-            enc,
-            &s.query_latent,
-            latent,
-            &s.no_sink,
-            &s.output_latent,
-            self.position,
-            1,
-            1.0 / (head_dim as f32).sqrt(),
-        )?;
-        encode_mat_vec_q8_0_grouped_f32(
-            ctx,
-            enc,
-            &mla.value_expand,
-            &s.output_latent,
-            &s.heads_out,
-            kv,
-            head_dim,
-            heads,
-        )?;
-        matvec(
-            ctx,
-            enc,
-            &mla.output,
-            &s.heads_out,
-            &s.block_out,
-            heads * head_dim,
-            h,
-        )?;
-        // Indexer cache maintenance (selection starts at the sparse frontier).
+        // Indexer cache maintenance from token zero. The pool this token
+        // completes is published before attention: a query at visible length
+        // L scores the first L / 4 pools, including its own.
         let index_dim = c.indexer_head_dim as usize;
         matvec(
             ctx,
@@ -1243,6 +1327,183 @@ impl<'w> Glm5NextSession<'w> {
             pooled,
             self.position,
             c.layer_norm_epsilon,
+        )?;
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let visible = self.position + 1;
+        if visible >= c.sparse_frontier() as usize {
+            self.encode_sparse_attention(ctx, enc, mla, latent, pooled, mla_index, visible, scale)?;
+        } else {
+            encode_latent_attention(
+                ctx,
+                enc,
+                &s.query_latent,
+                latent,
+                &s.no_sink,
+                &s.output_latent,
+                self.position,
+                1,
+                scale,
+            )?;
+        }
+        encode_mat_vec_q8_0_grouped_f32(
+            ctx,
+            enc,
+            &mla.value_expand,
+            &s.output_latent,
+            &s.heads_out,
+            kv,
+            head_dim,
+            heads,
+        )?;
+        matvec(
+            ctx,
+            enc,
+            &mla.output,
+            &s.heads_out,
+            &s.block_out,
+            heads * head_dim,
+            h,
+        )?;
+        Ok(())
+    }
+
+    /// Sparse attention for one token at visible length `visible` (at or past
+    /// the frontier): indexer query (F16-rounded) and head weights scaled by
+    /// 1 / sqrt(heads * dim) (exact: 1/64), lightning scores over the visible
+    /// pools, exact top-512 into this block's status slot, expansion to 2048
+    /// rows plus the `visible % 4` tail, and online attention over exactly
+    /// those latent rows (no sink).
+    #[allow(clippy::too_many_arguments)]
+    fn encode_sparse_attention(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        mla: &crate::glm5_next::MlaTensors<MetalTensor>,
+        latent: &MetalTensor,
+        pooled: &MetalTensor,
+        mla_index: usize,
+        visible: usize,
+        scale: f32,
+    ) -> Result<()> {
+        let c = &self.weights.config;
+        let s = &self.s;
+        let sp = self.sparse.as_ref().ok_or_else(|| {
+            Glm5NextMetalError::Invalid("sparse position without sparse scratch".into())
+        })?;
+        let (h, q_rank) = (c.hidden_size as usize, c.q_lora_rank as usize);
+        let (ih, id) = (c.indexer_head_count as usize, c.indexer_head_dim as usize);
+        let (heads, kv) = (c.head_count as usize, c.kv_lora_rank as usize);
+        let query_width = ih * id;
+        matvec(
+            ctx,
+            enc,
+            &mla.indexer.query,
+            &s.query_r,
+            &sp.index_query,
+            q_rank,
+            query_width,
+        )?;
+        encode_scatter_offset_f32_to_f16(
+            ctx,
+            enc,
+            &sp.index_query,
+            &sp.index_query_f16,
+            0,
+            query_width,
+        )?;
+        let weights = sp.index_weights.view_subrange(0, vec![ih as u64]);
+        matvec(
+            ctx,
+            enc,
+            &mla.indexer.head_weights,
+            &s.normed,
+            &weights,
+            h,
+            ih,
+        )?;
+        crate::metal::encode_scale_f32_in_place(
+            ctx,
+            enc,
+            &weights,
+            1.0 / (query_width as f32).sqrt(),
+        )?;
+        let pool_capacity = pooled.shape[1] as usize;
+        let visible_pools = visible / c.indexer_pool as usize;
+        let top_pools = c.selected_pool_count() as usize;
+        let row_slots = c.selection_width() as usize;
+        crate::metal::encode_lightning_scores_f16_matrix(
+            ctx,
+            enc,
+            &crate::metal::LightningScores {
+                queries: &sp.index_query_f16,
+                head_weights: &sp.index_weights,
+                keys: pooled,
+                visible_counts: &sp.visible_pools,
+                scores: &sp.scores,
+            },
+            ih,
+            id,
+            pool_capacity,
+            visible_pools,
+            1,
+        )?;
+        crate::metal::encode_select_top_k_ids(
+            ctx,
+            enc,
+            &crate::metal::TopKSelection {
+                scores: &sp.scores,
+                visible_counts: &sp.visible_pools,
+                ids: &sp.pool_ids,
+                counts: &sp.pool_counts,
+                status: &sp.status(mla_index),
+            },
+            pool_capacity,
+            visible_pools,
+            top_pools,
+            1,
+        )?;
+        crate::metal::encode_indexer_expand_selection(
+            ctx,
+            enc,
+            &crate::metal::IndexerSelection {
+                pool_ids: &sp.pool_ids,
+                pool_counts: &sp.pool_counts,
+                visible_rows: &sp.visible_rows,
+                row_ids: &sp.row_ids,
+                row_counts: &sp.row_counts,
+            },
+            top_pools,
+            row_slots,
+            1,
+        )?;
+        let flat = |t: &MetalTensor| t.view_subrange(0, vec![(kv * heads) as u64, 1]);
+        crate::metal::encode_online_selected_attention_f16(
+            ctx,
+            enc,
+            &crate::metal::SelectedAttention {
+                queries: &flat(&s.query_latent),
+                raw_cache: latent,
+                raw_cache_before_chunk: latent,
+                compressed_cache: latent,
+                selected_ids: &sp.row_ids,
+                selected_counts: &sp.row_counts,
+                visible_counts: &sp.visible_rows,
+                sinks: &s.no_sink,
+                output: &flat(&s.output_latent),
+            },
+            crate::metal::SelectedAttentionShape {
+                head_count: heads,
+                query_count: 1,
+                query_token_offset: 0,
+                token_count: 1,
+                chunk_start_position: self.position,
+                window: 0,
+                raw_cache_is_chunk: false,
+                selected_slots: row_slots,
+                compressed_capacity: latent.shape[1] as usize,
+                scale,
+                direct: true,
+            },
         )?;
         Ok(())
     }

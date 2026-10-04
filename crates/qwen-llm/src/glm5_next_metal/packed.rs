@@ -220,19 +220,35 @@ fn absorb_rows(
 impl Glm5NextSession<'_> {
     /// Packed prefill of `tokens` in chunks of the session's prefill rows;
     /// returns the last token's logits. Falls back to serial decode when the
-    /// session has no packed scratch.
+    /// session has no packed scratch. Packed chunks cover the dense range
+    /// (visible length up to 2051); rows at or past the sparse frontier run
+    /// through serial sparse decode.
     pub fn prefill_packed(&mut self, ctx: &MetalContext, tokens: &[u32]) -> Result<Vec<f32>> {
         let Some(rows) = self.packed.as_ref().map(|p| p.rows) else {
             return self.prefill(ctx, tokens);
         };
         self.validate_request(tokens)?;
-        let chunks: Vec<&[u32]> = tokens.chunks(rows).collect();
-        let last = chunks.len() - 1;
+        let dense = self.dense_rows_remaining().min(tokens.len());
+        let (packed, serial) = tokens.split_at(dense);
         let mut logits = None;
+        let chunks: Vec<&[u32]> = packed.chunks(rows).collect();
+        let last = chunks.len().wrapping_sub(1);
         for (index, chunk) in chunks.into_iter().enumerate() {
-            logits = self.step_packed(ctx, chunk, index == last)?;
+            logits = self.step_packed(ctx, chunk, serial.is_empty() && index == last)?;
+        }
+        if let Some((&final_token, head)) = serial.split_last() {
+            for &token in head {
+                self.advance(ctx, token)?;
+            }
+            logits = Some(self.forward(ctx, final_token)?);
         }
         logits.ok_or_else(|| Glm5NextMetalError::Invalid("missing prefill logits".into()))
+    }
+
+    /// Positions left in the dense range (visible length below the sparse
+    /// frontier) from the current position.
+    fn dense_rows_remaining(&self) -> usize {
+        (self.weights.config.sparse_frontier() as usize - 1).saturating_sub(self.position)
     }
 
     fn step_packed(
@@ -254,6 +270,13 @@ impl Glm5NextSession<'_> {
                 self.position,
                 self.position + tokens.len(),
                 self.capacity
+            ));
+        }
+        if tokens.len() > self.dense_rows_remaining() {
+            return invalid(format!(
+                "packed rows {}..{} reach the sparse frontier",
+                self.position,
+                self.position + tokens.len()
             ));
         }
         self.poisoned = true;

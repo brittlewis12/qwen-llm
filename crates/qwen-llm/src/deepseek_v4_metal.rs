@@ -848,40 +848,8 @@ fn encode_scale_f32_in_place(
     scale: f32,
     name: &str,
 ) -> Result<(), DeepSeekV4MetalError> {
-    if !scale.is_finite() {
-        return invalid(format!("{name} scale must be finite"));
-    }
-    validate_f32(values, &values.shape, true, name)?;
-    let count = usize::try_from(values.n_elements())
-        .map_err(|_| DeepSeekV4MetalError::Invalid(format!("{name} length exceeds usize")))?;
-    if count == 0 {
-        return invalid(format!("{name} must be nonempty"));
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Args {
-        count: u32,
-        scale: f32,
-    }
-    let count = u32::try_from(count)
-        .map_err(|_| DeepSeekV4MetalError::Invalid(format!("{name} length exceeds u32")))?;
-    let pso = ctx.pipeline("kernel_deepseek_v4_scale_f32_in_place")?;
-    enc.set_pipeline(&pso);
-    enc.set_bytes(0, &Args { count, scale });
-    enc.set_tensor(1, values);
-    enc.dispatch(
-        MTLSize {
-            width: (count as usize).div_ceil(256),
-            height: 1,
-            depth: 1,
-        },
-        MTLSize {
-            width: 256,
-            height: 1,
-            depth: 1,
-        },
-    );
-    Ok(())
+    crate::metal::encode_scale_f32_in_place(ctx, enc, values, scale)
+        .map_err(|error| DeepSeekV4MetalError::Invalid(format!("{name}: {error}")))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1,0 +1,52 @@
+{
+  "name": "glm53-sparse-v1",
+  "purpose": "Sparse-frontier qualification: 2093 IDs (sparse_qualification_text in crates/qwen-llm/src/glm5_next_metal/tests.rs: the qual-v1 passages plus twelve more) through llama.cpp serial decode, plus a capture run of the indexer inputs and outputs at positions 2050-2060 (visible lengths 2051-2061: the dense-equivalent control, the first exclusion at 2052, every tail length).",
+  "token_count": 2093,
+  "token_source": "tokens.txt in the location below; tests re-tokenize the text and assert every oracle record's token matches",
+  "artifact": {
+    "repo": "unsloth/GLM-5.3-Flash-GGUF",
+    "revision": "621d456e93e926e4b52f85cff5f634358c1828f9",
+    "file": "glm5-next/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+    "trunk_bytes": 117558078712
+  },
+  "producer": {
+    "tool": "scripts/reference/glm53/main.cpp",
+    "llama_cpp_revision": "e845373ff0b2b0998d673282bec05ee2f4e20106",
+    "wrapper_sha256": "e219b089d830aa4cfd8ec20c7394420e5f726c0e17fcc78d04abeb5dc6edce10",
+    "cmake_sha256": "4ea93ce27078a2dc43d6acd5df5f76aef85af557f5c96da5126c1154ecf6e3a0",
+    "device": "Apple M4 Max 128 GB, Metal, all layers offloaded",
+    "context": {
+      "n_ctx": 2304,
+      "n_batch": 1,
+      "n_ubatch": 1,
+      "type_k": "f16",
+      "type_v": "f16",
+      "flash_attn": false,
+      "fused_ops": "library defaults"
+    }
+  },
+  "location": "/Volumes/wdblack/weights-archive/.fetch/analysis/runs/glm53-oracle/sparse-v1",
+  "files": {
+    "serial.bin": {
+      "bytes": 1296672120,
+      "sha256": "eea4291b8de5dfb654760d81bd0eabefa3f0b958db37082fd1b802e43072afbf",
+      "run": "logits only, n_batch = n_ubatch = 1, all 2093 positions"
+    },
+    "capture.bin": {
+      "bytes": 1296672120,
+      "sha256": "eea4291b8de5dfb654760d81bd0eabefa3f0b958db37082fd1b802e43072afbf",
+      "run": "--capture indexer_q,indexer_weights,indexer_pool_k,indexer_score,indexer_top_k --steps 2050,...,2060"
+    },
+    "capture.bin.captures": {
+      "bytes": 38252948,
+      "sha256": "c5141151ea8cfda85489b9d85ca95e22311832b022eb3a98fbad643648f49bee",
+      "records": 605
+    }
+  },
+  "observations": [
+    "The capture run's logits are byte-identical to the logits-only run at all 2093 positions: these captures do not perturb llama.cpp.",
+    "Shapes: indexer_q [128, 32] F32 (rounded to F16 inside the fused lightning indexer), indexer_weights [32] (already scaled by 1/64), indexer_pool_k [128, 576] (padded past the visible pools), indexer_score [576] (-inf past visibility), indexer_top_k I32 [512] ordered by descending score.",
+    "Component replay: the native 32-head half-matrix scorer on these inputs reproduces indexer_score bitwise (relative error 0) at all 121 (position, block) cases; native selection equals llama.cpp's set at all 110 sparse cases; at position 2050 llama.cpp selects every visible pool.",
+    "End to end: Exact packed prefill of 2048 tokens then teacher-forced native decode of positions 2048-2092 agrees with serial.bin on top-1 at all 46 positions with zero choice regret; worst KL 4.2e-5 (dense position 2050), at most 1.8e-6 at the 42 sparse positions."
+  ]
+}

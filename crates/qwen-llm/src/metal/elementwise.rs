@@ -9,6 +9,55 @@ pub(crate) struct NArgs {
     pub(crate) n: u32,
 }
 
+/// Multiplies every element of an F32 tensor by a finite `scale`, in place.
+pub fn encode_scale_f32_in_place(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    values: &MetalTensor,
+    scale: f32,
+) -> Result<(), MetalError> {
+    const K: &str = "scale_f32_in_place";
+    let count = values.n_elements();
+    if !scale.is_finite() || count == 0 {
+        return Err(MetalError::BadShape {
+            kernel: K,
+            detail: format!("needs a finite scale and a nonempty tensor, got {scale} x {count}"),
+        });
+    }
+    super::checks::check_tensor(
+        K,
+        values,
+        GgmlType::F32,
+        &values.shape.clone(),
+        true,
+        "values",
+    )?;
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        count: u32,
+        scale: f32,
+    }
+    let count = super::checks::to_u32(K, count as usize, "length")?;
+    let pso = ctx.pipeline("kernel_deepseek_v4_scale_f32_in_place")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &Args { count, scale });
+    enc.set_tensor(1, values);
+    enc.dispatch(
+        MTLSize {
+            width: (count as usize).div_ceil(256),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_scatter_rows_f32_unique(
     ctx: &MetalContext,
     enc: &KernelEncoder,

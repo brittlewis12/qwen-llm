@@ -11,8 +11,10 @@
 //! Layout: F32 recurrent/conv state; an append-only F16 cache of MLA latents
 //! and completed pooled indexer keys plus a 4-slot pending ring; decode scratch
 //! and optional packed-prefill scratch, both resident for the session's life;
-//! per-MoE-block route records for each; last-position logits only. Sparse
-//! selection buffers are added here when P4 allocates them.
+//! per-MoE-block route records for each; last-position logits only; and,
+//! for sessions that reach the sparse frontier, single-token sparse-selection
+//! scratch (packed sparse microbatch scratch joins it with packed sparse
+//! prefill).
 
 use super::{FfnKind, Glm5NextConfig, Glm5NextError, MixerKind, Result};
 
@@ -265,6 +267,31 @@ pub fn mla_state_specs(c: &Glm5NextConfig, capacity: u64) -> Vec<BufferSpec> {
     ]
 }
 
+/// Sparse-selection scratch for single-token decode, needed only when the
+/// session can reach the sparse frontier: indexer query (F32 projection and
+/// its F16 rounding), scaled head weights, one score per pool, selected pool
+/// ids, expanded latent rows, per-token visibility, and one sticky selector
+/// status per MLA block (each block selects into its own slot).
+pub fn sparse_decode_specs(c: &Glm5NextConfig, capacity: u64) -> Vec<BufferSpec> {
+    let pools = capacity.div_ceil(c.indexer_pool as u64).max(1);
+    let (ih, id) = (c.indexer_head_count as u64, c.indexer_head_dim as u64);
+    let mla = c.block_count(MixerKind::Mla) as u64;
+    let z = BufferSpec::zeros;
+    vec![
+        z("index_query", F32, &[id * ih]),
+        z("index_query_f16", F16, &[id, ih, 1]),
+        z("index_weights", F32, &[ih, 1]),
+        z("scores", F32, &[pools, 1]),
+        z("pool_ids", I32, &[c.selected_pool_count() as u64, 1]),
+        z("pool_counts", I32, &[1]),
+        z("visible_pools", I32, &[1]),
+        z("visible_rows", I32, &[1]),
+        z("row_ids", I32, &[c.selection_width() as u64, 1]),
+        z("row_counts", I32, &[1]),
+        z("select_status", I32, &[mla.max(1)]),
+    ]
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Glm5NextMemoryLedger {
     capacity: u64,
@@ -274,6 +301,7 @@ pub struct Glm5NextMemoryLedger {
     mla_state: u64,
     decode_scratch: u64,
     decode_routes: u64,
+    sparse_decode: u64,
     packed_scratch: u64,
     packed_routes: u64,
     reserve: u64,
@@ -326,6 +354,11 @@ impl Glm5NextMemoryLedger {
         let mla_state = times(mla, priced(&mla_state_specs(c, capacity), price)?)?;
         let decode_scratch = priced(&decode_scratch_specs(c), price)?;
         let decode_routes = times(moe, priced(&route_specs(c, None), price)?)?;
+        let sparse_decode = if capacity >= u64::from(c.sparse_frontier()) {
+            priced(&sparse_decode_specs(c, capacity), price)?
+        } else {
+            0
+        };
         let (packed_scratch, packed_routes) = if prefill_rows == 0 {
             (0, 0)
         } else {
@@ -346,6 +379,7 @@ impl Glm5NextMemoryLedger {
             session_state,
             decode_scratch,
             decode_routes,
+            sparse_decode,
             packed_scratch,
             packed_routes,
             DYNAMIC_RESERVE_BYTES,
@@ -358,6 +392,7 @@ impl Glm5NextMemoryLedger {
             mla_state,
             decode_scratch,
             decode_routes,
+            sparse_decode,
             packed_scratch,
             packed_routes,
             reserve: DYNAMIC_RESERVE_BYTES,
@@ -378,13 +413,14 @@ impl Glm5NextMemoryLedger {
     }
 
     /// Named terms in bytes, for reports and allocation checks.
-    pub fn terms(&self) -> [(&'static str, u64); 10] {
+    pub fn terms(&self) -> [(&'static str, u64); 11] {
         [
             ("retained_weights", self.retained_weight_bytes),
             ("kda_state", self.kda_state),
             ("mla_state", self.mla_state),
             ("decode_scratch", self.decode_scratch),
             ("decode_routes", self.decode_routes),
+            ("sparse_decode", self.sparse_decode),
             ("packed_scratch", self.packed_scratch),
             ("packed_routes", self.packed_routes),
             ("reserve", self.reserve),

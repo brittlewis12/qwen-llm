@@ -311,6 +311,8 @@ fn check_host_wired_memory() -> Result<(), MetalError> {
 
 /// Unit-test contexts have isolated locks. Model/performance tests must also
 /// retain this production lease until their contexts and GPU resources drop.
+/// Like production, it waits for a busy lease only when
+/// `QWEN_METAL_LEASE_WAIT=1`; otherwise it refuses at once.
 #[cfg(test)]
 pub(crate) fn acquire_metal_benchmark_lease() -> Result<MetalProcessLease, MetalError> {
     let uid = unsafe { libc::geteuid() };
@@ -318,7 +320,8 @@ pub(crate) fn acquire_metal_benchmark_lease() -> Result<MetalProcessLease, Metal
         PathBuf::from("/tmp").join(format!("qwen-llm-{uid}")),
         uid,
     )?;
-    let lease = open_metal_process_lease(&path, false)?;
+    let wait = crate::env_flag::read_default_off(METAL_PROCESS_LEASE_WAIT_ENV);
+    let lease = open_metal_process_lease(&path, wait)?;
     check_host_wired_memory()?;
     Ok(lease)
 }

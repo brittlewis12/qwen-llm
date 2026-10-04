@@ -86,8 +86,18 @@ fn read_captures(
     out
 }
 
+/// Panics unless both sides are nonempty, equally long and finite, so a
+/// comparison can never pass vacuously or on NaN.
+fn assert_comparable(what: &str, actual: &[f32], expected: &[f32]) {
+    assert_eq!(actual.len(), expected.len(), "{what}: length mismatch");
+    assert!(!expected.is_empty(), "{what}: empty comparison");
+    assert_finite(&format!("{what} (actual)"), actual);
+    assert_finite(&format!("{what} (expected)"), expected);
+}
+
+/// `|actual - expected| / |expected|` (L2); finite by construction.
 fn relative_error(actual: &[f32], expected: &[f32]) -> f64 {
-    assert_eq!(actual.len(), expected.len());
+    assert_comparable("relative error", actual, expected);
     let diff: f64 = actual
         .iter()
         .zip(expected)
@@ -97,7 +107,9 @@ fn relative_error(actual: &[f32], expected: &[f32]) -> f64 {
     (diff / norm.max(1e-30)).sqrt()
 }
 
+/// KL(reference || native) over softmaxed logits; finite by construction.
 fn kl_divergence(reference: &[f32], native: &[f32]) -> f64 {
+    assert_comparable("KL", native, reference);
     let log_softmax = |x: &[f32]| {
         let max = x.iter().cloned().fold(f32::NEG_INFINITY, f32::max) as f64;
         let sum: f64 = x.iter().map(|v| (*v as f64 - max).exp()).sum();
@@ -106,7 +118,51 @@ fn kl_divergence(reference: &[f32], native: &[f32]) -> f64 {
             .collect::<Vec<_>>()
     };
     let (p, q) = (log_softmax(reference), log_softmax(native));
-    p.iter().zip(&q).map(|(lp, lq)| lp.exp() * (lp - lq)).sum()
+    let kl: f64 = p.iter().zip(&q).map(|(lp, lq)| lp.exp() * (lp - lq)).sum();
+    assert!(kl.is_finite(), "KL is not finite");
+    kl
+}
+
+/// Largest elementwise |actual - expected|; finite by construction.
+fn max_abs_diff(actual: &[f32], expected: &[f32]) -> f32 {
+    assert_comparable("max |diff|", actual, expected);
+    actual
+        .iter()
+        .zip(expected)
+        .map(|(a, e)| (a - e).abs())
+        .fold(0.0f32, f32::max)
+}
+
+/// Largest value and its index; NaN is the largest of all, so a reduction
+/// can never hide one.
+fn worst(values: impl IntoIterator<Item = f64>) -> (f64, usize) {
+    values
+        .into_iter()
+        .enumerate()
+        .fold((0.0f64, 0usize), |best, (i, v)| {
+            if v.is_nan() || best.0.is_nan() {
+                if best.0.is_nan() { best } else { (v, i) }
+            } else if v > best.0 {
+                (v, i)
+            } else {
+                best
+            }
+        })
+}
+
+/// Whether `value` is within `bound`; NaN never is.
+fn within(value: f64, bound: f64) -> bool {
+    value <= bound
+}
+
+/// Logit regret of each side's top-1 choice under the other side's logits:
+/// (reference best - reference logit of native's choice, native best -
+/// native logit of reference's choice). Both are zero when top-1 agrees; a
+/// flip is a near-tie only if both are small.
+fn choice_regret(reference: &[f32], native: &[f32]) -> (f32, f32) {
+    assert_comparable("choice regret", native, reference);
+    let (r, n) = (argmax(reference), argmax(native));
+    (reference[r] - reference[n], native[n] - native[r])
 }
 
 fn argmax(x: &[f32]) -> usize {
@@ -180,6 +236,19 @@ fn compare_state(
     }
 }
 
+/// Model-scale GPU tests hold the cross-process production lease and pass
+/// the wired-memory gate (unit-test `MetalContext`s only take a per-process
+/// lock), and run with Metal API validation. Bind the result first so it
+/// drops after every Metal resource of the test.
+fn production_lease() -> impl Sized {
+    assert_eq!(
+        std::env::var("MTL_DEBUG_LAYER").as_deref(),
+        Ok("1"),
+        "model-scale GLM GPU tests require MTL_DEBUG_LAYER=1"
+    );
+    crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease")
+}
+
 /// Bit patterns of every layer's persistent state (KDA conv and S; MLA
 /// latents, pending ring and pools).
 fn state_bits(session: &Glm5NextSession<'_>) -> Vec<Vec<u32>> {
@@ -204,10 +273,11 @@ fn state_bits(session: &Glm5NextSession<'_>) -> Vec<Vec<u32>> {
 /// block's residual streams, KDA state and indexer pools at steps 3/7/14, and
 /// unobserved-path parity; reports peak allocation and token latency.
 #[test]
-#[ignore = "loads the 109.5 GiB GLM-5.3 trunk; requires GLM53_GGUF, the ckpt-v1 oracle and an idle GPU"]
+#[ignore = "loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, the ckpt-v1 oracle and an idle GPU"]
 fn checkpoint_v1_matches_llama_cpp_oracle() {
+    let _lease = production_lease();
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
-    let ctx = MetalContext::new().expect("Metal context (production lease)");
+    let ctx = MetalContext::new().expect("Metal context");
     let gguf = GgufFile::open(&path).unwrap();
     let load = std::time::Instant::now();
     let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
@@ -274,11 +344,7 @@ fn checkpoint_v1_matches_llama_cpp_oracle() {
             assert_eq!(logits.len(), expected.len());
             let kl = kl_divergence(expected, &logits);
             assert!(kl.is_finite(), "position {position}: KL {kl}");
-            let max_abs = logits
-                .iter()
-                .zip(expected)
-                .map(|(a, e)| (a - e).abs())
-                .fold(0.0f32, f32::max);
+            let max_abs = max_abs_diff(&logits, expected);
             let worst = residuals
                 .iter()
                 .cloned()
@@ -322,11 +388,7 @@ fn checkpoint_v1_matches_llama_cpp_oracle() {
     let start = std::time::Instant::now();
     for (position, &token) in tokens.iter().enumerate() {
         let logits = session.forward(&ctx, token).unwrap();
-        let drift = logits
-            .iter()
-            .zip(&observed_logits[position])
-            .map(|(a, e)| (a - e).abs())
-            .fold(0.0f32, f32::max);
+        let drift = max_abs_diff(&logits, &observed_logits[position]);
         assert!(
             drift <= 1e-6,
             "position {position}: unobserved drift {drift}"
@@ -347,10 +409,11 @@ fn checkpoint_v1_matches_llama_cpp_oracle() {
 /// projections and grouped experts, as in llama.cpp's batched prefill) must
 /// keep top-1 and stay within a frozen KL and state envelope.
 #[test]
-#[ignore = "loads the 109.5 GiB GLM-5.3 trunk; requires GLM53_GGUF, the ckpt-v1 oracle and an idle GPU"]
+#[ignore = "loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, the ckpt-v1 oracle and an idle GPU"]
 fn packed_prefill_matches_serial_and_oracle_on_checkpoint_v1() {
+    let _lease = production_lease();
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
-    let ctx = MetalContext::new().expect("Metal context (production lease)");
+    let ctx = MetalContext::new().expect("Metal context");
     let gguf = GgufFile::open(&path).unwrap();
     let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
     let tokens = checkpoint_tokens();
@@ -364,11 +427,7 @@ fn packed_prefill_matches_serial_and_oracle_on_checkpoint_v1() {
         assert_finite(label, logits);
         let expected = &reference[position].1;
         let kl = kl_divergence(expected, logits);
-        let drift = logits
-            .iter()
-            .zip(&serial_logits[position])
-            .map(|(a, e)| (a - e).abs())
-            .fold(0.0f32, f32::max);
+        let drift = max_abs_diff(logits, &serial_logits[position]);
         eprintln!(
             "{label} pos {position:2}: kl vs llama.cpp {kl:.3e} max|dlogit| vs serial {drift:.3e}"
         );
@@ -546,10 +605,11 @@ fn assert_refused<'w, T>(
 /// 72-row tail) against exact lineage, which equals serial decode: last-row
 /// logits within the fast envelope, then three decode steps on each.
 #[test]
-#[ignore = "loads the 109.5 GiB GLM-5.3 trunk; requires GLM53_GGUF and an idle GPU"]
+#[ignore = "loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU"]
 fn packed_fast_matches_exact_over_a_grouped_block_and_tail() {
+    let _lease = production_lease();
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
-    let ctx = MetalContext::new().expect("Metal context (production lease)");
+    let ctx = MetalContext::new().expect("Metal context");
     let gguf = GgufFile::open(&path).unwrap();
     let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
     let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
@@ -699,31 +759,28 @@ impl ValidState {
     /// Per kind: (name, worst relative error over layers, worst layer index
     /// within the kind).
     fn errors(&self, reference: &Self) -> [(&'static str, f64, usize); 5] {
-        let worst = |a: &[Vec<f32>], b: &[Vec<f32>]| {
-            a.iter()
-                .zip(b)
-                .map(|(a, b)| {
-                    if b.is_empty() {
-                        0.0
-                    } else {
-                        relative_error(a, b)
-                    }
-                })
-                .enumerate()
-                .fold(
-                    (0.0f64, 0usize),
-                    |best, (i, e)| {
-                        if e > best.0 { (e, i) } else { best }
-                    },
-                )
+        // Only the pending ring may be legitimately empty (visible % 4 == 0),
+        // and then on both sides.
+        let kind = |name: &'static str, a: &[Vec<f32>], b: &[Vec<f32>], may_be_empty: bool| {
+            assert_eq!(a.len(), b.len(), "{name}: layer count mismatch");
+            assert!(!b.is_empty(), "{name}: no layers");
+            let (e, i) = worst(a.iter().zip(b).map(|(a, b)| {
+                if may_be_empty && b.is_empty() {
+                    assert!(a.is_empty(), "{name}: one side empty");
+                    0.0
+                } else {
+                    relative_error(a, b)
+                }
+            }));
+            (name, e, i)
         };
-        let row = |name, (e, i): (f64, usize)| (name, e, i);
+        let r = reference;
         [
-            row("kda_state", worst(&self.kda_state, &reference.kda_state)),
-            row("conv", worst(&self.conv, &reference.conv)),
-            row("latents", worst(&self.latents, &reference.latents)),
-            row("pools", worst(&self.pools, &reference.pools)),
-            row("pending", worst(&self.pending, &reference.pending)),
+            kind("kda_state", &self.kda_state, &r.kda_state, false),
+            kind("conv", &self.conv, &r.conv, false),
+            kind("latents", &self.latents, &r.latents, false),
+            kind("pools", &self.pools, &r.pools, false),
+            kind("pending", &self.pending, &r.pending, true),
         ]
     }
 }
@@ -805,13 +862,14 @@ fn qual_oracle_dir() -> PathBuf {
 /// depth (near-tied expert routing flipping under small perturbations,
 /// amplified by KDA), identically for every chunking.
 #[test]
-#[ignore = "loads the 109.5 GiB GLM-5.3 trunk; requires GLM53_GGUF, the qual-v1 oracle and an idle GPU"]
+#[ignore = "loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, the qual-v1 oracle and an idle GPU"]
 fn packed_fast_qualifies_across_chunkings_with_teacher_forcing() {
     const PROMPT: usize = 559;
     const CONTINUATION: usize = 32;
     const CAPACITY: usize = PROMPT + CONTINUATION;
+    let _lease = production_lease();
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
-    let ctx = MetalContext::new().expect("Metal context (production lease)");
+    let ctx = MetalContext::new().expect("Metal context");
     let gguf = GgufFile::open(&path).unwrap();
     let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
     let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
@@ -831,19 +889,19 @@ fn packed_fast_qualifies_across_chunkings_with_teacher_forcing() {
         ReferenceStream::open(&qual_oracle_dir().join("batch.bin")),
     );
     assert_eq!(serial_ref.remaining, CAPACITY);
-    let mut envelope = (0.0f64, 0.0f64);
-    for (position, &token) in tokens.iter().enumerate() {
-        let ((_, ts, s), (_, tb, b)) = (serial_ref.next(), batch_ref.next());
-        assert_eq!((ts, tb), (token, token), "token {position}");
-        let kl = kl_divergence(&s, &b);
-        envelope.1 = envelope.1.max(kl);
-        if position == PROMPT - 1 {
-            envelope.0 = kl;
-        }
-    }
+    let envelope: Vec<f64> = tokens
+        .iter()
+        .enumerate()
+        .map(|(position, &token)| {
+            let ((_, ts, s), (_, tb, b)) = (serial_ref.next(), batch_ref.next());
+            assert_eq!((ts, tb), (token, token), "token {position}");
+            kl_divergence(&s, &b)
+        })
+        .collect();
     eprintln!(
         "llama.cpp batched vs serial: prompt-end KL {:.3e}, worst {:.3e}",
-        envelope.0, envelope.1
+        envelope[PROMPT - 1],
+        worst(envelope.iter().copied()).0
     );
 
     // Exact packed reference.
@@ -894,15 +952,8 @@ fn packed_fast_qualifies_across_chunkings_with_teacher_forcing() {
         oracle_kls.push(kl_divergence(&expected, logits));
         oracle_top1 += usize::from(argmax(&expected) == argmax(logits));
     }
-    let oracle_worst =
-        oracle_kls
-            .iter()
-            .copied()
-            .enumerate()
-            .fold(
-                (0.0f64, 0usize),
-                |w, (i, k)| if k > w.0 { (k, i) } else { w },
-            );
+    assert_eq!(oracle_kls.len(), CAPACITY);
+    let oracle_worst = worst(oracle_kls.iter().copied());
     let buckets: Vec<String> = [0, 16, 32, 64, 128, 256, 384, PROMPT, CAPACITY]
         .windows(2)
         .map(|w| {
@@ -923,31 +974,31 @@ fn packed_fast_qualifies_across_chunkings_with_teacher_forcing() {
         oracle_worst.0, oracle_worst.1
     );
     eprintln!("  KL by position: {}", buckets.join("; "));
-    let pre_tie = oracle_kls[..ORACLE_TIE_POSITION]
-        .iter()
-        .copied()
-        .fold(0.0f64, f64::max);
+    let pre_tie = worst(oracle_kls[..ORACLE_TIE_POSITION].iter().copied()).0;
     let mut failures = Vec::new();
-    if pre_tie > ORACLE_PRE_TIE_KL {
+    if !within(pre_tie, ORACLE_PRE_TIE_KL) {
         failures.push(format!("native vs oracle before the tie: KL {pre_tie:.3e}"));
     }
-    if oracle_worst.0 > ORACLE_KL || oracle_top1 != CAPACITY {
+    if !within(oracle_worst.0, ORACLE_KL) || oracle_top1 != CAPACITY {
         failures.push(format!(
             "native vs oracle: worst KL {:.3e} at {}, top-1 {oracle_top1}/{CAPACITY}",
             oracle_worst.0, oracle_worst.1
         ));
     }
 
-    // Frozen Fast bounds: about 2x the worst measured over all variants.
+    // Calibrated regression bounds, not an independent holdout: about 2x the
+    // worst measured over all variants when this test was introduced.
     const LOGIT_KL: f64 = 2e-2; // measured 9.1e-3
     const KDA_STATE: f64 = 2e-1; // 1.06e-1
     const CONV: f64 = 2.5e-1; // 1.33e-1
     const LATENTS: f64 = 1.25e-1; // 6.6e-2
     const POOLS: f64 = 1.5e-1; // 7.4e-2
     const PENDING: f64 = 1.75e-1; // 8.8e-2
-    // Top-1 may flip only where the reference is nearly tied (measured flips
-    // at margins up to 0.06).
-    const TOP1_MARGIN: f32 = 0.2;
+    // Top-1 may flip only to a near-tied alternative: the logit regret of
+    // each side's choice under the other side's logits stays small. This
+    // bound predates the regret metric; measured flips: reference-side regret
+    // <= 0.06, Fast-side regret <= 0.176 (deterministic across runs).
+    const TOP1_REGRET: f32 = 0.2;
     let bound = |kind: &str| match kind {
         "kda_state" => KDA_STATE,
         "conv" => CONV,
@@ -984,20 +1035,23 @@ fn packed_fast_qualifies_across_chunkings_with_teacher_forcing() {
         let end_errors = ValidState::read(&fast).errors(&reference_end);
         let prompt_errors = prompt_state.errors(&reference_state);
         drop(fast);
-        let references = std::iter::once(&reference_prefill).chain(reference_steps.iter());
+        let references: Vec<&Vec<f32>> = std::iter::once(&reference_prefill)
+            .chain(reference_steps.iter())
+            .collect();
+        assert_eq!(references.len(), logits.len());
         let mut kls = Vec::with_capacity(logits.len());
         let mut flips = Vec::new();
-        for (step, (reference, fast)) in references.zip(&logits).enumerate() {
-            assert_finite(&label, fast);
+        for (step, (reference, fast)) in references.iter().zip(&logits).enumerate() {
             kls.push(kl_divergence(reference, fast));
-            if argmax(reference) != argmax(fast) {
-                flips.push((step, top2_margin(reference)));
+            let regret = choice_regret(reference, fast);
+            if regret != (0.0, 0.0) {
+                flips.push((step, regret));
             }
         }
-        let worst_kl = kls.iter().cloned().fold(0.0f64, f64::max);
+        let worst_kl = worst(kls.iter().copied()).0;
         let mean_kl = kls.iter().sum::<f64>() / kls.len() as f64;
         eprintln!(
-            "{label}: prefill {prefill_ms:.0} ms; KL prefill {:.3e} mean {mean_kl:.3e} worst {worst_kl:.3e}; top-1 flips (step, margin) {flips:?}",
+            "{label}: prefill {prefill_ms:.0} ms; KL prefill {:.3e} mean {mean_kl:.3e} worst {worst_kl:.3e}; top-1 flips (step, regret ref/fast) {flips:?}",
             kls[0]
         );
         for (when, errors) in [("prompt", &prompt_errors), ("end", &end_errors)] {
@@ -1007,45 +1061,104 @@ fn packed_fast_qualifies_across_chunkings_with_teacher_forcing() {
                 .collect();
             eprintln!("  {when}: {}", line.join("  "));
             for (kind, error, layer) in errors {
-                if *error > bound(kind) {
+                if !within(*error, bound(kind)) {
                     failures.push(format!(
                         "{label} {when}: {kind} {error:.3e} at layer {layer}"
                     ));
                 }
             }
         }
-        if worst_kl > LOGIT_KL {
+        if !within(worst_kl, LOGIT_KL) {
             failures.push(format!("{label}: worst KL {worst_kl:.3e}"));
         }
-        if let Some((step, margin)) = flips.iter().find(|(_, m)| *m > TOP1_MARGIN) {
+        let near_tie = |r: f32| within(f64::from(r), f64::from(TOP1_REGRET));
+        if let Some((step, regret)) = flips
+            .iter()
+            .find(|(_, (a, b))| !near_tie(*a) || !near_tie(*b))
+        {
             failures.push(format!(
-                "{label}: top-1 flip at step {step}, reference margin {margin:.3}"
+                "{label}: top-1 flip at step {step}, regret {regret:?}"
             ));
         }
         if let Some(index) = equal_to {
             let (bits, steps) = &fingerprints[index];
             let (r, p) = (variants[index].0, variants[index].1);
-            if *bits != prompt_bits || *steps != logits {
+            if *bits != prompt_bits || *steps != logit_bits(&logits) {
                 failures.push(format!("{label}: not bitwise equal to rows {r} prefix {p}"));
             }
         }
-        fingerprints.push((prompt_bits, logits));
+        fingerprints.push((prompt_bits, logit_bits(&logits)));
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
-/// A variant's prompt-end state bits and its logits at every step.
-type Fingerprint = (Vec<Vec<u32>>, Vec<Vec<f32>>);
+/// A variant's prompt-end state bits and its logit bits at every step.
+type Fingerprint = (Vec<Vec<u32>>, Vec<Vec<u32>>);
 
-/// Gap between the largest and second-largest logit.
-fn top2_margin(x: &[f32]) -> f32 {
-    let (mut first, mut second) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
-    for &v in x {
-        if v > first {
-            (first, second) = (v, first);
-        } else if v > second {
-            second = v;
-        }
+fn logit_bits(steps: &[Vec<f32>]) -> Vec<Vec<u32>> {
+    steps
+        .iter()
+        .map(|step| step.iter().map(|v| v.to_bits()).collect())
+        .collect()
+}
+
+/// CPU negative controls for the comparison helpers: nonfinite, empty and
+/// mismatched inputs fail loudly, reductions never hide NaN, and a top-1
+/// flip is measured by the regret of the choice actually made.
+#[test]
+fn comparison_helpers_refuse_nonfinite_and_mismatched_inputs() {
+    fn refused<T>(f: impl FnOnce() -> T) -> bool {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err()
     }
-    first - second
+    let ok = [1.0f32, 2.0, 3.0];
+    for bad in [
+        [1.0f32, f32::NAN, 3.0],
+        [1.0, f32::INFINITY, 3.0],
+        [f32::NEG_INFINITY, 2.0, 3.0],
+    ] {
+        assert!(refused(|| relative_error(&bad, &ok)));
+        assert!(refused(|| relative_error(&ok, &bad)));
+        assert!(refused(|| kl_divergence(&ok, &bad)));
+        assert!(refused(|| kl_divergence(&bad, &ok)));
+        assert!(refused(|| max_abs_diff(&bad, &ok)));
+        assert!(refused(|| choice_regret(&ok, &bad)));
+    }
+    assert!(refused(|| relative_error(&ok[..2], &ok)));
+    assert!(refused(|| relative_error(&[], &[])));
+    assert!(refused(|| kl_divergence(&ok, &ok[..2])));
+
+    assert!(worst([0.1, f64::NAN, 0.3]).0.is_nan());
+    assert!(worst([f64::NAN, 0.3]).0.is_nan());
+    assert_eq!(worst([0.1, 0.3, 0.2]), (0.3, 1));
+    assert!(!within(f64::NAN, 1.0));
+    assert!(within(1.0, 1.0) && !within(1.5, 1.0));
+
+    assert_eq!(
+        choice_regret(&[0.0, 1.0, 0.5], &[0.0, 2.0, 1.0]),
+        (0.0, 0.0)
+    );
+    // The reference's runner-up is close (margin 0.1), but native picked a
+    // far worse token under the reference: the regret says so.
+    let (forward, reverse) = choice_regret(&[0.0, 1.0, 0.9], &[2.0, 1.0, 1.5]);
+    assert!((forward - 1.0).abs() < 1e-6 && (reverse - 1.0).abs() < 1e-6);
+
+    let state = |kda: f32, pending: Vec<f32>| ValidState {
+        kda_state: vec![vec![1.0, kda]],
+        conv: vec![vec![1.0]],
+        latents: vec![vec![1.0]],
+        pools: vec![vec![1.0]],
+        pending: vec![pending],
+    };
+    assert!(refused(
+        || state(f32::NAN, vec![]).errors(&state(2.0, vec![]))
+    ));
+    assert!(refused(
+        || state(2.0, vec![]).errors(&state(f32::NAN, vec![]))
+    ));
+    assert!(refused(|| state(2.0, vec![1.0]).errors(&state(2.0, vec![]))));
+    let mut short = state(2.0, vec![]);
+    short.kda_state.push(vec![1.0, 2.0]);
+    assert!(refused(|| short.errors(&state(2.0, vec![]))));
+    let errors = state(2.0, vec![]).errors(&state(2.0, vec![]));
+    assert!(errors.iter().all(|(_, e, _)| *e == 0.0));
 }

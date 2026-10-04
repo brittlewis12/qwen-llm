@@ -40,8 +40,21 @@ no further `glm5-next` changes). Earlier research (2026-08-28 gap analysis,
 - Q6_K N64 at 512 rows: no measurable pp512 change (+0.8% inside a +-5% noise
   floor). Strict router skipped: both router kernels are full F32; it only reorders
   accumulation and cannot reduce routing flips, which come from upstream activations.
-- Next: P4 sparse selection (lifts the 2051-position cap), then P5, then compact
-  grouped-expert scheduling and the rest of P6.
+- P4 done (sparse DSA selection; `docs/bench/2026-10-04-glm53-p4-sparse/`):
+  shared H32 half-matrix scorer, radix4 selector, pool expansion and online
+  selected attention (DS4 delegates), sparse decode and packed sparse prefill
+  (64-query microbatches, sticky per-row selector status), run and bench up to
+  the checkpoint context. Gates (sparse-v1, bounds frozen before observation):
+  native scores equal llama.cpp's bitwise on its captured indexer inputs at
+  2050-2060 in all 11 MLA blocks, selection sets equal in all 110 sparse cases;
+  decode across the frontier top-1 46/46, worst KL 4.2e-5; exact packed equals
+  serial bitwise across the frontier for every chunking tested. A-B-B-A vs
+  llama.cpp: pp4096 178.6-182.7 vs 177.3-177.4 t/s, tg128 27.7-27.9 vs
+  22.1-22.5, tg128 at depth 4096 20.7-20.8 vs 19.9-20.1.
+- Next: P5 product lanes (entry tasks below), and P6: grouped-heads selected
+  attention (sparse decode costs +4.7 ms/token at the frontier; native loses 25%
+  from depth 0 to 4096 against llama.cpp's 10%), long-context dense attention,
+  a packed-prefill stage profiler, compact grouped-expert scheduling.
 
 ## Artifact
 

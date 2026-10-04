@@ -2362,7 +2362,7 @@ impl PrefillHyperScratch {
         n_tokens: usize,
     ) -> Result<(), DeepSeekV4MetalError> {
         require_serial(enc, "deepseek_v4_hc_repeat_batch")?;
-        let n_tokens_u32 = checked_token_count(n_tokens)?;
+        checked_token_count(n_tokens)?;
         validate_f32(
             embeddings,
             &[DEEPSEEK_V4_HIDDEN_SIZE as u64, n_tokens as u64],
@@ -2379,34 +2379,14 @@ impl PrefillHyperScratch {
             true,
             "packed initial residual",
         )?;
-        let pso = ctx.pipeline("kernel_deepseek_v4_hc_repeat_batch")?;
-        enc.set_pipeline(&pso);
-        enc.set_bytes(
-            0,
-            &HcBatchArgs {
-                hidden_size: u32_hidden(DEEPSEEK_V4_HIDDEN_SIZE)?,
-                n_tokens: n_tokens_u32,
-            },
-        );
-        enc.set_tensor(1, embeddings);
-        enc.set_tensor(2, residual);
-        let total = checked_mul(
+        crate::metal::encode_mhc4_repeat_rows(
+            ctx,
+            enc,
+            DEEPSEEK_V4_HIDDEN_SIZE,
             n_tokens,
-            residual_len(DEEPSEEK_V4_HIDDEN_SIZE)?,
-            "packed repeated residual",
+            embeddings,
+            residual,
         )?;
-        enc.dispatch(
-            MTLSize {
-                width: total.div_ceil(256),
-                height: 1,
-                depth: 1,
-            },
-            MTLSize {
-                width: 256,
-                height: 1,
-                depth: 1,
-            },
-        );
         Ok(())
     }
 
@@ -2427,7 +2407,7 @@ impl PrefillHyperScratch {
         #[cfg(feature = "dsv4-diagnostics")] layer: usize,
     ) -> Result<MetalTensor, DeepSeekV4MetalError> {
         require_serial(enc, "deepseek_v4_hc_pre_batch")?;
-        let n_tokens_u32 = checked_token_count(n_tokens)?;
+        checked_token_count(n_tokens)?;
         validate_eps(rms_eps, "packed mHC RMSNorm epsilon")?;
         validate_eps(hc_eps, "packed mHC epsilon")?;
         let residual_width = residual_len(DEEPSEEK_V4_HIDDEN_SIZE)?;
@@ -2568,64 +2548,34 @@ impl PrefillHyperScratch {
                 })
             })
             .flatten();
-        let pso = ctx.pipeline("kernel_deepseek_v4_hc_controls_batch")?;
-        enc.set_pipeline(&pso);
-        enc.set_bytes(
-            0,
-            &ControlsArgs {
-                n_tokens: n_tokens_u32,
-                eps: hc_eps,
-            },
-        );
         #[cfg(feature = "dsv4-diagnostics")]
-        enc.set_tensor(1, controls_input.unwrap_or(&mixes));
+        let controls_mixes = controls_input.unwrap_or(&mixes);
         #[cfg(not(feature = "dsv4-diagnostics"))]
-        enc.set_tensor(1, &mixes);
-        enc.set_tensor(2, scale);
-        enc.set_tensor(3, base);
-        enc.set_tensor(4, &pre);
-        enc.set_tensor(5, &post);
-        enc.set_tensor(6, &combination);
-        enc.dispatch(
-            MTLSize {
-                width: n_tokens,
-                height: 1,
-                depth: 1,
-            },
-            MTLSize {
-                width: 1,
-                height: 1,
-                depth: 1,
-            },
-        );
+        let controls_mixes = &mixes;
+        crate::metal::encode_mhc4_controls_rows(
+            ctx,
+            enc,
+            n_tokens,
+            hc_eps,
+            controls_mixes,
+            scale,
+            base,
+            &pre,
+            &post,
+            &combination,
+        )?;
         #[cfg(feature = "dsv4-diagnostics")]
         drop(controls_tag);
 
-        let pso = ctx.pipeline("kernel_deepseek_v4_hc_collapse_batch")?;
-        enc.set_pipeline(&pso);
-        enc.set_bytes(
-            0,
-            &HcBatchArgs {
-                hidden_size: u32_hidden(DEEPSEEK_V4_HIDDEN_SIZE)?,
-                n_tokens: n_tokens_u32,
-            },
-        );
-        enc.set_tensor(1, residual);
-        enc.set_tensor(2, &pre);
-        enc.set_tensor(3, &collapsed);
-        let total = checked_mul(n_tokens, DEEPSEEK_V4_HIDDEN_SIZE, "packed mHC collapse")?;
-        enc.dispatch(
-            MTLSize {
-                width: total.div_ceil(256),
-                height: 1,
-                depth: 1,
-            },
-            MTLSize {
-                width: 256,
-                height: 1,
-                depth: 1,
-            },
-        );
+        crate::metal::encode_mhc4_collapse_rows(
+            ctx,
+            enc,
+            DEEPSEEK_V4_HIDDEN_SIZE,
+            n_tokens,
+            residual,
+            &pre,
+            &collapsed,
+        )?;
         Ok(collapsed)
     }
 
@@ -2639,7 +2589,7 @@ impl PrefillHyperScratch {
         n_tokens: usize,
     ) -> Result<(), DeepSeekV4MetalError> {
         require_serial(enc, "deepseek_v4_hc_post_batch")?;
-        let n_tokens_u32 = checked_token_count(n_tokens)?;
+        checked_token_count(n_tokens)?;
         validate_f32(
             block_output,
             &[DEEPSEEK_V4_HIDDEN_SIZE as u64, n_tokens as u64],
@@ -2672,37 +2622,17 @@ impl PrefillHyperScratch {
             ],
             "packed mHC combinations",
         )?;
-        let pso = ctx.pipeline("kernel_deepseek_v4_hc_post_batch")?;
-        enc.set_pipeline(&pso);
-        enc.set_bytes(
-            0,
-            &HcBatchArgs {
-                hidden_size: u32_hidden(DEEPSEEK_V4_HIDDEN_SIZE)?,
-                n_tokens: n_tokens_u32,
-            },
-        );
-        enc.set_tensor(1, block_output);
-        enc.set_tensor(2, residual);
-        enc.set_tensor(3, &post);
-        enc.set_tensor(4, &combination);
-        enc.set_tensor(5, output);
-        let total = checked_mul(
+        crate::metal::encode_mhc4_post_rows(
+            ctx,
+            enc,
+            DEEPSEEK_V4_HIDDEN_SIZE,
             n_tokens,
-            residual_len(DEEPSEEK_V4_HIDDEN_SIZE)?,
-            "packed mHC post",
+            block_output,
+            residual,
+            &post,
+            &combination,
+            output,
         )?;
-        enc.dispatch(
-            MTLSize {
-                width: total.div_ceil(256),
-                height: 1,
-                depth: 1,
-            },
-            MTLSize {
-                width: 256,
-                height: 1,
-                depth: 1,
-            },
-        );
         Ok(())
     }
 }

@@ -408,96 +408,225 @@ impl Glm5NextConfig {
     }
 }
 
+// Typed views of one block's tensors, generic over the element: binding uses
+// `&TensorDesc`; a Metal residency maps them to its own tensor handles.
+
 #[derive(Debug)]
-pub struct HyperConnectionTensors<'a> {
-    pub mix: &'a TensorDesc,
-    pub base: &'a TensorDesc,
-    pub scale: &'a TensorDesc,
+pub struct HyperConnectionTensors<T> {
+    pub mix: T,
+    pub base: T,
+    pub scale: T,
 }
 
 #[derive(Debug)]
-pub struct KdaTensors<'a> {
-    pub query: &'a TensorDesc,
-    pub key: &'a TensorDesc,
-    pub value: &'a TensorDesc,
-    pub query_conv: &'a TensorDesc,
-    pub key_conv: &'a TensorDesc,
-    pub value_conv: &'a TensorDesc,
-    pub decay_a: &'a TensorDesc,
-    pub decay_b: &'a TensorDesc,
-    pub decay_bias: &'a TensorDesc,
+pub struct KdaTensors<T> {
+    pub query: T,
+    pub key: T,
+    pub value: T,
+    pub query_conv: T,
+    pub key_conv: T,
+    pub value_conv: T,
+    pub decay_a: T,
+    pub decay_b: T,
+    pub decay_bias: T,
     /// Stores `-exp(A_log)` per head, not `A_log`.
-    pub neg_exp_a_log: &'a TensorDesc,
-    pub beta: &'a TensorDesc,
-    pub gate_a: &'a TensorDesc,
-    pub gate_b: &'a TensorDesc,
-    pub output_norm: &'a TensorDesc,
-    pub output: &'a TensorDesc,
+    pub neg_exp_a_log: T,
+    pub beta: T,
+    pub gate_a: T,
+    pub gate_b: T,
+    pub output_norm: T,
+    pub output: T,
 }
 
 #[derive(Debug)]
-pub struct IndexerTensors<'a> {
-    pub query: &'a TensorDesc,
-    pub key: &'a TensorDesc,
-    pub key_norm: &'a TensorDesc,
-    pub key_norm_bias: &'a TensorDesc,
-    pub head_weights: &'a TensorDesc,
-    pub pool_gate: &'a TensorDesc,
-    pub pool_position: &'a TensorDesc,
+pub struct IndexerTensors<T> {
+    pub query: T,
+    pub key: T,
+    pub key_norm: T,
+    pub key_norm_bias: T,
+    pub head_weights: T,
+    pub pool_gate: T,
+    pub pool_position: T,
 }
 
 #[derive(Debug)]
-pub struct MlaTensors<'a> {
-    pub query_a: &'a TensorDesc,
-    pub query_a_norm: &'a TensorDesc,
-    pub query_b: &'a TensorDesc,
-    pub latent: &'a TensorDesc,
-    pub latent_norm: &'a TensorDesc,
+pub struct MlaTensors<T> {
+    pub query_a: T,
+    pub query_a_norm: T,
+    pub query_b: T,
+    pub latent: T,
+    pub latent_norm: T,
     /// [head_dim, kv_lora_rank, heads]: absorbs queries into the latent.
-    pub key_absorb: &'a TensorDesc,
+    pub key_absorb: T,
     /// [kv_lora_rank, head_dim, heads]: expands latent outputs per head.
-    pub value_expand: &'a TensorDesc,
-    pub output: &'a TensorDesc,
-    pub indexer: IndexerTensors<'a>,
+    pub value_expand: T,
+    pub output: T,
+    pub indexer: IndexerTensors<T>,
 }
 
 #[derive(Debug)]
-pub enum MixerTensors<'a> {
-    Kda(KdaTensors<'a>),
-    Mla(MlaTensors<'a>),
+pub enum MixerTensors<T> {
+    Kda(KdaTensors<T>),
+    Mla(MlaTensors<T>),
 }
 
 #[derive(Debug)]
-pub struct DenseFfnTensors<'a> {
-    pub gate: &'a TensorDesc,
-    pub up: &'a TensorDesc,
-    pub down: &'a TensorDesc,
+pub struct DenseFfnTensors<T> {
+    pub gate: T,
+    pub up: T,
+    pub down: T,
 }
 
 #[derive(Debug)]
-pub struct MoeTensors<'a> {
-    pub router: &'a TensorDesc,
-    pub selection_bias: &'a TensorDesc,
-    pub gate_experts: &'a TensorDesc,
-    pub up_experts: &'a TensorDesc,
-    pub down_experts: &'a TensorDesc,
-    pub shared: DenseFfnTensors<'a>,
+pub struct MoeTensors<T> {
+    pub router: T,
+    pub selection_bias: T,
+    pub gate_experts: T,
+    pub up_experts: T,
+    pub down_experts: T,
+    pub shared: DenseFfnTensors<T>,
 }
 
 #[derive(Debug)]
-pub enum FfnTensors<'a> {
-    Dense(DenseFfnTensors<'a>),
-    Moe(MoeTensors<'a>),
+pub enum FfnTensors<T> {
+    Dense(DenseFfnTensors<T>),
+    Moe(MoeTensors<T>),
 }
 
 #[derive(Debug)]
-pub struct Glm5NextBlock<'a> {
-    pub attention_hc: HyperConnectionTensors<'a>,
-    pub ffn_hc: HyperConnectionTensors<'a>,
-    pub attention_norm: &'a TensorDesc,
-    pub ffn_norm: &'a TensorDesc,
-    pub mixer: MixerTensors<'a>,
-    pub ffn: FfnTensors<'a>,
+pub struct Glm5NextBlock<T> {
+    pub attention_hc: HyperConnectionTensors<T>,
+    pub ffn_hc: HyperConnectionTensors<T>,
+    pub attention_norm: T,
+    pub ffn_norm: T,
+    pub mixer: MixerTensors<T>,
+    pub ffn: FfnTensors<T>,
+}
+
+impl<T> HyperConnectionTensors<T> {
+    pub fn try_map<U, E>(
+        &self,
+        f: &mut impl FnMut(&T) -> std::result::Result<U, E>,
+    ) -> std::result::Result<HyperConnectionTensors<U>, E> {
+        Ok(HyperConnectionTensors {
+            mix: f(&self.mix)?,
+            base: f(&self.base)?,
+            scale: f(&self.scale)?,
+        })
+    }
+}
+
+impl<T> KdaTensors<T> {
+    pub fn try_map<U, E>(
+        &self,
+        f: &mut impl FnMut(&T) -> std::result::Result<U, E>,
+    ) -> std::result::Result<KdaTensors<U>, E> {
+        Ok(KdaTensors {
+            query: f(&self.query)?,
+            key: f(&self.key)?,
+            value: f(&self.value)?,
+            query_conv: f(&self.query_conv)?,
+            key_conv: f(&self.key_conv)?,
+            value_conv: f(&self.value_conv)?,
+            decay_a: f(&self.decay_a)?,
+            decay_b: f(&self.decay_b)?,
+            decay_bias: f(&self.decay_bias)?,
+            neg_exp_a_log: f(&self.neg_exp_a_log)?,
+            beta: f(&self.beta)?,
+            gate_a: f(&self.gate_a)?,
+            gate_b: f(&self.gate_b)?,
+            output_norm: f(&self.output_norm)?,
+            output: f(&self.output)?,
+        })
+    }
+}
+
+impl<T> IndexerTensors<T> {
+    pub fn try_map<U, E>(
+        &self,
+        f: &mut impl FnMut(&T) -> std::result::Result<U, E>,
+    ) -> std::result::Result<IndexerTensors<U>, E> {
+        Ok(IndexerTensors {
+            query: f(&self.query)?,
+            key: f(&self.key)?,
+            key_norm: f(&self.key_norm)?,
+            key_norm_bias: f(&self.key_norm_bias)?,
+            head_weights: f(&self.head_weights)?,
+            pool_gate: f(&self.pool_gate)?,
+            pool_position: f(&self.pool_position)?,
+        })
+    }
+}
+
+impl<T> MlaTensors<T> {
+    pub fn try_map<U, E>(
+        &self,
+        f: &mut impl FnMut(&T) -> std::result::Result<U, E>,
+    ) -> std::result::Result<MlaTensors<U>, E> {
+        Ok(MlaTensors {
+            query_a: f(&self.query_a)?,
+            query_a_norm: f(&self.query_a_norm)?,
+            query_b: f(&self.query_b)?,
+            latent: f(&self.latent)?,
+            latent_norm: f(&self.latent_norm)?,
+            key_absorb: f(&self.key_absorb)?,
+            value_expand: f(&self.value_expand)?,
+            output: f(&self.output)?,
+            indexer: self.indexer.try_map(f)?,
+        })
+    }
+}
+
+impl<T> DenseFfnTensors<T> {
+    pub fn try_map<U, E>(
+        &self,
+        f: &mut impl FnMut(&T) -> std::result::Result<U, E>,
+    ) -> std::result::Result<DenseFfnTensors<U>, E> {
+        Ok(DenseFfnTensors {
+            gate: f(&self.gate)?,
+            up: f(&self.up)?,
+            down: f(&self.down)?,
+        })
+    }
+}
+
+impl<T> MoeTensors<T> {
+    pub fn try_map<U, E>(
+        &self,
+        f: &mut impl FnMut(&T) -> std::result::Result<U, E>,
+    ) -> std::result::Result<MoeTensors<U>, E> {
+        Ok(MoeTensors {
+            router: f(&self.router)?,
+            selection_bias: f(&self.selection_bias)?,
+            gate_experts: f(&self.gate_experts)?,
+            up_experts: f(&self.up_experts)?,
+            down_experts: f(&self.down_experts)?,
+            shared: self.shared.try_map(f)?,
+        })
+    }
+}
+
+impl<T> Glm5NextBlock<T> {
+    /// The same block with every tensor mapped through `f`, in field order.
+    pub fn try_map<U, E>(
+        &self,
+        f: &mut impl FnMut(&T) -> std::result::Result<U, E>,
+    ) -> std::result::Result<Glm5NextBlock<U>, E> {
+        Ok(Glm5NextBlock {
+            attention_hc: self.attention_hc.try_map(f)?,
+            ffn_hc: self.ffn_hc.try_map(f)?,
+            attention_norm: f(&self.attention_norm)?,
+            ffn_norm: f(&self.ffn_norm)?,
+            mixer: match &self.mixer {
+                MixerTensors::Kda(kda) => MixerTensors::Kda(kda.try_map(f)?),
+                MixerTensors::Mla(mla) => MixerTensors::Mla(mla.try_map(f)?),
+            },
+            ffn: match &self.ffn {
+                FfnTensors::Dense(dense) => FfnTensors::Dense(dense.try_map(f)?),
+                FfnTensors::Moe(moe) => FfnTensors::Moe(moe.try_map(f)?),
+            },
+        })
+    }
 }
 
 /// One bound trunk tensor and the execution role that consumes it.
@@ -513,7 +642,7 @@ pub struct Glm5NextModel<'a> {
     pub token_embedding: &'a TensorDesc,
     pub output_norm: &'a TensorDesc,
     pub output: &'a TensorDesc,
-    pub blocks: Vec<Glm5NextBlock<'a>>,
+    pub blocks: Vec<Glm5NextBlock<&'a TensorDesc>>,
     /// Every executed tensor exactly once, in binding order.
     pub trunk: Vec<BoundTensor<'a>>,
     /// NextN block tensors: recognized, never retained or executed.
@@ -623,7 +752,7 @@ fn bind_block<'a>(
     c: &Glm5NextConfig,
     i: usize,
     kind: BlockKind,
-) -> Result<Glm5NextBlock<'a>> {
+) -> Result<Glm5NextBlock<&'a TensorDesc>> {
     let h = u64::from(c.hidden_size);
     let attention_hc = bind_hc(b, c, i, "attn")?;
     let ffn_hc = bind_hc(b, c, i, "ffn")?;
@@ -660,7 +789,7 @@ fn bind_hc<'a>(
     c: &Glm5NextConfig,
     i: usize,
     site: &str,
-) -> Result<HyperConnectionTensors<'a>> {
+) -> Result<HyperConnectionTensors<&'a TensorDesc>> {
     let mixes = u64::from(c.hc_mix_count());
     Ok(HyperConnectionTensors {
         mix: b.take(
@@ -681,7 +810,11 @@ fn bind_hc<'a>(
     })
 }
 
-fn bind_kda<'a>(b: &mut Binder<'a>, c: &Glm5NextConfig, i: usize) -> Result<KdaTensors<'a>> {
+fn bind_kda<'a>(
+    b: &mut Binder<'a>,
+    c: &Glm5NextConfig,
+    i: usize,
+) -> Result<KdaTensors<&'a TensorDesc>> {
     let h = u64::from(c.hidden_size);
     let d = u64::from(c.kda_width());
     let heads = u64::from(c.head_count);
@@ -709,7 +842,11 @@ fn bind_kda<'a>(b: &mut Binder<'a>, c: &Glm5NextConfig, i: usize) -> Result<KdaT
     })
 }
 
-fn bind_mla<'a>(b: &mut Binder<'a>, c: &Glm5NextConfig, i: usize) -> Result<MlaTensors<'a>> {
+fn bind_mla<'a>(
+    b: &mut Binder<'a>,
+    c: &Glm5NextConfig,
+    i: usize,
+) -> Result<MlaTensors<&'a TensorDesc>> {
     let h = u64::from(c.hidden_size);
     let q_rank = u64::from(c.q_lora_rank);
     let kv_rank = u64::from(c.kv_lora_rank);
@@ -761,7 +898,7 @@ fn bind_dense<'a>(
     suffix: &str,
     h: u64,
     f: u64,
-) -> Result<DenseFfnTensors<'a>> {
+) -> Result<DenseFfnTensors<&'a TensorDesc>> {
     let p = TensorRole::Projection;
     Ok(DenseFfnTensors {
         gate: b.take(&format!("blk.{i}.ffn_gate{suffix}.weight"), &[h, f], p)?,
@@ -770,7 +907,11 @@ fn bind_dense<'a>(
     })
 }
 
-fn bind_moe<'a>(b: &mut Binder<'a>, c: &Glm5NextConfig, i: usize) -> Result<MoeTensors<'a>> {
+fn bind_moe<'a>(
+    b: &mut Binder<'a>,
+    c: &Glm5NextConfig,
+    i: usize,
+) -> Result<MoeTensors<&'a TensorDesc>> {
     let h = u64::from(c.hidden_size);
     let e = u64::from(c.expert_count);
     let f = u64::from(c.expert_ffn_size);

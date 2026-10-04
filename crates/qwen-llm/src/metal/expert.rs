@@ -749,7 +749,7 @@ mod tests {
         let status = offset_tensor(
             &ctx,
             16,
-            bytemuck::cast_slice(&vec![0i32; ROWS]),
+            bytemuck::cast_slice(&[0i32; ROWS]),
             16,
             vec![r],
             GgmlType::I32,
@@ -760,7 +760,7 @@ mod tests {
             let counts = offset_tensor(
                 &ctx,
                 16,
-                bytemuck::cast_slice(&vec![0i32; EXPERTS]),
+                bytemuck::cast_slice(&[0i32; EXPERTS]),
                 16,
                 vec![e],
                 GgmlType::I32,

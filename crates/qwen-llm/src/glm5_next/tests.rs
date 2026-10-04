@@ -200,7 +200,8 @@ fn metadata_fails_closed() {
         f(&mut m);
         Glm5NextConfig::from_metadata(&m).unwrap_err().to_string()
     };
-    let cases: Vec<(&str, Box<dyn Fn(&mut BTreeMap<String, Value>)>)> = vec![
+    type Mutation = Box<dyn Fn(&mut BTreeMap<String, Value>)>;
+    let cases: Vec<(&str, Mutation)> = vec![
         (
             "unrecognized",
             Box::new(|m| {

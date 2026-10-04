@@ -780,8 +780,8 @@ mod tests {
         let mixes_t = tensor(&ctx, &mixes, vec![24, r]);
         let scale_t = tensor(&ctx, &scale, vec![3]);
         let base_t = tensor(&ctx, &base, vec![24]);
-        let pre_t = tensor(&ctx, &vec![0.0; 4 * R], vec![4, r]);
-        let post_t = tensor(&ctx, &vec![0.0; 4 * R], vec![4, r]);
+        let pre_t = tensor(&ctx, &[0.0; 4 * R], vec![4, r]);
+        let post_t = tensor(&ctx, &[0.0; 4 * R], vec![4, r]);
         let comb_t = tensor(&ctx, &vec![0.0; 16 * R], vec![4, 4, r]);
         let collapsed_t = tensor(&ctx, &vec![0.0; H * R], vec![h, r]);
         let block_t = tensor(&ctx, &block, vec![h, r]);

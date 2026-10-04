@@ -551,6 +551,7 @@ pub(crate) fn run_raw(
             &measured,
             Some(RequestStatsDiagnostics {
                 deepseek_v4: None,
+                glm5_next: None,
                 k2_horizon: Some(RequestStatsK2Diagnostics {
                     prefill,
                     chat: chat_record,
@@ -686,6 +687,7 @@ mod tests {
     fn k2_stats_record_selected_prefill_without_other_family_diagnostics() {
         let diagnostics = RequestStatsDiagnostics {
             deepseek_v4: None,
+            glm5_next: None,
             k2_horizon: Some(RequestStatsK2Diagnostics {
                 chat: None,
                 timing: None,

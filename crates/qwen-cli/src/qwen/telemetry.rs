@@ -1426,6 +1426,20 @@ pub(crate) struct RequestStatsDiagnostics {
     pub(crate) deepseek_v4: Option<RequestStatsDeepSeekV4Diagnostics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) k2_horizon: Option<RequestStatsK2Diagnostics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) glm5_next: Option<RequestStatsGlm5NextDiagnostics>,
+}
+
+/// GLM-5.3 request facts: prefill path, session geometry, retained-window
+/// prefetch and the phase timing (setup separated from the loaded request).
+#[derive(Debug, Serialize)]
+pub(crate) struct RequestStatsGlm5NextDiagnostics {
+    pub(crate) schema_version: u32,
+    pub(crate) prefill_mode: &'static str,
+    pub(crate) prefill_rows: u64,
+    pub(crate) capacity: u64,
+    pub(crate) prefetch: serde_json::Value,
+    pub(crate) timing: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -1471,9 +1485,11 @@ pub(crate) fn parse_build_dirty(raw: &str) -> bool {
 /// - `total_ms` (record `timing_ms.total`): request wall from after the
 ///   model is resident to the last token; model load is excluded and
 ///   reported separately by lanes that measure it.
-/// K2 explicitly reconstructs `total_ms` from encoding, request preparation and
-/// resident execution spans (encoding precedes capacity-shaped loading). Its
-/// namespaced timing diagnostic reports the separate continuous lane wall and
+///
+/// K2 and GLM-5.3 explicitly reconstruct `total_ms` from encoding, request
+/// preparation and resident execution spans (encoding precedes
+/// capacity-shaped loading) with the shared `lane_timing` accumulator. Their
+/// namespaced timing diagnostics report the separate continuous lane wall and
 /// all setup phases; this does not change other families' measurements.
 pub(crate) struct RequestStatsMeasured {
     pub input_tokens: u64,

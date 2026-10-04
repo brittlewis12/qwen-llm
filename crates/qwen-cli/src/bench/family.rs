@@ -205,23 +205,39 @@ pub(crate) fn with_family_bench<R>(
             body(&mut bench)
         }
         ModelFamily::Glm5Next => {
-            let context = qwen_llm::glm5_next::Glm5NextConfig::from_gguf(gguf)
-                .context("bind GLM-5.3-Flash configuration")?
-                .context_length as usize;
+            // The same layout admission as `qwen run` (synthetic tokens need
+            // no tokenizer), then the session preflight before any weight is
+            // mapped.
+            let layout = qwen_llm::glm5_next::Glm5NextArtifactLayout::inspect(gguf)
+                .context("admit GLM-5.3-Flash artifact")?;
+            let context = layout.config().context_length as usize;
             ensure!(
                 extent.forwards <= context,
                 "GLM-5.3-Flash rows must stay within the checkpoint context {context} (need {})",
                 extent.forwards
             );
+            let prefill_rows = if layout.packed_prefill() {
+                extent
+                    .prefill_endpoint
+                    .clamp(1, qwen_llm::glm5_next_metal::DEFAULT_PREFILL_ROWS)
+            } else {
+                0
+            };
+            qwen_llm::glm5_next_metal::preflight_session(
+                ctx,
+                gguf,
+                layout.model(),
+                extent.forwards,
+                prefill_rows,
+            )
+            .context("admit the GLM-5.3-Flash bench session")?;
             let weights = Glm5NextWeights::load(ctx, gguf).context("load GLM-5.3-Flash weights")?;
             let mut bench = Glm5NextBench {
                 ctx,
                 vocab: weights.config.vocab_size as usize,
                 weights: &weights,
                 capacity: extent.forwards,
-                prefill_rows: extent
-                    .prefill_endpoint
-                    .clamp(1, qwen_llm::glm5_next_metal::DEFAULT_PREFILL_ROWS),
+                prefill_rows,
                 session: None,
             };
             body(&mut bench)

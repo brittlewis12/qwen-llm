@@ -29,12 +29,19 @@ no further `glm5-next` changes). Earlier research (2026-08-28 gap analysis,
 - Long-context qualification (qual-v1, `scripts/reference/glm53/qual-v1.json`, 591
   positions): native serial matches llama.cpp serial to KL <= 1.1e-9 until an exact
   router-score tie at position 156 that the two break differently (native: lowest
-  expert id), top-1 591/591. Fast vs Exact: KL <= 9.1e-3, top-1 flips only at
-  margins <= 0.06, tighter than llama.cpp's own batched-vs-serial divergence on the
-  same tokens (prompt-end KL 8.6e-3, worst 4.2e-2). Chunk size is arithmetic-neutral
-  (512 = 128 and 64 = 97 bitwise).
-- Next: P4 sparse selection (lifts the 2051-position cap), cheap prefill experiments
-  (Q6_K N64 threshold, strict router) and compact grouped-expert scheduling, then P5.
+  expert id), top-1 591/591. Fast vs Exact: KL <= 9.1e-3, top-1 flips only with
+  choice regret <= 0.06 (reference) / 0.176 (Fast), tighter than llama.cpp's own
+  batched-vs-serial divergence on the same tokens (prompt-end KL 8.6e-3, worst
+  4.2e-2). Chunk size is arithmetic-neutral (512 = 128 and 64 = 97 bitwise). Bounds
+  are calibrated regression bounds, not a holdout.
+- Model-scale tests hold the cross-process production lease, pass the wired-memory
+  gate and run with `MTL_DEBUG_LAYER=1`; comparison helpers fail on NaN, empty or
+  mismatched inputs.
+- Q6_K N64 at 512 rows: no measurable pp512 change (+0.8% inside a +-5% noise
+  floor). Strict router skipped: both router kernels are full F32; it only reorders
+  accumulation and cannot reduce routing flips, which come from upstream activations.
+- Next: P4 sparse selection (lifts the 2051-position cap), then P5, then compact
+  grouped-expert scheduling and the rest of P6.
 
 ## Artifact
 
@@ -290,8 +297,38 @@ Each packet ends with a `cx` review. Estimates are focused engineer-days.
   chunk straddling 2052 with per-query visibility, continued prefill. Avoid inheriting
   the Qwen4Exp `2048 + 3 + remainder` scheduling shoulder (`PERF-ROADMAP.md:56`).
   Gate: boundary fixtures at 2049-2056 vs llama.cpp; then pp4096.
+  Verified semantics (llama.cpp `build_kpool_select`, `set_input_kpool`): weights =
+  `indexer_proj . x / 64`; score = sum_h relu(q_h . pooled) * w_h with q rounded to
+  F16 and F16 pooled keys (fused lightning indexer); a query at visible length L
+  sees the first floor(L/4) pools, including one it completes; top-512 pools, each
+  expanded to its 4 chronological cells, plus the tail of L % 4 cells (absent
+  `kpool_select_tail` defaults to true; absent `indexer.types` means every MLA layer
+  selects); attention scale 1/16, no sinks. llama.cpp fills threshold ties in atomic
+  order; native breaks them by lowest pool id.
+  Design (cx): binder refuses `kpool_select_tail = false` and shared indexer types;
+  pool publication moves before attention (decode and packed); a 32-head half-MMA
+  scorer templated from DS4's matrix scorer, DS4's radix4 selector, a pool-to-row
+  expansion kernel and DS4's online selected-attention kernel (window 0, 2051 slots,
+  no sink) behind family-neutral encoders in `crates/qwen-llm/src/metal/` with DS4
+  delegating; decode and packed share every sparse kernel so Exact packed stays
+  bitwise equal to serial; selector status is sticky per request; packed sparse
+  rows run in reusable 64-query microbatches (scores [ceil(capacity/4), 64]); chunk
+  offset of the first sparse row is clamp(2051 - chunk_start, 0, rows); positions
+  are contiguous from zero (no prefix eviction or rebased restores). Gates:
+  component fixtures (signed weights, threshold ties, every tail length, a
+  distinctive excluded row, signed zero), real-input component replay from
+  `indexer_q`/`indexer_weights`/`indexer_pool_k` captures (identical sets above the
+  measured score-error margin; strict winners/losers and threshold counts below
+  it), Exact packed 2048 + 16 teacher-forced decode steps, then crossing chunks.
+  End-to-end bounds for the boundary run are frozen before it is observed.
 - P5 Product lanes (4-6 d). Chat in `run`, `info` from the preparation result,
-  request bench, `serve` backend (live session first), lens sites.
+  request bench, `serve` backend (live session first), lens sites. Entry tasks from
+  the 2026-10-04 review: one CPU preparation result (binding, coverage, stops and
+  tokenizer admission) drives both `run` and capability projection; cooperative
+  cancellation at retained-prefetch read and packed-prefill chunk boundaries, with
+  allocation admission before expensive warming; `tokenizer_ms` covers encoding only
+  and `total_ms` the loaded request, with setup and end-to-end time reported
+  separately.
 - P6 Optimization (open). Beat llama.cpp on the same artifact (tg 22.6, pp512 223,
   pp4096 174) with ABBA `qwen-bench` runs, then push toward the bandwidth ceiling.
 

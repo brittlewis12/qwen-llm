@@ -393,13 +393,9 @@ mod tests {
             .iter()
             .fold(0.0f32, |m, v| m.max(v.abs()))
             .max(1e-6);
-        let worst = actual
-            .iter()
-            .zip(expected)
-            .map(|(a, e)| (a - e).abs())
-            .fold(0.0f32, f32::max);
+        let worst = super::super::test_support::max_abs_diff_finite(label, actual, expected);
         assert!(
-            actual.iter().all(|v| v.is_finite()) && worst / scale <= relative,
+            worst / scale <= relative,
             "{label}: max abs {worst} vs scale {scale}"
         );
     }

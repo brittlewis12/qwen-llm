@@ -913,11 +913,7 @@ mod tests {
             .sqrt();
         let cos = dot / (na * ne).max(1e-30);
         let ref_max = expected.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-        let max_abs = actual
-            .iter()
-            .zip(expected)
-            .map(|(a, e)| (a - e).abs())
-            .fold(0.0f32, f32::max);
+        let max_abs = super::super::test_support::max_abs_diff_finite(label, actual, expected);
         eprintln!("[{label}] cos={cos:.7} max|delta|={max_abs:.3e} ref_max={ref_max:.3e}");
         assert!(cos >= 0.9999, "{label}: cos {cos}");
         assert!(

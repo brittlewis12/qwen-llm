@@ -537,7 +537,9 @@ pub fn encode_mat_mat_q8_0_grouped_f32(
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{offset_tensor, synthetic_q8_0_bank, tensor_f32_at_offset};
+    use super::super::test_support::{
+        max_abs_diff_finite, offset_tensor, synthetic_q8_0_bank, tensor_f32_at_offset,
+    };
     use super::*;
 
     const H: usize = LATENT_HEADS;
@@ -651,11 +653,7 @@ mod tests {
             });
             let expected = reference(&q, &cache, start, rows, scale);
             let actual = tensor_f32_at_offset(&out_t);
-            let worst = actual
-                .iter()
-                .zip(&expected)
-                .map(|(a, e)| (a - e).abs())
-                .fold(0.0f32, f32::max);
+            let worst = max_abs_diff_finite("latent attention", &actual, &expected);
             assert!(
                 actual.iter().all(|v| v.is_finite()),
                 "start {start}: non-finite"
@@ -764,11 +762,7 @@ mod tests {
                 let gemv = tensor_f32_at_offset(&yr);
                 let got = &grouped[row * n_out * H..(row + 1) * n_out * H];
                 let scale = gemv.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-                let worst = got
-                    .iter()
-                    .zip(&gemv)
-                    .map(|(a, e)| (a - e).abs())
-                    .fold(0.0f32, f32::max);
+                let worst = max_abs_diff_finite("grouped vs gemv", got, &gemv);
                 assert!(
                     worst <= 1e-5 * scale.max(1.0),
                     "{n_in}->{n_out} row {row}: {worst} (scale {scale})"
@@ -811,7 +805,12 @@ mod tests {
                     .unwrap();
             }
         });
-        assert!(tensor_f32_at_offset(&y_grouped) == tensor_f32_at_offset(&y_flat));
+        let (a, b) = (
+            tensor_f32_at_offset(&y_grouped),
+            tensor_f32_at_offset(&y_flat),
+        );
+        assert_eq!(max_abs_diff_finite("grouped vs flat", &a, &b), 0.0);
+        assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()));
 
         let y = output();
         let command = ctx.queue.commandBuffer().unwrap();
@@ -997,22 +996,14 @@ mod tests {
             let qt = &q[token * W * H..(token + 1) * W * H];
             let want = selected_reference(qt, &cache, rows, scale);
             let got = &out[token * W * H..(token + 1) * W * H];
-            let worst = got
-                .iter()
-                .zip(&want)
-                .map(|(g, e)| (g - e).abs())
-                .fold(0.0f32, f32::max);
+            let worst = max_abs_diff_finite("selected attention", got, &want);
             assert!(worst <= 2e-5, "query {query}: max |diff| {worst}");
             if query == 0 {
                 // The fixture discriminates: attending EXCLUDED changes head 0.
                 let mut with = rows.clone();
                 with.push(EXCLUDED);
                 let wrong = selected_reference(qt, &cache, &with, scale);
-                let moved = wrong[..W]
-                    .iter()
-                    .zip(&got[..W])
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0.0f32, f32::max);
+                let moved = max_abs_diff_finite("excluded row", &wrong[..W], &got[..W]);
                 assert!(moved > 0.1, "excluded row is not distinctive ({moved})");
             }
         }
@@ -1065,11 +1056,7 @@ mod tests {
             .unwrap();
         });
         let (dense, selected) = (tensor_f32_at_offset(&dense_t), tensor_f32_at_offset(&sel_t));
-        let worst = dense
-            .iter()
-            .zip(&selected)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
+        let worst = max_abs_diff_finite("dense vs full selection", &selected, &dense);
         assert!(worst <= 1e-5, "dense vs full selection: {worst}");
     }
 

@@ -209,7 +209,7 @@ pub fn encode_online_selected_attention_f16(
         || !fits(g.compressed_capacity.checked_mul(width))
         || !fits(g.selected_slots.checked_mul(g.query_count))
         || !fits(g.chunk_start_position.checked_add(query_end))
-        || !fits(Some(g.window))
+        || !fits(g.window.checked_mul(width))
     {
         return Err(overflow());
     }
@@ -252,6 +252,29 @@ pub fn encode_online_selected_attention_f16(
         }
         check_tensor(K, cache, GgmlType::F16, &cache.shape.clone(), false, name)?;
         check_alignment(K, cache, 8, name)?;
+    }
+    // Raw rows the kernel can address: the ring (`position % window`), or in
+    // chunk layout the chunk's rows plus the ring of rows before it.
+    if g.window > 0 {
+        let rows = |t: &MetalTensor| t.n_elements() / width as u64;
+        let (window, tokens) = (g.window as u64, g.token_count as u64);
+        let short = |name: &str, needed: u64, have: u64| {
+            bad_shape(
+                K,
+                format!("{name} holds {have} rows; window {window} needs {needed}"),
+            )
+        };
+        if g.raw_cache_is_chunk {
+            if rows(b.raw_cache) < tokens {
+                return Err(short("raw chunk cache", tokens, rows(b.raw_cache)));
+            }
+            if rows(b.raw_cache_before_chunk) < window {
+                let have = rows(b.raw_cache_before_chunk);
+                return Err(short("raw cache before chunk", window, have));
+            }
+        } else if rows(b.raw_cache) < window {
+            return Err(short("raw ring", window, rows(b.raw_cache)));
+        }
     }
     let (slots, queries) = (g.selected_slots as u64, g.query_count as u64);
     check_tensor(
@@ -1048,5 +1071,89 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
         assert!(worst <= 1e-5, "dense vs full selection: {worst}");
+    }
+
+    /// The encoder refuses raw caches too short for the window or chunk it
+    /// is asked to read (no work is submitted).
+    #[test]
+    fn online_selected_attention_refuses_short_raw_caches() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        const TOKENS: usize = 2;
+        let f16_rows = |rows: usize| {
+            offset_tensor(
+                &ctx,
+                64,
+                &vec![0u8; rows * W * 2],
+                64,
+                vec![W as u64, rows as u64],
+                GgmlType::F16,
+            )
+        };
+        let i32_t = |v: &[i32], shape: Vec<u64>| {
+            offset_tensor(&ctx, 16, bytemuck::cast_slice(v), 16, shape, GgmlType::I32)
+        };
+        let q = f32_tensor(
+            &ctx,
+            &vec![0.0; W * H * TOKENS],
+            vec![(W * H) as u64, TOKENS as u64],
+        );
+        let out = f32_tensor(
+            &ctx,
+            &vec![0.0; W * H * TOKENS],
+            vec![(W * H) as u64, TOKENS as u64],
+        );
+        let compressed = f16_rows(16);
+        let ids = i32_t(&[0; 4 * TOKENS], vec![4, TOKENS as u64]);
+        let counts = i32_t(&[1; TOKENS], vec![TOKENS as u64]);
+        let visible = i32_t(&[1; TOKENS], vec![TOKENS as u64]);
+        let sinks = f32_tensor(&ctx, &[LATENT_NO_SINK; H], vec![H as u64]);
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        let attempt = |raw: &MetalTensor, before: &MetalTensor, window: usize, chunk: bool| {
+            encode_online_selected_attention_f16(
+                &ctx,
+                &enc,
+                &SelectedAttention {
+                    queries: &q,
+                    raw_cache: raw,
+                    raw_cache_before_chunk: before,
+                    compressed_cache: &compressed,
+                    selected_ids: &ids,
+                    selected_counts: &counts,
+                    visible_counts: &visible,
+                    sinks: &sinks,
+                    output: &out,
+                },
+                SelectedAttentionShape {
+                    head_count: H,
+                    query_count: TOKENS,
+                    query_token_offset: 0,
+                    token_count: TOKENS,
+                    chunk_start_position: 200,
+                    window,
+                    raw_cache_is_chunk: chunk,
+                    selected_slots: 4,
+                    compressed_capacity: 16,
+                    scale: 0.0625,
+                    direct: true,
+                },
+            )
+            .map_err(|e| e.to_string())
+        };
+        let (one, ring, chunk_rows) = (f16_rows(1), f16_rows(128), f16_rows(TOKENS));
+        let err = attempt(&one, &one, 128, false).unwrap_err();
+        assert!(err.contains("raw ring holds 1 rows"), "{err}");
+        let err = attempt(&one, &ring, 128, true).unwrap_err();
+        assert!(err.contains("raw chunk cache holds 1 rows"), "{err}");
+        let err = attempt(&chunk_rows, &one, 128, true).unwrap_err();
+        assert!(err.contains("raw cache before chunk holds 1 rows"), "{err}");
+        // Window 0 never reads raw rows; ring 128 and chunk layouts that fit
+        // are accepted.
+        attempt(&one, &one, 0, false).unwrap();
+        attempt(&ring, &one, 128, false).unwrap();
+        attempt(&chunk_rows, &ring, 128, true).unwrap();
+        enc.end();
     }
 }

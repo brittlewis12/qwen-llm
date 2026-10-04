@@ -246,7 +246,12 @@ mod tests {
         let n = tensor.n_elements() as usize;
         let bytes = unsafe {
             std::slice::from_raw_parts(
-                tensor.buffer.contents().as_ptr().cast::<u8>().add(tensor.offset as usize),
+                tensor
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(tensor.offset as usize),
                 n * std::mem::size_of::<T>(),
             )
         };
@@ -286,7 +291,10 @@ mod tests {
         let (want_ids, want_weights) = reference(route, logits, bias);
         assert_eq!(ids, want_ids);
         for (a, e) in weights.iter().zip(&want_weights) {
-            assert!((a - e).abs() <= 2e-6 * (1.0 + e.abs()), "{weights:?} vs {want_weights:?}");
+            assert!(
+                (a - e).abs() <= 2e-6 * (1.0 + e.abs()),
+                "{weights:?} vs {want_weights:?}"
+            );
         }
     }
 
@@ -310,7 +318,10 @@ mod tests {
 
         // Winners in the ninth simdgroup (256..288), outside DS4's old range.
         let mut high = base.clone();
-        for (k, i) in [256, 263, 270, 277, 284, 287, 260, 281].into_iter().enumerate() {
+        for (k, i) in [256, 263, 270, 277, 284, 287, 260, 281]
+            .into_iter()
+            .enumerate()
+        {
             high[i] = 8.0 - k as f32 * 0.5;
         }
         let (_, ids, _) = run(&ctx, &GLM, &high, &zero);
@@ -347,11 +358,17 @@ mod tests {
         let mut logits: Vec<f32> = (0..288).map(|i| (i % 13) as f32 * 0.1).collect();
         let zero = vec![0.0; 288];
         logits[123] = f32::NAN;
-        assert_eq!(run(&ctx, &GLM, &logits, &zero).0, ROUTE_STATUS_NONFINITE_LOGIT);
+        assert_eq!(
+            run(&ctx, &GLM, &logits, &zero).0,
+            ROUTE_STATUS_NONFINITE_LOGIT
+        );
         logits[123] = 0.0;
         let mut bias = zero.clone();
         bias[3] = f32::INFINITY;
-        assert_eq!(run(&ctx, &GLM, &logits, &bias).0, ROUTE_STATUS_NONFINITE_BIAS);
+        assert_eq!(
+            run(&ctx, &GLM, &logits, &bias).0,
+            ROUTE_STATUS_NONFINITE_BIAS
+        );
 
         // DS4 geometry through the same entry: 256 experts, top-6, sqrt-softplus.
         let ds4 = LearnedRoute {

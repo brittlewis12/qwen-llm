@@ -265,7 +265,14 @@ mod tests {
     use crate::deepseek_v4_oracle::{clamped_swiglu, hyper_connection_post, hyper_connection_pre};
 
     fn tensor(ctx: &MetalContext, values: &[f32], shape: Vec<u64>) -> MetalTensor {
-        offset_tensor(ctx, 16, bytemuck::cast_slice(values), 20, shape, GgmlType::F32)
+        offset_tensor(
+            ctx,
+            16,
+            bytemuck::cast_slice(values),
+            20,
+            shape,
+            GgmlType::F32,
+        )
     }
 
     fn assert_close(label: &str, actual: &[f32], expected: &[f32], tolerance: f32) {
@@ -350,20 +357,42 @@ mod tests {
             encode_mhc4_collapse(&ctx, enc, H, &residual_t, &pre_t, &collapsed_t).unwrap();
             encode_mhc4_collapse(&ctx, enc, H, &residual_t, &quarter_t, &mean_t).unwrap();
             encode_mhc4_post(
-                &ctx, enc, H, &block_t, &residual_t, &post_t, &comb_t, &out_t,
+                &ctx,
+                enc,
+                H,
+                &block_t,
+                &residual_t,
+                &post_t,
+                &comb_t,
+                &out_t,
             )
             .unwrap();
             encode_mhc4_repeat(&ctx, enc, H, &embed_t, &repeated_t).unwrap();
         });
-        assert_close("pre", &tensor_f32_at_offset(&pre_t), &pre.controls.pre, 1e-5);
-        assert_close("post", &tensor_f32_at_offset(&post_t), &pre.controls.post, 1e-5);
+        assert_close(
+            "pre",
+            &tensor_f32_at_offset(&pre_t),
+            &pre.controls.pre,
+            1e-5,
+        );
+        assert_close(
+            "post",
+            &tensor_f32_at_offset(&post_t),
+            &pre.controls.post,
+            1e-5,
+        );
         assert_close(
             "combination",
             &tensor_f32_at_offset(&comb_t),
             &pre.controls.combination,
             1e-5,
         );
-        assert_close("collapse", &tensor_f32_at_offset(&collapsed_t), &pre.input, 1e-5);
+        assert_close(
+            "collapse",
+            &tensor_f32_at_offset(&collapsed_t),
+            &pre.input,
+            1e-5,
+        );
         assert_close("mean collapse", &tensor_f32_at_offset(&mean_t), &mean, 1e-6);
         assert_close("post residual", &tensor_f32_at_offset(&out_t), &post, 1e-5);
         let repeated = tensor_f32_at_offset(&repeated_t);
@@ -377,8 +406,21 @@ mod tests {
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
-        let gate = [-20.0f32, -10.0, -0.5, 0.0, 3.0, 9.99, 10.0, 10.01, 50.0, f32::MIN_POSITIVE];
-        let up = [20.0f32, -10.0, 0.25, 7.0, -10.5, 10.0, 11.0, -50.0, 2.0, -1.0];
+        let gate = [
+            -20.0f32,
+            -10.0,
+            -0.5,
+            0.0,
+            3.0,
+            9.99,
+            10.0,
+            10.01,
+            50.0,
+            f32::MIN_POSITIVE,
+        ];
+        let up = [
+            20.0f32, -10.0, 0.25, 7.0, -10.5, 10.0, 11.0, -50.0, 2.0, -1.0,
+        ];
         let expected = clamped_swiglu(&gate, &up, 10.0).unwrap();
         let shape = vec![gate.len() as u64];
         let gate_t = tensor(&ctx, &gate, shape.clone());
@@ -389,8 +431,18 @@ mod tests {
             encode_clamped_swiglu(&ctx, enc, &gate_t, &up_t, &out_t, 10.0).unwrap();
             encode_clamped_swiglu(&ctx, enc, &in_place_t, &up_t, &in_place_t, 10.0).unwrap();
         });
-        assert_close("clamped swiglu", &tensor_f32_at_offset(&out_t), &expected, 1e-6);
-        assert_close("in place", &tensor_f32_at_offset(&in_place_t), &expected, 1e-6);
+        assert_close(
+            "clamped swiglu",
+            &tensor_f32_at_offset(&out_t),
+            &expected,
+            1e-6,
+        );
+        assert_close(
+            "in place",
+            &tensor_f32_at_offset(&in_place_t),
+            &expected,
+            1e-6,
+        );
         assert!(
             encode_clamped_swiglu(
                 &ctx,

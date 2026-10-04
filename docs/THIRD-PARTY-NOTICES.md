@@ -12,7 +12,9 @@ DwarfStar's `kernel_dsv4_indexer_scores_tiled_f32`, revision
 update and gated output norm) as of revision
 `0aaea5a238fb41a35106a551e73c8409dfb751ac` (file last changed in
 `147109a3cc49f12e4706e9fb7f81816c79e016a8`), consuming the GGUF's
-`ssm_a = -exp(A_log)` instead of `A_log`.
+`ssm_a = -exp(A_log)` instead of `A_log`. The packed prefill kernels
+`kernel_glm53_kda_prefill_{prepare,recurrence,output}` in the same file adapt
+DwarfStar's kernels of the same names at that revision, with the same change.
 
 ## llama.cpp
 

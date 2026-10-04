@@ -182,6 +182,187 @@ pub fn encode_kda_decode(
     Ok(())
 }
 
+/// Packed prefill of `rows` consecutive tokens. Same bindings as
+/// [`encode_kda_decode`] with per-row activations: `q`, `k`, `v`, `raw_gate`,
+/// `output_gate` and `out` are `[width, rows]` and `raw_beta` `[heads, rows]`.
+/// Stage 1 rewrites `q`, `k`, `v` and `raw_gate` in place (normalized
+/// activations and decay), so those must be writable scratch. Equivalent to
+/// `rows` decode steps: state and conv tails continue across calls and
+/// interleave with decode.
+pub fn encode_kda_prefill(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    heads: usize,
+    rows: usize,
+    b: &KdaDecode<'_>,
+    lower_bound: f32,
+    norm_eps: f32,
+) -> Result<(), MetalError> {
+    const K: &str = "kda_prefill";
+    require_serial(K, enc)?;
+    if heads == 0 || rows == 0 {
+        return Err(checks::bad_shape(K, "heads and rows must be positive"));
+    }
+    if !lower_bound.is_finite() || lower_bound >= 0.0 || !norm_eps.is_finite() || norm_eps <= 0.0 {
+        return Err(checks::bad_shape(
+            K,
+            "lower bound must be negative and epsilon positive",
+        ));
+    }
+    let width = (heads * KDA_HEAD_DIM) as u64;
+    let (r, h, d) = (rows as u64, heads as u64, KDA_HEAD_DIM as u64);
+    let f32_ = GgmlType::F32;
+    for (tensor, writable, name) in [
+        (b.q, true, "q"),
+        (b.k, true, "k"),
+        (b.v, true, "v"),
+        (b.raw_gate, true, "raw gate"),
+        (b.output_gate, false, "output gate"),
+        (b.out, true, "output"),
+    ] {
+        check_tensor(K, tensor, f32_, &[width, r], writable, name)?;
+        check_alignment(K, tensor, 16, name)?;
+    }
+    check_tensor(K, b.raw_beta, f32_, &[h, r], false, "raw beta")?;
+    check_tensor(K, b.neg_exp_a_log, f32_, &[h], false, "ssm_a")?;
+    check_tensor(K, b.dt_bias, f32_, &[width], false, "dt bias")?;
+    for (tensor, name) in [
+        (b.q_conv, "q conv"),
+        (b.k_conv, "k conv"),
+        (b.v_conv, "v conv"),
+    ] {
+        check_tensor(K, tensor, f32_, &[4, 1, width], false, name)?;
+    }
+    check_tensor(K, b.output_norm, f32_, &[d], false, "output norm")?;
+    check_tensor(K, b.conv_state, f32_, &[width, 3, 3], true, "conv state")?;
+    check_tensor(K, b.state, f32_, &[d, d, h], true, "state")?;
+    check_alignment(K, b.state, 16, "state")?;
+    let all = [
+        (b.q, "q"),
+        (b.k, "k"),
+        (b.v, "v"),
+        (b.raw_gate, "raw gate"),
+        (b.raw_beta, "raw beta"),
+        (b.output_gate, "output gate"),
+        (b.q_conv, "q conv"),
+        (b.k_conv, "k conv"),
+        (b.v_conv, "v conv"),
+        (b.neg_exp_a_log, "ssm_a"),
+        (b.dt_bias, "dt bias"),
+        (b.output_norm, "output norm"),
+        (b.conv_state, "conv state"),
+        (b.state, "state"),
+        (b.out, "output"),
+    ];
+    for (i, (written, name)) in all.iter().enumerate() {
+        if !matches!(
+            *name,
+            "q" | "k" | "v" | "raw gate" | "conv state" | "state" | "output"
+        ) {
+            continue;
+        }
+        for (j, (other, other_name)) in all.iter().enumerate() {
+            if i != j && checks::overlaps(written, other) {
+                return Err(checks::bad_shape(K, format!("{name} aliases {other_name}")));
+            }
+        }
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_heads: u32,
+        n_rows: u32,
+        lower_bound: f32,
+        norm_eps: f32,
+    }
+    let args = Args {
+        n_heads: to_u32(K, heads, "heads")?,
+        n_rows: to_u32(K, rows, "rows")?,
+        lower_bound,
+        norm_eps,
+    };
+    let threads = MTLSize {
+        width: THREADS,
+        height: 1,
+        depth: 1,
+    };
+    let pipeline = |name: &str| -> Result<Pipeline, MetalError> {
+        let pso = ctx.pipeline(name)?;
+        if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < THREADS {
+            return Err(checks::bad_shape(
+                K,
+                "needs 32-lane simdgroups and 128 threads",
+            ));
+        }
+        Ok(pso)
+    };
+
+    let prepare = pipeline("kernel_glm53_kda_prefill_prepare")?;
+    enc.set_pipeline(&prepare);
+    enc.set_bytes(0, &args);
+    for (index, tensor) in [
+        b.q,
+        b.k,
+        b.v,
+        b.raw_gate,
+        b.q_conv,
+        b.k_conv,
+        b.v_conv,
+        b.neg_exp_a_log,
+        b.dt_bias,
+        b.conv_state,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        enc.set_tensor(index + 1, tensor);
+    }
+    enc.set_threadgroup_memory(0, (2 * KDA_HEAD_DIM + 8) * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: heads,
+            height: 1,
+            depth: 1,
+        },
+        threads,
+    );
+
+    let recurrence = pipeline("kernel_glm53_kda_prefill_recurrence")?;
+    enc.set_pipeline(&recurrence);
+    enc.set_bytes(0, &args);
+    for (index, tensor) in [b.q, b.k, b.v, b.raw_gate, b.raw_beta, b.state, b.out]
+        .into_iter()
+        .enumerate()
+    {
+        enc.set_tensor(index + 1, tensor);
+    }
+    enc.dispatch(
+        MTLSize {
+            width: heads,
+            height: KDA_HEAD_DIM / 4,
+            depth: 1,
+        },
+        threads,
+    );
+
+    let output = pipeline("kernel_glm53_kda_prefill_output")?;
+    enc.set_pipeline(&output);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, b.out);
+    enc.set_tensor(2, b.output_gate);
+    enc.set_tensor(3, b.output_norm);
+    enc.set_threadgroup_memory(0, 4 * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: rows,
+            height: heads,
+            depth: 1,
+        },
+        threads,
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{offset_tensor, tensor_f32_at_offset};
@@ -376,5 +557,155 @@ mod tests {
         let err =
             encode_kda_decode(&ctx, &enc, 1, &bindings(&state, &act), -5.0, 1e-5).unwrap_err();
         assert!(err.to_string().contains("aliases"), "{err}");
+    }
+
+    /// Packed prefill over two chunks (37 then 20 rows, so state and conv
+    /// tails continue across calls), then one decode step, against the CPU
+    /// contract iterated token by token: outputs, state and conv tails.
+    #[test]
+    fn kda_prefill_matches_stepwise_contract_across_chunks_and_decode() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        const HEADS: usize = 64;
+        let width = HEADS * KDA_HEAD_DIM;
+        let (w, d, h) = (width as u64, KDA_HEAD_DIM as u64, HEADS as u64);
+        let q_conv = series(width * 4, 7, 1.0);
+        let k_conv = series(width * 4, 8, 1.0);
+        let v_conv = series(width * 4, 9, 1.0);
+        let neg_exp_a_log: Vec<f32> = (0..HEADS).map(|i| -(0.75 + val(i, 10, 1.0))).collect();
+        let dt_bias = series(width, 11, 2.0);
+        let output_norm: Vec<f32> = (0..KDA_HEAD_DIM).map(|i| 1.0 + val(i, 12, 0.5)).collect();
+        let mut conv_ref = series(9 * width, 13, 1.0);
+        let mut state_ref = series(HEADS * KDA_HEAD_DIM * KDA_HEAD_DIM, 14, 0.2);
+        let weights = KdaWeights {
+            q_conv: &q_conv,
+            k_conv: &k_conv,
+            v_conv: &v_conv,
+            neg_exp_a_log: &neg_exp_a_log,
+            dt_bias: &dt_bias,
+            output_norm: &output_norm,
+            lower_bound: -5.0,
+            norm_eps: 1e-5,
+        };
+        let q_conv_t = tensor(&ctx, &q_conv, vec![4, 1, w]);
+        let k_conv_t = tensor(&ctx, &k_conv, vec![4, 1, w]);
+        let v_conv_t = tensor(&ctx, &v_conv, vec![4, 1, w]);
+        let a_t = tensor(&ctx, &neg_exp_a_log, vec![h]);
+        let dt_t = tensor(&ctx, &dt_bias, vec![w]);
+        let norm_t = tensor(&ctx, &output_norm, vec![d]);
+        let conv_t = tensor(&ctx, &conv_ref, vec![w, 3, 3]);
+        let state_t = tensor(&ctx, &state_ref, vec![d, d, h]);
+        let token = |t: usize| {
+            (
+                series(width, 1 + 31 * t, 2.0),
+                series(width, 2 + 31 * t, 2.0),
+                series(width, 3 + 31 * t, 2.0),
+                series(width, 4 + 31 * t, 6.0),
+                (0..HEADS)
+                    .map(|i| val(i + t * HEADS, 5, 4.0))
+                    .collect::<Vec<_>>(),
+                series(width, 6 + 31 * t, 4.0),
+            )
+        };
+        let mut position = 0;
+        for rows in [37usize, 20, 1] {
+            let mut cols: [Vec<f32>; 6] = Default::default();
+            let mut expected = Vec::with_capacity(rows * width);
+            for t in position..position + rows {
+                let (q, k, v, g, b, og) = token(t);
+                expected.extend(kda_decode_step(
+                    HEADS,
+                    &KdaStepInput {
+                        q: &q,
+                        k: &k,
+                        v: &v,
+                        raw_gate: &g,
+                        raw_beta: &b,
+                        output_gate: &og,
+                    },
+                    &weights,
+                    &mut conv_ref,
+                    &mut state_ref,
+                ));
+                for (col, values) in cols.iter_mut().zip([q, k, v, g, b, og]) {
+                    col.extend(values);
+                }
+            }
+            let r = rows as u64;
+            let out_t = tensor(&ctx, &vec![0.0; rows * width], vec![w, r]);
+            let q_t = tensor(&ctx, &cols[0], vec![w, r]);
+            let k_t = tensor(&ctx, &cols[1], vec![w, r]);
+            let v_t = tensor(&ctx, &cols[2], vec![w, r]);
+            let g_t = tensor(&ctx, &cols[3], vec![w, r]);
+            let b_t = tensor(&ctx, &cols[4], vec![h, r]);
+            let og_t = tensor(&ctx, &cols[5], vec![w, r]);
+            let command = ctx.queue.commandBuffer().expect("command buffer");
+            let enc = KernelEncoder::begin(&command);
+            if rows == 1 {
+                let flat = |t: &MetalTensor, n: u64| MetalTensor {
+                    shape: vec![n],
+                    ..t.clone()
+                };
+                let bindings = KdaDecode {
+                    q: &flat(&q_t, w),
+                    k: &flat(&k_t, w),
+                    v: &flat(&v_t, w),
+                    raw_gate: &flat(&g_t, w),
+                    raw_beta: &flat(&b_t, h),
+                    output_gate: &flat(&og_t, w),
+                    q_conv: &q_conv_t,
+                    k_conv: &k_conv_t,
+                    v_conv: &v_conv_t,
+                    neg_exp_a_log: &a_t,
+                    dt_bias: &dt_t,
+                    output_norm: &norm_t,
+                    conv_state: &conv_t,
+                    state: &state_t,
+                    out: &flat(&out_t, w),
+                };
+                encode_kda_decode(&ctx, &enc, HEADS, &bindings, -5.0, 1e-5).unwrap();
+            } else {
+                let bindings = KdaDecode {
+                    q: &q_t,
+                    k: &k_t,
+                    v: &v_t,
+                    raw_gate: &g_t,
+                    raw_beta: &b_t,
+                    output_gate: &og_t,
+                    q_conv: &q_conv_t,
+                    k_conv: &k_conv_t,
+                    v_conv: &v_conv_t,
+                    neg_exp_a_log: &a_t,
+                    dt_bias: &dt_t,
+                    output_norm: &norm_t,
+                    conv_state: &conv_t,
+                    state: &state_t,
+                    out: &out_t,
+                };
+                encode_kda_prefill(&ctx, &enc, HEADS, rows, &bindings, -5.0, 1e-5).unwrap();
+            }
+            enc.end();
+            command.commit();
+            wait_completed(&command).expect("KDA prefill command");
+            assert_close(
+                &format!("rows {rows} output"),
+                &tensor_f32_at_offset(&out_t),
+                &expected,
+                3e-5,
+            );
+            assert_close(
+                &format!("rows {rows} state"),
+                &tensor_f32_at_offset(&state_t),
+                &state_ref,
+                3e-6,
+            );
+            assert_eq!(
+                tensor_f32_at_offset(&conv_t),
+                conv_ref,
+                "rows {rows} conv state"
+            );
+            position += rows;
+        }
     }
 }

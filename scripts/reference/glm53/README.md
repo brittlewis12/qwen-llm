@@ -38,8 +38,15 @@ target/glm53-oracle/bin/glm53_oracle --capture-default "$MODEL" target/profiles/
 
 `--capture NAME,...` selects base names (llama.cpp appends `-<layer>`);
 `--capture-default` selects mHC controls/residuals, KDA and MLA internals,
-FFN outputs and `result_norm`. Captures force graph splits, so request only what
-a comparison needs.
+FFN outputs and `result_norm`; `--capture-checkpoint` adds KDA `new_state`
+(4 MiB per KDA block per step) and the new and cached pooled indexer keys,
+which short-context logits cannot validate. `--steps I,...` limits captures to
+those positions. A requested name that produces no record fails the run.
+Captures force graph splits, which can change backend fusion; compare one
+capture-enabled run against a logits-only run before relying on captures.
+
+Every run writes `OUTPUT.manifest.json`: identity, model path, effective
+context settings, token IDs and record counts per name.
 
 Memory: the model needs about 110 GiB resident, so llama.cpp and the native
 family cannot run together. Check that wired memory is low before a capture,
@@ -53,8 +60,9 @@ position, u32 token, `vocab` f32 logits.
 
 Captures, `OUTPUT.captures`: `GLMCAP01`, then records until EOF: u32 step
 (position), u32 layer (`0xffffffff` when the name has no layer suffix), u32
-name length, name bytes, u32 ggml type (F32 0, F16 1, I32 26), 4 x i64 `ne`,
-i64 byte length, raw contiguous bytes. `l_out` and `hc_*_post` hold the four
+occurrence of (step, layer, name) in evaluation order (mHC controls run once
+per sub-block: 0 attention, 1 FFN), u32 name length, name bytes, u32 ggml type
+(F32 0, F16 1, I32 26), 4 x i64 `ne`, i64 byte length, raw contiguous bytes. `l_out` and `hc_*_post` hold the four
 mHC streams (`[4096, 4]` per token), not a single 4096-wide row.
 
 `inspect_capture.py OUTPUT.captures` lists records with shapes and norms.

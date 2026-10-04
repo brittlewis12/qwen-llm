@@ -10,11 +10,13 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 static constexpr int32_t kVocab = 154880;
@@ -29,6 +31,15 @@ static uint32_t number(const std::string & input) {
     return static_cast<uint32_t>(value);
 }
 
+static std::vector<std::string> split_list(const std::string & list) {
+    std::vector<std::string> out;
+    std::stringstream stream(list);
+    for (std::string item; std::getline(stream, item, ',');) {
+        if (!item.empty()) out.push_back(item);
+    }
+    return out;
+}
+
 static void write_u32(std::ostream & out, uint32_t value) {
     const char bytes[] = {char(value), char(value >> 8), char(value >> 16), char(value >> 24)};
     out.write(bytes, 4);
@@ -39,19 +50,25 @@ static void write_i64(std::ostream & out, int64_t value) {
     write_u32(out, static_cast<uint32_t>(static_cast<uint64_t>(value) >> 32));
 }
 
-// Default capture set: per-block residual and sub-block outputs, the mHC
-// controls, KDA/MLA internals that decide the first checkpoint, and the head.
+// Per-block residuals and sub-block outputs, mHC controls, KDA/MLA internals
+// and the head. The checkpoint profile adds recurrent and pooled state, which
+// short-context logits cannot validate (every visible token is attended).
 static const char * kDefaultCaptures =
     "hc_mixes,hc_pre,hc_post,hc_comb,hc_attn_pre,hc_attn_post,l_out,"
     "kda_q_conv,kda_k_conv,kda_v_conv,kda_g1,kda_beta,kda_scan_out,kda_g2,kda_normed,kda_out,"
     "q_absorbed,kv_cmpr,kqv_out,indexer_q,indexer_k,indexer_gate,indexer_weights,"
     "ffn_moe_out,ffn_shexp,ffn_out,result_norm";
+static const char * kCheckpointExtra = "new_state,indexer_pool_k_new,indexer_pool_k";
 
 struct capture_state {
     std::set<std::string> names;
+    std::set<uint32_t> steps;  // empty: every step
     std::ofstream out;
     uint32_t step = 0;
     uint64_t records = 0;
+    std::map<std::string, uint64_t> per_name;
+    // Occurrence of (step, layer, name): mHC controls run once per sub-block.
+    std::map<std::tuple<uint32_t, int32_t, std::string>, uint32_t> occurrences;
     std::string error;
 };
 
@@ -69,8 +86,9 @@ static std::pair<std::string, int32_t> split_name(const char * raw) {
 static bool capture_tensor(ggml_tensor * tensor, bool ask, void * user_data) {
     auto & state = *static_cast<capture_state *>(user_data);
     const auto [base, layer] = split_name(tensor->name);
-    if (!state.names.count(base)) return ask ? false : true;
-    if (ask) return true;
+    const bool wanted = state.names.count(base) && (state.steps.empty() || state.steps.count(state.step));
+    if (ask) return wanted;
+    if (!wanted) return true;
     if (!state.error.empty()) return false;
     if (!ggml_is_contiguous(tensor)) {
         state.error = std::string("non-contiguous capture ") + tensor->name;
@@ -80,10 +98,12 @@ static bool capture_tensor(ggml_tensor * tensor, bool ask, void * user_data) {
         state.error = std::string("unsupported capture type for ") + tensor->name;
         return false;
     }
+    const uint32_t occurrence = state.occurrences[{state.step, layer, base}]++;
     std::vector<char> bytes(ggml_nbytes(tensor));
     ggml_backend_tensor_get(tensor, bytes.data(), 0, bytes.size());
     write_u32(state.out, state.step);
     write_u32(state.out, static_cast<uint32_t>(layer));
+    write_u32(state.out, occurrence);
     write_u32(state.out, static_cast<uint32_t>(base.size()));
     state.out.write(base.data(), static_cast<std::streamsize>(base.size()));
     write_u32(state.out, static_cast<uint32_t>(tensor->type));
@@ -91,7 +111,17 @@ static bool capture_tensor(ggml_tensor * tensor, bool ask, void * user_data) {
     write_i64(state.out, static_cast<int64_t>(bytes.size()));
     state.out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
     ++state.records;
+    ++state.per_name[base];
     return true;
+}
+
+static std::string json_escape(const std::string & text) {
+    std::string out;
+    for (const char c : text) {
+        if (c == '"' || c == '\\') out += '\\';
+        out += c;
+    }
+    return out;
 }
 
 int main(int argc, char ** argv) {
@@ -104,16 +134,25 @@ int main(int argc, char ** argv) {
             return 0;
         }
         std::string captures;
-        if (!args.empty() && args[0] == "--capture-default") {
-            captures = kDefaultCaptures;
+        std::string steps;
+        while (!args.empty() && args[0].rfind("--", 0) == 0) {
+            const std::string flag = args[0];
             args.erase(args.begin());
-        } else if (args.size() > 1 && args[0] == "--capture") {
-            captures = args[1];
-            args.erase(args.begin(), args.begin() + 2);
+            if (flag == "--capture-default") {
+                captures = kDefaultCaptures;
+            } else if (flag == "--capture-checkpoint") {
+                captures = std::string(kDefaultCaptures) + "," + kCheckpointExtra;
+            } else if ((flag == "--capture" || flag == "--steps") && !args.empty()) {
+                (flag == "--capture" ? captures : steps) = args[0];
+                args.erase(args.begin());
+            } else {
+                throw std::runtime_error("unknown or incomplete option " + flag);
+            }
         }
-        if (args.size() < 3 || args[0].rfind("--", 0) == 0) {
+        if (args.size() < 3) {
             throw std::runtime_error(
-                "usage: glm53_oracle [--capture NAME,... | --capture-default] MODEL OUTPUT ID... (1..4096 IDs)");
+                "usage: glm53_oracle [--capture NAME,... | --capture-default | --capture-checkpoint] "
+                "[--steps I,...] MODEL OUTPUT ID... (1..4096 IDs)");
         }
         const std::string model_path = args[0];
         const std::string output_path = args[1];
@@ -126,6 +165,15 @@ int main(int argc, char ** argv) {
         if (tokens.size() > kMaxTokens) throw std::runtime_error("too many IDs");
         const auto count = static_cast<uint32_t>(tokens.size());
 
+        auto state = std::make_unique<capture_state>();
+        for (const auto & name : split_list(captures)) state->names.insert(name);
+        for (const auto & step : split_list(steps)) {
+            const auto value = number(step);
+            if (value >= count) throw std::runtime_error("--steps entry beyond the token count");
+            state->steps.insert(value);
+        }
+        if (!steps.empty() && state->names.empty()) throw std::runtime_error("--steps requires a capture set");
+
         llama_backend_init();
         auto mp = llama_model_default_params();
         mp.n_gpu_layers = -1;
@@ -135,7 +183,6 @@ int main(int argc, char ** argv) {
         const auto vocab = llama_vocab_n_tokens(llama_model_get_vocab(model.get()));
         if (vocab != kVocab) throw std::runtime_error("unexpected vocabulary size");
 
-        auto state = std::make_unique<capture_state>();
         auto cp = llama_context_default_params();
         cp.n_ctx = std::max(256u, (count + 255u) / 256u * 256u);
         cp.n_batch = 1;
@@ -149,11 +196,7 @@ int main(int argc, char ** argv) {
         cp.offload_kqv = true;
         cp.op_offload = true;
         cp.no_perf = true;
-        if (!captures.empty()) {
-            std::stringstream list(captures);
-            for (std::string name; std::getline(list, name, ',');) {
-                if (!name.empty()) state->names.insert(name);
-            }
+        if (!state->names.empty()) {
             state->out.open(output_path + ".captures", std::ios::binary | std::ios::trunc);
             if (!state->out) throw std::runtime_error("cannot open capture output");
             state->out.exceptions(std::ios::badbit | std::ios::failbit);
@@ -195,10 +238,31 @@ int main(int argc, char ** argv) {
         }
         llama_batch_free(batch);
         output.close();
-        if (state->out.is_open()) {
-            state->out.close();
-            std::cerr << "GLM oracle: " << state->records << " capture records\n";
+        if (state->out.is_open()) state->out.close();
+        for (const auto & name : state->names) {
+            if (!state->per_name.count(name)) {
+                throw std::runtime_error("requested capture produced no records: " + name);
+            }
         }
+
+        std::ofstream manifest(output_path + ".manifest.json", std::ios::trunc);
+        manifest.exceptions(std::ios::badbit | std::ios::failbit);
+        manifest << "{\n  \"identity\": {\"revision\": \"" << GLM53_REFERENCE_REVISION << "\", \"wrapper_sha256\": \""
+                 << GLM53_WRAPPER_SHA256 << "\", \"cmake_sha256\": \"" << GLM53_CMAKE_SHA256 << "\"},\n"
+                 << "  \"model\": \"" << json_escape(model_path) << "\",\n"
+                 << "  \"context\": {\"n_ctx\": " << cp.n_ctx << ", \"n_batch\": 1, \"n_ubatch\": 1, "
+                 << "\"type_k\": \"f16\", \"type_v\": \"f16\", \"flash_attn\": false, \"n_seq_max\": 1, "
+                 << "\"fused_ops\": \"library defaults\"},\n  \"tokens\": [";
+        for (uint32_t i = 0; i < count; ++i) manifest << (i ? ", " : "") << tokens[i];
+        manifest << "],\n  \"capture_records\": {";
+        bool first = true;
+        for (const auto & [name, n] : state->per_name) {
+            manifest << (first ? "" : ", ") << '"' << json_escape(name) << "\": " << n;
+            first = false;
+        }
+        manifest << "}\n}\n";
+        manifest.close();
+        if (state->records) std::cerr << "GLM oracle: " << state->records << " capture records\n";
         context.reset();
         model.reset();
         llama_backend_free();

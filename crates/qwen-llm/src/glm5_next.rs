@@ -14,10 +14,12 @@ use crate::tensor::TensorDesc;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 
+pub mod admission;
 pub mod coverage;
 pub mod memory;
 pub mod oracle;
 
+pub use admission::{Glm5NextAdmissionError, Glm5NextArtifactLayout, Glm5NextPreparedArtifact};
 pub use coverage::{CoverageRow, ExecutionMode, RoleCoverage, Support, TensorRole};
 pub use memory::{Glm5NextMemoryLedger, Glm5NextPhasePeaks};
 

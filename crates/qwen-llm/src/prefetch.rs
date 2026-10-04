@@ -128,6 +128,21 @@ pub fn prefetch_fd_range(
     workers: usize,
     chunk_bytes: usize,
 ) -> io::Result<PrefetchReport> {
+    prefetch_fd_range_with_cancel(file, start, end, workers, chunk_bytes, &|| false)
+}
+
+/// [`prefetch_fd_range`] that polls `should_cancel` before every chunk read
+/// in every worker and stops with [`io::ErrorKind::Interrupted`] ("prefetch
+/// cancelled") once it returns true. Prefetch only warms the page cache, so
+/// stopping early leaves nothing to undo.
+pub fn prefetch_fd_range_with_cancel(
+    file: &File,
+    start: u64,
+    end: u64,
+    workers: usize,
+    chunk_bytes: usize,
+    should_cancel: &(dyn Fn() -> bool + Sync),
+) -> io::Result<PrefetchReport> {
     if workers == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -181,6 +196,12 @@ pub fn prefetch_fd_range(
                 let mut scratch = vec![0u8; chunk_bytes];
                 let mut offset = start;
                 while offset < end {
+                    if should_cancel() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::Interrupted,
+                            "prefetch cancelled",
+                        ));
+                    }
                     let want = (chunk_bytes as u64).min(end - offset) as usize;
                     let mut got = 0;
                     while got < want {
@@ -273,6 +294,22 @@ mod tests {
         }
         f.sync_all().expect("sync fixture");
         Fixture(path)
+    }
+
+    #[test]
+    fn range_prefetch_stops_when_cancelled() {
+        let f = make_fixture(1 << 20);
+        let file = File::open(&f.0).unwrap();
+        let err = prefetch_fd_range_with_cancel(&file, 0, 1 << 20, 2, 4096, &|| true).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+        // Cancel after a few chunks have been read.
+        let polls = std::sync::atomic::AtomicUsize::new(0);
+        let cancel_late = || polls.fetch_add(1, Ordering::Relaxed) >= 8;
+        let err =
+            prefetch_fd_range_with_cancel(&file, 0, 1 << 20, 2, 4096, &cancel_late).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+        let report = prefetch_fd_range_with_cancel(&file, 0, 1 << 20, 2, 4096, &|| false).unwrap();
+        assert_eq!(report.bytes, 1 << 20);
     }
 
     #[test]

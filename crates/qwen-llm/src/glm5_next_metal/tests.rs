@@ -596,6 +596,33 @@ fn packed_prefill_matches_serial_and_oracle_on_checkpoint_v1() {
                 );
             }
         }
+        // Cancellation between packed chunks: a checkpoint that allows two
+        // 4-row chunks stops the third; the session stays at position 8,
+        // unpoisoned, and finishing the prompt reproduces serial decode
+        // (Exact: bitwise).
+        let mut cancelled = Glm5NextSession::with_prefill_rows(&ctx, &weights, 256, 4).unwrap();
+        cancelled.set_packed_lineage(lineage);
+        let mut allowed = 2;
+        let error = cancelled
+            .prefill_packed_with_checkpoint(&ctx, &tokens, &mut || {
+                if allowed == 0 {
+                    return Err("test cancel".into());
+                }
+                allowed -= 1;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(matches!(error, Glm5NextMetalError::Cancelled(_)), "{error}");
+        assert_eq!(cancelled.position(), 8);
+        assert!(!cancelled.poisoned, "cancellation must not poison");
+        let resumed = cancelled.prefill_packed(&ctx, &tokens[8..]).unwrap();
+        check(
+            &format!("{lineage:?} resumed after cancel"),
+            14,
+            &resumed,
+            lineage,
+        );
+        drop(cancelled);
         let mut mixed = Glm5NextSession::with_prefill_rows(&ctx, &weights, 256, 8).unwrap();
         mixed.set_packed_lineage(lineage);
         let logits = mixed.prefill_packed(&ctx, &tokens[..11]).unwrap();
@@ -2195,4 +2222,37 @@ fn sparse_long_context_matches_llama_cpp_near_4096() {
         );
     }
     assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Session preflight against the real artifact before any weight is mapped:
+/// a 32k session is admitted; the full checkpoint context is refused with a
+/// fitting capacity, which is itself admitted.
+#[test]
+#[ignore = "requires GLM53_GGUF (header and retained-window plan only) and Metal"]
+fn preflight_admits_fitting_sessions_and_reports_the_largest() {
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let ctx = MetalContext::new().expect("Metal context");
+    let gguf = GgufFile::open(&path).unwrap();
+    let prepared = crate::glm5_next::Glm5NextPreparedArtifact::inspect(&gguf).unwrap();
+    let model = prepared.model();
+    let admitted = preflight_session(&ctx, &gguf, model, 32_768, 512).unwrap();
+    assert!(admitted.ledger.capacity() == 32_768);
+    let context = model.config.context_length as usize;
+    match preflight_session(&ctx, &gguf, model, context, 512) {
+        Err(Glm5NextMetalError::MemoryAdmission {
+            required_bytes,
+            budget_bytes,
+            fitting_capacity: Some(fitting),
+            ..
+        }) => {
+            eprintln!(
+                "1M refused: required {required_bytes}, budget {budget_bytes}, fitting {fitting}"
+            );
+            assert!(required_bytes > budget_bytes);
+            assert!((32_768..context as u64).contains(&fitting), "{fitting}");
+            preflight_session(&ctx, &gguf, model, fitting as usize, 512).unwrap();
+            assert!(preflight_session(&ctx, &gguf, model, fitting as usize + 1, 512).is_err());
+        }
+        other => panic!("expected a refusal with a fitting capacity, got {other:?}"),
+    }
 }

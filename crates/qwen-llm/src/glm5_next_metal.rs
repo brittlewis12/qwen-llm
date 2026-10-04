@@ -36,6 +36,24 @@ pub enum Glm5NextMetalError {
     Metal(#[from] MetalError),
     #[error("GLM-5.3 Metal: {0}")]
     Invalid(String),
+    /// The caller's checkpoint stopped a multi-step operation at a boundary
+    /// where the session (if any) is consistent and unpoisoned.
+    #[error("GLM-5.3 cancelled: {0}")]
+    Cancelled(String),
+    /// The requested session does not fit device memory.
+    #[error(
+        "GLM-5.3 session needs {required_bytes} bytes but {budget_bytes} are available ({reason}); {}",
+        match fitting_capacity {
+            Some(n) => format!("the largest capacity that fits is {n} positions"),
+            None => "no capacity fits".to_string(),
+        }
+    )]
+    MemoryAdmission {
+        required_bytes: u64,
+        budget_bytes: u64,
+        reason: String,
+        fitting_capacity: Option<u64>,
+    },
 }
 
 impl From<crate::metal_forward::MfError> for Glm5NextMetalError {
@@ -64,6 +82,61 @@ fn retained_geometry(ctx: &MetalContext) -> Result<(usize, usize)> {
 /// Default packed-prefill chunk (rows per command buffer).
 pub const DEFAULT_PREFILL_ROWS: usize = 512;
 
+/// The device-priced plan of an admitted session (see [`preflight_session`]).
+#[derive(Clone, Copy, Debug)]
+pub struct Glm5NextPreflight {
+    pub ledger: Glm5NextMemoryLedger,
+}
+
+/// Admits a session of `capacity` positions with `prefill_rows`-row packed
+/// chunks against current device memory before any weight is mapped or
+/// prefetched: retained windows, session buffers and reserve, priced with the
+/// device. On refusal, reports the largest capacity that fits the same
+/// budget (the smaller of working-set headroom and the process limit).
+pub fn preflight_session(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    model: &Glm5NextModel<'_>,
+    capacity: usize,
+    prefill_rows: usize,
+) -> Result<Glm5NextPreflight> {
+    let (page, max_buffer) = retained_geometry(ctx)?;
+    let (_, retained) = model.plan_retained(gguf, page, max_buffer)?;
+    let price = device_price(ctx);
+    let ledger = Glm5NextMemoryLedger::new(
+        &model.config,
+        retained,
+        capacity as u64,
+        prefill_rows as u64,
+        &price,
+    )?;
+    let admission =
+        evaluate_metal_memory_admission(ledger.peak_bytes(), 0, ctx.memory_signals(), true);
+    if admission.admitted {
+        return Ok(Glm5NextPreflight { ledger });
+    }
+    let headroom = admission.working_set_headroom_bytes.unwrap_or(0);
+    let budget = match admission.signals.process_limit_remaining_bytes {
+        Some(process) if process > 0 => headroom.min(process),
+        _ => headroom,
+    };
+    let fitting_capacity = Glm5NextMemoryLedger::max_capacity(
+        &model.config,
+        retained,
+        prefill_rows as u64,
+        budget,
+        &price,
+    )
+    .ok()
+    .flatten();
+    Err(Glm5NextMetalError::MemoryAdmission {
+        required_bytes: ledger.peak_bytes(),
+        budget_bytes: budget,
+        reason: format!("{:?}", admission.reason),
+        fitting_capacity,
+    })
+}
+
 /// What [`prefetch_retained`] did.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RetainedPrefetch {
@@ -82,6 +155,18 @@ pub fn prefetch_retained(
     gguf: &GgufFile,
     threshold: f64,
 ) -> Result<RetainedPrefetch> {
+    prefetch_retained_with_cancel(ctx, gguf, threshold, &|| false)
+}
+
+/// [`prefetch_retained`] that stops with [`Glm5NextMetalError::Cancelled`]
+/// once `should_cancel` returns true (polled per window and per read chunk).
+/// Prefetch only warms the page cache, so stopping leaves nothing to undo.
+pub fn prefetch_retained_with_cancel(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    threshold: f64,
+    should_cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<RetainedPrefetch> {
     let started = std::time::Instant::now();
     let model = Glm5NextModel::from_gguf(gguf)?;
     let (page, max_buffer) = retained_geometry(ctx)?;
@@ -91,6 +176,9 @@ pub fn prefetch_retained(
         ..Default::default()
     };
     for window in &plan.windows {
+        if should_cancel() {
+            return Err(Glm5NextMetalError::Cancelled("retained prefetch".into()));
+        }
         let shard = gguf
             .shards
             .get(window.shard_idx)
@@ -107,14 +195,20 @@ pub fn prefetch_retained(
         if resident >= threshold {
             continue;
         }
-        let read = crate::prefetch::prefetch_fd_range(
+        let read = crate::prefetch::prefetch_fd_range_with_cancel(
             &shard.file,
             start as u64,
             end as u64,
             crate::prefetch::DEFAULT_WORKERS,
             crate::prefetch::DEFAULT_CHUNK_BYTES,
+            should_cancel,
         )
-        .map_err(|e| Glm5NextMetalError::Invalid(format!("prefetch: {e}")))?;
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::Interrupted => {
+                Glm5NextMetalError::Cancelled("retained prefetch".into())
+            }
+            _ => Glm5NextMetalError::Invalid(format!("prefetch: {e}")),
+        })?;
         report.cold_windows += 1;
         report.bytes_read += read.bytes;
     }

@@ -277,14 +277,36 @@ impl Glm5NextSession<'_> {
     /// session has no packed scratch. Rows below the sparse frontier attend
     /// densely; rows at or past it run sparse selection in microbatches.
     pub fn prefill_packed(&mut self, ctx: &MetalContext, tokens: &[u32]) -> Result<Vec<f32>> {
-        let Some(rows) = self.packed.as_ref().map(|p| p.rows) else {
-            return self.prefill(ctx, tokens);
-        };
+        self.prefill_packed_with_checkpoint(ctx, tokens, &mut || Ok(()))
+    }
+
+    /// [`Self::prefill_packed`] that calls `checkpoint` before every chunk
+    /// (every token without packed scratch). When it returns an error, the
+    /// prefill stops with [`Glm5NextMetalError::Cancelled`] at a chunk
+    /// boundary: the completed chunks stay committed, the session is not
+    /// poisoned, and its position is the end of the last completed chunk.
+    pub fn prefill_packed_with_checkpoint(
+        &mut self,
+        ctx: &MetalContext,
+        tokens: &[u32],
+        checkpoint: &mut dyn FnMut() -> std::result::Result<(), String>,
+    ) -> Result<Vec<f32>> {
         self.validate_request(tokens)?;
+        let mut check = || checkpoint().map_err(Glm5NextMetalError::Cancelled);
+        let Some(rows) = self.packed.as_ref().map(|p| p.rows) else {
+            let (&last, head) = tokens.split_last().expect("validated nonempty");
+            for &token in head {
+                check()?;
+                self.advance(ctx, token)?;
+            }
+            check()?;
+            return self.forward(ctx, last);
+        };
         let chunks: Vec<&[u32]> = tokens.chunks(rows).collect();
         let last = chunks.len() - 1;
         let mut logits = None;
         for (index, chunk) in chunks.into_iter().enumerate() {
+            check()?;
             logits = self.step_packed(ctx, chunk, index == last)?;
         }
         logits.ok_or_else(|| Glm5NextMetalError::Invalid("missing prefill logits".into()))

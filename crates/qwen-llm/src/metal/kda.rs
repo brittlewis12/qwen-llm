@@ -5,7 +5,7 @@
 //! CPU contract: [`crate::glm5_next::oracle::kda_decode_step`]. Kernel:
 //! `kernel_glm53_kda_decode` (adapted from DwarfStar).
 
-use super::checks::{check_tensor, require_serial, to_u32};
+use super::checks::{check_alignment, check_disjoint, check_tensor, require_serial, to_u32};
 use super::*;
 
 pub const KDA_HEAD_DIM: usize = 128;
@@ -88,7 +88,37 @@ pub fn encode_kda_decode(
     check_tensor(K, b.conv_state, f32_, &[width, 3, 3], true, "conv state")?;
     let d = KDA_HEAD_DIM as u64;
     check_tensor(K, b.state, f32_, &[d, d, heads as u64], true, "state")?;
+    // The recurrence reads and writes state rows as float4.
+    check_alignment(K, b.state, 16, "state")?;
     check_tensor(K, b.out, f32_, &[width], true, "output")?;
+    let inputs = [
+        (b.q, "q"),
+        (b.k, "k"),
+        (b.v, "v"),
+        (b.raw_gate, "raw gate"),
+        (b.raw_beta, "raw beta"),
+        (b.output_gate, "output gate"),
+        (b.q_conv, "q conv"),
+        (b.k_conv, "k conv"),
+        (b.v_conv, "v conv"),
+        (b.neg_exp_a_log, "ssm_a"),
+        (b.dt_bias, "dt bias"),
+        (b.output_norm, "output norm"),
+    ];
+    for (written, name) in [
+        (b.conv_state, "conv state"),
+        (b.state, "state"),
+        (b.out, "output"),
+    ] {
+        check_disjoint(K, written, &inputs)
+            .map_err(|e| checks::bad_shape(K, format!("{name}: {e}")))?;
+    }
+    check_disjoint(
+        K,
+        b.out,
+        &[(b.conv_state, "conv state"), (b.state, "state")],
+    )?;
+    check_disjoint(K, b.state, &[(b.conv_state, "conv state")])?;
     let pso = ctx.pipeline("kernel_glm53_kda_decode")?;
     if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < THREADS {
         return Err(checks::bad_shape(
@@ -296,5 +326,55 @@ mod tests {
                 "step {step} conv state"
             );
         }
+    }
+
+    #[test]
+    fn kda_decode_refuses_misaligned_state_and_aliasing() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        let w = KDA_HEAD_DIM as u64;
+        let d = KDA_HEAD_DIM as u64;
+        let act = tensor(&ctx, &vec![0.1; KDA_HEAD_DIM], vec![w]);
+        let one = tensor(&ctx, &[0.0], vec![1]);
+        let conv = tensor(&ctx, &vec![0.1; 4 * KDA_HEAD_DIM], vec![4, 1, w]);
+        let norm = tensor(&ctx, &vec![1.0; KDA_HEAD_DIM], vec![d]);
+        let conv_state = tensor(&ctx, &vec![0.0; 9 * KDA_HEAD_DIM], vec![w, 3, 3]);
+        let state_values = vec![0.0f32; KDA_HEAD_DIM * KDA_HEAD_DIM];
+        let misaligned = offset_tensor(
+            &ctx,
+            20,
+            bytemuck::cast_slice(&state_values),
+            20,
+            vec![d, d, 1],
+            GgmlType::F32,
+        );
+        let state = tensor(&ctx, &state_values, vec![d, d, 1]);
+        let out = tensor(&ctx, &vec![0.0; KDA_HEAD_DIM], vec![w]);
+        let bindings = |state, out| KdaDecode {
+            q: &act,
+            k: &act,
+            v: &act,
+            raw_gate: &act,
+            raw_beta: &one,
+            output_gate: &act,
+            q_conv: &conv,
+            k_conv: &conv,
+            v_conv: &conv,
+            neg_exp_a_log: &one,
+            dt_bias: &act,
+            output_norm: &norm,
+            conv_state: &conv_state,
+            state,
+            out,
+        };
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        let err =
+            encode_kda_decode(&ctx, &enc, 1, &bindings(&misaligned, &out), -5.0, 1e-5).unwrap_err();
+        assert!(err.to_string().contains("16-byte aligned"), "{err}");
+        let err =
+            encode_kda_decode(&ctx, &enc, 1, &bindings(&state, &act), -5.0, 1e-5).unwrap_err();
+        assert!(err.to_string().contains("aliases"), "{err}");
     }
 }

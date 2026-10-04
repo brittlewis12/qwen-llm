@@ -94,6 +94,61 @@ pub(crate) fn check_expert_bank(
             format!("{name} is not {experts} contiguous expert slices inside its buffer"),
         ));
     }
+    // Quant block structs are read through typed device pointers.
+    check_alignment(kernel, bank, 16, name)
+}
+
+/// `tensor`'s byte offset is a multiple of `align` (e.g. 16 for `float4` access).
+pub(crate) fn check_alignment(
+    kernel: &'static str,
+    tensor: &MetalTensor,
+    align: u64,
+    name: &str,
+) -> Result<(), MetalError> {
+    if !tensor.offset.is_multiple_of(align) {
+        return Err(bad_shape(
+            kernel,
+            format!(
+                "{name} offset {} is not {align}-byte aligned",
+                tensor.offset
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn byte_range(tensor: &MetalTensor) -> (usize, u64, u64) {
+    let start = tensor.offset;
+    (
+        Retained::as_ptr(&tensor.buffer) as *const _ as *const u8 as usize,
+        start,
+        start.saturating_add(tensor.n_bytes()),
+    )
+}
+
+/// Whether two views share any byte of the same buffer.
+pub(crate) fn overlaps(a: &MetalTensor, b: &MetalTensor) -> bool {
+    let (buffer_a, start_a, end_a) = byte_range(a);
+    let (buffer_b, start_b, end_b) = byte_range(b);
+    buffer_a == buffer_b && start_a < end_b && start_b < end_a
+}
+
+/// Whether two views cover exactly the same bytes of the same buffer.
+pub(crate) fn same_range(a: &MetalTensor, b: &MetalTensor) -> bool {
+    byte_range(a) == byte_range(b)
+}
+
+/// `output` shares no byte with any of `inputs`.
+pub(crate) fn check_disjoint(
+    kernel: &'static str,
+    output: &MetalTensor,
+    inputs: &[(&MetalTensor, &str)],
+) -> Result<(), MetalError> {
+    for (input, name) in inputs {
+        if overlaps(output, input) {
+            return Err(bad_shape(kernel, format!("output aliases {name}")));
+        }
+    }
     Ok(())
 }
 

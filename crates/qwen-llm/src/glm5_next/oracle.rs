@@ -200,6 +200,11 @@ mod tests {
             ));
         }
         let check = |label: &str, actual: &[f32], expected: &[f32], relative: f32| {
+            assert_eq!(actual.len(), expected.len(), "{label} length");
+            assert!(
+                actual.iter().chain(expected).all(|v| v.is_finite()),
+                "{label} has non-finite values"
+            );
             let scale = expected.iter().fold(0.0f32, |m, v| m.max(v.abs()));
             let worst = actual
                 .iter()

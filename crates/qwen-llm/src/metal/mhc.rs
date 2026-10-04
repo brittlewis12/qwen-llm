@@ -22,7 +22,9 @@ pub const MHC_MIXES: usize = 24;
 /// softmax, with epsilon added after it).
 pub const MHC_SINKHORN_ITERATIONS: usize = 20;
 
-use super::checks::{bad_shape as bad, check_tensor, require_serial};
+use super::checks::{
+    bad_shape as bad, check_disjoint, check_tensor, overlaps, require_serial, same_range,
+};
 
 fn check_f32(
     kernel: &'static str,
@@ -174,6 +176,17 @@ pub fn encode_mhc4_post(
     check_f32(K, post, &[4], false, "post")?;
     check_f32(K, comb, &[4, 4], false, "combination")?;
     check_f32(K, output, &[hidden as u64, 4], true, "output")?;
+    // Streams read across the residual while others are written.
+    check_disjoint(
+        K,
+        output,
+        &[
+            (block_output, "block output"),
+            (residual, "residual"),
+            (post, "post"),
+            (comb, "combination"),
+        ],
+    )?;
     let pso = ctx.pipeline("kernel_deepseek_v4_hc_post")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(0, &h);
@@ -187,7 +200,8 @@ pub fn encode_mhc4_post(
 }
 
 /// `output = silu(min(gate, clamp)) * clamp(up, -clamp, clamp)` elementwise.
-/// `output` may alias `gate` or `up`.
+/// `output` may be exactly `gate` or exactly `up` (same bytes); any other
+/// overlap is refused.
 pub fn encode_clamped_swiglu(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -197,6 +211,7 @@ pub fn encode_clamped_swiglu(
     clamp: f32,
 ) -> Result<(), MetalError> {
     const K: &str = "clamped_swiglu";
+    require_serial(K, enc)?;
     if !clamp.is_finite() || clamp <= 0.0 {
         return Err(bad(
             K,
@@ -207,6 +222,11 @@ pub fn encode_clamped_swiglu(
     check_f32(K, gate, &[n], false, "gate")?;
     check_f32(K, up, &[n], false, "up")?;
     check_f32(K, output, &[n], true, "output")?;
+    for (input, name) in [(gate, "gate"), (up, "up")] {
+        if overlaps(output, input) && !same_range(output, input) {
+            return Err(bad(K, format!("output partially overlaps {name}")));
+        }
+    }
     let n = u32::try_from(n).map_err(|_| bad(K, "width exceeds u32"))?;
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -420,5 +440,32 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn post_and_swiglu_refuse_unsafe_aliasing() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        const H: usize = 8;
+        let residual = tensor(&ctx, &[0.5; H * 4], vec![H as u64, 4]);
+        let block = tensor(&ctx, &[0.25; H], vec![H as u64]);
+        let post = tensor(&ctx, &[1.0; 4], vec![4]);
+        let comb = tensor(&ctx, &[0.25; 16], vec![4, 4]);
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        let err = encode_mhc4_post(&ctx, &enc, H, &block, &residual, &post, &comb, &residual)
+            .unwrap_err();
+        assert!(err.to_string().contains("aliases residual"), "{err}");
+
+        let gate = tensor(&ctx, &[1.0; 8], vec![8]);
+        let up = tensor(&ctx, &[2.0; 8], vec![8]);
+        let shifted = MetalTensor {
+            offset: gate.offset + 4,
+            ..gate.clone()
+        };
+        let err = encode_clamped_swiglu(&ctx, &enc, &gate, &up, &shifted, 10.0).unwrap_err();
+        assert!(err.to_string().contains("partially overlaps gate"), "{err}");
+        encode_clamped_swiglu(&ctx, &enc, &gate, &up, &gate, 10.0).unwrap();
     }
 }

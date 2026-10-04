@@ -9,7 +9,10 @@
 //! output unspecified, so callers must check route status before using results
 //! (both families validate route records after each token's command).
 
-use super::checks::{bad_shape, check_expert_bank, check_tensor, require_serial, to_u32};
+use super::checks::{
+    bad_shape, check_alignment, check_disjoint, check_expert_bank, check_tensor, require_serial,
+    to_u32,
+};
 use super::*;
 
 /// Gate/up dtypes with a fused all-slot `silu(min(g, c)) * clamp(u, -c, c)`.
@@ -117,6 +120,17 @@ pub fn encode_all_slots_gate_up_swiglu(
     check_tensor(K, input, GgmlType::F32, &[n_in as u64], false, "input")?;
     let out_shape = [n_out as u64, top_k as u64];
     check_tensor(K, output, GgmlType::F32, &out_shape, true, "output")?;
+    check_disjoint(
+        K,
+        output,
+        &[
+            (input, "input"),
+            (gate_bank, "gate bank"),
+            (up_bank, "up bank"),
+            (ids, "expert ids"),
+            (status, "route status"),
+        ],
+    )?;
     if gate_bank.dtype != up_bank.dtype {
         return Err(bad_shape(K, "gate and up banks must share a dtype"));
     }
@@ -188,6 +202,16 @@ pub fn encode_all_slots_down(
     let out_shape = [n_out as u64, top_k as u64];
     check_tensor(K, input, GgmlType::F32, &in_shape, false, "input")?;
     check_tensor(K, output, GgmlType::F32, &out_shape, true, "output")?;
+    check_disjoint(
+        K,
+        output,
+        &[
+            (input, "input"),
+            (bank, "down bank"),
+            (ids, "expert ids"),
+            (status, "route status"),
+        ],
+    )?;
     let args = AllSlotsArgs {
         n_in: to_u32(K, n_in, "n_in")?,
         n_out: to_u32(K, n_out, "n_out")?,
@@ -196,7 +220,9 @@ pub fn encode_all_slots_down(
         clamp: 0.0,
     };
     if bank.dtype == GgmlType::IQ4_XS {
-        // Qwen's all-slot IQ4_XS down: no status binding, 32-entry LUT.
+        // Qwen's all-slot IQ4_XS down: no status binding, 32-entry LUT, and
+        // slot inputs read as float4.
+        check_alignment(K, input, 16, "input")?;
         if !n_in.is_multiple_of(256) {
             return Err(bad_shape(
                 K,

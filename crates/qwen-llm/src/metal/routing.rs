@@ -6,6 +6,11 @@
 //! `routed_scale`. Results stay on the GPU in caller-owned views: `ids` (I32
 //! `[top_k]`), `weights` (F32 `[top_k]`) and `status` (I32 `[1]`, see
 //! [`ROUTE_STATUS_READY`]); consumers check `status` before reading ids.
+//!
+//! Tie policy: exact ties break toward the lowest expert id. llama.cpp's GLM
+//! routing uses `ggml_argsort_top_k`, whose Metal bitonic sort has no id
+//! tiebreak, so exactly tied selection scores can pick different experts;
+//! exact-id parity is not claimed for ties (measure-zero for real logits).
 
 use super::*;
 
@@ -114,6 +119,13 @@ pub fn encode_route_learned(
     check(ids, GgmlType::I32, &[top_k], true, "expert ids")?;
     check(weights, GgmlType::F32, &[top_k], true, "weights")?;
     check(status, GgmlType::I32, &[1], true, "status")?;
+    for written in [ids, weights, status] {
+        super::checks::check_disjoint(
+            KERNEL,
+            written,
+            &[(logits, "logits"), (bias, "selection bias")],
+        )?;
+    }
     let kernel = route.score.kernel();
     let pso = ctx.pipeline(kernel)?;
     let threads = route.threads();
@@ -380,5 +392,77 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    /// Pins the native tie policy on a mixed tie (lowest id among the 0.5s
+    /// fills slot 8). llama.cpp's bitonic argsort picks expert 6 here.
+    #[test]
+    fn route_mixed_ties_follow_the_lowest_id_policy() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        let logits = vec![0.0; 288];
+        let mut bias = vec![0.5f32; 288];
+        for i in (0..28).step_by(4) {
+            bias[i] = 0.75;
+        }
+        let (status, ids, _) = run(&ctx, &GLM, &logits, &bias);
+        assert_eq!(status, ROUTE_STATUS_READY);
+        assert_eq!(ids, [0, 4, 8, 12, 16, 20, 24, 1]);
+    }
+
+    /// Expert counts that are not a multiple of 32 leave a partially active
+    /// final simdgroup (e.g. DS4 REAP variants).
+    #[test]
+    fn route_handles_expert_counts_not_multiple_of_32() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        for (experts, score) in [
+            (200, RouteScore::Sigmoid),
+            (160, RouteScore::SqrtSoftplus),
+            (216, RouteScore::SqrtSoftplus),
+        ] {
+            let route = LearnedRoute {
+                experts,
+                top_k: 6,
+                score,
+                routed_scale: 1.5,
+            };
+            let logits: Vec<f32> = (0..experts)
+                .map(|i| ((i * 41 + 7) % 89) as f32 * 0.17 - 7.0)
+                .collect();
+            let bias: Vec<f32> = (0..experts).map(|i| ((i * 3) % 7) as f32 * 0.02).collect();
+            assert_route(&ctx, &route, &logits, &bias);
+        }
+    }
+
+    #[test]
+    fn route_refuses_outputs_aliasing_inputs() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        let logits = f32_tensor(&ctx, &vec![0.0; 288]);
+        let bias = f32_tensor(&ctx, &vec![0.0; 288]);
+        let ids = i32_tensor(&ctx, 8);
+        let status = i32_tensor(&ctx, 1);
+        let aliased_weights = MetalTensor {
+            shape: vec![8],
+            ..logits.clone()
+        };
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        let err = encode_route_learned(
+            &ctx,
+            &enc,
+            &GLM,
+            &logits,
+            &bias,
+            &ids,
+            &aliased_weights,
+            &status,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("aliases logits"), "{err}");
     }
 }

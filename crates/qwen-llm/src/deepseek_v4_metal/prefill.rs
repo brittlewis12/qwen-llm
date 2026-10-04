@@ -2257,68 +2257,17 @@ fn encode_q8_f32_mma_r2c16k64_grouped(
     {
         return invalid("packed grouped Q8 F32 R2C16K64 output overlaps an input");
     }
-    let pso = ctx.pipeline("kernel_mat_mat_q8_0_f32_r2c16k64_grouped")?;
-    if pso.threadExecutionWidth() != 32
-        || pso.maxTotalThreadsPerThreadgroup() < 128
-        || ctx.device.maxThreadgroupMemoryLength() < 4_096
-    {
-        return invalid("packed grouped Q8 F32 R2C16K64 requires four SIMDgroups and 4 KiB TGM");
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Args {
-        m: u32,
-        n: u32,
-        k: u32,
-        groups: u32,
-        nb01: u32,
-        stride_b: u32,
-        stride_c: u32,
-    }
-    let row_bytes = checked_mul(n_in / 32, 34, "grouped Q8 F32 R2C16K64 row bytes")?;
-    enc.set_pipeline(&pso);
-    enc.set_bytes(
-        0,
-        &Args {
-            m: u32::try_from(n_out).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("grouped Q8 F32 output exceeds u32".into())
-            })?,
-            n: u32::try_from(n_tokens).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("grouped Q8 F32 token count exceeds u32".into())
-            })?,
-            k: u32::try_from(n_in).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("grouped Q8 F32 input exceeds u32".into())
-            })?,
-            groups: u32::try_from(group_count).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("grouped Q8 F32 group count exceeds u32".into())
-            })?,
-            nb01: u32::try_from(row_bytes).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("grouped Q8 F32 row bytes exceed u32".into())
-            })?,
-            stride_b: u32::try_from(input_width).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("grouped Q8 F32 input stride exceeds u32".into())
-            })?,
-            stride_c: u32::try_from(output_width).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("grouped Q8 F32 output stride exceeds u32".into())
-            })?,
-        },
-    );
-    enc.set_tensor(1, weight);
-    enc.set_tensor(2, input);
-    enc.set_tensor(3, output);
-    enc.set_threadgroup_memory(0, 4_096);
-    enc.dispatch(
-        MTLSize {
-            width: n_tokens / 128,
-            height: n_out / 16,
-            depth: group_count,
-        },
-        MTLSize {
-            width: 128,
-            height: 1,
-            depth: 1,
-        },
-    );
+    crate::metal::encode_mat_mat_q8_0_grouped_f32(
+        ctx,
+        enc,
+        weight,
+        input,
+        output,
+        n_in,
+        n_out,
+        group_count,
+        n_tokens,
+    )?;
     Ok(())
 }
 

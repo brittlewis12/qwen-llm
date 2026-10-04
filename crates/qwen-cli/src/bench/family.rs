@@ -219,6 +219,9 @@ pub(crate) fn with_family_bench<R>(
                 vocab: weights.config.vocab_size as usize,
                 weights: &weights,
                 capacity: extent.forwards,
+                prefill_rows: extent
+                    .prefill_endpoint
+                    .clamp(1, qwen_llm::glm5_next_metal::DEFAULT_PREFILL_ROWS),
                 session: None,
             };
             body(&mut bench)
@@ -234,6 +237,7 @@ struct Glm5NextBench<'ctx, 'w> {
     weights: &'w Glm5NextWeights,
     session: Option<Glm5NextSession<'w>>,
     capacity: usize,
+    prefill_rows: usize,
     vocab: usize,
 }
 
@@ -253,14 +257,18 @@ impl FamilyBench for Glm5NextBench<'_, '_> {
     /// `qwen run` creates one per request.
     fn begin_rep(&mut self) -> Result<()> {
         self.session = None;
-        self.session = Some(Glm5NextSession::new(self.ctx, self.weights, self.capacity)?);
+        self.session = Some(Glm5NextSession::with_prefill_rows(
+            self.ctx,
+            self.weights,
+            self.capacity,
+            self.prefill_rows,
+        )?);
         Ok(())
     }
-    /// Production prompt path: serial tokens without the head, the last with
-    /// logits.
+    /// Production prompt path: packed chunks (fast lineage), last-row logits.
     fn prefill(&mut self, ids: &[u32]) -> Result<()> {
         let ctx = self.ctx;
-        std::hint::black_box(self.session()?.prefill(ctx, ids)?);
+        std::hint::black_box(self.session()?.prefill_packed(ctx, ids)?);
         Ok(())
     }
     fn decode(&mut self, id: u32) -> Result<()> {
@@ -270,9 +278,9 @@ impl FamilyBench for Glm5NextBench<'_, '_> {
     }
     fn semantics(&self) -> FamilySemantics {
         FamilySemantics {
-            prefill_mode: "serial_advance+last_logits",
+            prefill_mode: "packed_fast+last_logits",
             decode_mode: "serial+logits_copy+route_status_checks",
-            prefill_chunk: None,
+            prefill_chunk: Some(self.prefill_rows),
         }
     }
 }

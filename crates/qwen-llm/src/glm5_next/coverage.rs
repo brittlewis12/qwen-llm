@@ -99,8 +99,6 @@ const fn split(decode: Support, prefill: Support) -> RoleCoverage {
 }
 
 const DENSE: &str = "dense mat_vec / mat_mat";
-const GROUPED_Q8_TAIL: &str = "kernel_mat_mat_q8_0_f32_r2c16k64_grouped requires \
-     rows % 128 == 0 (deepseek_v4_metal/prefill.rs); add a tail path";
 
 /// Coverage of `role` stored as `dtype`, or `None` when no path exists.
 pub fn coverage(role: TensorRole, dtype: GgmlType) -> Option<RoleCoverage> {
@@ -129,7 +127,7 @@ pub fn coverage(role: TensorRole, dtype: GgmlType) -> Option<RoleCoverage> {
         ),
         (R::LatentAbsorb, T::Q8_0) => split(
             Support::Kernel("kernel_mat_vec_q8_0_f32_lcpp_grouped"),
-            Support::Pending(GROUPED_Q8_TAIL),
+            Support::Kernel("encode_mat_mat_q8_0_grouped_f32 (128-row blocks) + grouped GEMV tail"),
         ),
         // Expert entries list only dtypes verified on both paths (decode via
         // metal::expert's all-slot encoders, GPU-tested at GLM widths); other

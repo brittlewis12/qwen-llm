@@ -58,6 +58,9 @@ fn retained_geometry(ctx: &MetalContext) -> Result<(usize, usize)> {
     ))
 }
 
+/// Default packed-prefill chunk (rows per command buffer).
+pub const DEFAULT_PREFILL_ROWS: usize = 512;
+
 /// What [`prefetch_retained`] did.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RetainedPrefetch {
@@ -124,6 +127,8 @@ pub struct Glm5NextWeights {
     pub output: MetalTensor,
     pub blocks: Vec<Glm5NextBlock<MetalTensor>>,
     pub retained_bytes: u64,
+    /// Whether every executed weight cell has a packed-prefill path.
+    pub packed_prefill_admitted: bool,
     _backings: Vec<MetalGgufBacking>,
 }
 
@@ -133,6 +138,9 @@ impl Glm5NextWeights {
     pub fn load(ctx: &MetalContext, gguf: &GgufFile) -> Result<Self> {
         let model = Glm5NextModel::from_gguf(gguf)?;
         model.validate_execution(ExecutionMode::SerialDecode)?;
+        let packed_prefill_admitted = model
+            .validate_execution(ExecutionMode::PackedPrefill)
+            .is_ok();
         let (page, max_buffer) = retained_geometry(ctx)?;
         let (plan, retained_bytes) = model.plan_retained(gguf, page, max_buffer)?;
         // Admission and the allocations it prices form one transaction.
@@ -206,6 +214,7 @@ impl Glm5NextWeights {
             output,
             blocks,
             retained_bytes,
+            packed_prefill_admitted,
             _backings: backings,
         })
     }
@@ -424,6 +433,9 @@ impl<'w> Glm5NextSession<'w> {
         prefill_rows: usize,
     ) -> Result<Self> {
         let c = &weights.config;
+        if prefill_rows > 0 && !weights.packed_prefill_admitted {
+            return invalid("packed prefill is not admitted for these weights' dtypes");
+        }
         let frontier = c.sparse_frontier() as usize;
         if capacity == 0 || capacity >= frontier {
             return invalid(format!(

@@ -362,13 +362,7 @@ fn coverage_matrix_names_remaining_adaptations() {
         .into_iter()
         .map(|r| (r.role, r.dtype, r.tensors))
         .collect::<Vec<_>>();
-    assert_eq!(
-        pending,
-        [
-            // Cells order by role, then ggml type id (IQ3_S 21 < IQ2_S 22).
-            (TensorRole::LatentAbsorb, GgmlType::Q8_0, 22),
-        ]
-    );
+    assert!(pending.is_empty(), "{pending:?}");
     // Trunk IQ2_S down has no verified all-slot path.
     assert!(coverage::coverage(TensorRole::ExpertDown, GgmlType::IQ2_S).is_none());
     // Absent pairs have no path rather than an implicit F32 expansion.
@@ -383,12 +377,9 @@ fn execution_gate_is_phase_specific() {
     model
         .validate_execution(ExecutionMode::SerialDecode)
         .unwrap();
-    let prefill = model
+    model
         .validate_execution(ExecutionMode::PackedPrefill)
-        .unwrap_err()
-        .to_string();
-    assert!(prefill.contains("LatentAbsorb Q8_0"), "{prefill}");
-    assert!(!prefill.contains("Expert"), "{prefill}");
+        .unwrap();
 }
 
 fn term(l: &Glm5NextMemoryLedger, name: &str) -> u64 {
@@ -502,7 +493,10 @@ fn release_artifact_census_and_allocation_plan() {
             row.coverage.prefill
         );
     }
-    assert_eq!(model.pending_coverage().len(), 1);
+    assert!(model.pending_coverage().is_empty());
+    model
+        .validate_execution(ExecutionMode::PackedPrefill)
+        .unwrap();
     model
         .validate_execution(ExecutionMode::SerialDecode)
         .unwrap();

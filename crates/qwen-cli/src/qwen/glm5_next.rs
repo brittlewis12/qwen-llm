@@ -26,7 +26,7 @@ pub(crate) fn capability_projection(gguf: &GgufFile) -> Result<Value> {
             "status": "conditional", "implementation_status": "partial", "scope": "raw_only",
             "artifact_admission": {"status": "passed"},
             "capacity_policy": format!("dense_attention_range_below_{frontier}_and_device_memory"),
-            "prefill": "serial", "native_tokenizer": true, "latent_cache": "f16",
+            "prefill": "packed_fast", "native_tokenizer": true, "latent_cache": "f16",
         }),
         Err(error) => json!({
             "status": "unsupported", "implementation_status": "partial",
@@ -35,7 +35,7 @@ pub(crate) fn capability_projection(gguf: &GgufFile) -> Result<Value> {
     };
     let bench = match &admission {
         Ok(_) => json!({"status": "conditional", "implementation_status": "partial",
-            "command": "qwen-bench family", "scope": "serial_prefill_and_decode_rows"}),
+            "command": "qwen-bench suite", "scope": "packed_prefill_and_serial_decode_rows"}),
         Err(_) => json!({"status": "unsupported", "implementation_status": "partial"}),
     };
     let unsupported = |lane: &str| {
@@ -152,17 +152,16 @@ pub(crate) fn run_raw(
     );
     let load_t0 = Instant::now();
     let weights = Glm5NextWeights::load(&ctx, gguf).context("load GLM-5.3 weights")?;
-    let mut session =
-        Glm5NextSession::new(&ctx, &weights, capacity).context("create GLM-5.3 session")?;
+    let prefill_rows = tokens
+        .len()
+        .min(qwen_llm::glm5_next_metal::DEFAULT_PREFILL_ROWS);
+    let mut session = Glm5NextSession::with_prefill_rows(&ctx, &weights, capacity, prefill_rows)
+        .context("create GLM-5.3 session")?;
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
 
     let prefill_t0 = Instant::now();
-    let (&last, head) = tokens.split_last().context("empty prompt")?;
-    for &token in head {
-        shutdown::checkpoint()?;
-        session.advance(&ctx, token)?;
-    }
-    let logits = session.forward(&ctx, last)?;
+    shutdown::checkpoint()?;
+    let logits = session.prefill_packed(&ctx, &tokens)?;
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
 
     let stdout = std::io::stdout();
@@ -192,7 +191,7 @@ pub(crate) fn run_raw(
     let decode_tps =
         generation.tokens.len() as f64 / (generation.wall_ms / 1e3).max(f64::MIN_POSITIVE);
     eprintln!(
-        "glm5_next: prompt_tokens={} generated_tokens={} transitions={} stop={} capacity={capacity} prefill=serial prefetch_ms={prefetch_ms:.1} load_ms={load_ms:.1} prefill_ms={prefill_ms:.1} prefill_tps={prefill_tps:.2} decode_tps={decode_tps:.2}",
+        "glm5_next: prompt_tokens={} generated_tokens={} transitions={} stop={} capacity={capacity} prefill=packed_fast prefill_rows={prefill_rows} prefetch_ms={prefetch_ms:.1} load_ms={load_ms:.1} prefill_ms={prefill_ms:.1} prefill_tps={prefill_tps:.2} decode_tps={decode_tps:.2}",
         tokens.len(),
         generation.tokens.len(),
         generation.transitions,

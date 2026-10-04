@@ -190,6 +190,49 @@ fn matmat(
     Ok(())
 }
 
+/// Per-head latent absorption or expansion over `rows` token-major rows:
+/// grouped Q8_0 mat-mat (F32 accumulation) over whole 128-row blocks in fast
+/// lineage, and the decode grouped GEMV per remaining row (every row in exact
+/// lineage).
+#[allow(clippy::too_many_arguments)]
+fn absorb_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    lineage: PackedLineage,
+    weight: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    groups: usize,
+    rows: usize,
+) -> Result<()> {
+    let (in_width, out_width) = (n_in * groups, n_out * groups);
+    let blocked = match lineage {
+        PackedLineage::Fast => rows / 128 * 128,
+        PackedLineage::Exact => 0,
+    };
+    if blocked > 0 {
+        crate::metal::encode_mat_mat_q8_0_grouped_f32(
+            ctx,
+            enc,
+            weight,
+            &input.view_subrange(0, vec![in_width as u64, blocked as u64]),
+            &output.view_subrange(0, vec![out_width as u64, blocked as u64]),
+            n_in,
+            n_out,
+            groups,
+            blocked,
+        )?;
+    }
+    for row in blocked..rows {
+        let x = input.view_subrange((row * in_width) as u64, vec![in_width as u64]);
+        let y = output.view_subrange((row * out_width) as u64, vec![out_width as u64]);
+        encode_mat_vec_q8_0_grouped_f32(ctx, enc, weight, &x, &y, n_in, n_out, groups)?;
+    }
+    Ok(())
+}
+
 impl Glm5NextSession<'_> {
     /// Packed prefill of `tokens` in chunks of the session's prefill rows;
     /// returns the last token's logits. Falls back to serial decode when the
@@ -851,25 +894,18 @@ impl Glm5NextSession<'_> {
             self.position * kv,
             kv * rows,
         )?;
-        for row in 0..rows {
-            let q_row = p.query.view_subrange(
-                (row * heads * head_dim) as u64,
-                vec![(heads * head_dim) as u64],
-            );
-            let ql_row = p
-                .query_latent
-                .view_subrange((row * heads * kv) as u64, vec![(heads * kv) as u64]);
-            encode_mat_vec_q8_0_grouped_f32(
-                ctx,
-                enc,
-                &mla.key_absorb,
-                &q_row,
-                &ql_row,
-                head_dim,
-                kv,
-                heads,
-            )?;
-        }
+        absorb_rows(
+            ctx,
+            enc,
+            p.lineage,
+            &mla.key_absorb,
+            &p.query,
+            &p.query_latent,
+            head_dim,
+            kv,
+            heads,
+            rows,
+        )?;
         encode_latent_attention(
             ctx,
             enc,
@@ -881,25 +917,18 @@ impl Glm5NextSession<'_> {
             rows,
             1.0 / (head_dim as f32).sqrt(),
         )?;
-        for row in 0..rows {
-            let ol_row = p
-                .output_latent
-                .view_subrange((row * heads * kv) as u64, vec![(heads * kv) as u64]);
-            let ho_row = p.heads_out.view_subrange(
-                (row * heads * head_dim) as u64,
-                vec![(heads * head_dim) as u64],
-            );
-            encode_mat_vec_q8_0_grouped_f32(
-                ctx,
-                enc,
-                &mla.value_expand,
-                &ol_row,
-                &ho_row,
-                kv,
-                head_dim,
-                heads,
-            )?;
-        }
+        absorb_rows(
+            ctx,
+            enc,
+            p.lineage,
+            &mla.value_expand,
+            &p.output_latent,
+            &p.heads_out,
+            kv,
+            head_dim,
+            heads,
+            rows,
+        )?;
         matmat(
             ctx,
             enc,

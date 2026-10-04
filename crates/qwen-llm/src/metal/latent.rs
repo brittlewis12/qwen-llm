@@ -129,6 +129,118 @@ pub fn encode_latent_attention(
     Ok(())
 }
 
+/// Group-axis Q8_0 mat-mat over `rows` tokens with F32 activations and F32
+/// simdgroup accumulation: for each token and group `g`,
+/// `output[g * n_out..][..n_out] = W_g * input[g * n_in..][..n_in]`, with
+/// weights `[n_in, n_out, groups]` (one contiguous matrix per group) and
+/// token-major activations `[n_in * groups, rows]` / `[n_out * groups, rows]`.
+/// Requires `n_in % 64 == 0`, `n_out % 16 == 0` and `rows % 128 == 0`.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_mat_q8_0_grouped_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    groups: usize,
+    rows: usize,
+) -> Result<(), MetalError> {
+    const K: &str = "mat_mat_q8_0_grouped";
+    require_serial(K, enc)?;
+    if weight.dtype != GgmlType::Q8_0
+        || groups == 0
+        || rows == 0
+        || !n_in.is_multiple_of(64)
+        || !n_out.is_multiple_of(16)
+        || !rows.is_multiple_of(128)
+    {
+        return Err(bad_shape(
+            K,
+            format!(
+                "needs Q8_0, n_in % 64, n_out % 16 and rows % 128; got {:?} {n_in} {n_out} {rows}",
+                weight.dtype
+            ),
+        ));
+    }
+    let in_width = n_in * groups;
+    let out_width = n_out * groups;
+    let elements = (n_in * n_out * groups) as u64;
+    if weight.n_elements() != elements {
+        return Err(bad_shape(
+            K,
+            format!(
+                "weight has {} elements, expected {elements}",
+                weight.n_elements()
+            ),
+        ));
+    }
+    check_tensor(
+        K,
+        input,
+        GgmlType::F32,
+        &[in_width as u64, rows as u64],
+        false,
+        "input",
+    )?;
+    check_tensor(
+        K,
+        output,
+        GgmlType::F32,
+        &[out_width as u64, rows as u64],
+        true,
+        "output",
+    )?;
+    check_disjoint(K, output, &[(input, "input"), (weight, "weight")])?;
+    let pso = ctx.pipeline("kernel_mat_mat_q8_0_f32_r2c16k64_grouped")?;
+    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 128 {
+        return Err(bad_shape(K, "needs four 32-lane simdgroups"));
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        groups: u32,
+        nb01: u32,
+        stride_b: u32,
+        stride_c: u32,
+    }
+    let u = |v: usize, name: &str| super::checks::to_u32(K, v, name);
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            m: u(n_out, "n_out")?,
+            n: u(rows, "rows")?,
+            k: u(n_in, "n_in")?,
+            groups: u(groups, "groups")?,
+            nb01: u(n_in / 32 * 34, "row bytes")?,
+            stride_b: u(in_width, "input width")?,
+            stride_c: u(out_width, "output width")?,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, input);
+    enc.set_tensor(3, output);
+    enc.set_threadgroup_memory(0, 4_096);
+    enc.dispatch(
+        MTLSize {
+            width: rows / 128,
+            height: n_out / 16,
+            depth: groups,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{offset_tensor, synthetic_q8_0_bank, tensor_f32_at_offset};
@@ -310,6 +422,63 @@ mod tests {
                         "{n_in}->{n_out} head {h} row {r}: {got} vs {expected}"
                     );
                 }
+            }
+        }
+    }
+
+    /// Grouped Q8_0 mat-mat over 128 rows equals the per-row grouped GEMV at
+    /// both GLM absorption shapes (F32 accumulation, different order).
+    #[test]
+    fn grouped_q8_mat_mat_matches_per_row_gemv_at_glm_shapes() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        const ROWS: usize = 128;
+        for (n_in, n_out) in [(256usize, 512usize), (512, 256)] {
+            let (bytes, _) = synthetic_q8_0_bank(n_in, n_out * H);
+            let weight = offset_tensor(
+                &ctx,
+                256,
+                &bytes,
+                64,
+                vec![n_in as u64, n_out as u64, H as u64],
+                GgmlType::Q8_0,
+            );
+            let x: Vec<f32> = (0..n_in * H * ROWS)
+                .map(|i| (((i * 17 + (i / n_in) * 53) % 89) as f32 - 44.0) * 0.03)
+                .collect();
+            let x_t = f32_tensor(&ctx, &x, vec![(n_in * H) as u64, ROWS as u64]);
+            let y_t = f32_tensor(
+                &ctx,
+                &vec![0.0; n_out * H * ROWS],
+                vec![(n_out * H) as u64, ROWS as u64],
+            );
+            run(&ctx, |enc| {
+                encode_mat_mat_q8_0_grouped_f32(
+                    &ctx, enc, &weight, &x_t, &y_t, n_in, n_out, H, ROWS,
+                )
+                .unwrap();
+            });
+            let grouped = tensor_f32_at_offset(&y_t);
+            for row in [0usize, 1, 63, 127] {
+                let xr = x_t.view_subrange((row * n_in * H) as u64, vec![(n_in * H) as u64]);
+                let yr = f32_tensor(&ctx, &vec![0.0; n_out * H], vec![(n_out * H) as u64]);
+                run(&ctx, |enc| {
+                    encode_mat_vec_q8_0_grouped_f32(&ctx, enc, &weight, &xr, &yr, n_in, n_out, H)
+                        .unwrap();
+                });
+                let gemv = tensor_f32_at_offset(&yr);
+                let got = &grouped[row * n_out * H..(row + 1) * n_out * H];
+                let scale = gemv.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+                let worst = got
+                    .iter()
+                    .zip(&gemv)
+                    .map(|(a, e)| (a - e).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    worst <= 1e-5 * scale.max(1.0),
+                    "{n_in}->{n_out} row {row}: {worst} (scale {scale})"
+                );
             }
         }
     }

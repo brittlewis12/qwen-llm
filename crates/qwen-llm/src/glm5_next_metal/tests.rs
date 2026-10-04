@@ -446,3 +446,64 @@ fn packed_prefill_matches_serial_and_oracle_on_checkpoint_v1() {
         }
     }
 }
+
+/// Fast packed prefill over 200 tokens (one 128-row grouped block plus a
+/// 72-row tail) against exact lineage, which equals serial decode: last-row
+/// logits within the fast envelope, then three decode steps on each.
+#[test]
+#[ignore = "loads the 109.5 GiB GLM-5.3 trunk; requires GLM53_GGUF and an idle GPU"]
+fn packed_fast_matches_exact_over_a_grouped_block_and_tail() {
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let ctx = MetalContext::new().expect("Metal context (production lease)");
+    let gguf = GgufFile::open(&path).unwrap();
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
+    let text = "[gMASK]<sop>The history of maritime trade begins with coastal exchange between \
+        neighbouring settlements, long before ocean crossings were possible. Early sailors read the \
+        winds, the stars and the colour of the water; they carried grain, timber, metal and stories. \
+        Over centuries, harbours grew into cities, and the routes between them shaped languages, \
+        laws and the spread of ideas. Merchants learned to keep accounts, insure cargo and trust \
+        partners they had never met, and the ships themselves changed from rafts and dugouts to \
+        planked hulls with keels, sails and rudders capable of crossing open seas in every season.";
+    let text = format!("{text} {}", text.trim_start_matches("[gMASK]<sop>"));
+    let tokens: Vec<u32> = tokenizer
+        .encode(&text, false)
+        .unwrap()
+        .into_iter()
+        .map(|t| t as u32)
+        .collect();
+    assert!(
+        tokens.len() >= 129,
+        "need a full 128-row block, got {}",
+        tokens.len()
+    );
+    let tokens = &tokens[..tokens.len().min(200)];
+    let mut sessions = Vec::new();
+    for lineage in [PackedLineage::Exact, PackedLineage::Fast] {
+        let mut session = Glm5NextSession::with_prefill_rows(&ctx, &weights, 512, 512).unwrap();
+        session.set_packed_lineage(lineage);
+        let start = std::time::Instant::now();
+        let logits = session.prefill_packed(&ctx, tokens).unwrap();
+        eprintln!(
+            "{lineage:?}: {} tokens in {:.1} ms",
+            tokens.len(),
+            start.elapsed().as_secs_f64() * 1e3
+        );
+        sessions.push((session, logits));
+    }
+    let (exact, fast) = (&sessions[0].1, &sessions[1].1);
+    assert_finite("fast logits", fast);
+    let kl = kl_divergence(exact, fast);
+    eprintln!("fast vs exact after {} tokens: kl {kl:.3e}", tokens.len());
+    assert_eq!(argmax(fast), argmax(exact), "prefill top-1");
+    assert!(kl < 1e-3, "prefill KL {kl}");
+    let mut next = argmax(exact) as u32;
+    for step in 0..3 {
+        let a = sessions[0].0.forward(&ctx, next).unwrap();
+        let b = sessions[1].0.forward(&ctx, next).unwrap();
+        let kl = kl_divergence(&a, &b);
+        eprintln!("decode step {step}: kl {kl:.3e}");
+        assert!(kl < 1e-3, "decode step {step}: KL {kl}");
+        next = argmax(&a) as u32;
+    }
+}

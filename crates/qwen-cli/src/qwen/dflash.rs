@@ -91,21 +91,30 @@ pub(crate) const DFLASH_LONG_REENTRY_MEAN: f64 = 3.1;
 pub(crate) const DFLASH_PROPOSAL_SEED_XOR: u64 = 0x4446_4c41_5348_3251;
 
 /// Default margin for the batched-verify exact fallback: a committed row
-/// whose (top1 - top2) argmax gap is below this is re-evaluated through the
-/// token-major path. Sized at ~2x the max batched-vs-token-major logit
-/// delta observed by the shadow probe (9.5e-2, 2026-08-21).
-pub(crate) const DFLASH_VERIFY_FALLBACK_MARGIN_DEFAULT: f32 = 0.2;
+/// whose packed (top1 - top2) gap is below this is re-evaluated through the
+/// token-major path.
+///
+/// Calibrated on the error that decides a flip: the packed-minus-serial
+/// change in the top1 - top2 margin, measured against a serial shadow
+/// reference on 3,133 committed rows from 128 to 13.7K positions (Qwen3.8-27B
+/// Q8_0 + DFlash2, 2026-10-05). On near-tie rows (serial gap < 0.75) it peaked
+/// at 0.0065 in every context band; overall it stays below 7% of the gap. 0.1
+/// is ~15x the near-tie peak. The earlier 0.2/0.75 tiers were sized to the
+/// max per-logit error over the whole vocabulary (up to 0.365), which
+/// overstates the flip-relevant error 15-60x and flagged ~8% of rows.
+pub(crate) const DFLASH_VERIFY_FALLBACK_MARGIN_DEFAULT: f32 = 0.1;
+
+/// Margin for the explicit long-context lane (positions at or past the
+/// default 16K speculation stop, reachable only by raising
+/// `QWEN_DFLASH_OFF_CTX`). The 0.1 calibration does not reach this range.
+pub(crate) const DFLASH_VERIFY_FALLBACK_MARGIN_LONG: f32 = 0.75;
 
 pub(crate) fn verify_fallback_margin(n_pos: usize) -> f32 {
     std::env::var("QWEN_DFLASH_VERIFY_MARGIN")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(if n_pos >= 4096 {
-            // Ctx-aware: the batched-verify-vs-token-major divergence grows
-            // with context and content — 9.5e-2 at 42 tokens, ~3.65e-1 at
-            // 10.8K for BOTH the per-row and packed attention paths
-            // (2026-08-22 shadow probes). 2x the observed max per tier.
-            0.75
+        .unwrap_or(if n_pos >= DFLASH_OFF_CTX_DEFAULT {
+            DFLASH_VERIFY_FALLBACK_MARGIN_LONG
         } else {
             DFLASH_VERIFY_FALLBACK_MARGIN_DEFAULT
         })

@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-05 - DFlash Guard Recalibrated To The Flip-Relevant Error: Margin 0.1
+
+Qwen3.8-27B Q8_0 + DFlash2 Q8_0, greedy, 256 tokens, M4 Max.
+- **Trigger:** llama.cpp v0.6.0 (few-row MMA) runs DFlash2 on the same model,
+  drafter and 7,406-token code prompt at 49-51 tok/s against our 24.5. Both
+  engines accept the same drafts (~5.0 emitted/step) and produce identical
+  serial text. With the fallback off we reach 36.6. The rest is ~27 ms/step of
+  N=8 matmul (kernel gate, same day).
+- **Divergence census:** 12 prompts (code, structured, reasoning, prose; 128 to
+  7.4K positions). Serial at prefill chunk 128, DFlash without the guard, and
+  DFlash with it all matched default serial byte for byte (0/12 each). The
+  guard flagged 105 steps in those runs, none of which changed the output.
+- **Measurement:** pair each committed row's packed (top1 - top2) gap with a
+  serial shadow reference's gap: 3,133 rows from 128 to 13.7K positions. The
+  margin error |packed - serial| has median 0.0012-0.0015 in every band. On
+  near ties (serial gap < 0.75) it peaks at 0.0065 (<1K), 0.0061 (5.9-7.4K)
+  and 0.0043 (11.5-13.7K). Its larger values (up to 0.127) occur only on
+  wide-gap rows; overall it stays below 7% of the gap. The old 0.2/0.75 tiers
+  came from the max per-logit error over the vocabulary (up to 0.365) and
+  flagged ~8% of rows; a gap below 0.1 covers ~0.9%.
+- **Change:** margin 0.1 below the 16K speculation stop (~15x the near-tie
+  peak); 0.75 stays only for the explicit long lane past 16K, which this
+  calibration does not reach. `QWEN_DFLASH_VERIFY_MARGIN` still overrides.
+- **Result:** byte-identical on all validation runs (7.4K code, short code,
+  prose, three 11.5-13.7K code prompts). Fallbacks per run fell from 16-26 to
+  1-4; the census code prompt went 24.2 -> 29.7-31.4 tok/s (fast mode 36.1).
+  The guard now costs ~2-15% over no guard, from 15-52%. One validation run
+  was contaminated by concurrent load (every phase 2x, prefill included).
+- **Fast mode** (guard off) estimates a 3.7e-6 per-token flip rate (95% CI up
+  to 1.2e-5, <=1.2% of 1,024-token sessions); it stays opt-in. The next speed
+  lever for every mode is the few-row MMA kernel port.
+
 ## 2026-10-05 - DFlash Fallback Replays From The First Flagged Row: Q8 Code 1.18x -> 1.50x
 
 Qwen3.8-27B Q8_0 + DFlash2 Q8_0, ~7.4K prompt, greedy, 256 tokens, M4 Max.

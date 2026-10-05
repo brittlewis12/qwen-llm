@@ -101,8 +101,10 @@ pub fn run(args: SamplerReplayArgs, identity: serde_json::Value) -> Result<()> {
     let rows: Vec<Vec<f32>> = bytes
         .chunks_exact(row_bytes)
         .map(|row| {
-            row.chunks_exact(4)
-                .map(|v| f32::from_le_bytes(v.try_into().unwrap()))
+            row.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|v| f32::from_le_bytes(*v))
                 .collect()
         })
         .collect();

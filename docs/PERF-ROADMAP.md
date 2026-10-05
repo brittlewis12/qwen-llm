@@ -34,9 +34,74 @@ Its disk-only native FP8 Engram and exact decoder dependency-suffix code are now
 inspectable. Compare total prefill plus residency transitions and following
 decode; the screenshot's 800 tok/s excludes the reported eight-second switch.
 
+## Leverage Map — 2026-10-05 (after the GLM-5.3-Flash bring-up)
+
+Active force-ranked queue; supersedes the 2026-09-26 ordering below, whose
+eight residual items all remain open and are merged here. Inputs: the GLM P6
+baseline and memory observations (PERF-LOG 2026-10-05) and a two-round `cx`
+map review. Re-warming is necessary but insufficient: it addresses transient
+eviction, while a near-capacity prefetch can evict its own earlier pages, and
+pinning protects selected pages only by shifting pressure elsewhere. One GLM
+decode attribution packet separates sparse execution, CPU/command overhead and
+matvec efficiency before any fix is chosen. Primary llama.cpp comparisons
+disable its residency sets (`GGML_METAL_NO_RESIDENCY=1`, recorded with the
+commit); default-configuration numbers stay as separately labelled evidence.
+"Rising tide" names a reusable mechanism; a GLM measurement alone does not
+establish a cross-family gain.
+
+| # | Item | Cost | Evidence / mechanism | Cheapest decisive next step | Effort | Exactness |
+|---|---|---|---|---|---|---|
+| 1 | Bounded re-warm (rising tide) | GLM: a 71 s cold prefetch followed by a 26.7 s 23-token prefill; serve short prefills 0.6-1.4 s; 19 GB re-read after a build | no-copy weights are pageable file cache (system wired ~5 GiB mid-serve); transient eviction plus self-eviction near capacity | correlate sampled residency and physical reads with TTFT; bounded, cancellable warming of cold windows charged to TTFT (idle warming reported separately); re-measure llama.cpp pp32 with residency off | ½ d screen, 1-2 d fix | Bitwise |
+| 2 | GLM decode attribution (GLM qualification; rising-tide instruments and kernels) | ~12 ms/token at depth 4096-8192 over depth 0 (3-12 s per 256-1024-token reply); ~14 ms/token between measured depth-0 decode and a provisional weight-stream model | sparse stages, command/queue costs and per-shape matvec bandwidth unseparated; flat 4K-8K timings and the +4.7 ms frontier step do not locate the overhead | one packet: GPU stage times at depth 0 and 4096, CPU/queue timeline, matvec-shape effective bandwidth, a corrected executed-weight/state/head byte model; Flash-Next's three commands as the dissimilar sparse guardrail | 1 d packet, fix contingent | Bitwise instruments; Numerical kernel candidates |
+| 3 | Restart continuity (old #1, #7) | Qwen >130K immediate restart unqualified; Flash-Next restart discards history | publication limits; no Flash-Next durable codec | Qwen ~130K publication and restart; Flash-Next codec round trip and identical continuation | ½ d; 2-4 d | Bitwise |
+| 4 | Empty reasoning retention (old #4, rising tide) | possible replay drift for immediately closed thinking turns | provider retention of empty items unverified | one capture of an empty item through the next request | 1-2 h | Bitwise rendered history |
+| 5 | Unrestricted sampler (rising tide) | GLM sampled decode 25.3 vs greedy 27.6 tok/s (~3.3 ms/token, trajectories differ) | top-k off sorts the full 154,880-entry vocabulary per token; total gap not attributed | CPU replay on identical captured logits with existing sampler timings and cutoff/tie oracles | ½ d; 1-2 d candidate | Distributional; preserve the replay contract |
+| 6 | Dense prefill attention at depth (old #2) | pp512 257 -> 141 tok/s from 0 to 64K | attention ~8 TFLOPS | isolated attention at 32K/64K vs a matched mat-mat reference | ½ d; 3-5 d | Numerical |
+| 7 | DFlash in serve (old #3) | eligible early turns decode serially | drafter optional; speculation off above 16K | one retained agent request, serial vs `--drafter`, charged wall | 2-4 h | Greedy semantic; Distributional only with qualified sampling |
+| 8 | Flash-Next sparse execution (old #5) | 0.75-0.88x llama.cpp | 2048 + 3 + 2045 plan; +275 ms shoulder | the #2 guardrail attribution; fix the located stage | ½ d if separate; 2-5 d | Numerical |
+| 9 | DS4 short-prompt prefill (old #6) | 0.48x at pp512 | CPU routing below the compact-path predicate | route/expert/wait census, then a force-path pilot | ½ d; 2-4 d | Numerical |
+| 10 | Muse prefill (old #8) | 0.85x; ~3.1 s per fresh 4K | chunking, projections, attention growth | early/late chunk attribution | ½ d | Numerical |
+
+Order of execution: the #5 CPU replay first (cheapest), then #1 with a
+placement-matched llama.cpp pp32, then #2. The GLM small-prompt gap (pp32
+59.9 vs default-configuration llama.cpp 67.4 with residency sets on) is a
+question inside #1/#2, not a separate row. Gates: estimate each packet's MDE
+from paired controls, not from a three-run spread (pp512 191-203 is ~6%
+peak-to-peak and cannot support a 2-3% claim); cheap exact work needs a
+credible 2-3% whole-phase gain above MDE, work over a week needs >= 5%
+expected and a >= 10% ceiling. #1 must cut charged transient-eviction TTFT by
+>= 10% with no steady-state or warm-request regression; use GLM plus one
+dissimilar dense-27B guardrail.
+
+**mlock reclamation research (separate from performance; not authorized for
+whole-trunk use).** Whole-model `MTLResidencySet` stays closed. VM wiring by
+`mlock` is owned by the process's address space and should be reclaimed at
+exit even on SIGKILL, unlike driver-held residency sets, but that is unproven
+for GPU-used no-copy buffers and does not by itself remove Metal residency
+preparation. `vm.user_wire_limit` (116,823,110,451 B, 108.8 GiB) is below the
+109.5 GiB GLM trunk. A kill test may run only under this protocol:
+
+- Supervision: verify with a harmless timeout that tool cleanup cannot kill the
+  observer or child; independent session and process group, closed inherited
+  handles, results to a file, a bounded watchdog, signals only to the
+  identified child.
+- Host: quiet and unloaded, exclusive GPU lease, normal wired gate; no sysctl
+  raise or gate bypass.
+- Allocation: disposable file-backed no-copy mappings, 64 MiB first, then at
+  most 1 GiB; locked/unlocked and normal-exit controls.
+- Cases: kill after locking, during confirmed GPU execution (timestamps), and
+  after completion.
+- Record: locked bytes, wired delta, pressure/pageouts, GPU errors, exit status;
+  recovery at 15 and 60 s against a preregistered 64 MiB tolerance.
+- Abort on pressure escalation, allocation/lock failure, GPU recovery, or excess
+  at 15 s; observe through 60 s without reallocating.
+- Passing authorizes neither whole-trunk locking nor reopening residency sets;
+  a later performance pilot would start with frequently read dense pages.
+
 ## Leverage Map — 2026-09-26 (after the serve screens)
 
-Active force-ranked queue; supersedes the 2026-09-25 map below. Items #1-#4
+Superseded by the 2026-10-05 map above; its items #1-#8 are carried there.
+Active force-ranked queue at the time; supersedes the 2026-09-25 map below. Items #1-#4
 there are closed. Inputs are same-day screens (PERF-LOG 2026-09-26) of
 Qwen3.8-27B-Q8_0 through serve at effort medium, at agent-session depths up
 to ~73K tokens (one overnight session reached 133K):
@@ -153,6 +218,11 @@ Scope rules:
   not coordinate non-qwen Metal frameworks or prove Metal teardown completion;
   `QWEN_METAL_LEASE_SKIP_WIRED_GATE=1` is the explicit telemetry-gate override,
   not a process-exclusion bypass.
+- External engines run under the same supervision hazard: ggml-metal wires its
+  buffers through `MTLResidencySet` with a keep-alive heartbeat by default
+  (5 -> 114.7 GiB wired while loading GLM-5.3-Flash). Run llama.cpp with
+  `GGML_METAL_NO_RESIDENCY=1` under tool supervision and for primary
+  comparisons.
 - SIGINT and SIGTERM request cooperative qwen/qwen-bench cancellation at safe
   token, chunk, request, and benchmark boundaries. This only enables destructor
   teardown; it cannot survive a supervisor's SIGKILL before the boundary is

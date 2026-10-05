@@ -6,6 +6,62 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-05 - GLM-5.3-Flash Baseline, Placement, And Attribution Priorities
+
+Leverage map (2026-10-05). No optimization win claimed.
+- **Bring-up state:** GLM-5.3-Flash (`glm5-next`, UD-IQ3_XXS, 320B.A18B MoE:
+  45 executed blocks, 34 KDA + 11 MLA with sparse DSA from visible length
+  2052, 288 experts top-8 plus one shared, four-stream mHC) runs native in
+  run, bench, serve and plain lens (`docs/GLM53-FLASH-PLAN.md`, P1-P5).
+- **Baseline (`0294d13e`, `qwen-bench suite`, 3 runs, tok/s):**
+  - Depth 0: pp32 59.9, pp128 126.4, pp512 197.5 (samples 191-203), tg128
+    27.6.
+  - Depth 8192: pp32 54.0, pp128 107.4, pp512 174.7, tg128 20.8 (20.7 at 4096
+    in the P4 packet; llama.cpp 19.9-20.1 there, and 22.1-22.5 at depth 0).
+  - Decode at depth costs ~12 ms/token over depth 0 and is flat from 4096 to
+    8192; crossing the 2052 frontier alone costs +4.7 ms (46.5 -> 51.2 ms).
+    Neither locates the overhead.
+  - Sampled decode with the release preset (temperature 1.0, top-p 0.95, top-k
+    and min-p off) 25.3 vs greedy 27.6; top-k off sorts the full 154,880-entry
+    vocabulary per token. Trajectories differ, so the gap is not yet
+    attributed.
+- **Provisional weight-stream model (GGUF tensor inventory, GiB per token):**
+  - Dense non-expert 5.38: mostly Q6_K (attn_output 1.42, KDA q/k/v 0.89
+    each, dense blocks 0-2 0.35); Q8_0 MLA projections ~0.54; F32 router 0.18.
+  - Shared expert 0.81 (Q6_K); head 0.485; routed experts 8/288 x 102.3 =
+    2.84 (gate/up IQ2_S, down IQ3_S and IQ4_XS).
+  - Total ~9.5, or ~21.6 ms at 474 GB/s, against 36.2 ms measured. This is a
+    weight-stream estimate, not a demonstrated ceiling: executed tensors, KDA
+    and latent state, intermediates and rereads are not yet counted.
+- **Placement:**
+  - GLM weights are 109.5 GiB of pageable no-copy file cache; system wired
+    memory stays ~5 GiB even mid-serve.
+  - Near capacity the page cache churns. A cold run's prefetch read 117.5 GB
+    in 71 s and its 23-token prefill then took 26.7 s, consistent with the
+    prefetch evicting its own head. A startup after a build re-read 19 GB,
+    and fresh 22-28 token serve prefills varied 0.6-1.4 s (swap 2.8 GB in
+    use, ~190 MB free).
+  - Default-configuration llama.cpp (`e1425c0be`) wires its buffers through
+    `MTLResidencySet` with a 3-minute keep-alive. System wired memory went
+    5 -> 114.7 GiB while loading, and pp32 was 67.4 / tg16 24.45. That run
+    happened under tool supervision with a 200 ms SIGKILL escalation: the
+    2026-08-10 stranding hazard. It exited cleanly, and wired memory returned
+    to 5.1 GiB.
+  - `vm.user_wire_limit` = 116,823,110,451 B (108.8 GiB) < the 109.5 GiB
+    trunk.
+- **Decision:**
+  - Prioritize bounded re-warming (necessary but not sufficient against
+    steady-state over-subscription) and one GLM decode attribution packet;
+    cheap continuity checks stay high.
+  - Primary llama.cpp comparisons run with `GGML_METAL_NO_RESIDENCY=1`;
+    residency-on numbers are labelled default-configuration evidence.
+  - Whole-model `MTLResidencySet` stays closed. mlock reclamation is bounded
+    research under the roadmap's kill-test protocol, separate from
+    performance qualification.
+- **Next:** sampler CPU replay on identical logits; placement-matched
+  llama.cpp pp32; residency/I/O-correlated TTFT; the decode attribution
+  packet.
+
 ## 2026-10-05 - DFlash Guard Recalibrated To The Flip-Relevant Error: Margin 0.1
 
 Qwen3.8-27B Q8_0 + DFlash2 Q8_0, greedy, 256 tokens, M4 Max.

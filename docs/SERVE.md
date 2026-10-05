@@ -176,6 +176,38 @@ This job directory is separate from reusable model snapshots.
   by the same rank for the deficit and re-checks once. Metal-headroom denials
   are not retried: snapshots are CPU arenas, invisible to the Metal signal.
 
+### Idle residency (no-copy families)
+
+Metal wires no-copy weights only while commands use them, and unwires them
+about 2 s after the GPU goes idle (observed on macOS; not an API
+guarantee). The next request then pays to re-wire every page it touches.
+`--idle-residency-secs SECS` (or `QWEN_SERVE_IDLE_RESIDENCY_SECS`) keeps a
+family's no-copy weights wired for that long after each request, using
+ordinary keep-alive commands: 500 ms pulses that mark the weights used. It
+is not a residency set.
+
+- **Window.** It opens at the first activity: the warm-up (GLM) or the
+  first request (other families), so a pulse never faults in a cold model.
+  It reopens after every request.
+- **Default and bounds.** Default 60 s; 0 disables.
+- **Safety.**
+  - Pulsing is suspended under host memory pressure.
+  - It stops for the server's lifetime on any pulse failure, including a
+    pulse still running after 10 s.
+  - The last pulse settles at shutdown.
+  - A 1 GiB kill check recovered wired memory after SIGKILL between pulses
+    and with a command in flight
+    (`docs/bench/2026-10-05-residency-kill-check/`).
+- **Eligible families.** Every family whose serve weights are no-copy GGUF
+  windows: GLM-5.3-Flash, K2 Horizon, DeepSeek V4, Muse Glimmer and
+  Qwen3.8-Flash-Next. Each backend names its buffers (`retained_buffers()`).
+  - Flash-Next's CPU-read PLE table stays in the page cache, outside the
+    pulse.
+  - DeepSeek V4 turns the keep-alive off when its opt-in
+    `QWEN_DSV4_RESIDENCY_SET` already holds the weights.
+- **Refused.** Qwen serve loads Metal-allocated copies by default, which
+  are always wired, and refuses a nonzero value.
+
 ### Durable snapshots (cross-restart warmth)
 
 Qwen (3.5/3.6/3.8 dense and MoE) and DeepSeek V4 keep warm prefixes across
@@ -735,18 +767,10 @@ until the first `</think>`, then the `message`. Stops are `<|endoftext|>`,
 `<|user|>` and `<|observation|>`. Budget exhaustion inside reasoning is
 incomplete; a stop before `</think>` is a protocol failure.
 
-**Idle residency (opt-in).** Metal wires no-copy weights only while
-commands use them and unwires them about 2 s after the GPU goes idle, so a
-request after a pause pays ~1 s to re-wire GLM's 109.5 GiB (a 27-token
-prefill: 1.6-1.7 s instead of 0.6 s). `--idle-residency-secs SECS` (or
-`QWEN_SERVE_IDLE_RESIDENCY_SECS`) keeps them wired for that long after
-startup and after each request with ordinary keep-alive commands (500 ms
-pulses that mark the weights used; not a residency set). Default 60 s; 0
-disables. Pulsing suspends under host memory pressure, stops for good on
-any pulse failure, and the last pulse settles at shutdown. A 1 GiB kill
-check recovered wired memory after SIGKILL between pulses and with a
-command in flight (`docs/bench/2026-10-05-residency-kill-check/`). Other
-families refuse the flag until they expose their eligible buffers.
+**Idle residency.** On by default (60 s; see
+[Idle residency](#idle-residency-no-copy-families)). Without it, a request
+after a pause pays ~1 s to re-wire GLM's 109.5 GiB: a 27-token prefill takes
+1.6-1.7 s instead of 0.6 s. The window opens after the warm-up.
 
 **Live session.** KDA recurrent state cannot rewind, so the one resident
 session is reused only when a request's prompt strictly extends exactly the

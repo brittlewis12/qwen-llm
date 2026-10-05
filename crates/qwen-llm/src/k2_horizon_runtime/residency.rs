@@ -172,6 +172,13 @@ pub(super) struct ResidentWeights {
 }
 
 impl ResidentWeights {
+    pub fn retained_buffers(&self) -> Vec<&crate::metal::Buffer> {
+        self._backings
+            .iter()
+            .map(|backing| &backing.buffer)
+            .collect()
+    }
+
     pub fn realize(ctx: &MetalContext, plan: &K2RuntimePlan<'_>) -> Result<Self> {
         let source = plan.source;
         let mut backings = Vec::with_capacity(plan.retained.windows.len());

@@ -271,6 +271,21 @@ fn supports_serve_family(family: Option<ModelFamily>) -> bool {
     family.is_some_and(|family| profile(family).serve_backend)
 }
 
+/// Families whose serve weights are no-copy GGUF windows, so idle residency
+/// has buffers to keep wired. Qwen serve loads Metal-allocated copies by
+/// default (always wired, nothing to keep). Exhaustive on purpose: a new
+/// family must decide.
+fn idle_residency_eligible(family: ModelFamily) -> bool {
+    match family {
+        ModelFamily::Glm5Next
+        | ModelFamily::K2Horizon
+        | ModelFamily::DeepSeek4
+        | ModelFamily::MuseGlimmer
+        | ModelFamily::Qwen4Exp => true,
+        ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => false,
+    }
+}
+
 /// Limits for a family whose resident session capacity is fixed at load
 /// (Muse Glimmer, Flash-Next): both ceilings must be explicit.
 fn fixed_session_limits(
@@ -360,11 +375,15 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         &invocation.durable,
         invocation.snapshot_cache_mib,
     )?;
-    // Idle residency needs a backend that names its no-copy weights.
+    // Idle residency needs a backend whose weights are no-copy GGUF windows.
     ensure!(
-        invocation.idle_residency_secs.unwrap_or(0) == 0 || family == ModelFamily::Glm5Next,
-        "--idle-residency-secs is implemented for GLM-5.3-Flash serve only; {} keeps its placement",
+        invocation.idle_residency_secs.unwrap_or(0) == 0 || idle_residency_eligible(family),
+        "--idle-residency-secs keeps no-copy weights wired; {} serve weights are Metal-allocated copies, which are always wired",
         family.architecture_name()
+    );
+    let idle_window = idle_residency::configured_window(
+        invocation.idle_residency_secs,
+        idle_residency::DEFAULT_WINDOW,
     );
     let template_style = invocation.template_style;
     ensure!(
@@ -446,6 +465,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             let load_ms = started.elapsed().as_secs_f64() * 1e3;
             tracing::info!(target: "qwen_diag", "serve limits: family=k2_horizon raw_input_string_only capacity={} snapshot_cache_bytes=0", prepared.capacity);
             let mut backend = backend_k2::K2Backend::new(&model, prepared, model_id.clone());
+            backend.set_idle_residency(&ctx, idle_window);
             return accept_loop(
                 listener,
                 &model_id,
@@ -482,10 +502,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 &weights,
                 prepared,
                 model_id.clone(),
-                idle_residency::configured_window(
-                    invocation.idle_residency_secs,
-                    idle_residency::GLM_DEFAULT_WINDOW,
-                ),
+                idle_window,
             );
             let warm_up_ms = backend.warm_up()?;
             tracing::info!(target: "qwen_diag", "serve startup: family=glm5_next load_ms={load_ms:.1} warm_up_ms={warm_up_ms:.1}");
@@ -560,6 +577,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 math_options,
             )?;
             let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
+            backend.set_idle_residency(idle_window);
             let math_options = backend.math_options();
             tracing::info!(target: "qwen_diag", "serve limits: family=muse_glimmer max_context_tokens={} default_max_tokens={} snapshot_cache_bytes=0 matrix_prefill={} split_decode={}", context_limit, default_max_tokens, math_options.matrix_prefill, math_options.split_decode);
             crate::shutdown::checkpoint()?;
@@ -593,6 +611,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 invocation.snapshot_policy,
             )?;
             backend.template_style = template_style;
+            backend.set_idle_residency(idle_window);
             tracing::info!(target: "qwen_diag", "serve limits: family=deepseek_v4 max_context_tokens={} {}", context_limit, backend.snapshot_cache_plan);
             match invocation.durable.resolve("deepseek_v4") {
                 Ok(Some(plan)) => {
@@ -647,6 +666,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 invocation.snapshot_policy,
             )?;
             backend.template_style = template_style;
+            backend.set_idle_residency(idle_window);
             let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
             tracing::info!(target: "qwen_diag", "serve limits: family=qwen4exp max_context_tokens={context_limit} default_max_tokens={default_max_tokens} {}", backend.snapshot_cache_plan);
             crate::shutdown::checkpoint()?;

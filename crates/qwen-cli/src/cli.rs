@@ -113,12 +113,14 @@ pub(crate) struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     trace_sse: Option<PathBuf>,
 
-    /// Keep a family's no-copy weights wired for this long after the server
-    /// starts and after each request, through ordinary keep-alive commands,
-    /// so a request after a pause does not re-wire them (about 1 s for
-    /// GLM-5.3-Flash). Suspended under host memory pressure; 0 disables.
-    /// Currently GLM-5.3-Flash only. Default: QWEN_SERVE_IDLE_RESIDENCY_SECS,
-    /// else 60.
+    /// Keep a family's no-copy weights wired for this long after the
+    /// warm-up (or first request) and after each request, through ordinary
+    /// keep-alive commands, so a request after a pause does not re-wire them
+    /// (about 1 s for GLM-5.3-Flash). Suspended under host memory pressure;
+    /// 0 disables. GLM-5.3-Flash, K2 Horizon, DeepSeek V4, Muse Glimmer and
+    /// Qwen3.8-Flash-Next; Qwen serve loads Metal-allocated copies (always
+    /// wired) and refuses a nonzero value. Default:
+    /// QWEN_SERVE_IDLE_RESIDENCY_SECS, else 60.
     #[arg(long, value_name = "SECS")]
     idle_residency_secs: Option<u64>,
 

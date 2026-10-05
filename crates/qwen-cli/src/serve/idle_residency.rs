@@ -2,11 +2,16 @@
 //! weights between requests through ordinary command buffers
 //! (`metal::ResidencyKeepAlive`), so a request after a pause does not pay to
 //! re-wire them. Family-neutral scheduling; each backend names its eligible
-//! buffers. GLM-5.3-Flash defaults to a 60 s window ([`GLM_DEFAULT_WINDOW`]).
+//! buffers (`retained_buffers()`). Every family whose serve weights are
+//! no-copy GGUF windows defaults to a 60 s window ([`DEFAULT_WINDOW`]);
+//! families whose weights are Metal-allocated copies are always wired and
+//! refuse the flag.
 //!
-//! Window: opens when the backend is ready and again whenever a request
-//! finishes, whatever its outcome (activity is activity); pulses stop once
-//! it lapses, so an idle server returns its weights to pageable memory.
+//! Window: closed until the first activity (a warm-up, or the first request
+//! for backends without one, so a cold model is never faulted in by a
+//! pulse); it opens again whenever a request finishes, whatever its outcome
+//! (activity is activity); pulses stop once it lapses, so an idle server
+//! returns its weights to pageable memory.
 //! Pulsing is suspended while the host reports memory pressure (warning or
 //! critical) and stops for the server's lifetime on any pulse failure;
 //! requests are never affected.
@@ -17,10 +22,10 @@ use qwen_llm::metal::{
 use std::time::{Duration, Instant};
 
 pub(crate) const IDLE_RESIDENCY_ENV: &str = "QWEN_SERVE_IDLE_RESIDENCY_SECS";
-/// GLM-5.3-Flash's default: a 1 GiB kill check of ordinary command-buffer
-/// wiring recovered in every case (PERF-LOG 2026-10-05), and 60 s covers an
-/// interactive turn without holding the host for minutes.
-pub(crate) const GLM_DEFAULT_WINDOW: Duration = Duration::from_secs(60);
+/// The default for every no-copy family: a 1 GiB kill check of ordinary
+/// command-buffer wiring recovered in every case (PERF-LOG 2026-10-05), and
+/// 60 s covers an interactive turn without holding the host for minutes.
+pub(crate) const DEFAULT_WINDOW: Duration = Duration::from_secs(60);
 /// Well inside the ~2 s after which an idle GPU unwires no-copy weights.
 const PULSE_INTERVAL: Duration = Duration::from_millis(500);
 /// Bound on waiting for a final pulse at shutdown.
@@ -30,7 +35,8 @@ pub(crate) struct IdleResidency {
     family: &'static str,
     window: Duration,
     keep_alive: Option<ResidencyKeepAlive>,
-    last_activity: Instant,
+    /// `None` until the first activity: the window starts closed.
+    last_activity: Option<Instant>,
     last_pulse: Option<Instant>,
     suspended_for_pressure: bool,
 }
@@ -60,7 +66,7 @@ impl IdleResidency {
             family,
             window,
             keep_alive: None,
-            last_activity: Instant::now(),
+            last_activity: None,
             last_pulse: None,
             suspended_for_pressure: false,
         }
@@ -74,9 +80,9 @@ impl IdleResidency {
         self.window = Duration::ZERO;
     }
 
-    /// The backend became ready or a request finished.
+    /// The backend warmed up or a request finished.
     pub(crate) fn note_activity(&mut self) {
-        self.last_activity = Instant::now();
+        self.last_activity = Some(Instant::now());
     }
 
     /// Surface a failed or stuck pulse before a request uses the GPU.
@@ -98,7 +104,9 @@ impl IdleResidency {
         {
             return self.disable(&error.to_string());
         }
-        if self.last_activity.elapsed() > self.window
+        if self
+            .last_activity
+            .is_none_or(|at| at.elapsed() > self.window)
             || self
                 .last_pulse
                 .is_some_and(|at| at.elapsed() < PULSE_INTERVAL)
@@ -151,6 +159,14 @@ impl IdleResidency {
     pub(crate) fn window(&self) -> Duration {
         self.window
     }
+
+    #[cfg(test)]
+    pub(crate) fn is_open(&self) -> bool {
+        !self.window.is_zero()
+            && self
+                .last_activity
+                .is_some_and(|at| at.elapsed() <= self.window)
+    }
 }
 
 #[cfg(test)]
@@ -160,20 +176,25 @@ mod tests {
     #[test]
     fn the_flag_wins_then_the_environment_then_the_family_default() {
         assert_eq!(
-            configured_window(Some(90), GLM_DEFAULT_WINDOW),
+            configured_window(Some(90), DEFAULT_WINDOW),
             Duration::from_secs(90)
         );
-        assert_eq!(
-            configured_window(Some(0), GLM_DEFAULT_WINDOW),
-            Duration::ZERO
-        );
+        assert_eq!(configured_window(Some(0), DEFAULT_WINDOW), Duration::ZERO);
         if std::env::var_os(IDLE_RESIDENCY_ENV).is_none() {
-            assert_eq!(
-                configured_window(None, GLM_DEFAULT_WINDOW),
-                GLM_DEFAULT_WINDOW
-            );
+            assert_eq!(configured_window(None, DEFAULT_WINDOW), DEFAULT_WINDOW);
         }
         let residency = IdleResidency::new("test", Duration::ZERO);
         assert!(residency.window().is_zero());
+    }
+
+    #[test]
+    fn the_window_stays_closed_until_the_first_activity() {
+        let mut residency = IdleResidency::new("test", DEFAULT_WINDOW);
+        assert!(!residency.is_open(), "a cold model is never pulsed");
+        residency.note_activity();
+        assert!(residency.is_open());
+        let mut off = IdleResidency::new("test", Duration::ZERO);
+        off.note_activity();
+        assert!(!off.is_open());
     }
 }

@@ -51,9 +51,17 @@ pub(crate) struct FlashNextBackend {
     /// Deployment default for `x_qwen.template_style` (`--template-style`).
     pub(super) template_style: super::items::TemplateStyle,
     control_cpu_reserve: u64,
+    /// Off until [`FlashNextBackend::set_idle_residency`].
+    idle_residency: super::idle_residency::IdleResidency,
 }
 
 impl FlashNextBackend {
+    /// Keep the no-copy Metal weights wired for `window` after each request
+    /// (the CPU-read PLE table stays in the page cache, outside the pulse).
+    pub(super) fn set_idle_residency(&mut self, window: std::time::Duration) {
+        self.idle_residency = super::idle_residency::IdleResidency::new("qwen4exp", window);
+    }
+
     pub(crate) fn new(
         ctx: MetalContext,
         gguf: &'static GgufFile,
@@ -144,6 +152,10 @@ impl FlashNextBackend {
             snapshot_cache_plan,
             template_style: super::items::TemplateStyle::House,
             control_cpu_reserve: 0,
+            idle_residency: super::idle_residency::IdleResidency::new(
+                "qwen4exp",
+                std::time::Duration::ZERO,
+            ),
         })
     }
 }
@@ -158,6 +170,16 @@ impl GenerationBackend for FlashNextBackend {
 
     fn idle(&mut self) {
         super::log_expired_snapshots("qwen4exp", &self.cache.sweep());
+        let buffers = self.loaded.retained_buffers();
+        self.idle_residency.on_idle(&self.ctx, &buffers);
+    }
+
+    fn request_finished(&mut self) {
+        self.idle_residency.note_activity();
+    }
+
+    fn shutdown(&mut self) {
+        self.idle_residency.shutdown();
     }
 
     fn request_profile(&self) -> super::request_profile::RequestProfile {
@@ -172,6 +194,7 @@ impl GenerationBackend for FlashNextBackend {
         prompt: &str,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
+        self.idle_residency.before_request();
         let max_tokens = request.max_output_tokens.unwrap_or(self.default_max_tokens);
         let mut sampler = super::backend::request_sampler(request)?;
         let tokenize_t0 = Instant::now();

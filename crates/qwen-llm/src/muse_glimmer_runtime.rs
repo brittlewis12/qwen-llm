@@ -125,6 +125,11 @@ pub struct MuseGlimmerLoadedModel {
 }
 
 impl MuseGlimmerLoadedModel {
+    /// The retained no-copy weight buffers (for idle residency keep-alive).
+    pub fn retained_buffers(&self) -> Vec<&crate::metal::Buffer> {
+        crate::metal::retained_gguf_buffers(self.weights.tensors().map(|(_, tensor)| tensor))
+    }
+
     pub fn load(
         ctx: &MetalContext,
         gguf: &GgufFile,

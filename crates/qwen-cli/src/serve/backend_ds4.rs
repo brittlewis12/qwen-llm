@@ -89,6 +89,8 @@ pub(crate) struct DeepSeekV4Backend {
     /// Deployment default for `x_qwen.template_style` (`--template-style`).
     pub(super) template_style: TemplateStyle,
     control_cpu_reserve: u64,
+    /// Off until [`DeepSeekV4Backend::set_idle_residency`].
+    idle_residency: super::idle_residency::IdleResidency,
 }
 
 /// Process-unique, never published: pid + start nanos + a tag.
@@ -193,6 +195,10 @@ impl DeepSeekV4Backend {
         )?;
         Ok(Self {
             control_cpu_reserve: 0,
+            idle_residency: super::idle_residency::IdleResidency::new(
+                "deepseek_v4",
+                std::time::Duration::ZERO,
+            ),
             ctx,
             gguf,
             tokenizer,
@@ -460,6 +466,27 @@ fn decoded_text_closed_reasoning(
     text.contains("</think>")
 }
 
+impl DeepSeekV4Backend {
+    /// Keep the no-copy weights wired for `window` after each request. An
+    /// opt-in `MTLResidencySet` (`QWEN_DSV4_RESIDENCY_SET`) already keeps
+    /// them resident, so the keep-alive stays off then.
+    pub(super) fn set_idle_residency(&mut self, window: std::time::Duration) {
+        let window = if self
+            .residency
+            .as_ref()
+            .is_some_and(|residency| residency.has_residency_set())
+        {
+            if !window.is_zero() {
+                tracing::info!(target: "qwen_diag", "serve idle residency: family=deepseek_v4 off: the residency set keeps the weights resident");
+            }
+            std::time::Duration::ZERO
+        } else {
+            window
+        };
+        self.idle_residency = super::idle_residency::IdleResidency::new("deepseek_v4", window);
+    }
+}
+
 impl GenerationBackend for DeepSeekV4Backend {
     fn set_control_memory_reserve(&mut self, bytes: u64) {
         self.control_cpu_reserve = bytes;
@@ -477,11 +504,22 @@ impl GenerationBackend for DeepSeekV4Backend {
         {
             self.durable = None;
         }
+        // The residency moves into a request's session and is restored after
+        // it; between requests it is here.
+        if let Some(residency) = &self.residency {
+            let buffers = residency.retained_buffers();
+            self.idle_residency.on_idle(&self.ctx, &buffers);
+        }
+    }
+
+    fn request_finished(&mut self) {
+        self.idle_residency.note_activity();
     }
 
     /// Snapshots are written behind as they are captured, so shutdown only
     /// waits (bounded) for the queue to drain.
     fn shutdown(&mut self) {
+        self.idle_residency.shutdown();
         let Some(durable) = self.durable.as_ref() else {
             return;
         };
@@ -516,6 +554,7 @@ impl GenerationBackend for DeepSeekV4Backend {
         prompt: &str,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
+        self.idle_residency.before_request();
         let max_tokens = request.max_output_tokens.unwrap_or(self.default_max_tokens);
         // Sampling validation precedes tokenization, admission, residency
         // transfer, session allocation, and all model execution.

@@ -36,6 +36,22 @@ pub enum KeepAlivePulse {
     StillInFlight,
 }
 
+/// The distinct retained (no-copy GGUF) buffers behind `tensors`, in
+/// first-seen order: what a keep-alive must name to keep a family's pageable
+/// weights wired. Metal-allocated copies are always wired and excluded, so a
+/// family whose weights are copies yields an empty list.
+pub fn retained_gguf_buffers<'a>(
+    tensors: impl IntoIterator<Item = &'a MetalTensor>,
+) -> Vec<&'a Buffer> {
+    let mut seen = std::collections::HashSet::new();
+    tensors
+        .into_iter()
+        .filter(|t| t.provenance() == super::MetalTensorProvenance::RetainedGgufReadOnly)
+        .filter(|t| seen.insert(Retained::as_ptr(&t.buffer) as *const () as usize))
+        .map(|t| &t.buffer)
+        .collect()
+}
+
 fn failure(status: &str, error: impl Into<String>) -> MetalError {
     MetalError::CommandBufferFailed {
         status: status.into(),

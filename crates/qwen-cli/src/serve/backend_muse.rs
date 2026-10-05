@@ -45,6 +45,8 @@ pub(crate) struct MuseGlimmerBackend {
     consumed_tokens: Vec<u32>,
     prefix_reuse: bool,
     math_options: MuseGlimmerRuntimeOptions,
+    /// Off until [`MuseGlimmerBackend::set_idle_residency`].
+    idle_residency: super::idle_residency::IdleResidency,
 }
 
 impl MuseGlimmerBackend {
@@ -109,11 +111,20 @@ impl MuseGlimmerBackend {
             consumed_tokens: Vec::new(),
             prefix_reuse: qwen_llm::env_flag::read_default_on(PREFIX_REUSE_ENV),
             math_options,
+            idle_residency: super::idle_residency::IdleResidency::new(
+                "muse_glimmer",
+                std::time::Duration::ZERO,
+            ),
         })
     }
 
     pub(crate) fn math_options(&self) -> MuseGlimmerRuntimeOptions {
         self.math_options
+    }
+
+    /// Keep the no-copy weights wired for `window` after each request.
+    pub(super) fn set_idle_residency(&mut self, window: std::time::Duration) {
+        self.idle_residency = super::idle_residency::IdleResidency::new("muse_glimmer", window);
     }
 
     #[cfg(test)]
@@ -125,6 +136,19 @@ impl MuseGlimmerBackend {
 impl GenerationBackend for MuseGlimmerBackend {
     fn model_id(&self) -> &str {
         &self.model_id
+    }
+
+    fn idle(&mut self) {
+        let buffers = self.loaded.retained_buffers();
+        self.idle_residency.on_idle(&self.ctx, &buffers);
+    }
+
+    fn request_finished(&mut self) {
+        self.idle_residency.note_activity();
+    }
+
+    fn shutdown(&mut self) {
+        self.idle_residency.shutdown();
     }
 
     fn request_profile(&self) -> super::request_profile::RequestProfile {
@@ -142,6 +166,7 @@ impl GenerationBackend for MuseGlimmerBackend {
         prompt: &str,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
+        self.idle_residency.before_request();
         let max_tokens = request.max_output_tokens.unwrap_or(self.default_max_tokens);
         let sampling = SamplingConfig {
             temperature: request.temperature.unwrap_or(1.0),

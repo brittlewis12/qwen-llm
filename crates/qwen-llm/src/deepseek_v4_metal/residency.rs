@@ -796,6 +796,16 @@ impl DeepSeekV4MetalResidency {
             .map(|(name, tensor)| (name.as_str(), tensor))
     }
 
+    /// The retained no-copy weight buffers (for idle residency keep-alive).
+    pub fn retained_buffers(&self) -> Vec<&crate::metal::Buffer> {
+        crate::metal::retained_gguf_buffers(self.tensors.values())
+    }
+
+    /// Whether an opt-in `MTLResidencySet` already keeps the weights resident.
+    pub fn has_residency_set(&self) -> bool {
+        self._residency_set.is_some()
+    }
+
     pub fn len(&self) -> usize {
         self.tensors.len()
     }

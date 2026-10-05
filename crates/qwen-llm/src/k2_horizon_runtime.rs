@@ -97,6 +97,11 @@ pub struct K2LoadedModel<'a> {
 }
 
 impl<'a> K2LoadedModel<'a> {
+    /// The retained no-copy weight buffers (for idle residency keep-alive).
+    pub fn retained_buffers(&self) -> Vec<&crate::metal::Buffer> {
+        self.weights.retained_buffers()
+    }
+
     /// Prices weights AND one session before allocating any weight buffers.
     /// Capacity is bounded by checkpoint context and actual device/memory admission,
     /// not the lengths covered by numerical regression fixtures.

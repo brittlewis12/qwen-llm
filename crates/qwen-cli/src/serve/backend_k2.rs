@@ -108,6 +108,9 @@ pub(super) struct K2Backend<'model, 'ctx> {
     /// Exactly the tokens `session` has committed, or empty when unknown.
     history: Vec<u32>,
     prefix_reuse: bool,
+    /// Off until [`K2Backend::set_idle_residency`] names the context.
+    idle_residency: super::idle_residency::IdleResidency,
+    ctx: Option<&'ctx qwen_llm::metal::MetalContext>,
 }
 
 impl<'model, 'ctx> K2Backend<'model, 'ctx> {
@@ -123,13 +126,40 @@ impl<'model, 'ctx> K2Backend<'model, 'ctx> {
             session: None,
             history: Vec::new(),
             prefix_reuse: qwen_llm::env_flag::read_default_on(PREFIX_REUSE_ENV),
+            idle_residency: super::idle_residency::IdleResidency::new(
+                "k2_horizon",
+                std::time::Duration::ZERO,
+            ),
+            ctx: None,
         }
+    }
+
+    /// Keep the no-copy weights wired for `window` after each request.
+    pub(super) fn set_idle_residency(
+        &mut self,
+        ctx: &'ctx qwen_llm::metal::MetalContext,
+        window: std::time::Duration,
+    ) {
+        self.idle_residency = super::idle_residency::IdleResidency::new("k2_horizon", window);
+        self.ctx = Some(ctx);
     }
 }
 
 impl GenerationBackend for K2Backend<'_, '_> {
     fn model_id(&self) -> &str {
         &self.model_id
+    }
+    fn idle(&mut self) {
+        if let Some(ctx) = self.ctx {
+            let buffers = self.model.retained_buffers();
+            self.idle_residency.on_idle(ctx, &buffers);
+        }
+    }
+    fn request_finished(&mut self) {
+        self.idle_residency.note_activity();
+    }
+    fn shutdown(&mut self) {
+        self.idle_residency.shutdown();
     }
     fn request_profile(&self) -> super::request_profile::RequestProfile {
         super::request_profile::RequestProfile::K2 {
@@ -146,6 +176,7 @@ impl GenerationBackend for K2Backend<'_, '_> {
         prompt: &str,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
+        self.idle_residency.before_request();
         render_k2::render_with_profile(request, self.prepared.chat_profile.as_deref())?;
         let stops: &[i32] = if request.k2_chat.is_some() || request.k2_tools.is_some() {
             &qwen_llm::k2_horizon_chat::CHAT_STOPS

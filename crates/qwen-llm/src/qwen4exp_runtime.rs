@@ -541,6 +541,13 @@ impl Qwen4ExpDecodeOptions {
 }
 
 impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
+    /// The retained no-copy Metal weight buffers (for idle residency
+    /// keep-alive). The PLE table is read on the CPU from the mapping and is
+    /// not among them.
+    pub fn retained_buffers(&self) -> Vec<&crate::metal::Buffer> {
+        crate::metal::retained_gguf_buffers(self.weights.tensors().map(|(_, tensor)| tensor))
+    }
+
     pub fn load(
         ctx: &MetalContext,
         gguf: &'gguf GgufFile,

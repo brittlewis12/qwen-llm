@@ -4350,6 +4350,8 @@ mod tests {
             .collect();
         let mut recurrence_output = vec![0.0f32; v_elements];
         for hi in 0..N_V {
+            // Mirrors the kernel's `hi % n_k_heads` head mapping; this fixture has one K head.
+            #[allow(clippy::modulo_one)]
             let hk = hi % N_K;
             for dv in 0..HEAD_DIM {
                 let vector_index = hi * HEAD_DIM + dv;

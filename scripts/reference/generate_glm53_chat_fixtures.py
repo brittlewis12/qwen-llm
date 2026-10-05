@@ -304,13 +304,28 @@ def cases():
         clear_thinking=True,
         add_generation_prompt=False,
     )
+    # No user turn: last_user_index is -1, so every assistant keeps reasoning.
+    add(
+        "clear-thinking-no-user",
+        [system("S"), assistant("A", reasoning_content="R")],
+        clear_thinking=True,
+        add_generation_prompt=False,
+    )
     add("no-generation-prompt", HISTORY[:2], add_generation_prompt=False)
     add(
         "no-generation-prompt-user-last",
         HISTORY[:3],
         add_generation_prompt=False,
     )
-    add("tools-empty-list", q, tools=[])
+    # The template treats an empty list as no tools; a document that carries
+    # a tools key is refused natively, empty or not.
+    add("tools-empty-list", q, "refuse:tools", tools=[])
+    # A non-string reasoning_content falls through to the inline split.
+    add(
+        "history-reasoning-nonstring",
+        [user("Earlier"), assistant("Answer", reasoning_content=42), user("Next")],
+        "refuse:input",
+    )
 
     # Shapes the template renders but qwen-llm refuses.
     add("assistant-last", HISTORY[:2], "refuse:last_turn")

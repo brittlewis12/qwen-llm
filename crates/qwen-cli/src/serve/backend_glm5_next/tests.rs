@@ -69,13 +69,16 @@ fn cpu_startup_refuses_bad_limits_before_listener_or_metal() {
 struct Sink {
     bytes: Vec<u8>,
     ticks: usize,
+    pieces: usize,
     abort_tick: Option<usize>,
-    abort_piece: bool,
+    /// Disconnect on this (1-based) piece.
+    abort_piece: Option<usize>,
 }
 
 impl GenerationSink for Sink {
     fn piece(&mut self, bytes: &[u8]) -> io::Result<()> {
-        if self.abort_piece {
+        self.pieces += 1;
+        if self.abort_piece == Some(self.pieces) {
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, "test disconnect"));
         }
         self.bytes.extend_from_slice(bytes);
@@ -153,7 +156,7 @@ fn reference_bytes(
         .into_iter()
         .map(|id| id as u32)
         .collect();
-    let mut session = backend.fresh_session().unwrap();
+    let mut session = backend.fresh_session(0).unwrap();
     let logits = session.prefill_packed(backend.ctx, &tokens).unwrap();
     let mut sampler = Sampler::new(render::sampling(request)).unwrap();
     let mut bytes = Vec::new();
@@ -260,6 +263,8 @@ fn gpu_live_session_extends_resumes_and_resets() {
     let outcome = backend
         .generate(&first_req, &first_prompt, &mut exact_first)
         .unwrap();
+    let exact_history = backend.history.clone();
+    let first_len = outcome.usage.input_tokens;
     let (r, a) = split(&exact_first.bytes, outcome.end);
     let exact_replay = json!([
         {"role":"user","content":QUESTION},
@@ -279,6 +284,39 @@ fn gpu_live_session_extends_resumes_and_resets() {
         .generate(&exact_req, &exact_prompt, &mut cold)
         .unwrap();
     assert_eq!(warm.bytes, cold.bytes, "Exact: warm continuation == cold");
+    // The join itself: the logits after (prefill, decode forwards, suffix
+    // prefill) equal one cold prefill's, bit for bit.
+    let exact_tokens: Vec<u32> = backend
+        .prepared
+        .artifact
+        .tokenizer()
+        .encode(&exact_prompt, false)
+        .unwrap()
+        .into_iter()
+        .map(|id| id as u32)
+        .collect();
+    assert!(exact_tokens.starts_with(&exact_history));
+    let mut cold_session = backend.fresh_session(0).unwrap();
+    let cold_logits = cold_session.prefill_packed(&ctx, &exact_tokens).unwrap();
+    drop(cold_session);
+    let mut warm_session = backend.fresh_session(0).unwrap();
+    warm_session
+        .prefill_packed(&ctx, &exact_history[..first_len])
+        .unwrap();
+    for &token in &exact_history[first_len..] {
+        warm_session.forward(&ctx, token).unwrap();
+    }
+    let warm_logits = warm_session
+        .prefill_packed(&ctx, &exact_tokens[exact_history.len()..])
+        .unwrap();
+    drop(warm_session);
+    assert!(
+        warm_logits
+            .iter()
+            .zip(&cold_logits)
+            .all(|(a, b)| a.to_bits() == b.to_bits()),
+        "Exact warm and cold logits differ"
+    );
     backend.prefix_reuse = true;
     backend.lineage = PackedLineage::Fast;
     backend.session = None;
@@ -331,22 +369,45 @@ fn gpu_live_session_extends_resumes_and_resets() {
     assert_eq!(outcome.usage.cached_tokens, 512);
     assert_eq!(resumed.bytes, long_cold.bytes);
 
-    // An abort during decode clears the session; the retry is cold and equal.
-    let mut dropped = Sink {
-        abort_piece: true,
-        ..Sink::default()
-    };
-    assert!(matches!(
-        backend.generate(&first_req, &first_prompt, &mut dropped),
-        Err(BackendFailure::Aborted(_))
-    ));
-    assert!(backend.history.is_empty() && backend.session.is_none());
-    let mut retry = Sink::default();
-    let outcome = backend
-        .generate(&first_req, &first_prompt, &mut retry)
+    // An abort right after prefill (tick 3 of a one-chunk prompt), on the
+    // first decoded piece, or after several forwards clears the session; each
+    // retry is cold and equal to an uninterrupted run.
+    let (count_req, count_prompt) = request(
+        &backend,
+        greedy(json!("Count from 1 to 20, separated by spaces."), "low"),
+    );
+    let mut counted = Sink::default();
+    backend
+        .generate(&count_req, &count_prompt, &mut counted)
         .unwrap();
-    assert_eq!(outcome.usage.cached_tokens, 0);
-    assert_eq!(retry.bytes, first.bytes);
+    assert!(counted.pieces > 8, "{}", counted.pieces);
+    for sink in [
+        Sink {
+            abort_tick: Some(3),
+            ..Sink::default()
+        },
+        Sink {
+            abort_piece: Some(1),
+            ..Sink::default()
+        },
+        Sink {
+            abort_piece: Some(6),
+            ..Sink::default()
+        },
+    ] {
+        let mut sink = sink;
+        assert!(matches!(
+            backend.generate(&count_req, &count_prompt, &mut sink),
+            Err(BackendFailure::Aborted(_))
+        ));
+        assert!(backend.history.is_empty() && backend.session.is_none());
+        let mut retry = Sink::default();
+        let outcome = backend
+            .generate(&count_req, &count_prompt, &mut retry)
+            .unwrap();
+        assert_eq!(outcome.usage.cached_tokens, 0);
+        assert_eq!(retry.bytes, counted.bytes);
+    }
 
     // Over capacity is refused before the session: no ticks, history kept.
     let history = backend.history.clone();

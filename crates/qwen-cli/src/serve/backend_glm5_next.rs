@@ -156,12 +156,15 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         }
     }
 
-    fn fresh_session(&self) -> Result<Glm5NextSession<'w>, ServeError> {
-        let mut session = Glm5NextSession::with_prefill_rows(
+    /// A new session admitted together with `cpu_reserve` bytes of future
+    /// CPU storage (the request's transport allowance).
+    fn fresh_session(&self, cpu_reserve: u64) -> Result<Glm5NextSession<'w>, ServeError> {
+        let mut session = Glm5NextSession::with_prefill_rows_and_cpu_reserve(
             self.ctx,
             self.weights,
             self.prepared.capacity,
             self.prepared.prefill_rows,
+            cpu_reserve,
         )
         .map_err(|error| ServeError::server_error(format!("{FAMILY} session: {error}")))?;
         session.set_packed_lineage(self.lineage);
@@ -181,7 +184,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             .map(|id| u32::try_from(id).context("warm-up token id"))
             .collect::<Result<Vec<_>>>()?;
         let mut session = self
-            .fresh_session()
+            .fresh_session(0)
             .map_err(|e| anyhow::anyhow!(e.message))?;
         session
             .prefill_packed_with_checkpoint(self.ctx, &tokens, &mut || {
@@ -224,8 +227,9 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
         let tokens = decode_loop::encode_checked(tokenizer, prompt, false, vocab_size, FAMILY)?;
         let required =
             decode_loop::required_forwards(FAMILY, tokens.len(), maximum, self.prepared.capacity)?;
+        let reserve = sink.transport_reserve_bytes();
         super::transport_memory::admit_resident_transport(
-            sink.transport_reserve_bytes(),
+            reserve,
             MetalContext::process_limit_bytes_remaining(),
         )?;
         sink.tick().map_err(BackendFailure::Aborted)?;
@@ -239,7 +243,9 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
         if reused == 0 {
             // Release the old session's memory before allocating its successor.
             self.session = None;
-            self.session = Some(self.fresh_session()?);
+            // A new session's buffers and this request's transport allowance
+            // are admitted as one requirement.
+            self.session = Some(self.fresh_session(reserve)?);
         }
         let ctx = self.ctx;
         let session = self.session.as_mut().expect("session present");
@@ -266,7 +272,12 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
                 return Err(ServeError::server_error(format!("{FAMILY} prefill: {error}")).into());
             }
         };
-        sink.tick().map_err(BackendFailure::Aborted)?;
+        if let Err(abort) = sink.tick() {
+            // The prompt is consumed but no retry can extend it (an equal
+            // prompt has no fresh row): release the session now.
+            self.session = None;
+            return Err(BackendFailure::Aborted(abort));
+        }
         let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
         let generation = decode_loop::decode_serial(
             decode_loop::DecodeRequest {

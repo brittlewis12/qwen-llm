@@ -12,16 +12,13 @@ fn cases(fixture: &Value) -> &[Value] {
 /// The fixture case through the product path: document parse, effort
 /// parse, render.
 fn native(case: &Value) -> Result<String> {
-    let document = parse_document(&serde_json::to_vec(&case["messages"]).unwrap())?;
+    let mut document = json!({"messages": case["messages"]});
+    if let Some(tools) = case.get("tools") {
+        document["tools"] = tools.clone();
+    }
+    let document = parse_document(&serde_json::to_vec(&document).unwrap())?;
     assert_eq!(document.clear_thinking, None);
     let effort = Effort::parse(case.get("reasoning_effort").and_then(Value::as_str))?;
-    if let Some(tools) = case.get("tools") {
-        assert_eq!(
-            tools,
-            &json!([]),
-            "only an empty tool list renders as no tools"
-        );
-    }
     render(
         &document.messages,
         RenderOptions {
@@ -75,7 +72,9 @@ fn renders_every_supported_case_byte_for_byte_and_refuses_the_rest() {
                     "refuse:last_turn"
                     | "refuse:empty"
                     | "refuse:role"
-                    | "refuse:content_parts" => "glm5_next_chat_input",
+                    | "refuse:content_parts"
+                    | "refuse:input" => "glm5_next_chat_input",
+                    "refuse:tools" => "glm5_next_chat_tools",
                     other => panic!("{name}: unknown native policy {other}"),
                 };
                 assert_eq!(native(case).unwrap_err().code(), code, "{name}");

@@ -1802,6 +1802,42 @@
    ]
   },
   {
+   "name": "clear-thinking-no-user",
+   "native": "render",
+   "messages": [
+    {
+     "role": "system",
+     "content": "S"
+    },
+    {
+     "role": "assistant",
+     "content": "A",
+     "reasoning_content": "R"
+    }
+   ],
+   "clear_thinking": true,
+   "add_generation_prompt": false,
+   "rendered": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>S<|assistant|><think>R</think>A",
+   "token_ids": [
+    154822,
+    154824,
+    154826,
+    25062,
+    287,
+    29905,
+    371,
+    25,
+    7487,
+    154826,
+    50,
+    154828,
+    154841,
+    49,
+    154842,
+    32
+   ]
+  },
+  {
    "name": "no-generation-prompt",
    "native": "render",
    "messages": [
@@ -1886,7 +1922,7 @@
   },
   {
    "name": "tools-empty-list",
-   "native": "render",
+   "native": "refuse:tools",
    "messages": [
     {
      "role": "user",
@@ -1915,6 +1951,48 @@
     220,
     17,
     30,
+    154828,
+    154841
+   ]
+  },
+  {
+   "name": "history-reasoning-nonstring",
+   "native": "refuse:input",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Earlier"
+    },
+    {
+     "role": "assistant",
+     "content": "Answer",
+     "reasoning_content": 42
+    },
+    {
+     "role": "user",
+     "content": "Next"
+    }
+   ],
+   "add_generation_prompt": true,
+   "rendered": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>Earlier<|assistant|><think></think>Answer<|user|>Next<|assistant|><think>",
+   "token_ids": [
+    154822,
+    154824,
+    154826,
+    25062,
+    287,
+    29905,
+    371,
+    25,
+    7487,
+    154827,
+    32884,
+    154828,
+    154841,
+    154842,
+    16127,
+    154827,
+    5847,
     154828,
     154841
    ]

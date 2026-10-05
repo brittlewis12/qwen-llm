@@ -752,11 +752,14 @@ clears the session. `QWEN_GLM_PREFIX_REUSE=0` disables reuse.
 Checked under `MTL_DEBUG_LAYER=1` on UD-IQ3_XXS
 (`serve::backend_glm5_next::tests::gpu_live_session_extends_resumes_and_resets`):
 cold bytes equal the run lane's; a replayed turn reuses the whole history;
-under the Exact packed lineage a warm continuation equals a cold run
-bitwise; a two-chunk prompt cancelled between chunks resumes with the cold
-run's bytes; a decode abort's retry equals the first run; over-capacity is
-refused with no ticks and the history kept; JSON and SSE carry the reasoning
-item and the answer. These are wiring and cache-correctness checks, not
+under the Exact packed lineage a warm continuation's output bytes, and the
+logits at the join, equal a cold run's bit for bit; a two-chunk prompt
+cancelled between chunks resumes with the cold run's bytes; aborts after
+prefill, on the first piece and after several forwards clear the session and
+their retries equal an uninterrupted run; over-capacity is refused with no
+ticks and the history kept; JSON and SSE carry the reasoning item and the
+answer. A new session is admitted together with the request's transport
+allowance. These are wiring and cache-correctness checks, not
 reasoning-quality or sustained-service qualification.
 
 ## Wire subset (Open Responses)

@@ -492,6 +492,7 @@ pub(crate) fn run(
             } else {
                 stdout.write_all(bytes)?;
                 stdout.flush()?;
+                visible |= !bytes.is_empty();
             }
             Ok(())
         },
@@ -500,7 +501,21 @@ pub(crate) fn run(
             let token = checked_token_id(token, vocab_size, "generated")?;
             session.forward(&ctx, token).map_err(anyhow::Error::from)
         },
-    )?;
+    );
+    let generation = match generation {
+        Ok(generation) => generation,
+        Err(error) => {
+            // Leave the terminal on a fresh line; the original error stands.
+            if partition.is_some() {
+                let _ = writeln!(stderr);
+            }
+            if visible {
+                let _ = writeln!(stdout);
+                let _ = stdout.flush();
+            }
+            return Err(error);
+        }
+    };
     timing.record(Phase::ResidentExecution, resident_t0.elapsed())?;
     let report = timing.finish(lane_t0.elapsed())?;
     if let Some(partition) = partition {
@@ -536,7 +551,7 @@ pub(crate) fn run(
             )?;
         }
     }
-    if visible || (chat_record.is_none() && !generation.tokens.is_empty()) {
+    if visible {
         writeln!(stdout)?;
         stdout.flush()?;
     }

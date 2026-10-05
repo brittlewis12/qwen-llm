@@ -22,7 +22,8 @@ use crate::metal::{
     encode_get_rows_f32, encode_indexer_append, encode_kda_decode, encode_latent_attention,
     encode_mat_vec_q8_0_grouped_f32, encode_mhc4_collapse, encode_mhc4_controls, encode_mhc4_post,
     encode_mhc4_repeat, encode_moe_weighted_sum_f32, encode_rms_norm_mul_f32, encode_route_learned,
-    encode_scatter_offset_f32_to_f16, evaluate_metal_memory_admission, wait_completed,
+    encode_scatter_offset_f32_to_f16, evaluate_metal_memory_admission,
+    evaluate_metal_memory_admission_with_cpu_bytes, wait_completed,
 };
 use crate::tensor::{GgmlType, TensorDesc};
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLDevice};
@@ -766,6 +767,20 @@ impl<'w> Glm5NextSession<'w> {
         capacity: usize,
         prefill_rows: usize,
     ) -> Result<Self> {
+        Self::with_prefill_rows_and_cpu_reserve(ctx, weights, capacity, prefill_rows, 0)
+    }
+
+    /// Like [`Self::with_prefill_rows`], admitting the session buffers
+    /// together with caller-owned future CPU storage (serve transport and
+    /// control allowances) in one decision, so neither spends headroom the
+    /// other already counted.
+    pub fn with_prefill_rows_and_cpu_reserve(
+        ctx: &MetalContext,
+        weights: &'w Glm5NextWeights,
+        capacity: usize,
+        prefill_rows: usize,
+        cpu_reserve_bytes: u64,
+    ) -> Result<Self> {
         let c = &weights.config;
         if prefill_rows > 0 && !weights.packed_prefill_admitted {
             return invalid("packed prefill is not admitted for these weights' dtypes");
@@ -784,11 +799,16 @@ impl<'w> Glm5NextSession<'w> {
         let session_bytes = ledger.peak_bytes() - weights.retained_bytes;
         // Admission and the allocations it prices form one transaction.
         let _allocation = ctx.begin_allocation_transaction();
-        let admission =
-            evaluate_metal_memory_admission(session_bytes, 0, ctx.memory_signals(), true);
+        let admission = evaluate_metal_memory_admission_with_cpu_bytes(
+            session_bytes,
+            cpu_reserve_bytes,
+            0,
+            ctx.memory_signals(),
+            true,
+        );
         if !admission.admitted {
             return invalid(format!(
-                "session does not fit: reason={:?} required={session_bytes}",
+                "session does not fit: reason={:?} required={session_bytes} cpu_reserve={cpu_reserve_bytes}",
                 admission.reason
             ));
         }

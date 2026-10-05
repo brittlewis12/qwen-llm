@@ -84,6 +84,11 @@ no further `glm5-next` changes). Earlier research (2026-08-28 gap analysis,
   to the logits bit for bit, readouts move no state (dense, packed and sparse
   continuations stay bit-identical), content is not hashed. Linear transport
   waits for a declared stream coordinate.
+- P6 baseline (`0294d13e`, `qwen-bench suite`, 3 runs): pp32 59.9, pp128 126.4,
+  pp512 197.5, tg128 27.6 tok/s at depth 0; at depth 8192 pp32 54.0, pp128 107.4,
+  pp512 174.7, tg128 20.8. Decode at depth costs about 12 ms/token over depth 0
+  and is flat from 4096 to 8192, so the cost sits in the sparse path's fixed
+  terms rather than in indexer scoring that grows with depth.
 - Next: P6: grouped-heads selected attention (sparse decode
   costs +4.7 ms/token at the frontier; native loses 25% from depth 0 to 4096
   against llama.cpp's 10%), long-context dense attention, a packed-prefill stage

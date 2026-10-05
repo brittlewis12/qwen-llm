@@ -80,6 +80,8 @@ pub(crate) enum OutputProtocol {
         eot_token_id: i32,
         declared_tools: Vec<String>,
     },
+    /// GLM-5.3-Flash text chat: reasoning pre-opened by the prompt.
+    Glm5NextChat,
 }
 
 impl OutputProtocol {
@@ -90,7 +92,10 @@ impl OutputProtocol {
     pub(crate) fn reasons(&self) -> bool {
         match self {
             Self::RawText => false,
-            Self::K2Chat { .. } | Self::K2Tools { .. } | Self::MuseAtem { .. } => true,
+            Self::K2Chat { .. }
+            | Self::K2Tools { .. }
+            | Self::MuseAtem { .. }
+            | Self::Glm5NextChat => true,
             Self::Qwen {
                 preopened_reasoning,
                 ..
@@ -130,6 +135,7 @@ impl OutputPartition {
                 parse_tools,
                 tool_grammar,
             )),
+            OutputProtocol::Glm5NextChat => Self::Preopened(super::render_glm5_next::partition()),
             OutputProtocol::MuseAtem {
                 eos_token_id,
                 eot_token_id,

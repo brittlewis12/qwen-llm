@@ -139,6 +139,8 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
 # may extend through the model's declared context.
 # K2 requires explicit --max-context-tokens (within checkpoint context) and
 # --max-tokens; --snapshot-cache-mib is ignored (live-session prefix reuse).
+# GLM-5.3-Flash requires both too (device memory admits the session at
+# startup and names the capacity that fits); --snapshot-cache-mib only warns.
 ```
 
 **Durable diagnostic workbench.** `--lens-data-dir PATH` enables saved Lens history
@@ -177,11 +179,11 @@ This job directory is separate from reusable model snapshots.
 ### Durable snapshots (cross-restart warmth)
 
 Qwen (3.5/3.6/3.8 dense and MoE) and DeepSeek V4 keep warm prefixes across
-restarts in a disk tier under the RAM cache. Flash-Next, Muse Glimmer, and K2
-have no durable tier: an explicit `--durable-snapshot-*` value is refused at
-startup (`--durable-snapshot-dir off` is accepted), and the default logs that
-the tier does not apply. Muse and K2 reuse their live session instead of
-snapshots, so `--snapshot-cache-mib` only draws a warning there.
+restarts in a disk tier under the RAM cache. Flash-Next, Muse Glimmer, K2 and
+GLM-5.3-Flash have no durable tier: an explicit `--durable-snapshot-*` value is
+refused at startup (`--durable-snapshot-dir off` is accepted), and the default
+logs that the tier does not apply. Muse, K2 and GLM reuse their live session
+instead of snapshots, so `--snapshot-cache-mib` only draws a warning there.
 
 - **Flags.** `--durable-snapshot-dir PATH|off` (default
   `~/.cache/qwen-llm/serve-checkpoints`; each family uses its own subdirectory
@@ -691,10 +693,76 @@ three requested formats through CLI, HTTP JSON and SSE. They demonstrate product
 wiring, not universal tool reliability, schema compliance or answer quality.
 Reproduction: `scripts/reference/k2/README.md`.
 
+## GLM-5.3-Flash Verified Text Chat
+
+```sh
+qwen serve -m GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf \
+  --max-context-tokens 16384 --max-tokens 2048
+```
+
+Startup admits the artifact, requires its chat profile (embedded template
+digest pinned to the upstream or unsloth GGUF template, every marker a single
+released token, the released stops), and refuses to serve otherwise: there is
+no raw serve lane. Before listening it admits the session against device
+memory (a refusal names the `--max-context-tokens` that fits), prefetches the
+retained windows, loads, and runs a two-token warm-up prefill so the first
+request is not charged the weights' first GPU use (`serve startup:` logs
+`load_ms` and `warm_up_ms`).
+
+Requests use the shared Open Responses parser; the pinned
+`glm53_flash_text_v1` renderer (`crates/qwen-llm/src/glm5_next_chat.rs`)
+renders them:
+
+- `input` string is one user message; items are system/developer (or
+  `instructions`), user and assistant messages with `reasoning` items, ending
+  in a user turn. Tools, function calls and results are refused (`tools`).
+- `reasoning.effort` is `low`, `high` or `max` (default `max`, the
+  template's); anything else is a 400 on `reasoning.effort`, where the
+  template would silently use Max. The template always opens reasoning:
+  `x_qwen.no_thinking: true` is refused, `x_qwen.thinking: true` is a no-op.
+- History renders as generated. The template keeps past reasoning by
+  default; an assistant without a reasoning item renders with empty
+  reasoning, never through the template's inline `</think>` split.
+  `x_qwen.history_thinking: "strip"` is the template's own `clear_thinking`
+  (reasoning at or before the last user turn dropped). `template_style` is
+  refused at startup and per request, as for K2 and Muse.
+- Sampling defaults are the release `generation_config.json`: temperature
+  1.0, top-p 0.95, top-k and min-p off, seed 42; `max_output_tokens` defaults
+  to `--max-tokens` and must be within capacity.
+
+Output partitions on the pre-opened reasoning: bytes are a `reasoning` item
+until the first `</think>`, then the `message`. Stops are `<|endoftext|>`,
+`<|user|>` and `<|observation|>`. Budget exhaustion inside reasoning is
+incomplete; a stop before `</think>` is a protocol failure.
+
+**Live session.** KDA recurrent state cannot rewind, so the one resident
+session is reused only when a request's prompt strictly extends exactly the
+tokens it consumed; anything else drops it and prefills a fresh session
+(about 8 ms to allocate). A replayed conversation extends: the model ends a
+turn by sampling `<|user|>`, the next turn's opener, and the renderer writes
+history back byte-for-byte when the client replays the reasoning and answer
+items. Re-tokenization that differs from the sampled tokens, a changed
+effort or system message, `strip`, or whitespace the template strips from an
+answer all fall back to a fresh session. Every client-caused refusal
+(budget, capacity, input) precedes the session, so the cache survives it. A
+cancellation during prefill keeps the committed chunks (a retry of the same
+prompt resumes from them); an abort during decode or any engine failure
+clears the session. `QWEN_GLM_PREFIX_REUSE=0` disables reuse.
+
+Checked under `MTL_DEBUG_LAYER=1` on UD-IQ3_XXS
+(`serve::backend_glm5_next::tests::gpu_live_session_extends_resumes_and_resets`):
+cold bytes equal the run lane's; a replayed turn reuses the whole history;
+under the Exact packed lineage a warm continuation equals a cold run
+bitwise; a two-chunk prompt cancelled between chunks resumes with the cold
+run's bytes; a decode abort's retry equals the first run; over-capacity is
+refused with no ticks and the history kept; JSON and SSE carry the reasoning
+item and the answer. These are wiring and cache-correctness checks, not
+reasoning-quality or sustained-service qualification.
+
 ## Wire subset (Open Responses)
 
 This section describes the Qwen/DeepSeek/Muse chat profiles; K2's narrower raw and
-verified-chat contracts are specified separately above.
+verified-chat contracts and GLM's text chat are specified separately above.
 
 The parser, Qwen capability binding, and prompt renderer are one shared pure
 module. `qwen-lens --open-responses FILE|-` uses that same path for offline

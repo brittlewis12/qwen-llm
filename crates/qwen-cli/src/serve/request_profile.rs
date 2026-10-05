@@ -2,7 +2,7 @@
 
 use super::items::{QwenTemplate, ServeError, ServeRequest, TemplateStyle};
 use super::output_partition::{OutputProtocol, ToolGrammar};
-use super::{render, render_ds4, render_k2, render_muse};
+use super::{render, render_ds4, render_glm5_next, render_k2, render_muse};
 use qwen_llm::muse_glimmer::MuseGlimmerChatTemplateProfile;
 use serde_json::Value;
 use std::sync::Arc;
@@ -33,6 +33,11 @@ pub(crate) enum RequestProfile {
         capacity: usize,
         max_piece_bytes: usize,
     },
+    /// Verified GLM-5.3-Flash text chat over a session of fixed capacity.
+    Glm5Next {
+        default_max_tokens: usize,
+        capacity: usize,
+    },
 }
 
 impl RequestProfile {
@@ -57,7 +62,7 @@ impl RequestProfile {
             Self::OrdinaryQwen { style, .. }
             | Self::FlashNext { style }
             | Self::DeepSeekV4 { style } => Some(*style),
-            Self::UnboundQwen | Self::Muse { .. } | Self::K2 { .. } => None,
+            Self::UnboundQwen | Self::Muse { .. } | Self::K2 { .. } | Self::Glm5Next { .. } => None,
         }
     }
 
@@ -100,6 +105,10 @@ impl RequestProfile {
                 }
                 Ok(())
             }
+            Self::Glm5Next {
+                default_max_tokens,
+                capacity,
+            } => render_glm5_next::normalize_request(request, *default_max_tokens, *capacity),
         }
     }
 
@@ -125,6 +134,7 @@ impl RequestProfile {
                 render_muse::render_muse_glimmer_serve_prompt(request, *template)
             }
             Self::K2 { chat, .. } => render_k2::render_with_profile(request, chat.as_deref()),
+            Self::Glm5Next { .. } => render_glm5_next::render(request),
         }
     }
 
@@ -171,6 +181,7 @@ impl RequestProfile {
                 ..
             } => render_k2::tools::output_protocol(request, *max_piece_bytes),
             Self::K2 { chat: None, .. } => OutputProtocol::RawText,
+            Self::Glm5Next { .. } => OutputProtocol::Glm5NextChat,
         }
     }
 }

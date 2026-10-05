@@ -105,7 +105,7 @@ static GLM5_NEXT: FamilyProfile = FamilyProfile {
     display: "GLM-5.3-Flash",
     drafter: DrafterSupport::Unsupported("family_no_speculation"),
     fixed_cohort: FixedCohort::None,
-    serve_backend: false,
+    serve_backend: true,
     serve_warmth: ServeWarmth::LiveSession,
     capabilities: glm5_next_capabilities,
 };

@@ -18,6 +18,7 @@
 mod assets;
 pub(crate) mod backend;
 pub(crate) mod backend_ds4;
+mod backend_glm5_next;
 pub(crate) mod backend_k2;
 pub(crate) mod backend_muse;
 pub(crate) mod backend_qwen4exp;
@@ -396,7 +397,10 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         assets,
         access: lens_http::access::BrowserAccess::new(invocation.lens_allowed_origin.clone()),
     });
-    if matches!(family, ModelFamily::K2Horizon | ModelFamily::MuseGlimmer) {
+    if matches!(
+        family,
+        ModelFamily::K2Horizon | ModelFamily::MuseGlimmer | ModelFamily::Glm5Next
+    ) {
         ensure!(
             template_style == items::TemplateStyle::House,
             "--template-style upstream is defined for Qwen and DeepSeek V4 serve; {} serve renders its release format",
@@ -444,7 +448,41 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 workbench,
             );
         }
-        ModelFamily::Glm5Next => unreachable!("GLM-5.3-Flash has no serve backend (refused above)"),
+        ModelFamily::Glm5Next => {
+            // CPU admission (artifact, limits, chat profile) before the
+            // listener; device admission, prefetch and load before accepting.
+            let prepared = backend_glm5_next::Prepared::new(&gguf, &invocation)?;
+            let listener = bind_loopback(&invocation.addr)?;
+            let mut trace = invocation
+                .trace_sse
+                .as_deref()
+                .map(http::TraceLog::open)
+                .transpose()?;
+            let model_id = invocation
+                .model
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .context("model path has no printable file stem")?
+                .to_owned();
+            crate::shutdown::checkpoint()?;
+            let ctx = qwen_llm::metal::MetalContext::new()?;
+            let started = Instant::now();
+            let weights = backend_glm5_next::load(&ctx, &gguf, &prepared)?;
+            let load_ms = started.elapsed().as_secs_f64() * 1e3;
+            tracing::info!(target: "qwen_diag", "serve limits: {}", prepared.describe());
+            let mut backend =
+                backend_glm5_next::Glm5NextBackend::new(&ctx, &weights, prepared, model_id.clone());
+            let warm_up_ms = backend.warm_up()?;
+            tracing::info!(target: "qwen_diag", "serve startup: family=glm5_next load_ms={load_ms:.1} warm_up_ms={warm_up_ms:.1}");
+            return accept_loop(
+                listener,
+                &model_id,
+                load_ms,
+                &mut backend,
+                &mut trace,
+                workbench,
+            );
+        }
         ModelFamily::Qwen35
         | ModelFamily::Qwen35Moe
         | ModelFamily::Qwen4Exp
@@ -483,7 +521,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
 
     match family {
         ModelFamily::K2Horizon => unreachable!("K2 Horizon returned above"),
-        ModelFamily::Glm5Next => unreachable!("GLM-5.3-Flash has no serve backend (refused above)"),
+        ModelFamily::Glm5Next => unreachable!("GLM-5.3-Flash returned above"),
         ModelFamily::MuseGlimmer => {
             let math_options = backend_muse::read_math_options()?;
             let config = qwen_llm::muse_glimmer::MuseGlimmerConfig::from_gguf(&gguf)
@@ -1107,12 +1145,8 @@ mod tests {
                 profile(*family).serve_backend,
                 "{family:?}"
             );
-            // Every family serves except GLM-5.3-Flash, whose backend is not built yet.
-            assert_eq!(
-                profile(*family).serve_backend,
-                *family != ModelFamily::Glm5Next,
-                "{family:?}"
-            );
+            // Every recognised family has a backend.
+            assert!(profile(*family).serve_backend, "{family:?}");
         }
         assert!(!supports_serve_family(None));
     }

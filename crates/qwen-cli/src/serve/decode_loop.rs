@@ -106,6 +106,29 @@ pub(crate) fn reusable_prefix(
         .min(prompt.len().saturating_sub(1))
 }
 
+/// Live-session reuse for a family whose recurrent state cannot rewind: the
+/// whole consumed history is reused only when the prompt strictly extends
+/// it (at least one new row, so the request gets fresh logits); otherwise
+/// nothing is. `previous` is trusted only when it matches the session's
+/// committed length exactly.
+pub(crate) fn extending_prefix(
+    previous: &[u32],
+    prompt: &[u32],
+    committed: usize,
+    enabled: bool,
+) -> usize {
+    if enabled
+        && !previous.is_empty()
+        && previous.len() == committed
+        && prompt.len() > previous.len()
+        && prompt.starts_with(previous)
+    {
+        previous.len()
+    } else {
+        0
+    }
+}
+
 /// Run the canonical loop. Every emitted token is written with `piece` and
 /// followed by `tick`, because `piece` only touches the socket when the
 /// output partition emits — a buffered tool block would otherwise hide a
@@ -421,6 +444,20 @@ mod tests {
         assert_eq!(reusable_prefix(&[1, 2, 3], &[1, 2, 3], 2, true), 0);
         assert_eq!(reusable_prefix(&[], &[1, 2], 2, true), 0);
         assert_eq!(reusable_prefix(&[1, 2, 3], &[1, 2, 3], 3, false), 0);
+    }
+
+    #[test]
+    fn extending_prefix_reuses_only_a_strict_extension_of_the_committed_history() {
+        let history = [1, 2, 3];
+        assert_eq!(extending_prefix(&history, &[1, 2, 3, 4], 3, true), 3);
+        assert_eq!(extending_prefix(&history, &[1, 2, 3, 4, 5], 3, true), 3);
+        // Equal (no fresh row), shorter, diverging, or untrusted history.
+        assert_eq!(extending_prefix(&history, &[1, 2, 3], 3, true), 0);
+        assert_eq!(extending_prefix(&history, &[1, 2], 3, true), 0);
+        assert_eq!(extending_prefix(&history, &[1, 9, 3, 4], 3, true), 0);
+        assert_eq!(extending_prefix(&history, &[1, 2, 3, 4], 4, true), 0);
+        assert_eq!(extending_prefix(&[], &[1], 0, true), 0);
+        assert_eq!(extending_prefix(&history, &[1, 2, 3, 4], 3, false), 0);
     }
 
     #[test]

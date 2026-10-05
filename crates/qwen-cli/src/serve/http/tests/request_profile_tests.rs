@@ -70,6 +70,13 @@ impl GenerationBackend for ProfileBackend {
             RequestProfile::K2 {
                 default_max_tokens, ..
             } => assert_eq!(request.max_output_tokens, Some(*default_max_tokens)),
+            RequestProfile::Glm5Next {
+                default_max_tokens, ..
+            } => {
+                assert_eq!(request.max_output_tokens, Some(*default_max_tokens));
+                assert_eq!((request.top_k, request.min_p), (Some(0), Some(0.0)));
+                assert_eq!(request.seed, Some(42));
+            }
             _ => {}
         }
         sink.tick().map_err(BackendFailure::Aborted)?;
@@ -171,6 +178,26 @@ fn family_profiles_drive_real_http_json_and_sse_without_hook_overrides() {
         false,
     ));
     cases.push((k2(true, 128), json!({"model":"test","input":[{"role":"user","content":"Hello"}],"reasoning":{"effort":"low"}}), "<|ifm|im_start|>user\nHello<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think_faster>\n".into(), "plan</ifm|think_faster>answer".into(), GenerationEnd::StopToken(1), true));
+    let glm = RequestProfile::Glm5Next {
+        default_max_tokens: 8,
+        capacity: 128,
+    };
+    cases.push((
+        glm.clone(),
+        json!({"model":"test","input":"Hello","instructions":"System"}),
+        "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>System<|user|>Hello<|assistant|><think>".into(),
+        "plan</think>answer".into(),
+        GenerationEnd::StopToken(154_827),
+        true,
+    ));
+    cases.push((
+        glm,
+        json!({"model":"test","input":[{"role":"user","content":"one"},{"type":"reasoning","content":"r1"},{"role":"assistant","content":"a1"},{"role":"user","content":"two"}],"reasoning":{"effort":"low"}}),
+        "[gMASK]<sop><|system|>Reasoning Effort: Low<|user|>one<|assistant|><think>r1</think>a1<|user|>two<|assistant|><think>".into(),
+        "plan</think>answer".into(),
+        GenerationEnd::StopToken(154_820),
+        true,
+    ));
     for (profile, body, prompt, output, end, reasoning) in cases {
         for streaming in [false, true] {
             let mut body = body.clone();
@@ -204,6 +231,13 @@ fn family_profiles_drive_real_http_json_and_sse_without_hook_overrides() {
                 assert_eq!(reply["top_p"], 0.95);
                 assert_eq!(reply["max_output_tokens"], 8);
                 assert_eq!(reply["reasoning"], json!({"effort":"high"}));
+            }
+            if matches!(profile, RequestProfile::Glm5Next { .. }) {
+                assert_eq!(reply["temperature"], 1.0);
+                assert_eq!(reply["top_p"], 0.95);
+                assert_eq!(reply["max_output_tokens"], 8);
+                let effort = body["reasoning"]["effort"].as_str().unwrap_or("max");
+                assert_eq!(reply["reasoning"], json!({"effort": effort}));
             }
         }
     }
@@ -355,6 +389,10 @@ fn style_overrides_are_applied_or_refused_before_execution() {
             default_max_tokens: 8,
             eos_token_id: 1,
             eot_token_id: 2,
+        },
+        RequestProfile::Glm5Next {
+            default_max_tokens: 8,
+            capacity: 128,
         },
     ] {
         let body = json!({"model":"test","input":"Hello","x_qwen":{"template_style":"upstream"}});

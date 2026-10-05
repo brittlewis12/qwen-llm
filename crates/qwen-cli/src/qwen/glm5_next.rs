@@ -2,7 +2,8 @@
 //! (dense attention below visible length 2052, sparse DSA selection from
 //! there on) within device memory, from a raw prompt or a text chat
 //! rendered by `qwen_llm::glm5_next_chat`; chat reasoning streams to stderr
-//! and the answer to stdout. Tools, serve and lens are not implemented;
+//! and the answer to stdout (`qwen serve`: `serve/backend_glm5_next.rs`).
+//! Tools and lens are not implemented;
 //! every other surface refuses rather than falling through to Qwen
 //! protocols.
 
@@ -165,6 +166,17 @@ pub(crate) fn capability_projection(gguf: &GgufFile) -> Result<Value> {
             "code": "glm5_next_lane_unimplemented",
             "message": format!("{FAMILY} has no {lane} implementation yet")})
     };
+    let serve = match &verdict {
+        Ok((_, Ok(_))) => json!({"status": "conditional", "implementation_status": "partial",
+            "endpoint": "/v1/responses", "input": "verified_text_chat_items",
+            "capacity_policy": "explicit_max_context_tokens_and_max_tokens_within_device_memory",
+            "prefix_reuse": "live_session_exact_extension", "snapshot_cache": false, "tools": false,
+            "sampling_default": "release_generation_config_temperature_1_top_p_0.95"}),
+        Ok((_, Err(error))) => json!({"status": "unsupported", "implementation_status": "partial",
+            "code": error.code(), "message": format!("{FAMILY} serve renders verified text chat only: {error}")}),
+        Err(error) => json!({"status": "unsupported", "implementation_status": "partial",
+            "code": error.code(), "message": error.to_string()}),
+    };
     let refused = |code: &str, message: String| {
         let refused = json!({"status": "unsupported", "code": code, "message": message});
         json!({"levels": [], "fallback": null, "no_thinking": refused, "thinking": refused})
@@ -187,7 +199,7 @@ pub(crate) fn capability_projection(gguf: &GgufFile) -> Result<Value> {
         ),
     };
     Ok(json!({
-        "execution": {"run": run, "bench": bench, "serve": unsupported("serve"), "lens": unsupported("lens"),
+        "execution": {"run": run, "bench": bench, "serve": serve, "lens": unsupported("lens"),
             "request_device": {"status": "not_evaluated",
                 "requires": ["request_options_and_token_budget", "live_memory_admission"]}},
         "input": input_support(&verdict),

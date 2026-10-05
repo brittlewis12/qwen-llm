@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-05 - Placement Screen: GPU Wiring Follows Activity; ~1 s Re-Wire After 2 s Idle
+
+Leverage map (2026-10-05) #1, first screen. No change landed.
+- **Wiring follows GPU activity, in both engines.** System wired memory
+  (vm_stat, 2-3 s samples):
+  - `qwen-bench suite` on GLM-5.3-Flash holds 115.4 GiB wired throughout
+    its run and returns to 5.1 GiB at exit.
+  - llama.cpp `e1425c0be` with `GGML_METAL_NO_RESIDENCY=1` climbs 5 -> 115
+    GiB over its first ~66 s (first GPU use at ~1.7 GiB/s), dips to 57.7 GiB
+    between test phases, and returns to 4.9 GiB within 5 s of exit.
+  - So no-copy weights are wired while commands use them, with or without
+    residency sets. The earlier "~5 GiB wired mid-serve" sample was taken
+    while serve was idle.
+- **Re-wire tax (GLM serve, capacity 4096, fresh 27-token prompts, effort
+  low, 4 output tokens):**
+  - Back-to-back request: wired 115.4 GiB before it, prefill 591 ms.
+  - After any idle gap of 2, 5, 10, 30 or 60 s: wired 5.0-5.2 GiB before,
+    115.4 GiB after, prefill 1,603-1,699 ms. The 0-gap request right after
+    the warm-up also paid it.
+  - Page-ins during these requests were 17-3,106 pages (≤ ~49 MB), so the
+    weights stayed in the page cache. The ~1.0-1.1 s is re-wiring, not
+    disk.
+  - Decode is unaffected once wired (115-129 ms for 3 tokens).
+- **Implication:** every interactive serve turn after a pause of ≥ 2 s pays
+  about 1 s of TTFT. llama.cpp's default residency-set keep-alive (3 min
+  heartbeat) exists to avoid this. Eviction (the 13-27 s first prefills) is
+  a separate, rarer state.
+- **Placement-matched llama.cpp** (`GGML_METAL_NO_RESIDENCY=1`, 3 runs):
+  - llama.cpp pp32 66.2 ± 1.1, pp128 141.1 ± 2.5, pp512 165.2 ± 9.8, tg16
+    23.7.
+  - qwen-llm in the same session: pp32 59.6, pp512 210.2, tg64 27.9 (pp128
+    126.4 earlier).
+  - The small-prompt gap (llama.cpp +10-12% at pp32/pp128) is real, not
+    placement; it moves into the #2 attribution. qwen-llm leads at pp512
+    (+27%) and tg (+18%).
+- **Next:** prototype an idle keep-alive (an ordinary command buffer that
+  marks the weight buffers used, sub-2 s cadence, bounded window,
+  default-off) and re-run this gap screen. Its kill safety needs its own
+  check: it extends ordinary command-buffer wiring into idle time; it is not
+  a residency set.
+
 ## 2026-10-05 - Sampler: Radix Full-Vocabulary Order, Still Bitwise v1; GLM Sampled Decode +3.2%
 
 Leverage map (2026-10-05) #5.

@@ -147,7 +147,7 @@ pub fn run(args: ResidencyKillChildArgs) -> Result<()> {
                     serde_json::json!({"phase": "executing", "committed_t": since(),
                         "running": command.status() != MTLCommandBufferStatus::Completed}),
                 )?;
-                command.waitUntilCompleted();
+                qwen_llm::metal::wait_completed(&command)?;
                 let gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
                 status(
                     &args.status,

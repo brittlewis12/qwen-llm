@@ -101,7 +101,7 @@ impl OutputProtocol {
 
 pub(crate) enum OutputPartition {
     Raw(Utf8Assembler),
-    K2(super::partition_k2::K2Partition),
+    Preopened(super::partition_preopened::PreopenedPartition),
     K2Tools(super::partition_k2::K2ToolsPartition),
     Qwen(QwenOutputPartition),
     Muse(MuseAtemPartition),
@@ -112,7 +112,7 @@ impl OutputPartition {
         match protocol {
             OutputProtocol::RawText => Self::Raw(Utf8Assembler::new()),
             OutputProtocol::K2Chat { effort } => {
-                Self::K2(super::partition_k2::K2Partition::new(effort))
+                Self::Preopened(super::partition_k2::k2_partition(effort))
             }
             OutputProtocol::K2Tools {
                 effort,
@@ -151,7 +151,7 @@ impl OutputPartition {
                 }
             }
             Self::Qwen(partition) => partition.push(bytes, events),
-            Self::K2(partition) => partition.push(bytes, events),
+            Self::Preopened(partition) => partition.push(bytes, events),
             Self::K2Tools(partition) => partition.push(bytes, events),
             Self::Muse(partition) => partition.push(bytes, events),
         }
@@ -175,7 +175,7 @@ impl OutputPartition {
                 Ok(())
             }
             Self::Muse(partition) => partition.finish(end, events),
-            Self::K2(partition) => partition.finish(end, events),
+            Self::Preopened(partition) => partition.finish(end, events),
             Self::K2Tools(partition) => partition.finish(end, events),
         }
     }
@@ -190,7 +190,7 @@ impl OutputPartition {
             }
             Self::Qwen(partition) => partition.abort(events),
             Self::Muse(partition) => partition.abort(events),
-            Self::K2(partition) => partition.abort(events),
+            Self::Preopened(partition) => partition.abort(events),
             Self::K2Tools(_) => {}
         }
     }

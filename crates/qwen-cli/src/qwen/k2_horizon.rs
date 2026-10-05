@@ -401,7 +401,7 @@ pub(crate) fn run_raw(
         .filter(|_| tool_chat.is_none())
         .map(|record| {
             chat::Effort::parse(record["reasoning_effort"].as_str())
-                .map(crate::serve::partition_k2::K2Partition::new)
+                .map(crate::serve::partition_k2::k2_partition)
         })
         .transpose()?;
     let mut tool_partition = tool_chat.as_ref().map(|chat| {
@@ -427,7 +427,13 @@ pub(crate) fn run_raw(
             } else if let Some(partition) = &mut partition {
                 let mut events = Vec::new();
                 partition.push(bytes, &mut events);
-                write_chat_events(&events, &mut stdout, &mut stderr, &mut visible)?;
+                crate::chat_output::write_chat_events(
+                    &events,
+                    &mut stdout,
+                    &mut stderr,
+                    &mut visible,
+                    "K2",
+                )?;
             } else {
                 stdout.write_all(bytes)?;
                 stdout.flush()?;
@@ -493,7 +499,13 @@ pub(crate) fn run_raw(
             crate::serve::outcome::generation_end(&generation).1,
             &mut events,
         );
-        write_chat_events(&events, &mut stdout, &mut stderr, &mut visible)?;
+        crate::chat_output::write_chat_events(
+            &events,
+            &mut stdout,
+            &mut stderr,
+            &mut visible,
+            "K2",
+        )?;
         writeln!(stderr)?;
         result.map_err(|e| anyhow::anyhow!(e.message))?;
         if !reasoning_closed {
@@ -560,29 +572,6 @@ pub(crate) fn run_raw(
             }),
         )?;
     }
-    Ok(())
-}
-
-fn write_chat_events(
-    events: &[crate::serve::partition::PartitionEvent],
-    stdout: &mut impl Write,
-    stderr: &mut impl Write,
-    visible: &mut bool,
-) -> Result<()> {
-    use crate::serve::partition::PartitionEvent;
-    for event in events {
-        match event {
-            PartitionEvent::Reasoning(text) => stderr.write_all(text.as_bytes())?,
-            PartitionEvent::Visible(text) => {
-                stdout.write_all(text.as_bytes())?;
-                *visible |= !text.is_empty();
-            }
-            PartitionEvent::ReasoningClosed => {}
-            PartitionEvent::FunctionCall(_) => bail!("K2 no-tools partition produced a tool call"),
-        }
-    }
-    stdout.flush()?;
-    stderr.flush()?;
     Ok(())
 }
 

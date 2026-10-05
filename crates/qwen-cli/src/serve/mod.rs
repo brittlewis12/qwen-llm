@@ -35,6 +35,7 @@ mod owner_activity;
 pub(crate) mod partition;
 pub(crate) mod partition_k2;
 pub(crate) mod partition_muse;
+pub(crate) mod partition_preopened;
 pub(crate) mod render_ds4;
 pub(crate) mod render_k2;
 pub(crate) mod render_muse;

@@ -8,6 +8,8 @@ mod args;
 mod bounded_file;
 mod cli;
 use bounded_file::read_regular_file_bounded;
+#[path = "qwen/chat_output.rs"]
+mod chat_output;
 mod concurrent_jsonl;
 #[path = "qwen/decode.rs"]
 mod decode;

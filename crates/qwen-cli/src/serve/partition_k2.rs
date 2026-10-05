@@ -2,8 +2,8 @@
 //! answer merely because a budget or malformed termination cut it short.
 use super::items::ServeError;
 use super::output_partition::GenerationEnd;
-use super::partition::{PartitionEvent, safe_emit_len};
-use super::utf8::Utf8Assembler;
+use super::partition::PartitionEvent;
+use super::partition_preopened::{PreopenedGrammar, PreopenedPartition};
 use qwen_llm::k2_horizon_chat::{CHAT_STOPS, Effort};
 
 pub(crate) struct K2ToolsPartition {
@@ -18,7 +18,7 @@ impl K2ToolsPartition {
         max_bytes: usize,
     ) -> Self {
         Self {
-            reasoning: K2Partition::new(effort),
+            reasoning: k2_partition(effort),
             tools: qwen_llm::k2_horizon_chat::tools::ToolOutputStream::owned(
                 config.call_format,
                 config.definitions,
@@ -57,7 +57,7 @@ impl K2ToolsPartition {
             return Err(error);
         }
         let mut incoming = Vec::new();
-        let reasoning = std::mem::replace(&mut self.reasoning, K2Partition::new(Effort::High));
+        let reasoning = std::mem::replace(&mut self.reasoning, k2_partition(Effort::High));
         reasoning.finish(end, &mut incoming)?;
         self.route(incoming, events);
         if let Some(error) = self.failure {
@@ -85,114 +85,19 @@ impl K2ToolsPartition {
     }
 }
 
-pub(crate) struct K2Partition {
-    utf8: Utf8Assembler,
-    open: String,
-    at_start: bool,
-    closed: bool,
-    emitted_reasoning: bool,
-    pending: String,
-}
+/// K2's pre-opened reasoning: the effort's opener, closed by any released
+/// IFM terminator.
+pub(crate) type K2Partition = PreopenedPartition;
 
 const REASONING_CLOSES: [&str; 3] = ["</ifm|think>", "</ifm|think_fast>", "</ifm|think_faster>"];
 
-impl K2Partition {
-    pub(crate) fn new(effort: Effort) -> Self {
-        Self {
-            utf8: Utf8Assembler::new(),
-            open: format!("<{}>", effort.tag()),
-            at_start: true,
-            closed: false,
-            emitted_reasoning: false,
-            pending: String::new(),
-        }
-    }
-    pub(crate) fn closed(&self) -> bool {
-        self.closed
-    }
-    pub(crate) fn push(&mut self, bytes: &[u8], events: &mut Vec<PartitionEvent>) {
-        let text = self.utf8.push(bytes);
-        self.text(&text, events);
-    }
-    fn reasoning(&mut self, text: String, events: &mut Vec<PartitionEvent>) {
-        self.emitted_reasoning = true;
-        events.push(PartitionEvent::Reasoning(text));
-    }
-    fn text(&mut self, text: &str, events: &mut Vec<PartitionEvent>) {
-        self.pending.push_str(text);
-        if self.at_start {
-            if self.open.starts_with(&self.pending) && self.pending.len() < self.open.len() {
-                return;
-            }
-            if self.pending.starts_with(&self.open) {
-                self.pending.drain(..self.open.len());
-            }
-            self.at_start = false;
-        }
-        if !self.closed {
-            // Effort controls the prompt, not which released terminator the
-            // model emits. Never infer closure from a tool marker or EOS.
-            if let Some((index, close)) = REASONING_CLOSES
-                .iter()
-                .filter_map(|close| self.pending.find(close).map(|index| (index, close)))
-                .min_by_key(|(index, _)| *index)
-            {
-                let reasoning = self.pending[..index].to_owned();
-                self.pending.drain(..index + close.len());
-                if !reasoning.is_empty() || !self.emitted_reasoning {
-                    self.reasoning(reasoning, events);
-                }
-                events.push(PartitionEvent::ReasoningClosed);
-                self.closed = true;
-            } else {
-                let safe = REASONING_CLOSES
-                    .iter()
-                    .map(|close| safe_emit_len(&self.pending, close))
-                    .min()
-                    .unwrap();
-                if safe > 0 {
-                    let text = self.pending[..safe].to_owned();
-                    self.pending.drain(..safe);
-                    self.reasoning(text, events);
-                }
-                return;
-            }
-        }
-        if !self.pending.is_empty() {
-            events.push(PartitionEvent::Visible(std::mem::take(&mut self.pending)));
-        }
-    }
-    pub(crate) fn finish(
-        mut self,
-        end: GenerationEnd,
-        events: &mut Vec<PartitionEvent>,
-    ) -> Result<(), ServeError> {
-        let text = self.utf8.finish();
-        self.text(&text, events);
-        if !self.closed {
-            // Flush a truncated delimiter as reasoning, never as final text.
-            let pending = std::mem::take(&mut self.pending);
-            if !pending.is_empty() || !self.emitted_reasoning {
-                self.reasoning(pending, events);
-            }
-            if !end.is_token_limit() {
-                return Err(ServeError::server_error(
-                    "invalid K2 model output: stop before reasoning close",
-                ));
-            }
-        }
-        if let GenerationEnd::StopToken(id) = end
-            && !CHAT_STOPS.contains(&id)
-        {
-            return Err(ServeError::server_error(
-                "invalid K2 model output: unsupported stop token",
-            ));
-        }
-        Ok(())
-    }
-    pub(crate) fn abort(self, _: &mut Vec<PartitionEvent>) {
-        // No completion or guessed interpretation of pending delimiter/UTF-8 bytes.
-    }
+pub(crate) fn k2_partition(effort: Effort) -> K2Partition {
+    PreopenedPartition::new(PreopenedGrammar {
+        family: "K2",
+        open: format!("<{}>", effort.tag()),
+        closes: &REASONING_CLOSES,
+        stops: &CHAT_STOPS,
+    })
 }
 
 #[cfg(test)]
@@ -228,7 +133,7 @@ mod tests {
                 );
                 for split in 0..=all.len() {
                     for stop in [1, 250019] {
-                        let mut partition = K2Partition::new(effort);
+                        let mut partition = k2_partition(effort);
                         let mut events = Vec::new();
                         partition.push(&all.as_bytes()[..split], &mut events);
                         partition.push(&all.as_bytes()[split..], &mut events);
@@ -280,7 +185,7 @@ mod tests {
                         "answer \u{2192}<ifm|think>literal</ifm|think><tool_call>text</tool_call>";
                     let all = format!("{opener}{reason}</{}>{visible}", effort.tag());
                     for split in 0..=all.len() {
-                        let mut p = K2Partition::new(effort);
+                        let mut p = k2_partition(effort);
                         let mut events = Vec::new();
                         p.push(&all.as_bytes()[..split], &mut events);
                         p.push(&all.as_bytes()[split..], &mut events);
@@ -300,7 +205,7 @@ mod tests {
             for close in REASONING_CLOSES {
                 let text = format!("plan{close}answer</ifm|think>literal");
                 for split in 0..=text.len() {
-                    let mut p = K2Partition::new(effort);
+                    let mut p = k2_partition(effort);
                     let mut events = Vec::new();
                     p.push(&text.as_bytes()[..split], &mut events);
                     p.push(&text.as_bytes()[split..], &mut events);
@@ -328,7 +233,7 @@ mod tests {
                 GenerationEnd::StopToken(1),
                 GenerationEnd::StopToken(250019),
             ] {
-                let mut p = K2Partition::new(Effort::High);
+                let mut p = k2_partition(Effort::High);
                 let mut events = Vec::new();
                 for b in text.as_bytes() {
                     p.push(&[*b], &mut events);
@@ -338,19 +243,19 @@ mod tests {
                 assert_eq!(collect(&events).2, 0);
             }
         }
-        let mut p = K2Partition::new(Effort::High);
+        let mut p = k2_partition(Effort::High);
         let mut events = Vec::new();
         p.push(b"a</ifm|think>x", &mut events);
         assert!(p.finish(GenerationEnd::StopToken(42), &mut events).is_err());
     }
     #[test]
     fn k2_abort_discards_ambiguity_and_invalid_utf8_is_replaced() {
-        let mut p = K2Partition::new(Effort::High);
+        let mut p = k2_partition(Effort::High);
         let mut events = Vec::new();
         p.push(b"plan</ifm|thi", &mut events);
         p.abort(&mut events);
         assert_eq!(collect(&events), ("plan".into(), "".into(), 0));
-        let mut p = K2Partition::new(Effort::High);
+        let mut p = k2_partition(Effort::High);
         let mut events = Vec::new();
         p.push(b"\xff</ifm|think>\xf0\x9f", &mut events);
         p.finish(GenerationEnd::TokenLimit, &mut events).unwrap();

@@ -196,7 +196,7 @@ fn gpu_verified_k2_chat_http_matches_raw_and_releases_sessions() {
             assert_eq!(raw_outcome.usage.output_tokens, raw_budget);
             assert_eq!(raw_outcome.usage.input_tokens, outcome.usage.input_tokens);
         }
-        let mut partition = super::super::partition_k2::K2Partition::new(effort);
+        let mut partition = super::super::partition_k2::k2_partition(effort);
         let mut events = Vec::new();
         partition.push(&sink.bytes, &mut events);
         partition.finish(outcome.end, &mut events).unwrap();

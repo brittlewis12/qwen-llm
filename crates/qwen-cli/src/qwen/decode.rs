@@ -15,11 +15,15 @@ pub(crate) fn cli_sampling_config(args: &Args) -> Result<SamplingConfig> {
     .context("validate CLI sampling configuration")
 }
 
-pub(crate) fn muse_glimmer_sampling_config(
+/// A family's released sampling preset with each explicitly passed CLI
+/// sampling flag overriding its field; the seed is always the CLI's.
+pub(crate) fn release_sampling_config(
+    mut config: SamplingConfig,
     args: &Args,
     explicit: ExplicitCliOptions,
+    family: &str,
 ) -> Result<SamplingConfig> {
-    let mut config = SamplingConfig::muse_glimmer(args.seed);
+    config.seed = args.seed;
     if explicit.temperature {
         config.temperature = args.temperature;
     }
@@ -35,7 +39,19 @@ pub(crate) fn muse_glimmer_sampling_config(
     config
         .validate()
         .map_err(anyhow::Error::new)
-        .context("validate Muse Glimmer sampling configuration")
+        .with_context(|| format!("validate {family} sampling configuration"))
+}
+
+pub(crate) fn muse_glimmer_sampling_config(
+    args: &Args,
+    explicit: ExplicitCliOptions,
+) -> Result<SamplingConfig> {
+    release_sampling_config(
+        SamplingConfig::muse_glimmer(args.seed),
+        args,
+        explicit,
+        "Muse Glimmer",
+    )
 }
 
 pub(crate) fn request_sampling_config(

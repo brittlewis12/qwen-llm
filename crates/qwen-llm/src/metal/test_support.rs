@@ -2281,6 +2281,8 @@ pub(super) fn fill_audit_f16(tensor: &MetalTensor, salt: usize) {
     }
 }
 
+// Query, head and key indices address several arrays and decide visibility
+// (`kk < ctx_len`); iterators would hide that.
 #[allow(clippy::needless_range_loop)]
 pub(super) fn dflash_attn_cpu_oracle(
     q: &[f32],

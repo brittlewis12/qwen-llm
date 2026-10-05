@@ -62,6 +62,7 @@ pub(super) struct CpuCausalAttentionVjp {
     pub(super) grad_gate: Vec<f32>,
 }
 
+// `key_token` indexes `scores` and also derives the K/V row offsets.
 #[allow(clippy::needless_range_loop)]
 pub(super) fn cpu_causal_gated_attention_forward(
     q: &[f32],
@@ -132,7 +133,6 @@ pub(super) fn cpu_causal_gated_attention_forward(
     })
 }
 
-#[allow(clippy::needless_range_loop)]
 pub(super) fn cpu_causal_gated_attention_vjp(
     q: &[f32],
     k: &[f32],
@@ -155,7 +155,10 @@ pub(super) fn cpu_causal_gated_attention_vjp(
     )
 }
 
-#[allow(clippy::needless_range_loop, clippy::too_many_arguments)]
+// Token, head and position indices address several arrays and derive their
+// row offsets, as in the forward reference.
+#[allow(clippy::needless_range_loop)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn cpu_causal_gated_attention_vjp_with_forward(
     q: &[f32],
     k: &[f32],

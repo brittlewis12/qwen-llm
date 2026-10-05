@@ -435,6 +435,8 @@ fn k0s_issue_order_and_nonfinite_classes_are_exact() {
 
 #[cfg(feature = "dflash-k0s-diagnostics")]
 #[test]
+// Spells the scalar score's accumulation in operation order (ending with
+// `0.5 + expected`) so the bit-exact expectation reads like the kernel.
 #[allow(clippy::assign_op_pattern)]
 fn k0s_finite_score_preserves_scalar_operation_bits_and_first_tie() {
     let score = dflash_k0s_scalar_score(&[1.5, -2.0, 0.25], &[2.0, 3.0, 4.0], 0.5);

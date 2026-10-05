@@ -1459,6 +1459,8 @@ fn adjacent_pair_rope_rows_in_place(
     require_finite("adjacent-pair RoPE output", values)
 }
 
+// Token, head and position indices address several arrays and derive their
+// row offsets; iterators would hide that stride math.
 #[allow(clippy::needless_range_loop)]
 fn cpu_causal_gqa_forward(
     q: &[f32],
@@ -1525,7 +1527,9 @@ fn cpu_causal_gqa_forward(
     })
 }
 
-#[allow(clippy::needless_range_loop, clippy::too_many_arguments)]
+// Same indexing as `cpu_causal_gqa_forward`.
+#[allow(clippy::needless_range_loop)]
+#[allow(clippy::too_many_arguments)]
 fn cpu_causal_gqa_vjp(
     q: &[f32],
     k: &[f32],

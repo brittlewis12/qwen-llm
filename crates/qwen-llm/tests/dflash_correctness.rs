@@ -2626,7 +2626,6 @@ fn smalln_selection_sweep_27b() {
         ("lm_head", &mm.lm_head, h),
     ];
 
-    #[allow(clippy::type_complexity)]
     let timed = |encode: &dyn Fn(&KernelEncoder), iters: usize, reps: usize| -> f64 {
         let mut best = f64::INFINITY;
         for _ in 0..reps {
@@ -2703,9 +2702,9 @@ fn smalln_selection_sweep_27b() {
 
         // (cfg name, valid at N?, encode closure builder) — run per N.
         for &n in &ns {
-            // Enumerate configs valid at this (N, dtype).
-            #[allow(clippy::type_complexity)]
-            let mut cfgs: Vec<(String, Box<dyn Fn(&KernelEncoder) + '_>, usize)> = Vec::new(); // (name, encode, cols_computed)
+            // Enumerate configs valid at this (N, dtype): (name, encode, cols_computed).
+            type EncodeFn<'a> = Box<dyn Fn(&KernelEncoder) + 'a>;
+            let mut cfgs: Vec<(String, EncodeFn<'_>, usize)> = Vec::new();
 
             // C1: current production selection at n_query=N.
             {

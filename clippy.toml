@@ -3,3 +3,8 @@
 disallowed-methods = [
     { path = "objc2_metal::MTLCommandBuffer::waitUntilCompleted", reason = "use qwen_llm::metal::wait_completed / commit_and_wait, which fail unless the buffer completed without error" },
 ]
+
+# `too_many_arguments` keeps clippy's default threshold. Metal encode and
+# dispatch functions bind one buffer or dimension per argument, so they allow
+# the lint item by item. Any other function over the threshold is a refactor
+# candidate (an argument struct or a narrower API), not a lint to silence.

@@ -2301,7 +2301,11 @@ fn lens_captures_read_out_without_moving_state() {
     let last = lensed
         .readout(&ctx, capture.site(blocks as usize - 1).unwrap())
         .unwrap();
-    assert_eq!(bits(&last), bits(&expected), "last block reads out to logits");
+    assert_eq!(
+        bits(&last),
+        bits(&expected),
+        "last block reads out to logits"
+    );
     for site in [0, blocks as usize / 2] {
         assert_finite(
             "early readout",
@@ -2321,6 +2325,48 @@ fn lens_captures_read_out_without_moving_state() {
             bits(&lensed.forward(&ctx, token).unwrap()),
             bits(&reference.forward(&ctx, token).unwrap()),
             "continuation after lens readouts"
+        );
+    }
+    drop((reference, lensed));
+
+    // Readouts between packed chunks and past the sparse frontier leave the
+    // continuation bit-identical too. Arbitrary in-vocabulary ids: this is
+    // state equivalence, not a quality check.
+    let frontier = c.sparse_frontier() as usize;
+    let ids: Vec<u32> = (0..frontier + 8)
+        .map(|i| 1000 + (i as u32 * 7919) % 50_000)
+        .collect();
+    let capacity = frontier + 16;
+    let mut reference = Glm5NextSession::with_prefill_rows(&ctx, &weights, capacity, 512).unwrap();
+    let mut lensed = Glm5NextSession::with_prefill_rows(&ctx, &weights, capacity, 512).unwrap();
+    for (at, next) in [(600, 900), (frontier - 1, frontier + 4)] {
+        let start = reference.position();
+        reference.prefill_packed(&ctx, &ids[start..at]).unwrap();
+        lensed.prefill_packed(&ctx, &ids[start..at]).unwrap();
+        // The capture position is dense at 600 and sparse (visible length
+        // 2052) at the frontier.
+        let capture = lensed
+            .forward_with_post_block_captures(&ctx, ids[at], &[0, blocks / 2, blocks - 1])
+            .unwrap();
+        let expected = reference.forward(&ctx, ids[at]).unwrap();
+        assert_eq!(bits(&capture.logits), bits(&expected), "capture at {at}");
+        for site in 0..3 {
+            lensed.readout(&ctx, capture.site(site).unwrap()).unwrap();
+        }
+        assert_eq!(
+            state_bits(&lensed),
+            state_bits(&reference),
+            "state after readouts at {at}"
+        );
+        assert_eq!(
+            bits(&lensed.prefill_packed(&ctx, &ids[at + 1..next]).unwrap()),
+            bits(&reference.prefill_packed(&ctx, &ids[at + 1..next]).unwrap()),
+            "packed continuation after readouts at {at}"
+        );
+        assert_eq!(
+            bits(&lensed.forward(&ctx, ids[next]).unwrap()),
+            bits(&reference.forward(&ctx, ids[next]).unwrap()),
+            "decode continuation after readouts at {at}"
         );
     }
 }

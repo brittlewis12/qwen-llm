@@ -22,10 +22,12 @@ pub struct Glm5NextCapture {
 }
 
 impl Glm5NextCapture {
-    /// The `[stream][hidden]` residual of the `index`-th captured block.
+    /// The `[stream][hidden]` residual of the `index`-th captured block;
+    /// `None` out of range (overflow included).
     pub fn site(&self, index: usize) -> Option<&[f32]> {
-        let width = self.streams * self.hidden;
-        self.residuals.get(index * width..(index + 1) * width)
+        let width = self.streams.checked_mul(self.hidden)?;
+        let start = index.checked_mul(width)?;
+        self.residuals.get(start..start.checked_add(width)?)
     }
 }
 
@@ -106,8 +108,9 @@ impl Glm5NextSession<'_> {
             ));
         }
         let s = &self.s;
-        // Per-token scratch: every decoded token rewrites both residual
-        // buffers from its embedding before reading them.
+        // Per-token scratch: a decoded token writes residual[0] from its
+        // embedding and residual[1] in its first block before reading
+        // either; packed prefill has its own residual buffers.
         write_f32(&s.residual[1], residual)?;
         let command = ctx
             .queue
@@ -140,5 +143,29 @@ impl Glm5NextSession<'_> {
             return invalid("readout produced nonfinite logits");
         }
         Ok(logits)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sites_are_bounded_without_overflow() {
+        let capture = Glm5NextCapture {
+            position: 0,
+            layers: vec![0, 3],
+            streams: 4,
+            hidden: 2,
+            residuals: (0..16).map(|v| v as f32).collect(),
+            logits: Vec::new(),
+        };
+        assert_eq!(
+            capture.site(1).unwrap(),
+            &[8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0]
+        );
+        for index in [2, usize::MAX, 1usize << 61, usize::MAX / 8 + 1] {
+            assert!(capture.site(index).is_none(), "{index}");
+        }
     }
 }

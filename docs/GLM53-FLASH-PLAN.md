@@ -78,7 +78,13 @@ no further `glm5-next` changes). Earlier research (2026-08-28 gap analysis,
   Exact warm equals cold in output bytes and in join logits bit for bit,
   cancelled prefill resumes with the cold bytes, aborted decodes retry cold.
   Run and serve stats records are success-only, as for K2.
-- Next: P5 lens sites; then P6: grouped-heads selected attention (sparse decode
+- P5 lens done: `qwen-lens read-full --logit-lens` reads every stream of the
+  selected executed blocks' post-block residual through the deployed tail
+  (fixed four-stream mean, output norm, untied head); the last block reads out
+  to the logits bit for bit, readouts move no state (dense, packed and sparse
+  continuations stay bit-identical), content is not hashed. Linear transport
+  waits for a declared stream coordinate.
+- Next: P6: grouped-heads selected attention (sparse decode
   costs +4.7 ms/token at the frontier; native loses 25% from depth 0 to 4096
   against llama.cpp's 10%), long-context dense attention, a packed-prefill stage
   profiler (a fresh 22-28 token prefill costs 0.6-1.4 s), compact grouped-expert

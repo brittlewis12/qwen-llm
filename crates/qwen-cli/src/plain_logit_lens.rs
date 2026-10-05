@@ -490,9 +490,11 @@ mod tests {
                 crate::digest_json(&original).unwrap()
             );
         }
-        let k2 = input_metadata(&args, &[1, 2], 0, Some(ModelFamily::K2Horizon));
-        assert_eq!(k2["input_token_count"], 2);
-        assert_eq!(k2["executed_token_count"], 1);
+        for family in [ModelFamily::K2Horizon, ModelFamily::Glm5Next] {
+            let counted = input_metadata(&args, &[1, 2], 0, Some(family));
+            assert_eq!(counted["input_token_count"], 2);
+            assert_eq!(counted["executed_token_count"], 1);
+        }
     }
 
     #[test]
@@ -504,6 +506,41 @@ mod tests {
         assert!(metadata_budget(&args, 1, 5120, 256, 2000).is_err());
         args.top_k = 64;
         metadata_budget(&args, 1, 5120, 256, 2000).unwrap();
+    }
+
+    #[test]
+    fn an_uncomputed_content_identity_publishes_as_null_not_a_digest() {
+        let output = std::env::temp_dir().join(format!(
+            "qwen-null-identity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let args = parse(&["--logit-lens", "--full-output", output.to_str().unwrap()])
+            .unwrap()
+            .args;
+        let mut bundle = Bundle::optional(Some(&output), &[0], 2).unwrap().unwrap();
+        bundle.row(0, &[1.0, 2.0]).unwrap();
+        let model = json!({"architecture": "glm5-next", "output_tail": "native_four_stream_mean_rmsnorm_untied_head",
+            "content_identity": {"scheme": "not_computed"}});
+        publish(
+            &args,
+            &[1, 2],
+            1,
+            Some(ModelFamily::Glm5Next),
+            model,
+            vec![json!({"source_layer": 0})],
+            Some(bundle),
+            None,
+        )
+        .unwrap();
+        let metadata: Value =
+            serde_json::from_slice(&std::fs::read(output.join("metadata.json")).unwrap()).unwrap();
+        assert_eq!(metadata["identities"]["model_content_blake3"], Value::Null);
+        assert_eq!(metadata["payload"]["shape"], json!([1, 2]));
+        std::fs::remove_dir_all(&output).unwrap();
     }
 
     #[test]

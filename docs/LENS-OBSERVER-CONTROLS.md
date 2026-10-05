@@ -43,6 +43,10 @@ mean (no learned or input-dependent weights), then applies the output RMSNorm
 and untied head. Its plain lens captures all four streams of each selected
 executed block (the NextN block is never run) and reads them through exactly
 that tail, so the last block reads out to the token's logits bit for bit.
+An earlier block's readout is the deployed head's projection of that
+intermediate state, not the next sub-block's input: the mean discards stream
+differences that sum to zero, which the next block's learned `hc_pre` mixing
+can still use.
 `--include-vector` reports `[4, 4096]` stream-major values labelled
 `native_source_post_block_residual_streams`. Input is raw text or token ids
 (`[gMASK]<sop>` belongs in it); the prefix runs packed, the selected position

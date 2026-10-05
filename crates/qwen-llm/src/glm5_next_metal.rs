@@ -591,19 +591,25 @@ impl SparseScratch {
     }
 }
 
-/// Writes I32 values into a shared-storage I32 tensor. Callers are
-/// synchronized session code: no command touching it may be in flight.
-fn write_i32(tensor: &MetalTensor, values: &[i32]) -> Result<()> {
+/// Writes 4-byte elements into a shared-storage tensor of `dtype` holding
+/// exactly `values.len()` elements. Callers are synchronized session code:
+/// no command touching it may be in flight.
+fn write_elements<T: bytemuck::Pod>(
+    tensor: &MetalTensor,
+    dtype: GgmlType,
+    values: &[T],
+) -> Result<()> {
     let end = tensor.offset.checked_add(4 * values.len() as u64);
-    if tensor.dtype != GgmlType::I32
+    if tensor.dtype != dtype
+        || std::mem::size_of::<T>() != 4
         || tensor.n_elements() != values.len() as u64
         || !tensor.offset.is_multiple_of(4)
         || end.is_none_or(|end| end > tensor.buffer.length() as u64)
     {
-        return invalid("cannot write I32 values into this tensor");
+        return invalid(format!("cannot write {dtype:?} values into this tensor"));
     }
-    // SAFETY: shared storage; dtype, length, alignment and range checked;
-    // the caller guarantees no in-flight command uses the tensor.
+    // SAFETY: shared storage; dtype, element size, length, alignment and
+    // range checked; the caller guarantees no in-flight command uses it.
     unsafe {
         std::ptr::copy_nonoverlapping(
             values.as_ptr(),
@@ -613,11 +619,19 @@ fn write_i32(tensor: &MetalTensor, values: &[i32]) -> Result<()> {
                 .as_ptr()
                 .cast::<u8>()
                 .add(tensor.offset as usize)
-                .cast::<i32>(),
+                .cast::<T>(),
             values.len(),
         );
     }
     Ok(())
+}
+
+fn write_i32(tensor: &MetalTensor, values: &[i32]) -> Result<()> {
+    write_elements(tensor, GgmlType::I32, values)
+}
+
+fn write_f32(tensor: &MetalTensor, values: &[f32]) -> Result<()> {
+    write_elements(tensor, GgmlType::F32, values)
 }
 
 impl RouteRecord {
@@ -1644,7 +1658,9 @@ fn matvec(
     Ok(())
 }
 
+mod lens;
 mod packed;
+pub use lens::Glm5NextCapture;
 pub use packed::PackedLineage;
 
 #[cfg(test)]

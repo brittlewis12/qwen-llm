@@ -2256,3 +2256,71 @@ fn preflight_admits_fitting_sessions_and_reports_the_largest() {
         other => panic!("expected a refusal with a fitting capacity, got {other:?}"),
     }
 }
+
+/// Lens surface: post-block captures of one decoded token equal ordinary
+/// decode, readouts leave every persistent state bit and the position alone,
+/// the last block reads out to the token's logits bit for bit, and refusals
+/// execute nothing.
+#[test]
+#[ignore = "loads the GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU"]
+fn lens_captures_read_out_without_moving_state() {
+    let _lease = production_lease();
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let ctx = MetalContext::new().expect("Metal context");
+    let gguf = GgufFile::open(&path).unwrap();
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let c = &weights.config;
+    let (blocks, width) = (c.executed_block_count(), c.hc_width() as usize);
+    let tokens = checkpoint_tokens();
+    let mut reference = Glm5NextSession::new(&ctx, &weights, 64).unwrap();
+    let mut lensed = Glm5NextSession::new(&ctx, &weights, 64).unwrap();
+    for &token in &tokens[..4] {
+        reference.forward(&ctx, token).unwrap();
+        lensed.forward(&ctx, token).unwrap();
+    }
+    for bad in [vec![], vec![3, 3], vec![5, 2], vec![blocks]] {
+        assert!(
+            lensed
+                .forward_with_post_block_captures(&ctx, tokens[4], &bad)
+                .is_err(),
+            "{bad:?}"
+        );
+        assert_eq!(lensed.position(), 4);
+    }
+    let all: Vec<u32> = (0..blocks).collect();
+    let capture = lensed
+        .forward_with_post_block_captures(&ctx, tokens[4], &all)
+        .unwrap();
+    let expected = reference.forward(&ctx, tokens[4]).unwrap();
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits(&capture.logits), bits(&expected));
+    assert_eq!((capture.position, lensed.position()), (4, 5));
+    assert_eq!(capture.residuals.len(), blocks as usize * width);
+    assert_finite("captured residuals", &capture.residuals);
+    let before = state_bits(&lensed);
+    let last = lensed
+        .readout(&ctx, capture.site(blocks as usize - 1).unwrap())
+        .unwrap();
+    assert_eq!(bits(&last), bits(&expected), "last block reads out to logits");
+    for site in [0, blocks as usize / 2] {
+        assert_finite(
+            "early readout",
+            &lensed.readout(&ctx, capture.site(site).unwrap()).unwrap(),
+        );
+    }
+    let zeros = lensed.readout(&ctx, &vec![0.0; width]).unwrap();
+    assert!(zeros.iter().all(|&v| v == 0.0));
+    assert!(lensed.readout(&ctx, &vec![0.0; width - 1]).is_err());
+    let mut nan = vec![0.0; width];
+    nan[7] = f32::NAN;
+    assert!(lensed.readout(&ctx, &nan).is_err());
+    assert_eq!(state_bits(&lensed), before, "readouts moved session state");
+    assert_eq!(lensed.position(), 5);
+    for &token in &tokens[5..8] {
+        assert_eq!(
+            bits(&lensed.forward(&ctx, token).unwrap()),
+            bits(&reference.forward(&ctx, token).unwrap()),
+            "continuation after lens readouts"
+        );
+    }
+}

@@ -2,8 +2,9 @@
 //! (dense attention below visible length 2052, sparse DSA selection from
 //! there on) within device memory, from a raw prompt or a text chat
 //! rendered by `qwen_llm::glm5_next_chat`; chat reasoning streams to stderr
-//! and the answer to stdout (`qwen serve`: `serve/backend_glm5_next.rs`).
-//! Tools and lens are not implemented;
+//! and the answer to stdout (`qwen serve`: `serve/backend_glm5_next.rs`;
+//! `qwen-lens read-full --logit-lens`: `plain_logit_lens/glm5_next.rs`).
+//! Tools, lens transport and fitting are not implemented;
 //! every other surface refuses rather than falling through to Qwen
 //! protocols.
 
@@ -161,11 +162,6 @@ pub(crate) fn capability_projection(gguf: &GgufFile) -> Result<Value> {
             "command": "qwen-bench suite", "scope": "packed_prefill_and_serial_decode_rows"}),
         Err(_) => json!({"status": "unsupported", "implementation_status": "partial"}),
     };
-    let unsupported = |lane: &str| {
-        json!({"status": "unsupported", "implementation_status": "unsupported",
-            "code": "glm5_next_lane_unimplemented",
-            "message": format!("{FAMILY} has no {lane} implementation yet")})
-    };
     let serve = match &verdict {
         Ok((_, Ok(_))) => json!({"status": "conditional", "implementation_status": "partial",
             "endpoint": "/v1/responses", "input": "verified_text_chat_items",
@@ -174,6 +170,15 @@ pub(crate) fn capability_projection(gguf: &GgufFile) -> Result<Value> {
             "sampling_default": "release_generation_config_temperature_1_top_p_0.95"}),
         Ok((_, Err(error))) => json!({"status": "unsupported", "implementation_status": "partial",
             "code": error.code(), "message": format!("{FAMILY} serve renders verified text chat only: {error}")}),
+        Err(error) => json!({"status": "unsupported", "implementation_status": "partial",
+            "code": error.code(), "message": error.to_string()}),
+    };
+    let lens = match &verdict {
+        Ok(_) => json!({"status": "partial", "command": "qwen-lens read-full --logit-lens",
+            "scope": "raw_plain_logit_lens_post_block_residual_streams",
+            "output_tail": "native_four_stream_mean_rmsnorm_untied_head",
+            "capacity_policy": "selected_position_plus_one_within_device_memory",
+            "content_identity": "not_computed", "transport": "unsupported", "cli_interventions": false}),
         Err(error) => json!({"status": "unsupported", "implementation_status": "partial",
             "code": error.code(), "message": error.to_string()}),
     };
@@ -199,7 +204,7 @@ pub(crate) fn capability_projection(gguf: &GgufFile) -> Result<Value> {
         ),
     };
     Ok(json!({
-        "execution": {"run": run, "bench": bench, "serve": serve, "lens": unsupported("lens"),
+        "execution": {"run": run, "bench": bench, "serve": serve, "lens": lens,
             "request_device": {"status": "not_evaluated",
                 "requires": ["request_options_and_token_budget", "live_memory_admission"]}},
         "input": input_support(&verdict),

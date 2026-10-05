@@ -8,6 +8,7 @@ use qwen_llm::runtime::{LoadedModelConfig, ModelLoadIntent, Runtime, SequenceCon
 use qwen_llm::tokenizer::{LlamaCppTokenizer, Tokenizer};
 use serde_json::{Value, json};
 
+mod glm5_next;
 mod k2;
 pub(crate) use k2::read_transport as read_k2_transport;
 
@@ -118,6 +119,15 @@ pub(super) fn read(args: ReadFullArgs) -> Result<()> {
     );
     let gguf = GgufFile::open(&args.model)?;
     let family = ModelFamily::detect(&gguf);
+    if family == Some(ModelFamily::Glm5Next) {
+        // Preflight (artifact, input, sites) precedes any Metal work; the
+        // artifact's content is not hashed.
+        let prepared = glm5_next::Prepared::new(&args, &gguf)?;
+        let (tokens, position, model, results, bundle) = prepared.execute(&args, &gguf)?;
+        return publish(
+            &args, &tokens, position, family, model, results, bundle, None,
+        );
+    }
     let k2 = if family == Some(ModelFamily::K2Horizon) {
         Some(k2::Prepared::new(&args, &gguf)?)
     } else {
@@ -286,11 +296,38 @@ pub(super) fn read(args: ReadFullArgs) -> Result<()> {
             bundle,
         )
     };
-    let input = input_metadata(&args, &tokens, position, family);
+    publish(
+        &args,
+        &tokens,
+        position,
+        family,
+        model,
+        results,
+        bundle,
+        Some(&content),
+    )
+}
+
+/// Assemble, serialize and publish the readout document. `content` is the
+/// artifact's content identity where the family computes one.
+#[allow(clippy::too_many_arguments)]
+fn publish(
+    args: &ReadFullArgs,
+    tokens: &[i32],
+    position: usize,
+    family: Option<ModelFamily>,
+    model: Value,
+    results: Vec<Value>,
+    bundle: Option<Bundle>,
+    content: Option<&qwen_llm::checkpoint_identity::CheckpointContentReport>,
+) -> Result<()> {
+    let input = input_metadata(args, tokens, position, family);
     let observer = json!({"method": "plain_logit_lens", "transport": "identity", "source_site": "native_post_block_residual", "fitted_artifact": null, "transfer_acknowledgement_required": false});
     let mut document = json!({"schema": "llm.lens.readout", "schema_version": 1, "readout": "native_plain_logit_lens", "score_semantics": "deployed_pre_softmax_logits_after_architectural_output_norm_scaling_and_softcap", "ranking_scope": "full_vocabulary", "input_blake3": super::digest_json(&input)?, "input": input, "observer_blake3": super::digest_json(&observer)?, "observer": observer, "deployed_model": model, "reader": {"build_commit": env!("QWEN_BUILD_COMMIT"), "build_dirty": env!("QWEN_BUILD_DIRTY"), "build_source_state": env!("QWEN_BUILD_SOURCE_STATE"), "build_stamp_source": env!("QWEN_BUILD_STAMP_SOURCE"), "build_stamp_error": env!("QWEN_BUILD_STAMP_ERROR")}});
     document["results"] = Value::Array(results);
-    document["deployed_model"]["content_blake3"] = json!(super::hex(&content.content_id));
+    document["deployed_model"]["content_blake3"] = content.map_or(Value::Null, |content| {
+        json!(super::hex(&content.content_id))
+    });
     document["deployed_model"]["path"] = json!(args.model);
     document["execution_provenance"] = super::full_output::execution_provenance();
     let bytes = serialize_then_publish(&document, bundle)?;
@@ -309,8 +346,8 @@ fn input_metadata(
 ) -> Value {
     let mut input = json!({"source": if args.prompt.is_some() { "prompt" } else { "token_ids" }, "add_special_tokens": args.prompt.as_ref().map(|_| !args.no_special_tokens), "token_ids": tokens, "selected_position": position, "captured_token_id": tokens[position], "predicts_position": position + 1});
     // Existing families' input objects are digest contracts; do not extend them
-    // as a side effect of adding K2 provenance.
-    if family == Some(ModelFamily::K2Horizon) {
+    // as a side effect of adding K2 (and later GLM) provenance.
+    if matches!(family, Some(ModelFamily::K2Horizon | ModelFamily::Glm5Next)) {
         input["input_token_count"] = json!(tokens.len());
         input["executed_token_count"] = json!(position + 1);
     }

@@ -37,6 +37,20 @@ having a native observer does not make a dense fitted transport valid on MoE.
 Multi-stream residual architectures need a capture/head-coordinate adapter;
 an arbitrary flattening is not a principled logit lens.
 
+GLM-5.3-Flash is such an architecture, and its adapter is its own head: the
+deployed tail collapses the four post-block residual streams with a fixed
+mean (no learned or input-dependent weights), then applies the output RMSNorm
+and untied head. Its plain lens captures all four streams of each selected
+executed block (the NextN block is never run) and reads them through exactly
+that tail, so the last block reads out to the token's logits bit for bit.
+`--include-vector` reports `[4, 4096]` stream-major values labelled
+`native_source_post_block_residual_streams`. Input is raw text or token ids
+(`[gMASK]<sop>` belongs in it); the prefix runs packed, the selected position
+runs as one serial decode. Content identity is not computed (`content_blake3`
+is null): the artifact is identified by its admitted tensor layout and
+tokenizer metadata. Linear transport stays refused until a stream coordinate
+is declared for it.
+
 ## What The Scores Mean
 
 For plain, transport is identity, not an allocated or rounded F16 matrix.

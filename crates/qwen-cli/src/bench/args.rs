@@ -42,6 +42,9 @@ pub(crate) enum Cmd {
     DecodeDenseWholeBatch(dense_whole_batch::DecodeDenseWholeBatchArgs),
     /// Localize and repair Qwen MoE GDN replay schedule drift at B=16.
     DecodeMoeGdnRepair(moe_gdn_repair::DecodeMoeGdnRepairArgs),
+    /// Child process for the bounded kill check of ordinary command-buffer
+    /// wiring (an external observer SIGKILLs it); not a benchmark.
+    ResidencyKillChild(crate::residency_kill_child::ResidencyKillChildArgs),
     /// CPU-only replay of the production sampler on captured logits rows,
     /// with its phase profile; no Metal or model.
     SamplerReplay(crate::sampler_replay::SamplerReplayArgs),

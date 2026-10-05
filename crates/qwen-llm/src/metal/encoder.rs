@@ -218,6 +218,15 @@ impl KernelEncoder {
         self.finish();
     }
 
+    /// Mark `buf` used for reading by this pass without binding it, so the
+    /// command keeps it resident (`MTLComputeCommandEncoder.useResource`).
+    pub fn use_resource_read(&self, buf: &Buffer) {
+        let resource: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLResource> =
+            objc2::runtime::ProtocolObject::from_ref(&**buf);
+        self.raw
+            .useResource_usage(resource, objc2_metal::MTLResourceUsage::Read);
+    }
+
     /// Bind a buffer at slot `index`.
     pub fn set_buffer(&self, index: usize, buf: &Buffer, offset: u64) {
         unsafe {

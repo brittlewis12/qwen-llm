@@ -16,10 +16,7 @@
 use super::{Buffer, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_fill_f32};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{
-    MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue, MTLComputeCommandEncoder,
-    MTLResource, MTLResourceUsage,
-};
+use objc2_metal::{MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue};
 use std::time::{Duration, Instant};
 
 /// A pulse still running after this long is reported as stuck.
@@ -118,8 +115,7 @@ impl ResidencyKeepAlive {
             .ok_or_else(|| failure("keep-alive pulse", "no command buffer"))?;
         let enc = KernelEncoder::begin(&command);
         for buffer in buffers {
-            let resource: &ProtocolObject<dyn MTLResource> = ProtocolObject::from_ref(&***buffer);
-            enc.raw.useResource_usage(resource, MTLResourceUsage::Read);
+            enc.use_resource_read(buffer);
         }
         encode_fill_f32(ctx, &enc, &self.marker, 0.0)?;
         enc.end();

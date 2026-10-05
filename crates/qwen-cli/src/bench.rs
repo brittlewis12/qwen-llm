@@ -80,6 +80,7 @@ mod proj_micro;
 #[allow(dead_code)]
 mod prompt_template;
 mod q4_mma_ceiling;
+mod residency_kill_child;
 mod response_shape_runtime;
 #[path = "bench/roofline.rs"]
 mod roofline;
@@ -608,7 +609,10 @@ fn run() -> Result<()> {
     let _ = BUILD_IDENTITY_POLICY.set(policy);
     if !matches!(
         &args.cmd,
-        Cmd::BuildInfo(_) | Cmd::LmHeadScreeningOracle(_) | Cmd::DflashE0Lockstep(_)
+        Cmd::BuildInfo(_)
+            | Cmd::LmHeadScreeningOracle(_)
+            | Cmd::DflashE0Lockstep(_)
+            | Cmd::ResidencyKillChild(_)
     ) {
         validate_build_identity(qwen_build_identity_packet(), policy)?;
     }
@@ -671,6 +675,7 @@ fn run() -> Result<()> {
         Cmd::MoeBatchSweep(a) => run_moe_batch_sweep(a),
         Cmd::Roofline(a) => run_roofline(a),
         Cmd::RopeMicro(a) => rope_micro::run(a, serde_json::to_value(recorded_build_identity())?),
+        Cmd::ResidencyKillChild(a) => residency_kill_child::run(a),
         Cmd::SamplerReplay(a) => {
             sampler_replay::run(a, serde_json::to_value(recorded_build_identity())?)
         }

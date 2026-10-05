@@ -106,6 +106,9 @@ no further `glm5-next` changes). Earlier research (2026-08-28 gap analysis,
   (`docs/bench/2026-10-05-glm53-kda-short-k/`). Since the P6 baseline, tg128
   has gone from 27.6 to 31.4 (depth 0) and from 20.8 to 29.7 (depth 4096).
 - Serve's idle residency now covers every no-copy family (`344da7e7`).
+- Bitwise dispatch fusion (`d786a9f5`): KDA q/k/v in one Q6_K dispatch and
+  the shared expert through the fused gate/up/SwiGLU kernel. tg128 is now
+  ~32.5 tok/s at depth 0.
 - Next: P6:
   - KDA and expert weight streaming (~321 GB/s against 474);
   - the small-prompt prefill gap against llama.cpp (pp32 60 vs 66 with

@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-05 - GLM Bitwise Dispatch Fusion (KDA q/k/v, Shared SwiGLU): tg128 ~+2%; Routed-Expert Screen
+
+Leverage map (2026-10-05) #2. Packet
+`docs/bench/2026-10-05-glm53-bitwise-dispatch-fusion/`.
+- **Change (`d786a9f5`):**
+  - KDA q/k/v run as one three-matrix Q6_K dispatch, with the single
+    kernel's per-row body verbatim.
+  - The shared expert uses DS4's fused Q6_K gate/up/clamped-SwiGLU kernel.
+- **Exactness:** Bitwise. Unit tests compare against the separate
+  dispatches bit for bit. A greedy 96-token GLM decode gives the same
+  fingerprint (`199e752f…`) before and after.
+- **A/B vs `a9fafb50`:**
+  - tg128 depth 0: 31.33 -> 32.16 (repeat 32.12 -> 32.78), about 0.6-0.8
+    ms per token;
+  - depth 4096: 28.38 -> 30.10, but the parent cell was 1.3 tok/s low
+    against its own earlier run.
+- **Routed-expert screen (`a9fafb50`,
+  `metal::expert::tests::routed_expert_block_dispatch_costs`):**
+  - 229-234 µs per block (attribution 238);
+  - IQ2_S gate/up SwiGLU 145-147 µs (291-297 GB/s);
+  - IQ3_S down 81-84 µs (345-357 GB/s);
+  - the cost is in the dequantizing kernels, not in dispatch structure.
+  - A threadgroup-memory IQ2_S grid (llama.cpp's approach), with 2 or 4
+    simdgroups per threadgroup, was bitwise but 2-4% slower, so divergent
+    constant-memory reads are not the limiter. Rejected.
+- **P6 so far:** tg128 27.6 -> ~32.5 tok/s at depth 0 and 20.8 -> ~30 at
+  depth 4096.
+- **Next:** the routed-expert kernels need a limiter profile (ALU vs memory)
+  before any rewrite, and DS4 shares them. Smaller items: the dense FFN
+  through the same fused kernel (3 blocks), and MLA projections.
+
 ## 2026-10-05 - Serve Idle Residency for Every No-Copy Family; DS4 Confirms the Re-wire Cost
 
 Leverage map (2026-10-05) #1. Code `344da7e7`; packet

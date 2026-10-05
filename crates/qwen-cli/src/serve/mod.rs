@@ -482,7 +482,10 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 &weights,
                 prepared,
                 model_id.clone(),
-                idle_residency::configured_window(invocation.idle_residency_secs),
+                idle_residency::configured_window(
+                    invocation.idle_residency_secs,
+                    idle_residency::GLM_DEFAULT_WINDOW,
+                ),
             );
             let warm_up_ms = backend.warm_up()?;
             tracing::info!(target: "qwen_diag", "serve startup: family=glm5_next load_ms={load_ms:.1} warm_up_ms={warm_up_ms:.1}");

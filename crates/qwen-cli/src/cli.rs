@@ -118,7 +118,7 @@ pub(crate) struct ServeArgs {
     /// so a request after a pause does not re-wire them (about 1 s for
     /// GLM-5.3-Flash). Suspended under host memory pressure; 0 disables.
     /// Currently GLM-5.3-Flash only. Default: QWEN_SERVE_IDLE_RESIDENCY_SECS,
-    /// else 0.
+    /// else 60.
     #[arg(long, value_name = "SECS")]
     idle_residency_secs: Option<u64>,
 

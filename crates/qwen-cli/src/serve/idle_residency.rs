@@ -2,7 +2,7 @@
 //! weights between requests through ordinary command buffers
 //! (`metal::ResidencyKeepAlive`), so a request after a pause does not pay to
 //! re-wire them. Family-neutral scheduling; each backend names its eligible
-//! buffers. Off (0) by default.
+//! buffers. GLM-5.3-Flash defaults to a 60 s window ([`GLM_DEFAULT_WINDOW`]).
 //!
 //! Window: opens when the backend is ready and again whenever a request
 //! finishes, whatever its outcome (activity is activity); pulses stop once
@@ -17,6 +17,10 @@ use qwen_llm::metal::{
 use std::time::{Duration, Instant};
 
 pub(crate) const IDLE_RESIDENCY_ENV: &str = "QWEN_SERVE_IDLE_RESIDENCY_SECS";
+/// GLM-5.3-Flash's default: a 1 GiB kill check of ordinary command-buffer
+/// wiring recovered in every case (PERF-LOG 2026-10-05), and 60 s covers an
+/// interactive turn without holding the host for minutes.
+pub(crate) const GLM_DEFAULT_WINDOW: Duration = Duration::from_secs(60);
 /// Well inside the ~2 s after which an idle GPU unwires no-copy weights.
 const PULSE_INTERVAL: Duration = Duration::from_millis(500);
 /// Bound on waiting for a final pulse at shutdown.
@@ -31,14 +35,15 @@ pub(crate) struct IdleResidency {
     suspended_for_pressure: bool,
 }
 
-/// The configured window: the flag, else the environment, else off.
-pub(crate) fn configured_window(flag: Option<u64>) -> Duration {
+/// The configured window: the flag, else the environment, else the
+/// family's default.
+pub(crate) fn configured_window(flag: Option<u64>, family_default: Duration) -> Duration {
     flag.or_else(|| {
         std::env::var(IDLE_RESIDENCY_ENV)
             .ok()
             .and_then(|value| value.parse().ok())
     })
-    .map_or(Duration::ZERO, Duration::from_secs)
+    .map_or(family_default, Duration::from_secs)
 }
 
 impl IdleResidency {
@@ -153,9 +158,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_flag_wins_then_the_environment_then_off() {
-        assert_eq!(configured_window(Some(60)), Duration::from_secs(60));
-        assert_eq!(configured_window(Some(0)), Duration::ZERO);
+    fn the_flag_wins_then_the_environment_then_the_family_default() {
+        assert_eq!(
+            configured_window(Some(90), GLM_DEFAULT_WINDOW),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            configured_window(Some(0), GLM_DEFAULT_WINDOW),
+            Duration::ZERO
+        );
+        if std::env::var_os(IDLE_RESIDENCY_ENV).is_none() {
+            assert_eq!(
+                configured_window(None, GLM_DEFAULT_WINDOW),
+                GLM_DEFAULT_WINDOW
+            );
+        }
         let residency = IdleResidency::new("test", Duration::ZERO);
         assert!(residency.window().is_zero());
     }

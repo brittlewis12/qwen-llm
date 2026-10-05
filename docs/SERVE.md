@@ -741,11 +741,12 @@ request after a pause pays ~1 s to re-wire GLM's 109.5 GiB (a 27-token
 prefill: 1.6-1.7 s instead of 0.6 s). `--idle-residency-secs SECS` (or
 `QWEN_SERVE_IDLE_RESIDENCY_SECS`) keeps them wired for that long after
 startup and after each request with ordinary keep-alive commands (500 ms
-pulses that mark the weights used; not a residency set). Pulsing suspends
-under host memory pressure, stops for good on any pulse failure, and the
-last pulse settles at shutdown. Off by default until a bounded kill check
-and pressure/energy qualification (PERF-ROADMAP 2026-10-05 #1). Other
-families refuse the flag.
+pulses that mark the weights used; not a residency set). Default 60 s; 0
+disables. Pulsing suspends under host memory pressure, stops for good on
+any pulse failure, and the last pulse settles at shutdown. A 1 GiB kill
+check recovered wired memory after SIGKILL between pulses and with a
+command in flight (`docs/bench/2026-10-05-residency-kill-check/`). Other
+families refuse the flag until they expose their eligible buffers.
 
 **Live session.** KDA recurrent state cannot rewind, so the one resident
 session is reused only when a request's prompt strictly extends exactly the

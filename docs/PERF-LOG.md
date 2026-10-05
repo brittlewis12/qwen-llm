@@ -6,6 +6,20 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-05 - GLM Serve Idle Residency On By Default (60 s)
+
+Leverage map (2026-10-05) #1.
+- **Decision:** with the 1 GiB kill check recovered in every case, GLM serve
+  defaults to a 60 s idle-residency window. `--idle-residency-secs 0` (or
+  the environment variable) disables it.
+- **Rationale for 60 s:** it covers an interactive turn without holding
+  ~115 GiB wired for minutes. llama.cpp's 3-minute keep-alive is precedent,
+  not a requirement.
+- **Still open:** observing the pressure suspension under real pressure,
+  idle energy, and extending the mechanism to other families. Each backend
+  must name its pageable no-copy weights; a family whose weights are
+  Metal-allocated is always wired and gains nothing.
+
 ## 2026-10-05 - GLM Decode Attribution: Depth Cost Is Selected Attention; Weight Streaming at ~321 GB/s
 
 Leverage map (2026-10-05) #2. Packet `docs/bench/2026-10-05-glm53-decode-attribution/`.

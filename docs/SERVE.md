@@ -735,6 +735,18 @@ until the first `</think>`, then the `message`. Stops are `<|endoftext|>`,
 `<|user|>` and `<|observation|>`. Budget exhaustion inside reasoning is
 incomplete; a stop before `</think>` is a protocol failure.
 
+**Idle residency (opt-in).** Metal wires no-copy weights only while
+commands use them and unwires them about 2 s after the GPU goes idle, so a
+request after a pause pays ~1 s to re-wire GLM's 109.5 GiB (a 27-token
+prefill: 1.6-1.7 s instead of 0.6 s). `--idle-residency-secs SECS` (or
+`QWEN_SERVE_IDLE_RESIDENCY_SECS`) keeps them wired for that long after
+startup and after each request with ordinary keep-alive commands (500 ms
+pulses that mark the weights used; not a residency set). Pulsing suspends
+under host memory pressure, stops for good on any pulse failure, and the
+last pulse settles at shutdown. Off by default until a bounded kill check
+and pressure/energy qualification (PERF-ROADMAP 2026-10-05 #1). Other
+families refuse the flag.
+
 **Live session.** KDA recurrent state cannot rewind, so the one resident
 session is reused only when a request's prompt strictly extends exactly the
 tokens it consumed; anything else drops it and prefills a fresh session

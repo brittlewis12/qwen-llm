@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-05 - Idle Residency Keep-Alive (Opt-In): GLM Serve Prefill After A Pause 1.65 -> 0.60 s
+
+Leverage map (2026-10-05) #1. Opt-in; default-on is held.
+- **Mechanism:**
+  - `metal::ResidencyKeepAlive` submits a pulse: one ordinary command
+    buffer that `useResource(Read)`s the retained no-copy windows and runs a
+    one-element fill. It never waits. `poll` reports a failed pulse, or one
+    running longer than 10 s as stuck; `settle` bounds shutdown.
+  - `serve::idle_residency` (family-neutral) pulses every 500 ms while the
+    window is open. The window opens at backend ready and again when any
+    request finishes. Pulsing suspends while
+    `kern.memorystatus_vm_pressure_level` >= 2 and stops for the server's
+    lifetime on any failure.
+  - Flag: `qwen serve --idle-residency-secs` (or
+    `QWEN_SERVE_IDLE_RESIDENCY_SECS`), default off. GLM-5.3-Flash only;
+    other families refuse it. Not a residency set.
+- **Evidence (GLM serve, fresh 27-token prompts, 4 output tokens):**
+
+  | Window | Gap before request | Wired before | Prefill |
+  |---|---|---|---|
+  | none | ≥ 2 s | 5.0-5.2 GiB | 1,603-1,699 ms |
+  | 120 s | 0-60 s | 114.6-115.5 GiB | 577-614 ms |
+  | 120 s | 150 s (lapsed) | 5.2 GiB | 1,641 ms |
+  | 60 s | 5, 0, 30 s | wired | 578-610 ms |
+  | 60 s | 90 s (lapsed) | 5.0 GiB | 1,686 ms |
+
+  SIGINT returned wired memory to 4.9-5.2 GiB within 3-5 s every time.
+- **Review (cx):** go for the mechanism, no unconditional default-on yet.
+  - The pulse holds the state every request already holds (command-buffer
+    wiring) and extends it into a bounded idle window. Historical
+    mid-request kills are indirect evidence that this is reclaimed, not an
+    observation.
+  - Default-on needs a bounded kill check of ordinary pulse wiring
+    (detached observer, ≤ 1 GiB, a recovery tolerance well below the
+    observed wired increase, kills both between pulses and during confirmed
+    execution), pressure and idle-energy qualification, and a dissimilar
+    family.
+  - An initial 60 s window is preferred over llama.cpp's 3 minutes.
+- **Next:** the kill check; then the placement-matched short-prompt gap
+  inside the #2 attribution.
+
 ## 2026-10-05 - Placement Screen: GPU Wiring Follows Activity; ~1 s Re-Wire After 2 s Idle
 
 Leverage map (2026-10-05) #1, first screen. No change landed.

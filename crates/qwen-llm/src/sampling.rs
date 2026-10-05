@@ -755,28 +755,31 @@ impl Sampler {
             .capacity()
             .saturating_mul(std::mem::size_of::<Candidate>());
 
+        let full_order = self.config.top_k == 0 || self.config.top_k >= logits.len();
         let fill_t0 = Instant::now();
-        for (token, &logit) in logits.iter().enumerate() {
-            if logit.is_nan() {
-                return Err(SamplingError::NanLogit { token });
+        if !full_order {
+            for (token, &logit) in logits.iter().enumerate() {
+                if logit.is_nan() {
+                    return Err(SamplingError::NanLogit { token });
+                }
+                candidates.push(Candidate {
+                    token: token as i32,
+                    logit: f64::from(logit),
+                });
             }
-            candidates.push(Candidate {
-                token: token as i32,
-                logit: f64::from(logit),
-            });
         }
         let candidate_fill_ms = elapsed_ms(fill_t0);
 
+        // The full order (key build, radix sort, decode) is timed as one
+        // ordering phase, matching `sample`'s path.
         let order_t0 = Instant::now();
-        let compare = |a: &Candidate, b: &Candidate| match b.logit.total_cmp(&a.logit) {
-            Ordering::Equal => a.token.cmp(&b.token),
-            order => order,
-        };
-        if self.config.top_k > 0 && self.config.top_k < candidates.len() {
-            candidates.select_nth_unstable_by(self.config.top_k, compare);
+        if full_order {
+            candidates = fully_ordered_candidates(logits)?;
+        } else {
+            candidates.select_nth_unstable_by(self.config.top_k, candidate_order);
             candidates.truncate(self.config.top_k);
+            candidates.sort_unstable_by(candidate_order);
         }
-        candidates.sort_unstable_by(compare);
         let top_k_order_ms = elapsed_ms(order_t0);
         let after_top_k = candidates.len();
 
@@ -988,6 +991,9 @@ fn greedy_token(logits: &[f32]) -> Result<i32, SamplingError> {
 
 fn sorted_candidates(logits: &[f32], top_k: usize) -> Result<Vec<Candidate>, SamplingError> {
     validate_logits_shape(logits)?;
+    if top_k == 0 || top_k >= logits.len() {
+        return fully_ordered_candidates(logits);
+    }
     let mut candidates = Vec::with_capacity(logits.len());
     for (token, &logit) in logits.iter().enumerate() {
         if logit.is_nan() {
@@ -998,17 +1004,85 @@ fn sorted_candidates(logits: &[f32], top_k: usize) -> Result<Vec<Candidate>, Sam
             logit: f64::from(logit),
         });
     }
-
-    let compare = |a: &Candidate, b: &Candidate| match b.logit.total_cmp(&a.logit) {
-        Ordering::Equal => a.token.cmp(&b.token),
-        order => order,
-    };
-    if top_k > 0 && top_k < candidates.len() {
-        candidates.select_nth_unstable_by(top_k, compare);
-        candidates.truncate(top_k);
-    }
-    candidates.sort_unstable_by(compare);
+    candidates.select_nth_unstable_by(top_k, candidate_order);
+    candidates.truncate(top_k);
+    candidates.sort_unstable_by(candidate_order);
     Ok(candidates)
+}
+
+/// A `u64` whose ascending order is [`candidate_order`]: descending logit
+/// in `f32` total order (which `f64::from` preserves, signed zeros and
+/// infinities included), then ascending token id.
+fn candidate_key(token: usize, logit: f32) -> u64 {
+    let bits = logit.to_bits();
+    let ascending = if bits & 0x8000_0000 != 0 {
+        !bits
+    } else {
+        bits | 0x8000_0000
+    };
+    (u64::from(!ascending) << 32) | token as u64
+}
+
+/// Every candidate in [`candidate_order`], built by an LSD radix sort of
+/// [`candidate_key`]s rather than a comparison sort: the same order, so the
+/// same weights, sums and draws as sampler-v1, at a fraction of the cost for
+/// a full vocabulary (top-k off).
+fn fully_ordered_candidates(logits: &[f32]) -> Result<Vec<Candidate>, SamplingError> {
+    let mut keys = Vec::with_capacity(logits.len());
+    for (token, &logit) in logits.iter().enumerate() {
+        if logit.is_nan() {
+            return Err(SamplingError::NanLogit { token });
+        }
+        keys.push(candidate_key(token, logit));
+    }
+    radix_sort_u64(&mut keys);
+    Ok(keys
+        .into_iter()
+        .map(|key| {
+            let token = (key & 0xffff_ffff) as usize;
+            Candidate {
+                token: token as i32,
+                logit: f64::from(logits[token]),
+            }
+        })
+        .collect())
+}
+
+/// Stable LSD radix sort, 16-bit digits, skipping digits every key shares.
+fn radix_sort_u64(keys: &mut Vec<u64>) {
+    const BITS: u32 = 16;
+    const BUCKETS: usize = 1 << BITS;
+    if keys.len() < 2 {
+        return;
+    }
+    let (or, and) = keys
+        .iter()
+        .fold((0u64, u64::MAX), |(or, and), &k| (or | k, and & k));
+    let varying = or ^ and;
+    let mut scratch = vec![0u64; keys.len()];
+    let mut shift = 0;
+    while shift < 64 {
+        let mask = ((BUCKETS as u64) - 1) << shift;
+        if varying & mask != 0 {
+            let mut counts = [0usize; BUCKETS];
+            for &key in keys.iter() {
+                counts[((key >> shift) as usize) & (BUCKETS - 1)] += 1;
+            }
+            let mut offset = 0;
+            for count in counts.iter_mut() {
+                let next = offset + *count;
+                *count = offset;
+                offset = next;
+            }
+            for &key in keys.iter() {
+                let digit = ((key >> shift) as usize) & (BUCKETS - 1);
+                scratch[counts[digit]] = key;
+                counts[digit] += 1;
+            }
+            std::mem::swap(keys, &mut scratch);
+        }
+        shift += BITS;
+    }
 }
 
 fn probability_weights(candidates: &[Candidate]) -> Result<Vec<f64>, SamplingError> {
@@ -1420,6 +1494,73 @@ mod tests {
             assert_eq!(sampler.sample(&[0.0, 3.0, 1.0]).unwrap().token, 1);
             assert_eq!(sampler.draws(), draw);
         }
+    }
+
+    /// The radix-built full order is exactly the comparator order on every
+    /// row shape: ties, signed zeros, infinities, subnormals, constant rows,
+    /// and lengths around the digit and bucket boundaries.
+    #[test]
+    fn radix_full_order_is_the_comparator_order() {
+        let comparator = |logits: &[f32]| {
+            let mut candidates: Vec<Candidate> = logits
+                .iter()
+                .enumerate()
+                .map(|(token, &logit)| Candidate {
+                    token: token as i32,
+                    logit: f64::from(logit),
+                })
+                .collect();
+            candidates.sort_unstable_by(candidate_order);
+            candidates
+        };
+        let mut rng = Xoshiro256PlusPlus::from_seed(0x5a17);
+        let specials = [
+            0.0,
+            -0.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            f32::from_bits(1),
+            f32::from_bits(0x8000_0001),
+            f32::MAX,
+            f32::MIN,
+            1.0,
+            -1.0,
+        ];
+        let mut rows: Vec<Vec<f32>> = Vec::new();
+        for len in [1, 2, 3, 2047, 2048, 2049, 4097, 154_880] {
+            rows.push(
+                (0..len)
+                    .map(|_| (rng.next_unit_f64() * 60.0 - 30.0) as f32)
+                    .collect(),
+            );
+            // Heavy ties: a handful of distinct values.
+            rows.push(
+                (0..len)
+                    .map(|_| (rng.next_u64() % 4) as f32 - 1.5)
+                    .collect(),
+            );
+            rows.push(
+                (0..len)
+                    .map(|_| specials[(rng.next_u64() % specials.len() as u64) as usize])
+                    .collect(),
+            );
+            rows.push(vec![2.5; len]);
+        }
+        for row in &rows {
+            let expected = comparator(row);
+            let actual = fully_ordered_candidates(row).unwrap();
+            assert_eq!(actual.len(), expected.len());
+            for (a, e) in actual.iter().zip(&expected) {
+                assert_eq!(a.token, e.token);
+                assert_eq!(a.logit.to_bits(), e.logit.to_bits());
+            }
+        }
+        assert!(matches!(
+            fully_ordered_candidates(&[0.0, f32::NAN]),
+            Err(SamplingError::NanLogit { token: 1 })
+        ));
     }
 
     #[test]

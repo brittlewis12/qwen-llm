@@ -1,0 +1,294 @@
+{
+ "schema": "qwen.residency_kill_check.v1",
+ "pid": 47917,
+ "sid": 47915,
+ "pgid": 47915,
+ "file_bytes": 1073741824,
+ "tolerance_bytes": 402653184,
+ "cases": [
+  {
+   "case": "normal",
+   "wired_before": 5317416277.333333,
+   "child_pid": 47935,
+   "wired_loaded": 6571382101.333333,
+   "exit_code": 0,
+   "killed": false,
+   "status": [
+    {
+     "phase": "ready",
+     "pid": 47935,
+     "bytes": 1073741824,
+     "t": 0.038660167
+    },
+    {
+     "phase": "pulsing",
+     "t": 0.046301792
+    },
+    {
+     "phase": "exiting",
+     "t": 8.159324667
+    }
+   ],
+   "recovery": [
+    {
+     "t": 1,
+     "wired": 5315411968.0,
+     "excess": -52261683.19999981,
+     "spread": 18219008,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    },
+    {
+     "t": 5,
+     "wired": 5482141013.333333,
+     "excess": 114467362.1333332,
+     "spread": 260030464,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    },
+    {
+     "t": 15,
+     "wired": 5391532032.0,
+     "excess": 23858380.80000019,
+     "spread": 259407872,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    },
+    {
+     "t": 30,
+     "wired": 5315100672.0,
+     "excess": -52572979.19999981,
+     "spread": 32768,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    },
+    {
+     "t": 60,
+     "wired": 5319158442.666667,
+     "excess": -48515208.533332825,
+     "spread": 18907136,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    }
+   ],
+   "increase": 1253965824.0
+  },
+  {
+   "case": "stopped",
+   "wired_before": 5397157205.333333,
+   "child_pid": 48006,
+   "wired_loaded": 6146501290.666667,
+   "wired_at_kill_unpulsed": 5305750869.333333,
+   "killed": true,
+   "kill_t": 1791224182.4028642,
+   "exit_code": -9,
+   "status": [
+    {
+     "phase": "ready",
+     "pid": 48006,
+     "bytes": 1073741824,
+     "t": 0.034303
+    },
+    {
+     "phase": "stopped",
+     "t": 3.078863708
+    }
+   ],
+   "recovery": [
+    {
+     "t": 1,
+     "wired": 5483249664.0,
+     "excess": 115576012.80000019,
+     "spread": 240943104,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    },
+    {
+     "t": 5,
+     "wired": 5390592682.666667,
+     "excess": 22919031.466667175,
+     "spread": 259440640,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    },
+    {
+     "t": 15,
+     "wired": 5397359274.666667,
+     "excess": 29685623.466667175,
+     "spread": 259489792,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    },
+    {
+     "t": 30,
+     "wired": 5390925824.0,
+     "excess": 23252172.80000019,
+     "spread": 259391488,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    },
+    {
+     "t": 60,
+     "wired": 5397643264.0,
+     "excess": 29969612.80000019,
+     "spread": 259473408,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    }
+   ],
+   "increase": 749344085.333334
+  },
+  {
+   "case": "pulse",
+   "wired_before": 5478405461.333333,
+   "child_pid": 48046,
+   "wired_loaded": 6739935232.0,
+   "killed": true,
+   "kill_t": 1791224248.9216902,
+   "exit_code": -9,
+   "status": [
+    {
+     "phase": "ready",
+     "pid": 48046,
+     "bytes": 1073741824,
+     "t": 0.031938833
+    },
+    {
+     "phase": "pulsing",
+     "t": 0.040773333
+    }
+   ],
+   "recovery": [
+    {
+     "t": 1,
+     "wired": 5305996629.333333,
+     "excess": -61677021.866666794,
+     "spread": 442368,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    },
+    {
+     "t": 5,
+     "wired": 5391652181.333333,
+     "excess": 23978530.133333206,
+     "spread": 259375104,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    },
+    {
+     "t": 15,
+     "wired": 5391570261.333333,
+     "excess": 23896610.133333206,
+     "spread": 259702784,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    },
+    {
+     "t": 30,
+     "wired": 5394131626.666667,
+     "excess": 26457975.466667175,
+     "spread": 259424256,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    },
+    {
+     "t": 60,
+     "wired": 5393367040.0,
+     "excess": 25693388.80000019,
+     "spread": 260390912,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    }
+   ],
+   "increase": 1261529770.666667
+  },
+  {
+   "case": "execute",
+   "wired_before": 5306269696.0,
+   "child_pid": 48097,
+   "wired_loaded": 6599942144.0,
+   "in_flight_at_kill": true,
+   "last_status_before_kill": {
+    "phase": "executing",
+    "committed_t": 1.947047,
+    "running": true
+   },
+   "killed": true,
+   "kill_t": 1791224313.313108,
+   "exit_code": -9,
+   "status": [
+    {
+     "phase": "ready",
+     "pid": 48097,
+     "bytes": 1073741824,
+     "t": 0.03460975
+    },
+    {
+     "phase": "executing",
+     "committed_t": 0.052214667,
+     "running": true
+    },
+    {
+     "phase": "completed",
+     "gpu_ms": 1874.627249315381,
+     "t": 1.9385907919999998
+    },
+    {
+     "phase": "executing",
+     "committed_t": 1.947047,
+     "running": true
+    }
+   ],
+   "recovery": [
+    {
+     "t": 1,
+     "wired": 6169504426.666667,
+     "excess": 801830775.4666672,
+     "spread": 1293778944,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    },
+    {
+     "t": 5,
+     "wired": 5573170517.333333,
+     "excess": 205496866.1333332,
+     "spread": 18710528,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    },
+    {
+     "t": 15,
+     "wired": 5479945557.333333,
+     "excess": 112271906.1333332,
+     "spread": 259407872,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    },
+    {
+     "t": 30,
+     "wired": 5487143594.666667,
+     "excess": 119469943.46666718,
+     "spread": 277168128,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    },
+    {
+     "t": 60,
+     "wired": 5565557418.666667,
+     "excess": 197883767.46666718,
+     "spread": 262144,
+     "pressure_level": 1,
+     "pageouts": 1528701
+    }
+   ],
+   "increase": 1293672448.0
+  }
+ ],
+ "preconditions": {
+  "engine_processes": [],
+  "pressure_level": 1,
+  "baseline_wired": 5367673651.2,
+  "baseline_spread": 251002880
+ },
+ "verdict": "recovered"
+}

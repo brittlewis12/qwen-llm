@@ -6,6 +6,64 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-05 - GLM Decode Attribution: Depth Cost Is Selected Attention; Weight Streaming at ~321 GB/s
+
+Leverage map (2026-10-05) #2. Packet `docs/bench/2026-10-05-glm53-decode-attribution/`.
+- **Instrument:** `Glm5NextSession::forward_stage_profiled` runs one command
+  with one timestamp-sampled encoder per stage. It is bitwise equal to a
+  plain step (`MTL_DEBUG_LAYER=1`). Encoder boundaries cost ~1.5 ms per
+  step, so stage shares transfer and absolute sums do not.
+- **Depth 64 (unprofiled 38.98 ms/token):**
+  - kda 12.0 ms (323 GB/s over 3.9 GB).
+  - routed experts 10.1 ms (304 GB/s over 3.1 GB).
+  - shared expert 2.6 ms (334 GB/s).
+  - mHC pre (attention + ffn) 4.2 ms for 39 MB of weights: 90 small
+    stages at ~46 µs.
+  - MLA output 1.7 ms (432 GB/s), MLA projection 1.5 ms (320 GB/s).
+  - head 1.0 ms (505 GB/s), router 0.8 ms (242 GB/s, F32), dense FFN
+    0.8 ms (459 GB/s).
+  - Weight streaming overall is ~30.5 ms for ~9.8 GB, about 321 GB/s.
+- **Depth 4096 (51.21 ms/token, +12.2 ms):**
+  - Selected attention takes 11.6 ms (1.05 ms per MLA block over 2,048
+    selected rows, one query). A few MB of reads per block, so it is
+    latency- or occupancy-bound.
+  - Scoring 0.08 ms, selection 0.55 ms, sparse query 0.34 ms. Every other
+    stage is unchanged.
+  - The kernel is the family-neutral online selected attention that DS4
+    also uses (rising tide).
+- **Decision:** next is split-row selected attention for one query: rows
+  split across threadgroups with an in-order reduce, as K2's 2026-09-26
+  split did, raw-bit equal to serial. Ceiling ~10 ms/token at depth ≥ 2052,
+  about 20% of decode there. mHC-pre fusion (~2-3 ms, about 6-8% at depth
+  0) and Q6_K/expert streaming efficiency (321 -> ~400 GB/s would be
+  ~6 ms) follow.
+
+## 2026-10-05 - Kill Check: Ordinary Command-Buffer Wiring Is Reclaimed After SIGKILL (1 GiB)
+
+Leverage map (2026-10-05) #1. Packet `docs/bench/2026-10-05-residency-kill-check/`.
+- **Setup:**
+  - Detached observer, verified with a deliberately timed-out tool call.
+  - Quiet host: baseline 5.00 GiB wired, 0.25 GB spread.
+  - A 1 GiB file-backed no-copy buffer.
+  - No residency set, mlock, sysctl change or gate bypass. The child holds
+    the production lease. Tolerance 384 MiB.
+- **Results (excess after kill at 60 s):**
+  - normal exit, wired +1.17 GiB: -46 MiB.
+  - SIGKILL after pulsing stopped and the buffer unwired (-0.09 GiB before
+    the kill): 29 MiB.
+  - SIGKILL between keep-alive pulses (+1.17 GiB): 25 MiB, recovered
+    within 1 s.
+  - SIGKILL 0.3 s into a ~1.9 s command confirmed in flight (+1.20 GiB):
+    765 MiB at 1 s, 196 at 5 s, 107-189 MiB through 60 s, within the
+    baseline spread. A re-check minutes later read 4.94 GiB.
+- **Interpretation:**
+  - Ordinary command-buffer wiring, both idle-pulsed and in flight, was
+    reclaimed after SIGKILL at 1 GiB. That supports the keep-alive's
+    premise that it adds only state every request already holds.
+  - Not proof at 115 GiB; residency sets stay closed.
+- **Remaining for default-on:** pressure and idle-energy qualification on
+  the serve configuration, and a dissimilar no-copy family.
+
 ## 2026-10-05 - Idle Residency Keep-Alive (Opt-In): GLM Serve Prefill After A Pause 1.65 -> 0.60 s
 
 Leverage map (2026-10-05) #1. Opt-in; default-on is held.

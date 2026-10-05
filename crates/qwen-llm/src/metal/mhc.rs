@@ -961,7 +961,8 @@ mod tests {
             samples.sort_by(f64::total_cmp);
             samples[samples.len() / 2]
         };
-        let rows: [(&str, &dyn Fn(&KernelEncoder)); 6] = [
+        type Encode<'a> = &'a dyn Fn(&KernelEncoder);
+        let rows: [(&str, Encode<'_>); 6] = [
             ("whole pre (5 dispatches)", &|enc: &KernelEncoder| {
                 rms(enc);
                 mix(enc);

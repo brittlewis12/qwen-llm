@@ -484,12 +484,16 @@ fn ledger_terms_match_release_geometry() {
     // slot outputs 4096 G).
     let packed = 38_041 * G;
     // Sparse decode (capacity reaches the frontier): eleven sub-granule
-    // buffers plus [8192] F32 pool scores (2 G).
-    let sparse = 12 * G;
+    // buffers plus [8192] F32 pool scores (2 G), and split selected
+    // attention partials for 64 heads x 17 splits: [512, 1088] F32 136 G and
+    // [2, 1088] F32 1 G.
+    let sparse = (12 + 137) * G;
     // Packed sparse (512 rows, 64-query microbatches): queries 512 + 256 G,
     // weights 4 G, visibility 2 G, scores [8192, 64] 128 G, pools 8 + 1 G,
-    // rows [2051, 64] 33 + 1 G, statuses [11 x 512] 2 G.
-    let packed_sparse = 947 * G;
+    // rows [2051, 64] 33 + 1 G, statuses [11 x 512] 2 G; split attention
+    // partials for 16-query sub-batches: [512, 17408] F32 2176 G and
+    // [2, 17408] F32 9 G.
+    let packed_sparse = (947 + 2185) * G;
     for (name, bytes) in [
         ("retained_weights", 100 * GIB),
         ("kda_state", kda),

@@ -97,6 +97,8 @@ pub(super) struct PackedSparseScratch {
     row_ids: MetalTensor,
     row_counts: MetalTensor,
     select_status: MetalTensor,
+    attention_partials: MetalTensor,
+    attention_partial_stats: MetalTensor,
     rows: usize,
     microbatch: usize,
 }
@@ -117,6 +119,8 @@ impl PackedSparseScratch {
             row_ids: b.take("row_ids")?,
             row_counts: b.take("row_counts")?,
             select_status: b.take("select_status")?,
+            attention_partials: b.take("attention_partials")?,
+            attention_partial_stats: b.take("attention_partial_stats")?,
             rows: rows as usize,
             microbatch: rows.min(memory::PACKED_SPARSE_QUERIES) as usize,
         };
@@ -1261,34 +1265,54 @@ impl Glm5NextSession<'_> {
                 row_slots,
                 n,
             )?;
-            crate::metal::encode_online_selected_attention_f16(
-                ctx,
-                enc,
-                &crate::metal::SelectedAttention {
-                    queries: &flat(&p.query_latent),
-                    raw_cache: latent,
-                    raw_cache_before_chunk: latent,
-                    compressed_cache: latent,
-                    selected_ids: &row_ids,
-                    selected_counts: &row_counts,
-                    visible_counts: &visible_rows,
-                    sinks: &self.s.no_sink,
-                    output: &flat(&p.output_latent),
-                },
-                crate::metal::SelectedAttentionShape {
-                    head_count: heads,
-                    query_count: n,
-                    query_token_offset: start,
-                    token_count: rows,
-                    chunk_start_position: self.position,
-                    window: 0,
-                    raw_cache_is_chunk: false,
-                    selected_slots: row_slots,
-                    compressed_capacity: latent.shape[1] as usize,
-                    scale,
-                    direct: true,
-                },
-            )?;
+            // Split selected attention in query sub-batches: the partition is
+            // per query, so the sub-batch size never changes a result and
+            // packed rows equal serial decode's (Exact lineage) bitwise.
+            let split_queries = memory::PACKED_SPLIT_QUERIES as usize;
+            let mut sub = 0;
+            while sub < n {
+                let m = split_queries.min(n - sub);
+                let units = memory::split_attention_units(c, m as u64);
+                let sub_rows = |t: &MetalTensor| t.view_subrange(sub as u64, vec![m as u64]);
+                crate::metal::encode_online_selected_attention_split_f16(
+                    ctx,
+                    enc,
+                    &crate::metal::SelectedAttention {
+                        queries: &flat(&p.query_latent),
+                        raw_cache: latent,
+                        raw_cache_before_chunk: latent,
+                        compressed_cache: latent,
+                        selected_ids: &row_ids.view_subrange(
+                            (sub * row_slots) as u64,
+                            vec![row_slots as u64, m as u64],
+                        ),
+                        selected_counts: &sub_rows(&row_counts),
+                        visible_counts: &sub_rows(&visible_rows),
+                        sinks: &self.s.no_sink,
+                        output: &flat(&p.output_latent),
+                    },
+                    crate::metal::SelectedAttentionShape {
+                        head_count: heads,
+                        query_count: m,
+                        query_token_offset: start + sub,
+                        token_count: rows,
+                        chunk_start_position: self.position,
+                        window: 0,
+                        raw_cache_is_chunk: false,
+                        selected_slots: row_slots,
+                        compressed_capacity: latent.shape[1] as usize,
+                        scale,
+                        direct: true,
+                    },
+                    &crate::metal::SelectedAttentionPartials {
+                        values: &sp
+                            .attention_partials
+                            .view_subrange(0, vec![kv as u64, units]),
+                        stats: &sp.attention_partial_stats.view_subrange(0, vec![2, units]),
+                    },
+                )?;
+                sub += m;
+            }
             start += n;
         }
         Ok(())

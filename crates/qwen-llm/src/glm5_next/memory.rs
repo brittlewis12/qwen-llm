@@ -275,6 +275,7 @@ pub fn sparse_decode_specs(c: &Glm5NextConfig, capacity: u64) -> Vec<BufferSpec>
     let pools = capacity.div_ceil(c.indexer_pool as u64).max(1);
     let (ih, id) = (c.indexer_head_count as u64, c.indexer_head_dim as u64);
     let mla = c.block_count(MixerKind::Mla) as u64;
+    let units = split_attention_units(c, 1);
     let z = BufferSpec::zeros;
     vec![
         z("index_query", F32, &[id * ih]),
@@ -288,7 +289,21 @@ pub fn sparse_decode_specs(c: &Glm5NextConfig, capacity: u64) -> Vec<BufferSpec>
         z("row_ids", I32, &[c.selection_width() as u64, 1]),
         z("row_counts", I32, &[1]),
         z("select_status", I32, &[mla.max(1)]),
+        z("attention_partials", F32, &[c.kv_lora_rank as u64, units]),
+        z("attention_partial_stats", F32, &[2, units]),
     ]
+}
+
+/// Queries per split selected-attention dispatch in packed prefill: bounds
+/// the partial scratch (one 512-wide accumulator per query, head and
+/// split) without changing any query's result.
+pub const PACKED_SPLIT_QUERIES: u64 = 16;
+
+/// (query, head, split) work units of the split selected attention for
+/// `queries` queries over the release selection width (window 0).
+pub fn split_attention_units(c: &Glm5NextConfig, queries: u64) -> u64 {
+    let splits = crate::metal::selected_attention_splits(0, c.selection_width() as usize) as u64;
+    queries * c.head_count as u64 * splits
 }
 
 /// Sparse rows of one packed chunk run in microbatches of at most this many
@@ -305,6 +320,7 @@ pub fn packed_sparse_specs(c: &Glm5NextConfig, capacity: u64, rows: u64) -> Vec<
     let (ih, id) = (c.indexer_head_count as u64, c.indexer_head_dim as u64);
     let mla = c.block_count(MixerKind::Mla) as u64;
     let s = rows.min(PACKED_SPARSE_QUERIES);
+    let units = split_attention_units(c, s.min(PACKED_SPLIT_QUERIES));
     let z = BufferSpec::zeros;
     vec![
         z("index_query", F32, &[id * ih, rows]),
@@ -318,6 +334,8 @@ pub fn packed_sparse_specs(c: &Glm5NextConfig, capacity: u64, rows: u64) -> Vec<
         z("row_ids", I32, &[c.selection_width() as u64, s]),
         z("row_counts", I32, &[s]),
         z("select_status", I32, &[mla.max(1).saturating_mul(rows)]),
+        z("attention_partials", F32, &[c.kv_lora_rank as u64, units]),
+        z("attention_partial_stats", F32, &[2, units]),
     ]
 }
 

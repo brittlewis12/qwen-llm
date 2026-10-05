@@ -2448,6 +2448,168 @@ kernel void kernel_deepseek_v4_online_packed_selected_sink_attention_f16_direct(
     output4[lane + 96] = o3 * inverse;
 }
 
+struct online_selected_split_args {
+    ds4_packed_selected_attention_args base;
+    uint split_rows;
+    uint splits;
+};
+
+// Split online selected attention, partial pass: one 32-lane simdgroup per
+// (query, head, split). A query's attended rows (its raw window, then its
+// selected slots, in that order) are cut into consecutive ranges of
+// `split_rows`; each split runs the serial kernel's online update over its
+// range from an empty state (maximum -inf, denominator 0) and writes its
+// (maximum, denominator, unnormalized accumulator). Splits past a query's
+// rows write an empty state. The partition depends only on the query's own
+// geometry, never on how many queries share the dispatch.
+kernel void kernel_online_selected_attention_f16_split_partial(
+        constant online_selected_split_args & split_args [[buffer(0)]],
+        device const float * queries [[buffer(1)]],
+        device const half * raw_cache [[buffer(2)]],
+        device const half * preserved_raw_cache [[buffer(3)]],
+        device const half * compressed_cache [[buffer(4)]],
+        device const int * selected_ids [[buffer(5)]],
+        device const int * selected_counts [[buffer(6)]],
+        device const int * visible_counts [[buffer(7)]],
+        device float * partial_values [[buffer(8)]],
+        device float * partial_stats [[buffer(9)]],
+        uint3 group [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    constant ds4_packed_selected_attention_args & args = split_args.base;
+    const uint local_query = group.x;
+    const uint head = group.y;
+    const uint split = group.z;
+    if (local_query >= args.query_count || head >= args.head_count
+            || split >= split_args.splits) return;
+
+    const uint token = args.query_token_offset + local_query;
+    const uint absolute_position = args.chunk_start_position + token;
+    const uint visible_end = absolute_position + 1u;
+    const uint raw_count = min(visible_end, args.window);
+    const uint raw_start = visible_end - raw_count;
+    const int selected_i = selected_counts[local_query];
+    const int visible_i = visible_counts[local_query];
+    const uint selected_count = selected_i > 0
+        ? min(uint(selected_i), args.selected_slots)
+        : 0u;
+    const uint visible_count = visible_i > 0 ? uint(visible_i) : 0u;
+    const uint query_start = (token * args.head_count + head) * args.head_dim;
+    const uint ids_base = local_query * args.selected_slots;
+    device const float4 * query4 = (device const float4 *)(queries + query_start);
+    const float4 q0 = query4[lane];
+    const float4 q1 = query4[lane + 32];
+    const float4 q2 = query4[lane + 64];
+    const float4 q3 = query4[lane + 96];
+
+    float maximum = -INFINITY;
+    float denominator = 0.0f;
+    float4 o0 = 0.0f;
+    float4 o1 = 0.0f;
+    float4 o2 = 0.0f;
+    float4 o3 = 0.0f;
+
+    const uint total = raw_count + selected_count;
+    const uint begin = min(split * split_args.split_rows, total);
+    const uint end = min(begin + split_args.split_rows, total);
+    for (uint item = begin; item < end; ++item) {
+        if (item < raw_count) {
+            const uint logical_position = raw_start + item;
+            const bool preserved = args.raw_cache_is_chunk != 0u
+                && logical_position < args.chunk_start_position;
+            device const half * cache = preserved ? preserved_raw_cache : raw_cache;
+            const uint cache_start = args.raw_cache_is_chunk == 0u || preserved
+                ? (logical_position % args.window) * args.head_dim
+                : (logical_position - args.chunk_start_position) * args.head_dim;
+            deepseek_v4_online_attend_f16_row_direct(
+                (device const half4 *)(cache + cache_start),
+                q0, q1, q2, q3, args.scale, lane,
+                maximum, denominator, o0, o1, o2, o3);
+        } else {
+            const int selected_id = selected_ids[ids_base + (item - raw_count)];
+            if (selected_id < 0 || uint(selected_id) >= visible_count
+                    || uint(selected_id) >= args.compressed_capacity) continue;
+            deepseek_v4_online_attend_f16_row_direct(
+                (device const half4 *)(compressed_cache + uint(selected_id) * args.head_dim),
+                q0, q1, q2, q3, args.scale, lane,
+                maximum, denominator, o0, o1, o2, o3);
+        }
+    }
+
+    const uint index = (local_query * args.head_count + head) * split_args.splits + split;
+    device float4 * values4 = (device float4 *)(partial_values + index * args.head_dim);
+    values4[lane] = o0;
+    values4[lane + 32] = o1;
+    values4[lane + 64] = o2;
+    values4[lane + 96] = o3;
+    if (lane == 0) {
+        partial_stats[2u * index] = maximum;
+        partial_stats[2u * index + 1u] = denominator;
+    }
+}
+
+// Split online selected attention, merge pass: one simdgroup per (query,
+// head) folds its splits in order into the sink's initial state (maximum
+// sink, denominator 1), with the serial row update's branch structure, and
+// writes the normalized output. Empty splits (denominator 0) are skipped.
+kernel void kernel_online_selected_attention_f16_split_merge(
+        constant online_selected_split_args & split_args [[buffer(0)]],
+        device const float * partial_values [[buffer(1)]],
+        device const float * partial_stats [[buffer(2)]],
+        device const float * sinks [[buffer(3)]],
+        device float * output [[buffer(4)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    constant ds4_packed_selected_attention_args & args = split_args.base;
+    const uint local_query = group.x;
+    const uint head = group.y;
+    if (local_query >= args.query_count || head >= args.head_count) return;
+    const uint token = args.query_token_offset + local_query;
+    const uint query_start = (token * args.head_count + head) * args.head_dim;
+
+    float maximum = sinks[head];
+    float denominator = 1.0f;
+    float4 o0 = 0.0f;
+    float4 o1 = 0.0f;
+    float4 o2 = 0.0f;
+    float4 o3 = 0.0f;
+    const uint first = (local_query * args.head_count + head) * split_args.splits;
+    for (uint split = 0u; split < split_args.splits; ++split) {
+        const uint index = first + split;
+        const float part_denominator = partial_stats[2u * index + 1u];
+        if (part_denominator == 0.0f) continue;
+        const float part_maximum = partial_stats[2u * index];
+        device const float4 * values4 =
+            (device const float4 *)(partial_values + index * args.head_dim);
+        const float4 p0 = values4[lane];
+        const float4 p1 = values4[lane + 32];
+        const float4 p2 = values4[lane + 64];
+        const float4 p3 = values4[lane + 96];
+        if (part_maximum > maximum) {
+            const float previous_scale = exp(maximum - part_maximum);
+            denominator = denominator * previous_scale + part_denominator;
+            o0 = o0 * previous_scale + p0;
+            o1 = o1 * previous_scale + p1;
+            o2 = o2 * previous_scale + p2;
+            o3 = o3 * previous_scale + p3;
+            maximum = part_maximum;
+        } else {
+            const float part_scale = exp(part_maximum - maximum);
+            denominator += part_denominator * part_scale;
+            o0 += p0 * part_scale;
+            o1 += p1 * part_scale;
+            o2 += p2 * part_scale;
+            o3 += p3 * part_scale;
+        }
+    }
+
+    const float inverse = 1.0f / denominator;
+    device float4 * output4 = (device float4 *)(output + query_start);
+    output4[lane] = o0 * inverse;
+    output4[lane + 32] = o1 * inverse;
+    output4[lane + 64] = o2 * inverse;
+    output4[lane + 96] = o3 * inverse;
+}
+
 kernel void kernel_deepseek_v4_compressor_frontier_write(
         constant ds4_compressor_frontier_args & args [[buffer(0)]],
         device const float * projected_kv [[buffer(1)]],

@@ -172,20 +172,13 @@ pub struct SelectedAttentionShape {
     pub direct: bool,
 }
 
-/// Online-softmax attention of each query over its raw window (the newest
-/// `window` positions) and then its selected compressed rows, in slot order,
-/// one simdgroup per (query, head), head width 512, accumulated in F32. The
-/// raw-cache layout is the caller's contract (DS4 validates it before
-/// delegating); GLM passes `window = 0` and its latent cache as the
-/// compressed cache.
-pub fn encode_online_selected_attention_f16(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
+/// The buffer and geometry contract shared by the serial and split
+/// selected-attention encoders.
+fn validate_selected_attention(
     b: &SelectedAttention<'_>,
     g: SelectedAttentionShape,
 ) -> Result<(), MetalError> {
     const K: &str = "online_selected_attention";
-    require_serial(K, enc)?;
     let overflow = || bad_shape(K, "geometry exceeds 32-bit shader offsets");
     let width = LATENT_WIDTH;
     let query_width = g.head_count.checked_mul(width).ok_or_else(overflow)?;
@@ -323,6 +316,25 @@ pub fn encode_online_selected_attention_f16(
             (b.sinks, "sinks"),
         ],
     )?;
+    Ok(())
+}
+
+/// Online-softmax attention of each query over its raw window (the newest
+/// `window` positions) and then its selected compressed rows, in slot order,
+/// one simdgroup per (query, head), head width 512, accumulated in F32. The
+/// raw-cache layout is the caller's contract (DS4 validates it before
+/// delegating); GLM passes `window = 0` and its latent cache as the
+/// compressed cache.
+pub fn encode_online_selected_attention_f16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    b: &SelectedAttention<'_>,
+    g: SelectedAttentionShape,
+) -> Result<(), MetalError> {
+    const K: &str = "online_selected_attention";
+    require_serial(K, enc)?;
+    validate_selected_attention(b, g)?;
+    let width = LATENT_WIDTH;
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
@@ -398,6 +410,179 @@ pub fn encode_online_selected_attention_f16(
             height: 1,
             depth: 1,
         },
+    );
+    Ok(())
+}
+
+/// Rows per split of [`encode_online_selected_attention_split_f16`].
+pub const SELECTED_SPLIT_ROWS: usize = 128;
+
+/// Splits per (query, head): its raw window plus selected slots, in ranges
+/// of [`SELECTED_SPLIT_ROWS`].
+pub fn selected_attention_splits(window: usize, selected_slots: usize) -> usize {
+    window
+        .saturating_add(selected_slots)
+        .div_ceil(SELECTED_SPLIT_ROWS)
+        .max(1)
+}
+
+/// Scratch for [`encode_online_selected_attention_split_f16`]: F32
+/// `[512, units]` unnormalized accumulators and F32 `[2, units]`
+/// (maximum, denominator) pairs, `units = queries * heads * splits`.
+pub struct SelectedAttentionPartials<'a> {
+    pub values: &'a MetalTensor,
+    pub stats: &'a MetalTensor,
+}
+
+/// [`encode_online_selected_attention_f16`] with each query's rows (raw
+/// window, then selected slots) cut into ranges of [`SELECTED_SPLIT_ROWS`]:
+/// one simdgroup per (query, head, split) runs the online update over its
+/// range, then one per (query, head) folds the splits in order into the
+/// sink's initial state. Many more simdgroups for a single query (decode)
+/// at the cost of a different summation order than the serial kernel
+/// (numerical, not bitwise). The partition depends only on each query's
+/// own geometry, so a query's result does not depend on how many queries
+/// share the dispatch. Direct row reads only.
+pub fn encode_online_selected_attention_split_f16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    b: &SelectedAttention<'_>,
+    g: SelectedAttentionShape,
+    partials: &SelectedAttentionPartials<'_>,
+) -> Result<(), MetalError> {
+    const K: &str = "online_selected_attention_split";
+    require_serial(K, enc)?;
+    validate_selected_attention(b, g)?;
+    if !g.direct {
+        return Err(bad_shape(K, "the split kernel reads rows directly"));
+    }
+    let width = LATENT_WIDTH;
+    let splits = selected_attention_splits(g.window, g.selected_slots);
+    let units = g
+        .query_count
+        .checked_mul(g.head_count)
+        .and_then(|v| v.checked_mul(splits))
+        .filter(|&v| {
+            v.checked_mul(width)
+                .and_then(|v| u32::try_from(v).ok())
+                .is_some()
+        })
+        .ok_or_else(|| bad_shape(K, "partials exceed 32-bit shader offsets"))?;
+    check_tensor(
+        K,
+        partials.values,
+        GgmlType::F32,
+        &[width as u64, units as u64],
+        true,
+        "partial values",
+    )?;
+    check_tensor(
+        K,
+        partials.stats,
+        GgmlType::F32,
+        &[2, units as u64],
+        true,
+        "partial stats",
+    )?;
+    check_alignment(K, partials.values, 16, "partial values")?;
+    check_alignment(K, partials.stats, 8, "partial stats")?;
+    for (partial, name) in [
+        (partials.values, "partial values"),
+        (partials.stats, "partial stats"),
+    ] {
+        check_disjoint(
+            K,
+            partial,
+            &[
+                (b.queries, "queries"),
+                (b.raw_cache, "raw cache"),
+                (b.raw_cache_before_chunk, "raw cache before chunk"),
+                (b.compressed_cache, "compressed cache"),
+                (b.selected_ids, "selected ids"),
+                (b.selected_counts, "selected counts"),
+                (b.visible_counts, "visible counts"),
+                (b.sinks, "sinks"),
+                (b.output, "output"),
+            ],
+        )
+        .map_err(|e| bad_shape(K, format!("{name}: {e}")))?;
+    }
+    check_disjoint(K, partials.values, &[(partials.stats, "partial stats")])?;
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        head_count: u32,
+        head_dim: u32,
+        query_count: u32,
+        query_token_offset: u32,
+        chunk_start_position: u32,
+        window: u32,
+        selected_slots: u32,
+        compressed_capacity: u32,
+        raw_cache_is_chunk: u32,
+        scale: f32,
+        split_rows: u32,
+        splits: u32,
+    }
+    let u = |v: usize, name: &str| super::checks::to_u32(K, v, name);
+    let args = Args {
+        head_count: u(g.head_count, "heads")?,
+        head_dim: u(width, "head dim")?,
+        query_count: u(g.query_count, "queries")?,
+        query_token_offset: u(g.query_token_offset, "query offset")?,
+        chunk_start_position: u(g.chunk_start_position, "chunk start")?,
+        window: u(g.window, "window")?,
+        selected_slots: u(g.selected_slots, "selected slots")?,
+        compressed_capacity: u(g.compressed_capacity, "compressed capacity")?,
+        raw_cache_is_chunk: u32::from(g.raw_cache_is_chunk),
+        scale: g.scale,
+        split_rows: u(SELECTED_SPLIT_ROWS, "split rows")?,
+        splits: u(splits, "splits")?,
+    };
+    let simdgroup = MTLSize {
+        width: 32,
+        height: 1,
+        depth: 1,
+    };
+    let partial = ctx.pipeline("kernel_online_selected_attention_f16_split_partial")?;
+    let merge = ctx.pipeline("kernel_online_selected_attention_f16_split_merge")?;
+    for pso in [&partial, &merge] {
+        if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 32 {
+            return Err(bad_shape(K, "needs one 32-lane simdgroup per work unit"));
+        }
+    }
+    enc.set_pipeline(&partial);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, b.queries);
+    enc.set_tensor(2, b.raw_cache);
+    enc.set_tensor(3, b.raw_cache_before_chunk);
+    enc.set_tensor(4, b.compressed_cache);
+    enc.set_tensor(5, b.selected_ids);
+    enc.set_tensor(6, b.selected_counts);
+    enc.set_tensor(7, b.visible_counts);
+    enc.set_tensor(8, partials.values);
+    enc.set_tensor(9, partials.stats);
+    enc.dispatch(
+        MTLSize {
+            width: g.query_count,
+            height: g.head_count,
+            depth: splits,
+        },
+        simdgroup,
+    );
+    enc.set_pipeline(&merge);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, partials.values);
+    enc.set_tensor(2, partials.stats);
+    enc.set_tensor(3, b.sinks);
+    enc.set_tensor(4, b.output);
+    enc.dispatch(
+        MTLSize {
+            width: g.query_count,
+            height: g.head_count,
+            depth: 1,
+        },
+        simdgroup,
     );
     Ok(())
 }
@@ -1058,6 +1243,148 @@ mod tests {
         let (dense, selected) = (tensor_f32_at_offset(&dense_t), tensor_f32_at_offset(&sel_t));
         let worst = max_abs_diff_finite("dense vs full selection", &selected, &dense);
         assert!(worst <= 1e-5, "dense vs full selection: {worst}");
+    }
+
+    /// The split kernel equals the serial kernel within float tolerance on
+    /// a DS4-shaped geometry (raw ring window, finite sinks, padded and
+    /// out-of-range selections) and a GLM-shaped one (window 0, no sink,
+    /// 2,051 slots); and a query's split result is bitwise independent of
+    /// how many queries share the dispatch.
+    #[test]
+    fn split_selected_attention_matches_serial_and_is_dispatch_independent() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        let mut state = 0x9e37_79b9u32;
+        let mut noise = |scale: f32| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            ((state >> 8) as f32 / 16_777_216.0 - 0.5) * 2.0 * scale
+        };
+        const CAP: usize = 2_400;
+        const TOKENS: usize = 4;
+        for (window, slots, sink, start) in [
+            (128usize, 300usize, 0.75f32, 2_200usize),
+            (0, 2_051, LATENT_NO_SINK, 2_300),
+        ] {
+            let q: Vec<f32> = (0..W * H * TOKENS).map(|_| noise(1.0)).collect();
+            let cache: Vec<half::f16> = (0..W * CAP)
+                .map(|_| half::f16::from_f32(noise(0.5)))
+                .collect();
+            let ring: Vec<half::f16> = (0..W * window.max(1))
+                .map(|_| half::f16::from_f32(noise(0.5)))
+                .collect();
+            let mut ids = vec![-1i32; slots * TOKENS];
+            let mut counts = [0i32; TOKENS];
+            let mut visible = [0i32; TOKENS];
+            for t in 0..TOKENS {
+                let l = start + t + 1;
+                visible[t] = l as i32;
+                counts[t] = (slots - 7 * t) as i32;
+                for slot in 0..slots {
+                    // Mostly valid ids; some beyond visibility or negative.
+                    ids[t * slots + slot] = match slot % 97 {
+                        0 => -1,
+                        1 => (l + 3) as i32,
+                        _ => ((slot * 7 + t) % l) as i32,
+                    };
+                }
+            }
+            let i32_t = |v: &[i32], shape: Vec<u64>| {
+                offset_tensor(&ctx, 16, bytemuck::cast_slice(v), 16, shape, GgmlType::I32)
+            };
+            let f16_t = |v: &[half::f16], rows: usize| {
+                offset_tensor(
+                    &ctx,
+                    64,
+                    bytemuck::cast_slice(v),
+                    64,
+                    vec![W as u64, rows as u64],
+                    GgmlType::F16,
+                )
+            };
+            let q_t = f32_tensor(&ctx, &q, vec![(W * H) as u64, TOKENS as u64]);
+            let cache_t = f16_t(&cache, CAP);
+            let ring_t = f16_t(&ring, window.max(1));
+            let sinks_t = f32_tensor(&ctx, &[sink; H], vec![H as u64]);
+            let splits = selected_attention_splits(window, slots);
+            let run_kind = |split: bool, first: usize, count: usize| -> Vec<f32> {
+                let out_t = f32_tensor(
+                    &ctx,
+                    &vec![3.0; W * H * TOKENS],
+                    vec![(W * H) as u64, TOKENS as u64],
+                );
+                let ids_t = i32_t(
+                    &ids[first * slots..(first + count) * slots],
+                    vec![slots as u64, count as u64],
+                );
+                let counts_t = i32_t(&counts[first..first + count], vec![count as u64]);
+                let visible_t = i32_t(&visible[first..first + count], vec![count as u64]);
+                let units = (count * H * splits) as u64;
+                let values_t =
+                    f32_tensor(&ctx, &vec![0.0; W * units as usize], vec![W as u64, units]);
+                let stats_t = f32_tensor(&ctx, &vec![0.0; 2 * units as usize], vec![2, units]);
+                let buffers = SelectedAttention {
+                    queries: &q_t,
+                    raw_cache: &ring_t,
+                    raw_cache_before_chunk: &ring_t,
+                    compressed_cache: &cache_t,
+                    selected_ids: &ids_t,
+                    selected_counts: &counts_t,
+                    visible_counts: &visible_t,
+                    sinks: &sinks_t,
+                    output: &out_t,
+                };
+                let shape = SelectedAttentionShape {
+                    head_count: H,
+                    query_count: count,
+                    query_token_offset: first,
+                    token_count: TOKENS,
+                    chunk_start_position: start,
+                    window,
+                    raw_cache_is_chunk: false,
+                    selected_slots: slots,
+                    compressed_capacity: CAP,
+                    scale: 1.0 / 16.0,
+                    direct: true,
+                };
+                run(&ctx, |enc| {
+                    if split {
+                        let partials = SelectedAttentionPartials {
+                            values: &values_t,
+                            stats: &stats_t,
+                        };
+                        encode_online_selected_attention_split_f16(
+                            &ctx, enc, &buffers, shape, &partials,
+                        )
+                        .unwrap();
+                    } else {
+                        encode_online_selected_attention_f16(&ctx, enc, &buffers, shape).unwrap();
+                    }
+                });
+                tensor_f32_at_offset(&out_t)
+            };
+            let serial = run_kind(false, 0, TOKENS);
+            let split = run_kind(true, 0, TOKENS);
+            let worst = max_abs_diff_finite("split vs serial", &split, &serial);
+            assert!(worst <= 2e-6, "window {window}: split vs serial {worst}");
+            assert_ne!(
+                split.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                vec![3.0f32.to_bits(); split.len()]
+            );
+            for t in 0..TOKENS {
+                let alone = run_kind(true, t, 1);
+                let row = t * W * H..(t + 1) * W * H;
+                assert!(
+                    alone[row.clone()]
+                        .iter()
+                        .zip(&split[row])
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "window {window}: token {t} depends on the dispatch"
+                );
+            }
+        }
     }
 
     /// The encoder refuses raw caches too short for the window or chunk it

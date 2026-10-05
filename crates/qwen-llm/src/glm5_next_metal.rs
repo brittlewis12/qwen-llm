@@ -570,6 +570,8 @@ struct SparseScratch {
     row_ids: MetalTensor,
     row_counts: MetalTensor,
     select_status: MetalTensor,
+    attention_partials: MetalTensor,
+    attention_partial_stats: MetalTensor,
 }
 
 impl SparseScratch {
@@ -588,6 +590,8 @@ impl SparseScratch {
             row_ids: b.take("row_ids")?,
             row_counts: b.take("row_counts")?,
             select_status: b.take("select_status")?,
+            attention_partials: b.take("attention_partials")?,
+            attention_partial_stats: b.take("attention_partial_stats")?,
         };
         b.finish()?;
         Ok(s)
@@ -1811,7 +1815,7 @@ impl<'w> Glm5NextSession<'w> {
         )?;
         let flat = |t: &MetalTensor| t.view_subrange(0, vec![(kv * heads) as u64, 1]);
         self.stage(enc, Glm5NextStage::SparseAttention, Some(block))?;
-        crate::metal::encode_online_selected_attention_f16(
+        crate::metal::encode_online_selected_attention_split_f16(
             ctx,
             enc,
             &crate::metal::SelectedAttention {
@@ -1837,6 +1841,10 @@ impl<'w> Glm5NextSession<'w> {
                 compressed_capacity: latent.shape[1] as usize,
                 scale,
                 direct: true,
+            },
+            &crate::metal::SelectedAttentionPartials {
+                values: &sp.attention_partials,
+                stats: &sp.attention_partial_stats,
             },
         )?;
         Ok(())

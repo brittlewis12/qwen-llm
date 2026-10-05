@@ -199,7 +199,11 @@ fn moe_grouped_generic_mapping_matches_metal_source() {
         let l = moe_grouped_generic_layout(dtype).unwrap();
         let needle = format!("[[host_name(\"{name}\")]]");
         let lines: Vec<&str> = MOE_METAL.lines().filter(|s| s.contains(&needle)).collect();
-        assert_eq!(lines.len(), 1, "expected exactly one instantiation of {name}");
+        assert_eq!(
+            lines.len(),
+            1,
+            "expected exactly one instantiation of {name}"
+        );
         assert!(
             lines[0].contains("kernel_moe_swiglu_clamped_grouped_slots_n16_generic<")
                 && lines[0].contains(&format!("qt_dequantize_{}>", l.suffix)),

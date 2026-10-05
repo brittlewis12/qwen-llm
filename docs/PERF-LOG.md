@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-05 - GLM Fused mHC Pre: tg128 +7.8% (27.5 -> 29.7 tok/s)
+
+Leverage map (2026-10-05) #2. Packet `docs/bench/2026-10-05-glm53-fused-mhc-pre/`.
+- **Change (`b1ff3b8e`):** the 90 per-token mHC pre sub-blocks go from five
+  serial dispatches to two:
+  - split-K Q8_0 partials of the raw residual, per (256-value chunk, row);
+  - one 1024-thread finish per row: RMS scale, register-resident
+    controls, collapse and block norm.
+  Decode and packed prefill share the kernels. DS4 is unchanged.
+- **Not bitwise for DS4:** a register-resident controls kernel was tried
+  as a bitwise drop-in for both families. Under fast math the combination
+  moved by up to 35 ulps, so DS4 keeps its kernel until it has its own
+  qualification.
+- **Exactness:** Numerical (requalified). Live GLM gates pass 14/14:
+  - Exact packed == serial decode bitwise;
+  - near-4096 prompt-end KL 9.3e-9, worst 9.0e-5;
+  - packed sparse KL 1.7e-5 against a 1e-2 gate.
+- **A/B vs `a23a9202`:**
+  - tg128 depth 0: 27.54 -> 29.70 tok/s (36.31 -> 33.67 ms);
+  - tg128 depth 4096: 26.66 -> 28.45 tok/s;
+  - prefill neutral or better (pp128@4096 +4.4%, pp4096 179.1 -> 182.7).
+- **Attribution v3:** mHC pre 4.13 -> 1.33 ms per token; unprofiled step
+  38.58 -> 35.97 ms (depth 64) and 40.60 -> 38.03 ms (depth 4096).
+- **Against llama.cpp (`e1425c0be`, no residency sets):** native tg is now
+  29.7 vs 23.7 tok/s.
+- **Next:** weight streaming. kda is 12.0 ms at 324 GB/s, against 505 GB/s
+  for the same Q6_K kernel on the head. Run a KDA per-dispatch screen
+  before choosing between multi-matrix dispatches and the recurrence.
+
 ## 2026-10-05 - GLM Split Selected Attention: tg128 at Depth +27.9% (20.8 -> 26.6 tok/s)
 
 Leverage map (2026-10-05) #2. Packet

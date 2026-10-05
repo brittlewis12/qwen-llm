@@ -98,8 +98,10 @@ no further `glm5-next` changes). Earlier research (2026-08-28 gap analysis,
     26.62 tok/s, and at depth 8192 from 20.92 to 26.41. Prefill is neutral
     (pp4096 181.7). Decode at depth now costs ~2 ms/token over depth 0
     (`docs/bench/2026-10-05-glm53-split-selected-attention/`).
+- The fused mHC pre (`b1ff3b8e`, numerical, requalified) takes tg128 at
+  depth 0 from 27.54 to 29.70 tok/s and at depth 4096 from 26.66 to 28.45
+  (`docs/bench/2026-10-05-glm53-fused-mhc-pre/`).
 - Next: P6:
-  - mHC pre (3.9 ms/token; single-thread controls first, then a fused pre);
   - KDA and expert weight streaming (~321 GB/s against 474);
   - the small-prompt prefill gap against llama.cpp (pp32 60 vs 66 with
     matched placement);

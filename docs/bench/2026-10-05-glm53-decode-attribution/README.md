@@ -86,3 +86,20 @@ Findings:
   - RMS over 16,384 values 6.5;
   - block RMS 3.0;
   - collapse 1.7.
+
+## v3: after the fused mHC pre (`b1ff3b8e`)
+
+`attribution-v3.json`, same method. Packet `../2026-10-05-glm53-fused-mhc-pre/`.
+
+| Stage (ms per token) | v2 depth 64 | v3 depth 64 | v3 depth 4096 |
+|---|---:|---:|---:|
+| attention_pre | 2.03 | **0.68** | 0.65 |
+| ffn_pre | 2.11 | **0.66** | 0.64 |
+| kda | 12.02 | 11.98 | 11.75 |
+| routed_experts | 10.05 | 10.02 | 9.92 |
+| shared_expert | 2.62 | 2.60 | 2.49 |
+| mla_output + mla_projection | 3.16 | 3.16 | 3.12 |
+| **unprofiled wall** | **38.58** | **35.97** | **38.03** |
+
+Weight streaming (kda, experts, shared, MLA, head, router, dense) is now
+~30 of ~36 ms per token at depth 64.

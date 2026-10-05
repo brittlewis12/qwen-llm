@@ -10,6 +10,10 @@ use serde_json::{Value, json};
 
 mod glm5_next;
 mod k2;
+
+/// A family's executed readout: input tokens, selected position, deployed
+/// model metadata, per-layer results and the optional full-vocabulary bundle.
+type Readout = (Vec<i32>, usize, Value, Vec<Value>, Option<Bundle>);
 pub(crate) use k2::read_transport as read_k2_transport;
 
 fn layers(requested: &[u32], count: u32) -> Result<Vec<u32>> {

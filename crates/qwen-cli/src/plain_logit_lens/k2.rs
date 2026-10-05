@@ -98,7 +98,7 @@ impl Prepared {
         gguf: &GgufFile,
         content: &CheckpointContentReport,
         mut transport: Option<&mut crate::linear_transport::VerifiedTransport>,
-    ) -> Result<(Vec<i32>, usize, Value, Vec<Value>, Option<Bundle>)> {
+    ) -> Result<Readout> {
         crate::shutdown::checkpoint()?;
         let context = MetalContext::new()?;
         let model = K2LoadedModel::load(&context, gguf, u32::try_from(self.position + 1)?)?;

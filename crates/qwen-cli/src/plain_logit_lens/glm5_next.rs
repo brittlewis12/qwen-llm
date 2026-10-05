@@ -106,11 +106,7 @@ impl<'g> Prepared<'g> {
         })
     }
 
-    pub(super) fn execute(
-        self,
-        args: &ReadFullArgs,
-        gguf: &GgufFile,
-    ) -> Result<(Vec<i32>, usize, Value, Vec<Value>, Option<Bundle>)> {
+    pub(super) fn execute(self, args: &ReadFullArgs, gguf: &GgufFile) -> Result<Readout> {
         let config = self.artifact.config();
         let blocks = config.executed_block_count();
         let (streams, hidden) = (config.hc_streams as usize, config.hidden_size as usize);

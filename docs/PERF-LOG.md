@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-05 - GLM Split Selected Attention: tg128 at Depth +27.9% (20.8 -> 26.6 tok/s)
+
+Leverage map (2026-10-05) #2. Packet
+`docs/bench/2026-10-05-glm53-split-selected-attention/`; attribution v2 in
+`docs/bench/2026-10-05-glm53-decode-attribution/`.
+- **Change (`ea49595f`, hardened `02d3ccdf`):** selected attention runs as
+  128-row partials, one simdgroup per (query, head, split), and an in-order
+  merge into the sink state. Packed sparse rows use 16-query sub-batches.
+  DS4 still uses the serial kernel.
+- **Exactness:** Numerical (requalified). Exact packed prefill still equals
+  serial decode bitwise. Live GLM gates pass 14/14:
+  - near-4096 prompt-end KL 2.402e-8, worst 3.343e-5, top-1 33/33;
+  - packed sparse KL 1.040e-6;
+  - frontier decode top-1 46/46.
+  The hardening (finite empty state) reproduced these values exactly.
+- **A/B vs `479fa9c1`, same session:**
+  - tg128 at depth 4096: 20.81 -> 26.62 tok/s (48.06 -> 37.57 ms);
+  - tg128 at depth 8192: 20.92 -> 26.41 tok/s;
+  - pp32, pp512 and pp4096 neutral within noise (pp4096 181.4 -> 181.7).
+- **Attribution v2 at depth 4096:**
+  - selected attention 11.60 -> 1.05 ms per token;
+  - unprofiled step 51.21 -> 40.60 ms;
+  - the depth penalty is now ~2.0 ms (all sparse stages).
+- **Next:**
+  - mHC pre. The screen gives 28.8 µs per sub-block, 10.4 µs of it in the
+    single-thread controls kernel. First, a bitwise register-resident
+    controls kernel; then a fused split-K pre, which is numerical.
+  - KDA streaming (11.8 ms at 328 GB/s) needs its own per-dispatch screen.
+
 ## 2026-10-05 - GLM Serve Idle Residency On By Default (60 s)
 
 Leverage map (2026-10-05) #1.

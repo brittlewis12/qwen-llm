@@ -53,3 +53,36 @@ Findings:
   ~30.5 ms for ~9.8 GB at depth 64, or ~321 GB/s against 474 GB/s stream.
 - mHC pre (RMSNorm, mix matvec, controls, collapse, norm) costs ~4.1 ms per
   token for 39 MB of weights: 90 small stages at ~46 µs each.
+
+## v2: after the split selected attention (`a99792ba`)
+
+`attribution-v2.json`: same method and command, with
+`GLM53_STAGE_OUT=attribution-v2.json`. Packet
+`../2026-10-05-glm53-split-selected-attention/` has the A/B.
+
+| Stage (ms per token) | v1 depth 4096 | v2 depth 4096 | v2 depth 64 |
+|---|---:|---:|---:|
+| sparse_attention | 11.60 | **1.05** | — |
+| sparse_select | 0.55 | 0.55 | — |
+| sparse_query | 0.34 | 0.34 | — |
+| sparse_scores | 0.08 | 0.08 | — |
+| kda | 12.02 | 11.83 | 12.02 |
+| routed_experts | 10.04 | 9.99 | 10.05 |
+| ffn_pre + attention_pre | 4.07 | 3.92 | 4.13 |
+| **unprofiled wall** | **51.21** | **40.60** | **38.58** |
+
+- Selected attention now takes ~95 µs per MLA block. All sparse stages
+  together cost ~2.0 ms per token, which is the whole remaining depth
+  penalty (40.60 vs 38.58 ms).
+- Other stages are unchanged. Decode is now led by weight streaming:
+  kda 11.8, routed experts 10.0, shared expert 2.6, MLA 3.2, head 1.0,
+  router 0.8 and dense FFN 0.8 ms. mHC pre (3.9 ms) is next.
+- mHC pre per sub-block, from the `metal::mhc::tests::mhc4_pre_dispatch_costs`
+  screen at GLM width with synthetic weights and 90 chained repetitions, in
+  µs:
+  - whole sequence 28.8;
+  - controls 10.4 (one GPU thread, 20 Sinkhorn rounds through device memory);
+  - Q8_0 mix 7.1;
+  - RMS over 16,384 values 6.5;
+  - block RMS 3.0;
+  - collapse 1.7.

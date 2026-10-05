@@ -89,12 +89,22 @@ no further `glm5-next` changes). Earlier research (2026-08-28 gap analysis,
   pp512 174.7, tg128 20.8. Decode at depth costs about 12 ms/token over depth 0
   and is flat from 4096 to 8192, so the cost sits in the sparse path's fixed
   terms rather than in indexer scoring that grows with depth.
-- Next: P6: grouped-heads selected attention (sparse decode
-  costs +4.7 ms/token at the frontier; native loses 25% from depth 0 to 4096
-  against llama.cpp's 10%), long-context dense attention, a packed-prefill stage
-  profiler (a fresh 22-28 token prefill costs 0.6-1.4 s), compact grouped-expert
-  scheduling, and an exact top-p sampler that avoids the full-vocabulary sort
-  (sampled decode 25.3 vs 27.7 tok/s greedy).
+- P6 progress (leverage map 2026-10-05):
+  - The sampler's radix full order is bitwise v1: sampled decode +3.2%.
+  - Serve keeps weights wired for 60 s after activity by default.
+  - Decode attribution located the depth penalty in selected attention.
+  - Split selected attention (`ea49595f`, `02d3ccdf`) is numerical and
+    requalified (live gates 14/14). tg128 at depth 4096 goes from 20.81 to
+    26.62 tok/s, and at depth 8192 from 20.92 to 26.41. Prefill is neutral
+    (pp4096 181.7). Decode at depth now costs ~2 ms/token over depth 0
+    (`docs/bench/2026-10-05-glm53-split-selected-attention/`).
+- Next: P6:
+  - mHC pre (3.9 ms/token; single-thread controls first, then a fused pre);
+  - KDA and expert weight streaming (~321 GB/s against 474);
+  - the small-prompt prefill gap against llama.cpp (pp32 60 vs 66 with
+    matched placement);
+  - long-context dense attention;
+  - a packed-prefill stage profiler.
 
 ## Artifact
 

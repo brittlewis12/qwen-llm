@@ -119,4 +119,15 @@ impl<'a> Glm5NextPreparedArtifact<'a> {
         generation_stops(self.layout.source, self.config().vocab_size)
             .map_err(|e| failure("glm5_next_generation_stops", e))
     }
+
+    /// Text-chat eligibility of this artifact (template, markers, stops).
+    /// Raw input does not depend on it.
+    pub fn chat_profile(
+        &self,
+    ) -> Result<crate::glm5_next_chat::VerifiedChatProfile, crate::glm5_next_chat::ChatError> {
+        let stops = self
+            .generation_stops()
+            .map_err(|e| crate::glm5_next_chat::ChatError::unverified(e.to_string()))?;
+        crate::glm5_next_chat::verify_profile(self.layout.source, &self.tokenizer, &stops)
+    }
 }

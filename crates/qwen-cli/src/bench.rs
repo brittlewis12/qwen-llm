@@ -84,6 +84,7 @@ mod response_shape_runtime;
 #[path = "bench/roofline.rs"]
 mod roofline;
 mod rope_micro;
+mod sampler_replay;
 mod shutdown;
 #[path = "../source_identity.rs"]
 mod source_identity;
@@ -670,6 +671,9 @@ fn run() -> Result<()> {
         Cmd::MoeBatchSweep(a) => run_moe_batch_sweep(a),
         Cmd::Roofline(a) => run_roofline(a),
         Cmd::RopeMicro(a) => rope_micro::run(a, serde_json::to_value(recorded_build_identity())?),
+        Cmd::SamplerReplay(a) => {
+            sampler_replay::run(a, serde_json::to_value(recorded_build_identity())?)
+        }
         Cmd::Q4MmaCeiling(a) => {
             q4_mma_ceiling::run(a, serde_json::to_value(recorded_build_identity())?)
         }

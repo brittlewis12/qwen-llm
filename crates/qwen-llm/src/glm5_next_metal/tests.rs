@@ -2370,3 +2370,86 @@ fn lens_captures_read_out_without_moving_state() {
         );
     }
 }
+
+/// Acquisition for the sampler replay (`qwen-bench sampler-replay`): real
+/// full-vocabulary logits rows from release-preset chat decoding, written as
+/// little-endian F32 rows to `GLM53_LOGITS_OUT` with a JSON sidecar. Not a
+/// gate; it only records inputs for CPU timing.
+#[test]
+#[ignore = "acquisition: loads the GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_LOGITS_OUT and an idle GPU"]
+fn capture_release_sampling_logits() {
+    use crate::glm5_next_chat::{Effort, Message, RenderOptions, render};
+    use crate::sampling::{Sampler, SamplingConfig};
+    use std::io::Write;
+    let _lease = production_lease();
+    let out = PathBuf::from(std::env::var("GLM53_LOGITS_OUT").expect("GLM53_LOGITS_OUT"));
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let ctx = MetalContext::new().expect("Metal context");
+    let gguf = GgufFile::open(&path).unwrap();
+    let artifact = crate::glm5_next::admission::Glm5NextPreparedArtifact::inspect(&gguf).unwrap();
+    let stops = artifact.generation_stops().unwrap();
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let prompts = [
+        ("Write a short poem about the sea.", Effort::High),
+        (
+            "Explain how a hash map handles collisions, in two paragraphs.",
+            Effort::Low,
+        ),
+        ("What is 17 * 23? Show your work briefly.", Effort::Max),
+    ];
+    let steps = 48;
+    let mut file = std::io::BufWriter::new(std::fs::File::create(&out).unwrap());
+    let mut records = Vec::new();
+    for (index, (question, effort)) in prompts.iter().enumerate() {
+        let text = render(
+            &[Message::User((*question).into())],
+            RenderOptions::generate(*effort, false),
+        )
+        .unwrap();
+        let tokens: Vec<u32> = artifact
+            .tokenizer()
+            .encode(&text, false)
+            .unwrap()
+            .into_iter()
+            .map(|id| id as u32)
+            .collect();
+        let mut session =
+            Glm5NextSession::with_prefill_rows(&ctx, &weights, tokens.len() + steps, tokens.len())
+                .unwrap();
+        let mut logits = session.prefill_packed(&ctx, &tokens).unwrap();
+        let config = SamplingConfig::glm5_next(1000 + index as u64);
+        let mut sampler = Sampler::new(config).unwrap();
+        let mut sampled = Vec::new();
+        for _ in 0..steps {
+            for value in &logits {
+                file.write_all(&value.to_le_bytes()).unwrap();
+            }
+            let token = sampler.sample(&logits).unwrap().token;
+            sampled.push(token);
+            if stops.contains(&token) {
+                break;
+            }
+            logits = session.forward(&ctx, token as u32).unwrap();
+        }
+        records.push(serde_json::json!({
+            "prompt": question, "effort": effort, "prompt_tokens": tokens.len(),
+            "seed": config.seed, "rows": sampled.len(), "sampled": sampled,
+        }));
+    }
+    file.flush().unwrap();
+    let rows: usize = records
+        .iter()
+        .map(|r| r["rows"].as_u64().unwrap() as usize)
+        .sum();
+    let sidecar = serde_json::json!({
+        "schema": "qwen.sampler_replay_logits.v1", "family": "glm5-next",
+        "vocab": weights.config.vocab_size, "rows": rows, "dtype": "f32_le",
+        "sampler": "SamplingConfig::glm5_next", "requests": records,
+    });
+    std::fs::write(
+        out.with_extension("json"),
+        serde_json::to_vec_pretty(&sidecar).unwrap(),
+    )
+    .unwrap();
+    eprintln!("wrote {rows} rows to {}", out.display());
+}

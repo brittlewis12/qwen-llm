@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-05 - Sampler: Radix Full-Vocabulary Order, Still Bitwise v1; GLM Sampled Decode +3.2%
+
+Leverage map (2026-10-05) #5.
+- **Instrument:** `qwen-bench sampler-replay` (CPU-only) times the
+  production sampler on captured logits rows. `--sidecar` replays each
+  recorded request with its seed and requires the recorded tokens.
+  Acquisition: `glm5_next_metal::tests::capture_release_sampling_logits`
+  (144 GLM rows, release preset, three chat prompts, efforts high, low and
+  max).
+- **Attribution (top-k off, 154,880 entries):**
+  - 2.88 ms per call. The comparator sort is 2.26 ms, probability weights
+    0.36, fill 0.12, top-p 0.08.
+  - The nucleus is tiny (p50 1, p90 4, max 39 tokens). With top-k 64 the
+    call is 0.35 ms.
+- **Change:** the full-vocabulary order is built from u64 keys (inverted f32
+  total order, then token id) with a stable 16-bit LSD radix. It is the
+  same order, so the same weights, sums, cutoff and draw: sampler-v1
+  unchanged, with no version bump.
+- **Evidence:**
+  - An exhaustive-shape order test passes, as do the 32 sampler tests with
+    their v1 golden streams.
+  - Replay reproduces all 144 recorded tokens, at 2.88 -> 1.65 ms per call.
+    8- and 11-bit digits measured 2.25 and 2.81 ms on a host at load ~12.
+- **Whole decode (GLM `qwen run`, release preset, seed 7, 256 tokens,
+  ABBA):** comparator 25.09 / 25.12, radix 25.78 / 26.00 tok/s, +3.2%
+  (about -1.2 ms/token). Output bytes and token fingerprints are identical
+  across all four runs.
+- **Remaining:** about 1.65 ms per call. A sampler-v2 (total summed outside
+  sorted order, nucleus by partial selection) could save about 0.8 ms more
+  but changes the replay contract and needs a version bump. Not taken.
+
 ## 2026-10-05 - GLM-5.3-Flash Baseline, Placement, And Attribution Priorities
 
 Leverage map (2026-10-05). No optimization win claimed.

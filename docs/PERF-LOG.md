@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-05 - DFlash Fallback Replays From The First Flagged Row: Q8 Code 1.18x -> 1.50x
+
+Qwen3.8-27B Q8_0 + DFlash2 Q8_0, ~7.4K prompt, greedy, 256 tokens, M4 Max.
+- **Census:** code ran 1.19x serial (16.29 tok/s serial), prose 0.90x. Exact
+  fallbacks were 49% of code decode: 22 of 51 steps, 292 ms each. Margin
+  sensitivity on code: 0.75 -> 19.3, 0.375 -> 24.2, 0.2 -> 28.6 tok/s.
+- **Waste:** the first under-margin row averaged index 2.8, yet the fallback
+  replayed from row 0; 61 of 102 replayed rows had already passed the margin.
+- **Change:** restore to the first flagged row (`n_keep = r`, the
+  partial-accept restore) and replay token-major from there. Rows replayed this
+  way run over packed in-block state, so any replayed row with exact gap below
+  0.15 or non-finite escalates to the whole-block replay
+  (`restore_to_pre_block_after_replay`). The replay no longer scatters into the
+  capture ring; the append publishes committed rows. Default on;
+  `QWEN_DFLASH_VERIFY_FALLBACK_PARTIAL=0` restores whole-block replay.
+- **Drift (shadow probe, margin 3.0):** on 91 paired repaired rows, drift vs a
+  serial reference was median 0.0047 / max 0.0308 (partial) vs 0.0034 / 0.0196
+  (whole-block); whole-block replay itself reached 0.0731. The worst partial row
+  (serial gap 0.080) motivated the 0.15 escalation floor.
+- **Result:** code 19.24 -> 24.48 tok/s (5 escalations); prose 15.02 -> 15.35
+  (fallback 1442 -> 1071 ms; prose stays below serial on acceptance). Stress at
+  margin 3.0: 39 fallbacks, 3 escalations, 0 shadow flips. Every run was
+  byte-identical to serial.
+- **Kernel gate (same day):** llama.cpp's few-row MMA (PR #29869) at exact
+  Qwen3.8 shapes runs the Q8_0 N=8 matmuls 1.31-1.47x faster than the mma8v
+  table, 26-30% of N=8 matmul time (~23-27 ms per verify). Q4_K_M shapes are
+  1.2-1.5x faster except lm_head. Not yet ported.
+
 ## 2026-09-26 - Qwen Idle Publication: Sessions Survive A Crash; 30 s Shutdown
 
 Leverage map (2026-09-26) #1.

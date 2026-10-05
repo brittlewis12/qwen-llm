@@ -118,6 +118,21 @@ pub(crate) fn verify_fallback_enabled() -> bool {
     qwen_llm::env_flag::read_default_on("QWEN_DFLASH_VERIFY_FALLBACK")
 }
 
+/// Rollback lever for partial fallback replay. Default on: a flagged packet
+/// keeps the rows before its first under-margin row and replays token-major
+/// from that row. The falsy vocabulary restores whole-block replay from row 0.
+/// Minimum exact (top1 - top2) gap of every row a partial fallback replays.
+/// Those rows run token-major over packed in-block state, whose drift reached
+/// 0.031 against a serial reference at ~7.4K (2026-10-05 shadow probe), while
+/// whole-block replay itself drifts up to 0.073. 0.15 is 2x the whole-block
+/// maximum; a nearer tie or non-finite gap escalates to the whole-block
+/// replay. These are observed maxima, not a proven bound.
+pub(crate) const DFLASH_VERIFY_FALLBACK_PARTIAL_MIN_GAP: f32 = 0.15;
+
+pub(crate) fn verify_fallback_partial_enabled() -> bool {
+    qwen_llm::env_flag::read_default_on("QWEN_DFLASH_VERIFY_FALLBACK_PARTIAL")
+}
+
 /// Ctx-keyed spec-vs-serial break-even in mean emitted tokens/step.
 pub(crate) fn dflash_breakeven(_kv_n_pos: usize) -> f64 {
     DFLASH_BREAKEVEN_BASE
@@ -379,6 +394,15 @@ pub(crate) struct DflashDecodeStats {
     pub(crate) drafts_scored: usize,
     pub(crate) physical_target_positions: usize,
     pub(crate) fallback_calls: usize,
+    /// Committed rows a fallback kept from the packed verify because every
+    /// row before the first under-margin row passed the margin.
+    pub(crate) fallback_rows_kept: usize,
+    /// Exact token-major forwards a fallback ran, including those of an
+    /// abandoned partial attempt.
+    pub(crate) fallback_rows_replayed: usize,
+    /// Partial replays redone as whole-block replays because a replayed row
+    /// was itself a near tie or non-finite.
+    pub(crate) fallback_escalations: usize,
     pub(crate) backoff_probe_steps: usize,
     pub(crate) backoff_reason: Option<DflashBackoffReason>,
     pub(crate) alpha_backoff: bool,
@@ -829,99 +853,185 @@ where
         // token-major forwards and re-accept against their argmaxes.
         let mut fallback_ran = false;
         let mut fallback_targets: Vec<i32> = Vec::new();
+        let mut fallback_replay_start = 0usize;
+        // Shadow-probe evidence: exact logits of every replayed row, compared
+        // below against the serial reference session.
+        let capture_replay_logits = shadow_probe.is_some();
+        let mut replay_logits: Vec<(usize, Vec<f32>)> = Vec::new();
         if !sampled_mode && verify_fallback_enabled() {
             let margin = verify_fallback_margin((drafter_pos as usize) + n_eff);
             let gaps = unsafe {
                 let src = verify_scratch.verify_gap.buffer.contents().as_ptr() as *const f32;
                 std::slice::from_raw_parts(src, n_eff)
             };
-            let flagged = (0..=n_accepted).any(|i| !(gaps[i].is_finite() && gaps[i] >= margin));
+            let first_flagged =
+                (0..=n_accepted).find(|&i| !(gaps[i].is_finite() && gaps[i] >= margin));
             if std::env::var_os("QWEN_DFLASH_VERIFY_FALLBACK_DIAG").is_some() {
                 eprintln!(
-                    "[fallback-diag] step_pos={drafter_pos} n_eff={n_eff} n_accepted={n_accepted} gaps={:?} flagged={flagged}",
+                    "[fallback-diag] step_pos={drafter_pos} n_eff={n_eff} n_accepted={n_accepted} gaps={:?} first_flagged={first_flagged:?}",
                     &gaps[..n_eff]
                 );
             }
-            if flagged {
+            if let Some(first_flagged) = first_flagged {
+                let mut replay_start = if verify_fallback_partial_enabled() {
+                    first_flagged
+                } else {
+                    0
+                };
                 let fallback_t0 = Instant::now();
                 fallback_ran = true;
                 stats.fallback_calls += 1;
-                qwen_llm::metal_dflash::encode_restore_to_pre_block(
-                    forward,
-                    &verify_scratch,
-                    drafter_pos,
-                    unsafe { sequence.metal_session_mut() },
-                    Some(n_eff as u32),
-                )
-                .context("verify fallback restore to pre-block state")?;
-                // Exact replay with adaptive stop: row 0 is the carry; each
-                // further row replays a draft only while the reference stream
-                // keeps accepting it. The replay stops at the first mismatch,
-                // so the session advances exactly the committed-row count.
-                fallback_targets.clear();
-                fallback_targets.reserve(n_eff);
-                accepted.clear();
-                terminal = None;
-                {
-                    let mut replay_row = |row: usize, token: i32| -> Result<i32> {
-                        let pos = drafter_pos + row as u32;
-                        let hidden_dst = verify_scratch.hidden_capture_n_slot(row as u32);
-                        let ref_logits = forward
-                            .single_token_with_multi_hidden(
-                                token,
-                                pos,
-                                unsafe { sequence.metal_session_mut() },
-                                &head.target_layer_ids,
-                                &hidden_dst,
-                            )
-                            .context("verify fallback exact row")?;
-                        if let Some((ring, wstart, features, ring_window)) = capture_ring
-                            .as_ref()
-                            .filter(|(_, wstart, _, _)| (pos as usize) >= *wstart)
-                        {
-                            let offset = ((pos as usize - *wstart) % *ring_window) * *features;
-                            let view = ring.view_subrange(offset as u64, vec![*features as u64]);
-                            let ring_encoder = loaded.context().queue.commandBuffer().expect("cmd");
-                            let ring_enc = KernelEncoder::begin(&ring_encoder);
-                            encode_scatter_offset_f32(
-                                loaded.context(),
-                                &ring_enc,
-                                &hidden_dst,
-                                &view,
-                                0,
-                                *features,
-                            )
-                            .context("fallback ring scatter")?;
-                            ring_enc.end();
-                            ring_encoder.commit();
-                            qwen_llm::metal::wait_completed(&ring_encoder)?;
-                        }
-                        Ok(argmax_i32(&ref_logits))
-                    };
-                    let row0_target = replay_row(0, verify_input[0])?;
-                    fallback_targets.push(row0_target);
-                    for (i, &draft) in verify_input[1..].iter().enumerate() {
-                        if draft != fallback_targets[i] {
-                            break;
-                        }
-                        accepted.push(draft);
-                        // Terminal checks BEFORE replaying the next row: the
-                        // terminal token is emitted but never consumed, and
-                        // the session must end exactly n_keep rows ahead of
-                        // the pre-block state or the completed-boundary
-                        // checkpoint fails KvPosition validation.
-                        if stop_tokens.contains(&draft) {
-                            terminal = Some(StopReason::Eos);
-                            break;
-                        }
-                        if tokens.len() + accepted.len() == max_tokens {
-                            terminal = Some(StopReason::TokenLimit);
-                            break;
-                        }
-                        let target = replay_row(i + 1, draft)?;
-                        fallback_targets.push(target);
-                    }
+                // Rows before the first flagged row passed the margin, the
+                // same test that lets an unflagged step commit packed state.
+                // Keep them and the drafts they confirmed (d_1..d_start),
+                // exactly as a partial accept of `replay_start` rows would,
+                // and replay token-major only from the first flagged row.
+                if replay_start == 0 {
+                    qwen_llm::metal_dflash::encode_restore_to_pre_block(
+                        forward,
+                        &verify_scratch,
+                        drafter_pos,
+                        unsafe { sequence.metal_session_mut() },
+                        Some(n_eff as u32),
+                    )
+                    .context("verify fallback restore to pre-block state")?;
+                } else {
+                    qwen_llm::metal_dflash::encode_restore_after_partial_accept_inner(
+                        forward,
+                        &verify_scratch,
+                        replay_start as u32,
+                        drafter_pos,
+                        unsafe { sequence.metal_session_mut() },
+                        Some(n_eff as u32),
+                    )
+                    .context("verify fallback restore to first flagged row")?;
                 }
+                // The packed accept loop stops at a terminal draft, so a
+                // kept prefix can only end in one when it spans every
+                // accepted draft; that draft is emitted and never consumed.
+                let packed_terminal = terminal;
+                // At most two attempts. Every row a partial attempt replays runs
+                // token-major over packed in-block state, which the margin
+                // vouches for only through the kept argmaxes, so the attempt
+                // escalates to the whole-block replay as soon as any replayed
+                // row is itself a near tie or non-finite.
+                loop {
+                    let partial_attempt = replay_start > 0;
+                    accepted.truncate(replay_start);
+                    terminal = if replay_start == n_accepted {
+                        packed_terminal
+                    } else {
+                        None
+                    };
+                    // Exact replay with adaptive stop: each row replays only
+                    // while the reference stream keeps accepting drafts. The
+                    // replay stops at the first mismatch, so the session
+                    // advances exactly the committed-row count.
+                    fallback_targets.clear();
+                    fallback_targets.reserve(n_eff);
+                    fallback_targets.extend_from_slice(&verify_argmax[..replay_start]);
+                    replay_logits.clear();
+                    let mut escalate_row: Option<(usize, f32)> = None;
+                    let mut attempt_rows = 0usize;
+                    if terminal.is_none() {
+                        // Replayed hiddens land only in the verify capture slots.
+                        // The append below publishes committed rows to the
+                        // capture ring, so an abandoned attempt leaves no ring
+                        // writes behind.
+                        let mut replay_row = |row: usize, token: i32| -> Result<(i32, f32)> {
+                            let pos = drafter_pos + row as u32;
+                            let hidden_dst = verify_scratch.hidden_capture_n_slot(row as u32);
+                            let ref_logits = forward
+                                .single_token_with_multi_hidden(
+                                    token,
+                                    pos,
+                                    unsafe { sequence.metal_session_mut() },
+                                    &head.target_layer_ids,
+                                    &hidden_dst,
+                                )
+                                .context("verify fallback exact row")?;
+                            if capture_replay_logits {
+                                replay_logits.push((row, ref_logits.clone()));
+                            }
+                            // (top1 - top2), or NaN when any logit is NaN.
+                            let mut top1 = f32::NEG_INFINITY;
+                            let mut top2 = f32::NEG_INFINITY;
+                            let mut has_nan = false;
+                            for &v in &ref_logits {
+                                if v.is_nan() {
+                                    has_nan = true;
+                                } else if v > top1 {
+                                    top2 = top1;
+                                    top1 = v;
+                                } else if v > top2 {
+                                    top2 = v;
+                                }
+                            }
+                            let gap = if has_nan { f32::NAN } else { top1 - top2 };
+                            Ok((argmax_i32(&ref_logits), gap))
+                        };
+                        let near_tie = |gap: f32| {
+                            !(gap.is_finite() && gap >= DFLASH_VERIFY_FALLBACK_PARTIAL_MIN_GAP)
+                        };
+                        let (start_target, start_gap) =
+                            replay_row(replay_start, verify_input[replay_start])?;
+                        attempt_rows += 1;
+                        if partial_attempt && near_tie(start_gap) {
+                            escalate_row = Some((replay_start, start_gap));
+                        } else {
+                            fallback_targets.push(start_target);
+                            for (i, &draft) in
+                                verify_input[1..].iter().enumerate().skip(replay_start)
+                            {
+                                if draft != fallback_targets[i] {
+                                    break;
+                                }
+                                accepted.push(draft);
+                                // Terminal checks BEFORE replaying the next row: the
+                                // terminal token is emitted but never consumed, and
+                                // the session must end exactly n_keep rows ahead of
+                                // the pre-block state or the completed-boundary
+                                // checkpoint fails KvPosition validation.
+                                if stop_tokens.contains(&draft) {
+                                    terminal = Some(StopReason::Eos);
+                                    break;
+                                }
+                                if tokens.len() + accepted.len() == max_tokens {
+                                    terminal = Some(StopReason::TokenLimit);
+                                    break;
+                                }
+                                let (target, gap) = replay_row(i + 1, draft)?;
+                                attempt_rows += 1;
+                                if partial_attempt && near_tie(gap) {
+                                    escalate_row = Some((i + 1, gap));
+                                    break;
+                                }
+                                fallback_targets.push(target);
+                            }
+                        }
+                    }
+                    stats.fallback_rows_replayed += attempt_rows;
+                    let Some((escalate_row, escalate_gap)) = escalate_row else {
+                        break;
+                    };
+                    if std::env::var_os("QWEN_DFLASH_VERIFY_FALLBACK_DIAG").is_some() {
+                        eprintln!(
+                            "[fallback-diag] escalate step_pos={drafter_pos} kept={replay_start} row={escalate_row} exact_gap={escalate_gap}"
+                        );
+                    }
+                    stats.fallback_escalations += 1;
+                    qwen_llm::metal_dflash::encode_restore_to_pre_block_after_replay(
+                        forward,
+                        &verify_scratch,
+                        drafter_pos,
+                        unsafe { sequence.metal_session_mut() },
+                        Some(n_eff as u32),
+                    )
+                    .context("verify fallback escalation to whole-block replay")?;
+                    replay_start = 0;
+                }
+                fallback_replay_start = replay_start;
+                stats.fallback_rows_kept += replay_start;
                 n_accepted = accepted.len();
                 n_keep = if terminal.is_some() {
                     n_accepted
@@ -1074,6 +1184,17 @@ where
                     );
                 }
                 eprintln!("[shadow-probe] row pos={pos} gap={ref_gap:.6e} delta={max_delta:.6e}");
+                if let Some((_, replay)) = replay_logits.iter().find(|(row, _)| *row == i) {
+                    let replay_delta = replay
+                        .iter()
+                        .zip(&ref_logits)
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0.0f32, f32::max);
+                    eprintln!(
+                        "[shadow-probe] replayed pos={pos} row={i} kept={fallback_replay_start} ref_gap={ref_gap:.6e} replay_delta={replay_delta:.6e} flip={}",
+                        spec_tok != ref_tok
+                    );
+                }
             }
         }
         for token in accepted {

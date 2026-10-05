@@ -15836,6 +15836,46 @@ pub fn encode_restore_to_pre_block(
     target_session: &mut MetalSession,
     n_eff_override: Option<u32>,
 ) -> Result<(), DFlashError> {
+    restore_to_pre_block_checked(
+        base,
+        scratch,
+        start_position,
+        target_session,
+        n_eff_override,
+        false,
+    )
+}
+
+/// [`encode_restore_to_pre_block`] for a fallback that already restored to a
+/// partial-accept state and replayed rows token-major, so `kv_n_pos` may be
+/// anywhere in `[start_position, start_position + n]`. The phase-0 pre-block
+/// capture is written only by packed verify, so it still holds the pre-block
+/// state, and the whole-block replay that follows overwrites every row.
+pub fn encode_restore_to_pre_block_after_replay(
+    base: &MetalForward<'_>,
+    scratch: &MetalDFlashVerifyScratch,
+    start_position: u32,
+    target_session: &mut MetalSession,
+    n_eff_override: Option<u32>,
+) -> Result<(), DFlashError> {
+    restore_to_pre_block_checked(
+        base,
+        scratch,
+        start_position,
+        target_session,
+        n_eff_override,
+        true,
+    )
+}
+
+fn restore_to_pre_block_checked(
+    base: &MetalForward<'_>,
+    scratch: &MetalDFlashVerifyScratch,
+    start_position: u32,
+    target_session: &mut MetalSession,
+    n_eff_override: Option<u32>,
+    after_replay: bool,
+) -> Result<(), DFlashError> {
     let n_block = scratch.n;
     let n = n_eff_override.unwrap_or(n_block);
     if n == 0 || n > n_block {
@@ -15872,12 +15912,17 @@ pub fn encode_restore_to_pre_block(
             })
         })?;
     for (i, &kp) in target_session.kv_n_pos.iter().enumerate() {
-        if kp != expected_kv_pre {
+        let valid = if after_replay {
+            (start_position as usize..=expected_kv_pre).contains(&kp)
+        } else {
+            kp == expected_kv_pre
+        };
+        if !valid {
             return Err(DFlashError::Metal(MetalError::BadShape {
                 kernel: "restore_to_pre_block",
                 detail: format!(
-                    "kv_n_pos[{i}]={kp} != start_position + N = {expected_kv_pre}; \
-                     restore must be called immediately after packed_verify(.., \
+                    "kv_n_pos[{i}]={kp} is outside the allowed range for start_position={start_position}, \
+                     N={n}, after_replay={after_replay}; restore must follow packed_verify(.., \
                      start_position) on the same session"
                 ),
             }));

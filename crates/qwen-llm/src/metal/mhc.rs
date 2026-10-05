@@ -856,4 +856,127 @@ mod tests {
             );
         }
     }
+
+    /// Timing screen (not qualification): GPU time of the single-token mHC
+    /// pre sequence at GLM-5.3 width (hidden 4096, Q8_0 mix [16384 -> 24]),
+    /// as a chain of 90 dependent repetitions per command (one decode step's
+    /// worth of pre sub-blocks), whole and per dispatch. Synthetic weights.
+    #[test]
+    #[ignore = "timing screen; run without MTL_DEBUG_LAYER"]
+    fn mhc4_pre_dispatch_costs() {
+        assert!(
+            std::env::var_os("MTL_DEBUG_LAYER").is_none(),
+            "timing runs must not enable MTL_DEBUG_LAYER"
+        );
+        let _lease = crate::metal::acquire_metal_benchmark_lease().expect("GPU lease");
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        const H: usize = 4096;
+        const REPS: usize = 90;
+        let n = H * MHC_STREAMS;
+        let residual: Vec<f32> = (0..n)
+            .map(|i| ((i * 7 + 3) % 29) as f32 * 0.013 - 0.17)
+            .collect();
+        let (mix_bytes, _) = super::super::test_support::synthetic_q8_0_bank(n, MHC_MIXES);
+        let mix_t = offset_tensor(
+            &ctx,
+            0,
+            &mix_bytes,
+            0,
+            vec![n as u64, MHC_MIXES as u64],
+            GgmlType::Q8_0,
+        );
+        let residual_t = tensor(&ctx, &residual, vec![H as u64, 4]);
+        let ones_t = tensor(&ctx, &vec![1.0; n], vec![n as u64]);
+        let normalized_t = tensor(&ctx, &vec![0.0; n], vec![n as u64]);
+        let mixes_t = tensor(&ctx, &[0.0; MHC_MIXES], vec![MHC_MIXES as u64]);
+        let scale_t = tensor(&ctx, &[0.8, -0.45, 1.1], vec![3]);
+        let base_t = tensor(&ctx, &[0.1; MHC_MIXES], vec![MHC_MIXES as u64]);
+        let pre_t = tensor(&ctx, &[0.0; 4], vec![4]);
+        let post_t = tensor(&ctx, &[0.0; 4], vec![4]);
+        let comb_t = tensor(&ctx, &[0.0; 16], vec![4, 4]);
+        let collapsed_t = tensor(&ctx, &vec![0.0; H], vec![H as u64]);
+        let norm_w_t = tensor(&ctx, &vec![1.0; H], vec![H as u64]);
+        let normed_t = tensor(&ctx, &vec![0.0; H], vec![H as u64]);
+        let (rms_eps, hc_eps) = (1e-5f32, 1e-6f32);
+        let rms = |enc: &KernelEncoder| {
+            crate::metal::encode_rms_norm_mul_f32(
+                &ctx,
+                enc,
+                &residual_t,
+                &ones_t,
+                &normalized_t,
+                rms_eps,
+            )
+            .unwrap()
+        };
+        let mix = |enc: &KernelEncoder| {
+            crate::metal::encode_mat_vec_q8_0_f32(
+                &ctx,
+                enc,
+                &mix_t,
+                &normalized_t,
+                &mixes_t,
+                n,
+                MHC_MIXES,
+            )
+            .unwrap()
+        };
+        let controls = |enc: &KernelEncoder| {
+            encode_mhc4_controls(
+                &ctx, enc, hc_eps, &mixes_t, &scale_t, &base_t, &pre_t, &post_t, &comb_t,
+            )
+            .unwrap()
+        };
+        let collapse = |enc: &KernelEncoder| {
+            encode_mhc4_collapse(&ctx, enc, H, &residual_t, &pre_t, &collapsed_t).unwrap()
+        };
+        let block_norm = |enc: &KernelEncoder| {
+            crate::metal::encode_rms_norm_mul_f32(
+                &ctx,
+                enc,
+                &collapsed_t,
+                &norm_w_t,
+                &normed_t,
+                rms_eps,
+            )
+            .unwrap()
+        };
+        let time = |encode: &dyn Fn(&KernelEncoder)| -> f64 {
+            let mut samples: Vec<f64> = (0..8)
+                .map(|_| {
+                    let command = ctx.queue.commandBuffer().expect("command buffer");
+                    let enc = KernelEncoder::begin(&command);
+                    for _ in 0..REPS {
+                        encode(&enc);
+                    }
+                    enc.end();
+                    command.commit();
+                    wait_completed(&command).expect("command buffer failed");
+                    (command.GPUEndTime() - command.GPUStartTime()) * 1e6 / REPS as f64
+                })
+                .skip(1)
+                .collect();
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        };
+        let rows: [(&str, &dyn Fn(&KernelEncoder)); 6] = [
+            ("whole pre (5 dispatches)", &|enc: &KernelEncoder| {
+                rms(enc);
+                mix(enc);
+                controls(enc);
+                collapse(enc);
+                block_norm(enc);
+            }),
+            ("rms 16384", &rms),
+            ("mix q8_0 16384->24", &mix),
+            ("controls (1 thread)", &controls),
+            ("collapse 4096", &collapse),
+            ("block rms 4096", &block_norm),
+        ];
+        for (label, encode) in rows {
+            eprintln!("mhc4 pre: {label:<26} {:7.2} us/rep", time(encode));
+        }
+    }
 }

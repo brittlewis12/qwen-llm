@@ -476,13 +476,16 @@ fn ledger_terms_match_release_geometry() {
     // [128,8192] F16 = 128 G.
     let mla = 11 * (2048 + 1 + 128) * G;
     // 46 decode buffers; every sub-granule vector costs one granule; logits
-    // [154880] F32 = 38 G.
-    let decode = 135 * G;
+    // [154880] F32 = 38 G. The fused mHC pre needs no [16384] ones or
+    // normalized row (4 G each), only sub-granule partials [24, 64] and [64].
+    let decode = 129 * G;
     // ids, weights, status: one granule each per MoE block.
     let routes = 42 * 3 * G;
     // 512-row packed activations (largest: query/output latents 4096 G each,
-    // slot outputs 4096 G).
-    let packed = 38_041 * G;
+    // slot outputs 4096 G). The fused mHC pre replaces the [16384, 512]
+    // normalized rows (2048 G) with partials [24, 64, 512] (192 G) and
+    // [64, 512] (8 G).
+    let packed = 36_193 * G;
     // Sparse decode (capacity reaches the frontier): eleven sub-granule
     // buffers plus [8192] F32 pool scores (2 G), and split selected
     // attention partials for 64 heads x 17 splits: [512, 1088] F32 136 G and

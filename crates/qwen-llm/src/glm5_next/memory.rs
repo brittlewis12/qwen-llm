@@ -107,6 +107,12 @@ pub fn priced(specs: &[BufferSpec], price: BufferPricer<'_>) -> Result<u64> {
 
 use BufferType::{F16, F32, I32};
 
+/// Split-K partials per row of the fused mHC pre
+/// ([`crate::metal::encode_mhc4_pre_q8_0`]).
+pub fn hc_chunks(c: &Glm5NextConfig) -> u64 {
+    crate::metal::mhc4_pre_chunks(c.hidden_size as usize) as u64
+}
+
 /// Decode scratch shared by every block, including the logits and constants.
 pub fn decode_scratch_specs(c: &Glm5NextConfig) -> Vec<BufferSpec> {
     let h = c.hidden_size as u64;
@@ -121,10 +127,14 @@ pub fn decode_scratch_specs(c: &Glm5NextConfig) -> Vec<BufferSpec> {
         z("embedding", F32, &[h]),
         z("residual_a", F32, &[h, 4]),
         z("residual_b", F32, &[h, 4]),
-        BufferSpec::filled("ones", &[c.hc_width() as u64], 1.0),
         BufferSpec::filled("quarter", &[4], 0.25),
         BufferSpec::filled("no_sink", &[heads], crate::metal::LATENT_NO_SINK),
-        z("normalized", F32, &[c.hc_width() as u64]),
+        z(
+            "hc_partial_dots",
+            F32,
+            &[c.hc_mix_count() as u64, hc_chunks(c), 1],
+        ),
+        z("hc_partial_sumsq", F32, &[hc_chunks(c), 1]),
         z("mixes", F32, &[c.hc_mix_count() as u64]),
         z("pre", F32, &[4]),
         z("post", F32, &[4]),
@@ -184,7 +194,12 @@ pub fn packed_scratch_specs(c: &Glm5NextConfig, rows: u64) -> Vec<BufferSpec> {
         z("embedding", F32, &[h, r]),
         z("residual_a", F32, &[h, 4, r]),
         z("residual_b", F32, &[h, 4, r]),
-        z("normalized", F32, &[c.hc_width() as u64, r]),
+        z(
+            "hc_partial_dots",
+            F32,
+            &[c.hc_mix_count() as u64, hc_chunks(c), r],
+        ),
+        z("hc_partial_sumsq", F32, &[hc_chunks(c), r]),
         z("mixes", F32, &[c.hc_mix_count() as u64, r]),
         z("pre", F32, &[4, r]),
         z("post", F32, &[4, r]),

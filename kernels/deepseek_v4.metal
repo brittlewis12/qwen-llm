@@ -4852,6 +4852,226 @@ kernel void kernel_deepseek_v4_hc_controls_batch(
     }
 }
 
+// mHC controls for one token's 24 mixes, as kernel_deepseek_v4_hc_controls
+// computes them, with the 4x4 combination held in registers and stored
+// once. Same expressions in the same order, but not bitwise equal to the
+// device-memory kernel under fast math: codegen differs by up to 35 ulps in
+// the combination (pre and post match). Used by the fused pre only.
+static inline void mhc4_controls_registers(
+        float eps,
+        device const float * mix,
+        device const float * scale,
+        device const float * base,
+        device float * pre,
+        device float * post,
+        device float * combination) {
+    for (uint stream = 0; stream < DS4_CONNECTIONS; ++stream) {
+        pre[stream] = 1.0f / (1.0f + exp(-(mix[stream] * scale[0] + base[stream]))) + eps;
+        post[stream] = 2.0f / (1.0f + exp(-(mix[4 + stream] * scale[1] + base[4 + stream])));
+    }
+
+    float c[DS4_CONNECTIONS * DS4_CONNECTIONS];
+    for (uint source = 0; source < DS4_CONNECTIONS; ++source) {
+        float row_max = -INFINITY;
+        for (uint destination = 0; destination < DS4_CONNECTIONS; ++destination) {
+            const uint index = source * DS4_CONNECTIONS + destination;
+            c[index] = mix[8 + index] * scale[2] + base[8 + index];
+            row_max = max(row_max, c[index]);
+        }
+        float sum = 0.0f;
+        for (uint destination = 0; destination < DS4_CONNECTIONS; ++destination) {
+            const uint index = source * DS4_CONNECTIONS + destination;
+            c[index] = exp(c[index] - row_max);
+            sum += c[index];
+        }
+        const float inverse = 1.0f / sum;
+        for (uint destination = 0; destination < DS4_CONNECTIONS; ++destination) {
+            const uint index = source * DS4_CONNECTIONS + destination;
+            c[index] = c[index] * inverse + eps;
+        }
+    }
+
+    for (uint destination = 0; destination < DS4_CONNECTIONS; ++destination) {
+        float sum = 0.0f;
+        for (uint source = 0; source < DS4_CONNECTIONS; ++source) {
+            sum += c[source * DS4_CONNECTIONS + destination];
+        }
+        const float inverse = 1.0f / (sum + eps);
+        for (uint source = 0; source < DS4_CONNECTIONS; ++source) {
+            c[source * DS4_CONNECTIONS + destination] *= inverse;
+        }
+    }
+    for (uint iteration = 1; iteration < DS4_SINKHORN_ITERATIONS; ++iteration) {
+        for (uint source = 0; source < DS4_CONNECTIONS; ++source) {
+            float sum = 0.0f;
+            for (uint destination = 0; destination < DS4_CONNECTIONS; ++destination) {
+                sum += c[source * DS4_CONNECTIONS + destination];
+            }
+            const float inverse = 1.0f / (sum + eps);
+            for (uint destination = 0; destination < DS4_CONNECTIONS; ++destination) {
+                c[source * DS4_CONNECTIONS + destination] *= inverse;
+            }
+        }
+        for (uint destination = 0; destination < DS4_CONNECTIONS; ++destination) {
+            float sum = 0.0f;
+            for (uint source = 0; source < DS4_CONNECTIONS; ++source) {
+                sum += c[source * DS4_CONNECTIONS + destination];
+            }
+            const float inverse = 1.0f / (sum + eps);
+            for (uint source = 0; source < DS4_CONNECTIONS; ++source) {
+                c[source * DS4_CONNECTIONS + destination] *= inverse;
+            }
+        }
+    }
+    for (uint index = 0; index < DS4_CONNECTIONS * DS4_CONNECTIONS; ++index) {
+        combination[index] = c[index];
+    }
+}
+
+struct mhc4_pre_args {
+    uint hidden;
+    uint rows;
+    uint chunks;
+    float hc_rms_eps;
+    float hc_eps;
+    float norm_eps;
+};
+
+// Flattened residual values per fused-pre partial: 8 Q8_0 blocks.
+constant uint MHC4_PRE_CHUNK_BLOCKS = 8;
+
+// Fused mHC pre, pass 1: one threadgroup of 8 simdgroups per (chunk, row).
+// Lane l reads 8 consecutive residual values of block l / 4 of the chunk.
+// Simdgroup 0 writes the chunk's sum of squares; simdgroup g writes the
+// chunk's dots of mix rows g, g + 8 and g + 16 with the raw residual (the
+// RMS scale is a per-row scalar, applied once to the reduced dots).
+[[max_total_threads_per_threadgroup(256)]]
+kernel void kernel_mhc4_pre_mix_partial_q8_0(
+        constant mhc4_pre_args & args [[buffer(0)]],
+        device const float * residual [[buffer(1)]],
+        device const uchar * mix [[buffer(2)]],
+        device float * partial_dots [[buffer(3)]],
+        device float * partial_sumsq [[buffer(4)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        ushort sg [[simdgroup_index_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    const uint chunk = group.x;
+    const uint row = group.y;
+    if (chunk >= args.chunks || row >= args.rows) return;
+    const uint width = args.hidden * DS4_CONNECTIONS;
+    const uint blocks = width / 32u;
+    const uint block = chunk * MHC4_PRE_CHUNK_BLOCKS + lane / 4u;
+    const uint lane_offset = (lane % 4u) * 8u;
+    device const float4 * x4 =
+        (device const float4 *)(residual + row * width + block * 32u + lane_offset);
+    const float4 x0 = x4[0];
+    const float4 x1 = x4[1];
+    const uint unit = row * args.chunks + chunk;
+    if (sg == 0) {
+        const float sumsq = simd_sum(dot(x0, x0) + dot(x1, x1));
+        if (lane == 0) partial_sumsq[unit] = sumsq;
+    }
+    for (uint m = sg; m < DS4_PARAMETERS; m += 8u) {
+        device const uchar * b = mix + (ulong(m) * blocks + block) * 34u;
+        const float d = float(*(device const half *)b);
+        device const char * q = (device const char *)(b + 2u + lane_offset);
+        const float4 q0 = float4(q[0], q[1], q[2], q[3]);
+        const float4 q1 = float4(q[4], q[5], q[6], q[7]);
+        const float partial = simd_sum((dot(q0, x0) + dot(q1, x1)) * d);
+        if (lane == 0) partial_dots[unit * DS4_PARAMETERS + m] = partial;
+    }
+}
+
+// Fused mHC pre, pass 2: one 1024-thread threadgroup per row. Simdgroups
+// 0-23 reduce the chunk dots of one mix each and simdgroup 24 the sums of
+// squares (lane-strided over chunks, then simd_sum: a fixed order that does
+// not depend on how many rows share the dispatch); thread 0 scales the dots
+// by the RMS factor and runs the register-resident controls; every thread
+// then collapses its dimensions with the pre gates, and the block RMSNorm
+// follows with kernel_rms_norm_mul_f32's expressions, loop and reduction
+// shape at 1024 threads.
+[[max_total_threads_per_threadgroup(1024)]]
+kernel void kernel_mhc4_pre_finish(
+        constant mhc4_pre_args & args [[buffer(0)]],
+        device const float * residual [[buffer(1)]],
+        device const float * partial_dots [[buffer(2)]],
+        device const float * partial_sumsq [[buffer(3)]],
+        device const float * scale [[buffer(4)]],
+        device const float * base [[buffer(5)]],
+        device const float * norm_weight [[buffer(6)]],
+        device float * mixes [[buffer(7)]],
+        device float * pre [[buffer(8)]],
+        device float * post [[buffer(9)]],
+        device float * combination [[buffer(10)]],
+        device float * collapsed [[buffer(11)]],
+        device float * normed [[buffer(12)]],
+        threadgroup float * shared [[threadgroup(0)]],
+        uint row [[threadgroup_position_in_grid]],
+        uint tid [[thread_position_in_threadgroup]],
+        ushort sg [[simdgroup_index_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]],
+        uint ntg [[threads_per_threadgroup]]) {
+    if (row >= args.rows) return;
+    threadgroup float * reduced = shared;       // 24 dots, then the sum of squares
+    threadgroup float * gates = shared + 32;    // pre[4]
+    threadgroup float * partial = shared + 64;  // one sum per simdgroup
+    const uint width = args.hidden * DS4_CONNECTIONS;
+    if (sg <= DS4_PARAMETERS) {
+        float sum = 0.0f;
+        for (uint c = lane; c < args.chunks; c += 32u) {
+            const uint unit = row * args.chunks + c;
+            sum += sg < DS4_PARAMETERS
+                ? partial_dots[unit * DS4_PARAMETERS + sg]
+                : partial_sumsq[unit];
+        }
+        sum = simd_sum(sum);
+        if (lane == 0) reduced[sg] = sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        const float inverse = rsqrt(reduced[DS4_PARAMETERS] / float(width) + args.hc_rms_eps);
+        device float * m = mixes + row * DS4_PARAMETERS;
+        for (uint i = 0; i < DS4_PARAMETERS; ++i) {
+            m[i] = reduced[i] * inverse;
+        }
+        device float * row_pre = pre + row * DS4_CONNECTIONS;
+        mhc4_controls_registers(
+            args.hc_eps,
+            m,
+            scale,
+            base,
+            row_pre,
+            post + row * DS4_CONNECTIONS,
+            combination + row * DS4_CONNECTIONS * DS4_CONNECTIONS);
+        for (uint s = 0; s < DS4_CONNECTIONS; ++s) {
+            gates[s] = row_pre[s];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    device const float * r = residual + row * width;
+    device float * out = collapsed + row * args.hidden;
+    float sumsq = 0.0f;
+    for (uint i = tid; i < args.hidden; i += ntg) {
+        float value = 0.0f;
+        for (uint source = 0; source < DS4_CONNECTIONS; ++source) {
+            value += r[source * args.hidden + i] * gates[source];
+        }
+        out[i] = value;
+        sumsq += value * value;
+    }
+    sumsq = simd_sum(sumsq);
+    if (lane == 0) partial[sg] = sumsq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    sumsq = (lane < (ntg + 31u) / 32u) ? partial[lane] : 0.0f;
+    sumsq = simd_sum(sumsq);
+    const float norm_scale = rsqrt(sumsq / float(args.hidden) + args.norm_eps);
+    device float * y = normed + row * args.hidden;
+    for (uint i = tid; i < args.hidden; i += ntg) {
+        y[i] = (out[i] * norm_scale) * norm_weight[i];
+    }
+}
+
 kernel void kernel_deepseek_v4_hc_collapse(
         constant uint & hidden_size [[buffer(0)]],
         device const float * residual [[buffer(1)]],

@@ -15,7 +15,6 @@
 use super::*;
 use crate::metal::{
     GroupedExperts, encode_grouped_routed_experts, encode_indexer_append_rows, encode_kda_prefill,
-    encode_mat_vec_q8_0_batch_f32, encode_mhc4_collapse_rows, encode_mhc4_controls_rows,
     encode_mhc4_post_rows, encode_mhc4_repeat_rows, encode_rms_norm_mul_rows_f32,
     encode_route_learned_rows,
 };
@@ -37,7 +36,8 @@ pub(super) struct PackedScratch {
     token: MetalTensor,
     embedding: MetalTensor,
     residual: [MetalTensor; 2],
-    normalized: MetalTensor,
+    hc_partial_dots: MetalTensor,
+    hc_partial_sumsq: MetalTensor,
     mixes: MetalTensor,
     pre: MetalTensor,
     post: MetalTensor,
@@ -145,7 +145,8 @@ impl PackedScratch {
             token: b.take("token")?,
             embedding: b.take("embedding")?,
             residual: [b.take("residual_a")?, b.take("residual_b")?],
-            normalized: b.take("normalized")?,
+            hc_partial_dots: b.take("hc_partial_dots")?,
+            hc_partial_sumsq: b.take("hc_partial_sumsq")?,
             mixes: b.take("mixes")?,
             pre: b.take("pre")?,
             post: b.take("post")?,
@@ -450,16 +451,13 @@ impl Glm5NextSession<'_> {
         let mut mla_index = 0;
         for (index, block) in w.blocks.iter().enumerate() {
             let (a, b) = (v(&p.residual[0]), v(&p.residual[1]));
-            self.encode_hc_pre_rows(ctx, &enc, rows, &a, &block.attention_hc)?;
-            encode_rms_norm_mul_rows_f32(
+            self.encode_hc_pre_rows(
                 ctx,
                 &enc,
-                &v(&p.collapsed),
-                &block.attention_norm,
-                &v(&p.normed),
                 rows,
-                h,
-                c.rms_epsilon,
+                &a,
+                &block.attention_hc,
+                &block.attention_norm,
             )?;
             match (&block.mixer, &self.layers[index]) {
                 (MixerTensors::Kda(kda), LayerState::Kda { conv, state }) => {
@@ -489,17 +487,7 @@ impl Glm5NextSession<'_> {
                 &v(&p.comb),
                 &b,
             )?;
-            self.encode_hc_pre_rows(ctx, &enc, rows, &b, &block.ffn_hc)?;
-            encode_rms_norm_mul_rows_f32(
-                ctx,
-                &enc,
-                &v(&p.collapsed),
-                &block.ffn_norm,
-                &v(&p.normed),
-                rows,
-                h,
-                c.rms_epsilon,
-            )?;
+            self.encode_hc_pre_rows(ctx, &enc, rows, &b, &block.ffn_hc, &block.ffn_norm)?;
             match &block.ffn {
                 FfnTensors::Dense(dense) => {
                     let f = c.dense_ffn_size as usize;
@@ -743,6 +731,9 @@ impl Glm5NextSession<'_> {
         Ok(())
     }
 
+    /// [`Glm5NextSession::encode_hc_pre`] for `rows` packed tokens: the same
+    /// fused kernels with a rows axis (each row independent), so packed
+    /// prefill keeps decode's mHC lineage in both lineages.
     fn encode_hc_pre_rows(
         &self,
         ctx: &MetalContext,
@@ -750,52 +741,36 @@ impl Glm5NextSession<'_> {
         rows: usize,
         residual: &MetalTensor,
         hc: &crate::glm5_next::HyperConnectionTensors<MetalTensor>,
+        norm_weight: &MetalTensor,
     ) -> Result<()> {
         let c = &self.weights.config;
         let p = self.packed.as_ref().expect("packed scratch");
         let v = |t: &MetalTensor| rows_view(t, rows);
-        let (width, mixes) = (c.hc_width() as usize, c.hc_mix_count() as usize);
-        encode_rms_norm_mul_rows_f32(
-            ctx,
-            enc,
-            residual,
-            &self.s.ones,
-            &v(&p.normalized),
-            rows,
-            width,
-            c.rms_epsilon,
-        )?;
-        // Exact decode lineage for the Sinkhorn inputs.
-        encode_mat_vec_q8_0_batch_f32(
-            ctx,
-            enc,
-            &hc.mix,
-            &v(&p.normalized),
-            &v(&p.mixes),
-            width,
-            mixes,
-            rows,
-        )?;
-        encode_mhc4_controls_rows(
-            ctx,
-            enc,
-            rows,
-            c.hc_epsilon,
-            &v(&p.mixes),
-            &hc.scale,
-            &hc.base,
-            &v(&p.pre),
-            &v(&p.post),
-            &v(&p.comb),
-        )?;
-        encode_mhc4_collapse_rows(
+        crate::metal::encode_mhc4_pre_q8_0(
             ctx,
             enc,
             c.hidden_size as usize,
             rows,
-            residual,
-            &v(&p.pre),
-            &v(&p.collapsed),
+            super::hc_pre_eps(c),
+            &crate::metal::Mhc4PreInputs {
+                residual,
+                mix: &hc.mix,
+                scale: &hc.scale,
+                base: &hc.base,
+                norm_weight,
+            },
+            &crate::metal::Mhc4PrePartials {
+                dots: &v(&p.hc_partial_dots),
+                sumsq: &v(&p.hc_partial_sumsq),
+            },
+            &crate::metal::Mhc4PreOutputs {
+                mixes: &v(&p.mixes),
+                pre: &v(&p.pre),
+                post: &v(&p.post),
+                comb: &v(&p.comb),
+                collapsed: &v(&p.collapsed),
+                normed: &v(&p.normed),
+            },
         )?;
         Ok(())
     }

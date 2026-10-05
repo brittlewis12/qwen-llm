@@ -110,12 +110,10 @@ pub fn coverage(role: TensorRole, dtype: GgmlType) -> Option<RoleCoverage> {
         }
         (R::Head, T::Q6_K | T::Q8_0 | T::Q4_K | T::Q5_K | T::F16 | T::BF16) => both(DENSE),
         (R::Vector | R::Conv, T::F32) => both("elementwise / kernel_ssm_conv_silu_f32"),
-        // Unweighted RMSNorm over [hidden * streams], the Q8_0 projection to the
-        // 24 mixes, then controls; controls alone consume projected F32 mixes.
-        (R::HyperMix, T::Q8_0) => split(
-            Support::Kernel("rms_norm + mat_vec_q8_0 + kernel_deepseek_v4_hc_controls"),
-            Support::Kernel("rms_norm + mat_mat_q8_0 + kernel_deepseek_v4_hc_controls_batch"),
-        ),
+        // Fused pre: split-K Q8_0 mix dots and sums of squares over
+        // [hidden * streams], then one threadgroup per row for the RMS scale,
+        // controls, collapse and block norm; decode and packed rows share it.
+        (R::HyperMix, T::Q8_0) => both("kernel_mhc4_pre_mix_partial_q8_0 + kernel_mhc4_pre_finish"),
         (
             R::Projection,
             T::Q8_0 | T::Q6_K | T::Q5_K | T::Q4_K | T::IQ4_XS | T::F16 | T::BF16 | T::F32,

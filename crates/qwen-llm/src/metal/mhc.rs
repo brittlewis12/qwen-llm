@@ -23,7 +23,8 @@ pub const MHC_MIXES: usize = 24;
 pub const MHC_SINKHORN_ITERATIONS: usize = 20;
 
 use super::checks::{
-    bad_shape as bad, check_disjoint, check_tensor, overlaps, require_serial, same_range,
+    bad_shape as bad, check_alignment, check_disjoint, check_tensor, overlaps, require_serial,
+    same_range,
 };
 
 fn check_f32(
@@ -460,6 +461,250 @@ pub fn encode_clamped_swiglu(
     Ok(())
 }
 
+/// Flattened residual values per partial of [`encode_mhc4_pre_q8_0`].
+pub const MHC4_PRE_CHUNK: usize = 256;
+
+/// Partials per row of [`encode_mhc4_pre_q8_0`] at `hidden`.
+/// Saturates on absurd widths; [`encode_mhc4_pre_q8_0`] validates the
+/// geometry (width a multiple of [`MHC4_PRE_CHUNK`], 32-bit offsets).
+pub fn mhc4_pre_chunks(hidden: usize) -> usize {
+    hidden.saturating_mul(MHC_STREAMS).div_ceil(MHC4_PRE_CHUNK)
+}
+
+/// Scratch of [`encode_mhc4_pre_q8_0`]: F32 `[24, chunks, rows]` partial
+/// dots and F32 `[chunks, rows]` partial sums of squares.
+pub struct Mhc4PrePartials<'a> {
+    pub dots: &'a MetalTensor,
+    pub sumsq: &'a MetalTensor,
+}
+
+/// Outputs of [`encode_mhc4_pre_q8_0`], all F32 per row: mixes `[24]`, pre
+/// and post `[4]`, combination `[4, 4]`, collapsed and normed `[hidden]`.
+pub struct Mhc4PreOutputs<'a> {
+    pub mixes: &'a MetalTensor,
+    pub pre: &'a MetalTensor,
+    pub post: &'a MetalTensor,
+    pub comb: &'a MetalTensor,
+    pub collapsed: &'a MetalTensor,
+    pub normed: &'a MetalTensor,
+}
+
+/// Inputs of [`encode_mhc4_pre_q8_0`]: residual `[hidden, 4, rows]`, Q8_0
+/// mix `[4 * hidden, 24]`, F32 scale `[3]` and base `[24]`, and the block's
+/// F32 norm weight `[hidden]`.
+pub struct Mhc4PreInputs<'a> {
+    pub residual: &'a MetalTensor,
+    pub mix: &'a MetalTensor,
+    pub scale: &'a MetalTensor,
+    pub base: &'a MetalTensor,
+    pub norm_weight: &'a MetalTensor,
+}
+
+/// Fused single-token-or-rows mHC pre with a Q8_0 mix projection: per row,
+/// `mixes = (mix . residual) * rsqrt(mean(residual^2) + hc_rms_eps)`, the
+/// controls of [`encode_mhc4_controls`], the collapse of
+/// [`encode_mhc4_collapse`] and the block RMSNorm with `norm_weight`. Two
+/// dispatches: split-K partials per (256-value chunk, row), then one
+/// 1024-thread threadgroup per row. Rows are independent, so a row's result
+/// does not depend on how many rows share the dispatch (decode is rows = 1).
+/// The RMS scale multiplies the reduced dots instead of the residual, so
+/// the mixes differ from rms_norm + mat_vec numerically, not bitwise. The
+/// controls repeat [`encode_mhc4_controls`]' expressions in registers,
+/// which under fast math is numerical too (up to 35 ulps in the
+/// combination). Given the same gates, the collapse and block norm equal
+/// [`encode_mhc4_collapse`] and a 1024-thread `encode_rms_norm_mul_f32`
+/// bitwise.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mhc4_pre_q8_0(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    hidden: usize,
+    rows: usize,
+    eps: Mhc4PreEps,
+    inputs: &Mhc4PreInputs<'_>,
+    partials: &Mhc4PrePartials<'_>,
+    outputs: &Mhc4PreOutputs<'_>,
+) -> Result<(), MetalError> {
+    const K: &str = "mhc4_pre_q8_0";
+    require_serial(K, enc)?;
+    for (value, name) in [
+        (eps.hc_rms, "hyper-connection RMS epsilon"),
+        (eps.hc, "hyper-connection epsilon"),
+        (eps.norm, "norm epsilon"),
+    ] {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(bad(
+                K,
+                format!("{name} must be finite and positive, got {value}"),
+            ));
+        }
+    }
+    let (h, width) = residual_geometry(K, hidden)?;
+    if !width.is_multiple_of(MHC4_PRE_CHUNK) {
+        return Err(bad(
+            K,
+            format!("flattened width {width} is not a multiple of {MHC4_PRE_CHUNK}"),
+        ));
+    }
+    let n = rows_u32(K, rows)?;
+    let chunks = mhc4_pre_chunks(hidden);
+    let r = rows as u64;
+    if (chunks as u64)
+        .checked_mul(r)
+        .and_then(|u| u.checked_mul(MHC_MIXES as u64))
+        .is_none_or(|v| u32::try_from(v).is_err())
+    {
+        return Err(bad(K, "partials exceed 32-bit shader offsets"));
+    }
+    if (width as u64)
+        .checked_mul(r)
+        .is_none_or(|v| u32::try_from(v).is_err())
+    {
+        return Err(bad(K, "residual rows exceed 32-bit shader offsets"));
+    }
+    check_f32(
+        K,
+        inputs.residual,
+        &[hidden as u64, 4, r],
+        false,
+        "residual",
+    )?;
+    check_tensor(
+        K,
+        inputs.mix,
+        GgmlType::Q8_0,
+        &[width as u64, MHC_MIXES as u64],
+        false,
+        "mix",
+    )?;
+    check_f32(K, inputs.scale, &[3], false, "scale")?;
+    check_f32(K, inputs.base, &[MHC_MIXES as u64], false, "base")?;
+    check_f32(
+        K,
+        inputs.norm_weight,
+        &[hidden as u64],
+        false,
+        "norm weight",
+    )?;
+    check_f32(
+        K,
+        partials.dots,
+        &[MHC_MIXES as u64, chunks as u64, r],
+        true,
+        "partial dots",
+    )?;
+    check_f32(K, partials.sumsq, &[chunks as u64, r], true, "partial sums")?;
+    check_f32(K, outputs.mixes, &[MHC_MIXES as u64, r], true, "mixes")?;
+    check_f32(K, outputs.pre, &[4, r], true, "pre")?;
+    check_f32(K, outputs.post, &[4, r], true, "post")?;
+    check_f32(K, outputs.comb, &[4, 4, r], true, "combination")?;
+    check_f32(K, outputs.collapsed, &[hidden as u64, r], true, "collapsed")?;
+    check_f32(K, outputs.normed, &[hidden as u64, r], true, "normed")?;
+    check_alignment(K, inputs.residual, 16, "residual")?;
+    let written = [
+        (partials.dots, "partial dots"),
+        (partials.sumsq, "partial sums"),
+        (outputs.mixes, "mixes"),
+        (outputs.pre, "pre"),
+        (outputs.post, "post"),
+        (outputs.comb, "combination"),
+        (outputs.collapsed, "collapsed"),
+        (outputs.normed, "normed"),
+    ];
+    let read = [
+        (inputs.residual, "residual"),
+        (inputs.mix, "mix"),
+        (inputs.scale, "scale"),
+        (inputs.base, "base"),
+        (inputs.norm_weight, "norm weight"),
+    ];
+    for (i, &(tensor, name)) in written.iter().enumerate() {
+        check_disjoint(K, tensor, &read).map_err(|e| bad(K, format!("{name}: {e}")))?;
+        check_disjoint(K, tensor, &written[i + 1..]).map_err(|e| bad(K, format!("{name}: {e}")))?;
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        hidden: u32,
+        rows: u32,
+        chunks: u32,
+        hc_rms_eps: f32,
+        hc_eps: f32,
+        norm_eps: f32,
+    }
+    let args = Args {
+        hidden: h,
+        rows: n,
+        chunks: u32::try_from(chunks).map_err(|_| bad(K, "chunks exceed u32"))?,
+        hc_rms_eps: eps.hc_rms,
+        hc_eps: eps.hc,
+        norm_eps: eps.norm,
+    };
+    let partial = ctx.pipeline("kernel_mhc4_pre_mix_partial_q8_0")?;
+    let finish = ctx.pipeline("kernel_mhc4_pre_finish")?;
+    if partial.threadExecutionWidth() != 32 || partial.maxTotalThreadsPerThreadgroup() < 256 {
+        return Err(bad(K, "the partial pass needs 8 simdgroups of 32 lanes"));
+    }
+    if finish.threadExecutionWidth() != 32 || finish.maxTotalThreadsPerThreadgroup() < 1024 {
+        return Err(bad(K, "the finish pass needs 32 simdgroups of 32 lanes"));
+    }
+    enc.set_pipeline(&partial);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, inputs.residual);
+    enc.set_tensor(2, inputs.mix);
+    enc.set_tensor(3, partials.dots);
+    enc.set_tensor(4, partials.sumsq);
+    enc.dispatch(
+        MTLSize {
+            width: chunks,
+            height: rows,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    enc.set_pipeline(&finish);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, inputs.residual);
+    enc.set_tensor(2, partials.dots);
+    enc.set_tensor(3, partials.sumsq);
+    enc.set_tensor(4, inputs.scale);
+    enc.set_tensor(5, inputs.base);
+    enc.set_tensor(6, inputs.norm_weight);
+    enc.set_tensor(7, outputs.mixes);
+    enc.set_tensor(8, outputs.pre);
+    enc.set_tensor(9, outputs.post);
+    enc.set_tensor(10, outputs.comb);
+    enc.set_tensor(11, outputs.collapsed);
+    enc.set_tensor(12, outputs.normed);
+    enc.set_threadgroup_memory(0, 96 * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: rows,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 1024,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Epsilons of [`encode_mhc4_pre_q8_0`]: the flattened residual's RMS, the
+/// controls (Sinkhorn) and the block RMSNorm.
+#[derive(Clone, Copy, Debug)]
+pub struct Mhc4PreEps {
+    pub hc_rms: f32,
+    pub hc: f32,
+    pub norm: f32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{offset_tensor, tensor_f32_at_offset};
@@ -600,6 +845,83 @@ mod tests {
         let repeated = tensor_f32_at_offset(&repeated_t);
         for s in 0..4 {
             assert_eq!(&repeated[s * H..(s + 1) * H], &block[..], "stream {s}");
+        }
+    }
+
+    /// The single-token and per-row controls kernels agree bitwise over 512
+    /// rows of wide random mixes, scales and biases: decode and packed
+    /// prefill share the Sinkhorn controls lineage (Exact packed rows equal
+    /// serial decode).
+    #[test]
+    fn mhc4_controls_single_and_rows_agree_bitwise() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        const ROWS: usize = 512;
+        let mut state = 0x6c8e_9cf5u32;
+        let mut noise = |scale: f32| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            ((state >> 8) as f32 / 16_777_216.0 - 0.5) * 2.0 * scale
+        };
+        let mixes: Vec<f32> = (0..ROWS * MHC_MIXES).map(|_| noise(6.0)).collect();
+        let scale = [noise(2.0), noise(2.0), noise(2.0)];
+        let base: Vec<f32> = (0..MHC_MIXES).map(|_| noise(3.0)).collect();
+        let eps = 1e-6;
+        let mixes_t = tensor(&ctx, &mixes, vec![MHC_MIXES as u64, ROWS as u64]);
+        let scale_t = tensor(&ctx, &scale, vec![3]);
+        let base_t = tensor(&ctx, &base, vec![MHC_MIXES as u64]);
+        let outputs = || {
+            (
+                tensor(&ctx, &vec![7.0; 4 * ROWS], vec![4, ROWS as u64]),
+                tensor(&ctx, &vec![7.0; 4 * ROWS], vec![4, ROWS as u64]),
+                tensor(&ctx, &vec![7.0; 16 * ROWS], vec![4, 4, ROWS as u64]),
+            )
+        };
+        let (rows_pre, rows_post, rows_comb) = outputs();
+        let (one_pre, one_post, one_comb) = outputs();
+        run(&ctx, |enc| {
+            encode_mhc4_controls_rows(
+                &ctx, enc, ROWS, eps, &mixes_t, &scale_t, &base_t, &rows_pre, &rows_post,
+                &rows_comb,
+            )
+            .unwrap();
+            for row in 0..ROWS as u64 {
+                let view = |t: &MetalTensor, width: u64, shape: Vec<u64>| {
+                    t.view_subrange(row * width, shape)
+                };
+                encode_mhc4_controls(
+                    &ctx,
+                    enc,
+                    eps,
+                    &view(&mixes_t, MHC_MIXES as u64, vec![MHC_MIXES as u64]),
+                    &scale_t,
+                    &base_t,
+                    &view(&one_pre, 4, vec![4]),
+                    &view(&one_post, 4, vec![4]),
+                    &view(&one_comb, 16, vec![4, 4]),
+                )
+                .unwrap();
+            }
+        });
+        let bits = |t: &MetalTensor| -> Vec<u32> {
+            tensor_f32_at_offset(t)
+                .iter()
+                .map(|v| v.to_bits())
+                .collect()
+        };
+        for (label, rows, one) in [
+            ("pre", &rows_pre, &one_pre),
+            ("post", &rows_post, &one_post),
+            ("combination", &rows_comb, &one_comb),
+        ] {
+            let (rows, one) = (bits(rows), bits(one));
+            assert!(
+                rows.iter().all(|&b| f32::from_bits(b).is_finite()),
+                "{label}: non-finite"
+            );
+            assert_eq!(rows, one, "{label}: rows vs single");
         }
     }
 
@@ -857,6 +1179,549 @@ mod tests {
         }
     }
 
+    /// Fused Q8_0 pre at GLM width over three distinct rows, against the
+    /// five-dispatch path (rms_norm, Q8_0 mat-vec, controls, collapse, block
+    /// norm) and the CPU contract. Rows are dispatch-independent: each row
+    /// of the 3-row dispatch equals its single-row dispatch bitwise. Given
+    /// the unfused path's controls, the fused collapse and block norm keep
+    /// their kernels' arithmetic, so those outputs match bitwise when the
+    /// pre gates do.
+    #[test]
+    fn mhc4_pre_q8_0_matches_the_unfused_path_and_is_row_independent() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        const H: usize = 4096;
+        const ROWS: usize = 3;
+        let n = H * MHC_STREAMS;
+        let residual: Vec<f32> = (0..n * ROWS)
+            .map(|i| {
+                let (row, s, d) = (i / n, (i % n) / H, i % H);
+                (s as f32 - 1.3) * (0.4 + 0.3 * row as f32)
+                    + ((d * 7 + s * 3 + row * 11) % 29) as f32 * 0.013
+                    - 0.17
+            })
+            .collect();
+        let (mix_bytes, function) = super::super::test_support::synthetic_q8_0_bank(n, MHC_MIXES);
+        let scale = [0.8f32, -0.45, 1.1];
+        let base: Vec<f32> = (0..MHC_MIXES)
+            .map(|i| ((i * 5 + 2) % 17) as f32 * 0.04 - 0.3)
+            .collect();
+        let norm_weight: Vec<f32> = (0..H).map(|d| 0.5 + (d % 13) as f32 * 0.07).collect();
+        let eps = Mhc4PreEps {
+            hc_rms: 1e-5,
+            hc: 1e-6,
+            norm: 1e-5,
+        };
+        let chunks = mhc4_pre_chunks(H);
+        let mix_t = offset_tensor(
+            &ctx,
+            32,
+            &mix_bytes,
+            32,
+            vec![n as u64, MHC_MIXES as u64],
+            GgmlType::Q8_0,
+        );
+        let residual_t = tensor(&ctx, &residual, vec![H as u64, 4, ROWS as u64]);
+        let scale_t = tensor(&ctx, &scale, vec![3]);
+        let base_t = tensor(&ctx, &base, vec![MHC_MIXES as u64]);
+        let weight_t = tensor(&ctx, &norm_weight, vec![H as u64]);
+        let zeros = |shape: Vec<u64>| {
+            let len = shape.iter().product::<u64>() as usize;
+            tensor(&ctx, &vec![f32::NAN; len], shape)
+        };
+        struct Out {
+            mixes: MetalTensor,
+            pre: MetalTensor,
+            post: MetalTensor,
+            comb: MetalTensor,
+            collapsed: MetalTensor,
+            normed: MetalTensor,
+        }
+        let outputs = |rows: u64| Out {
+            mixes: zeros(vec![MHC_MIXES as u64, rows]),
+            pre: zeros(vec![4, rows]),
+            post: zeros(vec![4, rows]),
+            comb: zeros(vec![4, 4, rows]),
+            collapsed: zeros(vec![H as u64, rows]),
+            normed: zeros(vec![H as u64, rows]),
+        };
+        let dots_t = zeros(vec![MHC_MIXES as u64, chunks as u64, ROWS as u64]);
+        let sums_t = zeros(vec![chunks as u64, ROWS as u64]);
+        let fused = |out: &Out, residual: &MetalTensor, rows: usize, enc: &KernelEncoder| {
+            let r = rows as u64;
+            encode_mhc4_pre_q8_0(
+                &ctx,
+                enc,
+                H,
+                rows,
+                eps,
+                &Mhc4PreInputs {
+                    residual,
+                    mix: &mix_t,
+                    scale: &scale_t,
+                    base: &base_t,
+                    norm_weight: &weight_t,
+                },
+                &Mhc4PrePartials {
+                    dots: &dots_t.view_subrange(0, vec![MHC_MIXES as u64, chunks as u64, r]),
+                    sumsq: &sums_t.view_subrange(0, vec![chunks as u64, r]),
+                },
+                &Mhc4PreOutputs {
+                    mixes: &out.mixes,
+                    pre: &out.pre,
+                    post: &out.post,
+                    comb: &out.comb,
+                    collapsed: &out.collapsed,
+                    normed: &out.normed,
+                },
+            )
+            .unwrap();
+        };
+        let all = outputs(ROWS as u64);
+        let singles: Vec<Out> = (0..ROWS).map(|_| outputs(1)).collect();
+        run(&ctx, |enc| {
+            fused(&all, &residual_t, ROWS, enc);
+            for (row, out) in singles.iter().enumerate() {
+                let view = residual_t.view_subrange((row * n) as u64, vec![H as u64, 4, 1]);
+                fused(out, &view, 1, enc);
+            }
+        });
+        let read = |t: &MetalTensor| tensor_f32_at_offset(t);
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        for (row, single) in singles.iter().enumerate() {
+            for (label, whole, one, width) in [
+                ("mixes", &all.mixes, &single.mixes, MHC_MIXES),
+                ("pre", &all.pre, &single.pre, 4),
+                ("post", &all.post, &single.post, 4),
+                ("combination", &all.comb, &single.comb, 16),
+                ("collapsed", &all.collapsed, &single.collapsed, H),
+                ("normed", &all.normed, &single.normed, H),
+            ] {
+                assert_eq!(
+                    bits(&read(whole)[row * width..(row + 1) * width]),
+                    bits(&read(one)),
+                    "row {row} {label}: 3-row dispatch vs single"
+                );
+            }
+        }
+
+        for row in 0..ROWS {
+            let r = &residual[row * n..(row + 1) * n];
+            let cpu = crate::deepseek_v4_oracle::hyper_connection_pre(
+                r,
+                H,
+                MHC_STREAMS,
+                &function,
+                &scale,
+                &base,
+                eps.hc_rms,
+                MHC_SINKHORN_ITERATIONS,
+                eps.hc,
+            )
+            .unwrap();
+            let mean = cpu.input.iter().map(|v| (v * v) as f64).sum::<f64>() / H as f64;
+            let inverse = 1.0 / (mean + eps.norm as f64).sqrt();
+            let normed: Vec<f32> = cpu
+                .input
+                .iter()
+                .zip(&norm_weight)
+                .map(|(v, w)| (*v as f64 * inverse * *w as f64) as f32)
+                .collect();
+            let at =
+                |t: &MetalTensor, width: usize| read(t)[row * width..(row + 1) * width].to_vec();
+            // The CPU oracle accumulates 16,384 F32 products sequentially; both
+            // GPU paths sit ~2e-5 (scaled) from it on the mixes.
+            assert_close("fused mixes", &at(&all.mixes, MHC_MIXES), &cpu.mixes, 5e-5);
+            assert_close("fused pre", &at(&all.pre, 4), &cpu.controls.pre, 1e-5);
+            assert_close("fused post", &at(&all.post, 4), &cpu.controls.post, 1e-5);
+            assert_close(
+                "fused combination",
+                &at(&all.comb, 16),
+                &cpu.controls.combination,
+                1e-5,
+            );
+            assert_close("fused collapsed", &at(&all.collapsed, H), &cpu.input, 1e-5);
+            assert_close("fused normed", &at(&all.normed, H), &normed, 1e-4);
+        }
+
+        // The unfused path on row 1, then its block norm from the same gates.
+        let row = 1;
+        let view = residual_t.view_subrange((row * n) as u64, vec![H as u64, 4]);
+        let ones_t = tensor(&ctx, &vec![1.0; n], vec![n as u64]);
+        let normalized_t = zeros(vec![n as u64]);
+        let unfused = outputs(1);
+        let flat = |t: &MetalTensor, len: u64| t.view_subrange(0, vec![len]);
+        run(&ctx, |enc| {
+            crate::metal::encode_rms_norm_mul_f32(
+                &ctx,
+                enc,
+                &view.view_subrange(0, vec![n as u64]),
+                &ones_t,
+                &normalized_t,
+                eps.hc_rms,
+            )
+            .unwrap();
+            crate::metal::encode_mat_vec_q8_0_f32(
+                &ctx,
+                enc,
+                &mix_t,
+                &normalized_t,
+                &flat(&unfused.mixes, MHC_MIXES as u64),
+                n,
+                MHC_MIXES,
+            )
+            .unwrap();
+            encode_mhc4_controls(
+                &ctx,
+                enc,
+                eps.hc,
+                &flat(&unfused.mixes, MHC_MIXES as u64),
+                &scale_t,
+                &base_t,
+                &flat(&unfused.pre, 4),
+                &flat(&unfused.post, 4),
+                &unfused.comb.view_subrange(0, vec![4, 4]),
+            )
+            .unwrap();
+            encode_mhc4_collapse(
+                &ctx,
+                enc,
+                H,
+                &view,
+                &flat(&unfused.pre, 4),
+                &flat(&unfused.collapsed, H as u64),
+            )
+            .unwrap();
+            crate::metal::encode_rms_norm_mul_f32(
+                &ctx,
+                enc,
+                &flat(&unfused.collapsed, H as u64),
+                &weight_t,
+                &flat(&unfused.normed, H as u64),
+                eps.norm,
+            )
+            .unwrap();
+        });
+        let at = |t: &MetalTensor, width: usize| read(t)[row * width..(row + 1) * width].to_vec();
+        for (label, fused_v, unfused_v, tolerance) in [
+            (
+                "mixes",
+                at(&all.mixes, MHC_MIXES),
+                read(&unfused.mixes),
+                1e-5,
+            ),
+            ("pre", at(&all.pre, 4), read(&unfused.pre), 2e-6),
+            ("post", at(&all.post, 4), read(&unfused.post), 2e-6),
+            ("combination", at(&all.comb, 16), read(&unfused.comb), 2e-6),
+            (
+                "collapsed",
+                at(&all.collapsed, H),
+                read(&unfused.collapsed),
+                2e-6,
+            ),
+            ("normed", at(&all.normed, H), read(&unfused.normed), 2e-6),
+        ] {
+            assert_close(
+                &format!("fused vs unfused {label}"),
+                &fused_v,
+                &unfused_v,
+                tolerance,
+            );
+        }
+
+        // Given the fused gates, the standalone collapse and 1024-thread block
+        // norm reproduce the fused collapse and norm bitwise.
+        let gates_t = tensor(&ctx, &at(&all.pre, 4), vec![4]);
+        let collapsed_t = zeros(vec![H as u64]);
+        let normed_t = zeros(vec![H as u64]);
+        let rms_threads = ctx
+            .pipeline("kernel_rms_norm_mul_f32")
+            .unwrap()
+            .maxTotalThreadsPerThreadgroup()
+            .min(1024);
+        assert_eq!(
+            rms_threads, 1024,
+            "the bitwise claim is scoped to 1024 threads"
+        );
+        run(&ctx, |enc| {
+            encode_mhc4_collapse(&ctx, enc, H, &view, &gates_t, &collapsed_t).unwrap();
+            crate::metal::encode_rms_norm_mul_f32(
+                &ctx,
+                enc,
+                &collapsed_t,
+                &weight_t,
+                &normed_t,
+                eps.norm,
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            bits(&read(&collapsed_t)),
+            bits(&at(&all.collapsed, H)),
+            "collapse from the fused gates"
+        );
+        assert_eq!(
+            bits(&read(&normed_t)),
+            bits(&at(&all.normed, H)),
+            "block norm from the fused collapse"
+        );
+    }
+
+    /// Directed numerics of the fused Q8_0 pre against an independent f64
+    /// reference (mix dots and RMS in f64, the CPU Sinkhorn on the reference
+    /// mixes, collapse and block norm in f64 from the GPU gates). The Q8_0
+    /// bank spans the full quant range (-128..=127) with signed scales.
+    /// Widths of 1, 31, 32 and 33 chunks (hidden 64, 1984, 2048, 2112), and
+    /// at hidden 2112 six rows in one dispatch: zero, near-epsilon,
+    /// alternating (cancelling), wide-spread with spikes, random, and
+    /// random again under saturating control scales and biases. Every
+    /// output is finite.
+    #[test]
+    fn mhc4_pre_q8_0_directed_numerics_and_widths() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        let mut state = 0x51ed_2701u32;
+        let mut noise = move |scale: f32| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            ((state >> 8) as f32 / 16_777_216.0 - 0.5) * 2.0 * scale
+        };
+        let eps = Mhc4PreEps {
+            hc_rms: 1e-5,
+            hc: 1e-6,
+            norm: 1e-5,
+        };
+        struct Case {
+            name: &'static str,
+            hidden: usize,
+            residuals: Vec<(&'static str, Vec<f32>)>,
+            scale: [f32; 3],
+            base: Vec<f32>,
+        }
+        let mut cases = Vec::new();
+        for hidden in [64usize, 1984, 2048, 2112] {
+            let n = hidden * MHC_STREAMS;
+            let mut residuals = vec![("random", (0..n).map(|_| noise(2.0)).collect::<Vec<f32>>())];
+            if hidden == 2112 {
+                residuals.push(("zero", vec![0.0; n]));
+                residuals.push(("near epsilon", (0..n).map(|_| noise(1e-4)).collect()));
+                residuals.push((
+                    "alternating",
+                    (0..n)
+                        .map(|i| if i % 2 == 0 { 3.0 } else { -3.0 })
+                        .collect(),
+                ));
+                residuals.push((
+                    "spread with spikes",
+                    (0..n)
+                        .map(|i| if i % 997 == 0 { 1.0e3 } else { noise(1e-3) })
+                        .collect(),
+                ));
+            }
+            let base: Vec<f32> = (0..MHC_MIXES).map(|_| noise(0.5)).collect();
+            cases.push(Case {
+                name: "plain",
+                hidden,
+                residuals,
+                scale: [0.8, -0.45, 1.1],
+                base,
+            });
+        }
+        let n = 2112 * MHC_STREAMS;
+        cases.push(Case {
+            name: "saturating controls",
+            hidden: 2112,
+            residuals: vec![("random", (0..n).map(|_| noise(2.0)).collect())],
+            scale: [4.0, -4.0, 3.0],
+            base: (0..MHC_MIXES)
+                .map(|i| if i % 2 == 0 { 6.0 } else { -6.0 })
+                .collect(),
+        });
+
+        for case in &cases {
+            let (h, rows) = (case.hidden, case.residuals.len());
+            let n = h * MHC_STREAMS;
+            let chunks = mhc4_pre_chunks(h);
+            // Full-range Q8_0 bank: quants cycle through -128..=127, scales
+            // are signed and vary per block.
+            let blocks = n / 32;
+            let mut bytes = Vec::with_capacity(MHC_MIXES * blocks * 34);
+            let mut weights = vec![0.0f64; MHC_MIXES * n];
+            for m in 0..MHC_MIXES {
+                for b in 0..blocks {
+                    let d = half::f16::from_f32(noise(2e-3));
+                    bytes.extend_from_slice(&d.to_bits().to_le_bytes());
+                    for l in 0..32 {
+                        let q = (((m * 131 + b * 37 + l * 11) % 256) as i32 - 128) as i8;
+                        bytes.push(q as u8);
+                        weights[m * n + b * 32 + l] = d.to_f64() * f64::from(q);
+                    }
+                }
+            }
+            let residual: Vec<f32> = case.residuals.iter().flat_map(|(_, r)| r.clone()).collect();
+            let norm_weight: Vec<f32> = (0..h).map(|_| 0.5 + noise(0.4).abs()).collect();
+            let mix_t = offset_tensor(
+                &ctx,
+                36,
+                &bytes,
+                6,
+                vec![n as u64, MHC_MIXES as u64],
+                GgmlType::Q8_0,
+            );
+            let r = rows as u64;
+            let residual_t = tensor(&ctx, &residual, vec![h as u64, 4, r]);
+            let scale_t = tensor(&ctx, &case.scale, vec![3]);
+            let base_t = tensor(&ctx, &case.base, vec![MHC_MIXES as u64]);
+            let weight_t = tensor(&ctx, &norm_weight, vec![h as u64]);
+            let nan = |shape: Vec<u64>| {
+                let len = shape.iter().product::<u64>() as usize;
+                tensor(&ctx, &vec![f32::NAN; len], shape)
+            };
+            let dots_t = nan(vec![MHC_MIXES as u64, chunks as u64, r]);
+            let sums_t = nan(vec![chunks as u64, r]);
+            let mixes_t = nan(vec![MHC_MIXES as u64, r]);
+            let pre_t = nan(vec![4, r]);
+            let post_t = nan(vec![4, r]);
+            let comb_t = nan(vec![4, 4, r]);
+            let collapsed_t = nan(vec![h as u64, r]);
+            let normed_t = nan(vec![h as u64, r]);
+            run(&ctx, |enc| {
+                encode_mhc4_pre_q8_0(
+                    &ctx,
+                    enc,
+                    h,
+                    rows,
+                    eps,
+                    &Mhc4PreInputs {
+                        residual: &residual_t,
+                        mix: &mix_t,
+                        scale: &scale_t,
+                        base: &base_t,
+                        norm_weight: &weight_t,
+                    },
+                    &Mhc4PrePartials {
+                        dots: &dots_t,
+                        sumsq: &sums_t,
+                    },
+                    &Mhc4PreOutputs {
+                        mixes: &mixes_t,
+                        pre: &pre_t,
+                        post: &post_t,
+                        comb: &comb_t,
+                        collapsed: &collapsed_t,
+                        normed: &normed_t,
+                    },
+                )
+                .unwrap();
+            });
+            let (mixes, pre, post, comb, collapsed, normed) = (
+                tensor_f32_at_offset(&mixes_t),
+                tensor_f32_at_offset(&pre_t),
+                tensor_f32_at_offset(&post_t),
+                tensor_f32_at_offset(&comb_t),
+                tensor_f32_at_offset(&collapsed_t),
+                tensor_f32_at_offset(&normed_t),
+            );
+            for (label, values) in [
+                ("mixes", &mixes),
+                ("pre", &pre),
+                ("post", &post),
+                ("combination", &comb),
+                ("collapsed", &collapsed),
+                ("normed", &normed),
+            ] {
+                assert!(
+                    values.iter().all(|v| v.is_finite()),
+                    "{} hidden {h}: non-finite {label}",
+                    case.name
+                );
+            }
+            for (row, (kind, x)) in case.residuals.iter().enumerate() {
+                let label = format!("{} hidden {h} {kind}", case.name);
+                let sumsq: f64 = x.iter().map(|v| f64::from(*v).powi(2)).sum();
+                let inverse = 1.0 / (sumsq / n as f64 + f64::from(eps.hc_rms)).sqrt();
+                let mut reference = vec![0.0f32; MHC_MIXES];
+                for (m, out) in reference.iter_mut().enumerate() {
+                    let w = &weights[m * n..(m + 1) * n];
+                    let dot: f64 = w.iter().zip(x).map(|(w, x)| w * f64::from(*x)).sum();
+                    let magnitude: f64 = w
+                        .iter()
+                        .zip(x)
+                        .map(|(w, x)| (w * f64::from(*x)).abs())
+                        .sum();
+                    *out = (dot * inverse) as f32;
+                    let got = f64::from(mixes[row * MHC_MIXES + m]);
+                    let bound = 2e-6 * magnitude * inverse + 1e-6;
+                    assert!(
+                        (got - dot * inverse).abs() <= bound,
+                        "{label}: mix {m} {got} vs {} (bound {bound:e})",
+                        dot * inverse
+                    );
+                }
+                let controls = crate::deepseek_v4_oracle::split_sinkhorn(
+                    &reference,
+                    &case.scale,
+                    &case.base,
+                    MHC_STREAMS,
+                    MHC_SINKHORN_ITERATIONS,
+                    eps.hc,
+                )
+                .unwrap();
+                for (what, got, want) in [
+                    ("pre", &pre[row * 4..(row + 1) * 4], &controls.pre[..]),
+                    ("post", &post[row * 4..(row + 1) * 4], &controls.post[..]),
+                    (
+                        "combination",
+                        &comb[row * 16..(row + 1) * 16],
+                        &controls.combination[..],
+                    ),
+                ] {
+                    for (i, (g, w)) in got.iter().zip(want).enumerate() {
+                        assert!((g - w).abs() <= 1e-4, "{label}: {what}[{i}] {g} vs {w}");
+                    }
+                }
+                // Collapse and block norm in f64 from the GPU gates.
+                let gates = &pre[row * 4..(row + 1) * 4];
+                let want: Vec<f64> = (0..h)
+                    .map(|d| {
+                        (0..MHC_STREAMS)
+                            .map(|s| f64::from(x[s * h + d]) * f64::from(gates[s]))
+                            .sum()
+                    })
+                    .collect();
+                let scale_c: f64 = (0..h)
+                    .map(|d| {
+                        (0..MHC_STREAMS)
+                            .map(|s| f64::from(x[s * h + d]).abs())
+                            .sum::<f64>()
+                    })
+                    .fold(0.0, f64::max)
+                    * 2.0;
+                for (d, w) in want.iter().enumerate() {
+                    let g = f64::from(collapsed[row * h + d]);
+                    assert!(
+                        (g - w).abs() <= 1e-6 * scale_c + 1e-30,
+                        "{label}: collapsed[{d}] {g} vs {w}"
+                    );
+                }
+                let mean = want.iter().map(|v| v * v).sum::<f64>() / h as f64;
+                let norm_inverse = 1.0 / (mean + f64::from(eps.norm)).sqrt();
+                for (d, w) in want.iter().enumerate() {
+                    let expected = w * norm_inverse * f64::from(norm_weight[d]);
+                    let g = f64::from(normed[row * h + d]);
+                    let bound = 1e-5 * (scale_c * norm_inverse) + 1e-30;
+                    assert!(
+                        (g - expected).abs() <= bound,
+                        "{label}: normed[{d}] {g} vs {expected} (bound {bound:e})"
+                    );
+                }
+            }
+        }
+    }
+
     /// Timing screen (not qualification): GPU time of the single-token mHC
     /// pre sequence at GLM-5.3 width (hidden 4096, Q8_0 mix [16384 -> 24]),
     /// as a chain of 90 dependent repetitions per command (one decode step's
@@ -943,6 +1808,46 @@ mod tests {
             )
             .unwrap()
         };
+        let chunks = mhc4_pre_chunks(H) as u64;
+        let dots_t = tensor(
+            &ctx,
+            &vec![0.0; MHC_MIXES * chunks as usize],
+            vec![MHC_MIXES as u64, chunks, 1],
+        );
+        let sums_t = tensor(&ctx, &vec![0.0; chunks as usize], vec![chunks, 1]);
+        let fused = |enc: &KernelEncoder| {
+            encode_mhc4_pre_q8_0(
+                &ctx,
+                enc,
+                H,
+                1,
+                Mhc4PreEps {
+                    hc_rms: rms_eps,
+                    hc: hc_eps,
+                    norm: rms_eps,
+                },
+                &Mhc4PreInputs {
+                    residual: &residual_t.view_subrange(0, vec![H as u64, 4, 1]),
+                    mix: &mix_t,
+                    scale: &scale_t,
+                    base: &base_t,
+                    norm_weight: &norm_w_t,
+                },
+                &Mhc4PrePartials {
+                    dots: &dots_t,
+                    sumsq: &sums_t,
+                },
+                &Mhc4PreOutputs {
+                    mixes: &mixes_t.view_subrange(0, vec![MHC_MIXES as u64, 1]),
+                    pre: &pre_t.view_subrange(0, vec![4, 1]),
+                    post: &post_t.view_subrange(0, vec![4, 1]),
+                    comb: &comb_t.view_subrange(0, vec![4, 4, 1]),
+                    collapsed: &collapsed_t.view_subrange(0, vec![H as u64, 1]),
+                    normed: &normed_t.view_subrange(0, vec![H as u64, 1]),
+                },
+            )
+            .unwrap()
+        };
         let time = |encode: &dyn Fn(&KernelEncoder)| -> f64 {
             let mut samples: Vec<f64> = (0..8)
                 .map(|_| {
@@ -961,8 +1866,20 @@ mod tests {
             samples.sort_by(f64::total_cmp);
             samples[samples.len() / 2]
         };
+        // Latency-bound chains read the GPU clock state: ramp it first.
+        let warm = std::time::Instant::now();
+        while warm.elapsed() < std::time::Duration::from_secs(2) {
+            time(&|enc: &KernelEncoder| {
+                rms(enc);
+                mix(enc);
+                controls(enc);
+                collapse(enc);
+                block_norm(enc);
+            });
+        }
         type Encode<'a> = &'a dyn Fn(&KernelEncoder);
-        let rows: [(&str, Encode<'_>); 6] = [
+        let rows: [(&str, Encode<'_>); 7] = [
+            ("fused pre (2 dispatches)", &fused),
             ("whole pre (5 dispatches)", &|enc: &KernelEncoder| {
                 rms(enc);
                 mix(enc);

@@ -20,8 +20,8 @@ use crate::metal::{
     MetalTensor, ROUTE_STATUS_READY, RetainedStorageDisposition, RouteScore, encode_add_f32,
     encode_all_slots_down, encode_all_slots_gate_up_swiglu, encode_clamped_swiglu,
     encode_get_rows_f32, encode_indexer_append, encode_kda_decode, encode_latent_attention,
-    encode_mat_vec_q8_0_grouped_f32, encode_mhc4_collapse, encode_mhc4_controls, encode_mhc4_post,
-    encode_mhc4_repeat, encode_moe_weighted_sum_f32, encode_rms_norm_mul_f32, encode_route_learned,
+    encode_mat_vec_q8_0_grouped_f32, encode_mhc4_collapse, encode_mhc4_post, encode_mhc4_repeat,
+    encode_moe_weighted_sum_f32, encode_rms_norm_mul_f32, encode_route_learned,
     encode_scatter_offset_f32_to_f16, evaluate_metal_memory_admission,
     evaluate_metal_memory_admission_with_cpu_bytes, wait_completed,
 };
@@ -352,10 +352,10 @@ struct Scratch {
     token: MetalTensor,
     embedding: MetalTensor,
     residual: [MetalTensor; 2],
-    ones: MetalTensor,
     quarter: MetalTensor,
     no_sink: MetalTensor,
-    normalized: MetalTensor,
+    hc_partial_dots: MetalTensor,
+    hc_partial_sumsq: MetalTensor,
     mixes: MetalTensor,
     pre: MetalTensor,
     post: MetalTensor,
@@ -472,10 +472,10 @@ impl Scratch {
             token: b.take("token")?,
             embedding: b.take("embedding")?,
             residual: [b.take("residual_a")?, b.take("residual_b")?],
-            ones: b.take("ones")?,
             quarter: b.take("quarter")?,
             no_sink: b.take("no_sink")?,
-            normalized: b.take("normalized")?,
+            hc_partial_dots: b.take("hc_partial_dots")?,
+            hc_partial_sumsq: b.take("hc_partial_sumsq")?,
             mixes: b.take("mixes")?,
             pre: b.take("pre")?,
             post: b.take("post")?,
@@ -1227,22 +1227,7 @@ impl<'w> Glm5NextSession<'w> {
             let (a, b) = (&s.residual[0], &s.residual[1]);
             // Attention sub-block: a -> b.
             self.stage(&mut enc, Glm5NextStage::AttentionPre, Some(index))?;
-            self.encode_hc_pre(
-                ctx,
-                &enc,
-                a,
-                &block.attention_hc.mix,
-                &block.attention_hc.scale,
-                &block.attention_hc.base,
-            )?;
-            encode_rms_norm_mul_f32(
-                ctx,
-                &enc,
-                &s.collapsed,
-                &block.attention_norm,
-                &s.normed,
-                c.rms_epsilon,
-            )?;
+            self.encode_hc_pre(ctx, &enc, a, &block.attention_hc, &block.attention_norm)?;
             match (&block.mixer, &self.layers[index]) {
                 (MixerTensors::Kda(kda), LayerState::Kda { conv, state }) => {
                     self.stage(&mut enc, Glm5NextStage::Kda, Some(index))?;
@@ -1278,22 +1263,7 @@ impl<'w> Glm5NextSession<'w> {
             }
             // FFN sub-block: b -> a.
             self.stage(&mut enc, Glm5NextStage::FfnPre, Some(index))?;
-            self.encode_hc_pre(
-                ctx,
-                &enc,
-                b,
-                &block.ffn_hc.mix,
-                &block.ffn_hc.scale,
-                &block.ffn_hc.base,
-            )?;
-            encode_rms_norm_mul_f32(
-                ctx,
-                &enc,
-                &s.collapsed,
-                &block.ffn_norm,
-                &s.normed,
-                c.rms_epsilon,
-            )?;
+            self.encode_hc_pre(ctx, &enc, b, &block.ffn_hc, &block.ffn_norm)?;
             match &block.ffn {
                 FfnTensors::Dense(dense) => {
                     self.stage(&mut enc, Glm5NextStage::DenseFfn, Some(index))?;
@@ -1452,47 +1422,48 @@ impl<'w> Glm5NextSession<'w> {
         Ok(())
     }
 
-    /// Flattened unweighted RMSNorm, mix projection, controls and collapse into
-    /// `collapsed`; `post`/`comb` stay set for the matching post.
+    /// The fused mHC pre ([`crate::metal::encode_mhc4_pre_q8_0`]) of one
+    /// sub-block: mixes, controls and collapse into `collapsed`, then the
+    /// block norm into `normed`; `post`/`comb` stay set for the matching
+    /// post. GLM admits only Q8_0 mixes (coverage), and packed rows run the
+    /// same kernels, so packed prefill keeps decode's mHC lineage.
     fn encode_hc_pre(
         &self,
         ctx: &MetalContext,
         enc: &KernelEncoder,
         residual: &MetalTensor,
-        mix: &MetalTensor,
-        scale: &MetalTensor,
-        base: &MetalTensor,
+        hc: &crate::glm5_next::HyperConnectionTensors<MetalTensor>,
+        norm_weight: &MetalTensor,
     ) -> Result<()> {
         let c = &self.weights.config;
         let s = &self.s;
-        encode_rms_norm_mul_f32(ctx, enc, residual, &s.ones, &s.normalized, c.rms_epsilon)?;
-        matvec(
-            ctx,
-            enc,
-            mix,
-            &s.normalized,
-            &s.mixes,
-            c.hc_width() as usize,
-            c.hc_mix_count() as usize,
-        )?;
-        encode_mhc4_controls(
-            ctx,
-            enc,
-            c.hc_epsilon,
-            &s.mixes,
-            scale,
-            base,
-            &s.pre,
-            &s.post,
-            &s.comb,
-        )?;
-        encode_mhc4_collapse(
+        let one = |t: &MetalTensor, shape: Vec<u64>| t.view_subrange(0, shape);
+        let (h, mixes) = (c.hidden_size as u64, c.hc_mix_count() as u64);
+        crate::metal::encode_mhc4_pre_q8_0(
             ctx,
             enc,
             c.hidden_size as usize,
-            residual,
-            &s.pre,
-            &s.collapsed,
+            1,
+            hc_pre_eps(c),
+            &crate::metal::Mhc4PreInputs {
+                residual: &one(residual, vec![h, 4, 1]),
+                mix: &hc.mix,
+                scale: &hc.scale,
+                base: &hc.base,
+                norm_weight,
+            },
+            &crate::metal::Mhc4PrePartials {
+                dots: &s.hc_partial_dots,
+                sumsq: &s.hc_partial_sumsq,
+            },
+            &crate::metal::Mhc4PreOutputs {
+                mixes: &one(&s.mixes, vec![mixes, 1]),
+                pre: &one(&s.pre, vec![4, 1]),
+                post: &one(&s.post, vec![4, 1]),
+                comb: &one(&s.comb, vec![4, 4, 1]),
+                collapsed: &one(&s.collapsed, vec![h, 1]),
+                normed: &one(&s.normed, vec![h, 1]),
+            },
         )?;
         Ok(())
     }
@@ -1848,6 +1819,16 @@ impl<'w> Glm5NextSession<'w> {
             },
         )?;
         Ok(())
+    }
+}
+
+/// Epsilons of the fused mHC pre: the flattened residual's RMS and the block
+/// norm both use the model's RMS epsilon.
+fn hc_pre_eps(c: &crate::glm5_next::Glm5NextConfig) -> crate::metal::Mhc4PreEps {
+    crate::metal::Mhc4PreEps {
+        hc_rms: c.rms_epsilon,
+        hc: c.hc_epsilon,
+        norm: c.rms_epsilon,
     }
 }
 

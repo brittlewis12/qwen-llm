@@ -1387,6 +1387,317 @@ mod tests {
         }
     }
 
+    /// Directed edge cases of the split kernel against an independent f64
+    /// softmax (the sink as one extra logit with a zero value row) and
+    /// against the serial kernel: row totals of 127, 128 and 129 and across
+    /// three splits with a raw window, zero counts, an all-rejected interior
+    /// split and an empty trailing split, all-equal scores, a dominant sink
+    /// and wide score separation. Partials start NaN-poisoned and are reused
+    /// by consecutive dispatches of different query counts in one serial
+    /// encoder (the packed sub-batch pattern, through sub-views); a lone
+    /// dispatch leaves the other output rows untouched and reproduces its
+    /// row bitwise.
+    #[test]
+    fn split_selected_attention_directed_cases_match_an_independent_softmax() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        struct Case {
+            name: &'static str,
+            window: usize,
+            slots: usize,
+            sink: f32,
+            query_scale: f32,
+            counts: [i32; TOKENS],
+            rejected: [std::ops::Range<usize>; TOKENS],
+            tolerance: f64,
+        }
+        const CAP: usize = 2_400;
+        const TOKENS: usize = 3;
+        const START: usize = 2_000;
+        const SCALE: f32 = 1.0 / 16.0;
+        let cases = [
+            Case {
+                name: "totals 127/128/129",
+                window: 0,
+                slots: 129,
+                sink: LATENT_NO_SINK,
+                query_scale: 1.0,
+                counts: [127, 128, 129],
+                rejected: [0..0, 0..0, 0..0],
+                tolerance: 2e-5,
+            },
+            Case {
+                name: "raw window across splits",
+                window: 100,
+                slots: 157,
+                sink: 0.75,
+                query_scale: 1.0,
+                counts: [157, 28, 29],
+                rejected: [0..0, 0..0, 0..0],
+                tolerance: 2e-5,
+            },
+            Case {
+                name: "zero, rejected interior, empty trailing",
+                window: 0,
+                slots: 300,
+                sink: LATENT_NO_SINK,
+                query_scale: 1.0,
+                counts: [0, 300, 200],
+                rejected: [0..0, 128..256, 0..0],
+                tolerance: 2e-5,
+            },
+            Case {
+                name: "all-equal scores",
+                window: 0,
+                slots: 300,
+                sink: LATENT_NO_SINK,
+                query_scale: 0.0,
+                counts: [300, 255, 129],
+                rejected: [0..0, 0..0, 0..0],
+                tolerance: 2e-5,
+            },
+            Case {
+                name: "dominant sink",
+                window: 0,
+                slots: 300,
+                sink: 40.0,
+                query_scale: 1.0,
+                counts: [300, 300, 300],
+                rejected: [0..0, 0..0, 0..0],
+                tolerance: 2e-5,
+            },
+            Case {
+                name: "wide separation",
+                window: 0,
+                slots: 300,
+                sink: LATENT_NO_SINK,
+                query_scale: 40.0,
+                counts: [300, 300, 300],
+                rejected: [0..0, 0..0, 0..0],
+                tolerance: 1e-4,
+            },
+        ];
+        let mut state = 0x2545_f491u32;
+        let mut noise = |scale: f32| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            ((state >> 8) as f32 / 16_777_216.0 - 0.5) * 2.0 * scale
+        };
+        for case in &cases {
+            let name = case.name;
+            let (window, slots) = (case.window, case.slots);
+            let q: Vec<f32> = (0..W * H * TOKENS)
+                .map(|_| noise(case.query_scale))
+                .collect();
+            let cache: Vec<half::f16> = (0..W * CAP)
+                .map(|_| half::f16::from_f32(noise(0.5)))
+                .collect();
+            let ring: Vec<half::f16> = (0..W * window.max(1))
+                .map(|_| half::f16::from_f32(noise(0.5)))
+                .collect();
+            let visible: [i32; TOKENS] = std::array::from_fn(|t| (START + t + 1) as i32);
+            let mut ids = vec![0i32; slots * TOKENS];
+            for t in 0..TOKENS {
+                let l = visible[t] as usize;
+                for slot in 0..slots {
+                    ids[t * slots + slot] = if case.rejected[t].contains(&slot) {
+                        // Negative, then beyond visibility (inside capacity).
+                        if slot % 2 == 0 { -1 } else { (l + 3) as i32 }
+                    } else {
+                        ((slot * 13 + t * 5) % l) as i32
+                    };
+                }
+            }
+
+            // Independent softmax over (sink, raw window rows, admitted ids).
+            let oracle = |t: usize| -> Vec<f64> {
+                let visible_end = START + t + 1;
+                let raw_count = visible_end.min(window);
+                let mut rows: Vec<&[half::f16]> = (visible_end - raw_count..visible_end)
+                    .map(|p| &ring[(p % window) * W..][..W])
+                    .collect();
+                let count = (case.counts[t].max(0) as usize).min(slots);
+                for &id in &ids[t * slots..][..count] {
+                    if id >= 0 && (id as usize) < visible_end && (id as usize) < CAP {
+                        rows.push(&cache[id as usize * W..][..W]);
+                    }
+                }
+                let mut out = vec![0.0f64; W * H];
+                for h in 0..H {
+                    let qh = &q[(t * H + h) * W..][..W];
+                    let scores: Vec<f64> = rows
+                        .iter()
+                        .map(|row| {
+                            qh.iter()
+                                .zip(row.iter())
+                                .map(|(q, k)| *q as f64 * k.to_f64())
+                                .sum::<f64>()
+                                * SCALE as f64
+                        })
+                        .collect();
+                    let top = scores.iter().fold(case.sink as f64, |m, &s| m.max(s));
+                    let mut denominator = (case.sink as f64 - top).exp();
+                    let o = &mut out[h * W..][..W];
+                    for (row, s) in rows.iter().zip(&scores) {
+                        let weight = (s - top).exp();
+                        denominator += weight;
+                        for (o, k) in o.iter_mut().zip(row.iter()) {
+                            *o += weight * k.to_f64();
+                        }
+                    }
+                    o.iter_mut().for_each(|v| *v /= denominator);
+                }
+                out
+            };
+
+            let i32_t = |v: &[i32], shape: Vec<u64>| {
+                offset_tensor(&ctx, 16, bytemuck::cast_slice(v), 16, shape, GgmlType::I32)
+            };
+            let f16_t = |v: &[half::f16], rows: usize| {
+                offset_tensor(
+                    &ctx,
+                    64,
+                    bytemuck::cast_slice(v),
+                    64,
+                    vec![W as u64, rows as u64],
+                    GgmlType::F16,
+                )
+            };
+            let q_t = f32_tensor(&ctx, &q, vec![(W * H) as u64, TOKENS as u64]);
+            let cache_t = f16_t(&cache, CAP);
+            let ring_t = f16_t(&ring, window.max(1));
+            let sinks_t = f32_tensor(&ctx, &[case.sink; H], vec![H as u64]);
+            let ids_t = i32_t(&ids, vec![slots as u64, TOKENS as u64]);
+            let counts_t = i32_t(&case.counts, vec![TOKENS as u64]);
+            let visible_t = i32_t(&visible, vec![TOKENS as u64]);
+            let splits = selected_attention_splits(window, slots);
+            let all_units = (TOKENS * H * splits) as u64;
+            let values_t = f32_tensor(
+                &ctx,
+                &vec![f32::NAN; W * all_units as usize],
+                vec![W as u64, all_units],
+            );
+            let stats_t = f32_tensor(
+                &ctx,
+                &vec![f32::NAN; 2 * all_units as usize],
+                vec![2, all_units],
+            );
+            let output = || {
+                f32_tensor(
+                    &ctx,
+                    &vec![3.0; W * H * TOKENS],
+                    vec![(W * H) as u64, TOKENS as u64],
+                )
+            };
+            // Encode (first, count) dispatches in order into one serial encoder.
+            let encode = |out_t: &MetalTensor, split: bool, batches: &[(usize, usize)]| {
+                run(&ctx, |enc| {
+                    for &(first, count) in batches {
+                        let ids_v = ids_t.view_subrange(
+                            (first * slots) as u64,
+                            vec![slots as u64, count as u64],
+                        );
+                        let counts_v = counts_t.view_subrange(first as u64, vec![count as u64]);
+                        let visible_v = visible_t.view_subrange(first as u64, vec![count as u64]);
+                        let buffers = SelectedAttention {
+                            queries: &q_t,
+                            raw_cache: &ring_t,
+                            raw_cache_before_chunk: &ring_t,
+                            compressed_cache: &cache_t,
+                            selected_ids: &ids_v,
+                            selected_counts: &counts_v,
+                            visible_counts: &visible_v,
+                            sinks: &sinks_t,
+                            output: out_t,
+                        };
+                        let shape = SelectedAttentionShape {
+                            head_count: H,
+                            query_count: count,
+                            query_token_offset: first,
+                            token_count: TOKENS,
+                            chunk_start_position: START,
+                            window,
+                            raw_cache_is_chunk: false,
+                            selected_slots: slots,
+                            compressed_capacity: CAP,
+                            scale: SCALE,
+                            direct: true,
+                        };
+                        if split {
+                            let units = (count * H * splits) as u64;
+                            let partials = SelectedAttentionPartials {
+                                values: &values_t.view_subrange(0, vec![W as u64, units]),
+                                stats: &stats_t.view_subrange(0, vec![2, units]),
+                            };
+                            encode_online_selected_attention_split_f16(
+                                &ctx, enc, &buffers, shape, &partials,
+                            )
+                            .unwrap();
+                        } else {
+                            encode_online_selected_attention_f16(&ctx, enc, &buffers, shape)
+                                .unwrap();
+                        }
+                    }
+                });
+                tensor_f32_at_offset(out_t)
+            };
+            let split = encode(&output(), true, &[(0, 2), (2, 1)]);
+            let serial = encode(&output(), false, &[(0, TOKENS)]);
+            for t in 0..TOKENS {
+                let expected = oracle(t);
+                let row = t * W * H..(t + 1) * W * H;
+                for h in 0..H {
+                    let head = |v: &[f32]| v[row.start + h * W..][..W].to_vec();
+                    let (got, reference) = (head(&split), head(&serial));
+                    let want = &expected[h * W..][..W];
+                    let magnitude = want.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+                    let bound = case.tolerance * magnitude;
+                    let worst = |v: &[f32]| {
+                        v.iter()
+                            .zip(want)
+                            .map(|(a, e)| (*a as f64 - e).abs())
+                            .fold(0.0f64, f64::max)
+                    };
+                    assert!(
+                        got.iter().all(|v| v.is_finite()),
+                        "{name}: token {t} head {h}: non-finite split output"
+                    );
+                    assert!(
+                        worst(&got) <= bound,
+                        "{name}: token {t} head {h}: split vs oracle {} > {bound}",
+                        worst(&got)
+                    );
+                    assert!(
+                        worst(&reference) <= bound,
+                        "{name}: token {t} head {h}: serial vs oracle {} > {bound}",
+                        worst(&reference)
+                    );
+                    if magnitude == 0.0 {
+                        assert!(got.iter().all(|v| *v == 0.0), "{name}: token {t}: not zero");
+                    }
+                }
+            }
+            // A lone middle query leaves the other rows untouched and
+            // reproduces its row bitwise.
+            let alone = encode(&output(), true, &[(1, 1)]);
+            for t in 0..TOKENS {
+                let row = t * W * H..(t + 1) * W * H;
+                let expected: Vec<u32> = if t == 1 {
+                    split[row.clone()].iter().map(|v| v.to_bits()).collect()
+                } else {
+                    vec![3.0f32.to_bits(); W * H]
+                };
+                assert_eq!(
+                    alone[row].iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    expected,
+                    "{name}: lone dispatch, token {t}"
+                );
+            }
+        }
+    }
+
     /// The encoder refuses raw caches too short for the window or chunk it
     /// is asked to read (no work is submitted).
     #[test]

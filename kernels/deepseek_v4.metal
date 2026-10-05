@@ -2454,14 +2454,24 @@ struct online_selected_split_args {
     uint splits;
 };
 
+// Maximum of an empty split's state. Finite, like the host's no-sink logit
+// (LATENT_NO_SINK), because the metallib builds with fast math: the first
+// admitted row's update then scales an all-zero state by exp(empty - score)
+// with no infinity arithmetic, and lands on (score, 1, row) exactly as from
+// -inf for any score above it. Scores are finite by contract, as in the
+// serial kernel.
+constant float SELECTED_SPLIT_EMPTY_MAXIMUM = -1.0e30f;
+
 // Split online selected attention, partial pass: one 32-lane simdgroup per
 // (query, head, split). A query's attended rows (its raw window, then its
 // selected slots, in that order) are cut into consecutive ranges of
 // `split_rows`; each split runs the serial kernel's online update over its
-// range from an empty state (maximum -inf, denominator 0) and writes its
-// (maximum, denominator, unnormalized accumulator). Splits past a query's
-// rows write an empty state. The partition depends only on the query's own
+// range from an empty state (maximum SELECTED_SPLIT_EMPTY_MAXIMUM,
+// denominator 0) and writes its (maximum, denominator, unnormalized
+// accumulator). Splits past a query's rows, or whose ids are all rejected,
+// write the empty state. The partition depends only on the query's own
 // geometry, never on how many queries share the dispatch.
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_online_selected_attention_f16_split_partial(
         constant online_selected_split_args & split_args [[buffer(0)]],
         device const float * queries [[buffer(1)]],
@@ -2501,7 +2511,7 @@ kernel void kernel_online_selected_attention_f16_split_partial(
     const float4 q2 = query4[lane + 64];
     const float4 q3 = query4[lane + 96];
 
-    float maximum = -INFINITY;
+    float maximum = SELECTED_SPLIT_EMPTY_MAXIMUM;
     float denominator = 0.0f;
     float4 o0 = 0.0f;
     float4 o1 = 0.0f;
@@ -2551,6 +2561,7 @@ kernel void kernel_online_selected_attention_f16_split_partial(
 // head) folds its splits in order into the sink's initial state (maximum
 // sink, denominator 1), with the serial row update's branch structure, and
 // writes the normalized output. Empty splits (denominator 0) are skipped.
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_online_selected_attention_f16_split_merge(
         constant online_selected_split_args & split_args [[buffer(0)]],
         device const float * partial_values [[buffer(1)]],

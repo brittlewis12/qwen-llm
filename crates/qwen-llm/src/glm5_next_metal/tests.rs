@@ -2327,6 +2327,16 @@ fn lens_captures_read_out_without_moving_state() {
             "continuation after lens readouts"
         );
     }
+    // A stage-profiled step is the same step: bitwise logits and state.
+    let (profiled, report) = lensed.forward_stage_profiled(&ctx, tokens[8]).unwrap();
+    assert_eq!(
+        bits(&profiled),
+        bits(&reference.forward(&ctx, tokens[8]).unwrap())
+    );
+    assert_eq!(state_bits(&lensed), state_bits(&reference));
+    assert!(report.spans.len() > 45 * 6, "{}", report.spans.len());
+    assert!(report.spans.iter().all(|span| span.gpu_ms >= 0.0));
+    assert!(report.span_sum_ms > 0.0 && report.span_sum_ms <= report.command_gpu_ms * 1.001);
     drop((reference, lensed));
 
     // Readouts between packed chunks and past the sparse frontier leave the
@@ -2452,4 +2462,164 @@ fn capture_release_sampling_logits() {
     )
     .unwrap();
     eprintln!("wrote {rows} rows to {}", out.display());
+}
+
+/// Per-stage bytes of executed weights read by one decode step, from GGUF
+/// tensor names: routed experts count top-k of the expert stack, the
+/// embedding one row; the sparse query weights only past the frontier.
+fn stage_weight_bytes(gguf: &GgufFile, c: &Glm5NextConfig) -> BTreeMap<&'static str, f64> {
+    let mut bytes = BTreeMap::new();
+    let executed = c.executed_block_count() as usize;
+    for tensor in &gguf.tensors {
+        let name = tensor.name.as_str();
+        let n = tensor.n_bytes as f64;
+        let (stage, scale) = if name.starts_with("token_embd") {
+            ("embed", 1.0 / c.vocab_size as f64)
+        } else if name.starts_with("output") {
+            ("head", 1.0)
+        } else if let Some(rest) = name.strip_prefix("blk.") {
+            let (block, rest) = rest.split_once('.').unwrap();
+            let block: usize = block.parse().unwrap();
+            if block >= executed {
+                continue;
+            }
+            let mla = c.blocks[block].mixer == MixerKind::Mla;
+            let stage = if rest.starts_with("hc_attn_") || rest.starts_with("attn_norm") {
+                "attention_pre"
+            } else if rest.starts_with("hc_ffn_") || rest.starts_with("ffn_norm") {
+                "ffn_pre"
+            } else if rest.starts_with("indexer.attn_q_b") || rest.starts_with("indexer.proj") {
+                "sparse_query"
+            } else if rest.starts_with("indexer") {
+                "mla_indexer"
+            } else if mla && (rest.starts_with("attn_v_b") || rest.starts_with("attn_output")) {
+                "mla_output"
+            } else if mla && rest.starts_with("attn_") {
+                "mla_projection"
+            } else if rest.starts_with("attn_") || rest.starts_with("ssm_") {
+                "kda"
+            } else if rest.starts_with("ffn_gate_inp") || rest.starts_with("exp_probs_b") {
+                "router"
+            } else if rest.contains("_exps") {
+                *bytes.entry("routed_experts").or_insert(0.0) +=
+                    n * c.expert_used_count as f64 / c.expert_count as f64;
+                continue;
+            } else if rest.contains("_shexp") {
+                "shared_expert"
+            } else if rest.starts_with("ffn_") {
+                "dense_ffn"
+            } else {
+                "unmapped"
+            };
+            (stage, 1.0)
+        } else {
+            ("unmapped", 1.0)
+        };
+        *bytes.entry(stage).or_insert(0.0) += n * scale;
+    }
+    bytes
+}
+
+/// Leverage map 2026-10-05 #2: decode attribution. At depths 64 and 4096,
+/// unprofiled per-token wall time, then profiled steps (one sampled encoder
+/// per stage) aggregated per stage kind, beside a per-stage weight-byte
+/// model and the effective bandwidth it implies. Writes JSON to
+/// `GLM53_STAGE_OUT`. Timing, not qualification: no bounds.
+#[test]
+#[ignore = "timing: loads the GLM-5.3 trunk; requires GLM53_GGUF, GLM53_STAGE_OUT, no MTL_DEBUG_LAYER and an idle GPU"]
+fn decode_stage_attribution() {
+    let _lease = perf_lease();
+    let out = PathBuf::from(std::env::var("GLM53_STAGE_OUT").expect("GLM53_STAGE_OUT"));
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let ctx = MetalContext::new().expect("Metal context");
+    let gguf = GgufFile::open(&path).unwrap();
+    let artifact = crate::glm5_next::admission::Glm5NextPreparedArtifact::inspect(&gguf).unwrap();
+    let tokens: Vec<u32> = artifact
+        .tokenizer()
+        .encode(&format!("[gMASK]<sop>{}", long_qualification_text()), false)
+        .unwrap()
+        .into_iter()
+        .map(|id| id as u32)
+        .collect();
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let c = &weights.config;
+    let bytes = stage_weight_bytes(&gguf, c);
+    let (steps, warm) = (12usize, 4usize);
+    let capacity = 4096 + 2 * (steps + warm) + 8;
+    assert!(tokens.len() >= capacity, "{} tokens", tokens.len());
+    let mut session = Glm5NextSession::with_prefill_rows(&ctx, &weights, capacity, 512).unwrap();
+    let mut depths = Vec::new();
+    for depth in [64usize, 4096] {
+        let start = session.position();
+        session.prefill_packed(&ctx, &tokens[start..depth]).unwrap();
+        let mut next = depth;
+        for _ in 0..warm {
+            session.forward(&ctx, tokens[next]).unwrap();
+            next += 1;
+        }
+        let mut wall = Vec::new();
+        for _ in 0..steps {
+            let started = std::time::Instant::now();
+            session.forward(&ctx, tokens[next]).unwrap();
+            wall.push(started.elapsed().as_secs_f64() * 1e3);
+            next += 1;
+        }
+        let mut stage_ms: BTreeMap<&'static str, f64> = BTreeMap::new();
+        let mut stage_spans: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let (mut command, mut span_sum) = (0.0, 0.0);
+        for _ in 0..steps {
+            let (_, report) = session.forward_stage_profiled(&ctx, tokens[next]).unwrap();
+            next += 1;
+            command += report.command_gpu_ms / steps as f64;
+            span_sum += report.span_sum_ms / steps as f64;
+            for span in &report.spans {
+                *stage_ms.entry(span.stage.as_str()).or_default() += span.gpu_ms / steps as f64;
+                *stage_spans.entry(span.stage.as_str()).or_default() += 1;
+            }
+        }
+        let wall_ms = wall.iter().sum::<f64>() / wall.len() as f64;
+        let stages: serde_json::Map<String, serde_json::Value> = stage_ms
+            .iter()
+            .map(|(&stage, &ms)| {
+                let b = bytes.get(stage).copied().unwrap_or(0.0);
+                let gb_s = if ms > 0.0 { b / (ms * 1e-3) / 1e9 } else { 0.0 };
+                (
+                    stage.to_string(),
+                    serde_json::json!({"ms": ms, "share_of_spans": ms / span_sum,
+                        "spans_per_step": stage_spans[stage] / steps, "weight_bytes": b,
+                        "effective_gb_s": gb_s}),
+                )
+            })
+            .collect();
+        eprintln!(
+            "depth {depth}: unprofiled {wall_ms:.2} ms/token; profiled command {command:.2} ms, span sum {span_sum:.2} ms"
+        );
+        let mut ranked: Vec<_> = stage_ms.iter().collect();
+        ranked.sort_by(|a, b| b.1.total_cmp(a.1));
+        for (stage, ms) in ranked {
+            let b = bytes.get(stage).copied().unwrap_or(0.0);
+            eprintln!(
+                "  {stage:18} {ms:7.3} ms  {:5.1}%  {:8.1} MB  {:6.1} GB/s",
+                100.0 * ms / span_sum,
+                b / 1e6,
+                if *ms > 0.0 {
+                    b / (ms * 1e-3) / 1e9
+                } else {
+                    0.0
+                }
+            );
+        }
+        depths.push(serde_json::json!({
+            "depth": depth, "steps": steps, "unprofiled_wall_ms_per_token": wall_ms,
+            "unprofiled_wall_ms": wall, "profiled_command_gpu_ms": command,
+            "profiled_span_sum_ms": span_sum, "stages": stages,
+        }));
+    }
+    let document = serde_json::json!({
+        "schema": "glm53.decode_stage_attribution.v1",
+        "method": "one command per step, one timestamp-sampled encoder per stage; spans scaled to the command's GPU time",
+        "prompt": "[gMASK]<sop> + long_qualification_text (teacher-forced)",
+        "weight_bytes_per_step": bytes, "depths": depths,
+    });
+    std::fs::write(&out, serde_json::to_vec_pretty(&document).unwrap()).unwrap();
 }

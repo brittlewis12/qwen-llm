@@ -233,7 +233,10 @@ pub struct Glm5NextWeights {
 impl Glm5NextWeights {
     /// The retained no-copy weight buffers (for idle residency keep-alive).
     pub fn retained_buffers(&self) -> Vec<&crate::metal::Buffer> {
-        self._backings.iter().map(|backing| &backing.buffer).collect()
+        self._backings
+            .iter()
+            .map(|backing| &backing.buffer)
+            .collect()
     }
 
     /// Admits serial decode and the retained bytes, then maps every executed
@@ -748,6 +751,85 @@ pub enum Glm5NextProbe {
     BlockResidual,
 }
 
+/// Decode stages timed by [`Glm5NextSession::forward_stage_profiled`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Glm5NextStage {
+    Embed,
+    AttentionPre,
+    Kda,
+    MlaProjection,
+    MlaIndexer,
+    DenseAttention,
+    SparseQuery,
+    SparseScores,
+    SparseSelect,
+    SparseAttention,
+    MlaOutput,
+    AttentionPost,
+    FfnPre,
+    DenseFfn,
+    Router,
+    RoutedExperts,
+    SharedExpert,
+    FfnPost,
+    Head,
+}
+
+impl Glm5NextStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Embed => "embed",
+            Self::AttentionPre => "attention_pre",
+            Self::Kda => "kda",
+            Self::MlaProjection => "mla_projection",
+            Self::MlaIndexer => "mla_indexer",
+            Self::DenseAttention => "dense_attention",
+            Self::SparseQuery => "sparse_query",
+            Self::SparseScores => "sparse_scores",
+            Self::SparseSelect => "sparse_select",
+            Self::SparseAttention => "sparse_attention",
+            Self::MlaOutput => "mla_output",
+            Self::AttentionPost => "attention_post",
+            Self::FfnPre => "ffn_pre",
+            Self::DenseFfn => "dense_ffn",
+            Self::Router => "router",
+            Self::RoutedExperts => "routed_experts",
+            Self::SharedExpert => "shared_expert",
+            Self::FfnPost => "ffn_post",
+            Self::Head => "head",
+        }
+    }
+}
+
+/// One timed encoder of a profiled decode step.
+#[derive(Clone, Copy, Debug)]
+pub struct Glm5NextStageSpan {
+    pub stage: Glm5NextStage,
+    /// Executed block, or `None` for the embedding and the head.
+    pub block: Option<u32>,
+    /// Stage-boundary timestamps scaled to the command's GPU time.
+    pub gpu_ms: f64,
+}
+
+/// Attribution of one decode step: the step is encoded as one command with
+/// one sampled encoder per stage (diagnostic; encoder boundaries add their
+/// own cost, reported as the gap between the span sum and the command).
+#[derive(Clone, Debug)]
+pub struct Glm5NextStageReport {
+    pub spans: Vec<Glm5NextStageSpan>,
+    pub command_gpu_ms: f64,
+    pub span_sum_ms: f64,
+}
+
+/// Samples per profiled step: two per stage span, with headroom.
+const STAGE_SAMPLE_CAPACITY: usize = 2048;
+
+struct StageRecorder {
+    samples: crate::metal::MetalTimestampSampleBuffer,
+    spans: Vec<(Glm5NextStage, Option<u32>)>,
+    command_gpu_ms: f64,
+}
+
 pub struct Glm5NextSession<'w> {
     weights: &'w Glm5NextWeights,
     capacity: usize,
@@ -762,6 +844,8 @@ pub struct Glm5NextSession<'w> {
     ledger: Glm5NextMemoryLedger,
     /// Net device-counter change across buffer construction (diagnostic).
     observed_allocation_delta: u64,
+    /// Set only by [`Self::forward_stage_profiled`] for one step.
+    stage_recorder: std::cell::RefCell<Option<StageRecorder>>,
     /// Test hook: the next packed chunk sees zero visible pools for this
     /// chunk row, so its sparse selection fails in every MLA block.
     #[cfg(test)]
@@ -861,6 +945,7 @@ impl<'w> Glm5NextSession<'w> {
             packed,
             ledger,
             observed_allocation_delta,
+            stage_recorder: std::cell::RefCell::new(None),
             #[cfg(test)]
             corrupt_sparse_row: None,
         })
@@ -893,6 +978,85 @@ impl<'w> Glm5NextSession<'w> {
     /// Decode one token at the next position; returns full-vocabulary logits.
     pub fn forward(&mut self, ctx: &MetalContext, token: u32) -> Result<Vec<f32>> {
         self.forward_observed(ctx, token, &[], &mut |_, _, _| {})
+    }
+
+    /// Like [`Self::forward`] (same kernels, same state), encoding the step
+    /// as one command with a timestamp-sampled encoder per stage. The
+    /// encoder boundaries cost GPU time of their own, so the spans attribute
+    /// a slightly slower step; compare shares, not the sum, with `forward`.
+    pub fn forward_stage_profiled(
+        &mut self,
+        ctx: &MetalContext,
+        token: u32,
+    ) -> Result<(Vec<f32>, Glm5NextStageReport)> {
+        *self.stage_recorder.borrow_mut() = Some(StageRecorder {
+            samples: ctx.timestamp_sample_buffer(STAGE_SAMPLE_CAPACITY)?,
+            spans: Vec::new(),
+            command_gpu_ms: 0.0,
+        });
+        let result = self.forward(ctx, token);
+        let recorder = self.stage_recorder.borrow_mut().take();
+        let logits = result?;
+        let recorder =
+            recorder.ok_or_else(|| Glm5NextMetalError::Invalid("stage recorder lost".into()))?;
+        let n = recorder.spans.len();
+        if n == 0 {
+            return invalid("profiled step recorded no stages");
+        }
+        let ticks = ctx.resolve_timestamp_samples(&recorder.samples, 2 * n)?;
+        let total_ticks = ticks[2 * n - 1].saturating_sub(ticks[0]);
+        if total_ticks == 0 || recorder.command_gpu_ms <= 0.0 {
+            return invalid("profiled step has no measurable GPU time");
+        }
+        let scale = recorder.command_gpu_ms / total_ticks as f64;
+        let spans: Vec<Glm5NextStageSpan> = recorder
+            .spans
+            .iter()
+            .enumerate()
+            .map(|(i, &(stage, block))| Glm5NextStageSpan {
+                stage,
+                block,
+                gpu_ms: ticks[2 * i + 1].saturating_sub(ticks[2 * i]) as f64 * scale,
+            })
+            .collect();
+        let span_sum_ms = spans.iter().map(|span| span.gpu_ms).sum();
+        Ok((
+            logits,
+            Glm5NextStageReport {
+                spans,
+                command_gpu_ms: recorder.command_gpu_ms,
+                span_sum_ms,
+            },
+        ))
+    }
+
+    /// Starts a sampled encoder for `stage` when a profiled step is
+    /// recording; otherwise does nothing.
+    fn stage(
+        &self,
+        enc: &mut KernelEncoder,
+        stage: Glm5NextStage,
+        block: Option<usize>,
+    ) -> Result<()> {
+        let mut recorder = self.stage_recorder.borrow_mut();
+        let Some(recorder) = recorder.as_mut() else {
+            return Ok(());
+        };
+        let index = recorder.spans.len();
+        if 2 * index + 1 >= recorder.samples.sample_count() {
+            return invalid("stage profile sample capacity exceeded");
+        }
+        let command = enc.parent.clone();
+        enc.finish();
+        *enc = KernelEncoder::try_begin_sampled(
+            &command,
+            &recorder.samples,
+            2 * index,
+            2 * index + 1,
+            false,
+        )?;
+        recorder.spans.push((stage, block.map(|b| b as u32)));
+        Ok(())
     }
 
     /// Advance one token without the output head (prompt positions whose
@@ -1051,12 +1215,14 @@ impl<'w> Glm5NextSession<'w> {
             .commandBuffer()
             .ok_or_else(|| Glm5NextMetalError::Invalid("no command buffer".into()))?;
         let mut enc = KernelEncoder::begin(&command);
+        self.stage(&mut enc, Glm5NextStage::Embed, None)?;
         encode_get_rows_f32(ctx, &enc, &w.embedding, &s.token, &s.embedding, 1, h)?;
         encode_mhc4_repeat(ctx, &enc, h, &s.embedding, &s.residual[0])?;
         let mut mla_index = 0;
         for (index, block) in w.blocks.iter().enumerate() {
             let (a, b) = (&s.residual[0], &s.residual[1]);
             // Attention sub-block: a -> b.
+            self.stage(&mut enc, Glm5NextStage::AttentionPre, Some(index))?;
             self.encode_hc_pre(
                 ctx,
                 &enc,
@@ -1075,6 +1241,7 @@ impl<'w> Glm5NextSession<'w> {
             )?;
             match (&block.mixer, &self.layers[index]) {
                 (MixerTensors::Kda(kda), LayerState::Kda { conv, state }) => {
+                    self.stage(&mut enc, Glm5NextStage::Kda, Some(index))?;
                     self.encode_kda(ctx, &enc, kda, conv, state)?
                 }
                 (
@@ -1085,11 +1252,14 @@ impl<'w> Glm5NextSession<'w> {
                         pooled,
                     },
                 ) => {
-                    self.encode_mla(ctx, &enc, mla, latent, pending, pooled, mla_index)?;
+                    self.encode_mla(
+                        ctx, &mut enc, mla, latent, pending, pooled, mla_index, index,
+                    )?;
                     mla_index += 1;
                 }
                 _ => return invalid(format!("block {index} state does not match its mixer")),
             }
+            self.stage(&mut enc, Glm5NextStage::AttentionPost, Some(index))?;
             encode_mhc4_post(ctx, &enc, h, &s.block_out, a, &s.post, &s.comb, b)?;
             if observed && probes.contains(&Glm5NextProbe::AttentionResidual) {
                 enc.end();
@@ -1103,6 +1273,7 @@ impl<'w> Glm5NextSession<'w> {
                 enc = KernelEncoder::begin(&command);
             }
             // FFN sub-block: b -> a.
+            self.stage(&mut enc, Glm5NextStage::FfnPre, Some(index))?;
             self.encode_hc_pre(
                 ctx,
                 &enc,
@@ -1121,6 +1292,7 @@ impl<'w> Glm5NextSession<'w> {
             )?;
             match &block.ffn {
                 FfnTensors::Dense(dense) => {
+                    self.stage(&mut enc, Glm5NextStage::DenseFfn, Some(index))?;
                     let f = c.dense_ffn_size as usize;
                     matvec(ctx, &enc, &dense.gate, &s.normed, &s.dense_gate, h, f)?;
                     matvec(ctx, &enc, &dense.up, &s.normed, &s.dense_up, h, f)?;
@@ -1143,6 +1315,7 @@ impl<'w> Glm5NextSession<'w> {
                         c.expert_ffn_size as usize,
                         c.expert_used_count as usize,
                     );
+                    self.stage(&mut enc, Glm5NextStage::Router, Some(index))?;
                     matvec(ctx, &enc, &moe.router, &s.normed, &s.router, h, e)?;
                     let spec = LearnedRoute {
                         experts: e,
@@ -1160,6 +1333,7 @@ impl<'w> Glm5NextSession<'w> {
                         &route.weights,
                         &route.status,
                     )?;
+                    self.stage(&mut enc, Glm5NextStage::RoutedExperts, Some(index))?;
                     encode_all_slots_gate_up_swiglu(
                         ctx,
                         &enc,
@@ -1197,6 +1371,7 @@ impl<'w> Glm5NextSession<'w> {
                         h,
                         k,
                     )?;
+                    self.stage(&mut enc, Glm5NextStage::SharedExpert, Some(index))?;
                     let sf = c.shared_expert_ffn_size as usize;
                     matvec(
                         ctx,
@@ -1228,6 +1403,7 @@ impl<'w> Glm5NextSession<'w> {
                     encode_add_f32(ctx, &enc, &s.routed, &s.shared, &s.block_out)?;
                 }
             }
+            self.stage(&mut enc, Glm5NextStage::FfnPost, Some(index))?;
             encode_mhc4_post(ctx, &enc, h, &s.block_out, b, &s.post, &s.comb, a)?;
             if observed && probes.contains(&Glm5NextProbe::BlockResidual) {
                 enc.end();
@@ -1242,6 +1418,7 @@ impl<'w> Glm5NextSession<'w> {
             }
         }
         if logits {
+            self.stage(&mut enc, Glm5NextStage::Head, None)?;
             // Head: mean of the four streams, output norm, logits.
             encode_mhc4_collapse(ctx, &enc, h, &s.residual[0], &s.quarter, &s.final_hidden)?;
             encode_rms_norm_mul_f32(
@@ -1265,6 +1442,9 @@ impl<'w> Glm5NextSession<'w> {
         enc.end();
         command.commit();
         wait_completed(&command)?;
+        if let Some(recorder) = self.stage_recorder.borrow_mut().as_mut() {
+            recorder.command_gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+        }
         Ok(())
     }
 
@@ -1380,16 +1560,19 @@ impl<'w> Glm5NextSession<'w> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn encode_mla(
         &self,
         ctx: &MetalContext,
-        enc: &KernelEncoder,
+        enc: &mut KernelEncoder,
         mla: &crate::glm5_next::MlaTensors<MetalTensor>,
         latent: &MetalTensor,
         pending: &MetalTensor,
         pooled: &MetalTensor,
         mla_index: usize,
+        block: usize,
     ) -> Result<()> {
+        self.stage(enc, Glm5NextStage::MlaProjection, Some(block))?;
         let c = &self.weights.config;
         let s = &self.s;
         let h = c.hidden_size as usize;
@@ -1438,6 +1621,7 @@ impl<'w> Glm5NextSession<'w> {
         // completes is published before attention: a query at visible length
         // L scores the first L / 4 pools, including its own.
         let index_dim = c.indexer_head_dim as usize;
+        self.stage(enc, Glm5NextStage::MlaIndexer, Some(block))?;
         matvec(
             ctx,
             enc,
@@ -1472,8 +1656,11 @@ impl<'w> Glm5NextSession<'w> {
         let scale = 1.0 / (head_dim as f32).sqrt();
         let visible = self.position + 1;
         if visible >= c.sparse_frontier() as usize {
-            self.encode_sparse_attention(ctx, enc, mla, latent, pooled, mla_index, visible, scale)?;
+            self.encode_sparse_attention(
+                ctx, enc, mla, latent, pooled, mla_index, visible, scale, block,
+            )?;
         } else {
+            self.stage(enc, Glm5NextStage::DenseAttention, Some(block))?;
             encode_latent_attention(
                 ctx,
                 enc,
@@ -1486,6 +1673,7 @@ impl<'w> Glm5NextSession<'w> {
                 scale,
             )?;
         }
+        self.stage(enc, Glm5NextStage::MlaOutput, Some(block))?;
         encode_mat_vec_q8_0_grouped_f32(
             ctx,
             enc,
@@ -1518,14 +1706,16 @@ impl<'w> Glm5NextSession<'w> {
     fn encode_sparse_attention(
         &self,
         ctx: &MetalContext,
-        enc: &KernelEncoder,
+        enc: &mut KernelEncoder,
         mla: &crate::glm5_next::MlaTensors<MetalTensor>,
         latent: &MetalTensor,
         pooled: &MetalTensor,
         mla_index: usize,
         visible: usize,
         scale: f32,
+        block: usize,
     ) -> Result<()> {
+        self.stage(enc, Glm5NextStage::SparseQuery, Some(block))?;
         let c = &self.weights.config;
         let s = &self.s;
         let sp = self.sparse.as_ref().ok_or_else(|| {
@@ -1572,6 +1762,7 @@ impl<'w> Glm5NextSession<'w> {
         let visible_pools = visible / c.indexer_pool as usize;
         let top_pools = c.selected_pool_count() as usize;
         let row_slots = c.selection_width() as usize;
+        self.stage(enc, Glm5NextStage::SparseScores, Some(block))?;
         crate::metal::encode_lightning_scores_f16_matrix(
             ctx,
             enc,
@@ -1588,6 +1779,7 @@ impl<'w> Glm5NextSession<'w> {
             visible_pools,
             1,
         )?;
+        self.stage(enc, Glm5NextStage::SparseSelect, Some(block))?;
         crate::metal::encode_select_top_k_ids(
             ctx,
             enc,
@@ -1618,6 +1810,7 @@ impl<'w> Glm5NextSession<'w> {
             1,
         )?;
         let flat = |t: &MetalTensor| t.view_subrange(0, vec![(kv * heads) as u64, 1]);
+        self.stage(enc, Glm5NextStage::SparseAttention, Some(block))?;
         crate::metal::encode_online_selected_attention_f16(
             ctx,
             enc,

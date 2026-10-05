@@ -6,7 +6,7 @@ family. The semantic reference is llama.cpp `src/models/glm5-next.cpp` at upstre
 no further `glm5-next` changes). Earlier research (2026-08-28 gap analysis,
 2026-08-29 schedule) and `cx` adversarial reviews at each packet are folded in.
 
-## Status (2026-10-04)
+## Status (2026-10-05)
 
 - P1 done: strict binder, role x dtype coverage with a phase-specific execution
   gate, memory ledger, native `glm4` tokenizer (HF and llama-tokenize parity),
@@ -51,10 +51,39 @@ no further `glm5-next` changes). Earlier research (2026-08-28 gap analysis,
   serial bitwise across the frontier for every chunking tested. A-B-B-A vs
   llama.cpp: pp4096 178.6-182.7 vs 177.3-177.4 t/s, tg128 27.7-27.9 vs
   22.1-22.5, tg128 at depth 4096 20.7-20.8 vs 19.9-20.1.
-- Next: P5 product lanes (entry tasks below), and P6: grouped-heads selected
-  attention (sparse decode costs +4.7 ms/token at the frontier; native loses 25%
-  from depth 0 to 4096 against llama.cpp's 10%), long-context dense attention,
-  a packed-prefill stage profiler, compact grouped-expert scheduling.
+- P4 follow-up: sparse-v2 (`scripts/reference/glm53/sparse-v2.json`) qualifies
+  selection near 4096 (sets equal in all 44 cases) with replays bound to their
+  manifests.
+- P5 entry tasks done: one CPU preparation (`glm5_next::admission`) drives run,
+  bench and capabilities with stable codes; session preflight before prefetch
+  names the capacity that fits; prefetch and packed prefill cancel at read and
+  chunk boundaries; phase timing separates setup from the loaded request.
+- P5 chat (T1 template) done: `glm5_next_chat` renders the upstream template's
+  text subset byte-for-byte (48 jinja2 fixtures from
+  `scripts/reference/generate_glm53_chat_fixtures.py`, both template digests
+  pinned; the GGUF template differs only on null assistant content, which it
+  prints as `None`); native token ids equal HF's on every rendered case. Effort
+  low/high/max (default max; others refused rather than silently Max), no
+  non-thinking mode, `clear_thinking`, tools refused. Chat eligibility is the
+  embedded template digest, single-token markers and released stops.
+- P5 run done: `qwen run --user/--system/--messages`, reasoning to stderr and
+  the answer to stdout through the shared pre-opened partition, release sampling
+  (temperature 1.0, top-p 0.95, top-k/min-p off) for raw and chat unless flags
+  override, chat profile and controls in `diagnostics.glm5_next` (schema 2).
+- P5 serve done (`docs/SERVE.md#glm-53-flash-verified-text-chat`): verified text
+  chat over one live session reused only on exact extension of its consumed
+  tokens (KDA cannot rewind), fresh otherwise; prefill cancellation keeps the
+  committed chunks; startup preflight, prefetch, load and warm-up before
+  accepting. GPU gate: cold equals run, replayed turns reuse the whole history,
+  Exact warm equals cold in output bytes and in join logits bit for bit,
+  cancelled prefill resumes with the cold bytes, aborted decodes retry cold.
+  Run and serve stats records are success-only, as for K2.
+- Next: P5 lens sites; then P6: grouped-heads selected attention (sparse decode
+  costs +4.7 ms/token at the frontier; native loses 25% from depth 0 to 4096
+  against llama.cpp's 10%), long-context dense attention, a packed-prefill stage
+  profiler (a fresh 22-28 token prefill costs 0.6-1.4 s), compact grouped-expert
+  scheduling, and an exact top-p sampler that avoids the full-vocabulary sort
+  (sampled decode 25.3 vs 27.7 tok/s greedy).
 
 ## Artifact
 

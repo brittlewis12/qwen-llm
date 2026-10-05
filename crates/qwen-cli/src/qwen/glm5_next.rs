@@ -167,6 +167,7 @@ pub(crate) fn capability_projection(gguf: &GgufFile) -> Result<Value> {
             "endpoint": "/v1/responses", "input": "verified_text_chat_items",
             "capacity_policy": "explicit_max_context_tokens_and_max_tokens_within_device_memory",
             "prefix_reuse": "live_session_exact_extension", "snapshot_cache": false, "tools": false,
+            "idle_residency": "opt_in_idle_residency_secs",
             "sampling_default": "release_generation_config_temperature_1_top_p_0.95"}),
         Ok((_, Err(error))) => json!({"status": "unsupported", "implementation_status": "partial",
             "code": error.code(), "message": format!("{FAMILY} serve renders verified text chat only: {error}")}),

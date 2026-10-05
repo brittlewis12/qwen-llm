@@ -24,11 +24,6 @@ use std::time::Instant;
 
 /// Default-on rollback lever for live-session reuse.
 const PREFIX_REUSE_ENV: &str = "QWEN_GLM_PREFIX_REUSE";
-/// Seconds after the last request during which idle pulses keep the weights
-/// wired (0, the default, disables them; see `metal::ResidencyKeepAlive`).
-const KEEP_RESIDENT_ENV: &str = "QWEN_GLM_KEEP_RESIDENT_SECS";
-/// Well inside the ~2 s after which an idle GPU unwires no-copy weights.
-const KEEP_ALIVE_PULSE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// CPU startup facts: the admitted artifact, its verified chat profile and
 /// the session geometry fixed for the server's lifetime.
@@ -128,13 +123,6 @@ pub(super) fn load(
     Glm5NextWeights::load(ctx, gguf).context("load GLM-5.3 weights")
 }
 
-fn keep_resident_window() -> std::time::Duration {
-    std::env::var(KEEP_RESIDENT_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map_or(std::time::Duration::ZERO, std::time::Duration::from_secs)
-}
-
 pub(super) struct Glm5NextBackend<'w, 'g> {
     ctx: &'w MetalContext,
     weights: &'w Glm5NextWeights,
@@ -144,10 +132,7 @@ pub(super) struct Glm5NextBackend<'w, 'g> {
     /// Exactly the tokens `session` has consumed, or empty when unknown.
     history: Vec<u32>,
     prefix_reuse: bool,
-    keep_alive: Option<qwen_llm::metal::ResidencyKeepAlive>,
-    keep_alive_window: std::time::Duration,
-    last_activity: Instant,
-    last_pulse: Option<Instant>,
+    idle_residency: super::idle_residency::IdleResidency,
     /// Packed-prefill arithmetic for new sessions (tests compare warm and
     /// cold paths under `Exact`, which matches serial decode bitwise).
     lineage: PackedLineage,
@@ -159,6 +144,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         weights: &'w Glm5NextWeights,
         prepared: Prepared<'g>,
         model_id: String,
+        idle_residency: std::time::Duration,
     ) -> Self {
         Self {
             ctx,
@@ -168,52 +154,11 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             session: None,
             history: Vec::new(),
             prefix_reuse: qwen_llm::env_flag::read_default_on(PREFIX_REUSE_ENV),
-            keep_alive: None,
-            keep_alive_window: keep_resident_window(),
-            last_activity: Instant::now(),
-            last_pulse: None,
+            idle_residency: super::idle_residency::IdleResidency::new("glm5_next", idle_residency),
             lineage: PackedLineage::default(),
         }
     }
 
-    /// One idle pulse when the keep-alive window is open and the last pulse
-    /// is at least [`KEEP_ALIVE_PULSE`] old. A failed pulse disables pulsing
-    /// for the server's lifetime; requests are unaffected.
-    fn pulse_if_due(&mut self) {
-        if self.keep_alive_window.is_zero()
-            || self.last_activity.elapsed() > self.keep_alive_window
-            || self
-                .last_pulse
-                .is_some_and(|at| at.elapsed() < KEEP_ALIVE_PULSE)
-        {
-            return;
-        }
-        if self.keep_alive.is_none() {
-            match qwen_llm::metal::ResidencyKeepAlive::new(self.ctx) {
-                Ok(keep_alive) => self.keep_alive = Some(keep_alive),
-                Err(error) => {
-                    tracing::warn!("serve: GLM keep-alive unavailable: {error}");
-                    self.keep_alive_window = std::time::Duration::ZERO;
-                    return;
-                }
-            }
-        }
-        let buffers = self.weights.retained_buffers();
-        let keep_alive = self.keep_alive.as_mut().expect("created above");
-        match keep_alive.pulse(self.ctx, &buffers) {
-            Ok(qwen_llm::metal::KeepAlivePulse::Submitted) => {
-                self.last_pulse = Some(Instant::now())
-            }
-            Ok(qwen_llm::metal::KeepAlivePulse::StillInFlight) => {}
-            Err(error) => {
-                tracing::warn!("serve: GLM keep-alive pulse failed; pulsing disabled: {error}");
-                self.keep_alive_window = std::time::Duration::ZERO;
-            }
-        }
-    }
-
-    /// A new session admitted together with `cpu_reserve` bytes of future
-    /// CPU storage (the request's transport allowance).
     fn fresh_session(&self, cpu_reserve: u64) -> Result<Glm5NextSession<'w>, ServeError> {
         let mut session = Glm5NextSession::with_prefill_rows_and_cpu_reserve(
             self.ctx,
@@ -248,6 +193,8 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             })
             .context("GLM-5.3 serve warm-up")?;
         drop(session);
+        // The server is about to accept: open the idle-residency window.
+        self.idle_residency.note_activity();
         Ok(started.elapsed().as_secs_f64() * 1e3)
     }
 }
@@ -270,6 +217,7 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
         prompt: &str,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
+        self.idle_residency.before_request();
         // Everything a client can get wrong is refused before the live
         // session is touched, so a 400 keeps the cached conversation.
         let maximum = request
@@ -390,15 +338,16 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
     }
 
     fn idle(&mut self) {
-        self.pulse_if_due();
+        let buffers = self.weights.retained_buffers();
+        self.idle_residency.on_idle(self.ctx, &buffers);
     }
 
     fn request_finished(&mut self) {
-        self.last_activity = Instant::now();
+        self.idle_residency.note_activity();
     }
 
     fn shutdown(&mut self) {
-        self.keep_alive_window = std::time::Duration::ZERO;
+        self.idle_residency.shutdown();
         self.session = None;
         self.history.clear();
     }

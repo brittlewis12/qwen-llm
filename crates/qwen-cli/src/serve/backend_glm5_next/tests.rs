@@ -24,6 +24,7 @@ fn invocation(
         drafter: None,
         trace_sse: None,
         template_style: Default::default(),
+        idle_residency_secs: None,
     }
 }
 
@@ -188,7 +189,13 @@ fn gpu_live_session_extends_resumes_and_resets() {
     // A CLI test links the production library: this takes the real lease.
     let ctx = MetalContext::new().unwrap();
     let weights = load(&ctx, &source, &prepared).unwrap();
-    let mut backend = Glm5NextBackend::new(&ctx, &weights, prepared, "glm".into());
+    let mut backend = Glm5NextBackend::new(
+        &ctx,
+        &weights,
+        prepared,
+        "glm".into(),
+        std::time::Duration::ZERO,
+    );
     eprintln!("warm_up_ms={:.1}", backend.warm_up().unwrap());
     let greedy = |input: Value, effort: &str| {
         json!({"model":"glm","input":input,"reasoning":{"effort":effort},

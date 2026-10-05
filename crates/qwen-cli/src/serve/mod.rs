@@ -27,6 +27,7 @@ pub(crate) mod decode_loop;
 pub(crate) mod durable;
 pub(crate) mod events;
 pub(crate) mod http;
+mod idle_residency;
 mod jobs;
 pub(crate) mod lens_http;
 mod native;
@@ -359,6 +360,12 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         &invocation.durable,
         invocation.snapshot_cache_mib,
     )?;
+    // Idle residency needs a backend that names its no-copy weights.
+    ensure!(
+        invocation.idle_residency_secs.unwrap_or(0) == 0 || family == ModelFamily::Glm5Next,
+        "--idle-residency-secs is implemented for GLM-5.3-Flash serve only; {} keeps its placement",
+        family.architecture_name()
+    );
     let template_style = invocation.template_style;
     ensure!(
         invocation.lens_allowed_origin.is_empty()
@@ -470,8 +477,13 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             let weights = backend_glm5_next::load(&ctx, &gguf, &prepared)?;
             let load_ms = started.elapsed().as_secs_f64() * 1e3;
             tracing::info!(target: "qwen_diag", "serve limits: {}", prepared.describe());
-            let mut backend =
-                backend_glm5_next::Glm5NextBackend::new(&ctx, &weights, prepared, model_id.clone());
+            let mut backend = backend_glm5_next::Glm5NextBackend::new(
+                &ctx,
+                &weights,
+                prepared,
+                model_id.clone(),
+                idle_residency::configured_window(invocation.idle_residency_secs),
+            );
             let warm_up_ms = backend.warm_up()?;
             tracing::info!(target: "qwen_diag", "serve startup: family=glm5_next load_ms={load_ms:.1} warm_up_ms={warm_up_ms:.1}");
             return accept_loop(

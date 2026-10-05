@@ -113,6 +113,15 @@ pub(crate) struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     trace_sse: Option<PathBuf>,
 
+    /// Keep a family's no-copy weights wired for this long after the server
+    /// starts and after each request, through ordinary keep-alive commands,
+    /// so a request after a pause does not re-wire them (about 1 s for
+    /// GLM-5.3-Flash). Suspended under host memory pressure; 0 disables.
+    /// Currently GLM-5.3-Flash only. Default: QWEN_SERVE_IDLE_RESIDENCY_SECS,
+    /// else 0.
+    #[arg(long, value_name = "SECS")]
+    idle_residency_secs: Option<u64>,
+
     /// Private durable Lens job history; native execution currently supports ordinary Qwen.
     #[arg(long)]
     lens_data_dir: Option<PathBuf>,
@@ -208,6 +217,8 @@ pub(crate) struct ServeInvocation {
     pub(crate) web_root: Option<PathBuf>,
     pub(crate) lens_allowed_origin: Vec<crate::serve::lens_http::access::BrowserOrigin>,
     pub(crate) template_style: crate::open_responses::items::TemplateStyle,
+    /// `None`: the environment default (see `serve::idle_residency`).
+    pub(crate) idle_residency_secs: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -487,6 +498,7 @@ pub(crate) fn normalize(args: &mut Args) -> Invocation {
             web_root: serve.web_root,
             lens_allowed_origin: serve.lens_allowed_origin,
             template_style: serve.template_style,
+            idle_residency_secs: serve.idle_residency_secs,
         }),
         Command::Run(run) => {
             let input = match (run.user, run.messages, run.raw_prompt) {

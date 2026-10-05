@@ -663,6 +663,16 @@ where
             let elapsed_ms = transition_t0.elapsed().as_secs_f64() * 1e3;
             transition_wall_ms += elapsed_ms;
             first_transition_ms.get_or_insert(elapsed_ms);
+            // Keep the shadow reference on the committed stream through
+            // serial steps too, so later speculative rows stay comparable.
+            if let Some(shadow) = shadow_probe.as_deref_mut() {
+                forward
+                    .single_token(carry, position as u32, unsafe {
+                        shadow.metal_session_mut()
+                    })
+                    .context("shadow probe off-step single_token")?;
+                shadow.advance_by(1)?;
+            }
             carry = sampler
                 .sample(&next)
                 .context("sample dflash off-mode token")?

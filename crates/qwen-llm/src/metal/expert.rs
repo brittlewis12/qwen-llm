@@ -921,4 +921,159 @@ mod tests {
             "{label}: max {max_abs} ref {ref_max}"
         );
     }
+
+    /// Timing screen (not qualification): GPU time of one GLM-5.3 routed-expert
+    /// decode block (288-expert banks: IQ2_S gate/up [4096 -> 2048], IQ3_S
+    /// down [2048 -> 4096]; top-8 all-slot gate/up SwiGLU, all-slot down, then
+    /// the weighted sum) as a chain of 42 dependent blocks per command. Each
+    /// block routes to a different 8 experts, so weights stream from DRAM.
+    /// Random quant payloads with finite scales (timing only). Refuses
+    /// MTL_DEBUG_LAYER.
+    #[test]
+    #[ignore = "timing screen; run without MTL_DEBUG_LAYER"]
+    fn routed_expert_block_dispatch_costs() {
+        assert!(
+            std::env::var_os("MTL_DEBUG_LAYER").is_none(),
+            "timing runs must not enable MTL_DEBUG_LAYER"
+        );
+        let _lease = crate::metal::acquire_metal_benchmark_lease().expect("GPU lease");
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        const E: usize = 288;
+        const BLOCKS: usize = 42;
+        let bank = |dtype: GgmlType, n_in: usize, n_out: usize, seed: u64| -> MetalTensor {
+            let (block, block_bytes) = dtype.storage_layout().unwrap();
+            let blocks = E * n_out * (n_in / block as usize);
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut bytes = vec![0u8; blocks * block_bytes as usize];
+            for word in bytes.as_chunks_mut::<8>().0 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                word.copy_from_slice(&state.to_le_bytes());
+            }
+            for (i, chunk) in bytes.chunks_exact_mut(block_bytes as usize).enumerate() {
+                let d = ((i % 7) + 1) as f32 / 4096.0;
+                chunk[..2].copy_from_slice(&half::f16::from_f32(d).to_bits().to_le_bytes());
+            }
+            offset_tensor(
+                &ctx,
+                0,
+                &bytes,
+                0,
+                vec![n_in as u64, n_out as u64, E as u64],
+                dtype,
+            )
+        };
+        let gate = bank(GgmlType::IQ2_S, HIDDEN, FFN, 1);
+        let up = bank(GgmlType::IQ2_S, HIDDEN, FFN, 2);
+        let down = bank(GgmlType::IQ3_S, FFN, HIDDEN, 3);
+        let f32_t = |values: &[f32], shape: Vec<u64>| {
+            offset_tensor(
+                &ctx,
+                0,
+                bytemuck::cast_slice(values),
+                0,
+                shape,
+                GgmlType::F32,
+            )
+        };
+        let i32_t = |values: &[i32], shape: Vec<u64>| {
+            offset_tensor(
+                &ctx,
+                0,
+                bytemuck::cast_slice(values),
+                0,
+                shape,
+                GgmlType::I32,
+            )
+        };
+        let input = f32_t(
+            &(0..HIDDEN)
+                .map(|i| ((i * 37) % 101) as f32 * 0.01 - 0.5)
+                .collect::<Vec<_>>(),
+            vec![HIDDEN as u64],
+        );
+        let routes: Vec<MetalTensor> = (0..BLOCKS)
+            .map(|b| {
+                let ids: Vec<i32> = (0..TOP_K).map(|j| ((b * 61 + j * 37) % E) as i32).collect();
+                i32_t(&ids, vec![TOP_K as u64])
+            })
+            .collect();
+        let status = i32_t(&[crate::metal::ROUTE_STATUS_READY], vec![1]);
+        let weights = f32_t(&[0.125; TOP_K], vec![TOP_K as u64]);
+        let inner = f32_t(&vec![0.0; FFN * TOP_K], vec![FFN as u64, TOP_K as u64]);
+        let slots = f32_t(
+            &vec![0.0; HIDDEN * TOP_K],
+            vec![HIDDEN as u64, TOP_K as u64],
+        );
+        let routed = f32_t(&vec![0.0; HIDDEN], vec![HIDDEN as u64]);
+        let gate_up = |enc: &KernelEncoder, b: usize| {
+            encode_all_slots_gate_up_swiglu(
+                &ctx, enc, &gate, &up, &input, &routes[b], &status, &inner, HIDDEN, FFN, E, TOP_K,
+                7.0,
+            )
+            .unwrap();
+        };
+        let down_pass = |enc: &KernelEncoder, b: usize| {
+            encode_all_slots_down(
+                &ctx, enc, &down, &inner, &routes[b], &status, &slots, FFN, HIDDEN, E, TOP_K,
+            )
+            .unwrap();
+        };
+        let sum = |enc: &KernelEncoder, _: usize| {
+            crate::metal::encode_moe_weighted_sum_f32(
+                &ctx, enc, &slots, &weights, &routed, HIDDEN, TOP_K,
+            )
+            .unwrap();
+        };
+        let time = |encode: &dyn Fn(&KernelEncoder, usize)| -> f64 {
+            let mut samples: Vec<f64> = (0..6)
+                .map(|_| {
+                    let command = ctx.queue.commandBuffer().expect("command buffer");
+                    let enc = KernelEncoder::begin(&command);
+                    for b in 0..BLOCKS {
+                        encode(&enc, b);
+                    }
+                    enc.end();
+                    command.commit();
+                    crate::metal::wait_completed(&command).expect("command buffer failed");
+                    (command.GPUEndTime() - command.GPUStartTime()) * 1e6 / BLOCKS as f64
+                })
+                .skip(1)
+                .collect();
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        };
+        let whole = |enc: &KernelEncoder, b: usize| {
+            gate_up(enc, b);
+            down_pass(enc, b);
+            sum(enc, b);
+        };
+        let warm = std::time::Instant::now();
+        while warm.elapsed() < std::time::Duration::from_secs(2) {
+            time(&whole);
+        }
+        let bytes = |dtype: GgmlType, n_in: usize, n_out: usize| {
+            let (block, block_bytes) = dtype.storage_layout().unwrap();
+            (n_in as u64 / block * block_bytes) as f64 * n_out as f64 * TOP_K as f64
+        };
+        let gate_up_bytes = 2.0 * bytes(GgmlType::IQ2_S, HIDDEN, FFN);
+        let down_bytes = bytes(GgmlType::IQ3_S, FFN, HIDDEN);
+        type Encode<'a> = &'a dyn Fn(&KernelEncoder, usize);
+        let rows: [(&str, Encode<'_>, f64); 4] = [
+            ("whole routed block", &whole, gate_up_bytes + down_bytes),
+            ("gate/up SwiGLU (IQ2_S, 8 slots)", &gate_up, gate_up_bytes),
+            ("down (IQ3_S, 8 slots)", &down_pass, down_bytes),
+            ("weighted sum", &sum, 0.0),
+        ];
+        for (label, encode, bytes) in rows {
+            let us = time(encode);
+            eprintln!(
+                "routed experts: {label:<34} {us:8.2} us/block {:7.1} GB/s",
+                bytes / us / 1e3
+            );
+        }
+    }
 }

@@ -1487,7 +1487,16 @@ impl<'w> Glm5NextSession<'w> {
         matvec(ctx, enc, &kda.key, &s.normed, &s.k, h, width)?;
         matvec(ctx, enc, &kda.value, &s.normed, &s.v, h, width)?;
         matvec(ctx, enc, &kda.decay_a, &s.normed, &s.rank_a, h, rank)?;
-        matvec(ctx, enc, &kda.decay_b, &s.rank_a, &s.raw_gate, rank, width)?;
+        low_rank_expand(
+            ctx,
+            enc,
+            &kda.decay_b,
+            &s.rank_a,
+            &s.raw_gate,
+            rank,
+            width,
+            1,
+        )?;
         matvec(
             ctx,
             enc,
@@ -1498,7 +1507,7 @@ impl<'w> Glm5NextSession<'w> {
             c.head_count as usize,
         )?;
         matvec(ctx, enc, &kda.gate_a, &s.normed, &s.rank_b, h, rank)?;
-        matvec(
+        low_rank_expand(
             ctx,
             enc,
             &kda.gate_b,
@@ -1506,6 +1515,7 @@ impl<'w> Glm5NextSession<'w> {
             &s.output_gate,
             rank,
             width,
+            1,
         )?;
         encode_kda_decode(
             ctx,
@@ -1830,6 +1840,33 @@ fn hc_pre_eps(c: &crate::glm5_next::Glm5NextConfig) -> crate::metal::Mhc4PreEps 
         hc: c.hc_epsilon,
         norm: c.rms_epsilon,
     }
+}
+
+/// KDA's low-rank expansions (`ssm_f_b`, `ssm_g_b`: rank 128 -> width):
+/// the short-K Q8_0 kernel over `rows` independent inputs when the weight is
+/// Q8_0 with a short row, else the generic mat-vec per row. Decode and
+/// Exact packed rows both come here, so they keep one lineage.
+#[allow(clippy::too_many_arguments)]
+fn low_rank_expand(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    rows: usize,
+) -> Result<()> {
+    if weight.dtype == GgmlType::Q8_0 && matches!(n_in, 32 | 64 | 128 | 256) {
+        crate::metal::encode_mat_vec_q8_0_short_k_f32(ctx, enc, weight, x, y, n_in, n_out, rows)?;
+        return Ok(());
+    }
+    for row in 0..rows {
+        let xr = x.view_subrange((row * n_in) as u64, vec![n_in as u64]);
+        let yr = y.view_subrange((row * n_out) as u64, vec![n_out as u64]);
+        matvec(ctx, enc, weight, &xr, &yr, n_in, n_out)?;
+    }
+    Ok(())
 }
 
 fn matvec(

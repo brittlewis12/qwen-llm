@@ -704,4 +704,298 @@ mod tests {
             position += rows;
         }
     }
+
+    /// Timing screen (not qualification): GPU time of one GLM-5.3 KDA decode
+    /// block (hidden 4096, 64 heads; Q6_K q/k/v [4096 -> 8192] and output
+    /// [8192 -> 4096]; Q8_0 f_a/g_a [4096 -> 128], beta [4096 -> 64],
+    /// f_b/g_b [128 -> 8192]; the recurrence) as a chain of 34 dependent
+    /// blocks per command, cycling 8 distinct weight and state sets so the
+    /// weights stream from DRAM, whole and per dispatch group. Proxy rows
+    /// time one dispatch over the concatenated rows of a group: an upper
+    /// bound for a multi-matrix dispatch with the same per-row kernel.
+    /// Synthetic weights; refuses MTL_DEBUG_LAYER.
+    #[test]
+    #[ignore = "timing screen; run without MTL_DEBUG_LAYER"]
+    fn kda_block_dispatch_costs() {
+        assert!(
+            std::env::var_os("MTL_DEBUG_LAYER").is_none(),
+            "timing runs must not enable MTL_DEBUG_LAYER"
+        );
+        let _lease = crate::metal::acquire_metal_benchmark_lease().expect("GPU lease");
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        const H: usize = 4096;
+        const HEADS: usize = 64;
+        const RANK: usize = KDA_HEAD_DIM;
+        const SETS: usize = 8;
+        const BLOCKS: usize = 34;
+        let width = HEADS * KDA_HEAD_DIM;
+        let q6 = |n_in: usize, n_out: usize, seed: usize| -> MetalTensor {
+            let per_row = n_in / 256;
+            let mut bytes = Vec::with_capacity(n_out * per_row * 210);
+            let blocks: Vec<[u8; 210]> = (0..16)
+                .map(|i| super::super::test_support::encode_q6_k_block(0.01, seed * 31 + i).0)
+                .collect();
+            for i in 0..n_out * per_row {
+                bytes.extend_from_slice(&blocks[i % blocks.len()]);
+            }
+            offset_tensor(
+                &ctx,
+                0,
+                &bytes,
+                0,
+                vec![n_in as u64, n_out as u64],
+                GgmlType::Q6_K,
+            )
+        };
+        let q8 = |n_in: usize, n_out: usize| -> MetalTensor {
+            let bytes = super::super::test_support::synthetic_q8_0_bytes(n_in, n_out);
+            offset_tensor(
+                &ctx,
+                0,
+                &bytes,
+                0,
+                vec![n_in as u64, n_out as u64],
+                GgmlType::Q8_0,
+            )
+        };
+        struct Set {
+            q: MetalTensor,
+            k: MetalTensor,
+            v: MetalTensor,
+            output: MetalTensor,
+            f_a: MetalTensor,
+            g_a: MetalTensor,
+            beta: MetalTensor,
+            f_b: MetalTensor,
+            g_b: MetalTensor,
+            conv: MetalTensor,
+            state: MetalTensor,
+        }
+        let w = width as u64;
+        let d = KDA_HEAD_DIM as u64;
+        let sets: Vec<Set> = (0..SETS)
+            .map(|i| Set {
+                q: q6(H, width, 3 * i),
+                k: q6(H, width, 3 * i + 1),
+                v: q6(H, width, 3 * i + 2),
+                output: q6(width, H, 100 + i),
+                f_a: q8(H, RANK),
+                g_a: q8(H, RANK),
+                beta: q8(H, HEADS),
+                f_b: q8(RANK, width),
+                g_b: q8(RANK, width),
+                conv: tensor(&ctx, &series(9 * width, 13 + i, 1.0), vec![w, 3, 3]),
+                state: tensor(
+                    &ctx,
+                    &series(HEADS * KDA_HEAD_DIM * KDA_HEAD_DIM, 14 + i, 0.2),
+                    vec![d, d, HEADS as u64],
+                ),
+            })
+            .collect();
+        // Proxies: one dispatch over the concatenated rows of a group.
+        let qkv_proxy: Vec<MetalTensor> = (0..SETS).map(|i| q6(H, 3 * width, 200 + i)).collect();
+        let a_proxy: Vec<MetalTensor> = (0..SETS).map(|_| q8(H, 2 * RANK + HEADS)).collect();
+        let b_proxy: Vec<MetalTensor> = (0..SETS).map(|_| q8(RANK, 2 * width)).collect();
+        let f32_zeros = |n: usize| tensor(&ctx, &vec![0.0; n], vec![n as u64]);
+        let normed = tensor(&ctx, &series(H, 1, 2.0), vec![H as u64]);
+        let (q, k, v) = (f32_zeros(width), f32_zeros(width), f32_zeros(width));
+        let (rank_a, rank_b) = (f32_zeros(RANK), f32_zeros(RANK));
+        let (raw_gate, output_gate) = (f32_zeros(width), f32_zeros(width));
+        let raw_beta = f32_zeros(HEADS);
+        let kda_out = f32_zeros(width);
+        let block_out = f32_zeros(H);
+        let qkv_out = f32_zeros(3 * width);
+        let a_out = f32_zeros(2 * RANK + HEADS);
+        let b_out = f32_zeros(2 * width);
+        let q_conv = tensor(&ctx, &series(width * 4, 7, 1.0), vec![4, 1, w]);
+        let k_conv = tensor(&ctx, &series(width * 4, 8, 1.0), vec![4, 1, w]);
+        let v_conv = tensor(&ctx, &series(width * 4, 9, 1.0), vec![4, 1, w]);
+        let neg_exp_a_log: Vec<f32> = (0..HEADS).map(|h| -(0.75 + val(h, 10, 1.0))).collect();
+        let a_t = tensor(&ctx, &neg_exp_a_log, vec![HEADS as u64]);
+        let dt_t = tensor(&ctx, &series(width, 11, 2.0), vec![w]);
+        let norm_t = tensor(&ctx, &vec![1.0; KDA_HEAD_DIM], vec![d]);
+        let mv = |enc: &KernelEncoder, wt: &MetalTensor, x: &MetalTensor, y: &MetalTensor| {
+            let (n_in, n_out) = (wt.shape[0] as usize, wt.shape[1] as usize);
+            crate::metal_forward::encode_mat_vec_dispatch(&ctx, enc, wt, x, y, n_in, n_out)
+                .unwrap();
+        };
+        let qkv = |enc: &KernelEncoder, s: &Set| {
+            mv(enc, &s.q, &normed, &q);
+            mv(enc, &s.k, &normed, &k);
+            mv(enc, &s.v, &normed, &v);
+        };
+        let small = |enc: &KernelEncoder, s: &Set| {
+            mv(enc, &s.f_a, &normed, &rank_a);
+            mv(enc, &s.f_b, &rank_a, &raw_gate);
+            mv(enc, &s.beta, &normed, &raw_beta);
+            mv(enc, &s.g_a, &normed, &rank_b);
+            mv(enc, &s.g_b, &rank_b, &output_gate);
+        };
+        let short = |enc: &KernelEncoder, wt: &MetalTensor, x: &MetalTensor, y: &MetalTensor| {
+            let (n_in, n_out) = (wt.shape[0] as usize, wt.shape[1] as usize);
+            crate::metal::encode_mat_vec_q8_0_short_k_f32(&ctx, enc, wt, x, y, n_in, n_out, 1)
+                .unwrap();
+        };
+        let small_short = |enc: &KernelEncoder, s: &Set| {
+            mv(enc, &s.f_a, &normed, &rank_a);
+            short(enc, &s.f_b, &rank_a, &raw_gate);
+            mv(enc, &s.beta, &normed, &raw_beta);
+            mv(enc, &s.g_a, &normed, &rank_b);
+            short(enc, &s.g_b, &rank_b, &output_gate);
+        };
+        let recurrence = |enc: &KernelEncoder, s: &Set| {
+            encode_kda_decode(
+                &ctx,
+                enc,
+                HEADS,
+                &KdaDecode {
+                    q: &q,
+                    k: &k,
+                    v: &v,
+                    raw_gate: &raw_gate,
+                    raw_beta: &raw_beta,
+                    output_gate: &output_gate,
+                    q_conv: &q_conv,
+                    k_conv: &k_conv,
+                    v_conv: &v_conv,
+                    neg_exp_a_log: &a_t,
+                    dt_bias: &dt_t,
+                    output_norm: &norm_t,
+                    conv_state: &s.conv,
+                    state: &s.state,
+                    out: &kda_out,
+                },
+                -5.0,
+                1e-5,
+            )
+            .unwrap();
+        };
+        let output = |enc: &KernelEncoder, s: &Set| mv(enc, &s.output, &kda_out, &block_out);
+        let time = |encode: &dyn Fn(&KernelEncoder, usize)| -> f64 {
+            let mut samples: Vec<f64> = (0..6)
+                .map(|_| {
+                    let command = ctx.queue.commandBuffer().expect("command buffer");
+                    let enc = KernelEncoder::begin(&command);
+                    for block in 0..BLOCKS {
+                        encode(&enc, block % SETS);
+                    }
+                    enc.end();
+                    command.commit();
+                    wait_completed(&command).expect("command buffer failed");
+                    (command.GPUEndTime() - command.GPUStartTime()) * 1e6 / BLOCKS as f64
+                })
+                .skip(1)
+                .collect();
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        };
+        let whole = |enc: &KernelEncoder, i: usize| {
+            let s = &sets[i];
+            qkv(enc, s);
+            small(enc, s);
+            recurrence(enc, s);
+            output(enc, s);
+        };
+        let warm = std::time::Instant::now();
+        while warm.elapsed() < std::time::Duration::from_secs(2) {
+            time(&whole);
+        }
+        let q6_bytes = |n_in: usize, n_out: usize| (n_in / 256 * n_out * 210) as f64;
+        let q8_bytes = |n_in: usize, n_out: usize| (n_in / 32 * n_out * 34) as f64;
+        let small_bytes =
+            2.0 * q8_bytes(H, RANK) + q8_bytes(H, HEADS) + 2.0 * q8_bytes(RANK, width);
+        let qkv_bytes = 3.0 * q6_bytes(H, width);
+        let state_bytes = 2.0 * (HEADS * KDA_HEAD_DIM * KDA_HEAD_DIM * 4) as f64;
+        type Encode<'a> = &'a dyn Fn(&KernelEncoder, usize);
+        let rows: [(&str, Encode<'_>, f64); 13] = [
+            (
+                "whole block, short-K b projections",
+                &|e: &KernelEncoder, i: usize| {
+                    let s = &sets[i];
+                    qkv(e, s);
+                    small_short(e, s);
+                    recurrence(e, s);
+                    output(e, s);
+                },
+                qkv_bytes + small_bytes + q6_bytes(width, H) + state_bytes,
+            ),
+            (
+                "small q8_0, short-K b projections",
+                &|e: &KernelEncoder, i: usize| small_short(e, &sets[i]),
+                small_bytes,
+            ),
+            (
+                "q8_0 128->8192 short-K",
+                &|e: &KernelEncoder, i: usize| short(e, &sets[i].f_b, &rank_a, &raw_gate),
+                q8_bytes(RANK, width),
+            ),
+            (
+                "whole block (9 matvecs + recurrence)",
+                &whole,
+                qkv_bytes + small_bytes + q6_bytes(width, H) + state_bytes,
+            ),
+            (
+                "q, k, v (3 x q6_k 4096->8192)",
+                &|e: &KernelEncoder, i: usize| qkv(e, &sets[i]),
+                qkv_bytes,
+            ),
+            (
+                "proxy: one q6_k 4096->24576",
+                &|e: &KernelEncoder, i: usize| mv(e, &qkv_proxy[i], &normed, &qkv_out),
+                qkv_bytes,
+            ),
+            (
+                "small q8_0 (5 dispatches)",
+                &|e: &KernelEncoder, i: usize| small(e, &sets[i]),
+                small_bytes,
+            ),
+            (
+                "proxy: q8_0 4096->320 + 128->16384",
+                &|e: &KernelEncoder, i: usize| {
+                    mv(e, &a_proxy[i], &normed, &a_out);
+                    mv(
+                        e,
+                        &b_proxy[i],
+                        &a_out.view_subrange(0, vec![RANK as u64]),
+                        &b_out,
+                    );
+                },
+                small_bytes,
+            ),
+            (
+                "recurrence",
+                &|e: &KernelEncoder, i: usize| recurrence(e, &sets[i]),
+                state_bytes,
+            ),
+            (
+                "output (q6_k 8192->4096)",
+                &|e: &KernelEncoder, i: usize| output(e, &sets[i]),
+                q6_bytes(width, H),
+            ),
+            (
+                "q6_k 4096->8192 alone",
+                &|e: &KernelEncoder, i: usize| mv(e, &sets[i].q, &normed, &q),
+                q6_bytes(H, width),
+            ),
+            (
+                "q8_0 128->8192 generic",
+                &|e: &KernelEncoder, i: usize| mv(e, &sets[i].f_b, &rank_a, &raw_gate),
+                q8_bytes(RANK, width),
+            ),
+            (
+                "q8_0 4096->128 alone",
+                &|e: &KernelEncoder, i: usize| mv(e, &sets[i].f_a, &normed, &rank_a),
+                q8_bytes(H, RANK),
+            ),
+        ];
+        for (label, encode, bytes) in rows {
+            let us = time(encode);
+            eprintln!(
+                "kda block: {label:<40} {us:8.2} us/block {:7.1} GB/s",
+                bytes / us / 1e3
+            );
+        }
+    }
 }

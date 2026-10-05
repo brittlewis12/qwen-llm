@@ -233,6 +233,27 @@ fn matmat(
     Ok(())
 }
 
+/// KDA low-rank expansion over `rows` rows: the decode kernel
+/// ([`super::low_rank_expand`]) for every row in exact lineage, batched
+/// mat-mat in fast lineage.
+#[allow(clippy::too_many_arguments)]
+fn expand_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    lineage: PackedLineage,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    rows: usize,
+) -> Result<()> {
+    match lineage {
+        PackedLineage::Exact => super::low_rank_expand(ctx, enc, weight, x, y, n_in, n_out, rows),
+        PackedLineage::Fast => matmat(ctx, enc, lineage, weight, x, y, n_in, n_out, rows),
+    }
+}
+
 /// Per-head latent absorption or expansion over `rows` token-major rows:
 /// grouped Q8_0 mat-mat (F32 accumulation) over whole 128-row blocks in fast
 /// lineage, and the decode grouped GEMV per remaining row (every row in exact
@@ -827,7 +848,7 @@ impl Glm5NextSession<'_> {
             rank,
             rows,
         )?;
-        matmat(
+        expand_rows(
             ctx,
             enc,
             p.lineage,
@@ -860,7 +881,7 @@ impl Glm5NextSession<'_> {
             rank,
             rows,
         )?;
-        matmat(
+        expand_rows(
             ctx,
             enc,
             p.lineage,

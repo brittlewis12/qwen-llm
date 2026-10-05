@@ -739,3 +739,58 @@ kernel void kernel_ds4_shared_swiglu_q8_0_f32_lcpp(
         }
     }
 }
+
+struct mat_vec_q8_0_short_args {
+    uint n_in;
+    uint n_out;
+    uint rows;
+};
+
+constant constexpr ushort Q8_0_SHORT_SIMDGROUPS = 4;
+
+// Q8_0 mat-vec for short rows: n_in = 32 * nb with nb in {1, 2, 4, 8}. The
+// generic kernels split K across lanes and simdgroups, so a 4-block row
+// leaves most lanes idle; here each row takes 2 * nb lanes (16 quants per
+// lane) and a simdgroup covers 16 / nb rows, reduced with xor shuffles
+// inside each row's aligned lane group. Grid y indexes independent input
+// rows (x [n_in, rows] -> y [n_out, rows]); a row's result does not depend
+// on how many share the dispatch.
+[[max_total_threads_per_threadgroup(128)]]
+kernel void kernel_mat_vec_q8_0_f32_short_k(
+        constant mat_vec_q8_0_short_args & args [[buffer(0)]],
+        device const uchar * weight [[buffer(1)]],
+        device const float * x [[buffer(2)]],
+        device       float * y [[buffer(3)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint nb = args.n_in / QK8_0;
+    const uint lanes_per_row = nb * 2u;
+    const uint rows_per_simdgroup = 32u / lanes_per_row;
+    const uint part = tiisg % lanes_per_row;
+    const uint out_row = (tgpig.x * Q8_0_SHORT_SIMDGROUPS + sgitg) * rows_per_simdgroup
+        + tiisg / lanes_per_row;
+    const uint token = tgpig.y;
+    const bool active = out_row < args.n_out && token < args.rows;
+
+    float sum = 0.0f;
+    if (active) {
+        const uint block = part / 2u;
+        const uint half_offset = (part % 2u) * 16u;
+        device const uchar * blk = weight + ((ulong)out_row * nb + block) * Q8_0_BYTES;
+        const float d = (float)*(device const half *)blk;
+        device const int8_t * qs = (device const int8_t *)(blk + 2) + half_offset;
+        device const float * xv = x + (ulong)token * args.n_in + block * QK8_0 + half_offset;
+        float sumq = 0.0f;
+        for (ushort i = 0; i < 16; ++i) {
+            sumq += (float)qs[i] * xv[i];
+        }
+        sum = sumq * d;
+    }
+    for (uint offset = lanes_per_row / 2u; offset > 0u; offset /= 2u) {
+        sum += simd_shuffle_xor(sum, (ushort)offset);
+    }
+    if (active && part == 0u) {
+        y[(ulong)token * args.n_out + out_row] = sum;
+    }
+}

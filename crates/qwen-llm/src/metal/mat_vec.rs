@@ -1861,6 +1861,95 @@ pub fn encode_mat_vec_q8_0_f32(
     Ok(())
 }
 
+/// Q8_0 mat-vec for short rows (`n_in` of 32, 64, 128 or 256) over `rows`
+/// independent inputs: `x` `[n_in, rows]` -> `y` `[n_out, rows]`. The generic
+/// kernels split K across lanes and simdgroups and leave most lanes idle on
+/// a 4-block row (GLM KDA's 128 -> 8192 low-rank expansions ran at ~38 GB/s);
+/// this one gives each row 2 * nb lanes and a simdgroup 16 / nb rows. Its
+/// per-row reduction order differs from [`encode_mat_vec_q8_0_f32`]'s
+/// (numerical, not bitwise), so callers opt in explicitly; a row's result
+/// does not depend on `rows`.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_vec_q8_0_short_k_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    rows: usize,
+) -> Result<(), MetalError> {
+    const K: &str = "mat_vec_q8_0_short_k";
+    let bad = |detail: String| MetalError::BadShape { kernel: K, detail };
+    if !matches!(n_in, 32 | 64 | 128 | 256) || n_out == 0 || rows == 0 {
+        return Err(bad(format!(
+            "n_in={n_in} must be 32, 64, 128 or 256; n_out={n_out} and rows={rows} nonzero"
+        )));
+    }
+    let expected_weight = n_in.checked_mul(n_out);
+    let expected_input = rows.checked_mul(n_in);
+    let expected_output = rows.checked_mul(n_out);
+    if weight.dtype != GgmlType::Q8_0
+        || x.dtype != GgmlType::F32
+        || y.dtype != GgmlType::F32
+        || expected_weight.is_none_or(|expected| weight.n_elements() as usize != expected)
+        || expected_input.is_none_or(|expected| x.n_elements() as usize != expected)
+        || expected_output.is_none_or(|expected| y.n_elements() as usize != expected)
+        || expected_output.is_none_or(|v| u32::try_from(v).is_err())
+        || expected_input.is_none_or(|v| u32::try_from(v).is_err())
+    {
+        return Err(bad(format!(
+            "expected Q8_0 weight and F32 [{rows},{n_in}] -> [{rows},{n_out}], got {:?} x={} y={}",
+            weight.dtype,
+            x.n_elements(),
+            y.n_elements()
+        )));
+    }
+    super::checks::check_disjoint(K, y, &[(weight, "weight"), (x, "input")])?;
+    enc.note_read(weight);
+    enc.note_read(x);
+    enc.note_write(y);
+    let pso = ctx.pipeline("kernel_mat_vec_q8_0_f32_short_k")?;
+    const SIMDGROUPS: usize = 4;
+    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < SIMDGROUPS * 32 {
+        return Err(bad("needs four 32-lane simdgroups".into()));
+    }
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        rows: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            rows: rows as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    let rows_per_threadgroup = SIMDGROUPS * (16 / (n_in / 32));
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(rows_per_threadgroup),
+            height: rows,
+            depth: 1,
+        },
+        MTLSize {
+            width: SIMDGROUPS * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Group-axis Q8_0 GEMV with the exact singleton `_lcpp` accumulation body.
 /// Grid depth indexes `n_groups` consecutive weight blocks, input slices, and
 /// output slices, so one dispatch replaces `n_groups` sequential singleton
@@ -2648,6 +2737,98 @@ pub fn encode_mat_vec_q6_k_batch_f32(
 mod tests {
     use super::*;
     use crate::metal::test_support::*;
+
+    /// Short-K Q8_0 mat-vec against an f64 reference of the decoded weights
+    /// and the generic kernel, for n_in 32/64/128/256, an n_out that leaves a
+    /// partial threadgroup, and three rows; each row of the 3-row dispatch
+    /// equals its single-row dispatch bitwise, and outputs outside the
+    /// written range stay untouched.
+    #[test]
+    fn short_k_q8_0_mat_vec_matches_reference_and_is_row_independent() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const ROWS: usize = 3;
+        const N_OUT: usize = 1_037;
+        for n_in in [32usize, 64, 128, 256] {
+            let (bytes, decoded) = synthetic_q8_0_bank(n_in, N_OUT);
+            let weight = offset_tensor(
+                &ctx,
+                36,
+                &bytes,
+                4,
+                vec![n_in as u64, N_OUT as u64],
+                GgmlType::Q8_0,
+            );
+            let x: Vec<f32> = (0..n_in * ROWS)
+                .map(|i| ((i * 37 + 11) % 101) as f32 * 0.02 - 1.0)
+                .collect();
+            let f32_t = |values: &[f32], shape: Vec<u64>| {
+                offset_tensor(
+                    &ctx,
+                    16,
+                    bytemuck::cast_slice(values),
+                    16,
+                    shape,
+                    GgmlType::F32,
+                )
+            };
+            let x_t = f32_t(&x, vec![n_in as u64, ROWS as u64]);
+            let all = f32_t(&vec![7.0; N_OUT * ROWS], vec![N_OUT as u64, ROWS as u64]);
+            let singles: Vec<MetalTensor> = (0..ROWS)
+                .map(|_| f32_t(&vec![7.0; N_OUT], vec![N_OUT as u64]))
+                .collect();
+            let generic = f32_t(&vec![7.0; N_OUT], vec![N_OUT as u64]);
+            let command = ctx.queue.commandBuffer().expect("command buffer");
+            let enc = KernelEncoder::begin(&command);
+            encode_mat_vec_q8_0_short_k_f32(&ctx, &enc, &weight, &x_t, &all, n_in, N_OUT, ROWS)
+                .unwrap();
+            for (row, out) in singles.iter().enumerate() {
+                let xr = x_t.view_subrange((row * n_in) as u64, vec![n_in as u64]);
+                encode_mat_vec_q8_0_short_k_f32(&ctx, &enc, &weight, &xr, out, n_in, N_OUT, 1)
+                    .unwrap();
+            }
+            let x1 = x_t.view_subrange(n_in as u64, vec![n_in as u64]);
+            encode_mat_vec_q8_0_f32(&ctx, &enc, &weight, &x1, &generic, n_in, N_OUT).unwrap();
+            enc.end();
+            command.commit();
+            wait_completed(&command).expect("short-K command");
+            let all = tensor_f32_at_offset(&all);
+            let generic = tensor_f32_at_offset(&generic);
+            for row in 0..ROWS {
+                let got = &all[row * N_OUT..(row + 1) * N_OUT];
+                let single = tensor_f32_at_offset(&singles[row]);
+                assert_eq!(
+                    got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    single.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    "n_in {n_in} row {row}: 3-row dispatch vs single"
+                );
+                let xr = &x[row * n_in..(row + 1) * n_in];
+                for o in 0..N_OUT {
+                    let w = &decoded[o * n_in..(o + 1) * n_in];
+                    let want: f64 = w.iter().zip(xr).map(|(w, x)| *w as f64 * *x as f64).sum();
+                    let scale: f64 = w
+                        .iter()
+                        .zip(xr)
+                        .map(|(w, x)| (*w as f64 * *x as f64).abs())
+                        .sum();
+                    assert!(
+                        (got[o] as f64 - want).abs() <= 1e-6 * scale + 1e-7,
+                        "n_in {n_in} row {row} out {o}: {} vs {want}",
+                        got[o]
+                    );
+                    if row == 1 {
+                        assert!(
+                            (got[o] - generic[o]).abs() as f64 <= 1e-6 * scale + 1e-7,
+                            "n_in {n_in} out {o}: short-K {} vs generic {}",
+                            got[o],
+                            generic[o]
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn mxfp4_mat_vec_dispatch_gpu_matches_reference_with_offsets() {

@@ -225,5 +225,5 @@ the later exactness test log records
 `git-source-sha256-v2:8d0281d3224f15913e835d50054c7018c8e606319684bce5191a5e753eb6b51a`.
 Operator observation: no run used `MTLResidencySet`, pre-wiring, `mlock`,
 cache-bypass reads, or the residency-coupled A10B path. The retention manifest
-independently records disabled residency/prefetch for that child. The user-owned
+independently records disabled residency/prefetch for that child. An unrelated
 llama server remained untouched.

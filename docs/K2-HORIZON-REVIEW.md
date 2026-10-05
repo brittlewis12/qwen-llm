@@ -196,7 +196,7 @@ behavior on a live device remain a separately authorized validation gate.
 
 ## Authorized synthetic GPU follow-up
 
-After the user explicitly selected the two synthetic probes, inspection found
+After the two synthetic probes were explicitly selected, inspection found
 that unit-test contexts isolate their leases and bypass the wired-memory gate.
 Both probes now explicitly retain `acquire_metal_benchmark_lease()` from before
 context creation until all GPU resources drop. No foreign process was stopped.
@@ -243,8 +243,8 @@ the explicit qualification/identity/accounting limitations. Packet is commit-rea
 
 ## Packet 7 independent checkpoint oracle
 
-The user superseded the earlier synthetic-only permission boundary with explicit
-direction to continue using the lease as intended and not ask per-test questions.
+The earlier synthetic-only permission boundary is superseded: GPU work uses the
+lease as intended, without per-test questions.
 The full-model smoke test passes. An independent IFM-fork comparison passes 42
 full-vocabulary rows, including a 32-token continuation, with all top-1 IDs equal
 and max error 0.002706051. Detailed scope and reproduction are in the plan and
@@ -511,7 +511,7 @@ policy, completed JSON/SSE and abort checks, and correctly limited documentation
 
 ## Packet 16 serving documentation consolidation
 
-The user questioned the separate K2 serving manual. The raw family contract still
+The separate K2 serving manual was reconsidered. The raw family contract still
 needs an explicit boundary from Qwen/DeepSeek/Muse chat, but not a separate manual.
 It now lives in `SERVE.md#k2-horizon-raw-profile`, with test reproduction in the
 reference README and development evidence here/in the plan. The old generic wire
@@ -1183,8 +1183,8 @@ integrity/count audit while retaining the failed quality verdict.
 
 ## Packet 34 main readiness and principled capacity admission
 
-The user requested removal of arbitrary forward/position/context/response limits,
-warning-free readiness and integration into main, with checkpoint-specific templating
+Scope: remove arbitrary forward/position/context/response limits, reach
+warning-free readiness and integrate into main, with checkpoint-specific templating
 high priority but nonblocking. The out-of-band review's eight-warning count, private
 packed default and uncommitted compact state were stale: all-target checking was
 already warning-free, packed prefill was already selected automatically, and the
@@ -1248,8 +1248,8 @@ use the production lease, real wired gate and API validation; no shared service
 was stopped or restarted. Current CPU counts are 77 engine and 24 CLI tests under
 the K2 filters, and all-target checking emits no warnings.
 
-Main integration will retain unrelated user work. The user explicitly approved
-replacing the colliding untracked historical K2 plan with this evolved plan.
+Main integration will retain unrelated work. This evolved plan replaces the
+colliding untracked historical K2 plan.
 Remaining product work is checkpoint-appropriate templating and CLI intervention
 plans; broader quality/latency and compact-cache research stay separately scoped.
 
@@ -1273,7 +1273,7 @@ All-target checking remains warning-free.
 
 ## Packet 35 verified final-checkpoint no-tools CLI templating
 
-After main integration, the user asked to continue. The templating design jam
+After main integration, work continued. The templating design jam
 recommended family-local rendering and a separate later output/HTTP packet, with
 raw checkpoints unaffected. Eligibility binds the structural dense profile,
 posttrained tokenizer metadata, embedded-template digest, and verified retained
@@ -1614,7 +1614,7 @@ K2 frontend CPU tests and final all-target/whitespace checks pass.
 
 ## Packet 42: practical final Q4 generation
 
-The user reprioritized final dense 7B quantizations, native tools/reasoning, native
+Priorities moved to final dense 7B quantizations, native tools/reasoning, native
 context and applicable existing optimizations. Intermediate-shape campaigns and
 lens overflow design are not blockers; the latter remains parked, not canonical.
 
@@ -1685,7 +1685,7 @@ wording clarification above rather than inventing a new artifact requirement.
 
 ## Packet 44: native tool-history primitives
 
-The user explicitly excludes dynamic template engines/dependencies. A proposed
+Dynamic template engines/dependencies are explicitly excluded. A proposed
 isolated engine probe was removed before execution; workspace manifests/lockfile
 are unchanged. Implementation is ordinary typed Rust, with pinned Python/Jinja
 used only as the independent development oracle.

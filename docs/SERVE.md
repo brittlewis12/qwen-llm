@@ -1048,8 +1048,7 @@ because client model-pickers probe it).
   `[A-Za-z0-9_.-]{1,64}` — dotted names are released-protocol shapes
   (Qwen3.6 oracle `fs.list`, Muse ATEM namespaces).
 - Preserve/strip rendering policy: preserve is the default for the validated
-  Qwen3.6 identity (owner position, Amendment 1 of S0; economics measured in S0
-  G2), and strip remains available there via `x_qwen`. Validated Qwen3.8 and
+  Qwen3.6 identity (Amendment 1 of S0; economics measured in S0 G2), and strip remains available there via `x_qwen`. Validated Qwen3.8 and
   Flash-Next follow their released template, which preserves by default:
   plain and tool turns alike replay their reasoning (until 2026-09-25 plain
   turns always rendered the empty block and dropped it).

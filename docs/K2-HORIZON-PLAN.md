@@ -68,7 +68,7 @@ Local weights: `~/models/K2-Horizon-7B-Q8_0.gguf` (9,573,964,160 bytes), from
 
 ## Remaining Work
 
-The user's current priority is complete practical support for the released final
+The current priority is complete practical support for the released final
 dense 7B, not a campaign across intermediate checkpoint geometries:
 
 Q8 and standard mixed Q4 generation, native tools and released reasoning controls

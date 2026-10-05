@@ -61,7 +61,7 @@ admission authoritative. This changes physical request organization, not model
 math or the result order.
 
 The measurement binary identifies commit `47eb2a1` with a dirty worktree because
-two unrelated user-owned documents were untracked. The candidate path itself is
+two unrelated documents were untracked. The candidate path itself is
 the reviewed source plus explicit `QWEN_CONCURRENCY_PAIR_PLANNER=1`; promotion
 changes only that policy default.
 

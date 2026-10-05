@@ -1,4 +1,4 @@
-# One representative per model family: the daily-driver artifact of each,
+# One representative artifact per model family,
 # for the cross-family qwen-llm vs llama.cpp baseline. `scripts/bench/models.toml`
 # remains the Qwen size ladder.
 #

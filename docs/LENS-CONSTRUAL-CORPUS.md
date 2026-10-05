@@ -75,7 +75,7 @@ factual error does not become valid merely because someone can imagine it.
 
 ## Accumulation Can Change Status Without Losing Text
 
-The user's earlier frame explicitly challenged the assumption that the canonical
+An earlier frame explicitly challenged the assumption that the canonical
 trajectory fully specifies the underlying situation: intentions, constraints,
 background and even the user's understanding can be incomplete. That prior
 position is recovered in recall session `ses_feada9d36ffevFGRexXnuPwpix`, message

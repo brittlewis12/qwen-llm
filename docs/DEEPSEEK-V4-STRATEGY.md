@@ -2407,9 +2407,9 @@ unqualified artifact is not silently slow.
 | All-slot Q3/Q4 MoE | numerics + perf | K6, legal E, block geometry, alias and pipeline checks |
 | Multigroup selector, long/split-K HCA | exactness contract, reduction order + perf | scratch/pipeline capability plus visibility band |
 | F16 scorer | diagnostic scope | capability, keeping default off |
-| Residency set | wired memory (owner's call) | unchanged; stays opt-in (see below) |
+| Residency set | wired memory | unchanged; stays opt-in (see below) |
 
-**Residency-set default (owner decision, 2026-09-24).** The model-wide
+**Residency-set default (decided 2026-09-24).** The model-wide
 `MTLResidencySet` stays opt-in (`QWEN_DSV4_RESIDENCY_SET=1`) for every process,
 serve included. It may become a default only with evidence that a forced
 termination (SIGKILL during or after load, and the memory-pressure kill a

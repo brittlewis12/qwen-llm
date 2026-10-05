@@ -2560,7 +2560,7 @@ the failure:
       flash-attn-v4 if long-ctx dominates the prompts we care about,
       packed GDN recurrence if short-mid ctx dominates.
 
-  ### Bottleneck shift across context length (Britt + codex)
+  ### Bottleneck shift across context length
 
   Estimated phase contribution (no profile yet — that's v0.70):
 

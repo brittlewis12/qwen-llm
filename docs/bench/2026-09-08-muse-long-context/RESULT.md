@@ -116,7 +116,7 @@ with a completed assistant message. Its adapter joins adjacent content with two
 newlines and renders native ATEM without a generation prompt; embedded Qwen
 thinking remains ordinary content. Result:46899 tokens, SHA-256
 `bdd33a93003545cc7135d431c0bcfae0b36872f72341b3c0187944a826088bb3`.
-These are fixed prefixes of an adapted checked-in transcript, not the user's Mara
+These are fixed prefixes of an adapted checked-in transcript, not a captured Mara
 recording or complete standalone requests at every prefix length.
 
 `2b94a341` qualification passes in370.15s: original versus optimized6884 prefill,

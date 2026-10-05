@@ -131,7 +131,7 @@ The measured binary SHA-256 is
 It embeds base commit `ea7c4e1feb6375120bd5d5da780af299aeeb1550`, dirty bit one,
 and source-state digest
 `git-source-sha256-v2:b892daa7d72737138ba5889a6ac97176ac90cb87b5309867129caac0dcc904ac`.
-The dirty state includes the candidate source plus two pre-existing user-owned
+The dirty state includes the candidate source plus two pre-existing unrelated
 untracked documents, so authority is same-binary/source-bound rather than a
 portable clean-build claim.
 

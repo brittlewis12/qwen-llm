@@ -15,7 +15,7 @@ Leverage map (2026-09-26) #1.
     133K-token 27B session (~9 GB) would not survive a restart.
   - A crash lost whatever had not already spilled to disk; for an active
     session, that was usually all of it.
-  - SERVE.md F2's owner decision ("publish on graceful shutdown and idle")
+  - SERVE.md F2's decision ("publish on graceful shutdown and idle")
     had only its shutdown half implemented.
 - **Now:**
   - **Idle publication:** after 30 s without any request
@@ -96,11 +96,10 @@ Leverage map (2026-09-26) #1.
   - Delta chains, to cut per-turn write volume.
   - Measurement above ~100K tokens.
 
-## 2026-09-26 - Daily-Driver Screens: Real Reuse, Restart At 66K, Prefill Parity
+## 2026-09-26 - Serve Screens: Real Reuse, Restart At 66K, Prefill Parity
 
-Map reassessment (cx) against actual owner usage. The opencode DB shows only
-Qwen3.8-27B-Q8_0 through serve, effort medium, sessions up to ~73K, no
-effort switches.
+Map reassessment (cx). Screens use Qwen3.8-27B-Q8_0 through serve at effort
+medium only (no effort switches), at agent-session depths up to ~73K.
 
 - **The Sep 14 session reused nothing.** All 16 requests reported 0 cached
   tokens, and each re-prefilled 12-73K tokens (63-483 s per request, 41
@@ -113,7 +112,7 @@ effort switches.
   boundary (12157/12223, 12218/16080, 16075/16188, 16183/16247,
   16242/17948, 17943/18019). Only new tool output was prefilled: 3.8K
   tokens in 20.1 s, 1.7K in 8.4 s, small tails in 0.7-1.1 s.
-- **Restart at the owner's depth:** a 66,115-token prompt at effort medium
+- **Restart at 66K:** a 66,115-token prompt at effort medium
   took a 371 s cold prefill.
   - On SIGTERM, the shutdown flush published the 66,240-token completed
     boundary (4.5 GB in 6.4 s). The second queued snapshot missed the 10 s
@@ -235,7 +234,7 @@ split-K retune (3cd4751).
 
 ## 2026-09-25 - DS4 History Renders As Generated; `--template-style house|upstream`
 
-Leverage map #2, DS4 half. Owner principle: serve does not rewrite past turns
+Leverage map #2, DS4 half. Principle: serve does not rewrite past turns
 because of a new request's controls. Deliberate departures from a release
 template are allowed and configurable.
 
@@ -288,7 +287,7 @@ template are allowed and configurable.
 
 ## 2026-09-25 - Qwen History Renders As Generated Across Thinking-Mode Switches
 
-Leverage map #2, Qwen half. Owner rule: turning reasoning off mid-chat must
+Leverage map #2, Qwen half. Rule: turning reasoning off mid-chat must
 not evict past reasoning or invalidate the KV cache.
 
 - **Before:**
@@ -752,7 +751,7 @@ Adversarial Codex reviews of the 2026-09-23 work found real defects; fixed:
   arithmetic; failing score buffer becomes24912. Packed admission includes rounded
   sizes; logical positions, shaders and arithmetic are unchanged. CPU exhaustive
   position/group/overflow test and all-target CLI check PASS; GPU rerun deferred.
-- User's shared server is in use. Exact oldPID/listener/lock checks and a narrow
+- A shared server was in use. Exact oldPID/listener/lock checks and a narrow
   executable filter missed a Flash-Next launch/readiness shell. No processes were
   stopped/restarted, but starting the packet in that window was an operational
   mistake. Do not run more GPU work based on apparent idle gaps; coordinate first.
@@ -1494,7 +1493,7 @@ Adversarial Codex reviews of the 2026-09-23 work found real defects; fixed:
 - Full6269-token followup backend ABBA216.803237 ->3.827429s saves98.235%
   (56.645x), including16 output tokens. Both paired50% gates pass; control spread
   0.003197%. Reuses6230 tokens, computes39; all emissions/consumed IDs agree.
-  Native Current fixture plus authored reply/Mara followup, not the user's recording.
+  Native Current fixture plus authored reply/Mara followup, not a captured recording.
 - Model/session allocations unchanged29,599,907,840 /480,280,576B; CPU history
   storage is additional. All-activeKV/rewind oracles and cancellation guards pass;
   `93151c9c` short sampled retries match reset attemp1/seed42 andtemp0.7/seed99.
@@ -4224,7 +4223,7 @@ written; reusable diagnostic observers remain.
   numerically exact inverse rollback are not supported.
 - All model workloads were serialized with ordinary pageable storage. DSV4
   explicitly used `QWEN_DSV4_PREFETCH=off` and
-  `QWEN_DSV4_RESIDENCY_SET=0`; the user-owned llama server remained untouched.
+  `QWEN_DSV4_RESIDENCY_SET=0`; an unrelated llama server remained untouched.
 
 Decision: retain only the observers. Reopen FFN sparsity for independently high
 complete-block occupancy, Lightning certification for a materially tighter
@@ -4260,7 +4259,7 @@ isolated falsifiers and removed. No experimental kernel or selector remains.
   ceiling; do not retune N64, rows-per-simdgroup, or dual gate/up fusion.
 - All GPU work was serialized on ordinary pageable Qwen storage. No residency
   set, pre-wire, `mlock`, cache-bypass read, or residency-coupled A10B path ran;
-  the user-owned llama server was untouched.
+  an unrelated llama server was untouched.
 
 Decision: keep native N32 IQ2_S prefill and native singleton IQ2_S decode. The
 next Ridge branch must delete model work rather than reshuffle the same MMAs or
@@ -4336,7 +4335,7 @@ total, and clean committed timing is still required for release promotion.
   MTP draft. N2 is not recomputing a previously known conditional.
 - Operator observation: all loads were ordinary pageable Qwen loads. No
   residency set, pre-wire, `mlock`, cache-bypass read, or residency-coupled A10B
-  path ran; GPU work was serialized and the user-owned llama server untouched.
+  path ran; GPU work was serialized and an unrelated llama server untouched.
 
 Decision: use Ridge as the leading interactive candidate while retaining
 Qwen3.8 Q4_K_M as the higher-bit capability/prefill anchor and Qwen3.6 Q4_K_M as
@@ -4392,7 +4391,7 @@ yet positive and the long-context shared-KV scratch is not lazy.
   GDN algebra, exact payload deduplication, and local recurrence retunes stay
   below current leverage.
 - Operator observation: no residency API, pre-wire, `mlock`, cache-bypass read,
-  or residency-coupled A10B path ran. All qwen processes exited; the user's tiny
+  or residency-coupled A10B path ran. All qwen processes exited; an unrelated
   idle OvisOCR server remained untouched.
 
 Decision: retain packed D1/N2 behind explicit research surfaces. Next evidence
@@ -5039,7 +5038,7 @@ executor. The existing A3B Q4 fixture was extended to 128 requested output
 tokens and run counterbalanced B16/B2 then B2/B16 with one release binary
 embedding commit `4238acd`, dirty bit `1`, and exact source-state digest
 `git-source-sha256-v2:0c155730c47ffb4e99a0caa0cd37c69d3e04dfe62c247b2ed51010b90b1af7b4`.
-The dirty bit includes two pre-existing user-owned untracked documents; the
+The dirty bit includes two pre-existing unrelated untracked documents; the
 packet claims same-binary rather than portable clean-build authority.
 
 B16 execution takes `15,260.044/15,304.856 ms`; B2 takes
@@ -14844,7 +14843,7 @@ drafting + draft-only LM head only if real emitted/step can exploit those bucket
 ## 2026-07-07 - v0.502 MTP Replay/Oracle Probes Reopen Verify as the Binding Loss
 
 Status: bench diagnostic + strategy update. cx resume
-`019f3dc1-9f10-7dc0-99b2-3da3af5ac384` was pushed with the user's M4 Max
+`019f3dc1-9f10-7dc0-99b2-3da3af5ac384` was pushed with the reported M4 Max
 64 GB MTPLX signal (`~65-80 tok/s` on Qwen3.6 27B native MTP) and local MTPLX
 repo recon; recommendation: prove the draft-free ceiling before a large native
 MTP rewrite.
@@ -14945,7 +14944,7 @@ after single-CB drafting; (4) Q5_K port.
 
 Status: systematic config sweep + staleness audit (bench/harness only; NO
 production dispatch change yet — that is the recorded follow-up with its
-own gate). Britt's ask: verify the small-N story carries no stale kernel
+own gate). Goal: verify the small-N story carries no stale kernel
 assumptions. cx-vetted axes/ranges/granularity (design vet `019f393b-7...`);
 staleness audit of the verify/drafter/MTP paths preceded the sweep.
 
@@ -15364,7 +15363,7 @@ recorded (pmset reports none on this box; noted as vacuous).
   (`progc-131k-q36`). The alias-drift Qwen3.5 capture (`progc-131k`) is
   CONTROL-ONLY (near-identical counters; useful cross-version evidence,
   never a decision input).
-- RE-RANK (cx-signed ordering, conditional on Britt's true-long priority
+- RE-RANK (cx-signed ordering, conditional on the true-long priority
   call): attention re-ranks INTO the W-program, not as standalone knob
   work. If true-long is PRIMARY: W's first ranked target family is
   attention main/reduce (not GDN glue), and the parked v0.490 G8 bcast
@@ -28524,7 +28523,7 @@ Comparison to earlier dense packed prefill default (`P=16`):
 - new prefill: `~140.7 t/s`
 - improvement: `~1.76x` over the prior packed default
 
-Comparison to same-prompt llama.cpp data the user supplied:
+Comparison to supplied same-prompt llama.cpp data:
 
 - llama.cpp prompt: `186.8 t/s`
 - qwen-llm prompt after tuning: `140.7 t/s`

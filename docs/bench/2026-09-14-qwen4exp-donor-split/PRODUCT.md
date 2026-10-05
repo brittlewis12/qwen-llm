@@ -10,7 +10,7 @@ runs supply delivery authority rather than retroactively validating them.
 
 ## Exclusive Completion
 
-The user explicitly approved gracefully stopping PID48728. Its command was
+Gracefully stopping PID48728 was explicitly approved. Its command was
 rechecked, SIGINT sent only to that PID, and exit confirmed. No forced termination
 or lease bypass was used. The server was not restarted.
 

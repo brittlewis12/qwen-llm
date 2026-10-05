@@ -2552,7 +2552,7 @@ fn smalln_mma_micro_27b() {
 }
 
 /// **v0.500 small-N matmul selection sweep** (`smalln_selection_sweep_27b`).
-/// Britt's ask: systematic config-permutation sweep so the small-N story
+/// Goal: systematic config-permutation sweep so the small-N story
 /// carries no stale kernel assumptions. cx-vetted axes/ranges/granularity
 /// (session `019f393b-7...`): Family C first (selection permutations of
 /// EXISTING kernels — the staleness audit found N in {2,3,4,8} verify

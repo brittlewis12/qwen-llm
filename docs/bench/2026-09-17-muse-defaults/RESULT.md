@@ -46,10 +46,10 @@ shared materialized F16 attention, which requested6225*4 bytes without aligning
 each dynamic threadgroup allocation. This affects original scalar math as well as
 the scalar tail of optimized prefill; it is not new split-attention arithmetic.
 
-User correction exposed a Flash-Next server launch/readiness shell via the requested
-`ps aux | rg qwen`. The narrow direct-process filter missed that activity. Absence
-of an old PID/listener/live lock holder was insufficient operational coordination
-after the user said the server was in use. No server process was stopped/restarted,
+A broader `ps aux | rg qwen` check exposed a Flash-Next server launch/readiness
+shell. The narrow direct-process filter missed that activity. Absence of an old
+PID/listener/live lock holder was insufficient operational coordination once the
+server was reported in use. No server process was stopped/restarted,
 but the attempted GPU packet should not have been launched in that window. All
 further GPU work is deferred; do not infer permission from an apparently idle lock.
 

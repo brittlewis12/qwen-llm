@@ -8,7 +8,7 @@ ladder, and the first against llama.cpp since b9833 (2026-06-28).
 
 - M4 Max 128 GB, AC power. qwen-llm `70ec9a9b` (clean), llama.cpp b11182
   `e9f824d8c0` (MTL, BLAS; flash attention `auto`; residency sets on by default).
-- One daily-driver artifact per family (`scripts/bench/models-families.toml`),
+- One representative artifact per family (`scripts/bench/models-families.toml`),
   the same GGUF for both engines.
 - llama-bench semantics on both sides: synthetic random tokens, pp at depth 0,
   tg128 at depth 0 / 8192 (and 32768 for dense 27B and A3B), untimed depth fill.
@@ -58,8 +58,8 @@ blocks 34.7 / 38.0 t/s, 9.1%).
 ## Caveats
 
 - **Residency.** llama.cpp creates Metal residency sets by default
-  (`keep_alive = 180 s`); qwen-llm's DS4 residency set stays opt-in (owner
-  decision, 2026-09-24), and the other families do not use one. August's DS4
+  (`keep_alive = 180 s`); qwen-llm's DS4 residency set stays opt-in (decided
+  2026-09-24), and the other families do not use one. August's DS4
   measurements put residency at roughly +20-25% prefill; it cannot account for
   a 2x pp512 gap on its own.
 - **Synthetic tokens.** Random token ids spread MoE routing across experts

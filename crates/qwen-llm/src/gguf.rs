@@ -1,6 +1,6 @@
 //! GGUF v3 mmap-only loader.
 //!
-//! Parsing is delegated to `gguf-rs` (Britt's own crate, in `~/code/gguf`)
+//! Parsing is delegated to `gguf-rs` (source in `~/code/gguf`)
 //! for metadata + tensor-table semantics. We layer:
 //!
 //! 1. Independent `Mmap`s of the GGUF file(s) so kernels read tensor bytes

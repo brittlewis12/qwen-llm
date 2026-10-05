@@ -154,7 +154,7 @@ arithmetic does NOT exonerate packed checkpoint/commit bookkeeping or the
 batched lm_head); NOT grounds for the state-side contingency ladder;
 record and close that arm.
 
-Runtime discipline: exclusive GPU (Britt, 2026-07-20); fresh process per
+Runtime discipline: exclusive GPU (2026-07-20); fresh process per
 run; sequential runs; `pmset -g therm` before/after the batch (context
 only); wall time context-only; artifacts `<config>-<fixture>-runN.{out,err}`
 in this directory plus a manifest.

@@ -147,4 +147,4 @@ command: diagnostics perform host readback. Its complete output is
 
 No run used `MTLResidencySet`, `requestResidency`, pre-wiring, `mlock`,
 cache-bypass reads, or the residency-coupled A10B path. GPU/model workloads were
-serialized. The user-owned OvisOCR llama server remained alive and untouched.
+serialized. An unrelated OvisOCR llama server remained alive and untouched.

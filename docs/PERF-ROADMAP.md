@@ -34,29 +34,29 @@ Its disk-only native FP8 Engram and exact decoder dependency-suffix code are now
 inspectable. Compare total prefill plus residency transitions and following
 decode; the screenshot's 800 tok/s excludes the reported eight-second switch.
 
-## Leverage Map — 2026-09-26 (after the daily-driver screens)
+## Leverage Map — 2026-09-26 (after the serve screens)
 
 Active force-ranked queue; supersedes the 2026-09-25 map below. Items #1-#4
-there are closed. Re-ranked against actual owner usage (opencode DB:
-Qwen3.8-27B-Q8_0 through serve only, effort medium, sessions up to ~73K
-tokens, overnight to 133K) and same-day screens (PERF-LOG 2026-09-26):
+there are closed. Inputs are same-day screens (PERF-LOG 2026-09-26) of
+Qwen3.8-27B-Q8_0 through serve at effort medium, at agent-session depths up
+to ~73K tokens (one overnight session reached 133K):
 
-- Reuse works through the real client.
+- Reuse works through a real agent client.
 - Restart at 66K restores from disk in 2.4 s.
 - Decode leads llama.cpp by 1.07-1.59x.
 - Long prefill is at parity with llama.cpp.
-- Families the owner does not use are parked, in their prior order.
+- Items #5-#8 carry over from the 2026-09-25 map in their prior order.
 
-| # | Item | Owner cost | Evidence / mechanism | Cheapest decisive next step | Effort |
+| # | Item | Cost | Evidence / mechanism | Cheapest decisive next step | Effort |
 |---|---|---|---|---|---|
 | 1 | Restart continuity above ~100K (27B Q8): **mechanism landed 2026-09-26** | residual: an immediate restart of a >~130K session before any idle period | PERF-LOG 2026-09-26: idle publication (30 s) of the transcript boundary plus a 30 s shared-budget shutdown flush; after SIGKILL at 66K the session restored from disk: 13.0 s wall vs 381 s cold | measure one ~130K session (idle write time, restart); should: `deferred-restore` staged integrity as the serve default after size/pressure/failure evidence (~40% of write time; the reserved copy stays, since existing-record validation still decodes) | ½ day to qualify |
 | 2 | Prefill attention at depth (dense Qwen) | new tool output at 16-73K depth: pp512 257 → 141 t/s from 0 → 64K; a 47K-token jump took ~7 min | parity with llama.cpp; attention share ~8 TFLOPS | time the prefill attention kernel alone at 32K/64K against its FLOP count and a mat-mat reference; decide whether a tiled flash-prefill is worth it | ½ day screen, 3-5 days fix |
-| 3 | DFlash on owner-eligible requests | early turns (≤16K) decode serially at ~16 t/s unless a drafter is loaded | speculation off above 16,384 (`DFLASH_OFF_CTX_DEFAULT`); unknown whether the owner's launch loads a drafter | check the launch; one retained opencode-shaped request serial vs DFlash, full request wall | 2-4 h screen |
+| 3 | DFlash in serve agent sessions | without `--drafter`, early turns (≤16K) decode serially at ~16 t/s | speculation off above 16,384 (`DFLASH_OFF_CTX_DEFAULT`); serve speculates only when launched with `--drafter` | one retained opencode-shaped request through serve, serial vs `--drafter`, full request wall | 2-4 h screen |
 | 4 | AI SDK retention of empty reasoning items | possible replay drift for immediately closed thinking turns | emitted since c7b49279; provider capture covers only nonempty reasoning | one provider capture with an empty item through the next request | 1-2 h |
-| 5 | Flash-Next selected-range prefill and depth decode (parked: unused) | 0.75-0.88x of llama.cpp | 2048 + 3 + 2045 plan; +275 ms shoulder | time the three commands separately | ½ day, fix 2-5 days |
-| 6 | DS4 short-prompt prefill (parked) | 0.48x at pp512 | CPU routing below 2048 | route census on one 512-token prompt | ½ day, 2-4 days |
-| 7 | Flash-Next durable tier (parked) | restart discards history | RAM cache only | codec round trip | 2-4 days |
-| 8 | Muse prefill (parked) | 0.85x | 128-token chunks | early/late chunk attribution | ½ day screen |
+| 5 | Flash-Next selected-range prefill and depth decode | 0.75-0.88x of llama.cpp | 2048 + 3 + 2045 plan; +275 ms shoulder | time the three commands separately | ½ day, fix 2-5 days |
+| 6 | DS4 short-prompt prefill | 0.48x at pp512 | CPU routing below 2048 | route census on one 512-token prompt | ½ day, 2-4 days |
+| 7 | Flash-Next durable tier | restart discards history | RAM cache only | codec round trip | 2-4 days |
+| 8 | Muse prefill | 0.85x | 128-token chunks | early/late chunk attribution | ½ day screen |
 
 ## Leverage Map — 2026-09-25 (after the cross-family baseline)
 
@@ -82,8 +82,8 @@ Qwen margins. Costs are arithmetic from measured rates, not session savings.
 
 Deprioritized: identity-gate cleanup as its own milestone, blanket cache
 rewrites, continuous batching without observed busy failures, process-cold CLI
-optimization as the default goal, DS4 residency by default (owner decision).
-MLX and quality/KLD comparisons are deferred by the owner.
+optimization as the default goal, DS4 residency by default (stays opt-in; see
+`docs/DEEPSEEK-V4-STRATEGY.md`). MLX and quality/KLD comparisons are deferred.
 
 The measurement that would re-rank this: one real agent session replayed
 against llama-server (same artifact, tool results, output budget; a warm
@@ -99,9 +99,8 @@ inference contract remains serial batch size one, not aggregate serving
 throughput.
 
 Deployment shape (amended 2026-09-25): multi-turn agent sessions through
-`qwen serve` are the primary deployment (the owner's daily driver), so session
-wall, prefix reuse and restart continuity rank alongside the phase latencies
-below. Process-cold CLI invocation remains measured but is no longer the
+`qwen serve` are a primary deployment shape, so session wall, prefix reuse and
+restart continuity rank alongside the phase latencies below. Process-cold CLI invocation remains measured but is no longer the
 default optimization target.
 
 The three co-primary latency objectives are:
@@ -610,8 +609,8 @@ existing Qwen server holding the production lease. Test contexts had used
 per-process test locks, so all September14 Flash-Next timing/profile authority
 below is provisional; numeric/state checks remain observed passes. The new
 benchmark guard acquires the real production lease and wired-memory check
-before Metal setup and correctly refused the occupied lease. The user then
-approved SIGINT to the verified server; it exited and was not restarted. The
+before Metal setup and correctly refused the occupied lease. The verified
+server was then stopped with an approved SIGINT; it exited and was not restarted. The
 guarded actual-product32-token packet and real CLI known-answer check now pass.
 New exclusive GPU/executor-wall savings are16.0366%/15.7158%; older unguarded
 timings and coarse profiles remain provisional, not retroactively promoted.
@@ -2640,7 +2639,7 @@ uncertainty.
 ## Latest Baseline Snapshot
 
 **2026-09-25, cross-family, llama.cpp b11182** (`e9f824d8c0`), qwen-llm
-`70ec9a9b`, one daily-driver artifact per family, production paths on both
+`70ec9a9b`, one representative artifact per family, production paths on both
 sides, ABBA blocks, 4 samples per cell, ratio against llama.cpp's better
 `-ub` (512 or 2048). Artifact:
 `docs/bench/2026-09-25-1759-families-family/FINDINGS.md`.
@@ -5361,7 +5360,7 @@ attribution applies there too. `--prefill-warm` (validated: gpu_ms within
 ~0.5-2% of decode-ramp) makes deep-context measurement routine (131k warm
 ~4 min). Parked v0.490 condition is now MET if true-long becomes primary:
 revisit `QWEN_ATTN_V4_G8_BCAST=1` promotion and re-rank attention byte/
-occupancy work against the W-program (Britt's call).
+occupancy work against the W-program (a priority call, not a measurement).
 v0.495-v0.497 then close the board (cx-signed program-level statement,
 session `019f347b-c...`): the dispatch census revises narrow-glue to a
 ~1.2-1.5 ms ceiling; W1b partition packing is falsified at its control row
@@ -5419,7 +5418,7 @@ tensor silicon; a step-change-alpha drafter/MTP asset (price in
 `--tree-sim`, no engine work); or a real multi-token source arriving via
 batching, which inherits mma8 as the best-known N in {4,8} primitive
 (`~2.0-2.8x` the incumbent MM tile at N=8).
-v0.500 then answers Britt's stale-assumption challenge with a staleness
+v0.500 then answers a stale-assumption challenge with a staleness
 audit + cx-vetted systematic sweep (see the PERF-LOG entry for the
 table). The audit finds the verify path frozen at v0.44x selections:
 GENERIC 32-wide tiles at N<16 (n16 needs n_query==16 exactly), per-token

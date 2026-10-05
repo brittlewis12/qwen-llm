@@ -7,7 +7,7 @@ economics and left the behavioral term open (S0 Amendment 1, G2).
 
 ## Question
 
-Does preserving full reasoning history across turns (owner's intended
+Does preserving full reasoning history across turns (the intended
 default) change model behavior per family, relative to the strip/drop
 contracts those families were trained with? "Change" is measured, not
 assumed, in both directions: degradation (drift, verbosity inflation,

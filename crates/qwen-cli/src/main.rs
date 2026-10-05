@@ -798,7 +798,7 @@ fn prepare_modern_run_prompt(
                     let Some(QwenBoundGeneration::Template(mode)) = qwen_bound else {
                         unreachable!("non-3.8 ordinary Qwen binds a template mode");
                     };
-                    // Pinned templates follow the serve owner position and
+                    // Pinned templates follow the serve rendering policy and
                     // preserve replayed reasoning; the legacy generic contract
                     // strips it.
                     render_qwen_chat_for_template(

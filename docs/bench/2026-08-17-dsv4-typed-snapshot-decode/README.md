@@ -181,4 +181,4 @@ the snapshot decoder and does not imply inference or GPU speedup.
 
 All work is CPU-only and model-free. No GGUF, Metal context, residency set,
 `requestResidency`, pre-wire, `mlock`, cache-bypass read, uncached read, or
-residency-coupled pread path may run. PID 8770 remains user-owned and untouched.
+residency-coupled pread path may run. Unrelated PID 8770 remains untouched.

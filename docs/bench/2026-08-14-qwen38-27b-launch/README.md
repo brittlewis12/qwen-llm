@@ -246,8 +246,8 @@ Operator observation: no run called `MTLResidencySet`, requested whole-model
 residency, pre-wired or locked pages, used cache-bypass reads, or selected the
 residency-coupled A10B pread path. The maintained quality child fixed
 `QWEN_DSV4_RESIDENCY_SET=0` and
-`QWEN_DSV4_PREFETCH=off`; all qwen processes exited normally. The user's tiny
-idle OvisOCR llama server remained owned and untouched.
+`QWEN_DSV4_PREFETCH=off`; all qwen processes exited normally. An unrelated
+idle OvisOCR llama server remained untouched.
 
 Force-ranked next work:
 

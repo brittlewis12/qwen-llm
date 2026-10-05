@@ -161,7 +161,7 @@ Evidence paths below are relative to the private artifact root:
 
 ## Sidequest: Dynamical Landscapes
 
-The user's [2021 attractor-methods review](https://pmc.ncbi.nlm.nih.gov/articles/PMC8085613/)
+The [2021 attractor-methods review](https://pmc.ncbi.nlm.nih.gov/articles/PMC8085613/)
 suggests useful exploratory tools, not evidence that our readouts contain chaotic
 attractors. Candidate analyses on the planned data: short-history/delay features,
 recurrence and observed transition maps, and held-out predictive comparisons.

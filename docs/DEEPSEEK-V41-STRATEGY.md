@@ -97,7 +97,7 @@ and up to 16 readers. The graph overlaps Engram reads with encoder work. This is
 concrete SSD row access, not a claim that ordinary MLX lazy tensor slicing is
 out-of-core.
 
-The user's September 11 screenshot reports an eight-second transition from
+A September 11 screenshot reports an eight-second transition from
 the decode expert cache to full encoder residency and about 800 prefill tok/s
 afterward. It describes scalar cached, overlapped layer-major, and fully
 resident encoder schedules. Keep the transition and post-prefill cache recovery

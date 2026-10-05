@@ -35,7 +35,7 @@ There is one backend-local history, not a concurrent multi-request cache.
 
 The checked-in Current system text is rendered natively through ATEM, high effort.
 The followup includes an authored short assistant reply and Mara's request to find
-warmth/power. It is not the user's captured Mara session. Token SHA-256:
+warmth/power. It is not a captured Mara session. Token SHA-256:
 `bbf0248261a24f86134c70ac720ad9fdecc7894aa0e1e8ed4a303a15c4e341a2`.
 Capacity 8192, temperature 0, seed 42, output limit 16.
 

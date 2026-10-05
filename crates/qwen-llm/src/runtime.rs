@@ -448,7 +448,7 @@ fn apply_prefetch_policy(
 /// gate needs a controlled pressure experiment first (A3B under three
 /// admission regimes) to identify the actual regression boundary.
 /// Until then we compute the conservative bound, log if it would fail,
-/// but let the prefetch proceed. On Britt's 128 GiB workstation the
+/// but let the prefetch proceed. On a 128 GiB M4 Max the
 /// naive `missing + shard + margin` formula would silently prevent
 /// the measured 5× first-byte wins because `available_memory` on an
 /// active desktop is often < 30 GiB.

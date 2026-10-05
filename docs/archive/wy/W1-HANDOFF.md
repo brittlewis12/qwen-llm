@@ -132,8 +132,8 @@ before they wasted GPU time. Replicate that pattern:
    has a live co-tenant agent; NEVER edit, commit, or `git add -A`
    there. Trellis swing lives in ~/code/qwen-llm-trellis (parked:
    LDLQ pilot next; branch trellis/t7-real-weight-oracle).
-2. GPU: Britt granted this program exclusive GPU access (2026-07-19,
-   trellis context). Re-confirm scope with Britt before your first
+2. GPU: this program had exclusive GPU access (2026-07-19,
+   trellis context). Re-confirm that scope before your first
    timed GPU run, and check whether the co-tenant still runs timed
    work. CPU-heavy work: nice -n 19 + thread caps (env knob pattern)
    as courtesy regardless.

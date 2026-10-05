@@ -240,7 +240,7 @@ campaign:
 - record device registry ID/name, OS, physical memory, AC state, memory
   pressure, thermal state, swap, and protected PID 8770 before and after.
 
-PID 8770 is user-owned: only query it, abort if active, and never signal it.
+PID 8770 is unrelated: only query it, abort if active, and never signal it.
 The collector may not use name-based process cleanup. Existing packet roots are
 never overwritten.
 

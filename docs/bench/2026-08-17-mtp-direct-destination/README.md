@@ -201,5 +201,5 @@ unauthenticated token fixture rather than emitting a disposition.
 
 No residency set, `requestResidency`, pre-wire, `mlock`, cache-bypass read,
 uncached read, or residency-coupled A10B pread path is authorized. The ordinary
-pageable GGUF loader remains unchanged. PID 8770 is user-owned and must not be
+pageable GGUF loader remains unchanged. PID 8770 is unrelated and must not be
 touched. No process may be killed to conduct this experiment.

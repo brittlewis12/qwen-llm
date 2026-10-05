@@ -422,4 +422,4 @@ on restore, rewind, and cross-session reuse.
 Phase 0 is model-free and uses ordinary Metal buffers only. It must not load a
 GGUF or exercise a residency set, `requestResidency`, pre-wire, `mlock`,
 cache-bypass read, uncached read, or residency-coupled pread path. PID 8770 is
-user-owned and must remain untouched.
+unrelated and must remain untouched.

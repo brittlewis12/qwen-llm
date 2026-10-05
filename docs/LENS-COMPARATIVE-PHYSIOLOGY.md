@@ -158,7 +158,7 @@ capture is packed, while scalar bundles and generation are serial: identical
 input is not a claim of bit-identical internal state across these execution modes.
 
 Both bundle answers accept constructing a bundle while rejecting identity of a
-bare set with the whole structured object. But the user's domain-specific set
+bare set with the whole structured object. But the prompt's domain-specific set
 is not a fixed technical category, and the supplied assistant history explicitly
 allows it additional structure. Narrowing it to a bare set may miss a legitimate
 question about representing structured objects, even when the literal-identity
@@ -172,7 +172,8 @@ claim of no way to encode the distinction overstates this. A categorical
 embedding needs specified categories and morphisms, not just an object-level
 product construction. Xhigh's larger-total-space language is not generally
 valid as a cardinality claim for infinite fibers. The mathematical object,
-model interpretation, and user's understanding remain separate objects of inquiry.
+model interpretation, and the understanding expressed in the source transcript
+remain separate objects of inquiry.
 
 In shoobie, both answers continue the cartoon-source framing and distinguish it
 from footwear stereotypes rather than asking what the correction refers to.
@@ -191,11 +192,11 @@ shoebox etymology unverified. The retrieved excerpt of Nick Ravo's
 [1987 reporting](https://www.nytimes.com/1987/02/16/nyregion/talk-long-beach-island-for-early-tourists-tepid-welcome-jersey-resort.html)
 uses the term for regional tourists, predating the cartoon. This is an accessible
 article excerpt, not a fresh archival audit of the earliest attestation. Crucially,
-the historical assistant proposes the cartoon as the user's personal source;
+the historical assistant proposes the cartoon as a personal source of the word;
 it does not explicitly assert that the cartoon coined the word. The new answers
 strengthen this into the word itself being specifically from the cartoon and
 the cartoon having given us the word. Pre-cartoon attestation checks that
-universal-origin claim, not cartoon usage or the user's personal association.
+universal-origin claim, not cartoon usage or a personal association.
 The shoebox origin remains unverified rather than established false. Neither
 external source was supplied to the model. This scope change could reflect
 prior model knowledge/errors or reconstruction from the retained history; we

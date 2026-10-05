@@ -16,7 +16,7 @@ The measured release binary has SHA-256
 and embeds commit `4238acdd182552dffeac743744848b5e62a71eab`, dirty bit `1`,
 and source-state digest
 `git-source-sha256-v2:0c155730c47ffb4e99a0caa0cd37c69d3e04dfe62c247b2ed51010b90b1af7b4`.
-The dirty bit includes two pre-existing user-owned untracked documents; they
+The dirty bit includes two pre-existing unrelated untracked documents; they
 were not moved or modified for this packet. ABBA uses this same binary in all
 four arms. This packet therefore has exact same-binary authority, not a
 portable clean-build claim.

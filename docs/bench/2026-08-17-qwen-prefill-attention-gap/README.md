@@ -157,4 +157,4 @@ comparison with the sequential fallback.
 
 No model or GPU workload ran. No GGUF, residency set, `requestResidency`,
 pre-wire, `mlock`, cache-bypass read, uncached read, or residency-coupled pread
-path ran. PID 8770 remained user-owned and untouched.
+path ran. Unrelated PID 8770 remained untouched.

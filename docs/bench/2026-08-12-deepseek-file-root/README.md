@@ -74,7 +74,7 @@ snapshot geometry. Pair telemetry schema 4 distinguishes file-root restores
 from pair-local capture/restore.
 
 The measurement binary reports base commit `ef186cb` with a dirty worktree
-because it contains this candidate plus two unrelated user-owned untracked
+because it contains this candidate plus two unrelated untracked
 documents. `validation.json` binds the measured source and transient binary
 hashes. The complete fixture, exact outputs, machine-readable measurements, and
 compact raw process telemetry are retained here.

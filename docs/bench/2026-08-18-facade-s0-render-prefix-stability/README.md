@@ -53,7 +53,7 @@ Scope notes (frozen):
    completed-turn reasoning re-prefill residual (PERF-LOG 2026-08-13 GO
    entry). DSpark on disk is a speculative-decoding drafter, not a chat
    surface.
-4. Amendment (pre-execution, 2026-08-18): the owner's standing position is
+4. Amendment (pre-execution, 2026-08-18): the standing position is
    that reasoning history should be preserved unconditionally — for all
    sessions, not only tool loops — in contrast to the conditional
    preserve/drop contracts of DS4 and Qwen3.8. S0 therefore treats
@@ -168,7 +168,7 @@ turn 1 was 987).
 - **G2:** If P3 holds and P4 shows a materially larger tail (as predicted),
   preserve-mode rendering is economically free (zero tail) while strip
   carries a quantified per-turn tax. The facade's default-policy decision
-  (preserve unconditionally, per the owner's position in scope note 4) then
+  (preserve unconditionally, per scope note 4) then
   rests solely on per-family behavioral evidence, to be preregistered
   separately; S3's zero-tail-re-prefill gate generalizes from
   tool-session optimization to default-contract property wherever

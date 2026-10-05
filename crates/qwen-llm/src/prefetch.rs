@@ -5,7 +5,7 @@
 //! On macOS APFS + Apple Silicon, `mmap` sequential reads deliver
 //! roughly ~0.8 GB/s cold, while the same drive reaches ~6 GB/s under
 //! direct large-block reads (measured on the internal 2 TB SSD via `fio`
-//! posixaio, 1 MiB, QD8; see `ssd-bench/` in Britt's random workspace).
+//! posixaio, 1 MiB, QD8; the `ssd-bench/` harness lives outside this repo).
 //! The gap is driven by macOS demand paging: mmap traverses the file
 //! four pages at a time, each miss a synchronous fault. Populating the
 //! unified buffer cache in parallel via `pread(2)` gets us closer to the

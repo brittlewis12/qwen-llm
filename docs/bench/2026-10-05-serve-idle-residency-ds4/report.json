@@ -1,0 +1,88 @@
+{
+  "model": "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+  "qwen": "target/release/qwen",
+  "wired_idle_gib": 4.86,
+  "arms": [
+    {
+      "arm": "off",
+      "idle_residency_secs": 0,
+      "exit_code": 130,
+      "rows": [
+        {
+          "request": "warm",
+          "pause_s": 0.0,
+          "wall_ms": 12802.1,
+          "wired_before_gib": 5.15,
+          "wired_after_gib": 104.55,
+          "prefill_ms": 12245.8
+        },
+        {
+          "request": "back_to_back",
+          "pause_s": 0.0,
+          "wall_ms": 1524.3,
+          "wired_before_gib": 104.55,
+          "wired_after_gib": 104.61,
+          "prefill_ms": 1244.1
+        },
+        {
+          "request": "after_10s",
+          "pause_s": 10.0,
+          "wall_ms": 2314.2,
+          "wired_before_gib": 4.91,
+          "wired_after_gib": 104.63,
+          "prefill_ms": 2031.6
+        },
+        {
+          "request": "after_30s",
+          "pause_s": 30.0,
+          "wall_ms": 2266.4,
+          "wired_before_gib": 4.92,
+          "wired_after_gib": 104.57,
+          "prefill_ms": 1993.7
+        }
+      ],
+      "pid": 30842
+    },
+    {
+      "arm": "keep",
+      "idle_residency_secs": null,
+      "exit_code": 130,
+      "rows": [
+        {
+          "request": "warm",
+          "pause_s": 0.0,
+          "wall_ms": 17384.6,
+          "wired_before_gib": 4.91,
+          "wired_after_gib": 105.46,
+          "prefill_ms": 17103.4
+        },
+        {
+          "request": "back_to_back",
+          "pause_s": 0.0,
+          "wall_ms": 1581.6,
+          "wired_before_gib": 105.33,
+          "wired_after_gib": 105.07,
+          "prefill_ms": 1301.8
+        },
+        {
+          "request": "after_10s",
+          "pause_s": 10.0,
+          "wall_ms": 1563.2,
+          "wired_before_gib": 102.12,
+          "wired_after_gib": 104.88,
+          "prefill_ms": 1285.2
+        },
+        {
+          "request": "after_30s",
+          "pause_s": 30.0,
+          "wall_ms": 1486.9,
+          "wired_before_gib": 102.12,
+          "wired_after_gib": 104.69,
+          "prefill_ms": 1212.1
+        }
+      ],
+      "pid": 30897
+    }
+  ],
+  "wired_end_gib": 102.17
+}

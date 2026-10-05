@@ -101,6 +101,11 @@ no further `glm5-next` changes). Earlier research (2026-08-28 gap analysis,
 - The fused mHC pre (`b1ff3b8e`, numerical, requalified) takes tg128 at
   depth 0 from 27.54 to 29.70 tok/s and at depth 4096 from 26.66 to 28.45
   (`docs/bench/2026-10-05-glm53-fused-mhc-pre/`).
+- The short-K Q8_0 mat-vec for the KDA low-rank expansions (`b7655f61`,
+  numerical, requalified) takes tg128 at depth 0 from 30.03 to 31.43 tok/s
+  (`docs/bench/2026-10-05-glm53-kda-short-k/`). Since the P6 baseline, tg128
+  has gone from 27.6 to 31.4 (depth 0) and from 20.8 to 29.7 (depth 4096).
+- Serve's idle residency now covers every no-copy family (`344da7e7`).
 - Next: P6:
   - KDA and expert weight streaming (~321 GB/s against 474);
   - the small-prompt prefill gap against llama.cpp (pp32 60 vs 66 with

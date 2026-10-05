@@ -1,0 +1,11 @@
+serve-keep.log:5:serve idle residency: family=deepseek_v4 window_s=60 pulse_ms=500
+serve-keep.log:8:serve: listening on http://127.0.0.1:8792 model=DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004 load_ms=0.0 lens_history=false (serial; POST /v1/responses, GET /v1/models)
+serve-keep.log:17:serve phases: tokenize_ms=0.1 session_ms=4.4 restore_ms=0.0 restore_source=none prefill_ms=17103.4 prompt_capture_ms=74.3 family=deepseek_v4
+serve-keep.log:20:serve phases: tokenize_ms=0.1 session_ms=2.3 restore_ms=0.0 restore_source=none prefill_ms=1301.8 prompt_capture_ms=70.4 family=deepseek_v4
+serve-keep.log:23:serve phases: tokenize_ms=0.1 session_ms=6.2 restore_ms=0.0 restore_source=none prefill_ms=1285.2 prompt_capture_ms=70.6 family=deepseek_v4
+serve-keep.log:26:serve phases: tokenize_ms=0.1 session_ms=5.9 restore_ms=0.0 restore_source=none prefill_ms=1212.1 prompt_capture_ms=69.9 family=deepseek_v4
+serve-off.log:7:serve: listening on http://127.0.0.1:8791 model=DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004 load_ms=0.0 lens_history=false (serial; POST /v1/responses, GET /v1/models)
+serve-off.log:16:serve phases: tokenize_ms=0.1 session_ms=5.6 restore_ms=0.0 restore_source=none prefill_ms=12245.8 prompt_capture_ms=73.0 family=deepseek_v4
+serve-off.log:19:serve phases: tokenize_ms=0.1 session_ms=2.3 restore_ms=0.0 restore_source=none prefill_ms=1244.1 prompt_capture_ms=71.7 family=deepseek_v4
+serve-off.log:22:serve phases: tokenize_ms=0.1 session_ms=5.9 restore_ms=0.0 restore_source=none prefill_ms=2031.6 prompt_capture_ms=68.8 family=deepseek_v4
+serve-off.log:25:serve phases: tokenize_ms=0.1 session_ms=5.9 restore_ms=0.0 restore_source=none prefill_ms=1993.7 prompt_capture_ms=67.7 family=deepseek_v4

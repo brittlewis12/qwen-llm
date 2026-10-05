@@ -6,6 +6,59 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-05 - Serve Idle Residency for Every No-Copy Family; DS4 Confirms the Re-wire Cost
+
+Leverage map (2026-10-05) #1. Code `344da7e7`; packet
+`docs/bench/2026-10-05-serve-idle-residency-ds4/`.
+- **Change:**
+  - K2 Horizon, DeepSeek V4, Muse Glimmer and Flash-Next name their no-copy
+    weight buffers (`retained_buffers()`, `metal::retained_gguf_buffers`)
+    and get GLM's keep-alive hooks. The default is 60 s for all of them.
+  - The window stays closed until the first activity (warm-up or first
+    request), so a pulse never faults in a cold model.
+  - Qwen serve loads Metal-allocated copies (always wired) and refuses a
+    nonzero flag.
+  - DS4 stays off when its opt-in residency set is active.
+- **DS4 pause screen (`dc2d5ada`, fresh 40-token prompts, 4 tokens out):**
+  - Keep-alive off: wired memory falls to 4.9 GiB within 10 s, and paused
+    requests prefill in 1,994-2,032 ms against 1,244 ms back to back.
+  - Default window: 102 GiB stays wired through 10 s and 30 s pauses, and
+    paused requests prefill in 1,212-1,285 ms.
+  - So a second, dissimilar family pays the same ~0.8 s re-wire and the
+    keep-alive removes it.
+- **Still open:** observing the pressure suspension under real pressure,
+  and idle energy.
+
+## 2026-10-05 - GLM Short-K Q8_0 Mat-Vec for KDA: tg128 +4.7% (30.0 -> 31.4 tok/s)
+
+Leverage map (2026-10-05) #2. Packet `docs/bench/2026-10-05-glm53-kda-short-k/`.
+- **Screen (`metal::kda::tests::kda_block_dispatch_costs`):** it reproduces
+  attribution (352.5 vs 352 µs per KDA block). q/k/v run at 441 GB/s and
+  the output at 441 GB/s, but the five small Q8_0 projections take 74 µs
+  for 3.4 MB. Most of that is `ssm_f_b`/`ssm_g_b` (Q8_0 128 -> 8192, 28.8 µs
+  each): the generic kernel keeps 16 of 128 lanes busy on a 4-block row.
+- **Change (`b7655f61`):** `encode_mat_vec_q8_0_short_k_f32` (K of 32-256,
+  2·nb lanes per row, several rows per simdgroup) for those two tensors, at
+  decode and in packed Exact rows. The generic dispatcher and other
+  families are unchanged.
+- **Exactness:** Numerical (requalified). Live gates pass 14/14; Exact
+  packed == serial bitwise; near-4096 prompt-end KL 2.95e-8.
+- **Screen result:** 28.8 -> 4.7 µs per expansion; KDA block 352.5 -> 302.6 µs.
+- **A/B vs `344da7e7`:**
+  - tg128 depth 0: 30.03 -> 31.43 tok/s;
+  - tg128 depth 4096: 28.46 -> 29.72 tok/s;
+  - prefill unchanged.
+- **DS4 regression:** the 256-token greedy fingerprint at `dc2d5ada` is
+  `26f39112d3959e96`, equal to main's recorded value. The shared
+  selected-attention refactor and new kernels leave DS4 bitwise.
+- **P6 so far:** tg128 27.6 -> 31.4 tok/s (depth 0) and 20.8 -> 29.7
+  (depth 4096); llama.cpp, placement-matched, is 23.7.
+- **Next:**
+  - routed experts (10.0 ms at 305 GB/s; DS4 shares the all-slot IQ2_S
+    and IQ3_S kernels, so a bitwise-first plan is needed);
+  - a one-dispatch q/k/v (proxy saves ~0.6 ms);
+  - shared expert (2.6 ms at 333 GB/s).
+
 ## 2026-10-05 - GLM Fused mHC Pre: tg128 +7.8% (27.5 -> 29.7 tok/s)
 
 Leverage map (2026-10-05) #2. Packet `docs/bench/2026-10-05-glm53-fused-mhc-pre/`.

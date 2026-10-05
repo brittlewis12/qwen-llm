@@ -231,6 +231,11 @@ pub struct Glm5NextWeights {
 }
 
 impl Glm5NextWeights {
+    /// The retained no-copy weight buffers (for idle residency keep-alive).
+    pub fn retained_buffers(&self) -> Vec<&crate::metal::Buffer> {
+        self._backings.iter().map(|backing| &backing.buffer).collect()
+    }
+
     /// Admits serial decode and the retained bytes, then maps every executed
     /// tensor (NextN never) without copying.
     pub fn load(ctx: &MetalContext, gguf: &GgufFile) -> Result<Self> {

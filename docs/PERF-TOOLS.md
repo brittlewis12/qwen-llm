@@ -916,15 +916,21 @@ command, model, prompt, build profile, and environment fixed across variants.
 ### Serialized GPU lease
 
 Timed GPU work is globally exclusive across the repository, including parallel
-agents. Until automated enforcement lands, only the coordinating session may run
-benchmarks; subagents remain read-only and return benchmark plans to it.
+agents. Every qwen-llm process that initializes Metal takes an exclusive `flock`
+on `/tmp/qwen-llm-$UID/metal.lock` and records `pid=... executable=...
+opencode_session=...` in it (`crates/qwen-llm/src/metal/context.rs`). A busy
+lease fails immediately; `QWEN_METAL_LEASE_WAIT=1` queues instead.
 
-The planned enforcement surface is `target/profiles/GPU-LEASE.json`, carrying
-owner, process identity, purpose, creation time, and expiry. Timed `qwen-bench`
-modes should refuse a live foreign lease and record lease identity in artifacts.
-Stale recovery must verify the exact owner process and expiry; it must never kill
-processes by pattern. Build and non-GPU analysis may proceed outside the lease,
-but not concurrently with a promotion-grade timed run.
+Other engines, such as llama.cpp, do not take this lease. Run them through
+`scripts/bench/with-metal-lease [--] COMMAND ...`, which takes the same lease
+with the same checks and execs COMMAND while holding it; `family.py` does this
+for `llama-bench`. For example:
+`QWEN_METAL_LEASE_WAIT=1 scripts/bench/with-metal-lease llama-server -m MODEL ...`.
+
+The lease serializes the GPU, not the machine: a build or other CPU-heavy work
+still perturbs a timed run. Stale recovery must verify the exact owner process;
+it must never kill processes by pattern. Build and non-GPU analysis may proceed
+outside the lease, but not concurrently with a promotion-grade timed run.
 
 ### qwen-bench pp prompt sweeps
 

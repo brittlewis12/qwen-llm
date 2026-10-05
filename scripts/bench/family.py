@@ -50,6 +50,9 @@ SOURCE_STATE_PREFIX = "git-source-sha256-v2:"
 DEFAULT_QWEN_BENCH = ROOT / "target" / "release" / "qwen-bench"
 DEFAULT_MODELS_TOML = ROOT / "scripts" / "bench" / "models.toml"
 DEFAULT_DIGEST = ROOT / "scripts" / "bench" / "digest.py"
+# llama.cpp does not take qwen-llm's Metal process lease; run it under the
+# same lease so the two engines never overlap on the GPU.
+WITH_METAL_LEASE = ROOT / "scripts" / "bench" / "with-metal-lease"
 
 SHARD_RE = re.compile(r"-(\d{5})-of-\d{5}\.gguf$")
 
@@ -195,7 +198,20 @@ def probe_lcpp(
     allow_unpinned: bool,
 ) -> dict:
     rows = run_json(
-        [llama_bench, "-m", sample_model, "-p", "1", "-n", "0", "-r", "1", "-o", "json"]
+        [
+            WITH_METAL_LEASE,
+            llama_bench,
+            "-m",
+            sample_model,
+            "-p",
+            "1",
+            "-n",
+            "0",
+            "-r",
+            "1",
+            "-o",
+            "json",
+        ]
     )
     r = rows[0]
     if lock is not None:
@@ -936,7 +952,7 @@ def main() -> int:
         def run_lcpp(block: int) -> list[dict]:
             rows: list[dict] = []
             if pp_shapes:
-                cmd: list[str | Path] = [llama_bench, "-m", path]
+                cmd: list[str | Path] = [WITH_METAL_LEASE, llama_bench, "-m", path]
                 cmd += ["-p", ",".join(str(p) for p in pp_shapes), "-n", "0"]
                 cmd += ["-ub", ",".join(str(u) for u in ubatches)]
                 cmd += ["-r", str(args.runs), "-o", "json"]
@@ -946,7 +962,7 @@ def main() -> int:
                     {"engine": "llama.cpp", "tag": tag, "test": "pp", "block": block},
                 )
             if tg_shapes:
-                cmd = [llama_bench, "-m", path, "-p", "0"]
+                cmd = [WITH_METAL_LEASE, llama_bench, "-m", path, "-p", "0"]
                 cmd += ["-n", ",".join(str(n) for n in tg_shapes)]
                 cmd += ["-d", ",".join(str(d) for d in depths)]
                 cmd += ["-ub", str(tuned_ubatch)]

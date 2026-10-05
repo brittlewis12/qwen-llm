@@ -1,14 +1,18 @@
-//! GLM-5.3-Flash: bounded raw generation up to the checkpoint context
+//! GLM-5.3-Flash: bounded serial generation up to the checkpoint context
 //! (dense attention below visible length 2052, sparse DSA selection from
-//! there on) within device memory. Chat templating, serve and lens are not
-//! implemented; every other surface refuses rather than falling through to
-//! Qwen protocols.
+//! there on) within device memory, from a raw prompt or a text chat
+//! rendered by `qwen_llm::glm5_next_chat`; chat reasoning streams to stderr
+//! and the answer to stdout. Tools, serve and lens are not implemented;
+//! every other surface refuses rather than falling through to Qwen
+//! protocols.
 
 use super::*;
 use crate::lane_timing::{LanePhases, LaneTiming};
+use crate::prompt_template::{InputCapability, Support};
 use qwen_llm::glm5_next::{
     Glm5NextAdmissionError, Glm5NextArtifactLayout, Glm5NextPreparedArtifact,
 };
+use qwen_llm::glm5_next_chat::{self as chat, Effort, Message, RenderOptions};
 use qwen_llm::glm5_next_metal::{
     DEFAULT_PREFILL_ROWS, Glm5NextMetalError, Glm5NextSession, Glm5NextWeights,
     prefetch_retained_with_cancel, preflight_session,
@@ -17,16 +21,19 @@ use serde_json::{Value, json};
 
 const FAMILY: &str = "GLM-5.3-Flash";
 
-/// Request phases of the GLM run lane. Setup (artifact, tokenizer, device,
-/// memory preflight, prefetch) stays out of the loaded request, which is
-/// encoding, request preparation and resident execution.
+/// Request phases of the GLM run lane. Setup (artifact, tokenizer, chat
+/// profile, input, rendering, device, memory preflight, prefetch) stays out
+/// of the loaded request, which is request preparation, encoding and
+/// resident execution.
 #[derive(Clone, Copy)]
 enum Phase {
-    InputAcquisition,
+    RequestPreparation,
     ArtifactLayout,
     TokenizerConstruction,
+    ArtifactVerification,
+    InputAcquisition,
+    Rendering,
     Encoding,
-    RequestPreparation,
     DeviceSetup,
     MemoryPreflight,
     Prefetch,
@@ -38,11 +45,13 @@ enum Phase {
 impl LanePhases for Phase {
     const FAMILY: &'static str = "GLM-5.3";
     const PHASES: &'static [(Self, &'static str)] = &[
-        (Phase::InputAcquisition, "input_acquisition"),
+        (Phase::RequestPreparation, "request_preparation"),
         (Phase::ArtifactLayout, "artifact_layout"),
         (Phase::TokenizerConstruction, "tokenizer_construction"),
+        (Phase::ArtifactVerification, "artifact_verification"),
+        (Phase::InputAcquisition, "input_acquisition"),
+        (Phase::Rendering, "rendering"),
         (Phase::Encoding, "encoding"),
-        (Phase::RequestPreparation, "request_preparation"),
         (Phase::DeviceSetup, "device_setup"),
         (Phase::MemoryPreflight, "memory_preflight"),
         (Phase::Prefetch, "prefetch"),
@@ -77,23 +86,76 @@ fn admission(
     Ok((prepared, stops))
 }
 
+type ChatVerdict = std::result::Result<chat::VerifiedChatProfile, chat::ChatError>;
+
+/// The artifact's admission and, once admitted, its chat profile verdict.
+fn verdict(
+    gguf: &GgufFile,
+) -> std::result::Result<(Glm5NextPreparedArtifact<'_>, ChatVerdict), Glm5NextAdmissionError> {
+    let (prepared, _) = admission(gguf)?;
+    let profile = prepared.chat_profile();
+    Ok((prepared, profile))
+}
+
+/// Which input forms render for this artifact: raw once it is admitted,
+/// text chat once its template profile verifies, tools never (yet).
+fn input_support(
+    verdict: &std::result::Result<
+        (Glm5NextPreparedArtifact<'_>, ChatVerdict),
+        Glm5NextAdmissionError,
+    >,
+) -> InputCapability {
+    let tools = Support::Unsupported {
+        code: "glm5_next_chat_tools",
+        message: format!("{FAMILY} tool definitions and tool history are not implemented"),
+    };
+    match verdict {
+        Err(error) => InputCapability::none(error.code(), error.to_string()),
+        Ok((_, Ok(_))) => InputCapability {
+            raw: Support::Supported,
+            user: Support::Supported,
+            messages: Support::Supported,
+            tools,
+        },
+        Ok((_, Err(error))) => InputCapability {
+            tools,
+            ..InputCapability::raw_only(error.code(), format!("{error}; use --raw-prompt"))
+        },
+    }
+}
+
+/// `capabilities.input` for callers outside the family profile.
+pub(crate) fn input_capability(gguf: &GgufFile) -> InputCapability {
+    input_support(&verdict(gguf))
+}
+
+/// `capabilities.template` for callers outside the family profile.
+pub(crate) fn template_projection(gguf: &GgufFile) -> Value {
+    capability_projection(gguf)
+        .map(|projection| projection["template"].clone())
+        .unwrap_or_else(|error| json!({"status": "unresolved", "message": error.to_string()}))
+}
+
 pub(crate) fn capability_projection(gguf: &GgufFile) -> Result<Value> {
-    let admission = admission(gguf);
-    let run = match &admission {
-        Ok((prepared, _)) => json!({
-            "status": "conditional", "implementation_status": "partial", "scope": "raw_only",
+    let verdict = verdict(gguf);
+    let run = match &verdict {
+        Ok((prepared, profile)) => json!({
+            "status": "conditional", "implementation_status": "partial",
+            "scope": if profile.is_ok() { "raw_and_text_chat" } else { "raw_only" },
             "artifact_admission": {"status": "passed"},
             "capacity_policy": format!("checkpoint_context_{}_and_device_memory", prepared.config().context_length),
             "attention": "dense_below_2052_sparse_dsa_from_2052",
             "prefill": if prepared.packed_prefill() { "packed_fast" } else { "serial" },
             "native_tokenizer": true, "latent_cache": "f16",
+            "output": "raw_literal_or_reasoning_stderr_answer_stdout",
+            "sampling_default": "release_generation_config_temperature_1_top_p_0.95",
         }),
         Err(error) => json!({
             "status": "unsupported", "implementation_status": "partial",
             "artifact_admission": {"status": "rejected", "code": error.code(), "message": error.to_string()},
         }),
     };
-    let bench = match &admission {
+    let bench = match &verdict {
         Ok(_) => json!({"status": "conditional", "implementation_status": "partial",
             "command": "qwen-bench suite", "scope": "packed_prefill_and_serial_decode_rows"}),
         Err(_) => json!({"status": "unsupported", "implementation_status": "partial"}),
@@ -103,59 +165,116 @@ pub(crate) fn capability_projection(gguf: &GgufFile) -> Result<Value> {
             "code": "glm5_next_lane_unimplemented",
             "message": format!("{FAMILY} has no {lane} implementation yet")})
     };
-    let raw = match &admission {
-        Ok(_) => json!({"status": "supported"}),
-        Err(error) => {
-            json!({"status": "unsupported", "code": error.code(), "message": error.to_string()})
-        }
+    let refused = |code: &str, message: String| {
+        let refused = json!({"status": "unsupported", "code": code, "message": message});
+        json!({"levels": [], "fallback": null, "no_thinking": refused, "thinking": refused})
     };
-    let templated = json!({"status": "unsupported", "code": "glm5_next_chat_unimplemented",
-        "message": format!("{FAMILY} chat rendering is not implemented; use --raw-prompt")});
+    let (reasoning, template) = match &verdict {
+        Ok((_, Ok(profile))) => (
+            json!({"levels": Effort::LEVELS, "fallback": Effort::default().as_str(),
+                "no_thinking": {"status": "unsupported", "code": "glm5_next_no_non_thinking_mode",
+                    "message": format!("the {FAMILY} template always opens reasoning; use reasoning effort low")},
+                "thinking": {"status": "supported"}}),
+            json!({"status": "identified", "rendered_as": chat::RENDERER, "profile": profile}),
+        ),
+        Ok((_, Err(error))) => (
+            refused(error.code(), error.to_string()),
+            json!({"status": "unverified", "rendered_as": null, "code": error.code(), "message": error.to_string()}),
+        ),
+        Err(error) => (
+            refused(error.code(), error.to_string()),
+            json!({"status": "unsupported", "rendered_as": null, "message": error.to_string()}),
+        ),
+    };
     Ok(json!({
         "execution": {"run": run, "bench": bench, "serve": unsupported("serve"), "lens": unsupported("lens"),
             "request_device": {"status": "not_evaluated",
                 "requires": ["request_options_and_token_budget", "live_memory_admission"]}},
-        "input": {"raw": raw, "user": templated, "messages": templated, "tools": templated},
-        "reasoning": {"levels": [], "fallback": null,
-            "no_thinking": {"status": "unsupported", "code": "glm5_next_chat_unimplemented", "message": "raw input has no reasoning controls"},
-            "thinking": {"status": "unsupported", "code": "glm5_next_chat_unimplemented", "message": "raw input has no reasoning controls"}},
-        "template": {"status": "unsupported", "rendered_as": null,
-            "message": format!("{FAMILY} raw input has no template renderer yet")},
+        "input": input_support(&verdict),
+        "reasoning": reasoning,
+        "template": template,
     }))
 }
 
-fn prepare_raw(
+/// What the request asks for, settled before the artifact is inspected or
+/// any input is read.
+enum Request {
+    /// `--raw-prompt`, or the legacy prompt flags.
+    Raw(cli::Invocation),
+    /// `--user` (with `--system`) or `--messages`.
+    Chat {
+        run: cli::RunInvocation,
+        effort: Effort,
+    },
+}
+
+fn admit(
     invocation: cli::Invocation,
     args: &Args,
     explicit: ExplicitCliOptions,
-) -> Result<(String, PromptSource)> {
-    admission::GLM5_NEXT_RAW_SINGLE_TURN.admit(&admission::supplied(args, explicit))?;
+) -> Result<Request> {
+    admission::GLM5_NEXT_SINGLE_TURN.admit(&admission::supplied(args, explicit))?;
     ensure!(
         args.drafter.is_none(),
         "{FAMILY} does not support --drafter"
     );
     ensure!(
         args.messages.is_none(),
-        "{FAMILY} currently supports raw input only"
+        "{FAMILY} reads chat documents with `qwen run --messages`; the legacy --messages flag is unsupported"
     );
     match invocation {
-        cli::Invocation::Run(run) => {
+        cli::Invocation::Run(run) if matches!(run.input, cli::RunInput::RawPrompt(_)) => {
             ensure!(
                 !run.no_thinking && run.reasoning_effort.is_none(),
-                "{FAMILY} raw input does not accept reasoning controls"
+                "{FAMILY} raw input does not accept reasoning controls; the prompt is the exact model input"
             );
-            match run.input {
-                cli::RunInput::RawPrompt(text) => Ok((text, PromptSource::Inline)),
-                _ => bail!(
-                    "{FAMILY} chat rendering is not implemented; use --raw-prompt (include [gMASK]<sop> for the release prefix)"
-                ),
-            }
+            Ok(Request::Raw(cli::Invocation::Run(run)))
         }
+        cli::Invocation::Run(run) => {
+            ensure!(
+                !run.no_thinking,
+                "{FAMILY} has no --no-thinking mode: its template always opens reasoning; use --reasoning-effort low for the least"
+            );
+            let effort = Effort::parse(run.reasoning_effort.as_deref())?;
+            Ok(Request::Chat { run, effort })
+        }
+        cli::Invocation::Legacy => Ok(Request::Raw(cli::Invocation::Legacy)),
+        _ => bail!("{FAMILY} generation is a single-turn run path"),
+    }
+}
+
+fn raw_input(invocation: cli::Invocation, args: &Args) -> Result<(String, PromptSource)> {
+    match invocation {
+        cli::Invocation::Run(cli::RunInvocation {
+            input: cli::RunInput::RawPrompt(text),
+            ..
+        }) => Ok((text, PromptSource::Inline)),
         cli::Invocation::Legacy => {
             let (text, source, _) = prompt_text(args)?;
             Ok((text, source))
         }
-        _ => bail!("{FAMILY} raw preparation is a single-turn generation path"),
+        _ => bail!("{FAMILY} raw input requires --raw-prompt"),
+    }
+}
+
+/// The conversation and its `clear_thinking` from `--user`/`--system` or a
+/// `--messages` document.
+fn chat_messages(input: cli::AcquiredRunInput) -> Result<(Vec<Message>, bool)> {
+    match input {
+        cli::AcquiredRunInput::User { system, user } => Ok((
+            system
+                .map(Message::System)
+                .into_iter()
+                .chain([Message::User(user)])
+                .collect(),
+            false,
+        )),
+        cli::AcquiredRunInput::Messages { document, source } => {
+            let document = chat::parse_document(document.as_bytes())
+                .with_context(|| format!("read {FAMILY} chat document from {source}"))?;
+            Ok((document.messages, document.clear_thinking.unwrap_or(false)))
+        }
+        cli::AcquiredRunInput::RawPrompt(_) => bail!("{FAMILY} raw input is not a chat"),
     }
 }
 
@@ -212,7 +331,7 @@ fn preflight(
     }
 }
 
-pub(crate) fn run_raw(
+pub(crate) fn run(
     gguf: &GgufFile,
     args: &Args,
     explicit: ExplicitCliOptions,
@@ -220,9 +339,11 @@ pub(crate) fn run_raw(
 ) -> Result<()> {
     let lane_t0 = Instant::now();
     let mut timing = Timing::default();
-    let (text, source) = timing.measure(Phase::InputAcquisition, || {
-        prepare_raw(invocation, args, explicit)
+    let request = timing.measure(Phase::RequestPreparation, || {
+        admit(invocation, args, explicit)
     })?;
+    let sampling =
+        release_sampling_config(SamplingConfig::glm5_next(args.seed), args, explicit, FAMILY)?;
     let layout = timing.measure(Phase::ArtifactLayout, || {
         Glm5NextArtifactLayout::inspect(gguf).with_context(|| format!("admit {FAMILY} artifact"))
     })?;
@@ -233,16 +354,52 @@ pub(crate) fn run_raw(
     })?;
     let stops = prepared.generation_stops()?;
     let vocab_size = prepared.config().vocab_size;
-    // The glm4 tokenizer never inserts BOS; [gMASK]<sop> belongs in the text.
+    let (text, source, mut chat_record) = match request {
+        Request::Raw(invocation) => {
+            let (text, source) =
+                timing.measure(Phase::InputAcquisition, || raw_input(invocation, args))?;
+            (text, source, None)
+        }
+        Request::Chat { run, effort } => {
+            // Bind the artifact's template before reading a file or waiting on stdin.
+            let profile = timing.measure(Phase::ArtifactVerification, || {
+                prepared
+                    .chat_profile()
+                    .map_err(|error| anyhow!("{error}; use --raw-prompt"))
+            })?;
+            shutdown::checkpoint()?;
+            let input = timing.measure(Phase::InputAcquisition, || run.acquire_input())?;
+            let (text, clear_thinking) = timing.measure(Phase::Rendering, || {
+                let (messages, clear_thinking) = chat_messages(input)?;
+                let text =
+                    chat::render(&messages, RenderOptions::generate(effort, clear_thinking))?;
+                Ok((text, clear_thinking))
+            })?;
+            let record = json!({
+                "profile": profile, "reasoning_effort": effort, "clear_thinking": clear_thinking,
+                "stops": chat::CHAT_STOPS, "prefix_owner": "renderer",
+                "output": "reasoning_stderr_answer_stdout",
+            });
+            (text, PromptSource::Messages, Some(record))
+        }
+    };
+    // The glm4 tokenizer never inserts BOS; [gMASK]<sop> belongs in the
+    // text, and the chat renderer writes it.
+    let add_special = chat_record.is_none() && !args.no_special_tokens;
     let tokens = timing.measure(Phase::Encoding, || {
         prepared
             .tokenizer()
-            .encode(&text, !args.no_special_tokens)?
+            .encode(&text, add_special)?
             .into_iter()
             .enumerate()
             .map(|(i, id)| checked_token_id(id, vocab_size, &format!("prompt[{i}]")))
             .collect::<Result<Vec<_>>>()
     })?;
+    if let Some(record) = &mut chat_record {
+        let ids: Vec<i32> = tokens.iter().map(|&t| t as i32).collect();
+        record["prompt_token_ids_sha256_i32le"] =
+            json!(qwen_llm::tokenizer::token_ids_sha256_i32le(&ids));
+    }
     let (capacity, prefill_rows) = timing.measure(Phase::RequestPreparation, || {
         let capacity = capacity(args, tokens.len(), prepared.config().context_length)?;
         let rows = if prepared.packed_prefill() {
@@ -252,7 +409,7 @@ pub(crate) fn run_raw(
         };
         Ok((capacity, rows))
     })?;
-    let mut sampler = Sampler::new(cli_sampling_config(args)?)?;
+    let mut sampler = Sampler::new(sampling)?;
     shutdown::checkpoint()?;
 
     let ctx = timing.measure(Phase::DeviceSetup, || {
@@ -298,14 +455,32 @@ pub(crate) fn run_raw(
     let prefill_ms = resident_t0.elapsed().as_secs_f64() * 1e3;
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
+    let mut stderr = std::io::stderr();
+    let mut partition = chat_record
+        .as_ref()
+        .map(|_| crate::serve::render_glm5_next::partition());
+    let mut visible = false;
     let generation = generate_serial(
         logits,
         args.tokens,
         &stops,
         &mut sampler,
         |token| {
-            stdout.write_all(prepared.tokenizer().try_decode_piece_bytes_exact(token)?)?;
-            stdout.flush()?;
+            let bytes = prepared.tokenizer().try_decode_piece_bytes_exact(token)?;
+            if let Some(partition) = &mut partition {
+                let mut events = Vec::new();
+                partition.push(bytes, &mut events);
+                crate::chat_output::write_chat_events(
+                    &events,
+                    &mut stdout,
+                    &mut stderr,
+                    &mut visible,
+                    FAMILY,
+                )?;
+            } else {
+                stdout.write_all(bytes)?;
+                stdout.flush()?;
+            }
             Ok(())
         },
         |token| {
@@ -314,12 +489,45 @@ pub(crate) fn run_raw(
             session.forward(&ctx, token).map_err(anyhow::Error::from)
         },
     )?;
-    if !generation.tokens.is_empty() {
+    timing.record(Phase::ResidentExecution, resident_t0.elapsed())?;
+    let report = timing.finish(lane_t0.elapsed())?;
+    if let Some(partition) = partition {
+        let mut events = Vec::new();
+        let closed_before = partition.closed();
+        let result = partition.finish(
+            crate::serve::outcome::generation_end(&generation).1,
+            &mut events,
+        );
+        let closed = closed_before
+            || events.iter().any(|event| {
+                matches!(
+                    event,
+                    crate::serve::partition::PartitionEvent::ReasoningClosed
+                )
+            });
+        crate::chat_output::write_chat_events(
+            &events,
+            &mut stdout,
+            &mut stderr,
+            &mut visible,
+            FAMILY,
+        )?;
+        writeln!(stderr)?;
+        if let Some(record) = &mut chat_record {
+            record["reasoning_closed"] = json!(closed);
+        }
+        result.map_err(|error| anyhow!(error.message))?;
+        if !closed {
+            writeln!(
+                stderr,
+                "glm5_next: incomplete response: token budget exhausted before reasoning closed; no final answer"
+            )?;
+        }
+    }
+    if visible || (chat_record.is_none() && !generation.tokens.is_empty()) {
         writeln!(stdout)?;
         stdout.flush()?;
     }
-    timing.record(Phase::ResidentExecution, resident_t0.elapsed())?;
-    let report = timing.finish(lane_t0.elapsed())?;
 
     let prefill_mode = if prefill_rows > 0 {
         "packed_fast"
@@ -330,7 +538,13 @@ pub(crate) fn run_raw(
     let decode_tps =
         generation.tokens.len() as f64 / (generation.wall_ms / 1e3).max(f64::MIN_POSITIVE);
     eprintln!(
-        "glm5_next: prompt_tokens={} generated_tokens={} transitions={} stop={} capacity={capacity} prefill={prefill_mode} prefill_rows={prefill_rows} setup_prefetch_ms={:.1} load_ms={:.1} prefill_ms={prefill_ms:.1} prefill_tps={prefill_tps:.2} decode_tps={decode_tps:.2} loaded_request_ms={:.1} end_to_end_ms={:.1}",
+        "glm5_next: input={} prompt_tokens={} generated_tokens={} transitions={} stop={} capacity={capacity} prefill={prefill_mode} prefill_rows={prefill_rows} setup_prefetch_ms={:.1} load_ms={:.1} prefill_ms={prefill_ms:.1} prefill_tps={prefill_tps:.2} decode_tps={decode_tps:.2} loaded_request_ms={:.1} end_to_end_ms={:.1}",
+        chat_record
+            .as_ref()
+            .map_or("raw".to_string(), |record| format!(
+                "chat effort={}",
+                record["reasoning_effort"].as_str().unwrap_or("?")
+            )),
         tokens.len(),
         generation.tokens.len(),
         generation.transitions,
@@ -361,13 +575,13 @@ pub(crate) fn run_raw(
             path,
             0,
             ModelFamily::Glm5Next.record_label(),
-            request_stats_input(source, None),
+            request_stats_input(source, chat_record.as_ref().map(|_| chat::RENDERER)),
             &measured,
             Some(RequestStatsDiagnostics {
                 deepseek_v4: None,
                 k2_horizon: None,
                 glm5_next: Some(RequestStatsGlm5NextDiagnostics {
-                    schema_version: 1,
+                    schema_version: 2,
                     prefill_mode,
                     prefill_rows: prefill_rows as u64,
                     capacity: capacity as u64,
@@ -377,11 +591,18 @@ pub(crate) fn run_raw(
                         "bytes_read": prefetch.bytes_read,
                     }),
                     timing: report.json,
+                    sampling: sampling_json(sampling),
+                    chat: chat_record,
                 }),
             }),
         )?;
     }
     Ok(())
+}
+
+fn sampling_json(config: SamplingConfig) -> Value {
+    json!({"temperature": config.temperature, "top_k": config.top_k, "top_p": config.top_p,
+        "min_p": config.min_p, "seed": config.seed})
 }
 
 #[cfg(test)]
@@ -457,29 +678,131 @@ mod tests {
         assert!(admission_advice(None, 10).contains("free device memory"));
     }
 
+    fn run_args(extra: &[&str]) -> Vec<String> {
+        ["qwen", "run", "-m", "m.gguf"]
+            .iter()
+            .chain(extra)
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    fn admitted(extra: &[&str]) -> Result<Request> {
+        let argv = run_args(extra);
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let (args, explicit, invocation) = parse(&argv);
+        admit(invocation, &args, explicit)
+    }
+
     #[test]
-    fn raw_lane_refuses_templated_input() {
-        let (args, explicit, invocation) =
-            parse(&["qwen", "run", "-m", "m.gguf", "--user", "hello"]);
-        let error = prepare_raw(invocation, &args, explicit)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("chat rendering is not implemented"),
-            "{error}"
-        );
-        let (args, explicit, invocation) = parse(&[
-            "qwen",
-            "run",
-            "-m",
-            "m.gguf",
-            "--raw-prompt",
-            "[gMASK]<sop>hi",
-        ]);
+    fn chat_and_raw_requests_settle_their_controls_before_any_input() {
+        for (extra, effort) in [
+            (&["--user", "hi"][..], Effort::Max),
+            (&["--user", "hi", "--reasoning-effort", "low"], Effort::Low),
+            (
+                &["--user", "hi", "--reasoning-effort", "high"],
+                Effort::High,
+            ),
+            (
+                &[
+                    "--messages",
+                    "/nonexistent.json",
+                    "--reasoning-effort",
+                    "max",
+                ],
+                Effort::Max,
+            ),
+        ] {
+            match admitted(extra).unwrap() {
+                Request::Chat { effort: got, .. } => assert_eq!(got, effort, "{extra:?}"),
+                Request::Raw(_) => panic!("{extra:?} is chat"),
+            }
+        }
+        for (extra, needle) in [
+            (
+                &["--user", "hi", "--reasoning-effort", "medium"][..],
+                "low, high or max",
+            ),
+            (
+                &["--user", "hi", "--reasoning-effort", "none"],
+                "no non-thinking mode",
+            ),
+            (&["--user", "hi", "--no-thinking"], "no --no-thinking mode"),
+            (&["--user", "hi", "--drafter", "d.gguf"], "--drafter"),
+        ] {
+            let error = format!("{:#}", admitted(extra).err().unwrap());
+            assert!(error.contains(needle), "{extra:?}: {error}");
+        }
+        let Request::Raw(invocation) = admitted(&["--raw-prompt", "[gMASK]<sop>hi"]).unwrap()
+        else {
+            panic!("raw prompt is raw");
+        };
+        let (args, ..) = parse(&["qwen", "run", "-m", "m.gguf", "--raw-prompt", "x"]);
+        assert_eq!(raw_input(invocation, &args).unwrap().0, "[gMASK]<sop>hi");
+    }
+
+    #[test]
+    fn user_and_system_flags_become_the_conversation() {
+        let (messages, clear) = chat_messages(cli::AcquiredRunInput::User {
+            system: Some("Be brief.".into()),
+            user: "hi".into(),
+        })
+        .unwrap();
+        assert!(!clear);
         assert_eq!(
-            prepare_raw(invocation, &args, explicit).unwrap().0,
-            "[gMASK]<sop>hi"
+            messages,
+            [
+                Message::System("Be brief.".into()),
+                Message::User("hi".into())
+            ]
         );
+        let (messages, clear) = chat_messages(cli::AcquiredRunInput::Messages {
+            document: r#"{"messages":[{"role":"user","content":"q"}],"clear_thinking":true}"#
+                .into(),
+            source: "test".into(),
+        })
+        .unwrap();
+        assert!(clear);
+        assert_eq!(messages, [Message::User("q".into())]);
+        let error = chat_messages(cli::AcquiredRunInput::Messages {
+            document: r#"{"messages":[{"role":"user","content":"q"}],"tools":[]}"#.into(),
+            source: "test".into(),
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("tool"), "{error:#}");
+    }
+
+    #[test]
+    fn sampling_defaults_to_the_release_config_and_flags_override_it() {
+        let config = |extra: &[&str]| {
+            let argv = run_args(extra);
+            let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+            let (args, explicit, _) = parse(&argv);
+            release_sampling_config(
+                SamplingConfig::glm5_next(args.seed),
+                &args,
+                explicit,
+                FAMILY,
+            )
+            .unwrap()
+        };
+        let release = config(&["--user", "hi"]);
+        assert_eq!(release, SamplingConfig::glm5_next(42));
+        assert_eq!((release.temperature, release.top_p), (1.0, 0.95));
+        assert_eq!((release.top_k, release.min_p), (0, 0.0));
+        assert_eq!(config(&["--raw-prompt", "x"]), release);
+        let greedy = config(&["--raw-prompt", "x", "--temp", "0", "--seed", "7"]);
+        assert_eq!(
+            greedy,
+            SamplingConfig {
+                temperature: 0.0,
+                seed: 7,
+                ..release
+            }
+        );
+        let custom = config(&[
+            "--user", "hi", "--top-k", "40", "--min-p", "0.05", "--top-p", "1",
+        ]);
+        assert_eq!((custom.top_k, custom.min_p, custom.top_p), (40, 0.05, 1.0));
     }
 
     #[test]

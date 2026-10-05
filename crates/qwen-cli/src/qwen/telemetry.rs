@@ -1431,7 +1431,8 @@ pub(crate) struct RequestStatsDiagnostics {
 }
 
 /// GLM-5.3 request facts: prefill path, session geometry, retained-window
-/// prefetch and the phase timing (setup separated from the loaded request).
+/// prefetch and the phase timing (setup separated from the loaded request);
+/// for chat input, the verified profile, controls and sampling (schema 2).
 #[derive(Debug, Serialize)]
 pub(crate) struct RequestStatsGlm5NextDiagnostics {
     pub(crate) schema_version: u32,
@@ -1440,6 +1441,9 @@ pub(crate) struct RequestStatsGlm5NextDiagnostics {
     pub(crate) capacity: u64,
     pub(crate) prefetch: serde_json::Value,
     pub(crate) timing: serde_json::Value,
+    pub(crate) sampling: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) chat: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]

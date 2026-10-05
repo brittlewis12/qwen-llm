@@ -65,6 +65,18 @@ impl SamplingConfig {
         }
     }
 
+    /// GLM-5.3-Flash's released `generation_config.json`: temperature and
+    /// nucleus only, so top-k and min-p are off.
+    pub fn glm5_next(seed: u64) -> Self {
+        Self {
+            temperature: crate::glm5_next_chat::TEMPERATURE,
+            top_k: 0,
+            top_p: crate::glm5_next_chat::TOP_P,
+            min_p: 0.0,
+            seed,
+        }
+    }
+
     pub fn validate(self) -> Result<Self, SamplingError> {
         if !self.temperature.is_finite() || self.temperature < 0.0 {
             return Err(SamplingError::InvalidTemperature(self.temperature));

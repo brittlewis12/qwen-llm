@@ -296,7 +296,7 @@ fn run() -> Result<()> {
             return k2_horizon::run_raw(&gguf, &args, explicit_options, invocation);
         }
         ModelFamily::Glm5Next => {
-            return glm5_next::run_raw(&gguf, &args, explicit_options, invocation);
+            return glm5_next::run(&gguf, &args, explicit_options, invocation);
         }
         ModelFamily::MuseGlimmer => {
             return run_muse_glimmer_single_turn(
@@ -751,7 +751,9 @@ fn prepare_modern_run_prompt(
                 )
                 .context("render DeepSeek V4 0731 user request")?,
                 ModelFamily::K2Horizon => bail!("K2 Horizon currently supports raw input only"),
-                ModelFamily::Glm5Next => bail!("GLM-5.3-Flash currently supports raw input only"),
+                ModelFamily::Glm5Next => {
+                    bail!("GLM-5.3-Flash requests are prepared by its own run lane")
+                }
                 ModelFamily::MuseGlimmer => {
                     bail!("Muse Glimmer requests are prepared by prepare_muse_glimmer_prompt")
                 }
@@ -825,7 +827,9 @@ fn prepare_modern_run_prompt(
                 )
                 .context("render strict DeepSeek V4 0731 messages")?,
                 ModelFamily::K2Horizon => bail!("K2 Horizon currently supports raw input only"),
-                ModelFamily::Glm5Next => bail!("GLM-5.3-Flash currently supports raw input only"),
+                ModelFamily::Glm5Next => {
+                    bail!("GLM-5.3-Flash requests are prepared by its own run lane")
+                }
                 ModelFamily::MuseGlimmer => {
                     bail!("Muse Glimmer requests are prepared by prepare_muse_glimmer_prompt")
                 }
@@ -885,21 +889,7 @@ pub(crate) fn input_capability_for(
                 Err(error) => InputCapability::none(error.code(), error.to_string()),
             }
         }
-        Some(ModelFamily::Glm5Next) => {
-            match glm5_next::capability_projection(gguf) {
-                Ok(projection) if projection["input"]["raw"]["status"] == "supported" => {
-                    InputCapability::raw_only(
-                        "glm5_next_chat_unimplemented",
-                        "GLM-5.3-Flash chat rendering is not implemented; use --raw-prompt".into(),
-                    )
-                }
-                Ok(projection) => InputCapability::none(
-                    "glm5_next_artifact_rejected",
-                    projection["input"]["raw"]["message"].as_str().unwrap_or("rejected").into(),
-                ),
-                Err(error) => InputCapability::none("glm5_next_artifact_rejected", error.to_string()),
-            }
-        }
+        Some(ModelFamily::Glm5Next) => glm5_next::input_capability(gguf),
         None => InputCapability::none(
             "unknown_family",
             "templated input requires a recognised architecture".into(),
@@ -944,10 +934,7 @@ fn template_projection(family: Option<ModelFamily>, gguf: &GgufFile) -> serde_js
             "status": "unsupported", "rendered_as": null,
             "message": "K2 Horizon raw input has no template renderer",
         }),
-        Some(ModelFamily::Glm5Next) => serde_json::json!({
-            "status": "unsupported", "rendered_as": null,
-            "message": "GLM-5.3-Flash raw input has no template renderer yet",
-        }),
+        Some(ModelFamily::Glm5Next) => glm5_next::template_projection(gguf),
         None => serde_json::json!({
             "status": "unresolved",
             "message": "no recognised architecture",

@@ -264,7 +264,7 @@ pub(crate) enum DocumentSource {
         .args(["user", "messages", "raw_prompt"])
 ))]
 pub(crate) struct RunArgs {
-    /// Path to a Qwen, DeepSeek V4, Muse Glimmer, or K2 Horizon GGUF file.
+    /// Path to a Qwen, DeepSeek V4, Muse Glimmer, K2 Horizon, or GLM-5.3-Flash GGUF file.
     #[arg(short = 'm', long)]
     model: PathBuf,
 
@@ -280,7 +280,7 @@ pub(crate) struct RunArgs {
     )]
     system: Option<String>,
 
-    /// Render family-validated messages JSON (strict chat or Muse ATEM); '-' reads stdin.
+    /// Render family-validated messages JSON (strict chat, Muse ATEM, or GLM text chat); '-' reads stdin.
     #[arg(long, value_name = "FILE|-")]
     messages: Option<PathBuf>,
 
@@ -301,7 +301,8 @@ pub(crate) struct RunArgs {
     /// `qwen info --json` capabilities.reasoning). Qwen3.8: none/low/medium/xhigh,
     /// default xhigh; DeepSeek V4: none/low/high/max, default none (ordinary
     /// chat); Muse: low/medium/high/xhigh, default high; verified K2 chat:
-    /// high/medium/low, default high (no non-thinking transition).
+    /// high/medium/low, default high (no non-thinking transition); verified
+    /// GLM-5.3-Flash chat: low/high/max, default max (no non-thinking mode).
     #[arg(
         long,
         value_name = "LEVEL",
@@ -322,19 +323,19 @@ struct GenerationOverrides {
     #[arg(short = 'n', long = "max-tokens", visible_alias = "tokens")]
     tokens: Option<usize>,
 
-    /// Sampling temperature; omitted uses the detected family preset (Muse: 1, others: 0).
+    /// Sampling temperature; omitted uses the detected family preset (Muse, GLM: 1, others: 0).
     #[arg(long = "temp", visible_alias = "temperature")]
     temperature: Option<f32>,
 
-    /// Top-k cutoff; omitted uses the detected family preset (Muse: 64, others: 200).
+    /// Top-k cutoff; omitted uses the detected family preset (Muse: 64, GLM: 0 = off, others: 200).
     #[arg(long)]
     top_k: Option<usize>,
 
-    /// Nucleus cutoff; omitted uses the detected family preset (Muse: .95, others: 1).
+    /// Nucleus cutoff; omitted uses the detected family preset (Muse, GLM: .95, others: 1).
     #[arg(long)]
     top_p: Option<f32>,
 
-    /// Min-p cutoff; omitted uses the detected family preset (Muse: 0, others: .05).
+    /// Min-p cutoff; omitted uses the detected family preset (Muse, GLM: 0, others: .05).
     #[arg(long)]
     min_p: Option<f32>,
 

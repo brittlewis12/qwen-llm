@@ -203,8 +203,9 @@ pub(crate) const K2_RAW_SINGLE_TURN: LaneAdmission = LaneAdmission {
     supported: &[O::MaxContextTokens, O::RequestStatsJsonl],
 };
 
-pub(crate) const GLM5_NEXT_RAW_SINGLE_TURN: LaneAdmission = LaneAdmission {
-    envelope: "GLM-5.3-Flash currently supports bounded raw serial single-turn generation only",
+/// Raw and text-chat input; the lane checks reasoning and chat controls.
+pub(crate) const GLM5_NEXT_SINGLE_TURN: LaneAdmission = LaneAdmission {
+    envelope: "GLM-5.3-Flash currently supports bounded serial single-turn generation (raw or text chat) only",
     supported: &[O::MaxContextTokens, O::RequestStatsJsonl],
 };
 

@@ -391,8 +391,8 @@ struct Scratch {
     expert_inner: MetalTensor,
     expert_out: MetalTensor,
     routed: MetalTensor,
-    shared_gate: MetalTensor,
-    shared_up: MetalTensor,
+    /// `[3 * shared_ffn]`: SwiGLU output, then gate and up.
+    shared_swiglu: MetalTensor,
     shared: MetalTensor,
     // head
     final_hidden: MetalTensor,
@@ -508,8 +508,7 @@ impl Scratch {
             expert_inner: b.take("expert_inner")?,
             expert_out: b.take("expert_out")?,
             routed: b.take("routed")?,
-            shared_gate: b.take("shared_gate")?,
-            shared_up: b.take("shared_up")?,
+            shared_swiglu: b.take("shared_swiglu")?,
             shared: b.take("shared")?,
             final_hidden: b.take("final_hidden")?,
             final_normed: b.take("final_normed")?,
@@ -1347,29 +1346,21 @@ impl<'w> Glm5NextSession<'w> {
                     )?;
                     self.stage(&mut enc, Glm5NextStage::SharedExpert, Some(index))?;
                     let sf = c.shared_expert_ffn_size as usize;
-                    matvec(
+                    shared_gate_up_swiglu(
                         ctx,
                         &enc,
-                        &moe.shared.gate,
+                        &moe.shared,
                         &s.normed,
-                        &s.shared_gate,
+                        &s.shared_swiglu,
                         h,
                         sf,
-                    )?;
-                    matvec(ctx, &enc, &moe.shared.up, &s.normed, &s.shared_up, h, sf)?;
-                    encode_clamped_swiglu(
-                        ctx,
-                        &enc,
-                        &s.shared_gate,
-                        &s.shared_up,
-                        &s.shared_gate,
                         c.swiglu_clamp,
                     )?;
                     matvec(
                         ctx,
                         &enc,
                         &moe.shared.down,
-                        &s.shared_gate,
+                        &s.shared_swiglu.view_subrange(0, vec![sf as u64]),
                         &s.shared,
                         sf,
                         h,
@@ -1483,9 +1474,25 @@ impl<'w> Glm5NextSession<'w> {
             c.kda_width() as usize,
             c.kda_head_dim as usize,
         );
-        matvec(ctx, enc, &kda.query, &s.normed, &s.q, h, width)?;
-        matvec(ctx, enc, &kda.key, &s.normed, &s.k, h, width)?;
-        matvec(ctx, enc, &kda.value, &s.normed, &s.v, h, width)?;
+        // q, k and v share the input: one dispatch when all three are Q6_K
+        // (each row bitwise equal to its own mat-vec, so packed rows keep
+        // the lineage with separate dispatches).
+        let qkv = [&kda.query, &kda.key, &kda.value];
+        if qkv.iter().all(|w| w.dtype == GgmlType::Q6_K) && width.is_multiple_of(2) {
+            crate::metal::encode_mat_vec_q6_k_x3_f32(
+                ctx,
+                enc,
+                qkv,
+                &s.normed,
+                [&s.q, &s.k, &s.v],
+                h,
+                width,
+            )?;
+        } else {
+            matvec(ctx, enc, &kda.query, &s.normed, &s.q, h, width)?;
+            matvec(ctx, enc, &kda.key, &s.normed, &s.k, h, width)?;
+            matvec(ctx, enc, &kda.value, &s.normed, &s.v, h, width)?;
+        }
         matvec(ctx, enc, &kda.decay_a, &s.normed, &s.rank_a, h, rank)?;
         low_rank_expand(
             ctx,
@@ -1840,6 +1847,45 @@ fn hc_pre_eps(c: &crate::glm5_next::Glm5NextConfig) -> crate::metal::Mhc4PreEps 
         hc: c.hc_epsilon,
         norm: c.rms_epsilon,
     }
+}
+
+/// The shared expert's clamped SwiGLU into `scratch[..sf]` (`scratch` is
+/// `[3 * sf]`: output, gate, up). Q6_K gate and up run DS4's fused kernel,
+/// which equals two Q6_K mat-vecs plus [`encode_clamped_swiglu`] bitwise
+/// (`metal::mat_vec` test `fused_q6_k_shared_swiglu_equals_separate_path_bitwise`),
+/// so packed rows keep the separate path and the same lineage. Other dtypes
+/// run the separate path here too.
+#[allow(clippy::too_many_arguments)]
+fn shared_gate_up_swiglu(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    shared: &crate::glm5_next::DenseFfnTensors<MetalTensor>,
+    x: &MetalTensor,
+    scratch: &MetalTensor,
+    h: usize,
+    sf: usize,
+    clamp: f32,
+) -> Result<()> {
+    if shared.gate.dtype == GgmlType::Q6_K && shared.up.dtype == GgmlType::Q6_K {
+        crate::metal::encode_ds4_shared_swiglu_q6_k_f32(
+            ctx,
+            enc,
+            &shared.gate,
+            &shared.up,
+            x,
+            scratch,
+            h,
+            sf,
+            clamp,
+        )?;
+        return Ok(());
+    }
+    let part = |i: u64| scratch.view_subrange(i * sf as u64, vec![sf as u64]);
+    let (out, gate, up) = (part(0), part(1), part(2));
+    matvec(ctx, enc, &shared.gate, x, &gate, h, sf)?;
+    matvec(ctx, enc, &shared.up, x, &up, h, sf)?;
+    encode_clamped_swiglu(ctx, enc, &gate, &up, &out, clamp)?;
+    Ok(())
 }
 
 /// KDA's low-rank expansions (`ssm_f_b`, `ssm_g_b`: rank 128 -> width):

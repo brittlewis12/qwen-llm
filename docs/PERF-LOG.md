@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-05 - Leverage Map Re-Ranked After P6 (cx Session `01a10cc`)
+
+- **Status:**
+  - #1 serve keep-alive has landed across the eligible families;
+    qualification items remain.
+  - #2 GLM attribution and its four fixes are complete; routed experts are
+    the open branch.
+  - #5 radix sampler is complete; sampler-v2 is parked.
+- **New rank:**
+  1. #4 empty reasoning, bounded to 1-2 h and judged on the full round
+     trip.
+  2. #9 census of DS4 short prefill. A fully wired ~40-token request takes
+     1.2-1.3 s; CPU routing as the cause is unproven. The GLM pp32 gap uses
+     the same census format; it is only ~49 ms per 32 tokens.
+  3. #2 expert limiter profile with `scripts/profile/gpu_limiter_capture.py`
+     before any rewrite.
+  4. #3(a) Qwen restart qualification.
+  5. The GLM short-prefill fix.
+  6. #8 attribution.
+  7. #6 and #10.
+  8. #3(b) Flash-Next codec.
+  #7 DFlash stays with its existing owner.
+- **Protocol (map gates):** order-balanced, repeated A/B blocks with
+  contemporaneous controls; MDE from between-block variation (one parent
+  tg cell drifted ~4.4% between runs); unchanged cells as controls; GLM
+  plus DS4 for shared-kernel changes.
+- **Correction to the bitwise dispatch fusion entry:** the threadgroup-grid
+  IQ2_S variant did not help, but that alone does not rule out
+  constant-memory divergence as a factor. The limiter profile decides.
+  A first bitwise candidate is keeping the gate/up kernel's final
+  per-simdgroup totals in registers instead of the threadgroup round trip.
+- **The 38-40 tok/s GLM decode figure** is an optimistic bandwidth-based
+  estimate, not an established ceiling.
+
 ## 2026-10-05 - Few-Row Q8_0 MMA (Ported From llama.cpp): DFlash2 Q8 Code 29.8 -> 38.3 tok/s
 
 Qwen3.8-27B Q8_0 + DFlash2 Q8_0, greedy, 256 tokens, M4 Max.

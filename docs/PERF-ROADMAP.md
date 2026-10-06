@@ -34,44 +34,74 @@ Its disk-only native FP8 Engram and exact decoder dependency-suffix code are now
 inspectable. Compare total prefill plus residency transitions and following
 decode; the screenshot's 800 tok/s excludes the reported eight-second switch.
 
-## Leverage Map — 2026-10-05 (after the GLM-5.3-Flash bring-up)
+## Leverage Map — 2026-10-05 (after the GLM-5.3-Flash bring-up; re-ranked end of day)
 
-Active force-ranked queue; supersedes the 2026-09-26 ordering below, whose
-eight residual items all remain open and are merged here. Inputs: the GLM P6
-baseline and memory observations (PERF-LOG 2026-10-05) and a two-round `cx`
-map review. Re-warming is necessary but insufficient: it addresses transient
-eviction, while a near-capacity prefetch can evict its own earlier pages, and
-pinning protects selected pages only by shifting pressure elsewhere. One GLM
-decode attribution packet separates sparse execution, CPU/command overhead and
-matvec efficiency before any fix is chosen. Primary llama.cpp comparisons
-disable its residency sets (`GGML_METAL_NO_RESIDENCY=1`, recorded with the
-commit); default-configuration numbers stay as separately labelled evidence.
-"Rising tide" names a reusable mechanism; a GLM measurement alone does not
-establish a cross-family gain.
+Active force-ranked queue. It supersedes the 2026-09-26 ordering below,
+whose eight residual items are merged here.
+
+- **Inputs:** the GLM P6 baseline and memory observations (PERF-LOG
+  2026-10-05), a two-round `cx` map review, and an end-of-day `cx` re-rank
+  (session `01a10cc`).
+- **Item IDs vs rank:** item numbers are stable IDs. Execution rank is the
+  order paragraph below the table.
+- **GLM attribution:** done. It separated sparse execution, command overhead
+  and mat-vec efficiency, and four fixes landed (#2).
+- **llama.cpp comparisons:** primary comparisons disable its residency sets
+  (`GGML_METAL_NO_RESIDENCY=1`, recorded with the commit).
+  Default-configuration numbers stay as separately labelled evidence.
+- **"Rising tide"** names a reusable mechanism. A GLM measurement alone does
+  not establish a cross-family gain.
 
 | # | Item | Cost | Evidence / mechanism | Cheapest decisive next step | Effort | Exactness |
 |---|---|---|---|---|---|---|
-| 1 | Placement: idle re-wire and eviction (rising tide): **keep-alive landed 2026-10-05; default 60 s for every no-copy serve family (GLM, K2, DS4, Muse, Flash-Next) after the 1 GiB kill check; DS4 pause screen confirms the ~0.8 s re-wire and its removal (`docs/bench/2026-10-05-serve-idle-residency-ds4/`)** | GLM serve: ~1.0-1.1 s extra prefill per request after ≥ 2 s idle (1.60-1.70 s vs 0.59 s); rarer eviction (a 26.7 s 23-token prefill after a cold prefetch) | no-copy weights are wired only while commands use them, in both engines; `--idle-residency-secs` keeps them wired through ordinary keep-alive commands: 578-614 ms inside the window, 1,641-1,686 ms after it lapses | kill check passed (`docs/bench/2026-10-05-residency-kill-check/`: SIGKILL between pulses and with a command in flight both recovered); GLM serve defaults to a 60 s window; still open: observing the pressure suspension under real pressure, idle energy, and extending eligibility to other no-copy families (each backend names its pageable weights; a family whose weights are Metal-allocated is always wired and gains nothing); bounded re-warm stays the eviction answer | kill check ½ d; family extension 1 d | Bitwise |
-| 2 | GLM decode: **split selected attention (+27.9% at depth 4096), fused mHC pre (+7.8%), short-K KDA expansions (+4.7%) and bitwise q/k/v + shared-SwiGLU fusion (~+2%) landed 2026-10-05; tg128 27.6 -> ~32.5 (depth 0), 20.8 -> ~30 (depth 4096)**; next routed experts (rising tide: DS4 shares the all-slot IQ2_S/IQ3_S kernels, the selected-attention encoder and the mHC primitives) | routed experts 10.0 ms (IQ2_S gate/up 291-297 GB/s, IQ3_S down 345-357 GB/s); KDA ~9.7 ms; shared expert ~2.4 ms; MLA 3.2 ms; depth penalty ~2.0 ms (sparse stages) | packets `2026-10-05-glm53-split-selected-attention`, `-fused-mhc-pre`, `-kda-short-k`, `-bitwise-dispatch-fusion`; screens `metal::{mhc,kda,expert}::tests::*_dispatch_costs` reproduce attribution; a threadgroup-memory IQ2_S grid was bitwise but 2-4% slower (rejected) | limiter profile of the all-slot IQ2_S/IQ3_S kernels (ALU vs memory; xctrace GPU counters or instruction-count variants) before any rewrite; a rewrite must keep DS4 bitwise or carry its own DS4 qualification; then the dense FFN through the fused Q6_K kernel and MLA projections | split, mHC, short-K, fusion done; experts open | Numerical (requalified) for the split, mHC and short-K; Bitwise for the fusion |
-| 3 | Restart continuity (old #1, #7) | Qwen >130K immediate restart unqualified; Flash-Next restart discards history | publication limits; no Flash-Next durable codec | Qwen ~130K publication and restart; Flash-Next codec round trip and identical continuation | ½ d; 2-4 d | Bitwise |
-| 4 | Empty reasoning retention (old #4, rising tide) | possible replay drift for immediately closed thinking turns | provider retention of empty items unverified | one capture of an empty item through the next request | 1-2 h | Bitwise rendered history |
-| 5 | Unrestricted sampler (rising tide): **radix order landed 2026-10-05** | residual ~1.65 ms per call with top-k off (was 2.88) | replay attribution: the comparator sort was 2.26 ms; the bitwise-v1 radix order gave +3.2% GLM sampled decode (PERF-LOG 2026-10-05) | could: a sampler-v2 (total outside sorted order, nucleus by partial selection; ~0.8 ms more), version bump required | done; v2 1-2 d | Bitwise (landed); Distributional (v2) |
+| 1 | Placement: idle re-wire and eviction (rising tide): **serve keep-alive landed across eligible families (GLM, K2, DS4, Muse, Flash-Next; default 60 s, window closed until first activity; Qwen's copied weights refuse); qualification remains** | idle re-wire (fixed by the keep-alive): GLM ~1.0-1.1 s, DS4 ~0.8 s extra prefill after a pause; eviction (separate, open): a 26.7 s 23-token GLM prefill after a cold prefetch | re-wire: no-copy weights are wired only while commands use them; keep-alive pulses hold them (GLM 578-614 ms vs 1,641-1,686 ms; DS4, the dissimilar no-copy guardrail, 1.21-1.29 s vs 1.99-2.03 s; `docs/bench/2026-10-05-serve-idle-residency-ds4/`); kill check passed (`docs/bench/2026-10-05-residency-kill-check/`) | tracked separately: observe the pressure suspension under real pressure; idle energy; eviction recovery (bounded re-warm) | open items ½ d each | Bitwise |
+| 2 | GLM decode: **attribution and four fixes complete 2026-10-05** (split selected attention, fused mHC pre, short-K KDA expansions, bitwise q/k/v + shared-SwiGLU fusion): tg128 27.6 -> ~32.5 (depth 0), 20.8 -> ~30 (depth 4096); llama.cpp 23.7. Open branch: routed experts (rising tide: DS4 shares the all-slot IQ2_S/IQ3_S kernels) | routed experts 10.0 ms (IQ2_S gate/up 291-297 GB/s, IQ3_S down 345-357 GB/s); KDA ~9.7 ms; shared expert ~2.4; MLA 3.2; depth penalty ~2.0 ms. Optimistic bandwidth-based estimate at ~470 GB/s: experts ~3.3 ms, KDA ~1.4, shared+MLA+router ~1.5 (~38-40 tok/s; not an established ceiling) | packets `2026-10-05-glm53-split-selected-attention`, `-fused-mhc-pre`, `-kda-short-k`, `-bitwise-dispatch-fusion`; screens `metal::{mhc,kda,expert}::tests::*_dispatch_costs` reproduce attribution; a threadgroup-memory IQ2_S grid was bitwise but 2-4% slower (it did not help; that alone does not rule out constant-memory divergence) | limiter profile of the expert screens with `scripts/profile/gpu_limiter_capture.py` (`xctrace` counters: bandwidth, execution utilization, occupancy together; real payloads and routes); fallback: checksummed variants that keep compressed reads and addressing but drop decode work (bounds, not attribution). First bitwise candidate: keep the IQ2_S gate/up final per-simdgroup totals in registers instead of the threadgroup round trip (`kernels/mat_vec.metal` all-slot SwiGLU tail), with primitive bitwise checks and DS4 qualification | experts: profile ½ d, then select from measured ceilings | Numerical (requalified) for the split, mHC and short-K; Bitwise for the fusion; expert changes Bitwise or DS4-requalified |
+| 3 | Restart continuity (old #1, #7) | Qwen >130K immediate restart unqualified; Flash-Next restart discards history | publication limits; no Flash-Next durable codec | split: (a) Qwen ~130K publication and restart qualification (cheap; ranked ahead of further speculative kernel work); (b) Flash-Next codec round trip and identical continuation (separate, larger) | (a) ½ d; (b) 2-4 d | Bitwise |
+| 4 | Empty reasoning retention (old #4, rising tide) | possible replay drift for immediately closed thinking turns | provider retention of empty items unverified | capture the full round trip: emitted empty reasoning, what the client sends next, the rendered history and prefix; close if canonical history is equivalent, expand only for a reproduced defect | 1-2 h (bounded) | Bitwise rendered history |
+| 5 | Unrestricted sampler (rising tide): **radix order complete 2026-10-05; sampler-v2 parked** | residual ~1.65 ms per call with top-k off (was 2.88) | replay attribution: the comparator sort was 2.26 ms; the bitwise-v1 radix order gave +3.2% GLM sampled decode (PERF-LOG 2026-10-05) | parked: a sampler-v2 (total outside sorted order, nucleus by partial selection; ~0.8 ms more) needs renewed benefit and a version bump | done; v2 parked | Bitwise (landed); Distributional (v2) |
 | 6 | Dense prefill attention at depth (old #2) | pp512 257 -> 141 tok/s from 0 to 64K | attention ~8 TFLOPS | isolated attention at 32K/64K vs a matched mat-mat reference | ½ d; 3-5 d | Numerical |
-| 7 | DFlash in serve (old #3) | eligible early turns decode serially | drafter optional; speculation off above 16K | one retained agent request, serial vs `--drafter`, charged wall | 2-4 h | Greedy semantic; Distributional only with qualified sampling |
-| 8 | Flash-Next sparse execution (old #5) | 0.75-0.88x llama.cpp | 2048 + 3 + 2045 plan; +275 ms shoulder | the #2 guardrail attribution; fix the located stage | ½ d if separate; 2-5 d | Numerical |
-| 9 | DS4 short-prompt prefill (old #6) | 0.48x at pp512 | CPU routing below the compact-path predicate | route/expert/wait census, then a force-path pilot | ½ d; 2-4 d | Numerical |
+| 7 | DFlash in serve (old #3) | eligible early turns decode serially | drafter optional; speculation off above 16K. Proceeds with its existing owner on main: guard recalibrated to margin 0.1, first-flagged-row replay, and the few-row Q8_0 MMA port landed (PERF-LOG 2026-10-05, DFlash entries; Q8 code 29.8 -> 38.3 tok/s); remaining: serve qualification | one retained agent request, serial vs `--drafter`, charged wall | 2-4 h | Greedy semantic; Distributional only with qualified sampling |
+| 8 | Flash-Next sparse execution (old #5) | 0.75-0.88x llama.cpp | 2048 + 3 + 2045 plan; +275 ms shoulder | its own three-command attribution (dense shoulder, selected command, remaining); GLM's split strategy may transfer, but its encoder is not a drop-in for Flash-Next's separate K/V and gated attention | ½ d; 2-5 d | Numerical |
+| 9 | DS4 short-prompt prefill (old #6) | 0.48x llama.cpp at pp512 (dated); fully wired ~40-token serve prefill 1.21-1.30 s (2026-10-05 pause screen). Subcase: GLM pp32 ~60 vs ~66 tok/s placement-matched, only ~49 ms per 32 tokens | CPU routing below the compact-route predicate (`deepseek_v4_metal/prefill.rs`) is a hypothesis; causality unproven. Serve's prefill timer excludes session construction and prompt capture | census one warm fresh ~40-token and one 512-token request with `QWEN_DSV4_PREFILL_TRACE` and the stage recorders (chunk lengths, route/expert policy, CPU routing, GPU stages, command gaps, active experts, tile occupancy; reconcile without double counting); a matched short-prompt llama.cpp control; force compact routing only if the census shows headroom (same route ids, weights, duplicates and order; no padding). GLM's short prefill shares the census format, not an assumed fix | census ½ d; fix 2-4 d | Numerical |
 | 10 | Muse prefill (old #8) | 0.85x; ~3.1 s per fresh 4K | chunking, projections, attention growth | early/late chunk attribution | ½ d | Numerical |
 
-Order of execution: the #5 CPU replay first (cheapest; done), then #1 with a
-placement-matched llama.cpp pp32, then #2. The GLM small-prompt gap (pp32
-59.9 vs default-configuration llama.cpp 67.4 with residency sets on) is a
-question inside #1/#2, not a separate row. Gates: estimate each packet's MDE
-from paired controls, not from a three-run spread (pp512 191-203 is ~6%
-peak-to-peak and cannot support a 2-3% claim); cheap exact work needs a
-credible 2-3% whole-phase gain above MDE, work over a week needs >= 5%
-expected and a >= 10% ceiling. #1 must cut charged transient-eviction TTFT by
->= 10% with no steady-state or warm-request regression; use GLM plus one
-dissimilar dense-27B guardrail.
+Order of execution (rank, by item ID):
+
+1. #4, bounded to 1-2 h.
+2. #9 census: DS4 short prefill, with the GLM short-prefill subcase in the
+   same format.
+3. #2 experts limiter profile; select the implementation from measured
+   ceilings.
+4. #3(a) Qwen restart qualification, ahead of further speculative kernel
+   rewrites.
+5. GLM short-prefill fix, if the census shows one.
+6. #8 attribution.
+7. #6 and #10.
+8. #3(b) Flash-Next codec.
+
+#7 proceeds with its existing owner. #1's open items and #5 v2 are tracked,
+not ranked.
+
+Gates and measurement protocol:
+
+- **Gains:** cheap exact work needs a credible 2-3% whole-phase gain above
+  the minimum detectable effect (MDE). Work over a week needs >= 5%
+  expected and a >= 10% ceiling. #1's eviction work must cut charged
+  transient-eviction time to first token by >= 10%, with no steady-state or
+  warm-request regression.
+- **Schedule:** use repeated, order-balanced A/B blocks with
+  contemporaneous controls, and estimate MDE from between-block variation.
+  A parent tg cell once came in ~4.4% below its own earlier run, and tiny
+  within-process stddevs do not capture that drift.
+- **Fix the rules in advance:** freeze the schedule and invalidation rules
+  beforehand, and retain every attempt.
+- **Profile, then time:** profile for attribution, then measure untraced
+  throughput.
+- **Controls:** include unchanged cells (for example prefill when only
+  decode changes). Match placement and thermal state. Measure GLM plus DS4
+  for shared-kernel changes.
+- **Inconclusive:** a sub-MDE result stays inconclusive; correctness
+  evidence still stands.
 
 **mlock reclamation research (separate from performance; not authorized for
 whole-trunk use).** Whole-model `MTLResidencySet` stays closed. VM wiring by

@@ -2,13 +2,13 @@
 
 #[path = "qwen/admission.rs"]
 mod admission;
-#[cfg(test)]
-mod test_alloc;
 #[path = "qwen/args.rs"]
 mod args;
 #[allow(dead_code)] // Shared artifact readers also consumed by qwen-lens.
 mod bounded_file;
 mod cli;
+#[cfg(test)]
+mod test_alloc;
 use bounded_file::read_regular_file_bounded;
 #[path = "qwen/chat_output.rs"]
 mod chat_output;

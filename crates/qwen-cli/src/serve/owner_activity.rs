@@ -1,11 +1,14 @@
 //! Admission lifetime accounting; only the model owner runs maintenance callbacks.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
 struct State {
     active: usize,
     completed: usize,
+    /// Of `completed`, how many ended in a server-side failure.
+    failed: usize,
     closed: bool,
 }
 
@@ -21,6 +24,9 @@ pub(super) struct ActivityGuard {
     admission: Admission,
     finished: bool,
     completes: bool,
+    /// The connection answered a server-side failure (5xx) after
+    /// generation, which the owner did not see (a partition failure).
+    server_failed: AtomicBool,
 }
 
 impl Admission {
@@ -42,6 +48,7 @@ impl Admission {
             admission: self.clone(),
             finished: false,
             completes,
+            server_failed: AtomicBool::new(false),
         })
     }
 
@@ -54,6 +61,10 @@ impl Admission {
 impl ActivityGuard {
     pub(super) fn mark_work(&mut self) {
         self.completes = true;
+    }
+    /// Report a server-side failure to the owner with this completion.
+    pub(super) fn mark_server_failure(&self) {
+        self.server_failed.store(true, Ordering::Release);
     }
     fn finish(&mut self, completed: bool) {
         if self.finished {
@@ -69,6 +80,9 @@ impl ActivityGuard {
         state.active -= 1;
         if completed {
             state.completed += 1;
+            if self.server_failed.load(Ordering::Acquire) {
+                state.failed += 1;
+            }
         }
         self.finished = true;
     }
@@ -86,16 +100,25 @@ impl OwnerActivity {
     }
 
     pub(super) fn drain_finished(&mut self, mut callback: impl FnMut()) {
-        let completed = {
+        self.drain_finished_with_failures(|_| callback());
+    }
+
+    /// [`Self::drain_finished`], telling the callback whether each
+    /// completion ended in a server-side failure the owner did not see.
+    pub(super) fn drain_finished_with_failures(&mut self, mut callback: impl FnMut(bool)) {
+        let (completed, failed) = {
             let mut state = self
                 .admission
                 .0
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            std::mem::take(&mut state.completed)
+            (
+                std::mem::take(&mut state.completed),
+                std::mem::take(&mut state.failed),
+            )
         };
-        for _ in 0..completed {
-            callback();
+        for index in 0..completed {
+            callback(index < failed);
         }
     }
 

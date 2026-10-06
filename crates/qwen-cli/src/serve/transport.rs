@@ -170,6 +170,12 @@ impl GenerationBackend for HttpProxy {
         self.profile.clone()
     }
 
+    /// Worker-side failures after generation (partition) reach the owner
+    /// with this connection's completion.
+    fn request_failed_on_server(&mut self) {
+        self.activity.mark_server_failure();
+    }
+
     fn generate(
         &mut self,
         _request: &ServeRequest,

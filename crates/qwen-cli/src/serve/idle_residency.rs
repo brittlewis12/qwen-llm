@@ -12,9 +12,11 @@
 //! client aborted after submission (that still used the weights). A
 //! server-side failure (5xx, which includes GPU and command-buffer faults)
 //! closes it at once instead, so no pulse follows a fault. A request
-//! counts by what it actually submitted: [`IdleResidency::before_request`]
+//! counts by the GPU compute work it began: [`IdleResidency::before_request`]
 //! snapshots the process's compute-encoder count and
-//! [`IdleResidency::request_finished`] compares it, so model lists, refusals,
+//! [`IdleResidency::request_finished`] compares it (a proxy for submission:
+//! an encoder abandoned before its command buffer commits still counts, and
+//! the failure rule below covers the known failure paths), so model lists, refusals,
 //! admission or allocation failures and cancellations before the first
 //! command never open or renew it. Only compute encoders count (blit-only
 //! work does not). A snapshot still unmatched when the owner goes idle is
@@ -278,14 +280,17 @@ mod tests {
         assert!(residency.window().is_zero());
     }
 
-    static FAKE_ENCODERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    // Per thread, so tests running in parallel never see each other's work.
+    std::thread_local! {
+        static FAKE_ENCODERS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
 
     fn fake_encoders() -> u64 {
-        FAKE_ENCODERS.load(std::sync::atomic::Ordering::SeqCst)
+        FAKE_ENCODERS.get()
     }
 
     fn submit() {
-        FAKE_ENCODERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        FAKE_ENCODERS.set(FAKE_ENCODERS.get() + 1);
     }
 
     /// The window follows submitted GPU work, not request lifecycle: a

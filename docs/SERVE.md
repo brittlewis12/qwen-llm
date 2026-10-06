@@ -187,14 +187,17 @@ ordinary keep-alive commands: 500 ms pulses that mark the weights used. It
 is not a residency set.
 
 - **Window.** It opens at the first activity: the warm-up (GLM) or the
-  first request that submitted GPU compute work (other families), so a
-  pulse never faults in a cold model. It reopens when such a request
-  finishes, even if its client aborted it after submission. A request is
-  judged by what it submitted: the backend snapshots the process's
+  first request that began GPU compute work (other families), so a pulse
+  never faults in a cold model. It reopens when such a request finishes,
+  even if its client aborted it after submission. A request is judged by
+  the compute work it began: the backend snapshots the process's
   compute-encoder count when the request starts and compares it when the
-  connection finishes. A server-side failure (5xx, including GPU and
-  command-buffer faults and memory-admission refusals) closes the window
-  at once, so no pulse follows a fault. These never open or renew it:
+  connection finishes. This is a proxy for submission; an encoder
+  abandoned before its command buffer commits still counts. A server-side
+  failure (5xx, including GPU and command-buffer faults, memory-admission
+  refusals, and tool-output failures found after generation) closes the
+  window at once, so no pulse follows a fault. These never open or renew
+  it:
   - model lists, malformed or refused requests, and disconnects;
   - memory-admission refusals and session or runner allocation failures;
   - a cancellation before the first command;

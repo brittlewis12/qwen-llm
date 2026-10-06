@@ -829,6 +829,21 @@ fn wait_for_connection(listener: &TcpListener) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Owner-side completion of finished connections: a server-side failure
+/// the connection answered after generation (a partition failure) reaches
+/// the backend before the completion itself.
+fn drain_completions(
+    activity: &mut owner_activity::OwnerActivity,
+    backend: &mut dyn http::GenerationBackend,
+) {
+    activity.drain_finished_with_failures(|failed| {
+        if failed {
+            backend.request_failed_on_server();
+        }
+        backend.request_finished();
+    });
+}
+
 fn spawn_acceptor(
     listener: TcpListener,
     sender: SyncSender<control::Event>,
@@ -1012,7 +1027,7 @@ fn accept_loop_with_workbench(
                     };
                 if settled {
                     connection.take();
-                    activity.drain_finished(|| backend.request_finished());
+                    drain_completions(&mut activity, backend);
                 }
                 continue;
             }
@@ -1023,7 +1038,7 @@ fn accept_loop_with_workbench(
             let event = match receiver.recv_timeout(ADMISSION_POLL_INTERVAL) {
                 Ok(event) => event,
                 Err(RecvTimeoutError::Timeout) => {
-                    activity.drain_finished(|| backend.request_finished());
+                    drain_completions(&mut activity, backend);
                     activity.idle_if_quiet(|| backend.idle());
                     continue;
                 }
@@ -1056,7 +1071,7 @@ fn accept_loop_with_workbench(
                     }
                 }
             }
-            activity.drain_finished(|| backend.request_finished());
+            drain_completions(&mut activity, backend);
         }
         Ok(())
     })();
@@ -1068,7 +1083,7 @@ fn accept_loop_with_workbench(
     drop(receiver);
     let worker_result = connection.map_or(Ok(()), transport::Connection::stop_and_join);
     let acceptor_result = acceptor.join();
-    activity.drain_finished(|| backend.request_finished());
+    drain_completions(&mut activity, backend);
     // Stop accepting before the bounded durable flush, so clients see a
     // closed port rather than a stalled server during shutdown.
     let settlement = shutdown_owner(backend, &activity);

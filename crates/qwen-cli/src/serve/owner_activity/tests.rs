@@ -152,3 +152,17 @@ fn only_promoted_preparation_reports_model_work_completion() {
     assert_eq!(count, 1);
     assert!(owner.is_settled());
 }
+
+#[test]
+fn a_marked_server_failure_travels_with_its_completion() {
+    let mut owner = OwnerActivity::default();
+    let failed = owner.admission().try_admit().unwrap();
+    let ok = owner.admission().try_admit().unwrap();
+    failed.mark_server_failure();
+    drop(failed);
+    drop(ok);
+    let mut seen = Vec::new();
+    owner.drain_finished_with_failures(|failed| seen.push(failed));
+    assert_eq!(seen, vec![true, false]);
+    owner.drain_finished_with_failures(|_| panic!("delivered twice"));
+}

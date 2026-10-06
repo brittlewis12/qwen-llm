@@ -846,6 +846,7 @@ fn handle_responses(
                     partition.push(piece, &mut partition_events);
                 }
                 if let Err(error) = partition.finish(outcome.end, &mut partition_events) {
+                    note_server_failure(backend, &error);
                     return write_serve_error(&mut writer, &error);
                 }
                 let envelope = super::events::build_response_object(
@@ -890,6 +891,7 @@ fn handle_responses(
             Ok(outcome) => {
                 let mut events = Vec::new();
                 if let Err(error) = partition.finish(outcome.end, &mut events) {
+                    note_server_failure(backend, &error);
                     response.fail(&error)?;
                     return sse.done();
                 }
@@ -914,6 +916,14 @@ fn handle_responses(
             }
             Err(BackendFailure::Aborted(error)) => Err(error),
         }
+    }
+}
+
+/// A failure after the backend succeeded (the output partition) is still a
+/// server-side failure: report it so idle residency does not renew.
+fn note_server_failure(backend: &mut dyn GenerationBackend, error: &ServeError) {
+    if error.status >= 500 {
+        backend.request_failed_on_server();
     }
 }
 

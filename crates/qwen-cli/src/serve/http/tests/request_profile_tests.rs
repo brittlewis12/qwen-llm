@@ -410,3 +410,103 @@ fn style_overrides_are_applied_or_refused_before_execution() {
         assert!(result.starts_with("HTTP/1.1 400"), "{result}");
     }
 }
+
+/// A tool-block failure in the output partition happens on the HTTP worker
+/// after the backend succeeded. It must still reach the owner as a
+/// server-side failure (idle residency closes and never renews), streaming
+/// or not: directly, and across the owner bridge with the completion.
+#[test]
+fn partition_failures_after_generation_reach_the_owner() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[derive(Clone)]
+    struct Counting {
+        inner: ProfileBackend,
+        failures: Arc<AtomicUsize>,
+    }
+    impl GenerationBackend for Counting {
+        fn model_id(&self) -> &str {
+            "test"
+        }
+        fn request_profile(&self) -> RequestProfile {
+            self.inner.profile.clone()
+        }
+        fn generate(
+            &mut self,
+            request: &ServeRequest,
+            prompt: &str,
+            sink: &mut dyn GenerationSink,
+        ) -> Result<GenerationOutcome, BackendFailure> {
+            self.inner.generate(request, prompt, sink)
+        }
+        fn request_failed_on_server(&mut self) {
+            self.failures.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let backend = |failures: &Arc<AtomicUsize>| Counting {
+        inner: ProfileBackend {
+            profile: RequestProfile::Glm5Next {
+                default_max_tokens: 8,
+                capacity: 128,
+                max_piece_bytes: 64,
+            },
+            expected_prompt: None,
+            // A call to an undeclared function: the partition refuses it
+            // (500) only when the turn finishes.
+            output: "plan</think><tool_call>undeclared</tool_call>".into(),
+            end: GenerationEnd::StopToken(154_829),
+        },
+        failures: Arc::clone(failures),
+    };
+    for streaming in [false, true] {
+        let body = json!({"model":"test","input":"Weather?","stream":streaming,
+            "tools":[{"type":"function","name":"get_weather","parameters":{"type":"object",
+            "properties":{"city":{"type":"string"}}}}]});
+        let request = post("/v1/responses", &body.to_string());
+
+        let failures = Arc::new(AtomicUsize::new(0));
+        let direct = super::roundtrip(backend(&failures), &request);
+        assert!(direct.contains("names no declared tool"), "{direct}");
+        assert_eq!(
+            failures.load(Ordering::SeqCst),
+            1,
+            "direct, stream={streaming}"
+        );
+
+        let failures = Arc::new(AtomicUsize::new(0));
+        let mut bridged = backend(&failures);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut activity = crate::serve::owner_activity::OwnerActivity::default();
+            let guard = activity.admission().try_admit().unwrap();
+            crate::serve::transport::handle_connection(
+                stream,
+                &mut bridged,
+                None,
+                guard,
+                || Ok(()),
+            )
+            .unwrap();
+            let mut completions = Vec::new();
+            activity.drain_finished_with_failures(|failed| completions.push(failed));
+            completions
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client.write_all(request.as_bytes()).unwrap();
+        let mut reply = String::new();
+        client.read_to_string(&mut reply).unwrap();
+        assert!(reply.contains("names no declared tool"), "{reply}");
+        // The owner's backend saw a successful generation; the failure
+        // arrives with the completion, for the owner to report.
+        assert_eq!(
+            server.join().unwrap(),
+            vec![true],
+            "bridged, stream={streaming}"
+        );
+        assert_eq!(failures.load(Ordering::SeqCst), 0);
+    }
+}

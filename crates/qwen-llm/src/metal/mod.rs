@@ -476,7 +476,9 @@ pub fn kernel_trace_take_delta() -> KernelTraceCounters {
 
 /// Compute encoders begun by this process (every [`KernelEncoder`]
 /// constructor). Monotonic; callers compare snapshots, for example to tell
-/// whether a request submitted any GPU compute work.
+/// whether a request began any GPU compute work. It counts encoder starts,
+/// not committed command buffers: an encoder ended without its command
+/// buffer ever committing still counts.
 static COMPUTE_ENCODERS_BEGUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// See [`COMPUTE_ENCODERS_BEGUN`].

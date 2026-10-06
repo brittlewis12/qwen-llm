@@ -8,8 +8,10 @@
 //!
 //! Window: closed until the first activity (a warm-up, or the first request
 //! that submitted GPU compute work, so a cold model is never faulted in by a
-//! pulse). It opens again when such a request finishes, whatever its outcome
-//! (a failure or abort after submission still used the weights). A request
+//! pulse). It opens again when such a request finishes, including one its
+//! client aborted after submission (that still used the weights). A
+//! server-side failure (5xx, which includes GPU and command-buffer faults)
+//! closes it at once instead, so no pulse follows a fault. A request
 //! counts by what it actually submitted: [`IdleResidency::before_request`]
 //! snapshots the process's compute-encoder count and
 //! [`IdleResidency::request_finished`] compares it, so model lists, refusals,
@@ -55,6 +57,8 @@ pub(crate) struct IdleResidency {
     encoders_at_request: Option<u64>,
     /// The process's compute-encoder count (injectable for tests).
     encoders: fn() -> u64,
+    /// The current request ended in a server-side failure.
+    failed_on_server: bool,
     /// The unavailable-pressure-reading notice was logged.
     pressure_unknown_logged: bool,
     last_pulse: Option<Instant>,
@@ -89,6 +93,7 @@ impl IdleResidency {
             last_activity: None,
             encoders_at_request: None,
             encoders: qwen_llm::metal::compute_encoders_begun,
+            failed_on_server: false,
             pressure_unknown_logged: false,
             last_pulse: None,
             suspended_for_pressure: false,
@@ -119,15 +124,26 @@ impl IdleResidency {
         }
     }
 
+    /// The current request ended in a server-side failure (5xx, which
+    /// includes GPU and command-buffer faults): close the window now, so no
+    /// pulse follows a fault, and do not renew it when the connection
+    /// finishes. The next request that submits work and succeeds (or is
+    /// aborted by its client) reopens it.
+    pub(crate) fn request_failed_on_server(&mut self) {
+        self.failed_on_server = true;
+        self.last_activity = None;
+    }
+
     /// A connection finished. Only one whose request submitted GPU compute
-    /// work (encoders begun since [`IdleResidency::before_request`]) opens or
-    /// renews the window.
+    /// work (encoders begun since [`IdleResidency::before_request`]) and did
+    /// not fail on the server opens or renews the window.
     pub(crate) fn request_finished(&mut self) {
         let submitted = self
             .encoders_at_request
             .take()
             .map(|start| (self.encoders)().saturating_sub(start));
-        let renews = submitted.is_some_and(|count| count > 0);
+        let failed = std::mem::take(&mut self.failed_on_server);
+        let renews = !failed && submitted.is_some_and(|count| count > 0);
         if renews {
             self.note_activity();
         }
@@ -137,7 +153,11 @@ impl IdleResidency {
                 "serve idle residency: family={} finished compute_encoders={} window={}",
                 self.family,
                 submitted.map_or_else(|| "none".to_owned(), |count| count.to_string()),
-                if renews { "renewed" } else { "unchanged" }
+                match (failed, renews) {
+                    (true, _) => "closed",
+                    (false, true) => "renewed",
+                    (false, false) => "unchanged",
+                }
             );
         }
     }
@@ -146,6 +166,7 @@ impl IdleResidency {
     /// matching finish is stale and must not let a pulse's encoders count.
     fn forget_unfinished_request(&mut self) {
         self.encoders_at_request = None;
+        self.failed_on_server = false;
     }
 
     /// Called from the owner loop's idle tick.
@@ -311,6 +332,29 @@ mod tests {
         submit();
         residency.request_finished();
         assert!(!residency.is_open(), "a pulse opened the window");
+    }
+
+    /// A server-side failure after submission (a GPU fault, for example)
+    /// closes an open window at once and does not renew it at the finish;
+    /// the next request that submits work and does not fail reopens it.
+    #[test]
+    fn a_server_failure_after_submission_closes_the_window() {
+        let mut residency = IdleResidency::new("test", DEFAULT_WINDOW);
+        residency.encoders = fake_encoders;
+        residency.before_request();
+        submit();
+        residency.request_finished();
+        assert!(residency.is_open());
+        residency.before_request();
+        submit();
+        residency.request_failed_on_server();
+        assert!(!residency.is_open(), "a fault left the window open");
+        residency.request_finished();
+        assert!(!residency.is_open(), "a fault renewed the window");
+        residency.before_request();
+        submit();
+        residency.request_finished();
+        assert!(residency.is_open(), "a later success reopens it");
     }
 
     #[test]

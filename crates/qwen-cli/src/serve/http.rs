@@ -138,6 +138,10 @@ pub(crate) trait GenerationBackend {
     /// Called by the serial loop after every admitted connection, whatever
     /// its outcome (idle-publication debounce).
     fn request_finished(&mut self) {}
+    /// Called by the serial loop when a generation ended in a server-side
+    /// failure (status 5xx: GPU or command-buffer faults, memory admission,
+    /// internal validation), before its connection finishes.
+    fn request_failed_on_server(&mut self) {}
 }
 
 struct TraceSseWriter<'a, 'b> {

@@ -379,6 +379,74 @@ fn cancelled_queued_work_never_calls_backend() {
     assert!(activity.is_settled());
 }
 
+/// Idle residency must not pulse after a fault: the owner reports exactly
+/// the generations that ended in a server-side (5xx) failure, and nothing
+/// for success, a client error or a transport abort.
+#[test]
+fn only_server_side_failures_are_reported_to_the_backend() {
+    type Outcome = fn() -> Result<GenerationOutcome, BackendFailure>;
+    struct Counting {
+        result: Outcome,
+        failures: usize,
+    }
+    impl GenerationBackend for Counting {
+        fn model_id(&self) -> &str {
+            "test"
+        }
+        fn generate(
+            &mut self,
+            _request: &ServeRequest,
+            _prompt: &str,
+            _sink: &mut dyn GenerationSink,
+        ) -> Result<GenerationOutcome, BackendFailure> {
+            (self.result)()
+        }
+        fn request_failed_on_server(&mut self) {
+            self.failures += 1;
+        }
+    }
+    let cases: [(Outcome, usize); 5] = [
+        (|| Ok(outcome()), 0),
+        (|| Err(ServeError::server_error("fault").into()), 1),
+        (
+            || {
+                let mut error = ServeError::server_error("memory");
+                error.status = 503;
+                Err(error.into())
+            },
+            1,
+        ),
+        (
+            || Err(ServeError::invalid_request(None, "client").into()),
+            0,
+        ),
+        (
+            || {
+                Err(BackendFailure::Aborted(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "gone",
+                )))
+            },
+            0,
+        ),
+    ];
+    for (result, expected) in cases {
+        let (mut activity, mut proxy, incoming) = pipeline();
+        let worker = std::thread::spawn(move || {
+            proxy.generate_prepared(prepared(), &mut Collect(Vec::new()))
+        });
+        let work = incoming.recv_timeout(WAIT).unwrap();
+        let mut backend = Counting {
+            result,
+            failures: 0,
+        };
+        execute(work, &mut backend);
+        let _ = worker.join().unwrap();
+        assert_eq!(backend.failures, expected);
+        activity.drain_finished(|| {});
+    }
+}
+
 #[test]
 fn owner_waits_for_downstream_processing_and_cancellation_interrupts_ack_wait() {
     struct Blocked {

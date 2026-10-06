@@ -515,6 +515,9 @@ impl GenerationBackend for DeepSeekV4Backend {
     fn request_finished(&mut self) {
         self.idle_residency.request_finished();
     }
+    fn request_failed_on_server(&mut self) {
+        self.idle_residency.request_failed_on_server();
+    }
 
     /// Snapshots are written behind as they are captured, so shutdown only
     /// waits (bounded) for the queue to drain.

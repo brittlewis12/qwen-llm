@@ -189,10 +189,12 @@ is not a residency set.
 - **Window.** It opens at the first activity: the warm-up (GLM) or the
   first request that submitted GPU compute work (other families), so a
   pulse never faults in a cold model. It reopens when such a request
-  finishes, even if it failed or was aborted after submitting. A request
-  is judged by what it submitted: the backend snapshots the process's
+  finishes, even if its client aborted it after submission. A request is
+  judged by what it submitted: the backend snapshots the process's
   compute-encoder count when the request starts and compares it when the
-  connection finishes. These never open or renew it:
+  connection finishes. A server-side failure (5xx, including GPU and
+  command-buffer faults and memory-admission refusals) closes the window
+  at once, so no pulse follows a fault. These never open or renew it:
   - model lists, malformed or refused requests, and disconnects;
   - memory-admission refusals and session or runner allocation failures;
   - a cancellation before the first command;
@@ -200,7 +202,7 @@ is not a residency set.
     server goes idle is dropped before any pulse).
 
   Blit-only work does not count. `RUST_LOG=info,qwen_diag=debug` logs
-  each finish (`finished compute_encoders=N window=renewed|unchanged`);
+  each finish (`finished compute_encoders=N window=renewed|unchanged|closed`);
   `scripts/reference/serve_residency_poll_check.py` checks polling, a
   refusal, a completed request and a client abort after submission
   against those lines.

@@ -280,6 +280,11 @@ fn execute(work: Work, backend: &mut dyn GenerationBackend) {
         Ok(()) => backend.generate_prepared(work.prepared, &mut sink),
         Err(error) => Err(BackendFailure::Aborted(error)),
     };
+    if let Err(BackendFailure::Serve(error)) = &result
+        && error.status >= 500
+    {
+        backend.request_failed_on_server();
+    }
     let _ = work.terminal.try_send(result);
     // Closing the piece stream follows publishing the terminal. The subscriber
     // drains prior pieces before inspecting it, including on generation errors.

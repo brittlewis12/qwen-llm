@@ -147,6 +147,9 @@ impl GenerationBackend for MuseGlimmerBackend {
     fn request_finished(&mut self) {
         self.idle_residency.request_finished();
     }
+    fn request_failed_on_server(&mut self) {
+        self.idle_residency.request_failed_on_server();
+    }
 
     fn shutdown(&mut self) {
         self.idle_residency.shutdown();

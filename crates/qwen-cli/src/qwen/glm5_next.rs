@@ -308,6 +308,12 @@ fn chat_messages(input: cli::AcquiredRunInput) -> Result<(Vec<Message>, bool)> {
         cli::AcquiredRunInput::Messages { document, source } => {
             let document = chat::parse_document(document.as_bytes())
                 .with_context(|| format!("read {FAMILY} chat document from {source}"))?;
+            // An empty list renders nothing upstream; declared tools need the
+            // run lane's tool output, which is not wired yet.
+            ensure!(
+                document.tools.is_empty(),
+                "{FAMILY} qwen run does not accept tool definitions yet (glm5_next_chat_tools)"
+            );
             Ok((document.messages, document.clear_thinking.unwrap_or(false)))
         }
         cli::AcquiredRunInput::RawPrompt(_) => bail!("{FAMILY} raw input is not a chat"),
@@ -814,8 +820,15 @@ mod tests {
         .unwrap();
         assert!(clear);
         assert_eq!(messages, [Message::User("q".into())]);
-        let error = chat_messages(cli::AcquiredRunInput::Messages {
+        let (messages, _) = chat_messages(cli::AcquiredRunInput::Messages {
             document: r#"{"messages":[{"role":"user","content":"q"}],"tools":[]}"#.into(),
+            source: "test".into(),
+        })
+        .unwrap();
+        assert_eq!(messages, [Message::User("q".into())]);
+        let error = chat_messages(cli::AcquiredRunInput::Messages {
+            document: r#"{"messages":[{"role":"user","content":"q"}],"tools":[{"name":"f"}]}"#
+                .into(),
             source: "test".into(),
         })
         .unwrap_err();

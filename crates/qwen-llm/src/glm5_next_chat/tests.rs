@@ -19,8 +19,9 @@ fn native(case: &Value) -> Result<String> {
     let document = parse_document(&serde_json::to_vec(&document).unwrap())?;
     assert_eq!(document.clear_thinking, None);
     let effort = Effort::parse(case.get("reasoning_effort").and_then(Value::as_str))?;
-    render(
+    render_with_tools(
         &document.messages,
+        &document.tools,
         RenderOptions {
             effort,
             clear_thinking: case["clear_thinking"].as_bool().unwrap_or(false),
@@ -41,7 +42,10 @@ fn fixture_pins_the_upstream_release_and_the_gguf_conversion() {
     assert_eq!(generation["eos_token_id"], json!(CHAT_STOPS));
     assert_eq!(generation["temperature"], json!(TEMPERATURE));
     assert_eq!(generation["top_p"].as_f64().unwrap() as f32, TOP_P);
-    assert!(cases(&f).iter().all(|case| case.get("error").is_none()));
+    // Upstream errors only on shapes qwen-llm refuses (string arguments).
+    for case in cases(&f).iter().filter(|case| case.get("error").is_some()) {
+        assert_ne!(case["native"], "render", "{}", case["name"]);
+    }
 }
 
 #[test]
@@ -56,7 +60,7 @@ fn renders_every_supported_case_byte_for_byte_and_refuses_the_rest() {
     let mut rendered = 0;
     for case in cases(&f) {
         let name = case["name"].as_str().unwrap();
-        let expected = case["rendered"].as_str().unwrap();
+        let expected = case["rendered"].as_str().unwrap_or_default();
         match case["native"].as_str().unwrap() {
             "render" => {
                 assert_eq!(native(case).unwrap(), expected, "{name}");
@@ -81,26 +85,43 @@ fn renders_every_supported_case_byte_for_byte_and_refuses_the_rest() {
             }
         }
     }
-    assert!(rendered >= 35, "{rendered}");
+    assert!(rendered >= 56, "{rendered}");
 }
 
 #[test]
-fn only_null_assistant_content_separates_the_gguf_template_from_upstream() {
+fn only_null_content_separates_the_gguf_template_from_upstream() {
     let f = fixture();
-    let differ: Vec<_> = cases(&f)
+    let differ: Vec<&str> = cases(&f)
         .iter()
         .filter(|case| case.get("gguf_rendered").is_some())
+        .map(|case| case["name"].as_str().unwrap())
         .collect();
-    assert_eq!(differ.len(), 1);
-    let case = differ[0];
-    assert_eq!(case["name"], "history-content-null");
+    assert_eq!(differ, ["history-content-null", "tool-result-null-content"]);
+    let by_name = |name: &str| {
+        cases(&f)
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    // Null assistant content: render upstream's empty text.
+    let case = by_name("history-content-null");
     assert!(
         case["gguf_rendered"]
             .as_str()
             .unwrap()
             .contains("</think>None<|user|>")
     );
-    assert_eq!(native(case).unwrap(), case["rendered"].as_str().unwrap());
+    assert_eq!(native(&case).unwrap(), case["rendered"].as_str().unwrap());
+    // Null tool content: the two templates disagree ("None"); refused.
+    let case = by_name("tool-result-null-content");
+    assert!(
+        case["gguf_rendered"]
+            .as_str()
+            .unwrap()
+            .contains("<tool_response>None</tool_response>")
+    );
+    assert_eq!(native(&case).unwrap_err().code(), "glm5_next_chat_input");
 }
 
 #[test]
@@ -134,18 +155,34 @@ fn effort_levels_are_explicit_and_default_to_max() {
 }
 
 #[test]
-fn documents_refuse_tools_and_anything_the_renderer_would_drop() {
+fn documents_refuse_anything_the_renderer_would_drop() {
     for (document, code) in [
         (
-            r#"{"messages":[{"role":"user","content":"x"}],"tools":[]}"#,
+            r#"{"messages":[{"role":"user","content":"x"}],"tools":{}}"#,
             "glm5_next_chat_tools",
         ),
         (
-            r#"[{"role":"assistant","content":null,"tool_calls":[]},{"role":"user","content":"x"}]"#,
+            r#"[{"role":"user","content":"x","tool_calls":[]}]"#,
             "glm5_next_chat_tools",
         ),
         (
             r#"[{"role":"tool","content":"r"},{"role":"user","content":"x"}]"#,
+            "glm5_next_chat_input",
+        ),
+        (
+            r#"[{"role":"user","content":"x","tool_call_id":"c"}]"#,
+            "glm5_next_chat_input",
+        ),
+        (
+            r#"{"messages":[],"tools":[{"type":"function","function":{"name":"bad name"}}]}"#,
+            "glm5_next_chat_tools",
+        ),
+        (
+            r#"{"messages":[],"tools":[{"type":"function","function":{"name":"f","examples":[]}}]}"#,
+            "glm5_next_chat_tools",
+        ),
+        (
+            r#"[{"role":"assistant","content":"","tool_calls":[{"id":"c","type":"function","function":{"name":"f","arguments":{"a<b":1}}}]}]"#,
             "glm5_next_chat_tools",
         ),
         (
@@ -199,7 +236,8 @@ fn documents_refuse_tools_and_anything_the_renderer_would_drop() {
         document.messages[0],
         Message::Assistant {
             content: String::new(),
-            reasoning: None
+            reasoning: None,
+            calls: Vec::new()
         }
     );
 }
@@ -217,6 +255,7 @@ fn a_reply_extends_its_prompt_when_rendered_back_as_history() {
     second.push(Message::Assistant {
         content: "A1".into(),
         reasoning: Some("R1".into()),
+        calls: Vec::new(),
     });
     second.push(Message::User("Q2".into()));
     let next = render(&second, options).unwrap();
@@ -252,5 +291,5 @@ fn gguf_profile_verifies_and_native_tokens_match_hf() {
         assert_eq!(json!(ids), case["token_ids"], "{}", case["name"]);
         checked += 1;
     }
-    assert!(checked >= 35);
+    assert!(checked >= 56);
 }

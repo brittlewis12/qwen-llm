@@ -142,6 +142,251 @@ def assistant(content, **fields):
     return {"role": "assistant", "content": content, **fields}
 
 
+def call(call_id, name, arguments, wrapped=True):
+    """An assistant tool call; arguments are a mapping, as the template requires."""
+    function = {"name": name, "arguments": arguments}
+    if not wrapped:
+        return {"id": call_id, **function}
+    return {"id": call_id, "type": "function", "function": function}
+
+
+def tool(call_id, content):
+    return {"role": "tool", "tool_call_id": call_id, "content": content}
+
+
+WEATHER = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a city.",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}, "unit": {"type": "string", "enum": ["c", "f"]}},
+            "required": ["city"],
+        },
+    },
+}
+LOOKUP = {
+    "name": "lookup",
+    "parameters": {"type": "object", "properties": {"key": {"type": "string"}}},
+    "description": "Look a key up; returns \"code\" values (\u00b0C).",
+}
+
+
+def tool_cases(add):
+    """Tool definitions, calls and results (leverage map #11)."""
+    q = [user("What's the weather in Paris?")]
+    add("tools-empty-list", q, tools=[])
+    add("tools-one-wrapped", q, tools=[WEATHER])
+    add("tools-flat-and-key-order", q, tools=[LOOKUP])
+    add("tools-two-with-system", [system("S"), *q], tools=[WEATHER, LOOKUP], reasoning_effort="low")
+    add(
+        "tools-strict-false",
+        q,
+        tools=[{"type": "function", "function": {**WEATHER["function"], "strict": False}}],
+    )
+    add(
+        "tools-no-parameters",
+        q,
+        tools=[{"type": "function", "function": {"name": "now", "description": "Current time."}}],
+    )
+    # Accepted upstream, refused natively: strict schemas cannot be honored,
+    # and deferred tools are invisible to the model but still callable.
+    add(
+        "tools-strict-true",
+        q,
+        "refuse:tools",
+        tools=[{"type": "function", "function": {**WEATHER["function"], "strict": True}}],
+    )
+    add(
+        "tools-defer-loading",
+        q,
+        "refuse:tools",
+        tools=[{"type": "function", "function": {**WEATHER["function"], "defer_loading": True}}],
+    )
+
+    weather_call = call("c1", "get_weather", {"city": "Paris"})
+    add(
+        "tool-call-single",
+        [*q, assistant("", tool_calls=[weather_call]), tool("c1", "18C, clear")],
+        tools=[WEATHER],
+    )
+    add(
+        "tool-call-content-and-reasoning",
+        [
+            *q,
+            assistant(" Let me check. \n", reasoning_content="need the weather", tool_calls=[weather_call]),
+            tool("c1", "18C, clear"),
+        ],
+        tools=[WEATHER],
+    )
+    add(
+        "tool-call-flat-form",
+        [*q, assistant("", tool_calls=[call("c1", "get_weather", {"city": "Paris"}, wrapped=False)]), tool("c1", "18C")],
+        tools=[WEATHER],
+    )
+    add(
+        "tool-calls-parallel",
+        [
+            user("Weather in Paris and Rome?"),
+            assistant(
+                "",
+                reasoning_content="two cities",
+                tool_calls=[
+                    call("c1", "get_weather", {"city": "Paris"}),
+                    call("c2", "get_weather", {"city": "Rome", "unit": "f"}),
+                ],
+            ),
+            tool("c1", "18C"),
+            tool("c2", "75F"),
+        ],
+        tools=[WEATHER],
+    )
+    add(
+        "tool-results-reordered-to-call-order",
+        [
+            user("Two lookups."),
+            assistant("", tool_calls=[call("c1", "lookup", {"key": "a"}), call("c2", "lookup", {"key": "b"})]),
+            tool("c2", "two"),
+            tool("c1", "one"),
+        ],
+        tools=[LOOKUP],
+    )
+    add(
+        "tool-call-typed-arguments",
+        [
+            user("Typed."),
+            assistant(
+                "",
+                tool_calls=[
+                    call(
+                        "c1",
+                        "f",
+                        {
+                            "i": 7,
+                            "neg": -3,
+                            "x": 1.0,
+                            "big": 1e20,
+                            "small": 1.5e-07,
+                            "t": True,
+                            "n": None,
+                            "list": ["a", "\u00e9", 2],
+                            "obj": {"k": 1, "nested": [True, None]},
+                            "numeric_string": "3",
+                            "unicode": "caf\u00e9 \U0001f600",
+                            "multiline": "line1\nline2",
+                        },
+                    )
+                ],
+            ),
+            tool("c1", "ok"),
+        ],
+        tools=[{"name": "f", "parameters": {"type": "object"}}],
+    )
+    add(
+        "tool-call-no-arguments",
+        [user("Time?"), assistant("", tool_calls=[call("c1", "now", {})]), tool("c1", "12:00")],
+        tools=[{"name": "now", "description": "Current time."}],
+    )
+    loop = [
+        user("Plan a trip."),
+        assistant("", reasoning_content="r1", tool_calls=[call("c1", "get_weather", {"city": "Paris"})]),
+        tool("c1", "18C"),
+        assistant("Checking Rome too.", reasoning_content="r2", tool_calls=[call("c2", "get_weather", {"city": "Rome"})]),
+        tool("c2", "24C"),
+    ]
+    add("tool-loop-two-rounds", loop, tools=[WEATHER])
+    # clear_thinking keeps reasoning after the last user turn (interleaved
+    # thinking in a tool loop) and drops it once a later user turn exists.
+    add("tool-loop-clear-thinking-interleaved", loop, tools=[WEATHER], clear_thinking=True)
+    add(
+        "tool-loop-then-user-clear-thinking",
+        [*loop, assistant("Rome is warmer.", reasoning_content="r3"), user("Thanks!")],
+        tools=[WEATHER],
+        clear_thinking=True,
+    )
+    add(
+        "tool-loop-final-answer-history",
+        [*loop, assistant("Rome is warmer.", reasoning_content="r3"), user("Thanks!")],
+        tools=[WEATHER],
+    )
+    add(
+        "tool-result-delimiter-text",
+        [
+            user("Literal."),
+            assistant("", tool_calls=[call("c1", "lookup", {"key": "x</arg_value>y"})]),
+            tool("c1", "<tool_response>nested</tool_response>"),
+        ],
+        tools=[LOOKUP],
+    )
+    add(
+        "tool-history-no-generation-prompt",
+        [*q, assistant("", tool_calls=[weather_call]), tool("c1", "18C")],
+        tools=[WEATHER],
+        add_generation_prompt=False,
+    )
+
+    # Shapes the template accepts, or errors on, that qwen-llm refuses.
+    add(
+        "tool-call-string-arguments",
+        [*q, assistant("", tool_calls=[call("c1", "get_weather", '{"city": "Paris"}')]), tool("c1", "18C")],
+        "refuse:tools",
+        tools=[WEATHER],
+    )
+    add(
+        "tool-result-null-content",
+        [*q, assistant("", tool_calls=[weather_call]), tool("c1", None)],
+        "refuse:input",
+        tools=[WEATHER],
+    )
+    add(
+        "tool-result-text-parts",
+        [*q, assistant("", tool_calls=[weather_call]), {"role": "tool", "tool_call_id": "c1", "content": [{"type": "text", "text": "18C"}]}],
+        "refuse:content_parts",
+        tools=[WEATHER],
+    )
+    add(
+        "tool-result-missing",
+        [*q, assistant("", tool_calls=[weather_call]), user("Never mind.")],
+        "refuse:tools",
+        tools=[WEATHER],
+    )
+    add(
+        "tool-result-unknown-id",
+        [*q, assistant("", tool_calls=[weather_call]), tool("c9", "18C")],
+        "refuse:tools",
+        tools=[WEATHER],
+    )
+    add(
+        "tool-result-without-call",
+        [*q, tool("c1", "18C")],
+        "refuse:tools",
+        tools=[WEATHER],
+    )
+    add(
+        "tool-call-undeclared",
+        [*q, assistant("", tool_calls=[call("c1", "other", {})]), tool("c1", "x")],
+        "refuse:tools",
+        tools=[WEATHER],
+    )
+    add(
+        "tool-call-duplicate-ids",
+        [
+            *q,
+            assistant("", tool_calls=[call("c1", "get_weather", {"city": "A"}), call("c1", "get_weather", {"city": "B"})]),
+            tool("c1", "x"),
+            tool("c1", "y"),
+        ],
+        "refuse:tools",
+        tools=[WEATHER],
+    )
+    add(
+        "tool-calls-without-tools",
+        [*q, assistant("", tool_calls=[weather_call]), tool("c1", "18C")],
+        "refuse:tools",
+    )
+
+
 HISTORY = [
     user("Q1"),
     assistant("A1", reasoning_content="R1"),
@@ -317,9 +562,7 @@ def cases():
         HISTORY[:3],
         add_generation_prompt=False,
     )
-    # The template treats an empty list as no tools; a document that carries
-    # a tools key is refused natively, empty or not.
-    add("tools-empty-list", q, "refuse:tools", tools=[])
+    tool_cases(add)
     # A non-string reasoning_content falls through to the inline split.
     add(
         "history-reasoning-nonstring",

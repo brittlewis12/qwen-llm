@@ -101,6 +101,7 @@ fn messages(request: &ServeRequest) -> Result<Vec<Message>, ServeError> {
             } if calls.is_empty() => Message::Assistant {
                 content: visible.clone(),
                 reasoning: Some(reasoning.clone().unwrap_or_default()),
+                calls: Vec::new(),
             },
             Turn::Assistant { .. } | Turn::ToolResults(_) => return Err(tools()),
         });

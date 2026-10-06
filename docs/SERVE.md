@@ -745,7 +745,7 @@ request is not charged the weights' first GPU use (`serve startup:` logs
 `load_ms` and `warm_up_ms`).
 
 Requests use the shared Open Responses parser; the pinned
-`glm53_flash_text_v1` renderer (`crates/qwen-llm/src/glm5_next_chat.rs`)
+`glm53_flash_chat_v2` renderer (`crates/qwen-llm/src/glm5_next_chat.rs`)
 renders them:
 
 - `input` string is one user message; items are system/developer (or

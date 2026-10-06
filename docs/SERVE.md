@@ -850,18 +850,29 @@ and parses it, and never runs a tool.
   - Memory: the block is capped at its byte bound and admitted before it
     grows. Its capacity grows in 64 KiB steps, and each step must find
     process headroom for the block's whole outstanding peak at the new
-    capacity, less what it already holds. That peak is 192 bytes per block
-    byte: the text, the parsed values with their container overhead, and
-    the serialized arguments kept and embedded in events and the response.
-    The factor is measured against a counting allocator over
-    container-heavy shapes; the worst, arrays nested to the decoder's
-    128-level limit, costs about 152
-    (`crates/qwen-llm/tests/glm53_tool_block_peak.rs`). Headroom is read
-    afresh at every step and once more before the parse, so an earlier step
-    reserves nothing. A failed check ends the turn with
-    `memory_admission_denied` (503). Nothing is reserved upfront at the
-    worst case (the longest piece is 512 bytes; the 99.9th percentile
-    is 52).
+    capacity, less what it already holds. That peak is 256 bytes per block
+    byte. It covers the text, the parsed values with their container
+    overhead, the serialized arguments kept and embedded in events and the
+    response, and, when not streaming, the collected output pieces (one
+    allocation each).
+    - Counting allocators measure it over container-heavy shapes (arrays
+      nested to the decoder's 128-level limit are the worst).
+    - Through serve's real handler, the peak above a run without a block
+      is about 149 bytes per block byte when streaming (with or without an
+      SSE trace) and 205 when not streaming with one-byte pieces. The
+      theoretical worst is about 225.
+    - Sources: `crates/qwen-cli/src/serve/http/tests/tool_block_memory_tests.rs`
+      and `crates/qwen-llm/tests/glm53_tool_block_peak.rs`.
+    - Headroom is read afresh at every step and once more before the
+      parse, so an earlier step reserves nothing. A failed check ends the
+      turn with `memory_admission_denied` (503).
+    - When not streaming, the partition runs after generation, so the
+      check prices the block's parse and publication but cannot stop the
+      collection itself. Collecting other output is not priced (map #14).
+    - Nothing is reserved upfront at the worst case (the longest piece is
+      512 bytes; the 99.9th percentile is 52).
+    - A partition failure found after generation (this refusal, or an
+      ill-typed call) reaches the model owner as a server-side failure.
   - Text after a call, an undeclared function, a repeated key or an
     ill-typed value is a server error, never text.
   - A block still open at the token limit is incomplete with no call.

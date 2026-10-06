@@ -1190,6 +1190,8 @@ mod tests {
     mod k2_chat;
     #[path = "request_profile_tests.rs"]
     mod request_profiles;
+    #[path = "tool_block_memory_tests.rs"]
+    mod tool_block_memory;
 
     #[test]
     fn muse_non_stream_partitions_reasoning_visible_and_calls() {

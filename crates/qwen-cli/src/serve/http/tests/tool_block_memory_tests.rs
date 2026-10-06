@@ -1,0 +1,164 @@
+//! End-to-end peak memory of a GLM-5.3 tool block through the real HTTP
+//! handler (`handle_connection`): non-streaming, streaming, and streaming
+//! with an SSE trace, measured by the test allocator (`crate::test_alloc`;
+//! frees on the trace writer thread count). The peak above a run without a
+//! tool block must stay within the admission model,
+//! `tool_block_peak_bytes(block)`.
+
+use super::*;
+use crate::serve::request_profile::RequestProfile;
+use qwen_llm::glm5_next_chat::{TOOL_BLOCK_PEAK_FACTOR, tool_block_peak_bytes};
+
+/// Emits `output` in `piece`-byte pieces (ASCII, so every split is a char
+/// boundary), as a backend streams decoded tokens.
+#[derive(Clone)]
+struct ToolOutput {
+    output: String,
+    piece: usize,
+}
+
+impl GenerationBackend for ToolOutput {
+    fn model_id(&self) -> &str {
+        "test"
+    }
+    fn request_profile(&self) -> RequestProfile {
+        RequestProfile::Glm5Next {
+            default_max_tokens: 64,
+            capacity: 1 << 20,
+            max_piece_bytes: 512,
+        }
+    }
+    fn generate(
+        &mut self,
+        _request: &ServeRequest,
+        _prompt: &str,
+        sink: &mut dyn GenerationSink,
+    ) -> Result<GenerationOutcome, BackendFailure> {
+        for piece in self.output.as_bytes().chunks(self.piece) {
+            sink.piece(piece).map_err(BackendFailure::Aborted)?;
+        }
+        Ok(GenerationOutcome {
+            end: GenerationEnd::StopToken(154_829),
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cached_tokens: 0,
+            },
+            stats: None,
+        })
+    }
+}
+
+/// Serve one request with `backend`, measuring the handler thread; returns
+/// the response and the peak.
+fn served(backend: ToolOutput, request: String, trace: Option<&Path>) -> (String, usize) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let trace = trace.map(|path| TraceLog::open(path).unwrap());
+    let subscriber = trace.as_ref().map(TraceLog::subscriber);
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut backend = backend;
+        let ((), peak) = crate::test_alloc::measure(|| {
+            handle_connection(&stream, &mut backend, subscriber).unwrap();
+        });
+        peak
+    });
+    let mut client = TcpStream::connect(address).unwrap();
+    client.write_all(request.as_bytes()).unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).unwrap();
+    let peak = server.join().unwrap();
+    drop(trace);
+    (response, peak)
+}
+
+#[test]
+fn tool_block_publication_stays_within_the_admission_model() {
+    let body = |streaming: bool, schema: Value| {
+        json!({"model": "test", "input": "Go.", "stream": streaming,
+            "max_output_tokens": 200_000, "reasoning": {"effort": "low"},
+            "tools": [{"type": "function", "name": "f", "parameters": {"type": "object",
+                "properties": {"a": schema}}}]})
+        .to_string()
+    };
+    let call = |value: &str| {
+        format!("<tool_call>f<arg_key>a</arg_key><arg_value>{value}</arg_value></tool_call>")
+    };
+    let inner = format!("{}1{}", "[".repeat(126), "]".repeat(126));
+    let shapes: Vec<(&str, Value, String)> = vec![
+        (
+            "array of deep arrays",
+            json!({"type": "array"}),
+            call(&format!("[{}]", vec![inner.as_str(); 300].join(","))),
+        ),
+        (
+            "one-element arrays",
+            json!({"type": "array"}),
+            call(&format!("[{}]", vec!["[1]"; 20_000].join(","))),
+        ),
+        (
+            "control escapes",
+            json!({"type": "string"}),
+            call(&"\u{1}".repeat(60_000)),
+        ),
+        (
+            "short strings",
+            json!({"type": "array"}),
+            call(&format!("[{}]", vec!["\"a\""; 20_000].join(","))),
+        ),
+    ];
+    let trace_dir = std::env::temp_dir().join(format!("qwen-tool-peak-{}", std::process::id()));
+    std::fs::create_dir_all(&trace_dir).unwrap();
+    let mut worst = 0.0f64;
+    // One-byte pieces are the worst case for non-streaming collection (one
+    // allocation per piece); four bytes is closer to typical tokens.
+    for (mode, streaming, traced, piece) in [
+        ("non-stream/1", false, false, 1),
+        ("non-stream/4", false, false, 4),
+        ("stream/1", true, false, 1),
+        ("stream+trace/1", true, true, 1),
+    ] {
+        let trace_path = trace_dir.join(format!("{}.jsonl", mode.replace('/', "-")));
+        let trace = traced.then_some(trace_path.as_path());
+        // Fixed costs of the same request with no tool block.
+        let (reply, baseline) = served(
+            ToolOutput {
+                output: "plan</think>ok".into(),
+                piece,
+            },
+            post("/v1/responses", &body(streaming, json!({"type": "array"}))),
+            trace,
+        );
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        for (label, schema, block) in &shapes {
+            let (reply, peak) = served(
+                ToolOutput {
+                    output: format!("plan</think>{block}"),
+                    piece,
+                },
+                post("/v1/responses", &body(streaming, schema.clone())),
+                trace,
+            );
+            assert!(
+                reply.starts_with("HTTP/1.1 200"),
+                "{mode} {label}: {reply:.300}"
+            );
+            assert!(reply.contains("function_call"), "{mode} {label}");
+            let above = peak.saturating_sub(baseline);
+            let ratio = above as f64 / block.len() as f64;
+            worst = worst.max(ratio);
+            eprintln!(
+                "[tool-block-e2e] {mode} {label}: block={} peak_above_baseline={above} ratio={ratio:.1}",
+                block.len()
+            );
+            assert!(
+                above <= tool_block_peak_bytes(block.len()),
+                "{mode} {label}: {above} bytes above baseline for a {}-byte block exceeds {TOOL_BLOCK_PEAK_FACTOR}x",
+                block.len()
+            );
+        }
+    }
+    eprintln!("[tool-block-e2e] worst ratio {worst:.1} (model {TOOL_BLOCK_PEAK_FACTOR})");
+    let _ = std::fs::remove_dir_all(&trace_dir);
+}

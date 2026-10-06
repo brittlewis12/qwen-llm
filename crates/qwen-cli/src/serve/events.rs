@@ -126,6 +126,17 @@ impl EventWrite for CollectEvents {
     }
 }
 
+/// Drops every lifecycle event as it is emitted: the non-stream response is
+/// the finished envelope alone, so nothing else is retained.
+#[derive(Debug, Default)]
+pub(crate) struct DiscardEvents;
+
+impl EventWrite for DiscardEvents {
+    fn event(&mut self, _event_type: &str, _payload: Value) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// SSE framing over any writer, flushed per event (serial loopback server;
 /// flush latency is the streaming contract).
 pub(crate) struct SseWriter<W: Write>(pub(crate) W);
@@ -267,7 +278,8 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
         if self.message_opened {
             output.push(self.message_item_json(self.message_status.unwrap_or("incomplete")));
         }
-        output.extend(self.tool_items.iter().cloned());
+        // Moved, not cloned: the terminal envelope is their last use.
+        output.append(&mut self.tool_items);
         self.completed_at = Some(now_unix());
         let mut envelope = self.response_envelope("failed", Value::Array(output), None, None);
         envelope["error"] = error.to_json()["error"].clone();
@@ -629,7 +641,8 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
         if self.message_opened {
             output.push(self.message_item_json(self.message_status.unwrap_or("completed")));
         }
-        output.extend(self.tool_items.iter().cloned());
+        // Moved, not cloned: the terminal envelope is their last use.
+        output.append(&mut self.tool_items);
         let (status, event_type, incomplete_reason) = match stop_reason {
             StopReason::Eos => ("completed", "response.completed", None),
             StopReason::TokenLimit => (
@@ -654,7 +667,8 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
 }
 
 /// Build the non-stream response object by replaying the same machinery
-/// into a discard sink (identical output shape by construction).
+/// into a discard sink (identical output shape by construction; no event
+/// payload is retained).
 pub(crate) fn build_response_object(
     request: &ServeRequest,
     response_id: String,
@@ -664,7 +678,7 @@ pub(crate) fn build_response_object(
     usage: Usage,
     stats: Option<&ServeStats>,
 ) -> io::Result<Value> {
-    let mut sink = CollectEvents::default();
+    let mut sink = DiscardEvents;
     let mut stream = ResponseStream::begin(
         &mut sink,
         response_id,

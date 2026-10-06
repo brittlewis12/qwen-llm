@@ -2,6 +2,8 @@
 
 #[path = "qwen/admission.rs"]
 mod admission;
+#[cfg(test)]
+mod test_alloc;
 #[path = "qwen/args.rs"]
 mod args;
 #[allow(dead_code)] // Shared artifact readers also consumed by qwen-lens.

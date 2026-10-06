@@ -203,14 +203,18 @@ fn typed_argument(definition: &ToolDefinition, key: &str, raw: &str) -> Result<V
 /// Bytes held at once, at most, per byte of a buffered tool block while it
 /// is parsed and its calls are published: the text itself, the parsed
 /// values (container slots, map entries and scalar copies, which dominate:
-/// `[[1],[1],…]` costs far more than its text), and the serialized
-/// arguments a server keeps and embeds in events and the response body.
-/// Measured against a counting allocator (16-byte malloc quanta) over
-/// container-heavy shapes (`tests/glm53_tool_block_peak.rs`): the worst,
-/// one argument holding arrays nested to the decoder's 128-level limit,
-/// costs about 152 bytes per block byte, near the ~160 of a four-slot
-/// vector per `[]` pair; 192 leaves room for the publication copies.
-pub const TOOL_BLOCK_PEAK_FACTOR: usize = 192;
+/// `[[1],[1],…]` costs far more than its text), the serialized arguments a
+/// server keeps and embeds in events and the response body, and, for a
+/// non-streaming response, the collected output pieces (one allocation per
+/// piece). Measured with counting allocators (16-byte malloc quanta): the
+/// parse and one publication alone (`tests/glm53_tool_block_peak.rs`) reach
+/// about 152 for arrays nested to the decoder's 128-level limit; serve's
+/// real handler end to end (`serve/http/tests/tool_block_memory_tests.rs`
+/// in qwen-cli) about 149 streaming with or without a trace and 205
+/// non-streaming with one-byte pieces. The theoretical non-streaming worst
+/// is about 225 (about 64 per byte for one-byte pieces on top of the
+/// parse); 256 covers it.
+pub const TOOL_BLOCK_PEAK_FACTOR: usize = 256;
 
 /// [`TOOL_BLOCK_PEAK_FACTOR`] applied to a block of `bytes` (saturating).
 pub const fn tool_block_peak_bytes(bytes: usize) -> usize {

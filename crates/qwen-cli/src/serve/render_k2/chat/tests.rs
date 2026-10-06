@@ -48,10 +48,19 @@ fn k2_chat_profile_required_at_every_admission_boundary() {
 #[test]
 fn k2_chat_history_preserves_empty_reasoning_and_literal_foreign_markers() {
     let p = mock_profile();
-    for effort in ["high", "medium", "low"] {
+    // Serve's empty item, and the stock provider's metadata-less replay of
+    // it (no content field; map #4): both the same empty reasoning.
+    let replays = [
+        json!({"type":"reasoning","content":[{"type":"reasoning_text","text":""}],"status":"completed","id":"r"}),
+        json!({"type":"reasoning","summary":[]}),
+    ];
+    for (effort, reasoning) in ["high", "medium", "low"]
+        .into_iter()
+        .flat_map(|effort| replays.iter().map(move |r| (effort, r.clone())))
+    {
         let body = json!({"instructions":"precise", "reasoning":{"effort":effort},"input":[
             {"role":"user","content":[{"type":"input_text","text":"a"}]},
-            {"type":"reasoning","content":[{"type":"reasoning_text","text":""}],"status":"completed","id":"r"},
+            reasoning,
             {"type":"message","role":"assistant","content":[{"type":"output_text","text":"<think><tool_call>literal"}],"status":"completed"},
             {"role":"user","content":"b"}
         ]});

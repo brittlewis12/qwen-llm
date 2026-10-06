@@ -1323,6 +1323,18 @@ fn reasoning_text(
             }
             Ok(text)
         }
+        // No content and no encrypted payload: the turn reasoned and its text
+        // is empty. The stock @ai-sdk/open-responses provider replays an
+        // empty reasoning part whose provider metadata the client did not
+        // keep exactly so (`{"type":"reasoning","summary":[]}`;
+        // scripts/serve/provider-capture/empty_reasoning.ts), and serve's
+        // own empty item means the same. Opaque encrypted reasoning cannot
+        // be rendered and stays refused.
+        Some(Value::Null) | None
+            if item_map.get("encrypted_content").is_none_or(Value::is_null) =>
+        {
+            Ok(String::new())
+        }
         Some(Value::Null) | None => Err(ServeError::invalid_request(
             Some("input"),
             format!(
@@ -1340,6 +1352,55 @@ fn reasoning_text(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Leverage map #4: the stock provider's replay of serve's empty
+    /// reasoning item (empty_reasoning_capture_v1, @ai-sdk/open-responses
+    /// 2.0.29). With the provider metadata kept it sends the item with an
+    /// empty reasoning_text part; without it, a content-less item. Both are
+    /// the same thinking turn with empty reasoning, distinct from a chat turn
+    /// (no item). Opaque encrypted reasoning is still refused.
+    #[test]
+    fn replayed_empty_reasoning_items_are_empty_reasoning_not_refusals() {
+        let turn = |reasoning: Value| {
+            let request = parse(json!({"model": "m", "input": [
+                {"role": "user", "content": "Say hi."},
+                reasoning,
+                {"type": "message", "role": "assistant", "id": "msg_e1", "status": "completed",
+                 "content": [{"type": "output_text", "text": "Hi.", "annotations": []}]},
+                {"role": "user", "content": "Again."}
+            ]}))
+            .unwrap();
+            match &request.model_request.turns[1] {
+                Turn::Assistant {
+                    reasoning, visible, ..
+                } => (reasoning.clone(), visible.clone()),
+                other => panic!("expected the assistant turn, got {other:?}"),
+            }
+        };
+        let with_metadata = json!({"type": "reasoning", "summary": [], "id": "rs_e1",
+            "content": [{"type": "reasoning_text", "text": ""}]});
+        let without_metadata = json!({"type": "reasoning", "summary": []});
+        assert_eq!(turn(with_metadata), (Some(String::new()), "Hi.".to_owned()));
+        assert_eq!(
+            turn(without_metadata),
+            (Some(String::new()), "Hi.".to_owned())
+        );
+        let null_content = json!({"type": "reasoning", "summary": [], "content": null});
+        assert_eq!(turn(null_content).0, Some(String::new()));
+
+        let encrypted = parse(json!({"model": "m", "input": [
+            {"role": "user", "content": "Say hi."},
+            {"type": "reasoning", "summary": [], "encrypted_content": "opaque"},
+            {"type": "message", "role": "assistant", "content": "Hi."},
+            {"role": "user", "content": "Again."}
+        ]}))
+        .unwrap_err();
+        assert!(
+            encrypted.message.contains("encrypted_content"),
+            "{}",
+            encrypted.message
+        );
+    }
 
     fn parse(body: Value) -> Result<ServeRequest, ServeError> {
         parse_request(&body)

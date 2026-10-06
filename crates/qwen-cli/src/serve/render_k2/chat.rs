@@ -177,9 +177,6 @@ pub(crate) fn parse_with_profile(
                 return Err(invalid("input", "only completed history may be replayed"));
             }
         }
-        let content = item
-            .get("content")
-            .ok_or_else(|| invalid("input", "content is required"))?;
         if kind == "reasoning" {
             if pending_reasoning.is_some() {
                 return Err(invalid(
@@ -187,9 +184,18 @@ pub(crate) fn parse_with_profile(
                     "reasoning must directly precede an assistant",
                 ));
             }
-            pending_reasoning = Some(text(content, "reasoning_text")?);
+            // A content-less reasoning item is empty reasoning: the stock
+            // provider replays serve's empty item so when the client did not
+            // keep its metadata (open_responses::items, map #4).
+            pending_reasoning = Some(match item.get("content") {
+                None | Some(Value::Null) => String::new(),
+                Some(content) => text(content, "reasoning_text")?,
+            });
             continue;
         }
+        let content = item
+            .get("content")
+            .ok_or_else(|| invalid("input", "content is required"))?;
         if kind != "message" {
             return Err(invalid(
                 "input",

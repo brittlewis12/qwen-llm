@@ -100,7 +100,13 @@ pub(crate) fn input_from_responses(
                 if reasoning.is_some() {
                     return Err(invalid("input", "orphan reasoning item"));
                 }
-                reasoning = Some(chat::text(&item["content"], "reasoning_text")?);
+                // Content-less reasoning is empty reasoning (see
+                // open_responses::items; the stock provider's metadata-less
+                // replay of serve's empty item).
+                reasoning = Some(match item.get("content") {
+                    None | Some(Value::Null) => String::new(),
+                    Some(content) => chat::text(content, "reasoning_text")?,
+                });
                 assistant = None;
             }
             "message" => {
@@ -353,6 +359,36 @@ pub(crate) fn output_protocol(request: &ServeRequest, max_piece: usize) -> Outpu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Leverage map #4 on the K2 tool path: the stock provider's
+    /// metadata-less replay of serve's empty reasoning item (no content
+    /// field) is the same empty reasoning as the explicit item, with an
+    /// identical input and rendered prompt.
+    #[test]
+    fn k2_tool_history_reads_contentless_reasoning_as_empty() {
+        let body = |reasoning: Value| {
+            json!({"model":"k2","tools":[{"type":"function","name":"lookup_code",
+            "parameters":{"type":"object","properties":{"key":{"type":"string"}}}}],
+            "input":[
+                {"role":"user","content":"Look it up."},
+                reasoning,
+                {"type":"function_call","call_id":"call_1","name":"lookup_code","arguments":"{\"key\":\"orbital\"}"},
+                {"type":"function_call_output","call_id":"call_1","output":"7"},
+                {"role":"user","content":"Again."}
+            ]})
+        };
+        let parse = |reasoning: Value| {
+            input_from_responses(&body(reasoning), Effort::parse(Some("low")).unwrap())
+                .unwrap()
+                .0
+        };
+        let explicit = parse(
+            json!({"type":"reasoning","summary":[],"id":"rs_e1","content":[{"type":"reasoning_text","text":""}]}),
+        );
+        let contentless = parse(json!({"type":"reasoning","summary":[]}));
+        assert_eq!(contentless, explicit);
+        assert_eq!(contentless.render().unwrap(), explicit.render().unwrap());
+    }
 
     #[test]
     fn k2_wire_json_preserves_containers_and_rejects_ambiguous_duplicate_keys() {

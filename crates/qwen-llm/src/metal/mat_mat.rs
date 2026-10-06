@@ -1580,6 +1580,113 @@ pub fn encode_mat_mat_mma8_variant(
     Ok(())
 }
 
+/// Simdgroups per threadgroup and 8-row tiles per threadgroup for the few-row
+/// Q8_0 kernel, following llama.cpp's `ggml_metal_op_mul_mat_mma_tiling`:
+/// fewer output rows get more simdgroups splitting K; the row tile is the
+/// widest that still leaves >= 128 threadgroups and fits 16 KiB of
+/// reduction memory. Only NSG 8/16/32 are instantiated.
+pub(crate) fn q8_0_fewrow_tiling(n_in: usize, n_out: usize) -> (usize, usize) {
+    let halve_to = |mut n: usize, limit: usize| {
+        while n > 1 && n > limit {
+            n /= 2;
+        }
+        n
+    };
+    let nsg = if n_out <= 64 {
+        32
+    } else if n_out <= 6144 {
+        16
+    } else {
+        8
+    };
+    let nsg = halve_to(nsg, n_in / 32).max(8);
+    let nt = halve_to(4, (16384 / (nsg * 256)).min(n_out / (128 * 8)));
+    (nt, nsg)
+}
+
+/// Few-row Q8_0 mat-mat for 1..=8 activation rows (x = [n_cols, n_in],
+/// y = [n_cols, n_out]), adapted from llama.cpp's few-row MMA kernel
+/// (`kernels/mat_mat_q8_0_fewrow.metal`). Each weight is read once for all
+/// rows; n_out and n_cols need no tile multiple.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_mat_q8_0_fewrow_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_cols: usize,
+) -> Result<(), MetalError> {
+    use objc2_metal::MTLComputePipelineState as _;
+    let bad = |detail: String| MetalError::BadShape {
+        kernel: "mat_mat_q8_0_fewrow",
+        detail,
+    };
+    if weight.dtype != GgmlType::Q8_0 || x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
+        return Err(bad(format!(
+            "dtypes weight/x/y = {:?}/{:?}/{:?}, expected Q8_0/F32/F32",
+            weight.dtype, x.dtype, y.dtype
+        )));
+    }
+    if n_in == 0 || !n_in.is_multiple_of(32) || n_out == 0 || !(1..=8).contains(&n_cols) {
+        return Err(bad(format!(
+            "n_in={n_in} (multiple of 32), n_out={n_out} (> 0), n_cols={n_cols} (1..=8)"
+        )));
+    }
+    if weight.n_elements() as usize != n_in * n_out
+        || x.n_elements() as usize != n_cols * n_in
+        || y.n_elements() as usize != n_cols * n_out
+    {
+        return Err(bad(format!(
+            "elements weight/x/y = {}/{}/{} for n_in={n_in} n_out={n_out} n_cols={n_cols}",
+            weight.n_elements(),
+            x.n_elements(),
+            y.n_elements()
+        )));
+    }
+    let (nt, mut nsg) = q8_0_fewrow_tiling(n_in, n_out);
+    let mut pso = ctx.pipeline(&format!("kernel_mat_mat_q8_0_fewrow_nt{nt}_nsg{nsg}_f32"))?;
+    while nsg > 8 && pso.maxTotalThreadsPerThreadgroup() < 32 * nsg {
+        nsg /= 2;
+        pso = ctx.pipeline(&format!("kernel_mat_mat_q8_0_fewrow_nt{nt}_nsg{nsg}_f32"))?;
+    }
+    enc.set_pipeline(&pso);
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_cols: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_cols: n_cols as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(8 * nt),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32 * nsg,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn encode_ffn_fused_swiglu_q4_k_mma8_f32(
     ctx: &MetalContext,
@@ -2747,6 +2854,91 @@ pub fn encode_ffn_fused_swiglu_q4_K_mm_f32(
 mod tests {
     use super::*;
     use crate::metal::test_support::*;
+
+    #[test]
+    fn q8_0_fewrow_tiling_follows_upstream_rule() {
+        // (n_in, n_out) -> (nt, nsg) for the Qwen3.8-27B Q8_0 verify shapes.
+        assert_eq!(q8_0_fewrow_tiling(5120, 17408), (4, 8));
+        assert_eq!(q8_0_fewrow_tiling(17408, 5120), (4, 16));
+        assert_eq!(q8_0_fewrow_tiling(5120, 1024), (1, 16));
+        assert_eq!(q8_0_fewrow_tiling(5120, 248320), (4, 8));
+        assert_eq!(q8_0_fewrow_tiling(512, 9), (1, 16));
+        assert_eq!(q8_0_fewrow_tiling(64, 9), (1, 8));
+    }
+
+    #[test]
+    fn q8_0_fewrow_matches_cpu_reference_at_tile_edges() {
+        let ctx = match metal_test_context() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+        // (n_in, n_out, n_cols): odd n_out exercises clamped loads and
+        // masked stores; the shapes cover NSG 32/16/8 and NT 1/2/4.
+        for &(n_in, n_out, n_cols) in &[
+            (64usize, 9usize, 1usize),
+            (512, 9, 3),
+            (5120, 2048, 8),
+            (1024, 7000, 5),
+            (4096, 6144, 2),
+        ] {
+            let blocks = n_in / 32;
+            let mut weight_bytes = Vec::with_capacity(n_out * blocks * 34);
+            let mut weight_f64 = Vec::with_capacity(n_out * n_in);
+            for row in 0..n_out {
+                for block in 0..blocks {
+                    let d = half::f16::from_f32(0.002 * (1 + (row * 7 + block * 3) % 11) as f32);
+                    weight_bytes.extend_from_slice(&d.to_le_bytes());
+                    for i in 0..32 {
+                        let q = (((row * 131 + block * 17 + i * 29) % 255) as i32 - 127) as i8;
+                        weight_bytes.push(q as u8);
+                        weight_f64.push(f64::from(d.to_f32()) * f64::from(q));
+                    }
+                }
+            }
+            let x: Vec<f32> = (0..n_cols * n_in)
+                .map(|i| ((i * 37 + 11) % 97) as f32 * 0.01 - 0.48)
+                .collect();
+            let weight = offset_tensor(
+                &ctx,
+                32,
+                &weight_bytes,
+                6,
+                vec![n_in as u64, n_out as u64],
+                GgmlType::Q8_0,
+            );
+            let x_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x),
+                vec![(n_cols * n_in) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let y_t = MetalTensor::zeros_f32(&ctx, vec![(n_cols * n_out) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_mat_mat_q8_0_fewrow_f32(&ctx, enc, &weight, &x_t, &y_t, n_in, n_out, n_cols)
+            })
+            .unwrap();
+            let got = read_back_f32(&y_t.buffer, n_cols * n_out);
+            let mut max_err = 0.0f64;
+            let mut max_ref = 0.0f64;
+            for c in 0..n_cols {
+                for r in 0..n_out {
+                    let expected: f64 = (0..n_in)
+                        .map(|k| weight_f64[r * n_in + k] * f64::from(x[c * n_in + k]))
+                        .sum();
+                    max_err = max_err.max((f64::from(got[c * n_out + r]) - expected).abs());
+                    max_ref = max_ref.max(expected.abs());
+                }
+            }
+            eprintln!(
+                "[q8_0-fewrow] n_in={n_in} n_out={n_out} n_cols={n_cols} max_err={max_err:.3e} max_ref={max_ref:.3e}"
+            );
+            assert!(
+                max_err <= 1e-5 * max_ref.max(1.0),
+                "q8_0 fewrow n_in={n_in} n_out={n_out} n_cols={n_cols}: max_err {max_err} vs max_ref {max_ref}"
+            );
+        }
+    }
 
     #[test]
     fn iq2_xs_mat_vec_and_mat_mat_match_cpu_codec_with_offsets() {

@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-05 - Few-Row Q8_0 MMA (Ported From llama.cpp): DFlash2 Q8 Code 29.8 -> 38.3 tok/s
+
+Qwen3.8-27B Q8_0 + DFlash2 Q8_0, greedy, 256 tokens, M4 Max.
+- **Kernel:** `kernels/mat_mat_q8_0_fewrow.metal` adapts llama.cpp PR
+  #29869's few-row MMA for Q8_0. NSG simdgroups split K and reduce once.
+  Quants fill half A fragments from registers (sign flip, exact 1024 + q). The
+  block scale is applied in FP32 after the MMA, and the next block is
+  prefetched into registers. It uses upstream's tiling rule and handles any
+  n_out and 1..8 rows.
+- **Scope:** the small-N table routes Q8_0 at 2..8 rows to it only for
+  `encode_mat_mat_dispatch` callers. Explicit-policy callers (DeepSeek V4,
+  GLM5-Next) keep their own matrix lineage. Rollback:
+  `QWEN_MATMAT_Q8_FEWROW=0`.
+- **Correctness:** a GPU unit test matches an f64 CPU reference within
+  relative 2-5e-7 at tile-edge shapes (n_out 9 and 7000; 1, 2, 3, 5 and 8
+  rows; NSG 8/16/32; NT 1/2/4).
+- **Micro** (`matmat-smalln-micro`, production tensors rotated 8 per family):
+  target shapes 1.34-1.50x faster than `r1c1k128` (294-352 -> 420-472 GB/s);
+  drafter-class shapes 1.7-2.7x. Weighted 8-row matmul per verify fell from
+  85.6 to 60.8 ms. The exact-shape gate earlier predicted 23-27 ms.
+- **End to end** (census code prompt, A/B bracketed by two old-kernel runs):
+  29.8/31.1 -> **38.3 tok/s** with the calibrated guard. Fast mode (guard off)
+  reaches 44.1, against llama.cpp v0.6.0's 49-51 on the same model, drafter
+  and prompt. Verify dropped from 118-128 to 95.5 ms and draft from 15.6-17.1
+  to 11.4 ms. Short code 44.6, reasoning 54.1, 12K code 33.4, prose 17.2
+  (backoff). Every run was byte-identical to serial.
+- **Numerics improve:** against the serial shadow reference (1,530 rows), the
+  top1-top2 margin error fell from median 0.0012 to 0.0003; the near-tie max
+  is 0.0029 (from 0.0043-0.0065) and the error stays below 2.9% of the gap
+  (from <7%). Zero flips. The 0.1 guard therefore has more headroom.
+
 ## 2026-10-05 - GLM P6 Work Integrated Into Main (Rebase Onto `bffe76f9`)
 
 - **What:** `feat/glm53-p6` (29 commits) was rebased onto main `bffe76f9`

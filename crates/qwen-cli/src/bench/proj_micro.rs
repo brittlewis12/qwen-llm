@@ -601,7 +601,7 @@ pub(crate) fn run_matmat_smalln_micro(args: MatmatSmallnMicroArgs) -> Result<()>
                 "mma8_r4c1k64",
             ],
             // v0.77: Q5_K/Q8_0 mma8v variants exist now (no nc kernels).
-            GgmlType::Q5_K | GgmlType::Q8_0 => vec![
+            GgmlType::Q5_K => vec![
                 "table",
                 "generic",
                 "seq8",
@@ -610,6 +610,17 @@ pub(crate) fn run_matmat_smalln_micro(args: MatmatSmallnMicroArgs) -> Result<()>
                 "mma8_r1c1k64_sg2",
                 "mma8_r2c1k128",
                 "mma8_r4c1k64",
+            ],
+            GgmlType::Q8_0 => vec![
+                "table",
+                "generic",
+                "seq8",
+                "mma8_r2c1k64",
+                "mma8_r1c1k128",
+                "mma8_r1c1k64_sg2",
+                "mma8_r2c1k128",
+                "mma8_r4c1k64",
+                "q8_fewrow",
             ],
             _ => vec!["table", "seq8"],
         };
@@ -644,6 +655,9 @@ pub(crate) fn run_matmat_smalln_micro(args: MatmatSmallnMicroArgs) -> Result<()>
                             }
                         }
                         "nc8" => qwen_llm::metal::encode_mat_vec_nc_dispatch(
+                            &ctx, enc, w, &x, &y, n_in, n_out, N_COLS,
+                        )?,
+                        "q8_fewrow" => qwen_llm::metal::encode_mat_mat_q8_0_fewrow_f32(
                             &ctx, enc, w, &x, &y, n_in, n_out, N_COLS,
                         )?,
                         v => {

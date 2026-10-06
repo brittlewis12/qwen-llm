@@ -23,6 +23,13 @@ DwarfStar's kernels of the same names at that revision, with the same change.
 quantized matrix topology from llama.cpp's `kernel_mul_mm_id`, revision
 `6a32c29a746a2e44de463de647f9f6661eb5086b`.
 
+`kernel_mat_mat_q8_0_fewrow_f32` in `kernels/mat_mat_q8_0_fewrow.metal`
+adapts llama.cpp's few-row MMA kernel `kernel_mul_mv_mma_blk` with its Q8_0
+fragment builder and `ggml_metal_op_mul_mat_mma_tiling` rule
+(`ggml/src/ggml-metal/kernels/mul_mv_mma.metal`, PR #29869, revision
+`a3a1c4747fdc0dcad40b3946108b89375d9a7d0e`), without batch dimensions or the
+fused residual add.
+
 The adapted source portions are provided under the following terms:
 
 MIT License

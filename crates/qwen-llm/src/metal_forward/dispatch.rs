@@ -188,13 +188,15 @@ pub fn encode_mat_mat_dispatch(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MfError> {
-    encode_mat_mat_dispatch_with_policy(ctx, enc, weight, x, y, n_in, n_out, n_query, true)
+    encode_mat_mat_dispatch_routed(ctx, enc, weight, x, y, n_in, n_out, n_query, true, true)
 }
 
 /// Prompt GEMM dispatch with an explicit choice about the Qwen-tuned
 /// `n_query == 1` mat-vec shortcut. Families that pin a bitwise matrix
 /// lineage at N=1 (DeepSeek V4 packed prefill) pass `false` so a Qwen
-/// routing decision cannot change their arithmetic.
+/// routing decision cannot change their arithmetic. Explicit-policy callers
+/// (DeepSeek V4, GLM5-Next) also never take the Q8_0 few-row arm; it reaches
+/// only callers of [`encode_mat_mat_dispatch`].
 #[allow(clippy::too_many_arguments)]
 pub fn encode_mat_mat_dispatch_with_policy(
     ctx: &MetalContext,
@@ -206,6 +208,33 @@ pub fn encode_mat_mat_dispatch_with_policy(
     n_out: usize,
     n_query: usize,
     allow_n1_mat_vec: bool,
+) -> Result<(), MfError> {
+    encode_mat_mat_dispatch_routed(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        n_query,
+        allow_n1_mat_vec,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_mat_mat_dispatch_routed(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+    allow_n1_mat_vec: bool,
+    allow_q8_fewrow: bool,
 ) -> Result<(), MfError> {
     validate_f32_q8_mat_mat_addressing(weight.dtype, n_in, n_out, n_query)?;
     // v0.77: n_query == 1 is exactly the mat-vec contract (x = [n_in],
@@ -308,6 +337,22 @@ pub fn encode_mat_mat_dispatch_with_policy(
             //     out_proj dispatches in packed verify: ~-11 ms/pass)
             //   Q8_0 drafter shapes: -49% to -75% (DFlash 2 draft_block
             //     phases 2/3: ~-8 ms/draft)
+            // Few-row Q8_0 MMA (adapted from llama.cpp PR #29869): K split
+            // across simdgroups, register-filled fragments, any n_out, and
+            // 2..=8 rows, so N < 8 no longer falls to the generic tile.
+            // Production Q8_0 verify shapes run 1.34-1.50x faster than
+            // r1c1k128 (420-472 GB/s); the top1-top2 margin error against a
+            // serial reference fell from 0.0012 to 0.0003 median.
+            // Rollback: QWEN_MATMAT_Q8_FEWROW=0.
+            2..=8
+                if allow_q8_fewrow
+                    && weight.dtype == GgmlType::Q8_0
+                    && matmat_q8_fewrow_enabled() =>
+            {
+                return Ok(crate::metal::encode_mat_mat_q8_0_fewrow_f32(
+                    ctx, enc, weight, x, y, n_in, n_out, n_query,
+                )?);
+            }
             8 if matches!(weight.dtype, GgmlType::Q5_K | GgmlType::Q8_0)
                 && n_out.is_multiple_of(8) =>
             {

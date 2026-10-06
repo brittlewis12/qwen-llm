@@ -2866,6 +2866,47 @@ mod tests {
         assert_eq!(q8_0_fewrow_tiling(64, 9), (1, 8));
     }
 
+    /// Largest |got - expected| after checking lengths and that every output
+    /// is finite: a plain `f64::max` fold drops NaN operands, so an all-NaN
+    /// output would otherwise report zero error.
+    fn checked_max_abs_error(got: &[f32], expected: &[f64]) -> Result<f64, String> {
+        if got.len() != expected.len() {
+            return Err(format!(
+                "length {} vs expected {}",
+                got.len(),
+                expected.len()
+            ));
+        }
+        if let Some(i) = got.iter().position(|v| !v.is_finite()) {
+            return Err(format!("non-finite output {} at {i}", got[i]));
+        }
+        if let Some(i) = expected.iter().position(|v| !v.is_finite()) {
+            return Err(format!("non-finite reference {} at {i}", expected[i]));
+        }
+        Ok(got
+            .iter()
+            .zip(expected)
+            .map(|(g, e)| (f64::from(*g) - e).abs())
+            .fold(0.0, f64::max))
+    }
+
+    /// Negative controls for the comparison predicate: NaN, infinity and a
+    /// length mismatch are refused; a finite exact match reports zero.
+    #[test]
+    fn checked_max_abs_error_refuses_nonfinite_and_mismatched_outputs() {
+        let expected = [1.0f64, -2.0, 3.5];
+        assert_eq!(checked_max_abs_error(&[1.0, -2.0, 3.5], &expected), Ok(0.0));
+        assert!(checked_max_abs_error(&[f32::NAN; 3], &expected).is_err());
+        assert!(checked_max_abs_error(&[1.0, f32::NAN, 3.5], &expected).is_err());
+        assert!(checked_max_abs_error(&[1.0, f32::INFINITY, 3.5], &expected).is_err());
+        assert!(checked_max_abs_error(&[1.0, -2.0], &expected).is_err());
+        assert_eq!(
+            checked_max_abs_error(&[1.0, -2.5, 3.5], &expected),
+            Ok(0.5),
+            "a finite difference is measured"
+        );
+    }
+
     #[test]
     fn q8_0_fewrow_matches_cpu_reference_at_tile_edges() {
         let ctx = match metal_test_context() {
@@ -2919,17 +2960,18 @@ mod tests {
             })
             .unwrap();
             let got = read_back_f32(&y_t.buffer, n_cols * n_out);
-            let mut max_err = 0.0f64;
-            let mut max_ref = 0.0f64;
-            for c in 0..n_cols {
-                for r in 0..n_out {
-                    let expected: f64 = (0..n_in)
+            let expected: Vec<f64> = (0..n_cols)
+                .flat_map(|c| (0..n_out).map(move |r| (c, r)))
+                .map(|(c, r)| {
+                    (0..n_in)
                         .map(|k| weight_f64[r * n_in + k] * f64::from(x[c * n_in + k]))
-                        .sum();
-                    max_err = max_err.max((f64::from(got[c * n_out + r]) - expected).abs());
-                    max_ref = max_ref.max(expected.abs());
-                }
-            }
+                        .sum()
+                })
+                .collect();
+            let max_err = checked_max_abs_error(&got, &expected).unwrap_or_else(|e| {
+                panic!("q8_0 fewrow n_in={n_in} n_out={n_out} n_cols={n_cols}: {e}")
+            });
+            let max_ref = expected.iter().fold(0.0f64, |m, e| m.max(e.abs()));
             eprintln!(
                 "[q8_0-fewrow] n_in={n_in} n_out={n_out} n_cols={n_cols} max_err={max_err:.3e} max_ref={max_ref:.3e}"
             );

@@ -6,7 +6,7 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
-## 2026-10-06 - opencode Reasoning Replay (Map #13): Lost in the Client's Bundled Provider
+## 2026-10-06 - opencode Reasoning Replay (Map #13): Lost in the Client's Bundled Provider, Fixed in the Fork
 
 Packet `docs/bench/2026-10-06-opencode-reasoning-replay/`. CPU only: a
 scripted mock in serve's shapes, with opencode 0.1.0 isolated from the
@@ -26,8 +26,12 @@ calling session.
 - **Effect:** where a family keeps past reasoning (GLM-5.3 by default),
   each agent step re-renders the previous step with empty reasoning. Live
   reuse stops there, and conditioning differs from generation.
-- **Open:** a serve-side restore policy for the just-generated turn; a live
-  GLM-serve opencode session to size it.
+- **Fix (fork `8084ffaf7b`):** a bun patch backports the 2.x reasoning
+  case. With it, local and attached runs replay every past reasoning item
+  in order (`report-patched.json`). The new provider test fails on the
+  unpatched converter.
+- **Open:** landing on `fork-dev` and rebuilding the installed binary; a
+  live GLM-serve opencode session, unpatched vs patched.
 
 ## 2026-10-05 - GLM-5.3-Flash Native Tools (Map #11)
 

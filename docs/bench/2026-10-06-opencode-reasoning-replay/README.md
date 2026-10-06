@@ -129,17 +129,42 @@ serve accepts.
     restored at step k is missing again at step k+1.
 - **A:** document only.
 
+## Fix (opencode fork, 2026-10-06)
+
+opencode is a local fork, so the client is fixed at the source.
+- **Commit:** `8084ffaf7b` on branch `fix/open-responses-reasoning-replay`, in
+  worktree `~/code/opencode-reasoning-replay`.
+- **Change:** a bun patch (`patches/@ai-sdk%2Fopen-responses@1.0.35.patch`)
+  backports the 2.x converter's reasoning case. Pending assistant text is
+  flushed, then the reasoning part becomes `{type: "reasoning", summary:
+  [], content: [{type: "reasoning_text", text}]}` in part order, without
+  `content` when the text is empty. Text and tool calls are unchanged.
+- **Test:** a new provider test against a real local server fails on the
+  unpatched converter and passes with the patch. The package typecheck and
+  491 provider and session tests pass.
+
+Rerun with the patched binary (`report-patched.json`):
+
+| Mode | Reasoning items replayed |
+|---|---|
+| `local` | every past item, in order: 1, 2 and 3 at the three continuation requests |
+| `attached` | the same |
+| `attached-file-provider` | not applicable: still refused (AI SDK 6 provider) |
+| `attached-openai` | none (a separate provider, unchanged) |
+
 ## Status
 
-#13's question is answered, and the cause is located in the client: the
-omission is real in normal use, including within one agent loop.
+#13's question is answered and the client is fixed in the fork.
+Landing the fix on `fork-dev` and rebuilding the installed binary are
+still pending.
 
 Next:
-- Size the effect live: a fixed GLM-serve opencode session of three or
-  more steps, within a run and across runs. Record per step: reasoning
-  items sent, effective prompt tokens, reused and prefilled tokens, time to
-  first token and task wall time.
-- Then choose between C and the prompt-boundary checkpoint (they are
-  complementary).
+- **Live check:** a fixed GLM-serve opencode session of three or more
+  steps, within a run and across runs, unpatched vs patched. Record per
+  step: reasoning items sent, effective prompt tokens, reused and
+  prefilled tokens, time to first token and task wall time. Patched,
+  every step should extend the live session.
+- **Prompt-boundary checkpoint:** still useful for clients that drop or
+  edit the last turn, but no longer needed for opencode.
 - One session is a mechanism screen. It is not a quality or default-policy
   decision.

@@ -1,0 +1,373 @@
+{
+  "opencode": "0.1.0",
+  "modes": [
+    {
+      "mode": "local",
+      "npm": "@ai-sdk/open-responses",
+      "runs": [
+        {
+          "run": "first",
+          "exit": 0
+        },
+        {
+          "run": "continued",
+          "exit": 0
+        }
+      ],
+      "requests": [
+        {
+          "role": "title",
+          "sequence": [
+            "user",
+            "user"
+          ],
+          "reasoning": [],
+          "has_tools": false,
+          "store": null,
+          "include": null
+        },
+        {
+          "role": "user_turn",
+          "sequence": [
+            "user"
+          ],
+          "reasoning": [],
+          "has_tools": true,
+          "store": null,
+          "include": null
+        },
+        {
+          "role": "after_tool",
+          "sequence": [
+            "user",
+            "reasoning",
+            "function_call",
+            "function_call_output"
+          ],
+          "reasoning": [
+            {
+              "id": null,
+              "content": [
+                "R-call-2"
+              ],
+              "summary": []
+            }
+          ],
+          "has_tools": true,
+          "store": null,
+          "include": null
+        },
+        {
+          "role": "user_turn",
+          "sequence": [
+            "user",
+            "reasoning",
+            "function_call",
+            "function_call_output",
+            "reasoning",
+            "assistant",
+            "user"
+          ],
+          "reasoning": [
+            {
+              "id": null,
+              "content": [
+                "R-call-2"
+              ],
+              "summary": []
+            },
+            {
+              "id": null,
+              "content": [
+                "R-answer-3"
+              ],
+              "summary": []
+            }
+          ],
+          "has_tools": true,
+          "store": null,
+          "include": null
+        },
+        {
+          "role": "after_tool",
+          "sequence": [
+            "user",
+            "reasoning",
+            "function_call",
+            "function_call_output",
+            "reasoning",
+            "assistant",
+            "user",
+            "reasoning",
+            "function_call",
+            "function_call_output"
+          ],
+          "reasoning": [
+            {
+              "id": null,
+              "content": [
+                "R-call-2"
+              ],
+              "summary": []
+            },
+            {
+              "id": null,
+              "content": [
+                "R-answer-3"
+              ],
+              "summary": []
+            },
+            {
+              "id": null,
+              "content": [
+                "R-call-4"
+              ],
+              "summary": []
+            }
+          ],
+          "has_tools": true,
+          "store": null,
+          "include": null
+        }
+      ]
+    },
+    {
+      "mode": "attached",
+      "npm": "@ai-sdk/open-responses",
+      "runs": [
+        {
+          "run": "first",
+          "exit": 0
+        },
+        {
+          "run": "continued",
+          "exit": 0
+        }
+      ],
+      "requests": [
+        {
+          "role": "title",
+          "sequence": [
+            "user",
+            "user"
+          ],
+          "reasoning": [],
+          "has_tools": false,
+          "store": null,
+          "include": null
+        },
+        {
+          "role": "user_turn",
+          "sequence": [
+            "user"
+          ],
+          "reasoning": [],
+          "has_tools": true,
+          "store": null,
+          "include": null
+        },
+        {
+          "role": "after_tool",
+          "sequence": [
+            "user",
+            "reasoning",
+            "function_call",
+            "function_call_output"
+          ],
+          "reasoning": [
+            {
+              "id": null,
+              "content": [
+                "R-call-2"
+              ],
+              "summary": []
+            }
+          ],
+          "has_tools": true,
+          "store": null,
+          "include": null
+        },
+        {
+          "role": "user_turn",
+          "sequence": [
+            "user",
+            "reasoning",
+            "function_call",
+            "function_call_output",
+            "reasoning",
+            "assistant",
+            "user"
+          ],
+          "reasoning": [
+            {
+              "id": null,
+              "content": [
+                "R-call-2"
+              ],
+              "summary": []
+            },
+            {
+              "id": null,
+              "content": [
+                "R-answer-3"
+              ],
+              "summary": []
+            }
+          ],
+          "has_tools": true,
+          "store": null,
+          "include": null
+        },
+        {
+          "role": "after_tool",
+          "sequence": [
+            "user",
+            "reasoning",
+            "function_call",
+            "function_call_output",
+            "reasoning",
+            "assistant",
+            "user",
+            "reasoning",
+            "function_call",
+            "function_call_output"
+          ],
+          "reasoning": [
+            {
+              "id": null,
+              "content": [
+                "R-call-2"
+              ],
+              "summary": []
+            },
+            {
+              "id": null,
+              "content": [
+                "R-answer-3"
+              ],
+              "summary": []
+            },
+            {
+              "id": null,
+              "content": [
+                "R-call-4"
+              ],
+              "summary": []
+            }
+          ],
+          "has_tools": true,
+          "store": null,
+          "include": null
+        }
+      ]
+    },
+    {
+      "mode": "attached-file-provider",
+      "npm": "file://~/.cache/opencode/node_modules/@ai-sdk/open-responses/dist/index.js",
+      "runs": [
+        {
+          "run": "first",
+          "exit": 1
+        },
+        {
+          "run": "continued",
+          "exit": 1
+        }
+      ],
+      "requests": []
+    },
+    {
+      "mode": "attached-openai",
+      "npm": "@ai-sdk/openai",
+      "runs": [
+        {
+          "run": "first",
+          "exit": 0
+        },
+        {
+          "run": "continued",
+          "exit": 0
+        }
+      ],
+      "requests": [
+        {
+          "role": "title",
+          "sequence": [
+            "system",
+            "user",
+            "user"
+          ],
+          "reasoning": [],
+          "has_tools": false,
+          "store": false,
+          "include": null
+        },
+        {
+          "role": "user_turn",
+          "sequence": [
+            "developer",
+            "user"
+          ],
+          "reasoning": [],
+          "has_tools": true,
+          "store": false,
+          "include": [
+            "reasoning.encrypted_content"
+          ]
+        },
+        {
+          "role": "after_tool",
+          "sequence": [
+            "developer",
+            "user",
+            "function_call",
+            "function_call_output"
+          ],
+          "reasoning": [],
+          "has_tools": true,
+          "store": false,
+          "include": [
+            "reasoning.encrypted_content"
+          ]
+        },
+        {
+          "role": "user_turn",
+          "sequence": [
+            "developer",
+            "user",
+            "function_call",
+            "function_call_output",
+            "assistant",
+            "user"
+          ],
+          "reasoning": [],
+          "has_tools": true,
+          "store": false,
+          "include": [
+            "reasoning.encrypted_content"
+          ]
+        },
+        {
+          "role": "after_tool",
+          "sequence": [
+            "developer",
+            "user",
+            "function_call",
+            "function_call_output",
+            "assistant",
+            "user",
+            "function_call",
+            "function_call_output"
+          ],
+          "reasoning": [],
+          "has_tools": true,
+          "store": false,
+          "include": [
+            "reasoning.encrypted_content"
+          ]
+        }
+      ]
+    }
+  ],
+  "opencode_build": "fork fix/open-responses-reasoning-replay 8084ffaf7b (patched @ai-sdk/open-responses 1.0.35)"
+}

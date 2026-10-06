@@ -100,22 +100,7 @@ fn value_type(value: &Value) -> &'static str {
 }
 
 pub(super) fn resolve_argument_ref(parameters: &Value, spec: &Value) -> Option<Value> {
-    let reference = spec["$ref"].as_str()?;
-    let key = reference
-        .strip_prefix("#/$defs/")
-        .or_else(|| reference.strip_prefix("#/definitions/"))?;
-    let defs = if parameters["$defs"].is_object() {
-        &parameters["$defs"]
-    } else {
-        &parameters["definitions"]
-    };
-    let mut merged = defs.get(key)?.as_object()?.clone();
-    for (key, value) in spec.as_object()? {
-        if key != "$ref" {
-            merged.insert(key.clone(), value.clone());
-        }
-    }
-    Some(Value::Object(merged))
+    crate::tool_schema::resolve_ref(parameters, spec)
 }
 
 pub(super) fn argument_type(

@@ -103,6 +103,7 @@ pub mod tensor;
 #[doc(hidden)]
 pub mod test_fixtures;
 pub mod tokenizer;
+pub mod tool_schema;
 pub mod trellis_ldlq;
 pub mod trellis_offline;
 pub mod workspace_lens;

@@ -78,6 +78,17 @@ impl LanePhases for Phase {
 
 type Timing = LaneTiming<Phase>;
 
+/// Forward-artifact preparation (binding, execution coverage, tokenizer)
+/// without generation policy: the library call the plain lens admits with
+/// (`qwen-lens`, `plain_logit_lens::glm5_next`), from which the capability
+/// projection derives lens support, so the two cannot disagree. Stop and chat
+/// requirements apply only to the lanes that generate.
+pub(crate) fn forward_admission(
+    gguf: &GgufFile,
+) -> std::result::Result<Glm5NextPreparedArtifact<'_>, Glm5NextAdmissionError> {
+    Glm5NextPreparedArtifact::inspect(gguf)
+}
+
 /// CPU preparation shared by run, info and bench: binding, execution
 /// coverage, tokenizer and stop set, with stable refusal codes.
 fn admission(
@@ -174,8 +185,15 @@ pub(crate) fn capability_projection(gguf: &GgufFile) -> Result<Value> {
         Err(error) => json!({"status": "unsupported", "implementation_status": "partial",
             "code": error.code(), "message": error.to_string()}),
     };
-    let lens = match &verdict {
-        Ok(_) => json!({"status": "partial", "command": "qwen-lens read-full --logit-lens",
+    // Lens support follows forward preparation only (generation stops are
+    // a generation-lane requirement): re-derived only when generation
+    // admission failed, since its success implies forward preparation's.
+    let forward = match &verdict {
+        Ok(_) => Ok(()),
+        Err(_) => forward_admission(gguf).map(|_| ()),
+    };
+    let lens = match &forward {
+        Ok(()) => json!({"status": "partial", "command": "qwen-lens read-full --logit-lens",
             "scope": "raw_plain_logit_lens_post_block_residual_streams",
             "output_tail": "native_four_stream_mean_rmsnorm_untied_head",
             "capacity_policy": "selected_position_plus_one_within_device_memory",

@@ -87,6 +87,8 @@ impl<'g> Prepared<'g> {
             !args.allow_unvalidated_transfer,
             "{FAMILY} plain observations do not accept --allow-unvalidated-transfer"
         );
+        // Forward preparation only (no generation stops): the same library
+        // call `qwen`'s capability projection derives lens support from.
         let artifact = Glm5NextPreparedArtifact::inspect(gguf)
             .with_context(|| format!("admit {FAMILY} artifact"))?;
         // The glm4 tokenizer inserts nothing; the flag only governs parsing.

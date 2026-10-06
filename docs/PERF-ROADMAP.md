@@ -64,20 +64,24 @@ whose eight residual items are merged here.
 | 8 | Flash-Next sparse execution (old #5) | 0.75-0.88x llama.cpp | 2048 + 3 + 2045 plan; +275 ms shoulder | its own three-command attribution (dense shoulder, selected command, remaining); GLM's split strategy may transfer, but its encoder is not a drop-in for Flash-Next's separate K/V and gated attention | ½ d; 2-5 d | Numerical |
 | 9 | DS4 short-prompt prefill (old #6) | 0.48x llama.cpp at pp512 (dated); fully wired ~40-token serve prefill 1.21-1.30 s (2026-10-05 pause screen). Subcase: GLM pp32 ~60 vs ~66 tok/s placement-matched, only ~49 ms per 32 tokens | CPU routing below the compact-route predicate (`deepseek_v4_metal/prefill.rs`) is a hypothesis; causality unproven. Serve's prefill timer excludes session construction and prompt capture | census one warm fresh ~40-token and one 512-token request with `QWEN_DSV4_PREFILL_TRACE` and the stage recorders (chunk lengths, route/expert policy, CPU routing, GPU stages, command gaps, active experts, tile occupancy; reconcile without double counting); a matched short-prompt llama.cpp control; force compact routing only if the census shows headroom (same route ids, weights, duplicates and order; no padding). GLM's short prefill shares the census format, not an assumed fix | census ½ d; fix 2-4 d | Numerical |
 | 10 | Muse prefill (old #8) | 0.85x; ~3.1 s per fresh 4K | chunking, projections, attention growth | early/late chunk attribution | ½ d | Numerical |
+| 11 | GLM-5.3 native tools (product; added 2026-10-05 after an out-of-band review: overdue, the only served family without tools; Qwen, DS4 (DSML), Muse (ATEM) and K2 have them) | GLM text chat, effort, partitioned output and HTTP work, but tool definitions and tool history are refused (`glm5_next_chat_tools`); agent workflows cannot use GLM | upstream template renders tools and tool history; GLM emits `<tool_call>` blocks with `<arg_key>`/`<arg_value>` pairs; the chat renderer is byte-exact on 48 jinja2 fixtures (`scripts/reference/generate_glm53_chat_fixtures.py`) | extend the fixture generator to tool cases (definitions, calls, tool results, multi-round), render them byte-exact, parse tool calls from output (streamed partition), then wire `qwen run --messages` and serve `/v1/responses` tools following the K2/DS4 serve patterns; refuse whatever is not covered | 2-4 d | Bitwise rendered prompt; parser exact on fixtures |
+| 12 | GLM serve Fast-lineage reuse qualification (added 2026-10-05, out-of-band review) | default-Fast warm/cold reuse is checked on answer content only; logit equality is checked in Exact mode (`serve/backend_glm5_next/tests.rs`) | Fast packed prefill differs arithmetically from serial by design, so bitwise or identical-prose requirements would be wrong | a small teacher-forced Fast comparison across reuse boundaries (cold vs warm continuation) under the existing KL/regret policy | ½ d | Numerical (KL/regret) |
 
 Order of execution (rank, by item ID):
 
 1. #4, bounded to 1-2 h.
-2. #9 census: DS4 short prefill, with the GLM short-prefill subcase in the
+2. #11 GLM native tools. Overdue, and ahead of further performance work.
+3. #12 GLM Fast reuse qualification.
+4. #9 census: DS4 short prefill, with the GLM short-prefill subcase in the
    same format.
-3. #2 experts limiter profile; select the implementation from measured
+5. #2 experts limiter profile; select the implementation from measured
    ceilings.
-4. #3(a) Qwen restart qualification, ahead of further speculative kernel
+6. #3(a) Qwen restart qualification, ahead of further speculative kernel
    rewrites.
-5. GLM short-prefill fix, if the census shows one.
-6. #8 attribution.
-7. #6 and #10.
-8. #3(b) Flash-Next codec.
+7. GLM short-prefill fix, if the census shows one.
+8. #8 attribution.
+9. #6 and #10.
+10. #3(b) Flash-Next codec.
 
 #7 proceeds with its existing owner. #1's open items and #5 v2 are tracked,
 not ranked.

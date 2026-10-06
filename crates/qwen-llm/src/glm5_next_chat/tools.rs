@@ -16,7 +16,9 @@
 //! function, and `strict: true` or `defer_loading` definitions are refused
 //! (neither can be honored), as are `parameters` schemas that generated
 //! arguments could not be typed by (unresolvable or malformed `$ref`,
-//! malformed `properties` or combinators; `tool_schema::check_strict_parameters`).
+//! malformed `properties`, `type`, `enum` or combinators, or more typing
+//! work than one definition's budget; `tool_schema::strict_parameter_kinds`).
+//! Each argument's outer types are computed once, then looked up.
 
 use super::*;
 use serde_json::{Map, Value};
@@ -68,6 +70,8 @@ pub fn valid_argument_key(key: &str) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolDefinition {
     function: Map<String, Value>,
+    /// Each argument's admitted outer types under `parameters`.
+    kinds: crate::tool_schema::ArgumentKinds,
 }
 
 impl ToolDefinition {
@@ -94,6 +98,7 @@ impl ToolDefinition {
             None => object,
         };
         let mut kept = Map::new();
+        let mut kinds = crate::tool_schema::ArgumentKinds::any();
         for (key, value) in function {
             match key.as_str() {
                 "name" => {
@@ -114,8 +119,10 @@ impl ToolDefinition {
                 }
                 // Generated arguments are typed by this schema; one that
                 // cannot type them is refused now, not after generation.
-                "parameters" => crate::tool_schema::check_strict_parameters(value)
-                    .map_err(|e| tools(format!("tool parameters: {e}")))?,
+                "parameters" => {
+                    kinds = crate::tool_schema::strict_parameter_kinds(value)
+                        .map_err(|e| tools(format!("tool parameters: {e}")))?;
+                }
                 "description" => {}
                 // The template drops `strict`; only `false` means what it shows.
                 "strict" if value == &Value::Bool(false) => continue,
@@ -138,7 +145,10 @@ impl ToolDefinition {
         if !kept.contains_key("name") {
             return Err(tools("a tool definition needs a name"));
         }
-        Ok(Self { function: kept })
+        Ok(Self {
+            function: kept,
+            kinds,
+        })
     }
 
     /// A definition from its parts, printed `name`, `description`,
@@ -170,6 +180,13 @@ impl ToolDefinition {
 
     pub fn description(&self) -> Option<&str> {
         self.function.get("description").and_then(Value::as_str)
+    }
+
+    /// The outer types `parameters` admits for argument `key`
+    /// ([`crate::tool_schema::strict_argument_kinds`], computed when the
+    /// definition was built).
+    pub fn argument_kinds(&self, key: &str) -> u8 {
+        self.kinds.of(key)
     }
 
     fn render(&self, out: &mut String) -> Result<()> {

@@ -258,19 +258,25 @@ pub fn argument_kinds(parameters: &Value, key: &str) -> Result<u8, String> {
 /// admitting anything would mistype a value: a `$ref` must resolve
 /// ([`ref_target`]) or the schema is refused, and a `$ref` with sibling
 /// keywords admits the intersection of the target's and the siblings'
-/// types (JSON Schema applies both), not an overlay.
+/// types (JSON Schema applies both), not an overlay. Malformed `type`,
+/// `enum` or combinators are refused rather than read as absent.
 pub fn strict_schema_kinds(spec: &Value, root: &Value) -> Result<u8, String> {
     strict_kinds(spec, root, &mut Walk::default())
 }
 
-/// Bound on schema objects one strict walk visits. Cycles are cut by the
-/// active-reference list, but shared targets reached along many paths
-/// (`allOf` members referencing one definition, nested) would otherwise
-/// expand exponentially within the depth limit.
-const WALK_VISITS: usize = 1 << 16;
+/// Bound on schema objects visited while typing one tool definition (all
+/// of its arguments together). Cycles are cut by the active-reference
+/// lists, but shared targets reached along many paths (`allOf` members
+/// referencing one definition, nested) would otherwise expand
+/// exponentially within the depth limit.
+const WALK_VISITS: usize = 1 << 18;
 
-/// State of one strict walk: the references being resolved (cycle and
-/// depth guard; an empty entry marks combinator nesting) and the visits.
+/// State of one strict typing pass: the references being resolved by the
+/// current walk (cycle and depth guard; an empty entry marks combinator
+/// nesting) and the visits, shared by every walk in the pass. The root
+/// walk and each property walk keep separate reference lists: a definition
+/// being expanded as the arguments object is not thereby a cycle when a
+/// property's own type refers to it (a recursive `Node.child: Node`).
 #[derive(Default)]
 struct Walk {
     active: Vec<String>,
@@ -294,6 +300,27 @@ impl Walk {
     fn resolving(&self, reference: &str) -> bool {
         self.active.iter().any(|v| v == reference)
     }
+
+    /// Run `walk` with a fresh reference list, sharing the visit budget.
+    fn separately<T>(&mut self, walk: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = std::mem::take(&mut self.active);
+        let result = walk(self);
+        self.active = outer;
+        result
+    }
+}
+
+/// `object[name]` as an array, refusing any other present value.
+fn array_keyword<'v>(
+    object: &'v serde_json::Map<String, Value>,
+    name: &str,
+    what: &str,
+) -> Result<Option<&'v Vec<Value>>, String> {
+    match object.get(name) {
+        None => Ok(None),
+        Some(Value::Array(items)) => Ok(Some(items)),
+        Some(_) => Err(format!("{what} {name} must be an array")),
+    }
 }
 
 fn strict_kinds(spec: &Value, root: &Value, walk: &mut Walk) -> Result<u8, String> {
@@ -304,35 +331,43 @@ fn strict_kinds(spec: &Value, root: &Value, walk: &mut Walk) -> Result<u8, Strin
     let Some(object) = spec.as_object() else {
         return Ok(ANY);
     };
+    let what = "tool argument schema";
     let mut mask = ANY;
     if let Some(reference) = object.get("$ref") {
         let reference = reference
             .as_str()
-            .ok_or_else(|| "tool argument schema $ref must be a string".to_owned())?;
-        let target = ref_target(root, reference).ok_or_else(|| {
-            format!("tool argument schema $ref {reference:?} is not a local definition")
-        })?;
+            .ok_or_else(|| format!("{what} $ref must be a string"))?;
+        let target = ref_target(root, reference)
+            .ok_or_else(|| format!("{what} $ref {reference:?} is not a local definition"))?;
         if !walk.resolving(reference) {
             walk.active.push(reference.into());
             mask &= strict_kinds(target, root, walk)?;
             walk.active.pop();
         }
     }
-    if let Some(name) = object.get("type").and_then(Value::as_str) {
-        mask &= type_name_kinds(name);
-    } else if let Some(types) = object.get("type").and_then(Value::as_array) {
-        mask &= types
-            .iter()
-            .fold(0, |m, v| m | v.as_str().map_or(ANY, type_name_kinds));
+    match object.get("type") {
+        None => {}
+        Some(Value::String(name)) => mask &= type_name_kinds(name),
+        Some(Value::Array(names)) => {
+            let mut kinds = 0;
+            for name in names {
+                let name = name
+                    .as_str()
+                    .ok_or_else(|| format!("{what} type entries must be strings"))?;
+                kinds |= type_name_kinds(name);
+            }
+            mask &= kinds;
+        }
+        Some(_) => return Err(format!("{what} type must be a string or an array")),
     }
-    if let Some(values) = object.get("enum").and_then(Value::as_array) {
+    if let Some(values) = array_keyword(object, "enum", what)? {
         mask &= values.iter().fold(0, |m, v| m | value_kind(v));
     }
     if let Some(value) = object.get("const") {
         mask &= value_kind(value);
     }
     for key in ["anyOf", "oneOf", "allOf"] {
-        if let Some(variants) = object.get(key).and_then(Value::as_array) {
+        if let Some(variants) = array_keyword(object, key, what)? {
             let mut combined = if key == "allOf" { ANY } else { 0 };
             for variant in variants {
                 walk.active.push(String::new());
@@ -377,14 +412,14 @@ fn object_argument_kinds(
     let Some(object) = schema.as_object() else {
         return Ok(ANY);
     };
+    let what = "tool parameters";
     let mut mask = ANY;
     if let Some(reference) = object.get("$ref") {
         let reference = reference
             .as_str()
-            .ok_or_else(|| "tool parameters $ref must be a string".to_owned())?;
-        let target = ref_target(root, reference).ok_or_else(|| {
-            format!("tool parameters $ref {reference:?} is not a local definition")
-        })?;
+            .ok_or_else(|| format!("{what} $ref must be a string"))?;
+        let target = ref_target(root, reference)
+            .ok_or_else(|| format!("{what} $ref {reference:?} is not a local definition"))?;
         if !walk.resolving(reference) {
             walk.active.push(reference.into());
             mask &= object_argument_kinds(target, root, key, walk)?;
@@ -395,20 +430,15 @@ fn object_argument_kinds(
         None => {}
         Some(Value::Object(properties)) => {
             if let Some(property) = properties.get(key) {
-                walk.active.push(String::new());
-                mask &= strict_kinds(property, root, walk)?;
-                walk.active.pop();
+                mask &= walk.separately(|walk| strict_kinds(property, root, walk))?;
             }
         }
-        Some(_) => return Err("tool parameters properties must be an object".into()),
+        Some(_) => return Err(format!("{what} properties must be an object")),
     }
     for combinator in ["allOf", "anyOf", "oneOf"] {
-        let Some(members) = object.get(combinator) else {
+        let Some(members) = array_keyword(object, combinator, what)? else {
             continue;
         };
-        let members = members
-            .as_array()
-            .ok_or_else(|| format!("tool parameters {combinator} must be an array"))?;
         let mut combined = if combinator == "allOf" { ANY } else { 0 };
         for member in members {
             walk.active.push(String::new());
@@ -425,66 +455,80 @@ fn object_argument_kinds(
     Ok(mask)
 }
 
-/// Bound on (distinct property names) x (object schemas in the root walk)
-/// that [`check_strict_parameters`] will type.
-const STRICT_CHECK_WORK: usize = 1 << 20;
+/// Every argument's outer types under one tool definition's `parameters`
+/// ([`strict_argument_kinds`]), computed once when the definition arrives:
+/// each name declared in any `properties` of the root walk, and one value
+/// for every undeclared name. All walks share one visit budget, so a
+/// definition's typing work is bounded as a whole.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArgumentKinds {
+    declared: std::collections::BTreeMap<String, u8>,
+    undeclared: u8,
+}
 
-/// Refuse, when a definition arrives, a `parameters` schema that
-/// [`strict_argument_kinds`] would refuse for some argument when the model
-/// calls the tool: every property name declared anywhere in the root walk,
-/// and an undeclared name, must type. A refusal then reaches the client
-/// before generation rather than as a failed call after it.
-pub fn check_strict_parameters(parameters: &Value) -> Result<(), String> {
+impl ArgumentKinds {
+    /// No schema: every argument admits anything.
+    pub fn any() -> Self {
+        Self {
+            declared: Default::default(),
+            undeclared: ANY,
+        }
+    }
+
+    pub fn of(&self, key: &str) -> u8 {
+        self.declared.get(key).copied().unwrap_or(self.undeclared)
+    }
+}
+
+/// [`ArgumentKinds`] for `parameters`, refusing a schema that could not
+/// type some argument, so the refusal reaches the client before generation
+/// rather than as a failed call after it.
+pub fn strict_parameter_kinds(parameters: &Value) -> Result<ArgumentKinds, String> {
+    let mut walk = Walk::default();
     let mut keys = std::collections::BTreeSet::new();
-    let mut schemas = 0usize;
     collect_property_keys(
         parameters,
         parameters,
         &mut Vec::new(),
         &mut keys,
-        &mut schemas,
-    );
-    if schemas > WALK_VISITS {
-        return Err(format!(
-            "tool parameters schema exceeds {WALK_VISITS} schema visits"
-        ));
-    }
-    if keys.len().saturating_mul(schemas) > STRICT_CHECK_WORK {
-        return Err(format!(
-            "tool parameters schema is too large to type arguments ({} names across {schemas} object schemas)",
-            keys.len()
-        ));
-    }
+        &mut walk,
+    )?;
     // A name no `properties` declares exercises every structural check.
-    strict_argument_kinds(parameters, "\u{0}undeclared")?;
+    let undeclared = object_argument_kinds(parameters, parameters, "\u{0}undeclared", &mut walk)?;
+    let mut declared = std::collections::BTreeMap::new();
     for key in keys {
-        strict_argument_kinds(parameters, key)?;
+        let kinds = object_argument_kinds(parameters, parameters, key, &mut walk)?;
+        declared.insert(key.to_owned(), kinds);
     }
-    Ok(())
+    Ok(ArgumentKinds {
+        declared,
+        undeclared,
+    })
 }
 
-/// Property names in the root walk of [`strict_argument_kinds`]; malformed
-/// or unresolvable parts are skipped here and reported by the typing pass.
+/// Property names in the root walk of [`strict_argument_kinds`] (counted
+/// against the pass's visits); malformed or unresolvable parts are skipped
+/// here and reported by the typing walks.
 fn collect_property_keys<'a>(
     schema: &'a Value,
     root: &'a Value,
     active: &mut Vec<&'a str>,
     keys: &mut std::collections::BTreeSet<&'a str>,
-    schemas: &mut usize,
-) {
+    walk: &mut Walk,
+) -> Result<(), String> {
     let Some(object) = schema.as_object() else {
-        return;
+        return Ok(());
     };
-    if active.len() >= 128 || *schemas > WALK_VISITS {
-        return;
+    if active.len() >= 128 {
+        return Ok(());
     }
-    *schemas += 1;
+    walk.visit()?;
     if let Some(reference) = object.get("$ref").and_then(Value::as_str)
         && !active.contains(&reference)
         && let Some(target) = ref_target(root, reference)
     {
         active.push(reference);
-        collect_property_keys(target, root, active, keys, schemas);
+        collect_property_keys(target, root, active, keys, walk)?;
         active.pop();
     }
     if let Some(Value::Object(properties)) = object.get("properties") {
@@ -494,11 +538,12 @@ fn collect_property_keys<'a>(
         if let Some(Value::Array(members)) = object.get(combinator) {
             for member in members {
                 active.push("");
-                collect_property_keys(member, root, active, keys, schemas);
+                collect_property_keys(member, root, active, keys, walk)?;
                 active.pop();
             }
         }
     }
+    Ok(())
 }
 
 /// Why [`decode_json_prefix`] stopped.
@@ -702,12 +747,13 @@ mod tests {
     /// must type, so a broken schema is refused before generation.
     #[test]
     fn parameters_are_checked_for_every_declared_property_up_front() {
-        assert!(
-            check_strict_parameters(&json!({"type": "object", "properties": {
+        let kinds = strict_parameter_kinds(&json!({"type": "object", "properties": {
             "a": {"type": "string"}, "b": {"$ref": "#/$defs/B"}},
             "$defs": {"B": {"type": "integer"}}}))
-            .is_ok()
-        );
+        .unwrap();
+        assert_eq!(kinds.of("a"), STRING);
+        assert_eq!(kinds.of("b"), INTEGER);
+        assert_eq!(kinds.of("undeclared"), ANY);
         for bad in [
             // A property's reference that is never resolvable.
             json!({"properties": {"a": {"$ref": "#/$defs/Gone"}}}),
@@ -719,9 +765,35 @@ mod tests {
             // Root structure.
             json!({"$ref": "#/$defs/Gone"}),
             json!({"properties": "a"}),
+            // Property-level keywords that are malformed, not absent.
+            json!({"properties": {"x": {"allOf": {}}}}),
+            json!({"properties": {"x": {"anyOf": "integer"}}}),
+            json!({"properties": {"x": {"type": 5}}}),
+            json!({"properties": {"x": {"type": ["integer", 5]}}}),
+            json!({"properties": {"x": {"enum": "a"}}}),
+            json!({"$ref": "#/$defs/A", "$defs": {"A": {"properties": {"x": {"oneOf": {}}}}}}),
         ] {
-            assert!(check_strict_parameters(&bad).is_err(), "{bad}");
+            assert!(strict_parameter_kinds(&bad).is_err(), "{bad}");
         }
+    }
+
+    /// A definition expanded as the arguments object is not a cycle when a
+    /// property's own type refers to it: `Node.child: Node` admits objects
+    /// only, so raw `abc` is never a string for it.
+    #[test]
+    fn a_recursive_property_keeps_its_type() {
+        let parameters = json!({"$ref": "#/$defs/Node", "$defs": {"Node": {
+            "type": "object",
+            "properties": {"child": {"$ref": "#/$defs/Node"}, "n": {"type": "integer"}}}}});
+        assert_eq!(strict_argument_kinds(&parameters, "child"), Ok(OBJECT));
+        let kinds = strict_parameter_kinds(&parameters).unwrap();
+        assert_eq!(kinds.of("child"), OBJECT);
+        assert_eq!(kinds.of("n"), INTEGER);
+        // Within one property walk, a true cycle still terminates.
+        let cycle = json!({"properties": {"x": {"$ref": "#/$defs/A"}}, "$defs": {
+            "A": {"$ref": "#/$defs/B", "type": ["integer", "string"]},
+            "B": {"$ref": "#/$defs/A", "type": "integer"}}});
+        assert_eq!(strict_argument_kinds(&cycle, "x"), Ok(INTEGER));
     }
 
     /// Shared targets reached along many paths would expand exponentially
@@ -743,7 +815,33 @@ mod tests {
         let started = std::time::Instant::now();
         let error = strict_argument_kinds(&parameters, "x").unwrap_err();
         assert!(error.contains("schema visits"), "{error}");
-        assert!(check_strict_parameters(&parameters).is_err());
+        assert!(strict_parameter_kinds(&parameters).is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    /// The budget covers a definition as a whole: many properties that each
+    /// stay under it alone, all referring to one branching definition, are
+    /// refused together rather than each granted a fresh budget.
+    #[test]
+    fn one_budget_covers_every_property_of_a_definition() {
+        let mut defs = serde_json::Map::new();
+        for level in 0..9 {
+            let next = format!("#/$defs/L{}", level + 1);
+            defs.insert(
+                format!("L{level}"),
+                json!({"allOf": [{"$ref": next}, {"$ref": next}]}),
+            );
+        }
+        defs.insert("L9".into(), json!({"type": "integer"}));
+        let properties: serde_json::Map<String, Value> = (0..2_000)
+            .map(|i| (format!("p{i}"), json!({"$ref": "#/$defs/L0"})))
+            .collect();
+        let parameters = json!({"properties": properties, "$defs": defs});
+        // One property alone is cheap (about 2^10 visits) and types.
+        assert_eq!(strict_argument_kinds(&parameters, "p0"), Ok(INTEGER));
+        let started = std::time::Instant::now();
+        let error = strict_parameter_kinds(&parameters).unwrap_err();
+        assert!(error.contains("schema visits"), "{error}");
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 

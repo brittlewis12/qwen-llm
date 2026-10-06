@@ -30,9 +30,7 @@
 
 use super::tools::{tools, valid_argument_key, valid_tool_name};
 use super::*;
-use crate::tool_schema::{
-    ANY, STRING, decode_json, python_json, strict_argument_kinds, value_kind,
-};
+use crate::tool_schema::{STRING, decode_json, python_json, value_kind};
 use serde_json::{Map, Value};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,10 +181,9 @@ fn parse_call<'t>(
 
 /// The argument value for `raw` under the declared schema (module rules).
 fn typed_argument(definition: &ToolDefinition, key: &str, raw: &str) -> Result<Value> {
-    let mask = match definition.parameters() {
-        Some(parameters) => strict_argument_kinds(parameters, key).map_err(tools)?,
-        None => ANY,
-    };
+    // Computed once when the definition was built (a schema that could not
+    // type every argument was refused then).
+    let mask = definition.argument_kinds(key);
     let decoded = decode_json(raw)
         .ok()
         .filter(|v| !v.is_string() && value_kind(v) & mask != 0 && python_json(v).is_ok());

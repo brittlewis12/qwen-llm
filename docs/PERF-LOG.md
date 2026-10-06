@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-05 - GLM P6 Work Integrated Into Main (Rebase Onto `bffe76f9`)
+
+- **What:** `feat/glm53-p6` (29 commits) was rebased onto main `bffe76f9`
+  and fast-forwarded into main.
+- **Conflict:** only `docs/PERF-LOG.md`, where both sides added entries at
+  the top. Both were kept; the P6 entries sit above the DFlash entries, in
+  integration order.
+- **Commit ids:** the 2026-10-05 packets and entries below cite pre-rebase
+  ids, which also appear as build stamps in their JSON records. The map is
+  `docs/bench/2026-10-05-glm53-p6-commit-map.md`.
+- **Verification on the rebased tree:**
+  - fmt clean;
+  - qwen-llm lib 1,228 passed; two Flash-Next tests first failed only on
+    another process's GPU lease, then passed with
+    `QWEN_METAL_LEASE_WAIT=1`;
+  - qwen-cli 772 passed.
+
 ## 2026-10-05 - GLM Bitwise Dispatch Fusion (KDA q/k/v, Shared SwiGLU): tg128 ~+2%; Routed-Expert Screen
 
 Leverage map (2026-10-05) #2. Packet

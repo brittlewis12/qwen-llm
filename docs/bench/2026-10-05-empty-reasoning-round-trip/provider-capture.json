@@ -1,0 +1,125 @@
+{
+  "fixture": "empty_reasoning_capture_v1",
+  "provider": "@ai-sdk/open-responses@2.0.29",
+  "module": "~/.cache/opencode/node_modules/@ai-sdk/open-responses/dist/index.js",
+  "captured_at": "2026-10-06T02:32:52.067Z",
+  "generate_reasoning_parts": [
+    {
+      "type": "reasoning",
+      "text": "",
+      "providerMetadata": {
+        "qwen-serve": {
+          "itemId": "rs_e1",
+          "reasoningSummary": [],
+          "reasoningContent": [
+            {
+              "type": "reasoning_text",
+              "text": ""
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "stream_reasoning_parts": [
+    {
+      "type": "reasoning-start",
+      "id": "rs_e1"
+    },
+    {
+      "type": "reasoning-end",
+      "id": "rs_e1",
+      "providerMetadata": {
+        "qwen-serve": {
+          "itemId": "rs_e1",
+          "reasoningSummary": [],
+          "reasoningContent": [
+            {
+              "type": "reasoning_text",
+              "text": ""
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "replay_with_metadata_input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Say hi."
+        }
+      ]
+    },
+    {
+      "type": "reasoning",
+      "summary": [],
+      "id": "rs_e1",
+      "content": [
+        {
+          "type": "reasoning_text",
+          "text": ""
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Hi."
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Again."
+        }
+      ]
+    }
+  ],
+  "replay_without_metadata_input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Say hi."
+        }
+      ]
+    },
+    {
+      "type": "reasoning",
+      "summary": []
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Hi."
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Again."
+        }
+      ]
+    }
+  ]
+}

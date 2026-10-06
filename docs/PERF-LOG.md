@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-05 - Empty Reasoning Round Trip (Map #4): Provider Exact, Serve 400 Fixed, Client Omits Reasoning
+
+Packet `docs/bench/2026-10-05-empty-reasoning-round-trip/`.
+- **Provider (`@ai-sdk/open-responses` 2.0.29, from opencode's cache):**
+  - Serve's empty reasoning item becomes a reasoning part with empty text
+    and `reasoningContent` metadata, both streamed and not.
+  - Replayed with that metadata, it returns exactly as emitted.
+  - Replayed without metadata, it becomes `{"type":"reasoning",
+    "summary":[]}`, which serve refused with a 400.
+- **Fix:** a reasoning item with neither `content` nor `encrypted_content`
+  is empty reasoning, in the shared parser and in both K2 parsers.
+  Encrypted reasoning stays refused. Tests use the captured shapes.
+- **Real client (opencode 0.1.0, `run --local` then `-c`, isolated
+  config):**
+  - It stores the empty reasoning part without metadata.
+  - It replays no reasoning item for the past turn, whether the reasoning
+    was empty or not.
+  - This conflicts with the 2026-09-26 agent-loop evidence and is tracked
+    as map #13.
+- **#4 is closed.**
+
 ## 2026-10-05 - Out-Of-Band Review Fixes: Residency Lifecycle, Validation Predicates, Lens Capability
 
 An external read-only review of main `77665c2d` found no architectural

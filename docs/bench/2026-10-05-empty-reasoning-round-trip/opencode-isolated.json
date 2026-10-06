@@ -1,0 +1,36 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "mockserve/mock-model",
+  "small_model": "mockserve/mock-model",
+  "provider": {
+    "mockserve": {
+      "npm": "@ai-sdk/open-responses",
+      "name": "mock serve",
+      "options": {
+        "url": "http://127.0.0.1:18737/v1/responses"
+      },
+      "models": {
+        "mock-model": {
+          "name": "mock",
+          "tool_call": true,
+          "reasoning": true,
+          "limit": {
+            "context": 32768,
+            "output": 1024
+          },
+          "reasoning_options": [
+            {
+              "type": "effort",
+              "values": [
+                "none",
+                "low",
+                "medium",
+                "xhigh"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}

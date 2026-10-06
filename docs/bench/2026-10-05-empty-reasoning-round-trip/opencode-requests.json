@@ -1,0 +1,322 @@
+{
+ "empty-ro": [
+  {
+   "stream": true,
+   "reasoning": null,
+   "input": [
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Generate a title for this conversation:\n"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Say hi."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stream": true,
+   "reasoning": null,
+   "input": [
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Say hi."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stream": true,
+   "reasoning": null,
+   "input": [
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Say hi."
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "Hi."
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Again."
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "nonempty-ro": [
+  {
+   "stream": true,
+   "reasoning": null,
+   "input": [
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Generate a title for this conversation:\n"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Say hi."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stream": true,
+   "reasoning": null,
+   "input": [
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Say hi."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stream": true,
+   "reasoning": null,
+   "input": [
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Say hi."
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "Hi."
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Again."
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "empty": [
+  {
+   "stream": true,
+   "reasoning": null,
+   "input": [
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Generate a title for this conversation:\n"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Say hi."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stream": true,
+   "reasoning": null,
+   "input": [
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Say hi."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stream": true,
+   "reasoning": null,
+   "input": [
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Say hi."
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "Hi."
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Again."
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "nonempty": [
+  {
+   "stream": true,
+   "reasoning": null,
+   "input": [
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Generate a title for this conversation:\n"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Say hi."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stream": true,
+   "reasoning": null,
+   "input": [
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Say hi."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stream": true,
+   "reasoning": null,
+   "input": [
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Say hi."
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "Hi."
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Again."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -44,9 +44,20 @@ def wired_gib():
     return round(pages * size / 2**30, 2)
 
 
-def get_models(addr):
-    with urllib.request.urlopen(f"http://{addr}/v1/models", timeout=30) as response:
-        response.read()
+def get_models(addr, deadline_s=300):
+    """List models. Serve is serial: while a request (or an aborted one that
+    is still unwinding) holds the owner, it answers 503, so retry until it is
+    free again."""
+    deadline = time.monotonic() + deadline_s
+    while True:
+        try:
+            with urllib.request.urlopen(f"http://{addr}/v1/models", timeout=30) as response:
+                response.read()
+                return
+        except urllib.error.HTTPError as error:
+            if error.code != 503 or time.monotonic() > deadline:
+                raise
+            time.sleep(0.5)
 
 
 def post(addr, model_id):

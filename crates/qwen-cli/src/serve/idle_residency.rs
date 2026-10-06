@@ -2,10 +2,9 @@
 //! weights between requests through ordinary command buffers
 //! (`metal::ResidencyKeepAlive`), so a request after a pause does not pay to
 //! re-wire them. Family-neutral scheduling; each backend names its eligible
-//! buffers (`retained_buffers()`). Every family whose serve weights are
-//! no-copy GGUF windows defaults to a 60 s window ([`DEFAULT_WINDOW`]);
-//! families whose weights are Metal-allocated copies are always wired and
-//! refuse the flag.
+//! buffers (`retained_buffers()`). Every family whose serve backend names its
+//! no-copy GGUF windows defaults to a 60 s window ([`DEFAULT_WINDOW`]); Qwen's
+//! backend does not yet and refuses the flag.
 //!
 //! Window: closed until the first activity (a warm-up, or the first request
 //! that ran the model, so a cold model is never faulted in by a pulse). It
@@ -14,9 +13,15 @@
 //! that never reached model execution (model lists, malformed or refused
 //! requests, disconnects) neither open nor renew it. Pulses stop once it
 //! lapses, so an idle server returns its weights to pageable memory.
-//! Pulsing is suspended while the host reports memory pressure (warning or
-//! critical) and stops for the server's lifetime on any pulse failure;
-//! requests are never affected.
+//! Pulsing stops for the server's lifetime on any pulse failure; requests are
+//! never affected.
+//!
+//! Pressure: a pulse is skipped while the host reports memory pressure of
+//! warning or worse; pulsing resumes on the next idle tick after it clears,
+//! within the original window (no cooldown), and a pulse already submitted
+//! is not cancelled. A host that cannot report pressure is treated as
+//! unpressured; that is logged once. This is suspension, not protection
+//! against re-pinning under oscillating pressure.
 
 use qwen_llm::metal::{
     Buffer, KeepAlivePulse, MetalContext, ResidencyKeepAlive, host_memory_pressure_level,
@@ -41,6 +46,8 @@ pub(crate) struct IdleResidency {
     last_activity: Option<Instant>,
     /// The current request reached model execution.
     executed: bool,
+    /// The unavailable-pressure-reading notice was logged.
+    pressure_unknown_logged: bool,
     last_pulse: Option<Instant>,
     suspended_for_pressure: bool,
 }
@@ -72,6 +79,7 @@ impl IdleResidency {
             keep_alive: None,
             last_activity: None,
             executed: false,
+            pressure_unknown_logged: false,
             last_pulse: None,
             suspended_for_pressure: false,
         }
@@ -114,7 +122,13 @@ impl IdleResidency {
     }
 
     /// Called from the owner loop's idle tick.
-    pub(crate) fn on_idle(&mut self, ctx: &MetalContext, buffers: &[&Buffer]) {
+    /// `buffers` is called only when a pulse is due, so a closed or
+    /// recently pulsed window costs no enumeration.
+    pub(crate) fn on_idle<'b>(
+        &mut self,
+        ctx: &MetalContext,
+        buffers: impl FnOnce() -> Vec<&'b Buffer>,
+    ) {
         if self.window.is_zero() {
             return;
         }
@@ -132,7 +146,16 @@ impl IdleResidency {
         {
             return;
         }
-        let pressured = host_memory_pressure_level().is_some_and(|level| level >= 2);
+        let level = host_memory_pressure_level();
+        if level.is_none() && !self.pressure_unknown_logged {
+            self.pressure_unknown_logged = true;
+            tracing::info!(
+                target: "qwen_diag",
+                "serve idle residency: family={} host memory pressure unavailable; pulsing without suspension",
+                self.family
+            );
+        }
+        let pressured = level.is_some_and(|level| level >= 2);
         if pressured != self.suspended_for_pressure {
             tracing::info!(
                 target: "qwen_diag",
@@ -155,7 +178,7 @@ impl IdleResidency {
             .keep_alive
             .as_mut()
             .expect("created above")
-            .pulse(ctx, buffers)
+            .pulse(ctx, &buffers())
         {
             Ok(KeepAlivePulse::Submitted) => self.last_pulse = Some(Instant::now()),
             Ok(KeepAlivePulse::StillInFlight) => {}

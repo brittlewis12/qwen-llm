@@ -54,6 +54,10 @@ impl RequestProfile {
     pub(crate) fn parse(&self, body: &Value) -> Result<ServeRequest, ServeError> {
         match self {
             Self::K2 { chat, .. } => render_k2::parse_with_profile(body, chat.as_deref()),
+            Self::Glm5Next { .. } => {
+                render_glm5_next::check_raw_tool_definitions(body)?;
+                super::items::parse_request(body)
+            }
             _ => super::items::parse_request(body),
         }
     }

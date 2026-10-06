@@ -170,8 +170,9 @@ impl GenerationBackend for FlashNextBackend {
 
     fn idle(&mut self) {
         super::log_expired_snapshots("qwen4exp", &self.cache.sweep());
-        let buffers = self.loaded.retained_buffers();
-        self.idle_residency.on_idle(&self.ctx, &buffers);
+        let loaded = &self.loaded;
+        self.idle_residency
+            .on_idle(&self.ctx, || loaded.retained_buffers());
     }
 
     fn request_finished(&mut self) {
@@ -211,11 +212,13 @@ impl GenerationBackend for FlashNextBackend {
             sink.transport_reserve_bytes(),
             self.ctx.memory_signals().process_limit_remaining_bytes,
         )?;
-        self.idle_residency.note_execution();
         let mut runner = self
             .loaded
             .create_runner(&self.ctx)
             .map_err(|error| ServeError::server_error(format!("bind {FAMILY} runner: {error}")))?;
+        // Idle residency follows weight use: admission and runner allocation
+        // above can refuse without any; restore and prefill below use them.
+        self.idle_residency.note_execution();
 
         let mut run = || -> Result<GenerationOutcome, BackendFailure> {
             let restore_t0 = Instant::now();

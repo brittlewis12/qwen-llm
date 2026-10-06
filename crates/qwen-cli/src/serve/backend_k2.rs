@@ -151,8 +151,9 @@ impl GenerationBackend for K2Backend<'_, '_> {
     }
     fn idle(&mut self) {
         if let Some(ctx) = self.ctx {
-            let buffers = self.model.retained_buffers();
-            self.idle_residency.on_idle(ctx, &buffers);
+            let model = self.model;
+            self.idle_residency
+                .on_idle(ctx, || model.retained_buffers());
         }
     }
     fn request_finished(&mut self) {
@@ -203,7 +204,6 @@ impl GenerationBackend for K2Backend<'_, '_> {
             qwen_llm::metal::MetalContext::process_limit_bytes_remaining(),
         )?;
         sink.tick().map_err(BackendFailure::Aborted)?;
-        self.idle_residency.note_execution();
         let prefill_t0 = std::time::Instant::now();
         // Taken before the session moves and republished only on success, so any
         // error or abort below leaves no history and the next request rewinds to
@@ -237,6 +237,8 @@ impl GenerationBackend for K2Backend<'_, '_> {
         let mut logits = Vec::new();
         for (index, span) in suffix.chunks(span_tokens).enumerate() {
             sink.tick().map_err(BackendFailure::Aborted)?;
+            // Idle residency follows weight use: the first span submits it.
+            self.idle_residency.note_execution();
             if index + 1 == spans {
                 logits = session
                     .append(span)

@@ -272,10 +272,11 @@ fn supports_serve_family(family: Option<ModelFamily>) -> bool {
     family.is_some_and(|family| profile(family).serve_backend)
 }
 
-/// Families whose serve weights are no-copy GGUF windows, so idle residency
-/// has buffers to keep wired. Qwen serve loads Metal-allocated copies by
-/// default (always wired, nothing to keep). Exhaustive on purpose: a new
-/// family must decide.
+/// Families whose serve backend names its no-copy weight buffers, so idle
+/// residency can keep them wired. Qwen's backend does not yet: its default
+/// weights are Metal-allocated copies (always wired), and the opt-in
+/// `QWEN_GGUF_NO_COPY` storage would need the hooks on both its request and
+/// native-inference paths. Exhaustive on purpose: a new family must decide.
 fn idle_residency_eligible(family: ModelFamily) -> bool {
     match family {
         ModelFamily::Glm5Next
@@ -379,7 +380,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     // Idle residency needs a backend whose weights are no-copy GGUF windows.
     ensure!(
         invocation.idle_residency_secs.unwrap_or(0) == 0 || idle_residency_eligible(family),
-        "--idle-residency-secs keeps no-copy weights wired; {} serve weights are Metal-allocated copies, which are always wired",
+        "--idle-residency-secs is not implemented for {} serve: its backend does not name its weight buffers (its default weights are Metal-allocated copies, which stay wired; QWEN_GGUF_NO_COPY storage is not yet covered)",
         family.architecture_name()
     );
     let idle_window = idle_residency::configured_window(

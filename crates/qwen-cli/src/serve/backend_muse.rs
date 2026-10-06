@@ -139,8 +139,9 @@ impl GenerationBackend for MuseGlimmerBackend {
     }
 
     fn idle(&mut self) {
-        let buffers = self.loaded.retained_buffers();
-        self.idle_residency.on_idle(&self.ctx, &buffers);
+        let loaded = &self.loaded;
+        self.idle_residency
+            .on_idle(&self.ctx, || loaded.retained_buffers());
     }
 
     fn request_finished(&mut self) {
@@ -188,7 +189,6 @@ impl GenerationBackend for MuseGlimmerBackend {
             self.ctx.memory_signals().process_limit_remaining_bytes,
         )?;
         let stop_tokens = [self.eos_token_id, self.eot_token_id];
-        self.idle_residency.note_execution();
         let prefill_t0 = Instant::now();
         // Taken before the session moves and republished only on success, so
         // any error or abort below leaves no history. A late HTTP write failure
@@ -209,6 +209,9 @@ impl GenerationBackend for MuseGlimmerBackend {
             .rewind_prefix(reused_tokens)
             .map_err(|error| ServeError::server_error(format!("rewind Muse session: {error}")))?;
         let mut checkpoint_abort: Option<io::Error> = None;
+        // Idle residency follows weight use: runner creation and rewind above
+        // submit no weight commands; prefill does.
+        self.idle_residency.note_execution();
         let logits = runner.prefill_with_command_checkpoint(&prompt_ids[reused_tokens..], || {
             sink.tick().map_err(|error| {
                 checkpoint_abort = Some(error);

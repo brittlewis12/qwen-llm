@@ -507,8 +507,8 @@ impl GenerationBackend for DeepSeekV4Backend {
         // The residency moves into a request's session and is restored after
         // it; between requests it is here.
         if let Some(residency) = &self.residency {
-            let buffers = residency.retained_buffers();
-            self.idle_residency.on_idle(&self.ctx, &buffers);
+            self.idle_residency
+                .on_idle(&self.ctx, || residency.retained_buffers());
         }
     }
 
@@ -582,7 +582,6 @@ impl GenerationBackend for DeepSeekV4Backend {
             self.ctx.memory_signals().process_limit_remaining_bytes,
         )?;
 
-        self.idle_residency.note_execution();
         let residency = self.residency.take().ok_or_else(|| {
             // Unreachable unless a prior request poisoned the slot; a server
             // that can never serve again must not pretend otherwise (k3 R1.5).
@@ -725,6 +724,8 @@ impl DeepSeekV4Backend {
         let chunk_count = ranges.len();
         for (index, range) in ranges.into_iter().enumerate() {
             sink.tick().map_err(BackendFailure::Aborted)?;
+            // Idle residency follows weight use: the first chunk submits it.
+            self.idle_residency.note_execution();
             let chunk = &suffix[range];
             let result = if index + 1 == chunk_count {
                 session.prefill_tokens(&self.ctx, chunk).map(|_| ())
@@ -738,6 +739,8 @@ impl DeepSeekV4Backend {
             }
         }
         let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
+        // A fully restored prompt still decodes over the weights.
+        self.idle_residency.note_execution();
 
         // Capture the prompt boundary for the next turn before decoding.
         let capture_t0 = Instant::now();

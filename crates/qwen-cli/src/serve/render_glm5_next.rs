@@ -96,7 +96,10 @@ pub(crate) fn normalize_request(
 
 /// The buffered tool block's bound: every output token at its longest
 /// decoded piece, times 3 for UTF-8 replacement expansion.
-fn tool_byte_budget(max_tokens: usize, max_piece_bytes: usize) -> Result<usize, ServeError> {
+pub(crate) fn tool_byte_budget(
+    max_tokens: usize,
+    max_piece_bytes: usize,
+) -> Result<usize, ServeError> {
     max_tokens
         .checked_mul(max_piece_bytes)
         .and_then(|n| n.checked_mul(3))
@@ -124,6 +127,48 @@ pub(crate) fn output_protocol(
         },
         _ => OutputProtocol::Glm5NextChat,
     }
+}
+
+/// GLM's template prints every key of a function object except `strict`
+/// and `defer_loading`, and hides deferred functions. The shared parser keeps
+/// only name, description, parameters and strict, so refuse anything it
+/// would drop before parsing: `defer_loading: true`, and any other key.
+pub(crate) fn check_raw_tool_definitions(body: &serde_json::Value) -> Result<(), ServeError> {
+    let Some(tools) = body.get("tools").and_then(serde_json::Value::as_array) else {
+        return Ok(());
+    };
+    for (index, tool) in tools.iter().enumerate() {
+        let Some(map) = tool.as_object() else {
+            continue;
+        };
+        for (key, value) in map {
+            match key.as_str() {
+                "type" | "name" | "description" | "parameters" | "strict" => {}
+                "defer_loading"
+                    if matches!(
+                        value,
+                        serde_json::Value::Null | serde_json::Value::Bool(false)
+                    ) => {}
+                "defer_loading" => {
+                    return Err(invalid(
+                        "tools",
+                        format!(
+                            "tool {index}: {FAMILY} cannot honor defer_loading (deferred functions are hidden from the model but callable)"
+                        ),
+                    ));
+                }
+                other => {
+                    return Err(invalid(
+                        "tools",
+                        format!(
+                            "tool {index}: {FAMILY} renders function objects verbatim and does not support key {other:?}"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The declared functions, in request order.
@@ -167,14 +212,15 @@ fn messages(request: &ServeRequest) -> Result<Vec<Message>, ServeError> {
                 let calls = calls
                     .iter()
                     .map(|call| {
-                        let arguments = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                        // Lossless: containers kept, duplicate keys refused.
+                        let arguments = qwen_llm::tool_schema::decode_json(&call.arguments)
                             .ok()
                             .and_then(|value| value.as_object().cloned())
                             .ok_or_else(|| {
                                 invalid(
                                     "input",
                                     format!(
-                                        "{FAMILY} function_call {:?} arguments must be a JSON object",
+                                        "{FAMILY} function_call {:?} arguments must be a JSON object without duplicate keys",
                                         call.call_id
                                     ),
                                 )
@@ -300,6 +346,13 @@ mod tests {
         };
         assert_eq!(definitions.len(), 1);
         assert_eq!(max_bytes, 8 * 64 * 3);
+        // Duplicate keys are refused, not collapsed.
+        let error = bound(json!({"model":"m","tools":[{"type":"function","name":"get_weather"}],
+            "input":[{"role":"user","content":"q"},
+                {"type":"function_call","call_id":"c1","name":"get_weather","arguments":"{\"a\":1,\"a\":2}"},
+                {"type":"function_call_output","call_id":"c1","output":"r"}]}))
+        .unwrap_err();
+        assert_eq!(error.status, 400, "{error:?}");
         // Arguments that are not a JSON object are refused before execution.
         let error = bound(
             json!({"model":"m","tools":[{"type":"function","name":"get_weather"}],
@@ -441,6 +494,14 @@ mod tests {
             ),
             (
                 json!({"model":"m","input":"q","tools":[{"type":"function","name":"f","strict":true,"parameters":{}}]}),
+                "tools",
+            ),
+            (
+                json!({"model":"m","input":"q","tools":[{"type":"function","name":"f","defer_loading":true}]}),
+                "tools",
+            ),
+            (
+                json!({"model":"m","input":"q","tools":[{"type":"function","name":"f","examples":[]}]}),
                 "tools",
             ),
             (

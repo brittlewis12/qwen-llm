@@ -236,14 +236,23 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
         let tokens = decode_loop::encode_checked(tokenizer, prompt, false, vocab_size, FAMILY)?;
         let required =
             decode_loop::required_forwards(FAMILY, tokens.len(), maximum, self.prepared.capacity)?;
-        let reserve = sink.transport_reserve_bytes();
+        let mut reserve = sink.transport_reserve_bytes();
+        if !request.model_request.tools.is_empty() {
+            // The tool block's worst case lives three times at the end of
+            // the turn: the buffered text, the parsed values and the
+            // serialized arguments.
+            let block = render::tool_byte_budget(maximum, self.prepared.max_piece_bytes)? as u64;
+            reserve = block
+                .checked_mul(3)
+                .and_then(|tools| reserve.checked_add(tools))
+                .ok_or_else(|| ServeError::server_error("tool output reservation overflow"))?;
+        }
         super::transport_memory::admit_resident_transport(
             reserve,
             MetalContext::process_limit_bytes_remaining(),
         )?;
         sink.tick().map_err(BackendFailure::Aborted)?;
 
-        self.idle_residency.note_execution();
         let prefill_t0 = Instant::now();
         // Taken before the session is used and republished only for a state
         // the session is known to hold, so a failure leaves no stale history.
@@ -261,12 +270,19 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
         let session = self.session.as_mut().expect("session present");
 
         let mut checkpoint_abort: Option<io::Error> = None;
+        let start = session.position();
         let logits = session.prefill_packed_with_checkpoint(ctx, &tokens[reused..], &mut || {
             sink.tick().map_err(|error| {
                 checkpoint_abort = Some(error);
                 "transport aborted during GLM-5.3 prefill".into()
             })
         });
+        // Idle residency follows weight use: a prefill that ran (or committed
+        // chunks before failing) used them; admission refusals and session
+        // allocation above did not.
+        if logits.is_ok() || session.position() > start {
+            self.idle_residency.note_execution();
+        }
         let logits = match logits {
             Ok(logits) => logits,
             Err(error) => {
@@ -344,8 +360,9 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
     }
 
     fn idle(&mut self) {
-        let buffers = self.weights.retained_buffers();
-        self.idle_residency.on_idle(self.ctx, &buffers);
+        let weights = self.weights;
+        self.idle_residency
+            .on_idle(self.ctx, || weights.retained_buffers());
     }
 
     fn request_finished(&mut self) {

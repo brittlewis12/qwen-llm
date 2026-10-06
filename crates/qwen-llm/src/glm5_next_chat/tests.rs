@@ -186,6 +186,10 @@ fn documents_refuse_anything_the_renderer_would_drop() {
             "glm5_next_chat_tools",
         ),
         (
+            r#"[{"role":"assistant","content":"","tool_calls":[{"id":"c","type":"function","function":{"name":"f","arguments":{"a":1,"a":2}}}]}]"#,
+            "glm5_next_chat_input",
+        ),
+        (
             r#"[{"role":"user","content":"x","reasoning_content":"r"}]"#,
             "glm5_next_chat_input",
         ),
@@ -227,6 +231,19 @@ fn documents_refuse_anything_the_renderer_would_drop() {
             "{document}"
         );
     }
+    // A literal "$serde_json::private::Number" key stays an object key.
+    let document = parse_document(
+        br#"{"tools":[{"name":"f"}],"messages":[{"role":"user","content":"q"},{"role":"assistant","content":"","tool_calls":[{"id":"c","name":"f","arguments":{"x":{"$serde_json::private::Number":"7"}}}]},{"role":"tool","tool_call_id":"c","content":"r"}]}"#,
+    )
+    .unwrap();
+    let Message::Assistant { calls, .. } = &document.messages[1] else {
+        panic!("assistant turn");
+    };
+    assert!(
+        calls[0].arguments["x"].is_object(),
+        "{:?}",
+        calls[0].arguments
+    );
     let document = parse_document(
         br#"{"messages":[{"role":"assistant"},{"role":"user","content":"q"}],"clear_thinking":true}"#,
     )

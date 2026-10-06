@@ -306,6 +306,29 @@ impl WireMessage {
 pub fn parse_document(bytes: &[u8]) -> Result<ChatDocument> {
     let wire: Wire = serde_json::from_slice(bytes)
         .map_err(|e| input(format!("invalid GLM chat message document: {e}")))?;
+    // Tool calls and definitions come from a lossless decode: serde's
+    // arbitrary-precision visitor would read a literal
+    // "$serde_json::private::Number" key as a number and collapse duplicate
+    // keys silently.
+    let lossless = std::str::from_utf8(bytes)
+        .map_err(|e| input(format!("invalid GLM chat message document: {e}")))
+        .and_then(|text| {
+            crate::tool_schema::decode_json(text)
+                .map_err(|e| input(format!("invalid GLM chat message document: {e}")))
+        })?;
+    let wire = match wire {
+        Wire::Array(mut messages) => {
+            restore_tool_calls(&mut messages, &lossless);
+            Wire::Array(messages)
+        }
+        Wire::Object(mut document) => {
+            restore_tool_calls(&mut document.messages, &lossless["messages"]);
+            if document.tools.is_some() {
+                document.tools = lossless.get("tools").cloned();
+            }
+            Wire::Object(document)
+        }
+    };
     let (messages, clear_thinking, definitions) = match wire {
         Wire::Array(messages) => (messages, None, Vec::new()),
         Wire::Object(document) => {
@@ -330,6 +353,18 @@ pub fn parse_document(bytes: &[u8]) -> Result<ChatDocument> {
         clear_thinking,
         tools: definitions,
     })
+}
+
+/// Replace serde-decoded `tool_calls` with the lossless decode's.
+fn restore_tool_calls(messages: &mut [WireMessage], lossless: &serde_json::Value) {
+    for (index, message) in messages.iter_mut().enumerate() {
+        if message.tool_calls.is_some() {
+            message.tool_calls = lossless
+                .get(index)
+                .and_then(|m| m.get("tool_calls"))
+                .cloned();
+        }
+    }
 }
 
 /// Python's `str.isspace`, which `str.strip()` uses: Unicode `White_Space`

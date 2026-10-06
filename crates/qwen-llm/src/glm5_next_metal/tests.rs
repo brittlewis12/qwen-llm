@@ -2672,21 +2672,27 @@ fn reuse_gate(
     positions: usize,
     cold: &[Vec<f32>],
     warm: &[Vec<f32>],
+    failures: &mut Vec<String>,
 ) -> (f64, f32, usize, bool) {
     const KL_BOUND: f64 = 2e-2;
     const REGRET_BOUND: f32 = 0.2;
     assert_eq!(cold.len(), positions, "{label}: cold position count");
     assert_eq!(warm.len(), positions, "{label}: warm position count");
     let (mut kl_worst, mut regret_worst, mut agree) = (0.0f64, 0.0f32, 0);
+    let mut table = Vec::new();
     for (position, (c, w)) in cold.iter().zip(warm).enumerate() {
         assert_finite(&format!("{label} cold {position}"), c);
         assert_finite(&format!("{label} warm {position}"), w);
-        let kl = kl_divergence(c, w).max(kl_divergence(w, c));
+        let (forward, reverse) = (kl_divergence(c, w), kl_divergence(w, c));
+        let kl = forward.max(reverse);
         let (r0, r1) = choice_regret(c, w);
-        assert!(
-            within(kl, KL_BOUND) && r0 <= REGRET_BOUND && r1 <= REGRET_BOUND,
-            "{label} position {position}: KL {kl:.3e} (bound {KL_BOUND:e}), regret {r0:.3}/{r1:.3} (bound {REGRET_BOUND})"
-        );
+        table.push(format!("{position}:{forward:.1e}/{reverse:.1e}"));
+        // Every violation is recorded; the test fails once, after all cases.
+        if !(within(kl, KL_BOUND) && r0 <= REGRET_BOUND && r1 <= REGRET_BOUND) {
+            failures.push(format!(
+                "{label} position {position}: KL {forward:.3e} cold||warm, {reverse:.3e} warm||cold (bound {KL_BOUND:e}), regret {r0:.3}/{r1:.3} (bound {REGRET_BOUND})"
+            ));
+        }
         kl_worst = kl_worst.max(kl);
         regret_worst = regret_worst.max(r0).max(r1);
         agree += usize::from(argmax(c) == argmax(w));
@@ -2697,7 +2703,34 @@ fn reuse_gate(
         cold.len(),
         cold.len()
     );
+    eprintln!(
+        "  KL cold||warm / warm||cold by position: {}",
+        table.join(" ")
+    );
     (kl_worst, regret_worst, agree, bitwise)
+}
+
+/// Diagnostic only (asserts nothing): how far `other` is from the Exact
+/// `reference` per position, in the Fast policy's own direction
+/// (reference||other), with top-1 flips and their regrets.
+fn reference_report(label: &str, reference: &[Vec<f32>], other: &[Vec<f32>]) {
+    let kls: Vec<f64> = reference
+        .iter()
+        .zip(other)
+        .map(|(r, o)| kl_divergence(r, o))
+        .collect();
+    let flips: Vec<(usize, (f32, f32))> = reference
+        .iter()
+        .zip(other)
+        .enumerate()
+        .map(|(position, (r, o))| (position, choice_regret(r, o)))
+        .filter(|(_, regret)| *regret != (0.0, 0.0))
+        .collect();
+    let (worst, at) = worst(kls.iter().copied());
+    eprintln!(
+        "  {label} vs Exact: worst KL {worst:.3e} at {at}, mean {:.3e}, top-1 flips (position, regret exact/other) {flips:?}",
+        kls.iter().sum::<f64>() / kls.len() as f64
+    );
 }
 
 /// Map #12: serve's default Fast packed lineage across live-session reuse.
@@ -2748,6 +2781,7 @@ fn fast_reuse_stays_within_the_fast_policy_across_reuse_boundaries() {
     let long = encode(&long_qualification_text());
     let continuation: Vec<u32> = long[3000..3000 + CONTINUATION].to_vec();
     let positions = CONTINUATION + 1;
+    let mut failures = Vec::new();
     // Serve's default lineage, selected explicitly rather than inherited.
     let fast_session = |capacity: usize| {
         let mut session =
@@ -2763,6 +2797,24 @@ fn fast_reuse_stays_within_the_fast_policy_across_reuse_boundaries() {
     // Cold: one Fast prefill of the whole prompt, then the continuation.
     let cold = |prompt: &[u32]| -> Vec<Vec<f32>> {
         let mut session = fast_session(prompt.len() + CONTINUATION + 1);
+        let mut logits = vec![session.prefill_packed(&ctx, prompt).unwrap()];
+        for &token in &continuation {
+            logits.push(session.forward(&ctx, token).unwrap());
+        }
+        logits
+    };
+    // Diagnostic reference: the same cold run in the Exact lineage (packed
+    // Exact matches serial), to tell which Fast run moved, not only that the
+    // two differ. Nothing is asserted on it.
+    let exact = |prompt: &[u32]| -> Vec<Vec<f32>> {
+        let mut session = Glm5NextSession::with_prefill_rows(
+            &ctx,
+            &weights,
+            prompt.len() + CONTINUATION + 1,
+            512,
+        )
+        .unwrap();
+        session.set_packed_lineage(PackedLineage::Exact);
         let mut logits = vec![session.prefill_packed(&ctx, prompt).unwrap()];
         for &token in &continuation {
             logits.push(session.forward(&ctx, token).unwrap());
@@ -2789,12 +2841,17 @@ fn fast_reuse_stays_within_the_fast_policy_across_reuse_boundaries() {
     // 1. Ordinary continuation.
     let (first, generated, suffix) = (&long[..700], &long[700..740], &long[740..1300]);
     let joined: Vec<u32> = [first, generated, suffix].concat();
+    let (cold_logits, warm_logits) = (cold(&joined), warm(first, generated, suffix));
     reuse_gate(
         "ordinary",
         positions,
-        &cold(&joined),
-        &warm(first, generated, suffix),
+        &cold_logits,
+        &warm_logits,
+        &mut failures,
     );
+    let reference = exact(&joined);
+    reference_report("ordinary cold", &reference, &cold_logits);
+    reference_report("ordinary warm", &reference, &warm_logits);
 
     // 2. Tool continuation through <|observation|>, crossing the frontier.
     let tool = ToolDefinition::from_value(&serde_json::json!({"name": "get_weather",
@@ -2880,12 +2937,20 @@ fn fast_reuse_stays_within_the_fast_policy_across_reuse_boundaries() {
         generated_tokens.len(),
         next.len()
     );
+    let (cold_logits, warm_logits) = (
+        cold(&next),
+        warm(&first_tokens, &generated_tokens, &next[consumed..]),
+    );
     reuse_gate(
         "tool loop across the frontier",
         positions,
-        &cold(&next),
-        &warm(&first_tokens, &generated_tokens, &next[consumed..]),
+        &cold_logits,
+        &warm_logits,
+        &mut failures,
     );
+    let reference = exact(&next);
+    reference_report("tool loop cold", &reference, &cold_logits);
+    reference_report("tool loop warm", &reference, &warm_logits);
 
     // 3. Cancellation at the second chunk boundary, then resume.
     let prompt = &long[..1300];
@@ -2908,9 +2973,15 @@ fn fast_reuse_stays_within_the_fast_policy_across_reuse_boundaries() {
     }
     // Resuming replays the uninterrupted chunk schedule (512 | 512 | 276),
     // so this case is held to bitwise equality, not only the numerical gate.
-    let (.., bitwise) = reuse_gate("cancel and resume", positions, &cold(prompt), &resumed);
-    assert!(
-        bitwise,
-        "a resumed prefill on the same schedule must be bitwise"
+    let (.., bitwise) = reuse_gate(
+        "cancel and resume",
+        positions,
+        &cold(prompt),
+        &resumed,
+        &mut failures,
     );
+    if !bitwise {
+        failures.push("cancel and resume: not bitwise on the same chunk schedule".into());
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

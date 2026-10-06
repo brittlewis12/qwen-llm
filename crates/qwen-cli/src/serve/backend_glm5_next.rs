@@ -236,17 +236,9 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
         let tokens = decode_loop::encode_checked(tokenizer, prompt, false, vocab_size, FAMILY)?;
         let required =
             decode_loop::required_forwards(FAMILY, tokens.len(), maximum, self.prepared.capacity)?;
-        let mut reserve = sink.transport_reserve_bytes();
-        if !request.model_request.tools.is_empty() {
-            // The tool block's worst case lives three times at the end of
-            // the turn: the buffered text, the parsed values and the
-            // serialized arguments.
-            let block = render::tool_byte_budget(maximum, self.prepared.max_piece_bytes)? as u64;
-            reserve = block
-                .checked_mul(3)
-                .and_then(|tools| reserve.checked_add(tools))
-                .ok_or_else(|| ServeError::server_error("tool output reservation overflow"))?;
-        }
+        // A tool block's memory is admitted as it grows (the tools partition),
+        // not reserved here at its rarely approached worst case.
+        let reserve = sink.transport_reserve_bytes();
         super::transport_memory::admit_resident_transport(
             reserve,
             MetalContext::process_limit_bytes_remaining(),

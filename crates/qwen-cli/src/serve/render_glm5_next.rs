@@ -364,6 +364,58 @@ mod tests {
         assert_eq!(error.status, 400, "{error:?}");
     }
 
+    /// Live-session reuse after a tool call is an exact prefix property: a
+    /// call the model wrote in `tojson`'s canonical form re-renders as the
+    /// same bytes, so the next prompt extends prompt + generated text; a
+    /// noncanonical but valid call (`["a","b"]`) is accepted, re-renders
+    /// canonically, and the next prompt does not extend it, so serve's exact
+    /// prefix check declines reuse and prefills fresh rather than diverge.
+    #[test]
+    fn tool_history_extends_only_canonical_generated_calls() {
+        use crate::serve::output_partition::{GenerationEnd, OutputPartition};
+        let tools = json!([{"type":"function","name":"tag",
+            "parameters":{"type":"object","properties":{"tags":{"type":"array"}}}}]);
+        let (request, prompt) =
+            bound(json!({"model":"m","input":"q","tools":tools,"reasoning":{"effort":"low"}}))
+                .unwrap();
+        for (generated_value, extends) in [(r#"["a", "b"]"#, true), (r#"["a","b"]"#, false)] {
+            let generated = format!(
+                "</think><tool_call>tag<arg_key>tags</arg_key><arg_value>{generated_value}</arg_value></tool_call>"
+            );
+            let mut partition = OutputPartition::new(PROFILE.output(&request));
+            let mut events = Vec::new();
+            partition.push(generated.as_bytes(), &mut events);
+            partition
+                .finish(GenerationEnd::StopToken(154_829), &mut events)
+                .unwrap();
+            let call = events
+                .iter()
+                .find_map(|e| match e {
+                    PartitionEvent::FunctionCall(call) => Some(call.clone()),
+                    _ => None,
+                })
+                .expect("a parsed call");
+            assert_eq!(
+                serde_json::Value::Object(call.arguments.clone()),
+                json!({"tags":["a","b"]})
+            );
+            let arguments = serde_json::to_string(&call.arguments).unwrap();
+            let (_, next) = bound(
+                json!({"model":"m","tools":tools,"reasoning":{"effort":"low"},
+                "input":[{"role":"user","content":"q"},
+                    {"type":"reasoning","content":""},
+                    {"type":"function_call","call_id":"c1","name":"tag","arguments":arguments},
+                    {"type":"function_call_output","call_id":"c1","output":"ok"}]}),
+            )
+            .unwrap();
+            assert_eq!(
+                next.starts_with(&format!("{prompt}{generated}")),
+                extends,
+                "{generated_value}: next prompt {next:?}"
+            );
+        }
+    }
+
     /// Generated output with a call: reasoning, visible text, then the call
     /// as a FunctionCall event with schema-typed arguments; a tool marker
     /// inside reasoning stays reasoning.

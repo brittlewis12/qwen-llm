@@ -225,6 +225,11 @@ impl ToolOutputStream {
         }
     }
 
+    /// Bytes currently held: the open tool block, or a held-back marker prefix.
+    pub fn buffered_bytes(&self) -> usize {
+        self.block.as_ref().map_or(self.pending.len(), String::len)
+    }
+
     /// Visible text to release now. Tool bytes never leave as text. Errors
     /// poison the stream.
     pub fn push_visible(&mut self, text: &str) -> Result<String> {

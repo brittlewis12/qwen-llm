@@ -89,6 +89,20 @@ pub(crate) fn forward_admission(
     Glm5NextPreparedArtifact::inspect(gguf)
 }
 
+/// Lens support follows forward preparation only (generation stops are a
+/// generation-lane requirement): re-derived when generation admission
+/// failed, since its success implies forward preparation's.
+fn lens_admission<E>(
+    generation_admitted: bool,
+    forward: impl FnOnce() -> std::result::Result<(), E>,
+) -> std::result::Result<(), E> {
+    if generation_admitted {
+        Ok(())
+    } else {
+        forward()
+    }
+}
+
 /// CPU preparation shared by run, info and bench: binding, execution
 /// coverage, tokenizer and stop set, with stable refusal codes.
 fn admission(
@@ -185,13 +199,7 @@ pub(crate) fn capability_projection(gguf: &GgufFile) -> Result<Value> {
         Err(error) => json!({"status": "unsupported", "implementation_status": "partial",
             "code": error.code(), "message": error.to_string()}),
     };
-    // Lens support follows forward preparation only (generation stops are
-    // a generation-lane requirement): re-derived only when generation
-    // admission failed, since its success implies forward preparation's.
-    let forward = match &verdict {
-        Ok(_) => Ok(()),
-        Err(_) => forward_admission(gguf).map(|_| ()),
-    };
+    let forward = lens_admission(verdict.is_ok(), || forward_admission(gguf).map(|_| ()));
     let lens = match &forward {
         Ok(()) => json!({"status": "partial", "command": "qwen-lens read-full --logit-lens",
             "scope": "raw_plain_logit_lens_post_block_residual_streams",
@@ -875,6 +883,19 @@ mod tests {
         };
         let (args, ..) = parse(&["qwen", "run", "-m", "m.gguf", "--raw-prompt", "x"]);
         assert_eq!(raw_input(invocation, &args).unwrap().0, "[gMASK]<sop>hi");
+    }
+
+    /// Lens support never inherits a generation-only refusal: a failed
+    /// generation admission (e.g. invalid stops) falls back to forward
+    /// preparation, which decides alone; a passed one implies it.
+    #[test]
+    fn lens_support_follows_forward_preparation_not_generation_stops() {
+        assert_eq!(lens_admission::<&str>(false, || Ok(())), Ok(()));
+        assert_eq!(lens_admission(false, || Err("binding")), Err("binding"));
+        assert_eq!(
+            lens_admission::<&str>(true, || panic!("forward preparation re-run")),
+            Ok(())
+        );
     }
 
     #[test]

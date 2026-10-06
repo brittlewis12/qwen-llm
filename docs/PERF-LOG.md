@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-05 - Out-Of-Band Review Fixes: Residency Lifecycle, Validation Predicates, Lens Capability
+
+An external read-only review of main `77665c2d` found no architectural
+issue and five bounded defects, all fixed:
+
+- **Idle residency renewal (#1 qualification, `ad5934f9`):** every admitted
+  connection completed through `request_finished`, so model-list polling,
+  malformed requests and disconnects opened or renewed the keep-alive
+  window. Now only a request that reached model execution (marked at each
+  backend's first GPU work) refreshes it.
+- **Few-row Q8_0 test (`b426663d`):** its `f64::max` error fold dropped NaN,
+  so an all-NaN output could pass. It now asserts length and finiteness,
+  with a negative control.
+- **Oracle cache (`3a621166`):** verified evidence was cached by path only.
+  The key now includes the expected length, SHA-256 and record count, with
+  valid-first, conflicting-second controls.
+- **Lens capability (`bb6ffc49`):** lens support now follows forward
+  preparation (the same `inspect` the plain lens calls), not generation
+  stops.
+- **GLM readout domain (`8d84abf7`):** a finite residual whose output-norm
+  F32 sum of squares overflows used to read out finite zero logits. It is
+  now refused by an accumulation-error bound, not a magnitude cutoff. The
+  live lens test still reads out bit for bit.
+
+The review's forward items: native GLM tool support, and a Fast-lineage
+teacher-forced warm/cold reuse check (KL/regret policy). Their priority
+against the leverage map is pending.
+
 ## 2026-10-05 - Leverage Map Re-Ranked After P6 (cx Session `01a10cc`)
 
 - **Status:**

@@ -187,8 +187,11 @@ ordinary keep-alive commands: 500 ms pulses that mark the weights used. It
 is not a residency set.
 
 - **Window.** It opens at the first activity: the warm-up (GLM) or the
-  first request (other families), so a pulse never faults in a cold model.
-  It reopens after every request.
+  first request that runs the model (other families), so a pulse never
+  faults in a cold model. It reopens when a request that ran the model
+  finishes, even if the request aborts after execution started. Model
+  lists, malformed or refused requests and disconnects never reach model
+  execution, so they neither open nor renew it.
 - **Default and bounds.** Default 60 s; 0 disables.
 - **Safety.**
   - Pulsing is suspended under host memory pressure.

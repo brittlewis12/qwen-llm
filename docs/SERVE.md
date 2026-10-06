@@ -767,7 +767,12 @@ request is not charged the weights' first GPU use (`serve startup:` logs
 
 Requests use the shared Open Responses parser; the pinned
 `glm53_flash_chat_v2` renderer (`crates/qwen-llm/src/glm5_next_chat.rs`)
-renders them:
+renders them. The body is decoded once, losslessly
+(`qwen_llm::tool_schema::decode_json`, as for K2): a literal
+`"$serde_json::private::Number"` key in a tool schema or replayed arguments
+stays an ordinary key (serde's arbitrary-precision `Value` would read it as a
+number), and a duplicate key anywhere is a 400 rather than silently
+collapsed. `qwen run --messages` documents decode the same way.
 
 - `input` string is one user message; items are system/developer (or
   `instructions`), user and assistant messages with `reasoning` items,

@@ -45,6 +45,20 @@ impl RequestProfile {
     pub(crate) fn decode(&self, body: &[u8]) -> Result<Value, ServeError> {
         match self {
             Self::K2 { .. } => render_k2::tools::decode_request_json(body),
+            // Tool schemas and replayed arguments reach GLM's renderer as
+            // sent: no key read as serde's internal number tag, duplicate
+            // keys refused rather than collapsed.
+            Self::Glm5Next { .. } => {
+                let text = std::str::from_utf8(body).map_err(|error| {
+                    ServeError::invalid_request(
+                        None,
+                        format!("request body is not UTF-8 JSON: {error}"),
+                    )
+                })?;
+                qwen_llm::tool_schema::decode_json(text).map_err(|error| {
+                    ServeError::invalid_request(None, format!("request body is not JSON: {error}"))
+                })
+            }
             _ => serde_json::from_slice(body).map_err(|error| {
                 ServeError::invalid_request(None, format!("request body is not JSON: {error}"))
             }),
@@ -56,7 +70,7 @@ impl RequestProfile {
             Self::K2 { chat, .. } => render_k2::parse_with_profile(body, chat.as_deref()),
             Self::Glm5Next { .. } => {
                 render_glm5_next::check_raw_tool_definitions(body)?;
-                super::items::parse_request(body)
+                super::items::parse_request_lossless(body)
             }
             _ => super::items::parse_request(body),
         }
@@ -213,5 +227,70 @@ mod tests {
     fn profiles_are_owned_cpu_metadata() {
         fn assert_owned<T: Send + Sync + 'static>() {}
         assert_owned::<RequestProfile>();
+    }
+
+    const GLM: RequestProfile = RequestProfile::Glm5Next {
+        default_max_tokens: 64,
+        capacity: 4096,
+        max_piece_bytes: 512,
+    };
+
+    /// A GLM request body decodes once, losslessly, from raw bytes: a
+    /// literal "$serde_json::private::Number" object (numeric or not, with
+    /// sibling keys) in a tool schema or a replayed call's arguments reaches
+    /// the rendered prompt as sent, and duplicate keys anywhere are a 400.
+    /// Other families keep serde decoding, where the replayed sentinel stays
+    /// a 400 (their renderers decode the same way).
+    #[test]
+    fn glm_bodies_decode_losslessly_from_raw_bytes() {
+        let body = |value: &str| {
+            let arguments = serde_json::to_string(&format!(r#"{{"x":{value}}}"#)).unwrap();
+            format!(
+                r#"{{"model":"m","tools":[{{"type":"function","name":"f","parameters":{{"type":"object","properties":{{"x":{{"type":"object","default":{value}}}}}}}}}],"input":[{{"role":"user","content":"q"}},{{"type":"function_call","call_id":"c","name":"f","arguments":{arguments}}},{{"type":"function_call_output","call_id":"c","output":"r"}}]}}"#
+            )
+        };
+        let sentinel = r#""$serde_json::private::Number""#;
+        for value in [
+            format!(r#"{{{sentinel}:"7"}}"#),
+            format!(r#"{{{sentinel}:"not-a-number"}}"#),
+            format!(r#"{{{sentinel}:"7","y":1}}"#),
+        ] {
+            let raw = body(&value);
+            let decoded = GLM.decode(raw.as_bytes()).unwrap();
+            let mut request = GLM
+                .parse(&decoded)
+                .unwrap_or_else(|e| panic!("{raw}: {e:?}"));
+            let expected = qwen_llm::tool_schema::decode_json(&value).unwrap();
+            assert_eq!(
+                request.model_request.tools[0].parameters["properties"]["x"]["default"],
+                expected
+            );
+            GLM.normalize(&mut request).unwrap();
+            let prompt = GLM.render(&request).unwrap();
+            // Python tojson's separators, with the literal key kept.
+            let printed = qwen_llm::tool_schema::python_json(&expected).unwrap();
+            assert!(printed.contains("$serde_json::private::Number"));
+            assert_eq!(prompt.matches(&printed).count(), 2, "{prompt}");
+        }
+        for duplicate in [
+            r#"{"model":"m","input":"q","input":"r"}"#.to_owned(),
+            body(r#"{"a":1,"a":2}"#),
+            r#"{"model":"m","input":"q","tools":[{"type":"function","name":"f","parameters":{"type":"object","type":"array"}}]}"#.to_owned(),
+        ] {
+            let error = GLM
+                .decode(duplicate.as_bytes())
+                .and_then(|decoded| GLM.parse(&decoded))
+                .unwrap_err();
+            assert_eq!(error.status, 400, "{duplicate}");
+        }
+        // Qwen keeps serde decoding; the sentinel in replayed arguments is
+        // refused there (fail closed), not mis-rendered.
+        let qwen = RequestProfile::UnboundQwen;
+        let raw = body(&format!(r#"{{{sentinel}:"not-a-number"}}"#));
+        let error = qwen
+            .decode(raw.as_bytes())
+            .and_then(|decoded| qwen.parse(&decoded))
+            .unwrap_err();
+        assert_eq!(error.status, 400);
     }
 }

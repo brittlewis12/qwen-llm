@@ -14,7 +14,7 @@
 
 use crate::gguf::GgufFile;
 use crate::tokenizer::NativeTokenizer;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 /// `zai-org/GLM-5.3-Flash` revision of the pinned template and generation config.
@@ -194,38 +194,50 @@ pub struct ChatDocument {
     pub tools: Vec<ToolDefinition>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+/// One message's fields, read from the lossless decode. Unknown fields are
+/// refused; a null field is absent.
 struct WireMessage {
     role: String,
-    #[serde(default)]
     content: Option<serde_json::Value>,
-    #[serde(default)]
     reasoning_content: Option<String>,
-    #[serde(default)]
     tool_calls: Option<serde_json::Value>,
-    #[serde(default)]
     tool_call_id: Option<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WireDocument {
-    messages: Vec<WireMessage>,
-    #[serde(default)]
-    clear_thinking: Option<bool>,
-    #[serde(default)]
-    tools: Option<serde_json::Value>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Wire {
-    Array(Vec<WireMessage>),
-    Object(WireDocument),
-}
-
 impl WireMessage {
+    fn from_value(value: serde_json::Value, index: usize) -> Result<Self> {
+        let serde_json::Value::Object(mut fields) = value else {
+            return Err(input(format!("message {index} must be an object")));
+        };
+        if let Some(key) = fields.keys().find(|key| {
+            !matches!(
+                key.as_str(),
+                "role" | "content" | "reasoning_content" | "tool_calls" | "tool_call_id"
+            )
+        }) {
+            return Err(input(format!("message {index}: unknown field {key:?}")));
+        }
+        let mut field = |name: &str| fields.remove(name).filter(|v| !v.is_null());
+        let string = |name: &str, value: Option<serde_json::Value>| match value {
+            None => Ok(None),
+            Some(serde_json::Value::String(text)) => Ok(Some(text)),
+            Some(_) => Err(input(format!("message {index}: {name} must be a string"))),
+        };
+        let role = string("role", field("role"))?
+            .ok_or_else(|| input(format!("message {index}: missing role")))?;
+        let content = field("content");
+        let reasoning_content = string("reasoning_content", field("reasoning_content"))?;
+        let tool_calls = field("tool_calls");
+        let tool_call_id = string("tool_call_id", field("tool_call_id"))?;
+        Ok(Self {
+            role,
+            content,
+            reasoning_content,
+            tool_calls,
+            tool_call_id,
+        })
+    }
+
     fn into_message(self, index: usize) -> Result<Message> {
         if self.tool_calls.is_some() && self.role != "assistant" {
             return Err(tools(format!(
@@ -304,68 +316,62 @@ impl WireMessage {
     }
 }
 
+/// A message array, or `{"messages", "clear_thinking"?, "tools"?}`.
+///
+/// One lossless decode ([`crate::tool_schema::decode_json`]) reads the whole
+/// document, so tool calls and definitions keep a literal
+/// `"$serde_json::private::Number"` key (serde's arbitrary-precision visitor
+/// would read it as a number, or fail on a non-numeric one) and duplicate
+/// keys anywhere are refused rather than collapsed.
 pub fn parse_document(bytes: &[u8]) -> Result<ChatDocument> {
-    let wire: Wire = serde_json::from_slice(bytes)
-        .map_err(|e| input(format!("invalid GLM chat message document: {e}")))?;
-    // Tool calls and definitions come from a lossless decode: serde's
-    // arbitrary-precision visitor would read a literal
-    // "$serde_json::private::Number" key as a number and collapse duplicate
-    // keys silently.
-    let lossless = std::str::from_utf8(bytes)
-        .map_err(|e| input(format!("invalid GLM chat message document: {e}")))
-        .and_then(|text| {
-            crate::tool_schema::decode_json(text)
-                .map_err(|e| input(format!("invalid GLM chat message document: {e}")))
-        })?;
-    let wire = match wire {
-        Wire::Array(mut messages) => {
-            restore_tool_calls(&mut messages, &lossless);
-            Wire::Array(messages)
-        }
-        Wire::Object(mut document) => {
-            restore_tool_calls(&mut document.messages, &lossless["messages"]);
-            if document.tools.is_some() {
-                document.tools = lossless.get("tools").cloned();
+    let invalid = |why: String| input(format!("invalid GLM chat message document: {why}"));
+    let text = std::str::from_utf8(bytes).map_err(|e| invalid(e.to_string()))?;
+    let document = crate::tool_schema::decode_json(text).map_err(invalid)?;
+    let (messages, clear_thinking, tools_field) = match document {
+        serde_json::Value::Array(messages) => (messages, None, None),
+        serde_json::Value::Object(mut fields) => {
+            if let Some(key) = fields
+                .keys()
+                .find(|key| !matches!(key.as_str(), "messages" | "clear_thinking" | "tools"))
+            {
+                return Err(invalid(format!("unknown field {key:?}")));
             }
-            Wire::Object(document)
+            let messages = match fields.remove("messages") {
+                Some(serde_json::Value::Array(messages)) => messages,
+                Some(_) => return Err(invalid("messages must be an array".into())),
+                None => return Err(invalid("missing field \"messages\"".into())),
+            };
+            let clear_thinking = match fields.remove("clear_thinking") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::Bool(flag)) => Some(flag),
+                Some(_) => return Err(invalid("clear_thinking must be a boolean".into())),
+            };
+            (messages, clear_thinking, fields.remove("tools"))
+        }
+        _ => {
+            return Err(invalid(
+                "expected a message array or a document object".into(),
+            ));
         }
     };
-    let (messages, clear_thinking, definitions) = match wire {
-        Wire::Array(messages) => (messages, None, Vec::new()),
-        Wire::Object(document) => {
-            let definitions = match document.tools {
-                None | Some(serde_json::Value::Null) => Vec::new(),
-                Some(serde_json::Value::Array(definitions)) => definitions
-                    .iter()
-                    .map(ToolDefinition::from_value)
-                    .collect::<Result<_>>()?,
-                Some(_) => return Err(tools("tools must be an array of tool definitions")),
-            };
-            (document.messages, document.clear_thinking, definitions)
-        }
+    let definitions = match tools_field {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(definitions)) => definitions
+            .iter()
+            .map(ToolDefinition::from_value)
+            .collect::<Result<_>>()?,
+        Some(_) => return Err(tools("tools must be an array of tool definitions")),
     };
     let messages = messages
         .into_iter()
         .enumerate()
-        .map(|(index, message)| message.into_message(index))
+        .map(|(index, message)| WireMessage::from_value(message, index)?.into_message(index))
         .collect::<Result<_>>()?;
     Ok(ChatDocument {
         messages,
         clear_thinking,
         tools: definitions,
     })
-}
-
-/// Replace serde-decoded `tool_calls` with the lossless decode's.
-fn restore_tool_calls(messages: &mut [WireMessage], lossless: &serde_json::Value) {
-    for (index, message) in messages.iter_mut().enumerate() {
-        if message.tool_calls.is_some() {
-            message.tool_calls = lossless
-                .get(index)
-                .and_then(|m| m.get("tool_calls"))
-                .cloned();
-        }
-    }
 }
 
 /// Python's `str.isspace`, which `str.strip()` uses: Unicode `White_Space`

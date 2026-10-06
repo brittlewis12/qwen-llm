@@ -244,6 +244,40 @@ fn documents_refuse_anything_the_renderer_would_drop() {
         "{:?}",
         calls[0].arguments
     );
+    // Raw bytes, decoded once losslessly: numeric and non-numeric sentinels,
+    // with or without sibling keys, stay literal objects in tool calls and in
+    // tool definitions; duplicate keys anywhere are refused.
+    let sentinel = r#""$serde_json::private::Number""#;
+    for value in [
+        format!(r#"{{{sentinel}:"7"}}"#),
+        format!(r#"{{{sentinel}:"not-a-number"}}"#),
+        format!(r#"{{{sentinel}:"7","y":1}}"#),
+        format!(r#"{{"y":1,{sentinel}:[]}}"#),
+    ] {
+        let raw = format!(
+            r#"{{"tools":[{{"name":"f","parameters":{{"type":"object","properties":{{"x":{{"type":"object","default":{value}}}}}}}}}],"messages":[{{"role":"user","content":"q"}},{{"role":"assistant","content":"","tool_calls":[{{"id":"c","name":"f","arguments":{{"x":{value}}}}}]}},{{"role":"tool","tool_call_id":"c","content":"r"}}]}}"#
+        );
+        let document = parse_document(raw.as_bytes()).unwrap_or_else(|e| panic!("{raw}: {e}"));
+        let expected = crate::tool_schema::decode_json(&value).unwrap();
+        assert!(expected.is_object());
+        let Message::Assistant { calls, .. } = &document.messages[1] else {
+            panic!("assistant turn");
+        };
+        assert_eq!(calls[0].arguments["x"], expected, "{raw}");
+        let parameters = document.tools[0].parameters().unwrap();
+        assert_eq!(parameters["properties"]["x"]["default"], expected, "{raw}");
+    }
+    for duplicate in [
+        r#"{"messages":[{"role":"user","content":"q"}],"messages":[]}"#,
+        r#"{"tools":[{"name":"f","parameters":{"type":"object","type":"array"}}],"messages":[{"role":"user","content":"q"}]}"#,
+        r#"{"tools":[{"name":"f"}],"messages":[{"role":"user","content":"q"},{"role":"assistant","content":"","tool_calls":[{"id":"c","name":"f","arguments":{"x":1,"x":2}}]},{"role":"tool","tool_call_id":"c","content":"r"}]}"#,
+    ] {
+        assert_eq!(
+            parse_document(duplicate.as_bytes()).unwrap_err().code(),
+            "glm5_next_chat_input",
+            "{duplicate}"
+        );
+    }
     let document = parse_document(
         br#"{"messages":[{"role":"assistant"},{"role":"user","content":"q"}],"clear_thinking":true}"#,
     )

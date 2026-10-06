@@ -385,6 +385,31 @@ fn f32_field(map: &serde_json::Map<String, Value>, key: &str) -> Result<Option<f
 }
 
 pub(crate) fn parse_request(body: &Value) -> Result<ServeRequest, ServeError> {
+    parse_request_with(body, ArgumentsDecoding::Serde)
+}
+
+/// How replayed `function_call.arguments` strings are checked to be JSON
+/// objects. Each family's renderer decodes them again the same way.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArgumentsDecoding {
+    /// serde's `Value` (objects keyed by its internal number tag are
+    /// refused; duplicate keys collapse): the renderers of the families that
+    /// use [`parse_request`] decode the same way.
+    Serde,
+    /// Lossless (`qwen_llm::tool_schema::decode_json`: literal keys kept,
+    /// duplicate keys refused), for families whose renderer decodes so.
+    Lossless,
+}
+
+/// [`parse_request`] with lossless argument decoding (GLM-5.3-Flash).
+pub(crate) fn parse_request_lossless(body: &Value) -> Result<ServeRequest, ServeError> {
+    parse_request_with(body, ArgumentsDecoding::Lossless)
+}
+
+fn parse_request_with(
+    body: &Value,
+    arguments: ArgumentsDecoding,
+) -> Result<ServeRequest, ServeError> {
     let map = body
         .as_object()
         .ok_or_else(|| ServeError::invalid_request(None, "request body must be a JSON object"))?;
@@ -642,7 +667,7 @@ pub(crate) fn parse_request(body: &Value) -> Result<ServeRequest, ServeError> {
     request.instructions = instructions.clone();
     let input = non_null(map, "input")
         .ok_or_else(|| ServeError::invalid_request(Some("input"), "input is required"))?;
-    validate_input(input, instructions, &mut request)?;
+    validate_input(input, instructions, &mut request, arguments)?;
     Ok(request)
 }
 
@@ -684,6 +709,7 @@ fn validate_input(
     input: &Value,
     instructions: Option<String>,
     request: &mut ServeRequest,
+    arguments: ArgumentsDecoding,
 ) -> Result<(), ServeError> {
     request.model_request.system = instructions;
     request.model_request.system_source = request
@@ -699,7 +725,7 @@ fn validate_input(
             request.model_request.turns.push(Turn::User(text.clone()));
             Ok(())
         }
-        Value::Array(items) => validate_items(items, request),
+        Value::Array(items) => validate_items(items, request, arguments),
         _ => Err(ServeError::invalid_request(
             Some("input"),
             "input must be a string or an item array",
@@ -707,7 +733,11 @@ fn validate_input(
     }
 }
 
-fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), ServeError> {
+fn validate_items(
+    items: &[Value],
+    request: &mut ServeRequest,
+    decoding: ArgumentsDecoding,
+) -> Result<(), ServeError> {
     if items.is_empty() {
         return Err(ServeError::invalid_request(Some("input"), "input is empty"));
     }
@@ -851,10 +881,17 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
                     ));
                 }
                 let arguments = required_str(item_map, "arguments", index)?;
-                if !matches!(
-                    serde_json::from_str::<Value>(&arguments),
-                    Ok(Value::Object(_))
-                ) {
+                let object = match decoding {
+                    ArgumentsDecoding::Serde => matches!(
+                        serde_json::from_str::<Value>(&arguments),
+                        Ok(Value::Object(_))
+                    ),
+                    ArgumentsDecoding::Lossless => matches!(
+                        qwen_llm::tool_schema::decode_json(&arguments),
+                        Ok(Value::Object(_))
+                    ),
+                };
+                if !object {
                     return Err(ServeError::invalid_request(
                         Some("input"),
                         format!(

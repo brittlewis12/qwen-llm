@@ -110,17 +110,26 @@ def post_and_abort(addr, model_id):
         body=body,
         headers={"Content-Type": "application/json"},
     )
+    # Serve answers `Connection: close`, so getresponse() detaches the
+    # socket from the connection: keep it to shut it down ourselves.
+    sock = connection.sock
     response = connection.getresponse()
     seen = None
-    while True:
-        line = response.fp.readline()
-        if not line:
-            break
-        if line.startswith(b"event: ") and b"delta" in line:
-            seen = line.decode().strip()
-            break
-    connection.sock.shutdown(socket.SHUT_RDWR)
-    connection.close()
+    try:
+        while True:
+            line = response.fp.readline()
+            if not line:
+                break
+            if line.startswith(b"event: ") and b"delta" in line:
+                seen = line.decode().strip()
+                break
+    finally:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        response.close()
+        connection.close()
     return seen
 
 
@@ -190,11 +199,17 @@ def main():
     def phase(label, action):
         mark = len(log.read_text(errors="replace"))
         if action is not None:
-            outcomes[label] = action()
+            # A failed phase is recorded and the run continues, so the
+            # report always shows what each phase did.
+            try:
+                outcomes[label] = action()
+            except Exception as error:  # noqa: BLE001
+                outcomes[label] = {"error": repr(error)}
             samples.append({"phase": label, "t": 0, "wired_gib": wired_gib()})
         poll_phase(addr, span, f"{label}_then_polling", samples)
         phases[label] = finishes(log.read_text(errors="replace")[mark:])
 
+    failure = None
     try:
         deadline = time.monotonic() + 1800
         while "serve: listening on" not in log.read_text(errors="replace"):
@@ -209,6 +224,8 @@ def main():
         )
         phase("request", lambda: post(addr, model_id))
         phase("aborted_after_submission", lambda: post_and_abort(addr, model_id))
+    except (Exception, SystemExit) as error:  # noqa: BLE001
+        failure = repr(error)
     finally:
         if process.poll() is None:
             process.send_signal(signal.SIGINT)
@@ -233,14 +250,17 @@ def main():
         and 400 <= outcomes["refused"] < 500,
         "refused_never_renews": renewed("refused") == 0,
         "request_renews_once": renewed("request") == 1,
-        "abort_after_submission_renews_once": outcomes.get("aborted_after_submission")
-        is not None
+        "abort_after_submission_renews_once": isinstance(
+            outcomes.get("aborted_after_submission"), str
+        )
         and renewed("aborted_after_submission") == 1,
+        "completed": failure is None,
     }
     report = {
         "model": Path(args.model).name,
         "window_s": args.window,
         "outcomes": outcomes,
+        "failure": failure,
         "verdicts": verdicts,
         "passed": all(verdicts.values()),
         "finishes": {

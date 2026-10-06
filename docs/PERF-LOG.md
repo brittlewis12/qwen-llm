@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-05 - GLM-5.3-Flash Native Tools (Map #11)
+
+Packet `docs/bench/2026-10-05-glm53-tools/`.
+- **Rendering (`871f93e8`):** the jinja oracle gains 29 tool cases:
+  definitions, calls with every `tojson` type, results reordered to call
+  order, loops with `clear_thinking`, and refusals. The renderer is
+  byte-exact on all 56 render cases, and native token ids equal HF's.
+  K2's `tojson` and schema-type masks moved to a family-neutral
+  `tool_schema` (`a4550d82`).
+- **Parsing (`c39e1728`):** a streaming `<tool_call>` parser. It holds
+  back markers, buffers the block within a byte budget, types arguments by
+  schema so re-rendering a parsed call reproduces its bytes, and treats a
+  malformed block as an error, never as text.
+- **Serve (`2c9285ff`) and `qwen run` (`f00e5230`):** tools, `function_call`
+  and `function_call_output` items, `function_call` output items; the run
+  lane prints a Responses object.
+- **Live:**
+  - the model emitted `get_weather {"city":"Paris","days":2}` through
+    serve (JSON and SSE) and `qwen run`;
+  - the replayed loop reused 218 of 236 tokens (401 ms vs 1.5 s cold
+    prefill), because `<|observation|>` ends the call turn the way
+    `<|user|>` ends a chat turn.
+
 ## 2026-10-05 - Empty Reasoning Round Trip (Map #4): Provider Exact, Serve 400 Fixed, Client Omits Reasoning
 
 Packet `docs/bench/2026-10-05-empty-reasoning-round-trip/`.

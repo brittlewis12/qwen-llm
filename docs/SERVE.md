@@ -728,7 +728,7 @@ three requested formats through CLI, HTTP JSON and SSE. They demonstrate product
 wiring, not universal tool reliability, schema compliance or answer quality.
 Reproduction: `scripts/reference/k2/README.md`.
 
-## GLM-5.3-Flash Verified Text Chat
+## GLM-5.3-Flash Verified Chat And Tools
 
 ```sh
 qwen serve -m GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf \
@@ -749,8 +749,9 @@ Requests use the shared Open Responses parser; the pinned
 renders them:
 
 - `input` string is one user message; items are system/developer (or
-  `instructions`), user and assistant messages with `reasoning` items, ending
-  in a user turn. Tools, function calls and results are refused (`tools`).
+  `instructions`), user and assistant messages with `reasoning` items,
+  `function_call` and `function_call_output` items, ending in a user turn or
+  tool results. Tools are below.
 - `reasoning.effort` is `low`, `high` or `max` (default `max`, the
   template's); anything else is a 400 on `reasoning.effort`, where the
   template would silently use Max. The template always opens reasoning:
@@ -769,6 +770,46 @@ Output partitions on the pre-opened reasoning: bytes are a `reasoning` item
 until the first `</think>`, then the `message`. Stops are `<|endoftext|>`,
 `<|user|>` and `<|observation|>`. Budget exhaustion inside reasoning is
 incomplete; a stop before `</think>` is a protocol failure.
+
+**Tools.** Function tools follow the template's own format; serve renders
+and parses it, and never runs a tool.
+
+- **Definitions.** They render in request order as one `<|system|>` tools
+  block of `{"name", "description", "parameters"}` objects (Python `tojson`).
+  `strict: true` is refused (no constrained decoding). `tool_choice` is
+  `auto` or `allowed_tools` (shared rules below).
+- **History.**
+  - A replayed `function_call` becomes its assistant turn's
+    `<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value>…</tool_call>`:
+    string values are written verbatim, others through `tojson`, and
+    `arguments` must be a JSON object.
+  - `function_call_output` items render under one `<|observation|>` as
+    `<tool_response>…</tool_response>`, in call order.
+  - Each call needs exactly one output before the next turn.
+  - Renders are byte-exact against the template oracle's tool cases
+    (`crates/qwen-llm/tests/fixtures/glm53_chat_hf.json`).
+- **Output.** After `</think>`, visible text is released until the first
+  `<tool_call>`. The block is buffered within `max_output_tokens` × the
+  longest decoded token × 3 bytes, and calls are published together as
+  `function_call` items when the turn stops (`<|observation|>`).
+  - Arguments are typed by the declared schema. A schema that admits no
+    string must decode as JSON of an admitted type. A schema that admits a
+    string keeps the text, unless it is exactly `tojson` of another
+    admitted type.
+  - Text after a call, an undeclared function, a repeated key or an
+    ill-typed value is a server error, never text.
+  - A block still open at the token limit is incomplete with no call.
+  - A tool marker inside reasoning stays reasoning.
+- **Live session.** A tool loop extends the live session: the model ends
+  the call turn by sampling `<|observation|>`, which opens the results.
+  Live, UD-IQ3_XXS, effort low
+  (`docs/bench/2026-10-05-glm53-tools/serve-tool-loop.json`):
+  - the first turn returned `get_weather {"city":"Paris","days":2}`;
+  - the replayed call and output reused 218 of 236 tokens (401 ms
+    prefill vs 1.5 s cold), and the answer used the output;
+  - JSON and SSE behaved alike.
+- **`qwen run --messages`.** A document with `tools` prints one Responses
+  JSON object, `function_call` items included, instead of streaming text.
 
 **Idle residency.** On by default (60 s; see
 [Idle residency](#idle-residency-no-copy-families)). Without it, a request

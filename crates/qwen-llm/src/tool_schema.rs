@@ -165,11 +165,24 @@ pub fn ref_target<'a>(parameters: &'a Value, reference: &str) -> Option<&'a Valu
     parameters.get(namespace)?.get(key.as_str())
 }
 
-/// A local `$ref` of `spec` ([`ref_target`]), merged with `spec`'s sibling
-/// keys (the overlay a template presents).
+/// K2 Horizon's template-presentation convention, which its renderer and
+/// argument typing share and which must not change without K2's own
+/// qualification: a `#/$defs/<k>` or `#/definitions/<k>` reference looks
+/// `<k>` up in `$defs` when that object exists, else in `definitions` (not by
+/// the reference's own namespace), with no pointer unescaping, merged with
+/// `spec`'s sibling keys (the overlay the template presents). GLM uses the
+/// namespace-correct [`ref_target`] instead.
 pub fn resolve_ref(parameters: &Value, spec: &Value) -> Option<Value> {
     let reference = spec["$ref"].as_str()?;
-    let mut merged = ref_target(parameters, reference)?.as_object()?.clone();
+    let key = reference
+        .strip_prefix("#/$defs/")
+        .or_else(|| reference.strip_prefix("#/definitions/"))?;
+    let defs = if parameters["$defs"].is_object() {
+        &parameters["$defs"]
+    } else {
+        &parameters["definitions"]
+    };
+    let mut merged = defs.get(key)?.as_object()?.clone();
     for (key, value) in spec.as_object()? {
         if key != "$ref" {
             merged.insert(key.clone(), value.clone());
@@ -515,10 +528,11 @@ mod tests {
         // Siblings intersect with the target (integer), not override it.
         assert_eq!(strict_argument_kinds(&parameters, "sib"), Ok(INTEGER));
         assert_eq!(strict_argument_kinds(&parameters, "missing"), Ok(ANY));
-        // The shared resolver now also picks the right namespace.
+        // K2's presentation convention is unchanged: `$defs` wins whenever it
+        // exists, matching what K2's renderer shows the model.
         assert_eq!(
             resolve_ref(&parameters, &json!({"$ref": "#/definitions/T"})),
-            Some(json!({"type": "string"}))
+            Some(json!({"type": "integer"}))
         );
     }
 

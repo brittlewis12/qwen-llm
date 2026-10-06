@@ -227,13 +227,21 @@ def main():
     except (Exception, SystemExit) as error:  # noqa: BLE001
         failure = repr(error)
     finally:
-        if process.poll() is None:
-            process.send_signal(signal.SIGINT)
-            try:
-                process.wait(timeout=120)
-            except subprocess.TimeoutExpired:
-                process.terminate()
-                process.wait(timeout=60)
+        # Never let a stuck shutdown skip the report.
+        try:
+            if process.poll() is None:
+                process.send_signal(signal.SIGINT)
+                try:
+                    process.wait(timeout=120)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=60)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=60)
+        except Exception as error:  # noqa: BLE001
+            failure = failure or f"shutdown: {error!r}"
     samples.append({"phase": "after_exit", "t": 0, "wired_gib": wired_gib()})
     def renewed(label):
         return sum(1 for f in phases.get(label, []) if f["window"] == "renewed")
@@ -255,6 +263,11 @@ def main():
         )
         and renewed("aborted_after_submission") == 1,
         "completed": failure is None,
+        # A phase that raised fails the run even if its log line looks right.
+        "no_phase_errors": not any(
+            isinstance(outcome, dict) and "error" in outcome
+            for outcome in outcomes.values()
+        ),
     }
     report = {
         "model": Path(args.model).name,

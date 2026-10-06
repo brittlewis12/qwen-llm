@@ -395,14 +395,16 @@ fn strict_kinds(spec: &Value, root: &Value, walk: &mut Walk) -> Result<u8, Strin
 /// schema admits anything. A non-string or unresolvable `$ref` anywhere in
 /// the walk refuses the schema; a reference cycle adds nothing further.
 pub fn strict_argument_kinds(parameters: &Value, key: &str) -> Result<u8, String> {
-    object_argument_kinds(parameters, parameters, key, &mut Walk::default())
+    object_argument_kinds(parameters, parameters, Some(key), &mut Walk::default())
 }
 
-/// [`strict_argument_kinds`] for one object schema in the root walk.
+/// [`strict_argument_kinds`] for one object schema in the root walk; `None`
+/// types a name that no `properties` declares (no string stands in for it,
+/// so it cannot collide with a declared name).
 fn object_argument_kinds(
     schema: &Value,
     root: &Value,
-    key: &str,
+    key: Option<&str>,
     walk: &mut Walk,
 ) -> Result<u8, String> {
     walk.visit()?;
@@ -429,7 +431,7 @@ fn object_argument_kinds(
     match object.get("properties") {
         None => {}
         Some(Value::Object(properties)) => {
-            if let Some(property) = properties.get(key) {
+            if let Some(property) = key.and_then(|key| properties.get(key)) {
                 mask &= walk.separately(|walk| strict_kinds(property, root, walk))?;
             }
         }
@@ -493,11 +495,11 @@ pub fn strict_parameter_kinds(parameters: &Value) -> Result<ArgumentKinds, Strin
         &mut keys,
         &mut walk,
     )?;
-    // A name no `properties` declares exercises every structural check.
-    let undeclared = object_argument_kinds(parameters, parameters, "\u{0}undeclared", &mut walk)?;
+    // Undeclared names: this walk also runs every structural check.
+    let undeclared = object_argument_kinds(parameters, parameters, None, &mut walk)?;
     let mut declared = std::collections::BTreeMap::new();
     for key in keys {
-        let kinds = object_argument_kinds(parameters, parameters, key, &mut walk)?;
+        let kinds = object_argument_kinds(parameters, parameters, Some(key), &mut walk)?;
         declared.insert(key.to_owned(), kinds);
     }
     Ok(ArgumentKinds {
@@ -754,6 +756,14 @@ mod tests {
         assert_eq!(kinds.of("a"), STRING);
         assert_eq!(kinds.of("b"), INTEGER);
         assert_eq!(kinds.of("undeclared"), ANY);
+        // No sentinel name stands in for undeclared arguments: declaring
+        // any name, however odd, constrains only that name.
+        for odd in ["\u{0}undeclared", "", "undeclared"] {
+            let kinds =
+                strict_parameter_kinds(&json!({"properties": {odd: {"type": "integer"}}})).unwrap();
+            assert_eq!(kinds.of(odd), INTEGER, "{odd:?}");
+            assert_eq!(kinds.of("other"), ANY, "{odd:?}");
+        }
         for bad in [
             // A property's reference that is never resolvable.
             json!({"properties": {"a": {"$ref": "#/$defs/Gone"}}}),

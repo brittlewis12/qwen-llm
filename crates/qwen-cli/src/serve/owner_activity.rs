@@ -105,6 +105,10 @@ impl OwnerActivity {
 
     /// [`Self::drain_finished`], telling the callback whether each
     /// completion ended in a server-side failure the owner did not see.
+    /// Counts are aggregate, so within one batch the failures come first
+    /// (not in completion order): any failure in a batch is conservative
+    /// for the whole batch (idle residency closes and the batch's
+    /// successes cannot reopen it).
     pub(super) fn drain_finished_with_failures(&mut self, mut callback: impl FnMut(bool)) {
         let (completed, failed) = {
             let mut state = self

@@ -362,6 +362,25 @@ mod tests {
         assert!(residency.is_open(), "a later success reopens it");
     }
 
+    /// A drained batch holding a failure and a success arrives failures
+    /// first (`drain_finished_with_failures`): the window closes and the
+    /// batch's success cannot reopen it.
+    #[test]
+    fn a_batch_with_any_failure_leaves_the_window_closed() {
+        let mut residency = IdleResidency::new("test", DEFAULT_WINDOW);
+        residency.encoders = fake_encoders;
+        residency.before_request();
+        submit();
+        residency.request_finished();
+        assert!(residency.is_open());
+        residency.before_request();
+        submit();
+        residency.request_failed_on_server();
+        residency.request_finished();
+        residency.request_finished();
+        assert!(!residency.is_open(), "a success in the batch reopened it");
+    }
+
     #[test]
     fn the_window_stays_closed_until_the_first_activity() {
         let mut residency = IdleResidency::new("test", DEFAULT_WINDOW);

@@ -262,19 +262,12 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
         let session = self.session.as_mut().expect("session present");
 
         let mut checkpoint_abort: Option<io::Error> = None;
-        let start = session.position();
         let logits = session.prefill_packed_with_checkpoint(ctx, &tokens[reused..], &mut || {
             sink.tick().map_err(|error| {
                 checkpoint_abort = Some(error);
                 "transport aborted during GLM-5.3 prefill".into()
             })
         });
-        // Idle residency follows weight use: a prefill that ran (or committed
-        // chunks before failing) used them; admission refusals and session
-        // allocation above did not.
-        if logits.is_ok() || session.position() > start {
-            self.idle_residency.note_execution();
-        }
         let logits = match logits {
             Ok(logits) => logits,
             Err(error) => {

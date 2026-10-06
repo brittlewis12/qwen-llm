@@ -474,8 +474,19 @@ pub fn kernel_trace_take_delta() -> KernelTraceCounters {
     })
 }
 
+/// Compute encoders begun by this process (every [`KernelEncoder`]
+/// constructor). Monotonic; callers compare snapshots, for example to tell
+/// whether a request submitted any GPU compute work.
+static COMPUTE_ENCODERS_BEGUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// See [`COMPUTE_ENCODERS_BEGUN`].
+pub fn compute_encoders_begun() -> u64 {
+    COMPUTE_ENCODERS_BEGUN.load(Ordering::Relaxed)
+}
+
 #[inline]
 fn kernel_trace_record_encoder(concurrent: bool) {
+    COMPUTE_ENCODERS_BEGUN.fetch_add(1, Ordering::Relaxed);
     census_record_encoder(concurrent);
     if KERNEL_TRACE_ACTIVE_THREADS.load(Ordering::Relaxed) == 0 {
         return;

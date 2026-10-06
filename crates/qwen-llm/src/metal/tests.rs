@@ -14,6 +14,36 @@ fn diagnostics_observers_return_to_inactive_state() {
     assert_eq!(diagnostics_observer_active_counts(), [0, 0, 0]);
 }
 
+/// Serve's idle residency renews only after a request that submitted compute
+/// work, measured by this counter: every compute encoder constructor counts
+/// (serial and concurrent), blit encoders do not.
+#[test]
+fn compute_encoder_counter_counts_every_compute_encoder_and_no_blit() {
+    let ctx = match metal_test_context() {
+        Some(ctx) => ctx,
+        None => return,
+    };
+    let cmd = ctx.queue.commandBuffer().expect("cmd buf");
+    let before = compute_encoders_begun();
+    KernelEncoder::begin(&cmd).end();
+    let after_serial = compute_encoders_begun();
+    assert!(after_serial > before, "a serial compute encoder");
+    KernelEncoder::begin_concurrent(&cmd).end();
+    assert!(compute_encoders_begun() > after_serial, "a concurrent one");
+    let blit_cmd = ctx.queue.commandBuffer().expect("cmd buf");
+    let before_blit = compute_encoders_begun();
+    BlitEncoder::begin(&blit_cmd).end();
+    // Tests may run in parallel; only this thread's blit is between the
+    // reads when single-threaded, so check the equality there.
+    if std::env::var("RUST_TEST_THREADS").as_deref() == Ok("1") {
+        assert_eq!(compute_encoders_begun(), before_blit, "a blit counted");
+    }
+    cmd.commit();
+    blit_cmd.commit();
+    wait_completed(&cmd).expect("compute command buffer");
+    wait_completed(&blit_cmd).expect("blit command buffer");
+}
+
 #[test]
 fn mxfp4_f32_matrix_tile_matches_scalar_envelope_and_guards() {
     let ctx = match metal_test_context() {

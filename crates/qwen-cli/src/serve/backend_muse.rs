@@ -209,9 +209,6 @@ impl GenerationBackend for MuseGlimmerBackend {
             .rewind_prefix(reused_tokens)
             .map_err(|error| ServeError::server_error(format!("rewind Muse session: {error}")))?;
         let mut checkpoint_abort: Option<io::Error> = None;
-        // Idle residency follows weight use: runner creation and rewind above
-        // submit no weight commands; prefill does.
-        self.idle_residency.note_execution();
         let logits = runner.prefill_with_command_checkpoint(&prompt_ids[reused_tokens..], || {
             sink.tick().map_err(|error| {
                 checkpoint_abort = Some(error);

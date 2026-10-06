@@ -2,14 +2,20 @@
 # requires-python = ">=3.11"
 # dependencies = []
 # ///
-"""Live idle-residency lifecycle check for `qwen serve`: non-inference traffic
-(`GET /v1/models` polling) must neither open nor renew the keep-alive
-window; a request that runs the model must. Uses a short window and samples
-wired memory (`vm_stat`) through phases:
+"""Live idle-residency lifecycle check for `qwen serve`: only a request that
+submitted GPU compute work opens or renews the keep-alive window.
+Non-inference traffic (`GET /v1/models` polling) and a request refused
+before submission must not; a completed request and one aborted by the
+client after submission must. The verdicts come from the server's own
+per-finish lines (`RUST_LOG=info,qwen_diag=debug`), with wired memory
+(`vm_stat`, host-wide and so noisy) sampled alongside. Phases, each
+followed by polling past a short window:
 
-  1. after startup (GLM's warm-up opens the window; families without a
-     warm-up start closed), then past the window while polling models;
-  2. one real request, then past the window while polling models.
+  1. startup (GLM's warm-up opens the window; families without a warm-up
+     start closed);
+  2. a prompt longer than the context (refused before any GPU work);
+  3. one real request;
+  4. a streamed request the client closes after its first output event.
 
 Starts and stops only the server it launched. Run detached.
 
@@ -18,12 +24,15 @@ Starts and stops only the server it launched. Run detached.
 """
 
 import argparse
+import http.client
 import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -59,6 +68,74 @@ def post(addr, model_id):
         return json.loads(response.read())["status"]
 
 
+def post_refused(addr, model_id, max_context_tokens):
+    """A prompt longer than the context: refused before any GPU work."""
+    body = json.dumps(
+        {
+            "model": model_id,
+            "input": "word " * (max_context_tokens + 512),
+            "max_output_tokens": 16,
+            "stream": False,
+        }
+    ).encode()
+    request = urllib.request.Request(
+        f"http://{addr}/v1/responses",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=600) as response:
+            return response.status
+    except urllib.error.HTTPError as error:
+        return error.code
+
+
+def post_and_abort(addr, model_id):
+    """Stream a request and close the connection after the first output
+    event: aborted after submission."""
+    host, port = addr.split(":")
+    body = json.dumps(
+        {
+            "model": model_id,
+            "input": "Count from one to two hundred in words.",
+            "max_output_tokens": 256,
+            "reasoning": {"effort": "low"},
+            "stream": True,
+        }
+    ).encode()
+    connection = http.client.HTTPConnection(host, int(port), timeout=600)
+    connection.request(
+        "POST",
+        "/v1/responses",
+        body=body,
+        headers={"Content-Type": "application/json"},
+    )
+    response = connection.getresponse()
+    seen = None
+    while True:
+        line = response.fp.readline()
+        if not line:
+            break
+        if line.startswith(b"event: ") and b"delta" in line:
+            seen = line.decode().strip()
+            break
+    connection.sock.shutdown(socket.SHUT_RDWR)
+    connection.close()
+    return seen
+
+
+FINISHED = re.compile(
+    r"serve idle residency: family=\S+ finished compute_encoders=(\S+) window=(\S+)"
+)
+
+
+def finishes(text):
+    return [
+        {"compute_encoders": encoders, "window": window}
+        for encoders, window in FINISHED.findall(text)
+    ]
+
+
 def poll_phase(addr, seconds, label, samples):
     start = time.monotonic()
     while time.monotonic() - start < seconds:
@@ -85,7 +162,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     log = out / "serve.log"
     addr = "127.0.0.1:8794"
-    env = dict(os.environ, QWEN_METAL_LEASE_WAIT="1", RUST_LOG="info")
+    env = dict(os.environ, QWEN_METAL_LEASE_WAIT="1", RUST_LOG="info,qwen_diag=debug")
     env.pop("MTL_DEBUG_LAYER", None)
     command = [
         args.qwen,
@@ -106,7 +183,18 @@ def main():
         process = subprocess.Popen(
             command, stdout=sink, stderr=subprocess.STDOUT, env=env
         )
-    status = None
+    model_id = Path(args.model).stem
+    phases = {}
+    outcomes = {}
+
+    def phase(label, action):
+        mark = len(log.read_text(errors="replace"))
+        if action is not None:
+            outcomes[label] = action()
+            samples.append({"phase": label, "t": 0, "wired_gib": wired_gib()})
+        poll_phase(addr, span, f"{label}_then_polling", samples)
+        phases[label] = finishes(log.read_text(errors="replace")[mark:])
+
     try:
         deadline = time.monotonic() + 1800
         while "serve: listening on" not in log.read_text(errors="replace"):
@@ -114,10 +202,13 @@ def main():
                 raise SystemExit(f"server not listening; see {log}")
             time.sleep(1)
         span = args.window + 12
-        poll_phase(addr, span, "startup_then_polling", samples)
-        status = post(addr, Path(args.model).stem)
-        samples.append({"phase": "after_request", "t": 0, "wired_gib": wired_gib()})
-        poll_phase(addr, span, "request_then_polling", samples)
+        phase("startup", None)
+        phase(
+            "refused",
+            lambda: post_refused(addr, model_id, args.max_context_tokens),
+        )
+        phase("request", lambda: post(addr, model_id))
+        phase("aborted_after_submission", lambda: post_and_abort(addr, model_id))
     finally:
         if process.poll() is None:
             process.send_signal(signal.SIGINT)
@@ -127,10 +218,39 @@ def main():
                 process.terminate()
                 process.wait(timeout=60)
     samples.append({"phase": "after_exit", "t": 0, "wired_gib": wired_gib()})
+    def renewed(label):
+        return sum(1 for f in phases.get(label, []) if f["window"] == "renewed")
+
+    verdicts = {
+        # Model lists finish without a request start.
+        "polling_never_renews": all(
+            f["window"] == "unchanged"
+            for label in phases
+            for f in phases[label]
+            if f["compute_encoders"] == "none"
+        ),
+        "refused_is_4xx": isinstance(outcomes.get("refused"), int)
+        and 400 <= outcomes["refused"] < 500,
+        "refused_never_renews": renewed("refused") == 0,
+        "request_renews_once": renewed("request") == 1,
+        "abort_after_submission_renews_once": outcomes.get("aborted_after_submission")
+        is not None
+        and renewed("aborted_after_submission") == 1,
+    }
     report = {
         "model": Path(args.model).name,
         "window_s": args.window,
-        "request_status": status,
+        "outcomes": outcomes,
+        "verdicts": verdicts,
+        "passed": all(verdicts.values()),
+        "finishes": {
+            label: {
+                "total": len(found),
+                "with_request": [f for f in found if f["compute_encoders"] != "none"],
+                "renewed": renewed(label),
+            }
+            for label, found in phases.items()
+        },
         "samples": samples,
         "exit_code": process.returncode,
         "residency_lines": re.findall(

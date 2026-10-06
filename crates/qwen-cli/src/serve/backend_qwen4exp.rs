@@ -216,9 +216,6 @@ impl GenerationBackend for FlashNextBackend {
             .loaded
             .create_runner(&self.ctx)
             .map_err(|error| ServeError::server_error(format!("bind {FAMILY} runner: {error}")))?;
-        // Idle residency follows weight use: admission and runner allocation
-        // above can refuse without any; restore and prefill below use them.
-        self.idle_residency.note_execution();
 
         let mut run = || -> Result<GenerationOutcome, BackendFailure> {
             let restore_t0 = Instant::now();

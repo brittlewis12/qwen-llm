@@ -7,12 +7,19 @@
 //! backend does not yet and refuses the flag.
 //!
 //! Window: closed until the first activity (a warm-up, or the first request
-//! that ran the model, so a cold model is never faulted in by a pulse). It
-//! opens again when a request that ran the model finishes, whatever its
-//! outcome (an abort after execution still used the weights). Connections
-//! that never reached model execution (model lists, malformed or refused
-//! requests, disconnects) neither open nor renew it. Pulses stop once it
-//! lapses, so an idle server returns its weights to pageable memory.
+//! that submitted GPU compute work, so a cold model is never faulted in by a
+//! pulse). It opens again when such a request finishes, whatever its outcome
+//! (a failure or abort after submission still used the weights). A request
+//! counts by what it actually submitted: [`IdleResidency::before_request`]
+//! snapshots the process's compute-encoder count and
+//! [`IdleResidency::request_finished`] compares it, so model lists, refusals,
+//! admission or allocation failures and cancellations before the first
+//! command never open or renew it. Only compute encoders count (blit-only
+//! work does not). A snapshot still unmatched when the owner goes idle is
+//! dropped before any pulse, so the keep-alive's own work can never renew
+//! the window. Each finish is logged at debug on `qwen_diag`
+//! (`RUST_LOG=info,qwen_diag=debug`). Pulses stop once it lapses, so an idle
+//! server returns its weights to pageable memory.
 //! Pulsing stops for the server's lifetime on any pulse failure; requests are
 //! never affected.
 //!
@@ -44,8 +51,10 @@ pub(crate) struct IdleResidency {
     keep_alive: Option<ResidencyKeepAlive>,
     /// `None` until the first activity: the window starts closed.
     last_activity: Option<Instant>,
-    /// The current request reached model execution.
-    executed: bool,
+    /// Compute encoders begun before the current request.
+    encoders_at_request: Option<u64>,
+    /// The process's compute-encoder count (injectable for tests).
+    encoders: fn() -> u64,
     /// The unavailable-pressure-reading notice was logged.
     pressure_unknown_logged: bool,
     last_pulse: Option<Instant>,
@@ -78,7 +87,8 @@ impl IdleResidency {
             window,
             keep_alive: None,
             last_activity: None,
-            executed: false,
+            encoders_at_request: None,
+            encoders: qwen_llm::metal::compute_encoders_begun,
             pressure_unknown_logged: false,
             last_pulse: None,
             suspended_for_pressure: false,
@@ -98,27 +108,44 @@ impl IdleResidency {
         self.last_activity = Some(Instant::now());
     }
 
-    /// The current request reached model execution (the backend's first GPU
-    /// work, after validation and admission).
-    pub(crate) fn note_execution(&mut self) {
-        self.executed = true;
-    }
-
-    /// A connection finished. Only one that reached model execution opens or
-    /// renews the window.
-    pub(crate) fn request_finished(&mut self) {
-        if std::mem::take(&mut self.executed) {
-            self.note_activity();
-        }
-    }
-
-    /// Surface a failed or stuck pulse before a request uses the GPU.
+    /// A request is about to run: surface a failed or stuck pulse, and
+    /// snapshot the compute-encoder count its submissions are measured from.
     pub(crate) fn before_request(&mut self) {
+        self.encoders_at_request = Some((self.encoders)());
         if let Some(keep_alive) = &mut self.keep_alive
             && let Err(error) = keep_alive.poll()
         {
             self.disable(&error.to_string());
         }
+    }
+
+    /// A connection finished. Only one whose request submitted GPU compute
+    /// work (encoders begun since [`IdleResidency::before_request`]) opens or
+    /// renews the window.
+    pub(crate) fn request_finished(&mut self) {
+        let submitted = self
+            .encoders_at_request
+            .take()
+            .map(|start| (self.encoders)().saturating_sub(start));
+        let renews = submitted.is_some_and(|count| count > 0);
+        if renews {
+            self.note_activity();
+        }
+        if !self.window.is_zero() {
+            tracing::debug!(
+                target: "qwen_diag",
+                "serve idle residency: family={} finished compute_encoders={} window={}",
+                self.family,
+                submitted.map_or_else(|| "none".to_owned(), |count| count.to_string()),
+                if renews { "renewed" } else { "unchanged" }
+            );
+        }
+    }
+
+    /// The owner is idle, so no request is in flight: a snapshot without a
+    /// matching finish is stale and must not let a pulse's encoders count.
+    fn forget_unfinished_request(&mut self) {
+        self.encoders_at_request = None;
     }
 
     /// Called from the owner loop's idle tick.
@@ -129,6 +156,7 @@ impl IdleResidency {
         ctx: &MetalContext,
         buffers: impl FnOnce() -> Vec<&'b Buffer>,
     ) {
+        self.forget_unfinished_request();
         if self.window.is_zero() {
             return;
         }
@@ -229,31 +257,60 @@ mod tests {
         assert!(residency.window().is_zero());
     }
 
+    static FAKE_ENCODERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn fake_encoders() -> u64 {
+        FAKE_ENCODERS.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn submit() {
+        FAKE_ENCODERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The window follows submitted GPU work, not request lifecycle: a
+    /// request that submitted nothing (model list, refusal, admission
+    /// failure, cancellation before the first command) neither opens nor
+    /// renews it; one that submitted anything (even if it failed afterwards)
+    /// does; a finish without a request start counts nothing.
     #[test]
-    fn only_requests_that_ran_the_model_open_or_renew_the_window() {
+    fn only_requests_that_submitted_gpu_work_open_or_renew_the_window() {
         let mut residency = IdleResidency::new("test", DEFAULT_WINDOW);
-        // A model list, a malformed request or a disconnect: no execution.
+        residency.encoders = fake_encoders;
         residency.request_finished();
-        assert!(
-            !residency.is_open(),
-            "non-inference traffic opened the window"
-        );
-        // A request that ran the model (even one that aborts afterwards).
-        residency.note_execution();
+        assert!(!residency.is_open(), "a finish without a request");
+        residency.before_request();
+        residency.request_finished();
+        assert!(!residency.is_open(), "nothing submitted opened the window");
+        residency.before_request();
+        submit();
         residency.request_finished();
         assert!(residency.is_open());
         let opened = residency.last_activity;
         std::thread::sleep(Duration::from_millis(5));
-        // Polling afterwards does not renew it.
+        residency.before_request();
         residency.request_finished();
         assert_eq!(
             residency.last_activity, opened,
-            "non-inference traffic renewed the window"
+            "no submission renewed the window"
         );
-        // The next executed request does.
-        residency.note_execution();
+        residency.before_request();
+        submit();
         residency.request_finished();
         assert!(residency.last_activity > opened);
+    }
+
+    /// A request start without a finish (a path that never settles through
+    /// the owner) followed by an idle pulse: the pulse's encoders must not
+    /// renew the window on a later finish.
+    #[test]
+    fn an_idle_pulse_never_counts_as_request_work() {
+        let mut residency = IdleResidency::new("test", DEFAULT_WINDOW);
+        residency.encoders = fake_encoders;
+        residency.before_request();
+        residency.forget_unfinished_request();
+        submit();
+        residency.request_finished();
+        assert!(!residency.is_open(), "a pulse opened the window");
     }
 
     #[test]

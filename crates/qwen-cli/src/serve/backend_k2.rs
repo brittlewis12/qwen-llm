@@ -237,8 +237,6 @@ impl GenerationBackend for K2Backend<'_, '_> {
         let mut logits = Vec::new();
         for (index, span) in suffix.chunks(span_tokens).enumerate() {
             sink.tick().map_err(BackendFailure::Aborted)?;
-            // Idle residency follows weight use: the first span submits it.
-            self.idle_residency.note_execution();
             if index + 1 == spans {
                 logits = session
                     .append(span)

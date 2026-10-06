@@ -187,14 +187,31 @@ ordinary keep-alive commands: 500 ms pulses that mark the weights used. It
 is not a residency set.
 
 - **Window.** It opens at the first activity: the warm-up (GLM) or the
-  first request that runs the model (other families), so a pulse never
-  faults in a cold model. It reopens when a request that ran the model
-  finishes, even if the request aborts after execution started. Model
-  lists, malformed or refused requests and disconnects never reach model
-  execution, so they neither open nor renew it.
+  first request that submitted GPU compute work (other families), so a
+  pulse never faults in a cold model. It reopens when such a request
+  finishes, even if it failed or was aborted after submitting. A request
+  is judged by what it submitted: the backend snapshots the process's
+  compute-encoder count when the request starts and compares it when the
+  connection finishes. These never open or renew it:
+  - model lists, malformed or refused requests, and disconnects;
+  - memory-admission refusals and session or runner allocation failures;
+  - a cancellation before the first command;
+  - the keep-alive pulses themselves (a snapshot left unmatched when the
+    server goes idle is dropped before any pulse).
+
+  Blit-only work does not count. `RUST_LOG=info,qwen_diag=debug` logs
+  each finish (`finished compute_encoders=N window=renewed|unchanged`);
+  `scripts/reference/serve_residency_poll_check.py` checks polling, a
+  refusal, a completed request and a client abort after submission
+  against those lines.
 - **Default and bounds.** Default 60 s; 0 disables.
 - **Safety.**
-  - Pulsing is suspended under host memory pressure.
+  - Pulsing is suspended while the host reports memory pressure of
+    warning or worse. It resumes on the next idle tick after the pressure
+    clears, within the same window and with no cooldown, and an
+    already-submitted pulse is not cancelled. A host that cannot report
+    pressure counts as unpressured (logged once). This is suspension, not
+    protection against re-pinning under oscillating pressure.
   - It stops for the server's lifetime on any pulse failure, including a
     pulse still running after 10 s.
   - The last pulse settles at shutdown.
@@ -208,8 +225,10 @@ is not a residency set.
     pulse.
   - DeepSeek V4 turns the keep-alive off when its opt-in
     `QWEN_DSV4_RESIDENCY_SET` already holds the weights.
-- **Refused.** Qwen serve loads Metal-allocated copies by default, which
-  are always wired, and refuses a nonzero value.
+- **Refused.** Qwen's serve backend does not name its weight buffers yet,
+  and refuses a nonzero value. Its default weights are Metal-allocated
+  copies, which stay wired anyway. The opt-in `QWEN_GGUF_NO_COPY` storage
+  would need the hooks on both its request and native-inference paths.
 
 ### Durable snapshots (cross-restart warmth)
 

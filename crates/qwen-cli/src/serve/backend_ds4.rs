@@ -724,8 +724,6 @@ impl DeepSeekV4Backend {
         let chunk_count = ranges.len();
         for (index, range) in ranges.into_iter().enumerate() {
             sink.tick().map_err(BackendFailure::Aborted)?;
-            // Idle residency follows weight use: the first chunk submits it.
-            self.idle_residency.note_execution();
             let chunk = &suffix[range];
             let result = if index + 1 == chunk_count {
                 session.prefill_tokens(&self.ctx, chunk).map(|_| ())
@@ -739,8 +737,6 @@ impl DeepSeekV4Backend {
             }
         }
         let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
-        // A fully restored prompt still decodes over the weights.
-        self.idle_residency.note_execution();
 
         // Capture the prompt boundary for the next turn before decoding.
         let capture_t0 = Instant::now();

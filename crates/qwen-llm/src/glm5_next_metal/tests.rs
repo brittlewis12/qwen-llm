@@ -19,16 +19,16 @@ const SPARSE_V2_MANIFEST: &str = include_str!("../../../../scripts/reference/glm
 /// Oracle evidence named by a reference manifest. Before a test reads `name`
 /// from `dir`, its byte length and SHA-256 must equal the manifest's, and a
 /// capture file's record count must equal the manifest's `records`, so a
-/// replay is bound to the recorded producer run (hashed once per process).
+/// replay is bound to the recorded producer run. Hashed once per process per
+/// (path, length, SHA-256, records): the same expectation skips rehashing,
+/// and a different manifest for an already verified path is checked afresh.
 fn verified(manifest: &str, dir: &std::path::Path, name: &str) -> PathBuf {
     use sha2::Digest;
     use std::io::Read;
-    static VERIFIED: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
+    type Key = (PathBuf, u64, String, Option<u64>);
+    static VERIFIED: std::sync::Mutex<std::collections::BTreeSet<Key>> =
         std::sync::Mutex::new(std::collections::BTreeSet::new());
     let path = dir.join(name);
-    if VERIFIED.lock().unwrap().contains(&path) {
-        return path;
-    }
     let manifest: serde_json::Value = serde_json::from_str(manifest).unwrap();
     let entry = &manifest["files"][name];
     let bytes = entry["bytes"]
@@ -37,6 +37,15 @@ fn verified(manifest: &str, dir: &std::path::Path, name: &str) -> PathBuf {
     let sha256 = entry["sha256"]
         .as_str()
         .unwrap_or_else(|| panic!("{name}: no SHA-256 in the manifest"));
+    let key: Key = (
+        path.clone(),
+        bytes,
+        sha256.to_owned(),
+        entry["records"].as_u64(),
+    );
+    if VERIFIED.lock().unwrap().contains(&key) {
+        return path;
+    }
     let length = std::fs::metadata(&path)
         .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
         .len();
@@ -64,7 +73,7 @@ fn verified(manifest: &str, dir: &std::path::Path, name: &str) -> PathBuf {
             "{name}: record count differs from the manifest"
         );
     }
-    VERIFIED.lock().unwrap().insert(path.clone());
+    VERIFIED.lock().unwrap().insert(key);
     path
 }
 
@@ -2140,6 +2149,21 @@ fn oracle_evidence_refuses_manifest_mismatches() {
     assert!(refused(manifest(capture.len(), &"0".repeat(64), 1)), "hash");
     assert!(refused(manifest(capture.len(), &digest, 2)), "records");
     assert_eq!(capture_record_count(&dir.join("a.captures")), 1);
+    verified(&manifest(capture.len(), &digest, 1), &dir, "a.captures");
+    // Valid first, conflicting second: a cached verification of this path
+    // must not answer for a different manifest.
+    assert!(
+        refused(manifest(capture.len() + 1, &digest, 1)),
+        "size after a pass"
+    );
+    assert!(
+        refused(manifest(capture.len(), &"0".repeat(64), 1)),
+        "hash after a pass"
+    );
+    assert!(
+        refused(manifest(capture.len(), &digest, 2)),
+        "records after a pass"
+    );
     verified(&manifest(capture.len(), &digest, 1), &dir, "a.captures");
     std::fs::remove_dir_all(&dir).unwrap();
 }

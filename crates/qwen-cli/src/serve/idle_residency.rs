@@ -8,10 +8,12 @@
 //! refuse the flag.
 //!
 //! Window: closed until the first activity (a warm-up, or the first request
-//! for backends without one, so a cold model is never faulted in by a
-//! pulse); it opens again whenever a request finishes, whatever its outcome
-//! (activity is activity); pulses stop once it lapses, so an idle server
-//! returns its weights to pageable memory.
+//! that ran the model, so a cold model is never faulted in by a pulse). It
+//! opens again when a request that ran the model finishes, whatever its
+//! outcome (an abort after execution still used the weights). Connections
+//! that never reached model execution (model lists, malformed or refused
+//! requests, disconnects) neither open nor renew it. Pulses stop once it
+//! lapses, so an idle server returns its weights to pageable memory.
 //! Pulsing is suspended while the host reports memory pressure (warning or
 //! critical) and stops for the server's lifetime on any pulse failure;
 //! requests are never affected.
@@ -37,6 +39,8 @@ pub(crate) struct IdleResidency {
     keep_alive: Option<ResidencyKeepAlive>,
     /// `None` until the first activity: the window starts closed.
     last_activity: Option<Instant>,
+    /// The current request reached model execution.
+    executed: bool,
     last_pulse: Option<Instant>,
     suspended_for_pressure: bool,
 }
@@ -67,6 +71,7 @@ impl IdleResidency {
             window,
             keep_alive: None,
             last_activity: None,
+            executed: false,
             last_pulse: None,
             suspended_for_pressure: false,
         }
@@ -80,9 +85,23 @@ impl IdleResidency {
         self.window = Duration::ZERO;
     }
 
-    /// The backend warmed up or a request finished.
+    /// The backend warmed up (ran the model outside a request).
     pub(crate) fn note_activity(&mut self) {
         self.last_activity = Some(Instant::now());
+    }
+
+    /// The current request reached model execution (the backend's first GPU
+    /// work, after validation and admission).
+    pub(crate) fn note_execution(&mut self) {
+        self.executed = true;
+    }
+
+    /// A connection finished. Only one that reached model execution opens or
+    /// renews the window.
+    pub(crate) fn request_finished(&mut self) {
+        if std::mem::take(&mut self.executed) {
+            self.note_activity();
+        }
     }
 
     /// Surface a failed or stuck pulse before a request uses the GPU.
@@ -185,6 +204,33 @@ mod tests {
         }
         let residency = IdleResidency::new("test", Duration::ZERO);
         assert!(residency.window().is_zero());
+    }
+
+    #[test]
+    fn only_requests_that_ran_the_model_open_or_renew_the_window() {
+        let mut residency = IdleResidency::new("test", DEFAULT_WINDOW);
+        // A model list, a malformed request or a disconnect: no execution.
+        residency.request_finished();
+        assert!(
+            !residency.is_open(),
+            "non-inference traffic opened the window"
+        );
+        // A request that ran the model (even one that aborts afterwards).
+        residency.note_execution();
+        residency.request_finished();
+        assert!(residency.is_open());
+        let opened = residency.last_activity;
+        std::thread::sleep(Duration::from_millis(5));
+        // Polling afterwards does not renew it.
+        residency.request_finished();
+        assert_eq!(
+            residency.last_activity, opened,
+            "non-inference traffic renewed the window"
+        );
+        // The next executed request does.
+        residency.note_execution();
+        residency.request_finished();
+        assert!(residency.last_activity > opened);
     }
 
     #[test]

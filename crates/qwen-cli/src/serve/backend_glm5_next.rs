@@ -238,6 +238,7 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
         )?;
         sink.tick().map_err(BackendFailure::Aborted)?;
 
+        self.idle_residency.note_execution();
         let prefill_t0 = Instant::now();
         // Taken before the session is used and republished only for a state
         // the session is known to hold, so a failure leaves no stale history.
@@ -343,7 +344,7 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
     }
 
     fn request_finished(&mut self) {
-        self.idle_residency.note_activity();
+        self.idle_residency.request_finished();
     }
 
     fn shutdown(&mut self) {

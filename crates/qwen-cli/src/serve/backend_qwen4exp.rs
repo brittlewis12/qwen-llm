@@ -175,7 +175,7 @@ impl GenerationBackend for FlashNextBackend {
     }
 
     fn request_finished(&mut self) {
-        self.idle_residency.note_activity();
+        self.idle_residency.request_finished();
     }
 
     fn shutdown(&mut self) {
@@ -211,6 +211,7 @@ impl GenerationBackend for FlashNextBackend {
             sink.transport_reserve_bytes(),
             self.ctx.memory_signals().process_limit_remaining_bytes,
         )?;
+        self.idle_residency.note_execution();
         let mut runner = self
             .loaded
             .create_runner(&self.ctx)

@@ -156,7 +156,7 @@ impl GenerationBackend for K2Backend<'_, '_> {
         }
     }
     fn request_finished(&mut self) {
-        self.idle_residency.note_activity();
+        self.idle_residency.request_finished();
     }
     fn shutdown(&mut self) {
         self.idle_residency.shutdown();
@@ -203,6 +203,7 @@ impl GenerationBackend for K2Backend<'_, '_> {
             qwen_llm::metal::MetalContext::process_limit_bytes_remaining(),
         )?;
         sink.tick().map_err(BackendFailure::Aborted)?;
+        self.idle_residency.note_execution();
         let prefill_t0 = std::time::Instant::now();
         // Taken before the session moves and republished only on success, so any
         // error or abort below leaves no history and the next request rewinds to

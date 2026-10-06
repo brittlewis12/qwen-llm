@@ -144,7 +144,7 @@ impl GenerationBackend for MuseGlimmerBackend {
     }
 
     fn request_finished(&mut self) {
-        self.idle_residency.note_activity();
+        self.idle_residency.request_finished();
     }
 
     fn shutdown(&mut self) {
@@ -188,6 +188,7 @@ impl GenerationBackend for MuseGlimmerBackend {
             self.ctx.memory_signals().process_limit_remaining_bytes,
         )?;
         let stop_tokens = [self.eos_token_id, self.eot_token_id];
+        self.idle_residency.note_execution();
         let prefill_t0 = Instant::now();
         // Taken before the session moves and republished only on success, so
         // any error or abort below leaves no history. A late HTTP write failure

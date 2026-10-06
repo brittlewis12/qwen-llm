@@ -513,7 +513,7 @@ impl GenerationBackend for DeepSeekV4Backend {
     }
 
     fn request_finished(&mut self) {
-        self.idle_residency.note_activity();
+        self.idle_residency.request_finished();
     }
 
     /// Snapshots are written behind as they are captured, so shutdown only
@@ -582,6 +582,7 @@ impl GenerationBackend for DeepSeekV4Backend {
             self.ctx.memory_signals().process_limit_remaining_bytes,
         )?;
 
+        self.idle_residency.note_execution();
         let residency = self.residency.take().ok_or_else(|| {
             // Unreachable unless a prior request poisoned the slot; a server
             // that can never serve again must not pretend otherwise (k3 R1.5).

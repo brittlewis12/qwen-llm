@@ -2661,3 +2661,256 @@ fn decode_stage_attribution() {
     });
     std::fs::write(&out, serde_json::to_vec_pretty(&document).unwrap()).unwrap();
 }
+
+/// Per-position reuse comparison of `warm` against `cold` logits at the join
+/// and teacher-forced continuation positions: KL both ways and both choice
+/// regrets, with bounds frozen before observation (map #12, cx session
+/// 01a1046). `positions` is the expected count (the join plus the
+/// continuation). Returns (worst KL, worst regret, top-1 agreements, bitwise).
+fn reuse_gate(
+    label: &str,
+    positions: usize,
+    cold: &[Vec<f32>],
+    warm: &[Vec<f32>],
+) -> (f64, f32, usize, bool) {
+    const KL_BOUND: f64 = 2e-2;
+    const REGRET_BOUND: f32 = 0.2;
+    assert_eq!(cold.len(), positions, "{label}: cold position count");
+    assert_eq!(warm.len(), positions, "{label}: warm position count");
+    let (mut kl_worst, mut regret_worst, mut agree) = (0.0f64, 0.0f32, 0);
+    for (position, (c, w)) in cold.iter().zip(warm).enumerate() {
+        assert_finite(&format!("{label} cold {position}"), c);
+        assert_finite(&format!("{label} warm {position}"), w);
+        let kl = kl_divergence(c, w).max(kl_divergence(w, c));
+        let (r0, r1) = choice_regret(c, w);
+        assert!(
+            within(kl, KL_BOUND) && r0 <= REGRET_BOUND && r1 <= REGRET_BOUND,
+            "{label} position {position}: KL {kl:.3e} (bound {KL_BOUND:e}), regret {r0:.3}/{r1:.3} (bound {REGRET_BOUND})"
+        );
+        kl_worst = kl_worst.max(kl);
+        regret_worst = regret_worst.max(r0).max(r1);
+        agree += usize::from(argmax(c) == argmax(w));
+    }
+    let bitwise = logit_bits(cold) == logit_bits(warm);
+    eprintln!(
+        "{label}: {} positions, worst KL {kl_worst:.3e}, worst regret {regret_worst:.3}, top-1 {agree}/{}, bitwise {bitwise}",
+        cold.len(),
+        cold.len()
+    );
+    (kl_worst, regret_worst, agree, bitwise)
+}
+
+/// Map #12: serve's default Fast packed lineage across live-session reuse.
+/// Three teacher-forced cases, each compared at the join and 32 continuation
+/// positions against one cold Fast prefill of the whole prompt:
+///
+/// 1. Ordinary continuation: Fast prefill of a 700-token prompt, 40 serially
+///    decoded "generated" tokens, then a Fast prefill of the next-turn suffix
+///    (to 1300, off the 512-row grid).
+/// 2. Tool continuation across the sparse frontier: a rendered tools
+///    conversation padded so the prompt ends 60-90 tokens below it; the
+///    frozen generated call is decoded serially and still ends below it
+///    (asserted); the next prompt (call results under `<|observation|>`)
+///    must extend those tokens exactly, and its suffix alone crosses into
+///    sparse attention (asserted).
+/// 3. Cancellation: a Fast prefill cancelled at its second chunk boundary
+///    and resumed from the committed position replays the uninterrupted
+///    chunk schedule, so it must be bitwise equal to the cold run.
+///
+/// Every session selects the Fast lineage explicitly (asserted), and each
+/// case compares exactly 33 positions. Bounds (frozen before observation):
+/// per position, KL both ways <= 2e-2 and both choice regrets <= 0.2. Not
+/// required for cases 1-2: bitwise equality, identical sampled text, or
+/// identical recurrent state (Fast is numerical by design; the Exact
+/// lineage keeps its own bitwise warm/cold check in serve).
+#[test]
+#[ignore = "loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU"]
+fn fast_reuse_stays_within_the_fast_policy_across_reuse_boundaries() {
+    use crate::glm5_next_chat::{
+        self as chat, Effort, Message, RenderOptions, ToolCall, ToolDefinition,
+    };
+    const CONTINUATION: usize = 32;
+    let _lease = production_lease();
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let ctx = MetalContext::new().expect("Metal context");
+    let gguf = GgufFile::open(&path).unwrap();
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
+    let encode = |text: &str| -> Vec<u32> {
+        tokenizer
+            .encode(text, false)
+            .unwrap()
+            .into_iter()
+            .map(|t| t as u32)
+            .collect()
+    };
+    let frontier = weights.config.sparse_frontier() as usize;
+    let long = encode(&long_qualification_text());
+    let continuation: Vec<u32> = long[3000..3000 + CONTINUATION].to_vec();
+    let positions = CONTINUATION + 1;
+    // Serve's default lineage, selected explicitly rather than inherited.
+    let fast_session = |capacity: usize| {
+        let mut session =
+            Glm5NextSession::with_prefill_rows(&ctx, &weights, capacity, 512).unwrap();
+        session.set_packed_lineage(PackedLineage::Fast);
+        assert_eq!(
+            session.packed.as_ref().map(|packed| packed.lineage),
+            Some(PackedLineage::Fast)
+        );
+        session
+    };
+
+    // Cold: one Fast prefill of the whole prompt, then the continuation.
+    let cold = |prompt: &[u32]| -> Vec<Vec<f32>> {
+        let mut session = fast_session(prompt.len() + CONTINUATION + 1);
+        let mut logits = vec![session.prefill_packed(&ctx, prompt).unwrap()];
+        for &token in &continuation {
+            logits.push(session.forward(&ctx, token).unwrap());
+        }
+        logits
+    };
+    // Warm: Fast prefill of the first turn, serial decode of the generated
+    // tokens, Fast prefill of the suffix, then the continuation.
+    let warm = |first: &[u32], generated: &[u32], suffix: &[u32]| -> Vec<Vec<f32>> {
+        let capacity = first.len() + generated.len() + suffix.len() + CONTINUATION + 1;
+        let mut session = fast_session(capacity);
+        session.prefill_packed(&ctx, first).unwrap();
+        for &token in generated {
+            session.forward(&ctx, token).unwrap();
+        }
+        assert_eq!(session.position(), first.len() + generated.len());
+        let mut logits = vec![session.prefill_packed(&ctx, suffix).unwrap()];
+        for &token in &continuation {
+            logits.push(session.forward(&ctx, token).unwrap());
+        }
+        logits
+    };
+
+    // 1. Ordinary continuation.
+    let (first, generated, suffix) = (&long[..700], &long[700..740], &long[740..1300]);
+    let joined: Vec<u32> = [first, generated, suffix].concat();
+    reuse_gate(
+        "ordinary",
+        positions,
+        &cold(&joined),
+        &warm(first, generated, suffix),
+    );
+
+    // 2. Tool continuation through <|observation|>, crossing the frontier.
+    let tool = ToolDefinition::from_value(&serde_json::json!({"name": "get_weather",
+        "description": "Get the current weather for a city.",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}))
+    .unwrap();
+    let options = RenderOptions::generate(Effort::Low, false);
+    let text = long_qualification_text();
+    let user = |chars: usize| {
+        let mut end = chars.min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!(
+            "{}\n\nWhat's the weather in Paris? Use the tool.",
+            &text["[gMASK]<sop>".len()..end]
+        )
+    };
+    // Pad the user turn until the first prompt ends 60-90 tokens below the
+    // frontier, so the generated call still ends below it and the results
+    // alone cross it.
+    let mut chars = text.len();
+    let mut attempts = 0;
+    let first = loop {
+        attempts += 1;
+        assert!(attempts <= 32, "padding did not converge near the frontier");
+        let rendered = chat::render_with_tools(
+            &[Message::User(user(chars))],
+            std::slice::from_ref(&tool),
+            options,
+        )
+        .unwrap();
+        let tokens = encode(&rendered);
+        if tokens.len() < frontier - 60 && tokens.len() > frontier - 90 {
+            break (user(chars), tokens);
+        }
+        let excess = tokens.len() as isize - (frontier as isize - 75);
+        chars = (chars as isize - excess * 3).max(1) as usize;
+    };
+    let (user_text, first_tokens) = first;
+    let generated_text = "need the weather</think><tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>";
+    let generated_tokens = encode(generated_text);
+    let messages = vec![
+        Message::User(user_text),
+        Message::Assistant {
+            content: String::new(),
+            reasoning: Some("need the weather".into()),
+            calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "get_weather".into(),
+                arguments: serde_json::json!({"city": "Paris"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            }],
+        },
+        // Long enough that the results alone cross the frontier.
+        Message::Tool {
+            call_id: "c1".into(),
+            content: "Paris: 18C, clear skies, light wind from the west. ".repeat(24),
+        },
+    ];
+    let next =
+        encode(&chat::render_with_tools(&messages, std::slice::from_ref(&tool), options).unwrap());
+    let consumed = first_tokens.len() + generated_tokens.len();
+    assert_eq!(
+        &next[..consumed],
+        [first_tokens.as_slice(), generated_tokens.as_slice()].concat(),
+        "the tool-result prompt must extend the consumed history"
+    );
+    // The consumed history (prompt plus generated call) ends below the
+    // frontier, so the suffix prefill itself crosses it.
+    assert!(
+        consumed < frontier && next.len() > frontier + 32,
+        "first {} generated {} consumed {consumed} next {} frontier {frontier}",
+        first_tokens.len(),
+        generated_tokens.len(),
+        next.len()
+    );
+    eprintln!(
+        "tool geometry: first {} + generated {} = consumed {consumed} < frontier {frontier} < next {}",
+        first_tokens.len(),
+        generated_tokens.len(),
+        next.len()
+    );
+    reuse_gate(
+        "tool loop across the frontier",
+        positions,
+        &cold(&next),
+        &warm(&first_tokens, &generated_tokens, &next[consumed..]),
+    );
+
+    // 3. Cancellation at the second chunk boundary, then resume.
+    let prompt = &long[..1300];
+    let mut session = fast_session(prompt.len() + CONTINUATION + 1);
+    let mut calls = 0;
+    let cancelled = session.prefill_packed_with_checkpoint(&ctx, prompt, &mut || {
+        calls += 1;
+        if calls == 2 {
+            Err("cancel".into())
+        } else {
+            Ok(())
+        }
+    });
+    assert!(matches!(cancelled, Err(Glm5NextMetalError::Cancelled(_))));
+    let committed = session.position();
+    assert_eq!(committed, 512, "cancelled after exactly one 512-row chunk");
+    let mut resumed = vec![session.prefill_packed(&ctx, &prompt[committed..]).unwrap()];
+    for &token in &continuation {
+        resumed.push(session.forward(&ctx, token).unwrap());
+    }
+    // Resuming replays the uninterrupted chunk schedule (512 | 512 | 276),
+    // so this case is held to bitwise equality, not only the numerical gate.
+    let (.., bitwise) = reuse_gate("cancel and resume", positions, &cold(prompt), &resumed);
+    assert!(
+        bitwise,
+        "a resumed prefill on the same schedule must be bitwise"
+    );
+}

@@ -89,6 +89,10 @@ fn input(message: impl Into<String>) -> ChatError {
 
 mod tools;
 use tools::tools;
+mod tool_output;
+pub use tool_output::{
+    OutputCall, ToolOutputEnd, ToolOutputFinish, ToolOutputStream, parse_tool_calls,
+};
 pub use tools::{
     ARG_KEY_CLOSE, ARG_KEY_OPEN, ARG_VALUE_CLOSE, ARG_VALUE_OPEN, OBSERVATION, TOOL_CALL_CLOSE,
     TOOL_CALL_OPEN, TOOL_RESPONSE_CLOSE, TOOL_RESPONSE_OPEN, ToolCall, ToolDefinition, tojson,

@@ -528,8 +528,9 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
     fn emit_function_call(&mut self, index: usize, call: &ParsedCall) -> io::Result<()> {
         let item_id = format!("fc_{}_{index}", self.response_id);
         let call_id = format!("call_{}_{index}", self.response_id);
-        let arguments =
-            serde_json::to_string(&Value::Object(call.arguments.clone())).expect("serialize args");
+        // Serialized in place: no second parsed tree (the GLM tool-block
+        // memory model, TOOL_BLOCK_PEAK_FACTOR, counts one).
+        let arguments = serde_json::to_string(&call.arguments).expect("serialize args");
         let output_index = self.output_index;
         self.emit(
             "response.output_item.added",

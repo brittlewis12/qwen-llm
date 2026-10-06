@@ -797,13 +797,20 @@ and parses it, and never runs a tool.
 
 - **Definitions.** They render in request order as one `<|system|>` tools
   block of `{"name", "description", "parameters"}` objects (Python `tojson`).
-  `strict: true` is refused (no constrained decoding). `tool_choice` is
-  `auto` or `allowed_tools` (shared rules below).
+  `strict: true` is refused (no constrained decoding). So are
+  `defer_loading: true` and any key other than `type`, `name`,
+  `description`, `parameters` and `strict`: upstream would hide deferred
+  functions and print other keys, which the shared parser does not keep.
+  `tool_choice` is `auto` or `allowed_tools` (shared rules below).
+  Generated calls to functions outside `allowed_tools`, and extra calls when
+  `parallel_tool_calls` is false, are suppressed from the response, not
+  prevented by decoding.
 - **History.**
   - A replayed `function_call` becomes its assistant turn's
     `<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value>…</tool_call>`:
     string values are written verbatim, others through `tojson`, and
-    `arguments` must be a JSON object.
+    `arguments` must be a JSON object without duplicate keys (decoded
+    losslessly).
   - `function_call_output` items render under one `<|observation|>` as
     `<tool_response>…</tool_response>`, in call order.
   - Each call needs exactly one output before the next turn.
@@ -813,10 +820,30 @@ and parses it, and never runs a tool.
   `<tool_call>`. The block is buffered within `max_output_tokens` × the
   longest decoded token × 3 bytes, and calls are published together as
   `function_call` items when the turn stops (`<|observation|>`).
-  - Arguments are typed by the declared schema. A schema that admits no
-    string must decode as JSON of an admitted type. A schema that admits a
-    string keeps the text, unless it is exactly `tojson` of another
-    admitted type.
+  - Each argument's outer type comes from the declared schema (`type`,
+    `enum`, `const`, `anyOf`/`oneOf`/`allOf`, local `$ref`). This is not
+    full JSON Schema validation, and an unresolvable `$ref` refuses the call.
+    - A schema that admits no string: the value must decode losslessly as
+      JSON of an admitted, renderable type.
+    - A schema that admits a string: the text is the string, unless it also
+      decodes as another admitted type (`3` under `{}` or `["string",
+      "integer"]`). The template writes both identically, so such a call is
+      refused as ambiguous; declare a narrower schema.
+  - Memory: the block is capped at its byte bound and admitted before it
+    grows. Its capacity grows in 64 KiB steps, and each step must find
+    process headroom for the block's whole outstanding peak at the new
+    capacity, less what it already holds. That peak is 192 bytes per block
+    byte: the text, the parsed values with their container overhead, and
+    the serialized arguments kept and embedded in events and the response.
+    The factor is measured against a counting allocator over
+    container-heavy shapes; the worst, arrays nested to the decoder's
+    128-level limit, costs about 152
+    (`crates/qwen-llm/tests/glm53_tool_block_peak.rs`). Headroom is read
+    afresh at every step and once more before the parse, so an earlier step
+    reserves nothing. A failed check ends the turn with
+    `memory_admission_denied` (503). Nothing is reserved upfront at the
+    worst case (the longest piece is 512 bytes; the 99.9th percentile
+    is 52).
   - Text after a call, an undeclared function, a repeated key or an
     ill-typed value is a server error, never text.
   - A block still open at the token limit is incomplete with no call.
@@ -829,8 +856,9 @@ and parses it, and never runs a tool.
   - the replayed call and output reused 218 of 236 tokens (401 ms
     prefill vs 1.5 s cold), and the answer used the output;
   - JSON and SSE behaved alike.
-- **`qwen run --messages`.** A document with `tools` prints one Responses
-  JSON object, `function_call` items included, instead of streaming text.
+- **`qwen run --messages`.** A document with a nonempty `tools` list prints
+  one Responses JSON object, `function_call` items included, instead of
+  streaming text.
 
 **Idle residency.** On by default (60 s; see
 [Idle residency](#idle-residency-no-copy-families)). Without it, a request

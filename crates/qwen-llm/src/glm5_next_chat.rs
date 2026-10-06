@@ -91,7 +91,8 @@ mod tools;
 use tools::tools;
 mod tool_output;
 pub use tool_output::{
-    OutputCall, ToolOutputEnd, ToolOutputFinish, ToolOutputStream, parse_tool_calls,
+    OutputCall, TOOL_BLOCK_PEAK_FACTOR, ToolOutputEnd, ToolOutputFinish, ToolOutputStream,
+    parse_tool_calls, tool_block_peak_bytes,
 };
 pub use tools::{
     ARG_KEY_CLOSE, ARG_KEY_OPEN, ARG_VALUE_CLOSE, ARG_VALUE_OPEN, OBSERVATION, TOOL_CALL_CLOSE,

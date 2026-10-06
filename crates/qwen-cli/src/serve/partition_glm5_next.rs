@@ -4,26 +4,32 @@
 //! publishes calls together once the turn's whole tool block parses. A tool
 //! marker inside reasoning stays reasoning text.
 //!
-//! Memory: the block is capped at the request's byte bound, and admitted as
-//! it grows. Each further [`ADMISSION_STEP`] of buffered text must find
-//! three steps of process headroom (the text, its parsed values and their
-//! serialized arguments live together at finish), or the turn fails with
-//! `memory_admission_denied` (503) instead of growing unpriced.
+//! Memory: the block is capped at the request's byte bound and admitted
+//! before it grows. Before any push that would begin or extend the block
+//! beyond its capacity, the capacity grows by whole [`ADMISSION_STEP`]s, and
+//! the process must have headroom for the block's whole outstanding peak at
+//! the new capacity: [`tool_block_peak_bytes`] (text, parsed values with
+//! their container overhead, and the published serializations) less what
+//! the block already holds. The check repeats at every step against current
+//! headroom, so earlier steps reserve nothing that later allocations could
+//! take, and once more before the block is parsed. A failed check ends the
+//! turn with `memory_admission_denied` (503) instead of growing unpriced.
 use super::items::ServeError;
 use super::output_partition::GenerationEnd;
 use super::partition::PartitionEvent;
 use super::partition_preopened::PreopenedPartition;
-use qwen_llm::glm5_next_chat::{ToolDefinition, ToolOutputEnd, ToolOutputStream};
+use qwen_llm::glm5_next_chat::{
+    ToolDefinition, ToolOutputEnd, ToolOutputStream, tool_block_peak_bytes,
+};
 
-/// Buffered tool bytes admitted per step.
-pub(crate) const ADMISSION_STEP: usize = 1 << 20;
+/// Block capacity admitted per step.
+pub(crate) const ADMISSION_STEP: usize = 64 << 10;
 
 pub(crate) struct Glm5NextToolsPartition {
     reasoning: PreopenedPartition,
     tools: ToolOutputStream,
+    max_bytes: usize,
     failure: Option<ServeError>,
-    /// Buffered bytes admitted so far.
-    admitted: usize,
     /// Process memory headroom (None: the host omits it).
     headroom: fn() -> Option<u64>,
 }
@@ -45,21 +51,34 @@ impl Glm5NextToolsPartition {
         Self {
             reasoning: super::render_glm5_next::partition(),
             tools: ToolOutputStream::new(definitions, max_bytes),
+            max_bytes,
             failure: None,
-            admitted: 0,
             headroom,
         }
     }
 
-    /// Admit the buffered block's growth step by step.
-    fn admit_growth(&mut self) {
-        while self.failure.is_none() && self.tools.buffered_bytes() > self.admitted {
-            let need = (3 * ADMISSION_STEP) as u64;
-            match super::transport_memory::admit_resident_transport(need, (self.headroom)()) {
-                Ok(()) => self.admitted += ADMISSION_STEP,
-                Err(error) => self.failure = Some(error),
-            }
+    /// Headroom for the block's outstanding peak at `capacity`, given what
+    /// it already holds.
+    fn admit_outstanding(&self, capacity: usize) -> Result<(), ServeError> {
+        let held = self.tools.block_capacity();
+        let outstanding = tool_block_peak_bytes(capacity).saturating_sub(held);
+        super::transport_memory::admit_resident_transport(outstanding as u64, (self.headroom)())
+    }
+
+    /// Before a push that makes the block `len` bytes: grow its capacity
+    /// by whole steps (within the byte bound), admitted first.
+    fn admit_block(&mut self, len: usize) -> Result<(), ServeError> {
+        if len <= self.tools.block_capacity() || len > self.max_bytes {
+            // Fits, or the stream refuses it over the bound without growing.
+            return Ok(());
         }
+        let capacity = len
+            .div_ceil(ADMISSION_STEP)
+            .saturating_mul(ADMISSION_STEP)
+            .min(self.max_bytes);
+        self.admit_outstanding(capacity)?;
+        self.tools.reserve_block(capacity);
+        Ok(())
     }
 
     fn route(&mut self, incoming: Vec<PartitionEvent>, events: &mut Vec<PartitionEvent>) {
@@ -68,6 +87,13 @@ impl Glm5NextToolsPartition {
                 return;
             }
             if let PartitionEvent::Visible(text) = event {
+                let len = self.tools.block_len_after(&text);
+                if len > 0
+                    && let Err(error) = self.admit_block(len)
+                {
+                    self.failure = Some(error);
+                    return;
+                }
                 match self.tools.push_visible(&text) {
                     Ok(text) if !text.is_empty() => events.push(PartitionEvent::Visible(text)),
                     Ok(_) => {}
@@ -83,7 +109,6 @@ impl Glm5NextToolsPartition {
         let mut incoming = Vec::new();
         self.reasoning.push(bytes, &mut incoming);
         self.route(incoming, events);
-        self.admit_growth();
     }
 
     pub(crate) fn finish(
@@ -101,6 +126,12 @@ impl Glm5NextToolsPartition {
         self.route(incoming, events);
         if let Some(error) = self.failure {
             return Err(error);
+        }
+        // Headroom may have shrunk since the last step: price the parse and
+        // publication once more against it.
+        let capacity = self.tools.block_capacity();
+        if capacity > 0 {
+            self.admit_outstanding(capacity)?;
         }
         let result = self
             .tools
@@ -137,32 +168,157 @@ mod tests {
         .unwrap()
     }
 
-    /// A growing tool block is admitted step by step: ample headroom
-    /// publishes the call; headroom below three steps fails the turn with
-    /// memory_admission_denied once the block holds any bytes; plain text with
-    /// no block never asks.
+    const STOP: GenerationEnd = GenerationEnd::StopToken(154_829);
+
+    std::thread_local! {
+        static HEADROOM: std::cell::Cell<u64> = const { std::cell::Cell::new(u64::MAX) };
+    }
+
+    fn scripted() -> Option<u64> {
+        Some(HEADROOM.get())
+    }
+
+    fn peak(capacity: usize) -> u64 {
+        tool_block_peak_bytes(capacity) as u64
+    }
+
+    /// Ample headroom publishes the call; headroom below the first step's
+    /// outstanding peak fails the turn with memory_admission_denied before
+    /// the block allocates; plain text with no block never asks.
     #[test]
-    fn tool_block_growth_is_admitted_incrementally() {
+    fn tool_block_growth_is_admitted_before_it_allocates() {
         let call = "</think><tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>";
-        let run = |headroom: fn() -> Option<u64>, output: &str| {
+        let run = |headroom: u64, output: &str| {
+            HEADROOM.set(headroom);
             let mut partition =
-                Glm5NextToolsPartition::with_headroom(vec![weather()], 1 << 24, headroom);
+                Glm5NextToolsPartition::with_headroom(vec![weather()], 1 << 24, scripted);
             let mut events = Vec::new();
             partition.push(output.as_bytes(), &mut events);
-            partition
-                .finish(GenerationEnd::StopToken(154_829), &mut events)
-                .map(|()| events)
+            let held = partition.tools.block_capacity();
+            (held, partition.finish(STOP, &mut events).map(|()| events))
         };
-        let events = run(|| Some(1 << 40), call).unwrap();
+        let (held, events) = run(peak(ADMISSION_STEP), call);
+        assert_eq!(held, ADMISSION_STEP, "capacity is the admitted step");
         assert!(
             events
+                .unwrap()
                 .iter()
                 .any(|e| matches!(e, PartitionEvent::FunctionCall(_)))
         );
-        let error = run(|| Some(1 << 20), call).unwrap_err();
+        let (held, error) = run(peak(ADMISSION_STEP) - 1, call);
+        assert_eq!(held, 0, "a refused step allocates no block");
+        let error = error.unwrap_err();
         assert_eq!(error.status, 503);
         assert_eq!(error.code, Some("memory_admission_denied"));
         // Text with no tool block buffers nothing and asks nothing.
-        assert!(run(|| Some(0x10), "</think>Plain answer.").is_ok());
+        assert!(run(0x10, "</think>Plain answer.").1.is_ok());
+    }
+
+    /// The block grows over several steps against fixed headroom. Each step
+    /// prices the whole outstanding peak at the new capacity, so headroom
+    /// that covers two steps' peak (less the first step's text) admits the
+    /// second step and refuses the third, before it allocates.
+    #[test]
+    fn every_step_prices_the_whole_outstanding_peak() {
+        HEADROOM.set(peak(2 * ADMISSION_STEP) - ADMISSION_STEP as u64);
+        let mut partition =
+            Glm5NextToolsPartition::with_headroom(vec![weather()], 1 << 24, scripted);
+        let mut events = Vec::new();
+        partition.push(
+            b"</think><tool_call>get_weather<arg_key>city</arg_key><arg_value>",
+            &mut events,
+        );
+        assert_eq!(partition.tools.block_capacity(), ADMISSION_STEP);
+        let filler = "a".repeat(ADMISSION_STEP / 4);
+        let mut steps = Vec::new();
+        for _ in 0..12 {
+            partition.push(filler.as_bytes(), &mut events);
+            steps.push((
+                partition.tools.block_capacity(),
+                partition.failure.is_some(),
+            ));
+            if partition.failure.is_some() {
+                break;
+            }
+        }
+        let refused = steps.iter().position(|&(_, failed)| failed).unwrap();
+        // Up to two steps fit; the push that needs a third is refused, and
+        // the capacity never ran ahead of an admitted step.
+        assert!(
+            steps[..refused]
+                .iter()
+                .all(|&(c, _)| c <= 2 * ADMISSION_STEP)
+        );
+        assert_eq!(steps[refused].0, 2 * ADMISSION_STEP);
+        assert!(partition.tools.buffered_bytes() <= 2 * ADMISSION_STEP);
+        let error = partition.finish(STOP, &mut events).unwrap_err();
+        assert_eq!(error.code, Some("memory_admission_denied"));
+    }
+
+    /// Headroom falls while the block grows: a step admitted earlier is not a
+    /// reservation, so the next step is priced against what is left, and a
+    /// drop after the last step fails the parse at finish.
+    #[test]
+    fn decreasing_headroom_is_rechecked_at_each_step_and_before_the_parse() {
+        let head = b"</think><tool_call>get_weather<arg_key>city</arg_key><arg_value>";
+        let tail = b"</arg_value></tool_call>";
+        let filler = "a".repeat(ADMISSION_STEP);
+        // Ample for the first step, then too little for the second.
+        HEADROOM.set(u64::MAX);
+        let mut partition =
+            Glm5NextToolsPartition::with_headroom(vec![weather()], 1 << 24, scripted);
+        let mut events = Vec::new();
+        partition.push(head, &mut events);
+        assert!(partition.failure.is_none());
+        HEADROOM.set(peak(2 * ADMISSION_STEP) - ADMISSION_STEP as u64 - 1);
+        partition.push(filler.as_bytes(), &mut events);
+        assert!(
+            partition.failure.is_some(),
+            "the second step was not rechecked"
+        );
+        assert_eq!(partition.tools.block_capacity(), ADMISSION_STEP);
+        // Every step admitted, then the parse is refused at finish.
+        HEADROOM.set(u64::MAX);
+        let mut partition =
+            Glm5NextToolsPartition::with_headroom(vec![weather()], 1 << 24, scripted);
+        partition.push(head, &mut events);
+        partition.push(filler.as_bytes(), &mut events);
+        partition.push(tail, &mut events);
+        assert!(partition.failure.is_none());
+        let capacity = partition.tools.block_capacity();
+        HEADROOM.set(peak(capacity) - capacity as u64 - 1);
+        let error = partition.finish(STOP, &mut events).unwrap_err();
+        assert_eq!(error.code, Some("memory_admission_denied"));
+        HEADROOM.set(u64::MAX);
+    }
+
+    /// A container-heavy argument is priced like any other block byte: the
+    /// model's factor covers its parse (measured in qwen-llm's
+    /// glm53_tool_block_peak), so admission depends only on the block's
+    /// length and publishes the parsed tree.
+    #[test]
+    fn container_heavy_blocks_publish_within_the_admitted_model() {
+        let items = vec!["[[1]]"; 20_000].join(",");
+        let schema = ToolDefinition::from_value(&json!({"name": "f", "parameters": {
+            "type": "object", "properties": {"a": {"type": "array"}}}}))
+        .unwrap();
+        let output = format!(
+            "</think><tool_call>f<arg_key>a</arg_key><arg_value>[{items}]</arg_value></tool_call>"
+        );
+        let block = output.len() - "</think>".len();
+        let capacity = block.div_ceil(ADMISSION_STEP) * ADMISSION_STEP;
+        HEADROOM.set(peak(capacity));
+        let mut partition = Glm5NextToolsPartition::with_headroom(vec![schema], 1 << 24, scripted);
+        let mut events = Vec::new();
+        for piece in output.as_bytes().chunks(509) {
+            partition.push(piece, &mut events);
+        }
+        assert_eq!(partition.tools.block_capacity(), capacity);
+        partition.finish(STOP, &mut events).unwrap();
+        let PartitionEvent::FunctionCall(call) = events.last().unwrap() else {
+            panic!("no call published");
+        };
+        assert_eq!(call.arguments["a"].as_array().unwrap().len(), 20_000);
+        HEADROOM.set(u64::MAX);
     }
 }

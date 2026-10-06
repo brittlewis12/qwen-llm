@@ -203,12 +203,37 @@ fn typed_argument(definition: &ToolDefinition, key: &str, raw: &str) -> Result<V
     }
 }
 
+/// Bytes held at once, at most, per byte of a buffered tool block while it
+/// is parsed and its calls are published: the text itself, the parsed
+/// values (container slots, map entries and scalar copies, which dominate:
+/// `[[1],[1],…]` costs far more than its text), and the serialized
+/// arguments a server keeps and embeds in events and the response body.
+/// Measured against a counting allocator (16-byte malloc quanta) over
+/// container-heavy shapes (`tests/glm53_tool_block_peak.rs`): the worst,
+/// one argument holding arrays nested to the decoder's 128-level limit,
+/// costs about 152 bytes per block byte, near the ~160 of a four-slot
+/// vector per `[]` pair; 192 leaves room for the publication copies.
+pub const TOOL_BLOCK_PEAK_FACTOR: usize = 192;
+
+/// [`TOOL_BLOCK_PEAK_FACTOR`] applied to a block of `bytes` (saturating).
+pub const fn tool_block_peak_bytes(bytes: usize) -> usize {
+    bytes.saturating_mul(TOOL_BLOCK_PEAK_FACTOR)
+}
+
 /// Post-reasoning visible text in, visible text and finally calls out.
+///
+/// Memory: the block's capacity grows only to what the caller reserved
+/// ([`ToolOutputStream::reserve_block`]); [`ToolOutputStream::block_len_after`]
+/// tells the caller, before a push, how long the block would become, so it
+/// can admit the growth (and the block's eventual parse and publication
+/// peak, [`tool_block_peak_bytes`]) before any allocation.
 pub struct ToolOutputStream {
     definitions: Vec<ToolDefinition>,
     max_tool_bytes: usize,
     pending: String,
     block: Option<String>,
+    /// Capacity the caller admitted for the block (applied when it begins).
+    reserved: usize,
     failed: bool,
 }
 
@@ -221,6 +246,7 @@ impl ToolOutputStream {
             max_tool_bytes,
             pending: String::new(),
             block: None,
+            reserved: 0,
             failed: false,
         }
     }
@@ -228,6 +254,46 @@ impl ToolOutputStream {
     /// Bytes currently held: the open tool block, or a held-back marker prefix.
     pub fn buffered_bytes(&self) -> usize {
         self.block.as_ref().map_or(self.pending.len(), String::len)
+    }
+
+    /// The block's allocated capacity (0 before it begins).
+    pub fn block_capacity(&self) -> usize {
+        self.block.as_ref().map_or(0, String::capacity)
+    }
+
+    /// The block's length after `push_visible(text)`: 0 when the push
+    /// neither begins nor extends a block (plain text, a held marker prefix).
+    pub fn block_len_after(&self, text: &str) -> usize {
+        if self.failed {
+            return 0;
+        }
+        if let Some(block) = &self.block {
+            return block.len().saturating_add(text.len());
+        }
+        // Same search as push_visible, without building the joined text.
+        let joined_len = self.pending.len() + text.len();
+        let at = |index: usize| {
+            if index < self.pending.len() {
+                self.pending.as_bytes()[index]
+            } else {
+                text.as_bytes()[index - self.pending.len()]
+            }
+        };
+        let marker = TOOL_CALL_OPEN.as_bytes();
+        (0..joined_len.saturating_sub(marker.len() - 1))
+            .find(|&start| (0..marker.len()).all(|offset| at(start + offset) == marker[offset]))
+            .map_or(0, |start| joined_len - start)
+    }
+
+    /// Grow the block's capacity to exactly `capacity` (applied when the
+    /// block begins if it has not yet). Never shrinks.
+    pub fn reserve_block(&mut self, capacity: usize) {
+        self.reserved = self.reserved.max(capacity);
+        if let Some(block) = &mut self.block
+            && capacity > block.capacity()
+        {
+            block.reserve_exact(capacity - block.len());
+        }
     }
 
     /// Visible text to release now. Tool bytes never leave as text. Errors
@@ -263,7 +329,9 @@ impl ToolOutputStream {
             self.failed = true;
             return Err(tools("tool output exceeds the admitted byte budget"));
         }
-        self.block = Some(text.to_owned());
+        let mut block = String::with_capacity(self.reserved.max(text.len()));
+        block.push_str(text);
+        self.block = Some(block);
         Ok(())
     }
 
@@ -278,6 +346,8 @@ impl ToolOutputStream {
             block.clear();
             return Err(tools("tool output exceeds the admitted byte budget"));
         }
+        // Within a reservation this never reallocates; callers that do not
+        // reserve get ordinary amortized growth.
         block.push_str(text);
         Ok(())
     }
@@ -568,6 +638,35 @@ mod tests {
         let (text, finish) = stream_all(&pieces, vec![weather()], ToolOutputEnd::Stop);
         assert_eq!(text, whole_text);
         assert_eq!(finish.unwrap().calls, whole.calls);
+    }
+
+    /// The caller admits growth from `block_len_after` before each push, so
+    /// it must equal the block's real length after the push for every split
+    /// (0 while no block is open, marker prefixes held back included), and
+    /// the block's capacity must be exactly what was reserved.
+    #[test]
+    fn block_projection_matches_every_push_and_capacity_follows_reservations() {
+        let output = "Let me <tool check.<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>";
+        for size in [1, 2, 3, 5, 7, 11, 64] {
+            let mut stream = ToolOutputStream::new(vec![weather()], 1 << 20);
+            let mut reserved = 0;
+            let bytes = output.as_bytes();
+            for piece in bytes.chunks(size) {
+                let piece = std::str::from_utf8(piece).unwrap();
+                let projected = stream.block_len_after(piece);
+                if projected > stream.block_capacity() {
+                    reserved = projected.next_multiple_of(16);
+                    stream.reserve_block(reserved);
+                }
+                stream.push_visible(piece).unwrap();
+                let actual = stream.block.as_ref().map_or(0, String::len);
+                assert_eq!(projected, actual, "chunks of {size}");
+                if actual > 0 {
+                    assert_eq!(stream.block_capacity(), reserved, "chunks of {size}");
+                }
+            }
+            assert_eq!(stream.finish(ToolOutputEnd::Stop).unwrap().calls.len(), 1);
+        }
     }
 
     #[test]

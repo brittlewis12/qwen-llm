@@ -138,6 +138,10 @@ impl Glm5NextSession<'_> {
         enc.end();
         command.commit();
         wait_completed(&command)?;
+        // A finite residual can still leave the output norm's F32 sum of
+        // squares unrepresentable (an inf statistic gives a zero scale and
+        // finite zero logits); refuse it rather than read out silently.
+        output_norm_statistic(&read_f32(&s.final_hidden)?).map_err(Glm5NextMetalError::Invalid)?;
         let logits = read_f32(&s.logits)?;
         if !logits.iter().all(|v| v.is_finite()) {
             return invalid("readout produced nonfinite logits");
@@ -146,9 +150,52 @@ impl Glm5NextSession<'_> {
     }
 }
 
+/// The output norm's statistic on the deployed collapse output: its sum of
+/// squares, accumulated in F32 by `kernel_rms_norm_mul_f32`, must be
+/// representable. Accepted when the exact (f64) sum is at most
+/// `f32::MAX / (1 + n * eps)`, the accumulation-error bound for n nonnegative
+/// F32 terms, so an accepted input cannot overflow; anything above is refused
+/// with the statistic named. Ordinary activations are many orders of
+/// magnitude below the bound; this is a domain check for external readouts,
+/// not a magnitude policy.
+fn output_norm_statistic(hidden: &[f32]) -> std::result::Result<f64, String> {
+    let sum: f64 = hidden.iter().map(|v| f64::from(*v) * f64::from(*v)).sum();
+    let bound = f64::from(f32::MAX) / (1.0 + hidden.len() as f64 * f64::from(f32::EPSILON));
+    if sum.is_finite() && sum <= bound {
+        Ok(sum)
+    } else {
+        Err(format!(
+            "readout residual is outside the output norm's F32 domain: the collapsed stream's sum of \
+             squares {sum:e} exceeds the representable bound {bound:e} for {} values",
+            hidden.len()
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The output-norm statistic check refuses residuals whose collapsed
+    /// sum of squares cannot be represented in F32 (four identical 1e20
+    /// streams collapse to a finite 1e20 whose square overflows) and accepts
+    /// ordinary and zero inputs.
+    #[test]
+    fn output_norm_statistic_refuses_unrepresentable_sums_of_squares() {
+        let hidden = 4096;
+        assert!(output_norm_statistic(&vec![1.0e20; hidden]).is_err());
+        // 4096 x (3e17)^2 = 3.7e38 > f32::MAX; 4096 x (2e17)^2 = 1.6e38 fits.
+        assert!(output_norm_statistic(&vec![3.0e17; hidden]).is_err());
+        assert!(output_norm_statistic(&vec![2.0e17; hidden]).is_ok());
+        let refused = output_norm_statistic(&vec![1.0e20; hidden]).unwrap_err();
+        assert!(refused.contains("sum of squares"), "{refused}");
+        assert!(output_norm_statistic(&vec![0.0; hidden]).is_ok());
+        assert!(output_norm_statistic(&vec![37.5; hidden]).is_ok());
+        // Just inside and just outside the bound for a single value.
+        let edge = (f64::from(f32::MAX) / (1.0 + f64::from(f32::EPSILON))).sqrt();
+        assert!(output_norm_statistic(&[(edge * 0.999) as f32]).is_ok());
+        assert!(output_norm_statistic(&[(edge * 1.001) as f32]).is_err());
+    }
 
     #[test]
     fn sites_are_bounded_without_overflow() {

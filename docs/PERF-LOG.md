@@ -30,8 +30,9 @@ calling session.
   case. With it, local and attached runs replay every past reasoning item
   in order (`report-patched.json`). The new provider test fails on the
   unpatched converter.
-- **Open:** landing on `fork-dev` and rebuilding the installed binary; a
-  live GLM-serve opencode session, unpatched vs patched.
+- **Landed:** on `fork-dev` and installed (`install:local`). The installed
+  binary replays every past item.
+- **Open:** a live GLM-serve opencode session, unpatched vs patched.
 
 ## 2026-10-05 - GLM-5.3-Flash Native Tools (Map #11)
 

@@ -155,8 +155,12 @@ Rerun with the patched binary (`report-patched.json`):
 ## Status
 
 #13's question is answered and the client is fixed in the fork.
-Landing the fix on `fork-dev` and rebuilding the installed binary are
-still pending.
+- **Landed:** `fork-dev` was fast-forwarded to `8084ffaf7b`, then `bun
+  install` and `bun run install:local` ran from the fork root
+  (2026-10-06 16:52).
+- **Verified:** with the installed binary, local and attached runs carry 0,
+  1, 2 and 3 reasoning items at their four model requests: every past item,
+  in order.
 
 Next:
 - **Live check:** a fixed GLM-serve opencode session of three or more

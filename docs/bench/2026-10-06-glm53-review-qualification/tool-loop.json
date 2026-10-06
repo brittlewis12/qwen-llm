@@ -1,0 +1,67 @@
+{
+  "model": "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+  "records": [
+    {
+      "stream": false,
+      "first_status": "completed",
+      "first_items": [
+        "reasoning",
+        "function_call"
+      ],
+      "calls": [
+        {
+          "name": "get_weather",
+          "arguments": "{\"city\":\"Paris\",\"days\":2}"
+        }
+      ],
+      "first_events": [],
+      "second_status": "completed",
+      "second_items": [
+        "reasoning",
+        "message"
+      ],
+      "second_text": "Here's the weather in Paris for the next 2 days:\n\n- **Day 1:** 18\u00b0C, clear skies\n- **Day 2:** 21\u00b0C, sunny\n\nGreat conditions overall \u2014 mild and pleasant with plenty of sunshine!"
+    },
+    {
+      "stream": true,
+      "first_status": "completed",
+      "first_items": [
+        "reasoning",
+        "function_call"
+      ],
+      "calls": [
+        {
+          "name": "get_weather",
+          "arguments": "{\"city\":\"Paris\",\"days\":2}"
+        }
+      ],
+      "first_events": [
+        "response.completed",
+        "response.content_part.added",
+        "response.content_part.done",
+        "response.created",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.reasoning.delta",
+        "response.reasoning.done",
+        "response.reasoning_text.delta"
+      ],
+      "second_status": "completed",
+      "second_items": [
+        "reasoning",
+        "message"
+      ],
+      "second_text": "Here's the weather in Paris for the next 2 days:\n\n- **Day 1:** 18\u00b0C, clear skies\n- **Day 2:** 21\u00b0C, sunny\n\nGreat conditions overall \u2014 mild and pleasant with plenty of sunshine!"
+    }
+  ],
+  "serve_phases": [
+    "serve phases: family=glm5_next prefill_ms=1545.1 reused_tokens=0 prefill_tokens=201 decode_ms=571.4 required_forwards=1224 capacity=4096 transitions=17",
+    "serve phases: family=glm5_next prefill_ms=400.2 reused_tokens=218 prefill_tokens=18 decode_ms=1717.9 required_forwards=1259 capacity=4096 transitions=51",
+    "serve phases: family=glm5_next prefill_ms=1530.7 reused_tokens=0 prefill_tokens=201 decode_ms=571.6 required_forwards=1224 capacity=4096 transitions=17",
+    "serve phases: family=glm5_next prefill_ms=401.9 reused_tokens=218 prefill_tokens=18 decode_ms=1718.1 required_forwards=1259 capacity=4096 transitions=51"
+  ],
+  "exit_code": 130
+}

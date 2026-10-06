@@ -2733,6 +2733,14 @@ fn reference_report(label: &str, reference: &[Vec<f32>], other: &[Vec<f32>]) {
     );
 }
 
+/// KNOWN FAILING QUALIFICATION (map #12, 2026-10-06). Kept as the
+/// reproducer, with its frozen bounds and assertions unchanged. Fast reuse
+/// exceeds the warm/cold tolerance on these held-out prompts, and both cold
+/// and warm Fast also exceed the existing Exact-reference policy (see the
+/// diagnostic Exact report and `docs/bench/2026-10-06-glm53-review-
+/// qualification/`). Cancellation and resume on an unchanged schedule are
+/// bitwise. The general Fast-lineage qualification remains open.
+///
 /// Map #12: serve's default Fast packed lineage across live-session reuse.
 /// Three teacher-forced cases, each compared at the join and 32 continuation
 /// positions against one cold Fast prefill of the whole prompt:
@@ -2757,7 +2765,7 @@ fn reference_report(label: &str, reference: &[Vec<f32>], other: &[Vec<f32>]) {
 /// identical recurrent state (Fast is numerical by design; the Exact
 /// lineage keeps its own bitwise warm/cold check in serve).
 #[test]
-#[ignore = "loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU"]
+#[ignore = "known failing qualification (map #12); loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU"]
 fn fast_reuse_stays_within_the_fast_policy_across_reuse_boundaries() {
     use crate::glm5_next_chat::{
         self as chat, Effort, Message, RenderOptions, ToolCall, ToolDefinition,

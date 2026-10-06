@@ -1,0 +1,355 @@
+{
+  "model": "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+  "window_s": 10,
+  "outcomes": {
+    "refused": 400,
+    "request": "completed",
+    "aborted_after_submission": "event: response.reasoning.delta"
+  },
+  "failure": null,
+  "verdicts": {
+    "polling_never_renews": true,
+    "refused_is_4xx": true,
+    "refused_never_renews": true,
+    "request_renews_once": true,
+    "abort_after_submission_renews_once": true,
+    "completed": true,
+    "no_phase_errors": true
+  },
+  "passed": true,
+  "finishes": {
+    "startup": {
+      "total": 11,
+      "with_request": [],
+      "renewed": 0
+    },
+    "refused": {
+      "total": 12,
+      "with_request": [
+        {
+          "compute_encoders": "0",
+          "window": "unchanged"
+        }
+      ],
+      "renewed": 0
+    },
+    "request": {
+      "total": 12,
+      "with_request": [
+        {
+          "compute_encoders": "9",
+          "window": "renewed"
+        }
+      ],
+      "renewed": 1
+    },
+    "aborted_after_submission": {
+      "total": 12,
+      "with_request": [
+        {
+          "compute_encoders": "2",
+          "window": "renewed"
+        }
+      ],
+      "renewed": 1
+    }
+  },
+  "samples": [
+    {
+      "phase": "before_start",
+      "t": 0,
+      "wired_gib": 5.36
+    },
+    {
+      "phase": "startup_then_polling",
+      "t": 0.0,
+      "wired_gib": 114.9
+    },
+    {
+      "phase": "startup_then_polling",
+      "t": 2.0,
+      "wired_gib": 114.89
+    },
+    {
+      "phase": "startup_then_polling",
+      "t": 4.1,
+      "wired_gib": 114.89
+    },
+    {
+      "phase": "startup_then_polling",
+      "t": 6.1,
+      "wired_gib": 114.87
+    },
+    {
+      "phase": "startup_then_polling",
+      "t": 8.1,
+      "wired_gib": 115.13
+    },
+    {
+      "phase": "startup_then_polling",
+      "t": 10.1,
+      "wired_gib": 114.89
+    },
+    {
+      "phase": "startup_then_polling",
+      "t": 12.1,
+      "wired_gib": 5.17
+    },
+    {
+      "phase": "startup_then_polling",
+      "t": 14.2,
+      "wired_gib": 5.19
+    },
+    {
+      "phase": "startup_then_polling",
+      "t": 16.2,
+      "wired_gib": 5.17
+    },
+    {
+      "phase": "startup_then_polling",
+      "t": 18.2,
+      "wired_gib": 5.43
+    },
+    {
+      "phase": "startup_then_polling",
+      "t": 20.2,
+      "wired_gib": 5.19
+    },
+    {
+      "phase": "refused",
+      "t": 0,
+      "wired_gib": 5.17
+    },
+    {
+      "phase": "refused_then_polling",
+      "t": 0.0,
+      "wired_gib": 5.17
+    },
+    {
+      "phase": "refused_then_polling",
+      "t": 2.0,
+      "wired_gib": 5.19
+    },
+    {
+      "phase": "refused_then_polling",
+      "t": 4.0,
+      "wired_gib": 5.18
+    },
+    {
+      "phase": "refused_then_polling",
+      "t": 6.1,
+      "wired_gib": 5.41
+    },
+    {
+      "phase": "refused_then_polling",
+      "t": 8.1,
+      "wired_gib": 5.18
+    },
+    {
+      "phase": "refused_then_polling",
+      "t": 10.1,
+      "wired_gib": 5.17
+    },
+    {
+      "phase": "refused_then_polling",
+      "t": 12.1,
+      "wired_gib": 5.19
+    },
+    {
+      "phase": "refused_then_polling",
+      "t": 14.2,
+      "wired_gib": 5.17
+    },
+    {
+      "phase": "refused_then_polling",
+      "t": 16.2,
+      "wired_gib": 5.43
+    },
+    {
+      "phase": "refused_then_polling",
+      "t": 18.2,
+      "wired_gib": 5.19
+    },
+    {
+      "phase": "refused_then_polling",
+      "t": 20.2,
+      "wired_gib": 5.17
+    },
+    {
+      "phase": "request",
+      "t": 0,
+      "wired_gib": 115.63
+    },
+    {
+      "phase": "request_then_polling",
+      "t": 0.0,
+      "wired_gib": 115.63
+    },
+    {
+      "phase": "request_then_polling",
+      "t": 2.0,
+      "wired_gib": 115.11
+    },
+    {
+      "phase": "request_then_polling",
+      "t": 4.0,
+      "wired_gib": 114.87
+    },
+    {
+      "phase": "request_then_polling",
+      "t": 6.1,
+      "wired_gib": 114.86
+    },
+    {
+      "phase": "request_then_polling",
+      "t": 8.1,
+      "wired_gib": 114.87
+    },
+    {
+      "phase": "request_then_polling",
+      "t": 10.1,
+      "wired_gib": 114.86
+    },
+    {
+      "phase": "request_then_polling",
+      "t": 12.1,
+      "wired_gib": 5.43
+    },
+    {
+      "phase": "request_then_polling",
+      "t": 14.1,
+      "wired_gib": 5.19
+    },
+    {
+      "phase": "request_then_polling",
+      "t": 16.2,
+      "wired_gib": 5.17
+    },
+    {
+      "phase": "request_then_polling",
+      "t": 18.2,
+      "wired_gib": 5.19
+    },
+    {
+      "phase": "request_then_polling",
+      "t": 20.2,
+      "wired_gib": 5.17
+    },
+    {
+      "phase": "aborted_after_submission",
+      "t": 0,
+      "wired_gib": 115.64
+    },
+    {
+      "phase": "aborted_after_submission_then_polling",
+      "t": 0.5,
+      "wired_gib": 114.91
+    },
+    {
+      "phase": "aborted_after_submission_then_polling",
+      "t": 2.5,
+      "wired_gib": 114.87
+    },
+    {
+      "phase": "aborted_after_submission_then_polling",
+      "t": 4.6,
+      "wired_gib": 114.89
+    },
+    {
+      "phase": "aborted_after_submission_then_polling",
+      "t": 6.6,
+      "wired_gib": 114.89
+    },
+    {
+      "phase": "aborted_after_submission_then_polling",
+      "t": 8.6,
+      "wired_gib": 115.11
+    },
+    {
+      "phase": "aborted_after_submission_then_polling",
+      "t": 10.6,
+      "wired_gib": 114.89
+    },
+    {
+      "phase": "aborted_after_submission_then_polling",
+      "t": 12.6,
+      "wired_gib": 5.17
+    },
+    {
+      "phase": "aborted_after_submission_then_polling",
+      "t": 14.7,
+      "wired_gib": 5.18
+    },
+    {
+      "phase": "aborted_after_submission_then_polling",
+      "t": 16.7,
+      "wired_gib": 5.18
+    },
+    {
+      "phase": "aborted_after_submission_then_polling",
+      "t": 18.7,
+      "wired_gib": 5.41
+    },
+    {
+      "phase": "aborted_after_submission_then_polling",
+      "t": 20.7,
+      "wired_gib": 5.18
+    },
+    {
+      "phase": "after_exit",
+      "t": 0,
+      "wired_gib": 5.12
+    }
+  ],
+  "exit_code": 130,
+  "residency_lines": [
+    "serve idle residency: family=glm5_next window_s=10 pulse_ms=500",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=0 window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=9 window=renewed",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=2 window=renewed",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged",
+    "serve idle residency: family=glm5_next finished compute_encoders=none window=unchanged"
+  ]
+}

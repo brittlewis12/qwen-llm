@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-06 - GLM-5.3 Review Fixes Qualified Live; #12 Fast Reuse Fails Its Frozen Gate
+
+Packet `docs/bench/2026-10-06-glm53-review-qualification/`. Binaries frozen
+at `dfef7dc1`.
+- **Gates:** 14/14 pass under the debug layer.
+- **Tool loop:** the live tool loop reuses 218 of 236 tokens.
+- **Idle residency:** every verdict passes (polling and refusal never renew;
+  a completed request and a client abort after submission each renew once).
+- **#12 (known failing qualification):**
+  - The frozen warm/cold gate fails: ordinary KL 2.13e-2 with a 0.397-regret
+    flip; tool loop across the frontier KL 5.6e-2.
+  - An Exact reference shows that cold and warm Fast both exceed the
+    existing Fast policy: cold ordinary 2.17e-2; tool loop 7.9e-2 and
+    0.111, both flipping position 2 at Exact-side regret 0.54.
+  - Cancellation and resume on an unchanged schedule are bitwise.
+  - No regression from this branch was identified. A default-Fast
+    investigation is open; no bound change.
+
 ## 2026-10-06 - opencode Reasoning Replay (Map #13): Lost in the Client's Bundled Provider, Fixed in the Fork
 
 Packet `docs/bench/2026-10-06-opencode-reasoning-replay/`. CPU only: a

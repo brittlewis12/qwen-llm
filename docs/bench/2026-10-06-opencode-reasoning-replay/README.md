@@ -83,25 +83,63 @@ serve accepts.
 ## Consequences for serve
 
 - **Families that keep past reasoning in history** (GLM-5.3 by default,
-  Qwen3.8, DS4 house style):
-  - Every opencode step renders the previous assistant step with empty
-    reasoning, although the model generated reasoning there.
-  - This changes the model's conditioning inside an agent loop.
-  - It also changes the live-session prefix. Reuse stops at the previous
-    step's reasoning, and that step plus the tool results are prefilled
-    again on every step.
-  - Earlier turns are unaffected: they were already rendered without
-    reasoning in the previous prompt.
+  Qwen3.8, DS4 house style): every opencode step renders the previous
+  assistant step with empty reasoning, although the model generated
+  reasoning there. This changes the model's conditioning inside an agent
+  loop.
+- **Reuse cost for GLM.** The live session cannot rewind its recurrent
+  state, so reuse is all or nothing (`decode_loop::extending_prefix`): the
+  prompt must extend the whole committed history.
+  - The previous step's reasoning differs, so **every agent step is a full
+    re-prefill**.
+  - opencode's requests here carry about 50 KB before any conversation:
+    11 KB of instructions and 39 KB of schemas for 12 tools, roughly 12-14k
+    tokens. At GLM's roughly 180 tok/s prefill that is on the order of a
+    minute per step, versus prefilling only the new tool results when reuse
+    holds.
+  - Families that can truncate (Qwen's prefix reuse) lose only the
+    previous step.
 - **Families that drop past reasoning by template:** unaffected.
 - **Serve needs nothing** to accept these requests; they are valid.
+
+## Options (design review, cx session 01a10cc)
+
+- **C, preferred:** a client-side fix. A pinned, self-contained AI SDK 5
+  (provider specification v2) Responses provider whose input converter
+  replays reasoning parts as reasoning items, loaded by opencode through a
+  `file://` npm path. It fixes both conditioning and reuse, and keeps
+  request semantics stateless.
+  - Building it needs either a compatible provider source (not
+    downloaded) or a new provider.
+  - Enabling it in a user's opencode configuration is the user's choice.
+- **Engine-side reuse, independent of reasoning:** a prompt-boundary
+  checkpoint for GLM. It keeps the recurrent state at the end of each
+  prompt prefill, so a request that extends the previous *prompt* (but not
+  the generated turn) rewinds to it and prefills only the re-rendered turn
+  and the new items. That removes the full re-prefill for any client that
+  drops or edits the last generated turn. Rendering, and therefore
+  conditioning, is unchanged.
+- **B, not recommended by default:** serve restores the reasoning of the
+  turn it just generated when the history matches it except for the
+  missing item.
+  - It cannot tell omission from intent (explicit empty reasoning, edits,
+    `history_thinking: "strip"`).
+  - Content matching does not establish which client owns the turn.
+  - Restoring only the newest turn is not stable across steps: the turn
+    restored at step k is missing again at step k+1.
+- **A:** document only.
 
 ## Status
 
 #13's question is answered, and the cause is located in the client: the
 omission is real in normal use, including within one agent loop.
 
-Open: whether serve should restore the reasoning of the turn it just
-generated, when the request's history matches that turn exactly except for
-the missing reasoning item. That is a policy decision, still to be made.
-A live GLM-serve opencode session would measure the reuse cost and the
-answer-quality effect.
+Next:
+- Size the effect live: a fixed GLM-serve opencode session of three or
+  more steps, within a run and across runs. Record per step: reasoning
+  items sent, effective prompt tokens, reused and prefilled tokens, time to
+  first token and task wall time.
+- Then choose between C and the prompt-boundary checkpoint (they are
+  complementary).
+- One session is a mechanism screen. It is not a quality or default-policy
+  decision.

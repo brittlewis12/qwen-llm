@@ -1,5 +1,14 @@
 # Empty reasoning round trip (2026-10-05)
 
+> **Correction (2026-10-06, map #13).** The provider-layer capture below
+> drove the cached `@ai-sdk/open-responses` 2.0.29 build, which is not what
+> opencode 0.1.0 uses. opencode maps that provider id to a bundled 1.0.35
+> build with no reasoning input conversion, and it cannot load 2.0.29 (AI
+> SDK 6 provider specification). So the client never replays reasoning,
+> with or without metadata. See
+> `docs/bench/2026-10-06-opencode-reasoning-replay/`. The serve-side fix
+> recorded here stands.
+
 Leverage map #4, bounded to 1-2 h. Question: when serve emits an empty
 reasoning item (a thinking turn that closes its block immediately), what does
 the next request carry, and does serve render that history as generated?

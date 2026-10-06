@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-06 - opencode Reasoning Replay (Map #13): Lost in the Client's Bundled Provider
+
+Packet `docs/bench/2026-10-06-opencode-reasoning-replay/`. CPU only: a
+scripted mock in serve's shapes, with opencode 0.1.0 isolated from the
+calling session.
+- **Result:** no reasoning item is replayed, in any of 15 requests. That
+  holds within one multi-step tool run (the request after a tool result
+  lacks the reasoning before the call) and across runs (`-c`), in-process
+  (`--local`) and server-attached (`opencode serve` + `run --attach`), with
+  the open-responses and openai provider ids.
+- **Cause:**
+  - opencode stores reasoning parts and passes them to the provider.
+  - Its bundled `@ai-sdk/open-responses` 1.0.35 has no reasoning input
+    conversion.
+  - It cannot load the cached 2.0.29 (AI SDK 6 provider specification),
+    the build #4's provider capture used. That packet is corrected.
+  - Its bundled `@ai-sdk/openai` keeps only reasoning with OpenAI item ids.
+- **Effect:** where a family keeps past reasoning (GLM-5.3 by default),
+  each agent step re-renders the previous step with empty reasoning. Live
+  reuse stops there, and conditioning differs from generation.
+- **Open:** a serve-side restore policy for the just-generated turn; a live
+  GLM-serve opencode session to size it.
+
 ## 2026-10-05 - GLM-5.3-Flash Native Tools (Map #11)
 
 Packet `docs/bench/2026-10-05-glm53-tools/`.

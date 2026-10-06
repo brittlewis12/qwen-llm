@@ -437,6 +437,32 @@ mod tests {
         .unwrap()
     }
 
+    /// A root `parameters.$ref` to an unconstrained object does not hide the
+    /// root's own `properties`: an integer argument written as `abc` is
+    /// refused, not kept as a string. An unresolvable chain refuses the
+    /// definition itself.
+    #[test]
+    fn root_reference_siblings_type_generated_arguments() {
+        let tool = |parameters: serde_json::Value| {
+            ToolDefinition::from_value(&json!({"name": "f", "parameters": parameters})).unwrap()
+        };
+        let sibling = tool(
+            json!({"$ref": "#/$defs/Any", "$defs": {"Any": {"type": "object"}},
+            "properties": {"a": {"type": "integer"}}}),
+        );
+        let error = parse_tool_calls(&one_arg("abc"), std::slice::from_ref(&sibling)).unwrap_err();
+        assert!(error.to_string().contains("declared type"), "{error}");
+        let calls = parse_tool_calls(&one_arg("7"), &[sibling]).unwrap();
+        assert_eq!(calls[0].arguments["a"], json!(7));
+        let error = ToolDefinition::from_value(&json!({"name": "f", "parameters":
+            {"$ref": "#/$defs/A", "$defs": {"A": {"$ref": "#/$defs/Gone"}}}}))
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("not a local definition"),
+            "{error}"
+        );
+    }
+
     /// Text the template writes identically for a string and another
     /// admitted type is refused, not guessed; unambiguous text under an open
     /// schema is a string. Decoding is lossless and values must render.
@@ -475,9 +501,12 @@ mod tests {
             parse_tool_calls(&one_arg("1e999"), &[number]).is_err(),
             "unrenderable float"
         );
-        let bad_ref = schema_for_a(json!({"$ref": "#/$defs/missing"}));
+        // An unresolvable $ref never reaches the parser: the definition is
+        // refused when it arrives.
         assert!(
-            parse_tool_calls(&one_arg("x"), &[bad_ref]).is_err(),
+            ToolDefinition::from_value(&json!({"name": "f", "parameters": {
+                "properties": {"a": {"$ref": "#/$defs/missing"}}}}))
+            .is_err(),
             "unresolvable $ref"
         );
     }

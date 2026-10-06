@@ -822,7 +822,17 @@ and parses it, and never runs a tool.
   `function_call` items when the turn stops (`<|observation|>`).
   - Each argument's outer type comes from the declared schema (`type`,
     `enum`, `const`, `anyOf`/`oneOf`/`allOf`, local `$ref`). This is not
-    full JSON Schema validation, and an unresolvable `$ref` refuses the call.
+    full JSON Schema validation.
+    - Every object schema that applies to the arguments constrains each
+      argument, and they intersect: `parameters` itself, each target along
+      its `$ref` chain (the root's own `properties` still apply), and each
+      `allOf` member. Root `anyOf`/`oneOf` members unite.
+    - A definition whose schema could not type some argument is refused
+      with a 400 when the request arrives. That covers a non-string,
+      unresolvable or remote `$ref` anywhere in that walk or in a declared
+      property, and malformed `properties` or combinators. So is a schema
+      that needs more than 65,536 visits (shared references fanned out
+      along many paths).
     - A schema that admits no string: the value must decode losslessly as
       JSON of an admitted, renderable type.
     - A schema that admits a string: the text is the string, unless it also

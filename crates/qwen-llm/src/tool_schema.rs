@@ -259,14 +259,45 @@ pub fn argument_kinds(parameters: &Value, key: &str) -> Result<u8, String> {
 /// ([`ref_target`]) or the schema is refused, and a `$ref` with sibling
 /// keywords admits the intersection of the target's and the siblings'
 /// types (JSON Schema applies both), not an overlay.
-pub fn strict_schema_kinds(
-    spec: &Value,
-    root: &Value,
-    active: &mut Vec<String>,
-) -> Result<u8, String> {
-    if active.len() >= 128 {
-        return Err("tool argument schema exceeds reference safety limit".into());
+pub fn strict_schema_kinds(spec: &Value, root: &Value) -> Result<u8, String> {
+    strict_kinds(spec, root, &mut Walk::default())
+}
+
+/// Bound on schema objects one strict walk visits. Cycles are cut by the
+/// active-reference list, but shared targets reached along many paths
+/// (`allOf` members referencing one definition, nested) would otherwise
+/// expand exponentially within the depth limit.
+const WALK_VISITS: usize = 1 << 16;
+
+/// State of one strict walk: the references being resolved (cycle and
+/// depth guard; an empty entry marks combinator nesting) and the visits.
+#[derive(Default)]
+struct Walk {
+    active: Vec<String>,
+    visits: usize,
+}
+
+impl Walk {
+    fn visit(&mut self) -> Result<(), String> {
+        self.visits += 1;
+        if self.active.len() >= 128 {
+            return Err("tool argument schema exceeds reference safety limit".into());
+        }
+        if self.visits > WALK_VISITS {
+            return Err(format!(
+                "tool argument schema exceeds {WALK_VISITS} schema visits"
+            ));
+        }
+        Ok(())
     }
+
+    fn resolving(&self, reference: &str) -> bool {
+        self.active.iter().any(|v| v == reference)
+    }
+}
+
+fn strict_kinds(spec: &Value, root: &Value, walk: &mut Walk) -> Result<u8, String> {
+    walk.visit()?;
     if spec == &Value::Bool(false) {
         return Ok(0);
     }
@@ -281,10 +312,10 @@ pub fn strict_schema_kinds(
         let target = ref_target(root, reference).ok_or_else(|| {
             format!("tool argument schema $ref {reference:?} is not a local definition")
         })?;
-        if !active.iter().any(|v| v == reference) {
-            active.push(reference.into());
-            mask &= strict_schema_kinds(target, root, active)?;
-            active.pop();
+        if !walk.resolving(reference) {
+            walk.active.push(reference.into());
+            mask &= strict_kinds(target, root, walk)?;
+            walk.active.pop();
         }
     }
     if let Some(name) = object.get("type").and_then(Value::as_str) {
@@ -304,9 +335,9 @@ pub fn strict_schema_kinds(
         if let Some(variants) = object.get(key).and_then(Value::as_array) {
             let mut combined = if key == "allOf" { ANY } else { 0 };
             for variant in variants {
-                active.push(String::new());
-                let child = strict_schema_kinds(variant, root, active)?;
-                active.pop();
+                walk.active.push(String::new());
+                let child = strict_kinds(variant, root, walk)?;
+                walk.active.pop();
                 if key == "allOf" {
                     combined &= child;
                 } else {
@@ -320,23 +351,153 @@ pub fn strict_schema_kinds(
 }
 
 /// The outer types a function's `parameters` admit for argument `key` under
-/// [`strict_schema_kinds`] (`parameters` may itself be a `$ref`). A missing
-/// schema admits anything.
+/// [`strict_schema_kinds`]. Every object schema that applies to the
+/// arguments object constrains `key`, and they intersect: `parameters`
+/// itself, each target along its `$ref` chain (siblings apply alongside the
+/// reference, as for properties), and each `allOf` member; `anyOf`/`oneOf`
+/// members admit the union of what each allows. A schema in that walk that
+/// does not name `key` in `properties` leaves it unconstrained, so a missing
+/// schema admits anything. A non-string or unresolvable `$ref` anywhere in
+/// the walk refuses the schema; a reference cycle adds nothing further.
 pub fn strict_argument_kinds(parameters: &Value, key: &str) -> Result<u8, String> {
-    let mut active = Vec::new();
-    let resolved;
-    let parameters_schema = match parameters.get("$ref").and_then(Value::as_str) {
-        Some(reference) => {
-            resolved = ref_target(parameters, reference).ok_or_else(|| {
-                format!("tool parameters $ref {reference:?} is not a local definition")
-            })?;
-            resolved
-        }
-        None => parameters,
+    object_argument_kinds(parameters, parameters, key, &mut Walk::default())
+}
+
+/// [`strict_argument_kinds`] for one object schema in the root walk.
+fn object_argument_kinds(
+    schema: &Value,
+    root: &Value,
+    key: &str,
+    walk: &mut Walk,
+) -> Result<u8, String> {
+    walk.visit()?;
+    if schema == &Value::Bool(false) {
+        return Ok(0);
+    }
+    let Some(object) = schema.as_object() else {
+        return Ok(ANY);
     };
-    match parameters_schema.get("properties").and_then(|p| p.get(key)) {
-        Some(schema) => strict_schema_kinds(schema, parameters, &mut active),
-        None => Ok(ANY),
+    let mut mask = ANY;
+    if let Some(reference) = object.get("$ref") {
+        let reference = reference
+            .as_str()
+            .ok_or_else(|| "tool parameters $ref must be a string".to_owned())?;
+        let target = ref_target(root, reference).ok_or_else(|| {
+            format!("tool parameters $ref {reference:?} is not a local definition")
+        })?;
+        if !walk.resolving(reference) {
+            walk.active.push(reference.into());
+            mask &= object_argument_kinds(target, root, key, walk)?;
+            walk.active.pop();
+        }
+    }
+    match object.get("properties") {
+        None => {}
+        Some(Value::Object(properties)) => {
+            if let Some(property) = properties.get(key) {
+                walk.active.push(String::new());
+                mask &= strict_kinds(property, root, walk)?;
+                walk.active.pop();
+            }
+        }
+        Some(_) => return Err("tool parameters properties must be an object".into()),
+    }
+    for combinator in ["allOf", "anyOf", "oneOf"] {
+        let Some(members) = object.get(combinator) else {
+            continue;
+        };
+        let members = members
+            .as_array()
+            .ok_or_else(|| format!("tool parameters {combinator} must be an array"))?;
+        let mut combined = if combinator == "allOf" { ANY } else { 0 };
+        for member in members {
+            walk.active.push(String::new());
+            let kinds = object_argument_kinds(member, root, key, walk)?;
+            walk.active.pop();
+            if combinator == "allOf" {
+                combined &= kinds;
+            } else {
+                combined |= kinds;
+            }
+        }
+        mask &= combined;
+    }
+    Ok(mask)
+}
+
+/// Bound on (distinct property names) x (object schemas in the root walk)
+/// that [`check_strict_parameters`] will type.
+const STRICT_CHECK_WORK: usize = 1 << 20;
+
+/// Refuse, when a definition arrives, a `parameters` schema that
+/// [`strict_argument_kinds`] would refuse for some argument when the model
+/// calls the tool: every property name declared anywhere in the root walk,
+/// and an undeclared name, must type. A refusal then reaches the client
+/// before generation rather than as a failed call after it.
+pub fn check_strict_parameters(parameters: &Value) -> Result<(), String> {
+    let mut keys = std::collections::BTreeSet::new();
+    let mut schemas = 0usize;
+    collect_property_keys(
+        parameters,
+        parameters,
+        &mut Vec::new(),
+        &mut keys,
+        &mut schemas,
+    );
+    if schemas > WALK_VISITS {
+        return Err(format!(
+            "tool parameters schema exceeds {WALK_VISITS} schema visits"
+        ));
+    }
+    if keys.len().saturating_mul(schemas) > STRICT_CHECK_WORK {
+        return Err(format!(
+            "tool parameters schema is too large to type arguments ({} names across {schemas} object schemas)",
+            keys.len()
+        ));
+    }
+    // A name no `properties` declares exercises every structural check.
+    strict_argument_kinds(parameters, "\u{0}undeclared")?;
+    for key in keys {
+        strict_argument_kinds(parameters, key)?;
+    }
+    Ok(())
+}
+
+/// Property names in the root walk of [`strict_argument_kinds`]; malformed
+/// or unresolvable parts are skipped here and reported by the typing pass.
+fn collect_property_keys<'a>(
+    schema: &'a Value,
+    root: &'a Value,
+    active: &mut Vec<&'a str>,
+    keys: &mut std::collections::BTreeSet<&'a str>,
+    schemas: &mut usize,
+) {
+    let Some(object) = schema.as_object() else {
+        return;
+    };
+    if active.len() >= 128 || *schemas > WALK_VISITS {
+        return;
+    }
+    *schemas += 1;
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str)
+        && !active.contains(&reference)
+        && let Some(target) = ref_target(root, reference)
+    {
+        active.push(reference);
+        collect_property_keys(target, root, active, keys, schemas);
+        active.pop();
+    }
+    if let Some(Value::Object(properties)) = object.get("properties") {
+        keys.extend(properties.keys().map(String::as_str));
+    }
+    for combinator in ["allOf", "anyOf", "oneOf"] {
+        if let Some(Value::Array(members)) = object.get(combinator) {
+            for member in members {
+                active.push("");
+                collect_property_keys(member, root, active, keys, schemas);
+                active.pop();
+            }
+        }
     }
 }
 
@@ -534,6 +695,140 @@ mod tests {
             resolve_ref(&parameters, &json!({"$ref": "#/definitions/T"})),
             Some(json!({"type": "integer"}))
         );
+    }
+
+    /// Definitions are checked when they arrive: every declared property
+    /// (root, along `$ref` chains and in combinators) and an undeclared name
+    /// must type, so a broken schema is refused before generation.
+    #[test]
+    fn parameters_are_checked_for_every_declared_property_up_front() {
+        assert!(
+            check_strict_parameters(&json!({"type": "object", "properties": {
+            "a": {"type": "string"}, "b": {"$ref": "#/$defs/B"}},
+            "$defs": {"B": {"type": "integer"}}}))
+            .is_ok()
+        );
+        for bad in [
+            // A property's reference that is never resolvable.
+            json!({"properties": {"a": {"$ref": "#/$defs/Gone"}}}),
+            // Reachable only through the root chain.
+            json!({"$ref": "#/$defs/A", "$defs": {"A": {"properties": {
+                "a": {"$ref": "https://example.com/a"}}}}}),
+            // Reachable only through a root combinator.
+            json!({"anyOf": [{"properties": {"a": {"$ref": 3}}}]}),
+            // Root structure.
+            json!({"$ref": "#/$defs/Gone"}),
+            json!({"properties": "a"}),
+        ] {
+            assert!(check_strict_parameters(&bad).is_err(), "{bad}");
+        }
+    }
+
+    /// Shared targets reached along many paths would expand exponentially
+    /// within the depth limit; the visit budget refuses such a schema
+    /// promptly (cycles alone are cut by the active-reference list).
+    #[test]
+    fn shared_reference_fans_are_bounded() {
+        let mut defs = serde_json::Map::new();
+        for level in 0..40 {
+            let next = format!("#/$defs/L{}", level + 1);
+            defs.insert(
+                format!("L{level}"),
+                json!({"allOf": [{"$ref": next}, {"$ref": next}],
+                    "properties": {"x": {"allOf": [{"$ref": next}, {"$ref": next}]}}}),
+            );
+        }
+        defs.insert("L40".into(), json!({"type": "integer"}));
+        let parameters = json!({"$ref": "#/$defs/L0", "$defs": defs});
+        let started = std::time::Instant::now();
+        let error = strict_argument_kinds(&parameters, "x").unwrap_err();
+        assert!(error.contains("schema visits"), "{error}");
+        assert!(check_strict_parameters(&parameters).is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    /// A root `parameters.$ref` is one constraint among several, not a
+    /// replacement for the root: siblings, chains, and root combinators all
+    /// apply, and anything malformed or unresolvable refuses the schema.
+    #[test]
+    fn root_references_intersect_with_every_applicable_object_schema() {
+        let kinds = |parameters: Value, key: &str| strict_argument_kinds(&parameters, key);
+        // Root sibling properties apply alongside an unconstrained target:
+        // `abc` must not pass as a string for an integer argument.
+        assert_eq!(
+            kinds(
+                json!({"$ref": "#/$defs/Any", "$defs": {"Any": {"type": "object"}},
+                    "properties": {"x": {"type": "integer"}}}),
+                "x"
+            ),
+            Ok(INTEGER)
+        );
+        // Target and sibling constraints intersect.
+        assert_eq!(
+            kinds(
+                json!({"$ref": "#/$defs/T",
+                    "$defs": {"T": {"properties": {"x": {"type": ["integer", "string"]}}}},
+                    "properties": {"x": {"type": ["string", "boolean"]}}}),
+                "x"
+            ),
+            Ok(STRING)
+        );
+        // A chain resolves to its end; every link's properties apply.
+        let chained = json!({"$ref": "#/$defs/A", "$defs": {
+            "A": {"$ref": "#/$defs/B", "properties": {"x": {"type": ["integer", "null"]}}},
+            "B": {"properties": {"x": {"type": "integer"}}}}});
+        assert_eq!(kinds(chained, "x"), Ok(INTEGER));
+        // A chain whose later link is missing, malformed or remote refuses.
+        for bad in [
+            json!({"$ref": "#/$defs/A", "$defs": {"A": {"$ref": "#/$defs/Missing"}}}),
+            json!({"$ref": "#/$defs/A", "$defs": {"A": {"$ref": 7}}}),
+            json!({"$ref": "#/$defs/A", "$defs": {"A": {"$ref": "https://example.com/a"}}}),
+            json!({"$ref": "#/$defs/A/properties", "$defs": {"A": {}}}),
+        ] {
+            assert!(kinds(bad.clone(), "x").is_err(), "{bad}");
+        }
+        // A non-string root $ref is refused, not ignored.
+        assert!(kinds(json!({"$ref": ["#/$defs/A"], "$defs": {"A": {}}}), "x").is_err());
+        assert!(kinds(json!({"$ref": null}), "x").is_err());
+        // Malformed root structure is refused rather than read as absent.
+        assert!(kinds(json!({"properties": []}), "x").is_err());
+        assert!(kinds(json!({"allOf": {}}), "x").is_err());
+        // A cycle terminates and keeps the constraints it passed.
+        let cycle = json!({"$ref": "#/$defs/A", "$defs": {
+            "A": {"$ref": "#/$defs/B", "properties": {"x": {"type": "integer"}}},
+            "B": {"$ref": "#/$defs/A"}}});
+        assert_eq!(kinds(cycle, "x"), Ok(INTEGER));
+        // Root allOf intersects; anyOf/oneOf unite (a member without the
+        // property leaves it unconstrained).
+        assert_eq!(
+            kinds(
+                json!({"allOf": [{"properties": {"x": {"type": ["integer", "string"]}}},
+                    {"properties": {"x": {"type": "integer"}}}]}),
+                "x"
+            ),
+            Ok(INTEGER)
+        );
+        assert_eq!(
+            kinds(
+                json!({"anyOf": [{"properties": {"x": {"type": "integer"}}},
+                    {"properties": {"x": {"type": "boolean"}}}]}),
+                "x"
+            ),
+            Ok(INTEGER | BOOL)
+        );
+        assert_eq!(
+            kinds(
+                json!({"oneOf": [{"properties": {"x": {"type": "integer"}}}, {}]}),
+                "x"
+            ),
+            Ok(ANY)
+        );
+        // Plain schemas are unchanged.
+        assert_eq!(
+            kinds(json!({"properties": {"x": {"type": "number"}}}), "x"),
+            Ok(NUMBER | INTEGER)
+        );
+        assert_eq!(kinds(json!({"type": "object"}), "x"), Ok(ANY));
     }
 
     #[test]

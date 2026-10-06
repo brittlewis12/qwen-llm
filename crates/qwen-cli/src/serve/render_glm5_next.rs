@@ -556,6 +556,12 @@ mod tests {
                 json!({"model":"m","input":"q","tools":[{"type":"function","name":"f","examples":[]}]}),
                 "tools",
             ),
+            // A schema that could not type generated arguments.
+            (
+                json!({"model":"m","input":"q","tools":[{"type":"function","name":"f",
+                    "parameters":{"$ref":"#/$defs/A","$defs":{"A":{"$ref":"#/$defs/Gone"}}}}]}),
+                "tools",
+            ),
             (
                 json!({"model":"m","input":[{"role":"user","content":"q"},
                     {"type":"function_call","call_id":"c","name":"f","arguments":"{}"},

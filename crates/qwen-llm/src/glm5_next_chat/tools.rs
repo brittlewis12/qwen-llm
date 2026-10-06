@@ -14,7 +14,9 @@
 //! (the template errors on a string), results must answer exactly the
 //! preceding turn's calls (each once), every call must name a declared
 //! function, and `strict: true` or `defer_loading` definitions are refused
-//! (neither can be honored).
+//! (neither can be honored), as are `parameters` schemas that generated
+//! arguments could not be typed by (unresolvable or malformed `$ref`,
+//! malformed `properties` or combinators; `tool_schema::check_strict_parameters`).
 
 use super::*;
 use serde_json::{Map, Value};
@@ -110,7 +112,11 @@ impl ToolDefinition {
                 "parameters" if !value.is_object() => {
                     return Err(tools("tool parameters must be a JSON Schema object"));
                 }
-                "description" | "parameters" => {}
+                // Generated arguments are typed by this schema; one that
+                // cannot type them is refused now, not after generation.
+                "parameters" => crate::tool_schema::check_strict_parameters(value)
+                    .map_err(|e| tools(format!("tool parameters: {e}")))?,
+                "description" => {}
                 // The template drops `strict`; only `false` means what it shows.
                 "strict" if value == &Value::Bool(false) => continue,
                 "strict" => {

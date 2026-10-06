@@ -90,6 +90,7 @@ pub(crate) fn input_from_responses(
             .unwrap_or("message")
         {
             "reasoning" => {
+                let item = &chat::without_null_reasoning_fields(item);
                 metadata(item, &["type", "id", "status", "summary", "content"])?;
                 if item
                     .get("summary")
@@ -386,6 +387,9 @@ mod tests {
             json!({"type":"reasoning","summary":[],"id":"rs_e1","content":[{"type":"reasoning_text","text":""}]}),
         );
         let contentless = parse(json!({"type":"reasoning","summary":[]}));
+        let null_content =
+            parse(json!({"type":"reasoning","summary":[],"content":null,"encrypted_content":null}));
+        assert_eq!(null_content, explicit);
         assert_eq!(contentless, explicit);
         assert_eq!(contentless.render().unwrap(), explicit.render().unwrap());
     }

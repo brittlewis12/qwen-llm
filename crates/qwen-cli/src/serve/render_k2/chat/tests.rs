@@ -53,6 +53,7 @@ fn k2_chat_history_preserves_empty_reasoning_and_literal_foreign_markers() {
     let replays = [
         json!({"type":"reasoning","content":[{"type":"reasoning_text","text":""}],"status":"completed","id":"r"}),
         json!({"type":"reasoning","summary":[]}),
+        json!({"type":"reasoning","summary":[],"content":null,"encrypted_content":null}),
     ];
     for (effort, reasoning) in ["high", "medium", "low"]
         .into_iter()

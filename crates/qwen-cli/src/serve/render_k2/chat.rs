@@ -40,6 +40,20 @@ pub(super) fn fields<'a>(
     Ok(map)
 }
 
+/// A reasoning item with its null `content` and `encrypted_content` keys
+/// removed; any other null still fails field validation.
+pub(super) fn without_null_reasoning_fields(item: &Value) -> Value {
+    let mut item = item.clone();
+    if let Some(map) = item.as_object_mut() {
+        for key in ["content", "encrypted_content"] {
+            if map.get(key).is_some_and(Value::is_null) {
+                map.remove(key);
+            }
+        }
+    }
+    item
+}
+
 fn string<'a>(map: &'a Map<String, Value>, key: &str) -> Result<&'a str, ServeError> {
     map.get(key)
         .and_then(Value::as_str)
@@ -152,6 +166,15 @@ pub(crate) fn parse_with_profile(
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or("message");
+        // Reasoning items may carry `content: null` and `encrypted_content:
+        // null` (an empty reasoning item replayed without its metadata).
+        let reasoning_item;
+        let item = if kind == "reasoning" {
+            reasoning_item = without_null_reasoning_fields(item);
+            &reasoning_item
+        } else {
+            item
+        };
         let item = fields(
             item,
             if kind == "reasoning" {

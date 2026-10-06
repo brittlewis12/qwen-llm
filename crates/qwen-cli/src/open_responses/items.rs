@@ -1296,6 +1296,16 @@ fn reasoning_text(
     item_map: &serde_json::Map<String, Value>,
     index: usize,
 ) -> Result<String, ServeError> {
+    // Opaque reasoning cannot be rendered, with or without plain content.
+    if item_map
+        .get("encrypted_content")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err(ServeError::invalid_request(
+            Some("input"),
+            format!("item {index}: encrypted_content reasoning is unsupported"),
+        ));
+    }
     match item_map.get("content") {
         Some(Value::String(text)) => Ok(text.clone()),
         Some(Value::Array(parts)) => {
@@ -1330,17 +1340,21 @@ fn reasoning_text(
         // scripts/serve/provider-capture/empty_reasoning.ts), and serve's
         // own empty item means the same. Opaque encrypted reasoning cannot
         // be rendered and stays refused.
-        Some(Value::Null) | None
-            if item_map.get("encrypted_content").is_none_or(Value::is_null) =>
-        {
-            Ok(String::new())
-        }
-        Some(Value::Null) | None => Err(ServeError::invalid_request(
-            Some("input"),
-            format!(
-                "item {index}: reasoning items require plain content; encrypted_content is unsupported"
-            ),
-        )),
+        // No content: the turn reasoned and its text is empty, as long as no
+        // summary stands in for it (a summary is not the original reasoning
+        // and is never substituted). The stock @ai-sdk/open-responses
+        // provider replays serve's empty item so (`{"type":"reasoning",
+        // "summary":[]}`; scripts/serve/provider-capture/empty_reasoning.ts).
+        Some(Value::Null) | None => match item_map.get("summary") {
+            None | Some(Value::Null) => Ok(String::new()),
+            Some(Value::Array(parts)) if parts.is_empty() => Ok(String::new()),
+            Some(_) => Err(ServeError::invalid_request(
+                Some("input"),
+                format!(
+                    "item {index}: a reasoning summary without reasoning content cannot be rendered"
+                ),
+            )),
+        },
         _ => Err(ServeError::invalid_request(
             Some("input"),
             format!("item {index}: reasoning content must be a string or part array"),
@@ -1388,6 +1402,28 @@ mod tests {
         let null_content = json!({"type": "reasoning", "summary": [], "content": null});
         assert_eq!(turn(null_content).0, Some(String::new()));
 
+        let summary_only = parse(json!({"model": "m", "input": [
+            {"role": "user", "content": "Say hi."},
+            {"type": "reasoning", "summary": [{"type": "summary_text", "text": "planned"}]},
+            {"type": "message", "role": "assistant", "content": "Hi."},
+            {"role": "user", "content": "Again."}
+        ]}))
+        .unwrap_err();
+        assert!(
+            summary_only.message.contains("summary"),
+            "{}",
+            summary_only.message
+        );
+        let encrypted_null = json!({"type": "reasoning", "summary": [], "encrypted_content": null});
+        assert_eq!(turn(encrypted_null).0, Some(String::new()));
+        let encrypted_with_content = parse(json!({"model": "m", "input": [
+            {"role": "user", "content": "Say hi."},
+            {"type": "reasoning", "content": "plan", "encrypted_content": "opaque"},
+            {"type": "message", "role": "assistant", "content": "Hi."},
+            {"role": "user", "content": "Again."}
+        ]}))
+        .unwrap_err();
+        assert!(encrypted_with_content.message.contains("encrypted_content"));
         let encrypted = parse(json!({"model": "m", "input": [
             {"role": "user", "content": "Say hi."},
             {"type": "reasoning", "summary": [], "encrypted_content": "opaque"},

@@ -925,10 +925,12 @@ mod tests {
     /// Timing screen (not qualification): GPU time of one GLM-5.3 routed-expert
     /// decode block (288-expert banks: IQ2_S gate/up [4096 -> 2048], IQ3_S
     /// down [2048 -> 4096]; top-8 all-slot gate/up SwiGLU, all-slot down, then
-    /// the weighted sum) as a chain of 42 dependent blocks per command. Each
-    /// block routes to a different 8 experts, so weights stream from DRAM.
-    /// Random quant payloads with finite scales (timing only). Refuses
-    /// MTL_DEBUG_LAYER.
+    /// the weighted sum) as 42 serially encoded blocks per command: a repeated
+    /// workload, not a model-state chain (every block reads the same input and
+    /// no output feeds the next). Each block routes to a different 8 experts,
+    /// so weights stream from DRAM. Random quant payloads with finite scales,
+    /// which need not reproduce real lookup behavior (timing only). GB/s is
+    /// logical-byte effective bandwidth. Refuses MTL_DEBUG_LAYER.
     #[test]
     #[ignore = "timing screen; run without MTL_DEBUG_LAYER"]
     fn routed_expert_block_dispatch_costs() {

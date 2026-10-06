@@ -22,6 +22,9 @@ const SPARSE_V2_MANIFEST: &str = include_str!("../../../../scripts/reference/glm
 /// replay is bound to the recorded producer run. Hashed once per process per
 /// (path, length, SHA-256, records): the same expectation skips rehashing,
 /// and a different manifest for an already verified path is checked afresh.
+/// Oracle files are immutable evidence: a later read reopens the path and is
+/// not re-bound to the verified bytes, so replacing a file mid-process is
+/// outside this check.
 fn verified(manifest: &str, dir: &std::path::Path, name: &str) -> PathBuf {
     use sha2::Digest;
     use std::io::Read;
@@ -2283,8 +2286,10 @@ fn preflight_admits_fitting_sessions_and_reports_the_largest() {
 
 /// Lens surface: post-block captures of one decoded token equal ordinary
 /// decode, readouts leave every persistent state bit and the position alone,
-/// the last block reads out to the token's logits bit for bit, and refusals
-/// execute nothing.
+/// the last block reads out to the token's logits bit for bit. Malformed
+/// readout inputs are refused before any work; a finite residual outside the
+/// output norm's F32 domain is refused after the tail runs in scratch
+/// (a result-domain refusal), and neither moves persistent state.
 #[test]
 #[ignore = "loads the GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU"]
 fn lens_captures_read_out_without_moving_state() {
@@ -2342,6 +2347,15 @@ fn lens_captures_read_out_without_moving_state() {
     let mut nan = vec![0.0; width];
     nan[7] = f32::NAN;
     assert!(lensed.readout(&ctx, &nan).is_err());
+    // Finite residuals whose output-norm sum of squares overflows F32 (four
+    // identical 1e20 streams) are refused after the tail runs (a result-domain
+    // refusal, not preflight); a large accepted residual still reads out.
+    let refused = lensed.readout(&ctx, &vec![1.0e20; width]).unwrap_err();
+    assert!(refused.to_string().contains("sum of squares"), "{refused}");
+    assert_finite(
+        "large accepted readout",
+        &lensed.readout(&ctx, &vec![1.0e15; width]).unwrap(),
+    );
     assert_eq!(state_bits(&lensed), before, "readouts moved session state");
     assert_eq!(lensed.position(), 5);
     for &token in &tokens[5..8] {

@@ -55,6 +55,35 @@ pub(crate) fn check_tensor(
     Ok(())
 }
 
+/// A binding's physical extent, whatever its logical shape: its offset is a
+/// multiple of `align`, its bytes lie inside its buffer, and it is writable
+/// when `writable`. For encoders that accept row views of several shapes.
+pub(crate) fn check_physical(
+    kernel: &'static str,
+    tensor: &MetalTensor,
+    align: u64,
+    writable: bool,
+    name: &str,
+) -> Result<(), MetalError> {
+    if !tensor.offset.is_multiple_of(align) {
+        return Err(bad_shape(
+            kernel,
+            format!("{name} offset is not {align}-byte aligned"),
+        ));
+    }
+    let end = tensor
+        .offset
+        .checked_add(tensor.n_bytes())
+        .ok_or_else(|| bad_shape(kernel, format!("{name} range overflow")))?;
+    if end > tensor.buffer.length() as u64 {
+        return Err(bad_shape(kernel, format!("{name} exceeds its buffer")));
+    }
+    if writable && !tensor.is_writable() {
+        return Err(bad_shape(kernel, format!("{name} must be writable")));
+    }
+    Ok(())
+}
+
 /// An expert bank `[n_in, n_out, experts]` of `experts` contiguous, block-aligned
 /// expert matrices inside its buffer.
 pub(crate) fn check_expert_bank(

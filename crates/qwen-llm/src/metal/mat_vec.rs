@@ -1906,6 +1906,10 @@ pub fn encode_mat_vec_q8_0_short_k_f32(
             y.n_elements()
         )));
     }
+    // Q8_0 blocks open with a half scale; F32 rows are read and written as floats.
+    super::checks::check_physical(K, weight, 2, false, "weight")?;
+    super::checks::check_physical(K, x, 4, false, "input")?;
+    super::checks::check_physical(K, y, 4, true, "output")?;
     super::checks::check_disjoint(K, y, &[(weight, "weight"), (x, "input")])?;
     enc.note_read(weight);
     enc.note_read(x);
@@ -2536,6 +2540,7 @@ pub fn encode_mat_vec_q6_k_x3_f32(
         .checked_mul(3)
         .filter(|&r| u32::try_from(r).is_ok())
         .ok_or_else(|| bad("3 * n_out exceeds u32".into()))?;
+    let n_in_u32 = u32::try_from(n_in).map_err(|_| bad(format!("n_in={n_in} exceeds u32")))?;
     for (i, weight) in weights.iter().enumerate() {
         if weight.dtype != GgmlType::Q6_K || weight.shape != [n_in as u64, n_out as u64] {
             return Err(bad(format!(
@@ -2546,6 +2551,13 @@ pub fn encode_mat_vec_q6_k_x3_f32(
     }
     if x.dtype != GgmlType::F32 || x.n_elements() as usize != n_in {
         return Err(bad(format!("x must be F32 [{n_in}]")));
+    }
+    for (i, weight) in weights.iter().enumerate() {
+        super::checks::check_physical(K, weight, 2, false, &format!("weight {i}"))?;
+    }
+    super::checks::check_physical(K, x, 4, false, "input")?;
+    for (i, y) in ys.iter().enumerate() {
+        super::checks::check_physical(K, y, 4, true, &format!("output {i}"))?;
     }
     for (i, y) in ys.iter().enumerate() {
         if y.dtype != GgmlType::F32 || y.n_elements() as usize != n_out {
@@ -2583,7 +2595,7 @@ pub fn encode_mat_vec_q6_k_x3_f32(
     enc.set_bytes(
         0,
         &Args {
-            n_in: n_in as u32,
+            n_in: n_in_u32,
             n_out: n_out as u32,
         },
     );
@@ -2907,6 +2919,10 @@ mod tests {
                 let a = tensor_f32_at_offset(&singles[i]);
                 let b = tensor_f32_at_offset(&fused[i]);
                 assert!(a.iter().any(|v| *v != 0.0));
+                assert!(
+                    a.iter().chain(&b).all(|v| v.is_finite()),
+                    "{n_in}x{n_out} matrix {i}"
+                );
                 assert_eq!(
                     a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                     b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
@@ -2918,8 +2934,10 @@ mod tests {
 
     /// DS4's fused shared-expert kernel (Q6_K gate and up rows, clamped
     /// SwiGLU) equals GLM's separate path (two Q6_K mat-vecs, then
-    /// `encode_clamped_swiglu`) bitwise at GLM's shared-expert shape, so GLM
-    /// can use it without changing its lineage.
+    /// `encode_clamped_swiglu`) bitwise at GLM's shared-expert shape and
+    /// clamp (10, `swiglu_clamp_shexp`), over input scales whose gate and up
+    /// pre-activations fall inside, near and beyond the clamp, so GLM can use
+    /// it without changing its lineage. Every value is finite.
     #[test]
     fn fused_q6_k_shared_swiglu_equals_separate_path_bitwise() {
         let Some(ctx) = metal_test_context() else {
@@ -2927,7 +2945,7 @@ mod tests {
         };
         const N_IN: usize = 4096;
         const N_OUT: usize = 2048;
-        const CLAMP: f32 = 7.0;
+        const CLAMP: f32 = 10.0;
         let tensor_q6 = |bytes: &[u8]| {
             offset_tensor(
                 &ctx,
@@ -2940,9 +2958,6 @@ mod tests {
         };
         let gate = tensor_q6(&random_q6_k(N_IN, N_OUT, 1));
         let up = tensor_q6(&random_q6_k(N_IN, N_OUT, 2));
-        let x: Vec<f32> = (0..N_IN)
-            .map(|i| ((i * 53 + 7) % 211) as f32 * 0.05 - 5.0)
-            .collect();
         let f32_t = |values: &[f32], shape: Vec<u64>| {
             offset_tensor(
                 &ctx,
@@ -2953,42 +2968,109 @@ mod tests {
                 GgmlType::F32,
             )
         };
-        let x_t = f32_t(&x, vec![N_IN as u64]);
-        let g = f32_t(&vec![0.0; N_OUT], vec![N_OUT as u64]);
-        let u = f32_t(&vec![0.0; N_OUT], vec![N_OUT as u64]);
-        let fused = f32_t(&vec![0.0; 3 * N_OUT], vec![3 * N_OUT as u64]);
-        let command = ctx.queue.commandBuffer().expect("command buffer");
-        let enc = KernelEncoder::begin(&command);
-        encode_mat_vec_q6_k_f32(&ctx, &enc, &gate, &x_t, &g, N_IN, N_OUT).unwrap();
-        encode_mat_vec_q6_k_f32(&ctx, &enc, &up, &x_t, &u, N_IN, N_OUT).unwrap();
-        crate::metal::encode_clamped_swiglu(&ctx, &enc, &g, &u, &g, CLAMP).unwrap();
-        encode_ds4_shared_swiglu_q6_k_f32(&ctx, &enc, &gate, &up, &x_t, &fused, N_IN, N_OUT, CLAMP)
+        let (mut inside, mut beyond) = (false, false);
+        for scale in [0.05f32, 0.5, 2.0, 8.0] {
+            let x: Vec<f32> = (0..N_IN)
+                .map(|i| (((i * 53 + 7) % 211) as f32 - 105.0) * scale / 21.0)
+                .collect();
+            let x_t = f32_t(&x, vec![N_IN as u64]);
+            let g = f32_t(&vec![0.0; N_OUT], vec![N_OUT as u64]);
+            let u = f32_t(&vec![0.0; N_OUT], vec![N_OUT as u64]);
+            let o = f32_t(&vec![0.0; N_OUT], vec![N_OUT as u64]);
+            let fused = f32_t(&vec![0.0; 3 * N_OUT], vec![3 * N_OUT as u64]);
+            let command = ctx.queue.commandBuffer().expect("command buffer");
+            let enc = KernelEncoder::begin(&command);
+            encode_mat_vec_q6_k_f32(&ctx, &enc, &gate, &x_t, &g, N_IN, N_OUT).unwrap();
+            encode_mat_vec_q6_k_f32(&ctx, &enc, &up, &x_t, &u, N_IN, N_OUT).unwrap();
+            crate::metal::encode_clamped_swiglu(&ctx, &enc, &g, &u, &o, CLAMP).unwrap();
+            encode_ds4_shared_swiglu_q6_k_f32(
+                &ctx, &enc, &gate, &up, &x_t, &fused, N_IN, N_OUT, CLAMP,
+            )
             .unwrap();
-        enc.end();
-        command.commit();
-        wait_completed(&command).expect("shared expert command");
-        let separate = tensor_f32_at_offset(&g);
-        let fused = tensor_f32_at_offset(&fused);
-        assert!(separate.iter().any(|v| *v != 0.0) && separate.iter().all(|v| v.is_finite()));
+            enc.end();
+            command.commit();
+            wait_completed(&command).expect("shared expert command");
+            let (g, u) = (tensor_f32_at_offset(&g), tensor_f32_at_offset(&u));
+            let separate = tensor_f32_at_offset(&o);
+            let fused = tensor_f32_at_offset(&fused);
+            assert!(
+                separate.iter().chain(&fused).all(|v| v.is_finite()),
+                "scale {scale}"
+            );
+            inside |= g.iter().chain(&u).any(|v| v.abs() > 1.0 && v.abs() < CLAMP);
+            beyond |= g.iter().chain(&u).any(|v| v.abs() > CLAMP);
+            assert_eq!(
+                separate.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                fused[..N_OUT]
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                "scale {scale}: fused vs separate shared SwiGLU"
+            );
+        }
         assert!(
-            separate.iter().any(|v| v.abs() > 1.0),
-            "inputs reach the SwiGLU's nonlinear range"
-        );
-        assert_eq!(
-            separate.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-            fused[..N_OUT]
-                .iter()
-                .map(|v| v.to_bits())
-                .collect::<Vec<_>>(),
-            "fused vs separate shared SwiGLU"
+            inside && beyond,
+            "pre-activations cover both sides of the clamp"
         );
     }
 
-    /// Short-K Q8_0 mat-vec against an f64 reference of the decoded weights
-    /// and the generic kernel, for n_in 32/64/128/256, an n_out that leaves a
-    /// partial threadgroup, and three rows; each row of the 3-row dispatch
-    /// equals its single-row dispatch bitwise, and outputs outside the
-    /// written range stay untouched.
+    /// The short-K and three-matrix encoders refuse bindings whose physical
+    /// extent the kernel cannot read safely: a Q8_0/Q6_K view at an odd byte
+    /// offset (its half scale), an F32 view off 4-byte alignment, a view
+    /// past its buffer, and a read-only output.
+    #[test]
+    fn short_k_and_x3_encoders_refuse_malformed_physical_views() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let (bytes, _) = synthetic_q8_0_bank(128, 64);
+        let f32_t = |prefix: usize, n: usize| {
+            offset_tensor(
+                &ctx,
+                prefix,
+                bytemuck::cast_slice(&vec![0.5f32; n]),
+                0,
+                vec![n as u64],
+                GgmlType::F32,
+            )
+        };
+        let good_w = offset_tensor(&ctx, 0, &bytes, 0, vec![128, 64], GgmlType::Q8_0);
+        let odd_w = offset_tensor(&ctx, 33, &bytes, 0, vec![128, 64], GgmlType::Q8_0);
+        let (x, y) = (f32_t(0, 128), f32_t(0, 64));
+        let command = ctx.queue.commandBuffer().expect("command buffer");
+        let enc = KernelEncoder::begin(&command);
+        assert!(encode_mat_vec_q8_0_short_k_f32(&ctx, &enc, &good_w, &x, &y, 128, 64, 1).is_ok());
+        let refused = |w: &MetalTensor, x: &MetalTensor, y: &MetalTensor| {
+            encode_mat_vec_q8_0_short_k_f32(&ctx, &enc, w, x, y, 128, 64, 1).is_err()
+        };
+        assert!(refused(&odd_w, &x, &y), "odd Q8_0 offset");
+        assert!(refused(&good_w, &f32_t(2, 128), &y), "misaligned input");
+        let mut past = y.clone();
+        past.offset = past.buffer.length() as u64 - 4;
+        assert!(refused(&good_w, &x, &past), "output past its buffer");
+        let mut read_only = y.clone();
+        read_only.provenance = MetalTensorProvenance::RetainedGgufReadOnly;
+        assert!(refused(&good_w, &x, &read_only), "read-only output");
+
+        let q6 = random_q6_k(256, 4, 3);
+        let w6 = offset_tensor(&ctx, 0, &q6, 0, vec![256, 4], GgmlType::Q6_K);
+        let odd6 = offset_tensor(&ctx, 1, &q6, 0, vec![256, 4], GgmlType::Q6_K);
+        let x6 = f32_t(0, 256);
+        let ys: Vec<MetalTensor> = (0..3).map(|_| f32_t(0, 4)).collect();
+        let x3 = |w: [&MetalTensor; 3], x: &MetalTensor| {
+            encode_mat_vec_q6_k_x3_f32(&ctx, &enc, w, x, [&ys[0], &ys[1], &ys[2]], 256, 4)
+        };
+        assert!(x3([&w6, &w6, &w6], &x6).is_ok());
+        assert!(x3([&w6, &odd6, &w6], &x6).is_err(), "odd Q6_K offset");
+        assert!(
+            x3([&w6, &w6, &w6], &f32_t(2, 256)).is_err(),
+            "misaligned input"
+        );
+        enc.end();
+        command.commit();
+        wait_completed(&command).expect("encoder refusal command");
+    }
+
     #[test]
     fn short_k_q8_0_mat_vec_matches_reference_and_is_row_independent() {
         let Some(ctx) = metal_test_context() else {

@@ -110,28 +110,27 @@ fn verdict(
     Ok((prepared, profile))
 }
 
-/// Which input forms render for this artifact: raw once it is admitted,
-/// text chat once its template profile verifies, tools never (yet).
+/// Which input forms render for this artifact: raw once it is admitted;
+/// text chat and function tools once its template profile verifies.
 fn input_support(
     verdict: &std::result::Result<
         (Glm5NextPreparedArtifact<'_>, ChatVerdict),
         Glm5NextAdmissionError,
     >,
 ) -> InputCapability {
-    let tools = Support::Unsupported {
-        code: "glm5_next_chat_tools",
-        message: format!("{FAMILY} tool definitions and tool history are not implemented"),
-    };
     match verdict {
         Err(error) => InputCapability::none(error.code(), error.to_string()),
         Ok((_, Ok(_))) => InputCapability {
             raw: Support::Supported,
             user: Support::Supported,
             messages: Support::Supported,
-            tools,
+            tools: Support::Supported,
         },
         Ok((_, Err(error))) => InputCapability {
-            tools,
+            tools: Support::Unsupported {
+                code: error.code(),
+                message: format!("{FAMILY} tools need a verified chat template: {error}"),
+            },
             ..InputCapability::raw_only(error.code(), format!("{error}; use --raw-prompt"))
         },
     }
@@ -294,9 +293,11 @@ fn raw_input(invocation: cli::Invocation, args: &Args) -> Result<(String, Prompt
     }
 }
 
-/// The conversation and its `clear_thinking` from `--user`/`--system` or a
-/// `--messages` document.
-fn chat_messages(input: cli::AcquiredRunInput) -> Result<(Vec<Message>, bool)> {
+/// The conversation, its `clear_thinking` and its declared tools from
+/// `--user`/`--system` or a `--messages` document.
+fn chat_messages(
+    input: cli::AcquiredRunInput,
+) -> Result<(Vec<Message>, bool, Vec<chat::ToolDefinition>)> {
     match input {
         cli::AcquiredRunInput::User { system, user } => Ok((
             system
@@ -305,17 +306,16 @@ fn chat_messages(input: cli::AcquiredRunInput) -> Result<(Vec<Message>, bool)> {
                 .chain([Message::User(user)])
                 .collect(),
             false,
+            Vec::new(),
         )),
         cli::AcquiredRunInput::Messages { document, source } => {
             let document = chat::parse_document(document.as_bytes())
                 .with_context(|| format!("read {FAMILY} chat document from {source}"))?;
-            // An empty list renders nothing upstream; declared tools need the
-            // run lane's tool output, which is not wired yet.
-            ensure!(
-                document.tools.is_empty(),
-                "{FAMILY} qwen run does not accept tool definitions yet (glm5_next_chat_tools)"
-            );
-            Ok((document.messages, document.clear_thinking.unwrap_or(false)))
+            Ok((
+                document.messages,
+                document.clear_thinking.unwrap_or(false),
+                document.tools,
+            ))
         }
         cli::AcquiredRunInput::RawPrompt(_) => bail!("{FAMILY} raw input is not a chat"),
     }
@@ -397,6 +397,8 @@ pub(crate) fn run(
     })?;
     let stops = prepared.generation_stops()?;
     let vocab_size = prepared.config().vocab_size;
+    let mut tools: Vec<chat::ToolDefinition> = Vec::new();
+    let mut chat_effort = None;
     let (text, source, mut chat_record) = match request {
         Request::Raw(invocation) => {
             let (text, source) =
@@ -413,15 +415,21 @@ pub(crate) fn run(
             shutdown::checkpoint()?;
             let input = timing.measure(Phase::InputAcquisition, || run.acquire_input())?;
             let (text, clear_thinking) = timing.measure(Phase::Rendering, || {
-                let (messages, clear_thinking) = chat_messages(input)?;
-                let text =
-                    chat::render(&messages, RenderOptions::generate(effort, clear_thinking))?;
+                let (messages, clear_thinking, definitions) = chat_messages(input)?;
+                let text = chat::render_with_tools(
+                    &messages,
+                    &definitions,
+                    RenderOptions::generate(effort, clear_thinking),
+                )?;
+                tools = definitions;
                 Ok((text, clear_thinking))
             })?;
+            chat_effort = Some(effort);
             let record = json!({
                 "profile": profile, "reasoning_effort": effort, "clear_thinking": clear_thinking,
                 "stops": chat::CHAT_STOPS, "prefix_owner": "renderer",
-                "output": "reasoning_stderr_answer_stdout",
+                "output": if tools.is_empty() { "reasoning_stderr_answer_stdout" } else { "responses_json" },
+                "tools": tools.iter().map(chat::ToolDefinition::name).collect::<Vec<_>>(),
             });
             (text, PromptSource::Messages, Some(record))
         }
@@ -499,8 +507,27 @@ pub(crate) fn run(
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
     let mut stderr = std::io::stderr();
+    // With declared tools the output is one Responses JSON object (the
+    // serve shape, function_call items included), printed at the end.
+    let mut tool_partition = (!tools.is_empty())
+        .then(|| -> Result<_> {
+            let max_bytes = args
+                .tokens
+                .checked_mul(prepared.tokenizer().max_decoded_piece_bytes())
+                .and_then(|n| n.checked_mul(3))
+                .context("tool output byte bound overflows")?;
+            Ok(crate::serve::output_partition::OutputPartition::new(
+                crate::serve::output_partition::OutputProtocol::Glm5NextTools {
+                    definitions: tools.clone(),
+                    max_bytes,
+                },
+            ))
+        })
+        .transpose()?;
+    let mut tool_events = Vec::new();
     let mut partition = chat_record
         .as_ref()
+        .filter(|_| tool_partition.is_none())
         .map(|_| crate::serve::render_glm5_next::partition());
     let mut visible = false;
     let generation = generate_serial(
@@ -510,7 +537,9 @@ pub(crate) fn run(
         &mut sampler,
         |token| {
             let bytes = prepared.tokenizer().try_decode_piece_bytes_exact(token)?;
-            if let Some(partition) = &mut partition {
+            if let Some(partition) = &mut tool_partition {
+                partition.push(bytes, &mut tool_events);
+            } else if let Some(partition) = &mut partition {
                 let mut events = Vec::new();
                 partition.push(bytes, &mut events);
                 crate::chat_output::write_chat_events(
@@ -549,6 +578,56 @@ pub(crate) fn run(
     };
     timing.record(Phase::ResidentExecution, resident_t0.elapsed())?;
     let report = timing.finish(lane_t0.elapsed())?;
+    if let Some(partition) = tool_partition {
+        let (stop, end) = crate::serve::outcome::generation_end(&generation);
+        partition
+            .finish(end, &mut tool_events)
+            .map_err(|error| anyhow!(error.message))?;
+        let effort = chat_effort.context("tools imply a chat request")?;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+        let request = crate::serve::items::ServeRequest {
+            model: gguf.get_str("general.name").unwrap_or(FAMILY).into(),
+            model_request: crate::model_request::ModelRequest {
+                tools: tools
+                    .iter()
+                    .map(|tool| crate::model_request::ToolDefinition {
+                        name: tool.name().into(),
+                        description: tool.description().map(str::to_owned),
+                        parameters: tool
+                            .parameters()
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                        strict: None,
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            allowed_tools: tools.iter().map(|tool| tool.name().to_owned()).collect(),
+            parallel_tool_calls: true,
+            tool_choice: json!("auto"),
+            reasoning: Some(json!({"effort": effort.as_str()})),
+            max_output_tokens: Some(args.tokens),
+            temperature_echo: Some(f64::from(sampling.temperature)),
+            top_p_echo: Some(f64::from(sampling.top_p)),
+            ..Default::default()
+        };
+        let response = crate::serve::events::build_response_object(
+            &request,
+            format!("resp_glm_cli_{}_{}", std::process::id(), now.as_nanos()),
+            now.as_secs(),
+            &tool_events,
+            stop,
+            crate::serve::events::Usage {
+                input_tokens: tokens.len(),
+                output_tokens: generation.tokens.len(),
+                cached_tokens: 0,
+            },
+            None,
+        )?;
+        serde_json::to_writer(&mut stdout, &response)?;
+        writeln!(stdout)?;
+        stdout.flush()?;
+    }
     if let Some(partition) = partition {
         let mut events = Vec::new();
         let closed_before = partition.closed();
@@ -800,7 +879,7 @@ mod tests {
 
     #[test]
     fn user_and_system_flags_become_the_conversation() {
-        let (messages, clear) = chat_messages(cli::AcquiredRunInput::User {
+        let (messages, clear, _) = chat_messages(cli::AcquiredRunInput::User {
             system: Some("Be brief.".into()),
             user: "hi".into(),
         })
@@ -813,7 +892,7 @@ mod tests {
                 Message::User("hi".into())
             ]
         );
-        let (messages, clear) = chat_messages(cli::AcquiredRunInput::Messages {
+        let (messages, clear, _) = chat_messages(cli::AcquiredRunInput::Messages {
             document: r#"{"messages":[{"role":"user","content":"q"}],"clear_thinking":true}"#
                 .into(),
             source: "test".into(),
@@ -821,19 +900,28 @@ mod tests {
         .unwrap();
         assert!(clear);
         assert_eq!(messages, [Message::User("q".into())]);
-        let (messages, _) = chat_messages(cli::AcquiredRunInput::Messages {
+        let (messages, _, tools) = chat_messages(cli::AcquiredRunInput::Messages {
             document: r#"{"messages":[{"role":"user","content":"q"}],"tools":[]}"#.into(),
             source: "test".into(),
         })
         .unwrap();
         assert_eq!(messages, [Message::User("q".into())]);
-        let error = chat_messages(cli::AcquiredRunInput::Messages {
+        assert!(tools.is_empty());
+        let (_, _, tools) = chat_messages(cli::AcquiredRunInput::Messages {
             document: r#"{"messages":[{"role":"user","content":"q"}],"tools":[{"name":"f"}]}"#
                 .into(),
             source: "test".into(),
         })
+        .unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name(), "f");
+        let error = chat_messages(cli::AcquiredRunInput::Messages {
+            document: r#"{"messages":[{"role":"user","content":"q"}],"tools":[{"name":"f","strict":true}]}"#
+                .into(),
+            source: "test".into(),
+        })
         .unwrap_err();
-        assert!(format!("{error:#}").contains("tool"), "{error:#}");
+        assert!(format!("{error:#}").contains("strict"), "{error:#}");
     }
 
     #[test]

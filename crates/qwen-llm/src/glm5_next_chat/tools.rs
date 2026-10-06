@@ -162,6 +162,10 @@ impl ToolDefinition {
         self.function.get("parameters")
     }
 
+    pub fn description(&self) -> Option<&str> {
+        self.function.get("description").and_then(Value::as_str)
+    }
+
     fn render(&self, out: &mut String) -> Result<()> {
         out.push('{');
         for (i, (key, value)) in self.function.iter().enumerate() {

@@ -175,9 +175,10 @@ pub(crate) fn capability_projection(gguf: &GgufFile) -> Result<Value> {
     };
     let serve = match &verdict {
         Ok((_, Ok(_))) => json!({"status": "conditional", "implementation_status": "partial",
-            "endpoint": "/v1/responses", "input": "verified_text_chat_items",
+            "endpoint": "/v1/responses", "input": "verified_chat_and_function_tool_items",
             "capacity_policy": "explicit_max_context_tokens_and_max_tokens_within_device_memory",
-            "prefix_reuse": "live_session_exact_extension", "snapshot_cache": false, "tools": false,
+            "prefix_reuse": "live_session_exact_extension", "snapshot_cache": false,
+            "tools": "function_tools_auto_or_allowed_strict_refused",
             "idle_residency": "default_60s_idle_residency_secs",
             "sampling_default": "release_generation_config_temperature_1_top_p_0.95"}),
         Ok((_, Err(error))) => json!({"status": "unsupported", "implementation_status": "partial",

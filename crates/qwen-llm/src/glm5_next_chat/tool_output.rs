@@ -36,7 +36,7 @@ pub enum ToolOutputEnd {
 }
 
 /// A parsed call; the caller assigns its id.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutputCall {
     pub name: String,
     pub arguments: Map<String, Value>,

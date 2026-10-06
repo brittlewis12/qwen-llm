@@ -145,7 +145,7 @@ impl Effort {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
     System(String),
     User(String),
@@ -186,7 +186,7 @@ impl RenderOptions {
 
 /// A parsed `--messages` document: a bare message array, or
 /// `{"messages": [...], "clear_thinking": bool, "tools": [...]}`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatDocument {
     pub messages: Vec<Message>,
     pub clear_thinking: Option<bool>,

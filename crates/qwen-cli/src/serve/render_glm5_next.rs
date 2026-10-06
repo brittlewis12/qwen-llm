@@ -1,7 +1,12 @@
-//! GLM-5.3-Flash text chat over the serve and run lanes: Open Responses
+//! GLM-5.3-Flash chat and tools over the serve and run lanes: Open Responses
 //! items to the pinned renderer, the release sampling defaults, and the
 //! output grammar (reasoning pre-opened by `<|assistant|><think>`, closed by
-//! the first `</think>`).
+//! the first `</think>`; with declared tools, `<tool_call>` blocks after it).
+//!
+//! Tools: function definitions render in their declared order; a replayed
+//! `function_call` becomes the assistant turn's call (arguments are a JSON
+//! object), and `function_call_output` items become tool results, rendered
+//! in call order under one `<|observation|>`.
 //!
 //! Serve renders past turns as they were generated: an assistant turn that
 //! arrives without a reasoning item renders as empty reasoning (serve's rule
@@ -12,7 +17,8 @@ use super::items::{ServeError, ServeRequest};
 use super::partition_preopened::{PreopenedGrammar, PreopenedPartition};
 use crate::model_request::Turn;
 use qwen_llm::glm5_next_chat::{
-    self as chat, CHAT_STOPS, Effort, Message, RenderOptions, THINK_CLOSE, THINK_OPEN,
+    self as chat, CHAT_STOPS, Effort, Message, RenderOptions, THINK_CLOSE, THINK_OPEN, ToolCall,
+    ToolDefinition,
 };
 use qwen_llm::sampling::SamplingConfig;
 use serde_json::json;
@@ -55,6 +61,7 @@ pub(crate) fn normalize_request(
     request: &mut ServeRequest,
     default_max_tokens: usize,
     capacity: usize,
+    max_piece_bytes: usize,
 ) -> Result<(), ServeError> {
     let defaults = SamplingConfig::glm5_next(42);
     if request.temperature.is_none() {
@@ -81,7 +88,65 @@ pub(crate) fn normalize_request(
     let effort = effort(request)?;
     request.reasoning_effort = Some(effort.as_str().into());
     request.reasoning = Some(json!({"effort": effort.as_str()}));
+    if !request.model_request.tools.is_empty() {
+        tool_byte_budget(maximum, max_piece_bytes)?;
+    }
     render(request).map(drop)
+}
+
+/// The buffered tool block's bound: every output token at its longest
+/// decoded piece, times 3 for UTF-8 replacement expansion.
+fn tool_byte_budget(max_tokens: usize, max_piece_bytes: usize) -> Result<usize, ServeError> {
+    max_tokens
+        .checked_mul(max_piece_bytes)
+        .and_then(|n| n.checked_mul(3))
+        .filter(|&n| n > 0)
+        .ok_or_else(|| {
+            invalid(
+                "max_output_tokens",
+                format!("{FAMILY} decoded output byte bound overflow or zero"),
+            )
+        })
+}
+
+/// Text chat, or the tools grammar when the request declares functions.
+pub(crate) fn output_protocol(
+    request: &ServeRequest,
+    max_piece_bytes: usize,
+) -> crate::serve::output_partition::OutputProtocol {
+    use crate::serve::output_partition::OutputProtocol;
+    match definitions(request) {
+        Ok(definitions) if !definitions.is_empty() => OutputProtocol::Glm5NextTools {
+            definitions,
+            // Normalization admitted this bound before any response bytes.
+            max_bytes: tool_byte_budget(request.max_output_tokens.unwrap_or(1), max_piece_bytes)
+                .unwrap_or(usize::MAX),
+        },
+        _ => OutputProtocol::Glm5NextChat,
+    }
+}
+
+/// The declared functions, in request order.
+fn definitions(request: &ServeRequest) -> Result<Vec<ToolDefinition>, ServeError> {
+    request
+        .model_request
+        .tools
+        .iter()
+        .map(|tool| {
+            if tool.strict == Some(true) {
+                return Err(invalid(
+                    "tools",
+                    format!("{FAMILY} cannot honor strict tool schemas"),
+                ));
+            }
+            ToolDefinition::from_parts(
+                &tool.name,
+                tool.description.as_deref(),
+                Some(&tool.parameters),
+            )
+            .map_err(|error| invalid("tools", error.to_string()))
+        })
+        .collect()
 }
 
 /// The conversation the renderer sees: the system message, then each turn.
@@ -92,30 +157,52 @@ fn messages(request: &ServeRequest) -> Result<Vec<Message>, ServeError> {
         messages.push(Message::System(system.clone()));
     }
     for turn in &model.turns {
-        messages.push(match turn {
-            Turn::User(text) => Message::User(text.clone()),
+        match turn {
+            Turn::User(text) => messages.push(Message::User(text.clone())),
             Turn::Assistant {
                 reasoning,
                 visible,
                 calls,
-            } if calls.is_empty() => Message::Assistant {
-                content: visible.clone(),
-                reasoning: Some(reasoning.clone().unwrap_or_default()),
-                calls: Vec::new(),
-            },
-            Turn::Assistant { .. } | Turn::ToolResults(_) => return Err(tools()),
-        });
+            } => {
+                let calls = calls
+                    .iter()
+                    .map(|call| {
+                        let arguments = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                            .ok()
+                            .and_then(|value| value.as_object().cloned())
+                            .ok_or_else(|| {
+                                invalid(
+                                    "input",
+                                    format!(
+                                        "{FAMILY} function_call {:?} arguments must be a JSON object",
+                                        call.call_id
+                                    ),
+                                )
+                            })?;
+                        Ok(ToolCall {
+                            id: call.call_id.clone(),
+                            name: call.name.clone(),
+                            arguments,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ServeError>>()?;
+                messages.push(Message::Assistant {
+                    content: visible.clone(),
+                    reasoning: Some(reasoning.clone().unwrap_or_default()),
+                    calls,
+                });
+            }
+            Turn::ToolResults(results) => {
+                for result in results {
+                    messages.push(Message::Tool {
+                        call_id: result.call_id.clone(),
+                        content: result.output.clone(),
+                    });
+                }
+            }
+        }
     }
     Ok(messages)
-}
-
-fn tools() -> ServeError {
-    invalid(
-        "tools",
-        format!(
-            "{FAMILY} serve renders text chat only; tools and tool history are not implemented"
-        ),
-    )
 }
 
 pub(crate) fn render(request: &ServeRequest) -> Result<String, ServeError> {
@@ -127,11 +214,16 @@ pub(crate) fn render(request: &ServeRequest) -> Result<String, ServeError> {
             ),
         ));
     }
-    if request.model_request.has_tool_surface() || !request.allowed_tools.is_empty() {
-        return Err(tools());
-    }
+    let definitions = definitions(request)?;
     let options = RenderOptions::generate(effort(request)?, request.strip_history_thinking);
-    chat::render(&messages(request)?, options).map_err(|error| invalid("input", error.to_string()))
+    chat::render_with_tools(&messages(request)?, &definitions, options).map_err(|error| {
+        let param = if error.code() == "glm5_next_chat_tools" {
+            "tools"
+        } else {
+            "input"
+        };
+        invalid(param, error.to_string())
+    })
 }
 
 #[cfg(test)]
@@ -159,6 +251,7 @@ mod tests {
     const PROFILE: RequestProfile = RequestProfile::Glm5Next {
         default_max_tokens: 8,
         capacity: 64,
+        max_piece_bytes: 64,
     };
 
     fn bound(body: Value) -> Result<(ServeRequest, String), ServeError> {
@@ -169,6 +262,94 @@ mod tests {
     }
 
     const HEAD: &str = "[gMASK]<sop><|system|>Reasoning Effort: ";
+
+    /// Open Responses tools and tool history render exactly as the native
+    /// document does (the pinned `tool-call-content-and-reasoning` fixture
+    /// case): definitions in order, the replayed call with its JSON-object
+    /// arguments, and the output under `<|observation|>`. The output grammar
+    /// switches to tools.
+    #[test]
+    fn tools_and_tool_history_render_as_the_pinned_fixture() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../qwen-llm/tests/fixtures/glm53_chat_hf.json"
+        ))
+        .unwrap();
+        let case = fixture["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "tool-call-content-and-reasoning")
+            .unwrap();
+        let function = &case["tools"][0]["function"];
+        let body = json!({"model":"m","tools":[{"type":"function","name":function["name"],
+            "description":function["description"],"parameters":function["parameters"]}],
+            "input":[
+                {"role":"user","content":"What's the weather in Paris?"},
+                {"type":"reasoning","content":"need the weather"},
+                {"type":"message","role":"assistant","content":" Let me check. \n"},
+                {"type":"function_call","call_id":"c1","name":"get_weather","arguments":"{\"city\":\"Paris\"}"},
+                {"type":"function_call_output","call_id":"c1","output":"18C, clear"}]});
+        let (request, prompt) = bound(body).unwrap();
+        assert_eq!(prompt, case["rendered"].as_str().unwrap());
+        let crate::serve::output_partition::OutputProtocol::Glm5NextTools {
+            definitions,
+            max_bytes,
+        } = PROFILE.output(&request)
+        else {
+            panic!("declared tools select the tools grammar");
+        };
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(max_bytes, 8 * 64 * 3);
+        // Arguments that are not a JSON object are refused before execution.
+        let error = bound(
+            json!({"model":"m","tools":[{"type":"function","name":"get_weather"}],
+            "input":[{"role":"user","content":"q"},
+                {"type":"function_call","call_id":"c1","name":"get_weather","arguments":"[1]"},
+                {"type":"function_call_output","call_id":"c1","output":"r"}]}),
+        )
+        .unwrap_err();
+        assert_eq!(error.status, 400, "{error:?}");
+    }
+
+    /// Generated output with a call: reasoning, visible text, then the call
+    /// as a FunctionCall event with schema-typed arguments; a tool marker
+    /// inside reasoning stays reasoning.
+    #[test]
+    fn generated_tool_calls_become_function_call_events() {
+        use crate::serve::output_partition::{GenerationEnd, OutputPartition};
+        let (request, _) = bound(json!({"model":"m","input":"q","tools":[{"type":"function",
+            "name":"get_weather","parameters":{"type":"object","properties":{
+                "city":{"type":"string"},"days":{"type":"integer"}}}}]}))
+        .unwrap();
+        let output = "plan <tool_call>not yet</think>Checking.<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value><arg_key>days</arg_key><arg_value>3</arg_value></tool_call>";
+        let mut partition = OutputPartition::new(PROFILE.output(&request));
+        let mut events = Vec::new();
+        for byte in output.as_bytes().chunks(3) {
+            partition.push(byte, &mut events);
+        }
+        partition
+            .finish(GenerationEnd::StopToken(154_829), &mut events)
+            .unwrap();
+        let mut reasoning = String::new();
+        let mut visible = String::new();
+        let mut calls = Vec::new();
+        for event in events {
+            match event {
+                PartitionEvent::Reasoning(text) => reasoning.push_str(&text),
+                PartitionEvent::Visible(text) => visible.push_str(&text),
+                PartitionEvent::FunctionCall(call) => calls.push(call),
+                PartitionEvent::ReasoningClosed => {}
+            }
+        }
+        assert_eq!(reasoning, "plan <tool_call>not yet");
+        assert_eq!(visible, "Checking.");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(
+            serde_json::Value::Object(calls[0].arguments.clone()),
+            json!({"city":"Paris","days":3})
+        );
+    }
 
     #[test]
     fn requests_render_through_the_pinned_template_with_release_defaults() {
@@ -259,7 +440,7 @@ mod tests {
                 "max_output_tokens",
             ),
             (
-                json!({"model":"m","input":"q","tools":[{"type":"function","name":"f","parameters":{}}]}),
+                json!({"model":"m","input":"q","tools":[{"type":"function","name":"f","strict":true,"parameters":{}}]}),
                 "tools",
             ),
             (

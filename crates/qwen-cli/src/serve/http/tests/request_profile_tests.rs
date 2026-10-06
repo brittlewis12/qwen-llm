@@ -181,6 +181,7 @@ fn family_profiles_drive_real_http_json_and_sse_without_hook_overrides() {
     let glm = RequestProfile::Glm5Next {
         default_max_tokens: 8,
         capacity: 128,
+        max_piece_bytes: 64,
     };
     cases.push((
         glm.clone(),
@@ -393,6 +394,7 @@ fn style_overrides_are_applied_or_refused_before_execution() {
         RequestProfile::Glm5Next {
             default_max_tokens: 8,
             capacity: 128,
+            max_piece_bytes: 64,
         },
     ] {
         let body = json!({"model":"test","input":"Hello","x_qwen":{"template_style":"upstream"}});

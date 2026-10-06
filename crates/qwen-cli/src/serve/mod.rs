@@ -35,6 +35,7 @@ pub(crate) mod outcome;
 pub(crate) mod output_partition;
 mod owner_activity;
 pub(crate) mod partition;
+pub(crate) mod partition_glm5_next;
 pub(crate) mod partition_k2;
 pub(crate) mod partition_muse;
 pub(crate) mod partition_preopened;

@@ -63,7 +63,7 @@ pub fn valid_argument_key(key: &str) -> bool {
 
 /// One declared function: its object exactly as the template prints it
 /// (`name`, then any of `description` and `parameters`, in the given order).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolDefinition {
     function: Map<String, Value>,
 }
@@ -180,7 +180,7 @@ impl ToolDefinition {
 }
 
 /// One assistant tool call. `arguments` keep their order.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,

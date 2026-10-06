@@ -82,6 +82,11 @@ pub(crate) enum OutputProtocol {
     },
     /// GLM-5.3-Flash text chat: reasoning pre-opened by the prompt.
     Glm5NextChat,
+    /// GLM-5.3-Flash chat with declared tools: calls after `</think>`.
+    Glm5NextTools {
+        definitions: Vec<qwen_llm::glm5_next_chat::ToolDefinition>,
+        max_bytes: usize,
+    },
 }
 
 impl OutputProtocol {
@@ -95,7 +100,8 @@ impl OutputProtocol {
             Self::K2Chat { .. }
             | Self::K2Tools { .. }
             | Self::MuseAtem { .. }
-            | Self::Glm5NextChat => true,
+            | Self::Glm5NextChat
+            | Self::Glm5NextTools { .. } => true,
             Self::Qwen {
                 preopened_reasoning,
                 ..
@@ -108,6 +114,7 @@ pub(crate) enum OutputPartition {
     Raw(Utf8Assembler),
     Preopened(super::partition_preopened::PreopenedPartition),
     K2Tools(super::partition_k2::K2ToolsPartition),
+    Glm5NextTools(super::partition_glm5_next::Glm5NextToolsPartition),
     Qwen(QwenOutputPartition),
     Muse(MuseAtemPartition),
 }
@@ -136,6 +143,13 @@ impl OutputPartition {
                 tool_grammar,
             )),
             OutputProtocol::Glm5NextChat => Self::Preopened(super::render_glm5_next::partition()),
+            OutputProtocol::Glm5NextTools {
+                definitions,
+                max_bytes,
+            } => Self::Glm5NextTools(super::partition_glm5_next::Glm5NextToolsPartition::new(
+                definitions,
+                max_bytes,
+            )),
             OutputProtocol::MuseAtem {
                 eos_token_id,
                 eot_token_id,
@@ -159,6 +173,7 @@ impl OutputPartition {
             Self::Qwen(partition) => partition.push(bytes, events),
             Self::Preopened(partition) => partition.push(bytes, events),
             Self::K2Tools(partition) => partition.push(bytes, events),
+            Self::Glm5NextTools(partition) => partition.push(bytes, events),
             Self::Muse(partition) => partition.push(bytes, events),
         }
     }
@@ -183,6 +198,7 @@ impl OutputPartition {
             Self::Muse(partition) => partition.finish(end, events),
             Self::Preopened(partition) => partition.finish(end, events),
             Self::K2Tools(partition) => partition.finish(end, events),
+            Self::Glm5NextTools(partition) => partition.finish(end, events),
         }
     }
 
@@ -197,7 +213,7 @@ impl OutputPartition {
             Self::Qwen(partition) => partition.abort(events),
             Self::Muse(partition) => partition.abort(events),
             Self::Preopened(partition) => partition.abort(events),
-            Self::K2Tools(_) => {}
+            Self::K2Tools(_) | Self::Glm5NextTools(_) => {}
         }
     }
 }

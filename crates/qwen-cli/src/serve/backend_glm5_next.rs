@@ -33,6 +33,8 @@ pub(super) struct Prepared<'g> {
     default_max: usize,
     prefill_rows: usize,
     profile: VerifiedChatProfile,
+    /// Longest decoded token, for the tool block's byte budget.
+    max_piece_bytes: usize,
 }
 
 impl<'g> Prepared<'g> {
@@ -65,6 +67,7 @@ impl<'g> Prepared<'g> {
         } else {
             0
         };
+        let max_piece_bytes = artifact.tokenizer().max_decoded_piece_bytes();
         crate::shutdown::checkpoint()?;
         Ok(Self {
             artifact,
@@ -72,12 +75,13 @@ impl<'g> Prepared<'g> {
             default_max,
             prefill_rows,
             profile,
+            max_piece_bytes,
         })
     }
 
     pub(super) fn describe(&self) -> String {
         format!(
-            "family=glm5_next input=verified_text_chat renderer={} capacity={} default_max_tokens={} prefill_rows={} snapshot_cache_bytes=0",
+            "family=glm5_next input=verified_chat_and_tools renderer={} capacity={} default_max_tokens={} prefill_rows={} snapshot_cache_bytes=0",
             self.profile.renderer, self.capacity, self.default_max, self.prefill_rows
         )
     }
@@ -208,6 +212,7 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
         super::request_profile::RequestProfile::Glm5Next {
             default_max_tokens: self.prepared.default_max,
             capacity: self.prepared.capacity,
+            max_piece_bytes: self.prepared.max_piece_bytes,
         }
     }
 

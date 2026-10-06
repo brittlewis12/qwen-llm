@@ -33,10 +33,11 @@ pub(crate) enum RequestProfile {
         capacity: usize,
         max_piece_bytes: usize,
     },
-    /// Verified GLM-5.3-Flash text chat over a session of fixed capacity.
+    /// Verified GLM-5.3-Flash chat and tools over a session of fixed capacity.
     Glm5Next {
         default_max_tokens: usize,
         capacity: usize,
+        max_piece_bytes: usize,
     },
 }
 
@@ -108,7 +109,13 @@ impl RequestProfile {
             Self::Glm5Next {
                 default_max_tokens,
                 capacity,
-            } => render_glm5_next::normalize_request(request, *default_max_tokens, *capacity),
+                max_piece_bytes,
+            } => render_glm5_next::normalize_request(
+                request,
+                *default_max_tokens,
+                *capacity,
+                *max_piece_bytes,
+            ),
         }
     }
 
@@ -181,7 +188,9 @@ impl RequestProfile {
                 ..
             } => render_k2::tools::output_protocol(request, *max_piece_bytes),
             Self::K2 { chat: None, .. } => OutputProtocol::RawText,
-            Self::Glm5Next { .. } => OutputProtocol::Glm5NextChat,
+            Self::Glm5Next {
+                max_piece_bytes, ..
+            } => render_glm5_next::output_protocol(request, *max_piece_bytes),
         }
     }
 }

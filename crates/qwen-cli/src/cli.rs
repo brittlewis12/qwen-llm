@@ -39,7 +39,8 @@ pub(crate) struct InfoArgs {
 #[derive(Debug, ClapArgs)]
 #[command(group(clap::ArgGroup::new("workbench").args(["lens_data_dir", "web_root"]).multiple(true)))]
 pub(crate) struct ServeArgs {
-    /// Supported Qwen, DeepSeek V4, Muse Glimmer, or dense K2 GGUF (K2: raw only).
+    /// Supported Qwen, Qwen3.8-Flash-Next, DeepSeek V4, Muse Glimmer, K2 Horizon or
+    /// GLM-5.3-Flash GGUF.
     #[arg(short = 'm', long)]
     model: PathBuf,
 
@@ -56,19 +57,21 @@ pub(crate) struct ServeArgs {
     max_context_tokens: Option<usize>,
 
     /// Qwen/Flash-Next/DS4 RAM snapshot-cache MiB, or `auto`: min(25% of RAM, 50% of the
-    /// Metal working set left after load), at least 1 GiB. K2 ignores it (live-session prefix reuse).
+    /// Metal working set left after load), at least 1 GiB. Live-session families (Muse, K2,
+    /// GLM-5.3-Flash) keep no snapshots and accept only `auto` or 0.
     #[arg(long, value_name = "MIB|auto", default_value = "auto", value_parser = parse_snapshot_cache_mib)]
     snapshot_cache_mib: SnapshotCacheMib,
 
-    /// Expire snapshots unused for this long; 0 disables.
+    /// Expire snapshots unused for this long; 0 disables. Snapshot families only.
     #[arg(long, value_name = "SECS", default_value_t = 3600)]
     snapshot_idle_ttl_secs: u64,
 
-    /// Expire snapshots this long after capture regardless of use; 0 disables.
+    /// Expire snapshots this long after capture regardless of use; 0 disables. Snapshot
+    /// families only.
     #[arg(long, value_name = "SECS", default_value_t = 86_400)]
     snapshot_max_age_secs: u64,
 
-    /// Frecency half-life for eviction ranking; 0 evicts pure LRU.
+    /// Frecency half-life for eviction ranking; 0 evicts pure LRU. Snapshot families only.
     #[arg(long, value_name = "SECS", default_value_t = 600)]
     snapshot_half_life_secs: u64,
 
@@ -87,7 +90,7 @@ pub(crate) struct ServeArgs {
     #[arg(long, value_name = "TOKENS", default_value_t = crate::serve::durable::DEFAULT_MIN_TOKENS)]
     durable_snapshot_min_tokens: usize,
 
-    /// Qwen: once no request has arrived for this long, write the latest
+    /// Qwen only (DS4 refuses other values; 0 disables): once no request has arrived for this long, write the latest
     /// request's continuation snapshot to disk so a restart or crash keeps
     /// it (one write per idle period, GBs for long dense sessions); 0 = off.
     #[arg(long, value_name = "SECS", default_value_t = crate::serve::durable::DEFAULT_IDLE_PUBLISH_SECS)]

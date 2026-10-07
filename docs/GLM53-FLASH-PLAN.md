@@ -293,8 +293,10 @@ readout; a 4096-wide direction must say which stream(s) it targets.
 
 ## Memory
 
-The working set is 112 GiB (`iogpu.wired_limit_mb` 114688). Trunk weights leave about
-2.52 GiB for session state, scratch, logits and reserve. DS4's eager 4096-token
+The working set was planned at 112 GiB (`iogpu.wired_limit_mb` 114688), where trunk
+weights leave about 2.52 GiB for session state, scratch, logits and reserve. This host
+is now configured at 118 GiB (120832), which leaves about 8.5 GiB (corrected
+2026-10-07); capacity follows the configured limit through device admission. DS4's eager 4096-token
 prefill scratch (`deepseek_v4_metal/prefill.rs:1444`) would cost about 2.25 GiB at GLM
 widths (mHC buffers [16384, B], absorbed queries/latent output [64, 512, B], routed
 outputs [4096, 8, B]); full logits for 4096 positions would add 2.36 GiB. Therefore:
@@ -431,7 +433,9 @@ about 2.5-3 weeks.
 
 ## Deferred
 
-MTP (block 45 does not fit beside the IQ3_XXS trunk at 112 GiB); vision (qwen-llm has
+MTP (block 45 does not fit beside the IQ3_XXS trunk at 112 GiB; its weights fit at this
+host's configured 118 GiB, the execution peak remains to be admitted, and it stays a
+paper candidate, PERF-ROADMAP 2026-10-07); vision (qwen-llm has
 none; a `glm5v` mmproj exists); the lcpprs chain bump; UD-Q4_K_XL and other artifacts
 for the M5 Ultra; tools; snapshot implementation (state ownership is not deferred);
 context qualification beyond measured lengths.

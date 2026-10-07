@@ -1,7 +1,8 @@
 //! Allocation ledger for one GLM-5.3 session.
 //!
-//! The trunk leaves about 2.5 GiB of the 112 GiB Metal working set, so the
-//! ledger prices exactly what the session allocates: the native session builds
+//! The trunk nearly fills the Metal working set (about 2.5 GiB left under a
+//! 112 GiB wired limit, about 8.5 GiB under 118 GiB), so the ledger prices
+//! exactly what the session allocates: the native session builds
 //! every buffer from the [`BufferSpec`] lists below, and the ledger sums the
 //! same lists through a [`BufferPricer`] before allocation. Live sessions price
 //! with the device; planning without a device uses the named

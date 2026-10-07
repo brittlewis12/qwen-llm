@@ -437,6 +437,18 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     } else {
         tracing::info!(target: "qwen_diag", "serve: template_style={}", template_style.as_str());
     }
+    // Drafter admission is a header-level decision, settled once for every
+    // family before any lane binds, loads or opens the drafter: unsupported
+    // family/shape combinations are refused here with the shared code.
+    // `EngineBackend::new` still performs the GPU copy from the path;
+    // consolidating that reuse waits for the serve backend to settle.
+    let drafter = crate::drafter_policy::PreparedDrafter::prepare(
+        invocation.drafter.as_deref(),
+        &gguf,
+        Some(family),
+        crate::drafter_policy::Lane::Serve,
+    )?;
+    drop(drafter);
     // Keep K2 out of the generic serve admission and listener setup. Its
     // resident plan and raw request contract are owned by the K2 lane.
     match family {
@@ -523,18 +535,6 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         | ModelFamily::DeepSeek4
         | ModelFamily::MuseGlimmer => {}
     }
-    // Drafter admission is a header-level decision: refuse unsupported
-    // family/shape combinations and bind the drafter's metadata before the
-    // target's weights are loaded. `EngineBackend::new` still performs the
-    // GPU copy from the path; consolidating that reuse waits for the serve
-    // backend to settle.
-    let drafter = crate::drafter_policy::PreparedDrafter::prepare(
-        invocation.drafter.as_deref(),
-        &gguf,
-        Some(family),
-        crate::drafter_policy::Lane::Serve,
-    )?;
-    drop(drafter);
     // Bind before loading weights: an unresolvable, non-loopback, or busy
     // address is a startup error, not something to discover after a
     // multi-gigabyte load. Connections arriving during load queue in the

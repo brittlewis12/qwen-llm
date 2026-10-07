@@ -290,9 +290,19 @@ fn run() -> Result<()> {
         );
     };
     let model_family = Some(family);
+    // Drafter admission is a header-level decision, settled once for every
+    // family before any lane allocates on the GPU (or opens the drafter):
+    // unsupported families are refused here with the shared code, so no lane
+    // can accept and silently ignore `--drafter`.
+    let drafter = drafter_policy::PreparedDrafter::prepare(
+        args.drafter.as_deref(),
+        &gguf,
+        model_family,
+        drafter_policy::Lane::CliSingleTurn,
+    )?;
     // One exhaustive dispatch keeps each family out of the wrong admission
-    // lane. K2 and Muse own their request shapes and skip the Qwen batch and
-    // DeepSeek selector validators below.
+    // lane. K2, GLM and Muse own their request shapes and skip the Qwen batch
+    // and DeepSeek selector validators below.
     match family {
         ModelFamily::K2Horizon => {
             return k2_horizon::run_raw(&gguf, &args, explicit_options, invocation);
@@ -314,14 +324,6 @@ fn run() -> Result<()> {
         | ModelFamily::Qwen4Exp
         | ModelFamily::DeepSeek4 => {}
     }
-    // Drafter admission is a header-level decision; settle it (and bind the
-    // drafter's metadata) before any family lane allocates on the GPU.
-    let drafter = drafter_policy::PreparedDrafter::prepare(
-        args.drafter.as_deref(),
-        &gguf,
-        model_family,
-        drafter_policy::Lane::CliSingleTurn,
-    )?;
     // Prompt lookup's qualified layout is a header fact; other families
     // reject the flag in their own pre-load validators.
     if args.prompt_lookup

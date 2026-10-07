@@ -258,10 +258,11 @@ fn admit(
     explicit: ExplicitCliOptions,
 ) -> Result<Request> {
     admission::GLM5_NEXT_SINGLE_TURN.admit(&admission::supplied(args, explicit))?;
-    ensure!(
-        args.drafter.is_none(),
-        "{FAMILY} does not support --drafter"
-    );
+    crate::drafter_policy::ensure_drafter_admitted(
+        qwen_llm::model_family::ModelFamily::Glm5Next,
+        crate::drafter_policy::Lane::CliSingleTurn,
+        args.drafter.is_some(),
+    )?;
     ensure!(
         args.messages.is_none(),
         "{FAMILY} reads chat documents with `qwen run --messages`; the legacy --messages flag is unsupported"

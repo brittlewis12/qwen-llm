@@ -43,7 +43,11 @@ fn limits(
     maximum: Option<usize>,
     drafter: bool,
 ) -> Result<(usize, usize)> {
-    ensure!(!drafter, "K2 serve does not support a drafter");
+    crate::drafter_policy::ensure_drafter_admitted(
+        qwen_llm::model_family::ModelFamily::K2Horizon,
+        crate::drafter_policy::Lane::Serve,
+        drafter,
+    )?;
     let capacity = capacity
         .context("K2 serve requires explicit --max-context-tokens for resident memory planning")?;
     let maximum = maximum.context("K2 serve requires explicit --max-tokens")?;

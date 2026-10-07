@@ -42,10 +42,11 @@ impl<'g> Prepared<'g> {
         gguf: &'g GgufFile,
         invocation: &crate::cli::ServeInvocation,
     ) -> Result<Self> {
-        ensure!(
-            invocation.drafter.is_none(),
-            "{FAMILY} serve does not support a drafter"
-        );
+        crate::drafter_policy::ensure_drafter_admitted(
+            qwen_llm::model_family::ModelFamily::Glm5Next,
+            crate::drafter_policy::Lane::Serve,
+            invocation.drafter.is_some(),
+        )?;
         let artifact = Glm5NextPreparedArtifact::inspect(gguf)
             .with_context(|| format!("admit {FAMILY} artifact"))?;
         let (capacity, default_max) = super::fixed_session_limits(

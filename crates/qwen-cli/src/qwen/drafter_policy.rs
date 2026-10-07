@@ -5,8 +5,11 @@
 //! module existed the same question was answered in five places with three
 //! different outcomes: rejected pre-load (Muse, Flash-Next, DeepSeek serve),
 //! rejected after a full weight load (serve MoE target), or silently ignored
-//! (DeepSeek CLI). `run` and `serve` now consume one resolver, and the
-//! remaining post-load checks are defensive duplicates only.
+//! (DeepSeek CLI). `run` and `serve` now consume one resolver, settled once
+//! before family dispatch so no family lane can accept and ignore the flag
+//! (Muse's dispatch had skipped it). Lanes that also check
+//! (`ensure_drafter_admitted`) are defensive duplicates with the same code
+//! and message.
 //!
 //! The decision is a projection of what the implementation supports; it is
 //! not a capability table maintained by hand. Lane differences that are real
@@ -142,6 +145,19 @@ pub(crate) fn resolve_drafter(
         },
         None => DrafterDecision::Unsupported(DrafterUnsupported::UnknownFamily),
     }
+}
+
+/// Defensive duplicate of the pre-dispatch admission for a lane that knows
+/// its family: the same decision, code and message, never a private one.
+pub(crate) fn ensure_drafter_admitted(
+    family: ModelFamily,
+    lane: Lane,
+    requested: bool,
+) -> Result<()> {
+    if let DrafterDecision::Unsupported(reason) = resolve_drafter(Some(family), lane, requested) {
+        bail!("{reason}");
+    }
+    Ok(())
 }
 
 /// A drafter whose GGUF has been opened and whose metadata has been bound

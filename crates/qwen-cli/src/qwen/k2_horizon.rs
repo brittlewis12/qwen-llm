@@ -200,10 +200,11 @@ fn prepare_input(
     {
         let effort = timing.measure(Phase::RequestPreparation, || {
             admission::K2_RAW_SINGLE_TURN.admit(&admission::supplied(args, explicit))?;
-            ensure!(
-                args.drafter.is_none(),
-                "K2 Horizon does not support --drafter"
-            );
+            crate::drafter_policy::ensure_drafter_admitted(
+                qwen_llm::model_family::ModelFamily::K2Horizon,
+                crate::drafter_policy::Lane::CliSingleTurn,
+                args.drafter.is_some(),
+            )?;
             ensure!(
                 !run.no_thinking,
                 "K2 chat has no released --no-thinking transition"
@@ -257,10 +258,11 @@ fn prepare_raw_timed(
 ) -> Result<(String, PromptSource)> {
     timing.measure(Phase::RequestPreparation, || {
         admission::K2_RAW_SINGLE_TURN.admit(&admission::supplied(args, explicit))?;
-        ensure!(
-            args.drafter.is_none(),
-            "K2 Horizon does not support --drafter"
-        );
+        crate::drafter_policy::ensure_drafter_admitted(
+            qwen_llm::model_family::ModelFamily::K2Horizon,
+            crate::drafter_policy::Lane::CliSingleTurn,
+            args.drafter.is_some(),
+        )?;
         ensure!(
             args.messages.is_none(),
             "legacy K2 input is raw-only; use qwen run --messages for verified chat"

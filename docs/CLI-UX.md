@@ -475,15 +475,24 @@ qwen run -m GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf --messages tools.json \
   message items, and `function_call` items when tools are declared, built
   from the generated tokens after generation succeeds. Verified K2 Horizon
   and GLM chat only; other families, and raw input, refuse it.
+  - The object echoes the resolved effort, token limit, sampling and the
+    model's metadata name. It does not reproduce every CLI input field
+    (`instructions` is null, for example); the model name is a label, not
+    an artifact identity.
 - **Stats.** `glm5_next stats:` uses the established fields, then GLM's own
   (`input`, `capacity`, `prefill_rows`, `setup_prefetch_ms`,
-  `loaded_request_ms`).
-  - `weights_first_use=true` marks the single-turn prefill as the process's
-    first use of its no-copy weights. It includes wiring them, about 1 s for
-    GLM's 109.5 GiB; serve's warmed requests and the bench show steady state.
-  - The same label appears on every no-copy family's single-turn line (K2,
-    Muse, Flash-Next, DeepSeek V4). Ordinary Qwen copies its weights at
-    load, so its line carries no label.
+  `loaded_request_ms`). `total_ms` is the lane wall at the stats line,
+  output assembly included.
+  - `weights_first_use=true` marks the measured prefill as the process's
+    first GPU use of its weights. For no-copy weights that can include
+    wiring them (about 1 s for GLM's 109.5 GiB when they were unwired);
+    serve's warmed requests and the bench show steady state.
+  - The label appears on every no-copy family's single-turn line (K2,
+    Muse, Flash-Next, DeepSeek V4). Flash-Next's packed-profiling path
+    reports a warmed third pass and says `false`. Ordinary Qwen copies its
+    weights at load by default and its line is pinned by `fullmatch`
+    consumers, so it carries no label (a compatibility choice; the opt-in
+    `QWEN_GGUF_NO_COPY` storage would also pay first use).
 - **Refused.** `--drafter` (`family_no_speculation`), `--prompt-lookup`,
   batch and JSONL lanes, durable caches, and other legacy options outside
   the lane's admission table.

@@ -707,7 +707,9 @@ pub(crate) fn run(
         report.encoding_ms,
         report.load_ms,
         generation.wall_ms,
-        report.json["end_to_end_lane_ms"].as_f64().unwrap_or(0.0),
+        // The lane wall at this boundary, after output assembly, as K2 and
+        // Muse measure it (the JSON record keeps its own boundaries).
+        lane_t0.elapsed().as_secs_f64() * 1e3,
         chat_record
             .as_ref()
             .map_or("raw".to_string(), |record| format!(

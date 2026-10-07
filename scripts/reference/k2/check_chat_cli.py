@@ -217,10 +217,14 @@ def main():
             if case["effort"] == "low" and case["budget"] == 128:
                 response = case["response"]
                 assert response["status"] == "completed"
-                assert (
-                    completed.stdout
-                    == (response["output"][1]["content"][0]["text"] + "\n").encode()
-                )
+                # The CLI prints reasoning, the close and the answer; HTTP
+                # publishes them as separate items.
+                items = {item["type"]: item for item in response["output"]}
+                answer = completed_text[completed_close.end() :].removesuffix("\n")
+                assert answer == items["message"]["content"][0]["text"], answer
+                reasoning = completed_text[: completed_close.start()]
+                http_reasoning = items["reasoning"]["content"][0]["text"]
+                assert reasoning.removeprefix("<ifm|think_faster>") == http_reasoning
                 assert (
                     completed_doc["usage"]["input_tokens"]
                     == response["usage"]["input_tokens"]

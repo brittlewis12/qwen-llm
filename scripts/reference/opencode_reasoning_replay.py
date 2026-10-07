@@ -24,6 +24,11 @@ whether reasoning items keep their ids and content.
 
 Starts and stops only the processes it launched.
 
+Manual use only: it drives real opencode processes, which create sessions.
+Automated and agent-run screens must not run it, create opencode sessions
+or send requests to an opencode server in use; client-shaped serve screens
+use a scripted client instead (`serve_tool_loop_check.py`).
+
   uv run scripts/reference/opencode_reasoning_replay.py --out <dir>
 """
 

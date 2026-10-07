@@ -166,11 +166,15 @@ Rerun with the patched binary (`report-patched.json`):
   in order.
 
 Next:
-- **Live check:** a fixed GLM-serve opencode session of three or more
-  steps, within a run and across runs, unpatched vs patched. Record per
-  step: reasoning items sent, effective prompt tokens, reused and
-  prefilled tokens, time to first token and task wall time. Patched,
-  every step should extend the live session.
+- **Serve check (scripted, amended 2026-10-07):** a scripted client in the
+  patched client's item shapes (reasoning as `reasoning_text` content,
+  function calls and outputs), extending `serve_tool_loop_check.py` with
+  the captured opencode instructions and tool schemas, against a
+  separately launched GLM serve: three or more steps, plus branch,
+  shared-prefix new-session and cold cases. Record per step: reasoning
+  items sent, effective prompt tokens, reused and prefilled tokens, time to
+  first token and task wall time. Continued steps should extend the live
+  session. Screens do not drive opencode or an opencode server in use.
 - **Prompt-boundary checkpoint:** still useful for clients that drop or
   edit the last turn, but no longer needed for opencode.
 - One session is a mechanism screen. It is not a quality or default-policy

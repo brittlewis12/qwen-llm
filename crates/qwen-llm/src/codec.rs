@@ -22,6 +22,8 @@ pub enum CodecError {
     NoTraits(i32),
     #[error("no to_float dequantization function for ggml type {0}")]
     NoToFloat(i32),
+    #[error("linked GGML codec storage layout disagrees with {0:?}")]
+    TraitsLayoutMismatch(GgmlType),
     #[error("byte length {got} does not match expected {expected} for shape × dtype")]
     SizeMismatch { got: usize, expected: usize },
     #[error("tensor size overflows host usize for {name:?}")]
@@ -45,6 +47,19 @@ pub enum CodecError {
 struct DequantPlan {
     elements: usize,
     source_bytes: usize,
+}
+
+const MAX_CODEC_CALL_ELEMENTS: usize = 65_536;
+
+fn codec_chunk_layout(dtype: GgmlType) -> Result<(usize, usize), CodecError> {
+    let (elements, bytes) = dtype
+        .storage_layout()
+        .ok_or(CodecError::NoTraits(dtype as i32))?;
+    let blocks = MAX_CODEC_CALL_ELEMENTS / elements as usize;
+    if blocks == 0 {
+        return Err(CodecError::NoTraits(dtype as i32));
+    }
+    Ok((blocks * elements as usize, blocks * bytes as usize))
 }
 
 fn try_uninit_f32(desc: &TensorDesc, n: usize) -> Result<Vec<f32>, CodecError> {
@@ -124,17 +139,26 @@ fn validate_dequant(desc: &TensorDesc, bytes: &[u8]) -> Result<DequantPlan, Code
 /// Validate layout and codec availability without allocating or decoding weights.
 pub fn validate_dequantization(desc: &TensorDesc, bytes: &[u8]) -> Result<(), CodecError> {
     validate_dequant(desc, bytes)?;
-    if desc.dtype != GgmlType::F32 {
-        // The same static, read-only GGML trait table used by dequant_validated_into.
-        let traits = unsafe { llama_cpp_sys_2::ggml_get_type_traits(desc.dtype as i32 as u32) };
-        if traits.is_null() {
-            return Err(CodecError::NoTraits(desc.dtype as i32));
-        }
-        if unsafe { (*traits).to_float }.is_none() {
-            return Err(CodecError::NoToFloat(desc.dtype as i32));
-        }
+    if desc.dtype != GgmlType::F32 && codec_traits(desc.dtype)?.to_float.is_none() {
+        return Err(CodecError::NoToFloat(desc.dtype as i32));
     }
     Ok(())
+}
+
+fn codec_traits(dtype: GgmlType) -> Result<&'static llama_cpp_sys_2::ggml_type_traits, CodecError> {
+    let raw = dtype as i32;
+    // GGML asserts the enum bound before indexing its table; it is not a
+    // nullable lookup for unknown or newer wire types.
+    if raw < 0 || raw as u32 >= llama_cpp_sys_2::GGML_TYPE_COUNT {
+        return Err(CodecError::NoTraits(raw));
+    }
+    // SAFETY: the checked tag indexes GGML's immutable static trait table.
+    let traits = unsafe { llama_cpp_sys_2::ggml_get_type_traits(raw as u32).as_ref() }
+        .ok_or(CodecError::NoTraits(raw))?;
+    if dtype.storage_layout() != Some((traits.blck_size as u64, traits.type_size as u64)) {
+        return Err(CodecError::TraitsLayoutMismatch(dtype));
+    }
+    Ok(traits)
 }
 
 fn dequant_validated_into(
@@ -176,30 +200,50 @@ fn dequant_validated_into(
         return Ok(());
     }
 
-    // SAFETY: `ggml_get_type_traits` is read-only and idempotent. The
-    // returned pointer is a static-lifetime table per the ggml API; null
-    // means "no traits registered for this type."
     let raw_dtype = desc.dtype as i32;
-    let traits = unsafe { llama_cpp_sys_2::ggml_get_type_traits(raw_dtype as u32) };
-    if traits.is_null() {
-        return Err(CodecError::NoTraits(raw_dtype));
-    }
-    // SAFETY: traits is non-null per the check above. `to_float` is an
-    // optional function pointer.
-    let to_float = unsafe { (*traits).to_float }.ok_or(CodecError::NoToFloat(raw_dtype))?;
+    let to_float = codec_traits(desc.dtype)?
+        .to_float
+        .ok_or(CodecError::NoToFloat(raw_dtype))?;
 
-    let n_i64 = i64::try_from(plan.elements).map_err(|_| CodecError::SizeOverflow {
-        name: desc.name.clone(),
-    })?;
-    // SAFETY: `to_float(src, dst, n_elements)` reads `desc.n_bytes` from
-    // `bytes` and writes every output f32. The checked storage
-    // geometry and universal length guard prove that both spans are complete.
-    unsafe {
-        to_float(
-            bytes.as_ptr() as *const std::ffi::c_void,
-            output.as_mut_ptr().cast::<f32>(),
-            n_i64,
-        );
+    // GGML accepts i64 lengths, but several codecs use signed int indexing.
+    // Bound individual calls, not the tensor, and keep whole storage blocks.
+    let (chunk_elements, chunk_bytes) = codec_chunk_layout(desc.dtype)?;
+    // &[u8] promises no alignment. GGML dereferences typed block pointers;
+    // an explicitly aligned, bounded staging buffer handles such callers.
+    let mut staging = Vec::<u64>::new();
+    if bytes.as_ptr().align_offset(std::mem::align_of::<u64>()) != 0
+        || !chunk_bytes.is_multiple_of(std::mem::align_of::<u64>())
+    {
+        let words = chunk_bytes.min(bytes.len()).div_ceil(8);
+        staging
+            .try_reserve_exact(words)
+            .map_err(|_| CodecError::AllocationFailed {
+                name: desc.name.clone(),
+                bytes: words * 8,
+            })?;
+        staging.resize(words, 0);
+    }
+    for (source, destination) in bytes
+        .chunks(chunk_bytes)
+        .zip(output.chunks_mut(chunk_elements))
+    {
+        let source = if staging.is_empty() {
+            source
+        } else {
+            let aligned = bytemuck::cast_slice_mut::<u64, u8>(&mut staging);
+            aligned[..source.len()].copy_from_slice(source);
+            &aligned[..source.len()]
+        };
+        // SAFETY: both spans are complete validated blocks, source alignment
+        // is at least eight (sufficient for the admitted GGML block structs),
+        // and each call's element count and signed indexing fit i32.
+        unsafe {
+            to_float(
+                source.as_ptr().cast(),
+                destination.as_mut_ptr().cast::<f32>(),
+                destination.len() as i64,
+            );
+        }
     }
     Ok(())
 }
@@ -238,8 +282,8 @@ pub(crate) fn dequant_to_f32_in_place(
 /// Dequantize the raw `bytes` of a `desc` tensor into a fresh `Vec<f32>`.
 ///
 /// This calls `ggml_get_type_traits(dtype).to_float(bytes, dst, n)`, which
-/// covers F32 / F16 / BF16 / Q*_0 / Q*_1 / Q*_K / IQ* / MXFP4 — everything
-/// llama.cpp ships.
+/// uses the pinned GGML codecs, including Q1_0, Q2_0, NVFP4 and ternary
+/// storage. Codec availability does not imply native Metal execution support.
 pub fn dequant_to_f32(desc: &TensorDesc, bytes: &[u8]) -> Result<Vec<f32>, CodecError> {
     let plan = validate_dequant(desc, bytes)?;
     let mut out = try_uninit_f32(desc, plan.elements)?;
@@ -269,6 +313,130 @@ mod tests {
             shard_idx: 0,
             data_offset: 0,
             n_bytes: n_bytes as u64,
+        }
+    }
+
+    #[test]
+    fn extended_quant_codecs_match_linked_storage_layouts() {
+        for dtype in [
+            GgmlType::TQ1_0,
+            GgmlType::TQ2_0,
+            GgmlType::NVFP4,
+            GgmlType::Q1_0,
+            GgmlType::Q2_0,
+        ] {
+            let (elements, bytes) = dtype.storage_layout().unwrap();
+            let tensor = desc("extended", vec![elements], dtype, bytes as usize);
+            let payload = vec![0; bytes as usize];
+            validate_dequantization(&tensor, &payload).unwrap();
+            let values = dequant_to_f32(&tensor, &payload).unwrap();
+            assert_eq!(values.len(), elements as usize);
+            assert!(values.iter().all(|v| v.is_finite() && *v == 0.0), "{dtype}");
+        }
+        assert!(matches!(
+            codec_traits(GgmlType::Unknown),
+            Err(CodecError::NoTraits(-1))
+        ));
+    }
+
+    #[test]
+    fn q2_0_codec_matches_independent_packing_at_production_row_width() {
+        // 640 inputs = ten blocks, not a whole number of K-quant blocks.
+        let scales = [0.5f32, -2.0, 0.0, -0.0, 0.03125];
+        let mut payload = Vec::new();
+        let mut expected = Vec::new();
+        for block in 0..1030 {
+            let scale = scales[block % scales.len()];
+            payload.extend_from_slice(&half::f16::from_f32(scale).to_le_bytes());
+            for byte in 0..16 {
+                // Vary all four code positions independently, across rows too.
+                let packed = (block * 73 + byte * 29) as u8;
+                payload.push(packed);
+                for divisor in [1u16, 4, 16, 64] {
+                    let code = (u16::from(packed) / divisor) % 4;
+                    expected.push((code as f32 - 1.0) * scale);
+                }
+            }
+        }
+        let tensor = desc("q2_0", vec![640, 103], GgmlType::Q2_0, payload.len());
+        // Cross a codec-call boundary from a deliberately odd source address.
+        let mut storage = vec![0u64; (payload.len() + 1).div_ceil(8)];
+        let unaligned = &mut bytemuck::cast_slice_mut::<u64, u8>(&mut storage)[1..=payload.len()];
+        unaligned.copy_from_slice(&payload);
+        let actual = dequant_to_f32(&tensor, unaligned).unwrap();
+        assert_eq!(actual.len(), expected.len());
+        for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+            assert_eq!(actual.to_bits(), expected.to_bits(), "element {index}");
+        }
+        let mut in_place = vec![f32::NAN; expected.len()];
+        let mut aligned_storage = vec![0u64; payload.len().div_ceil(8)];
+        let aligned =
+            &mut bytemuck::cast_slice_mut::<u64, u8>(&mut aligned_storage)[..payload.len()];
+        aligned.copy_from_slice(&payload);
+        dequant_to_f32_in_place(&tensor, aligned, &mut in_place).unwrap();
+        assert!(
+            in_place
+                .iter()
+                .zip(&actual)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+        assert!(dequant_to_f32(&tensor, &payload[..payload.len() - 1]).is_err());
+        let bad_row = desc("q2_bad_row", vec![32, 2], GgmlType::Q2_0, 18);
+        assert!(matches!(
+            dequant_to_f32(&bad_row, &[0; 18]),
+            Err(CodecError::InvalidBlockGeometry { .. })
+        ));
+    }
+
+    #[test]
+    fn codec_calls_are_bounded_aligned_whole_blocks() {
+        for raw in 0..llama_cpp_sys_2::GGML_TYPE_COUNT {
+            let dtype = GgmlType::from_raw(raw);
+            if dtype == GgmlType::Unknown {
+                continue;
+            }
+            let (block, bytes) = dtype.storage_layout().unwrap();
+            let (elements, source_bytes) = codec_chunk_layout(dtype).unwrap();
+            assert!(elements > 0 && elements <= MAX_CODEC_CALL_ELEMENTS);
+            assert!(elements <= i32::MAX as usize);
+            assert_eq!(elements as u64 % block, 0);
+            assert_eq!(source_bytes as u64, elements as u64 / block * bytes);
+            assert_eq!(source_bytes % 8, 0);
+        }
+    }
+
+    #[test]
+    fn q1_0_codec_preserves_bit_order_and_signed_scale() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&half::f16::from_f32(-0.5).to_le_bytes());
+        payload.extend(0u8..16);
+        let tensor = desc("q1_0", vec![128], GgmlType::Q1_0, 18);
+        let actual = dequant_to_f32(&tensor, &payload).unwrap();
+        for (i, value) in actual.iter().enumerate() {
+            let expected = if ((i / 8) >> (i % 8)) & 1 == 1 {
+                -0.5
+            } else {
+                0.5
+            };
+            assert_eq!(*value, expected, "element {i}");
+        }
+    }
+
+    #[test]
+    fn nvfp4_codec_uses_four_scales_and_subblock_nibble_order() {
+        // UE4M3 scales 1, 2, 1/512, and the GGML zero sentinel.
+        let mut payload = vec![0x38, 0x40, 0x01, 0x7f];
+        for _ in 0..4 {
+            payload.extend((0u8..8).map(|q| q | ((q + 8) << 4)));
+        }
+        let tensor = desc("nvfp4", vec![64], GgmlType::NVFP4, 36);
+        let actual = dequant_to_f32(&tensor, &payload).unwrap();
+        let positive = [0.0f32, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+        for (sub, scale) in [1.0, 2.0, 1.0 / 512.0, 0.0].into_iter().enumerate() {
+            for (i, value) in positive.into_iter().enumerate() {
+                assert_eq!(actual[sub * 16 + i], value * scale);
+                assert_eq!(actual[sub * 16 + 8 + i], -value * scale);
+            }
         }
     }
 

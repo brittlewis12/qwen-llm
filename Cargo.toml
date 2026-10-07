@@ -49,7 +49,7 @@ memmap2 = "0.9"
 byteorder = "1.5"
 half = { version = "2.6", features = ["bytemuck"] }
 bytemuck = { version = "1.16", features = ["derive"] }
-gguf-rs = { git = "https://github.com/brittlewis12/gguf.git", rev = "c7369fd4868a6f613459fff355477f53bf4ee2f1" }
+gguf-rs = { git = "https://github.com/brittlewis12/gguf.git", rev = "3a92c518bce43959686bef1093b31b4067502d2b" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
 sha2 = "0.10"

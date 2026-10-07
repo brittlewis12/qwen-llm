@@ -1185,7 +1185,7 @@ fn prevalidate_header_before_decode(mmap: &[u8]) -> Result<(), GgufError> {
             )));
         }
         let kind = read_u32(mmap, &mut p)?;
-        if kind >= 40 {
+        if !ggml_type_layout_raw(kind).is_some_and(|(block, bytes)| block > 0 && bytes > 0) {
             return Err(GgufError::Decode(format!(
                 "tensor declares invalid GGML type {kind}"
             )));
@@ -1952,6 +1952,106 @@ mod tests {
         drop(g);
         assert_eq!(&retained[..4], &GGUF_MAGIC.to_le_bytes());
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn quant_fixture(kind: u32, shape: &[u64], payload: &[u8], split: Option<u16>) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        b.extend_from_slice(&3u32.to_le_bytes());
+        b.extend_from_slice(&1u64.to_le_bytes());
+        b.extend_from_slice(&if split.is_some() { 3u64 } else { 0 }.to_le_bytes());
+        if let Some(index) = split {
+            for (key, value) in [(SPLIT_NO_KEY, index), (SPLIT_COUNT_KEY, 2)] {
+                push_string(&mut b, key);
+                b.extend_from_slice(&2u32.to_le_bytes());
+                b.extend_from_slice(&value.to_le_bytes());
+            }
+            push_string(&mut b, SPLIT_TENSORS_COUNT_KEY);
+            b.extend_from_slice(&5u32.to_le_bytes());
+            b.extend_from_slice(&2i32.to_le_bytes());
+        }
+        push_string(&mut b, if split == Some(1) { "second" } else { "first" });
+        b.extend_from_slice(&(shape.len() as u32).to_le_bytes());
+        for dim in shape {
+            b.extend_from_slice(&dim.to_le_bytes());
+        }
+        b.extend_from_slice(&kind.to_le_bytes());
+        b.extend_from_slice(&32u64.to_le_bytes());
+        while b.len() % GGUF_DEFAULT_ALIGNMENT as usize != 0 {
+            b.push(0);
+        }
+        b.extend_from_slice(&[0; 32]);
+        b.extend_from_slice(payload);
+        b
+    }
+
+    #[test]
+    fn extended_quant_gguf_round_trips_through_dependency_parser() {
+        for (kind, width, block_bytes) in [
+            (34, 256, 54),
+            (35, 256, 66),
+            (40, 64, 36),
+            (41, 128, 18),
+            (42, 640, 180),
+        ] {
+            let payload = vec![0; block_bytes * 2];
+            let bytes = quant_fixture(kind, &[width, 2], &payload, None);
+            let path = write_temp(&bytes);
+            let file = GgufFile::open(&path).unwrap_or_else(|e| panic!("type {kind}: {e}"));
+            let tensor = &file.tensors[0];
+            assert_eq!(tensor.dtype, GgmlType::from_raw(kind));
+            assert_eq!(tensor.shape, [width, 2]);
+            assert_eq!(tensor.n_bytes, payload.len() as u64);
+            assert_eq!(file.try_slice(tensor).unwrap(), payload);
+            let decoded =
+                crate::codec::dequant_to_f32(tensor, file.try_slice(tensor).unwrap()).unwrap();
+            assert_eq!(decoded.len(), width as usize * 2);
+            drop(file);
+            std::fs::remove_file(&path).unwrap();
+            let truncated = write_temp(&bytes[..bytes.len() - 1]);
+            assert_rejects!(&truncated, GgufError::Decode(_));
+            std::fs::remove_file(truncated).unwrap();
+        }
+    }
+
+    #[test]
+    fn q2_0_split_shards_preserve_type_offsets_and_payload() {
+        let dir = temp_split_dir();
+        let first = dir.join("quant-00001-of-00002.gguf");
+        let second = dir.join("quant-00002-of-00002.gguf");
+        std::fs::write(&first, quant_fixture(42, &[64], &[0x11; 18], Some(0))).unwrap();
+        std::fs::write(&second, quant_fixture(42, &[64], &[0x22; 18], Some(1))).unwrap();
+        let file = GgufFile::open(&first).unwrap();
+        assert_eq!(file.shard_count(), 2);
+        for (index, tensor) in file.tensors.iter().enumerate() {
+            assert_eq!(tensor.dtype, GgmlType::Q2_0);
+            assert_eq!(tensor.shard_idx, index);
+            assert_eq!(
+                file.try_slice(tensor).unwrap(),
+                vec![0x11 * (index as u8 + 1); 18]
+            );
+        }
+        drop(file);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn extended_quant_gguf_rejects_removed_types_and_partial_rows() {
+        for kind in [4, 5, 31, 32, 33, 36, 37, 38, 43, u32::MAX] {
+            let path = write_temp(&quant_fixture(kind, &[64], &[0; 256], None));
+            assert_rejects!(&path, GgufError::Decode(_));
+            std::fs::remove_file(path).unwrap();
+        }
+        for (kind, shape) in [
+            (40, [32, 2]),
+            (41, [64, 2]),
+            (42, [32, 2]),
+            (42, [MAX_DIMENSION, MAX_DIMENSION]),
+        ] {
+            let path = write_temp(&quant_fixture(kind, &shape, &[0; 36], None));
+            assert_rejects!(&path, GgufError::Decode(_));
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]

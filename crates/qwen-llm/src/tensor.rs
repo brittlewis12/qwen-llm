@@ -56,7 +56,12 @@ pub enum GgmlType {
     F64 = 28,
     IQ1_M = 29,
     BF16 = 30,
+    TQ1_0 = 34,
+    TQ2_0 = 35,
     MXFP4 = 39,
+    NVFP4 = 40,
+    Q1_0 = 41,
+    Q2_0 = 42,
     Unknown = -1,
 }
 
@@ -92,7 +97,12 @@ impl GgmlType {
             28 => Self::F64,
             29 => Self::IQ1_M,
             30 => Self::BF16,
+            34 => Self::TQ1_0,
+            35 => Self::TQ2_0,
             39 => Self::MXFP4,
+            40 => Self::NVFP4,
+            41 => Self::Q1_0,
+            42 => Self::Q2_0,
             _ => Self::Unknown,
         }
     }
@@ -128,7 +138,12 @@ impl GgmlType {
             Self::F64 => "F64",
             Self::IQ1_M => "IQ1_M",
             Self::BF16 => "BF16",
+            Self::TQ1_0 => "TQ1_0",
+            Self::TQ2_0 => "TQ2_0",
             Self::MXFP4 => "MXFP4",
+            Self::NVFP4 => "NVFP4",
+            Self::Q1_0 => "Q1_0",
+            Self::Q2_0 => "Q2_0",
             Self::Unknown => "UNKNOWN",
         }
     }
@@ -181,6 +196,9 @@ pub(crate) fn ggml_type_layout_raw(raw: u32) -> Option<(u64, u64)> {
         35 => (K, 2 + K / 4),
         36..=38 => (0, 0),
         39 => (32, 17),
+        40 => (64, 36),
+        41 => (128, 18),
+        42 => (64, 18),
         _ => return None,
     })
 }
@@ -241,6 +259,9 @@ mod tests {
             (34, (256, 2 + 4 + (256 - 16) / 5)),
             (35, (256, 66)),
             (39, (32, 17)),
+            (40, (64, 36)),
+            (41, (128, 18)),
+            (42, (64, 18)),
         ];
         for (raw, layout) in cases {
             assert_eq!(ggml_type_layout_raw(raw), Some(layout), "raw type {raw}");
@@ -288,7 +309,12 @@ mod tests {
             (28, GgmlType::F64, "F64"),
             (29, GgmlType::IQ1_M, "IQ1_M"),
             (30, GgmlType::BF16, "BF16"),
+            (34, GgmlType::TQ1_0, "TQ1_0"),
+            (35, GgmlType::TQ2_0, "TQ2_0"),
             (39, GgmlType::MXFP4, "MXFP4"),
+            (40, GgmlType::NVFP4, "NVFP4"),
+            (41, GgmlType::Q1_0, "Q1_0"),
+            (42, GgmlType::Q2_0, "Q2_0"),
         ];
         for (raw, dtype, wire_name) in cases {
             assert_eq!(GgmlType::from_raw(raw), dtype);

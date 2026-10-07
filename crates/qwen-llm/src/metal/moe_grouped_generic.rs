@@ -23,7 +23,7 @@ pub struct MoeGroupedGenericLayout {
     pub dtype: GgmlType,
     /// Kernel-name infix (`kernel_moe_down_<suffix>_f32_grouped_slots_generic`).
     pub suffix: &'static str,
-    /// Logical elements per tile block (256 for K/I-quants, 32 otherwise).
+    /// Logical elements per tile block (256 for K/I-quants, 64 for Q2_0, 32 otherwise).
     pub block_elems: usize,
     /// Bytes per tile block.
     pub block_bytes: usize,
@@ -48,6 +48,7 @@ const fn layout(
 /// `kernels/moe.metal`; `moe_grouped_generic_mapping_matches_metal_source`
 /// enforces that.
 pub const MOE_GROUPED_GENERIC_LAYOUTS: &[MoeGroupedGenericLayout] = &[
+    layout(GgmlType::Q2_0, "q2_0", 64, 18),
     layout(GgmlType::Q2_K, "q2_K", 256, 84),
     layout(GgmlType::Q3_K, "q3_K", 256, 110),
     layout(GgmlType::Q4_K, "q4_K", 256, 144),

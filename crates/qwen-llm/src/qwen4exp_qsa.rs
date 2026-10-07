@@ -17,9 +17,7 @@ use crate::metal::{
     encode_qk_rms_norm_rope_f32_packed_consecutive, encode_scatter_offset_f32_to_f16_kv,
     encode_sigmoid_mul_gate_strided_f32, mat_vec_q8_0_lcpp_enabled,
 };
-use crate::metal_forward::{
-    MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch, validate_f32_q8_mat_mat_addressing,
-};
+use crate::metal_forward::{MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch};
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig};
 use crate::qwen4exp_profile::{
     Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileRecorder, begin_optional, end_optional,
@@ -2402,10 +2400,10 @@ fn validate_packed_contract(
         (weights.value.dtype, g.hidden_size, g.kv_width()),
         (weights.output.dtype, g.query_width(), g.hidden_size),
     ] {
-        validate_f32_q8_mat_mat_addressing(dtype, n_in, n_out, tokens)?;
+        crate::qwen4exp_metal::validate_projection_addressing(dtype, n_in, n_out, tokens)?;
     }
     if plan.selected_tokens > 0 {
-        validate_f32_q8_mat_mat_addressing(
+        crate::qwen4exp_metal::validate_projection_addressing(
             weights.index_query.dtype,
             g.hidden_size,
             g.index_query_width(),
@@ -2888,22 +2886,10 @@ fn preflight_dense_packed_projection(
     ctx: &MetalContext,
     dtype: GgmlType,
 ) -> Result<(), Qwen4ExpQsaError> {
-    let kernels: &[&str] = match dtype {
-        GgmlType::F32 => &["kernel_mat_mat_f32_f32"],
-        GgmlType::Q8_0 => &[
-            "kernel_mat_mat_q8_0_f32",
-            "kernel_mat_mat_q8_0_f32_n16",
-            "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32",
-        ],
-        GgmlType::BF16 => &["kernel_mat_mat_bf16_f32"],
-        _ => {
-            return invalid(format!(
-                "unsupported dense packed QSA projection dtype {dtype:?}"
-            ));
-        }
-    };
-    for kernel in kernels {
-        ctx.pipeline(kernel)?;
+    if !crate::qwen4exp_metal::preflight_projection_pipelines(ctx, dtype, true, true)? {
+        return invalid(format!(
+            "unsupported dense packed QSA projection dtype {dtype:?}"
+        ));
     }
     Ok(())
 }
@@ -5940,14 +5926,22 @@ fn require_projection(
             tensor.shape
         ));
     }
-    match (role, tensor.dtype) {
-        (_, GgmlType::F32) | (ProjectionRole::Index, GgmlType::BF16) => {}
-        (ProjectionRole::Main, GgmlType::Q8_0) if n_in.is_multiple_of(32) => {}
-        _ => {
-            return invalid(format!("{name} has unsupported dtype {:?}", tensor.dtype));
-        }
+    if matches!(role, ProjectionRole::Index)
+        && !matches!(tensor.dtype, GgmlType::F32 | GgmlType::BF16)
+    {
+        return invalid(format!(
+            "{name} has unsupported indexer dtype {:?}",
+            tensor.dtype
+        ));
     }
-    require_range(name, tensor)
+    crate::qwen4exp_metal::validate_projection_range(
+        tensor.dtype,
+        n_in,
+        n_out,
+        tensor.offset,
+        tensor.buffer.length() as u64,
+    )?;
+    Ok(())
 }
 
 fn require_tensor(
@@ -5991,8 +5985,8 @@ fn storage_bytes(tensor: &MetalTensor) -> Result<u64, Qwen4ExpQsaError> {
 
 fn require_range(name: &str, tensor: &MetalTensor) -> Result<(), Qwen4ExpQsaError> {
     let alignment = match tensor.dtype {
-        GgmlType::F16 | GgmlType::BF16 | GgmlType::Q8_0 => 2,
-        _ => 4,
+        GgmlType::F32 | GgmlType::I32 => 4,
+        _ => 2,
     };
     if !tensor.offset.is_multiple_of(alignment) {
         return invalid(format!(

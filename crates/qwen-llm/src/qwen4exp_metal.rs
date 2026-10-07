@@ -1,9 +1,7 @@
 //! Metal primitives for Qwen3.8-Flash-Next gated residuals.
 
 use crate::metal::{KernelEncoder, MetalContext, MetalError, MetalTensor};
-use crate::metal_forward::{
-    MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch, validate_f32_q8_mat_mat_addressing,
-};
+use crate::metal_forward::{MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch};
 use crate::tensor::GgmlType;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -11,6 +9,10 @@ use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLComputePipelineState, MTLDevice,
     MTLResource, MTLSize,
 };
+
+#[cfg(test)]
+#[path = "qwen4exp_metal/projection_tests.rs"]
+mod projection_tests;
 
 const SIMD_WIDTH: usize = 32;
 
@@ -950,9 +952,9 @@ pub(crate) fn validate_and_preflight_gated_residual_packed_mix(
             inject.dtype
         )));
     }
-    validate_f32_q8_mat_mat_addressing(weights.down.dtype, hyper_hidden, scratch.low_rank, tokens)?;
-    validate_f32_q8_mat_mat_addressing(weights.up.dtype, scratch.low_rank, hyper_hidden, tokens)?;
-    validate_f32_q8_mat_mat_addressing(inject.dtype, hyper_hidden, scratch.branch_count, tokens)?;
+    validate_projection_addressing(weights.down.dtype, hyper_hidden, scratch.low_rank, tokens)?;
+    validate_projection_addressing(weights.up.dtype, scratch.low_rank, hyper_hidden, tokens)?;
+    validate_projection_addressing(inject.dtype, hyper_hidden, scratch.branch_count, tokens)?;
     #[cfg(test)]
     preflight_hc_packed_projection_override(ctx, weights, hyper_hidden, scratch.low_rank, tokens)?;
     for (name, tensor, width) in [
@@ -1271,6 +1273,112 @@ fn preflight_packed_combine(ctx: &MetalContext) -> Result<(), Qwen4ExpMetalError
     Ok(())
 }
 
+/// Native dense projection formats shared by the Flash-Next admission seams.
+pub(crate) const PROJECTION_DTYPES: &[GgmlType] = &[
+    GgmlType::F32,
+    GgmlType::BF16,
+    GgmlType::Q8_0,
+    GgmlType::Q4_K,
+    GgmlType::Q5_K,
+    GgmlType::Q6_K,
+    GgmlType::IQ4_XS,
+    GgmlType::IQ4_NL,
+];
+
+pub(crate) fn projection_dtype_supported(dtype: GgmlType) -> bool {
+    PROJECTION_DTYPES.contains(&dtype)
+}
+
+/// Validate the addressing used by native scalar and packed projection kernels.
+/// The existing F32/Q8 validator does not cover the other native formats.
+pub(crate) fn validate_projection_addressing(
+    dtype: GgmlType,
+    n_in: usize,
+    n_out: usize,
+    tokens: usize,
+) -> Result<(), MetalError> {
+    let bad = |detail| MetalError::BadShape {
+        kernel: "qwen4exp_projection",
+        detail,
+    };
+    if !projection_dtype_supported(dtype) {
+        return Err(bad(format!("unsupported projection dtype {dtype:?}")));
+    }
+    for (name, value) in [("n_in", n_in), ("n_out", n_out), ("tokens", tokens)] {
+        if value == 0 || u32::try_from(value).is_err() {
+            return Err(bad(format!(
+                "{name}={value} must fit nonzero u32 addressing"
+            )));
+        }
+    }
+    let (block, bytes) = dtype.storage_layout().expect("native projection layout");
+    if !(n_in as u64).is_multiple_of(block) {
+        return Err(bad(format!(
+            "{dtype:?} row width {n_in} is not aligned to {block} elements"
+        )));
+    }
+    let row_bytes = (n_in as u64 / block)
+        .checked_mul(bytes)
+        .ok_or_else(|| bad("projection row byte count overflow".into()))?;
+    if u32::try_from(row_bytes).is_err() {
+        return Err(bad("projection row byte stride exceeds u32".into()));
+    }
+    for (name, elements) in [
+        ("weight", n_in.checked_mul(n_out)),
+        ("input", n_in.checked_mul(tokens)),
+        ("output", n_out.checked_mul(tokens)),
+    ] {
+        if elements.and_then(|n| u32::try_from(n).ok()).is_none() {
+            return Err(bad(format!("{name} element count exceeds u32 addressing")));
+        }
+    }
+    Ok(())
+}
+
+/// Check physical projection storage without constructing a Metal device.
+pub(crate) fn validate_projection_range(
+    dtype: GgmlType,
+    n_in: usize,
+    n_out: usize,
+    offset: u64,
+    buffer_bytes: u64,
+) -> Result<(), MetalError> {
+    validate_projection_addressing(dtype, n_in, n_out, 1)?;
+    let bad = |detail| MetalError::BadShape {
+        kernel: "qwen4exp_projection",
+        detail,
+    };
+    let alignment = if dtype == GgmlType::F32 { 4 } else { 2 };
+    if !offset.is_multiple_of(alignment) {
+        return Err(bad(format!(
+            "{dtype:?} offset {offset} is not {alignment}-byte aligned"
+        )));
+    }
+    let (block, bytes) = dtype.storage_layout().expect("native projection layout");
+    let bytes = (n_in as u64 / block)
+        .checked_mul(n_out as u64)
+        .and_then(|blocks| blocks.checked_mul(bytes))
+        .ok_or_else(|| bad("projection storage byte count overflow".into()))?;
+    let end = offset
+        .checked_add(bytes)
+        .ok_or_else(|| bad("projection range overflow".into()))?;
+    if end > buffer_bytes {
+        return Err(bad(format!(
+            "projection range offset={offset} bytes={bytes} exceeds buffer={buffer_bytes}"
+        )));
+    }
+    Ok(())
+}
+
+/// Token embeddings retain the existing Q8 route and admit archived GSQ IQ4_XS.
+pub(crate) fn token_embedding_kernel_name(dtype: GgmlType) -> Option<&'static str> {
+    match dtype {
+        GgmlType::Q8_0 => Some("kernel_get_rows_q8_0_f32"),
+        GgmlType::IQ4_XS => Some("kernel_get_rows_iq4_xs_f32"),
+        _ => None,
+    }
+}
+
 /// Kernel names every Flash-Next projection dtype must be able to build.
 /// Returns `None` for unsupported dtypes so callers can report their own
 /// family-specific error.
@@ -1283,11 +1391,63 @@ pub(crate) fn projection_kernel_names(
         (GgmlType::F32, false) => &["kernel_mat_vec_f32_f32", "kernel_mat_vec_f32_f32_lcpp_r2"],
         (GgmlType::Q8_0, false) => &["kernel_mat_vec_q8_0_f32", "kernel_mat_vec_q8_0_f32_lcpp"],
         (GgmlType::BF16, false) if allow_bf16 => &["kernel_mat_vec_bf16_f32"],
+        (GgmlType::Q4_K, false) => &["kernel_mat_vec_q4_K_f32"],
+        (GgmlType::Q5_K, false) => &["kernel_mat_vec_q5_K_f32"],
+        (GgmlType::Q6_K, false) => &["kernel_mat_vec_q6_K_f32"],
+        (GgmlType::IQ4_XS, false) => &[
+            "kernel_mat_vec_iq4_xs_f32",
+            "kernel_mat_vec_iq4_xs_f32_fast",
+        ],
+        (GgmlType::IQ4_NL, false) => &[
+            "kernel_mat_vec_iq4_nl_f32",
+            "kernel_mat_vec_iq4_nl_f32_fast",
+        ],
+        (GgmlType::BF16, true) if allow_bf16 => &[
+            "kernel_mat_mat_bf16_f32",
+            "kernel_mat_mat_bf16_bfloat_act_f32",
+        ],
+        (GgmlType::Q4_K, true) => &[
+            "kernel_mat_mat_q4_K_f32",
+            "kernel_mat_mat_q4_K_f32_n16",
+            "kernel_mat_mat_q4_K_f32_n16_v2",
+            "kernel_mat_mat_q4_K_f32_n64",
+            "kernel_mat_vec_q4_K_nc2_rp4_f32",
+            "kernel_mat_vec_q4_K_nc4_f32",
+            "kernel_mat_mat_q4_K_mma8v_r1c1k128_f32",
+            "kernel_mat_mat_q4_K_mma8v_r1c1k128_vec4_f32",
+            "kernel_mat_mat_q4_K_mma8v_r1c1k64_sg2_f32",
+            "kernel_mat_mat_q4_K_mma8v_r1c1k64_sg2_vec4_f32",
+            "kernel_mat_mat_q4_K_mma8v_r2c1k64_vec4_f32",
+            "kernel_mat_mat_q4_K_mma8v_r2c2k64_f32",
+        ],
+        (GgmlType::Q5_K, true) => &[
+            "kernel_mat_mat_q5_K_f32",
+            "kernel_mat_mat_q5_K_f32_n16",
+            "kernel_mat_mat_q5_K_f32_n64",
+            "kernel_mat_mat_q5_K_mma8v_r1c1k128_f32",
+        ],
+        (GgmlType::Q6_K, true) => &[
+            "kernel_mat_mat_q6_K_f32",
+            "kernel_mat_mat_q6_K_f32_n16",
+            "kernel_mat_mat_q6_K_f32_n64",
+            "kernel_mat_vec_q6_K_nc2_f32",
+            "kernel_mat_vec_q6_K_nc4_f32",
+            "kernel_mat_mat_q6_K_mma8v_r1c1k128_f32",
+            "kernel_mat_mat_q6_K_mma8v_r2c2k64_f32",
+        ],
+        (GgmlType::IQ4_XS, true) => &["kernel_mat_mat_iq4_xs_f32", "kernel_mat_mat_iq4_xs_f32_mm"],
+        (GgmlType::IQ4_NL, true) => &["kernel_mat_mat_iq4_nl_f32", "kernel_mat_mat_iq4_nl_f32_mm"],
         (GgmlType::F32, true) => &["kernel_mat_mat_f32_f32"],
         (GgmlType::Q8_0, true) => &[
             "kernel_mat_mat_q8_0_f32",
             "kernel_mat_mat_q8_0_f32_n16",
             "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32",
+            "kernel_mat_mat_q8_0_fewrow_nt1_nsg8_f32",
+            "kernel_mat_mat_q8_0_fewrow_nt2_nsg8_f32",
+            "kernel_mat_mat_q8_0_fewrow_nt4_nsg8_f32",
+            "kernel_mat_mat_q8_0_fewrow_nt1_nsg16_f32",
+            "kernel_mat_mat_q8_0_fewrow_nt2_nsg16_f32",
+            "kernel_mat_mat_q8_0_fewrow_nt1_nsg32_f32",
         ],
         _ => return None,
     })
@@ -1316,7 +1476,7 @@ fn preflight_packed_projection(
     dtype: GgmlType,
 ) -> Result<(), Qwen4ExpMetalError> {
     preflight_projection(ctx, dtype)?;
-    if !preflight_projection_pipelines(ctx, dtype, true, false)? {
+    if !preflight_projection_pipelines(ctx, dtype, true, true)? {
         return Err(invalid(format!(
             "unsupported packed gated-residual projection dtype {dtype:?}"
         )));
@@ -1325,7 +1485,7 @@ fn preflight_packed_projection(
 }
 
 fn preflight_projection(ctx: &MetalContext, dtype: GgmlType) -> Result<(), Qwen4ExpMetalError> {
-    if !preflight_projection_pipelines(ctx, dtype, false, false)? {
+    if !preflight_projection_pipelines(ctx, dtype, false, true)? {
         return Err(invalid(format!(
             "unsupported gated-residual projection dtype {dtype:?}"
         )));
@@ -1415,23 +1575,14 @@ fn require_projection(
             tensor.shape, expected_shape
         )));
     }
-    let elements = n_in
-        .checked_mul(n_out)
-        .ok_or_else(|| invalid(format!("{name} element count overflow")))?;
-    match tensor.dtype {
-        GgmlType::F32 => require_physical_range(name, tensor, elements, 4, 4),
-        GgmlType::Q8_0 => {
-            if !n_in.is_multiple_of(32) {
-                return Err(invalid(format!(
-                    "{name} input width {n_in} is not Q8_0 block aligned"
-                )));
-            }
-            require_physical_range(name, tensor, elements / 32, 34, 2)
-        }
-        dtype => Err(invalid(format!(
-            "{name} must use F32 or Q8_0 storage, got {dtype:?}"
-        ))),
-    }
+    validate_projection_range(
+        tensor.dtype,
+        n_in,
+        n_out,
+        tensor.offset,
+        tensor.buffer.length() as u64,
+    )?;
+    Ok(())
 }
 
 fn checked_elements(shape: &[u64]) -> Result<usize, Qwen4ExpMetalError> {
@@ -1475,19 +1626,24 @@ fn require_physical_range(
 
 fn storage_bytes(tensor: &MetalTensor) -> Result<u64, Qwen4ExpMetalError> {
     let elements = checked_elements(&tensor.shape)?;
-    let bytes = match tensor.dtype {
-        GgmlType::F32 => elements.checked_mul(4),
-        GgmlType::Q8_0 if elements.is_multiple_of(32) => elements
-            .checked_div(32)
-            .and_then(|blocks| blocks.checked_mul(34)),
-        dtype => {
-            return Err(invalid(format!(
-                "cannot derive gated-residual storage bytes for {dtype:?}"
-            )));
-        }
+    if !projection_dtype_supported(tensor.dtype) {
+        return Err(invalid(format!(
+            "unsupported gated-residual storage dtype {:?}",
+            tensor.dtype
+        )));
     }
-    .ok_or_else(|| invalid("tensor storage byte length overflow"))?;
-    u64::try_from(bytes).map_err(|_| invalid("tensor storage byte length exceeds u64"))
+    let (block, bytes) = tensor
+        .dtype
+        .storage_layout()
+        .expect("native projection layout");
+    let elements = elements as u64;
+    if !elements.is_multiple_of(block) {
+        return Err(invalid("tensor storage is not block aligned"));
+    }
+    let bytes = (elements / block)
+        .checked_mul(bytes)
+        .ok_or_else(|| invalid("tensor storage byte length overflow"))?;
+    Ok(bytes)
 }
 
 fn require_disjoint(tensors: &[(&str, &MetalTensor)]) -> Result<(), Qwen4ExpMetalError> {
@@ -1926,40 +2082,6 @@ fn invalid(detail: impl Into<String>) -> Qwen4ExpMetalError {
 #[cfg(test)]
 mod tests {
 
-    #[test]
-    fn projection_kernel_names_pin_each_caller_list() {
-        use super::projection_kernel_names as names;
-        use crate::tensor::GgmlType;
-        assert_eq!(
-            names(GgmlType::F32, false, false),
-            Some(&["kernel_mat_vec_f32_f32", "kernel_mat_vec_f32_f32_lcpp_r2"][..])
-        );
-        assert_eq!(
-            names(GgmlType::Q8_0, false, false),
-            Some(&["kernel_mat_vec_q8_0_f32", "kernel_mat_vec_q8_0_f32_lcpp"][..])
-        );
-        assert_eq!(names(GgmlType::BF16, false, false), None);
-        assert_eq!(
-            names(GgmlType::BF16, false, true),
-            Some(&["kernel_mat_vec_bf16_f32"][..])
-        );
-        assert_eq!(
-            names(GgmlType::F32, true, false),
-            Some(&["kernel_mat_mat_f32_f32"][..])
-        );
-        assert_eq!(
-            names(GgmlType::Q8_0, true, false),
-            Some(
-                &[
-                    "kernel_mat_mat_q8_0_f32",
-                    "kernel_mat_mat_q8_0_f32_n16",
-                    "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32",
-                ][..]
-            )
-        );
-        assert_eq!(names(GgmlType::BF16, true, true), None);
-        assert_eq!(names(GgmlType::Q4_K, false, true), None);
-    }
     use super::*;
     use crate::metal::MetalTensorProvenance;
     use crate::qwen4exp_forward::{

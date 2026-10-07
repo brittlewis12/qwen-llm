@@ -908,6 +908,34 @@ kernel void kernel_get_rows_iq4_nl_f32(
     y[out_index] = d * get_rows_iq4nl_values[quant];
 }
 
+kernel void kernel_get_rows_iq4_xs_f32(
+        constant get_rows_args & args [[buffer(0)]],
+        device const uchar * embed [[buffer(1)]],
+        device const int * ids [[buffer(2)]],
+        device float * y [[buffer(3)]],
+        uint2 gid [[thread_position_in_grid]]) {
+    const uint r = gid.y;
+    const uint i = gid.x;
+    if (r >= args.n_rows || i >= args.n_cols) return;
+    const int row = ids[r];
+    const ulong out_index = (ulong)r * args.n_cols + i;
+    if ((uint)row >= args.n_vocab) {
+        y[out_index] = 0.0f;
+        return;
+    }
+    const ulong block_index = (ulong)(uint)row * (args.n_cols / 256u) + i / 256u;
+    device const uchar * block = embed + block_index * 136u;
+    const uint in_block = i % 256u;
+    const uint group = in_block / 32u;
+    const uint scales_h = uint(*((device const ushort *)(block + 2)));
+    const uint scale_l = (uint(block[4 + group / 2]) >> (4u * (group & 1u))) & 15u;
+    const uint scale_h = (scales_h >> (2u * group)) & 3u;
+    const float d = float(*((device const half *)block)) * float(int(scale_l | (scale_h << 4u)) - 32);
+    const uint packed = uint(block[8 + group * 16u + (in_block & 15u)]);
+    const uint quant = (in_block & 16u) ? packed >> 4u : packed & 15u;
+    y[out_index] = d * get_rows_iq4nl_values[quant];
+}
+
 // GDN α-chain fusion (replaces 3 dispatches: add_inplace + softplus + mul).
 //
 //   out[i] = softplus(a[i] + dt_bias[i]) * a_log[i]

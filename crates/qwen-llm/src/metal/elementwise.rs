@@ -2316,6 +2316,7 @@ pub fn encode_get_rows_f32(
         GgmlType::Q6_K => (256, 210),
         GgmlType::Q8_0 => (32, 34),
         GgmlType::IQ4_NL => (32, 18),
+        GgmlType::IQ4_XS => (256, 136),
         other => {
             return Err(MetalError::BadShape {
                 kernel: "get_rows",
@@ -2331,7 +2332,8 @@ pub fn encode_get_rows_f32(
         | GgmlType::Q4_K
         | GgmlType::Q6_K
         | GgmlType::Q8_0
-        | GgmlType::IQ4_NL => std::mem::align_of::<u16>(),
+        | GgmlType::IQ4_NL
+        | GgmlType::IQ4_XS => std::mem::align_of::<u16>(),
         _ => unreachable!(),
     } as u64;
     if !embed.offset.is_multiple_of(source_alignment) {
@@ -2402,6 +2404,7 @@ pub fn encode_get_rows_f32(
         GgmlType::Q6_K => "kernel_get_rows_q6_K_f32",
         GgmlType::Q8_0 => "kernel_get_rows_q8_0_f32",
         GgmlType::IQ4_NL => "kernel_get_rows_iq4_nl_f32",
+        GgmlType::IQ4_XS => "kernel_get_rows_iq4_xs_f32",
         _ => unreachable!(),
     };
     #[repr(C)]
@@ -3391,6 +3394,72 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn get_rows_iq4_xs_matches_codec_with_offsets_and_invalid_ids() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const COLS: usize = 512;
+        const ROWS: usize = 3;
+        let mut bytes = vec![0u8; ROWS * COLS / 256 * 136];
+        for (ordinal, block) in bytes.chunks_exact_mut(136).enumerate() {
+            let scale = half::f16::from_f32((ordinal as f32 - 2.0) / 1024.0);
+            block[..2].copy_from_slice(&scale.to_bits().to_le_bytes());
+            for (i, byte) in block[2..].iter_mut().enumerate() {
+                *byte = (i * 71 + ordinal * 13) as u8;
+            }
+        }
+        let desc = TensorDesc {
+            name: "iq4_xs_embedding".into(),
+            shape: vec![COLS as u64, ROWS as u64],
+            dtype: GgmlType::IQ4_XS,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: bytes.len() as u64,
+        };
+        let reference = crate::codec::dequant_to_f32(&desc, &bytes).unwrap();
+        let embed = offset_tensor(&ctx, 30, &bytes, 19, desc.shape, desc.dtype);
+        let indices = [2i32, -1, 0, ROWS as i32, 1, 1];
+        let ids = offset_tensor(
+            &ctx,
+            12,
+            bytemuck::cast_slice(&indices),
+            13,
+            vec![indices.len() as u64],
+            GgmlType::I32,
+        );
+        let y = offset_tensor(
+            &ctx,
+            20,
+            &vec![0u8; indices.len() * COLS * 4],
+            29,
+            vec![(indices.len() * COLS) as u64],
+            GgmlType::F32,
+        );
+        one_shot(&ctx, |enc| {
+            encode_get_rows_f32(&ctx, enc, &embed, &ids, &y, indices.len(), COLS)
+        })
+        .unwrap();
+        let actual = tensor_f32_at_offset(&y);
+        for (row, &id) in indices.iter().enumerate() {
+            for col in 0..COLS {
+                let expected = if (0..ROWS as i32).contains(&id) {
+                    reference[id as usize * COLS + col]
+                } else {
+                    0.0
+                };
+                let value = actual[row * COLS + col];
+                assert!(
+                    value.is_finite() && (value - expected).abs() <= 1e-6,
+                    "row={row}, col={col}: {value} vs {expected}"
+                );
+            }
+        }
+        assert_offset_guards(&embed, 30, 19);
+        assert_offset_guards(&ids, 12, 13);
+        assert_offset_guards(&y, 20, 29);
     }
 
     #[test]

@@ -773,7 +773,7 @@ pub(crate) fn validate_contract(
         weights.token_embedding,
         g.hidden_size,
         g.vocab_size,
-        &[GgmlType::Q8_0],
+        &[GgmlType::Q8_0, GgmlType::IQ4_XS],
     )?;
     for (name, tensor, dtype, shape) in [
         ("token ID", &workspace.token_id, GgmlType::I32, vec![1]),
@@ -844,10 +844,14 @@ pub(crate) fn validate_contract(
     require_same_device(ctx, &tensors)?;
     require_disjoint(&tensors)?;
 
-    let get_rows = ctx.pipeline("kernel_get_rows_q8_0_f32")?;
+    let kernel = crate::qwen4exp_metal::token_embedding_kernel_name(weights.token_embedding.dtype)
+        .ok_or_else(|| {
+            Qwen4ExpLayerZeroError::Invalid("unsupported token embedding dtype".into())
+        })?;
+    let get_rows = ctx.pipeline(kernel)?;
     if get_rows.threadExecutionWidth() != 32 || get_rows.maxTotalThreadsPerThreadgroup() < 32 {
         return invalid(format!(
-            "Q8_0 row pipeline requires SIMD width and capacity 32, got width={} capacity={}",
+            "{kernel} row pipeline requires SIMD width and capacity 32, got width={} capacity={}",
             get_rows.threadExecutionWidth(),
             get_rows.maxTotalThreadsPerThreadgroup()
         ));
@@ -879,14 +883,14 @@ fn validate_residual(
         weights.read.down,
         hyper,
         geometry.low_rank,
-        &[GgmlType::F32, GgmlType::Q8_0],
+        crate::qwen4exp_metal::PROJECTION_DTYPES,
     )?;
     require_projection(
         &format!("{role} residual up"),
         weights.read.up,
         geometry.low_rank,
         hyper,
-        &[GgmlType::F32, GgmlType::Q8_0],
+        crate::qwen4exp_metal::PROJECTION_DTYPES,
     )?;
     require_projection(
         &format!("{role} residual injection"),
@@ -1011,15 +1015,14 @@ fn require_projection(
             tensor.dtype, tensor.shape
         ));
     }
-    let (block, _) = tensor.dtype.storage_layout().ok_or_else(|| {
-        Qwen4ExpLayerZeroError::Invalid(format!("{name} has unsupported dtype {:?}", tensor.dtype))
-    })?;
-    if !(n_in as u64).is_multiple_of(block) {
-        return invalid(format!(
-            "{name} row width {n_in} is not aligned to {block} elements"
-        ));
-    }
-    require_range(name, tensor)
+    crate::qwen4exp_metal::validate_projection_range(
+        tensor.dtype,
+        n_in,
+        n_out,
+        tensor.offset,
+        tensor.buffer.length() as u64,
+    )?;
+    Ok(())
 }
 
 fn require_tensor(

@@ -2167,7 +2167,7 @@ fn validate_and_preflight_packed(
         weights.zero_one.layer_zero.token_embedding,
         workspace.geometry.hidden_size(),
         workspace.geometry.vocab_size(),
-        &[GgmlType::Q8_0],
+        &[GgmlType::Q8_0, GgmlType::IQ4_XS],
     )?;
     require_tensor(
         "packed token IDs",
@@ -2225,7 +2225,11 @@ fn validate_and_preflight_packed(
     ];
     require_same_device(ctx, &top_level)?;
     require_disjoint(&top_level)?;
-    for kernel in ["kernel_get_rows_q8_0_f32", "kernel_get_rows_iq4_nl_f32"] {
+    let embedding_kernel = crate::qwen4exp_metal::token_embedding_kernel_name(
+        weights.zero_one.layer_zero.token_embedding.dtype,
+    )
+    .ok_or_else(|| Qwen4ExpTextSessionError::Invalid("unsupported token embedding dtype".into()))?;
+    for kernel in [embedding_kernel, "kernel_get_rows_iq4_nl_f32"] {
         let pipeline = ctx.pipeline(kernel)?;
         if pipeline.threadExecutionWidth() != 32 || pipeline.maxTotalThreadsPerThreadgroup() < 32 {
             return invalid(format!(
@@ -2753,7 +2757,7 @@ fn validate_final_contract(
         weights.output,
         g.hidden_size(),
         g.vocab_size(),
-        &[GgmlType::F32, GgmlType::Q6_K],
+        crate::qwen4exp_metal::PROJECTION_DTYPES,
     )?;
     require_tensor(
         "session logits",
@@ -2780,15 +2784,16 @@ fn validate_final_contract(
     ];
     require_same_device(ctx, &tensors)?;
     require_disjoint(&tensors)?;
-    match weights.output.dtype {
-        GgmlType::F32 => {
-            ctx.pipeline("kernel_mat_vec_f32_f32")?;
-            ctx.pipeline("kernel_mat_vec_f32_f32_lcpp_r2")?;
-        }
-        GgmlType::Q6_K => {
-            ctx.pipeline("kernel_mat_vec_q6_K_f32")?;
-        }
-        _ => unreachable!(),
+    if !crate::qwen4exp_metal::preflight_projection_pipelines(
+        ctx,
+        weights.output.dtype,
+        false,
+        true,
+    )? {
+        return invalid(format!(
+            "unsupported output projection dtype {:?}",
+            weights.output.dtype
+        ));
     }
     Ok(())
 }
@@ -3168,15 +3173,14 @@ fn require_projection(
             tensor.dtype, tensor.shape
         ));
     }
-    let (block, _) = tensor.dtype.storage_layout().ok_or_else(|| {
-        Qwen4ExpTextSessionError::Invalid(format!("unsupported dtype {:?}", tensor.dtype))
-    })?;
-    if !(n_in as u64).is_multiple_of(block) {
-        return invalid(format!(
-            "{name} input width {n_in} is not aligned to {block} elements"
-        ));
-    }
-    require_range(name, tensor)
+    crate::qwen4exp_metal::validate_projection_range(
+        tensor.dtype,
+        n_in,
+        n_out,
+        tensor.offset,
+        tensor.buffer.length() as u64,
+    )?;
+    Ok(())
 }
 
 fn require_tensor(

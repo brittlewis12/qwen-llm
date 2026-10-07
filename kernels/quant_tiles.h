@@ -8,6 +8,7 @@
 // `blk` points at one storage block ("tile block") and `il` selects the
 // il-th run of 16 consecutive logical elements inside it:
 //   * QK=256 formats: NL = 16 calls per 256-element super-block.
+//   * Q2_0: NL = 4 calls per 64-element block.
 //   * QK=32 formats (Q4_0/Q4_1/Q8_0/IQ4_NL): NL = 2 calls per block.
 //   * Dense F32/F16/BF16: treated as 32-element tile blocks, NL = 2.
 //
@@ -16,7 +17,7 @@
 // uniform rule
 //   il    = (il + 2 < NL) ? il + 2 : il % 2;
 //   x_ptr = (il < 2) ? x_ptr + BYTES * ((2 + NL - 1) / NL) : x_ptr;
-// which is valid for both NL=16 and NL=2 (see mat_mat_mm_tile.h).
+// which is valid for NL=16, NL=4 and NL=2 (see mat_mat_mm_tile.h).
 //
 // The math of every function below is copied verbatim from the verified
 // per-format helpers (mat_mat_q2_k / q3_k / q4_k / q5_k / q6_k / q8_0 /
@@ -38,6 +39,8 @@
 // calls per tile block. Keep in sync with
 // crates/qwen-llm/src/metal/moe_grouped_generic.rs (a CPU test parses the
 // instantiations in moe.metal and checks them against the Rust mapping).
+#define QT_Q2_0_BYTES     18
+#define QT_Q2_0_NL        4
 #define QT_Q2_K_BYTES     84
 #define QT_Q2_K_NL        16
 #define QT_Q3_K_BYTES     110
@@ -458,6 +461,18 @@ constant float qt_iq4nl_values[16] = {
 };
 
 // ---------------------------------------------------------------------------
+// Q2_0 (QK = 64, NL = 4): four adjacent 2-bit codes per byte.
+inline void qt_dequantize_q2_0(device const uchar * blk,
+                               short il,
+                               thread half4x4 & reg) {
+    const float d = float(*((device const half *)blk));
+    QT_FOR_UNROLL (int i = 0; i < 16; ++i) {
+        const int j = 16 * il + i;
+        const int q = (blk[2 + j / 4] >> (2 * (j % 4))) & 3;
+        reg[i / 4][i % 4] = half(d * float(q - 1));
+    }
+}
+
 // K-quants (QK = 256, NL = 16).
 
 // Source: mat_mat_q2_k.metal dequantize_q2_K_half.

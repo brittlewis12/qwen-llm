@@ -4,15 +4,16 @@ use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
     MetalTimestampSampleBuffer, encode_axpy_rowwise_f32, encode_axpy_scalar_f32,
     encode_copy_offset_f32, encode_dot_sigmoid_f32, encode_mat_mat_f32_router_e8p32_strict,
-    encode_moe_down_iq4_nl_f32, encode_moe_down_iq4_nl_f32_fast,
-    encode_moe_down_iq4_nl_f32_grouped_slots, encode_moe_down_iq4_nl_f32_grouped_slots_m128_n16,
+    encode_moe_down_f32_grouped_slots_generic, encode_moe_down_iq4_nl_f32,
+    encode_moe_down_iq4_nl_f32_fast, encode_moe_down_iq4_nl_f32_grouped_slots,
+    encode_moe_down_iq4_nl_f32_grouped_slots_m128_n16, encode_moe_down_q2_0_f32,
     encode_moe_down_q8_0_f32_grouped_slots, encode_moe_down_weighted_sum_q8_0_f32,
-    encode_moe_route_bucket_slots_f32, encode_moe_swiglu_iq3_xxs_f32,
-    encode_moe_swiglu_iq3_xxs_f32_fast, encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16,
-    encode_moe_swiglu_iq4_xs_f32, encode_moe_swiglu_iq4_xs_f32_grouped_slots_n16,
-    encode_moe_weighted_sum_f32, encode_moe_weighted_sum_packed_f32, encode_shared_swiglu_q8_0_f32,
-    encode_silu_mul_f32, encode_topk_logits_softmax_dot_sigmoid_packed_f32,
-    encode_topk_logits_softmax_f32,
+    encode_moe_route_bucket_slots_f32, encode_moe_swiglu_f32_grouped_slots_generic_range,
+    encode_moe_swiglu_iq3_s_f32, encode_moe_swiglu_iq3_xxs_f32, encode_moe_swiglu_iq3_xxs_f32_fast,
+    encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16, encode_moe_swiglu_iq4_xs_f32,
+    encode_moe_swiglu_iq4_xs_f32_grouped_slots_n16, encode_moe_weighted_sum_f32,
+    encode_moe_weighted_sum_packed_f32, encode_shared_swiglu_q8_0_f32, encode_silu_mul_f32,
+    encode_topk_logits_softmax_dot_sigmoid_packed_f32, encode_topk_logits_softmax_f32,
 };
 #[cfg(test)]
 use crate::metal::{
@@ -38,7 +39,25 @@ use objc2_metal::{
     MTLResource,
 };
 
+#[path = "metal/qwen4exp_expert_compat.rs"]
+mod qwen4exp_expert_compat;
+
 const MAX_TOP_K: usize = 16;
+const ROUTED_GATE_UP_DTYPES: &[GgmlType] = &[
+    GgmlType::IQ2_S,
+    GgmlType::IQ3_S,
+    GgmlType::IQ3_XXS,
+    GgmlType::IQ4_XS,
+];
+const ROUTED_DOWN_DTYPES: &[GgmlType] = &[GgmlType::IQ4_NL, GgmlType::Q2_0, GgmlType::Q8_0];
+pub(crate) const SHARED_GATE_UP_DTYPES: &[GgmlType] = &[
+    GgmlType::Q4_K,
+    GgmlType::Q5_K,
+    GgmlType::Q6_K,
+    GgmlType::IQ4_XS,
+    GgmlType::Q8_0,
+];
+pub(crate) const SHARED_DOWN_DTYPES: &[GgmlType] = &[GgmlType::IQ4_NL, GgmlType::Q8_0];
 
 #[path = "qwen4exp_topk.rs"]
 pub(crate) mod guarded_topk;
@@ -1514,6 +1533,20 @@ fn encode_singleton_gate_up(
 ) -> Result<(), Qwen4ExpMoeError> {
     let g = weights.geometry;
     match weights.routed_gate.dtype {
+        GgmlType::IQ2_S => qwen4exp_expert_compat::encode(ctx, enc, input, weights, buffers)?,
+        GgmlType::IQ3_S => encode_moe_swiglu_iq3_s_f32(
+            ctx,
+            enc,
+            weights.routed_gate,
+            weights.routed_up,
+            input,
+            buffers.topk_ids,
+            buffers.routed_inner,
+            g.hidden_size,
+            g.routed_intermediate_size,
+            g.expert_count,
+            g.experts_per_token,
+        )?,
         GgmlType::IQ3_XXS => {
             let encode = if qwen4exp_moe_iq3_fast_enabled() {
                 encode_moe_swiglu_iq3_xxs_f32_fast
@@ -1560,8 +1593,10 @@ fn encode_singleton_down(
 ) -> Result<(), Qwen4ExpMoeError> {
     let g = weights.geometry;
     match weights.routed_down.dtype {
-        GgmlType::IQ4_NL => {
-            let encode = if qwen4exp_moe_iq4_down_fast_enabled() {
+        GgmlType::IQ4_NL | GgmlType::Q2_0 => {
+            let encode = if weights.routed_down.dtype == GgmlType::Q2_0 {
+                encode_moe_down_q2_0_f32
+            } else if qwen4exp_moe_iq4_down_fast_enabled() {
                 encode_moe_down_iq4_nl_f32_fast
             } else {
                 encode_moe_down_iq4_nl_f32
@@ -1606,6 +1641,23 @@ fn encode_singleton_down(
     Ok(())
 }
 
+fn require_shared_projection_scratch(g: Qwen4ExpMoeMetalGeometry) -> Result<(), Qwen4ExpMoeError> {
+    let needed = checked_product(
+        &[2, g.shared_intermediate_size],
+        "shared projection scratch",
+    )?;
+    let available = checked_product(
+        &[g.hidden_size, g.experts_per_token],
+        "routed output scratch",
+    )?;
+    if needed > available {
+        return invalid(format!(
+            "shared projections need {needed} scratch elements, routed output has {available}"
+        ));
+    }
+    Ok(())
+}
+
 fn encode_singleton_shared_gate_up(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1614,16 +1666,45 @@ fn encode_singleton_shared_gate_up(
     buffers: Qwen4ExpMoeSingletonBuffers<'_>,
 ) -> Result<(), Qwen4ExpMoeError> {
     let g = weights.geometry;
-    encode_shared_swiglu_q8_0_f32(
-        ctx,
-        enc,
-        weights.shared_gate,
-        weights.shared_up,
-        input,
-        buffers.shared_inner,
-        g.hidden_size,
-        g.shared_intermediate_size,
-    )?;
+    if weights.shared_gate.dtype == GgmlType::Q8_0 && weights.shared_up.dtype == GgmlType::Q8_0 {
+        encode_shared_swiglu_q8_0_f32(
+            ctx,
+            enc,
+            weights.shared_gate,
+            weights.shared_up,
+            input,
+            buffers.shared_inner,
+            g.hidden_size,
+            g.shared_intermediate_size,
+        )?;
+    } else {
+        // Routed down has already been reduced into output. Reuse its dead
+        // per-slot output for two disjoint shared projections (25,600 floats
+        // available versus 1,280 needed for the released Flash-Next geometry).
+        let n = g.shared_intermediate_size as u64;
+        require_shared_projection_scratch(g)?;
+        let gate = buffers.routed_expert_output.view_subrange(0, vec![n]);
+        let up = buffers.routed_expert_output.view_subrange(n, vec![n]);
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            weights.shared_gate,
+            input,
+            &gate,
+            g.hidden_size,
+            g.shared_intermediate_size,
+        )?;
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            weights.shared_up,
+            input,
+            &up,
+            g.hidden_size,
+            g.shared_intermediate_size,
+        )?;
+        encode_silu_mul_f32(ctx, enc, &gate, &up, buffers.shared_inner)?;
+    }
     Ok(())
 }
 
@@ -1785,6 +1866,23 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             Qwen4ExpPackedProfileLabel::detail("moe.routed_gate_up", layer, mixer),
         )?;
         match self.weights.routed_gate.dtype {
+            GgmlType::IQ2_S | GgmlType::IQ3_S => encode_moe_swiglu_f32_grouped_slots_generic_range(
+                ctx,
+                enc,
+                self.weights.routed_gate,
+                self.weights.routed_up,
+                self.input,
+                &self.views.route_counts,
+                &self.views.route_slots,
+                &self.views.routed_inner,
+                g.hidden_size,
+                g.routed_intermediate_size,
+                g.expert_count,
+                g.experts_per_token,
+                self.tokens,
+                0,
+                i32::MAX as u32,
+            )?,
             GgmlType::IQ3_XXS => encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16(
                 ctx,
                 enc,
@@ -1943,6 +2041,19 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             Qwen4ExpPackedProfileLabel::detail("moe.routed_down", layer, mixer),
         )?;
         match self.weights.routed_down.dtype {
+            GgmlType::Q2_0 => encode_moe_down_f32_grouped_slots_generic(
+                ctx,
+                enc,
+                self.weights.routed_down,
+                &self.views.routed_inner,
+                &self.views.route_counts,
+                &self.views.route_slots,
+                &self.views.routed_expert_output,
+                g.routed_intermediate_size,
+                g.hidden_size,
+                g.expert_count,
+                self.tokens,
+            )?,
             GgmlType::IQ4_NL => {
                 if packed_iq4_down_m128_n16_qualified(
                     ctx,
@@ -2653,7 +2764,7 @@ fn validate_weights(
         g.hidden_size,
         g.routed_intermediate_size,
         g.expert_count,
-        &[GgmlType::IQ3_XXS, GgmlType::IQ4_XS],
+        ROUTED_GATE_UP_DTYPES,
     )?;
     require_expert_bank(
         "MoE routed up bank",
@@ -2661,7 +2772,7 @@ fn validate_weights(
         g.hidden_size,
         g.routed_intermediate_size,
         g.expert_count,
-        &[GgmlType::IQ3_XXS, GgmlType::IQ4_XS],
+        ROUTED_GATE_UP_DTYPES,
     )?;
     if weights.routed_gate.dtype != weights.routed_up.dtype {
         return invalid(format!(
@@ -2675,7 +2786,7 @@ fn validate_weights(
         g.routed_intermediate_size,
         g.hidden_size,
         g.expert_count,
-        &[GgmlType::IQ4_NL, GgmlType::Q8_0],
+        ROUTED_DOWN_DTYPES,
     )?;
     require_tensor(
         "MoE shared router",
@@ -2689,21 +2800,21 @@ fn validate_weights(
         weights.shared_gate,
         g.hidden_size,
         g.shared_intermediate_size,
-        &[GgmlType::Q8_0],
+        SHARED_GATE_UP_DTYPES,
     )?;
     require_projection(
         "MoE shared up",
         weights.shared_up,
         g.hidden_size,
         g.shared_intermediate_size,
-        &[GgmlType::Q8_0],
+        SHARED_GATE_UP_DTYPES,
     )?;
     require_projection(
         "MoE shared down",
         weights.shared_down,
         g.shared_intermediate_size,
         g.hidden_size,
-        &[GgmlType::Q8_0],
+        SHARED_DOWN_DTYPES,
     )?;
     Ok(())
 }
@@ -2774,7 +2885,11 @@ pub(crate) fn validate_packed_contract(
             g.hidden_size,
         ),
     ] {
-        validate_f32_q8_mat_mat_addressing(dtype, n_in, n_out, tokens)?;
+        if matches!(dtype, GgmlType::F32 | GgmlType::Q8_0) {
+            validate_f32_q8_mat_mat_addressing(dtype, n_in, n_out, tokens)?;
+        } else {
+            crate::qwen4exp_metal::validate_projection_addressing(dtype, n_in, n_out, tokens)?;
+        }
     }
 
     for (name, tensor, dtype, shape) in [
@@ -2927,6 +3042,8 @@ pub(crate) fn preflight(
     preflight_projection(ctx, weights.router.dtype)?;
     preflight_projection(ctx, weights.shared_down.dtype)?;
     let (routed_gate_kernel, routed_gate_threads) = match weights.routed_gate.dtype {
+        GgmlType::IQ2_S => (qwen4exp_expert_compat::KERNEL, 64),
+        GgmlType::IQ3_S => ("kernel_moe_swiglu_iq3_s_f32", 64),
         GgmlType::IQ3_XXS if qwen4exp_moe_iq3_fast_enabled() => {
             ("kernel_moe_swiglu_iq3_xxs_f32_fast", 64)
         }
@@ -2936,8 +3053,21 @@ pub(crate) fn preflight(
     };
     require_pipeline_capacity(ctx, "kernel_topk_logits_softmax_f32", 1, 0)?;
     require_pipeline_capacity(ctx, "kernel_dot_sigmoid_f32", 32, 0)?;
-    require_pipeline_capacity(ctx, routed_gate_kernel, routed_gate_threads, 0)?;
+    require_pipeline_capacity(
+        ctx,
+        routed_gate_kernel,
+        routed_gate_threads,
+        if weights.routed_gate.dtype == GgmlType::IQ2_S {
+            16 * size_of::<f32>()
+        } else {
+            0
+        },
+    )?;
     match weights.routed_down.dtype {
+        GgmlType::Q2_0 => {
+            require_pipeline_capacity(ctx, "kernel_moe_down_q2_0_f32", 128, 0)?;
+            ctx.pipeline("kernel_moe_weighted_sum_f32")?;
+        }
         GgmlType::IQ4_NL => {
             if qwen4exp_moe_iq4_down_fast_enabled() {
                 require_pipeline_capacity(
@@ -2959,12 +3089,19 @@ pub(crate) fn preflight(
         )?,
         dtype => return invalid(format!("unsupported routed down dtype {dtype:?}")),
     }
-    require_pipeline_capacity(
-        ctx,
-        "kernel_shared_swiglu_q8_0_f32_lcpp",
-        128,
-        32 * 2 * 2 * size_of::<f32>(),
-    )?;
+    if weights.shared_gate.dtype == GgmlType::Q8_0 && weights.shared_up.dtype == GgmlType::Q8_0 {
+        require_pipeline_capacity(
+            ctx,
+            "kernel_shared_swiglu_q8_0_f32_lcpp",
+            128,
+            32 * 2 * 2 * size_of::<f32>(),
+        )?;
+    } else {
+        require_shared_projection_scratch(weights.geometry)?;
+        preflight_projection(ctx, weights.shared_gate.dtype)?;
+        preflight_projection(ctx, weights.shared_up.dtype)?;
+        ctx.pipeline("kernel_silu_mul_f32")?;
+    }
     ctx.pipeline("kernel_axpy_scalar_f32")?;
     Ok(())
 }
@@ -2996,6 +3133,8 @@ pub(crate) fn preflight_packed(
         preflight_packed_projection(ctx, dtype)?;
     }
     let routed_gate_kernel = match weights.routed_gate.dtype {
+        GgmlType::IQ2_S => "kernel_moe_swiglu_iq2_s_f32_grouped_slots_generic",
+        GgmlType::IQ3_S => "kernel_moe_swiglu_iq3_s_f32_grouped_slots_generic",
         GgmlType::IQ3_XXS => "kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16",
         GgmlType::IQ4_XS => "kernel_moe_swiglu_iq4_xs_f32_grouped_slots_n16",
         dtype => return invalid(format!("unsupported packed routed gate/up dtype {dtype:?}")),
@@ -3009,6 +3148,12 @@ pub(crate) fn preflight_packed(
     require_pipeline_capacity(ctx, "kernel_moe_route_bucket_slots_f32", 256, 0)?;
     require_pipeline_capacity(ctx, routed_gate_kernel, 128, 16_384)?;
     match weights.routed_down.dtype {
+        GgmlType::Q2_0 => require_pipeline_capacity(
+            ctx,
+            "kernel_moe_down_q2_0_f32_grouped_slots_generic",
+            128,
+            8192,
+        )?,
         GgmlType::IQ4_NL => {
             if packed_iq4_down_m128_n16_qualified(
                 ctx,
@@ -3046,6 +3191,13 @@ fn preflight_packed_projection(
     ctx: &MetalContext,
     dtype: GgmlType,
 ) -> Result<(), Qwen4ExpMoeError> {
+    // Small packed K-quant projections may select native mat-vec kernels.
+    if matches!(
+        dtype,
+        GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::IQ4_XS | GgmlType::IQ4_NL
+    ) {
+        preflight_projection(ctx, dtype)?;
+    }
     if !crate::qwen4exp_metal::preflight_projection_pipelines(ctx, dtype, true, false)? {
         return invalid(format!("unsupported packed MoE projection dtype {dtype:?}"));
     }
@@ -3068,6 +3220,17 @@ fn preflight_projection(ctx: &MetalContext, dtype: GgmlType) -> Result<(), Qwen4
                 128,
                 32 * 2 * size_of::<f32>(),
             ),
+        ],
+        GgmlType::Q4_K => &[("kernel_mat_vec_q4_K_f32", 64, 0)],
+        GgmlType::Q5_K => &[("kernel_mat_vec_q5_K_f32", 64, 0)],
+        GgmlType::Q6_K => &[("kernel_mat_vec_q6_K_f32", 64, 0)],
+        GgmlType::IQ4_XS => &[
+            ("kernel_mat_vec_iq4_xs_f32", 128, 0),
+            ("kernel_mat_vec_iq4_xs_f32_fast", 64, 32 * size_of::<f32>()),
+        ],
+        GgmlType::IQ4_NL => &[
+            ("kernel_mat_vec_iq4_nl_f32", 128, 0),
+            ("kernel_mat_vec_iq4_nl_f32_fast", 64, 32 * size_of::<f32>()),
         ],
         _ => return invalid(format!("unsupported MoE projection dtype {dtype:?}")),
     };
@@ -3235,7 +3398,16 @@ fn storage_bytes(tensor: &MetalTensor) -> Result<u64, Qwen4ExpMoeError> {
 fn require_range(name: &str, tensor: &MetalTensor) -> Result<(), Qwen4ExpMoeError> {
     let alignment = match tensor.dtype {
         GgmlType::F32 | GgmlType::I32 => 4,
-        GgmlType::IQ3_XXS | GgmlType::IQ4_XS | GgmlType::IQ4_NL | GgmlType::Q8_0 => 2,
+        GgmlType::IQ2_S
+        | GgmlType::IQ3_S
+        | GgmlType::IQ3_XXS
+        | GgmlType::IQ4_XS
+        | GgmlType::IQ4_NL
+        | GgmlType::Q8_0
+        | GgmlType::Q2_0
+        | GgmlType::Q4_K
+        | GgmlType::Q5_K
+        | GgmlType::Q6_K => 2,
         dtype => return invalid(format!("{name} has unsupported dtype {dtype:?}")),
     };
     if !tensor.offset.is_multiple_of(alignment) {
@@ -3332,3 +3504,7 @@ fn invalid<T>(detail: impl Into<String>) -> Result<T, Qwen4ExpMoeError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "qwen4exp_moe_compat_tests.rs"]
+mod compat_tests;

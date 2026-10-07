@@ -7,9 +7,7 @@ use crate::metal::{
     encode_l2_norm_pair_batched_f32, encode_mat_vec_f32_sigmoid, encode_sigmoid_f32,
     encode_ssm_conv_silu_f32,
 };
-use crate::metal_forward::{
-    MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch, validate_f32_q8_mat_mat_addressing,
-};
+use crate::metal_forward::{MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch};
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig};
 use crate::qwen4exp_profile::{
     Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileRecorder, begin_optional, end_optional,
@@ -1317,7 +1315,7 @@ pub(crate) fn validate_packed_contract(
         (weights.alpha.dtype, g.hidden_size, g.value_heads),
         (weights.output.dtype, g.value_width(), g.hidden_size),
     ] {
-        validate_f32_q8_mat_mat_addressing(dtype, n_in, n_out, tokens)?;
+        crate::qwen4exp_metal::validate_projection_addressing(dtype, n_in, n_out, tokens)?;
     }
     require_f32_shape(
         "packed GDN convolution state",
@@ -1429,13 +1427,37 @@ fn require_projection(
             tensor.shape
         ));
     }
-    match tensor.dtype {
-        GgmlType::F32 => require_range(name, tensor, 4),
-        GgmlType::Q8_0 if quantized_allowed && n_in.is_multiple_of(32) => {
-            require_range(name, tensor, 2)
-        }
-        dtype => invalid(format!("{name} has unsupported dtype {dtype:?}")),
+    if !quantized_allowed && tensor.dtype != GgmlType::F32 {
+        return invalid(format!(
+            "{name} must use F32 storage, got {:?}",
+            tensor.dtype
+        ));
     }
+    crate::qwen4exp_metal::validate_projection_range(
+        tensor.dtype,
+        n_in,
+        n_out,
+        tensor.offset,
+        tensor.buffer.length() as u64,
+    )?;
+    Ok(())
+}
+
+fn storage_bytes(tensor: &MetalTensor) -> Result<u64, Qwen4ExpGdnError> {
+    let elements = tensor
+        .shape
+        .iter()
+        .try_fold(1_u64, |n, &dim| n.checked_mul(dim))
+        .ok_or_else(|| Qwen4ExpGdnError::Invalid("tensor element count overflow".into()))?;
+    let (block, bytes) = tensor.dtype.storage_layout().ok_or_else(|| {
+        Qwen4ExpGdnError::Invalid(format!("unsupported dtype {:?}", tensor.dtype))
+    })?;
+    if block == 0 || !elements.is_multiple_of(block) {
+        return invalid("tensor storage is not block aligned");
+    }
+    (elements / block)
+        .checked_mul(bytes)
+        .ok_or_else(|| Qwen4ExpGdnError::Invalid("tensor byte count overflow".into()))
 }
 
 fn require_range(name: &str, tensor: &MetalTensor, alignment: u64) -> Result<(), Qwen4ExpGdnError> {
@@ -1445,7 +1467,7 @@ fn require_range(name: &str, tensor: &MetalTensor, alignment: u64) -> Result<(),
             tensor.offset
         ));
     }
-    let bytes = tensor.n_bytes();
+    let bytes = storage_bytes(tensor)?;
     let end = tensor
         .offset
         .checked_add(bytes)
@@ -1480,11 +1502,13 @@ fn require_disjoint(tensors: &[(&str, &MetalTensor)]) -> Result<(), Qwen4ExpGdnE
             let left_end = tensors[left]
                 .1
                 .offset
-                .saturating_add(tensors[left].1.n_bytes());
+                .checked_add(storage_bytes(tensors[left].1)?)
+                .ok_or_else(|| Qwen4ExpGdnError::Invalid("tensor range overflow".into()))?;
             let right_end = tensors[right]
                 .1
                 .offset
-                .saturating_add(tensors[right].1.n_bytes());
+                .checked_add(storage_bytes(tensors[right].1)?)
+                .ok_or_else(|| Qwen4ExpGdnError::Invalid("tensor range overflow".into()))?;
             if tensors[left].1.offset < right_end && tensors[right].1.offset < left_end {
                 return invalid(format!("{} overlaps {}", tensors[left].0, tensors[right].0));
             }
@@ -1580,14 +1604,14 @@ fn preflight_packed_projection(
     dtype: GgmlType,
 ) -> Result<(), Qwen4ExpGdnError> {
     preflight_projection(ctx, dtype)?;
-    if !crate::qwen4exp_metal::preflight_projection_pipelines(ctx, dtype, true, false)? {
+    if !crate::qwen4exp_metal::preflight_projection_pipelines(ctx, dtype, true, true)? {
         return invalid(format!("unsupported packed GDN projection dtype {dtype:?}"));
     }
     Ok(())
 }
 
 fn preflight_projection(ctx: &MetalContext, dtype: GgmlType) -> Result<(), Qwen4ExpGdnError> {
-    if !crate::qwen4exp_metal::preflight_projection_pipelines(ctx, dtype, false, false)? {
+    if !crate::qwen4exp_metal::preflight_projection_pipelines(ctx, dtype, false, true)? {
         return invalid(format!("unsupported GDN projection dtype {dtype:?}"));
     }
     Ok(())

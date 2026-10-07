@@ -6854,8 +6854,10 @@ kernel void kernel_moe_grouped_slots_mm_generic(
         device       float * dst          [[buffer(5)]],
         threadgroup  uchar * shmem        [[threadgroup(0)]],
         uint3  tgpig [[threadgroup_position_in_grid]],
-        ushort tiitg [[thread_index_in_threadgroup]],
+        uint tiitg_wide [[thread_index_in_threadgroup]],
         ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    // Match the release kernels' wide builtin for 512-expert grids.
+    const ushort tiitg = ushort(tiitg_wide);
     threadgroup half * sa = (threadgroup half *)(shmem);
     threadgroup half * sb = (threadgroup half *)(shmem + 4096);
 
@@ -7169,10 +7171,10 @@ kernel void kernel_moe_swiglu_grouped_slots_n16_generic(
         device       float * dst           [[buffer(6)]],
         threadgroup  uchar * shmem         [[threadgroup(0)]],
         uint3  tgpig [[threadgroup_position_in_grid]],
-        ushort tiitg [[thread_index_in_threadgroup]],
+        uint tiitg_wide [[thread_index_in_threadgroup]],
         ushort sgitg [[simdgroup_index_in_threadgroup]]) {
     moe_swiglu_grouped_slots_n16_body<BYTES, NL, DEQ, false>(
-        args, srcA_gate, srcA_up, srcB, counts, ids, dst, shmem, tgpig, tiitg, sgitg, 0.0f);
+        args, srcA_gate, srcA_up, srcB, counts, ids, dst, shmem, tgpig, ushort(tiitg_wide), sgitg, 0.0f);
 }
 
 template <int BYTES, short NL,
@@ -7188,10 +7190,10 @@ kernel void kernel_moe_swiglu_clamped_grouped_slots_n16_generic(
         constant     float & limit         [[buffer(7)]],
         threadgroup  uchar * shmem         [[threadgroup(0)]],
         uint3  tgpig [[threadgroup_position_in_grid]],
-        ushort tiitg [[thread_index_in_threadgroup]],
+        uint tiitg_wide [[thread_index_in_threadgroup]],
         ushort sgitg [[simdgroup_index_in_threadgroup]]) {
     moe_swiglu_grouped_slots_n16_body<BYTES, NL, DEQ, true>(
-        args, srcA_gate, srcA_up, srcB, counts, ids, dst, shmem, tgpig, tiitg, sgitg, limit);
+        args, srcA_gate, srcA_up, srcB, counts, ids, dst, shmem, tgpig, ushort(tiitg_wide), sgitg, limit);
 }
 
 typedef decltype(kernel_moe_grouped_slots_mm_generic<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K, 0>) moe_grouped_slots_mm_generic_t;
@@ -7200,6 +7202,9 @@ typedef decltype(kernel_moe_swiglu_clamped_grouped_slots_n16_generic<QT_Q4_K_BYT
 
 // One line per (role, dtype). Every host_name here must have a matching
 // entry in moe_grouped_generic.rs (enforced by a CPU test).
+template [[host_name("kernel_moe_down_q2_0_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q2_0_BYTES, QT_Q2_0_NL, qt_dequantize_q2_0, 0>;
+template [[host_name("kernel_moe_up_silu_mul_q2_0_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q2_0_BYTES, QT_Q2_0_NL, qt_dequantize_q2_0, 1>;
+template [[host_name("kernel_moe_swiglu_q2_0_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_Q2_0_BYTES, QT_Q2_0_NL, qt_dequantize_q2_0>;
 template [[host_name("kernel_moe_down_q2_K_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q2_K_BYTES, QT_Q2_K_NL, qt_dequantize_q2_K, 0>;
 template [[host_name("kernel_moe_up_silu_mul_q2_K_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_Q2_K_BYTES, QT_Q2_K_NL, qt_dequantize_q2_K, 1>;
 template [[host_name("kernel_moe_swiglu_q2_K_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_Q2_K_BYTES, QT_Q2_K_NL, qt_dequantize_q2_K>;

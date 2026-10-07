@@ -605,7 +605,7 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         {
             return invalid("packed prompt extent is outside the admitted forward limit");
         }
-        let weight_plan = Qwen4ExpMetalWeightPlan::for_ud_q3_k_xl(ctx, gguf)?;
+        let weight_plan = Qwen4ExpMetalWeightPlan::for_native(ctx, gguf)?;
         let expected_capacity = Qwen4ExpSessionCapacity::for_forward_limit(
             weight_plan.config(),
             capacity.forward_limit,

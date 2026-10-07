@@ -1091,6 +1091,12 @@ pub(crate) fn validate_packed_motor_contract(
         g.hidden_size,
         g.hidden_size,
     )?;
+    for (dtype, n_out) in [
+        (weights.key.dtype, g.hyper_width()),
+        (weights.value.dtype, g.hidden_size),
+    ] {
+        crate::qwen4exp_metal::validate_projection_addressing(dtype, g.hidden_size, n_out, tokens)?;
+    }
     for (name, tensor) in [
         ("packed PLE key norm", weights.key_norm),
         ("packed PLE query norm", weights.query_norm),
@@ -1235,14 +1241,14 @@ fn preflight_packed_projection(
     dtype: GgmlType,
 ) -> Result<(), Qwen4ExpPleMetalError> {
     preflight_projection(ctx, dtype)?;
-    if !crate::qwen4exp_metal::preflight_projection_pipelines(ctx, dtype, true, false)? {
+    if !crate::qwen4exp_metal::preflight_projection_pipelines(ctx, dtype, true, true)? {
         return invalid(format!("unsupported packed PLE projection dtype {dtype:?}"));
     }
     Ok(())
 }
 
 fn preflight_projection(ctx: &MetalContext, dtype: GgmlType) -> Result<(), Qwen4ExpPleMetalError> {
-    if !crate::qwen4exp_metal::preflight_projection_pipelines(ctx, dtype, false, false)? {
+    if !crate::qwen4exp_metal::preflight_projection_pipelines(ctx, dtype, false, true)? {
         return invalid(format!("unsupported PLE projection dtype {dtype:?}"));
     }
     Ok(())
@@ -1595,21 +1601,20 @@ fn require_projection(
     n_out: usize,
 ) -> Result<(), Qwen4ExpPleMetalError> {
     let shape = [n_in as u64, n_out as u64];
-    if tensor.shape != shape || !matches!(tensor.dtype, GgmlType::F32 | GgmlType::Q8_0) {
+    if tensor.shape != shape || !crate::qwen4exp_metal::projection_dtype_supported(tensor.dtype) {
         return invalid(format!(
-            "{name} must use F32 or Q8_0 with shape {shape:?}, got {:?} {:?}",
+            "{name} must use a native projection dtype with shape {shape:?}, got {:?} {:?}",
             tensor.dtype, tensor.shape
         ));
     }
-    let (block, _) = tensor.dtype.storage_layout().ok_or_else(|| {
-        Qwen4ExpPleMetalError::Invalid(format!("{name} has unsupported dtype {:?}", tensor.dtype))
-    })?;
-    if !(n_in as u64).is_multiple_of(block) {
-        return invalid(format!(
-            "{name} row width {n_in} is not aligned to {block} elements"
-        ));
-    }
-    require_range(name, tensor)
+    crate::qwen4exp_metal::validate_projection_range(
+        tensor.dtype,
+        n_in,
+        n_out,
+        tensor.offset,
+        tensor.buffer.length() as u64,
+    )?;
+    Ok(())
 }
 
 fn require_tensor(

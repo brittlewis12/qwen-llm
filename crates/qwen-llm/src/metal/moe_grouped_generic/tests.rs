@@ -42,6 +42,11 @@ const ALL_GGML_TYPES: &[GgmlType] = &[
     GgmlType::IQ1_M,
     GgmlType::BF16,
     GgmlType::MXFP4,
+    GgmlType::TQ1_0,
+    GgmlType::TQ2_0,
+    GgmlType::NVFP4,
+    GgmlType::Q1_0,
+    GgmlType::Q2_0,
     GgmlType::Unknown,
 ];
 
@@ -252,7 +257,7 @@ impl Lcg {
 /// else is random bytes, which is a valid encoding for every listed format.
 fn f16_scale_offsets(dtype: GgmlType) -> &'static [usize] {
     match dtype {
-        GgmlType::Q4_0 | GgmlType::Q8_0 | GgmlType::IQ4_NL => &[0],
+        GgmlType::Q2_0 | GgmlType::Q4_0 | GgmlType::Q8_0 | GgmlType::IQ4_NL => &[0],
         GgmlType::Q4_1 | GgmlType::Q4_K | GgmlType::Q5_K => &[0, 2],
         GgmlType::Q2_K => &[80, 82],
         GgmlType::Q3_K => &[108],
@@ -679,6 +684,7 @@ macro_rules! generic_grouped_moe_cases {
 }
 
 generic_grouped_moe_cases! {
+    generic_grouped_moe_down_q2_0_matches_cpu, generic_grouped_moe_gate_up_q2_0_matches_cpu => GgmlType::Q2_0;
     generic_grouped_moe_down_q2_k_matches_cpu, generic_grouped_moe_gate_up_q2_k_matches_cpu => GgmlType::Q2_K;
     generic_grouped_moe_down_q3_k_matches_cpu, generic_grouped_moe_gate_up_q3_k_matches_cpu => GgmlType::Q3_K;
     generic_grouped_moe_down_q4_k_matches_cpu, generic_grouped_moe_gate_up_q4_k_matches_cpu => GgmlType::Q4_K;

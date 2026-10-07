@@ -106,10 +106,11 @@ pub(crate) fn reusable_prefix(
         .min(prompt.len().saturating_sub(1))
 }
 
-/// Live-session reuse for a family whose recurrent state cannot rewind: the
-/// whole consumed history is reused only when the prompt strictly extends
-/// it (at least one new row, so the request gets fresh logits); otherwise
-/// nothing is. `previous` is trusted only when it matches the session's
+/// Live-session reuse for a family that cannot truncate its session state
+/// in place and has no snapshots to restore from (GLM-5.3 today): the whole
+/// consumed history is reused only when the prompt strictly extends it (at
+/// least one new row, so the request gets fresh logits); otherwise nothing
+/// is. `previous` is trusted only when it matches the session's
 /// committed length exactly.
 pub(crate) fn extending_prefix(
     previous: &[u32],

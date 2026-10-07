@@ -72,7 +72,8 @@ no further `glm5-next` changes). Earlier research (2026-08-28 gap analysis,
   override, chat profile and controls in `diagnostics.glm5_next` (schema 2).
 - P5 serve done (`docs/SERVE.md#glm-53-flash-verified-text-chat`): verified text
   chat over one live session reused only on exact extension of its consumed
-  tokens (KDA cannot rewind), fresh otherwise; prefill cancellation keeps the
+  tokens, fresh otherwise (no snapshot cache yet: an implementation gap, not
+  a model property; see the 2026-10-06 lane audit); prefill cancellation keeps the
   committed chunks; startup preflight, prefetch, load and warm-up before
   accepting. GPU gate: cold equals run, replayed turns reuse the whole history,
   Exact warm equals cold in output bytes and in join logits bit for bit,

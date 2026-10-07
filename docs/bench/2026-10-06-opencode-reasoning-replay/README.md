@@ -87,9 +87,12 @@ serve accepts.
   assistant step with empty reasoning, although the model generated
   reasoning there. This changes the model's conditioning inside an agent
   loop.
-- **Reuse cost for GLM.** The live session cannot rewind its recurrent
-  state, so reuse is all or nothing (`decode_loop::extending_prefix`): the
-  prompt must extend the whole committed history.
+- **Reuse cost for GLM.** GLM serve has one live session and no snapshot
+  cache, so reuse is all or nothing (`decode_loop::extending_prefix`): the
+  prompt must extend the whole committed history. (Correction, 2026-10-06:
+  an earlier version blamed recurrent state that "cannot rewind". The Qwen
+  and Flash-Next hybrids reuse with snapshots at boundaries; GLM lacks the
+  implementation, not the possibility. See the lane audit.)
   - The previous step's reasoning differs, so **every agent step is a full
     re-prefill**.
   - opencode's requests here carry about 50 KB before any conversation:

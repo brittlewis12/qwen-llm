@@ -54,6 +54,18 @@ pub(crate) fn muse_glimmer_sampling_config(
     )
 }
 
+pub(crate) fn qwen38_flash_next_sampling_config(
+    args: &Args,
+    explicit: ExplicitCliOptions,
+) -> Result<SamplingConfig> {
+    release_sampling_config(
+        SamplingConfig::qwen38_flash_next(args.seed),
+        args,
+        explicit,
+        "Qwen3.8-Flash-Next",
+    )
+}
+
 pub(crate) fn request_sampling_config(
     request: &JsonlRequest,
     args: &Args,

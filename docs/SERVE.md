@@ -447,6 +447,10 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   engine-side RAM prefix cache). Flash-Next (`serve/backend_qwen4exp.rs`, since 2026-09-17) holds
   one text-session workspace sized at load and hands it back reset after
   every request: the Qwen3.8 contract (effort levels, thinking, tools).
+  Absent sampling fields take the release `generation_config.json` (temperature
+  1.0, top-p 0.95, top-k 20, min-p 0, seed 42) at every effort, `no_thinking`
+  included, and are echoed; other Qwen identities keep the greedy-leaning
+  serve defaults (`serve/backend.rs::request_sampler`).
   Since 2026-09-23 it reuses prefixes through the shared serve snapshot
   cache: a request restores the longest cached strictly-shorter token prefix
   into the reset workspace and prefills the rest, with the Qwen

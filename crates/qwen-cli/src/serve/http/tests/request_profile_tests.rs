@@ -59,7 +59,14 @@ impl GenerationBackend for ProfileBackend {
             RequestProfile::OrdinaryQwen { .. } => {
                 assert_eq!(request.template, QwenTemplate::Generic)
             }
-            RequestProfile::FlashNext { .. } => assert_eq!(request.template, QwenTemplate::Qwen38),
+            RequestProfile::FlashNext { .. } => {
+                assert_eq!(request.template, QwenTemplate::Qwen38);
+                // Normalization resolved every sampling field before generation.
+                assert!(request.temperature.is_some() && request.top_p.is_some());
+                assert!(
+                    request.top_k.is_some() && request.min_p.is_some() && request.seed.is_some()
+                );
+            }
             RequestProfile::Muse {
                 default_max_tokens, ..
             } => {
@@ -233,6 +240,11 @@ fn family_profiles_drive_real_http_json_and_sse_without_hook_overrides() {
                 assert_eq!(reply["max_output_tokens"], 8);
                 assert_eq!(reply["reasoning"], json!({"effort":"high"}));
             }
+            // Release sampling even with no_thinking: one preset at every effort.
+            if matches!(profile, RequestProfile::FlashNext { .. }) {
+                assert_eq!(reply["temperature"], 1.0);
+                assert_eq!(reply["top_p"], 0.95);
+            }
             if matches!(profile, RequestProfile::Glm5Next { .. }) {
                 assert_eq!(reply["temperature"], 1.0);
                 assert_eq!(reply["top_p"], 0.95);
@@ -242,6 +254,74 @@ fn family_profiles_drive_real_http_json_and_sse_without_hook_overrides() {
             }
         }
     }
+}
+
+/// Flash-Next serve samples with the released `generation_config.json` when a
+/// request omits sampling, and every explicit field still wins on its own,
+/// greedy included. Other Qwen identities keep the greedy-leaning defaults.
+#[test]
+fn flash_next_defaults_to_release_sampling_and_keeps_explicit_fields() {
+    use crate::serve::request_profile::flash_next_sampling;
+    use qwen_llm::sampling::SamplingConfig;
+    let profile = RequestProfile::FlashNext {
+        style: TemplateStyle::House,
+    };
+    for body in [
+        json!({"model":"test","input":"Hello"}),
+        json!({"model":"test","input":"Hello","x_qwen":{"no_thinking":true}}),
+        json!({"model":"test","input":"Hello","reasoning":{"effort":"low"}}),
+    ] {
+        let mut request = profile.parse(&body).unwrap();
+        profile.normalize(&mut request).unwrap();
+        assert_eq!(
+            flash_next_sampling(&request),
+            SamplingConfig::qwen38_flash_next(42),
+            "{body}"
+        );
+        assert_eq!(
+            (request.temperature_echo, request.top_p_echo),
+            (Some(1.0), Some(0.95))
+        );
+    }
+
+    let mut request = profile
+        .parse(
+            &json!({"model":"test","input":"Hello","temperature":0.0,"top_p":0.8,
+            "x_qwen":{"top_k":5,"min_p":0.1,"seed":7}}),
+        )
+        .unwrap();
+    profile.normalize(&mut request).unwrap();
+    assert_eq!(
+        flash_next_sampling(&request),
+        SamplingConfig {
+            temperature: 0.0,
+            top_k: 5,
+            top_p: 0.8,
+            min_p: 0.1,
+            seed: 7,
+        }
+    );
+    assert_eq!(
+        (request.temperature_echo, request.top_p_echo),
+        (Some(0.0), Some(0.8))
+    );
+
+    let ordinary = RequestProfile::OrdinaryQwen {
+        template: QwenTemplate::Qwen38,
+        no_thinking_supported: true,
+        style: TemplateStyle::House,
+    };
+    let mut request = ordinary
+        .parse(&json!({"model":"test","input":"Hello"}))
+        .unwrap();
+    ordinary.normalize(&mut request).unwrap();
+    assert_eq!(
+        crate::serve::backend::request_sampler(&request)
+            .unwrap()
+            .config()
+            .temperature,
+        0.0
+    );
 }
 
 #[test]

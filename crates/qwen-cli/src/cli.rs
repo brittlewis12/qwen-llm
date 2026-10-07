@@ -347,19 +347,19 @@ struct GenerationOverrides {
     #[arg(short = 'n', long = "max-tokens", visible_alias = "tokens")]
     tokens: Option<usize>,
 
-    /// Sampling temperature; omitted uses the detected family preset (Muse, GLM: 1, others: 0).
+    /// Sampling temperature; omitted uses the detected family preset (Muse, GLM, Flash-Next: 1, others: 0).
     #[arg(long = "temp", visible_alias = "temperature")]
     temperature: Option<f32>,
 
-    /// Top-k cutoff; omitted uses the detected family preset (Muse: 64, GLM: 0 = off, others: 200).
+    /// Top-k cutoff; omitted uses the detected family preset (Muse: 64, Flash-Next: 20, GLM: 0 = off, others: 200).
     #[arg(long)]
     top_k: Option<usize>,
 
-    /// Nucleus cutoff; omitted uses the detected family preset (Muse, GLM: .95, others: 1).
+    /// Nucleus cutoff; omitted uses the detected family preset (Muse, GLM, Flash-Next: .95, others: 1).
     #[arg(long)]
     top_p: Option<f32>,
 
-    /// Min-p cutoff; omitted uses the detected family preset (Muse, GLM: 0, others: .05).
+    /// Min-p cutoff; omitted uses the detected family preset (Muse, GLM, Flash-Next: 0, others: .05).
     #[arg(long)]
     min_p: Option<f32>,
 

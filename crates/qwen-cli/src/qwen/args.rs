@@ -145,7 +145,7 @@ pub(crate) struct Args {
     #[arg(short = 'n', long, hide_short_help = true, default_value_t = 64)]
     pub(crate) tokens: usize,
 
-    /// Sampling temperature; zero is greedy. Muse omission uses its released value 1.
+    /// Sampling temperature; zero is greedy. Muse and Flash-Next omission use their released value 1.
     #[arg(
         long = "temp",
         visible_alias = "temperature",
@@ -154,15 +154,15 @@ pub(crate) struct Args {
     )]
     pub(crate) temperature: f32,
 
-    /// Top-k cutoff; zero disables it. Muse omission uses its released value 64.
+    /// Top-k cutoff; zero disables it. Muse and Flash-Next omission use their released values 64 and 20.
     #[arg(long, hide_short_help = true, default_value_t = 200)]
     pub(crate) top_k: usize,
 
-    /// Nucleus cutoff; one disables it. Muse omission uses its released value .95.
+    /// Nucleus cutoff; one disables it. Muse and Flash-Next omission use their released value .95.
     #[arg(long, hide_short_help = true, default_value_t = 1.0)]
     pub(crate) top_p: f32,
 
-    /// Min-p cutoff; zero disables it. Muse omission uses its released value 0.
+    /// Min-p cutoff; zero disables it. Muse and Flash-Next omission use their released value 0.
     #[arg(long, hide_short_help = true, default_value_t = 0.05)]
     pub(crate) min_p: f32,
 

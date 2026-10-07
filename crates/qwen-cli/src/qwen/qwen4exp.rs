@@ -436,7 +436,7 @@ pub(crate) fn run_qwen4exp_single_turn(
 ) -> Result<()> {
     validate_qwen4exp_generation_mode(args, explicit)?;
     let request_t0 = Instant::now();
-    let sampling = cli_sampling_config(args)?;
+    let sampling = qwen38_flash_next_sampling_config(args, explicit)?;
     let (prompt, prompt_source, _) = prompt_text(args)?;
     let tokenizer_t0 = Instant::now();
     let tokenizer = Tokenizer::from_gguf(gguf).context("load Qwen3.8-Flash-Next tokenizer")?;

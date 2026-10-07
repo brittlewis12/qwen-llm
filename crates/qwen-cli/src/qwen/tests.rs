@@ -2145,6 +2145,58 @@ fn muse_glimmer_sampling_uses_released_defaults_and_explicit_overrides() {
     );
 }
 
+/// Flash-Next samples with its released `generation_config.json` unless a
+/// flag says otherwise, at every reasoning level (one preset: the card's
+/// non-thinking preset depends on a presence penalty the sampler lacks).
+/// Greedy stays one explicit `--temp 0` away for determinism-first runs.
+#[test]
+fn qwen38_flash_next_sampling_uses_released_defaults_and_explicit_overrides() {
+    let run = |extra: &[&str]| {
+        let mut argv = vec!["qwen", "run", "-m", "model.gguf", "--user", "hello"];
+        argv.extend_from_slice(extra);
+        let matches = Args::command().try_get_matches_from(argv).unwrap();
+        let (_, run_matches) = matches.subcommand().unwrap();
+        let explicit = ExplicitCliOptions::from_matches(run_matches);
+        let mut args = Args::from_arg_matches(&matches).unwrap();
+        let invocation = cli::normalize(&mut args);
+        invocation.apply_option_overrides(&mut args);
+        qwen38_flash_next_sampling_config(&args, explicit).unwrap()
+    };
+    let release = SamplingConfig::qwen38_flash_next(42);
+    assert_eq!(
+        release,
+        SamplingConfig {
+            temperature: 1.0,
+            top_k: 20,
+            top_p: 0.95,
+            min_p: 0.0,
+            seed: 42,
+        }
+    );
+    assert_eq!(run(&[]), release);
+    assert_eq!(run(&["--no-thinking"]), release);
+    assert_eq!(run(&["--reasoning-effort", "low"]), release);
+    assert_eq!(
+        run(&["--temp", "0"]),
+        SamplingConfig {
+            temperature: 0.0,
+            ..release
+        }
+    );
+    assert_eq!(
+        run(&[
+            "--temp", "0.7", "--top-k", "0", "--top-p", "1", "--min-p", "0.1", "--seed", "7",
+        ]),
+        SamplingConfig {
+            temperature: 0.7,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.1,
+            seed: 7,
+        }
+    );
+}
+
 #[test]
 fn request_schema_versions_include_exact_generation_telemetry() {
     assert_eq!(

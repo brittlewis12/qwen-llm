@@ -24,6 +24,7 @@ use qwen_llm::qwen4exp_runtime::{
     Qwen4ExpLoadedModel, Qwen4ExpRuntimeError, Qwen4ExpSessionCapacity, Qwen4ExpTextRunner,
 };
 use qwen_llm::qwen4exp_text_session::Qwen4ExpTextSnapshot;
+use qwen_llm::sampling::Sampler;
 use qwen_llm::snapshot_policy::SnapshotPolicyConfig;
 use qwen_llm::tokenizer::Tokenizer;
 use std::io;
@@ -200,7 +201,8 @@ impl GenerationBackend for FlashNextBackend {
     ) -> Result<GenerationOutcome, BackendFailure> {
         self.idle_residency.before_request();
         let max_tokens = request.max_output_tokens.unwrap_or(self.default_max_tokens);
-        let mut sampler = super::backend::request_sampler(request)?;
+        let mut sampler = Sampler::new(super::request_profile::flash_next_sampling(request))
+            .map_err(|error| ServeError::invalid_request(None, format!("sampling: {error}")))?;
         let tokenize_t0 = Instant::now();
         let prompt_ids =
             decode_loop::encode_checked(&self.tokenizer, prompt, false, self.vocab_size, FAMILY)?;

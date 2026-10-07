@@ -77,6 +77,20 @@ impl SamplingConfig {
         }
     }
 
+    /// Qwen3.8-Flash-Next's released `generation_config.json`, which is also
+    /// the model card's thinking-mode preset. It applies at every reasoning
+    /// level, including non-thinking: the card's separate non-thinking preset
+    /// was tuned together with a presence penalty this sampler does not have.
+    pub fn qwen38_flash_next(seed: u64) -> Self {
+        Self {
+            temperature: 1.0,
+            top_k: 20,
+            top_p: 0.95,
+            min_p: 0.0,
+            seed,
+        }
+    }
+
     pub fn validate(self) -> Result<Self, SamplingError> {
         if !self.temperature.is_finite() || self.temperature < 0.0 {
             return Err(SamplingError::InvalidTemperature(self.temperature));

@@ -538,12 +538,18 @@ pub(crate) fn run_raw(
     let prefill_tps = tokens.len() as f64 / (prefill_ms / 1e3).max(f64::MIN_POSITIVE);
     let decode_tps =
         generation.tokens.len() as f64 / (generation.wall_ms / 1e3).max(f64::MIN_POSITIVE);
+    // The established stats line; a single-turn run's prefill is the
+    // process's first use of its no-copy weights (wiring included).
     eprintln!(
-        "k2_horizon: prompt_tokens={} generated_tokens={} transitions={} stop={} load_ms={load_ms:.1} prefill_ms={prefill_ms:.1}",
+        "k2_horizon stats: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} tokenizer_ms={:.1} load_ms={load_ms:.1} prefill_mode={} prefill_ms={prefill_ms:.1} prefill_tps={prefill_tps:.2} generation_ms={:.1} decode_tps={decode_tps:.2} total_ms={:.1} weights_first_use=true",
         tokens.len(),
         generation.tokens.len(),
         generation.transitions,
-        generation.stop_reason.as_str()
+        generation.stop_reason.as_str(),
+        timing.encoding_ms,
+        prefill.mode,
+        generation.wall_ms,
+        request_t0.elapsed().as_secs_f64() * 1e3,
     );
     if let Some(path) = args.request_stats_jsonl.as_ref() {
         let measured = RequestStatsMeasured {

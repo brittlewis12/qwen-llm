@@ -695,22 +695,27 @@ pub(crate) fn run(
     let prefill_tps = tokens.len() as f64 / (prefill_ms / 1e3).max(f64::MIN_POSITIVE);
     let decode_tps =
         generation.tokens.len() as f64 / (generation.wall_ms / 1e3).max(f64::MIN_POSITIVE);
+    // The established stats line, then GLM's own fields; a single-turn
+    // run's prefill is the process's first use of its no-copy weights
+    // (wiring included).
     eprintln!(
-        "glm5_next: input={} prompt_tokens={} generated_tokens={} transitions={} stop={} capacity={capacity} prefill={prefill_mode} prefill_rows={prefill_rows} setup_prefetch_ms={:.1} load_ms={:.1} prefill_ms={prefill_ms:.1} prefill_tps={prefill_tps:.2} decode_tps={decode_tps:.2} loaded_request_ms={:.1} end_to_end_ms={:.1}",
+        "glm5_next stats: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_mode={prefill_mode} prefill_ms={prefill_ms:.1} prefill_tps={prefill_tps:.2} generation_ms={:.1} decode_tps={decode_tps:.2} total_ms={:.1} weights_first_use=true input={} capacity={capacity} prefill_rows={prefill_rows} setup_prefetch_ms={:.1} loaded_request_ms={:.1}",
+        tokens.len(),
+        generation.tokens.len(),
+        generation.transitions,
+        generation.stop_reason.as_str(),
+        report.encoding_ms,
+        report.load_ms,
+        generation.wall_ms,
+        report.json["end_to_end_lane_ms"].as_f64().unwrap_or(0.0),
         chat_record
             .as_ref()
             .map_or("raw".to_string(), |record| format!(
                 "chat effort={}",
                 record["reasoning_effort"].as_str().unwrap_or("?")
             )),
-        tokens.len(),
-        generation.tokens.len(),
-        generation.transitions,
-        generation.stop_reason.as_str(),
         prefetch.wall.as_secs_f64() * 1e3,
-        report.load_ms,
         report.loaded_request_ms,
-        report.json["end_to_end_lane_ms"].as_f64().unwrap_or(0.0),
     );
     if let Some(path) = args.request_stats_jsonl.as_ref() {
         let measured = RequestStatsMeasured {

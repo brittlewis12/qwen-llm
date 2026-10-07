@@ -839,7 +839,7 @@ pub(crate) fn run_qwen4exp_single_turn(
         0.0
     };
     eprintln!(
-        "qwen4exp stats: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_mode={} prefill_ms={:.1} prefill_tps={:.2} prefill_commands={} prefill_packed_tokens={} prefill_scalar_tail_commands={} prefill_encode_cpu_ms={:.1} prefill_completion_wait_ms={:.1} prefill_gpu_ms={:?} prefill_gpu_samples={}/{} prefill_outside_gpu_ms={:?} generation_ms={:.1} decode_tps={:.2} decode_encode_cpu_ms={:.1} decode_completion_wait_ms={:.1} decode_gpu_ms={:?} decode_gpu_samples={}/{} decode_outside_gpu_ms={:?} total_ms={:.1}",
+        "qwen4exp stats: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_mode={} prefill_ms={:.1} prefill_tps={:.2} prefill_commands={} prefill_packed_tokens={} prefill_scalar_tail_commands={} prefill_encode_cpu_ms={:.1} prefill_completion_wait_ms={:.1} prefill_gpu_ms={:?} prefill_gpu_samples={}/{} prefill_outside_gpu_ms={:?} generation_ms={:.1} decode_tps={:.2} decode_encode_cpu_ms={:.1} decode_completion_wait_ms={:.1} decode_gpu_ms={:?} decode_gpu_samples={}/{} decode_outside_gpu_ms={:?} total_ms={:.1} weights_first_use=true",
         prompt_tokens.len(),
         generation.tokens.len(),
         generation.transitions,

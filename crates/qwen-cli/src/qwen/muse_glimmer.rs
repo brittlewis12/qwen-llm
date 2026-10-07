@@ -293,7 +293,7 @@ pub(crate) fn run_muse_glimmer_single_turn(
         0.0
     };
     eprintln!(
-        "muse_glimmer stats: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_mode={} prefill_ms={:.1} prefill_tps={:.2} prefill_commands={} prefill_packed_tokens={} prefill_scalar_tail_commands={} generation_ms={:.1} decode_tps={:.2} total_ms={:.1}",
+        "muse_glimmer stats: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_mode={} prefill_ms={:.1} prefill_tps={:.2} prefill_commands={} prefill_packed_tokens={} prefill_scalar_tail_commands={} generation_ms={:.1} decode_tps={:.2} total_ms={:.1} weights_first_use=true",
         prompt_tokens.len(),
         generation.tokens.len(),
         generation.transitions,

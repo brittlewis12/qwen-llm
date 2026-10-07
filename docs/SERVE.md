@@ -140,8 +140,8 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
 # K2 requires explicit --max-context-tokens (within checkpoint context) and
 # --max-tokens. GLM-5.3-Flash requires both too (device memory admits the
 # session at startup and names the capacity that fits). Muse, K2 and GLM keep
-# no snapshots: they refuse a positive --snapshot-cache-mib and non-default
-# --snapshot-* expiry/half-life values (auto, 0 and the defaults are fine).
+# no snapshots: --snapshot-cache-mib accepts only auto or 0, the expiry flags
+# only their default or 0, and --snapshot-half-life-secs only its default.
 ```
 
 **Durable diagnostic workbench.** `--lens-data-dir PATH` enables saved Lens history
@@ -246,9 +246,10 @@ logs that the tier does not apply. Muse, K2 and GLM reuse their live session
 instead of snapshots, so they refuse snapshot settings they cannot honour: a
 positive `--snapshot-cache-mib`, a non-zero non-default
 `--snapshot-idle-ttl-secs` or `--snapshot-max-age-secs`, and any
-`--snapshot-half-life-secs` change (0 is LRU ranking, not off). Omission,
-the defaults, `auto` and 0 are accepted. Values are judged, not flag
-presence: an explicit default is accepted like omission.
+`--snapshot-half-life-secs` change (0 is LRU ranking, not off). The budget
+accepts `auto` or 0, the expiries their default or 0, and the half-life
+only its default. Values are judged, not flag presence: an explicit default
+is accepted like omission.
 
 - **Flags.** `--durable-snapshot-dir PATH|off` (default
   `~/.cache/qwen-llm/serve-checkpoints`; each family uses its own subdirectory

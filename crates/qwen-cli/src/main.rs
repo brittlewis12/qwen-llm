@@ -1239,12 +1239,15 @@ fn capability_lines(projection: &serde_json::Value) -> Vec<String> {
             .map_or(String::new(), |name| format!(" as {name}"));
         lines.push(format!("template: {}{rendered}", status(template)));
     }
-    if let Some(execution) = capabilities
-        .get("execution")
-        .and_then(serde_json::Value::as_object)
-    {
-        for (lane, value) in execution {
-            lines.push(format!("{lane}: {}", status(value)));
+    // Either one aggregate refusal (an unverified release profile) or one
+    // entry per execution lane.
+    if let Some(execution) = capabilities.get("execution") {
+        if execution.get("status").is_some() {
+            lines.push(format!("execution: {}", status(execution)));
+        } else if let Some(lanes) = execution.as_object() {
+            for (lane, value) in lanes {
+                lines.push(format!("{lane}: {}", status(value)));
+            }
         }
     }
     lines
@@ -1375,4 +1378,27 @@ fn print_qwen_hybrid_geometry(gguf: &GgufFile) {
 
     // The architecture's own keys (`qwen35.*` dense, `qwen35moe.*` MoE).
     print_architecture_metadata(gguf);
+}
+
+#[cfg(test)]
+mod info_text_tests {
+    use super::capability_lines;
+    use serde_json::json;
+
+    #[test]
+    fn execution_renders_as_one_refusal_or_one_line_per_lane() {
+        let aggregate = json!({"capabilities": {"execution": {
+            "status": "rejected", "code": "muse_release_profile_unverified", "message": "m"}}});
+        assert_eq!(
+            capability_lines(&aggregate),
+            ["execution: rejected (muse_release_profile_unverified)"]
+        );
+        let lanes = json!({"capabilities": {"execution": {
+            "run": {"status": "conditional"},
+            "lens": {"status": "unsupported", "code": "x"}}}});
+        assert_eq!(
+            capability_lines(&lanes),
+            ["run: conditional", "lens: unsupported (x)"]
+        );
+    }
 }

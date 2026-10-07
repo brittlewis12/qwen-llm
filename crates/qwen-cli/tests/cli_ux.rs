@@ -105,11 +105,19 @@ impl HeaderOnlyGguf {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
         bytes.resize(bytes.len().next_multiple_of(32), 0);
+        // Unique per fixture: tests in this binary run concurrently.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
-            "qwen-cli-ux-{architecture}-{}.gguf",
-            std::process::id()
+            "qwen-cli-ux-{architecture}-{}-{}.gguf",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        std::fs::write(&path, bytes).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut file, &bytes).unwrap();
         Self(path)
     }
 }

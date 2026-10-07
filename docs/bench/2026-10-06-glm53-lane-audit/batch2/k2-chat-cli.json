@@ -1,0 +1,18 @@
+{
+  "status": "passed",
+  "scope": "verified_final_no_tools_cli_template_and_raw_controls",
+  "profile": {
+    "renderer": "k2_horizon_ifm_no_tools_v1",
+    "source_revision": "2c9659a84c4eea6f9f60462221fe762c8c84d75c",
+    "template_sha256": "a892cd0b0195599f283a8c706787520d9a6747640efb2f4dec4144b0abb62590",
+    "gguf_template_sha256": "f6e3cd6dbf0f95016fff531f41f921dee541025733c14580a881cf5a5f9fa750",
+    "generation_config_sha256": "2da7d47641f4509da4ae47711e31d8b5f0f3f801ee08d87e7e9f07f814bdc4a3",
+    "checkpoint_content_blake3": "719ae3a7c9386c25db2c33b50be15d715f883aa5a762495d5a65776660179e99",
+    "tokenizer_metadata_id": "51ebd8140ea2abd9",
+    "verification": "retained_bytes_hashed_no_filename_cache_or_downloader_claims",
+    "reference_policy": "template_and_generation_config_from_pinned_upstream_revision_publisher_declares_conversion_source"
+  },
+  "http_completed_parity": false,
+  "literal_output_equals_raw": true,
+  "performance_claim": false
+}

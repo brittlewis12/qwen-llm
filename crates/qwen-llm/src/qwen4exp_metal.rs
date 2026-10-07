@@ -2,7 +2,8 @@
 
 use crate::metal::{KernelEncoder, MetalContext, MetalError, MetalTensor};
 use crate::metal_forward::{
-    MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch, validate_f32_q8_mat_mat_addressing,
+    MfError, encode_mat_mat_dispatch_without_fewrow, encode_mat_vec_dispatch,
+    validate_f32_q8_mat_mat_addressing,
 };
 use crate::tensor::GgmlType;
 use objc2::rc::Retained;
@@ -445,7 +446,7 @@ impl GatedResidualPackedRead<'_, '_, '_> {
             self.scratch.branch_count,
             self.tokens,
         )?;
-        encode_mat_mat_dispatch(
+        encode_mat_mat_dispatch_without_fewrow(
             self.ctx,
             enc,
             self.inject,
@@ -786,7 +787,7 @@ pub(crate) unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'ctx
     #[cfg(not(test))]
     let down_overridden = false;
     if !down_overridden {
-        encode_mat_mat_dispatch(
+        encode_mat_mat_dispatch_without_fewrow(
             ctx,
             enc,
             weights.down,
@@ -813,7 +814,7 @@ pub(crate) unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'ctx
     #[cfg(not(test))]
     let up_overridden = false;
     if !up_overridden {
-        encode_mat_mat_dispatch(
+        encode_mat_mat_dispatch_without_fewrow(
             ctx,
             enc,
             weights.up,

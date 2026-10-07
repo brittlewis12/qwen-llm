@@ -4,7 +4,9 @@ use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
     encode_copy_offset_f32, encode_get_rows_f32,
 };
-use crate::metal_forward::{MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch};
+use crate::metal_forward::{
+    MfError, encode_mat_mat_dispatch_without_fewrow, encode_mat_vec_dispatch,
+};
 use crate::qwen4exp::{Qwen4ExpConfig, Qwen4ExpError};
 use crate::qwen4exp_ple::{PleGatherError, PleIq4NlTable};
 use crate::qwen4exp_residency::{Qwen4ExpMetalWeights, Qwen4ExpResidencyError};
@@ -806,7 +808,7 @@ pub(crate) unsafe fn encode_qwen4exp_ple_packed_motor(
     )?;
     let output = scratch.output(tokens)?;
 
-    encode_mat_mat_dispatch(
+    encode_mat_mat_dispatch_without_fewrow(
         ctx,
         enc,
         weights.key,
@@ -816,7 +818,7 @@ pub(crate) unsafe fn encode_qwen4exp_ple_packed_motor(
         g.hyper_width(),
         tokens,
     )?;
-    encode_mat_mat_dispatch(
+    encode_mat_mat_dispatch_without_fewrow(
         ctx,
         enc,
         weights.value,

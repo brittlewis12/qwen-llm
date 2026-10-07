@@ -20,7 +20,8 @@ use crate::metal::{
     encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16_range,
 };
 use crate::metal_forward::{
-    MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch, validate_f32_q8_mat_mat_addressing,
+    MfError, encode_mat_mat_dispatch_without_fewrow, encode_mat_vec_dispatch,
+    validate_f32_q8_mat_mat_addressing,
 };
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig};
 use crate::qwen4exp_profile::{
@@ -2046,7 +2047,7 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             enc,
             Qwen4ExpPackedProfileLabel::detail("moe.shared_gate_up", layer, mixer),
         )?;
-        encode_mat_mat_dispatch(
+        encode_mat_mat_dispatch_without_fewrow(
             ctx,
             enc,
             self.weights.shared_gate,
@@ -2056,7 +2057,7 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             g.shared_intermediate_size,
             self.tokens,
         )?;
-        encode_mat_mat_dispatch(
+        encode_mat_mat_dispatch_without_fewrow(
             ctx,
             enc,
             self.weights.shared_up,
@@ -2079,7 +2080,7 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             enc,
             Qwen4ExpPackedProfileLabel::detail("moe.shared_down", layer, mixer),
         )?;
-        encode_mat_mat_dispatch(
+        encode_mat_mat_dispatch_without_fewrow(
             ctx,
             enc,
             self.weights.shared_down,
@@ -2140,7 +2141,7 @@ fn encode_packed_router_projection(
             );
         });
     } else {
-        encode_mat_mat_dispatch(
+        encode_mat_mat_dispatch_without_fewrow(
             ctx,
             enc,
             weight,

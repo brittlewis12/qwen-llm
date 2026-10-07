@@ -12,7 +12,7 @@ use crate::k2_horizon_metal::{
     encode_full_rope_rows, encode_grouped_norm_rows, encode_online_attention_rows,
     encode_store_kv_rows,
 };
-use crate::metal_forward::encode_mat_mat_dispatch;
+use crate::metal_forward::encode_mat_mat_dispatch_without_fewrow;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_chunk(
@@ -55,7 +55,7 @@ pub(super) fn encode_chunk(
                 weight.dtype, weight.shape
             )));
         }
-        encode_mat_mat_dispatch(ctx, enc, weight, x, y, n_in, n_out, n)?;
+        encode_mat_mat_dispatch_without_fewrow(ctx, enc, weight, x, y, n_in, n_out, n)?;
         Ok(())
     };
     let batched_attention = attention == AttentionBackend::Online

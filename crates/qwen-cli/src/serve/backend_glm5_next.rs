@@ -1,9 +1,11 @@
 //! GLM-5.3-Flash serve: borrowed resident weights and one live session kept
-//! across requests. KDA recurrent state cannot rewind, so a request reuses
-//! the session only when its prompt strictly extends exactly what the
-//! session consumed (a replayed conversation does: the model ends a turn by
-//! sampling `<|user|>`, the next turn's opener); anything else drops the
-//! session and prefills a fresh one. No snapshots.
+//! across requests. A request reuses the session only when its prompt
+//! strictly extends exactly what the session consumed (a replayed
+//! conversation does: the model ends a turn by sampling `<|user|>`, the next
+//! turn's opener); anything else drops the session and prefills a fresh one.
+//! There is no snapshot cache yet. That is an implementation gap: the Qwen
+//! and Flash-Next hybrids also carry recurrent state and reuse prefixes by
+//! snapshotting it at boundaries (lane audit 2026-10-06).
 use super::decode_loop;
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest};
@@ -42,10 +44,11 @@ impl<'g> Prepared<'g> {
         gguf: &'g GgufFile,
         invocation: &crate::cli::ServeInvocation,
     ) -> Result<Self> {
-        ensure!(
-            invocation.drafter.is_none(),
-            "{FAMILY} serve does not support a drafter"
-        );
+        crate::drafter_policy::ensure_drafter_admitted(
+            qwen_llm::model_family::ModelFamily::Glm5Next,
+            crate::drafter_policy::Lane::Serve,
+            invocation.drafter.is_some(),
+        )?;
         let artifact = Glm5NextPreparedArtifact::inspect(gguf)
             .with_context(|| format!("admit {FAMILY} artifact"))?;
         let (capacity, default_max) = super::fixed_session_limits(

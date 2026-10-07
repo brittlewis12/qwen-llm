@@ -17,7 +17,9 @@ use crate::metal::{
     encode_qk_rms_norm_rope_f32_packed_consecutive, encode_scatter_offset_f32_to_f16_kv,
     encode_sigmoid_mul_gate_strided_f32, mat_vec_q8_0_lcpp_enabled,
 };
-use crate::metal_forward::{MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch};
+use crate::metal_forward::{
+    MfError, encode_mat_mat_dispatch_without_fewrow, encode_mat_vec_dispatch,
+};
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig};
 use crate::qwen4exp_profile::{
     Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileRecorder, begin_optional, end_optional,
@@ -3466,7 +3468,7 @@ fn encode_packed_step(
             tokens,
         )?;
     } else {
-        encode_mat_mat_dispatch(
+        encode_mat_mat_dispatch_without_fewrow(
             ctx,
             enc,
             weights.index_key,
@@ -3522,7 +3524,7 @@ fn encode_packed_step(
             MixerKind::QwenSparseAttention,
         ),
     )?;
-    encode_mat_mat_dispatch(
+    encode_mat_mat_dispatch_without_fewrow(
         ctx,
         enc,
         weights.query,
@@ -3532,7 +3534,7 @@ fn encode_packed_step(
         g.query_projection_width(),
         tokens,
     )?;
-    encode_mat_mat_dispatch(
+    encode_mat_mat_dispatch_without_fewrow(
         ctx,
         enc,
         weights.key,
@@ -3542,7 +3544,7 @@ fn encode_packed_step(
         g.kv_width(),
         tokens,
     )?;
-    encode_mat_mat_dispatch(
+    encode_mat_mat_dispatch_without_fewrow(
         ctx,
         enc,
         weights.value,
@@ -3703,7 +3705,7 @@ fn encode_packed_step(
                 plan.selected_tokens,
             )?;
         } else {
-            encode_mat_mat_dispatch(
+            encode_mat_mat_dispatch_without_fewrow(
                 ctx,
                 enc,
                 weights.index_query,
@@ -3880,7 +3882,7 @@ fn encode_packed_step(
             )?;
         }
     } else {
-        encode_mat_mat_dispatch(
+        encode_mat_mat_dispatch_without_fewrow(
             ctx,
             enc,
             weights.output,

@@ -1,7 +1,9 @@
 //! Metal primitives for Qwen3.8-Flash-Next gated residuals.
 
 use crate::metal::{KernelEncoder, MetalContext, MetalError, MetalTensor};
-use crate::metal_forward::{MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch};
+use crate::metal_forward::{
+    MfError, encode_mat_mat_dispatch_without_fewrow, encode_mat_vec_dispatch,
+};
 use crate::tensor::GgmlType;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -447,7 +449,7 @@ impl GatedResidualPackedRead<'_, '_, '_> {
             self.scratch.branch_count,
             self.tokens,
         )?;
-        encode_mat_mat_dispatch(
+        encode_mat_mat_dispatch_without_fewrow(
             self.ctx,
             enc,
             self.inject,
@@ -788,7 +790,7 @@ pub(crate) unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'ctx
     #[cfg(not(test))]
     let down_overridden = false;
     if !down_overridden {
-        encode_mat_mat_dispatch(
+        encode_mat_mat_dispatch_without_fewrow(
             ctx,
             enc,
             weights.down,
@@ -815,7 +817,7 @@ pub(crate) unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'ctx
     #[cfg(not(test))]
     let up_overridden = false;
     if !up_overridden {
-        encode_mat_mat_dispatch(
+        encode_mat_mat_dispatch_without_fewrow(
             ctx,
             enc,
             weights.up,
@@ -1442,12 +1444,6 @@ pub(crate) fn projection_kernel_names(
             "kernel_mat_mat_q8_0_f32",
             "kernel_mat_mat_q8_0_f32_n16",
             "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32",
-            "kernel_mat_mat_q8_0_fewrow_nt1_nsg8_f32",
-            "kernel_mat_mat_q8_0_fewrow_nt2_nsg8_f32",
-            "kernel_mat_mat_q8_0_fewrow_nt4_nsg8_f32",
-            "kernel_mat_mat_q8_0_fewrow_nt1_nsg16_f32",
-            "kernel_mat_mat_q8_0_fewrow_nt2_nsg16_f32",
-            "kernel_mat_mat_q8_0_fewrow_nt1_nsg32_f32",
         ],
         _ => return None,
     })

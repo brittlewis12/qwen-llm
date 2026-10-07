@@ -141,3 +141,16 @@ artifact; ordinary packed execution works. Coherent generation and matching
 short continuations do not establish full-model numerical parity with an
 independent engine. That broader quality gate, other GSQ variants and a
 controlled performance comparison remain unclaimed.
+
+## Main integration
+
+Integrated with main `01acecb4`. The merge preserves `d688e049`'s
+Flash-Next Q8 few-row dispatch exclusion; projection preflight now excludes
+those unreachable kernels and tests that policy explicitly. Adversarial
+review of both parents found no remaining integration blockers.
+
+Combined-tree validation: workspace check, 19 focused CPU contract tests,
+and 15 leased kernel-packet tests pass. A fresh release-build GSQ request
+with Metal API validation again returns `Hello from GSQ.` through EOS.
+Its 7.48 s first-use prefill versus 279 ms reported GPU time remains storage
+warmth evidence, not a kernel-performance comparison.

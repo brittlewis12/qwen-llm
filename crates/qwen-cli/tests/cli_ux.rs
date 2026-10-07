@@ -76,3 +76,198 @@ fn legacy_messages_dash_does_not_gain_modern_stdin_behavior() {
     assert!(stderr.contains("open model"), "{stderr}");
     assert!(!stderr.contains("read --messages -"), "{stderr}");
 }
+
+/// A header-only GGUF naming `architecture`: enough for family detection,
+/// nothing a lane could load. Removed when dropped.
+struct HeaderOnlyGguf(std::path::PathBuf);
+
+impl HeaderOnlyGguf {
+    fn new(architecture: &str) -> Self {
+        Self::with_u64(architecture, &[])
+    }
+
+    /// Also writes `<architecture>.<key> = value` (GGUF uint64) entries.
+    fn with_u64(architecture: &str, entries: &[(&str, u64)]) -> Self {
+        let string = |bytes: &mut Vec<u8>, text: &str| {
+            bytes.extend_from_slice(&(text.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(text.as_bytes());
+        };
+        let mut bytes = b"GGUF".to_vec();
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&(1 + entries.len() as u64).to_le_bytes());
+        string(&mut bytes, "general.architecture");
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        string(&mut bytes, architecture);
+        for (key, value) in entries {
+            string(&mut bytes, &format!("{architecture}.{key}"));
+            bytes.extend_from_slice(&10u32.to_le_bytes());
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.resize(bytes.len().next_multiple_of(32), 0);
+        // Unique per fixture: tests in this binary run concurrently.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "qwen-cli-ux-{architecture}-{}-{}.gguf",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut file, &bytes).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for HeaderOnlyGguf {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Drafter admission is settled once, before family dispatch, in run and
+/// serve: every family without speculation is refused with the shared
+/// message, and the drafter path is never opened (it does not exist here).
+#[test]
+fn every_family_without_speculation_refuses_drafter_before_dispatch() {
+    const DRAFTER: &str = "/qwen-cli-ux-missing-drafter.gguf";
+    for (architecture, display) in [
+        ("muse-glimmer", "Muse Glimmer"),
+        ("k2-horizon", "K2 Horizon"),
+        ("glm5-next", "GLM-5.3-Flash"),
+        ("qwen4exp", "Qwen3.8-Flash-Next"),
+        ("deepseek4", "DeepSeek V4"),
+    ] {
+        let model = HeaderOnlyGguf::new(architecture);
+        let path = model.0.to_str().unwrap();
+        for (lane, args) in [
+            (
+                "run",
+                vec!["run", "-m", path, "--user", "hi", "--drafter", DRAFTER],
+            ),
+            (
+                "serve",
+                vec![
+                    "serve",
+                    "-m",
+                    path,
+                    "--drafter",
+                    DRAFTER,
+                    "--max-context-tokens",
+                    "64",
+                    "--max-tokens",
+                    "8",
+                    "--addr",
+                    "127.0.0.1:0",
+                ],
+            ),
+        ] {
+            let output = run_with_stdin_held_open(&args);
+            assert!(!output.status.success(), "{architecture} {lane}");
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert!(
+                stderr.contains(&format!("--drafter is not supported for {display} {lane}")),
+                "{architecture} {lane}: {stderr}"
+            );
+            assert!(
+                !stderr.contains("open drafter"),
+                "{architecture} {lane}: {stderr}"
+            );
+        }
+    }
+}
+
+/// Text `qwen info` reports each family as itself: its own name and its own
+/// `<architecture>.*` metadata, never the Qwen hybrid block split or
+/// `qwen35.*` keys (MoE reports `qwen35moe.*`). The header and metadata do
+/// not depend on capability checks, so a bare header still reports them.
+#[test]
+fn text_info_describes_each_family_as_itself() {
+    for (architecture, family) in [
+        ("qwen35", "Qwen (qwen)"),
+        ("qwen35moe", "Qwen MoE (qwen)"),
+        ("qwen4exp", "Qwen3.8-Flash-Next (qwen4exp)"),
+        ("muse-glimmer", "Muse Glimmer (muse_glimmer)"),
+        ("k2-horizon", "K2 Horizon (k2_horizon)"),
+        ("glm5-next", "GLM-5.3-Flash (glm5_next)"),
+        ("glm5next", "GLM-5.3-Flash (glm5_next)"),
+        ("deepseek4", "DeepSeek V4 (deepseek_v4)"),
+        ("not-a-family", "unrecognised"),
+    ] {
+        let model = HeaderOnlyGguf::with_u64(architecture, &[("block_count", 4)]);
+        let output = Command::new(QWEN)
+            .args(["info", "-m", model.0.to_str().unwrap()])
+            .output()
+            .expect("run qwen info");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{architecture}: {stderr}");
+        assert!(
+            stdout.contains(&format!("family: {family}")),
+            "{architecture}: {stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("{architecture}.block_count = 4")),
+            "{architecture}: {stdout}"
+        );
+        assert!(stdout.contains("capabilities"), "{architecture}: {stdout}");
+        if !architecture.starts_with("qwen35") {
+            assert!(!stdout.contains("GDN"), "{architecture}: {stdout}");
+            assert!(!stdout.contains("qwen35."), "{architecture}: {stdout}");
+        }
+    }
+}
+
+/// `--format responses` is a verified-chat format (K2 Horizon, GLM-5.3-Flash):
+/// every other family, and raw input to those two, is refused before any
+/// lane loads, never accepted and ignored.
+#[test]
+fn structured_run_output_is_refused_outside_verified_chat() {
+    for (architecture, display) in [
+        ("qwen35", "Qwen"),
+        ("qwen35moe", "Qwen MoE"),
+        ("qwen4exp", "Qwen3.8-Flash-Next"),
+        ("muse-glimmer", "Muse Glimmer"),
+        ("deepseek4", "DeepSeek V4"),
+    ] {
+        let model = HeaderOnlyGguf::new(architecture);
+        let output = run_with_stdin_held_open(&[
+            "run",
+            "-m",
+            model.0.to_str().unwrap(),
+            "--user",
+            "hi",
+            "--format",
+            "responses",
+        ]);
+        assert!(!output.status.success(), "{architecture}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains(&format!(
+                "--format responses is supported for verified K2 Horizon and GLM-5.3-Flash chat; {display} run prints text"
+            )),
+            "{architecture}: {stderr}"
+        );
+    }
+    for architecture in ["k2-horizon", "glm5-next"] {
+        let model = HeaderOnlyGguf::new(architecture);
+        let output = run_with_stdin_held_open(&[
+            "run",
+            "-m",
+            model.0.to_str().unwrap(),
+            "--raw-prompt",
+            "x",
+            "--format",
+            "responses",
+        ]);
+        assert!(!output.status.success(), "{architecture}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("--format responses needs chat input"),
+            "{architecture}: {stderr}"
+        );
+    }
+}

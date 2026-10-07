@@ -47,6 +47,8 @@ def main():
             str(messages),
             "--reasoning-effort",
             "low",
+            "--format",
+            "responses",
             "--max-context-tokens",
             "2048",
             "-n",

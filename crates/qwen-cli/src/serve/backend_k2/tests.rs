@@ -318,7 +318,7 @@ fn cpu_downloaded_startup_rejects_options_before_listener_or_metal() {
             Some(32),
             Some(8),
             Some("nonexistent-drafter.gguf"),
-            "does not support a drafter",
+            "--drafter is not supported for",
         ),
     ] {
         let invocation = crate::cli::ServeInvocation {

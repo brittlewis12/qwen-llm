@@ -1,0 +1,20 @@
+{
+  "status": "passed",
+  "model": "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+  "text_equals_raw": true,
+  "responses_reconstructs_text": true,
+  "tool_call": {
+    "name": "get_weather",
+    "city": "Paris"
+  },
+  "fingerprints": {
+    "chat": {
+      "algorithm": "sha256-qwen-generated-token-ids-v1",
+      "value": "16842d7039f563c29188c92bc9edf1e27b401bf3bdff4a0bd878ff252a6507d5"
+    },
+    "tools": {
+      "algorithm": "sha256-qwen-generated-token-ids-v1",
+      "value": "7e065bdd8d26de07f2b2cb01280d64ceb62e09fa6e07b9e8423bf7f191dcc0fe"
+    }
+  }
+}

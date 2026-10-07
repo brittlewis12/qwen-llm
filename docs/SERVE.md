@@ -138,9 +138,10 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
 # --max-tokens (resident session capacity is fixed at load); admitted capacity
 # may extend through the model's declared context.
 # K2 requires explicit --max-context-tokens (within checkpoint context) and
-# --max-tokens; --snapshot-cache-mib is ignored (live-session prefix reuse).
-# GLM-5.3-Flash requires both too (device memory admits the session at
-# startup and names the capacity that fits); --snapshot-cache-mib only warns.
+# --max-tokens. GLM-5.3-Flash requires both too (device memory admits the
+# session at startup and names the capacity that fits). Muse, K2 and GLM keep
+# no snapshots: --snapshot-cache-mib accepts only auto or 0, the expiry flags
+# only their default or 0, and --snapshot-half-life-secs only its default.
 ```
 
 **Durable diagnostic workbench.** `--lens-data-dir PATH` enables saved Lens history
@@ -242,7 +243,13 @@ restarts in a disk tier under the RAM cache. Flash-Next, Muse Glimmer, K2 and
 GLM-5.3-Flash have no durable tier: an explicit `--durable-snapshot-*` value is
 refused at startup (`--durable-snapshot-dir off` is accepted), and the default
 logs that the tier does not apply. Muse, K2 and GLM reuse their live session
-instead of snapshots, so `--snapshot-cache-mib` only draws a warning there.
+instead of snapshots, so they refuse snapshot settings they cannot honour: a
+positive `--snapshot-cache-mib`, a non-zero non-default
+`--snapshot-idle-ttl-secs` or `--snapshot-max-age-secs`, and any
+`--snapshot-half-life-secs` change (0 is LRU ranking, not off). The budget
+accepts `auto` or 0, the expiries their default or 0, and the half-life
+only its default. Values are judged, not flag presence: an explicit default
+is accepted like omission.
 
 - **Flags.** `--durable-snapshot-dir PATH|off` (default
   `~/.cache/qwen-llm/serve-checkpoints`; each family uses its own subdirectory
@@ -285,7 +292,9 @@ instead of snapshots, so `--snapshot-cache-mib` only draws a warning there.
     - **Idle publication:** once no request has arrived for
       `--durable-idle-publish-secs` (default 30, 0 = off; any request, even a
       failed one, restarts the clock), the latest completed request's
-      transcript boundary is written.
+      transcript boundary is written. DS4 has no idle publication (it writes
+      as it captures) and refuses values other than the default and 0 while
+      its tier is on.
       - The transcript boundary is what every later turn reuses. The
         completed boundary only extends when the next prompt re-renders the
         turn exactly, so after a restart just that turn's tokens re-prefill.
@@ -894,10 +903,13 @@ and parses it, and never runs a tool.
 after a pause pays ~1 s to re-wire GLM's 109.5 GiB: a 27-token prefill takes
 1.6-1.7 s instead of 0.6 s. The window opens after the warm-up.
 
-**Live session.** KDA recurrent state cannot rewind, so the one resident
+**Live session.** GLM serve has no snapshot cache yet, so the one resident
 session is reused only when a request's prompt strictly extends exactly the
 tokens it consumed; anything else drops it and prefills a fresh session
-(about 8 ms to allocate). A replayed conversation extends: the model ends a
+(about 8 ms to allocate). This is an implementation gap, not a property of
+the model. The Qwen and Flash-Next hybrids also carry recurrent state and
+reuse prefixes by snapshotting it at boundaries; GLM snapshots are planned
+(`docs/bench/2026-10-06-glm53-lane-audit/`, PERF-ROADMAP). A replayed conversation extends: the model ends a
 turn by sampling `<|user|>`, the next turn's opener, and the renderer writes
 history back byte-for-byte when the client replays the reasoning and answer
 items. Re-tokenization that differs from the sampled tokens, a changed

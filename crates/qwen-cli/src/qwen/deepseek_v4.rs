@@ -1390,7 +1390,8 @@ pub(crate) fn run_deepseek_v4_single_turn(
         concat!(
             "deepseek_v4 stats: prompt_kind={} prefill_mode={} prefill_chunk_cap={} prompt_tokens={} generated_tokens={} transitions={} ",
             "stop_reason={} tokenizer_ms={:.1} prefetch_mode={} prefetch_ms={:.1} load_ms={:.1} prefill_ms={:.1} prefill_tps={:.2} ",
-            "generation_ms={:.1} decode_tps={:.2} transition_tps={:.2} build_commit={} build_dirty={} generated_ids_sha256={}"
+            "generation_ms={:.1} decode_tps={:.2} transition_tps={:.2} build_commit={} build_dirty={} generated_ids_sha256={} ",
+            "weights_first_use=true"
         ),
         prompt_kind,
         prefill_mode,

@@ -46,7 +46,7 @@ fn cpu_startup_refuses_bad_limits_before_listener_or_metal() {
             Some(64),
             Some(8),
             Some("drafter"),
-            "does not support a drafter",
+            "--drafter is not supported for",
         ),
         (
             Some(64),

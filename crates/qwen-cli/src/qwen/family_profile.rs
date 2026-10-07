@@ -37,6 +37,10 @@ pub(crate) struct FamilyProfile {
     /// A `GenerationBackend` exists; not artifact or device admission.
     pub(crate) serve_backend: bool,
     pub(crate) serve_warmth: ServeWarmth,
+    /// The durable tier writes the latest continuation snapshot after an
+    /// idle period (`--durable-idle-publish-secs`). A durable tier does not
+    /// imply it: DeepSeek V4 writes behind on capture instead.
+    pub(crate) durable_idle_publish: bool,
     pub(crate) capabilities: fn(&GgufFile) -> Result<Value>,
 }
 
@@ -47,6 +51,7 @@ static QWEN35: FamilyProfile = FamilyProfile {
     fixed_cohort: FixedCohort::Dense8,
     serve_backend: true,
     serve_warmth: ServeWarmth::SnapshotsDurable,
+    durable_idle_publish: true,
     capabilities: qwen35_capabilities,
 };
 
@@ -57,6 +62,7 @@ static QWEN35_MOE: FamilyProfile = FamilyProfile {
     fixed_cohort: FixedCohort::Moe16,
     serve_backend: true,
     serve_warmth: ServeWarmth::SnapshotsDurable,
+    durable_idle_publish: true,
     capabilities: qwen35_moe_capabilities,
 };
 
@@ -67,6 +73,7 @@ static QWEN4EXP: FamilyProfile = FamilyProfile {
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
     serve_warmth: ServeWarmth::SnapshotsRam,
+    durable_idle_publish: false,
     capabilities: qwen4exp_capabilities,
 };
 
@@ -77,6 +84,7 @@ static DEEPSEEK4: FamilyProfile = FamilyProfile {
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
     serve_warmth: ServeWarmth::SnapshotsDurable,
+    durable_idle_publish: false,
     capabilities: deepseek4_capabilities,
 };
 
@@ -87,6 +95,7 @@ static MUSE_GLIMMER: FamilyProfile = FamilyProfile {
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
     serve_warmth: ServeWarmth::LiveSession,
+    durable_idle_publish: false,
     capabilities: muse_glimmer_capabilities,
 };
 
@@ -97,6 +106,7 @@ static K2_HORIZON: FamilyProfile = FamilyProfile {
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
     serve_warmth: ServeWarmth::LiveSession,
+    durable_idle_publish: false,
     capabilities: k2_capabilities,
 };
 
@@ -107,6 +117,7 @@ static GLM5_NEXT: FamilyProfile = FamilyProfile {
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
     serve_warmth: ServeWarmth::LiveSession,
+    durable_idle_publish: false,
     capabilities: glm5_next_capabilities,
 };
 

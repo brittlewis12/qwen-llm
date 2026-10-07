@@ -191,6 +191,26 @@ pub fn encode_mat_mat_dispatch(
     encode_mat_mat_dispatch_routed(ctx, enc, weight, x, y, n_in, n_out, n_query, true, true)
 }
 
+/// [`encode_mat_mat_dispatch`] without the Q8_0 few-row arm (2..=8 rows):
+/// exactly the routes before `c640a113`. For families whose small-N
+/// routes have not been qualified on that arm (Qwen3.8-Flash-Next, K2
+/// Horizon); a family moves to [`encode_mat_mat_dispatch`] only after its
+/// route, numerical, continuation and performance checks pass (lane audit
+/// 2026-10-06, B1.5).
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_mat_dispatch_without_fewrow(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MfError> {
+    encode_mat_mat_dispatch_routed(ctx, enc, weight, x, y, n_in, n_out, n_query, true, false)
+}
+
 /// Prompt GEMM dispatch with an explicit choice about the Qwen-tuned
 /// `n_query == 1` mat-vec shortcut. Families that pin a bitwise matrix
 /// lineage at N=1 (DeepSeek V4 packed prefill) pass `false` so a Qwen

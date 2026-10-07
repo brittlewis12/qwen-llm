@@ -7,7 +7,9 @@ use crate::metal::{
     encode_l2_norm_pair_batched_f32, encode_mat_vec_f32_sigmoid, encode_sigmoid_f32,
     encode_ssm_conv_silu_f32,
 };
-use crate::metal_forward::{MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch};
+use crate::metal_forward::{
+    MfError, encode_mat_mat_dispatch_without_fewrow, encode_mat_vec_dispatch,
+};
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig};
 use crate::qwen4exp_profile::{
     Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProfileRecorder, begin_optional, end_optional,
@@ -933,7 +935,7 @@ unsafe fn encode_gated_delta_net_packed_inner(
         enc,
         Qwen4ExpPackedProfileLabel::detail("gdn.projections", layer, MixerKind::GatedDeltaNet),
     )?;
-    encode_mat_mat_dispatch(
+    encode_mat_mat_dispatch_without_fewrow(
         ctx,
         enc,
         weights.qkv,
@@ -943,7 +945,7 @@ unsafe fn encode_gated_delta_net_packed_inner(
         g.conv_width(),
         tokens,
     )?;
-    encode_mat_mat_dispatch(
+    encode_mat_mat_dispatch_without_fewrow(
         ctx,
         enc,
         weights.gate,
@@ -964,7 +966,7 @@ unsafe fn encode_gated_delta_net_packed_inner(
             g.value_heads,
         )?;
     } else {
-        encode_mat_mat_dispatch(
+        encode_mat_mat_dispatch_without_fewrow(
             ctx,
             enc,
             weights.beta,
@@ -976,7 +978,7 @@ unsafe fn encode_gated_delta_net_packed_inner(
         )?;
         encode_sigmoid_f32(ctx, enc, &beta, &beta)?;
     }
-    encode_mat_mat_dispatch(
+    encode_mat_mat_dispatch_without_fewrow(
         ctx,
         enc,
         weights.alpha,
@@ -1082,7 +1084,7 @@ unsafe fn encode_gated_delta_net_packed_inner(
         enc,
         Qwen4ExpPackedProfileLabel::detail("gdn.output", layer, MixerKind::GatedDeltaNet),
     )?;
-    encode_mat_mat_dispatch(
+    encode_mat_mat_dispatch_without_fewrow(
         ctx,
         enc,
         weights.output,

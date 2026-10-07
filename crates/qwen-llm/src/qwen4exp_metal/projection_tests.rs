@@ -70,23 +70,21 @@ fn gsq_projection_preflights_cover_native_dispatch_variants() {
     }
     assert!(projection_kernel_names(GgmlType::BF16, false, false).is_none());
     assert!(projection_kernel_names(GgmlType::BF16, true, false).is_none());
+    assert!(
+        projection_kernel_names(GgmlType::Q8_0, true, false)
+            .unwrap()
+            .iter()
+            .all(|name| !name.contains("fewrow"))
+    );
     for (dtype, packed, expected) in [
         (GgmlType::F32, false, "kernel_mat_vec_f32_f32_lcpp_r2"),
         (GgmlType::Q8_0, false, "kernel_mat_vec_q8_0_f32_lcpp"),
+        (GgmlType::Q8_0, true, "kernel_mat_mat_q8_0_f32"),
+        (GgmlType::Q8_0, true, "kernel_mat_mat_q8_0_f32_n16"),
         (
             GgmlType::Q8_0,
             true,
-            "kernel_mat_mat_q8_0_fewrow_nt1_nsg32_f32",
-        ),
-        (
-            GgmlType::Q8_0,
-            true,
-            "kernel_mat_mat_q8_0_fewrow_nt2_nsg8_f32",
-        ),
-        (
-            GgmlType::Q8_0,
-            true,
-            "kernel_mat_mat_q8_0_fewrow_nt4_nsg8_f32",
+            "kernel_mat_mat_q8_0_mma8v_r1c1k128_f32",
         ),
         (GgmlType::Q4_K, true, "kernel_mat_vec_q4_K_nc2_rp4_f32"),
         (

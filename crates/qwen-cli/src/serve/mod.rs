@@ -319,10 +319,16 @@ fn fixed_session_limits(
 /// user would wait through a cold re-prefill after restart believing it was
 /// on); say once that the defaulted tier does not apply; warn that a
 /// snapshot budget means nothing to a live-session family.
+/// Rejects warmth settings a family cannot honour, so none is silently
+/// ignored. Values are judged, not flag presence: an explicit default is
+/// indistinguishable from omission (clap `ValueSource` could tell them
+/// apart if that ever matters), and values that switch a feature off are
+/// always accepted.
 fn check_warmth_flags(
     family: &crate::family_profile::FamilyProfile,
     durable: &durable::DurableSnapshotConfig,
     snapshot_cache_mib: Option<u64>,
+    snapshot_policy: &qwen_llm::snapshot_policy::SnapshotPolicyConfig,
 ) -> Result<()> {
     use crate::family_profile::ServeWarmth;
     let durable_off = matches!(durable.dir, durable::DurableDir::Off) || durable.max_mib == Some(0);
@@ -343,11 +349,47 @@ fn check_warmth_flags(
             family.display
         );
     }
-    if family.serve_warmth == ServeWarmth::LiveSession && snapshot_cache_mib.is_some() {
-        tracing::warn!(
-            "serve: --snapshot-cache-mib has no effect for {}: it reuses its live session's prefix, not snapshots",
+    if family.serve_warmth == ServeWarmth::SnapshotsDurable
+        && !durable_off
+        && !family.durable_idle_publish
+    {
+        ensure!(
+            matches!(
+                durable.idle_publish_secs,
+                0 | durable::DEFAULT_IDLE_PUBLISH_SECS
+            ),
+            "{} serve's durable tier writes snapshots as it captures them and has no idle publication, so --durable-idle-publish-secs cannot take effect; drop the flag or pass 0",
             family.display
         );
+    }
+    if family.serve_warmth == ServeWarmth::LiveSession {
+        let defaults = qwen_llm::snapshot_policy::SnapshotPolicyConfig::default();
+        let unsupported = [
+            (
+                "--snapshot-cache-mib",
+                snapshot_cache_mib.is_some_and(|mib| mib != 0),
+            ),
+            (
+                "--snapshot-idle-ttl-secs",
+                !(snapshot_policy.idle_ttl.is_zero()
+                    || snapshot_policy.idle_ttl == defaults.idle_ttl),
+            ),
+            (
+                "--snapshot-max-age-secs",
+                !(snapshot_policy.max_age.is_zero() || snapshot_policy.max_age == defaults.max_age),
+            ),
+            // Zero is pure LRU ranking, a policy, not off.
+            (
+                "--snapshot-half-life-secs",
+                snapshot_policy.half_life != defaults.half_life,
+            ),
+        ];
+        if let Some((flag, _)) = unsupported.iter().find(|(_, set)| *set) {
+            bail!(
+                "{} serve reuses its live session's prefix and keeps no snapshots, so {flag} cannot take effect; drop the flag (`auto` or 0 for --snapshot-cache-mib, 0 for the expiry flags, are accepted)",
+                family.display
+            );
+        }
     }
     Ok(())
 }
@@ -376,6 +418,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         profile(family),
         &invocation.durable,
         invocation.snapshot_cache_mib,
+        &invocation.snapshot_policy,
     )?;
     // Idle residency needs a backend whose weights are no-copy GGUF windows.
     ensure!(
@@ -437,6 +480,18 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     } else {
         tracing::info!(target: "qwen_diag", "serve: template_style={}", template_style.as_str());
     }
+    // Drafter admission is a header-level decision, settled once for every
+    // family before any lane binds, loads or opens the drafter: unsupported
+    // family/shape combinations are refused here with the shared code.
+    // `EngineBackend::new` still performs the GPU copy from the path;
+    // consolidating that reuse waits for the serve backend to settle.
+    let drafter = crate::drafter_policy::PreparedDrafter::prepare(
+        invocation.drafter.as_deref(),
+        &gguf,
+        Some(family),
+        crate::drafter_policy::Lane::Serve,
+    )?;
+    drop(drafter);
     // Keep K2 out of the generic serve admission and listener setup. Its
     // resident plan and raw request contract are owned by the K2 lane.
     match family {
@@ -523,18 +578,6 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         | ModelFamily::DeepSeek4
         | ModelFamily::MuseGlimmer => {}
     }
-    // Drafter admission is a header-level decision: refuse unsupported
-    // family/shape combinations and bind the drafter's metadata before the
-    // target's weights are loaded. `EngineBackend::new` still performs the
-    // GPU copy from the path; consolidating that reuse waits for the serve
-    // backend to settle.
-    let drafter = crate::drafter_policy::PreparedDrafter::prepare(
-        invocation.drafter.as_deref(),
-        &gguf,
-        Some(family),
-        crate::drafter_policy::Lane::Serve,
-    )?;
-    drop(drafter);
     // Bind before loading weights: an unresolvable, non-loopback, or busy
     // address is a startup error, not something to discover after a
     // multi-gigabyte load. Connections arriving during load queue in the
@@ -1138,18 +1181,124 @@ mod tests {
             let family = profile(*family);
             let has_tier =
                 family.serve_warmth == crate::family_profile::ServeWarmth::SnapshotsDurable;
-            assert!(check_warmth_flags(family, &defaulted, None).is_ok());
-            assert!(check_warmth_flags(family, &defaulted, Some(1024)).is_ok());
+            let policy = qwen_llm::snapshot_policy::SnapshotPolicyConfig::default();
+            assert!(check_warmth_flags(family, &defaulted, None, &policy).is_ok());
+            assert_eq!(
+                check_warmth_flags(family, &defaulted, Some(1024), &policy).is_ok(),
+                family.serve_warmth != crate::family_profile::ServeWarmth::LiveSession,
+                "{}",
+                family.display
+            );
             for config in &explicit {
                 assert_eq!(
-                    check_warmth_flags(family, config, None).is_ok(),
+                    check_warmth_flags(family, config, None, &policy).is_ok(),
                     has_tier,
                     "{} {config:?}",
                     family.display
                 );
             }
             for config in &off {
-                assert!(check_warmth_flags(family, config, None).is_ok());
+                assert!(check_warmth_flags(family, config, None, &policy).is_ok());
+            }
+        }
+    }
+
+    /// Snapshot-policy settings on families that keep no snapshots are
+    /// refused rather than ignored; omission, the defaults and the values
+    /// that switch a feature off are accepted. Idle publication is refused
+    /// where the durable tier has none (DeepSeek V4), unless the tier is off.
+    #[test]
+    fn unsupported_snapshot_policy_settings_are_refused_not_ignored() {
+        use crate::family_profile::{ServeWarmth, profile};
+        use durable::{DEFAULT_IDLE_PUBLISH_SECS, DurableDir, DurableSnapshotConfig};
+        use qwen_llm::snapshot_policy::SnapshotPolicyConfig;
+        let defaults = SnapshotPolicyConfig::default();
+        let durable = |dir, idle_publish_secs| DurableSnapshotConfig {
+            dir,
+            max_mib: None,
+            idle_publish_secs,
+            ..DurableSnapshotConfig::off()
+        };
+        let default_tier = durable(DurableDir::Default, DEFAULT_IDLE_PUBLISH_SECS);
+        let secs = Duration::from_secs;
+        let accepted = [
+            (None, defaults),
+            (Some(0), defaults),
+            (
+                None,
+                SnapshotPolicyConfig {
+                    idle_ttl: Duration::ZERO,
+                    max_age: Duration::ZERO,
+                    ..defaults
+                },
+            ),
+        ];
+        let refused_on_live = [
+            (Some(512), defaults),
+            (
+                None,
+                SnapshotPolicyConfig {
+                    idle_ttl: secs(60),
+                    ..defaults
+                },
+            ),
+            (
+                None,
+                SnapshotPolicyConfig {
+                    max_age: secs(60),
+                    ..defaults
+                },
+            ),
+            (
+                None,
+                SnapshotPolicyConfig {
+                    half_life: Duration::ZERO,
+                    ..defaults
+                },
+            ),
+        ];
+        for family in ModelFamily::ALL {
+            let family = profile(*family);
+            assert!(
+                !family.durable_idle_publish
+                    || family.serve_warmth == ServeWarmth::SnapshotsDurable,
+                "{}: idle publication without a durable tier",
+                family.display
+            );
+            let live = family.serve_warmth == ServeWarmth::LiveSession;
+            for (mib, policy) in &accepted {
+                assert!(
+                    check_warmth_flags(family, &default_tier, *mib, policy).is_ok(),
+                    "{} {mib:?} {policy:?}",
+                    family.display
+                );
+            }
+            for (mib, policy) in &refused_on_live {
+                let error = check_warmth_flags(family, &default_tier, *mib, policy);
+                assert_eq!(
+                    error.is_err(),
+                    live,
+                    "{} {mib:?} {policy:?}",
+                    family.display
+                );
+                if let Err(error) = error {
+                    assert!(error.to_string().contains("keeps no snapshots"), "{error}");
+                }
+            }
+            if family.serve_warmth == ServeWarmth::SnapshotsDurable {
+                let publish = durable(DurableDir::Default, DEFAULT_IDLE_PUBLISH_SECS * 3);
+                assert_eq!(
+                    check_warmth_flags(family, &publish, None, &defaults).is_ok(),
+                    family.durable_idle_publish,
+                    "{}",
+                    family.display
+                );
+                for config in [
+                    durable(DurableDir::Default, 0),
+                    durable(DurableDir::Off, DEFAULT_IDLE_PUBLISH_SECS * 3),
+                ] {
+                    assert!(check_warmth_flags(family, &config, None, &defaults).is_ok());
+                }
             }
         }
     }

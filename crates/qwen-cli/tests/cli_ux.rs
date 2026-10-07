@@ -83,16 +83,27 @@ struct HeaderOnlyGguf(std::path::PathBuf);
 
 impl HeaderOnlyGguf {
     fn new(architecture: &str) -> Self {
-        let key = "general.architecture";
+        Self::with_u64(architecture, &[])
+    }
+
+    /// Also writes `<architecture>.<key> = value` (GGUF uint64) entries.
+    fn with_u64(architecture: &str, entries: &[(&str, u64)]) -> Self {
+        let string = |bytes: &mut Vec<u8>, text: &str| {
+            bytes.extend_from_slice(&(text.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(text.as_bytes());
+        };
         let mut bytes = b"GGUF".to_vec();
         bytes.extend_from_slice(&3u32.to_le_bytes());
         bytes.extend_from_slice(&0u64.to_le_bytes());
-        bytes.extend_from_slice(&1u64.to_le_bytes());
-        bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(key.as_bytes());
+        bytes.extend_from_slice(&(1 + entries.len() as u64).to_le_bytes());
+        string(&mut bytes, "general.architecture");
         bytes.extend_from_slice(&8u32.to_le_bytes());
-        bytes.extend_from_slice(&(architecture.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(architecture.as_bytes());
+        string(&mut bytes, architecture);
+        for (key, value) in entries {
+            string(&mut bytes, &format!("{architecture}.{key}"));
+            bytes.extend_from_slice(&10u32.to_le_bytes());
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
         bytes.resize(bytes.len().next_multiple_of(32), 0);
         let path = std::env::temp_dir().join(format!(
             "qwen-cli-ux-{architecture}-{}.gguf",
@@ -157,6 +168,47 @@ fn every_family_without_speculation_refuses_drafter_before_dispatch() {
                 !stderr.contains("open drafter"),
                 "{architecture} {lane}: {stderr}"
             );
+        }
+    }
+}
+
+/// Text `qwen info` reports each family as itself: its own name and its own
+/// `<architecture>.*` metadata, never the Qwen hybrid block split or
+/// `qwen35.*` keys (MoE reports `qwen35moe.*`). The header and metadata do
+/// not depend on capability checks, so a bare header still reports them.
+#[test]
+fn text_info_describes_each_family_as_itself() {
+    for (architecture, family) in [
+        ("qwen35", "Qwen (qwen)"),
+        ("qwen35moe", "Qwen MoE (qwen)"),
+        ("qwen4exp", "Qwen3.8-Flash-Next (qwen4exp)"),
+        ("muse-glimmer", "Muse Glimmer (muse_glimmer)"),
+        ("k2-horizon", "K2 Horizon (k2_horizon)"),
+        ("glm5-next", "GLM-5.3-Flash (glm5_next)"),
+        ("glm5next", "GLM-5.3-Flash (glm5_next)"),
+        ("deepseek4", "DeepSeek V4 (deepseek_v4)"),
+        ("not-a-family", "unrecognised"),
+    ] {
+        let model = HeaderOnlyGguf::with_u64(architecture, &[("block_count", 4)]);
+        let output = Command::new(QWEN)
+            .args(["info", "-m", model.0.to_str().unwrap()])
+            .output()
+            .expect("run qwen info");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{architecture}: {stderr}");
+        assert!(
+            stdout.contains(&format!("family: {family}")),
+            "{architecture}: {stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("{architecture}.block_count = 4")),
+            "{architecture}: {stdout}"
+        );
+        assert!(stdout.contains("capabilities"), "{architecture}: {stdout}");
+        if !architecture.starts_with("qwen35") {
+            assert!(!stdout.contains("GDN"), "{architecture}: {stdout}");
+            assert!(!stdout.contains("qwen35."), "{architecture}: {stdout}");
         }
     }
 }

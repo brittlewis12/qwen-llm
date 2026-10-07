@@ -1073,11 +1073,23 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
     if !info.json {
         return print_model_info(&info.model);
     }
+    let (_, projection) = info_projection(&info.model)?;
+    println!("{}", serde_json::to_string_pretty(&projection)?);
+    Ok(())
+}
+
+/// The header-only model facts `qwen info` reports, as one projection that
+/// both the JSON and the text views render (so they cannot disagree).
+fn info_projection(model: &Path) -> Result<(GgufFile, serde_json::Value)> {
+    let gguf = GgufFile::open(model).with_context(|| format!("open model {}", model.display()))?;
+    let projection = project_info(model, &gguf)?;
+    Ok((gguf, projection))
+}
+
+fn project_info(model: &Path, gguf: &GgufFile) -> Result<serde_json::Value> {
     use drafter_policy::{DrafterDecision, DrafterTarget, Lane, resolve_drafter};
     use family_profile::profile;
-    let gguf = GgufFile::open(&info.model)
-        .with_context(|| format!("open model {}", info.model.display()))?;
-    let family = ModelFamily::detect(&gguf);
+    let family = ModelFamily::detect(gguf);
     let project = |lane: Lane| -> serde_json::Value {
         match resolve_drafter(family, lane, true) {
             DrafterDecision::NotRequested => unreachable!("projection asks with a request"),
@@ -1099,7 +1111,7 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
     // fact for ordinary Qwen; other families reject the flag outright.
     let prompt_lookup = match family {
         Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe) => {
-            match qwen_llm::loader::Model::from_gguf(&gguf) {
+            match qwen_llm::loader::Model::from_gguf(gguf) {
                 Err(error) => serde_json::json!({
                     "status": "unsupported",
                     "code": "model_unreadable",
@@ -1130,20 +1142,20 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
         }),
     };
     let capabilities = match family {
-        Some(family) => (profile(family).capabilities)(&gguf)?,
+        Some(family) => (profile(family).capabilities)(gguf)?,
         None => serde_json::json!({
             "reasoning": {
                 "status": "unsupported",
                 "code": "unknown_family",
                 "message": "reasoning controls require a recognised architecture",
             },
-            "input": serde_json::to_value(input_capability_for(None, &gguf))?,
-            "template": template_projection(None, &gguf),
+            "input": serde_json::to_value(input_capability_for(None, gguf))?,
+            "template": template_projection(None, gguf),
         }),
     };
     let projection = serde_json::json!({
         "version": "qwen_info_v1",
-        "model": info.model.display().to_string(),
+        "model": model.display().to_string(),
         "architecture": gguf.architecture(),
         "family": family.map(ModelFamily::record_label),
         "drafter": {
@@ -1153,12 +1165,119 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
         "prompt_lookup": { "run": prompt_lookup },
         "capabilities": capabilities,
     });
-    println!("{}", serde_json::to_string_pretty(&projection)?);
-    Ok(())
+    Ok(projection)
+}
+
+/// One line per capability: its status (and code when unsupported), so the
+/// text view says the same thing as `--json` without its detail.
+fn capability_lines(projection: &serde_json::Value) -> Vec<String> {
+    fn status(value: &serde_json::Value) -> String {
+        let field = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
+        match (field("status"), field("code")) {
+            (Some(status), Some(code)) => format!("{status} ({code})"),
+            (Some(status), None) => status.to_owned(),
+            (None, _) => "-".to_owned(),
+        }
+    }
+    let mut lines = Vec::new();
+    for (label, path) in [
+        ("drafter run", "/drafter/run"),
+        ("drafter serve", "/drafter/serve"),
+        ("prompt lookup", "/prompt_lookup/run"),
+    ] {
+        if let Some(value) = projection.pointer(path) {
+            lines.push(format!("{label}: {}", status(value)));
+        }
+    }
+    let capabilities = &projection["capabilities"];
+    if let Some(reasoning) = capabilities.get("reasoning") {
+        let levels = reasoning
+            .get("levels")
+            .and_then(serde_json::Value::as_array)
+            .map(|levels| {
+                levels
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("|")
+            });
+        lines.push(match levels.filter(|levels| !levels.is_empty()) {
+            Some(levels) => format!(
+                "reasoning: levels {levels}; no-thinking {}",
+                reasoning
+                    .get("no_thinking")
+                    .map_or_else(|| "-".to_owned(), status)
+            ),
+            None if reasoning.get("status").is_some() => {
+                format!("reasoning: {}", status(reasoning))
+            }
+            None => format!(
+                "reasoning: no effort levels; no-thinking {}",
+                reasoning
+                    .get("no_thinking")
+                    .map_or_else(|| "-".to_owned(), status)
+            ),
+        });
+    }
+    if let Some(input) = capabilities
+        .get("input")
+        .and_then(serde_json::Value::as_object)
+    {
+        let forms: Vec<String> = input
+            .iter()
+            .filter(|(_, value)| value.is_object())
+            .map(|(form, value)| format!("{form} {}", status(value)))
+            .collect();
+        if !forms.is_empty() {
+            lines.push(format!("input: {}", forms.join(", ")));
+        }
+    }
+    if let Some(template) = capabilities.get("template") {
+        let rendered = template
+            .get("rendered_as")
+            .and_then(serde_json::Value::as_str)
+            .map_or(String::new(), |name| format!(" as {name}"));
+        lines.push(format!("template: {}{rendered}", status(template)));
+    }
+    if let Some(execution) = capabilities
+        .get("execution")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (lane, value) in execution {
+            lines.push(format!("{lane}: {}", status(value)));
+        }
+    }
+    lines
+}
+
+/// The family's own `<architecture>.*` metadata: scalar values in full,
+/// arrays by length.
+fn print_architecture_metadata(gguf: &GgufFile) {
+    let Some(architecture) = gguf.architecture() else {
+        return;
+    };
+    let prefix = format!("{architecture}.");
+    let keys: Vec<_> = gguf
+        .model
+        .metadata()
+        .iter()
+        .filter(|(key, _)| key.starts_with(&prefix))
+        .collect();
+    if keys.is_empty() {
+        return;
+    }
+    println!("metadata ({prefix}*):");
+    for (key, value) in keys {
+        match value {
+            serde_json::Value::Array(items) => println!("  {key} = [{} values]", items.len()),
+            other => println!("  {key} = {other}"),
+        }
+    }
 }
 
 fn print_model_info(model_path: &Path) -> Result<()> {
-    let gguf = qwen_llm::gguf::GgufFile::open(model_path)?;
+    let gguf = GgufFile::open(model_path)
+        .with_context(|| format!("open model {}", model_path.display()))?;
     println!(
         "loaded {}: arch={} {} tensors, {} shard(s), mmap={} MiB, primary tensor-data starts at {}",
         model_path.display(),
@@ -1169,10 +1288,52 @@ fn print_model_info(model_path: &Path) -> Result<()> {
         gguf.primary_shard().tensor_data_start,
     );
 
-    if ModelFamily::detect(&gguf) == Some(ModelFamily::DeepSeek4) {
-        return print_deepseek_v4_info(&gguf);
+    let family = ModelFamily::detect(&gguf);
+    match family {
+        Some(family) => println!(
+            "family: {} ({})",
+            family_profile::profile(family).display,
+            family.record_label()
+        ),
+        None => println!("family: unrecognised (run and serve refuse this architecture)"),
     }
+    match family {
+        // Family-owned geometry where it adds to the metadata.
+        Some(ModelFamily::DeepSeek4) => {
+            if let Err(error) = print_deepseek_v4_info(&gguf) {
+                println!("geometry: unavailable ({error:#})");
+                print_architecture_metadata(&gguf);
+            }
+        }
+        Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe) => print_qwen_hybrid_geometry(&gguf),
+        _ => {
+            let blocks = gguf
+                .tensors
+                .iter()
+                .filter_map(|tensor| tensor.name.strip_prefix("blk."))
+                .filter_map(|rest| rest.split('.').next()?.parse::<u32>().ok())
+                .collect::<std::collections::BTreeSet<_>>();
+            println!("blocks: {}", blocks.len());
+            print_architecture_metadata(&gguf);
+        }
+    }
+    // The header and metadata above never depend on capability checks; an
+    // artifact they cannot evaluate still reports everything else.
+    match project_info(model_path, &gguf) {
+        Ok(projection) => {
+            println!("capabilities:");
+            for line in capability_lines(&projection) {
+                println!("  {line}");
+            }
+        }
+        Err(error) => println!("capabilities: unavailable ({error:#})"),
+    }
+    Ok(())
+}
 
+/// Ordinary Qwen's hybrid layout: gated-delta-net vs full-attention blocks,
+/// two sample inventories, and the architecture's metadata.
+fn print_qwen_hybrid_geometry(gguf: &GgufFile) {
     // Group tensors by layer index. The GDN-layer test is "has ssm_* tensor",
     // the full-attn-layer test is "has attn_q/k/v/o.weight" (NOT attn_qkv,
     // which is GDN's combined input projection in this naming scheme).
@@ -1212,29 +1373,6 @@ fn print_model_info(model_path: &Path) -> Result<()> {
         }
     }
 
-    // Show metadata keys related to the architecture.
-    let interesting_keys = [
-        "qwen35.block_count",
-        "qwen35.attention.head_count",
-        "qwen35.attention.head_count_kv",
-        "qwen35.attention.key_length",
-        "qwen35.attention.value_length",
-        "qwen35.embedding_length",
-        "qwen35.feed_forward_length",
-        "qwen35.context_length",
-        "qwen35.nextn_predict_layers",
-        "qwen35.ssm.conv_kernel",
-        "qwen35.ssm.inner_size",
-        "qwen35.ssm.state_size",
-        "qwen35.ssm.time_step_rank",
-        "qwen35.ssm.group_count",
-    ];
-    println!("relevant metadata:");
-    for k in interesting_keys {
-        if let Some(v) = gguf.get_u64(k) {
-            println!("  {k} = {v}");
-        }
-    }
-
-    Ok(())
+    // The architecture's own keys (`qwen35.*` dense, `qwen35moe.*` MoE).
+    print_architecture_metadata(gguf);
 }

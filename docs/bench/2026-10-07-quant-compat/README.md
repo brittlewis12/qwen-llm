@@ -31,8 +31,8 @@ the signed-int indexing inside some GGML codecs without limiting tensor size.
 Unaligned byte slices use bounded, explicitly aligned staging before decoding.
 
 The existing parser commit `3a92c518bce43959686bef1093b31b4067502d2b`
-was published to `brittlewis12/gguf`'s `bump-deps-add-quants` branch with user
-authorization and is now the qwen-llm dependency pin. Additional parser
+was published, as authorized, to `brittlewis12/gguf`'s `bump-deps-add-quants`
+branch and is now the qwen-llm dependency pin. Additional parser
 regression tests live separately in `gguf-quant-compat`, based on that commit.
 
 ## Evidence
@@ -136,8 +136,13 @@ packed smoke took 888 ms wall / 275 ms GPU. The longer coding request
 decoded at 27.08 output tokens/s over 4.25 s. These are smoke timings, not a
 controlled benchmark or a promise about cold external-drive latency.
 
-The selected packed optimization remains capability-gated off for this
-artifact; ordinary packed execution works. Coherent generation and matching
+These smoke requests used capacities of 256 or 1024, below the selected-range
+threshold of 2051 tokens (`packed_selected_capable` compares the prompt extent
+or session capacity with the selected output width). They exercised ordinary
+packed execution, not selected packed attention. Native GSQ admission does not
+disable the selected path; its execution and numerical qualification above
+the frontier remain outstanding (PERF-ROADMAP #18; corrected 2026-10-07).
+Coherent generation and matching
 short continuations do not establish full-model numerical parity with an
 independent engine. That broader quality gate, other GSQ variants and a
 controlled performance comparison remain unclaimed.

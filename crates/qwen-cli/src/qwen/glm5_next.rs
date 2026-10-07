@@ -302,29 +302,65 @@ fn raw_input(invocation: cli::Invocation, args: &Args) -> Result<(String, Prompt
     }
 }
 
-/// The conversation, its `clear_thinking` and its declared tools from
-/// `--user`/`--system` or a `--messages` document.
-fn chat_messages(
-    input: cli::AcquiredRunInput,
-) -> Result<(Vec<Message>, bool, Vec<chat::ToolDefinition>)> {
+/// A chat request read from `--user`/`--system` or a `--messages` document.
+#[derive(Debug)]
+struct ChatInput {
+    messages: Vec<Message>,
+    clear_thinking: bool,
+    tools: Vec<chat::ToolDefinition>,
+    /// Assistant turns that arrived without reasoning and render with empty
+    /// reasoning.
+    history_reasoning_missing: usize,
+}
+
+/// The conversation, its `clear_thinking` and its declared tools. An
+/// assistant turn without `reasoning_content` (absent or null) renders with
+/// empty reasoning, every family's rule and the one GLM serve applies to a
+/// missing reasoning item; an explicit `""` is already empty. The renderer
+/// itself keeps the upstream template's inline `</think>` split for callers
+/// that ask for it; this boundary never does, so visible `</think>` text in
+/// a content field stays content.
+fn chat_messages(input: cli::AcquiredRunInput) -> Result<ChatInput> {
     match input {
-        cli::AcquiredRunInput::User { system, user } => Ok((
-            system
+        cli::AcquiredRunInput::User { system, user } => Ok(ChatInput {
+            messages: system
                 .map(Message::System)
                 .into_iter()
                 .chain([Message::User(user)])
                 .collect(),
-            false,
-            Vec::new(),
-        )),
+            clear_thinking: false,
+            tools: Vec::new(),
+            history_reasoning_missing: 0,
+        }),
         cli::AcquiredRunInput::Messages { document, source } => {
             let document = chat::parse_document(document.as_bytes())
                 .with_context(|| format!("read {FAMILY} chat document from {source}"))?;
-            Ok((
-                document.messages,
-                document.clear_thinking.unwrap_or(false),
-                document.tools,
-            ))
+            let mut missing = 0;
+            let messages = document
+                .messages
+                .into_iter()
+                .map(|message| match message {
+                    Message::Assistant {
+                        content,
+                        reasoning: None,
+                        calls,
+                    } => {
+                        missing += 1;
+                        Message::Assistant {
+                            content,
+                            reasoning: Some(String::new()),
+                            calls,
+                        }
+                    }
+                    other => other,
+                })
+                .collect();
+            Ok(ChatInput {
+                messages,
+                clear_thinking: document.clear_thinking.unwrap_or(false),
+                tools: document.tools,
+                history_reasoning_missing: missing,
+            })
         }
         cli::AcquiredRunInput::RawPrompt(_) => bail!("{FAMILY} raw input is not a chat"),
     }
@@ -423,19 +459,29 @@ pub(crate) fn run(
             })?;
             shutdown::checkpoint()?;
             let input = timing.measure(Phase::InputAcquisition, || run.acquire_input())?;
-            let (text, clear_thinking) = timing.measure(Phase::Rendering, || {
-                let (messages, clear_thinking, definitions) = chat_messages(input)?;
+            let (text, clear_thinking, missing) = timing.measure(Phase::Rendering, || {
+                let chat_input = chat_messages(input)?;
                 let text = chat::render_with_tools(
-                    &messages,
-                    &definitions,
-                    RenderOptions::generate(effort, clear_thinking),
+                    &chat_input.messages,
+                    &chat_input.tools,
+                    RenderOptions::generate(effort, chat_input.clear_thinking),
                 )?;
-                tools = definitions;
-                Ok((text, clear_thinking))
+                tools = chat_input.tools;
+                Ok((
+                    text,
+                    chat_input.clear_thinking,
+                    chat_input.history_reasoning_missing,
+                ))
             })?;
+            if missing > 0 {
+                eprintln!(
+                    "glm5_next: history_reasoning_missing={missing} (assistant turns without reasoning render with empty reasoning)"
+                );
+            }
             chat_effort = Some(effort);
             let record = json!({
                 "profile": profile, "reasoning_effort": effort, "clear_thinking": clear_thinking,
+                "history_reasoning_missing": missing,
                 "stops": chat::CHAT_STOPS, "prefix_owner": "renderer",
                 "output": if tools.is_empty() { "reasoning_stderr_answer_stdout" } else { "responses_json" },
                 "tools": tools.iter().map(chat::ToolDefinition::name).collect::<Vec<_>>(),
@@ -899,44 +945,110 @@ mod tests {
         );
     }
 
+    /// `qwen run --messages` renders history the way GLM serve does: an
+    /// assistant turn without reasoning (absent or null) gets empty
+    /// reasoning and is counted; explicit `""` is already empty and not
+    /// counted; a visible `</think>` in content stays content instead of
+    /// being split into reasoning by the template's inline rule. Plain and
+    /// tool-bearing turns, with and without clear_thinking.
+    #[test]
+    fn missing_history_reasoning_renders_as_empty_like_serve() {
+        let document = |clear: bool| {
+            format!(
+                r#"{{"clear_thinking":{clear},"tools":[{{"name":"f"}}],"messages":[
+                {{"role":"user","content":"one"}},
+                {{"role":"assistant","content":"plan</think>answer"}},
+                {{"role":"user","content":"two"}},
+                {{"role":"assistant","content":"","reasoning_content":null,"tool_calls":[{{"id":"c","name":"f","arguments":{{}}}}]}},
+                {{"role":"tool","tool_call_id":"c","content":"r"}},
+                {{"role":"assistant","content":"done","reasoning_content":""}},
+                {{"role":"assistant","content":"kept","reasoning_content":"why"}},
+                {{"role":"user","content":"three"}}]}}"#
+            )
+        };
+        for clear in [false, true] {
+            let input = chat_messages(cli::AcquiredRunInput::Messages {
+                document: document(clear),
+                source: "test".into(),
+            })
+            .unwrap();
+            assert_eq!(input.history_reasoning_missing, 2, "clear_thinking {clear}");
+            let reasonings: Vec<_> = input
+                .messages
+                .iter()
+                .filter_map(|message| match message {
+                    Message::Assistant {
+                        content, reasoning, ..
+                    } => Some((content.as_str(), reasoning.as_deref())),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                reasonings,
+                [
+                    ("plan</think>answer", Some("")),
+                    ("", Some("")),
+                    ("done", Some("")),
+                    ("kept", Some("why")),
+                ]
+            );
+            let options = RenderOptions::generate(Effort::High, clear);
+            let cli = chat::render_with_tools(&input.messages, &input.tools, options).unwrap();
+            // The renderer's own inline split would have turned "plan" into
+            // reasoning; the normalized history keeps it as content.
+            let mut raw = chat::parse_document(document(clear).as_bytes()).unwrap();
+            let split = chat::render_with_tools(&raw.messages, &raw.tools, options).unwrap();
+            assert_ne!(cli, split);
+            for message in &mut raw.messages {
+                if let Message::Assistant { reasoning, .. } = message {
+                    reasoning.get_or_insert_with(String::new);
+                }
+            }
+            assert_eq!(
+                cli,
+                chat::render_with_tools(&raw.messages, &raw.tools, options).unwrap()
+            );
+        }
+    }
+
     #[test]
     fn user_and_system_flags_become_the_conversation() {
-        let (messages, clear, _) = chat_messages(cli::AcquiredRunInput::User {
+        let input = chat_messages(cli::AcquiredRunInput::User {
             system: Some("Be brief.".into()),
             user: "hi".into(),
         })
         .unwrap();
-        assert!(!clear);
+        assert!(!input.clear_thinking);
         assert_eq!(
-            messages,
+            input.messages,
             [
                 Message::System("Be brief.".into()),
                 Message::User("hi".into())
             ]
         );
-        let (messages, clear, _) = chat_messages(cli::AcquiredRunInput::Messages {
+        let input = chat_messages(cli::AcquiredRunInput::Messages {
             document: r#"{"messages":[{"role":"user","content":"q"}],"clear_thinking":true}"#
                 .into(),
             source: "test".into(),
         })
         .unwrap();
-        assert!(clear);
-        assert_eq!(messages, [Message::User("q".into())]);
-        let (messages, _, tools) = chat_messages(cli::AcquiredRunInput::Messages {
+        assert!(input.clear_thinking);
+        assert_eq!(input.messages, [Message::User("q".into())]);
+        let input = chat_messages(cli::AcquiredRunInput::Messages {
             document: r#"{"messages":[{"role":"user","content":"q"}],"tools":[]}"#.into(),
             source: "test".into(),
         })
         .unwrap();
-        assert_eq!(messages, [Message::User("q".into())]);
-        assert!(tools.is_empty());
-        let (_, _, tools) = chat_messages(cli::AcquiredRunInput::Messages {
+        assert_eq!(input.messages, [Message::User("q".into())]);
+        assert!(input.tools.is_empty());
+        let input = chat_messages(cli::AcquiredRunInput::Messages {
             document: r#"{"messages":[{"role":"user","content":"q"}],"tools":[{"name":"f"}]}"#
                 .into(),
             source: "test".into(),
         })
         .unwrap();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name(), "f");
+        assert_eq!(input.tools.len(), 1);
+        assert_eq!(input.tools[0].name(), "f");
         let error = chat_messages(cli::AcquiredRunInput::Messages {
             document: r#"{"messages":[{"role":"user","content":"q"}],"tools":[{"name":"f","strict":true}]}"#
                 .into(),

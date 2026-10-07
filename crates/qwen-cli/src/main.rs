@@ -300,6 +300,21 @@ fn run() -> Result<()> {
         model_family,
         drafter_policy::Lane::CliSingleTurn,
     )?;
+    // Structured run output is a verified-chat format: settled here, before
+    // any lane loads, so no family can accept and ignore it.
+    if let cli::Invocation::Run(run) = &invocation
+        && run.format == chat_output::RunFormat::Responses
+    {
+        ensure!(
+            matches!(family, ModelFamily::K2Horizon | ModelFamily::Glm5Next),
+            "--format responses is supported for verified K2 Horizon and GLM-5.3-Flash chat; {} run prints text",
+            family_profile::profile(family).display
+        );
+        ensure!(
+            !matches!(run.input, cli::RunInput::RawPrompt(_)),
+            "--format responses needs chat input (--user or --messages); raw input prints text"
+        );
+    }
     // One exhaustive dispatch keeps each family out of the wrong admission
     // lane. K2, GLM and Muse own their request shapes and skip the Qwen batch
     // and DeepSeek selector validators below.

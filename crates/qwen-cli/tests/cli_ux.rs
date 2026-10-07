@@ -220,3 +220,54 @@ fn text_info_describes_each_family_as_itself() {
         }
     }
 }
+
+/// `--format responses` is a verified-chat format (K2 Horizon, GLM-5.3-Flash):
+/// every other family, and raw input to those two, is refused before any
+/// lane loads, never accepted and ignored.
+#[test]
+fn structured_run_output_is_refused_outside_verified_chat() {
+    for (architecture, display) in [
+        ("qwen35", "Qwen"),
+        ("qwen35moe", "Qwen MoE"),
+        ("qwen4exp", "Qwen3.8-Flash-Next"),
+        ("muse-glimmer", "Muse Glimmer"),
+        ("deepseek4", "DeepSeek V4"),
+    ] {
+        let model = HeaderOnlyGguf::new(architecture);
+        let output = run_with_stdin_held_open(&[
+            "run",
+            "-m",
+            model.0.to_str().unwrap(),
+            "--user",
+            "hi",
+            "--format",
+            "responses",
+        ]);
+        assert!(!output.status.success(), "{architecture}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains(&format!(
+                "--format responses is supported for verified K2 Horizon and GLM-5.3-Flash chat; {display} run prints text"
+            )),
+            "{architecture}: {stderr}"
+        );
+    }
+    for architecture in ["k2-horizon", "glm5-next"] {
+        let model = HeaderOnlyGguf::new(architecture);
+        let output = run_with_stdin_held_open(&[
+            "run",
+            "-m",
+            model.0.to_str().unwrap(),
+            "--raw-prompt",
+            "x",
+            "--format",
+            "responses",
+        ]);
+        assert!(!output.status.success(), "{architecture}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("--format responses needs chat input"),
+            "{architecture}: {stderr}"
+        );
+    }
+}

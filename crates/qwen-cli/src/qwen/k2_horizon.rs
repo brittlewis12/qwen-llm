@@ -17,7 +17,7 @@ use timing::{Phase, Timing};
 fn family_implementation() -> serde_json::Value {
     serde_json::json!({
         "run": {"status": "supported", "scope": "raw_or_verified_chat_and_tools", "requires_profile": "dense_7b",
-            "chat_profile": "verified_final_artifact", "output": "raw_literal_or_chat_text_or_tool_responses_json",
+            "chat_profile": "verified_final_artifact", "output": "decoded_text_or_format_responses",
             "capacity_policy": "checkpoint_context_and_device_memory", "native_tokenizer": true, "kv_storage": "f16"},
         "serve": {"status": "partial", "endpoint": "/v1/responses", "input": "raw_string_or_verified_chat_items",
             "capacity_policy": "checkpoint_context_and_device_memory", "snapshot_cache": false, "tools": true,
@@ -183,18 +183,22 @@ fn render_chat_input(input: cli::AcquiredRunInput, effort: chat::Effort) -> Resu
     Ok(render_chat_input_full(input, effort)?.0)
 }
 
+/// The request a K2 run lane generates from.
+struct PreparedInput {
+    text: String,
+    source: PromptSource,
+    chat_record: Option<serde_json::Value>,
+    tool_chat: Option<chat::tools::ToolChatInput>,
+    format: crate::chat_output::RunFormat,
+}
+
 fn prepare_input(
     gguf: &GgufFile,
     invocation: cli::Invocation,
     args: &Args,
     explicit: ExplicitCliOptions,
     timing: &mut Timing,
-) -> Result<(
-    String,
-    PromptSource,
-    Option<serde_json::Value>,
-    Option<chat::tools::ToolChatInput>,
-)> {
+) -> Result<PreparedInput> {
     if let cli::Invocation::Run(run) = &invocation
         && !matches!(run.input, cli::RunInput::RawPrompt(_))
     {
@@ -225,20 +229,31 @@ fn prepare_input(
         let cli::Invocation::Run(run) = invocation else {
             unreachable!()
         };
+        let format = run.format;
         let input = timing.measure(Phase::InputAcquisition, || run.acquire_input())?;
         let (text, tools) =
             timing.measure(Phase::Rendering, || render_chat_input_full(input, effort))?;
-        let record = serde_json::json!({"profile":profile,"reasoning_effort":effort,"stops":chat::CHAT_STOPS,
-            "bos_owner":"native_tokenizer","output":"reasoning_stderr_answer_stdout"});
-        let mut record = record;
+        let mut record = serde_json::json!({"profile":profile,"reasoning_effort":effort,"stops":chat::CHAT_STOPS,
+            "bos_owner":"native_tokenizer","output":format.label()});
         if let Some(tools) = &tools {
             record["tools"] = tools.config.echo();
-            record["output"] = serde_json::json!("responses_json");
         }
-        return Ok((text, PromptSource::Messages, Some(record), tools));
+        return Ok(PreparedInput {
+            text,
+            source: PromptSource::Messages,
+            chat_record: Some(record),
+            tool_chat: tools,
+            format,
+        });
     }
     let (text, source) = prepare_raw_timed(invocation, args, explicit, timing)?;
-    Ok((text, source, None, None))
+    Ok(PreparedInput {
+        text,
+        source,
+        chat_record: None,
+        tool_chat: None,
+        format: crate::chat_output::RunFormat::Text,
+    })
 }
 
 #[cfg(test)]
@@ -331,8 +346,13 @@ pub(crate) fn run_raw(
     })?;
     let config = artifact.config().clone();
     let tokenizer = artifact.into_tokenizer();
-    let (text, source, mut chat_record, tool_chat) =
-        prepare_input(gguf, invocation, args, explicit, &mut timing)?;
+    let PreparedInput {
+        text,
+        source,
+        mut chat_record,
+        tool_chat,
+        format,
+    } = prepare_input(gguf, invocation, args, explicit, &mut timing)?;
     let sampling = timing.measure(Phase::RequestPreparation, || cli_sampling_config(args))?;
     let sampling_echo = sampling.clone();
     let tool_byte_budget = if tool_chat.is_some() {
@@ -397,26 +417,30 @@ pub(crate) fn run_raw(
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
-    let mut stderr = std::io::stderr();
-    let mut partition = chat_record
+    // Chat prints the decoded bytes (text) or one Responses object; raw
+    // input prints the decoded bytes. With declared tools, the structured
+    // format parses calls; text leaves tool syntax literal.
+    let mut output = chat_record
         .as_ref()
-        .filter(|_| tool_chat.is_none())
-        .map(|record| {
-            chat::Effort::parse(record["reasoning_effort"].as_str())
-                .map(crate::serve::partition_k2::k2_partition)
+        .map(|record| -> Result<_> {
+            use crate::serve::output_partition::OutputProtocol;
+            let effort = chat::Effort::parse(record["reasoning_effort"].as_str())?;
+            let structured = match &tool_chat {
+                Some(chat) => OutputProtocol::K2Tools {
+                    effort: chat.effort,
+                    config: chat.config.clone(),
+                    max_bytes: tool_byte_budget,
+                },
+                None => OutputProtocol::K2Chat { effort },
+            };
+            Ok(crate::chat_output::ChatOutput::new(
+                format,
+                OutputProtocol::K2Chat { effort },
+                structured,
+            ))
         })
         .transpose()?;
-    let mut tool_partition = tool_chat.as_ref().map(|chat| {
-        crate::serve::output_partition::OutputPartition::new(
-            crate::serve::output_partition::OutputProtocol::K2Tools {
-                effort: chat.effort,
-                config: chat.config.clone(),
-                max_bytes: tool_byte_budget,
-            },
-        )
-    });
-    let mut tool_events = Vec::new();
-    let mut visible = false;
+    let mut wrote = false;
     let generation = generate_serial(
         logits,
         args.tokens,
@@ -424,21 +448,13 @@ pub(crate) fn run_raw(
         &mut sampler,
         |token| {
             let bytes = tokenizer.try_decode_piece_bytes_exact(token)?;
-            if let Some(partition) = &mut tool_partition {
-                partition.push(bytes, &mut tool_events);
-            } else if let Some(partition) = &mut partition {
-                let mut events = Vec::new();
-                partition.push(bytes, &mut events);
-                crate::chat_output::write_chat_events(
-                    &events,
-                    &mut stdout,
-                    &mut stderr,
-                    &mut visible,
-                    "K2",
-                )?;
-            } else {
-                stdout.write_all(bytes)?;
-                stdout.flush()?;
+            match &mut output {
+                Some(output) => output.piece(bytes, &mut stdout)?,
+                None => {
+                    stdout.write_all(bytes)?;
+                    stdout.flush()?;
+                    wrote |= !bytes.is_empty();
+                }
             }
             Ok(())
         },
@@ -446,7 +462,22 @@ pub(crate) fn run_raw(
             let token = checked_token_id(token, config.vocab_size, "generated")?;
             session.append(&[token]).map_err(anyhow::Error::from)
         },
-    )?;
+    );
+    let generation = match generation {
+        Ok(generation) => generation,
+        Err(error) => {
+            // Leave the terminal on a fresh line; the original error stands.
+            match &output {
+                Some(output) => output.abandon(&mut stdout),
+                None if wrote => {
+                    let _ = writeln!(stdout);
+                    let _ = stdout.flush();
+                }
+                None => {}
+            }
+            return Err(error);
+        }
+    };
     let execution_end = Instant::now();
     timing.record(
         Phase::ResidentExecution,
@@ -454,72 +485,55 @@ pub(crate) fn run_raw(
     )?;
     let timing = timing.finish(execution_end.duration_since(request_t0))?;
     let load_ms = timing.load_ms;
-    if let Some(partition) = tool_partition {
-        let (stop, end) = crate::serve::outcome::generation_end(&generation);
-        partition
-            .finish(end, &mut tool_events)
-            .map_err(|e| anyhow::anyhow!(e.message))?;
-        let chat = tool_chat.as_ref().unwrap();
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
-        let request = crate::serve::items::ServeRequest {
-            model: gguf.get_str("general.name").unwrap_or("k2-horizon").into(),
-            k2_tools: Some(chat.clone()),
-            instructions: chat.system_text().map(str::to_owned),
-            allowed_tools: chat.config.names()?,
-            parallel_tool_calls: true,
-            tool_choice: serde_json::json!("auto"),
-            reasoning: Some(serde_json::json!({"effort":chat.effort})),
-            max_output_tokens: Some(args.tokens),
-            temperature_echo: Some(f64::from(sampling_echo.temperature)),
-            top_p_echo: Some(f64::from(sampling_echo.top_p)),
-            ..Default::default()
-        };
-        let response = crate::serve::events::build_response_object(
-            &request,
-            format!("resp_k2_cli_{}_{}", std::process::id(), now.as_nanos()),
-            now.as_secs(),
-            &tool_events,
-            stop,
-            crate::serve::events::Usage {
+    match output {
+        Some(output) => {
+            let (stop, end) = crate::serve::outcome::generation_end(&generation);
+            let usage = crate::serve::events::Usage {
                 input_tokens: tokens.len(),
                 output_tokens: generation.tokens.len(),
                 cached_tokens: 0,
-            },
-            None,
-        )?;
-        serde_json::to_writer(&mut stdout, &response)?;
-        writeln!(stdout)?;
-        stdout.flush()?;
-    }
-    if let Some(partition) = partition {
-        let mut events = Vec::new();
-        let reasoning_closed = partition.closed();
-        if let Some(record) = &mut chat_record {
-            record["reasoning_closed"] = serde_json::json!(partition.closed());
+            };
+            let effort = chat_record
+                .as_ref()
+                .and_then(|record| record["reasoning_effort"].as_str())
+                .map(str::to_owned);
+            let request = || -> Result<crate::serve::items::ServeRequest> {
+                Ok(crate::serve::items::ServeRequest {
+                    model: gguf.get_str("general.name").unwrap_or("k2-horizon").into(),
+                    k2_tools: tool_chat.clone(),
+                    instructions: tool_chat
+                        .as_ref()
+                        .and_then(|chat| chat.system_text().map(str::to_owned)),
+                    allowed_tools: match &tool_chat {
+                        Some(chat) => chat.config.names()?,
+                        None => Vec::new(),
+                    },
+                    parallel_tool_calls: true,
+                    tool_choice: serde_json::json!("auto"),
+                    reasoning: Some(serde_json::json!({"effort": effort})),
+                    max_output_tokens: Some(args.tokens),
+                    temperature_echo: Some(f64::from(sampling_echo.temperature)),
+                    top_p_echo: Some(f64::from(sampling_echo.top_p)),
+                    ..Default::default()
+                })
+            };
+            let finish = output.finish(stop, end, usage, request, "resp_k2_cli", &mut stdout);
+            let closed = finish.as_ref().map(|finish| finish.reasoning_closed);
+            if let (Some(record), Ok(closed)) = (&mut chat_record, &closed) {
+                record["reasoning_closed"] = serde_json::json!(closed);
+            }
+            if matches!(closed, Ok(false)) {
+                eprintln!(
+                    "k2_horizon: incomplete response: token budget exhausted before reasoning closed; no final answer"
+                );
+            }
+            finish?;
         }
-        let result = partition.finish(
-            crate::serve::outcome::generation_end(&generation).1,
-            &mut events,
-        );
-        crate::chat_output::write_chat_events(
-            &events,
-            &mut stdout,
-            &mut stderr,
-            &mut visible,
-            "K2",
-        )?;
-        writeln!(stderr)?;
-        result.map_err(|e| anyhow::anyhow!(e.message))?;
-        if !reasoning_closed {
-            writeln!(
-                stderr,
-                "k2_horizon: incomplete response: token budget exhausted before reasoning closed; no final answer"
-            )?;
+        None if wrote => {
+            writeln!(stdout)?;
+            stdout.flush()?;
         }
-    }
-    if visible || (chat_record.is_none() && !generation.tokens.is_empty()) {
-        writeln!(stdout)?;
-        stdout.flush()?;
+        None => {}
     }
     let prefill_tps = tokens.len() as f64 / (prefill_ms / 1e3).max(f64::MIN_POSITIVE);
     let decode_tps =

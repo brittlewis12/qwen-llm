@@ -66,8 +66,9 @@ no further `glm5-next` changes). Earlier research (2026-08-28 gap analysis,
   low/high/max (default max; others refused rather than silently Max), no
   non-thinking mode, `clear_thinking`, tools refused. Chat eligibility is the
   embedded template digest, single-token markers and released stops.
-- P5 run done: `qwen run --user/--system/--messages`, reasoning to stderr and
-  the answer to stdout through the shared pre-opened partition, release sampling
+- P5 run done: `qwen run --user/--system/--messages`, the decoded generated
+  bytes on stdout as for every family (`--format responses` for one Responses
+  object; reasoning to stderr until 2026-10-06), release sampling
   (temperature 1.0, top-p 0.95, top-k/min-p off) for raw and chat unless flags
   override, chat profile and controls in `diagnostics.glm5_next` (schema 2).
 - P5 serve done (`docs/SERVE.md#glm-53-flash-verified-text-chat`): verified text

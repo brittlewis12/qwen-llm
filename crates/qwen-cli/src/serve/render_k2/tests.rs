@@ -9,7 +9,8 @@ fn raw_origin_and_special_policy_survive_normalization_without_templates() {
     assert_eq!(render(&request).unwrap().as_bytes(), text.as_bytes());
     assert_eq!(request.k2_add_special_tokens, Some(true));
     assert_eq!(request.max_output_tokens, Some(8));
-    assert_eq!(sampling(&request), SamplingConfig::default());
+    // Raw completion still samples with the release's card settings.
+    assert_eq!(sampling(&request), SamplingConfig::k2_horizon(42));
     assert!(!request.parallel_tool_calls);
     assert_eq!(request.tool_choice, "none");
     let explicit =

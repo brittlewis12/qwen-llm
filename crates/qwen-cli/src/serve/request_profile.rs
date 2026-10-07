@@ -3,6 +3,8 @@
 use super::items::{QwenTemplate, ServeError, ServeRequest, TemplateStyle};
 use super::output_partition::{OutputProtocol, ToolGrammar};
 use super::{render, render_ds4, render_glm5_next, render_k2, render_muse};
+use crate::release_identity::ReleaseIdentity;
+use crate::release_sampling::{decimal, release_sampling};
 use qwen_llm::muse_glimmer::MuseGlimmerChatTemplateProfile;
 use qwen_llm::sampling::SamplingConfig;
 use serde_json::Value;
@@ -15,12 +17,17 @@ pub(crate) enum RequestProfile {
         template: QwenTemplate,
         no_thinking_supported: bool,
         style: TemplateStyle,
+        /// The identified release's defaults for omitted sampling fields;
+        /// `None` leaves them to the backend's legacy greedy fallbacks.
+        sampling: Option<SamplingConfig>,
     },
     FlashNext {
         style: TemplateStyle,
     },
     DeepSeekV4 {
         style: TemplateStyle,
+        /// As for `OrdinaryQwen`.
+        sampling: Option<SamplingConfig>,
     },
     Muse {
         template: MuseGlimmerChatTemplateProfile,
@@ -81,7 +88,7 @@ impl RequestProfile {
         match self {
             Self::OrdinaryQwen { style, .. }
             | Self::FlashNext { style }
-            | Self::DeepSeekV4 { style } => Some(*style),
+            | Self::DeepSeekV4 { style, .. } => Some(*style),
             Self::UnboundQwen | Self::Muse { .. } | Self::K2 { .. } | Self::Glm5Next { .. } => None,
         }
     }
@@ -90,14 +97,23 @@ impl RequestProfile {
         match self {
             // Ordinary Qwen binds a clone during rendering; Flash-Next binds
             // before rendering, protocol selection and response echoes.
-            Self::UnboundQwen | Self::OrdinaryQwen { .. } => Ok(()),
+            Self::UnboundQwen => Ok(()),
+            Self::OrdinaryQwen { sampling, .. } => {
+                if let Some(release) = sampling {
+                    fill_sampling_defaults(request, *release);
+                }
+                Ok(())
+            }
             Self::FlashNext { .. } => {
                 *request =
                     crate::open_responses::bind_qwen_request(request, QwenTemplate::Qwen38, true)?;
-                normalize_flash_next_sampling(request);
+                fill_sampling_defaults(request, flash_next_release());
                 Ok(())
             }
-            Self::DeepSeekV4 { .. } => {
+            Self::DeepSeekV4 { sampling, .. } => {
+                if let Some(release) = sampling {
+                    fill_sampling_defaults(request, *release);
+                }
                 if request.template_style != Some(TemplateStyle::Upstream) {
                     request.history_reasoning_missing = 0;
                 }
@@ -215,35 +231,41 @@ impl RequestProfile {
     }
 }
 
-/// Qwen3.8-Flash-Next's released sampling, each request field overriding
-/// its own. The resident backend samples from exactly this.
-pub(crate) fn flash_next_sampling(request: &ServeRequest) -> SamplingConfig {
-    let defaults = SamplingConfig::qwen38_flash_next(42);
+/// Flash-Next's release defaults (`release_sampling`); serve seed 42.
+pub(crate) fn flash_next_release() -> SamplingConfig {
+    release_sampling(ReleaseIdentity::FlashNext, 42)
+}
+
+/// A request's sampler: each field it sets, else the release default. A
+/// backend samples from exactly this, so a request that bypassed
+/// normalization still gets the release's defaults.
+pub(crate) fn sampling_with_defaults(
+    request: &ServeRequest,
+    release: SamplingConfig,
+) -> SamplingConfig {
     SamplingConfig {
-        temperature: request.temperature.unwrap_or(defaults.temperature),
-        top_k: request.top_k.unwrap_or(defaults.top_k),
-        top_p: request.top_p.unwrap_or(defaults.top_p),
-        min_p: request.min_p.unwrap_or(defaults.min_p),
-        seed: request.seed.unwrap_or(defaults.seed),
+        temperature: request.temperature.unwrap_or(release.temperature),
+        top_k: request.top_k.unwrap_or(release.top_k),
+        top_p: request.top_p.unwrap_or(release.top_p),
+        min_p: request.min_p.unwrap_or(release.min_p),
+        seed: request.seed.unwrap_or(release.seed),
     }
 }
 
-/// Absent sampling fields take the release defaults, so the response echoes
-/// what was sampled rather than the greedy Qwen serve fallbacks.
-fn normalize_flash_next_sampling(request: &mut ServeRequest) {
-    let defaults = SamplingConfig::qwen38_flash_next(42);
+/// Absent sampling fields take the release defaults, and the response echoes
+/// what was sampled.
+pub(crate) fn fill_sampling_defaults(request: &mut ServeRequest, release: SamplingConfig) {
     if request.temperature.is_none() {
-        request.temperature = Some(defaults.temperature);
-        request.temperature_echo = Some(f64::from(defaults.temperature));
+        request.temperature = Some(release.temperature);
+        request.temperature_echo = Some(decimal(release.temperature));
     }
     if request.top_p.is_none() {
-        request.top_p = Some(defaults.top_p);
-        // Literal, as for Muse and GLM: f64::from(0.95f32) echoes 0.9499999…
-        request.top_p_echo = Some(0.95);
+        request.top_p = Some(release.top_p);
+        request.top_p_echo = Some(decimal(release.top_p));
     }
-    request.top_k.get_or_insert(defaults.top_k);
-    request.min_p.get_or_insert(defaults.min_p);
-    request.seed.get_or_insert(defaults.seed);
+    request.top_k.get_or_insert(release.top_k);
+    request.min_p.get_or_insert(release.min_p);
+    request.seed.get_or_insert(release.seed);
 }
 
 pub(super) fn qwen_preopens(template: QwenTemplate, request: &ServeRequest) -> bool {

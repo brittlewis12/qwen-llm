@@ -442,6 +442,7 @@ fn family_profiles_serve_history_or_standalone_assets_without_native_inference()
     let profiles = [
         RequestProfile::DeepSeekV4 {
             style: TemplateStyle::House,
+            sampling: None,
         },
         RequestProfile::FlashNext {
             style: TemplateStyle::House,

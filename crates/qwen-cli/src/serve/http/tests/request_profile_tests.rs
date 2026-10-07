@@ -137,16 +137,22 @@ fn family_profiles_drive_real_http_json_and_sse_without_hook_overrides() {
         .as_str()
         .unwrap();
     let mut cases = Vec::new();
-    for template in [
-        QwenTemplate::Qwen35,
-        QwenTemplate::Qwen36,
-        QwenTemplate::Qwen38,
+    // Served Qwen models carry their release's sampling decision; 0.6 is the
+    // Qwen3.5-27B/122B-A10B case.
+    for (template, temperature) in [
+        (QwenTemplate::Qwen35, 0.6),
+        (QwenTemplate::Qwen36, 1.0),
+        (QwenTemplate::Qwen38, 1.0),
     ] {
         cases.push((
             RequestProfile::OrdinaryQwen {
                 template,
                 no_thinking_supported: true,
                 style: TemplateStyle::House,
+                sampling: Some(qwen_llm::sampling::SamplingConfig::qwen3_release(
+                    temperature,
+                    42,
+                )),
             },
             json!({"model":"test","input":"Hello","x_qwen":{"no_thinking":true}}),
             qwen_prompt.to_string(),
@@ -167,7 +173,10 @@ fn family_profiles_drive_real_http_json_and_sse_without_hook_overrides() {
     ));
     for style in [TemplateStyle::House, TemplateStyle::Upstream] {
         cases.push((
-            RequestProfile::DeepSeekV4 { style },
+            RequestProfile::DeepSeekV4 {
+                style,
+                sampling: Some(qwen_llm::sampling::SamplingConfig::deepseek_v4_0731(42)),
+            },
             json!({"model":"test","input":"Hello"}),
             ds_prompt.into(),
             "answer".into(),
@@ -245,6 +254,20 @@ fn family_profiles_drive_real_http_json_and_sse_without_hook_overrides() {
                 assert_eq!(reply["temperature"], 1.0);
                 assert_eq!(reply["top_p"], 0.95);
             }
+            // Omitted sampling echoes the release decision as sampled.
+            if let RequestProfile::OrdinaryQwen {
+                sampling: Some(release),
+                ..
+            }
+            | RequestProfile::DeepSeekV4 {
+                sampling: Some(release),
+                ..
+            } = &profile
+            {
+                let decimal = crate::release_sampling::decimal;
+                assert_eq!(reply["temperature"], decimal(release.temperature));
+                assert_eq!(reply["top_p"], decimal(release.top_p));
+            }
             if matches!(profile, RequestProfile::Glm5Next { .. }) {
                 assert_eq!(reply["temperature"], 1.0);
                 assert_eq!(reply["top_p"], 0.95);
@@ -256,67 +279,111 @@ fn family_profiles_drive_real_http_json_and_sse_without_hook_overrides() {
     }
 }
 
-/// Flash-Next serve samples with the released `generation_config.json` when a
-/// request omits sampling, and every explicit field still wins on its own,
-/// greedy included. Other Qwen identities keep the greedy-leaning defaults.
+/// Served models sample with their release's defaults when a request omits
+/// sampling (Flash-Next at every effort, no_thinking included), echo what was
+/// sampled, and keep every explicit field on its own, greedy included. A
+/// profile without a release decision keeps the legacy greedy fallbacks.
 #[test]
-fn flash_next_defaults_to_release_sampling_and_keeps_explicit_fields() {
-    use crate::serve::request_profile::flash_next_sampling;
+fn served_families_default_to_release_sampling_and_keep_explicit_fields() {
+    use crate::serve::backend::release_request_sampler;
+    use crate::serve::request_profile::{flash_next_release, sampling_with_defaults};
     use qwen_llm::sampling::SamplingConfig;
-    let profile = RequestProfile::FlashNext {
-        style: TemplateStyle::House,
-    };
-    for body in [
-        json!({"model":"test","input":"Hello"}),
-        json!({"model":"test","input":"Hello","x_qwen":{"no_thinking":true}}),
-        json!({"model":"test","input":"Hello","reasoning":{"effort":"low"}}),
-    ] {
-        let mut request = profile.parse(&body).unwrap();
-        profile.normalize(&mut request).unwrap();
-        assert_eq!(
-            flash_next_sampling(&request),
+    let qwen35_27b = SamplingConfig::qwen3_release(0.6, 42);
+    let ds4 = SamplingConfig::deepseek_v4_0731(42);
+    let profiles = [
+        (
+            RequestProfile::FlashNext {
+                style: TemplateStyle::House,
+            },
             SamplingConfig::qwen38_flash_next(42),
-            "{body}"
-        );
-        assert_eq!(
-            (request.temperature_echo, request.top_p_echo),
-            (Some(1.0), Some(0.95))
-        );
-    }
+        ),
+        (
+            RequestProfile::OrdinaryQwen {
+                template: QwenTemplate::Qwen35,
+                no_thinking_supported: true,
+                style: TemplateStyle::House,
+                sampling: Some(qwen35_27b),
+            },
+            qwen35_27b,
+        ),
+        (
+            RequestProfile::DeepSeekV4 {
+                style: TemplateStyle::House,
+                sampling: Some(ds4),
+            },
+            ds4,
+        ),
+    ];
+    assert_eq!(flash_next_release(), SamplingConfig::qwen38_flash_next(42));
+    for (profile, release) in &profiles {
+        for body in [
+            json!({"model":"test","input":"Hello"}),
+            json!({"model":"test","input":"Hello","x_qwen":{"no_thinking":true}}),
+            json!({"model":"test","input":"Hello","reasoning":{"effort":"low"}}),
+        ] {
+            if matches!(profile, RequestProfile::DeepSeekV4 { .. }) && body["x_qwen"].is_object() {
+                continue; // DS4 selects tiers through reasoning.effort only.
+            }
+            let mut request = profile.parse(&body).unwrap();
+            if profile.normalize(&mut request).is_err() {
+                continue; // A family that refuses this effort is not under test here.
+            }
+            assert_eq!(
+                sampling_with_defaults(&request, *release),
+                *release,
+                "{body}"
+            );
+            let decimal = crate::release_sampling::decimal;
+            assert_eq!(
+                (request.temperature_echo, request.top_p_echo),
+                (
+                    Some(decimal(release.temperature)),
+                    Some(decimal(release.top_p))
+                ),
+                "{body}"
+            );
+            assert_eq!(
+                release_request_sampler(&request, Some(*release))
+                    .unwrap()
+                    .config(),
+                *release
+            );
+        }
 
-    let mut request = profile
-        .parse(
-            &json!({"model":"test","input":"Hello","temperature":0.0,"top_p":0.8,
-            "x_qwen":{"top_k":5,"min_p":0.1,"seed":7}}),
-        )
-        .unwrap();
-    profile.normalize(&mut request).unwrap();
-    assert_eq!(
-        flash_next_sampling(&request),
-        SamplingConfig {
+        let mut request = profile
+            .parse(
+                &json!({"model":"test","input":"Hello","temperature":0.0,"top_p":0.8,
+                "x_qwen":{"top_k":5,"min_p":0.1,"seed":7}}),
+            )
+            .unwrap();
+        profile.normalize(&mut request).unwrap();
+        let explicit = SamplingConfig {
             temperature: 0.0,
             top_k: 5,
             top_p: 0.8,
             min_p: 0.1,
             seed: 7,
-        }
-    );
-    assert_eq!(
-        (request.temperature_echo, request.top_p_echo),
-        (Some(0.0), Some(0.8))
-    );
+        };
+        assert_eq!(sampling_with_defaults(&request, *release), explicit);
+        assert_eq!(
+            (request.temperature_echo, request.top_p_echo),
+            (Some(0.0), Some(0.8))
+        );
+    }
 
-    let ordinary = RequestProfile::OrdinaryQwen {
+    let undecided = RequestProfile::OrdinaryQwen {
         template: QwenTemplate::Qwen38,
         no_thinking_supported: true,
         style: TemplateStyle::House,
+        sampling: None,
     };
-    let mut request = ordinary
+    let mut request = undecided
         .parse(&json!({"model":"test","input":"Hello"}))
         .unwrap();
-    ordinary.normalize(&mut request).unwrap();
+    undecided.normalize(&mut request).unwrap();
+    assert_eq!(request.temperature, None);
     assert_eq!(
-        crate::serve::backend::request_sampler(&request)
+        release_request_sampler(&request, None)
             .unwrap()
             .config()
             .temperature,
@@ -324,11 +391,37 @@ fn flash_next_defaults_to_release_sampling_and_keeps_explicit_fields() {
     );
 }
 
+/// K2 Horizon serve, raw and chat, defaults to the card's 1.0 / top-p 0.95.
+#[test]
+fn k2_serve_defaults_to_release_sampling() {
+    for chat in [false, true] {
+        let profile = k2(chat, 128);
+        let body = if chat {
+            json!({"model":"test","input":[{"role":"user","content":"hi"}]})
+        } else {
+            json!({"model":"test","input":"raw"})
+        };
+        let mut request = profile.parse(&body).unwrap();
+        profile.normalize(&mut request).unwrap();
+        assert_eq!(
+            crate::serve::render_k2::sampling(&request),
+            qwen_llm::sampling::SamplingConfig::k2_horizon(42)
+        );
+        assert_eq!(
+            (request.temperature_echo, request.top_p_echo),
+            (Some(1.0), Some(0.95))
+        );
+    }
+}
+
 #[test]
 fn profiles_preserve_style_and_history_normalization_boundaries() {
     let body = json!({"model":"test","input":[{"role":"user","content":"one"},{"role":"assistant","content":"answer"},{"role":"user","content":"two"}]});
     for style in [TemplateStyle::House, TemplateStyle::Upstream] {
-        let profile = RequestProfile::DeepSeekV4 { style };
+        let profile = RequestProfile::DeepSeekV4 {
+            style,
+            sampling: None,
+        };
         let mut request = profile.parse(&body).unwrap();
         assert_eq!(request.history_reasoning_missing, 1);
         request.template_style = profile.template_style_default();
@@ -343,6 +436,7 @@ fn profiles_preserve_style_and_history_normalization_boundaries() {
             template: QwenTemplate::Qwen36,
             no_thinking_supported: true,
             style: TemplateStyle::Upstream,
+            sampling: None,
         },
         RequestProfile::FlashNext {
             style: TemplateStyle::Upstream,
@@ -453,6 +547,7 @@ fn style_overrides_are_applied_or_refused_before_execution() {
                     template: QwenTemplate::Qwen36,
                     no_thinking_supported: true,
                     style: deployment,
+                    sampling: None,
                 },
                 expected_prompt: Some(prompt),
                 output: "answer".into(),

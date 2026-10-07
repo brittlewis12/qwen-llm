@@ -656,6 +656,10 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 invocation.snapshot_policy,
             )?;
             backend.template_style = template_style;
+            backend.release_sampling = Some(crate::release_sampling::release_sampling(
+                crate::release_identity::ReleaseIdentity::DeepSeekV4,
+                42,
+            ));
             backend.set_idle_residency(idle_window);
             tracing::info!(target: "qwen_diag", "serve limits: family=deepseek_v4 max_context_tokens={} {}", context_limit, backend.snapshot_cache_plan);
             match invocation.durable.resolve("deepseek_v4") {
@@ -751,6 +755,12 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 .transpose()
                 .context("open fitted Lens assets before Metal")?;
             let no_thinking_supported = template.verified();
+            // Sampling defaults follow the release, size included (Qwen3.5-27B
+            // and -122B-A10B differ from the rest).
+            let release_sampling = crate::release_sampling::release_sampling(
+                crate::release_identity::ReleaseIdentity::detect(family, &gguf),
+                42,
+            );
             ensure!(
                 template.verified() || template_style == items::TemplateStyle::House,
                 "--template-style upstream requires an identified Qwen release; this model uses the generic ChatML contract"
@@ -804,6 +814,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 no_thinking_supported,
             )?;
             backend.template_style = template_style;
+            backend.release_sampling = Some(release_sampling);
             tracing::info!(target: "qwen_diag", "serve limits: family=qwen max_context_tokens={context_ceiling} context_source={context_source} {snapshot_cache_plan}");
             backend.attach_lens_registry(registry)?;
             match invocation.durable.resolve("qwen") {

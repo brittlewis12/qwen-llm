@@ -2460,12 +2460,40 @@ fn sampled_structural_cli_is_hidden_bounded_and_fail_closed() {
         "--sampled-structural",
     ])
     .unwrap();
+    // The sampler half is checked against effective sampling, after release
+    // defaults: an explicit top-k 0 still fails there.
+    assert!(validate_sampled_structural_mode(&unbounded).is_ok());
     assert!(
-        validate_sampled_structural_mode(&unbounded)
+        validate_sampled_structural_sampling(&unbounded)
             .unwrap_err()
             .to_string()
             .contains("positive temperature and top-k")
     );
+    // Omitted sampling flags take a positive release preset and pass.
+    let argv = [
+        "qwen",
+        "--model",
+        "model.gguf",
+        "--prompt",
+        "hello",
+        "--prefix-cache-max-mib",
+        "0",
+        "--cache-prefix-auto-min-tokens",
+        "0",
+        "--request-timings",
+        "timing.jsonl",
+        "--sampled-structural",
+    ];
+    let matches = Args::command().try_get_matches_from(argv).unwrap();
+    let explicit = ExplicitCliOptions::from_matches(&matches);
+    let mut defaulted = Args::from_arg_matches(&matches).unwrap();
+    assert!(validate_sampled_structural_mode(&defaulted).is_ok());
+    crate::release_sampling::apply_run_defaults(
+        &mut defaulted,
+        explicit,
+        SamplingConfig::qwen3_release(1.0, 42),
+    );
+    assert!(validate_sampled_structural_sampling(&defaulted).is_ok());
 
     assert!(
         Args::try_parse_from([

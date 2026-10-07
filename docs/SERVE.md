@@ -449,8 +449,7 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   every request: the Qwen3.8 contract (effort levels, thinking, tools).
   Absent sampling fields take the release `generation_config.json` (temperature
   1.0, top-p 0.95, top-k 20, min-p 0, seed 42) at every effort, `no_thinking`
-  included, and are echoed; other Qwen identities keep the greedy-leaning
-  serve defaults (`serve/backend.rs::request_sampler`).
+  included, and are echoed (see the wire subset's sampling defaults).
   Since 2026-09-23 it reuses prefixes through the shared serve snapshot
   cache: a request restores the longest cached strictly-shorter token prefix
   into the reset workspace and prefills the rest, with the Qwen
@@ -585,7 +584,8 @@ Accepted fields are `model`, `input`, `stream`, `max_output_tokens`, `temperatur
 
 - Omitted `max_output_tokens` uses the explicit startup default. The full
   `prompt_tokens + max_output_tokens - 1` budget must fit capacity; no truncation.
-- Sampling defaults are temperature 0, top-p 1, top-k 0, min-p 0, seed 0.
+- Sampling defaults are the K2-Horizon card's (temperature 1.0, top-p 0.95;
+  top-k and min-p off; seed 42), raw and chat alike.
   `x_qwen` accepts only `seed`, `top_k`, `min_p`, and `stats`.
 - `x_k2` accepts only boolean `add_special_tokens`; other families reject that
   extension. If supplied, `store` must be false and `truncation` must be `"disabled"`.
@@ -976,6 +976,16 @@ startup. Muse requires an explicit startup default:
   on replayed input items accepted and ignored).
 - `instructions` — optional system text (exclusive with a system item).
 - `max_output_tokens`, `temperature`, `top_p` — standard.
+- Sampling defaults: every sampling field a request omits (`temperature`,
+  `top_p`, `x_qwen.top_k`, `x_qwen.min_p`, `x_qwen.seed`) takes the loaded
+  release's published preset, decided by release identity
+  (`qwen/release_identity.rs` detects, `qwen/release_sampling.rs` decides) and
+  echoed in the response; `qwen info --json` reports it under `sampling`.
+  Qwen3.x releases use temperature 1.0 / top-k 20 / top-p 0.95, except
+  Qwen3.5-27B and Qwen3.5-122B-A10B at 0.6; DeepSeek V4 0731 uses 1.0 / top-p
+  1.0; Muse, K2, GLM and Flash-Next use their releases' presets. Seed 42.
+  Converter-written `general.sampling.*` header keys are not consulted (tests
+  cross-check them). `qwen run` applies the same defaults.
 - `reasoning.effort` — validated Qwen3.8 identities accept `none`, `low`,
   `medium`, and `xhigh`; absent defaults to `xhigh`. It is rejected on generic
   Qwen identities. DS4 applies its separate renderer rules. Muse accepts

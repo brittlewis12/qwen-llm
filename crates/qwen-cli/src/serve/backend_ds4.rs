@@ -27,7 +27,7 @@
 //! Thinking tiers pre-open `<think>` in the prompt, so [`preopens_reasoning`]
 //! reports headless generation to the transport (S3-1).
 
-use super::backend::request_sampler;
+use super::backend::release_request_sampler;
 use super::decode_loop;
 use super::durable::{
     DurablePlan, DurableWorker, Resolved, queue_cap_bytes, resolve_content_identity,
@@ -88,6 +88,9 @@ pub(crate) struct DeepSeekV4Backend {
     durable: Option<Ds4Durable>,
     /// Deployment default for `x_qwen.template_style` (`--template-style`).
     pub(super) template_style: TemplateStyle,
+    /// The release's defaults for omitted sampling fields
+    /// (`release_sampling`); `None` keeps `request_sampler`'s fallbacks.
+    pub(super) release_sampling: Option<qwen_llm::sampling::SamplingConfig>,
     control_cpu_reserve: u64,
     /// Off until [`DeepSeekV4Backend::set_idle_residency`].
     idle_residency: super::idle_residency::IdleResidency,
@@ -215,6 +218,7 @@ impl DeepSeekV4Backend {
             config,
             durable: None,
             template_style: TemplateStyle::House,
+            release_sampling: None,
         })
     }
 
@@ -548,6 +552,7 @@ impl GenerationBackend for DeepSeekV4Backend {
     fn request_profile(&self) -> super::request_profile::RequestProfile {
         super::request_profile::RequestProfile::DeepSeekV4 {
             style: self.template_style,
+            sampling: self.release_sampling,
         }
     }
 
@@ -561,7 +566,7 @@ impl GenerationBackend for DeepSeekV4Backend {
         let max_tokens = request.max_output_tokens.unwrap_or(self.default_max_tokens);
         // Sampling validation precedes tokenization, admission, residency
         // transfer, session allocation, and all model execution.
-        let sampler = request_sampler(request)?;
+        let sampler = release_request_sampler(request, self.release_sampling)?;
         let tokenize_t0 = Instant::now();
         let prompt_ids = decode_loop::encode_checked(
             &self.tokenizer,
@@ -1407,6 +1412,9 @@ mod tests {
             min_p: Some(f32::NAN),
             ..ServeRequest::default()
         };
-        assert!(request_sampler(&request).is_err());
+        // With the release decision a served model has, and without one.
+        let release = qwen_llm::sampling::SamplingConfig::deepseek_v4_0731(42);
+        assert!(release_request_sampler(&request, Some(release)).is_err());
+        assert!(release_request_sampler(&request, None).is_err());
     }
 }

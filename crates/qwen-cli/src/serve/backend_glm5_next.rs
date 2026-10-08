@@ -679,6 +679,9 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                             "serve: glm5_next snapshot restore at {} failed: {error}; prefilling a fresh session",
                             hit.prefix_len
                         );
+                        // Release the failed snapshot before allocating, so
+                        // a pressure retry can reclaim it if evicted.
+                        drop(hit);
                         self.session = None;
                         self.session = Some(with_snapshot_release(&mut self.cache, None, || {
                             new_session(self.ctx, self.weights, &self.prepared, reserve, lineage)

@@ -497,8 +497,10 @@ pub(super) fn load_raw_direction(
         .enumerate()
         .map(|(slot, chunk)| {
             let values = chunk
-                .chunks_exact(4)
-                .map(|value| f32::from_le_bytes(value.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|value| f32::from_le_bytes(*value))
                 .collect::<Vec<_>>();
             let label = match layers {
                 Some(layers) => format!("{id} layer {}", layers[slot]),

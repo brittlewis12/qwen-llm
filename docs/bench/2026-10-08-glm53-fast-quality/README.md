@@ -83,9 +83,10 @@ is deprioritized given the cohort result, not refuted.
 ## Reading for #12
 
 The 2026-10-05 Fast policy (KL 2e-2, regret 0.2) was a regression bound
-calibrated on one prompt, not a quality criterion. Measured against
-quality, Fast passes; measured against agreement with Exact, so would no
-half-precision batched path (including llama.cpp's own). Options:
+calibrated on one prompt, not a quality criterion. Fast passes this
+quality cohort while failing that agreement gate. The measured llama.cpp
+batched-versus-serial comparison also exceeds the gate; other
+half-precision implementations remain untested. Options:
 
 1. Keep Fast as the default and replace the agreement bound with this
    quality criterion, with the properties stated separately (PERF-LOG

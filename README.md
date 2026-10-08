@@ -257,6 +257,7 @@ docs/              behaviour references, design plans and measurement records
 
 Other documents:
 
+- [docs/README.md](docs/README.md): index of the documentation and measurement packets
 - [docs/CLI-UX.md](docs/CLI-UX.md): how the `qwen` command line was designed
   and tested
 - [docs/ENV.md](docs/ENV.md): environment variables

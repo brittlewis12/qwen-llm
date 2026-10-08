@@ -84,6 +84,10 @@ COMMITTED = REPO / "docs/bench/2026-10-08-glm53-fast-quality/report.json"
 GATED_FULL = ("fast_split_grid", "fast_split_tail")
 FRONTIER = "fast_split_frontier"
 TEXT_ARMS = ("exact_512", "fast_512") + GATED_FULL
+# KL values are recorded raw; a computed KL may be a tiny negative number
+# from floating-point roundoff when two distributions (nearly) coincide.
+# Amended before any result was viewed (cx 01a10cc confirmation review).
+KL_ROUNDOFF = -1e-9
 TOOL_ARMS = ("exact_512", "fast_512", "fast_split")
 AGENT_ARMS = ("exact", "fast_512", "fast_split")
 
@@ -141,7 +145,7 @@ def validate(report, manifest, manifest_bytes, quality):
                 assert a["kl_from_exact"] == [], key
             else:
                 assert len(a["kl_from_exact"]) == qa.CONTINUATION and all(
-                    math.isfinite(x) and x >= 0.0 for x in a["kl_from_exact"]
+                    math.isfinite(x) and x >= KL_ROUNDOFF for x in a["kl_from_exact"]
                 ), (key, arm)
     assert len(seen) == 38, "missing items"
 
@@ -183,7 +187,7 @@ def validate(report, manifest, manifest_bytes, quality):
             for row in task["arms"][arm]:
                 assert row["generation"]["cap"] == manifest["agent_cap"]
                 kl = row["prompt_end_kl_from_exact"]
-                assert isinstance(kl, float) and math.isfinite(kl) and kl >= 0.0, (
+                assert isinstance(kl, float) and math.isfinite(kl) and kl >= KL_ROUNDOFF, (
                     "invalid evidence: non-finite prompt-end KL",
                     task["id"],
                     arm,

@@ -1468,8 +1468,8 @@ mod family_diagnostics_tests {
     use super::*;
 
     #[test]
-    fn deepseek_v4_family_diagnostics_match_previous_object() {
-        let value = serde_json::to_value(FamilyDiagnostics::DeepseekV4(
+    fn deepseek_v4_family_diagnostics_match_previous_serialized_bytes() {
+        let value = serde_json::to_string(&FamilyDiagnostics::DeepseekV4(
             RequestStatsDeepSeekV4Diagnostics {
                 schema_version: 1,
                 prefill_mode: "chunked",
@@ -1482,38 +1482,33 @@ mod family_diagnostics_tests {
         .unwrap();
         assert_eq!(
             value,
-            serde_json::json!({"deepseek_v4": {
-                "schema_version": 1, "prefill_mode": "chunked", "prefill_chunk_cap": 64,
-                "transitions": 3, "transition_tps": 4.5, "load_ms": 2.0
-            }})
+            "{\"deepseek_v4\":{\"schema_version\":1,\"prefill_mode\":\"chunked\",\"prefill_chunk_cap\":64,\"transitions\":3,\"transition_tps\":4.5,\"load_ms\":2.0}}"
         );
     }
 
     #[test]
-    fn k2_horizon_family_diagnostics_match_previous_object() {
-        let value = serde_json::to_value(FamilyDiagnostics::K2Horizon(RequestStatsK2Diagnostics {
-            prefill: qwen_llm::k2_horizon_runtime::K2PrefillInfo {
-                mode: "q8_lcpp_token_batch",
-                chunk_tokens: 32,
-                commands: 2,
-                temporary_activation_bytes: 1024,
-            },
-            chat: None,
-            timing: None,
-        }))
-        .unwrap();
+    fn k2_horizon_family_diagnostics_match_previous_serialized_bytes() {
+        let value =
+            serde_json::to_string(&FamilyDiagnostics::K2Horizon(RequestStatsK2Diagnostics {
+                prefill: qwen_llm::k2_horizon_runtime::K2PrefillInfo {
+                    mode: "q8_lcpp_token_batch",
+                    chunk_tokens: 32,
+                    commands: 2,
+                    temporary_activation_bytes: 1024,
+                },
+                chat: None,
+                timing: None,
+            }))
+            .unwrap();
         assert_eq!(
             value,
-            serde_json::json!({"k2_horizon": {
-                "prefill": {"mode": "q8_lcpp_token_batch", "chunk_tokens": 32,
-                    "commands": 2, "temporary_activation_bytes": 1024}
-            }})
+            "{\"k2_horizon\":{\"prefill\":{\"mode\":\"q8_lcpp_token_batch\",\"chunk_tokens\":32,\"commands\":2,\"temporary_activation_bytes\":1024}}}"
         );
     }
 
     #[test]
-    fn glm5_next_family_diagnostics_match_previous_object() {
-        let value = serde_json::to_value(FamilyDiagnostics::Glm5Next(
+    fn glm5_next_family_diagnostics_match_previous_serialized_bytes() {
+        let value = serde_json::to_string(&FamilyDiagnostics::Glm5Next(
             RequestStatsGlm5NextDiagnostics {
                 schema_version: 2,
                 prefill_mode: "packed_fast",
@@ -1528,11 +1523,7 @@ mod family_diagnostics_tests {
         .unwrap();
         assert_eq!(
             value,
-            serde_json::json!({"glm5_next": {
-                "schema_version": 2, "prefill_mode": "packed_fast", "prefill_rows": 4,
-                "capacity": 128, "prefetch": {"windows": 2},
-                "timing": {"total_ms": 9.0}, "sampling": {"seed": 42}
-            }})
+            "{\"glm5_next\":{\"schema_version\":2,\"prefill_mode\":\"packed_fast\",\"prefill_rows\":4,\"capacity\":128,\"prefetch\":{\"windows\":2},\"timing\":{\"total_ms\":9.0},\"sampling\":{\"seed\":42}}}"
         );
     }
 }

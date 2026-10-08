@@ -338,6 +338,7 @@ pub(crate) fn generation_run_bytes(
         native_hyper_captures: Vec::new(),
         raw_directions: Vec::new(),
         direction_readouts: Vec::new(),
+        generation_logprobs: Vec::new(),
     };
     let mut output = build_run_output(
         Path::new("model.gguf"),
@@ -1506,6 +1507,7 @@ fn run_artifact_serializes_envelope_exact_plan_and_score_semantics() {
         native_hyper_captures: Vec::new(),
         raw_directions: Vec::new(),
         direction_readouts: Vec::new(),
+        generation_logprobs: Vec::new(),
         execution_binding: None,
     };
     let value = serde_json::to_value(&artifact).unwrap();
@@ -1690,6 +1692,7 @@ fn summary_contains_required_counts_text_and_artifact_path() {
         native_hyper_captures: Vec::new(),
         raw_directions: Vec::new(),
         direction_readouts: Vec::new(),
+        generation_logprobs: Vec::new(),
         execution_binding: None,
     };
     assert_eq!(
@@ -3016,6 +3019,8 @@ fn raw_direction_payloads_are_exact_finite_nonzero_and_layer_bound() {
             json!([raw_operation("fixed_add", layers, None)]),
         );
         plan.direction_readouts.push(DirectionReadoutDefinition {
+            site: OperationSite::PostBlock,
+            point: None,
             id: "dot".into(),
             direction: "raw".into(),
             scope: serde_json::from_value(
@@ -3104,6 +3109,8 @@ fn direction_readout_only_plans_validate_bind_and_serialize_additively() {
     semantic
         .direction_readouts
         .push(DirectionReadoutDefinition {
+            site: OperationSite::PostBlock,
+            point: None,
             id: "semantic_dot".into(),
             direction: "raw".into(),
             scope: semantic.readouts[0].scope.clone(),
@@ -3179,6 +3186,8 @@ fn direction_readout_scalars_match_an_f64_oracle() {
     assert!(direction_readout_scalars(&[], &[]).is_err());
 
     let record = serde_json::to_value(LiveDirectionReadout {
+        site: OperationSite::PostBlock,
+        point: None,
         id: "r_dot".into(),
         direction: "raw".into(),
         source_layer: 3,

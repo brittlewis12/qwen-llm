@@ -676,6 +676,8 @@ mod tests {
         source.operations.clear();
         source.readouts.truncate(1);
         source.direction_readouts.push(DirectionReadoutDefinition {
+            site: OperationSite::PostBlock,
+            point: None,
             id: "dot".into(),
             direction: "a".into(),
             scope: Scope {

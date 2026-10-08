@@ -43,6 +43,7 @@ use event_schedule::{BoundEventSchedule, CompiledEvent, CompiledEventSchedule};
 
 mod execute;
 mod flash_next;
+mod glm5_next;
 mod lenses;
 mod output;
 mod plan;
@@ -181,6 +182,17 @@ pub(crate) struct LensRunArgs {
     #[arg(long, default_value_t = 0)]
     pub(crate) seed: u64,
 
+    /// Record the N most probable tokens (full-vocabulary log-softmax of the
+    /// unfiltered logits, before sampling) at every generated position.
+    /// GLM-5.3-Flash only; zero records none.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) logprobs_top_k: usize,
+
+    /// Also record these token IDs' log-probabilities at every generated
+    /// position (comma-separated). GLM-5.3-Flash only.
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) logprobs_token_ids: Vec<u32>,
+
     /// Replace this JSON run artifact atomically after successful execution.
     #[arg(long, conflicts_with = "requests_jsonl")]
     pub(crate) output: Option<PathBuf>,
@@ -234,12 +246,27 @@ pub(crate) struct ReadoutDefinition {
 }
 
 /// Scalar residual readout against one plan direction; no lens is involved.
+/// `site` (default post-block, omitted when serialized) and `point` (required
+/// for a module site) are GLM-5.3-Flash only: a module site reads one
+/// writer's output before or after that site's operations.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DirectionReadoutDefinition {
     pub(crate) id: String,
     pub(crate) direction: String,
     pub(crate) scope: Scope,
+    #[serde(default, skip_serializing_if = "OperationSite::is_post_block")]
+    pub(crate) site: OperationSite,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) point: Option<ReadoutPoint>,
+}
+
+/// When a module-site direction readout reads its site.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReadoutPoint {
+    BeforeOperations,
+    AfterOperations,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -273,6 +300,9 @@ pub(crate) enum RunSerialReason {
     CohortSerialPolicy,
     FlashNextPackedNotImplemented,
     MusePackedNotImplemented,
+    /// GLM-5.3-Flash interventions and captures run on the serial decode
+    /// path (the Exact lineage) for every prompt and generated token.
+    Glm5NextSerialInterventions,
 }
 
 impl RunSerialReason {
@@ -285,6 +315,7 @@ impl RunSerialReason {
             Self::CohortSerialPolicy => "cohort_serial_policy",
             Self::FlashNextPackedNotImplemented => "flash_next_packed_not_implemented",
             Self::MusePackedNotImplemented => "muse_packed_not_implemented",
+            Self::Glm5NextSerialInterventions => "glm5_next_serial_interventions",
         }
     }
 }
@@ -309,6 +340,10 @@ pub(crate) struct LiveReadout {
 pub(crate) struct LiveDirectionReadout {
     pub(crate) id: String,
     pub(crate) direction: String,
+    #[serde(skip_serializing_if = "OperationSite::is_post_block")]
+    pub(crate) site: OperationSite,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) point: Option<ReadoutPoint>,
     pub(crate) source_layer: u32,
     pub(crate) phase: &'static str,
     pub(crate) index: usize,
@@ -374,6 +409,69 @@ struct PreparedLens {
     raw_lm_head: Option<NativeLens>,
 }
 
+/// Unfiltered log-probabilities at one generated position.
+#[derive(Debug, Serialize)]
+pub(crate) struct GenerationLogprobs {
+    /// Zero-based generated position (the sampled token's index).
+    pub(crate) index: usize,
+    pub(crate) sampled_token_id: i32,
+    /// `[token_id, logprob]`, most probable first.
+    pub(crate) top: Vec<(u32, f64)>,
+    /// `[token_id, logprob]` for each requested ID, in request order.
+    pub(crate) tracked: Vec<(u32, f64)>,
+}
+
+/// Full-vocabulary log-softmax (f64) of `logits`: the `top_k` most probable
+/// IDs (ties by lower ID) and the `tracked` IDs.
+pub(crate) fn generation_logprobs(
+    logits: &[f32],
+    index: usize,
+    sampled: i32,
+    top_k: usize,
+    tracked: &[u32],
+) -> Result<GenerationLogprobs> {
+    ensure!(
+        logits.iter().all(|v| v.is_finite()),
+        "generation logits are not finite"
+    );
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+    let log_sum = logits
+        .iter()
+        .map(|v| (f64::from(*v) - max).exp())
+        .sum::<f64>()
+        .ln();
+    let logprob = |id: u32| f64::from(logits[id as usize]) - max - log_sum;
+    let mut order: Vec<u32> = (0..logits.len() as u32).collect();
+    let k = top_k.min(order.len());
+    if k > 0 {
+        order.select_nth_unstable_by(k - 1, |a, b| {
+            logits[*b as usize]
+                .total_cmp(&logits[*a as usize])
+                .then(a.cmp(b))
+        });
+        order.truncate(k);
+        order.sort_by(|a, b| {
+            logits[*b as usize]
+                .total_cmp(&logits[*a as usize])
+                .then(a.cmp(b))
+        });
+    } else {
+        order.clear();
+    }
+    for &id in tracked {
+        ensure!(
+            (id as usize) < logits.len(),
+            "tracked token {id} is outside the vocabulary"
+        );
+    }
+    Ok(GenerationLogprobs {
+        index,
+        sampled_token_id: sampled,
+        top: order.into_iter().map(|id| (id, logprob(id))).collect(),
+        tracked: tracked.iter().map(|&id| (id, logprob(id))).collect(),
+    })
+}
+
 pub(crate) fn run(args: LensRunArgs) -> Result<()> {
     validate_run_args(&args)?;
     if args.requests_jsonl.is_some() {
@@ -414,6 +512,11 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
             family.architecture_name()
         );
     }
+    ensure!(
+        family == ModelFamily::Glm5Next
+            || (args.logprobs_top_k == 0 && args.logprobs_token_ids.is_empty()),
+        "--logprobs-top-k and --logprobs-token-ids are supported only for GLM-5.3-Flash"
+    );
     match family {
         ModelFamily::MuseGlimmer => {
             return crate::muse_lens_run::run(
@@ -441,9 +544,16 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
         ModelFamily::K2Horizon => bail!(
             "qwen-lens run supports ordinary Qwen, Muse Glimmer, or Flash-Next; K2 Horizon is not supported by `qwen-lens run`; use its native `qwen-lens read-full --logit-lens` lane"
         ),
-        ModelFamily::Glm5Next => bail!(
-            "qwen-lens run supports ordinary Qwen, Muse Glimmer, or Flash-Next; GLM-5.3-Flash has no lens runtime yet"
-        ),
+        ModelFamily::Glm5Next => {
+            return glm5_next::run_glm5_next(
+                &args,
+                plan,
+                &plan_path,
+                plan_dir,
+                gguf,
+                output_path.as_deref(),
+            );
+        }
         ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {}
     }
     validate_ordinary_plan(&plan)?;

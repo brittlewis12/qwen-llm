@@ -132,6 +132,7 @@ pub(super) fn run_qwen4exp(
         native_hyper_captures,
         raw_directions: Vec::new(),
         direction_readouts: Vec::new(),
+        generation_logprobs: Vec::new(),
     };
     emit_run_output(
         args,

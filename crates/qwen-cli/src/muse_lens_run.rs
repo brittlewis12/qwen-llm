@@ -287,6 +287,7 @@ pub(crate) fn run(
             native_hyper_captures: Vec::new(),
             raw_directions: Vec::new(),
             direction_readouts: Vec::new(),
+            generation_logprobs: Vec::new(),
         },
         RunExecution::runtime_serial(
             args.prefill_execution,
@@ -1213,6 +1214,8 @@ mod tests {
             top_p: 1.0,
             min_p: 0.0,
             seed: 0,
+            logprobs_top_k: 0,
+            logprobs_token_ids: Vec::new(),
             output: None,
             format: Some(super::super::lens_run::RunStdoutFormat::Summary),
             output_dir: None,

@@ -362,7 +362,7 @@ pub(super) fn forward_event(
     }
     let (borrowed, module) = crate::lens_intervention::split_interventions(
         interventions.iter().map(|(_, _, site, op)| (*site, *op)),
-    );
+    )?;
     sequence.check_position(position as usize)?;
     sequence.ensure_can_append(1)?;
     let has_readouts = event.has_readouts();
@@ -494,6 +494,8 @@ pub(super) fn forward_event(
                     &read_f32_tensor(direction, execution.hidden_size),
                 )?;
                 direction_readouts.push(LiveDirectionReadout {
+                    site: OperationSite::PostBlock,
+                    point: None,
                     id: readout.id.clone(),
                     direction: readout.direction.clone(),
                     source_layer: layer,

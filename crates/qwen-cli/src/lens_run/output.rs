@@ -131,6 +131,9 @@ impl RunExecution {
                     Some(RunSerialReason::MusePackedNotImplemented) => {
                         runtime_kind == "muse_glimmer"
                     }
+                    Some(RunSerialReason::Glm5NextSerialInterventions) => {
+                        runtime_kind == "glm5_next"
+                    }
                     None => false,
                 };
                 ensure!(
@@ -267,6 +270,8 @@ pub(crate) struct RunOutput {
     pub(super) raw_directions: Vec<RawDirectionBinding>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(super) direction_readouts: Vec<LiveDirectionReadout>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) generation_logprobs: Vec<super::GenerationLogprobs>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) execution_binding: Option<RunExecutionBinding>,
 }
@@ -322,6 +327,7 @@ pub(crate) struct RunResult {
     pub(crate) native_hyper_captures: Vec<NativeHyperCapture>,
     pub(crate) raw_directions: Vec<RawDirectionBinding>,
     pub(crate) direction_readouts: Vec<LiveDirectionReadout>,
+    pub(crate) generation_logprobs: Vec<super::GenerationLogprobs>,
 }
 
 #[derive(Debug, Serialize)]
@@ -447,6 +453,7 @@ pub(super) fn build_run_output(
         native_hyper_captures: result.native_hyper_captures,
         raw_directions: result.raw_directions,
         direction_readouts: result.direction_readouts,
+        generation_logprobs: result.generation_logprobs,
         execution_binding,
     }
 }

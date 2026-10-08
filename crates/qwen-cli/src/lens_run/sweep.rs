@@ -191,6 +191,8 @@ impl CoefficientSweepArgs {
             top_p: self.top_p,
             min_p: self.min_p,
             seed: self.seed,
+            logprobs_top_k: 0,
+            logprobs_token_ids: Vec::new(),
             output: None,
             format: None,
             output_dir: None,
@@ -893,6 +895,7 @@ pub(super) fn execute_ordinary_arm(
         native_hyper_captures: Vec::new(),
         raw_directions: execution.raw_directions.clone(),
         direction_readouts,
+        generation_logprobs: Vec::new(),
     })
 }
 

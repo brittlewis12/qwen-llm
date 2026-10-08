@@ -582,8 +582,25 @@ fn ensure_raw_rows(
     Ok(())
 }
 
-/// Module-site operations are implemented by the dense engine only.
+/// Module-site operations are implemented by the dense engine only; the
+/// GLM-only expert sites are refused for every ordinary model.
 pub(super) fn validate_ordinary_sites(plan: &LensPlan, kind: ArchKind) -> Result<()> {
+    for operation in &plan.operations {
+        ensure!(
+            !operation.site.is_glm5_next_only(),
+            "operation {} site {} exists only in GLM-5.3-Flash",
+            operation.id,
+            operation.site.as_str()
+        );
+    }
+    for readout in &plan.direction_readouts {
+        ensure!(
+            readout.site == OperationSite::PostBlock && readout.point.is_none(),
+            "direction readout {} site {} is supported only by GLM-5.3-Flash; ordinary Qwen reads the post-block residual",
+            readout.id,
+            readout.site.as_str()
+        );
+    }
     if kind == ArchKind::Dense {
         return Ok(());
     }

@@ -62,7 +62,9 @@ pub(crate) struct OperationDefinition {
 }
 
 /// Where an operation edits the residual stream. Module sites edit a residual
-/// writer's output before its add; the selected layer names the block.
+/// writer's output before its add; the selected layer names the block. The
+/// routed and shared expert outputs exist only in GLM-5.3-Flash, whose MoE
+/// FFN adds them before its mHC post; every other runtime refuses them.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum OperationSite {
@@ -71,6 +73,8 @@ pub(crate) enum OperationSite {
     Embedding,
     MixerOutput,
     FfnOutput,
+    RoutedExpertsOutput,
+    SharedExpertOutput,
 }
 
 impl OperationSite {
@@ -84,45 +88,76 @@ impl OperationSite {
             Self::Embedding => "embedding",
             Self::MixerOutput => "mixer_output",
             Self::FfnOutput => "ffn_output",
+            Self::RoutedExpertsOutput => "routed_experts_output",
+            Self::SharedExpertOutput => "shared_expert_output",
         }
     }
 
-    pub(crate) fn module_site(self) -> Option<ModuleSite> {
-        match self {
+    /// Whether only GLM-5.3-Flash has this site.
+    pub(crate) fn is_glm5_next_only(self) -> bool {
+        matches!(self, Self::RoutedExpertsOutput | Self::SharedExpertOutput)
+    }
+
+    /// The ordinary dense engine's site (`None` for post-block); a
+    /// GLM-only site is refused rather than reinterpreted.
+    pub(crate) fn module_site(self) -> Result<Option<ModuleSite>> {
+        Ok(match self {
             Self::PostBlock => None,
             Self::Embedding => Some(ModuleSite::Embedding),
             Self::MixerOutput => Some(ModuleSite::MixerOutput),
             Self::FfnOutput => Some(ModuleSite::FfnOutput),
-        }
+            Self::RoutedExpertsOutput | Self::SharedExpertOutput => {
+                anyhow::bail!("site {} exists only in GLM-5.3-Flash", self.as_str())
+            }
+        })
+    }
+
+    /// The GLM-5.3-Flash engine's site; post-block (four mixed streams) is
+    /// not a GLM module site.
+    pub(crate) fn glm5_next_site(self) -> Result<qwen_llm::glm5_next_metal::Glm5NextSite> {
+        use qwen_llm::glm5_next_metal::Glm5NextSite as G;
+        Ok(match self {
+            Self::PostBlock => anyhow::bail!(
+                "GLM-5.3-Flash operations need a module site; post_block (its four mixed residual streams) is not supported"
+            ),
+            Self::Embedding => G::Embedding,
+            Self::MixerOutput => G::MixerOutput,
+            Self::FfnOutput => G::FfnOutput,
+            Self::RoutedExpertsOutput => G::RoutedExpertsOutput,
+            Self::SharedExpertOutput => G::SharedExpertOutput,
+        })
     }
 }
+
+/// Post-block items, then module-site items, each in caller order.
+pub(crate) type SplitBySite<T> = (Vec<T>, Vec<(ModuleSite, T)>);
 
 /// Split lowered operations by site, preserving caller order within each list.
 pub(crate) fn split_by_site<T>(
     sited: impl IntoIterator<Item = (OperationSite, T)>,
-) -> (Vec<T>, Vec<(ModuleSite, T)>) {
+) -> Result<SplitBySite<T>> {
     let mut post_block = Vec::new();
     let mut module = Vec::new();
     for (site, item) in sited {
-        match site.module_site() {
+        match site.module_site()? {
             None => post_block.push(item),
             Some(site) => module.push((site, item)),
         }
     }
-    (post_block, module)
+    Ok((post_block, module))
 }
 
 pub(crate) fn split_interventions<'a>(
     sited: impl IntoIterator<Item = (OperationSite, PostBlockIntervention<'a>)>,
-) -> (Vec<PostBlockIntervention<'a>>, Vec<ModuleIntervention<'a>>) {
-    let (post_block, module) = split_by_site(sited);
-    (
+) -> Result<(Vec<PostBlockIntervention<'a>>, Vec<ModuleIntervention<'a>>)> {
+    let (post_block, module) = split_by_site(sited)?;
+    Ok((
         post_block,
         module
             .into_iter()
             .map(|(site, op)| ModuleIntervention { site, op })
             .collect(),
-    )
+    ))
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -485,6 +520,8 @@ mod tests {
             ("embedding", OperationSite::Embedding),
             ("mixer_output", OperationSite::MixerOutput),
             ("ffn_output", OperationSite::FfnOutput),
+            ("routed_experts_output", OperationSite::RoutedExpertsOutput),
+            ("shared_expert_output", OperationSite::SharedExpertOutput),
         ] {
             let mut explicit = authored.clone();
             explicit["site"] = wire.into();
@@ -506,7 +543,8 @@ mod tests {
             (OperationSite::FfnOutput, "f1"),
             (OperationSite::PostBlock, "p1"),
             (OperationSite::Embedding, "e0"),
-        ]);
+        ])
+        .unwrap();
         assert_eq!(post_block, ["p0", "p1"]);
         assert_eq!(
             module,
@@ -517,5 +555,16 @@ mod tests {
                 (ModuleSite::Embedding, "e0"),
             ]
         );
+        // GLM-only sites are refused by the ordinary split, never moved to
+        // post-block.
+        for site in [
+            OperationSite::RoutedExpertsOutput,
+            OperationSite::SharedExpertOutput,
+        ] {
+            assert!(site.is_glm5_next_only());
+            assert!(split_by_site([(OperationSite::PostBlock, "p"), (site, "g")]).is_err());
+            assert!(site.glm5_next_site().is_ok());
+        }
+        assert!(OperationSite::PostBlock.glm5_next_site().is_err());
     }
 }

@@ -423,7 +423,7 @@ impl Glm5NextSession<'_> {
         want_logits: bool,
     ) -> Result<Option<Vec<f32>>> {
         if self.poisoned {
-            return invalid("session is poisoned by an earlier failed token");
+            return Err(Glm5NextMetalError::Poisoned);
         }
         let c = &self.weights.config;
         if let Some(&bad) = tokens.iter().find(|&&t| t >= c.vocab_size) {
@@ -466,10 +466,17 @@ impl Glm5NextSession<'_> {
         for (layer, route) in packed.routes.iter().enumerate() {
             if let Some(route) = route {
                 let status = read_i32(&rows_view(&route.status, tokens.len()))?;
-                if let Some(bad) = status.iter().find(|&&s| s != ROUTE_STATUS_READY) {
-                    return invalid(format!(
-                        "block {layer} packed route failed with status {bad}"
-                    ));
+                if let Some((row, &bad)) = status
+                    .iter()
+                    .enumerate()
+                    .find(|(_, s)| **s != ROUTE_STATUS_READY)
+                {
+                    return Err(Glm5NextMetalError::KernelValidation {
+                        stage: "packed route",
+                        block: layer,
+                        row: Some(row),
+                        status: bad,
+                    });
                 }
             }
         }
@@ -480,9 +487,12 @@ impl Glm5NextSession<'_> {
                 for row in dense..tokens.len() {
                     let code = status[block * sp.rows + row];
                     if code != crate::metal::SELECT_STATUS_OK {
-                        return invalid(format!(
-                            "MLA block {block} row {row} sparse selection failed with status {code}"
-                        ));
+                        return Err(Glm5NextMetalError::KernelValidation {
+                            stage: "packed sparse selection",
+                            block: super::mla_block(&self.weights.config, block),
+                            row: Some(row),
+                            status: code,
+                        });
                     }
                 }
             }

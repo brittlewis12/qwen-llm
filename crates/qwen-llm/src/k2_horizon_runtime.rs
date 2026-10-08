@@ -70,6 +70,17 @@ pub enum K2RuntimeError {
     Invalid(String),
     #[error("K2 session is poisoned; discard it and create a fresh session")]
     Poisoned,
+    /// The device memory admission refused weights or a session; typed so a
+    /// server can tell pressure from telemetry and size refusals.
+    #[error("K2 {0}")]
+    MemoryAdmission(crate::metal::MemoryAdmissionDenied),
+}
+
+impl K2RuntimeError {
+    /// A device memory refusal caused by memory pressure.
+    pub fn is_memory_pressure(&self) -> bool {
+        matches!(self, Self::MemoryAdmission(denied) if denied.reason.is_pressure())
+    }
 }
 
 fn invalid(message: impl Into<String>) -> K2RuntimeError {
@@ -885,13 +896,10 @@ fn admit_with_cpu_reserve(ctx: &MetalContext, bytes: u64, cpu_bytes: u64) -> Res
         ctx.memory_signals(),
         true,
     );
-    if !admission.admitted {
-        return Err(invalid(format!(
-            "memory admission denied: {}",
-            admission.reason.as_str()
-        )));
+    match admission.refusal() {
+        Some(denied) => Err(K2RuntimeError::MemoryAdmission(denied)),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn reconcile(ctx: &MetalContext, before: u64, price: u64) -> Result<()> {

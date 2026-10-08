@@ -1,33 +1,26 @@
 # Using `qwen serve` from opencode
 
-`qwen serve` speaks the Open Responses subset (docs/SERVE.md), so
-opencode drives it through the **stock** `@ai-sdk/open-responses`
-provider — no first-party provider package, no OpenAI-compatible shim.
+`qwen serve` exposes the Open Responses subset described in [SERVE.md](SERVE.md).
+OpenCode can connect through its bundled `@ai-sdk/open-responses` provider.
 
-## 1. Start the server
+## Start the server
 
 ```sh
 qwen serve -m ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf \
-  --addr 127.0.0.1:8737 --max-tokens 4096 --snapshot-cache-mib 4096
+  --addr 127.0.0.1:8737 --max-tokens 4096
 ```
 
-Notes:
+Set `--max-context-tokens` for families other than ordinary Qwen. Set
+`--max-tokens` for every family except DeepSeek V4. The family contracts and
+defaults are in [SERVE.md](SERVE.md).
 
-- The model stays resident; the first request pays first-touch paging,
-  later turns restore from checkpoints (~4 ms in the S2 agent gate).
-- Serve enforces loopback binding and one request in flight. A concurrent
-  connection now receives fail-fast `503` plus `Retry-After: 1`; OpenCode may
-  retry instead of waiting silently behind another session.
-- Serve holds the engine's Metal process lease, so `qwen-bench` runs and
-  serve are mutually exclusive tenants. Use `QWEN_METAL_LEASE_WAIT=1` to
-  queue politely behind a running bench.
-- Diagnostics go to stderr; `RUST_LOG=warn,qwen_diag=info` keeps the
-  per-request `serve stats: version=serve_stats_v1 …` line (the
-  `matched_tokens` field is the checkpoint-hit metric).
+The server binds to loopback and runs one request at a time. A concurrent
+request receives `503` with `Retry-After: 1`. Diagnostics go to stderr; use
+`RUST_LOG=warn,qwen_diag=info` to include the `serve stats:` line.
 
-## 2. Configure the provider
+## Configure the provider
 
-In `opencode.json` (project or global):
+In `opencode.json`:
 
 ```jsonc
 {
@@ -36,7 +29,6 @@ In `opencode.json` (project or global):
       "npm": "@ai-sdk/open-responses",
       "name": "qwen serve (local)",
       "options": {
-        // createOpenResponses takes a full endpoint URL, not a baseURL.
         "url": "http://127.0.0.1:8737/v1/responses"
       },
       "models": {
@@ -52,51 +44,22 @@ In `opencode.json` (project or global):
 }
 ```
 
-The model id must equal the GGUF file stem the server reports at
-`GET /v1/models`; serve rejects mismatches with `model_not_found`.
+The model id must match the GGUF filename stem reported by `GET /v1/models`.
+The endpoint is `POST /v1/responses`.
 
-`@ai-sdk/open-responses` is not in opencode's bundled provider map, so
-it is installed on demand into opencode's provider cache the first time
-the provider loads.
+## Reasoning replay
 
-## 3. What works, and what to expect
+The stock bundled `@ai-sdk/open-responses` 1.0.35 does not send prior reasoning
+items back to the server. Families that keep past reasoning therefore render
+that reasoning empty on later steps. A patched OpenCode build replays the items;
+the CPU-only capture and patched result are in
+[`docs/bench/2026-10-06-opencode-reasoning-replay/`](bench/2026-10-06-opencode-reasoning-replay/).
 
-Verified live (docs/bench/2026-08-19-s2-agent-gate/): multi-turn tool
-loops through the stock provider, reasoning items round-tripping
-verbatim, `store:false` throughout, and 10/10 requests hitting
-checkpoints with 94–100 % of each prompt restored.
+## Request fields and limits
 
-Production evidence is separate from that provider gate: real OpenCode session
-`ses_fe307ea3effefOzYcDBgTbYiie` ran successfully for five hours overnight on
-2026-08-20 (58 requests, reaching 133k prompt tokens). This proves sustained use
-for that session, not every model-family or deferred live gate.
-
-Current limits worth knowing:
-
-- One request runs at a time. A second concurrent OpenCode session receives
-  `503` and must retry.
-- Reasoning round-trips as plain `content`; `encrypted_content` is not
-  implemented or advertised.
-- `tool_choice` supports `"auto"` and exact `allowed_tools` narrowing with
-  mode `"auto"` only. Names must be declared; `strict:true`, `required`,
-  `none`, and forced-function choices are unsupported.
-- No image input, no `/responses/compact`, no WebSocket transport.
-- Validated Qwen3.8 27B identities support text, `none|low|medium|xhigh`
-  reasoning effort, no-thinking, and Qwen tool rendering. This is not a vision
-  surface; unvalidated identities fail family-specific controls closed.
-- DeepSeek V4 requires an explicit startup `--max-context-tokens`, supports
-  chat plus `none|low|high|max` reasoning effort, and preserves reasoning
-  history for non-`none` thinking tiers. It does not support tools,
-  `x_qwen.no_thinking`, or DFlash. Its core
-  S3 cells 1–5 passed; live cells 6–9 still require rerun.
-
-## 4. Checking checkpoint reuse
-
-Per response, with `x_qwen: {"stats": true}` the envelope carries
-`x_qwen.matched_tokens` / `restore_ms`; without it,
-`usage.input_tokens_details.cached_tokens` reports the same restored
-token count through the spec field. Server-side, grep the stats line:
-
-```sh
-grep 'serve stats' server.log | tail
-```
+`x_qwen.stats: true` adds `x_qwen.matched_tokens` and `x_qwen.restore_ms` to
+the response. Without it, restored tokens are reported as
+`usage.input_tokens_details.cached_tokens`. `x_qwen.seed` sets the sampling
+seed. The supported request fields and family-specific limits are documented
+in [SERVE.md](SERVE.md). DeepSeek V4 supports declared tools, renders them as
+DSML calls, and parses generated calls into response `function_call` items.

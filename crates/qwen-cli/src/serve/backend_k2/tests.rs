@@ -173,7 +173,9 @@ fn gpu_verified_k2_chat_http_matches_raw_and_releases_sessions() {
         (Effort::Low, 8),
         (Effort::Low, 128),
     ] {
-        let body = json!({"model":"k2-chat","input":[{"role":"user","content":"What is 2+2? Answer briefly."}], "reasoning":{"effort":effort}, "max_output_tokens":budget});
+        // Greedy is this check's contract (chat bytes equal the raw run's);
+        // serve's omitted-field default is the release's sampled preset.
+        let body = json!({"model":"k2-chat","temperature":0,"input":[{"role":"user","content":"What is 2+2? Answer briefly."}], "reasoning":{"effort":effort}, "max_output_tokens":budget});
         let (req, prompt) = request(&backend, body.clone());
         assert_eq!(
             backend.output_protocol(&req),
@@ -189,7 +191,7 @@ fn gpu_verified_k2_chat_http_matches_raw_and_releases_sessions() {
             assert!(raw_budget > 0);
             let (raw, raw_prompt) = request(
                 &backend,
-                json!({"model":"k2-chat","input":prompt,"max_output_tokens":raw_budget}),
+                json!({"model":"k2-chat","temperature":0,"input":prompt,"max_output_tokens":raw_budget}),
             );
             let mut raw_sink = Sink::default();
             let raw_outcome = backend.generate(&raw, &raw_prompt, &mut raw_sink).unwrap();
@@ -466,7 +468,12 @@ fn gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests() {
     let model = K2LoadedModel::load_unqualified(&ctx, &source, 32).unwrap();
     let mut backend = K2Backend::new(&model, prepared, "k2-test".into());
     let text = "The capital of France is";
-    let (req, prompt) = request(&backend, json!({"model":"k2-test","input":text}));
+    // Every request pins greedy: the expected bytes and raw-run parity are
+    // greedy facts, while serve's omitted-field default samples.
+    let (req, prompt) = request(
+        &backend,
+        json!({"model":"k2-test","temperature":0,"input":text}),
+    );
     assert_eq!(backend.output_protocol(&req), OutputProtocol::RawText);
     let mut first = Sink::default();
     let result = backend.generate(&req, &prompt, &mut first).unwrap();
@@ -531,7 +538,7 @@ fn gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests() {
     // Continuation: the whole previous exchange is reused, only the new turn runs.
     let (followup, followup_prompt) = request(
         &backend,
-        json!({"model":"k2-test","input":format!("{text}{}.", String::from_utf8(first.bytes.clone()).unwrap()),"max_output_tokens":1}),
+        json!({"model":"k2-test","temperature":0,"input":format!("{text}{}.", String::from_utf8(first.bytes.clone()).unwrap()),"max_output_tokens":1}),
     );
     let result = backend
         .generate(&followup, &followup_prompt, &mut Sink::default())
@@ -545,7 +552,7 @@ fn gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests() {
     backend.prefix_reuse = true;
     let (explicit, prompt) = request(
         &backend,
-        json!({"model":"k2-test","input":format!("<|ifm|begin_of_text|>{text}"),
+        json!({"model":"k2-test","temperature":0,"input":format!("<|ifm|begin_of_text|>{text}"),
         "x_k2":{"add_special_tokens":false}, "max_output_tokens":1}),
     );
     let mut sink = Sink::default();
@@ -556,7 +563,7 @@ fn gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests() {
 
     let (automatic, prompt) = request(
         &backend,
-        json!({"model":"k2-test","input":format!("<|ifm|begin_of_text|>{text}"), "max_output_tokens":1}),
+        json!({"model":"k2-test","temperature":0,"input":format!("<|ifm|begin_of_text|>{text}"), "max_output_tokens":1}),
     );
     let result = backend
         .generate(&automatic, &prompt, &mut Sink::default())
@@ -569,7 +576,7 @@ fn gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests() {
     for stream in [false, true] {
         let response = wire_request(
             &mut backend,
-            json!({"model":"k2-test","input":text,"stream":stream,
+            json!({"model":"k2-test","temperature":0,"input":text,"stream":stream,
             "max_output_tokens":8,"x_qwen":{"stats":stream}}),
         );
         assert!(response.starts_with("HTTP/1.1 200"));
@@ -603,7 +610,7 @@ fn gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests() {
 
     let (oversized, prompt) = request(
         &backend,
-        json!({"model":"k2-test","input":text,"max_output_tokens":32}),
+        json!({"model":"k2-test","temperature":0,"input":text,"max_output_tokens":32}),
     );
     let mut sink = Sink::default();
     assert!(matches!(
@@ -678,12 +685,13 @@ fn gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one() {
     let model = K2LoadedModel::load(&ctx, &source, u32::try_from(capacity).unwrap()).unwrap();
     let mut backend = K2Backend::new(&model, prepared, "k2-boundary".into());
     // Fresh-prefill parity with run/bench; the capacity-sized session is still
-    // kept and rewound to zero between requests.
+    // kept and rewound to zero between requests. Requests pin greedy: the
+    // recorded bench evidence is greedy and serve's default samples.
     backend.prefix_reuse = false;
     for (text, sampled, count, expected) in &cases {
         let (req, prompt) = request(
             &backend,
-            json!({"model":"k2-boundary","input":text,"max_output_tokens":sampled}),
+            json!({"model":"k2-boundary","temperature":0,"input":text,"max_output_tokens":sampled}),
         );
         let mut sink = Sink::default();
         let outcome = backend.generate(&req, &prompt, &mut sink).unwrap();
@@ -692,8 +700,7 @@ fn gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one() {
         assert_eq!(outcome.usage.output_tokens, *sampled);
         assert_eq!(outcome.usage.cached_tokens, 0);
         for stream in [false, true] {
-            let mut body =
-                json!({"model":"k2-boundary","input":text,"stream":stream,"x_qwen":{"stats":true}});
+            let mut body = json!({"model":"k2-boundary","temperature":0,"input":text,"stream":stream,"x_qwen":{"stats":true}});
             // Exercise the startup default at the configured request boundary.
             if *sampled != 1 {
                 body["max_output_tokens"] = json!(sampled);
@@ -729,7 +736,7 @@ fn gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one() {
     let text = &cases[0].0;
     let (oversized, prompt) = request(
         &backend,
-        json!({"model":"k2-boundary","input":text,"max_output_tokens":2}),
+        json!({"model":"k2-boundary","temperature":0,"input":text,"max_output_tokens":2}),
     );
     let mut sink = Sink::default();
     assert!(matches!(
@@ -740,7 +747,7 @@ fn gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one() {
     for stream in [false, true] {
         let response = wire_request(
             &mut backend,
-            json!({"model":"k2-boundary","input":text,"max_output_tokens":2,"stream":stream}),
+            json!({"model":"k2-boundary","temperature":0,"input":text,"max_output_tokens":2,"stream":stream}),
         );
         if stream {
             // The shared transport starts SSE before backend tokenization, so
@@ -775,12 +782,15 @@ fn gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one() {
     // last prefill span (one tick precedes prefill, one starts each span).
     let (reset, reset_prompt) = request(
         &backend,
-        json!({"model":"k2-boundary","input":"Unrelated reset."}),
+        json!({"model":"k2-boundary","temperature":0,"input":"Unrelated reset."}),
     );
     backend
         .generate(&reset, &reset_prompt, &mut Sink::default())
         .unwrap();
-    let (req, prompt) = request(&backend, json!({"model":"k2-boundary","input":text}));
+    let (req, prompt) = request(
+        &backend,
+        json!({"model":"k2-boundary","temperature":0,"input":text}),
+    );
     let span_tokens = prefill_span(model.prefill_info(cases[0].2).chunk_tokens);
     let spans = cases[0].2.div_ceil(span_tokens);
     assert!(

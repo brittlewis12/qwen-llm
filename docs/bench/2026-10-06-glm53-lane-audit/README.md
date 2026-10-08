@@ -64,7 +64,7 @@ Class:
 | 3 | `qwen run` exit status | a token limit succeeds | a token limit inside reasoning succeeds; an invalid stop before the close fails (`partition_k2.rs:223` tests the distinction) | same | **P**: keep the distinction; with literal output, `reasoning_closed` stays a diagnostic |
 | 4 | Stats line | `<fam> stats: … stop_reason= tokenizer_ms … total_ms` | own fields | own fields; prefill includes the weights' first GPU use, unlabelled | **I**; cold start is labelled, never warmed |
 | 5 | `--request-stats-jsonl` timing | `total` = wall minus load | sum of phases | sum of phases | **I** |
-| 6 | Sampling defaults | Qwen/DS4/Flash-Next: run = serve; Muse: the release preset in both | run uses CLI defaults; HTTP uses its raw defaults (recorded as intentional) | the release preset in both (Muse precedent) | GLM **P** (keep); K2 **P**, changed only by a named decision; **M**: share default resolution with per-family values and explicit-zero overrides |
+| 6 | Sampling defaults | Qwen/DS4/Flash-Next: run = serve; Muse: the release preset in both | run uses CLI defaults; HTTP uses its raw defaults (recorded as intentional) | the release preset in both (Muse precedent) | GLM **P** (keep); K2 **P**, changed only by a named decision; **M**: share default resolution with per-family values and explicit-zero overrides. **Resolved 2026-10-07** by named decision (see "Row 6 results") |
 | 7 | Effort and no-thinking | release-supported levels; `CapabilityError` codes | private codes | private codes | levels **S**; refusal codes **I** (shared codes do not imply identical levels) |
 | 8 | Drafter refusal | shared `drafter_policy` resolver, `family_no_speculation` | private, bypasses the resolver | same | **I** |
 | 9 | History missing reasoning | rendered as empty reasoning | filled and reported | `qwen run --messages` uses the template's inline `</think>` split, while serve fills empty reasoning: **CLI and serve disagree** | **I** (bug) |
@@ -469,3 +469,28 @@ Practice:
   after the every-family policy made it empty reasoning; it now
   checks that the reasoning is filled and reported. Reference check scripts
   were not rerun after that behaviour change.
+
+## Row 6 results (2026-10-07)
+
+Sampling defaults, by the owner's named decision: day-to-day `qwen run` and
+`qwen serve` sample with the identified release's published preset, never a
+generic greedy default and never a hard-coded seed. Commits `09b0c9c4`
+(Flash-Next), `60f6071e` (every family), `a1a17a15` (fresh seeds).
+- **Mechanism (M):** one decision table keyed by release identity
+  (`qwen/release_sampling.rs`), separate from detection
+  (`qwen/release_identity.rs`, name fields for version, header geometry for
+  shape). Run and serve share it; explicit fields win one by one, explicit
+  zeros included. `general.sampling.*` header keys are not inputs; a test
+  cross-checks them.
+- **K2 (P, changed by decision):** run and serve both use the card's
+  temperature 1.0 / top-p 0.95, raw and chat alike; the row's run/serve split
+  is closed.
+- **GLM, Muse (P, kept):** unchanged presets, now resolved through the shared
+  helper.
+- **Seeds:** an omitted seed is drawn per request and reported (`qwen run`
+  stderr; serve `x_qwen.stats.seed`). JSONL batches, bench and lens keep
+  their explicit contracts.
+- **Contracts checked:** K2, GLM reference check scripts pin `--temp 0` and
+  are unaffected. Three K2 GPU tests relied on the old greedy default; they
+  now pin `temperature: 0` (two rerun on K2-Horizon-7B Q8: fail unpinned,
+  pass pinned; the boundary test needs its evidence directory).

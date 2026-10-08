@@ -45,9 +45,13 @@ force-rank, raw attempts, limits and diagnostic harnesses are in
    about 7% whole4K on UD/GSQ. Old mixed-suffix gains and router-disabled
    199/282 ms residuals do not establish today's incremental saving. Require
    repeatable whole-call conversion (~1%+) before deeper qualification.
-2. GLM ragged absorption/expansion: N127/N129 remain about 65-82 ms slower
-   than N128 after expert retile. Isolate bindings before assigning causality
-   or writing a tail-safe kernel; this is not an aligned-4K saving claim.
+2. GLM ragged absorption/expansion: guarded F32 matrix-tail experiment is
+   measured but stays off. N32/64/127/255 whole targets save roughly3-6%;
+   code-N127 has reproducible distribution/continuation differences requiring
+   attribution. No bit gate added, no incumbent-as-ground-truth assumption.
+   Next bounded probe: token-axis GEMV retaining the incumbent arithmetic,
+   or localize the first code-N127 activation/route divergence. N129 and
+   aligned512/4K are unchanged. Evidence: `docs/bench/2026-10-08-glm-mla-tail/`.
 3. Flash selected-QSA leaf attribution: GSQ layer7 mixer was 33.87 ms dense
    versus 134.61 ms selected. Separate projection, selection, QK and value;
    whole-mixer time is not the budget for an individual kernel.
@@ -56,6 +60,16 @@ force-rank, raw attempts, limits and diagnostic harnesses are in
    direct coverage. Existing Flash IQ4_NL retile is already qualified at
    N512/527; establish complete-path conversion before widening its scope.
 5. GDN/KDA preparation including state update before recurrence redesign.
+
+User-requested capacity task is next after the completed GLM MLA tail screen:
+native low-bit IQ residency for Saluki, starting with IQ2_XXS. Metadata inspection
+corrects the original attribution: 225 tensors across IQ2_XXS, IQ2_XS, IQ1_S and
+IQ1_M expand 3.841 GiB to 62.568 GiB F32. IQ2_XXS alone accounts for 32.068 GiB
+of avoidable expansion, but cannot get the entire artifact near its 7.356 GiB
+file size. Existing IQ2_XS dense kernels are a cheap first coverage check;
+IQ1_M embedding gather is also required. This is role-aware capacity work,
+not a global whitelist change or a GPU-memory-limit increase. Scope, verified
+inventory and qualification plan: `docs/IQ-QUANT-NATIVE-CAPACITY.md`.
 
 Completed: guarded GLM IQ3_S SmallCounts down at actual rows 32-512, retaining
 generic for counts 17+. Two-corpus final production screen saves 8.73-10.89%

@@ -720,6 +720,183 @@ pub fn encode_mat_mat_q8_0_grouped_f32(
     Ok(())
 }
 
+const GROUPED_TAIL_KERNEL: &str = "kernel_mat_mat_q8_0_f32_r2c16k64_grouped_tail";
+
+fn grouped_tail_capacity(
+    width: usize,
+    threads: usize,
+    static_bytes: usize,
+    device_bytes: usize,
+) -> Result<(), MetalError> {
+    if width != 32
+        || threads < 128
+        || static_bytes
+            .checked_add(4096)
+            .is_none_or(|bytes| bytes > device_bytes)
+    {
+        return Err(bad_shape(
+            GROUPED_TAIL_KERNEL,
+            "needs SIMD32, TG128 and 4096 dynamic TGM bytes",
+        ));
+    }
+    Ok(())
+}
+
+/// Grouped Q8_0/F32 absorption for complete eight-token fragments, without
+/// padded activations or outputs. Same layouts as `encode_mat_mat_q8_0_grouped_f32`;
+/// requires positive K % 64 == 0, M % 16 == 0, groups > 0 and rows in 8..=128,
+/// divisible by eight. The 128-row case is a diagnostic control. Arithmetic
+/// retains F32 dequantization, activations and accumulation of the full tile.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_mat_q8_0_grouped_tail_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    groups: usize,
+    rows: usize,
+) -> Result<(), MetalError> {
+    const K: &str = GROUPED_TAIL_KERNEL;
+    require_serial(K, enc)?;
+    if n_in == 0
+        || n_out == 0
+        || groups == 0
+        || !n_in.is_multiple_of(64)
+        || !n_out.is_multiple_of(16)
+        || !(8..=128).contains(&rows)
+        || !rows.is_multiple_of(8)
+    {
+        return Err(bad_shape(
+            K,
+            "needs positive K % 64, M % 16, groups and rows % 8 in 8..=128",
+        ));
+    }
+    let product = |a: usize, b: usize| {
+        a.checked_mul(b)
+            .ok_or_else(|| bad_shape(K, "dimension product overflows"))
+    };
+    let in_width = product(n_in, groups)?;
+    let out_width = product(n_out, groups)?;
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        groups: u32,
+        nb01: u32,
+        stride_b: u32,
+        stride_c: u32,
+    }
+    let u = |v: usize, name: &str| super::checks::to_u32(K, v, name);
+    let args = Args {
+        m: u(n_out, "M")?,
+        n: u(rows, "N")?,
+        k: u(n_in, "K")?,
+        groups: u(groups, "groups")?,
+        nb01: u(product(n_in / 32, 34)?, "row bytes")?,
+        stride_b: u(in_width, "input width")?,
+        stride_c: u(out_width, "output width")?,
+    };
+    if weight.shape != [n_in as u64, n_out as u64, groups as u64]
+        && weight.shape != [n_in as u64, out_width as u64]
+    {
+        return Err(bad_shape(
+            K,
+            "weight must be [K, M, groups] or [K, M * groups]",
+        ));
+    }
+    if input.shape != [in_width as u64, rows as u64]
+        || output.shape != [out_width as u64, rows as u64]
+    {
+        return Err(bad_shape(
+            K,
+            "activations must be token-major [width * groups, rows]",
+        ));
+    }
+    for (name, tensor, elements, dtype, writable, alignment) in [
+        (
+            "weight",
+            weight,
+            product(n_in, out_width)?,
+            GgmlType::Q8_0,
+            false,
+            2,
+        ),
+        (
+            "input",
+            input,
+            product(in_width, rows)?,
+            GgmlType::F32,
+            false,
+            4,
+        ),
+        (
+            "output",
+            output,
+            product(out_width, rows)?,
+            GgmlType::F32,
+            true,
+            4,
+        ),
+    ] {
+        super::moe::validate_moe_decode_tensor(
+            K,
+            name,
+            tensor,
+            elements,
+            &[dtype],
+            writable,
+            alignment,
+        )?;
+    }
+    check_disjoint(K, output, &[(input, "input"), (weight, "weight")])?;
+    let device = ctx.device.registryID();
+    if enc.parent_command_buffer().device().registryID() != device
+        || [weight, input, output]
+            .iter()
+            .any(|t| t.buffer.device().registryID() != device)
+    {
+        return Err(bad_shape(
+            K,
+            "encoder and bindings must belong to the context device",
+        ));
+    }
+    let pso = ctx.pipeline(GROUPED_TAIL_KERNEL)?;
+    grouped_tail_capacity(
+        pso.threadExecutionWidth(),
+        pso.maxTotalThreadsPerThreadgroup(),
+        pso.staticThreadgroupMemoryLength(),
+        ctx.device.maxThreadgroupMemoryLength(),
+    )?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, input);
+    enc.set_tensor(3, output);
+    enc.set_threadgroup_memory(0, 4096);
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: n_out / 16,
+            depth: groups,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "latent/grouped_tail_tests.rs"]
+mod grouped_tail_tests;
+
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{

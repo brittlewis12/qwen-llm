@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-08 - MLA Tail Experiment Retained Off; Native IQ Capacity Queued
+
+- Guarded F32 grouped-Q8 tail batching removes repeated GEMV dispatches.
+  Whole target GPU saves3.07-6.02% at sampled N32/64/127/255 across two
+  streams; deep127 suffix saves6.14-6.76%, excluding its4096-token setup.
+  N8 is inconclusive; N128/129/512 are unchanged controls.
+- Production remains unchanged. Code-N127 shows endpoint KL up to0.08747
+  and a repeatable first-continuation top1 change; incumbent/candidate-side
+  regrets differ (0.01762/0.35316). No new bit gate, no claim that A is truth.
+  Route-driven numerical/timing amplification is plausible but unmeasured.
+- Four all-fragment primitive tests, three scope/split tests and the observer
+  test pass. Independent review finds no harness defect but requests targeted
+  numerical attribution before promotion. Evidence and next bounded GEMV
+  alternative: `docs/bench/2026-10-08-glm-mla-tail/README.md`.
+- User-requested Saluki capacity work is next. Metadata inspection confirms
+  four unsupported native-storage cohorts, not IQ2_XXS alone:225 tensors,
+  3.841 GiB compressed ->62.568 GiB F32; avoidable expansion58.727 GiB.
+  Reported75 GiB RSS/7tok/s not reproduced. IQ2_XXS is32.068 GiB of the
+  potential saving; existing IQ2_XS kernels and IQ1_M embedding gather also
+  matter. Role-aware scope: `docs/IQ-QUANT-NATIVE-CAPACITY.md`.
+
 ## 2026-10-08 - GLM Sparse IQ3_S Expert Down Converts to Whole-Prefill Gains
 
 - GLM Fast now selects M128/N16 down for expert counts 1-16, retaining

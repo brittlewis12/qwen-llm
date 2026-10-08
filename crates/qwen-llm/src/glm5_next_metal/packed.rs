@@ -29,6 +29,40 @@ mod router_prefill;
 #[path = "tests/expert_down.rs"]
 mod expert_down;
 
+#[cfg(test)]
+#[path = "tests/mla_tail.rs"]
+mod mla_tail;
+
+#[cfg(test)]
+thread_local! {
+    static ABSORB_TAIL: std::cell::Cell<(Option<bool>, usize)> = const { std::cell::Cell::new((None, 0)) };
+}
+
+#[cfg(test)]
+pub(super) fn with_absorb_tail_variant<R>(
+    variant: Option<bool>,
+    f: impl FnOnce() -> R,
+) -> (R, usize) {
+    struct Restore((Option<bool>, usize));
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ABSORB_TAIL.with(|state| state.set(self.0));
+        }
+    }
+    let _restore = Restore(ABSORB_TAIL.with(|state| state.replace((variant, 0))));
+    let result = f();
+    (result, ABSORB_TAIL.with(|state| state.get().1))
+}
+
+#[cfg(test)]
+fn absorb_tail_rows(lineage: PackedLineage, rows: usize) -> usize {
+    if lineage == PackedLineage::Fast && ABSORB_TAIL.with(|state| state.get().0) == Some(true) {
+        rows % 128 / 8 * 8
+    } else {
+        0
+    }
+}
+
 /// Packed stage families that have a Fast and an Exact form (map #12
 /// attribution: one family at a time can run in its Exact form in tests).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -445,10 +479,39 @@ fn absorb_rows(
             blocked,
         )?;
     }
-    for row in blocked..rows {
+    let tail_end = blocked;
+    #[cfg(test)]
+    let tail_end = {
+        let tail_rows = absorb_tail_rows(lineage, rows);
+        if tail_rows > 0 {
+            crate::metal::encode_mat_mat_q8_0_grouped_tail_f32(
+                ctx,
+                enc,
+                weight,
+                &input.view_subrange(
+                    (blocked * in_width) as u64,
+                    vec![in_width as u64, tail_rows as u64],
+                ),
+                &output.view_subrange(
+                    (blocked * out_width) as u64,
+                    vec![out_width as u64, tail_rows as u64],
+                ),
+                n_in,
+                n_out,
+                groups,
+                tail_rows,
+            )?;
+        }
+        tail_end + tail_rows
+    };
+    for row in tail_end..rows {
         let x = input.view_subrange((row * in_width) as u64, vec![in_width as u64]);
         let y = output.view_subrange((row * out_width) as u64, vec![out_width as u64]);
         encode_mat_vec_q8_0_grouped_f32(ctx, enc, weight, &x, &y, n_in, n_out, groups)?;
+    }
+    #[cfg(test)]
+    if tail_end > blocked {
+        ABSORB_TAIL.with(|state| state.set((state.get().0, state.get().1 + 1)));
     }
     Ok(())
 }
@@ -953,6 +1016,8 @@ impl Glm5NextSession<'_> {
         });
         #[cfg(test)]
         expert_down::record_completed_command(|| (command.GPUStartTime(), command.GPUEndTime()));
+        #[cfg(test)]
+        mla_tail::record_completed_command(|| (command.GPUStartTime(), command.GPUEndTime()));
         Ok(())
     }
 
@@ -1599,5 +1664,214 @@ mod down_policy_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod absorb_tail_policy_tests {
+    use super::*;
+
+    #[test]
+    fn absorb_tail_selection_is_off_by_default_and_exact_and_keeps_full_prefix() {
+        for variant in [None, Some(false), Some(true)] {
+            let ((), count) = with_absorb_tail_variant(variant, || {
+                for rows in 0..=1024 {
+                    let tail = absorb_tail_rows(PackedLineage::Fast, rows);
+                    assert_eq!(
+                        tail,
+                        if variant == Some(true) {
+                            rows % 128 / 8 * 8
+                        } else {
+                            0
+                        }
+                    );
+                    assert_eq!(absorb_tail_rows(PackedLineage::Exact, rows), 0);
+                    if variant == Some(true) {
+                        assert!(tail <= 120 && tail.is_multiple_of(8));
+                        assert!((rows - rows / 128 * 128 - tail) < 8);
+                    }
+                }
+            });
+            assert_eq!(count, 0);
+        }
+    }
+
+    #[test]
+    fn absorb_tail_dispatch_split_and_counter_preserve_prefix_and_residual() {
+        use crate::metal::{dispatch_census_begin, dispatch_census_take};
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        let offset_tensor = |ctx: &MetalContext,
+                             prefix: usize,
+                             data: &[u8],
+                             suffix: usize,
+                             shape: Vec<u64>,
+                             dtype: GgmlType| {
+            let mut bytes = vec![0xA5; prefix];
+            bytes.extend_from_slice(data);
+            bytes.resize(bytes.len() + suffix, 0x5A);
+            MetalTensor {
+                buffer: ctx.buffer_from(&bytes).unwrap(),
+                offset: prefix as u64,
+                shape,
+                dtype,
+                provenance: crate::metal::MetalTensorProvenance::OwnedWritable,
+            }
+        };
+        let (k, m, groups) = (64usize, 16usize, 2usize);
+        let mut bytes = vec![0u8; k / 32 * 34 * m * groups];
+        for (i, block) in bytes.chunks_exact_mut(34).enumerate() {
+            block[..2].copy_from_slice(&half::f16::from_f32(0.007).to_bits().to_le_bytes());
+            for (j, q) in block[2..].iter_mut().enumerate() {
+                *q = (((i * 13 + j * 7) % 63) as i8 - 31) as u8;
+            }
+        }
+        let weight = offset_tensor(
+            &ctx,
+            16,
+            &bytes,
+            16,
+            vec![k as u64, m as u64, groups as u64],
+            GgmlType::Q8_0,
+        );
+        for rows in [7, 8, 15, 120, 127, 128, 135, 136, 143, 248, 255, 256] {
+            let x: Vec<f32> = (0..k * groups * rows)
+                .map(|i| (i % 37) as f32 * 0.013 - 0.17)
+                .collect();
+            let input = offset_tensor(
+                &ctx,
+                16,
+                bytemuck::cast_slice(&x),
+                16,
+                vec![(k * groups) as u64, rows as u64],
+                GgmlType::F32,
+            );
+            for lineage in [PackedLineage::Fast, PackedLineage::Exact] {
+                let mut baseline: Option<Vec<f32>> = None;
+                for variant in [Some(false), None, Some(true)] {
+                    let output = offset_tensor(
+                        &ctx,
+                        16,
+                        bytemuck::cast_slice(&vec![-777.0f32; m * groups * rows]),
+                        16,
+                        vec![(m * groups) as u64, rows as u64],
+                        GgmlType::F32,
+                    );
+                    let command = ctx.queue.commandBuffer().unwrap();
+                    let enc = KernelEncoder::begin(&command);
+                    dispatch_census_begin();
+                    let (result, substitutions) = with_absorb_tail_variant(variant, || {
+                        absorb_rows(
+                            &ctx, &enc, lineage, &weight, &input, &output, k, m, groups, rows,
+                        )
+                    });
+                    let census = dispatch_census_take();
+                    enc.end();
+                    result.unwrap();
+                    command.commit();
+                    wait_completed(&command).unwrap();
+                    let blocked = if lineage == PackedLineage::Fast {
+                        rows / 128 * 128
+                    } else {
+                        0
+                    };
+                    let tail = if lineage == PackedLineage::Fast && variant == Some(true) {
+                        rows % 128 / 8 * 8
+                    } else {
+                        0
+                    };
+                    assert_eq!(substitutions, usize::from(tail > 0));
+                    let full: Vec<_> = census
+                        .iter()
+                        .filter(|r| r.kernel == "kernel_mat_mat_q8_0_f32_r2c16k64_grouped")
+                        .collect();
+                    assert_eq!(full.len(), usize::from(blocked > 0));
+                    if blocked > 0 {
+                        assert_eq!(full[0].grid_width, (blocked / 128) as u64);
+                    }
+                    assert_eq!(
+                        census
+                            .iter()
+                            .filter(|r| r.kernel == "kernel_mat_mat_q8_0_f32_r2c16k64_grouped_tail")
+                            .count(),
+                        usize::from(tail > 0)
+                    );
+                    assert_eq!(
+                        census
+                            .iter()
+                            .filter(|r| r.kernel == "kernel_mat_vec_q8_0_f32_lcpp_grouped")
+                            .count(),
+                        rows - blocked - tail
+                    );
+                    assert_eq!(
+                        census.len(),
+                        usize::from(blocked > 0) + usize::from(tail > 0) + rows - blocked - tail
+                    );
+                    let actual = unsafe {
+                        std::slice::from_raw_parts(
+                            output
+                                .buffer
+                                .contents()
+                                .as_ptr()
+                                .cast::<u8>()
+                                .add(output.offset as usize)
+                                .cast::<f32>(),
+                            m * groups * rows,
+                        )
+                        .to_vec()
+                    };
+                    assert!(actual.iter().all(|v| v.is_finite()));
+                    if let Some(ref baseline) = baseline {
+                        let peak = baseline.iter().fold(1.0f32, |peak, v| peak.max(v.abs()));
+                        let worst = actual
+                            .iter()
+                            .zip(baseline)
+                            .map(|(a, b)| (a - b).abs())
+                            .fold(0.0f32, f32::max);
+                        assert!(
+                            worst <= 1e-5 * peak,
+                            "rows={rows}, {lineage:?}, {variant:?}: {worst}"
+                        );
+                    } else {
+                        baseline = Some(actual);
+                    }
+                    let backing = unsafe {
+                        std::slice::from_raw_parts(
+                            output.buffer.contents().as_ptr().cast::<u8>(),
+                            output.buffer.length(),
+                        )
+                    };
+                    assert!(backing[..16].iter().all(|&b| b == 0xA5));
+                    assert!(backing[backing.len() - 16..].iter().all(|&b| b == 0x5A));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn absorb_tail_scope_restores_nested_unwound_and_thread_state() {
+        assert_eq!(ABSORB_TAIL.with(|s| s.get()), (None, 0));
+        let ((), count) = with_absorb_tail_variant(Some(true), || {
+            ABSORB_TAIL.with(|s| s.set((Some(true), 3)));
+            for variant in [None, Some(false), Some(true)] {
+                assert_eq!(
+                    with_absorb_tail_variant(variant, || ABSORB_TAIL.with(|s| s.get())),
+                    ((variant, 0), 0)
+                );
+            }
+            let _ = std::panic::catch_unwind(|| {
+                with_absorb_tail_variant(None, || panic!("scope restore probe"))
+            });
+            assert_eq!(ABSORB_TAIL.with(|s| s.get()), (Some(true), 3));
+            assert_eq!(
+                std::thread::spawn(|| ABSORB_TAIL.with(|s| s.get()))
+                    .join()
+                    .unwrap(),
+                (None, 0)
+            );
+        });
+        assert_eq!(count, 3);
+        assert_eq!(ABSORB_TAIL.with(|s| s.get()), (None, 0));
     }
 }

@@ -6,6 +6,56 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-08 - #12 GLM Fast Prefill Passes a Preregistered Quality Cohort; Drift Traced to Half Precision as a Class
+
+- **Quality** (`docs/bench/2026-10-08-glm53-fast-quality/`; cohort and
+  limits committed before the GPU run, analysis amended after cx review and
+  before viewing): Fast at 512 rows vs Exact on 38 continuation items from
+  22 repository documents (prose, code, long past the sparse frontier).
+  Overall NLL +0.0004 nats/token (central 90% [-0.0039, +0.0046], limit
+  0.005); every stratum within 0.010; top-1 accuracy unchanged; tool screen
+  12/12 greedy and 1.00 sampled for both lineages. QUALIFIES. Fast at 97
+  rows passes overall; its long stratum is inconclusive.
+- **Mechanism** (rounding probe): Exact with only its activations rounded
+  through half precision drifts from Exact by worst KL 0.164 (H2) and
+  0.154 (H5), against Fast's 0.113 and 0.095; Fast is as far from rounded
+  Exact as each is from Exact. Drift of this size is the model's
+  sensitivity to any half-precision step; F32 staging would remove one
+  source of the class, not the class. The F32-staging prototype is not
+  pursued on this evidence.
+- **Policy position** (not yet adopted): keep Fast as serve's default and
+  replace the one-prompt agreement bound (KL 2e-2, regret 0.2) with
+  separately stated properties: bitwise reuse and restore within a lineage
+  and schedule; Exact bitwise and selectable per request
+  (`x_qwen.prefill_lineage`, `43d344a5`); quality non-inferiority on the
+  preregistered cohort for any Fast change that is not bit-identical;
+  Fast-vs-Exact and warm-vs-cold drift of the measured class accepted and
+  reported; a tripwire on the frozen natural cases above about twice the
+  half-rounding drift.
+- Evaluated before the sparse IQ3_S down retile landed; that packet observed
+  bit-identical outputs, so the results are expected to carry over.
+
+## 2026-10-08 - #15 GLM RAM Snapshots: Engine Capture and Restore Bitwise
+
+- `Glm5NextSession::capture_snapshot` / `restore_snapshot`
+  (`glm5_next_metal/snapshot.rs`, `4df5f2c4`): KDA conv tails and state,
+  MLA latent rows `[0, n)`, completed pooled keys and the pending ring with
+  its phase; bound to the weights instance, the prefill lineage and a policy
+  version; restore validates before writing and refuses with a typed
+  mismatch.
+- Gates (GPU, Metal validation): restore then suffix equals the
+  uninterrupted run bitwise for both lineages, every pool residue, around
+  the sparse frontier (Exact n = 2051-2052, Fast 2050-2054), a cancelled
+  prefill's committed boundary and a recycled destination of another
+  capacity; refusals for lineage, weights instance, policy version and
+  capacity.
+- Size: about 0.14 GiB of fixed recurrent state plus ~11.7 KiB per token
+  (0.14 GiB at 100 tokens, 0.17 GiB at 2,052; estimator 0.27 GiB at the
+  11,129-token instructions-and-tools prefix #13 measured replaying in ~61 s).
+- Serve does not use it yet; serve integration (capture at the
+  renderer-reported system/tools boundary and before the final assistant
+  header, compatibility-aware lookup in the shared snapshot cache) is next.
+
 ## 2026-10-08 - GLM Native Directions Reproduce the Archived llama.cpp Dose-Response Study
 
 - `qwen-lens run` gains a GLM-5.3-Flash lane: raw directions, operations at

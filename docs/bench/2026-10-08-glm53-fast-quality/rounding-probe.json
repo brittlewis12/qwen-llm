@@ -1,0 +1,110 @@
+{
+  "schema": "glm53.activation_rounding_probe.v1",
+  "rows_per_chunk": 512,
+  "rounding": "Exact-lineage inputs to quantized-weight matrices (projections, KDA expansions, routed experts gate/up and down) rounded through half on a scratch copy; F32 router unrounded; weights F32-dequantized",
+  "cases": [
+    {
+      "id": "H2-code-context",
+      "rounded_exact_vs_exact": {
+        "worst_kl": 0.16443122001843521,
+        "worst_at": 21,
+        "mean_kl": 0.02782567449126221,
+        "prompt_end_kl": 0.026984145145104464,
+        "flips": [
+          [
+            21,
+            0.21837425,
+            0.77850723
+          ],
+          [
+            28,
+            0.2950592,
+            0.24413681
+          ],
+          [
+            29,
+            0.48406982,
+            0.1269989
+          ]
+        ]
+      },
+      "fast_vs_exact": {
+        "worst_kl": 0.11285985498589525,
+        "worst_at": 29,
+        "mean_kl": 0.026444297937640585,
+        "prompt_end_kl": 0.020898960485364923,
+        "flips": [
+          [
+            21,
+            0.21837425,
+            0.02666092
+          ]
+        ]
+      },
+      "fast_vs_rounded_exact": {
+        "worst_kl": 0.09825775212928849,
+        "worst_at": 1,
+        "mean_kl": 0.027171798024004212,
+        "prompt_end_kl": 0.047976935392981125,
+        "flips": [
+          [
+            28,
+            0.24413681,
+            0.46268654
+          ],
+          [
+            29,
+            0.1269989,
+            0.2630806
+          ]
+        ]
+      }
+    },
+    {
+      "id": "H5-long-chat-sparse",
+      "rounded_exact_vs_exact": {
+        "worst_kl": 0.15396044726141522,
+        "worst_at": 4,
+        "mean_kl": 0.018698618393182324,
+        "prompt_end_kl": 0.024861700067565107,
+        "flips": [
+          [
+            3,
+            0.07887268,
+            0.050458908
+          ],
+          [
+            4,
+            0.98646164,
+            0.22343063
+          ]
+        ]
+      },
+      "fast_vs_exact": {
+        "worst_kl": 0.09499933661098238,
+        "worst_at": 4,
+        "mean_kl": 0.01338527687279433,
+        "prompt_end_kl": 0.034868513095027476,
+        "flips": []
+      },
+      "fast_vs_rounded_exact": {
+        "worst_kl": 0.3321823846071246,
+        "worst_at": 4,
+        "mean_kl": 0.018035796837824653,
+        "prompt_end_kl": 0.011989136682130282,
+        "flips": [
+          [
+            3,
+            0.050458908,
+            0.122205734
+          ],
+          [
+            4,
+            0.22343063,
+            1.7056675
+          ]
+        ]
+      }
+    }
+  ]
+}

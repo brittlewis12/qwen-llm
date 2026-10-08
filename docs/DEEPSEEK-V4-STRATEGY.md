@@ -1,9 +1,8 @@
 # DeepSeek V4 support strategy
 
-Status: active architecture spike on branch `deepseek-v4-spike` in the
-`qwen-llm-dsv4` worktree. This document is scoped to Apple Silicon Metal and
-the DeepSeek-V4-Flash-0731 target model. It uses dependency order and promotion
-gates rather than delivery dates.
+Status: design record for the shipped DeepSeek V4 path on Apple Silicon Metal,
+targeting DeepSeek-V4-Flash-0731. It uses dependency order and promotion gates
+rather than delivery dates.
 
 ## Decision
 

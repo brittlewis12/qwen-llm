@@ -1,8 +1,7 @@
 # qwen serve — contract and program
 
-Status: S0–S3 functionality is present in the current working tree. Gate
-evidence is mixed and is recorded separately below; implementation status must
-not be read as a blanket gate pass.
+This document defines the `qwen serve` contract as implemented; gate records
+follow.
 
 Evidence base: S0 packet
 (`docs/bench/2026-08-18-facade-s0-render-prefix-stability/`), the S1/S2/S3
@@ -36,7 +35,7 @@ Operating goals, in order:
 | S2                | Tool items (XML-parameter form from the template oracle), exact declared/allowed-tool enforcement, continuation rendering                                                                                                                                                    | OpenCode via stock `@ai-sdk/open-responses` | Provider gate: 10/10 requests checkpoint-hit (94–100% restored), 5/5 turns tool-called. `allowed_tools` subsequently landed. Production evidence: real OpenCode session `ses_fe307ea3effefOzYcDBgTbYiie` ran successfully for 5 h overnight — docs/bench/2026-08-19-s2-agent-gate/ |
 | S3                | Pre-opened (headless) reasoning support, DeepSeek V4 family backend, DFlash drafter integration. `encrypted_content` is **not** implemented.                                                                                                                                    | OpenCode, DS4 clients                       | Core cells 1–5 passed: warm snapshot hits, CLI byte identity including CJK/emoji, 91% reasoning replay restore, clean headless partition, fail-closed behavior. Live cells 6–9 still require rerun — docs/bench/2026-08-19-s3-ds4-gate/ |
 
-## Remaining program (2026-08-20)
+## Remaining program
 
 **F1 — Durable continuity: implemented for Qwen and DS4 (2026-09-23), GPU
 validated (2026-09-24: a 1.51 GB 27B snapshot, larger than the write queue,

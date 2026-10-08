@@ -16,10 +16,11 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
     controlled performance are unclaimed.
   - Release sampling for Flash-Next (`09b0c9c4`): omitted fields come from
     its generation_config (temperature 1, top-p 0.95, top-k 20, min-p 0) in
-    run and serve, as for Muse and GLM. Ordinary Qwen, DS4 and K2 still
-    sample at temperature 0 (greedy) when fields are omitted.
-- **New rank:** #12, #13, #16 with #14 (a named sampling-default decision
-  inside #16), #18 (new), #15 (conditional on #13), #9, #3(a), #2, #8 (after
+    run and serve, as for Muse and GLM. Later the same evening `60f6071e`
+    gave ordinary Qwen, DS4 and K2 their releases' published presets too
+    (previously temperature 0, greedy); a holdout qualification remains.
+- **New rank:** #12, #13, #16 with #14 (holdout qualification of the new
+  sampling defaults inside #16), #18 (new), #15 (conditional on #13), #9, #3(a), #2, #8 (after
   a Flash-Next re-baseline), #19 (new), then #6, #10, #3(b). Tracked: #1's
   open items, #5 v2, #7, #17 (demoted: no 2-8-row hot path shown for
   Flash-Next or K2). GLM NextN stays a paper candidate.

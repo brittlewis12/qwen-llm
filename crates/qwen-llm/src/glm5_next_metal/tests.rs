@@ -5,6 +5,7 @@ use std::path::PathBuf;
 mod intervention_gates;
 mod natural;
 mod quality;
+mod quality_split;
 mod snapshot_gates;
 
 const ORACLE_DEFAULT: &str =

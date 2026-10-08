@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-08 - #12 Fast Policy Adopted; Drift Tests Migrated; Fast Split Qualification Preregistered
+
+- **Adopted** (the position below, with the review qualifications): Fast
+  stays serve's default; bitwise properties are hard (reuse, cancel/resume
+  and restore within one lineage and schedule; Exact equals serial decode
+  and is selectable per request); any Fast change or new schedule that is
+  not bit-identical passes the preregistered quality cohort (a fresh
+  holdout for substantial or tuned changes); Fast-vs-Exact and warm-vs-cold
+  drift of the measured class are reported, not bounded; DFlash keeps its
+  serial-equivalent verification requirement.
+- **Investigation trigger** (explicitly chosen, provisional, not a quality
+  limit): worst-position KL(Exact || Fast) > 0.33 on the frozen natural
+  cases, Fast 512 rows, cold and warm (`reuse_natural_evaluate`, report
+  schema v2: per-arm change from the hash-pinned 2026-10-07 baseline; 97
+  rows diagnostic). Non-finite logits or metrics always fail; flips are
+  counted by argmax inequality with both regrets.
+- **Tests migrated** (`16dec174` and review fixes): the warm/cold reproducer
+  is now `fast_reuse_schedule_sensitivity_across_reuse_boundaries`
+  (cancel/resume bitwise hard, drift reported); the chunking test is
+  `packed_fast_chunkings_keep_bit_identities_with_drift_alarms` (oracle and
+  bit identities hard, drift reported, state bounds kept as named
+  regression alarms). The trigger applies only where preregistered.
+- **Fast split qualification preregistered** (`quality-split-v1`, cx review
+  before any GPU run): a full Exact rerun; Fast 512 control; split arms at
+  the deployed agent prefix's in-chunk offset (11,104-token opencode
+  prefix, offset 352), with a short final segment, and across the sparse
+  frontier (long items); the tool tasks at their real 255-token boundary;
+  four agent-shaped cases at the deployed geometry (descriptive). Gates:
+  quality-v1's limits for every split arm, and the tool screen; otherwise
+  Fast snapshots stay opt-in.
+
 ## 2026-10-08 - #15 GLM Serve Snapshots: Exact On by Default, Fast Opt-In Pending Its Quality Arm
 
 - GLM serve keeps a RAM snapshot cache (`--snapshot-cache-mib`, shared
@@ -61,7 +92,8 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   sufficient source of drift of this size; its share within Fast and what
   F32 staging would leave are unmeasured. The F32-staging experiment is
   deprioritized given the cohort result, not refuted.
-- **Policy position** (proposed, not adopted; reviewed by cx 01a10cc):
+- **Policy position** (proposed here; adopted later the same day, entry
+  above; reviewed by cx 01a10cc):
   keep Fast as serve's default and replace the one-prompt agreement bound
   (KL 2e-2, regret 0.2) with separate properties. Bitwise: reuse,
   cancellation-resume and snapshot restore equal the uninterrupted run

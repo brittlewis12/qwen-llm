@@ -583,15 +583,11 @@ pub(crate) fn run_raw(
                 }),
             ),
             &measured,
-            Some(RequestStatsDiagnostics {
-                deepseek_v4: None,
-                glm5_next: None,
-                k2_horizon: Some(RequestStatsK2Diagnostics {
-                    prefill,
-                    chat: chat_record,
-                    timing: Some(timing.json),
-                }),
-            }),
+            Some(FamilyDiagnostics::K2Horizon(RequestStatsK2Diagnostics {
+                prefill,
+                chat: chat_record,
+                timing: Some(timing.json),
+            })),
         )?;
     }
     Ok(())
@@ -696,22 +692,17 @@ mod tests {
 
     #[test]
     fn k2_stats_record_selected_prefill_without_other_family_diagnostics() {
-        let diagnostics = RequestStatsDiagnostics {
-            deepseek_v4: None,
-            glm5_next: None,
-            k2_horizon: Some(RequestStatsK2Diagnostics {
-                chat: None,
-                timing: None,
-                prefill: qwen_llm::k2_horizon_runtime::K2PrefillInfo {
-                    mode: "q8_lcpp_token_batch",
-                    chunk_tokens: 32,
-                    commands: 2,
-                    temporary_activation_bytes: 7602304,
-                },
-            }),
-        };
+        let diagnostics = FamilyDiagnostics::K2Horizon(RequestStatsK2Diagnostics {
+            chat: None,
+            timing: None,
+            prefill: qwen_llm::k2_horizon_runtime::K2PrefillInfo {
+                mode: "q8_lcpp_token_batch",
+                chunk_tokens: 32,
+                commands: 2,
+                temporary_activation_bytes: 7602304,
+            },
+        });
         let record = serde_json::to_value(diagnostics).unwrap();
-        assert!(record.get("deepseek_v4").is_none());
         assert_eq!(record["k2_horizon"]["prefill"]["commands"], 2);
         assert_eq!(record["k2_horizon"]["prefill"]["chunk_tokens"], 32);
     }

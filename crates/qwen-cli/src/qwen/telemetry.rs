@@ -1368,7 +1368,7 @@ pub(crate) struct RequestStatsRequestRecord<'a> {
     pub(crate) output_fingerprint: Option<RequestStatsOutputFingerprint>,
     pub(crate) build: RequestStatsBuild,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) diagnostics: Option<RequestStatsDiagnostics>,
+    pub(crate) diagnostics: Option<FamilyDiagnostics>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1421,13 +1421,11 @@ pub(crate) struct RequestStatsBuild {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct RequestStatsDiagnostics {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) deepseek_v4: Option<RequestStatsDeepSeekV4Diagnostics>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) k2_horizon: Option<RequestStatsK2Diagnostics>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) glm5_next: Option<RequestStatsGlm5NextDiagnostics>,
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FamilyDiagnostics {
+    DeepseekV4(RequestStatsDeepSeekV4Diagnostics),
+    K2Horizon(RequestStatsK2Diagnostics),
+    Glm5Next(RequestStatsGlm5NextDiagnostics),
 }
 
 /// GLM-5.3 request facts: prefill path, session geometry, retained-window
@@ -1465,6 +1463,80 @@ pub(crate) struct RequestStatsDeepSeekV4Diagnostics {
     pub(crate) load_ms: f64,
 }
 
+#[cfg(test)]
+mod family_diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn deepseek_v4_family_diagnostics_match_previous_object() {
+        let value = serde_json::to_value(FamilyDiagnostics::DeepseekV4(
+            RequestStatsDeepSeekV4Diagnostics {
+                schema_version: 1,
+                prefill_mode: "chunked",
+                prefill_chunk_cap: 64,
+                transitions: 3,
+                transition_tps: 4.5,
+                load_ms: 2.0,
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"deepseek_v4": {
+                "schema_version": 1, "prefill_mode": "chunked", "prefill_chunk_cap": 64,
+                "transitions": 3, "transition_tps": 4.5, "load_ms": 2.0
+            }})
+        );
+    }
+
+    #[test]
+    fn k2_horizon_family_diagnostics_match_previous_object() {
+        let value = serde_json::to_value(FamilyDiagnostics::K2Horizon(RequestStatsK2Diagnostics {
+            prefill: qwen_llm::k2_horizon_runtime::K2PrefillInfo {
+                mode: "q8_lcpp_token_batch",
+                chunk_tokens: 32,
+                commands: 2,
+                temporary_activation_bytes: 1024,
+            },
+            chat: None,
+            timing: None,
+        }))
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"k2_horizon": {
+                "prefill": {"mode": "q8_lcpp_token_batch", "chunk_tokens": 32,
+                    "commands": 2, "temporary_activation_bytes": 1024}
+            }})
+        );
+    }
+
+    #[test]
+    fn glm5_next_family_diagnostics_match_previous_object() {
+        let value = serde_json::to_value(FamilyDiagnostics::Glm5Next(
+            RequestStatsGlm5NextDiagnostics {
+                schema_version: 2,
+                prefill_mode: "packed_fast",
+                prefill_rows: 4,
+                capacity: 128,
+                prefetch: serde_json::json!({"windows": 2}),
+                timing: serde_json::json!({"total_ms": 9.0}),
+                sampling: serde_json::json!({"seed": 42}),
+                chat: None,
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"glm5_next": {
+                "schema_version": 2, "prefill_mode": "packed_fast", "prefill_rows": 4,
+                "capacity": 128, "prefetch": {"windows": 2},
+                "timing": {"total_ms": 9.0}, "sampling": {"seed": 42}
+            }})
+        );
+    }
+}
+
 /// Case-insensitive parser for the `QWEN_BUILD_DIRTY` build-time env var.
 /// Accepts `0`/`false`/`no` (any case, plus empty) as clean; anything else
 /// is treated as dirty, biasing toward "assume unstable" if the value is
@@ -1481,7 +1553,7 @@ pub(crate) fn parse_build_dirty(raw: &str) -> bool {
 
 /// The family-neutral measured core of one completed single-turn request.
 /// Every lane already computes these; the record is a projection, not a new
-/// instrument. Family-specific facts travel in `RequestStatsDiagnostics`.
+/// instrument. Family-specific facts travel in `FamilyDiagnostics`.
 ///
 /// Field semantics are shared across lanes so records compare:
 /// - `tokenizer_ms` (record `timing_ms.tokenization`): encoding the prompt
@@ -1521,7 +1593,7 @@ pub(crate) fn build_single_turn_stats_record<'a>(
     family: &'a str,
     input: RequestStatsInput<'a>,
     measured: &RequestStatsMeasured,
-    diagnostics: Option<RequestStatsDiagnostics>,
+    diagnostics: Option<FamilyDiagnostics>,
 ) -> RequestStatsRequestRecord<'a> {
     RequestStatsRequestRecord {
         schema: "qwen-llm.request-stats",
@@ -1586,7 +1658,7 @@ pub(crate) fn append_single_turn_stats_record(
     family: &str,
     input: RequestStatsInput<'_>,
     measured: &RequestStatsMeasured,
-    diagnostics: Option<RequestStatsDiagnostics>,
+    diagnostics: Option<FamilyDiagnostics>,
 ) -> Result<()> {
     let record = build_single_turn_stats_record(
         &INVOCATION_ID,

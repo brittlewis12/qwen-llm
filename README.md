@@ -1,9 +1,15 @@
 # qwen-llm
 
 A local inference engine for Apple Silicon Macs, written in Rust with its own
-Metal kernels. It runs GGUF models from several families and includes a
-command-line runner, an HTTP server for local clients, interpretability
-("lens") tools and benchmarks.
+Metal kernels. It runs GGUF models from several families, from the command
+line or as a local HTTP server for clients such as coding agents.
+
+Because the engine executes every layer itself, it is also an instrument. It
+can project a model's intermediate activations into readable form, apply
+controlled interventions at chosen sites during a run, and save the results
+with the model and settings that produced them. Speed makes those experiments
+cheap to repeat, and owning the forward pass is what exposes the sites to
+measure and change.
 
 The project started with Qwen models, which is where the name and the `qwen`
 commands come from. It now runs other families too.
@@ -28,6 +34,11 @@ Input is text only. What a given file supports depends on its release,
 metadata and tensor layout, not just its architecture name. A request the
 file can't support is refused with an error that says why.
 
+A model that loads and runs has not thereby been shown to match a reference
+implementation or to be fast. Agreement and speed depend on the exact file,
+quantization, execution mode and hardware; the measurements under
+[docs/bench/](docs/bench/) say which combinations were checked and how.
+
 To see what the engine makes of a file without loading it onto the GPU:
 
 ```sh
@@ -35,10 +46,21 @@ qwen info -m MODEL.gguf          # summary
 qwen info -m MODEL.gguf --json   # reasoning levels, input forms, tools, sampling
 ```
 
+### Memory
+
+Weights stay resident in unified memory, and the GPU can only use as much
+memory as macOS lets it wire (`iogpu.wired_limit_mb`). A model needs roughly
+its file size plus room for context state, which grows with context length:
+Qwen3.8-27B's attention cache is about 8 GiB at 133K tokens. The file sizes in
+the performance table below are a guide. The 112 GiB GLM-5.3-Flash UD-IQ3_XXS
+file has been run on a 128 GB Mac with the wired limit raised to 118 GiB.
+
 ## Build
 
-Requirements: an Apple Silicon Mac, Rust 1.88 or newer, and the Xcode
-command-line tools (for `xcrun metal` and `xcrun metallib`).
+Requirements: an Apple Silicon Mac, Rust 1.88 or newer, and Xcode with its
+Metal toolchain, so that `xcrun metal` and `xcrun metallib` work. Since Xcode
+26 the toolchain is a separate download:
+`xcodebuild -downloadComponent MetalToolchain`.
 
 ```sh
 cargo build --release -p qwen-cli
@@ -54,11 +76,18 @@ models do not run through it.
 ## Running a model
 
 ```sh
-qwen run -m MODEL.gguf --user "Explain this"
-qwen run -m MODEL.gguf --system "Be concise" --user "Explain this" -n 1024
-qwen run -m MODEL.gguf --reasoning-effort low --user "Explain this"
-qwen run -m MODEL.gguf --no-thinking --user "Explain this"
-cat question.txt | qwen run -m MODEL.gguf --user -
+qwen run -m Qwen3.6-35B-A3B-UD-Q4_K_M.gguf -n 4096 --user "Why is the sky blue?"
+```
+
+Thinking models reason before they answer, so give them an output budget:
+without `-n` (`--max-tokens`), `qwen run` stops after 64 tokens. Other common
+forms:
+
+```sh
+qwen run -m MODEL.gguf -n 4096 --system "Be concise" --user "Explain this"
+qwen run -m MODEL.gguf -n 4096 --reasoning-effort low --user "Explain this"
+qwen run -m MODEL.gguf -n 1024 --no-thinking --user "Explain this"
+cat question.txt | qwen run -m MODEL.gguf -n 4096 --user -
 ```
 
 - The prompt is rendered with the model's chat template. Templates are
@@ -66,8 +95,6 @@ cat question.txt | qwen run -m MODEL.gguf --user -
 - `--reasoning-effort` takes the levels the release defines, such as
   `none`, `low`, `medium` and `xhigh` on Qwen3.8. `--no-thinking` selects the
   release's non-thinking mode where it has one.
-- `qwen run` generates at most 64 tokens unless you pass `-n`
-  (`--max-tokens`).
 - Sampling uses per-release presets, which `qwen info --json` reports.
   `--temp 0` gives greedy decoding. A sampled run without `--seed` picks a
   seed and prints it.
@@ -79,8 +106,8 @@ cat question.txt | qwen run -m MODEL.gguf --user -
 Conversations and tool use take messages as JSON, from a file or stdin:
 
 ```sh
-qwen run -m MODEL.gguf --messages conversation.json
-qwen run -m MODEL.gguf --messages -
+qwen run -m MODEL.gguf -n 4096 --messages conversation.json
+qwen run -m MODEL.gguf -n 4096 --messages -
 ```
 
 The JSON is an array of chat messages, or `{ "messages": [...], "tools": [...] }`
@@ -90,18 +117,14 @@ accepts.
 
 `--raw-prompt '<text>'` sends exact model input with no template.
 
-Dense Qwen models (`qwen35`) can use a DFlash drafter for speculative decoding
-with `--drafter DRAFTER.gguf`, in both `qwen run` and `qwen serve`. MoE Qwen
-models (`qwen35moe`) accept one in `qwen run` only.
-
 `qwen -h` shows the common options. `qwen --help` adds JSONL batch processing
 and research options.
 
 ## Serving
 
 ```sh
-qwen serve -m Qwen3.8-27B.gguf
-qwen serve -m GLM-5.3-Flash.gguf --max-context-tokens 32768 --max-tokens 4096
+qwen serve -m Qwen3.8-27B-Q4_K_M.gguf
+qwen serve -m GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf --max-context-tokens 32768 --max-tokens 4096
 ```
 
 `qwen serve` keeps one model loaded and serves a subset of the Open Responses
@@ -113,26 +136,59 @@ authentication. Clients that speak Open Responses can use it directly;
 - Requests run one at a time. A request that arrives while another is running
   gets `503` with `Retry-After: 1` straight away.
 - The API is stateless: clients send the whole conversation with each
-  request. The server keeps state from earlier requests and reuses the
-  longest part that matches, so a follow-up turn mostly processes only what
-  is new.
-- Qwen and DeepSeek V4 also save that state to disk (by default under
-  `~/.cache/qwen-llm/serve-checkpoints`) and can restore it after a restart.
-- Ordinary Qwen models size each request as it comes. The other families
-  allocate a fixed context at startup: DeepSeek V4 needs
-  `--max-context-tokens`, and Flash-Next, Muse Glimmer, K2 Horizon and
-  GLM-5.3-Flash need both `--max-context-tokens` and `--max-tokens`.
+  request. The server keeps state from earlier requests and reuses the part
+  that is compatible with the new one. How much it can reuse depends on the
+  family and execution mode; the table below summarizes it.
 
 [docs/SERVE.md](docs/SERVE.md) covers the API subset, caching and flags in
 detail.
 
+## What differs by family
+
+| Family | `qwen serve` sizing flags | Reuse between requests | Kept across restarts | DFlash drafter |
+|---|---|---|---|---|
+| Qwen dense (`qwen35`) | none | snapshots | yes | `run`, `serve` |
+| Qwen MoE (`qwen35moe`) | none | snapshots | yes | `run` |
+| Qwen3.8 Flash-Next | both | snapshots | no | no |
+| DeepSeek V4 | `--max-context-tokens` | snapshots | yes | no |
+| GLM-5.3-Flash | both | live session; snapshots with Exact prefill | no | no |
+| Muse Glimmer | both | live session | no | no |
+| K2 Horizon | both | live session | no | no |
+
+- **Sizing flags.** Ordinary Qwen sizes each request as it comes. The other
+  families allocate a fixed session at startup and need
+  `--max-context-tokens`, and all but DeepSeek V4 also `--max-tokens`.
+- **Snapshots** save model state at conversation boundaries; a later request
+  restores the longest one that matches its prompt. Qwen and DeepSeek V4 also
+  write them to disk (by default under `~/.cache/qwen-llm/serve-checkpoints`).
+- **Live session** reuses the one resident session: Muse Glimmer and K2
+  Horizon rewind it to the longest common prefix, and GLM-5.3-Flash continues
+  it only when the new prompt extends the previous one exactly.
+  GLM-5.3-Flash prefills with its Fast lineage by default; snapshots are on
+  for Exact prefill (`x_qwen.prefill_lineage: "exact"`) and opt-in for Fast
+  while that combination is being qualified.
+- **DFlash drafter** (`--drafter DRAFTER.gguf`) enables speculative decoding.
+
 ## Lens
 
-`qwen-lens` is a set of interpretability tools. It reads out what a model's
-intermediate layers predict, using a plain logit lens or J- and R-lenses
-(fitted locally or imported). It can also apply interventions between blocks
-during a run, sweep an intervention's strength and compare saved traces. See
-[docs/LENS-RUN.md](docs/LENS-RUN.md).
+`qwen-lens` projects intermediate activations into token-space readouts, using
+a plain logit lens or J- and R-lens transports (fitted locally or imported).
+With it you can:
+
+- read a run's projections across layers and positions;
+- intervene during a run with a lens row or your own direction vector, at
+  block outputs or, on dense Qwen and GLM-5.3-Flash, at each residual writer
+  (embedding, attention or GDN mixer, FFN) before its output is added;
+- sweep an intervention's strength over one model load and compare the arms;
+- reopen and compare saved results later: a result records the plan it ran
+  and content hashes of the lenses and directions it used.
+
+For example, projecting one direction out of GLM-5.3-Flash's residual writers
+gave the same refuse, hedge or comply label as llama.cpp running a published
+rank-1 weight edit, at all 152 prompt and dose pairs tested, from a single
+vector instead of edited weights
+([docs/bench/2026-10-08-glm53-directions/](docs/bench/2026-10-08-glm53-directions/README.md)).
+See [docs/LENS-RUN.md](docs/LENS-RUN.md) for what each family supports.
 
 `qwen serve` can also host a browser workbench for lens jobs:
 
@@ -145,23 +201,45 @@ Running new jobs from the workbench currently needs a dense or MoE Qwen3.6 or
 Qwen3.8 model (not Flash-Next) with its standard chat template. See
 [docs/LENS-WEB.md](docs/LENS-WEB.md).
 
-## Benchmarks
+## Performance
+
+A snapshot, not a current guarantee: qwen-llm `70ec9a9b` against llama.cpp
+b11182 on 2026-09-25, M4 Max 128 GB, same file for both. Tokens per second
+for qwen-llm, with the ratio to the better of llama.cpp's `-ub 512` and
+`-ub 2048` runs.
+
+| Model, file size | pp512 | pp4096 | tg128 | tg128 at 8K |
+|---|---:|---:|---:|---:|
+| Qwen3.8-27B Q4_K_M, 15.9 GiB | 246 (1.01x) | 233 (1.07x) | 25.6 (1.05x) | 23.2 (1.07x) |
+| Qwen3.6-35B-A3B UD-Q4_K_M, 20.6 GiB | 1535 (0.97x) | 1793 (1.05x) | 109.9 (1.19x) | 98.8 (1.16x) |
+| Qwen3.5-122B-A10B UD-Q4_K_XL, 71.7 GiB | 491 (0.96x) | 555 (1.04x) | 46.0 (1.11x) | 42.6 (1.12x) |
+| Qwen3.8-Flash-Next UD-Q3_K_XL, 83.8 GiB | 554 (0.86x) | 473 (0.77x) | 36.4 (0.88x) | 26.8 (0.75x) |
+| DeepSeek-V4-Flash-0731 UD-IQ3_XXS, 97.1 GiB | 141 (0.48x) | 254 (0.83x) | 28.7 (1.00x) | 22.4 (0.85x) |
+| Muse-Glimmer-30B Q8_0, 27.6 GiB | 228 (0.86x) | 198 (0.85x) | 16.5 (0.97x) | 15.7 (0.99x) |
+
+These are synthetic-token tests with llama-bench's semantics, not request
+latency, and several rows have changed since. Setup, caveats and raw data:
+[docs/bench/2026-09-25-1759-families-family/](docs/bench/2026-09-25-1759-families-family/FINDINGS.md).
+GLM-5.3-Flash was measured separately on 2026-10-04: prefill at 93-98% of
+llama.cpp, decode 21-25% ahead
+([docs/bench/2026-10-04-glm53-p3-packed-prefill/](docs/bench/2026-10-04-glm53-p3-packed-prefill/README.md)).
+
+To measure yourself:
 
 ```sh
 qwen-bench suite -m MODEL.gguf --pp 512 --tg 128 --runs 3 -o json
 ```
 
-`qwen-bench pp` and `qwen-bench tg` use the same test definitions as
-`llama-bench`'s prompt-processing and generation tests, so the two can be
-compared on the same model file. `suite` runs many shapes against one model
-load. `qwen-bench --help` lists the rest, most of which are profiling and
-research probes.
+The default `qwen-bench pp` and `tg` tests follow `llama-bench`'s timing
+semantics, so they can be compared with llama-bench on the same file when
+context depth, KV cache type and batch settings match. `suite` runs many
+shapes against one model load. `qwen-bench --help` lists the rest, most of
+which are profiling and research probes.
 
 - [docs/BENCH.md](docs/BENCH.md): methodology
-- [docs/PERF-LOG.md](docs/PERF-LOG.md): measurements over time
+- [docs/PERF-LOG.md](docs/PERF-LOG.md): measurements over time, including
+  approaches that were tried and closed
 - [docs/PERF-ROADMAP.md](docs/PERF-ROADMAP.md): open performance work
-- [docs/bench/](docs/bench/): raw data and write-ups for individual
-  measurements
 
 ## Repository layout
 

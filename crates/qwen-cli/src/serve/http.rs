@@ -856,7 +856,7 @@ fn handle_responses(
                     &partition_events,
                     response_stop_reason(outcome.end),
                     outcome.usage,
-                    outcome.stats.as_ref().filter(|_| request.echo_stats),
+                    ServeStats::echo_for(outcome.stats.as_ref(), &request).as_ref(),
                 )?;
                 write_json_response(&mut writer, 200, &envelope)
             }
@@ -901,7 +901,7 @@ fn handle_responses(
                 response.finish(
                     response_stop_reason(outcome.end),
                     outcome.usage,
-                    outcome.stats.as_ref().filter(|_| request.echo_stats),
+                    ServeStats::echo_for(outcome.stats.as_ref(), &request).as_ref(),
                 )?;
                 sse.done()
             }
@@ -1034,6 +1034,7 @@ mod tests {
                     matched_tokens: 5,
                     restore_ms: 1.25,
                     prompt_tokens: 7,
+                    seed: None,
                 }),
             })
         }
@@ -1431,6 +1432,16 @@ mod tests {
         assert_eq!(parsed["output"][1]["content"][0]["text"], "\n\nanswer");
         assert_eq!(parsed["usage"]["total_tokens"], 10);
         assert_eq!(parsed["x_qwen"]["matched_tokens"], 5);
+        // The stats echo carries the request's effective seed for replay.
+        let seeded = roundtrip(
+            MockBackend::new(&["<think>\np\n</think>\n\nanswer"], StopReason::Eos),
+            &post(
+                "/v1/responses",
+                r#"{"model":"qwen-test","input":"hi","x_qwen":{"stats":true,"seed":7}}"#,
+            ),
+        );
+        let parsed: Value = serde_json::from_str(body_of(&seeded)).unwrap();
+        assert_eq!(parsed["x_qwen"]["seed"], 7);
     }
 
     #[test]

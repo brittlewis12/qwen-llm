@@ -68,6 +68,7 @@ pub(crate) fn finish_generation(
             matched_tokens,
             restore_ms,
             prompt_tokens,
+            seed: None,
         }),
     }
 }

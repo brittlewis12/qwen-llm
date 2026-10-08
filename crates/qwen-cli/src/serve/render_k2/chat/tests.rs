@@ -24,7 +24,9 @@ fn k2_chat_profile_required_at_every_admission_boundary() {
     normalize_with_profile(&mut request, 8, 128, Some(&p)).unwrap();
     assert_eq!(request.reasoning, Some(json!({"effort":"high"})));
     assert_eq!(request.tool_choice, "none");
-    assert_eq!(request.temperature, Some(0.));
+    // The model card's sampling (release_sampling), not greedy.
+    assert_eq!(request.temperature, Some(1.0));
+    assert_eq!(request.top_p, Some(0.95));
     assert!(!request.parallel_tool_calls);
     assert_eq!(
         render_with_profile(&request, Some(&p)).unwrap(),

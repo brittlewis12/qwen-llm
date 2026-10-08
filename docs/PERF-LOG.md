@@ -6,6 +6,66 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-07 - Leverage Map Re-Ranked After Concurrent Flash-Next Work (cx `01a10cc`)
+
+- **Concurrent landings, logged here:**
+  - GSQ for Flash-Next (`7c75b21f`, `9f0aca03`, merge `95a83129`; packet
+    `docs/bench/2026-10-07-quant-compat/`): current GGML wire types admitted
+    with bounded CPU decoding; per-role native dtype admission, Q2_0 kernels,
+    generic grouped IQ2_S/IQ3_S experts. Smoke requests only; quality and
+    controlled performance are unclaimed.
+  - Release sampling for Flash-Next (`09b0c9c4`): omitted fields come from
+    its generation_config (temperature 1, top-p 0.95, top-k 20, min-p 0) in
+    run and serve, as for Muse and GLM. Later the same evening `60f6071e`
+    gave ordinary Qwen, DS4 and K2 their releases' published presets too
+    (previously temperature 0, greedy); a holdout qualification remains.
+- **New rank:** #12, #13, #16 with #14 (holdout qualification of the new
+  sampling defaults inside #16), #18 (new), #15 (conditional on #13), #9, #3(a), #2, #8 (after
+  a Flash-Next re-baseline), #19 (new), then #6, #10, #3(b). Tracked: #1's
+  open items, #5 v2, #7, #17 (demoted: no 2-8-row hot path shown for
+  Flash-Next or K2). GLM NextN stays a paper candidate.
+- **Moves:** #12 ahead of #13 (a default failing its declared policy);
+  #9 ahead of #2 (the ~3.3 ms expert figure is bandwidth headroom, not a
+  demonstrated saving, while an 18-token GLM tool step prefilled in 400 ms).
+- **Correction (GSQ packet):** selected packed attention is not gated off
+  for GSQ. `packed_selected_capable` compares the prompt extent (or session
+  capacity) with the selected output width, 2051
+  (`qwen4exp_text_session.rs:328-339`, `qwen4exp_qsa.rs:798-800`); the smoke
+  capacities were 256 and 1024. Above 2051 the path is enabled for GSQ and
+  unqualified (first child of #18). The packet sentence is replaced.
+- **Decline census (#18):** fast-path declines classed S/Q/I/P across
+  families. Examples: Flash-Next's IQ3_XXS expert specializations cannot read
+  GSQ's IQ2_S/IQ3_S banks (generic kernels run, cost unmeasured; the
+  specialized down dtype is IQ4_NL); its HC up-mix contract (Q8_0,
+  4x2560, K320) declines GSQ's BF16 HC projections while the load line
+  prints `hc_up_mix=true` (permission, not use); GLM coverage gaps refuse at
+  binding; GLM Fast (#12) is enabled despite a failed qualification; DS4's
+  device, artifact, expert-count and chunk qualifications sit inside #9.
+- **#13 sharpened:** GLM's live session reuses only exact extensions, so with
+  the unpatched client every step whose history carried dropped reasoning
+  was a full re-prefill. Families with LCP truncation keep the common
+  prefix; snapshot families restore from the latest compatible checkpoint.
+  With the patched client, continued steps should extend; prefill retries
+  resume from the committed chunk boundary. The screen counts continued
+  steps, branches, shared-prefix new sessions and cold starts separately.
+- **#19 DFlash2 beyond Qwen:** incoai publishes drafters for GLM-5.3-Flash,
+  GLM-5.3, Muse-Glimmer-30B, Qwen3.6-35B-A3B and Qwen3.8-27B. A bounded
+  feasibility packet (Muse first as lower risk): GLM Exact verify2/verify8
+  cost (a uniform-routing illustration gives ~58 distinct experts per layer
+  for 8 rows against 8 for one decode row), the KDA/MLA checkpoint contract,
+  and the drafter's feature convention (upstream averages the mHC streams).
+- **Memory statement corrected:** this host's `iogpu.wired_limit_mb` is
+  120832 (118 GiB), not the 112 GiB the GLM plan and ledger comment stated.
+  The UD-IQ3_XXS trunk leaves ~8.5 GiB; ~7.2 GiB after the fixed session
+  terms is a planning estimate assuming 512-row packed scratch, and ~640K
+  positions is a cache-only quotient, not an admitted context.
+- **Not ranked:** the Maya-S GLM requant (IQ2_XXS gate/up, mostly IQ2_S
+  down). The complete artifact is ~22 GiB smaller (89.8 vs 112.1 GiB);
+  routed bytes per token would fall only from 2.84 to 2.23 GiB, and the
+  decode benefit is unmeasured. Its card reports KL 0.428 against FP8 and
+  the worst agreement on tool calls, and IQ2_XXS has no Metal path here.
+  Byte reduction alone does not justify the implementation.
+
 ## 2026-10-06 - Lane Convergence Batch 2: `qwen run` Output and Stats
 
 Packet `docs/bench/2026-10-06-glm53-lane-audit/` (Batch 2 section).
@@ -190,7 +250,7 @@ against the leverage map is pending.
   6. #8 attribution.
   7. #6 and #10.
   8. #3(b) Flash-Next codec.
-  #7 DFlash stays with its existing owner.
+  #7 DFlash continues on main.
 - **Protocol (map gates):** order-balanced, repeated A/B blocks with
   contemporaneous controls; MDE from between-block variation (one parent
   tg cell drifted ~4.4% between runs); unchanged cells as controls; GLM
@@ -5185,7 +5245,7 @@ Do not run or extend it under current process supervision.
   workload, default, or transfer. No residency API or model/GPU workload was run
   while making this correction.
 
-Decision: require an explicit future user reopen plus a supervisor with a long or
+Decision: require an explicit future reopening decision plus a supervisor with a long or
 disabled SIGKILL deadline, deterministic unload, and observed host-memory
 recovery before any whole-model residency work. Until then, optimize ordinary
 pageable loading, execution, and reuse without wiring or pinning model-scale

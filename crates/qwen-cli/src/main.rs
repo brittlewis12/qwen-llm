@@ -62,6 +62,10 @@ mod prompt_template;
 #[path = "qwen/qwen4exp.rs"]
 mod qwen4exp;
 mod qwen_file_root;
+#[path = "qwen/release_identity.rs"]
+mod release_identity;
+#[path = "qwen/release_sampling.rs"]
+mod release_sampling;
 #[path = "qwen/run_options.rs"]
 mod run_options;
 mod serve;
@@ -315,6 +319,19 @@ fn run() -> Result<()> {
             "--format responses needs chat input (--user or --messages); raw input prints text"
         );
     }
+    // Day-to-day requests sample with the identified release's defaults for
+    // every field not passed, and a fresh seed unless one was chosen; JSONL
+    // batches and sampling attribution keep their explicit sampler contracts.
+    if args.requests_jsonl.is_none() && !args.sampling_attribution {
+        let identity = release_identity::ReleaseIdentity::detect(family, &gguf);
+        let release = release_sampling::release_sampling(identity, args.seed);
+        let drawn = release_sampling::apply_run_defaults(&mut args, explicit_options, release);
+        if let Some(seed) = drawn.filter(|_| args.temperature > 0.0) {
+            eprintln!("qwen: sampling seed {seed} (drawn; pass --seed {seed} to reproduce)");
+        }
+    }
+    // Checks on the effective sampler run once the defaults are known.
+    validate_sampled_structural_sampling(&args)?;
     // One exhaustive dispatch keeps each family out of the wrong admission
     // lane. K2, GLM and Muse own their request shapes and skip the Qwen batch
     // and DeepSeek selector validators below.
@@ -525,6 +542,16 @@ fn validate_sampling_attribution_mode(args: &Args) -> Result<()> {
     Ok(())
 }
 
+/// The sampler half of `--sampled-structural`'s contract, checked against the
+/// effective sampling once release defaults have filled omitted fields.
+fn validate_sampled_structural_sampling(args: &Args) -> Result<()> {
+    ensure!(
+        !args.sampled_structural || (args.temperature > 0.0 && args.top_k > 0),
+        "--sampled-structural requires positive temperature and top-k"
+    );
+    Ok(())
+}
+
 fn validate_sampled_structural_mode(args: &Args) -> Result<()> {
     if !args.sampled_structural {
         return Ok(());
@@ -543,10 +570,6 @@ fn validate_sampled_structural_mode(args: &Args) -> Result<()> {
             "--sampled-structural is incompatible with JSONL, warm follow-up, ",
             "prompt lookup, sampling attribution, and durable cache"
         )
-    );
-    ensure!(
-        args.temperature > 0.0 && args.top_k > 0,
-        "--sampled-structural requires positive temperature and top-k"
     );
     ensure!(
         args.prefix_cache_max_mib == 0
@@ -1168,6 +1191,13 @@ fn project_info(model: &Path, gguf: &GgufFile) -> Result<serde_json::Value> {
             "template": template_projection(None, gguf),
         }),
     };
+    // Run and serve defaults for every sampling field a request omits.
+    let sampling = match family {
+        Some(family) => {
+            release_sampling::projection(release_identity::ReleaseIdentity::detect(family, gguf))
+        }
+        None => serde_json::Value::Null,
+    };
     let projection = serde_json::json!({
         "version": "qwen_info_v1",
         "model": model.display().to_string(),
@@ -1178,6 +1208,7 @@ fn project_info(model: &Path, gguf: &GgufFile) -> Result<serde_json::Value> {
             "serve": project(Lane::Serve),
         },
         "prompt_lookup": { "run": prompt_lookup },
+        "sampling": sampling,
         "capabilities": capabilities,
     });
     Ok(projection)
@@ -1203,6 +1234,16 @@ fn capability_lines(projection: &serde_json::Value) -> Vec<String> {
         if let Some(value) = projection.pointer(path) {
             lines.push(format!("{label}: {}", status(value)));
         }
+    }
+    if let Some(sampling) = projection.get("sampling").filter(|value| value.is_object()) {
+        lines.push(format!(
+            "sampling: temperature {} top-k {} top-p {} min-p {} ({})",
+            sampling["temperature"],
+            sampling["top_k"],
+            sampling["top_p"],
+            sampling["min_p"],
+            sampling["identity"].as_str().unwrap_or("-"),
+        ));
     }
     let capabilities = &projection["capabilities"];
     if let Some(reasoning) = capabilities.get("reasoning") {

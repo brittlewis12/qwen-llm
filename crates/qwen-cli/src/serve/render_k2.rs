@@ -115,17 +115,7 @@ fn normalize_controls(
             format!("K2 max_output_tokens must be in 1..={capacity}"),
         ));
     }
-    if request.temperature.is_none() {
-        request.temperature = Some(0.0);
-        request.temperature_echo = Some(0.0);
-    }
-    if request.top_p.is_none() {
-        request.top_p = Some(1.0);
-        request.top_p_echo = Some(1.0);
-    }
-    request.top_k.get_or_insert(0);
-    request.min_p.get_or_insert(0.0);
-    request.seed.get_or_insert(0);
+    super::request_profile::fill_sampling_defaults(request, k2_release());
     let tools = request
         .k2_tools
         .as_ref()
@@ -138,14 +128,17 @@ fn normalize_controls(
     Ok(())
 }
 
+/// K2 Horizon's release defaults (`release_sampling`), raw and chat alike;
+/// serve seed 42 as for every family.
+fn k2_release() -> SamplingConfig {
+    crate::release_sampling::release_sampling(
+        crate::release_identity::ReleaseIdentity::K2Horizon,
+        42,
+    )
+}
+
 pub(crate) fn sampling(request: &ServeRequest) -> SamplingConfig {
-    SamplingConfig {
-        temperature: request.temperature.unwrap_or(0.0),
-        top_k: request.top_k.unwrap_or(0),
-        top_p: request.top_p.unwrap_or(1.0),
-        min_p: request.min_p.unwrap_or(0.0),
-        seed: request.seed.unwrap_or(0),
-    }
+    super::request_profile::sampling_with_defaults(request, k2_release())
 }
 
 pub(crate) fn render(request: &ServeRequest) -> Result<String, ServeError> {

@@ -43,15 +43,17 @@ pub(crate) fn effort(request: &ServeRequest) -> Result<Effort, ServeError> {
         .map_err(|error| invalid("reasoning.effort", error.to_string()))
 }
 
+/// GLM-5.3-Flash's release defaults (`release_sampling`); seeds are drawn
+/// per request.
+fn glm_release() -> SamplingConfig {
+    crate::release_sampling::release_sampling(
+        crate::release_identity::ReleaseIdentity::Glm53Flash,
+        0,
+    )
+}
+
 pub(crate) fn sampling(request: &ServeRequest) -> SamplingConfig {
-    let defaults = SamplingConfig::glm5_next(42);
-    SamplingConfig {
-        temperature: request.temperature.unwrap_or(defaults.temperature),
-        top_k: request.top_k.unwrap_or(defaults.top_k),
-        top_p: request.top_p.unwrap_or(defaults.top_p),
-        min_p: request.min_p.unwrap_or(defaults.min_p),
-        seed: request.seed.unwrap_or(defaults.seed),
-    }
+    super::request_profile::sampling_with_defaults(request, glm_release())
 }
 
 /// Release sampling defaults, the output budget, and the normalized effort
@@ -63,18 +65,7 @@ pub(crate) fn normalize_request(
     capacity: usize,
     max_piece_bytes: usize,
 ) -> Result<(), ServeError> {
-    let defaults = SamplingConfig::glm5_next(42);
-    if request.temperature.is_none() {
-        request.temperature = Some(defaults.temperature);
-        request.temperature_echo = Some(f64::from(defaults.temperature));
-    }
-    if request.top_p.is_none() {
-        request.top_p = Some(defaults.top_p);
-        request.top_p_echo = Some(0.95);
-    }
-    request.top_k.get_or_insert(defaults.top_k);
-    request.min_p.get_or_insert(defaults.min_p);
-    request.seed.get_or_insert(defaults.seed);
+    super::request_profile::fill_sampling_defaults(request, glm_release());
     let maximum = *request.max_output_tokens.get_or_insert(default_max_tokens);
     if maximum == 0 || maximum > capacity {
         return Err(invalid(
@@ -466,7 +457,7 @@ mod tests {
         assert_eq!(request.reasoning, Some(json!({"effort":"max"})));
         assert_eq!(
             sampling(&request),
-            SamplingConfig::glm5_next(42),
+            SamplingConfig::glm5_next(request.seed.expect("a fresh seed is drawn")),
             "release defaults"
         );
         assert_eq!(request.max_output_tokens, Some(8));

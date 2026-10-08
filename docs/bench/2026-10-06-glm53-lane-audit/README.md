@@ -33,7 +33,7 @@ Principles agreed for this audit:
   - The 2026-10-03 plan said it correctly ("prompt edits need replay or a
     compatible checkpoint"). The qualifier was dropped in the serve commit
     `aff7e84a`.
-  - The product intent (owner, 2026-09-23, session history): every family
+  - The product intent (recorded 2026-09-23, session history): every family
     reuses prefixes across multi-turn requests, by transcript-boundary
     snapshots, or by truncating live KV to the longest common prefix for
     attention-only families, and later persists snapshots durably.
@@ -466,6 +466,6 @@ Practice:
     literally and becomes a `function_call` (`get_weather`, Paris).
 - **Found along the way:** K2's chat check had failed since `edb597b3`
   (2026-09-24). It still expected missing history reasoning to be refused
-  after the owner's every-family policy made it empty reasoning; it now
+  after the every-family policy made it empty reasoning; it now
   checks that the reasoning is filled and reported. Reference check scripts
   were not rerun after that behaviour change.

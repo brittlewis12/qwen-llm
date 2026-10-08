@@ -145,7 +145,7 @@ pub(crate) struct Args {
     #[arg(short = 'n', long, hide_short_help = true, default_value_t = 64)]
     pub(crate) tokens: usize,
 
-    /// Sampling temperature; zero is greedy. Muse and Flash-Next omission use their released value 1.
+    /// Sampling temperature; zero is greedy. Omitted on a single request, the identified release's preset applies (`qwen info --json` reports it; greedy with --prompt-lookup); the default shown applies to --requests-jsonl.
     #[arg(
         long = "temp",
         visible_alias = "temperature",
@@ -154,19 +154,19 @@ pub(crate) struct Args {
     )]
     pub(crate) temperature: f32,
 
-    /// Top-k cutoff; zero disables it. Muse and Flash-Next omission use their released values 64 and 20.
+    /// Top-k cutoff; zero disables it. Omitted on a single request, the identified release's preset applies.
     #[arg(long, hide_short_help = true, default_value_t = 200)]
     pub(crate) top_k: usize,
 
-    /// Nucleus cutoff; one disables it. Muse and Flash-Next omission use their released value .95.
+    /// Nucleus cutoff; one disables it. Omitted on a single request, the identified release's preset applies.
     #[arg(long, hide_short_help = true, default_value_t = 1.0)]
     pub(crate) top_p: f32,
 
-    /// Min-p cutoff; zero disables it. Muse and Flash-Next omission use their released value 0.
+    /// Min-p cutoff; zero disables it. Omitted on a single request, the identified release's preset applies.
     #[arg(long, hide_short_help = true, default_value_t = 0.05)]
     pub(crate) min_p: f32,
 
-    /// Effective deterministic seed; identical requests reuse the same stream.
+    /// Sampling seed; identical requests with one seed reuse the same stream. Omitted on a single request, a fresh seed is drawn and reported on stderr; the default shown applies to --requests-jsonl.
     #[arg(long, hide_short_help = true, default_value_t = 42)]
     pub(crate) seed: u64,
 
@@ -318,6 +318,7 @@ pub(crate) struct ExplicitCliOptions {
     pub(crate) top_k: bool,
     pub(crate) top_p: bool,
     pub(crate) min_p: bool,
+    pub(crate) seed: bool,
     pub(crate) prefill_chunk: bool,
     pub(crate) prefix_cache_max_mib: bool,
     pub(crate) cache_prefix_auto_min_tokens: bool,
@@ -339,6 +340,7 @@ impl ExplicitCliOptions {
             top_k: command_line("top_k"),
             top_p: command_line("top_p"),
             min_p: command_line("min_p"),
+            seed: command_line("seed"),
             prefill_chunk: command_line("prefill_chunk"),
             prefix_cache_max_mib: command_line("prefix_cache_max_mib"),
             cache_prefix_auto_min_tokens: command_line("cache_prefix_auto_min_tokens"),

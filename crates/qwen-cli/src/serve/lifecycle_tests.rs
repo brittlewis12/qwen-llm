@@ -41,6 +41,7 @@ impl http::GenerationBackend for LifecycleBackend {
                 template: items::QwenTemplate::Qwen35,
                 no_thinking_supported: false,
                 style: items::TemplateStyle::House,
+                sampling: None,
             };
         }
         request_profile::RequestProfile::UnboundQwen

@@ -347,23 +347,23 @@ struct GenerationOverrides {
     #[arg(short = 'n', long = "max-tokens", visible_alias = "tokens")]
     tokens: Option<usize>,
 
-    /// Sampling temperature; omitted uses the detected family preset (Muse, GLM, Flash-Next: 1, others: 0).
+    /// Sampling temperature (0 = greedy); omitted uses the identified release's preset (`qwen info --json` reports `sampling`).
     #[arg(long = "temp", visible_alias = "temperature")]
     temperature: Option<f32>,
 
-    /// Top-k cutoff; omitted uses the detected family preset (Muse: 64, Flash-Next: 20, GLM: 0 = off, others: 200).
+    /// Top-k cutoff (0 = off); omitted uses the identified release's preset.
     #[arg(long)]
     top_k: Option<usize>,
 
-    /// Nucleus cutoff; omitted uses the detected family preset (Muse, GLM, Flash-Next: .95, others: 1).
+    /// Nucleus cutoff (1 = off); omitted uses the identified release's preset.
     #[arg(long)]
     top_p: Option<f32>,
 
-    /// Min-p cutoff; omitted uses the detected family preset (Muse, GLM, Flash-Next: 0, others: .05).
+    /// Min-p cutoff (0 = off); omitted uses the identified release's preset.
     #[arg(long)]
     min_p: Option<f32>,
 
-    /// Effective deterministic seed (default: 42).
+    /// Sampling seed; omitted, each request draws a fresh one and reports it on stderr.
     #[arg(long)]
     seed: Option<u64>,
 

@@ -249,6 +249,9 @@ pub(crate) struct EngineBackend {
     restore_source: &'static str,
     /// Deployment default for `x_qwen.template_style` (`--template-style`).
     pub(super) template_style: super::items::TemplateStyle,
+    /// The identified release's defaults for omitted sampling fields
+    /// (`release_sampling`); `None` keeps [`request_sampler`]'s fallbacks.
+    pub(super) release_sampling: Option<SamplingConfig>,
 }
 
 impl EngineBackend {
@@ -325,12 +328,31 @@ impl EngineBackend {
             durable: None,
             restore_source: "none",
             template_style: super::items::TemplateStyle::House,
+            release_sampling: None,
         })
     }
 }
 
-/// Sampler for a Qwen or DeepSeek V4 serve request with the greedy-leaning
-/// serve defaults (temperature 0, top_k 200, min_p 0.05).
+/// Sampler for a Qwen or DeepSeek V4 serve request: each field it sets, else
+/// the identified release's default, else (no release decision, as for test
+/// and pilot backends) [`request_sampler`]'s fallbacks.
+pub(crate) fn release_request_sampler(
+    request: &ServeRequest,
+    release: Option<SamplingConfig>,
+) -> Result<Sampler, ServeError> {
+    match release {
+        Some(release) => Sampler::new(super::request_profile::sampling_with_defaults(
+            request, release,
+        ))
+        .map_err(|error| ServeError::invalid_request(None, format!("sampling: {error}"))),
+        None => request_sampler(request),
+    }
+}
+
+/// Sampler for a Qwen or DeepSeek V4 serve request with the legacy
+/// greedy-leaning fallbacks (temperature 0, top_k 200, min_p 0.05), for
+/// backends without a release decision; served models use
+/// [`release_request_sampler`].
 pub(crate) fn request_sampler(request: &ServeRequest) -> Result<Sampler, ServeError> {
     Sampler::new(SamplingConfig {
         temperature: request.temperature.unwrap_or(0.0),
@@ -973,6 +995,7 @@ impl GenerationBackend for EngineBackend {
             template: self.template,
             no_thinking_supported: self.no_thinking_supported,
             style: self.template_style,
+            sampling: self.release_sampling,
         }
     }
 
@@ -992,7 +1015,7 @@ impl GenerationBackend for EngineBackend {
         }
         // Validate all user-controlled sampling values before tokenization,
         // request-state allocation, prefix restore, or model execution.
-        let mut sampler = request_sampler(request)?;
+        let mut sampler = release_request_sampler(request, self.release_sampling)?;
         // Rendered ChatML carries its own special-token markers; matches the
         // legacy messages path (prompt_add_special_tokens = false).
         let tokenize_t0 = Instant::now();
@@ -2233,6 +2256,7 @@ impl EngineBackend {
                 matched_tokens,
                 restore_ms,
                 prompt_tokens: prompt_ids.len(),
+                seed: None,
             }),
         })
     }

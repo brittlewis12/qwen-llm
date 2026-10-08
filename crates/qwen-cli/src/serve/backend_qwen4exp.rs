@@ -201,8 +201,11 @@ impl GenerationBackend for FlashNextBackend {
     ) -> Result<GenerationOutcome, BackendFailure> {
         self.idle_residency.before_request();
         let max_tokens = request.max_output_tokens.unwrap_or(self.default_max_tokens);
-        let mut sampler = Sampler::new(super::request_profile::flash_next_sampling(request))
-            .map_err(|error| ServeError::invalid_request(None, format!("sampling: {error}")))?;
+        let mut sampler = Sampler::new(super::request_profile::sampling_with_defaults(
+            request,
+            super::request_profile::flash_next_release(),
+        ))
+        .map_err(|error| ServeError::invalid_request(None, format!("sampling: {error}")))?;
         let tokenize_t0 = Instant::now();
         let prompt_ids =
             decode_loop::encode_checked(&self.tokenizer, prompt, false, self.vocab_size, FAMILY)?;

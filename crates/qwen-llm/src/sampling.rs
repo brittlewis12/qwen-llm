@@ -91,6 +91,45 @@ impl SamplingConfig {
         }
     }
 
+    /// The Qwen3.x release `generation_config.json` shape: top-k 20 and top-p
+    /// 0.95 with the release's own temperature (1.0 for most releases, 0.6 for
+    /// Qwen3.5-27B and Qwen3.5-122B-A10B). The model cards' penalty-dependent
+    /// mode presets are not represented; this sampler has no penalties.
+    pub fn qwen3_release(temperature: f32, seed: u64) -> Self {
+        Self {
+            temperature,
+            top_k: 20,
+            top_p: 0.95,
+            min_p: 0.0,
+            seed,
+        }
+    }
+
+    /// DeepSeek-V4-Flash-0731's released `generation_config.json`: temperature
+    /// 1.0 and top-p 1.0, so top-k and min-p are off. (The card suggests top-p
+    /// 0.95 for agentic use; callers can pass it.)
+    pub fn deepseek_v4_0731(seed: u64) -> Self {
+        Self {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed,
+        }
+    }
+
+    /// K2-Horizon's model card ("Best Practices: temperature=1.0, top_p=0.95");
+    /// its `generation_config.json` declares no sampling. Top-k and min-p off.
+    pub fn k2_horizon(seed: u64) -> Self {
+        Self {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 0.95,
+            min_p: 0.0,
+            seed,
+        }
+    }
+
     pub fn validate(self) -> Result<Self, SamplingError> {
         if !self.temperature.is_finite() || self.temperature < 0.0 {
             return Err(SamplingError::InvalidTemperature(self.temperature));

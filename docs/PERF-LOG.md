@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-08 - #15 GLM Serve Snapshots: Exact On by Default, Fast Opt-In Pending Its Quality Arm
+
+- GLM serve keeps a RAM snapshot cache (`--snapshot-cache-mib`, shared
+  expiry and eviction flags; no durable tier). The renderer records the end
+  of the shared instructions-and-tools prefix and the start of the
+  generation header while appending; serve verifies each against the
+  prompt's tokens. A request of a snapshot schedule splits its prefill at
+  those cuts on hit, miss, full cache or denied capture, so a restore
+  continues exactly the trajectory a miss runs (cx 01a10cc jam). Entries
+  are namespaced by (lineage, schedule) under one budget; reuse takes the
+  longer of the live-session extension and the best compatible snapshot.
+- Exact (`x_qwen.prefill_lineage: "exact"`) cuts at both boundaries and is
+  on whenever the cache has a budget: packed Exact equals serial decode, so
+  restores equal cold runs. Fast (the default lineage) stays off; its
+  shared-prefix split is a new schedule that enters the #12 quality cohort
+  as a candidate arm before it can be a default. `QWEN_GLM_FAST_SNAPSHOTS=1`
+  opts in for that qualification and for #13's cost screen.
+- GPU gate (Metal validation, 1,173-token shared prefix): Exact miss, shared
+  hit and transcript hit equal cold runs bitwise (logits and bytes); Fast
+  hit equals a miss on the same split, as does a full cache; Fast entries
+  never serve Exact; split prefills cancelled after one chunk resume onto
+  the same schedule in both lineages. Observed, not relied on: for this
+  prompt the Fast split's logits equaled the unsplit Fast prefill's.
+- Next: the Fast shared-split quality arm (preregistered: segmentation
+  algorithm, split points below and across the frontier and at pool
+  residues, all strata, real rendered tool boundaries, an ~11K agent-shaped
+  case), then #13's screen with the opt-in for cost.
+
 ## 2026-10-08 - #12 GLM Fast Prefill Passes a Preregistered Quality Cohort; Half-Rounded Activations Alone Reproduce Its Drift
 
 - **Quality** (`docs/bench/2026-10-08-glm53-fast-quality/`; cohort and

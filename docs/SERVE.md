@@ -145,8 +145,8 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
 # may extend through the model's declared context.
 # K2 requires explicit --max-context-tokens (within checkpoint context) and
 # --max-tokens. GLM-5.3-Flash requires both too (device memory admits the
-# session at startup and names the capacity that fits). Muse, K2 and GLM keep
-# no snapshots: --snapshot-cache-mib accepts only auto or 0, the expiry flags
+# session at startup and names the capacity that fits). Muse and K2 keep no
+# snapshots: --snapshot-cache-mib accepts only auto or 0, the expiry flags
 # only their default or 0, and --snapshot-half-life-secs only its default.
 ```
 
@@ -248,7 +248,7 @@ Qwen (3.5/3.6/3.8 dense and MoE) and DeepSeek V4 keep warm prefixes across
 restarts in a disk tier under the RAM cache. Flash-Next, Muse Glimmer, K2 and
 GLM-5.3-Flash have no durable tier: an explicit `--durable-snapshot-*` value is
 refused at startup (`--durable-snapshot-dir off` is accepted), and the default
-logs that the tier does not apply. Muse, K2 and GLM reuse their live session
+logs that the tier does not apply. Muse and K2 reuse their live session
 instead of snapshots, so they refuse snapshot settings they cannot honour: a
 positive `--snapshot-cache-mib`, a non-zero non-default
 `--snapshot-idle-ttl-secs` or `--snapshot-max-age-secs`, and any
@@ -464,7 +464,8 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   layer its pending index-key block, `n/4` compressed index keys, and `n` F16
   K/V rows: `118,063,104 + 24,576·n + 3,072·⌊n/4⌋` bytes (≈113 MiB + 24.75
   KiB/token; ≈0.95 GB at 32K). `--snapshot-cache-mib` configures the Qwen,
-  Flash-Next, and DS4 caches (default `auto`; see the cache policy above). Muse
+  Flash-Next, DS4 and GLM-5.3-Flash caches (default `auto`; see the cache
+  policy above). Muse
   reuses its one live session's longest common token prefix by default (no
   snapshots; `QWEN_MUSE_PREFIX_REUSE=0` disables).
   K2 keeps one live session and reuses its longest common token prefix (see
@@ -923,22 +924,58 @@ and parses it, and never runs a tool.
 after a pause pays ~1 s to re-wire GLM's 109.5 GiB: a 27-token prefill takes
 1.6-1.7 s instead of 0.6 s. The window opens after the warm-up.
 
-**Live session.** GLM serve has no snapshot cache yet, so the one resident
-session is reused only when a request's prompt strictly extends exactly the
-tokens it consumed; anything else drops it and prefills a fresh session
-(about 8 ms to allocate). This is an implementation gap, not a property of
-the model. The Qwen and Flash-Next hybrids also carry recurrent state and
-reuse prefixes by snapshotting it at boundaries; GLM snapshots are planned
-(`docs/bench/2026-10-06-glm53-lane-audit/`, PERF-ROADMAP). A replayed conversation extends: the model ends a
-turn by sampling `<|user|>`, the next turn's opener, and the renderer writes
-history back byte-for-byte when the client replays the reasoning and answer
-items. Re-tokenization that differs from the sampled tokens, a changed
+**Live session.** The one resident session is reused when a request's
+prompt strictly extends exactly the tokens it consumed; otherwise a snapshot
+may restore a shared prefix (below), or a fresh session (about 8 ms to
+allocate) prefills from the start. A replayed conversation extends: the
+model ends a turn by sampling `<|user|>`, the next turn's opener, and the
+renderer writes history back byte-for-byte when the client replays the
+reasoning and answer items. Re-tokenization that differs from the sampled tokens, a changed
 effort or system message, `strip`, or whitespace the template strips from an
 answer all fall back to a fresh session. Every client-caused refusal
 (budget, capacity, input) precedes the session, so the cache survives it. A
 cancellation during prefill keeps the committed chunks (a retry of the same
 prompt resumes from them); an abort during decode or any engine failure
-clears the session. `QWEN_GLM_PREFIX_REUSE=0` disables reuse.
+clears the session. `QWEN_GLM_PREFIX_REUSE=0` disables reuse (live session
+and snapshots).
+
+**Snapshots.** GLM keeps a RAM snapshot cache under `--snapshot-cache-mib`
+(default `auto`) and the shared expiry and eviction flags; there is no
+durable tier. A snapshot holds the session's recurrent and attention state
+at a committed position: about 0.14 GiB fixed plus ~11.7 KiB per token
+(0.27 GiB at an 11K-token instructions-and-tools prefix). The renderer
+records two boundaries while it renders: the end of the shared prefix (the
+effort line, the tools block and leading system messages) and the start of
+the generation header; serve verifies each against the prompt's tokens. A
+request whose schedule uses snapshots splits its prefill at those positions
+whether its lookup hits or misses, the cache is full or capture is denied,
+and captures the state at each cut when it is new and admitted. A later
+request restores the longest compatible snapshot when it reaches past the
+live session's extension (`usage.cached_tokens` reports it); entries are
+compatible only within one prefill lineage and schedule.
+
+- Exact (`x_qwen.prefill_lineage: "exact"`) cuts at both boundaries. Packed
+  Exact equals token-by-token decoding, so a restored request equals a cold
+  run bit for bit. On by default whenever the cache has a budget.
+- Fast (the default lineage) is off: its prefill depends on where chunks
+  start, so the split is a new Fast schedule that must pass the #12 quality
+  cohort before it becomes a default. `QWEN_GLM_FAST_SNAPSHOTS=1` opts in
+  for qualification: one cut at the shared prefix; a restored request equals
+  a miss on the same split, not an unsplit cold run.
+
+The `serve phases:` line reports `reuse_source=live|snapshot|none`,
+`restore_ms`, `snapshot_schedule`, `cuts`, each cut's capture outcome
+(`captured`, `present`, `ineligible`, `denied`, `failed`),
+`snapshot_capture_ms` and the cache's bytes and entries.
+
+Checked under `MTL_DEBUG_LAYER=1` on UD-IQ3_XXS with a 1,173-token shared
+prefix (`serve::backend_glm5_next::tests::gpu_snapshots_continue_the_captured_trajectory`):
+Exact misses capture both cuts and equal a cold run; a second conversation
+restores the shared prefix and an identical retry restores its transcript,
+both equal to cold runs bit for bit (logits and bytes); opt-in Fast hits equal
+a miss on the same split, as does a full cache; Fast entries never serve an
+Exact request; a split prefill cancelled after its first chunk resumes onto
+the same schedule with the uninterrupted run's logits, in both lineages.
 
 Checked under `MTL_DEBUG_LAYER=1` on UD-IQ3_XXS
 (`serve::backend_glm5_next::tests::gpu_live_session_extends_resumes_and_resets`):

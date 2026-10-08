@@ -19,13 +19,15 @@ unacceptable degradation.
 ## Preregistration
 
 `scripts/reference/glm53/quality-split-v1.json` (cuts, cases, generated at
-`2f4a6553` on the CPU) and `scripts/reference/glm53/quality_split_analysis.py`
+`3bb802a2` on the CPU) and `scripts/reference/glm53/quality_split_analysis.py`
 (limits, gates, decision rule; quality-v1's analysis imported unchanged)
-were committed (`83757f5f`) before any GPU run, amended after the cx 01a10cc
-preregistration review (`976071ed`: validation, invalid-evidence refusals,
+were committed (`476a72b3`) before any GPU run, amended after the cx 01a10cc
+preregistration review (`3964447b`: validation, invalid-evidence refusals,
 checkpointing; limits unchanged) and once more while the run was in progress
-and before any result was viewed (`3b63a8a1`: KL roundoff tolerance). Runs
-at `d65a09a2` with Metal API validation on (`run.log` not committed;
+and before any result was viewed (`ade29b1d`: KL roundoff tolerance). Runs
+at `d65a09a2` (the raw artifacts' evaluator commit; rebased as `9148817d`
+onto main commits that touched only qwen-cli code, not the harness) with Metal API validation
+on (`run.log` not committed;
 `report.json` and `verdict.json` are).
 
 - Arms on quality-v1's 38 text items (64 teacher-forced tokens each):

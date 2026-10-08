@@ -9,7 +9,7 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 ## 2026-10-08 - #12/#15 Fast Shared-Prefix Split: INCONCLUSIVE; Fast Snapshots Stay Opt-In
 
 - Preregistered `quality-split-v1` (`docs/bench/2026-10-08-glm53-fast-split-quality/`,
-  run at `d65a09a2`, Metal validation): grid (cut at the deployed agent
+  run at `d65a09a2`, rebased as `9148817d`, Metal validation): grid (cut at the deployed agent
   prefix's in-chunk offset), tail (17-20 tokens after the cut) and frontier
   (cuts 2050-2053) arms against a full Exact rerun. Every gated limit passed
   except the tail arm's overall NLL: +0.0011 nats/token, central 90%
@@ -31,7 +31,7 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 - Ordinary Qwen, Flash-Next and DeepSeek V4 profiles now carry their
   backend's default token limit and longest decoded piece (computed once at
   load); the output protocol's tool-block ceiling is the resolved limit x
-  longest piece x 3 (UTF-8 replacement), as GLM's (`974271fa`, `caacb6d1`;
+  longest piece x 3 (UTF-8 replacement), as GLM's (`a96df045`, `83dc518f`;
   cx jam and reviews). Normalization refuses an uncomputable ceiling (400)
   wherever the protocol parses tools (always for ordinary Qwen and
   Flash-Next); the protocol fails closed otherwise; the backends resolve
@@ -47,12 +47,12 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
 ## 2026-10-08 - #14 Output Memory, Packet 2: Qwen-XML and DeepSeek-DSML Tool Buffers Admitted
 
-- Measured first (`c0019d12`): Qwen XML and DS4 DSML tool blocks of GLM's
+- Measured first (`643fddfc`): Qwen XML and DS4 DSML tool blocks of GLM's
   four shapes through the real handler in one-byte pieces peak at most
   147.5 bytes per block byte, the same as GLM's (the shared argument parse
   and publication dominate), so GLM's retained 256x model applies; four
   shapes are evidence, not a bound.
-- Now (`753e5527`, `0ad98e8f`; cx reviews): the Qwen/DS4 tool buffer admits
+- Now (`c59aa130`, `9684df1d`; cx reviews): the Qwen/DS4 tool buffer admits
   each 64 KiB step at the checked 256x outstanding peak against fresh
   headroom and again before the parse (GLM's admission now uses the same
   checked pricing); refusals are stored, inert and returned by `finish`.
@@ -71,7 +71,7 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   family. Measured end to end (test allocator, plain output in one-byte
   pieces, 200,000 bytes): **246.5 bytes per output byte** above a minimal
   response; streaming 5.2.
-- Now (`fc687be8`, `beac1191`; cx 01a10cc jam and reviews): one contiguous
+- Now (`1c1c560c`, `ce4b1e57`; cx 01a10cc jam and reviews): one contiguous
   buffer plus piece end offsets, each growth step admitted before
   allocating (the step's whole peak less what is held, against fresh
   process headroom, Batch 3a's typed refusals; checked arithmetic, typed
@@ -103,7 +103,7 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   schema v2: per-arm change from the hash-pinned 2026-10-07 baseline; 97
   rows diagnostic). Non-finite logits or metrics always fail; flips are
   counted by argmax inequality with both regrets.
-- **Tests migrated** (`16dec174` and review fixes): the warm/cold reproducer
+- **Tests migrated** (`4490f96a` and review fixes): the warm/cold reproducer
   is now `fast_reuse_schedule_sensitivity_across_reuse_boundaries`
   (cancel/resume bitwise hard, drift reported); the chunking test is
   `packed_fast_chunkings_keep_bit_identities_with_drift_alarms` (oracle and

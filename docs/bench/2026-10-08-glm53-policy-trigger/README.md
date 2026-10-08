@@ -4,7 +4,8 @@ The adopted Fast policy (PERF-LOG 2026-10-08) keeps one investigation
 trigger: worst-position KL(Exact || Fast) above 0.33 on the frozen natural
 cases (`scripts/reference/glm53/reuse-natural-v1.json`), Fast at 512 rows,
 cold and warm. `reuse_natural_evaluate` (report schema v2) ran it at
-`d65a09a2` with Metal API validation (`natural-v2.json`).
+`d65a09a2` (rebased as `9148817d`; the interleaved main commits touched
+only qwen-cli code, not the harness) with Metal API validation (`natural-v2.json`).
 
 - **Not tripped.** Worst at 512 rows: 0.155 (H2 warm), 0.146 (H5 warm),
   0.113 (H2 cold); every other case below 0.10. At 97 rows (diagnostic)

@@ -230,7 +230,7 @@ fn allocate<'w>(
         "error":result.as_ref().err().map(ToString::to_string)}),
     );
     let mut s = result.expect("ordinary session admission/allocation failed; record flushed");
-    s.set_packed_lineage(PackedLineage::Fast);
+    s.set_packed_lineage(PackedLineage::Fast).unwrap();
     Some(s)
 }
 

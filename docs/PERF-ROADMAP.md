@@ -155,8 +155,9 @@ Order of execution (rank, by item ID; re-ranked 2026-10-07):
    candidate arm (long prefixes, real rendered tool boundaries, frozen
    Exact reused where compatible) before it becomes the default; hit and
    miss restores stay bitwise gates; #13's screen is rerun for cost.
-   Restore must equal the uninterrupted same-lineage, same-schedule state. RAM snapshots save retained-prefix
-   replay, not a first-ever prefill or a restart.
+   Restore must equal the uninterrupted same-lineage, same-schedule state.
+   RAM snapshots save retained-prefix replay, not a first-ever prefill or a
+   restart.
 3. #16 batch 3 with #14 (mostly CPU): 3a (typed memory refusals, one status
    table) is reviewed and awaiting integration; then #14 tool pricing beyond
    GLM and row 5 timing. The landed sampling defaults (`60f6071e`) get

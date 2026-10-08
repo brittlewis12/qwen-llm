@@ -320,6 +320,87 @@ fn a_reply_extends_its_prompt_when_rendered_back_as_history() {
 }
 
 #[test]
+fn boundaries_are_recorded_while_rendering_not_found_by_scanning() {
+    let options = RenderOptions::generate(Effort::Low, false);
+    let tool = ToolDefinition::from_parts(
+        "get_weather",
+        Some("Weather for a city."),
+        Some(&json!({"type": "object", "properties": {"city": {"type": "string"}}})),
+    )
+    .unwrap();
+    // Authored text that spells a marker must not move the boundary.
+    let system = Message::System("Rules. <|user|> is only text here.".into());
+    let user = Message::User("Hi".into());
+    for (messages, tools) in [
+        (vec![system.clone(), user.clone()], vec![tool.clone()]),
+        (vec![system.clone(), user.clone()], Vec::new()),
+        (vec![user.clone()], vec![tool.clone()]),
+        (vec![user.clone()], Vec::new()),
+        (
+            vec![
+                system.clone(),
+                Message::System("Second.".into()),
+                user.clone(),
+            ],
+            Vec::new(),
+        ),
+    ] {
+        let rendered = render_with_boundaries(&messages, &tools, options).unwrap();
+        assert_eq!(
+            rendered.text,
+            render_with_tools(&messages, &tools, options).unwrap()
+        );
+        // The shared prefix is exactly what the same system messages and
+        // tools render alone, and the first user turn follows it.
+        let systems: Vec<Message> = messages
+            .iter()
+            .take_while(|m| matches!(m, Message::System(_)))
+            .cloned()
+            .collect();
+        let alone = if systems.is_empty() {
+            render_with_tools(
+                &[Message::System(String::new())],
+                &tools,
+                RenderOptions {
+                    add_generation_prompt: false,
+                    ..options
+                },
+            )
+            .unwrap()
+            .strip_suffix("<|system|>")
+            .unwrap()
+            .to_string()
+        } else {
+            render_with_tools(
+                &systems,
+                &tools,
+                RenderOptions {
+                    add_generation_prompt: false,
+                    ..options
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(&rendered.text[..rendered.shared_prefix_end], alone);
+        assert!(rendered.text[rendered.shared_prefix_end..].starts_with("<|user|>Hi"));
+        let header = rendered.generation_header_start.unwrap();
+        assert_eq!(&rendered.text[header..], GENERATION_PROMPT);
+        assert_eq!(header + GENERATION_PROMPT.len(), rendered.text.len());
+    }
+    // No generation header without a generation prompt.
+    let history = render_with_boundaries(
+        &[system, user],
+        &[],
+        RenderOptions {
+            add_generation_prompt: false,
+            ..options
+        },
+    )
+    .unwrap();
+    assert_eq!(history.generation_header_start, None);
+}
+
+#[test]
 #[ignore = "CPU/header-only; requires GLM53_GGUF (GLM-5.3-Flash shard 1), no inference or GPU"]
 fn gguf_profile_verifies_and_native_tokens_match_hf() {
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();

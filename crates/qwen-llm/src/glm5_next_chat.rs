@@ -408,6 +408,31 @@ pub fn render_with_tools(
     definitions: &[ToolDefinition],
     options: RenderOptions,
 ) -> Result<String> {
+    render_with_boundaries(messages, definitions, options).map(|rendered| rendered.text)
+}
+
+/// A rendered conversation and byte offsets the renderer itself recorded
+/// while appending (never found by scanning, so authored text that looks
+/// like a marker cannot create one). Each offset is immediately followed
+/// by a special marker, which the tokenizer encodes atomically, so it is
+/// also a token boundary; callers still verify that by tokenizing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderedChat {
+    pub text: String,
+    /// End of the shared prefix: the effort line, the tools block and any
+    /// leading system messages, before the first other message.
+    pub shared_prefix_end: usize,
+    /// Start of the generation header (`<|assistant|><think>`), when one
+    /// was added.
+    pub generation_header_start: Option<usize>,
+}
+
+/// [`render_with_tools`] with the boundaries of [`RenderedChat`].
+pub fn render_with_boundaries(
+    messages: &[Message],
+    definitions: &[ToolDefinition],
+    options: RenderOptions,
+) -> Result<RenderedChat> {
     if messages.is_empty() {
         return Err(input("the conversation is empty"));
     }
@@ -427,7 +452,11 @@ pub fn render_with_tools(
     out.push_str("<|system|>Reasoning Effort: ");
     out.push_str(options.effort.label());
     tools::render_definitions(definitions, &mut out)?;
+    let mut shared_prefix_end = None;
     for (index, message) in messages.iter().enumerate() {
+        if shared_prefix_end.is_none() && !matches!(message, Message::System(_)) {
+            shared_prefix_end = Some(out.len());
+        }
         match message {
             Message::System(text) => {
                 out.push_str("<|system|>");
@@ -471,10 +500,17 @@ pub fn render_with_tools(
             }
         }
     }
-    if options.add_generation_prompt {
+    let shared_prefix_end = shared_prefix_end.unwrap_or(out.len());
+    let generation_header_start = options.add_generation_prompt.then(|| {
+        let start = out.len();
         out.push_str(GENERATION_PROMPT);
-    }
-    Ok(out)
+        start
+    });
+    Ok(RenderedChat {
+        text: out,
+        shared_prefix_end,
+        generation_header_start,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

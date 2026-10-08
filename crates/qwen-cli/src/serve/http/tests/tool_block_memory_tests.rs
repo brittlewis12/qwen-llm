@@ -15,6 +15,15 @@ use qwen_llm::glm5_next_chat::{TOOL_BLOCK_PEAK_FACTOR, tool_block_peak_bytes};
 struct ToolOutput {
     output: String,
     piece: usize,
+    profile: RequestProfile,
+}
+
+fn glm_profile() -> RequestProfile {
+    RequestProfile::Glm5Next {
+        default_max_tokens: 64,
+        capacity: 1 << 20,
+        max_piece_bytes: 512,
+    }
 }
 
 impl GenerationBackend for ToolOutput {
@@ -22,11 +31,7 @@ impl GenerationBackend for ToolOutput {
         "test"
     }
     fn request_profile(&self) -> RequestProfile {
-        RequestProfile::Glm5Next {
-            default_max_tokens: 64,
-            capacity: 1 << 20,
-            max_piece_bytes: 512,
-        }
+        self.profile.clone()
     }
     fn generate(
         &mut self,
@@ -126,6 +131,7 @@ fn tool_block_publication_stays_within_the_admission_model() {
             ToolOutput {
                 output: "plan</think>ok".into(),
                 piece,
+                profile: glm_profile(),
             },
             post("/v1/responses", &body(streaming, json!({"type": "array"}))),
             trace,
@@ -136,6 +142,7 @@ fn tool_block_publication_stays_within_the_admission_model() {
                 ToolOutput {
                     output: format!("plan</think>{block}"),
                     piece,
+                    profile: glm_profile(),
                 },
                 post("/v1/responses", &body(streaming, schema.clone())),
                 trace,
@@ -185,6 +192,7 @@ fn nonstream_plain_output_peak_per_byte() {
             ToolOutput {
                 output: "plan</think>ok".into(),
                 piece: 1,
+                profile: glm_profile(),
             },
             request(streaming),
             None,
@@ -193,6 +201,7 @@ fn nonstream_plain_output_peak_per_byte() {
             ToolOutput {
                 output: format!("plan</think>{text}"),
                 piece: 1,
+                profile: glm_profile(),
             },
             request(streaming),
             None,
@@ -210,4 +219,109 @@ fn nonstream_plain_output_peak_per_byte() {
             "stream={streaming}: {ratio:.1} bytes per output byte > {bound}"
         );
     }
+}
+
+/// Map #14 packet 2 measurement (before their admission): Qwen XML and
+/// DeepSeek V4 DSML tool blocks through the real handler, the same shapes
+/// as GLM's, in one-byte pieces. Measured 2026-10-08: worst 147.5 bytes per
+/// block byte (deep arrays, streaming), the same as GLM's (the shared
+/// argument parse and publication dominate). Held to GLM's 256 model, the
+/// factor the admission adopts; four shapes are evidence, not a proof.
+#[test]
+fn qwen_and_ds4_tool_block_peaks() {
+    let body = |streaming: bool| {
+        json!({"model": "test", "input": "Go.", "stream": streaming,
+            "max_output_tokens": 200_000, "reasoning": {"effort": "high"},
+            "tools": [{"type": "function", "name": "f", "parameters": {"type": "object",
+                "properties": {"a": {}}}}]})
+        .to_string()
+    };
+    let inner = format!("{}1{}", "[".repeat(126), "]".repeat(126));
+    let values: Vec<(&str, String)> = vec![
+        (
+            "array of deep arrays",
+            format!("[{}]", vec![inner.as_str(); 300].join(",")),
+        ),
+        (
+            "one-element arrays",
+            format!("[{}]", vec!["[1]"; 20_000].join(",")),
+        ),
+        ("control escapes", "\u{1}".repeat(60_000)),
+        (
+            "short strings",
+            format!("[{}]", vec!["\"a\""; 20_000].join(",")),
+        ),
+    ];
+    let qwen = |value: &str| {
+        format!(
+            "<tool_call>\n<function=f>\n<parameter=a>\n{value}\n</parameter>\n</function>\n</tool_call>"
+        )
+    };
+    let dsml = |value: &str| {
+        format!(
+            "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"f\">\n<｜DSML｜parameter name=\"a\" string=\"false\">{value}</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
+        )
+    };
+    let families: [(&str, RequestProfile, &str, &dyn Fn(&str) -> String); 2] = [
+        (
+            "qwen-xml",
+            RequestProfile::UnboundQwen,
+            "<think>plan</think>",
+            &qwen,
+        ),
+        (
+            "ds4-dsml",
+            RequestProfile::DeepSeekV4 {
+                style: TemplateStyle::House,
+                sampling: None,
+            },
+            "plan</think>",
+            &dsml,
+        ),
+    ];
+    let mut worst = 0.0f64;
+    for (family, profile, reasoning, call) in &families {
+        for (mode, streaming, piece) in [("non-stream/1", false, 1), ("stream/1", true, 1)] {
+            let (reply, baseline) = served(
+                ToolOutput {
+                    output: format!("{reasoning}ok"),
+                    piece,
+                    profile: profile.clone(),
+                },
+                post("/v1/responses", &body(streaming)),
+                None,
+            );
+            assert!(reply.starts_with("HTTP/1.1 200"), "{reply:.300}");
+            for (label, value) in &values {
+                let block = call(value);
+                let (reply, peak) = served(
+                    ToolOutput {
+                        output: format!("{reasoning}{block}"),
+                        piece,
+                        profile: profile.clone(),
+                    },
+                    post("/v1/responses", &body(streaming)),
+                    None,
+                );
+                assert!(
+                    reply.starts_with("HTTP/1.1 200"),
+                    "{family} {mode} {label}: {reply:.300}"
+                );
+                let called = reply.contains("function_call");
+                let above = peak.saturating_sub(baseline);
+                let ratio = above as f64 / block.len() as f64;
+                worst = worst.max(ratio);
+                eprintln!(
+                    "[tool-block-family] {family} {mode} {label}: block={} parsed_call={called} peak_above_baseline={above} ratio={ratio:.1}",
+                    block.len()
+                );
+                assert!(called, "{family} {mode} {label}: the call did not parse");
+                assert!(
+                    above <= tool_block_peak_bytes(block.len()),
+                    "{family} {mode} {label}: {above} bytes above baseline exceeds {TOOL_BLOCK_PEAK_FACTOR}x"
+                );
+            }
+        }
+    }
+    eprintln!("[tool-block-family] worst ratio {worst:.1}");
 }

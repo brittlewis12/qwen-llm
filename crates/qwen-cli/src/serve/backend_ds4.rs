@@ -159,6 +159,8 @@ pub(crate) struct DeepSeekV4Backend {
     selector_plan: DeepSeekV4MultigroupSelectorPlan,
     vocab_size: u32,
     default_max_tokens: usize,
+    /// Longest decoded piece of one token (output ceilings).
+    max_piece_bytes: usize,
     prefill_chunk_tokens: usize,
     cache: SnapshotCache<DeepSeekV4CausalSnapshot>,
     pub(super) snapshot_cache_plan: super::SnapshotCachePlan,
@@ -326,6 +328,7 @@ impl DeepSeekV4Backend {
             ),
             ctx,
             gguf,
+            max_piece_bytes: tokenizer.max_decoded_piece_bytes(),
             tokenizer,
             model_id,
             residency: Some(residency),
@@ -680,6 +683,10 @@ impl GenerationBackend for DeepSeekV4Backend {
         super::request_profile::RequestProfile::DeepSeekV4 {
             style: self.template_style,
             sampling: self.release_sampling,
+            limits: crate::serve::request_profile::OutputLimits {
+                default_max_tokens: self.default_max_tokens,
+                max_piece_bytes: self.max_piece_bytes,
+            },
         }
     }
 

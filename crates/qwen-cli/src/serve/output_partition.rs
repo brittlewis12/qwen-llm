@@ -74,6 +74,9 @@ pub(crate) enum OutputProtocol {
         preopened_reasoning: bool,
         parse_tools: bool,
         tool_grammar: ToolGrammar,
+        /// The tool block's proven byte ceiling (`None`: unbound test
+        /// profiles only).
+        tool_byte_ceiling: Option<usize>,
     },
     MuseAtem {
         eos_token_id: i32,
@@ -146,10 +149,12 @@ impl OutputPartition {
                 preopened_reasoning,
                 parse_tools,
                 tool_grammar,
+                tool_byte_ceiling,
             } => Self::Qwen(QwenOutputPartition::with_headroom(
                 preopened_reasoning,
                 parse_tools,
                 tool_grammar,
+                tool_byte_ceiling,
                 headroom,
             )),
             OutputProtocol::Glm5NextChat => Self::Preopened(super::render_glm5_next::partition()),
@@ -258,6 +263,7 @@ pub(crate) struct QwenOutputPartition {
     tool_grammar: ToolGrammar,
     pending_visible: String,
     tool_buffer: String,
+    tool_byte_ceiling: Option<usize>,
     failure: Option<ServeError>,
     headroom: super::http::Headroom,
     /// The grammar's call separator seen right before the open marker: part
@@ -322,6 +328,7 @@ impl QwenOutputPartition {
         preopened_reasoning: bool,
         parse_tools: bool,
         tool_grammar: ToolGrammar,
+        tool_byte_ceiling: Option<usize>,
         headroom: super::http::Headroom,
     ) -> Self {
         Self {
@@ -340,6 +347,7 @@ impl QwenOutputPartition {
             tool_grammar,
             pending_visible: String::new(),
             tool_buffer: String::new(),
+            tool_byte_ceiling,
             failure: None,
             headroom,
             tool_separator: "",
@@ -364,6 +372,15 @@ impl QwenOutputPartition {
             self.failure = Some(super::output_memory::size_overflow("tool block"));
             return false;
         };
+        if let Some(ceiling) = self.tool_byte_ceiling
+            && len > ceiling
+        {
+            self.failure = Some(super::output_memory::ceiling_exceeded(
+                "tool block",
+                ceiling,
+            ));
+            return false;
+        }
         if len <= self.tool_buffer.capacity() {
             return true;
         }
@@ -371,6 +388,8 @@ impl QwenOutputPartition {
             self.failure = Some(super::output_memory::size_overflow("tool block"));
             return false;
         };
+        // Never reserve past the ceiling (len is within it).
+        let capacity = self.tool_byte_ceiling.map_or(capacity, |c| capacity.min(c));
         if let Err(error) = self.admit_outstanding(capacity) {
             self.failure = Some(error);
             return false;
@@ -562,6 +581,7 @@ mod tests {
                         preopened_reasoning: false,
                         parse_tools: true,
                         tool_grammar: grammar,
+                        tool_byte_ceiling: None,
                     },
                     || Some(HEADROOM.load(Ordering::SeqCst)),
                 )
@@ -624,6 +644,7 @@ mod tests {
                 preopened_reasoning: false,
                 parse_tools: true,
                 tool_grammar: ToolGrammar::QwenXml,
+                tool_byte_ceiling: None,
             },
             || None,
         );
@@ -631,6 +652,51 @@ mod tests {
         assert_eq!(
             p.failure().map(|f| f.code),
             Some(Some("memory_signal_unavailable"))
+        );
+    }
+
+    /// A tool block past its proven byte ceiling fails the turn as an
+    /// internal accounting error (typed 500, not pressure), publishes no raw
+    /// tool text, and never reserves past the ceiling.
+    #[test]
+    fn tool_byte_ceiling_bounds_the_block_and_its_reservation() {
+        let protocol = |ceiling| OutputProtocol::Qwen {
+            preopened_reasoning: false,
+            parse_tools: true,
+            tool_grammar: ToolGrammar::QwenXml,
+            tool_byte_ceiling: Some(ceiling),
+        };
+        let open = "<tool_call>\n<function=f>\n<parameter=a>\n";
+        let close = "\n</parameter>\n</function>\n</tool_call>";
+        let block = format!("{open}1{close}");
+        // Exactly at the ceiling: parses, and the buffer stays within it.
+        let mut p = OutputPartition::with_headroom(protocol(block.len()), || Some(0));
+        let mut events = Vec::new();
+        p.push(format!("x{block}").as_bytes(), &mut events);
+        if let OutputPartition::Qwen(qwen) = &p {
+            assert!(qwen.tool_buffer.capacity() <= block.len());
+        }
+        p.finish(GenerationEnd::StopToken(0), &mut events).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PartitionEvent::FunctionCall(_)))
+        );
+        // One byte past it: typed 500, no raw tool text.
+        let mut p = OutputPartition::with_headroom(protocol(block.len() - 1), || Some(0));
+        let mut events = Vec::new();
+        p.push(format!("x{block}").as_bytes(), &mut events);
+        let failure = p.failure().cloned().expect("ceiling exceeded");
+        assert_eq!((failure.status, failure.code), (500, None));
+        assert_eq!(
+            p.finish(GenerationEnd::StopToken(0), &mut events)
+                .unwrap_err(),
+            failure
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, PartitionEvent::Visible(t) if t.contains("<tool_call>")))
         );
     }
 
@@ -658,6 +724,7 @@ mod tests {
             preopened_reasoning,
             parse_tools: true,
             tool_grammar: ToolGrammar::QwenXml,
+            tool_byte_ceiling: None,
         };
         assert!(!OutputProtocol::RawText.reasons());
         assert!(
@@ -727,6 +794,7 @@ mod tests {
                 preopened_reasoning: false,
                 parse_tools: true,
                 tool_grammar: ToolGrammar::QwenXml,
+                tool_byte_ceiling: None,
             },
             &[
                 b"<think>plan</think>answer<tool_",
@@ -753,6 +821,7 @@ mod tests {
                 preopened_reasoning: false,
                 parse_tools: false,
                 tool_grammar: ToolGrammar::QwenXml,
+                tool_byte_ceiling: None,
             },
             &[call],
             GenerationEnd::StopToken(1),
@@ -772,6 +841,7 @@ mod tests {
                 preopened_reasoning: true,
                 parse_tools: true,
                 tool_grammar: ToolGrammar::QwenXml,
+                tool_byte_ceiling: None,
             },
             &[
                 b"plan</think>answer<tool_call>\n<function=ping>\n",
@@ -806,6 +876,7 @@ mod tests {
                 preopened_reasoning: true,
                 parse_tools: false,
                 tool_grammar: ToolGrammar::QwenXml,
+                tool_byte_ceiling: None,
             },
             &[b"plan</think><tool_call>\n<function=ping>\n</function>\n</tool_call>"],
             GenerationEnd::StopToken(1),
@@ -834,6 +905,7 @@ mod tests {
             preopened_reasoning: false,
             parse_tools: true,
             tool_grammar: ToolGrammar::QwenXml,
+            tool_byte_ceiling: None,
         });
         let mut qwen_events = Vec::new();
         qwen.push(b"answer<tool_", &mut qwen_events);
@@ -883,6 +955,7 @@ mod tests {
             preopened_reasoning: false,
             parse_tools: true,
             tool_grammar: dsml,
+            tool_byte_ceiling: None,
         };
         let visible = |events: &[PartitionEvent]| {
             events

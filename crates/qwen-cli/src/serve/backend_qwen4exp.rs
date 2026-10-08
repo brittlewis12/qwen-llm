@@ -135,6 +135,8 @@ pub(crate) struct FlashNextBackend {
     loaded: Qwen4ExpLoadedModel<'static>,
     model_id: String,
     default_max_tokens: usize,
+    /// Longest decoded piece of one token (output ceilings).
+    max_piece_bytes: usize,
     forward_limit: usize,
     vocab_size: u32,
     stop_tokens: Vec<i32>,
@@ -211,6 +213,7 @@ impl FlashNextBackend {
         Ok(Self {
             ctx,
             gguf,
+            max_piece_bytes: prepared.tokenizer.max_decoded_piece_bytes(),
             tokenizer: prepared.tokenizer,
             loaded,
             model_id,
@@ -260,6 +263,10 @@ impl GenerationBackend for FlashNextBackend {
     fn request_profile(&self) -> super::request_profile::RequestProfile {
         super::request_profile::RequestProfile::FlashNext {
             style: self.template_style,
+            limits: crate::serve::request_profile::OutputLimits {
+                default_max_tokens: self.default_max_tokens,
+                max_piece_bytes: self.max_piece_bytes,
+            },
         }
     }
 

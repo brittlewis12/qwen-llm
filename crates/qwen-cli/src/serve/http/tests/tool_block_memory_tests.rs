@@ -276,6 +276,7 @@ fn qwen_and_ds4_tool_block_peaks() {
             RequestProfile::DeepSeekV4 {
                 style: TemplateStyle::House,
                 sampling: None,
+                limits: crate::serve::request_profile::OutputLimits::TEST,
             },
             "plan</think>",
             &dsml,

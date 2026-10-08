@@ -1137,6 +1137,7 @@ mod tests {
                     preopened_reasoning: false,
                     parse_tools: true,
                     tool_grammar: ToolGrammar::QwenXml,
+                    tool_byte_ceiling: None,
                 },
                 fail_with: None,
                 headroom: None,

@@ -8,7 +8,7 @@
 //! before it grows. Before any push that would begin or extend the block
 //! beyond its capacity, the capacity grows by whole [`ADMISSION_STEP`]s, and
 //! the process must have headroom for the block's whole outstanding peak at
-//! the new capacity: [`tool_block_peak_bytes`] (text, parsed values with
+//! the new capacity: `checked_tool_block_peak_bytes` (text, parsed values with
 //! their container overhead, and the published serializations) less what
 //! the block already holds. The check repeats at every step against current
 //! headroom, so earlier steps reserve nothing that later allocations could
@@ -20,9 +20,7 @@ use super::items::ServeError;
 use super::output_partition::GenerationEnd;
 use super::partition::PartitionEvent;
 use super::partition_preopened::PreopenedPartition;
-use qwen_llm::glm5_next_chat::{
-    ToolDefinition, ToolOutputEnd, ToolOutputStream, tool_block_peak_bytes,
-};
+use qwen_llm::glm5_next_chat::{ToolDefinition, ToolOutputEnd, ToolOutputStream};
 
 /// Block capacity admitted per step.
 pub(crate) const ADMISSION_STEP: usize = 64 << 10;
@@ -167,6 +165,7 @@ impl Glm5NextToolsPartition {
 mod tests {
     use super::*;
     use crate::serve::output_partition::GenerationEnd;
+    use qwen_llm::glm5_next_chat::tool_block_peak_bytes;
     use serde_json::json;
 
     fn weather() -> ToolDefinition {

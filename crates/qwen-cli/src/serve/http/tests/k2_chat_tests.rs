@@ -296,6 +296,7 @@ fn history_reasoning_diagnostic_fires_only_for_filled_reasoning_history() {
         preopened_reasoning,
         parse_tools: true,
         tool_grammar: ToolGrammar::QwenXml,
+        tool_byte_ceiling: None,
     };
     assert!(history_reasoning_diagnostic(&qwen, &protocol(true)).is_some());
     assert_eq!(history_reasoning_diagnostic(&qwen, &protocol(false)), None);

@@ -42,6 +42,7 @@ impl http::GenerationBackend for LifecycleBackend {
                 no_thinking_supported: false,
                 style: items::TemplateStyle::House,
                 sampling: None,
+                limits: crate::serve::request_profile::OutputLimits::TEST,
             };
         }
         request_profile::RequestProfile::UnboundQwen

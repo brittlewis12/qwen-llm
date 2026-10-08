@@ -70,6 +70,24 @@ pub(crate) fn size_overflow(what: &str) -> ServeError {
     }
 }
 
+/// A tool block's byte ceiling: every output token at its longest decoded
+/// piece, times 3 for UTF-8 replacement expansion (as GLM's
+/// `tool_byte_budget`); `None` on overflow or a zero limit.
+pub(crate) fn tool_byte_ceiling(max_tokens: usize, max_piece_bytes: usize) -> Option<usize> {
+    max_tokens
+        .checked_mul(max_piece_bytes)?
+        .checked_mul(3)
+        .filter(|&bytes| bytes > 0 && bytes <= isize::MAX as usize)
+}
+
+/// Output that exceeded its proven byte ceiling: an internal accounting
+/// failure (typed 500), not pressure and never a raw-text fallback.
+pub(crate) fn ceiling_exceeded(what: &str, ceiling: usize) -> ServeError {
+    ServeError::server_error(format!(
+        "{what} exceeded its proven byte ceiling of {ceiling}"
+    ))
+}
+
 /// An admitted allocation that still failed: a server error (no pressure
 /// decision was made). Unlike an admission refusal, it may leave a buffer's
 /// capacity partially changed.

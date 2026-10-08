@@ -229,6 +229,8 @@ pub(crate) struct EngineBackend {
     lens_registry: Option<std::sync::Arc<super::native::registry::Registry>>,
     model_id: String,
     default_max_tokens: usize,
+    /// Longest decoded piece of one token (output ceilings).
+    max_piece_bytes: usize,
     max_context_tokens: Option<usize>,
     /// Effective admission ceiling: the explicit `--max-context-tokens`, else
     /// the smaller of the hard default and the model's declared context.
@@ -450,6 +452,7 @@ impl EngineBackend {
         };
         Ok(Self {
             loaded,
+            max_piece_bytes: tokenizer.max_decoded_piece_bytes(),
             tokenizer: std::sync::Arc::new(tokenizer),
             control_cpu_reserve: 0,
             lens_registry: None,
@@ -1131,6 +1134,10 @@ impl GenerationBackend for EngineBackend {
             no_thinking_supported: self.no_thinking_supported,
             style: self.template_style,
             sampling: self.release_sampling,
+            limits: crate::serve::request_profile::OutputLimits {
+                default_max_tokens: self.default_max_tokens,
+                max_piece_bytes: self.max_piece_bytes,
+            },
         }
     }
 

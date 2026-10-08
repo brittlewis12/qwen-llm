@@ -6,9 +6,12 @@ specific to `--local` or to cross-run continuation? Where is it lost?
 
 ## Method
 
-- Driver: `scripts/reference/opencode_reasoning_replay.py`.
-- Mock: `scripts/reference/opencode_tool_mock.py`. It answers in `qwen
-  serve`'s item and SSE shapes, so no model or GPU is involved.
+- Driver: `scripts/reference/opencode_reasoning_replay.py`, which ran real
+  opencode processes. Removed 2026-10-07 together with its mock; both stay
+  readable at `48a1fc21`. Regression coverage for the fix is the fork's
+  provider test, which needs no opencode session.
+- Mock: `scripts/reference/opencode_tool_mock.py`. It answered in `qwen
+  serve`'s item and SSE shapes, so no model or GPU was involved.
 - Each assistant step returns a reasoning item with distinct text
   (`R-call-<n>` before a tool call, `R-answer-<n>` before the answer).
   Every request body is logged.

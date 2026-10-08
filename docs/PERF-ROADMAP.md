@@ -40,14 +40,15 @@ The active focus of this lane is prefill throughput and TTFT. The measured
 force-rank, raw attempts, limits and diagnostic harnesses are in
 `docs/bench/2026-10-07-glm-flash-prefill-map/README.md`.
 
-1. Flash efficient router at actual planner widths (2045 first), then measure
+1. **Router N2045 landed:** about 7% lower warm whole4096 GPU latency on UD
+   and GSQ with the planner unchanged. Then measure
    the remaining frontier-scheduling benefit. Mixed suffix diagnostic saves
    790 ms UD / 891 ms GSQ; these are not full-request speedup measurements.
 2. Density-aware expert down (GLM first) and cohort-specific Flash experts.
    GLM active N32 panels are only 43.85% occupied at 512 rows; recoverable time
    needs actual-route kernel replay, not an occupancy-as-speedup assumption.
-3. Narrow GLM router transfer: measured 2.85% GPU saving at 512, 1.51% at 128,
-   no benefit at 32. Cheap execution packet alongside #2, not a large bottleneck.
+3. **Narrow GLM router transfer landed:** final guarded packet saves 1.66%
+   GPU at 512 and 1.43% at 128 (earlier 2.85%/1.51%); 32 stays incumbent.
 4. GLM 128-row absorption tails: ordinary ragged-prefill sweep locates a
    boundary penalty; isolate it before writing a tail-safe grouped kernel.
 5. Flash selected-QSA leaf attribution, then GDN/KDA preparation. Do not fund
@@ -56,6 +57,10 @@ force-rank, raw attempts, limits and diagnostic harnesses are in
 This is a prefill-lane ordering, not a cancellation of other owners' product,
 snapshot or decode work below. No candidate defaults changed in the research
 packet. Cold placement, avoided prefill and warm engine throughput stay separate.
+
+The follow-up router promotion and unchanged-schedule full-request evidence
+are in `docs/bench/2026-10-08-prefill-router-transfer/README.md`. These small
+transfers are done; density-aware experts are the next implementation focus.
 
 Progress against the shared rows below: #8 now has current per-command screens
 for UD and GSQ, with accepted GSQ attribution and retained rejected UD observers.

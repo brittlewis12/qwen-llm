@@ -10,6 +10,9 @@
 //! ```
 //!
 //! Each width warms A and B, then records A1/B1/B2/A2 on fresh sessions.
+//! A forces generic even at production-selected widths; B forces the candidate
+//! at diagnostic widths (including N32), subject to the production capability
+//! guard. Outside this scope, Fast uses E8P32 only at N128/N512.
 //! Only prefill is timed; allocation and CPU diagnostics are outside it.
 //! Ordinary command timestamps are read after completion, without splitting
 //! encoders. GPU duration includes execution stalls; wall minus GPU duration
@@ -29,7 +32,7 @@ use std::cell::Cell;
 use std::io::Write;
 use std::time::Instant;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Override {
     active: bool,
     enabled: bool,
@@ -77,28 +80,216 @@ pub(super) fn record_completed_command_gpu_time(timestamps: impl FnOnce() -> (f6
     ROUTER_OVERRIDE.set(value);
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn encode_override(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    lineage: PackedLineage,
-    weight: &MetalTensor,
-    input: &MetalTensor,
-    output: &MetalTensor,
-    hidden: usize,
-    experts: usize,
-    rows: usize,
-) -> Result<bool> {
-    if lineage != PackedLineage::Fast || !ROUTER_OVERRIDE.get().enabled {
-        return Ok(false);
-    }
-    crate::metal::encode_mat_mat_f32_router_e8p32_strict(
-        ctx, enc, weight, input, output, hidden, experts, rows,
-    )?;
+pub(super) fn requested_override() -> Option<bool> {
+    let value = ROUTER_OVERRIDE.get();
+    value.active.then_some(value.enabled)
+}
+
+/// Count successful candidate encodes only while a diagnostic arm is active.
+pub(super) fn record_substitution() {
     let mut value = ROUTER_OVERRIDE.get();
+    if !value.active {
+        return;
+    }
     value.substitutions += 1;
     ROUTER_OVERRIDE.set(value);
-    Ok(true)
+}
+
+#[test]
+fn router_cpu_production_selection_is_narrow() {
+    assert_eq!(requested_override(), None);
+    for lineage in [PackedLineage::Fast, PackedLineage::Exact] {
+        for rows in [
+            0, 1, 31, 32, 33, 64, 127, 128, 129, 255, 256, 511, 512, 513, 1024,
+        ] {
+            let expected = lineage == PackedLineage::Fast && matches!(rows, 128 | 512);
+            let queried = Cell::new(false);
+            assert_eq!(
+                router_e8p32_selected(lineage, 4096, 288, GgmlType::F32, rows, || {
+                    queried.set(true);
+                    true
+                }),
+                expected,
+                "{lineage:?} N{rows}"
+            );
+            assert_eq!(
+                queried.get(),
+                expected,
+                "ineligible calls must not query Metal"
+            );
+            assert!(!router_e8p32_selected(
+                lineage,
+                4096,
+                288,
+                GgmlType::F32,
+                rows,
+                || false
+            ));
+        }
+    }
+    for (hidden, experts, dtype) in [
+        (2048, 288, GgmlType::F32),
+        (4096, 256, GgmlType::F32),
+        (4096, 288, GgmlType::Q8_0),
+    ] {
+        for rows in [128, 512] {
+            assert!(!router_e8p32_selected(
+                PackedLineage::Fast,
+                hidden,
+                experts,
+                dtype,
+                rows,
+                || panic!("unqualified geometry must not query Metal")
+            ));
+        }
+    }
+}
+
+#[test]
+fn router_cpu_pipeline_capacity_matches_dispatch() {
+    assert!(router_e8p32_capacity_supported(32, 32, 0, 0));
+    assert!(router_e8p32_capacity_supported(32, 1024, 32768, 32768));
+    for width in [0, 16, 64] {
+        assert!(!router_e8p32_capacity_supported(width, 1024, 0, 32768));
+    }
+    assert!(!router_e8p32_capacity_supported(32, 31, 0, 32768));
+    assert!(!router_e8p32_capacity_supported(32, 1024, 32769, 32768));
+}
+
+#[test]
+fn router_cpu_scoped_arms_override_widths_but_not_guards() {
+    let before = ROUTER_OVERRIDE.get();
+    for candidate in [false, true] {
+        with_override(candidate, || {
+            assert_eq!(requested_override(), Some(candidate));
+            for rows in [32, 128, 512] {
+                assert_eq!(
+                    router_e8p32_selected(
+                        PackedLineage::Fast,
+                        4096,
+                        288,
+                        GgmlType::F32,
+                        rows,
+                        || true
+                    ),
+                    candidate
+                );
+                assert!(!router_e8p32_selected(
+                    PackedLineage::Fast,
+                    4096,
+                    288,
+                    GgmlType::F32,
+                    rows,
+                    || false
+                ));
+                assert!(!router_e8p32_selected(
+                    PackedLineage::Exact,
+                    4096,
+                    288,
+                    GgmlType::F32,
+                    rows,
+                    || panic!("Exact must never query E8P32 capability")
+                ));
+            }
+            for (hidden, experts, dtype, rows) in [
+                (2048, 288, GgmlType::F32, 128),
+                (4096, 256, GgmlType::F32, 128),
+                (4096, 288, GgmlType::Q8_0, 128),
+                (4096, 288, GgmlType::F32, 0),
+            ] {
+                assert!(!router_e8p32_selected(
+                    PackedLineage::Fast,
+                    hidden,
+                    experts,
+                    dtype,
+                    rows,
+                    || panic!("override must not bypass geometry guards")
+                ));
+            }
+            if !candidate {
+                assert!(!router_e8p32_selected(
+                    PackedLineage::Fast,
+                    4096,
+                    288,
+                    GgmlType::F32,
+                    512,
+                    || panic!("forced incumbent must not query E8P32 capability")
+                ));
+            }
+        });
+        assert_eq!(ROUTER_OVERRIDE.get(), before);
+    }
+}
+
+#[test]
+fn router_cpu_override_restores_nested_error_and_unwind() {
+    let before = ROUTER_OVERRIDE.get();
+    let (result, report) = with_override(false, || {
+        record_completed_command_gpu_time(|| (1.0, 1.25));
+        let outer = ROUTER_OVERRIDE.get();
+        let ((), inner) = with_override(true, || {
+            record_substitution();
+            record_completed_command_gpu_time(|| (2.0, 2.5));
+        });
+        assert_eq!(inner.substitutions, 1);
+        assert_eq!(inner.gpu_ms, 500.0);
+        assert_eq!(ROUTER_OVERRIDE.get(), outer);
+        assert!(
+            std::panic::catch_unwind(|| {
+                with_override(true, || {
+                    record_substitution();
+                    panic!("diagnostic unwind");
+                });
+            })
+            .is_err()
+        );
+        assert_eq!(ROUTER_OVERRIDE.get(), outer);
+        Err::<(), &str>("diagnostic error")
+    });
+    assert_eq!(result, Err("diagnostic error"));
+    assert_eq!(report.substitutions, 0);
+    assert_eq!(report.completed_commands, 1);
+    assert_eq!(report.valid_gpu_commands, 1);
+    assert_eq!(report.gpu_ms, 250.0);
+    assert_eq!(ROUTER_OVERRIDE.get(), before);
+    assert!(
+        std::panic::catch_unwind(|| {
+            with_override(true, || panic!("outer diagnostic unwind"));
+        })
+        .is_err()
+    );
+    assert_eq!(ROUTER_OVERRIDE.get(), before);
+}
+
+#[test]
+fn router_cpu_inactive_capture_does_not_read_gpu_timestamps() {
+    let before = ROUTER_OVERRIDE.get();
+    assert!(!before.active);
+    record_completed_command_gpu_time(|| panic!("inactive capture queried GPU timestamps"));
+    record_substitution();
+    assert_eq!(ROUTER_OVERRIDE.get(), before);
+}
+
+#[test]
+fn router_cpu_capture_rejects_invalid_timestamps_in_both_arms() {
+    for candidate in [false, true] {
+        let ((), report) = with_override(candidate, || {
+            record_completed_command_gpu_time(|| (1.0, 1.25));
+            for timestamps in [
+                (0.0, 1.0),
+                (f64::NAN, 1.0),
+                (1.0, f64::INFINITY),
+                (2.0, 1.0),
+                (1.0, 1.0),
+                (1.0, f64::MAX),
+            ] {
+                record_completed_command_gpu_time(|| timestamps);
+            }
+        });
+        assert_eq!(report.completed_commands, 7);
+        assert_eq!(report.valid_gpu_commands, 1);
+        assert_eq!(report.gpu_ms, 250.0);
+    }
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -384,11 +575,16 @@ fn router_prefill_abba() {
         .collect();
     emit(
         &mut out,
-        json!({"event": "header", "schema": "glm53.router_prefill_abba.v2",
+        json!({"event": "header", "schema": "glm53.router_prefill_abba.v3",
             "decision": "diagnostic_only_no_promotion", "device": ctx.describe(),
             "fixture": crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.id, "shards": shards,
             "routers": routers, "widths": [32,128,512], "lineage": "Fast",
-            "incumbent": "matmat Fast -> generic F32", "candidate": "existing E8P32 strict",
+            "incumbent": "scoped A forces matmat Fast -> generic F32, including production E8P32 widths",
+            "candidate": "scoped B requests existing E8P32 strict at all diagnostic widths, including N32; capability fallback retained; 42 substitutions required",
+            "production_scope": {"lineage": "Fast", "rows": ROUTER_E8P32_ROWS,
+                "hidden": 4096, "experts": 288, "dtype": "F32",
+                "fallback": "generic on all other widths/geometry/dtypes or unavailable/incapable pipeline; Exact unchanged"},
+            "router_pipeline_supported": router_e8p32_supported(&ctx),
             "order_per_width": ["warm_A", "warm_B", "A1", "B1", "B2", "A2"],
             "whole_model_metric": "prefill wall including encode, wait, route checks and final logits copy; excludes session allocation and diagnostics",
             "command_gpu_metric": "sum of ordinary (GPUEndTime-GPUStartTime)*1000 after successful encode_chunk wait; no encoder splitting; includes GPU execution stalls",

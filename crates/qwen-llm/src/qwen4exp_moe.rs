@@ -72,11 +72,13 @@ const PACKED_ROUTER_E8P32_STRICT_EXPERTS: usize = 512;
 const PACKED_ROUTER_E8P32_STRICT_N512_TOKENS: usize = 512;
 const PACKED_ROUTER_E8P32_STRICT_N527_TOKENS: usize = 527;
 const PACKED_ROUTER_E8P32_STRICT_N1024_TOKENS: usize = 1_024;
+const PACKED_ROUTER_E8P32_STRICT_N2045_TOKENS: usize = 2_045;
 const PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS: usize = 2_048;
-pub(crate) const PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS: [usize; 4] = [
+pub(crate) const PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS: [usize; 5] = [
     PACKED_ROUTER_E8P32_STRICT_N512_TOKENS,
     PACKED_ROUTER_E8P32_STRICT_N527_TOKENS,
     PACKED_ROUTER_E8P32_STRICT_N1024_TOKENS,
+    PACKED_ROUTER_E8P32_STRICT_N2045_TOKENS,
     PACKED_ROUTER_E8P32_STRICT_FULL_CHUNK_TOKENS,
 ];
 const PACKED_IQ4_DOWN_M128_N16_HIDDEN: usize = 2_560;
@@ -229,6 +231,9 @@ thread_local! {
     static QWEN4EXP_PACKED_ROUTER_E8P32_STRICT_OVERRIDE: std::cell::Cell<Option<bool>> = const {
         std::cell::Cell::new(None)
     };
+    static QWEN4EXP_PACKED_ROUTER_N2045_OVERRIDE: std::cell::Cell<Option<bool>> = const {
+        std::cell::Cell::new(None)
+    };
     static QWEN4EXP_MOE_IQ4_DOWN_M128_N16_OVERRIDE: std::cell::Cell<Option<bool>> = const {
         std::cell::Cell::new(None)
     };
@@ -322,6 +327,26 @@ fn qwen4exp_packed_router_e8p32_strict_enabled() -> bool {
         return enabled;
     }
     configured_qwen4exp_packed_router_e8p32_strict_enabled()
+}
+
+/// Diagnostic eligibility only at N2045. False pins its historical generic
+/// route; true admits the existing strict kernel through all ordinary guards,
+/// including QWEN4EXP_PACKED_ROUTER_E8P32_STRICT=0. Other widths are untouched.
+/// Nested scopes and unwinding restore the production width policy.
+#[cfg(test)]
+pub(crate) fn with_qwen4exp_packed_router_n2045_override<R>(
+    enabled: bool,
+    f: impl FnOnce() -> R,
+) -> R {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            QWEN4EXP_PACKED_ROUTER_N2045_OVERRIDE.with(|slot| slot.set(self.0));
+        }
+    }
+    let previous = QWEN4EXP_PACKED_ROUTER_N2045_OVERRIDE.with(|slot| slot.replace(Some(enabled)));
+    let _restore = Restore(previous);
+    f()
 }
 
 #[cfg(test)]
@@ -502,11 +527,18 @@ fn packed_router_e8p32_strict_scope_qualified(
     router_dtype: GgmlType,
     tokens: usize,
 ) -> bool {
+    let width_qualified = PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS.contains(&tokens);
+    #[cfg(test)]
+    let width_qualified = if tokens == 2045 {
+        QWEN4EXP_PACKED_ROUTER_N2045_OVERRIDE.with(|slot| slot.get().unwrap_or(width_qualified))
+    } else {
+        width_qualified
+    };
     pipeline_capable
         && hidden_size == PACKED_ROUTER_E8P32_STRICT_HIDDEN
         && expert_count == PACKED_ROUTER_E8P32_STRICT_EXPERTS
         && router_dtype == GgmlType::F32
-        && PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS.contains(&tokens)
+        && width_qualified
 }
 
 /// The strict E8P32 router launches 32-thread SIMD groups.

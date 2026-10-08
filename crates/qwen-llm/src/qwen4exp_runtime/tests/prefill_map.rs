@@ -13,11 +13,15 @@
 //! One native session admits the full 4097-position extent. Natural text is
 //! repeated as whole text, then tokenized; both workloads use prefixes of the
 //! same token stream. First/warm/profiled passes use the incumbent planner.
+//! Historical N2045 generic routing is explicitly pinned by this entry point.
 //! Suffix ABBA compares 3+2045 with 2048 from the same position-2048 checkpoint,
 //! once with the configured default router and once with strict routing off.
 //! Allocation, restore, hashes, JSONL and the one-token handoff are not timed.
 //! Each command's executor wall/GPU interval is retained; their sum excludes
 //! the diagnostic gaps between commands and is NOT a request TTFT measurement.
+
+#[path = "router_2045.rs"]
+mod router_2045;
 
 use super::*;
 use serde_json::{Value, json};
@@ -238,7 +242,10 @@ struct Endpoint {
     state: Value,
 }
 
-fn endpoint(r: &Qwen4ExpTextRunner<'_, '_, '_>) -> PacketResult<Endpoint> {
+fn endpoint(
+    r: &Qwen4ExpTextRunner<'_, '_, '_>,
+    packed_rows: Option<usize>,
+) -> PacketResult<Endpoint> {
     let logits = r.logits()?.to_vec();
     let tensors: Vec<Value> = r
         .workspace
@@ -262,7 +269,10 @@ fn endpoint(r: &Qwen4ExpTextRunner<'_, '_, '_>) -> PacketResult<Endpoint> {
                 "shape": t.shape, "bytes": bytes.len(), "sha256": sha256_bytes(bytes)})
         })
         .collect();
-    let hyper = r.workspace.final_hyper_for_tests();
+    let hyper = match packed_rows {
+        Some(rows) => r.workspace.final_packed_hyper_for_tests(rows),
+        None => r.workspace.final_hyper_for_tests(),
+    };
     Ok(Endpoint {
         logits,
         state: json!({"position": r.next_position(),
@@ -418,7 +428,7 @@ fn suffix_packet(
                 );
             }
             let run = result?;
-            let current = endpoint(r)?;
+            let current = endpoint(r, Some(if merge { PREFIX } else { END - 2051 }))?;
             emit_endpoint(out, &label, &current);
             if !warm {
                 if disabled && arm == "A1" {
@@ -497,22 +507,24 @@ fn suffix_packet(
     Ok(())
 }
 
-fn model_packet(
+fn with_native_runner(
     ctx: &MetalContext,
     gguf: &GgufFile,
-    tokens: &[u32],
+    extent: usize,
+    cpu_margin: u64,
     out: &mut std::fs::File,
+    work: impl FnOnce(&mut Qwen4ExpTextRunner<'_, '_, '_>, &mut std::fs::File) -> PacketResult<()>,
 ) -> PacketResult<()> {
     let config = Qwen4ExpConfig::from_gguf(gguf)?;
-    let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, EXTENT)?;
+    let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, extent)?;
     emit(
         out,
-        json!({"event": "load_begin", "forward_limit": EXTENT,
-        "packed_admission_extent": EXTENT, "qsa_physical_capacity": capacity.qsa_physical_capacity()}),
+        json!({"event": "load_begin", "forward_limit": extent,
+        "packed_admission_extent": extent, "qsa_physical_capacity": capacity.qsa_physical_capacity()}),
     );
     // Production native combined admission precedes realization; never retry scalar
     // or bypass admission if it refuses. No test-only strict UD binder is used.
-    let mut loaded = Qwen4ExpLoadedModel::load_with_packed_prefill(ctx, gguf, capacity, EXTENT)?;
+    let mut loaded = Qwen4ExpLoadedModel::load_with_packed_prefill(ctx, gguf, capacity, extent)?;
     emit(
         out,
         json!({"event": "loaded", "admission": format!("{:?}", loaded.admission()),
@@ -536,13 +548,19 @@ fn model_packet(
         .map(|t| t.n_bytes())
         .sum::<u64>()
         + (config.vocab_size as u64 + r.weights.geometry.hyper_width() as u64) * 4;
+    emit(
+        out,
+        json!({"event": "diagnostic_memory_bound", "checkpoint_bytes": checkpoint_bytes,
+        "cpu_margin_bytes": cpu_margin, "bounded_cpu_bytes": checkpoint_bytes + cpu_margin,
+        "maximum_cpu_bytes": 512u64 << 20}),
+    );
     require(
-        checkpoint_bytes + CPU_MARGIN <= (512 << 20),
+        checkpoint_bytes + cpu_margin <= (512 << 20),
         "diagnostic CPU bound exceeds 512 MiB",
     )?;
     let cpu_gate = crate::metal::evaluate_metal_memory_admission_with_cpu_bytes(
         0,
-        checkpoint_bytes + CPU_MARGIN,
+        checkpoint_bytes + cpu_margin,
         crate::qwen4exp_text_session::QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES,
         ctx.memory_signals(),
         true,
@@ -550,7 +568,7 @@ fn model_packet(
     emit(
         out,
         json!({"event": "diagnostic_memory_gate", "checkpoint_bytes": checkpoint_bytes,
-        "cpu_margin_bytes": CPU_MARGIN, "admitted": cpu_gate.admitted,
+        "cpu_margin_bytes": cpu_margin, "admitted": cpu_gate.admitted,
         "admission": format!("{cpu_gate:?}")}),
     );
     require(
@@ -570,45 +588,55 @@ fn model_packet(
             "down": format!("{:?}", w.routed_down.dtype)})).collect::<Vec<_>>() }),
     );
 
-    for width in [512usize, END] {
-        let mut baseline: Option<Endpoint> = None;
-        let mut warm_run: Option<Run> = None;
-        for pass in ["first", "warm", "profiled"] {
-            r.reset()?;
-            let label = format!("normal/{width}/{pass}");
-            let plan = normal_plan(&r, width)?;
-            let run = run_schedule(
-                &mut r,
-                &tokens[..width],
-                &plan,
-                pass == "profiled",
-                out,
-                &label,
-            )?;
-            let current = endpoint(&r)?;
-            emit_endpoint(out, &label, &current);
-            if let Some(reference) = &baseline {
-                emit(
-                    out,
-                    json!({"event": "comparison", "label": label,
-                    "reference": format!("normal/{width}/first"), "same_schedule": true,
-                    "comparison": comparison(reference, &current)}),
-                );
-            } else {
-                baseline = Some(current);
-            }
-            if pass == "profiled" {
-                observer(out, width, warm_run.as_ref().unwrap(), &run);
-            }
-            if pass == "warm" {
-                warm_run = Some(run);
-            }
-        }
-    }
-    suffix_packet(&mut r, tokens, out)
+    work(&mut r, out)
 }
 
-fn packet(out: &mut std::fs::File) -> PacketResult<()> {
+fn model_packet(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    tokens: &[u32],
+    out: &mut std::fs::File,
+) -> PacketResult<()> {
+    with_native_runner(ctx, gguf, EXTENT, CPU_MARGIN, out, |r, out| {
+        for width in [512usize, END] {
+            let mut baseline: Option<Endpoint> = None;
+            let mut warm_run: Option<Run> = None;
+            for pass in ["first", "warm", "profiled"] {
+                r.reset()?;
+                let label = format!("normal/{width}/{pass}");
+                let plan = normal_plan(&r, width)?;
+                let run =
+                    run_schedule(r, &tokens[..width], &plan, pass == "profiled", out, &label)?;
+                let packed_rows =
+                    (plan.scalar_start == width).then(|| plan.packed_ranges.last().unwrap().len());
+                let current = endpoint(&r, packed_rows)?;
+                emit_endpoint(out, &label, &current);
+                if let Some(reference) = &baseline {
+                    emit(
+                        out,
+                        json!({"event": "comparison", "label": label,
+                    "reference": format!("normal/{width}/first"), "same_schedule": true,
+                    "comparison": comparison(reference, &current)}),
+                    );
+                } else {
+                    baseline = Some(current);
+                }
+                if pass == "profiled" {
+                    observer(out, width, warm_run.as_ref().unwrap(), &run);
+                }
+                if pass == "warm" {
+                    warm_run = Some(run);
+                }
+            }
+        }
+        suffix_packet(r, tokens, out)
+    })
+}
+
+fn with_native_artifact(
+    out: &mut std::fs::File,
+    work: impl FnOnce(&MetalContext, &GgufFile, &mut std::fs::File) -> PacketResult<()>,
+) -> PacketResult<()> {
     require(!cfg!(debug_assertions), "timing packet requires --release")?;
     require(
         std::env::var_os("MTL_DEBUG_LAYER").is_none(),
@@ -636,34 +664,77 @@ fn packet(out: &mut std::fs::File) -> PacketResult<()> {
         "bytes": s.size, "mtime_sec": s.mtime_sec, "mtime_nsec": s.mtime_nsec,
         "ctime_sec": s.ctime_sec, "ctime_nsec": s.ctime_nsec})).collect::<Vec<_>>() }),
     );
-    let tokenizer = Tokenizer::from_gguf(&gguf)?;
-    let source_tokens = tokenizer
-        .encode(CORPUS, false)?
-        .into_iter()
-        .map(u32::try_from)
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut text = String::new();
-    let mut tokens = Vec::new();
-    let mut repetitions = 0;
-    while tokens.len() < EXTENT && repetitions < 32 {
-        if repetitions > 0 {
-            text.push_str("\n\n");
-        }
-        text.push_str(CORPUS);
-        repetitions += 1;
-        tokens = tokenizer
-            .encode(&text, false)?
+    let ctx = MetalContext::new()?;
+    emit(
+        out,
+        json!({"event": "device", "description": ctx.describe(),
+        "selected_requested": qwen4exp_packed_selected_qsa_enabled(),
+        "router_default_enabled": crate::env_flag::read_default_on("QWEN4EXP_PACKED_ROUTER_E8P32_STRICT"),
+        "strict_router_pipeline_supported": crate::qwen4exp_moe::packed_router_e8p32_strict_supported(&ctx)}),
+    );
+    require(
+        crate::env_flag::read_default_on("QWEN4EXP_PACKED_ROUTER_E8P32_STRICT"),
+        "router diagnostic requires configured strict router enabled; rollback remains authoritative",
+    )?;
+    // Retain the final shard check even when a private diagnostic assertion
+    // panics. The outer new-file envelope still records the original panic.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&ctx, &gguf, out)));
+    match &result {
+        Ok(Err(error)) => emit(
+            out,
+            json!({"event": "model_error", "error": error.to_string(),
+            "model_work_aborted": true}),
+        ),
+        Err(_) => emit(
+            out,
+            json!({"event": "model_error", "error": "diagnostic panic; see final error",
+            "model_work_aborted": true}),
+        ),
+        _ => {}
+    }
+    let final_stamps = gguf.revalidate_retained_shard_stamps();
+    emit(
+        out,
+        json!({"event": "artifact_revalidation", "unchanged": final_stamps.as_ref().is_ok_and(|s| *s == stamps),
+        "error": final_stamps.as_ref().err().map(ToString::to_string)}),
+    );
+    match result {
+        Ok(result) => result?,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+    require(final_stamps? == stamps, "retained artifact stamps changed")
+}
+
+fn packet(out: &mut std::fs::File) -> PacketResult<()> {
+    with_native_artifact(out, |ctx, gguf, out| {
+        let tokenizer = Tokenizer::from_gguf(gguf)?;
+        let source_tokens = tokenizer
+            .encode(CORPUS, false)?
             .into_iter()
             .map(u32::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-    }
-    require(
-        tokens.len() >= EXTENT,
-        "32 whole-corpus repetitions did not supply 4097 tokens",
-    )?;
-    emit(
-        out,
-        json!({"event": "prompt", "source": "docs/bench/2026-08-29-qwen4exp-packed-natural-n512/prompt.txt",
+        let mut text = String::new();
+        let mut tokens = Vec::new();
+        let mut repetitions = 0;
+        while tokens.len() < EXTENT && repetitions < 32 {
+            if repetitions > 0 {
+                text.push_str("\n\n");
+            }
+            text.push_str(CORPUS);
+            repetitions += 1;
+            tokens = tokenizer
+                .encode(&text, false)?
+                .into_iter()
+                .map(u32::try_from)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        require(
+            tokens.len() >= EXTENT,
+            "32 whole-corpus repetitions did not supply 4097 tokens",
+        )?;
+        emit(
+            out,
+            json!({"event": "prompt", "source": "docs/bench/2026-08-29-qwen4exp-packed-natural-n512/prompt.txt",
         "source_text_sha256": sha256_bytes(CORPUS.as_bytes()), "whole_corpus_repetitions": repetitions,
         "separator": "two newlines between exact whole corpus copies", "add_special_tokens": false,
         "source_token_ids": source_tokens, "source_token_count": source_tokens.len(),
@@ -675,44 +746,39 @@ fn packet(out: &mut std::fs::File) -> PacketResult<()> {
         "prefixes": ([512usize, END].iter().map(|&n| json!({"tokens": n,
             "sha256_u32_le": sha256_u32_le(b"", &tokens[..n])})).collect::<Vec<_>>()),
         "first_label": "first for this width; not a controlled placement-cold measurement"}),
-    );
-    require(
-        source_tokens.len() < 512 || source_tokens[..512] == tokens[..512],
-        "corpus repetition changed the standalone natural512 prefix",
-    )?;
-    let ctx = MetalContext::new()?;
-    emit(
-        out,
-        json!({"event": "device", "description": ctx.describe(),
-        "selected_requested": qwen4exp_packed_selected_qsa_enabled(),
-        "router_default_enabled": crate::env_flag::read_default_on("QWEN4EXP_PACKED_ROUTER_E8P32_STRICT"),
-        "strict_router_pipeline_supported": crate::qwen4exp_moe::packed_router_e8p32_strict_supported(&ctx)}),
-    );
-    require(
-        crate::env_flag::read_default_on("QWEN4EXP_PACKED_ROUTER_E8P32_STRICT"),
-        "default-versus-disabled factorial requires configured default router enabled",
-    )?;
-    let result = model_packet(&ctx, &gguf, &tokens, out);
-    if let Err(error) = &result {
-        emit(
-            out,
-            json!({"event": "model_error", "error": error.to_string(),
-            "model_work_aborted": true}),
         );
-    }
-    let final_stamps = gguf.revalidate_retained_shard_stamps();
-    emit(
-        out,
-        json!({"event": "artifact_revalidation", "unchanged": final_stamps.as_ref().is_ok_and(|s| *s == stamps),
-        "error": final_stamps.as_ref().err().map(ToString::to_string)}),
-    );
-    result?;
-    require(final_stamps? == stamps, "retained artifact stamps changed")
+        require(
+            source_tokens.len() < 512 || source_tokens[..512] == tokens[..512],
+            "corpus repetition changed the standalone natural512 prefix",
+        )?;
+        model_packet(ctx, gguf, &tokens, out)
+    })
 }
 
 #[test]
 #[ignore = "production lease; FLASH_PREFILL_MODEL and new FLASH_PREFILL_OUT JSONL; release timing only"]
 fn native_prefill_map() {
+    run_packet(
+        "flash.prefill_map.v1",
+        include_bytes!("prefill_map.rs"),
+        json!({
+            "historical_baseline": "N2045 explicitly pinned to generic router; other default widths unchanged",
+            "measurement": "sum of private executor command intervals, excludes diagnostic gaps; not request TTFT",
+            "allocation_scope": "both widths share full 4097-position admission",
+            "bounded_work": "512/4096 first,warm,profiled; 2048 prefix; two router policies warm_A,warm_B,A1,B1,B2,A2 plus one handoff"
+        }),
+        |out| {
+            crate::qwen4exp_moe::with_qwen4exp_packed_router_n2045_override(false, || packet(out))
+        },
+    );
+}
+
+fn run_packet(
+    schema: &str,
+    packet_source: &[u8],
+    details: Value,
+    work: impl FnOnce(&mut std::fs::File) -> PacketResult<()>,
+) {
     let path =
         std::env::var_os("FLASH_PREFILL_OUT").expect("FLASH_PREFILL_OUT must name a new JSONL");
     let mut out = std::fs::OpenOptions::new()
@@ -722,28 +788,27 @@ fn native_prefill_map() {
         .expect("FLASH_PREFILL_OUT must not already exist");
     emit(
         &mut out,
-        json!({"event": "header", "schema": "flash.prefill_map.v1",
-        "decision": "diagnostic_only_no_promotion", "pid": std::process::id(),
-        "source_binding": {
-            "runtime_rs": sha256_bytes(include_bytes!("../../qwen4exp_runtime.rs")),
-            "packet_rs": sha256_bytes(include_bytes!("prefill_map.rs")),
-            "session_rs": sha256_bytes(include_bytes!("../../qwen4exp_text_session.rs")),
-            "checkpoint_rs": sha256_bytes(include_bytes!("../../qwen4exp_text_session/checkpoint.rs")),
-            "qsa_rs": sha256_bytes(include_bytes!("../../qwen4exp_qsa.rs")),
-            "moe_rs": sha256_bytes(include_bytes!("../../qwen4exp_moe.rs")),
-            "gdn_rs": sha256_bytes(include_bytes!("../../qwen4exp_gdn.rs")),
-            "dispatch_rs": sha256_bytes(include_bytes!("../../metal_forward/dispatch.rs")),
-            "profile_rs": sha256_bytes(include_bytes!("../../qwen4exp_profile.rs")),
-            "metallib": sha256_bytes(crate::KERNELS_METALLIB),
-            "note": "SHA256 of compiled inputs; not a claim about runtime checkout HEAD"},
-        "environment": (["QWEN4EXP_PACKED_SELECTED_QSA", "QWEN4EXP_PACKED_ROUTER_E8P32_STRICT",
-            "QWEN_MATMAT_BF16_BFLOAT_ACT", "QWEN4EXP_MOE_IQ4_DOWN_M128_N16"]
-            .iter().map(|&key| (key, std::env::var(key).ok())).collect::<BTreeMap<_, _>>()),
-        "measurement": "sum of private executor command intervals, excludes diagnostic gaps; not request TTFT",
-        "allocation_scope": "both widths share the full 4097-position selected-capable plan, not an exact512 allocation",
-        "bounded_work": "512/4096 first,warm,profiled; one 2048 prefix; two router policies each warm_A,warm_B,A1,B1,B2,A2 plus one handoff per arm"}),
+        json!({"event": "header", "schema": schema, "details": details,
+                "decision": "diagnostic_only_no_promotion", "pid": std::process::id(),
+                "source_binding": {
+                    "runtime_rs": sha256_bytes(include_bytes!("../../qwen4exp_runtime.rs")),
+                    "packet_rs": sha256_bytes(packet_source),
+                    "shared_packet_rs": sha256_bytes(include_bytes!("prefill_map.rs")),
+                    "session_rs": sha256_bytes(include_bytes!("../../qwen4exp_text_session.rs")),
+                    "checkpoint_rs": sha256_bytes(include_bytes!("../../qwen4exp_text_session/checkpoint.rs")),
+                    "qsa_rs": sha256_bytes(include_bytes!("../../qwen4exp_qsa.rs")),
+                    "moe_rs": sha256_bytes(include_bytes!("../../qwen4exp_moe.rs")),
+                    "gdn_rs": sha256_bytes(include_bytes!("../../qwen4exp_gdn.rs")),
+                    "dispatch_rs": sha256_bytes(include_bytes!("../../metal_forward/dispatch.rs")),
+                    "profile_rs": sha256_bytes(include_bytes!("../../qwen4exp_profile.rs")),
+                    "metallib": sha256_bytes(crate::KERNELS_METALLIB),
+                    "note": "SHA256 of compiled inputs; not a claim about runtime checkout HEAD"},
+                "environment": (["QWEN4EXP_PACKED_SELECTED_QSA", "QWEN4EXP_PACKED_ROUTER_E8P32_STRICT",
+                    "QWEN_MATMAT_BF16_BFLOAT_ACT", "QWEN4EXP_MOE_IQ4_DOWN_M128_N16"]
+                    .iter().map(|&key| (key, std::env::var(key).ok())).collect::<BTreeMap<_, _>>()),
+        }),
     );
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| packet(&mut out)));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&mut out)));
     // Do not leave a warm witness active if an assertion unwound its packet.
     let _ = crate::metal::dispatch_census_take();
     let error = match result {

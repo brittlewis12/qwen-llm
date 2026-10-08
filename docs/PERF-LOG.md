@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-08 - Existing Router Kernels Reach Flash Tails and GLM Packed Chunks
+
+- Flash-Next now admits strict E8P32 at N2045, without changing the
+  2048+3+2045 planner. Whole4K prefills save about7% GPU latency on both UD
+  and GSQ (~0.63 s); both natural streams and both ABBA pairs improve. A
+  repeated UD packet confirms7.22%/7.44%; inflated drifty means are retained
+  but not used as headlines. Five witnesses per artifact isolate48 changes.
+- GLM Fast uses the existing guarded kernel at N128/N512: final packet
+  saves1.43%/1.66% GPU, with paired wall wins. Exact and N32 stay unchanged.
+- No new shader or state approximation. Finite outputs, causal metadata and
+  continuation checks pass. A test-only observer was reading stale singleton
+  hyper scratch after packed execution; corrected to use the actual last
+  packed row, preserving the original evidence and its limitations.
+- Ten CPU checks, the leased all-width Metal differential, workspace check
+  and adversarial review pass. Raw evidence and decision:
+  `docs/bench/2026-10-08-prefill-router-transfer/README.md`.
+- Next: expert density, then remaining planner benefit measured against
+  efficient routing; old mixed-schedule savings are not additive.
+
 ## 2026-10-07 - Leverage Map Re-Ranked After Concurrent Flash-Next Work (cx `01a10cc`)
 
 - **Concurrent landings, logged here:**

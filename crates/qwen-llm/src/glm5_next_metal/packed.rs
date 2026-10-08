@@ -18,8 +18,9 @@ use crate::metal::{
     encode_mhc4_post_rows, encode_mhc4_repeat_rows, encode_rms_norm_mul_rows_f32,
     encode_route_learned_rows,
 };
+use objc2_metal::MTLComputePipelineState;
 
-// Diagnostic code and its scoped router substitution are absent from product builds.
+// Diagnostic overrides and timing are absent from product builds.
 #[cfg(test)]
 #[path = "tests/router_prefill.rs"]
 mod router_prefill;
@@ -32,6 +33,61 @@ pub enum PackedLineage {
     Fast,
     /// Decode kernels per row: identical to serial decode, slower.
     Exact,
+}
+
+// Measured release geometry and widths; this is not a broad size threshold.
+const ROUTER_E8P32_ROWS: [usize; 2] = [128, 512];
+
+fn router_e8p32_selected(
+    lineage: PackedLineage,
+    hidden: usize,
+    experts: usize,
+    dtype: GgmlType,
+    rows: usize,
+    supported: impl FnOnce() -> bool,
+) -> bool {
+    let requested = ROUTER_E8P32_ROWS.contains(&rows);
+    // An active A arm must remain generic after production promotion. B may
+    // probe other widths, but cannot bypass lineage, geometry or capability.
+    #[cfg(test)]
+    let requested = router_prefill::requested_override().unwrap_or(requested);
+    lineage == PackedLineage::Fast
+        && hidden == 4096
+        && experts == 288
+        && dtype == GgmlType::F32
+        && rows > 0
+        && requested
+        && supported()
+}
+
+fn router_e8p32_capacity_supported(
+    execution_width: usize,
+    max_threads: usize,
+    static_bytes: usize,
+    device_bytes: usize,
+) -> bool {
+    // Same requirements as Flash's strict router: 32 threads, no dynamic TGM.
+    execution_width == 32 && max_threads >= 32 && static_bytes <= device_bytes
+}
+
+fn router_e8p32_supported(ctx: &MetalContext) -> bool {
+    match ctx.pipeline("kernel_mat_mat_f32_f32_router_e8p32_strict") {
+        Ok(p) => router_e8p32_capacity_supported(
+            p.threadExecutionWidth(),
+            p.maxTotalThreadsPerThreadgroup(),
+            p.staticThreadgroupMemoryLength(),
+            ctx.device.maxThreadgroupMemoryLength(),
+        ),
+        Err(error) => {
+            static LOGGED: std::sync::Once = std::sync::Once::new();
+            LOGGED.call_once(|| {
+                tracing::warn!(
+                    "glm5_next: strict E8P32 router unavailable, using the generic path: {error}"
+                );
+            });
+            false
+        }
+    }
 }
 
 /// Activations for up to `rows` packed tokens, shared by every block.
@@ -564,21 +620,22 @@ impl Glm5NextSession<'_> {
                         c.expert_ffn_size as usize,
                         c.expert_used_count as usize,
                     );
-                    #[cfg(test)]
-                    let router_overridden = router_prefill::encode_override(
-                        ctx,
-                        &enc,
-                        p.lineage,
-                        &moe.router,
-                        &v(&p.normed),
-                        &v(&p.router),
-                        h,
-                        e,
-                        rows,
-                    )?;
-                    #[cfg(not(test))]
-                    let router_overridden = false;
-                    if !router_overridden {
+                    if router_e8p32_selected(p.lineage, h, e, moe.router.dtype, rows, || {
+                        router_e8p32_supported(ctx)
+                    }) {
+                        crate::metal::encode_mat_mat_f32_router_e8p32_strict(
+                            ctx,
+                            &enc,
+                            &moe.router,
+                            &v(&p.normed),
+                            &v(&p.router),
+                            h,
+                            e,
+                            rows,
+                        )?;
+                        #[cfg(test)]
+                        router_prefill::record_substitution();
+                    } else {
                         matmat(
                             ctx,
                             &enc,

@@ -221,6 +221,47 @@ fn read_tensor_bytes(tensor: &MetalTensor) -> Vec<u8> {
 }
 
 #[test]
+fn packed_router_n2045_scope_and_restore() {
+    let qualified = |pipeline, hidden, experts, dtype, n| {
+        packed_router_e8p32_strict_scope_qualified(pipeline, hidden, experts, dtype, n)
+    };
+    let width = |n| qualified(true, 2560, 512, GgmlType::F32, n);
+    let original = width(2045);
+    for enabled in [false, true] {
+        with_qwen4exp_packed_router_n2045_override(enabled, || {
+            for n in 0..=MAX_PACKED_TOKENS + 1 {
+                assert_eq!(
+                    width(n),
+                    if n == 2045 {
+                        enabled
+                    } else {
+                        PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS.contains(&n)
+                    },
+                    "N={n}, candidate={enabled}"
+                );
+            }
+            assert!(!qualified(false, 2560, 512, GgmlType::F32, 2045));
+            assert!(!qualified(true, 1280, 512, GgmlType::F32, 2045));
+            assert!(!qualified(true, 2560, 160, GgmlType::F32, 2045));
+            assert!(!qualified(true, 2560, 512, GgmlType::F16, 2045));
+            with_qwen4exp_packed_router_e8p32_strict_override(false, || {
+                assert!(!qwen4exp_packed_router_e8p32_strict_enabled());
+            });
+            with_qwen4exp_packed_router_n2045_override(!enabled, || {
+                assert_eq!(width(2045), !enabled)
+            });
+            assert_eq!(width(2045), enabled);
+        });
+        assert_eq!(width(2045), original);
+    }
+    let unwound = std::panic::catch_unwind(|| {
+        with_qwen4exp_packed_router_n2045_override(!original, || panic!("restore probe"));
+    });
+    assert!(unwound.is_err());
+    assert_eq!(width(2045), original);
+}
+
+#[test]
 fn packed_router_e8p32_strict_scope_is_exact() {
     let qualified = |device, hidden, experts, dtype, tokens| {
         packed_router_e8p32_strict_scope_qualified(device, hidden, experts, dtype, tokens)

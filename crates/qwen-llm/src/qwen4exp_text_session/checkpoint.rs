@@ -295,6 +295,29 @@ impl Qwen4ExpTextSessionMetalWorkspace {
         self.logits_ready = checkpoint.logits_ready;
     }
 
+    /// Observe the final row of the actual last packed command, not singleton scratch.
+    pub(crate) fn final_packed_hyper_for_tests(&self, command_rows: usize) -> Vec<f32> {
+        self.require_idle().unwrap();
+        assert!(self.logits_ready && !self.state_poisoned);
+        let packed = self.packed.as_ref().expect("packed workspace");
+        assert!(command_rows > 0 && command_rows <= packed.capacity);
+        let width = self.hyper_residual.n_elements() as usize;
+        let row = packed
+            .hyper_residual
+            .view_subrange(((command_rows - 1) * width) as u64, vec![width as u64]);
+        unsafe {
+            let source = row
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(row.offset as usize)
+                .cast::<f32>();
+            std::slice::from_raw_parts(source, width).to_vec()
+        }
+    }
+
+    /// Observe singleton scratch after a completed scalar command.
     pub(crate) fn final_hyper_for_tests(&self) -> Vec<f32> {
         self.require_idle().unwrap();
         assert!(self.logits_ready && !self.state_poisoned);

@@ -641,13 +641,12 @@ fn validate_k2_command(command: &Command) -> Result<()> {
     Ok(())
 }
 
-/// GLM-5.3-Flash supports the plain logit lens only; refuse every other
-/// model-reading command (and `read-full --full-lens`) before any Qwen or
-/// Muse path interprets it.
+/// GLM-5.3-Flash supports the plain logit lens and `run` (raw directions at
+/// module sites, its own lane); refuse every other model-reading command
+/// (and `read-full --full-lens`) before any Qwen or Muse path interprets it.
 fn validate_glm5_next_command(command: &Command) -> Result<()> {
     let path = match command {
         Command::TraceFull(args) => Some(&args.model),
-        Command::LensRun(args) => Some(&args.model),
         Command::CoefficientSweep(args) => Some(&args.model),
         Command::CompareTransfer(args) => Some(&args.model),
         Command::FitRows(args) => Some(&args.model),
@@ -660,7 +659,7 @@ fn validate_glm5_next_command(command: &Command) -> Result<()> {
         ensure!(
             qwen_llm::model_family::ModelFamily::detect(&gguf)
                 != Some(qwen_llm::model_family::ModelFamily::Glm5Next),
-            "GLM-5.3-Flash supports only read-full --logit-lens here; linear transport (its four-stream residual needs a declared coordinate), fitting, trace, run and sweep are not implemented"
+            "GLM-5.3-Flash supports only read-full --logit-lens and run (raw directions at module sites) here; linear transport (its four-stream residual needs a declared coordinate), fitting, trace and sweep are not implemented"
         );
     }
     Ok(())

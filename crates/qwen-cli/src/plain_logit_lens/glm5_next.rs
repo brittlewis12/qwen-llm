@@ -284,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn only_plain_read_full_passes_the_family_gate_before_any_asset_access() {
+    fn only_plain_read_full_and_run_pass_the_family_gate_before_any_asset_access() {
         let fixture = crate::linear_transport::tests::fixture("glm-gate", 2, 123);
         let path = fixture.0.join("model.gguf");
         crate::full_lens::write_cpu_gguf(&path, "glm5-next", 2, "unused", false);
@@ -341,6 +341,18 @@ mod tests {
             cache,
         ]);
         crate::validate_glm5_next_command(&plain).unwrap();
+        // `run` has its own GLM lane (raw directions at module sites).
+        let run = command(&[
+            "qwen-lens",
+            "run",
+            "--model",
+            model,
+            "--plan",
+            missing,
+            "--token-ids",
+            "0",
+        ]);
+        crate::validate_glm5_next_command(&run).unwrap();
         assert!(!fixture.0.join("must-not-exist").exists());
     }
 

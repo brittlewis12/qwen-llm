@@ -7,7 +7,7 @@ use super::items::{ServeError, ServeRequest};
 #[cfg(test)]
 use super::output_partition::OutputProtocol;
 use super::render_k2;
-use anyhow::{Context, Result, ensure};
+use anyhow::Result;
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::k2_horizon_runtime::{K2LoadedModel, K2PreparedArtifact, K2RuntimePlan, K2Session};
 use qwen_llm::metal::host_page_size_bytes;
@@ -37,39 +37,14 @@ fn prefill_span(chunk_tokens: usize) -> usize {
     PREFILL_SPAN.div_ceil(chunk) * chunk
 }
 
-fn limits(
-    context: u32,
-    capacity: Option<usize>,
-    maximum: Option<usize>,
-    drafter: bool,
-) -> Result<(usize, usize)> {
-    crate::drafter_policy::ensure_drafter_admitted(
-        qwen_llm::model_family::ModelFamily::K2Horizon,
-        crate::drafter_policy::Lane::Serve,
-        drafter,
-    )?;
-    let capacity = capacity
-        .context("K2 serve requires explicit --max-context-tokens for resident memory planning")?;
-    let maximum = maximum.context("K2 serve requires explicit --max-tokens")?;
-    ensure!(
-        capacity > 0 && capacity <= context as usize,
-        "K2 serve capacity must fit declared context {context}"
-    );
-    ensure!(
-        maximum > 0 && maximum <= capacity,
-        "K2 serve --max-tokens must be in 1..=capacity"
-    );
-    Ok((capacity, maximum))
-}
-
 impl Prepared {
     pub(super) fn new(gguf: &GgufFile, invocation: &crate::cli::ServeInvocation) -> Result<Self> {
         let config = qwen_llm::k2_horizon::K2HorizonConfig::from_gguf(gguf)?;
-        let (capacity, default_max) = limits(
-            config.context_length,
+        let (capacity, default_max) = super::fixed_session_limits(
+            qwen_llm::model_family::ModelFamily::K2Horizon,
+            config.context_length as usize,
             invocation.max_context_tokens,
             invocation.max_tokens,
-            invocation.drafter.is_some(),
         )?;
         let artifact = K2PreparedArtifact::inspect(gguf)?;
         artifact.generation_stops()?;

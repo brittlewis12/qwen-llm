@@ -322,8 +322,8 @@ fn supports_serve_family(family: Option<ModelFamily>) -> bool {
     family.is_some_and(|family| profile(family).serve_backend)
 }
 
-/// Limits for a family whose resident session capacity is fixed at load
-/// (Muse Glimmer, Flash-Next): both ceilings must be explicit.
+/// Limits for a family whose resident session capacity is fixed at load:
+/// both ceilings must be explicit and positive.
 fn fixed_session_limits(
     family: ModelFamily,
     model_context: usize,
@@ -335,12 +335,20 @@ fn fixed_session_limits(
         format!("{family} serve requires --max-context-tokens because its resident session capacity is fixed at startup")
     })?;
     ensure!(
+        context_limit > 0,
+        "{family} --max-context-tokens must be greater than 0"
+    );
+    ensure!(
         context_limit <= model_context,
         "{family} --max-context-tokens {context_limit} exceeds model context {model_context}",
     );
     let default_max_tokens = max_tokens.with_context(|| {
         format!("{family} serve requires explicit --max-tokens; the generic 65536-token default exceeds its session capacity")
     })?;
+    ensure!(
+        default_max_tokens > 0,
+        "{family} --max-tokens must be greater than 0"
+    );
     ensure!(
         default_max_tokens <= context_limit,
         "{family} --max-tokens {default_max_tokens} exceeds --max-context-tokens {context_limit}"
@@ -1093,6 +1101,12 @@ mod tests {
         );
         assert!(
             fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, Some(7_168), None).is_err()
+        );
+        assert!(
+            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, Some(0), Some(2_048)).is_err()
+        );
+        assert!(
+            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, Some(7_168), Some(0)).is_err()
         );
         assert!(
             fixed_session_limits(

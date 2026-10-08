@@ -41,7 +41,7 @@ fn cpu_startup_refuses_bad_limits_before_listener_or_metal() {
         (Some(64), None, None, "requires explicit --max-tokens"),
         (Some(64), Some(65), None, "exceeds --max-context-tokens"),
         (Some(4 << 20), Some(8), None, "exceeds model context"),
-        (Some(0), Some(0), None, "positive --max-context-tokens"),
+        (Some(0), Some(0), None, "must be greater than 0"),
         (
             Some(64),
             Some(8),

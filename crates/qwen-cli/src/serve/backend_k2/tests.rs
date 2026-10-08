@@ -274,29 +274,33 @@ fn gpu_verified_k2_chat_http_matches_raw_and_releases_sessions() {
 }
 
 #[test]
-fn startup_limits_use_declared_context_and_explicit_residency_no_drafter() {
-    assert_eq!(limits(8192, Some(32), Some(8), false).unwrap(), (32, 8));
-    assert_eq!(
-        limits(8192, Some(256), Some(256), false).unwrap(),
-        (256, 256)
-    );
+fn startup_limits_use_shared_fixed_capacity_admission() {
+    let limits = |context, capacity, maximum| {
+        super::super::fixed_session_limits(
+            qwen_llm::model_family::ModelFamily::K2Horizon,
+            context,
+            capacity,
+            maximum,
+        )
+    };
+    assert_eq!(limits(8192, Some(32), Some(8)).unwrap(), (32, 8));
+    assert_eq!(limits(8192, Some(256), Some(256)).unwrap(), (256, 256));
     for size in [257, 1024, 7169, 8192, 524288] {
         assert_eq!(
-            limits(524288, Some(size), Some(size), false).unwrap(),
+            limits(524288, Some(size), Some(size)).unwrap(),
             (size, size)
         );
     }
-    for (context, capacity, maximum, drafter) in [
-        (8192, None, Some(8), false),
-        (8192, Some(32), None, false),
-        (8192, Some(0), Some(1), false),
-        (8192, Some(8193), Some(1), false),
-        (8192, Some(32), Some(0), false),
-        (8192, Some(32), Some(33), false),
-        (1, Some(2), Some(1), false),
-        (8192, Some(32), Some(8), true),
+    for (context, capacity, maximum) in [
+        (8192, None, Some(8)),
+        (8192, Some(32), None),
+        (8192, Some(0), Some(1)),
+        (8192, Some(8193), Some(1)),
+        (8192, Some(32), Some(0)),
+        (8192, Some(32), Some(33)),
+        (1, Some(2), Some(1)),
     ] {
-        assert!(limits(context, capacity, maximum, drafter).is_err());
+        assert!(limits(context, capacity, maximum).is_err());
     }
 }
 
@@ -313,7 +317,7 @@ struct Sink {
 fn cpu_downloaded_startup_rejects_options_before_listener_or_metal() {
     let path = std::env::var("K2_GGUF").expect("K2_GGUF");
     for (capacity, maximum, drafter, expected) in [
-        (Some(usize::MAX), Some(8), None, "capacity must fit"),
+        (Some(usize::MAX), Some(8), None, "exceeds model context"),
         (None, Some(8), None, "explicit --max-context-tokens"),
         (Some(32), None, None, "explicit --max-tokens"),
         (

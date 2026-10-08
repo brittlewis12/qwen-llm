@@ -197,7 +197,9 @@ fn currency_code(value: &str) -> String {
     code.to_string()
 }
 
-/// Whether a parsed call is the expected one (first call only).
+/// Whether the first parsed call is the expected one: a lenient diagnostic
+/// (first call only, substring city match). `quality_analysis.py` rescores
+/// every recorded call strictly and alone supplies the verdict.
 fn call_correct(calls: &[chat::ToolCall], expect: Expect) -> bool {
     let Some(call) = calls.first() else {
         return false;
@@ -497,12 +499,12 @@ fn quality_cohort_evaluate() {
                     Err(e) => (false, Vec::new(), Some(e.clone())),
                 };
                 eprintln!(
-                    "{id} {} {:?}: correct {correct}, calls {calls:?}, stop {stop:?}",
+                    "{id} {} {:?}: lenient first-call match {correct}, calls {calls:?}, stop {stop:?}",
                     arm.name(),
                     generation.describe()["mode"]
                 );
                 rows.push(
-                    json!({"generation": generation.describe(), "correct": correct, "calls": calls,
+                    json!({"generation": generation.describe(), "lenient_first_call_correct": correct, "calls": calls,
                     "stop": stop, "emitted": emitted.len(), "parse_error": error, "text": text}),
                 );
             }

@@ -1315,8 +1315,10 @@ fn reuse_natural_stage_attribution() {
 /// (`packed::RoundExactActivations`: activations as a half-staged kernel
 /// sees them, weights still F32-dequantized, decode accumulation), and
 /// Fast. If rounded Exact diverges from Exact about as much as Fast does,
-/// activation rounding is the dominant source; if it stays small, weight
-/// tiles or accumulation dominate. Writes JSON to `GLM53_PROBE_OUT`.
+/// activation rounding alone is a sufficient source of drift of that size
+/// on these cases (not proof it is Fast's source, nor a measure of what
+/// F32 staging would leave); if it stays small, look to weight tiles or
+/// accumulation. Writes JSON to `GLM53_PROBE_OUT`.
 #[test]
 #[ignore = "map #12 precision probe: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_PROBE_OUT and an idle GPU"]
 fn reuse_natural_activation_rounding_probe() {

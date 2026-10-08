@@ -233,6 +233,7 @@ fn store_context(
 }
 
 impl DeepSeekV4Backend {
+    #[cfg(test)]
     pub(crate) fn new(
         ctx: MetalContext,
         gguf: GgufFile,
@@ -245,17 +246,26 @@ impl DeepSeekV4Backend {
     ) -> anyhow::Result<Self> {
         let tokenizer = Tokenizer::from_gguf(&gguf).context("initialize DeepSeek V4 tokenizer")?;
         let prefill_chunk_tokens = crate::deepseek_v4_prefill_chunk_tokens()?;
-        Self::new_with_cpu_state(
+        let prepared = Prepared {
+            context_limit: forward_limit,
+            forward_limit,
+            default_max_tokens,
+            tokenizer,
+            prefill_chunk_tokens,
+            template_style: TemplateStyle::House,
+            release_sampling: crate::release_sampling::release_sampling(
+                crate::release_identity::ReleaseIdentity::DeepSeekV4,
+                42,
+            ),
+        };
+        Self::new_prepared(
             ctx,
             gguf,
             model_id,
-            default_max_tokens,
-            forward_limit,
+            prepared,
             selector,
             snapshot_cache_mib,
             snapshot_policy,
-            tokenizer,
-            prefill_chunk_tokens,
         )
     }
 
@@ -268,33 +278,10 @@ impl DeepSeekV4Backend {
         snapshot_cache_mib: Option<u64>,
         snapshot_policy: SnapshotPolicyConfig,
     ) -> anyhow::Result<Self> {
-        Self::new_with_cpu_state(
-            ctx,
-            gguf,
-            model_id,
-            prepared.default_max_tokens,
-            prepared.forward_limit,
-            selector,
-            snapshot_cache_mib,
-            snapshot_policy,
-            prepared.tokenizer,
-            prepared.prefill_chunk_tokens,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn new_with_cpu_state(
-        ctx: MetalContext,
-        gguf: GgufFile,
-        model_id: String,
-        default_max_tokens: usize,
-        forward_limit: usize,
-        selector: crate::DeepSeekV4MultigroupSelectorArg,
-        snapshot_cache_mib: Option<u64>,
-        snapshot_policy: SnapshotPolicyConfig,
-        tokenizer: Tokenizer,
-        prefill_chunk_tokens: usize,
-    ) -> anyhow::Result<Self> {
+        let default_max_tokens = prepared.default_max_tokens;
+        let forward_limit = prepared.forward_limit;
+        let prefill_chunk_tokens = prepared.prefill_chunk_tokens;
+        let tokenizer = prepared.tokenizer;
         let vocab_size = tokenizer.n_vocab();
 
         let load_t0 = Instant::now();

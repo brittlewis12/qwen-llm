@@ -11,6 +11,7 @@ use qwen_llm::muse_glimmer_runtime::{MuseGlimmerLoadedModel, MuseGlimmerRuntimeO
 use qwen_llm::sampling::Sampler;
 use qwen_llm::tokenizer::LlamaCppTokenizer;
 use std::io;
+#[cfg(test)]
 use std::path::Path;
 use std::time::Instant;
 
@@ -156,6 +157,7 @@ impl MuseGlimmerBackend {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_options(
         ctx: MetalContext,
         gguf: GgufFile,
@@ -167,41 +169,15 @@ impl MuseGlimmerBackend {
     ) -> anyhow::Result<Self> {
         let config = MuseGlimmerConfig::from_gguf(&gguf)
             .context("bind Muse Glimmer release contract for serve")?;
+        let prepared =
+            Prepared::from_config(&gguf, config, capacity, default_max_tokens, math_options)?;
         let tokenizer =
             LlamaCppTokenizer::open(model_path).context("load Muse Glimmer serve tokenizer")?;
-        config
+        prepared
+            .config
             .validate_tokenizer(&tokenizer)
             .context("Muse Glimmer serve tokenizer contract")?;
-        let eos_token_id = config.eos_token_id as i32;
-        let eot_token_id = config.eot_token_id as i32;
-        config
-            .validate_stop_tokens(&gguf.stop_token_ids()?)
-            .context("Muse Glimmer serve stop-token contract")?;
-        let vocab_size = config.vocab_size;
-        let profile = config.chat_template_profile;
-        let loaded = MuseGlimmerLoadedModel::load_with_options(&ctx, &gguf, capacity, math_options)
-            .context("load resident Muse Glimmer serve model")?;
-        let math_options = loaded.math_options();
-        Ok(Self {
-            ctx,
-            _gguf: gguf,
-            tokenizer,
-            loaded,
-            model_id,
-            default_max_tokens,
-            capacity,
-            vocab_size,
-            eos_token_id,
-            eot_token_id,
-            profile,
-            consumed_tokens: Vec::new(),
-            prefix_reuse: qwen_llm::env_flag::read_default_on(PREFIX_REUSE_ENV),
-            math_options,
-            idle_residency: super::idle_residency::IdleResidency::new(
-                "muse_glimmer",
-                std::time::Duration::ZERO,
-            ),
-        })
+        Self::from_prepared(ctx, gguf, model_id, prepared, tokenizer)
     }
 
     pub(crate) fn math_options(&self) -> MuseGlimmerRuntimeOptions {

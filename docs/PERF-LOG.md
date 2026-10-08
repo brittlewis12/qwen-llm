@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-08 - #14 Output Memory, Packet 2: Qwen-XML and DeepSeek-DSML Tool Buffers Admitted
+
+- Measured first (`c0019d12`): Qwen XML and DS4 DSML tool blocks of GLM's
+  four shapes through the real handler in one-byte pieces peak at most
+  147.5 bytes per block byte, the same as GLM's (the shared argument parse
+  and publication dominate), so GLM's retained 256x model applies; four
+  shapes are evidence, not a bound.
+- Now (`753e5527`, `0ad98e8f`; cx reviews): the Qwen/DS4 tool buffer admits
+  each 64 KiB step at the checked 256x outstanding peak against fresh
+  headroom and again before the parse (GLM's admission now uses the same
+  checked pricing); refusals are stored, inert and returned by `finish`.
+  A stored Qwen or GLM failure stops a streaming generation at the refusing
+  piece and fails it with the typed code, publishing no held tool text;
+  non-streaming answers the JSON error after collection.
+- Not yet: a request-derived byte ceiling for Qwen/DS4 (their profiles do
+  not carry the effective token limit and piece bytes), so admission bounds
+  memory against headroom, not accepted output length; K2 and Muse tool
+  buffers, response accumulation, streaming retention and trace bytes.
+
 ## 2026-10-08 - #14 Output Memory, Packet 1: Admitted Contiguous Non-Streaming Collection, Typed Sink Refusals
 
 - Non-streaming responses held one allocation per output piece and a

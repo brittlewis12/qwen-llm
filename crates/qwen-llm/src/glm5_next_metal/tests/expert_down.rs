@@ -675,7 +675,7 @@ fn whole_screens(
                     16 << 20,
                 )
                 .unwrap();
-                session.set_packed_lineage(PackedLineage::Fast);
+                session.set_packed_lineage(PackedLineage::Fast).unwrap();
                 emit(
                     out,
                     json!({"event":"session_allocation","phase":"whole","rows":rows,
@@ -964,7 +964,7 @@ fn domain_cell(
         );
         let mut session =
             result.expect("normal session admission/allocation failed; raw error flushed");
-        session.set_packed_lineage(PackedLineage::Fast);
+        session.set_packed_lineage(PackedLineage::Fast).unwrap();
         assert_eq!(super::router_prefill::requested_override(), None);
         eprintln!("GLM down {phase} {stream} N{rows} {label}");
         let (((result, wall_ms), obs), substitutions) = with_domain_arm(production, b, || {
@@ -1398,7 +1398,7 @@ fn expert_down_packet() {
                 cpu_reserve(rows),
             )
             .unwrap();
-            session.set_packed_lineage(PackedLineage::Fast);
+            session.set_packed_lineage(PackedLineage::Fast).unwrap();
             emit(
                 &mut out,
                 json!({"event":"session_allocation","phase":"capture","rows":rows,"block":block,"wall_ms":start.elapsed().as_secs_f64()*1e3}),

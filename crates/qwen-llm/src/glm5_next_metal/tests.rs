@@ -556,7 +556,7 @@ fn packed_prefill_matches_serial_and_oracle_on_checkpoint_v1() {
     for lineage in [PackedLineage::Exact, PackedLineage::Fast] {
         for rows in [16usize, 4] {
             let mut packed = Glm5NextSession::with_prefill_rows(&ctx, &weights, 256, rows).unwrap();
-            packed.set_packed_lineage(lineage);
+            packed.set_packed_lineage(lineage).unwrap();
             let start = std::time::Instant::now();
             let logits = packed.prefill_packed(&ctx, &tokens).unwrap();
             eprintln!(
@@ -618,7 +618,7 @@ fn packed_prefill_matches_serial_and_oracle_on_checkpoint_v1() {
         // unpoisoned, and finishing the prompt reproduces serial decode
         // (Exact: bitwise).
         let mut cancelled = Glm5NextSession::with_prefill_rows(&ctx, &weights, 256, 4).unwrap();
-        cancelled.set_packed_lineage(lineage);
+        cancelled.set_packed_lineage(lineage).unwrap();
         let mut allowed = 2;
         let error = cancelled
             .prefill_packed_with_checkpoint(&ctx, &tokens, &mut || {
@@ -641,7 +641,7 @@ fn packed_prefill_matches_serial_and_oracle_on_checkpoint_v1() {
         );
         drop(cancelled);
         let mut mixed = Glm5NextSession::with_prefill_rows(&ctx, &weights, 256, 8).unwrap();
-        mixed.set_packed_lineage(lineage);
+        mixed.set_packed_lineage(lineage).unwrap();
         let logits = mixed.prefill_packed(&ctx, &tokens[..11]).unwrap();
         check(&format!("{lineage:?} mixed prefill"), 10, &logits, lineage);
         // Whole-request refusals execute nothing, and decode continues as if
@@ -680,7 +680,7 @@ fn packed_prefill_matches_serial_and_oracle_on_checkpoint_v1() {
         // Exactly full: a 12-position session takes 12 tokens, then refuses
         // every further token on every entry point.
         let mut full = Glm5NextSession::with_prefill_rows(&ctx, &weights, 12, 8).unwrap();
-        full.set_packed_lineage(lineage);
+        full.set_packed_lineage(lineage).unwrap();
         let logits = full.prefill_packed(&ctx, &tokens[..12]).unwrap();
         check(&format!("{lineage:?} full prefill"), 11, &logits, lineage);
         assert_eq!(full.position(), 12);
@@ -763,7 +763,7 @@ fn packed_fast_matches_exact_over_a_grouped_block_and_tail() {
     for lineage in [PackedLineage::Exact, PackedLineage::Fast] {
         let mut session = Glm5NextSession::with_prefill_rows(&ctx, &weights, 512, 512).unwrap();
         assert_allocation_within_ledger(&session);
-        session.set_packed_lineage(lineage);
+        session.set_packed_lineage(lineage).unwrap();
         let start = std::time::Instant::now();
         let logits = session.prefill_packed(&ctx, tokens).unwrap();
         eprintln!(
@@ -1176,7 +1176,7 @@ fn packed_fast_qualifies_across_chunkings_with_teacher_forcing() {
 
     // Exact packed reference.
     let mut exact = Glm5NextSession::with_prefill_rows(&ctx, &weights, CAPACITY, 512).unwrap();
-    exact.set_packed_lineage(PackedLineage::Exact);
+    exact.set_packed_lineage(PackedLineage::Exact).unwrap();
     let reference_prefill = exact.prefill_packed(&ctx, prompt).unwrap();
     let reference_state = ValidState::read(&exact);
     let reference_bits = state_bits(&exact);
@@ -1296,7 +1296,7 @@ fn packed_fast_qualifies_across_chunkings_with_teacher_forcing() {
     for &(rows, prefix, equal_to) in &variants {
         let label = format!("fast rows {rows} prefix {prefix}");
         let mut fast = Glm5NextSession::with_prefill_rows(&ctx, &weights, CAPACITY, rows).unwrap();
-        fast.set_packed_lineage(PackedLineage::Fast);
+        fast.set_packed_lineage(PackedLineage::Fast).unwrap();
         let start = std::time::Instant::now();
         if prefix > 0 {
             fast.prefill_packed(&ctx, &prompt[..prefix]).unwrap();
@@ -1741,7 +1741,7 @@ fn sparse_decode_crosses_the_frontier_against_llama_cpp() {
     const REGRET: f64 = 0.2;
 
     let mut session = Glm5NextSession::with_prefill_rows(&ctx, &weights, total, 512).unwrap();
-    session.set_packed_lineage(PackedLineage::Exact);
+    session.set_packed_lineage(PackedLineage::Exact).unwrap();
     assert_allocation_within_ledger(&session);
     let start = std::time::Instant::now();
     let prefix_logits = session.prefill_packed(&ctx, &tokens[..PREFIX]).unwrap();
@@ -1936,7 +1936,7 @@ fn packed_sparse_prefill_matches_serial_across_the_frontier() {
     let packed_run = |lineage: PackedLineage, rows: usize, prefix: usize| {
         let mut session =
             Glm5NextSession::with_prefill_rows(&ctx, &weights, capacity, rows).unwrap();
-        session.set_packed_lineage(lineage);
+        session.set_packed_lineage(lineage).unwrap();
         let start = std::time::Instant::now();
         if prefix > 0 {
             session.prefill_packed(&ctx, &prompt[..prefix]).unwrap();
@@ -2037,7 +2037,7 @@ fn packed_sparse_prefill_matches_llama_cpp_at_the_prompt_end() {
     for (lineage, bound) in [(PackedLineage::Exact, 1e-2), (PackedLineage::Fast, 2e-2)] {
         let mut session =
             Glm5NextSession::with_prefill_rows(&ctx, &weights, tokens.len(), 512).unwrap();
-        session.set_packed_lineage(lineage);
+        session.set_packed_lineage(lineage).unwrap();
         let logits = session.prefill_packed(&ctx, &tokens).unwrap();
         const ORACLE_POSITION: usize = 2092;
         let kl = kl_divergence(&expected, &logits);
@@ -2066,7 +2066,7 @@ fn packed_sparse_prefill_matches_llama_cpp_at_the_prompt_end() {
         at_frontier = reference.next().2;
     }
     let mut full = Glm5NextSession::with_prefill_rows(&ctx, &weights, FRONTIER, 512).unwrap();
-    full.set_packed_lineage(PackedLineage::Exact);
+    full.set_packed_lineage(PackedLineage::Exact).unwrap();
     let logits = full.prefill_packed(&ctx, &tokens[..FRONTIER]).unwrap();
     let kl = kl_divergence(&at_frontier, &logits);
     eprintln!(
@@ -2227,7 +2227,7 @@ fn sparse_long_context_matches_llama_cpp_near_4096() {
     let mut failures = Vec::new();
     for (lineage, bound) in [(PackedLineage::Exact, 1e-2), (PackedLineage::Fast, 2e-2)] {
         let mut session = Glm5NextSession::with_prefill_rows(&ctx, &weights, TOTAL, 512).unwrap();
-        session.set_packed_lineage(lineage);
+        session.set_packed_lineage(lineage).unwrap();
         let start = std::time::Instant::now();
         let mut native = vec![session.prefill_packed(&ctx, &tokens[..PROMPT]).unwrap()];
         let prefill_s = start.elapsed().as_secs_f64();
@@ -2806,7 +2806,7 @@ fn fast_reuse_stays_within_the_fast_policy_across_reuse_boundaries() {
     let fast_session = |capacity: usize| {
         let mut session =
             Glm5NextSession::with_prefill_rows(&ctx, &weights, capacity, 512).unwrap();
-        session.set_packed_lineage(PackedLineage::Fast);
+        session.set_packed_lineage(PackedLineage::Fast).unwrap();
         assert_eq!(
             session.packed.as_ref().map(|packed| packed.lineage),
             Some(PackedLineage::Fast)
@@ -2834,7 +2834,7 @@ fn fast_reuse_stays_within_the_fast_policy_across_reuse_boundaries() {
             512,
         )
         .unwrap();
-        session.set_packed_lineage(PackedLineage::Exact);
+        session.set_packed_lineage(PackedLineage::Exact).unwrap();
         let mut logits = vec![session.prefill_packed(&ctx, prompt).unwrap()];
         for &token in &continuation {
             logits.push(session.forward(&ctx, token).unwrap());

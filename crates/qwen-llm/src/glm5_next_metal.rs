@@ -1039,11 +1039,26 @@ impl<'w> Glm5NextSession<'w> {
         })
     }
 
-    /// Selects the packed-prefill arithmetic (no effect without packed scratch).
-    pub fn set_packed_lineage(&mut self, lineage: PackedLineage) {
-        if let Some(packed) = self.packed.as_mut() {
-            packed.lineage = lineage;
+    /// Selects the packed-prefill arithmetic before the session commits work
+    /// (no effect without packed scratch). Re-selecting the current lineage
+    /// is always accepted; changing it once tokens are committed is refused
+    /// without mutation, so the state (and any snapshot of it) never carries
+    /// one lineage's arithmetic under the other's label.
+    pub fn set_packed_lineage(&mut self, lineage: PackedLineage) -> Result<()> {
+        let Some(packed) = self.packed.as_mut() else {
+            return Ok(());
+        };
+        if packed.lineage == lineage {
+            return Ok(());
         }
+        if self.position > 0 {
+            return Err(Glm5NextMetalError::Invalid(format!(
+                "packed lineage cannot change from {:?} to {lineage:?} after {} committed tokens; start a fresh session",
+                packed.lineage, self.position
+            )));
+        }
+        packed.lineage = lineage;
+        Ok(())
     }
 
     /// The packed-prefill lineage, or `None` for a serial-only session.

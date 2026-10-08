@@ -37,7 +37,7 @@ fn fresh<'w>(
 ) -> Glm5NextSession<'w> {
     let mut s =
         Glm5NextSession::with_prefill_rows(ctx, weights, capacity, 512.min(capacity)).unwrap();
-    s.set_packed_lineage(lineage);
+    s.set_packed_lineage(lineage).unwrap();
     s
 }
 
@@ -155,6 +155,29 @@ fn snapshot_restore_equals_the_uninterrupted_run() {
         refused(small.restore_snapshot(&before)),
         "no room past the position"
     );
+    // A session with committed tokens keeps its lineage: relabelling is
+    // refused without mutation (re-selecting the same lineage is accepted),
+    // so its capture still refuses to restore into the other lineage. A
+    // fresh session may still choose.
+    assert!(
+        matches!(
+            exact.set_packed_lineage(PackedLineage::Fast),
+            Err(Glm5NextMetalError::Invalid(_))
+        ),
+        "relabel after committed work"
+    );
+    exact.set_packed_lineage(PackedLineage::Exact).unwrap();
+    assert_eq!(exact.packed_lineage(), Some(PackedLineage::Exact));
+    let mut fast_destination = fresh(&ctx, &weights, 600, PackedLineage::Exact);
+    fast_destination
+        .set_packed_lineage(PackedLineage::Fast)
+        .unwrap();
+    assert_eq!(fast_destination.packed_lineage(), Some(PackedLineage::Fast));
+    assert!(
+        refused(fast_destination.restore_snapshot(&exact.capture_snapshot().unwrap())),
+        "a refused relabel still reached the snapshot"
+    );
+    drop(fast_destination);
     assert_eq!(exact.position(), 100);
     assert!(
         exact.capture_snapshot().unwrap().same_state(&before),

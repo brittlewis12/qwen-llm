@@ -223,7 +223,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             cpu_reserve,
         )
         .map_err(session_error)?;
-        session.set_packed_lineage(lineage);
+        session.set_packed_lineage(lineage).map_err(session_error)?;
         Ok(session)
     }
 

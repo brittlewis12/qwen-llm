@@ -397,7 +397,7 @@ pub(super) fn session<'w>(
 ) -> Glm5NextSession<'w> {
     let mut session =
         Glm5NextSession::with_prefill_rows(ctx, weights, capacity, rows.min(capacity)).unwrap();
-    session.set_packed_lineage(lineage);
+    session.set_packed_lineage(lineage).unwrap();
     session
 }
 

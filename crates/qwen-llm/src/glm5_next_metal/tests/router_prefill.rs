@@ -627,7 +627,7 @@ fn router_prefill_abba() {
                 16 << 20,
             )
             .expect("admit one diagnostic session");
-            session.set_packed_lineage(PackedLineage::Fast);
+            session.set_packed_lineage(PackedLineage::Fast).unwrap();
             let allocation_ms = allocation_started.elapsed().as_secs_f64() * 1e3;
             let start_ms = packet_started.elapsed().as_secs_f64() * 1e3;
             let ((result, wall_ms), timing) = with_override(candidate, || {

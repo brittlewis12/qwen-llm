@@ -54,7 +54,7 @@ force-rank, raw attempts, limits and diagnostic harnesses are in
 5. Flash selected-QSA leaf attribution, then GDN/KDA preparation. Do not fund
    a scan/attention rewrite from decode timings or whole-mixer budgets.
 
-This is a prefill-lane ordering, not a cancellation of other owners' product,
+This is a prefill-lane ordering, not a cancellation of the product,
 snapshot or decode work below. No candidate defaults changed in the research
 packet. Cold placement, avoided prefill and warm engine throughput stay separate.
 

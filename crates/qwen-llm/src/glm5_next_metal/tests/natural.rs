@@ -1208,3 +1208,103 @@ fn packed_lineage_prefill_cost() {
     });
     std::fs::write(&out, serde_json::to_vec_pretty(&document).unwrap()).unwrap();
 }
+
+/// Map #12 attribution (no bounds; diagnostic). For one frozen case
+/// (`GLM53_ATTRIBUTION_CASE`, default H2) at 512 rows: Exact cold is the
+/// reference; then Fast cold with each stage family alone in its Exact form
+/// ("fast except stage"), and with every family Exact except one ("only
+/// stage fast"). One-at-a-time substitutions measure sensitivity, not
+/// additive shares. Writes JSON to `GLM53_ATTRIBUTION_OUT`.
+#[test]
+#[ignore = "map #12 attribution: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_ATTRIBUTION_OUT and an idle GPU"]
+fn reuse_natural_stage_attribution() {
+    use super::super::packed::{ExactStages, Stage};
+    let out = PathBuf::from(std::env::var("GLM53_ATTRIBUTION_OUT").expect("GLM53_ATTRIBUTION_OUT"));
+    let id = std::env::var("GLM53_ATTRIBUTION_CASE").unwrap_or_else(|_| "H2-code-context".into());
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
+    let fixture: Value = serde_json::from_slice(&std::fs::read(&fixture_path).unwrap()).unwrap();
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let gguf = GgufFile::open(&path).unwrap();
+    assert_eq!(fixture["artifact_layout"], artifact_layout(&gguf));
+    let config = crate::glm5_next::Glm5NextConfig::from_gguf(&gguf).unwrap();
+    let frozen = validate_fixture(
+        &fixture,
+        config.sparse_frontier() as usize,
+        config.indexer_pool as usize,
+    );
+    let case = frozen
+        .iter()
+        .find(|c| c.id == id)
+        .unwrap_or_else(|| panic!("unknown case {id}"));
+    let _lease = production_lease();
+    let ctx = MetalContext::new().expect("Metal context");
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let turn2 = case.turn2();
+    let capacity = turn2.len() + case.continuation.len() + 1;
+    let run = |lineage: PackedLineage| -> Vec<Vec<f32>> {
+        let mut s = session(&ctx, &weights, capacity, 512, lineage);
+        let mut logits = vec![s.prefill_packed(&ctx, &turn2).unwrap()];
+        for &token in &case.continuation {
+            logits.push(s.forward(&ctx, token).unwrap());
+        }
+        logits
+    };
+    let summary = |reference: &[Vec<f32>], other: &[Vec<f32>]| -> Value {
+        let kls: Vec<f64> = reference
+            .iter()
+            .zip(other)
+            .map(|(r, o)| kl_divergence(r, o))
+            .collect();
+        let flips: Vec<Value> = reference
+            .iter()
+            .zip(other)
+            .enumerate()
+            .filter_map(|(i, (r, o))| {
+                let (a, b) = choice_regret(r, o);
+                ((a, b) != (0.0, 0.0)).then(|| json!([i, a, b]))
+            })
+            .collect();
+        let (worst_kl, at) = worst(kls.iter().copied());
+        json!({"worst_kl": worst_kl, "worst_at": at, "mean_kl": kls.iter().sum::<f64>() / kls.len() as f64,
+            "prompt_end_kl": kls[0], "flips": flips})
+    };
+    let reference = run(PackedLineage::Exact);
+    let fast = summary(&reference, &run(PackedLineage::Fast));
+    eprintln!("{id}: fast {fast}");
+    let mut rows = Vec::new();
+    for stage in Stage::ALL {
+        let except = {
+            let _scope = ExactStages::set(&[stage]);
+            summary(&reference, &run(PackedLineage::Fast))
+        };
+        let others: Vec<Stage> = Stage::ALL.into_iter().filter(|s| *s != stage).collect();
+        let only = {
+            let _scope = ExactStages::set(&others);
+            summary(&reference, &run(PackedLineage::Fast))
+        };
+        eprintln!(
+            "{stage:?}: fast except it: worst KL {:.3e} mean {:.3e}; only it fast: worst KL {:.3e} mean {:.3e}",
+            except["worst_kl"].as_f64().unwrap(),
+            except["mean_kl"].as_f64().unwrap(),
+            only["worst_kl"].as_f64().unwrap(),
+            only["mean_kl"].as_f64().unwrap()
+        );
+        rows.push(json!({"stage": format!("{stage:?}"), "fast_except_stage": except, "only_stage_fast": only}));
+    }
+    let all_exact = {
+        let _scope = ExactStages::set(&Stage::ALL);
+        summary(&reference, &run(PackedLineage::Fast))
+    };
+    eprintln!("all stages exact inside a Fast session: {all_exact}");
+    let document = json!({
+        "schema": "glm53.reuse_natural_stage_attribution.v1", "case": id, "rows_per_chunk": 512,
+        "reference": "Exact cold", "fast": fast, "stages": rows,
+        "all_stages_exact_in_fast_session": all_exact,
+        "note": "one-at-a-time substitutions measure sensitivity, not additive shares",
+    });
+    std::fs::write(
+        &out,
+        serde_json::to_string_pretty(&document).unwrap() + "\n",
+    )
+    .unwrap();
+}

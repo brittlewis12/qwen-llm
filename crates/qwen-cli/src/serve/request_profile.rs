@@ -94,6 +94,12 @@ impl RequestProfile {
     }
 
     pub(crate) fn normalize(&self, request: &mut ServeRequest) -> Result<(), ServeError> {
+        if request.prefill_lineage.is_some() && !matches!(self, Self::Glm5Next { .. }) {
+            return Err(ServeError::invalid_request(
+                Some("x_qwen.prefill_lineage"),
+                "x_qwen.prefill_lineage is supported only by GLM-5.3-Flash; this family reads prompts one way",
+            ));
+        }
         match self {
             // Ordinary Qwen binds a clone during rendering; Flash-Next binds
             // before rendering, protocol selection and response echoes.

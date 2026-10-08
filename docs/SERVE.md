@@ -813,6 +813,14 @@ collapsed. `qwen run --messages` documents decode the same way.
 - Sampling defaults are the release `generation_config.json`: temperature
   1.0, top-p 0.95, top-k and min-p off, a fresh seed; `max_output_tokens` defaults
   to `--max-tokens` and must be within capacity.
+- `x_qwen.prefill_lineage` chooses how the prompt is read: `"fast"` (the
+  default: batched, ~190 tok/s, with small numerical drift from
+  token-by-token decoding) or `"exact"` (the decode kernels per row, ~40
+  tok/s, matching token-by-token decoding; for evaluations and reproducible
+  comparisons; `docs/bench/2026-10-07-glm53-natural-reuse/`). The live
+  session is reused only by requests of its own lineage; a change starts a
+  fresh session. The `serve phases:` line reports `lineage=`. Every other
+  family refuses the field.
 
 Output partitions on the pre-opened reasoning: bytes are a `reasoning` item
 until the first `</think>`, then the `message`. Stops are `<|endoftext|>`,

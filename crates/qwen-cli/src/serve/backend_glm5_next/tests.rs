@@ -157,7 +157,7 @@ fn reference_bytes(
         .into_iter()
         .map(|id| id as u32)
         .collect();
-    let mut session = backend.fresh_session(0).unwrap();
+    let mut session = backend.fresh_session(0, backend.lineage).unwrap();
     let logits = session.prefill_packed(backend.ctx, &tokens).unwrap();
     let mut sampler = Sampler::new(render::sampling(request)).unwrap();
     let mut bytes = Vec::new();
@@ -303,10 +303,10 @@ fn gpu_live_session_extends_resumes_and_resets() {
         .map(|id| id as u32)
         .collect();
     assert!(exact_tokens.starts_with(&exact_history));
-    let mut cold_session = backend.fresh_session(0).unwrap();
+    let mut cold_session = backend.fresh_session(0, backend.lineage).unwrap();
     let cold_logits = cold_session.prefill_packed(&ctx, &exact_tokens).unwrap();
     drop(cold_session);
-    let mut warm_session = backend.fresh_session(0).unwrap();
+    let mut warm_session = backend.fresh_session(0, backend.lineage).unwrap();
     warm_session
         .prefill_packed(&ctx, &exact_history[..first_len])
         .unwrap();
@@ -516,4 +516,41 @@ fn session_errors_map_typed_pressure_to_503_and_the_rest_to_500() {
         let error = session_error(other);
         assert_eq!((error.status, error.code), (500, None), "{}", error.message);
     }
+}
+
+/// A request reads its prompt with its own lineage, and a live session is
+/// reused only by requests of the lineage it was built with.
+#[test]
+fn live_session_reuse_requires_the_same_prefill_lineage() {
+    use crate::serve::items::PrefillLineage;
+    let mut request = ServeRequest::default();
+    assert_eq!(
+        request_lineage(&request, PackedLineage::Fast),
+        PackedLineage::Fast
+    );
+    request.prefill_lineage = Some(PrefillLineage::Exact);
+    assert_eq!(
+        request_lineage(&request, PackedLineage::Fast),
+        PackedLineage::Exact
+    );
+    request.prefill_lineage = Some(PrefillLineage::Fast);
+    assert_eq!(
+        request_lineage(&request, PackedLineage::Exact),
+        PackedLineage::Fast
+    );
+
+    assert_eq!(
+        reuse_len(218, Some(PackedLineage::Fast), PackedLineage::Fast),
+        218
+    );
+    assert_eq!(
+        reuse_len(218, Some(PackedLineage::Fast), PackedLineage::Exact),
+        0
+    );
+    assert_eq!(
+        reuse_len(218, Some(PackedLineage::Exact), PackedLineage::Fast),
+        0
+    );
+    assert_eq!(reuse_len(0, None, PackedLineage::Exact), 0);
+    assert_eq!(lineage_name(PackedLineage::Exact), "exact");
 }

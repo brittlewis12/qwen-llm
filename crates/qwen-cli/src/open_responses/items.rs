@@ -152,6 +152,25 @@ impl TemplateStyle {
     }
 }
 
+/// `x_qwen.prefill_lineage`: how a family with more than one prompt-reading
+/// arithmetic reads this request's prompt. Only GLM-5.3-Flash has one to
+/// choose (batched Fast, the default, or the slower Exact that matches
+/// token-by-token decoding); every other family refuses the field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrefillLineage {
+    Fast,
+    Exact,
+}
+
+impl PrefillLineage {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Exact => "exact",
+        }
+    }
+}
+
 /// An explicit `x_qwen.history_thinking` request, kept distinct from its
 /// absence so it can override either template style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,6 +227,8 @@ pub(crate) struct ServeRequest {
     /// `None` until serve applies its deployment default.
     pub(crate) template_style: Option<TemplateStyle>,
     pub(crate) echo_stats: bool,
+    /// As sent in `x_qwen.prefill_lineage`; `None` means the family default.
+    pub(crate) prefill_lineage: Option<PrefillLineage>,
     /// Assistant history turns (a message with the calls attached to it, or
     /// a call-only group) that arrived without a reasoning item. One rule for
     /// every family: such a turn renders exactly as the family's template
@@ -251,6 +272,7 @@ impl Default for ServeRequest {
             history_thinking: None,
             template_style: None,
             echo_stats: false,
+            prefill_lineage: None,
             history_reasoning_missing: 0,
         }
     }
@@ -642,6 +664,18 @@ fn parse_request_with(
                         ));
                     }
                 },
+                "prefill_lineage" => {
+                    request.prefill_lineage = Some(match value.as_str() {
+                        Some("fast") => PrefillLineage::Fast,
+                        Some("exact") => PrefillLineage::Exact,
+                        _ => {
+                            return Err(ServeError::invalid_request(
+                                Some("x_qwen.prefill_lineage"),
+                                "x_qwen.prefill_lineage must be \"fast\" or \"exact\"",
+                            ));
+                        }
+                    })
+                }
                 "stats" => {
                     request.echo_stats = value.as_bool().ok_or_else(|| {
                         ServeError::invalid_request(

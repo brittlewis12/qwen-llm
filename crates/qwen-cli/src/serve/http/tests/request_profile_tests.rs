@@ -692,3 +692,76 @@ fn partition_failures_after_generation_reach_the_owner() {
         assert_eq!(failures.load(Ordering::SeqCst), 0);
     }
 }
+
+/// `x_qwen.prefill_lineage` is GLM-5.3-Flash's alone: GLM binds it; every
+/// other family refuses it explicitly (400, named parameter); a value other
+/// than "fast" or "exact" is refused at parse.
+#[test]
+fn prefill_lineage_is_glm_only_and_refused_elsewhere() {
+    use crate::serve::items::PrefillLineage;
+    let body = |lineage: Value| json!({"model":"test","input":"Hello","x_qwen":{"prefill_lineage": lineage}});
+    let glm = RequestProfile::Glm5Next {
+        default_max_tokens: 8,
+        capacity: 128,
+        max_piece_bytes: 64,
+    };
+    for (value, expected) in [
+        ("exact", PrefillLineage::Exact),
+        ("fast", PrefillLineage::Fast),
+    ] {
+        let mut request = glm.parse(&body(json!(value))).unwrap();
+        glm.normalize(&mut request).unwrap();
+        assert_eq!(request.prefill_lineage, Some(expected));
+    }
+    for bad in [json!("serial"), json!(true), json!(1)] {
+        let error = glm.parse(&body(bad.clone())).unwrap_err();
+        assert_eq!(
+            (error.status, error.param.as_deref()),
+            (400, Some("x_qwen.prefill_lineage")),
+            "{bad}"
+        );
+    }
+    let others = [
+        RequestProfile::OrdinaryQwen {
+            template: QwenTemplate::Qwen38,
+            no_thinking_supported: true,
+            style: TemplateStyle::House,
+            sampling: None,
+        },
+        RequestProfile::FlashNext {
+            style: TemplateStyle::House,
+        },
+        RequestProfile::DeepSeekV4 {
+            style: TemplateStyle::House,
+            sampling: None,
+        },
+        RequestProfile::Muse {
+            template: MuseGlimmerChatTemplateProfile::UnslothLaunch,
+            default_max_tokens: 8,
+            eos_token_id: 1,
+            eot_token_id: 2,
+        },
+        k2(false, 128),
+    ];
+    // K2's own parser already refuses any unknown x_qwen field; the others
+    // parse it and refuse it when the family binds the request.
+    for profile in others {
+        let error = profile
+            .parse(&body(json!("exact")))
+            .and_then(|mut request| profile.normalize(&mut request))
+            .unwrap_err();
+        assert_eq!(error.status, 400, "{}", error.message);
+        assert!(
+            error
+                .param
+                .as_deref()
+                .is_some_and(|p| p.starts_with("x_qwen")),
+            "{error:?}"
+        );
+        assert!(
+            error.message.contains("prefill_lineage"),
+            "{}",
+            error.message
+        );
+    }
+}

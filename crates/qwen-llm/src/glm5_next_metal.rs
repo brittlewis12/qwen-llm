@@ -1035,6 +1035,11 @@ impl<'w> Glm5NextSession<'w> {
         }
     }
 
+    /// The packed-prefill lineage, or `None` for a serial-only session.
+    pub fn packed_lineage(&self) -> Option<PackedLineage> {
+        self.packed.as_ref().map(|packed| packed.lineage)
+    }
+
     pub fn position(&self) -> usize {
         self.position
     }

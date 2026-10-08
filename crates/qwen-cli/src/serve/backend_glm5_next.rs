@@ -161,6 +161,34 @@ fn session_error(error: Glm5NextMetalError) -> ServeError {
     }
 }
 
+/// The lineage this request reads its prompt with: `x_qwen.prefill_lineage`
+/// if sent, else the backend default.
+fn request_lineage(request: &ServeRequest, default: PackedLineage) -> PackedLineage {
+    match request.prefill_lineage {
+        Some(super::items::PrefillLineage::Exact) => PackedLineage::Exact,
+        Some(super::items::PrefillLineage::Fast) => PackedLineage::Fast,
+        None => default,
+    }
+}
+
+/// Tokens reused from the live session: its extending prefix, but only when
+/// the session reads prompts with the requested lineage (a live session
+/// never mixes lineages; a mismatch starts a fresh session).
+fn reuse_len(extending: usize, live: Option<PackedLineage>, requested: PackedLineage) -> usize {
+    match live {
+        Some(live) if live == requested => extending,
+        None => extending,
+        Some(_) => 0,
+    }
+}
+
+fn lineage_name(lineage: PackedLineage) -> &'static str {
+    match lineage {
+        PackedLineage::Fast => "fast",
+        PackedLineage::Exact => "exact",
+    }
+}
+
 impl<'w, 'g> Glm5NextBackend<'w, 'g> {
     pub(super) fn new(
         ctx: &'w MetalContext,
@@ -182,7 +210,11 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         }
     }
 
-    fn fresh_session(&self, cpu_reserve: u64) -> Result<Glm5NextSession<'w>, ServeError> {
+    fn fresh_session(
+        &self,
+        cpu_reserve: u64,
+        lineage: PackedLineage,
+    ) -> Result<Glm5NextSession<'w>, ServeError> {
         let mut session = Glm5NextSession::with_prefill_rows_and_cpu_reserve(
             self.ctx,
             self.weights,
@@ -191,7 +223,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             cpu_reserve,
         )
         .map_err(session_error)?;
-        session.set_packed_lineage(self.lineage);
+        session.set_packed_lineage(lineage);
         Ok(session)
     }
 
@@ -208,7 +240,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             .map(|id| u32::try_from(id).context("warm-up token id"))
             .collect::<Result<Vec<_>>>()?;
         let mut session = self
-            .fresh_session(0)
+            .fresh_session(0, self.lineage)
             .map_err(|e| anyhow::anyhow!(e.message))?;
         session
             .prefill_packed_with_checkpoint(self.ctx, &tokens, &mut || {
@@ -269,13 +301,24 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
         // the session is known to hold, so a failure leaves no stale history.
         let history = std::mem::take(&mut self.history);
         let committed = self.session.as_ref().map_or(0, Glm5NextSession::position);
-        let reused = decode_loop::extending_prefix(&history, &tokens, committed, self.prefix_reuse);
+        // A request may ask for the Exact lineage (`x_qwen.prefill_lineage`);
+        // a live session is reused only by requests of its own lineage.
+        let lineage = request_lineage(request, self.lineage);
+        let live_lineage = self
+            .session
+            .as_ref()
+            .and_then(Glm5NextSession::packed_lineage);
+        let reused = reuse_len(
+            decode_loop::extending_prefix(&history, &tokens, committed, self.prefix_reuse),
+            live_lineage,
+            lineage,
+        );
         if reused == 0 {
             // Release the old session's memory before allocating its successor.
             self.session = None;
             // A new session's buffers and this request's transport allowance
             // are admitted as one requirement.
-            self.session = Some(self.fresh_session(reserve)?);
+            self.session = Some(self.fresh_session(reserve, lineage)?);
         }
         let ctx = self.ctx;
         let session = self.session.as_mut().expect("session present");
@@ -349,11 +392,12 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
         self.history = history;
         tracing::info!(
             target: "qwen_diag",
-            "serve phases: family=glm5_next prefill_ms={prefill_ms:.1} reused_tokens={reused} prefill_tokens={} decode_ms={:.1} required_forwards={required} capacity={} transitions={}",
+            "serve phases: family=glm5_next prefill_ms={prefill_ms:.1} reused_tokens={reused} prefill_tokens={} decode_ms={:.1} required_forwards={required} capacity={} transitions={} lineage={}",
             tokens.len() - reused,
             generation.wall_ms,
             self.prepared.capacity,
             generation.transitions,
+            lineage_name(lineage),
         );
         Ok(super::outcome::finish_generation(
             tokens.len(),

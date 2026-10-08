@@ -47,6 +47,7 @@ pub(crate) mod request_profile;
 pub(crate) mod snapshot_cache;
 mod trace;
 mod transport;
+mod output_memory;
 mod transport_memory;
 pub(crate) mod utf8;
 

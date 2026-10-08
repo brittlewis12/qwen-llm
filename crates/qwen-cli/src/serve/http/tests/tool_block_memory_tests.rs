@@ -162,3 +162,52 @@ fn tool_block_publication_stays_within_the_admission_model() {
     eprintln!("[tool-block-e2e] worst ratio {worst:.1} (model {TOOL_BLOCK_PEAK_FACTOR})");
     let _ = std::fs::remove_dir_all(&trace_dir);
 }
+
+/// Map #14 measurement: plain output in one-byte pieces, the worst piece
+/// size for per-piece retention; the peak above a minimal response per
+/// output byte. Measured 2026-10-08: non-streaming 246.5 with one
+/// allocation and one retained event per piece, 16.3 with contiguous
+/// collection and events consumed as replayed; streaming 5.2. The bounds
+/// are regression alarms at about 1.5x the measured values.
+#[test]
+fn nonstream_plain_output_peak_per_byte() {
+    let request = |streaming: bool| {
+        post(
+            "/v1/responses",
+            &json!({"model": "test", "input": "Go.", "stream": streaming,
+                "max_output_tokens": 400_000, "reasoning": {"effort": "low"}})
+            .to_string(),
+        )
+    };
+    let text = "a".repeat(200_000);
+    for streaming in [false, true] {
+        let (_, base) = served(
+            ToolOutput {
+                output: "plan</think>ok".into(),
+                piece: 1,
+            },
+            request(streaming),
+            None,
+        );
+        let (response, peak) = served(
+            ToolOutput {
+                output: format!("plan</think>{text}"),
+                piece: 1,
+            },
+            request(streaming),
+            None,
+        );
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let ratio = (peak - base) as f64 / text.len() as f64;
+        eprintln!(
+            "[nonstream-plain] stream={streaming} bytes={} peak_above_base={} ratio={ratio:.1}",
+            text.len(),
+            peak - base
+        );
+        let bound = if streaming { 8.0 } else { 24.0 };
+        assert!(
+            ratio <= bound,
+            "stream={streaming}: {ratio:.1} bytes per output byte > {bound}"
+        );
+    }
+}

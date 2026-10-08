@@ -159,6 +159,8 @@ struct HttpProxy {
     control: Arc<Control>,
     activity: Arc<ActivityGuard>,
     extra_cpu_reserve: u64,
+    /// Headroom the HTTP side's output buffers admit against.
+    headroom: super::http::Headroom,
 }
 
 impl GenerationBackend for HttpProxy {
@@ -168,6 +170,10 @@ impl GenerationBackend for HttpProxy {
 
     fn request_profile(&self) -> RequestProfile {
         self.profile.clone()
+    }
+
+    fn output_headroom(&self) -> super::http::Headroom {
+        self.headroom
     }
 
     /// The owner's family renders here, once, with its boundaries.
@@ -401,6 +407,7 @@ impl Connection {
             control: Arc::clone(&control),
             activity: Arc::new(guard),
             extra_cpu_reserve,
+            headroom: qwen_llm::metal::MetalContext::process_limit_bytes_remaining,
         };
         let cancel = CancelOnDrop(Arc::clone(&control));
         #[cfg(test)]

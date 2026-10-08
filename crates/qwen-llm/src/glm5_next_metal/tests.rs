@@ -262,7 +262,12 @@ fn within(value: f64, bound: f64) -> bool {
 pub(super) fn choice_regret(reference: &[f32], native: &[f32]) -> (f32, f32) {
     assert_comparable("choice regret", native, reference);
     let (r, n) = (argmax(reference), argmax(native));
-    (reference[r] - reference[n], native[n] - native[r])
+    let regrets = (reference[r] - reference[n], native[n] - native[r]);
+    assert!(
+        regrets.0.is_finite() && regrets.1.is_finite(),
+        "choice regret is not finite: {regrets:?}"
+    );
+    regrets
 }
 
 pub(super) fn argmax(x: &[f32]) -> usize {
@@ -1110,10 +1115,10 @@ fn qual_oracle_dir() -> PathBuf {
 /// prompt of unrelated passages (one 512-row chunk plus a 47-row tail; three
 /// live pending slots) and 32 teacher-forced continuation tokens. Under the
 /// adopted map #12 policy (PERF-LOG 2026-10-08) this is not a quality
-/// qualification: logit drift from Exact is reported with the investigation
-/// trigger, top-1 flips are reported with both regrets (the earlier
-/// near-tie-only and KL 2e-2 bounds are superseded), and the state-error
-/// bounds remain as regression alarms.
+/// qualification: logit drift from Exact and top-1 flips (both regrets) are
+/// reported (the earlier near-tie-only and KL 2e-2 bounds are superseded;
+/// the investigation trigger belongs to the frozen natural cases), and the
+/// state-error bounds remain as regression alarms.
 ///
 /// 1. Native serial decode matches the llama.cpp serial oracle (long-context
 ///    dense attention, pools and recurrence): KL <= 1e-8 up to an exact
@@ -1121,8 +1126,8 @@ fn qual_oracle_dir() -> PathBuf {
 ///    tie policies, top-1 at all 591 positions; and the Exact packed
 ///    reference equals serial decode bitwise.
 /// 2. Fast prefill with chunks 512/128/64/97 and a 3-token packed prefix is
-///    compared with that Exact reference on logits at every step (reported;
-///    the trigger can fail) and on each state kind over its valid region, at
+///    compared with that Exact reference on logits at every step (reported)
+///    and on each state kind over its valid region, at
 ///    the prompt end and after the continuation, against regression alarms
 ///    frozen from measurement (about 2x): a change in Fast arithmetic to
 ///    investigate, not a quality limit.
@@ -1322,7 +1327,10 @@ fn packed_fast_chunkings_keep_bit_identities_with_drift_alarms() {
         assert_eq!(references.len(), logits.len());
         let references: Vec<Vec<f32>> = references.into_iter().cloned().collect();
         eprintln!("{label}: prefill {prefill_ms:.0} ms");
-        let drift = fast_drift_with_trigger(&label, &references, &logits, &mut failures);
+        // Diagnostic: the map #12 trigger is preregistered for the frozen
+        // natural cases at 512 rows only, not for these chunkings.
+        let drift = Drift::measure(&label, &references, &logits);
+        drift.print(&format!("{label} vs Exact (diagnostic)"));
         eprintln!("  KL at the prompt end {:.3e}", drift.kls[0]);
         for (when, errors) in [("prompt", &prompt_errors), ("end", &end_errors)] {
             let line: Vec<String> = errors
@@ -2806,10 +2814,11 @@ fn warm_cold_report(
 ///    and resumed from the committed position replays the uninterrupted
 ///    chunk schedule, so it must be bitwise equal to the cold run (hard).
 ///
-/// Cases 1-2 report warm versus cold and each against Exact; the only
-/// failure besides case 3 and non-finite values is the investigation
-/// trigger ([`FAST_DRIFT_TRIGGER_KL`]) on Fast versus Exact. Passing says
-/// nothing about quality; the preregistered cohort does.
+/// Cases 1-2 report warm versus cold and each against Exact (diagnostic: the
+/// investigation trigger, [`FAST_DRIFT_TRIGGER_KL`], is preregistered for
+/// the frozen natural cases only); the failures are case 3 and non-finite
+/// values. Passing says nothing about quality; the preregistered cohort
+/// does.
 #[test]
 #[ignore = "map #12 schedule-sensitivity report; loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU"]
 fn fast_reuse_schedule_sensitivity_across_reuse_boundaries() {
@@ -2835,7 +2844,7 @@ fn fast_reuse_schedule_sensitivity_across_reuse_boundaries() {
     let long = encode(&long_qualification_text());
     let continuation: Vec<u32> = long[3000..3000 + CONTINUATION].to_vec();
     let positions = CONTINUATION + 1;
-    let mut failures = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
     // Serve's default lineage, selected explicitly rather than inherited.
     let fast_session = |capacity: usize| {
         let mut session =
@@ -2898,8 +2907,8 @@ fn fast_reuse_schedule_sensitivity_across_reuse_boundaries() {
     let (cold_logits, warm_logits) = (cold(&joined), warm(first, generated, suffix));
     warm_cold_report("ordinary", positions, &cold_logits, &warm_logits);
     let reference = exact(&joined);
-    fast_drift_with_trigger("ordinary cold", &reference, &cold_logits, &mut failures);
-    fast_drift_with_trigger("ordinary warm", &reference, &warm_logits, &mut failures);
+    Drift::measure("ordinary cold", &reference, &cold_logits).print("ordinary cold vs Exact");
+    Drift::measure("ordinary warm", &reference, &warm_logits).print("ordinary warm vs Exact");
 
     // 2. Tool continuation through <|observation|>, crossing the frontier.
     let tool = ToolDefinition::from_value(&serde_json::json!({"name": "get_weather",
@@ -2996,8 +3005,8 @@ fn fast_reuse_schedule_sensitivity_across_reuse_boundaries() {
         &warm_logits,
     );
     let reference = exact(&next);
-    fast_drift_with_trigger("tool loop cold", &reference, &cold_logits, &mut failures);
-    fast_drift_with_trigger("tool loop warm", &reference, &warm_logits, &mut failures);
+    Drift::measure("tool loop cold", &reference, &cold_logits).print("tool loop cold vs Exact");
+    Drift::measure("tool loop warm", &reference, &warm_logits).print("tool loop warm vs Exact");
 
     // 3. Cancellation at the second chunk boundary, then resume.
     let prompt = &long[..1300];

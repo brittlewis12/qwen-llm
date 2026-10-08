@@ -385,6 +385,23 @@ fn quality_split_evaluate() {
     let _lease = production_lease();
     let ctx = MetalContext::new().expect("Metal context");
     let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let manifest_sha256 = sha256_hex(&manifest_bytes);
+    // Completed measurements are checkpointed with complete: false; the
+    // analysis refuses an incomplete report.
+    let write = |items: &[Value], tools: &[Value], agent: Value, complete: bool| {
+        let report = json!({
+            "schema": "glm53.quality_split_report.v1", "complete": complete,
+            "manifest": manifest_file.display().to_string(), "manifest_sha256": manifest_sha256,
+            "evaluator_commit": evaluator, "items": items, "tool_tasks": tools, "agent": agent,
+        });
+        let partial = report_path.with_extension("partial.json");
+        std::fs::write(
+            &partial,
+            serde_json::to_string_pretty(&report).unwrap() + "\n",
+        )
+        .unwrap();
+        std::fs::rename(&partial, &report_path).unwrap();
+    };
 
     // Text: Exact rerun, Fast 512 control, split arms; 64 teacher-forced
     // tokens each.
@@ -465,6 +482,7 @@ fn quality_split_evaluate() {
         items.push(json!({"path": item["path"], "stratum": item["stratum"],
             "doc_index": item["doc_index"], "prefix": length, "continuation": CONTINUATION,
             "arms": results}));
+        write(&items, &[], Value::Null, false);
     }
 
     // Tool tasks at their real shared-prefix cuts.
@@ -525,6 +543,7 @@ fn quality_split_evaluate() {
         }
         task_reports.push(json!({"id": id, "context_level": task["context_level"],
             "expected": task["expected"], "cut": cut, "arms": per_arm}));
+        write(&items, &task_reports, Value::Null, false);
     }
 
     // Agent-shaped cases at the deployed geometry.
@@ -634,20 +653,22 @@ fn quality_split_evaluate() {
         }
         agent_reports.push(json!({"id": id, "expected": task["expected"],
             "prompt_tokens": prompt.len(), "shared_prefix_tokens": shared, "arms": per_arm}));
+        write(
+            &items,
+            &task_reports,
+            json!({"shared_prefix_tokens": shared,
+                "exact_restore_equals_unsplit": exact_restore_bitwise, "tasks": agent_reports}),
+            false,
+        );
     }
 
-    let report = json!({
-        "schema": "glm53.quality_split_report.v1",
-        "manifest": manifest_file.display().to_string(), "manifest_sha256": sha256_hex(&manifest_bytes),
-        "evaluator_commit": evaluator, "items": items, "tool_tasks": task_reports,
-        "agent": {"shared_prefix_tokens": shared, "exact_restore_equals_unsplit": exact_restore_bitwise,
-            "tasks": agent_reports},
-    });
-    std::fs::write(
-        &report_path,
-        serde_json::to_string_pretty(&report).unwrap() + "\n",
-    )
-    .unwrap();
+    write(
+        &items,
+        &task_reports,
+        json!({"shared_prefix_tokens": shared,
+            "exact_restore_equals_unsplit": exact_restore_bitwise, "tasks": agent_reports}),
+        true,
+    );
 }
 
 #[test]

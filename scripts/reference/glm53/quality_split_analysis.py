@@ -30,7 +30,8 @@ FAILS if any fails; otherwise INCONCLUSIVE. No arm is chosen after the fact.
 Reported, not gated: each split arm against fast_512 (the schedule change
 alone), fast_512 against exact_512 (the control), and whether this run's
 exact_512 and fast_512 reproduce the committed quality-v1 report item by
-item (bitwise equal mean NLL and top-1).
+item (exact equality of the recorded mean NLL, top-1 and per-token NLL;
+not a logit-identity claim).
 
 Tools (gated, quality-v1's screen). The 12 tasks split at their
 renderer-recorded shared-prefix end (255 tokens; T09-T12 then read 1,200 or
@@ -44,8 +45,11 @@ instructions and 12 tools (11,104-token shared prefix, cut there), effort
 low. A generation is right if it ends at <|observation|> with a first call
 of the expected tool whose argument contains the expected substring.
 Reported per arm, with each generation's prompt-end KL from Exact. Flagged
-for investigation (not a verdict): parse errors or non-finite outputs in any
-arm, or an Exact-restore check that was not bitwise.
+for investigation (holds the decision until reviewed, changes no score):
+parse errors in any arm. Invalid evidence (refused before any verdict): an
+incomplete report, any mismatch with the frozen manifest (items, strata,
+cuts, chunk starts, arms, modes, seeds, caps), non-finite metrics, or an
+Exact-restore check that was not bitwise.
 
 Decision rule. fast_shared_split_v1 may become serve's Fast default only if
 the text verdict is QUALIFIES and the tool screen PASSES (and, separately,
@@ -84,10 +88,27 @@ TOOL_ARMS = ("exact_512", "fast_512", "fast_split")
 AGENT_ARMS = ("exact", "fast_512", "fast_split")
 
 
-def validate(report, manifest, manifest_bytes):
+def chunk_starts(length, cut, rows):
+    if cut is None:
+        return list(range(0, length, rows))
+    return list(range(0, cut, rows)) + list(range(cut, length, rows))
+
+
+def generation_modes(rows, seeds):
+    return [r["generation"]["mode"] for r in rows], [
+        r["generation"]["seed"] for r in rows if r["generation"]["mode"] == "sampled"
+    ]
+
+
+def validate(report, manifest, manifest_bytes, quality):
+    """Refuses a report that does not match the frozen manifest exactly, or
+    whose bitwise invariants or metrics are invalid (invalid evidence, before
+    any quality verdict)."""
+    assert report.get("complete") is True, "incomplete report"
     assert report["manifest_sha256"] == hashlib.sha256(manifest_bytes).hexdigest(), (
         "manifest hash"
     )
+    rows = manifest["rows"]
     expected = {(i["path"], i["prefix"]): i for i in manifest["text_items"]}
     assert len(expected) == 38, len(expected)
     seen = set()
@@ -96,35 +117,77 @@ def validate(report, manifest, manifest_bytes):
         assert key in expected and key not in seen, key
         seen.add(key)
         want = expected[key]
+        assert item["stratum"] == want["stratum"], key
+        assert item["doc_index"] == want["doc_index"], key
         arms = list(TEXT_ARMS) + ([FRONTIER] if want["cuts"][FRONTIER] else [])
         assert sorted(item["arms"]) == sorted(arms), (key, sorted(item["arms"]))
         for arm in arms:
             a = item["arms"][arm]
             cut = want["cuts"].get(arm)
             assert a["cut"] == cut, (key, arm)
+            assert a["chunk_starts"] == chunk_starts(item["prefix"], cut, rows), (key, arm)
             assert len(a["nll"]) == qa.CONTINUATION and all(
-                math.isfinite(x) for x in a["nll"]
+                isinstance(x, float) and math.isfinite(x) for x in a["nll"]
             ), (key, arm)
-            assert len(a["hits"]) == qa.CONTINUATION and a["top1"] == sum(a["hits"])
+            assert len(a["hits"]) == qa.CONTINUATION and all(
+                isinstance(h, bool) for h in a["hits"]
+            ), (key, arm)
+            assert a["top1"] == sum(a["hits"]), (key, arm)
             assert math.isclose(
                 a["mean_nll"], sum(a["nll"]) / qa.CONTINUATION, rel_tol=1e-9
             ), (key, arm)
-            assert len(a["logits_sha256"]) == qa.CONTINUATION
-            if arm != "exact_512":
+            assert len(a["logits_sha256"]) == qa.CONTINUATION, (key, arm)
+            if arm == "exact_512":
+                assert a["kl_from_exact"] == [], key
+            else:
                 assert len(a["kl_from_exact"]) == qa.CONTINUATION and all(
-                    math.isfinite(x) for x in a["kl_from_exact"]
+                    math.isfinite(x) and x >= 0.0 for x in a["kl_from_exact"]
                 ), (key, arm)
     assert len(seen) == 38, "missing items"
+
+    quality_tasks = {t["id"]: t for t in quality["tool_tasks"]}
     cuts = {t["id"]: t["shared_prefix_tokens"] for t in manifest["tool_tasks"]}
-    assert sorted(t["id"] for t in report["tool_tasks"]) == sorted(cuts)
+    report_ids = [t["id"] for t in report["tool_tasks"]]
+    assert sorted(report_ids) == sorted(cuts) and len(set(report_ids)) == len(report_ids)
     for task in report["tool_tasks"]:
+        long = quality_tasks[task["id"]]["context_level"] > 0
+        assert task["context_level"] == quality_tasks[task["id"]]["context_level"]
         assert task["cut"] == cuts[task["id"]], task["id"]
+        want_modes = ["greedy", "sampled"] + ([] if long else ["sampled", "sampled"])
+        want_seeds = manifest["tool_seeds"][: 1 if long else 3]
+        assert sorted(task["arms"]) == sorted(TOOL_ARMS), task["id"]
         for arm in TOOL_ARMS:
-            assert arm in task["arms"], (task["id"], arm)
-    assert len(report["agent"]["tasks"]) == len(manifest["agent_tasks"])
-    for task in report["agent"]["tasks"]:
+            modes, seeds = generation_modes(task["arms"][arm], want_seeds)
+            assert modes == want_modes and seeds == want_seeds, (task["id"], arm)
+            assert all(
+                r["generation"]["cap"] == manifest["tool_cap"] for r in task["arms"][arm]
+            ), (task["id"], arm)
+
+    agent = report["agent"]
+    assert agent["exact_restore_equals_unsplit"] is True, (
+        "invalid evidence: Exact restored at the shared cut is not bitwise equal to an unsplit Exact prefill"
+    )
+    frozen = {t["id"]: t for t in manifest["agent_tasks"]}
+    agent_ids = [t["id"] for t in agent["tasks"]]
+    assert sorted(agent_ids) == sorted(frozen) and len(set(agent_ids)) == len(agent_ids)
+    for task in agent["tasks"]:
+        assert task["shared_prefix_tokens"] == frozen[task["id"]]["shared_prefix_tokens"]
+        assert task["prompt_tokens"] == frozen[task["id"]]["prompt_tokens"]
+        assert sorted(task["arms"]) == sorted(AGENT_ARMS), task["id"]
         for arm in AGENT_ARMS:
-            assert len(task["arms"][arm]) == 2, (task["id"], arm)
+            modes, seeds = generation_modes(task["arms"][arm], None)
+            assert modes == ["greedy", "sampled"] and seeds == [manifest["agent_seed"]], (
+                task["id"],
+                arm,
+            )
+            for row in task["arms"][arm]:
+                assert row["generation"]["cap"] == manifest["agent_cap"]
+                kl = row["prompt_end_kl_from_exact"]
+                assert isinstance(kl, float) and math.isfinite(kl) and kl >= 0.0, (
+                    "invalid evidence: non-finite prompt-end KL",
+                    task["id"],
+                    arm,
+                )
 
 
 def comparison(items, arm, base, strata_filter=None):
@@ -174,18 +237,23 @@ def comparison(items, arm, base, strata_filter=None):
 
 
 def reproduces(items, committed):
-    """Per arm: items whose mean NLL and top-1 equal the committed report's."""
+    """Per arm: items whose recorded summary metrics (mean NLL, top-1) and
+    per-token NLL exactly equal the committed quality-v1 report's. Equal
+    recorded metrics are not a logit-identity claim; the logit hashes
+    recorded here serve later identity claims."""
     old = {(i["path"], i["prefix"]): i["arms"] for i in committed["items"]}
     out = {}
     for arm in ("exact_512", "fast_512"):
-        same = [
-            item["arms"][arm]["mean_nll"]
-            == old[(item["path"], item["prefix"])][arm]["mean_nll"]
-            and item["arms"][arm]["top1"]
-            == old[(item["path"], item["prefix"])][arm]["top1"]
-            for item in items
-        ]
-        out[arm] = {"equal_items": sum(same), "items": len(same)}
+        summary = per_token = 0
+        for item in items:
+            new, prev = item["arms"][arm], old[(item["path"], item["prefix"])][arm]
+            summary += int(new["mean_nll"] == prev["mean_nll"] and new["top1"] == prev["top1"])
+            per_token += int(new["nll"] == prev["nll"])
+        out[arm] = {
+            "equal_summary_metrics": summary,
+            "equal_per_token_nll": per_token,
+            "items": len(items),
+        }
     return out
 
 
@@ -244,7 +312,7 @@ def main():
     quality = json.loads(quality_bytes)
     committed_bytes = Path(args.committed).read_bytes()
     committed = json.loads(committed_bytes)
-    validate(report, manifest, manifest_bytes)
+    validate(report, manifest, manifest_bytes, quality)
     items = report["items"]
 
     comparisons = {}
@@ -281,8 +349,7 @@ def main():
         screen = "FAIL"
 
     agent, flags = {}, []
-    if not report["agent"]["exact_restore_equals_unsplit"]:
-        flags.append("agent: Exact restore not bitwise")
+    frozen = {t["id"]: t["expected"] for t in manifest["agent_tasks"]}
     for arm in AGENT_ARMS:
         rows = []
         for task in report["agent"]["tasks"]:
@@ -291,7 +358,7 @@ def main():
                     {
                         "task": task["id"],
                         "mode": row["generation"]["mode"],
-                        "correct": agent_correct(row, task["expected"]),
+                        "correct": agent_correct(row, frozen[task["id"]]),
                         "first_call": row["calls"][0] if row["calls"] else None,
                         "prompt_end_kl_from_exact": row["prompt_end_kl_from_exact"],
                     }
@@ -310,13 +377,16 @@ def main():
                 if row.get("parse_error"):
                     flags.append(f"tool {task['id']} {arm}: parse error (scored wrong)")
 
-    default_ok = text == "QUALIFIES" and screen == "PASS"
+    # Investigation flags (parse errors) do not change scores; they hold the
+    # decision until reviewed.
+    default_ok = text == "QUALIFIES" and screen == "PASS" and not flags
     verdict = {
         "schema": "glm53.quality_split_verdict.v1",
         "text_split": text,
         "tool_screen_split": screen,
         "fast_shared_split_may_become_default": default_ok,
-        "decision_note": "subject also to a release-build time-to-first-token screen",
+        "pending_review": bool(flags),
+        "decision_note": "subject also to a release-build time-to-first-token screen; investigation flags hold the decision until reviewed",
         "comparisons_gated": comparisons,
         "comparisons_reported": reported,
         "reproduces_committed": reproduces(items, committed),

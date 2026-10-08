@@ -810,6 +810,10 @@ impl<W: EventWrite> GenerationSink for StreamingSink<'_, '_, W> {
         for event in &events {
             self.stream.on_partition(event)?;
         }
+        // A stored refusal already decides the turn: stop generating.
+        if let Some(failure) = self.partition.failure() {
+            return Err(super::output_memory::refusal_error(failure.clone()));
+        }
         Ok(())
     }
     fn tick(&mut self) -> io::Result<()> {
@@ -982,7 +986,8 @@ fn handle_responses(
                     super::events::envelope_echo(request),
                 )?;
                 response.set_allowed_tools(request.allowed_tools.clone());
-                let mut partition = OutputPartition::new(output_protocol);
+                let mut partition =
+                    OutputPartition::with_headroom(output_protocol, backend.output_headroom());
                 let mut events = Vec::new();
                 for piece in sink.pieces() {
                     partition.push(piece, &mut events);
@@ -1036,7 +1041,7 @@ fn handle_responses(
         response.set_allowed_tools(request.allowed_tools.clone());
         let mut sink = StreamingSink {
             stream: &mut response,
-            partition: OutputPartition::new(output_protocol),
+            partition: OutputPartition::with_headroom(output_protocol, backend.output_headroom()),
         };
         let outcome = backend.generate_prepared(Arc::clone(&prepared), &mut sink);
         let StreamingSink { partition, .. } = sink;
@@ -1070,14 +1075,11 @@ fn handle_responses(
             Err(BackendFailure::Aborted(error)) => match super::output_memory::refusal_in(&error) {
                 // Refused on this side after the headers: the typed failure
                 // event, reported here (the backend saw a stopped sink).
+                // No raw-text fallback: the held output is dropped.
                 Some(refusal) => {
                     let refusal = refusal.clone();
                     note_server_failure(backend, &refusal);
-                    let mut events = Vec::new();
-                    partition.abort(&mut events);
-                    for event in &events {
-                        response.on_partition(event)?;
-                    }
+                    drop(partition);
                     response.fail(&refusal)?;
                     sse.done()
                 }
@@ -2012,6 +2014,49 @@ mod tests {
         assert!(!body_of(&response).contains("response.completed"));
         assert!(body_of(&response).ends_with("data: [DONE]\n\n"));
         assert_eq!(failures.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Map #14 packet 2 end to end: a Qwen tool block refused admission
+    /// stops a streaming generation at once and fails it with the typed
+    /// code, publishing no raw tool text; non-streaming answers the JSON 503.
+    /// Each reports one server failure.
+    #[test]
+    fn qwen_tool_block_refusals_stop_and_fail_typed() {
+        let pieces = [
+            "<think>plan</think>",
+            "Calling.\n",
+            "<tool_call>\n<function=f>\n",
+            "<parameter=a>\n1\n</parameter>\n",
+            "</function>\n</tool_call>",
+        ];
+        for streaming in [true, false] {
+            let mut backend = MockBackend::new(&pieces, StopReason::Eos);
+            // Room for collection steps (128 KiB), not a 64 KiB tool step at 256x.
+            backend.headroom = Some(|| Some(1 << 20));
+            let failures = Arc::clone(&backend.server_failures);
+            let body = if streaming {
+                r#"{"model":"qwen-test","input":"q","stream":true}"#
+            } else {
+                r#"{"model":"qwen-test","input":"q"}"#
+            };
+            let response = roundtrip(backend, &post("/v1/responses", body));
+            if streaming {
+                assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+                let failed = sse_payload(&response, "response.failed");
+                assert_eq!(
+                    failed["response"]["error"]["code"], "memory_admission_denied",
+                    "{failed}"
+                );
+                assert!(!body_of(&response).contains("<tool_call>"), "{response}");
+                assert!(!body_of(&response).contains("function_call"), "{response}");
+                assert!(!body_of(&response).contains("response.completed"));
+            } else {
+                assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+                let envelope: Value = serde_json::from_str(body_of(&response)).unwrap();
+                assert_eq!(envelope["error"]["code"], "memory_admission_denied");
+            }
+            assert_eq!(failures.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
     }
 
     #[test]

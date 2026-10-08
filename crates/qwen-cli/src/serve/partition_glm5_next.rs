@@ -45,7 +45,7 @@ impl Glm5NextToolsPartition {
         )
     }
 
-    fn with_headroom(
+    pub(crate) fn with_headroom(
         definitions: Vec<ToolDefinition>,
         max_bytes: usize,
         headroom: fn() -> Option<u64>,
@@ -57,6 +57,11 @@ impl Glm5NextToolsPartition {
             failure: None,
             headroom,
         }
+    }
+
+    /// A stored refusal or parse failure (the turn fails with it).
+    pub(crate) fn failure(&self) -> Option<&ServeError> {
+        self.failure.as_ref()
     }
 
     /// Headroom for the block's outstanding peak at `capacity`, given what

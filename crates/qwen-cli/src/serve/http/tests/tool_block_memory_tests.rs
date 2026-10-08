@@ -262,7 +262,9 @@ fn qwen_and_ds4_tool_block_peaks() {
             "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"f\">\n<｜DSML｜parameter name=\"a\" string=\"false\">{value}</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
         )
     };
-    let families: [(&str, RequestProfile, &str, &dyn Fn(&str) -> String); 2] = [
+    /// (label, profile, reasoning prefix, call renderer)
+    type Family<'a> = (&'a str, RequestProfile, &'a str, &'a dyn Fn(&str) -> String);
+    let families: [Family; 2] = [
         (
             "qwen-xml",
             RequestProfile::UnboundQwen,

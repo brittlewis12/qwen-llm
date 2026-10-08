@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-08 - #14 Output Memory, Packet 1: Admitted Contiguous Non-Streaming Collection, Typed Sink Refusals
+
+- Non-streaming responses held one allocation per output piece and a
+  retained event per piece until the body was written, unpriced in every
+  family. Measured end to end (test allocator, plain output in one-byte
+  pieces, 200,000 bytes): **246.5 bytes per output byte** above a minimal
+  response; streaming 5.2.
+- Now (`fc687be8`, `beac1191`; cx 01a10cc jam and reviews): one contiguous
+  buffer plus piece end offsets, each growth step admitted before
+  allocating (the step's whole peak less what is held, against fresh
+  process headroom, Batch 3a's typed refusals; checked arithmetic, typed
+  500 `memory_size_overflow`; a failed admitted reservation is a typed 500);
+  pieces replay into the partition one at a time with their events fed
+  straight into the response object. **16.3 bytes per output byte**; GLM's
+  non-streaming tool block worst ratio fell from ~205 to 146 (model 256).
+- A refusal raised inside a sink is carried as a typed error, not a
+  disconnect: JSON before headers, `response.failed` after, the server
+  failure reported once (direct and across the HTTP owner bridge).
+- Scope: admitted collection only. Response accumulation and terminal
+  copies, streaming retention, non-GLM tool parsers (Qwen/DS4, K2, Muse)
+  and trace bytes remain unpriced (next packets, in that order after the
+  tool parsers); K2's schema-work budget runs in parallel.
+
 ## 2026-10-08 - #12 Fast Policy Adopted; Drift Tests Migrated; Fast Split Qualification Preregistered
 
 - **Adopted** (the position below, with the review qualifications): Fast

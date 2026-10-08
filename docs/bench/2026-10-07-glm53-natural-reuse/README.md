@@ -155,3 +155,7 @@ does not meet the 2e-2 policy on these prompts either. Options, none taken:
   fallback, not recommended.
 
 The original unrelated-token reproducer stays as is (known failing).
+
+Evaluated at `9d426a6e`, before `c055fe4a` routed GLM packed routers at
+measured widths through E8P32; the router family alone contributed ~1e-2 here.
+The F32-staging experiment reruns its cases on the current code.

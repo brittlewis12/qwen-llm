@@ -686,43 +686,65 @@ impl<'a> CollectSink<'a> {
     }
 
     /// Admit, then reserve, room for `additional` bytes and one piece end.
+    /// Overflowing sizes are typed 500 `memory_size_overflow`; an admitted
+    /// allocation that fails is a typed server error.
     fn reserve_piece(&mut self, additional: usize) -> io::Result<()> {
         use super::output_memory::{
-            OUTPUT_STEP_BYTES, admit_growth, grown_capacity, refusal_error,
+            OUTPUT_STEP_BYTES, admit_growth, allocation_failure, grown_capacity, refusal_error,
+            size_overflow,
         };
-        let overflow = || transport_error("output size overflow");
+        const WHAT: &str = "non-streaming output collection";
+        let overflow = || refusal_error(size_overflow(WHAT));
+        let word = size_of::<usize>();
+        let (byte_cap, end_cap) = (self.bytes.capacity(), self.ends.capacity());
         let needed = self
             .bytes
             .len()
             .checked_add(additional)
             .ok_or_else(overflow)?;
-        let (byte_cap, end_cap) = (self.bytes.capacity(), self.ends.capacity());
         let new_bytes = if needed > byte_cap {
-            grown_capacity(byte_cap, needed, OUTPUT_STEP_BYTES)
+            grown_capacity(byte_cap, needed, OUTPUT_STEP_BYTES).ok_or_else(overflow)?
         } else {
             byte_cap
         };
         let new_ends = if self.ends.len() == end_cap {
-            grown_capacity(end_cap, end_cap + 1, OUTPUT_STEP_BYTES / size_of::<usize>())
+            let one_more = end_cap.checked_add(1).ok_or_else(overflow)?;
+            grown_capacity(end_cap, one_more, OUTPUT_STEP_BYTES / word).ok_or_else(overflow)?
         } else {
             end_cap
         };
         if (new_bytes, new_ends) == (byte_cap, end_cap) {
             return Ok(());
         }
-        let word = size_of::<usize>() as u64;
-        let held = byte_cap as u64 + end_cap as u64 * word;
+        // Byte sizes, checked; a vector cannot exceed isize::MAX bytes.
+        let bytes_of = |elements: usize, size: usize| {
+            elements
+                .checked_mul(size)
+                .filter(|&bytes| bytes <= isize::MAX as usize)
+                .map(|bytes| bytes as u64)
+                .ok_or_else(overflow)
+        };
+        let (old_b, new_b) = (bytes_of(byte_cap, 1)?, bytes_of(new_bytes, 1)?);
+        let (old_e, new_e) = (bytes_of(end_cap, word)?, bytes_of(new_ends, word)?);
         // While a buffer grows, its old allocation is live during the copy.
-        let grown = |new: u64, old: u64| if new > old { new + old } else { old };
-        let peak = grown(new_bytes as u64, byte_cap as u64)
-            + grown(new_ends as u64 * word, end_cap as u64 * word);
+        let grown = |new: u64, old: u64| {
+            if new > old {
+                new.checked_add(old).ok_or_else(overflow)
+            } else {
+                Ok(old)
+            }
+        };
+        let held = old_b.checked_add(old_e).ok_or_else(overflow)?;
+        let peak = grown(new_b, old_b)?
+            .checked_add(grown(new_e, old_e)?)
+            .ok_or_else(overflow)?;
         admit_growth(peak, held, (self.headroom)()).map_err(refusal_error)?;
         self.bytes
             .try_reserve_exact(new_bytes - self.bytes.len())
-            .map_err(io::Error::other)?;
+            .map_err(|e| refusal_error(allocation_failure(WHAT, e)))?;
         self.ends
             .try_reserve_exact(new_ends - self.ends.len())
-            .map_err(io::Error::other)?;
+            .map_err(|e| refusal_error(allocation_failure(WHAT, e)))?;
         Ok(())
     }
 
@@ -1094,6 +1116,8 @@ mod tests {
         fail_with: Option<ServeError>,
         headroom: Option<Headroom>,
         server_failures: Arc<std::sync::atomic::AtomicUsize>,
+        /// After its pieces, end as a sink-raised typed refusal would.
+        refuse_after: Option<ServeError>,
     }
 
     impl MockBackend {
@@ -1113,6 +1137,7 @@ mod tests {
                 fail_with: None,
                 headroom: None,
                 server_failures: Arc::default(),
+                refuse_after: None,
             }
         }
 
@@ -1180,6 +1205,11 @@ mod tests {
             for piece in &self.pieces {
                 sink.piece(piece.as_bytes())
                     .map_err(BackendFailure::Aborted)?;
+            }
+            if let Some(error) = self.refuse_after.clone() {
+                return Err(BackendFailure::Aborted(
+                    super::super::output_memory::refusal_error(error),
+                ));
             }
             Ok(GenerationOutcome {
                 end: self.end,
@@ -1958,6 +1988,30 @@ mod tests {
         );
         assert!(response.starts_with("HTTP/1.1 200"), "{response}");
         assert!(body_of(&response).contains("response.completed"));
+
+        // A typed refusal after the SSE headers: response.failed with its
+        // code, [DONE], no success terminal, one server-failure report.
+        let mut backend = MockBackend::new(&["hello "], StopReason::Eos);
+        backend.refuse_after = Some(
+            super::super::transport_memory::admit_resident_transport(10, Some(1)).unwrap_err(),
+        );
+        let failures = Arc::clone(&backend.server_failures);
+        let response = roundtrip(
+            backend,
+            &post(
+                "/v1/responses",
+                r#"{"model":"qwen-test","input":"q","stream":true}"#,
+            ),
+        );
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let failed = sse_payload(&response, "response.failed");
+        assert_eq!(
+            failed["response"]["error"]["code"], "memory_admission_denied",
+            "{failed}"
+        );
+        assert!(!body_of(&response).contains("response.completed"));
+        assert!(body_of(&response).ends_with("data: [DONE]\n\n"));
+        assert_eq!(failures.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]

@@ -684,3 +684,47 @@ fn http_side_output_refusals_cross_the_bridge_typed() {
     assert_eq!(backend.failures, 0, "the owner saw a stopped sink only");
     activity.drain_finished(|| {});
 }
+
+/// The whole bridged path: the HTTP side's collection is refused, the
+/// client gets the typed JSON 503, the owner's generation stops, and the
+/// server failure is reported exactly once (through the activity guard).
+#[test]
+fn bridged_output_refusal_answers_typed_and_reports_one_failure() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut backend = Backend(|sink: &mut dyn GenerationSink| {
+            for _ in 0..4 {
+                sink.piece(b"output").map_err(BackendFailure::Aborted)?;
+            }
+            Ok(outcome())
+        });
+        let mut activity = OwnerActivity::default();
+        let guard = activity.admission().try_admit().unwrap();
+        inject_proxy_headroom(|| Some(1));
+        handle_connection(stream, &mut backend, None, guard, || Ok(())).unwrap();
+        let mut failures = Vec::new();
+        activity.drain_finished_with_failures(|failed| failures.push(failed));
+        assert!(activity.is_settled());
+        failures
+    });
+    let body = r#"{"model":"test","input":"hi"}"#;
+    let mut client = TcpStream::connect(address).unwrap();
+    client.set_read_timeout(Some(WAIT)).unwrap();
+    client.write_all(format!("POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).unwrap();
+    let failures = server.join().unwrap();
+    assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+    let envelope: serde_json::Value =
+        serde_json::from_str(response.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(envelope["error"]["code"], "memory_admission_denied");
+    assert_eq!(
+        failures,
+        [true],
+        "one completion, reported as a server failure"
+    );
+}

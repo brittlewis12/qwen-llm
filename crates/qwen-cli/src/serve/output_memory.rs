@@ -49,9 +49,32 @@ pub(crate) fn admit_growth(peak: u64, held: u64, headroom: Option<u64>) -> Resul
 }
 
 /// Capacity of a buffer of `capacity` elements grown to hold `needed`: at
-/// least double (bounded copying), at least `step`, never below `needed`.
-pub(crate) fn grown_capacity(capacity: usize, needed: usize, step: usize) -> usize {
-    needed.max(capacity.saturating_mul(2)).max(step)
+/// least double (bounded copying), at least `step`, never below `needed`;
+/// `None` if doubling overflows.
+pub(crate) fn grown_capacity(capacity: usize, needed: usize, step: usize) -> Option<usize> {
+    Some(needed.max(capacity.checked_mul(2)?).max(step))
+}
+
+/// An output size whose arithmetic overflows: Batch 3a's typed 500
+/// `memory_size_overflow` (not pressure, not a client abort).
+pub(crate) fn size_overflow(what: &str) -> ServeError {
+    let (status, error_type, code) = super::transport_memory::refusal_kind(
+        qwen_llm::metal::MetalMemoryAdmissionReason::RequiredBytesOverflow,
+    );
+    ServeError {
+        status,
+        error_type,
+        code: Some(code),
+        param: None,
+        message: format!("{what}: output size arithmetic overflowed"),
+    }
+}
+
+/// An admitted allocation that still failed: a server error (no pressure
+/// decision was made). Unlike an admission refusal, it may leave a buffer's
+/// capacity partially changed.
+pub(crate) fn allocation_failure(what: &str, error: impl std::fmt::Display) -> ServeError {
+    ServeError::server_error(format!("{what}: admitted allocation failed: {error}"))
 }
 
 #[cfg(test)]
@@ -84,8 +107,15 @@ mod tests {
         );
         // A reported zero is an omitted budget (Batch 3a convention).
         assert!(admit_growth(30, 10, Some(0)).is_ok());
-        assert_eq!(grown_capacity(0, 1, 64), 64);
-        assert_eq!(grown_capacity(64, 65, 64), 128);
-        assert_eq!(grown_capacity(64, 1000, 64), 1000);
+        assert_eq!(grown_capacity(0, 1, 64), Some(64));
+        assert_eq!(grown_capacity(64, 65, 64), Some(128));
+        assert_eq!(grown_capacity(64, 1000, 64), Some(1000));
+        assert_eq!(grown_capacity(usize::MAX / 2 + 1, 1, 64), None);
+        let overflow = size_overflow("collection");
+        assert_eq!(
+            (overflow.status, overflow.code),
+            (500, Some("memory_size_overflow"))
+        );
+        assert_eq!(allocation_failure("collection", "oom").status, 500);
     }
 }

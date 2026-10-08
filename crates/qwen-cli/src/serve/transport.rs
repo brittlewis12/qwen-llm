@@ -330,6 +330,14 @@ std::thread_local! { static START_FAULT: std::cell::Cell<Option<StartFault>> = c
 pub(super) fn inject_start_fault(fault: StartFault) {
     START_FAULT.set(Some(fault));
 }
+#[cfg(test)]
+std::thread_local! { static PROXY_HEADROOM: std::cell::Cell<Option<super::http::Headroom>> = const { std::cell::Cell::new(None) }; }
+/// The next connection started on this thread admits its HTTP-side output
+/// against `headroom` (tests).
+#[cfg(test)]
+pub(super) fn inject_proxy_headroom(headroom: super::http::Headroom) {
+    PROXY_HEADROOM.set(Some(headroom));
+}
 
 impl Connection {
     pub(super) fn start(
@@ -409,6 +417,10 @@ impl Connection {
             extra_cpu_reserve,
             headroom: qwen_llm::metal::MetalContext::process_limit_bytes_remaining,
         };
+        #[cfg(test)]
+        if let Some(headroom) = PROXY_HEADROOM.take() {
+            proxy.headroom = headroom;
+        }
         let cancel = CancelOnDrop(Arc::clone(&control));
         #[cfg(test)]
         anyhow::ensure!(

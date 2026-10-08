@@ -62,6 +62,11 @@ pub enum Glm5NextMetalError {
     /// can only be dropped.
     #[error("GLM-5.3 session is poisoned by an earlier failed token")]
     Poisoned,
+    /// A snapshot cannot be restored into this session (another weights
+    /// instance, lineage or policy version, no room, or a region mismatch).
+    /// Nothing was written.
+    #[error("GLM-5.3 snapshot refused: {0}")]
+    SnapshotMismatch(String),
     /// A kernel reported a validation status for one block (and row, in a
     /// packed chunk): routing or sparse selection did not complete.
     #[error(
@@ -300,8 +305,13 @@ pub struct Glm5NextWeights {
     pub retained_bytes: u64,
     /// Whether every executed weight cell has a packed-prefill path.
     pub packed_prefill_admitted: bool,
+    /// Process-unique id of this load (snapshot identity).
+    instance: u64,
     _backings: Vec<MetalGgufBacking>,
 }
+
+/// Source of [`Glm5NextWeights::instance`] ids.
+static WEIGHTS_INSTANCES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Glm5NextWeights {
     /// The retained no-copy weight buffers (for idle residency keep-alive).
@@ -394,6 +404,7 @@ impl Glm5NextWeights {
             blocks,
             retained_bytes,
             packed_prefill_admitted,
+            instance: WEIGHTS_INSTANCES.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             _backings: backings,
         })
     }
@@ -2022,8 +2033,10 @@ fn matvec(
 
 mod lens;
 mod packed;
+mod snapshot;
 pub use lens::Glm5NextCapture;
 pub use packed::PackedLineage;
+pub use snapshot::{Glm5NextSnapshot, SNAPSHOT_POLICY_VERSION, snapshot_bytes};
 
 #[cfg(test)]
 mod tests;

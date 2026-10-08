@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 mod natural;
 mod quality;
+mod snapshot_gates;
 
 const ORACLE_DEFAULT: &str =
     "/Volumes/wdblack/weights-archive/.fetch/analysis/runs/glm53-oracle/ckpt-v1";

@@ -708,3 +708,17 @@ fn release_artifact_census_and_allocation_plan() {
         assert!(cap >= 4096);
     }
 }
+
+/// Map #15: snapshot bytes at the #13 prefix (11,129 tokens), from the
+/// release geometry by hand: 34 KDA blocks x (8,192 x 9 conv + 128 x 128 x 64
+/// state) x 4 B, plus 11 MLA blocks x (512 x 11,129 latent + 128 x 2 x 4
+/// pending + 128 x 2,782 pooled) x 2 B.
+#[test]
+fn snapshot_bytes_at_the_agent_prefix() {
+    let c = config();
+    let kda = 34u64 * (8_192 * 9 + 128 * 128 * 64) * 4;
+    let mla = 11u64 * (512 * 11_129 + 128 * 2 * 4 + 128 * (11_129 / 4)) * 2;
+    assert_eq!(kda + mla, 285_847_040);
+    assert_eq!(crate::glm5_next_metal::snapshot_bytes(&c, 11_129), Some(kda + mla));
+    assert_eq!(crate::glm5_next_metal::snapshot_bytes(&c, u64::MAX), None);
+}

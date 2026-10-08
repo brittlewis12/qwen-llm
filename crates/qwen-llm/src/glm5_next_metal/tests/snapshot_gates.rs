@@ -161,14 +161,17 @@ fn snapshot_restore_equals_the_uninterrupted_run() {
         "a refusal wrote state"
     );
 
-    // A poisoned session cannot be captured.
+    // A poisoned session cannot be captured: an injected selection failure
+    // in row 10 of the chunk crossing the frontier poisons it.
     let mut poisoned = fresh(&ctx, &weights, frontier + 64, PackedLineage::Fast);
-    poisoned.corrupt_sparse_row = Some(0);
+    poisoned.prefill_packed(&ctx, &tokens[..2048]).unwrap();
+    poisoned.corrupt_sparse_row = Some(10);
     assert!(
         poisoned
-            .prefill_packed(&ctx, &tokens[..frontier + 8])
+            .prefill_packed(&ctx, &tokens[2048..frontier + 32])
             .is_err()
     );
+    assert!(poisoned.is_poisoned());
     assert!(matches!(
         poisoned.capture_snapshot(),
         Err(Glm5NextMetalError::Poisoned)

@@ -2090,12 +2090,18 @@ fn packed_sparse_prefill_matches_llama_cpp_at_the_prompt_end() {
     let mut broken = Glm5NextSession::with_prefill_rows(&ctx, &weights, tokens.len(), 512).unwrap();
     broken.prefill_packed(&ctx, &tokens[..2048]).unwrap();
     broken.corrupt_sparse_row = Some(10);
-    let error = broken
-        .prefill_packed(&ctx, &tokens[2048..])
-        .unwrap_err()
-        .to_string();
+    // Typed since Batch 3a: the first MLA block (model block 3) reports row 10.
+    let error = broken.prefill_packed(&ctx, &tokens[2048..]).unwrap_err();
     assert!(
-        error.contains("MLA block 0 row 10 sparse selection failed with status 1"),
+        matches!(
+            error,
+            Glm5NextMetalError::KernelValidation {
+                stage: "packed sparse selection",
+                block: 3,
+                row: Some(10),
+                status: 1,
+            }
+        ),
         "{error}"
     );
     let (statuses, rows) = broken.packed_sparse_statuses().unwrap();

@@ -288,6 +288,7 @@ pub(crate) fn run(
             raw_directions: Vec::new(),
             direction_readouts: Vec::new(),
             generation_logprobs: Vec::new(),
+            input_provenance: None,
         },
         RunExecution::runtime_serial(
             args.prefill_execution,

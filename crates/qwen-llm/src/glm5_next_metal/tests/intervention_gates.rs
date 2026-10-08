@@ -252,6 +252,32 @@ fn module_interventions_are_inert_when_empty_and_exact_where_applied() {
     );
     assert!(refused.is_err(), "a short direction was accepted");
     assert_eq!(s.position(), position);
+    // A misaligned direction in a late block is refused with an earlier
+    // capture requested: validation precedes any submitted work.
+    let wide = f32_tensor(&ctx, &[r.as_slice(), &[0.0]].concat());
+    let mut misaligned = wide.view_subrange(0, vec![h as u64]);
+    misaligned.offset += 2;
+    let refused = s.forward_with_interventions(
+        &ctx,
+        last[0],
+        &[Glm5NextModuleIntervention {
+            site: Glm5NextSite::MixerOutput,
+            op: PostBlockIntervention::Projection {
+                layer: 40,
+                direction: &misaligned,
+                coefficient: 1.0,
+            },
+        }],
+        &[Glm5NextSiteCapture {
+            site: Glm5NextSite::MixerOutput,
+            block: 3,
+            point: Glm5NextCapturePoint::BeforeOperations,
+        }],
+        &mut |_, _| panic!("a capture ran before the refusal"),
+    );
+    assert!(refused.is_err(), "a misaligned direction was accepted");
+    assert_eq!(s.position(), position);
+    assert!(!s.is_poisoned(), "a refusal poisoned the session");
     assert_eq!(
         logit_bits(&[s.forward(&ctx, last[0]).unwrap()]),
         logit_bits(&[reference]),

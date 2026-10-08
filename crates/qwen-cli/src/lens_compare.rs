@@ -1621,8 +1621,19 @@ struct RunDocument {
     raw_directions: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     direction_readouts: Vec<serde_json::Value>,
+    // GLM-5.3-Flash additive records; retained for parsing, not compared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    generation_logprobs: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_provenance: Option<serde_json::Value>,
     #[serde(default)]
     execution_binding: Option<RunExecutionBinding>,
+}
+
+/// Parses and validates run-artifact bytes as `qwen-lens compare` reads them.
+#[cfg(test)]
+pub(crate) fn validate_run_bytes(bytes: &[u8], path: &Path) -> Result<()> {
+    parse_run_bytes(bytes, path).map(|_| ())
 }
 
 fn parse_run_bytes(bytes: &[u8], path: &Path) -> Result<RunDocument> {
@@ -1754,7 +1765,7 @@ impl RunDocument {
         ensure!(
             matches!(
                 self.runtime_kind.as_str(),
-                "ordinary_qwen" | "flash_next" | "muse_glimmer"
+                "ordinary_qwen" | "flash_next" | "muse_glimmer" | "glm5_next"
             ),
             "run has unsupported runtime kind {:?}",
             self.runtime_kind
@@ -1831,6 +1842,9 @@ impl RunDocument {
                             rendering.renderer == "tokenizer_text"
                         }
                         "muse_glimmer" => rendering.renderer == "muse_tokenizer_raw_prompt",
+                        "glm5_next" => {
+                            rendering.renderer == lens_run::GLM5_NEXT_RAW_PROMPT_RENDERER
+                        }
                         _ => false,
                     }
                     && rendering.generation_mode.is_none()
@@ -1898,6 +1912,13 @@ impl RunDocument {
                                     | "reasoning_xhigh"
                             )
                         }
+                        ("glm5_next", renderer)
+                            if renderer == qwen_llm::glm5_next_chat::RENDERER =>
+                        {
+                            matches!(mode, "reasoning_low" | "reasoning_high" | "reasoning_max")
+                                && rendering.spans.is_empty()
+                                && self.input_provenance.is_some()
+                        }
                         _ => false,
                     };
                 ensure!(
@@ -1905,7 +1926,9 @@ impl RunDocument {
                     "structured-message rendering metadata is inconsistent"
                 );
                 ensure!(
-                    rendering.renderer == "muse_glimmer_atem_v1" || !rendering.spans.is_empty(),
+                    rendering.renderer == "muse_glimmer_atem_v1"
+                        || self.runtime_kind == "glm5_next"
+                        || !rendering.spans.is_empty(),
                     "structured-message rendering requires renderer-authored spans"
                 );
             }
@@ -2831,6 +2854,8 @@ mod tests {
             native_hyper_captures: Vec::new(),
             raw_directions: Vec::new(),
             direction_readouts: Vec::new(),
+            generation_logprobs: Vec::new(),
+            input_provenance: None,
             execution_binding: None,
         }
     }
@@ -3563,6 +3588,8 @@ mod tests {
             native_hyper_captures: Vec::new(),
             raw_directions: Vec::new(),
             direction_readouts: Vec::new(),
+            generation_logprobs: Vec::new(),
+            input_provenance: None,
             execution_binding: None,
         };
         document.validate().unwrap();
@@ -3964,6 +3991,8 @@ mod tests {
             native_hyper_captures: Vec::new(),
             raw_directions: Vec::new(),
             direction_readouts: Vec::new(),
+            generation_logprobs: Vec::new(),
+            input_provenance: None,
             execution_binding: None,
         }
     }

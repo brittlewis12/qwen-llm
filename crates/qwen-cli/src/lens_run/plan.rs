@@ -582,9 +582,9 @@ fn ensure_raw_rows(
     Ok(())
 }
 
-/// Module-site operations are implemented by the dense engine only; the
-/// GLM-only expert sites are refused for every ordinary model.
-pub(super) fn validate_ordinary_sites(plan: &LensPlan, kind: ArchKind) -> Result<()> {
+/// GLM-only expert sites and module-site readouts are refused for every
+/// ordinary plan (run and artifact alike).
+fn refuse_glm5_next_only_features(plan: &LensPlan) -> Result<()> {
     for operation in &plan.operations {
         ensure!(
             !operation.site.is_glm5_next_only(),
@@ -601,6 +601,13 @@ pub(super) fn validate_ordinary_sites(plan: &LensPlan, kind: ArchKind) -> Result
             readout.site.as_str()
         );
     }
+    Ok(())
+}
+
+/// Module-site operations are implemented by the dense engine only; the
+/// GLM-only expert sites are refused for every ordinary model.
+pub(super) fn validate_ordinary_sites(plan: &LensPlan, kind: ArchKind) -> Result<()> {
+    refuse_glm5_next_only_features(plan)?;
     if kind == ArchKind::Dense {
         return Ok(());
     }
@@ -853,6 +860,7 @@ pub(crate) fn validate_run_artifact_plan(plan: &LensPlan, runtime_kind: &str) ->
         "ordinary_qwen" => validate_ordinary_plan(plan),
         "muse_glimmer" => validate_muse_artifact_plan(plan),
         "flash_next" => validate_flash_artifact_plan(plan),
+        "glm5_next" => super::glm5_next::validate_glm5_next_plan(plan),
         _ => bail!("run artifact has unsupported runtime kind {runtime_kind:?}"),
     }
 }
@@ -909,6 +917,7 @@ pub(super) fn validate_muse_artifact_plan(plan: &LensPlan) -> Result<()> {
 }
 
 pub(super) fn validate_ordinary_plan(plan: &LensPlan) -> Result<()> {
+    refuse_glm5_next_only_features(plan)?;
     ensure!(
         !plan.lenses.is_empty()
             || !plan.directions.is_empty()

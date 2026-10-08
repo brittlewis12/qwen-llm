@@ -896,6 +896,7 @@ pub(super) fn execute_ordinary_arm(
         raw_directions: execution.raw_directions.clone(),
         direction_readouts,
         generation_logprobs: Vec::new(),
+        input_provenance: None,
     })
 }
 

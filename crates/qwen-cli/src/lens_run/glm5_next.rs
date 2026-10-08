@@ -24,8 +24,9 @@ use qwen_llm::glm5_next_metal::{
 
 const FAMILY: &str = "GLM-5.3-Flash";
 
-/// Everything the plan may use, refused before any model work.
-fn validate_glm5_next_plan(plan: &LensPlan) -> Result<()> {
+/// Everything the plan may use, refused before any model work (also the run
+/// artifact's plan check).
+pub(crate) fn validate_glm5_next_plan(plan: &LensPlan) -> Result<()> {
     ensure!(
         plan.lenses.is_empty(),
         "{FAMILY} Lens plans cannot use lenses; use raw_residual_f32le directions"
@@ -130,15 +131,19 @@ fn effort(mode: Option<LensMessageMode>) -> Result<Effort> {
     })
 }
 
-/// The prompt tokens and their rendering record: raw text, literal ids, or a
-/// user turn rendered by the pinned GLM template (`--message-mode` effort),
-/// optionally followed by an assistant prefill: a `final` prefill closes the
-/// pre-opened reasoning with exactly `</think>` and appends its text; a
-/// `reasoning` prefill appends its text inside the reasoning.
+/// Renderer of raw `--prompt` text (the glm4 tokenizer inserts nothing).
+pub(crate) const RAW_PROMPT_RENDERER: &str = "glm5_next_tokenizer_raw_prompt";
+
+/// The prompt tokens and their rendering record, plus (for chat input) the
+/// GLM input provenance: raw text, literal ids, or a user turn rendered by
+/// the pinned GLM template (`--message-mode` effort), optionally followed by
+/// an assistant prefill: a `final` prefill closes the pre-opened reasoning
+/// with exactly `</think>` and appends its text; a `reasoning` prefill
+/// appends its text inside the reasoning.
 fn prepare_input(
     args: &LensRunArgs,
     artifact: &Glm5NextPreparedArtifact<'_>,
-) -> Result<PreparedLensInput> {
+) -> Result<(PreparedLensInput, Option<serde_json::Value>)> {
     ensure!(
         args.messages.is_none() && args.open_responses.is_none() && args.requests_jsonl.is_none(),
         "{FAMILY} Lens runs accept --prompt, --token-ids or --user (with --system); message documents, Open Responses and cohorts are not supported"
@@ -150,24 +155,30 @@ fn prepare_input(
         spans: Vec::new(),
     };
     if let Some(ids) = &args.token_ids {
-        return Ok(PreparedLensInput {
-            source: "token_ids",
-            add_special_tokens: None,
-            token_ids: ids.clone(),
-            rendering: rendering("token_ids", None),
-        });
+        return Ok((
+            PreparedLensInput {
+                source: "token_ids",
+                add_special_tokens: None,
+                token_ids: ids.clone(),
+                rendering: rendering("literal_token_ids", None),
+            },
+            None,
+        ));
     }
     if let Some(prompt) = &args.prompt {
         // The glm4 tokenizer inserts nothing; the flag governs special parsing.
         let add_special = !args.no_special_tokens;
-        return Ok(PreparedLensInput {
-            source: "prompt",
-            add_special_tokens: Some(add_special),
-            token_ids: tokenizer
-                .encode(prompt, add_special)
-                .with_context(|| format!("tokenize {FAMILY} prompt"))?,
-            rendering: rendering("raw_prompt", None),
-        });
+        return Ok((
+            PreparedLensInput {
+                source: "prompt",
+                add_special_tokens: Some(add_special),
+                token_ids: tokenizer
+                    .encode(prompt, add_special)
+                    .with_context(|| format!("tokenize {FAMILY} prompt"))?,
+                rendering: rendering(RAW_PROMPT_RENDERER, None),
+            },
+            None,
+        ));
     }
     let user = args
         .user
@@ -189,8 +200,21 @@ fn prepare_input(
     let mut text = chat::render(&messages, RenderOptions::generate(effort, false))
         .map_err(|e| anyhow::anyhow!(e.to_string()))
         .with_context(|| format!("render {FAMILY} chat input"))?;
-    let transition = match &args.assistant_prefill {
-        None => "none",
+    let prefill_record = args.assistant_prefill.as_ref().map(|prefill| {
+        serde_json::json!({
+            "channel": match prefill.channel {
+                AssistantPrefillChannel::Final => "final",
+                AssistantPrefillChannel::Reasoning => "reasoning",
+            },
+            "text": prefill.text,
+            "appended": match prefill.channel {
+                AssistantPrefillChannel::Final => format!("{}{}", chat::THINK_CLOSE, prefill.text),
+                AssistantPrefillChannel::Reasoning => prefill.text.clone(),
+            },
+        })
+    });
+    match &args.assistant_prefill {
+        None => {}
         Some(prefill) => {
             for marker in [
                 "<|",
@@ -204,30 +228,36 @@ fn prepare_input(
                     "{FAMILY} assistant prefill text must not contain template markers ({marker:?})"
                 );
             }
-            match prefill.channel {
-                AssistantPrefillChannel::Final => {
-                    text.push_str(chat::THINK_CLOSE);
-                    text.push_str(&prefill.text);
-                    "final"
-                }
-                AssistantPrefillChannel::Reasoning => {
-                    text.push_str(&prefill.text);
-                    "reasoning"
-                }
+            if prefill.channel == AssistantPrefillChannel::Final {
+                text.push_str(chat::THINK_CLOSE);
             }
+            text.push_str(&prefill.text);
         }
-    };
-    Ok(PreparedLensInput {
-        source: "user",
-        add_special_tokens: Some(false),
-        token_ids: tokenizer
-            .encode(&text, false)
-            .with_context(|| format!("tokenize rendered {FAMILY} chat input"))?,
-        rendering: rendering(
-            chat::RENDERER,
-            Some(format!("effort={};prefill={transition}", effort.as_str())),
-        ),
-    })
+    }
+    let provenance = serde_json::json!({
+        "kind": "glm5_next_chat",
+        "renderer": chat::RENDERER,
+        "template_sha256": chat::GGUF_TEMPLATE_SHA256,
+        "effort": effort.as_str(),
+        "system": args.system.is_some(),
+        "assistant_prefill": prefill_record,
+        "rendered_prompt_bytes": text.len(),
+        "rendered_prompt_blake3": blake3::hash(text.as_bytes()).to_hex().to_string(),
+    });
+    Ok((
+        PreparedLensInput {
+            source: "messages",
+            add_special_tokens: Some(false),
+            token_ids: tokenizer
+                .encode(&text, false)
+                .with_context(|| format!("tokenize rendered {FAMILY} chat input"))?,
+            rendering: rendering(
+                chat::RENDERER,
+                Some(format!("reasoning_{}", effort.as_str())),
+            ),
+        },
+        Some(provenance),
+    ))
 }
 
 fn readout_point(point: ReadoutPoint) -> Glm5NextCapturePoint {
@@ -370,7 +400,22 @@ pub(super) fn run_glm5_next(
     let hidden = config.hidden_size as usize;
     validate_sites(&plan, &config)?;
     let raw = load_raw_directions(&plan, plan_dir, blocks, hidden)?;
-    let prepared_input = prepare_input(args, &artifact)?;
+    let (prepared_input, input_provenance) = prepare_input(args, &artifact)?;
+    // Sampling and recording parameters are checked before any model work.
+    let mut sampler = Sampler::new(SamplingConfig {
+        temperature: args.temperature,
+        top_k: args.top_k,
+        top_p: args.top_p,
+        min_p: args.min_p,
+        seed: args.seed,
+    })?;
+    if let Some(&bad) = args
+        .logprobs_token_ids
+        .iter()
+        .find(|&&id| id >= config.vocab_size)
+    {
+        bail!("--logprobs-token-ids {bad} is outside the {FAMILY} vocabulary");
+    }
     let prompt_token_ids = prepared_input.token_ids.clone();
     ensure!(
         !prompt_token_ids.is_empty(),
@@ -464,13 +509,6 @@ pub(super) fn run_glm5_next(
 
     let tokenizer = artifact.tokenizer();
     let stops: HashSet<i32> = chat::CHAT_STOPS.into_iter().collect();
-    let mut sampler = Sampler::new(SamplingConfig {
-        temperature: args.temperature,
-        top_k: args.top_k,
-        top_p: args.top_p,
-        min_p: args.min_p,
-        seed: args.seed,
-    })?;
     let record_logprobs = args.logprobs_top_k > 0 || !args.logprobs_token_ids.is_empty();
     let mut event = execution.schedule.new_event()?;
     let mut operation_applications = Vec::new();
@@ -534,6 +572,7 @@ pub(super) fn run_glm5_next(
         raw_directions,
         direction_readouts,
         generation_logprobs,
+        input_provenance,
     };
     emit_run_output(
         args,

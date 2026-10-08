@@ -44,6 +44,7 @@ use event_schedule::{BoundEventSchedule, CompiledEvent, CompiledEventSchedule};
 mod execute;
 mod flash_next;
 mod glm5_next;
+pub(crate) use glm5_next::RAW_PROMPT_RENDERER as GLM5_NEXT_RAW_PROMPT_RENDERER;
 mod lenses;
 mod output;
 mod plan;
@@ -409,6 +410,29 @@ struct PreparedLens {
     raw_lm_head: Option<NativeLens>,
 }
 
+/// Input features each family admits, checked before family dispatch:
+/// typed assistant prefill is ordinary Qwen and GLM-5.3-Flash only; Open
+/// Responses inputs are ordinary Qwen only; generation log-probabilities are
+/// GLM-5.3-Flash only.
+pub(crate) fn validate_family_inputs(family: ModelFamily, args: &LensRunArgs) -> Result<()> {
+    let ordinary = matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe);
+    let glm = family == ModelFamily::Glm5Next;
+    ensure!(
+        args.assistant_prefill.is_none() || ordinary || glm,
+        "typed assistant prefill supports ordinary Qwen and GLM-5.3-Flash only"
+    );
+    ensure!(
+        args.open_responses.is_none() || ordinary,
+        "--open-responses supports ordinary Qwen only; {} is not supported",
+        family.architecture_name()
+    );
+    ensure!(
+        glm || (args.logprobs_top_k == 0 && args.logprobs_token_ids.is_empty()),
+        "--logprobs-top-k and --logprobs-token-ids are supported only for GLM-5.3-Flash"
+    );
+    Ok(())
+}
+
 /// Unfiltered log-probabilities at one generated position.
 #[derive(Debug, Serialize)]
 pub(crate) struct GenerationLogprobs {
@@ -501,22 +525,7 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
             gguf.architecture()
         )
     })?;
-    if family != ModelFamily::Qwen35 && family != ModelFamily::Qwen35Moe {
-        ensure!(
-            args.assistant_prefill.is_none(),
-            "typed assistant prefill supports ordinary Qwen only"
-        );
-        ensure!(
-            args.open_responses.is_none(),
-            "--open-responses supports ordinary Qwen only; {} is not supported",
-            family.architecture_name()
-        );
-    }
-    ensure!(
-        family == ModelFamily::Glm5Next
-            || (args.logprobs_top_k == 0 && args.logprobs_token_ids.is_empty()),
-        "--logprobs-top-k and --logprobs-token-ids are supported only for GLM-5.3-Flash"
-    );
+    validate_family_inputs(family, &args)?;
     match family {
         ModelFamily::MuseGlimmer => {
             return crate::muse_lens_run::run(

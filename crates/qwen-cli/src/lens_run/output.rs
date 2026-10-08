@@ -273,6 +273,8 @@ pub(crate) struct RunOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(super) generation_logprobs: Vec<super::GenerationLogprobs>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) input_provenance: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) execution_binding: Option<RunExecutionBinding>,
 }
 
@@ -328,6 +330,8 @@ pub(crate) struct RunResult {
     pub(crate) raw_directions: Vec<RawDirectionBinding>,
     pub(crate) direction_readouts: Vec<LiveDirectionReadout>,
     pub(crate) generation_logprobs: Vec<super::GenerationLogprobs>,
+    /// Family-specific input provenance (GLM chat rendering and prefill).
+    pub(crate) input_provenance: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -454,6 +458,7 @@ pub(super) fn build_run_output(
         raw_directions: result.raw_directions,
         direction_readouts: result.direction_readouts,
         generation_logprobs: result.generation_logprobs,
+        input_provenance: result.input_provenance,
         execution_binding,
     }
 }

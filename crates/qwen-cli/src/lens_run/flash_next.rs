@@ -133,6 +133,7 @@ pub(super) fn run_qwen4exp(
         raw_directions: Vec::new(),
         direction_readouts: Vec::new(),
         generation_logprobs: Vec::new(),
+        input_provenance: None,
     };
     emit_run_output(
         args,

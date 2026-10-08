@@ -312,10 +312,29 @@ fn typed_prefill_refuses_nonordinary_families_before_tokenizer_or_runtime() {
         assert!(
             error
                 .to_string()
-                .contains("typed assistant prefill supports ordinary Qwen only"),
+                .contains("typed assistant prefill supports ordinary Qwen and GLM-5.3-Flash only"),
             "{family:?}: {error:#}"
         );
     }
+    // GLM-5.3-Flash passes the dispatcher's prefill admission and fails
+    // later (this header-only file is not an admissible artifact).
+    let model = root.join("glm.gguf");
+    crate::full_lens::write_cpu_gguf(
+        &model,
+        ModelFamily::Glm5Next.architecture_name(),
+        2,
+        "not-a-tokenizer",
+        false,
+    );
+    let mut args = test_args();
+    args.model = model;
+    args.plan = plan.clone();
+    args.prompt = None;
+    args.user = Some("probe".into());
+    args.assistant_prefill =
+        Some(parse_assistant_prefill(r#"{"channel":"final","text":""}"#).unwrap());
+    let error = format!("{:#}", run(args).unwrap_err());
+    assert!(!error.contains("typed assistant prefill"), "{error}");
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -339,6 +358,7 @@ pub(crate) fn generation_run_bytes(
         raw_directions: Vec::new(),
         direction_readouts: Vec::new(),
         generation_logprobs: Vec::new(),
+        input_provenance: None,
     };
     let mut output = build_run_output(
         Path::new("model.gguf"),
@@ -1508,6 +1528,7 @@ fn run_artifact_serializes_envelope_exact_plan_and_score_semantics() {
         raw_directions: Vec::new(),
         direction_readouts: Vec::new(),
         generation_logprobs: Vec::new(),
+        input_provenance: None,
         execution_binding: None,
     };
     let value = serde_json::to_value(&artifact).unwrap();
@@ -1693,6 +1714,7 @@ fn summary_contains_required_counts_text_and_artifact_path() {
         raw_directions: Vec::new(),
         direction_readouts: Vec::new(),
         generation_logprobs: Vec::new(),
+        input_provenance: None,
         execution_binding: None,
     };
     assert_eq!(
@@ -3203,4 +3225,145 @@ fn direction_readout_scalars_match_an_f64_oracle() {
         json!({"id":"r_dot","direction":"raw","source_layer":3,"phase":"decode","index":1,
             "dot":-0.5,"h_norm_l2":2.0,"v_norm_l2":1.0})
     );
+}
+
+/// The dispatcher admits a typed assistant prefill for GLM-5.3-Flash (and
+/// ordinary Qwen) and refuses it elsewhere; log-probability recording is
+/// GLM-only; Open Responses stays ordinary-Qwen only.
+#[test]
+fn family_inputs_admit_glm_prefill_and_logprobs_only_where_supported() {
+    let parse = |extra: &[&str]| {
+        let mut argv = vec![
+            "run",
+            "--model",
+            "m.gguf",
+            "--plan",
+            "plan.json",
+            "--user",
+            "q",
+        ];
+        argv.extend_from_slice(extra);
+        RunArgsParser::try_parse_from(argv).unwrap().args
+    };
+    let prefill = parse(&["--assistant-prefill", r#"{"channel":"final","text":""}"#]);
+    let logprobs = parse(&["--logprobs-top-k", "10", "--logprobs-token-ids", "40,19116"]);
+    assert_eq!(logprobs.logprobs_token_ids, [40, 19116]);
+    assert!(validate_family_inputs(ModelFamily::Glm5Next, &prefill).is_ok());
+    assert!(validate_family_inputs(ModelFamily::Glm5Next, &logprobs).is_ok());
+    assert!(validate_family_inputs(ModelFamily::Qwen35, &prefill).is_ok());
+    for family in [
+        ModelFamily::Qwen4Exp,
+        ModelFamily::MuseGlimmer,
+        ModelFamily::DeepSeek4,
+        ModelFamily::K2Horizon,
+    ] {
+        assert!(
+            validate_family_inputs(family, &prefill).is_err(),
+            "{family:?} prefill"
+        );
+        assert!(
+            validate_family_inputs(family, &logprobs).is_err(),
+            "{family:?} logprobs"
+        );
+    }
+    assert!(validate_family_inputs(ModelFamily::Qwen35, &logprobs).is_err());
+}
+
+/// A GLM-5.3-Flash run artifact (raw direction, module-site operations and
+/// readouts, logprobs, chat provenance) is accepted by the compare reader;
+/// without its chat provenance it is refused.
+#[test]
+fn glm5_next_run_artifact_round_trips_through_the_reader() {
+    let scope = json!({"layers": {"kind": "range", "start": 15, "end": 36},
+        "prefill": {"kind": "all"}, "decode": {"kind": "all"}});
+    let plan: LensPlan = serde_json::from_value(json!({
+        "version": 1, "lenses": [], "readouts": [],
+        "directions": [{"id": "r", "source": {"kind": "raw_residual_f32le", "path": "r.f32le", "layout": "shared"}, "normalization": "unit_l2"}],
+        "operations": [
+            {"id": "mixer", "site": "mixer_output", "scope": scope, "action": {"kind": "projection_ablate", "direction": "r", "coefficient": 2.4}},
+            {"id": "shared", "site": "shared_expert_output", "scope": scope, "action": {"kind": "projection_ablate", "direction": "r", "coefficient": 2.4}}],
+        "direction_readouts": [{"id": "before", "direction": "r", "site": "mixer_output", "point": "before_operations",
+            "scope": {"layers": {"kind": "values", "values": [20]}, "prefill": {"kind": "all"}}}]
+    }))
+    .unwrap();
+    validate_plan(&plan).unwrap();
+    validate_run_artifact_plan(&plan, "glm5_next").unwrap();
+    assert!(validate_run_artifact_plan(&plan, "ordinary_qwen").is_err());
+    let digest = canonical_plan_blake3(&plan).unwrap();
+    let mut artifact = RunOutput {
+        generation_input: None,
+        linear_transports: Vec::new(),
+        schema: RUN_SCHEMA,
+        schema_version: RUN_SCHEMA_VERSION,
+        runtime_kind: "glm5_next",
+        model_path: "GLM.gguf".into(),
+        canonical_plan_path: "/canonical/plan.json".into(),
+        authored_plan: plan.clone(),
+        authored_plan_canonical_json_blake3: digest,
+        requested_live_readouts: Vec::new(),
+        plan,
+        position_bindings: Vec::new(),
+        input_source: "messages",
+        add_special_tokens: Some(false),
+        rendering: LensInputRendering {
+            renderer: qwen_llm::glm5_next_chat::RENDERER.into(),
+            generation_mode: Some("reasoning_low".into()),
+            spans: Vec::new(),
+        },
+        prompt_token_ids: vec![154822, 154824, 40],
+        generated_token_ids: vec![40, 41],
+        sampler: RunSampler {
+            temperature: 0.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed: 0,
+        },
+        max_new_tokens: 2,
+        decoded_text: "I J".into(),
+        stop_reason: "max_new_tokens".into(),
+        execution: RunExecution::runtime_serial(
+            PrefillExecution::Auto,
+            RunSerialReason::Glm5NextSerialInterventions,
+        ),
+        operation_applications: vec![OperationApplication {
+            id: "shared".into(),
+            layer: 20,
+            phase: "prefill",
+            index: 0,
+            site: OperationSite::SharedExpertOutput,
+        }],
+        live_readouts: Vec::new(),
+        native_hyper_captures: Vec::new(),
+        raw_directions: Vec::new(),
+        direction_readouts: vec![LiveDirectionReadout {
+            id: "before".into(),
+            direction: "r".into(),
+            site: OperationSite::MixerOutput,
+            point: Some(ReadoutPoint::BeforeOperations),
+            source_layer: 20,
+            phase: "prefill",
+            index: 0,
+            dot: 1.5,
+            h_norm_l2: 3.0,
+            v_norm_l2: 1.0,
+        }],
+        generation_logprobs: vec![generation_logprobs(&[0.0, 1.0, 2.0], 0, 2, 2, &[1]).unwrap()],
+        input_provenance: Some(json!({"kind": "glm5_next_chat", "effort": "low",
+            "assistant_prefill": {"channel": "final", "text": "", "appended": "</think>"}})),
+        execution_binding: None,
+    };
+    let bytes = serialize_run_output(&artifact).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["direction_readouts"][0]["site"], "mixer_output");
+    assert_eq!(value["direction_readouts"][0]["point"], "before_operations");
+    assert_eq!(
+        value["operation_applications"][0]["site"],
+        "shared_expert_output"
+    );
+    assert_eq!(value["generation_logprobs"][0]["top"][0][0], 2);
+    crate::lens_compare::validate_run_bytes(&bytes, Path::new("glm.json")).unwrap();
+    artifact.input_provenance = None;
+    let bytes = serialize_run_output(&artifact).unwrap();
+    assert!(crate::lens_compare::validate_run_bytes(&bytes, Path::new("glm.json")).is_err());
 }

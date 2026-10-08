@@ -132,10 +132,11 @@ impl Glm5NextSession<'_> {
                 let end = vector.offset.checked_add(h * 4);
                 if vector.dtype != GgmlType::F32
                     || vector.n_elements() != h
+                    || !vector.offset.is_multiple_of(4)
                     || end.is_none_or(|end| end > vector.buffer.length() as u64)
                 {
                     return invalid(format!(
-                        "intervention {index}: directions must be F32 [{h}] in bounds"
+                        "intervention {index}: directions must be aligned F32 [{h}] in bounds"
                     ));
                 }
             }

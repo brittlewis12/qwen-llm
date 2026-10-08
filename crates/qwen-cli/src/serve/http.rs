@@ -1120,6 +1120,8 @@ mod tests {
         server_failures: Arc<std::sync::atomic::AtomicUsize>,
         /// After its pieces, end as a sink-raised typed refusal would.
         refuse_after: Option<ServeError>,
+        /// Pieces offered to the sink (including a refused one).
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl MockBackend {
@@ -1140,6 +1142,7 @@ mod tests {
                 headroom: None,
                 server_failures: Arc::default(),
                 refuse_after: None,
+                attempts: Arc::default(),
             }
         }
 
@@ -1205,6 +1208,8 @@ mod tests {
             }
             sink.tick().map_err(BackendFailure::Aborted)?;
             for piece in &self.pieces {
+                self.attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 sink.piece(piece.as_bytes())
                     .map_err(BackendFailure::Aborted)?;
             }
@@ -2016,46 +2021,88 @@ mod tests {
         assert_eq!(failures.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
-    /// Map #14 packet 2 end to end: a Qwen tool block refused admission
-    /// stops a streaming generation at once and fails it with the typed
-    /// code, publishing no raw tool text; non-streaming answers the JSON 503.
-    /// Each reports one server failure.
+    /// Map #14 packet 2 end to end: a Qwen or GLM tool block refused
+    /// admission stops a streaming generation at the refusing piece (later
+    /// pieces are never requested) and fails it with the typed code,
+    /// publishing no held tool text; non-streaming (whose partition runs
+    /// after generation) answers the JSON 503. Each reports one server
+    /// failure.
     #[test]
-    fn qwen_tool_block_refusals_stop_and_fail_typed() {
-        let pieces = [
-            "<think>plan</think>",
-            "Calling.\n",
-            "<tool_call>\n<function=f>\n",
-            "<parameter=a>\n1\n</parameter>\n",
-            "</function>\n</tool_call>",
+    fn tool_block_refusals_stop_streaming_and_fail_typed() {
+        use std::sync::atomic::Ordering;
+        let glm_tools = || OutputProtocol::Glm5NextTools {
+            definitions: vec![
+                qwen_llm::glm5_next_chat::ToolDefinition::from_value(&json!({
+                    "name": "f", "parameters": {"type": "object",
+                        "properties": {"a": {"type": "integer"}}}}))
+                .unwrap(),
+            ],
+            max_bytes: 1 << 20,
+        };
+        let cases: [(&str, Vec<&str>, Option<OutputProtocol>, usize); 2] = [
+            (
+                "qwen",
+                vec![
+                    "<think>plan</think>",
+                    "Calling.\n",
+                    "<tool_call>\n<function=f>\n",
+                    "<parameter=a>\n1\n</parameter>\n",
+                    "</function>\n</tool_call>",
+                ],
+                None,
+                3,
+            ),
+            (
+                "glm",
+                vec![
+                    "plan</think>",
+                    "<tool_call>f<arg_key>a</arg_key>",
+                    "<arg_value>1</arg_value></tool_call>",
+                ],
+                Some(glm_tools()),
+                2,
+            ),
         ];
-        for streaming in [true, false] {
-            let mut backend = MockBackend::new(&pieces, StopReason::Eos);
-            // Room for collection steps (128 KiB), not a 64 KiB tool step at 256x.
-            backend.headroom = Some(|| Some(1 << 20));
-            let failures = Arc::clone(&backend.server_failures);
-            let body = if streaming {
-                r#"{"model":"qwen-test","input":"q","stream":true}"#
-            } else {
-                r#"{"model":"qwen-test","input":"q"}"#
-            };
-            let response = roundtrip(backend, &post("/v1/responses", body));
-            if streaming {
-                assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-                let failed = sse_payload(&response, "response.failed");
-                assert_eq!(
-                    failed["response"]["error"]["code"], "memory_admission_denied",
-                    "{failed}"
-                );
-                assert!(!body_of(&response).contains("<tool_call>"), "{response}");
-                assert!(!body_of(&response).contains("function_call"), "{response}");
-                assert!(!body_of(&response).contains("response.completed"));
-            } else {
-                assert!(response.starts_with("HTTP/1.1 503"), "{response}");
-                let envelope: Value = serde_json::from_str(body_of(&response)).unwrap();
-                assert_eq!(envelope["error"]["code"], "memory_admission_denied");
+        for (family, pieces, protocol, refusing_piece) in cases {
+            for streaming in [true, false] {
+                let mut backend = MockBackend::new(&pieces, StopReason::Eos);
+                if let Some(protocol) = protocol.clone() {
+                    backend.protocol = protocol;
+                }
+                // Room for collection steps (128 KiB), not a 64 KiB tool
+                // step at 256x.
+                backend.headroom = Some(|| Some(1 << 20));
+                let failures = Arc::clone(&backend.server_failures);
+                let attempts = Arc::clone(&backend.attempts);
+                let body = if streaming {
+                    r#"{"model":"qwen-test","input":"q","stream":true}"#
+                } else {
+                    r#"{"model":"qwen-test","input":"q"}"#
+                };
+                let response = roundtrip(backend, &post("/v1/responses", body));
+                if streaming {
+                    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+                    let failed = sse_payload(&response, "response.failed");
+                    assert_eq!(
+                        failed["response"]["error"]["code"], "memory_admission_denied",
+                        "{family}: {failed}"
+                    );
+                    assert!(!body_of(&response).contains("<tool_call>"), "{response}");
+                    assert!(!body_of(&response).contains("function_call"), "{response}");
+                    assert!(!body_of(&response).contains("response.completed"));
+                    assert_eq!(
+                        attempts.load(Ordering::SeqCst),
+                        refusing_piece,
+                        "{family}: generation stops at the refusing piece"
+                    );
+                } else {
+                    assert!(response.starts_with("HTTP/1.1 503"), "{family}: {response}");
+                    let envelope: Value = serde_json::from_str(body_of(&response)).unwrap();
+                    assert_eq!(envelope["error"]["code"], "memory_admission_denied");
+                    assert_eq!(attempts.load(Ordering::SeqCst), pieces.len());
+                }
+                assert_eq!(failures.load(Ordering::SeqCst), 1, "{family} {streaming}");
             }
-            assert_eq!(failures.load(std::sync::atomic::Ordering::SeqCst), 1);
         }
     }
 

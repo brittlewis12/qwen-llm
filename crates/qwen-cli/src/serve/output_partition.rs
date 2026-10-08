@@ -350,7 +350,8 @@ impl QwenOutputPartition {
     /// Headroom for the tool block's outstanding peak at `capacity`, given
     /// what the buffer already holds.
     fn admit_outstanding(&self, capacity: usize) -> Result<(), ServeError> {
-        let peak = qwen_llm::glm5_next_chat::tool_block_peak_bytes(capacity);
+        let peak = qwen_llm::glm5_next_chat::checked_tool_block_peak_bytes(capacity)
+            .ok_or_else(|| super::output_memory::size_overflow("tool block"))?;
         let outstanding = peak.saturating_sub(self.tool_buffer.capacity());
         super::transport_memory::admit_resident_transport(outstanding as u64, (self.headroom)())
     }

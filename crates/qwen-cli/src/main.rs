@@ -1457,4 +1457,65 @@ mod info_text_tests {
             ["run: conditional", "lens: unsupported (x)"]
         );
     }
+
+    /// A Qwen header too malformed to identify a release (a non-array
+    /// `tokenizer.ggml.tokens`) still projects: sampling falls back to the
+    /// unidentified-release decision instead of failing `qwen info`.
+    #[test]
+    fn malformed_release_metadata_projects_unidentified_sampling() {
+        fn string(out: &mut Vec<u8>, text: &str) {
+            out.extend_from_slice(&(text.len() as u64).to_le_bytes());
+            out.extend_from_slice(text.as_bytes());
+        }
+        let mut entries: Vec<Vec<u8>> = Vec::new();
+        for (key, value) in [
+            ("general.architecture", "qwen35"),
+            ("general.name", "Qwen3.5-27B"),
+        ] {
+            let mut entry = Vec::new();
+            string(&mut entry, key);
+            entry.extend_from_slice(&8u32.to_le_bytes());
+            string(&mut entry, value);
+            entries.push(entry);
+        }
+        for (key, value) in [
+            ("qwen35.block_count", 64u32),
+            ("qwen35.embedding_length", 5120),
+            // Malformed: the token list must be an array.
+            ("tokenizer.ggml.tokens", 7),
+        ] {
+            let mut entry = Vec::new();
+            string(&mut entry, key);
+            entry.extend_from_slice(&4u32.to_le_bytes());
+            entry.extend_from_slice(&value.to_le_bytes());
+            entries.push(entry);
+        }
+        let mut bytes = b"GGUF".to_vec();
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+        for entry in entries {
+            bytes.extend(entry);
+        }
+        bytes.resize(bytes.len().div_ceil(32) * 32, 0);
+        let path = std::env::temp_dir().join(format!(
+            "qwen-info-malformed-{}-{}.gguf",
+            std::process::id(),
+            crate::release_sampling::fresh_seed()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let (_, projection) = super::info_projection(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            projection["sampling"],
+            json!({"identity": "qwen_unidentified/dense_27b", "temperature": 1.0,
+                "top_k": 20, "top_p": 0.95, "min_p": 0.0})
+        );
+        assert!(projection["capabilities"].is_object());
+        assert!(
+            capability_lines(&projection)
+                .iter()
+                .any(|line| line.starts_with("sampling: temperature 1.0"))
+        );
+    }
 }

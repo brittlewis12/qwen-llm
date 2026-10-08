@@ -1226,6 +1226,25 @@ impl<'w> Glm5NextSession<'w> {
         probes: &[Glm5NextProbe],
         observer: &mut dyn FnMut(Glm5NextProbe, usize, &[f32]),
     ) -> Result<Option<Vec<f32>>> {
+        let mut no_captures = |_: Glm5NextSiteCapture, _: &[f32]| {};
+        let mut hooks = interventions::Hooks {
+            module: &[],
+            captures: &[],
+            observer: &mut no_captures,
+        };
+        self.step_hooked(ctx, token, logits, probes, observer, &mut hooks)
+    }
+
+    /// [`Self::step`] with module-site interventions and captures.
+    fn step_hooked(
+        &mut self,
+        ctx: &MetalContext,
+        token: u32,
+        logits: bool,
+        probes: &[Glm5NextProbe],
+        observer: &mut dyn FnMut(Glm5NextProbe, usize, &[f32]),
+        hooks: &mut interventions::Hooks<'_, '_>,
+    ) -> Result<Option<Vec<f32>>> {
         if self.poisoned {
             return Err(Glm5NextMetalError::Poisoned);
         }
@@ -1258,7 +1277,7 @@ impl<'w> Glm5NextSession<'w> {
             let mla = c.block_count(MixerKind::Mla);
             write_i32(&s.select_status, &vec![-1; mla])?;
         }
-        self.encode_token(ctx, token, logits, probes, observer)?;
+        self.encode_token(ctx, token, logits, probes, observer, hooks)?;
         for (layer, route) in self.routes.iter().enumerate() {
             if let Some(route) = route {
                 let status = read_i32(&route.status)?[0];
@@ -1300,6 +1319,7 @@ impl<'w> Glm5NextSession<'w> {
         logits: bool,
         probes: &[Glm5NextProbe],
         observer: &mut dyn FnMut(Glm5NextProbe, usize, &[f32]),
+        hooks: &mut interventions::Hooks<'_, '_>,
     ) -> Result<()> {
         let w = self.weights;
         let c = &w.config;
@@ -1323,6 +1343,15 @@ impl<'w> Glm5NextSession<'w> {
         let mut enc = KernelEncoder::begin(&command);
         self.stage(&mut enc, Glm5NextStage::Embed, None)?;
         encode_get_rows_f32(ctx, &enc, &w.embedding, &s.token, &s.embedding, 1, h)?;
+        self.apply_site_hooks(
+            ctx,
+            &mut command,
+            &mut enc,
+            hooks,
+            Glm5NextSite::Embedding,
+            0,
+            &s.embedding,
+        )?;
         encode_mhc4_repeat(ctx, &enc, h, &s.embedding, &s.residual[0])?;
         let mut mla_index = 0;
         for (index, block) in w.blocks.iter().enumerate() {
@@ -1350,6 +1379,15 @@ impl<'w> Glm5NextSession<'w> {
                 }
                 _ => return invalid(format!("block {index} state does not match its mixer")),
             }
+            self.apply_site_hooks(
+                ctx,
+                &mut command,
+                &mut enc,
+                hooks,
+                Glm5NextSite::MixerOutput,
+                index,
+                &s.block_out,
+            )?;
             self.stage(&mut enc, Glm5NextStage::AttentionPost, Some(index))?;
             encode_mhc4_post(ctx, &enc, h, &s.block_out, a, &s.post, &s.comb, b)?;
             if observed && probes.contains(&Glm5NextProbe::AttentionResidual) {
@@ -1447,6 +1485,15 @@ impl<'w> Glm5NextSession<'w> {
                         h,
                         k,
                     )?;
+                    self.apply_site_hooks(
+                        ctx,
+                        &mut command,
+                        &mut enc,
+                        hooks,
+                        Glm5NextSite::RoutedExpertsOutput,
+                        index,
+                        &s.routed,
+                    )?;
                     self.stage(&mut enc, Glm5NextStage::SharedExpert, Some(index))?;
                     let sf = c.shared_expert_ffn_size as usize;
                     shared_gate_up_swiglu(
@@ -1468,9 +1515,27 @@ impl<'w> Glm5NextSession<'w> {
                         sf,
                         h,
                     )?;
+                    self.apply_site_hooks(
+                        ctx,
+                        &mut command,
+                        &mut enc,
+                        hooks,
+                        Glm5NextSite::SharedExpertOutput,
+                        index,
+                        &s.shared,
+                    )?;
                     encode_add_f32(ctx, &enc, &s.routed, &s.shared, &s.block_out)?;
                 }
             }
+            self.apply_site_hooks(
+                ctx,
+                &mut command,
+                &mut enc,
+                hooks,
+                Glm5NextSite::FfnOutput,
+                index,
+                &s.block_out,
+            )?;
             self.stage(&mut enc, Glm5NextStage::FfnPost, Some(index))?;
             encode_mhc4_post(ctx, &enc, h, &s.block_out, b, &s.post, &s.comb, a)?;
             if observed && probes.contains(&Glm5NextProbe::BlockResidual) {
@@ -2031,8 +2096,12 @@ fn matvec(
     Ok(())
 }
 
+mod interventions;
 mod lens;
 mod packed;
+pub use interventions::{
+    Glm5NextCapturePoint, Glm5NextModuleIntervention, Glm5NextSite, Glm5NextSiteCapture,
+};
 mod snapshot;
 pub use lens::Glm5NextCapture;
 pub use packed::PackedLineage;

@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-08 - #14 Output Memory, Packet 3: Qwen/DS4 Tool-Block Byte Ceilings
+
+- Ordinary Qwen, Flash-Next and DeepSeek V4 profiles now carry their
+  backend's default token limit and longest decoded piece (computed once at
+  load); the output protocol's tool-block ceiling is the resolved limit x
+  longest piece x 3 (UTF-8 replacement), as GLM's (`974271fa`, `caacb6d1`;
+  cx jam and reviews). Normalization refuses an uncomputable ceiling (400)
+  wherever the protocol parses tools (always for ordinary Qwen and
+  Flash-Next); the protocol fails closed otherwise; the backends resolve
+  their token limit through the same helper.
+- A block past its ceiling fails the turn as a typed 500 internal
+  accounting error (not pressure, no raw-text fallback); reservations never
+  pass the ceiling. With packet 2's admission, the Qwen/DS4 tool block is
+  bounded both by accepted length and by fresh headroom.
+- Scope: the retained tool-block text; UTF-8 assembly, held-back visible
+  text and the first marker's copy happen before the block's admission.
+  Remaining #14 items: K2 and Muse tool buffers, response accumulation and
+  streaming retention, trace bytes, K2's schema-work budget.
+
 ## 2026-10-08 - #14 Output Memory, Packet 2: Qwen-XML and DeepSeek-DSML Tool Buffers Admitted
 
 - Measured first (`c0019d12`): Qwen XML and DS4 DSML tool blocks of GLM's

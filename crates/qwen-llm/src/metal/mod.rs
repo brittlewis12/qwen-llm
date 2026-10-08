@@ -296,6 +296,7 @@ mod encoder;
 mod expert;
 mod gdn;
 mod indexer_pool;
+pub(crate) mod iq3_s_down_retile;
 mod kda;
 mod keep_alive;
 mod latent;

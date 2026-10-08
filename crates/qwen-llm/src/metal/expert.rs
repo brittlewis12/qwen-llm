@@ -354,6 +354,39 @@ pub fn encode_grouped_routed_experts(
     rows: usize,
     clamp: f32,
 ) -> Result<(), MetalError> {
+    encode_grouped_routed_experts_with_down_policy(
+        ctx,
+        enc,
+        b,
+        hidden,
+        ffn,
+        experts,
+        top_k,
+        rows,
+        clamp,
+        GroupedDownPolicy::Incumbent,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GroupedDownPolicy {
+    Incumbent,
+    Iq3SSmallCounts,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_grouped_routed_experts_with_down_policy(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    b: &GroupedExperts<'_>,
+    hidden: usize,
+    ffn: usize,
+    experts: usize,
+    top_k: usize,
+    rows: usize,
+    clamp: f32,
+    down_policy: GroupedDownPolicy,
+) -> Result<(), MetalError> {
     const K: &str = "grouped_routed_experts";
     require_serial(K, enc)?;
     if rows == 0 || top_k == 0 || top_k > ROUTE_MAX_TOP_K {
@@ -422,6 +455,24 @@ pub fn encode_grouped_routed_experts(
         shape: vec![t.n_elements()],
         ..t.clone()
     };
+    let down_inner = flat(b.inner);
+    let down_out = flat(b.slot_out);
+    let prepared_down = match down_policy {
+        GroupedDownPolicy::Incumbent => None,
+        GroupedDownPolicy::Iq3SSmallCounts => super::iq3_s_down_retile::prepare_small_counts(
+            ctx,
+            enc,
+            b.down_bank,
+            &down_inner,
+            b.counts,
+            b.slots,
+            &down_out,
+            ffn,
+            hidden,
+            experts,
+            rows,
+        )?,
+    };
     encode_moe_route_bucket_slots_f32(
         ctx,
         enc,
@@ -448,7 +499,9 @@ pub fn encode_grouped_routed_experts(
         rows,
         clamp,
     )?;
-    if b.down_bank.dtype == GgmlType::IQ4_XS {
+    if let Some(down) = prepared_down {
+        down.encode()?;
+    } else if b.down_bank.dtype == GgmlType::IQ4_XS {
         encode_moe_down_iq4_xs_f32_grouped_slots(
             ctx,
             enc,

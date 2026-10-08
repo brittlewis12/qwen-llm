@@ -34,25 +34,37 @@ Its disk-only native FP8 Engram and exact decoder dependency-suffix code are now
 inspectable. Compare total prefill plus residency transitions and following
 decode; the screenshot's 800 tok/s excludes the reported eight-second switch.
 
-## GLM / Flash-Next Prefill Lane — 2026-10-07
+## GLM / Flash-Next Prefill Lane — 2026-10-08
 
 The active focus of this lane is prefill throughput and TTFT. The measured
 force-rank, raw attempts, limits and diagnostic harnesses are in
 `docs/bench/2026-10-07-glm-flash-prefill-map/README.md`.
 
-1. **Router N2045 landed:** about 7% lower warm whole4096 GPU latency on UD
-   and GSQ with the planner unchanged. Then measure
-   the remaining frontier-scheduling benefit. Mixed suffix diagnostic saves
-   790 ms UD / 891 ms GSQ; these are not full-request speedup measurements.
-2. Density-aware expert down (GLM first) and cohort-specific Flash experts.
-   GLM active N32 panels are only 43.85% occupied at 512 rows; recoverable time
-   needs actual-route kernel replay, not an occupancy-as-speedup assumption.
-3. **Narrow GLM router transfer landed:** final guarded packet saves 1.66%
-   GPU at 512 and 1.43% at 128 (earlier 2.85%/1.51%); 32 stays incumbent.
-4. GLM 128-row absorption tails: ordinary ragged-prefill sweep locates a
-   boundary penalty; isolate it before writing a tail-safe grouped kernel.
-5. Flash selected-QSA leaf attribution, then GDN/KDA preparation. Do not fund
-   a scan/attention rewrite from decode timings or whole-mixer budgets.
+1. Flash residual frontier scheduling: ordinary 2048+3+2045 versus 2048+2048
+   with production routers in both arms. N2045 router transfer already saves
+   about 7% whole4K on UD/GSQ. Old mixed-suffix gains and router-disabled
+   199/282 ms residuals do not establish today's incremental saving. Require
+   repeatable whole-call conversion (~1%+) before deeper qualification.
+2. GLM ragged absorption/expansion: N127/N129 remain about 65-82 ms slower
+   than N128 after expert retile. Isolate bindings before assigning causality
+   or writing a tail-safe kernel; this is not an aligned-4K saving claim.
+3. Flash selected-QSA leaf attribution: GSQ layer7 mixer was 33.87 ms dense
+   versus 134.61 ms selected. Separate projection, selection, QK and value;
+   whole-mixer time is not the budget for an individual kernel.
+4. GLM gate/up, then Flash experts by actual dtype/density cohort. Neither
+   retained Flash artifact has IQ3_S down banks, so the GLM shader has no
+   direct coverage. Existing Flash IQ4_NL retile is already qualified at
+   N512/527; establish complete-path conversion before widening its scope.
+5. GDN/KDA preparation including state update before recurrence redesign.
+
+Completed: guarded GLM IQ3_S SmallCounts down at actual rows 32-512, retaining
+generic for counts 17+. Two-corpus final production screen saves 8.73-10.89%
+at N32/128, 4.25-4.33% N512 and 2.71-3.61% whole4K; earlier domain confirms
+interior widths. Exact/other families unchanged. Packet:
+`docs/bench/2026-10-08-glm-iq3-down-retile/README.md`.
+The narrow GLM router transfer also landed (1.43% N128, 1.66% N512).
+For requests wholly beyond the dense frontier, selected QSA ranks first;
+for fresh short requests, expert-width coverage outranks frontier scheduling.
 
 This is a prefill-lane ordering, not a cancellation of other owners' product,
 snapshot or decode work below. No candidate defaults changed in the research
@@ -60,7 +72,7 @@ packet. Cold placement, avoided prefill and warm engine throughput stay separate
 
 The follow-up router promotion and unchanged-schedule full-request evidence
 are in `docs/bench/2026-10-08-prefill-router-transfer/README.md`. These small
-transfers are done; density-aware experts are the next implementation focus.
+transfers are done; the expert-down follow-up is also measured and guarded.
 
 Progress against the shared rows below: #8 now has current per-command screens
 for UD and GSQ, with accepted GSQ attribution and retained rejected UD observers.

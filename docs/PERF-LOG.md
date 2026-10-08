@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-08 - GLM Sparse IQ3_S Expert Down Converts to Whole-Prefill Gains
+
+- GLM Fast now selects M128/N16 down for expert counts 1-16, retaining
+  generic down for counts 17+; IQ3_S K2048/M4096/E288, actual rows 32-512.
+  Exact, other families/dtypes/widths stay unchanged. Checked capability
+  fallback precedes grouped dispatch; no new production allocation.
+- Two-corpus domain screen saves 7.34-10.93% GPU at sampled N32-256,
+  3.44-4.15% at N512 and 3.84-4.05% on ordinary eight-chunk 4K calls.
+  Final production-versus-forced-incumbent packet confirms 8.73-10.89%
+  at N32/128, 4.25-4.33% N512, 2.71-3.61% 4K (~0.59-0.78 s).
+  The lower 4K result has drift; all paired GPU and wall comparisons win.
+- Endpoint and four-token teacher-forced continuation comparisons match:
+  120 domain and 96 final comparisons, including incumbent-repeat controls.
+  This does not requalify Fast versus Exact or impose a bit-equality gate.
+- Eight leased Metal-validation primitive/fallback/isolation tests, family
+  policy and diagnostic CPU tests, release build/non-test check and independent
+  cx review pass. Shared GPU work waited for the quality evaluation lease.
+- Evidence and retained negative concentrated-route controls:
+  `docs/bench/2026-10-08-glm-iq3-down-retile/README.md`.
+  Next: Flash scheduling on the promoted-router baseline, GLM ragged
+  absorption/expansion, then Flash selected-QSA leaf attribution.
+
 ## 2026-10-08 - Existing Router Kernels Reach Flash Tails and GLM Packed Chunks
 
 - Flash-Next now admits strict E8P32 at N2045, without changing the

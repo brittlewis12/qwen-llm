@@ -14,9 +14,9 @@
 
 use super::*;
 use crate::metal::{
-    GroupedExperts, encode_grouped_routed_experts, encode_indexer_append_rows, encode_kda_prefill,
-    encode_mhc4_post_rows, encode_mhc4_repeat_rows, encode_rms_norm_mul_rows_f32,
-    encode_route_learned_rows,
+    GroupedDownPolicy, GroupedExperts, encode_grouped_routed_experts_with_down_policy,
+    encode_indexer_append_rows, encode_kda_prefill, encode_mhc4_post_rows, encode_mhc4_repeat_rows,
+    encode_rms_norm_mul_rows_f32, encode_route_learned_rows,
 };
 use objc2_metal::MTLComputePipelineState;
 
@@ -24,6 +24,10 @@ use objc2_metal::MTLComputePipelineState;
 #[cfg(test)]
 #[path = "tests/router_prefill.rs"]
 mod router_prefill;
+
+#[cfg(test)]
+#[path = "tests/expert_down.rs"]
+mod expert_down;
 
 /// Arithmetic lineage of packed prefill.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -33,6 +37,25 @@ pub enum PackedLineage {
     Fast,
     /// Decode kernels per row: identical to serial decode, slower.
     Exact,
+}
+
+fn grouped_down_policy(
+    lineage: PackedLineage,
+    dtype: GgmlType,
+    ffn: usize,
+    hidden: usize,
+    experts: usize,
+    rows: usize,
+) -> GroupedDownPolicy {
+    if lineage == PackedLineage::Fast
+        && dtype == GgmlType::IQ3_S
+        && (ffn, hidden, experts) == (2048, 4096, 288)
+        && (32..=512).contains(&rows)
+    {
+        GroupedDownPolicy::Iq3SSmallCounts
+    } else {
+        GroupedDownPolicy::Incumbent
+    }
 }
 
 // Measured release geometry and widths; this is not a broad size threshold.
@@ -715,7 +738,7 @@ impl Glm5NextSession<'_> {
                             )?;
                         }
                     } else {
-                        encode_grouped_routed_experts(
+                        encode_grouped_routed_experts_with_down_policy(
                             ctx,
                             &enc,
                             &GroupedExperts {
@@ -739,6 +762,16 @@ impl Glm5NextSession<'_> {
                             k,
                             rows,
                             c.swiglu_clamp,
+                            grouped_down_policy(p.lineage, moe.down_experts.dtype, f, h, e, rows),
+                        )?;
+                        #[cfg(test)]
+                        expert_down::after_grouped(
+                            ctx,
+                            &enc,
+                            index,
+                            rows,
+                            moe.down_experts.dtype,
+                            p,
                         )?;
                     }
                     let sf = c.shared_expert_ffn_size as usize;
@@ -831,6 +864,8 @@ impl Glm5NextSession<'_> {
         router_prefill::record_completed_command_gpu_time(|| {
             (command.GPUStartTime(), command.GPUEndTime())
         });
+        #[cfg(test)]
+        expert_down::record_completed_command(|| (command.GPUStartTime(), command.GPUEndTime()));
         Ok(())
     }
 
@@ -1394,5 +1429,78 @@ impl Glm5NextSession<'_> {
             start += n;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod down_policy_tests {
+    use super::*;
+
+    #[test]
+    fn iq3_s_down_policy_uses_actual_command_width_and_fast_lineage() {
+        for rows in 0..=1024 {
+            let expected = if (32..=512).contains(&rows) {
+                GroupedDownPolicy::Iq3SSmallCounts
+            } else {
+                GroupedDownPolicy::Incumbent
+            };
+            assert_eq!(
+                grouped_down_policy(PackedLineage::Fast, GgmlType::IQ3_S, 2048, 4096, 288, rows),
+                expected,
+                "rows={rows}"
+            );
+            assert_eq!(
+                grouped_down_policy(PackedLineage::Exact, GgmlType::IQ3_S, 2048, 4096, 288, rows),
+                GroupedDownPolicy::Incumbent,
+                "Exact rows={rows}"
+            );
+        }
+        for rows in [4096, usize::MAX] {
+            assert_eq!(
+                grouped_down_policy(PackedLineage::Fast, GgmlType::IQ3_S, 2048, 4096, 288, rows),
+                GroupedDownPolicy::Incumbent
+            );
+        }
+    }
+
+    #[test]
+    fn iq3_s_down_policy_preserves_other_geometries_and_dtypes() {
+        for rows in [32, 64, 127, 128, 129, 256, 512] {
+            for (ffn, hidden, experts) in [
+                (2047, 4096, 288),
+                (2049, 4096, 288),
+                (2048, 4095, 288),
+                (2048, 4097, 288),
+                (2048, 4096, 287),
+                (2048, 4096, 289),
+            ] {
+                assert_eq!(
+                    grouped_down_policy(
+                        PackedLineage::Fast,
+                        GgmlType::IQ3_S,
+                        ffn,
+                        hidden,
+                        experts,
+                        rows
+                    ),
+                    GroupedDownPolicy::Incumbent
+                );
+            }
+            for dtype in [
+                GgmlType::F32,
+                GgmlType::F16,
+                GgmlType::IQ2_S,
+                GgmlType::IQ3_XXS,
+                GgmlType::IQ4_XS,
+                GgmlType::Q2_0,
+                GgmlType::Q4_K,
+                GgmlType::Q8_0,
+            ] {
+                assert_eq!(
+                    grouped_down_policy(PackedLineage::Fast, dtype, 2048, 4096, 288, rows),
+                    GroupedDownPolicy::Incumbent
+                );
+            }
+        }
     }
 }

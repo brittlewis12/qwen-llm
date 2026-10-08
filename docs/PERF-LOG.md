@@ -6,32 +6,42 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
-## 2026-10-08 - #12 GLM Fast Prefill Passes a Preregistered Quality Cohort; Drift Traced to Half Precision as a Class
+## 2026-10-08 - #12 GLM Fast Prefill Passes a Preregistered Quality Cohort; Half-Rounded Activations Alone Reproduce Its Drift
 
 - **Quality** (`docs/bench/2026-10-08-glm53-fast-quality/`; cohort and
   limits committed before the GPU run, analysis amended after cx review and
   before viewing): Fast at 512 rows vs Exact on 38 continuation items from
   22 repository documents (prose, code, long past the sparse frontier).
-  Overall NLL +0.0004 nats/token (central 90% [-0.0039, +0.0046], limit
-  0.005); every stratum within 0.010; top-1 accuracy unchanged; tool screen
-  12/12 greedy and 1.00 sampled for both lineages. QUALIFIES. Fast at 97
-  rows passes overall; its long stratum is inconclusive.
-- **Mechanism** (rounding probe): Exact with only its activations rounded
-  through half precision drifts from Exact by worst KL 0.164 (H2) and
-  0.154 (H5), against Fast's 0.113 and 0.095; Fast is as far from rounded
-  Exact as each is from Exact. Drift of this size is the model's
-  sensitivity to any half-precision step; F32 staging would remove one
-  source of the class, not the class. The F32-staging prototype is not
-  pursued on this evidence.
-- **Policy position** (not yet adopted): keep Fast as serve's default and
-  replace the one-prompt agreement bound (KL 2e-2, regret 0.2) with
-  separately stated properties: bitwise reuse and restore within a lineage
-  and schedule; Exact bitwise and selectable per request
-  (`x_qwen.prefill_lineage`, `43d344a5`); quality non-inferiority on the
-  preregistered cohort for any Fast change that is not bit-identical;
-  Fast-vs-Exact and warm-vs-cold drift of the measured class accepted and
-  reported; a tripwire on the frozen natural cases above about twice the
-  half-rounding drift.
+  Overall NLL +0.0004 nats/token (central 90% [-0.0039, +0.0046]; the upper
+  bound 0.0046 sits close to the 0.005 limit); every stratum within 0.010;
+  top-1 accuracy unchanged; tool screen 12/12 greedy and 1.00 sampled for
+  both lineages. QUALIFIES on this cohort and screen, not as general
+  answer-quality equivalence. Fast at 97 rows passes overall; its long
+  stratum is inconclusive.
+- **Mechanism** (rounding probe, two frozen cases): Exact with only its
+  activations rounded through half precision drifts from Exact by worst KL
+  0.164 (H2) and 0.154 (H5), against Fast's 0.113 and 0.095; Fast is as far
+  from rounded Exact as each is from Exact. Activation rounding alone is a
+  sufficient source of drift of this size; its share within Fast and what
+  F32 staging would leave are unmeasured. The F32-staging experiment is
+  deprioritized given the cohort result, not refuted.
+- **Policy position** (proposed, not adopted; reviewed by cx 01a10cc):
+  keep Fast as serve's default and replace the one-prompt agreement bound
+  (KL 2e-2, regret 0.2) with separate properties. Bitwise: reuse,
+  cancellation-resume and snapshot restore equal the uninterrupted run
+  within one lineage and one schedule (segmentation and serial-versus-packed
+  spans); Exact equals token-by-token decoding and stays selectable per
+  request (`x_qwen.prefill_lineage`, `43d344a5`); bit-identity claims for
+  Fast kernel changes are shown. Gate: any Fast change or new schedule that
+  is not bit-identical passes the preregistered cohort's limits, with a
+  fresh holdout for substantial changes (this cohort is now visible).
+  Accepted and reported: Fast-vs-Exact and warm-vs-cold drift of the
+  measured class (worst-position KL to ~0.2, flips with regret up to 1.50).
+  Investigation trigger (explicitly chosen and provisional, not a derived
+  envelope): on the frozen natural cases, worst KL above ~0.33 (twice the
+  half-rounding drift), with per-case baselines and both choice regrets
+  kept beside it; non-finite values always fail. DFlash keeps its own
+  serial-equivalent verification requirement.
 - Evaluated before the sparse IQ3_S down retile landed; that packet observed
   bit-identical outputs, so the results are expected to carry over.
 
@@ -65,10 +75,11 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   `17ebacd4`, the never-merged directions lens work plus GLM sites).
 - Sweep (`docs/bench/2026-10-08-glm53-directions/`): projection at the
   mixer and shared-expert outputs of blocks 15-36, 19 doses from -3 to 6,
-  8 prompts, prompt token IDs equal to llama.cpp's. Against the archived
-  adapter sweep on the same IQ3_XXS weights: labels 152/152, every flip
-  interval identical, first token 148/152 (near-ties), 8-token text
-  137/152; P("I") logprob difference median 0.011, maximum 0.64.
+  8 prompts, prompt token IDs equal to the reconstructed archived
+  rendering tokenized by llama.cpp. Against the archived adapter sweep on
+  the same IQ3_XXS weights: labels 152/152, every flip interval identical,
+  first token 148/152 (near-ties), 8-token text 137/152; "I" logprob
+  difference median 0.011, maximum 0.64.
   Behavioral concordance; no cross-engine numerical budget was calibrated.
 
 ## 2026-10-08 - MLA Tail Experiment Retained Off; Native IQ Capacity Queued

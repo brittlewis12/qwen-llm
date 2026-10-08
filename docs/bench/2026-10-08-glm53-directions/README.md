@@ -9,8 +9,8 @@ Answer: behaviorally, yes. At all 19 doses on all 8 prompts, the two engines
 agree on every regex label (152/152) and on every flip interval, by both
 signals. The first generated token agrees at 148/152 points; the four
 disagreements are near-ties (top two within 0.3 nats in both engines). The
-full 8-token text agrees at 137/152. The probability of a first token "I"
-agrees to a median 0.011 nats (90th percentile 0.22, maximum 0.64 at
+full 8-token text agrees at 137/152. The log-probability of a first token
+"I" differs by a median 0.011 (90th percentile 0.22, maximum 0.64 at
 P ~ 5e-4). This is exploratory concordance: no cross-engine numerical
 budget was calibrated in advance, so the numbers above are descriptive, not
 a gate.
@@ -20,9 +20,9 @@ a gate.
 `/Volumes/wdblack/weights-archive/glm-5.3-flash-huihui-rank1/`
 (`PROVENANCE.md`, `scripts/sweep.py`, `results/sweep-iq3xxs.json`): a
 published edit of GLM-5.3-Flash changes 44 Q8_0 tensors, the attention
-output and shared-expert down projections of blocks 15-36, each by a rank-1
-update with one shared unit direction r: `W' = W - alpha r r^T W`,
-alpha = 2.3973. The study rebuilt it as a llama.cpp adapter (A = r^T W from
+output and shared-expert down projections of blocks 15-36, each by an
+approximately rank-1 update (~98%, the rest requantization residual) with
+one shared unit direction r: `W' ~ W - alpha r r^T W`, alpha = 2.3973. The study rebuilt it as a llama.cpp adapter (A = r^T W from
 the IQ3_XXS weights, B = -alpha r) and swept its scale over 19 doses from -3
 to 6 on six refusal-type prompts and two ordinary ones, greedy, 8 tokens,
 recording the first token's top ten logprobs (three decimals) and a regex
@@ -36,7 +36,7 @@ label (refuse, hedge, comply).
 | Edit | adapter `B(Ax)` at scale dose/2.397349 | `y <- y - dose r (r . y)` on the mixer output and the shared-expert output of blocks 15-36, before the mHC post and the routed/shared add, at every prompt and generated position (`plan-template.json`) |
 | Dose 0 | adapter loaded at scale 0 | coefficient-zero operations filtered; none applied |
 | Direction | `huihui-refusal-direction.npy` | its payload unchanged (`r.f32le`, F32 x 4096, BLAKE3 `0a37034a...`); L2 norm 1 within 1e-10, so `unit_l2` changes nothing |
-| Prompt | template via `/apply-template`, effort low, `</think>` appended | `--message-mode low --assistant-prefill '{"channel":"final","text":""}'` (appends exactly `</think>`); token IDs equal llama.cpp's for all 8 (`prompt-check.json`, `scripts/reference/glm53/directions_prompt_check.py`) |
+| Prompt | template via `/apply-template`, effort low, `</think>` appended | `--message-mode low --assistant-prefill '{"channel":"final","text":""}'` (appends exactly `</think>`); token IDs equal, for all 8, to the archived procedure reconstructed offline (the GGUF's embedded template rendered with effort low, `</think>` appended, tokenized by llama.cpp's `llama-tokenize`; `prompt-check.json`, `scripts/reference/glm53/directions_prompt_check.py`) |
 | Decoding | greedy, 8 tokens, one slot, no prompt cache | greedy, 8 tokens, serial prompt and decode (`glm5_next_serial_interventions`) |
 | Record | top 10 (rounded) | top 10 and tracked token 40 ("I"), unrounded |
 

@@ -58,7 +58,10 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   the sparse frontier (Exact n = 2051-2052, Fast 2050-2054), a cancelled
   prefill's committed boundary and a recycled destination of another
   capacity; refusals for lineage, weights instance, policy version and
-  capacity.
+  capacity. A session refuses a lineage change once it has committed
+  tokens (review fix), so a capture cannot carry one lineage's state under
+  the other's label. Rerun on the integrated tree (`652742b1`): snapshot
+  and intervention gates pass, as do the lib (1,316) and CLI suites.
 - Size: about 0.14 GiB of fixed recurrent state plus ~11.7 KiB per token
   (0.14 GiB at 100 tokens, 0.17 GiB at 2,052; estimator 0.27 GiB at the
   11,129-token instructions-and-tools prefix #13 measured replaying in ~61 s).

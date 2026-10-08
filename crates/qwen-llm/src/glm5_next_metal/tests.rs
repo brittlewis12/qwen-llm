@@ -2,6 +2,8 @@ use super::*;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+mod natural;
+
 const ORACLE_DEFAULT: &str =
     "/Volumes/wdblack/weights-archive/.fetch/analysis/runs/glm53-oracle/ckpt-v1";
 

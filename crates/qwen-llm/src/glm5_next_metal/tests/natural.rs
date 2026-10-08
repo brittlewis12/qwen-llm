@@ -38,11 +38,13 @@ use std::io::Write as _;
 const FIXTURE: &str = "../../scripts/reference/glm53/reuse-natural-v1.json";
 const CONTINUATION: usize = 32;
 const SCHEDULES: [usize; 2] = [512, 97];
-/// The Fast policy of `packed_prefill_matches_serial_on_long_context`
-/// (`LOGIT_KL`, `TOP1_REGRET`): KL(reference || fast) per position, and a
-/// top-1 flip only to a near tie, both regrets within the bound.
-const FAST_KL: f64 = 2e-2;
-const FAST_REGRET: f32 = 0.2;
+/// The committed 2026-10-07 natural-reuse report: the immutable baseline
+/// the adopted map #12 policy reports drift changes against (hash-checked).
+const BASELINE: &str = "../../docs/bench/2026-10-07-glm53-natural-reuse/report.json";
+const BASELINE_SHA256: &str = "1c58578eb981fef7695f1d71ac7b26f08e60bbb713bacddfa30aa66404bf58c1";
+/// The schedule the investigation trigger applies to (serve's); other
+/// schedules are diagnostic.
+const TRIGGER_ROWS: usize = 512;
 /// Released `<|observation|>`: a turn that called tools ends with it.
 pub(super) const OBSERVATION: u32 = 154_829;
 /// The preregistered cohort, in order. A full qualification needs all of it.
@@ -905,37 +907,30 @@ struct Run {
     ms: f64,
 }
 
-/// Fast policy against the Exact reference; records violations.
-fn fast_policy(
+/// Fast drift from the Exact reference (adopted map #12 policy): reported,
+/// with the change from the case's committed baseline; at the trigger
+/// schedule a worst-position KL above the trigger records an investigation
+/// failure.
+fn fast_drift(
     label: &str,
     reference: &[Vec<f32>],
     fast: &[Vec<f32>],
+    baseline: Option<f64>,
+    trigger: bool,
     failures: &mut Vec<String>,
 ) -> Value {
-    assert_eq!(reference.len(), fast.len(), "{label}: position count");
-    let mut kls = Vec::with_capacity(fast.len());
-    let mut flips = Vec::new();
-    let mut pass = true;
-    for (position, (r, f)) in reference.iter().zip(fast).enumerate() {
-        assert_finite(&format!("{label} reference {position}"), r);
-        assert_finite(&format!("{label} fast {position}"), f);
-        let kl = kl_divergence(r, f);
-        let (r0, r1) = choice_regret(r, f);
-        if !within(kl, FAST_KL) || !(r0 <= FAST_REGRET && r1 <= FAST_REGRET) {
-            pass = false;
-            failures.push(format!("{label} position {position}: KL(exact||fast) {kl:.3e} (bound {FAST_KL:e}), regret {r0:.3}/{r1:.3} (bound {FAST_REGRET})"));
-        }
-        if (r0, r1) != (0.0, 0.0) {
-            flips.push(json!([position, r0, r1]));
-        }
-        kls.push(kl);
-    }
-    let (worst_kl, at) = worst(kls.iter().copied());
-    let mean = kls.iter().sum::<f64>() / kls.len() as f64;
-    eprintln!(
-        "  {label}: worst KL(exact||fast) {worst_kl:.3e} at {at}, mean {mean:.3e}, flips {flips:?}, pass {pass}"
-    );
-    json!({"worst_kl": worst_kl, "worst_at": at, "mean_kl": mean, "flips": flips, "kl": kls, "pass": pass})
+    let drift = if trigger {
+        fast_drift_with_trigger(label, reference, fast, failures)
+    } else {
+        let drift = Drift::measure(label, reference, fast);
+        drift.print(&format!("{label} vs Exact (diagnostic)"));
+        drift
+    };
+    let mut value = drift.json();
+    value["trigger"] = json!({"applies": trigger, "tripped": trigger && drift.trips()});
+    value["baseline_worst_kl"] = json!(baseline);
+    value["change_from_baseline"] = json!(baseline.map(|b| drift.worst_kl - b));
+    value
 }
 
 /// Phase 2. Reads the fixture (`GLM53_REUSE_NATURAL` or the committed path),
@@ -987,6 +982,23 @@ fn reuse_natural_evaluate() {
         fixture["retained_weight_bytes"].as_u64(),
         Some(weights.retained_bytes)
     );
+    // The immutable baseline for reported changes.
+    let baseline_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(BASELINE);
+    let baseline_bytes = std::fs::read(&baseline_path)
+        .unwrap_or_else(|e| panic!("{}: {e}", baseline_path.display()));
+    assert_eq!(
+        sha256_hex(&baseline_bytes),
+        BASELINE_SHA256,
+        "the committed baseline report changed"
+    );
+    let baseline: Value = serde_json::from_slice(&baseline_bytes).unwrap();
+    let baseline_kl = |id: &str, rows: usize, arm: &str| -> Option<f64> {
+        baseline["cases"]
+            .as_array()?
+            .iter()
+            .find(|case| case["id"] == id)?["fast"][rows.to_string()][arm]["worst_kl"]
+            .as_f64()
+    };
     let mut failures = Vec::new();
     let mut reports = Vec::new();
     for case in &frozen {
@@ -1084,28 +1096,32 @@ fn reuse_natural_evaluate() {
                 "  fast {rows}: cold {:.0} ms, warm {:.0} ms",
                 fast_cold.ms, fast_warm.ms
             );
-            let cold_policy = fast_policy(
+            let trigger = rows == TRIGGER_ROWS;
+            let cold_drift = fast_drift(
                 &format!("{id} fast cold {rows}"),
                 &reference.logits,
                 &fast_cold.logits,
+                baseline_kl(id, rows, "cold"),
+                trigger,
                 &mut failures,
             );
-            let warm_policy = fast_policy(
+            let warm_drift = fast_drift(
                 &format!("{id} fast warm {rows}"),
                 &reference.logits,
                 &fast_warm.logits,
+                baseline_kl(id, rows, "warm"),
+                trigger,
                 &mut failures,
             );
-            let (kl, regret, agree, bitwise) = reuse_gate(
+            let (kl, regret, agree, bitwise) = warm_cold_report(
                 &format!("{id} fast warm vs cold {rows}"),
                 positions,
                 &fast_cold.logits,
                 &fast_warm.logits,
-                &mut failures,
             );
             fast.insert(rows.to_string(), json!({
-                "cold": cold_policy, "warm": warm_policy,
-                "reuse_gate": {"worst_kl": kl, "worst_regret": regret, "top1_agree": agree, "bitwise": bitwise},
+                "cold": cold_drift, "warm": warm_drift,
+                "warm_vs_cold": {"worst_kl_either_way": kl, "worst_regret": regret, "top1_agree": agree, "bitwise": bitwise},
                 "chunk_starts": {"cold": starts(0, turn2.len(), rows),
                     "warm": [starts(0, turn1.len(), rows), starts(join, turn2.len(), rows)]},
                 "ms": {"cold": fast_cold.ms, "warm": fast_warm.ms},
@@ -1117,15 +1133,21 @@ fn reuse_natural_evaluate() {
     }
     let partial = subset.is_some();
     let report = json!({
-        "schema": "glm53.reuse_natural_report.v1",
+        "schema": "glm53.reuse_natural_report.v2",
         "partial": partial,
         "fixture": fixture_path.display().to_string(),
         "fixture_sha256": sha256_hex(&fixture_bytes),
         "fixture_producer": fixture["producer"],
         "evaluator_commit": evaluator,
-        "policy": {"fast_vs_exact": {"kl_reference_fast": FAST_KL, "regret": FAST_REGRET},
-            "reuse_gate": {"kl_both_ways": 2e-2, "regret": 0.2},
-            "exact": "bitwise logits and persistent state"},
+        "policy": {
+            "adopted": "map #12, PERF-LOG 2026-10-08: Fast drift is reported; quality is gated by the preregistered cohort",
+            "fast_vs_exact": {"reported": "KL(exact||fast) per position, flips by argmax inequality with both regrets",
+                "investigation_trigger": {"worst_kl_exact_fast_above": FAST_DRIFT_TRIGGER_KL,
+                    "rows": TRIGGER_ROWS, "arms": ["cold", "warm"],
+                    "meaning": "investigate; not a quality verdict"}},
+            "warm_vs_cold": "reported",
+            "exact": "bitwise logits and persistent state (hard)",
+            "baseline": {"path": BASELINE, "sha256": BASELINE_SHA256}},
         "schedules": SCHEDULES, "cases": reports, "failures": failures,
     });
     std::fs::write(

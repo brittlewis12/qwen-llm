@@ -1,14 +1,17 @@
-//! Map #12 on natural trajectories (design jam with cx 01a10cc, 2026-10-07).
-//! Two phases, so every continuation is frozen before Fast is evaluated:
+//! Map #12 on natural trajectories (design jam and harness review with cx
+//! 01a10cc, 2026-10-07). Two phases, so every continuation is frozen before
+//! Fast is evaluated:
 //!
 //! 1. [`reuse_natural_generate`] (Exact lineage only) renders each
 //!    preregistered case's first turn, generates the model's own turn
 //!    (greedy, or seeded release sampling for the max-effort case), renders
 //!    the conversation again with the next turn, and records an Exact greedy
 //!    continuation. It writes the fixture (`scripts/reference/glm53/
-//!    reuse-natural-v1.json`), which is committed before phase 2 runs.
-//!    Rejections (token cap, grammar, round trip, geometry) are recorded;
-//!    replacements come only from each case's ordered variant list.
+//!    reuse-natural-v1.json`) and an attempt journal beside it. Rejections
+//!    (token cap, grammar, round trip, geometry) are journaled as they
+//!    happen; replacements come only from each case's ordered variant list.
+//!    Serve's CPU round trip (`qwen-cli`, `serve::render_glm5_next` tests)
+//!    checks the fixture before it is committed and before any Fast run.
 //! 2. [`reuse_natural_evaluate`] replays the frozen tokens. Exact cold is the
 //!    reference R. Exact warm must equal R bitwise (logits, and persistent
 //!    state at the join and at the end) at both chunk schedules, and Exact
@@ -17,7 +20,9 @@
 //!    must meet the frozen reuse gate against Fast cold at the same schedule.
 //!
 //! Emitted and consumed tokens are distinct, as in serve: a sampled stop is
-//! emitted but never forwarded, and the rendered next turn supplies it.
+//! emitted but never forwarded, and the rendered next turn supplies it. The
+//! generated text is split as serve's pre-opened partition splits it (one
+//! repeated leading `<think>` is dropped).
 //!
 //! [`packed_lineage_prefill_cost`] prices the Exact lineage against Fast.
 
@@ -27,6 +32,7 @@ use crate::glm5_next_chat::{
 };
 use crate::sampling::{Sampler, SamplingConfig};
 use serde_json::{Value, json};
+use std::io::Write as _;
 
 /// Relative to this crate's manifest directory.
 const FIXTURE: &str = "../../scripts/reference/glm53/reuse-natural-v1.json";
@@ -39,6 +45,15 @@ const FAST_KL: f64 = 2e-2;
 const FAST_REGRET: f32 = 0.2;
 /// Released `<|observation|>`: a turn that called tools ends with it.
 const OBSERVATION: u32 = 154_829;
+/// The preregistered cohort, in order. A full qualification needs all of it.
+const EXPECTED_CASES: [&str; 6] = [
+    "H1-short-chat",
+    "H2-code-context",
+    "H3-tool-dense",
+    "H4-tool-across-frontier",
+    "H5-long-chat-sparse",
+    "H6-max-sampled-tool",
+];
 
 #[derive(Clone, Copy, Debug)]
 enum Generation {
@@ -74,14 +89,19 @@ impl Generation {
 
     fn describe(self) -> Value {
         let s = self.sampling();
-        json!({"mode": match self { Self::Greedy { .. } => "greedy", Self::Sampled { .. } => "sampled" },
-            "cap": self.cap(), "temperature": s.temperature, "top_k": s.top_k,
-            "top_p": s.top_p, "min_p": s.min_p, "seed": s.seed, "sampler": "qwen_llm::sampling v1"})
+        let mode = match self {
+            Self::Greedy { .. } => "greedy",
+            Self::Sampled { .. } => "sampled",
+        };
+        json!({"mode": mode, "cap": self.cap(), "temperature": s.temperature,
+            "top_k": s.top_k, "top_p": s.top_p, "min_p": s.min_p, "seed": s.seed,
+            "sampler": "qwen_llm::sampling v1"})
     }
 }
 
-/// What the generated turn must look like, and where the conversation must sit
-/// relative to the sparse frontier.
+/// What the generated turn must look like, and where the conversation must
+/// sit relative to the sparse frontier. These are scoped cohort
+/// restrictions, not grammar claims.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Shape {
     /// No tool call; the whole second turn plus continuation stays dense.
@@ -103,14 +123,21 @@ impl Shape {
     }
 }
 
-/// One preregistered prompt. `pad` fits the first turn into a token window
-/// below the frontier (`frontier - hi ..= frontier - lo`) by trimming a
-/// leading passage.
+/// A user turn of a leading passage trimmed (at whitespace, from the front)
+/// until the rendered first turn fits `frontier - window.1 ..=
+/// frontier - window.0` tokens, then the question, which is never trimmed.
+struct Pad {
+    passage: String,
+    question: &'static str,
+    window: (usize, usize),
+}
+
+/// One preregistered prompt.
 struct Variant {
-    label: &'static str,
+    label: String,
     system: Option<&'static str>,
     user: String,
-    pad: Option<(usize, usize)>,
+    pad: Option<Pad>,
     next: String,
     effort: Effort,
     generation: Generation,
@@ -139,11 +166,16 @@ fn currency_tool() -> Value {
             "required": ["amount", "from", "to"]}})
 }
 
-/// The first `chars` characters of `source`, cut at a line boundary.
-fn lines_prefix(source: &str, chars: usize) -> &str {
-    match source[..chars.min(source.len())].rfind('\n') {
-        Some(end) => &source[..end],
-        None => source,
+/// The first `bytes` bytes of `source` (rounded down to a character
+/// boundary), cut at the last line break.
+fn lines_prefix(source: &str, bytes: usize) -> &str {
+    let mut end = bytes.min(source.len());
+    while !source.is_char_boundary(end) {
+        end -= 1;
+    }
+    match source[..end].rfind('\n') {
+        Some(line) => &source[..line],
+        None => &source[..end],
     }
 }
 
@@ -151,22 +183,24 @@ fn lines_prefix(source: &str, chars: usize) -> &str {
 /// case's later variants are used only when an earlier one is rejected.
 fn cohort() -> Vec<Case> {
     let low = |cap| (Effort::Low, Generation::Greedy { cap });
-    let variant =
-        |label, user: String, next: &str, (effort, generation): (Effort, Generation)| Variant {
-            label,
-            system: None,
-            user,
-            pad: None,
-            next: next.to_string(),
-            effort,
-            generation,
-        };
+    let variant = |label: &str,
+                   user: String,
+                   next: &str,
+                   (effort, generation): (Effort, Generation)| Variant {
+        label: label.to_string(),
+        system: None,
+        user,
+        pad: None,
+        next: next.to_string(),
+        effort,
+        generation,
+    };
     let code = lines_prefix(include_str!("../../glm5_next/memory.rs"), 5200);
     let code_b = lines_prefix(include_str!("../../glm5_next/coverage.rs"), 5200);
     let passages = long_qualification_text();
-    let passages = &passages["[gMASK]<sop>".len()..];
+    let passages = passages["[gMASK]<sop>".len()..].to_string();
     let weather_results = "Lisbon forecast. Day 1: 21C, sunny, light wind from the north-west, humidity 55 percent. Day 2: 19C, light rain in the afternoon, wind 20 km/h, humidity 78 percent. ";
-    vec![
+    let cases = vec![
         Case {
             id: "H1-short-chat",
             shape: Shape::ChatDense,
@@ -208,11 +242,15 @@ fn cohort() -> Vec<Case> {
             tools: vec![weather_tool()],
             variants: [("window-a", (400, 460)), ("window-b", (390, 450)), ("window-c", (410, 470))]
                 .into_iter()
-                .map(|(label, pad)| Variant {
-                    label,
+                .map(|(label, window)| Variant {
+                    label: label.to_string(),
                     system: None,
-                    user: format!("{passages}\n\nAfter reading the passages above: what's the weather in Lisbon for the next two days? Use the tool."),
-                    pad: Some(pad),
+                    user: String::new(),
+                    pad: Some(Pad {
+                        passage: passages.clone(),
+                        question: "After reading the passages above: what's the weather in Lisbon for the next two days? Use the tool.",
+                        window,
+                    }),
                     next: weather_results.repeat(12),
                     effort: Effort::Low,
                     generation: Generation::Greedy { cap: 384 },
@@ -237,7 +275,7 @@ fn cohort() -> Vec<Case> {
             variants: [20_261_007u64, 20_261_008, 20_261_009]
                 .into_iter()
                 .map(|seed| Variant {
-                    label: "kyoto",
+                    label: format!("kyoto-seed-{seed}"),
                     system: Some("You are a concise travel assistant."),
                     user: "I'm planning a weekend in Kyoto. Check the weather for Saturday and Sunday, then suggest one indoor and one outdoor activity.".into(),
                     pad: None,
@@ -247,7 +285,13 @@ fn cohort() -> Vec<Case> {
                 })
                 .collect(),
         },
-    ]
+    ];
+    let ids: Vec<&str> = cases.iter().map(|c| c.id).collect();
+    assert_eq!(
+        ids, EXPECTED_CASES,
+        "the cohort and its expected ids differ"
+    );
+    cases
 }
 
 fn render(messages: &[Message], tools: &[ToolDefinition], effort: Effort) -> String {
@@ -304,13 +348,44 @@ fn ids(tokens: &[u32]) -> String {
 fn parse_ids(value: &Value) -> Vec<u32> {
     value
         .as_str()
-        .unwrap()
+        .expect("token ids are a string")
         .split_whitespace()
-        .map(|t| t.parse().unwrap())
+        .map(|t| t.parse().expect("token id"))
         .collect()
 }
 
-/// Exact session of `capacity` positions with `rows`-row chunks.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Identity of the opened artifact from metadata only (no weight bytes are
+/// read): shard file names and lengths, and a digest of the tensor table
+/// (name, dtype, shape, shard, data offset and length of every tensor).
+fn artifact_identity(gguf: &GgufFile) -> Value {
+    let shards: Vec<Value> = gguf
+        .shards
+        .iter()
+        .map(|s| {
+            json!({"file": s.path.file_name().map(|n| n.to_string_lossy().into_owned()),
+                "bytes": s.mmap_len()})
+        })
+        .collect();
+    let mut table = String::new();
+    for t in &gguf.tensors {
+        table.push_str(&format!(
+            "{}\t{:?}\t{:?}\t{}\t{}\t{}\n",
+            t.name, t.dtype, t.shape, t.shard_idx, t.data_offset, t.n_bytes
+        ));
+    }
+    json!({"shards": shards, "tensors": gguf.tensors.len(),
+        "tensor_table_sha256": sha256_hex(table.as_bytes())})
+}
+
+/// Exact or Fast session of `capacity` positions with `rows`-row chunks.
 fn session<'w>(
     ctx: &MetalContext,
     weights: &'w Glm5NextWeights,
@@ -324,14 +399,15 @@ fn session<'w>(
     session
 }
 
-/// The model's own turn after `prompt`: emitted tokens, the stop (if any),
-/// and how many emitted tokens were consumed (forwarded). `Err` on the cap.
+/// The model's own turn after `prompt`: emitted tokens and the stop, if one
+/// ended it (the stop is the last emitted token). `Err` on the cap, with the
+/// emitted tokens.
 fn generate_turn(
     ctx: &MetalContext,
     weights: &Glm5NextWeights,
     prompt: &[u32],
     generation: Generation,
-) -> std::result::Result<(Vec<u32>, Option<u32>), String> {
+) -> std::result::Result<(Vec<u32>, Option<u32>), Vec<u32>> {
     let cap = generation.cap();
     let mut s = session(
         ctx,
@@ -350,17 +426,21 @@ fn generate_turn(
             return Ok((emitted, Some(token)));
         }
         if emitted.len() == cap {
-            return Err(format!("token cap {cap} reached without a stop"));
+            return Err(emitted);
         }
         logits = s.forward(ctx, token).unwrap();
     }
 }
 
-/// Reasoning, content and tool calls of a generated turn's text.
+/// Reasoning, content and tool calls of a generated turn's text, split as
+/// serve's pre-opened partition splits it: one repeated leading `<think>` is
+/// dropped, reasoning ends at the first `</think>`, and the rest is visible
+/// text whose tool block starts at the first `<tool_call>`.
 fn parse_turn(
     text: &str,
     tools: &[ToolDefinition],
 ) -> std::result::Result<(String, String, Vec<ToolCall>), String> {
+    let text = text.strip_prefix(chat::THINK_OPEN).unwrap_or(text);
     let (reasoning, rest) = text
         .split_once(chat::THINK_CLOSE)
         .ok_or("no </think> in the generated turn")?;
@@ -408,8 +488,52 @@ fn natural_continuation(
     (tokens, None)
 }
 
-/// Phase 1. Writes the frozen fixture to `GLM53_REUSE_NATURAL_OUT`; records
-/// the producer from `GLM53_PRODUCER_COMMIT` and `GLM53_PRODUCER_DIRTY`.
+/// Trims `pad.passage` from the front at whitespace boundaries (binary
+/// search: fewer leading bytes, fewer tokens) to the first start whose
+/// rendered first turn is at most `high` tokens; `Err` when that start is
+/// below `low` (the window is not reachable). Deterministic.
+fn fit_padding(
+    pad: &Pad,
+    frontier: usize,
+    count: impl Fn(&str) -> usize,
+) -> std::result::Result<String, String> {
+    let (low, high) = (frontier - pad.window.1, frontier - pad.window.0);
+    let user = |start: usize| format!("{}\n\n{}", &pad.passage[start..], pad.question);
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(
+            pad.passage
+                .char_indices()
+                .filter(|(_, c)| c.is_whitespace())
+                .map(|(i, c)| i + c.len_utf8()),
+        )
+        .filter(|&i| i < pad.passage.len())
+        .collect();
+    let (mut lo, mut hi) = (0usize, starts.len() - 1);
+    if count(&user(starts[hi])) > high {
+        return Err(format!("even the shortest padding exceeds {high} tokens"));
+    }
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if count(&user(starts[mid])) <= high {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    let n = count(&user(starts[lo]));
+    if n < low {
+        return Err(format!(
+            "padding window {low}..={high} not reachable: {n} tokens at the first fitting start"
+        ));
+    }
+    Ok(user(starts[lo]))
+}
+
+/// Phase 1. Writes the fixture to `GLM53_REUSE_NATURAL_OUT` and journals
+/// every attempt to `<out>.attempts.jsonl` as it happens; records the
+/// producer from `GLM53_PRODUCER_COMMIT` and `GLM53_PRODUCER_DIRTY`. When a
+/// case exhausts its variants, an explicitly incomplete fixture is written
+/// before the test fails.
 #[test]
 #[ignore = "generator (map #12 natural trajectories): loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_REUSE_NATURAL_OUT, GLM53_PRODUCER_COMMIT and an idle GPU"]
 fn reuse_natural_generate() {
@@ -417,10 +541,13 @@ fn reuse_natural_generate() {
         PathBuf::from(std::env::var("GLM53_REUSE_NATURAL_OUT").expect("GLM53_REUSE_NATURAL_OUT"));
     let commit = std::env::var("GLM53_PRODUCER_COMMIT").expect("GLM53_PRODUCER_COMMIT");
     let dirty = std::env::var("GLM53_PRODUCER_DIRTY").as_deref() == Ok("1");
+    let journal_path = out.with_extension("attempts.jsonl");
+    let mut journal = std::fs::File::create(&journal_path).unwrap();
     let _lease = production_lease();
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
     let ctx = MetalContext::new().expect("Metal context");
     let gguf = GgufFile::open(&path).unwrap();
+    let identity = artifact_identity(&gguf);
     let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
     let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
     let encode = |text: &str| -> Vec<u32> {
@@ -433,16 +560,35 @@ fn reuse_natural_generate() {
     };
     let frontier = weights.config.sparse_frontier() as usize;
     let pool = weights.config.indexer_pool as usize;
-    let mut cases = Vec::new();
+    let qual: Value = serde_json::from_str(QUAL_V1_MANIFEST).unwrap();
+    let write_fixture = |cases: &[Value], complete: bool| {
+        let fixture = json!({
+            "name": "glm53-reuse-natural-v1",
+            "complete": complete,
+            "purpose": "Map #12 natural trajectories: the model's own turns (Exact lineage) and Exact greedy continuations, frozen before any Fast evaluation; replayed by glm5_next_metal::tests::natural::reuse_natural_evaluate.",
+            "declared_artifact": qual["artifact"],
+            "artifact_identity": identity,
+            "retained_weight_bytes": weights.retained_bytes,
+            "frontier": frontier, "pool": pool, "continuation_max": CONTINUATION,
+            "expected_cases": EXPECTED_CASES,
+            "producer": {"test": "glm5_next_metal::tests::natural::reuse_natural_generate",
+                "commit": commit, "dirty": dirty, "lineage": "exact", "prefill_rows": 512,
+                "renderer": chat::RENDERER, "template_sha256": chat::GGUF_TEMPLATE_SHA256,
+                "journal": journal_path.file_name().map(|n| n.to_string_lossy().into_owned())},
+            "token_encoding": "space-separated token ids",
+            "cases": cases,
+        });
+        std::fs::write(&out, serde_json::to_string_pretty(&fixture).unwrap() + "\n").unwrap();
+    };
+    let mut cases: Vec<Value> = Vec::new();
     for case in cohort() {
         let definitions: Vec<ToolDefinition> = case
             .tools
             .iter()
             .map(|t| ToolDefinition::from_value(t).unwrap())
             .collect();
-        let mut attempts = Vec::new();
         let mut accepted = None;
-        for variant in &case.variants {
+        for (index, variant) in case.variants.iter().enumerate() {
             let started = std::time::Instant::now();
             let first_messages = |user: String| {
                 let mut messages = Vec::new();
@@ -452,85 +598,88 @@ fn reuse_natural_generate() {
                 messages.push(Message::User(user));
                 messages
             };
-            // Fit the first turn into its window by trimming leading text.
-            let mut user = variant.user.clone();
-            if let Some((lo, hi)) = variant.pad {
-                let (low, high) = (frontier - hi, frontier - lo);
-                let mut fitted = None;
-                for _ in 0..48 {
-                    let n = encode(&render(
-                        &first_messages(user.clone()),
+            let mut entry = json!({"case": case.id, "variant_index": index, "variant": variant.label,
+                "effort": variant.effort.as_str(), "generation": variant.generation.describe()});
+            let mut journal_entry = |entry: &mut Value, outcome: &str, detail: Option<String>| {
+                entry["outcome"] = json!(outcome);
+                if let Some(detail) = detail {
+                    eprintln!(
+                        "{} {}: rejected ({outcome}): {detail}",
+                        case.id, variant.label
+                    );
+                    entry["detail"] = json!(detail);
+                }
+                writeln!(journal, "{}", serde_json::to_string(entry).unwrap()).unwrap();
+                journal.flush().unwrap();
+            };
+            let user = match &variant.pad {
+                None => Ok(variant.user.clone()),
+                Some(pad) => fit_padding(pad, frontier, |user| {
+                    encode(&render(
+                        &first_messages(user.to_string()),
                         &definitions,
                         variant.effort,
                     ))
-                    .len();
-                    if (low..=high).contains(&n) {
-                        fitted = Some(user.clone());
-                        break;
-                    }
-                    let excess = n as isize - ((low + high) / 2) as isize;
-                    let mut cut = (excess * 3).clamp(-(user.len() as isize), user.len() as isize);
-                    if cut < 0 {
-                        cut = 0; // never longer than the preregistered text
-                    }
-                    let mut start = cut as usize;
-                    while !user.is_char_boundary(start) {
-                        start += 1;
-                    }
-                    user = user[start..].to_string();
-                }
-                user = fitted.unwrap_or_else(|| {
-                    panic!("{} {}: padding did not converge", case.id, variant.label)
-                });
-            }
-            let turn1_messages = first_messages(user);
-            let turn1 = encode(&render(&turn1_messages, &definitions, variant.effort));
-            let reject = |attempts: &mut Vec<Value>, outcome: &str, detail: String| {
-                eprintln!(
-                    "{} {}: rejected ({outcome}): {detail}",
-                    case.id, variant.label
-                );
-                attempts
-                    .push(json!({"variant": variant.label, "outcome": outcome, "detail": detail}));
+                    .len()
+                }),
             };
-            let (emitted, stop) = match generate_turn(&ctx, &weights, &turn1, variant.generation) {
-                Ok(turn) => turn,
+            let user = match user {
+                Ok(user) => user,
                 Err(detail) => {
-                    reject(&mut attempts, "cap", detail);
+                    journal_entry(&mut entry, "geometry", Some(detail));
                     continue;
                 }
             };
-            // A stop is emitted, never forwarded; everything before it is consumed.
-            let consumed: Vec<u32> = match stop {
-                Some(_) => emitted[..emitted.len() - 1].to_vec(),
-                None => emitted.clone(),
+            let turn1_messages = first_messages(user.clone());
+            let turn1 = encode(&render(&turn1_messages, &definitions, variant.effort));
+            entry["user_sha256"] = json!(sha256_hex(user.as_bytes()));
+            entry["first_turn_tokens"] = json!(turn1.len());
+            let (emitted, stop) = match generate_turn(&ctx, &weights, &turn1, variant.generation) {
+                Ok(turn) => turn,
+                Err(emitted) => {
+                    entry["emitted"] = json!(ids(&emitted));
+                    journal_entry(
+                        &mut entry,
+                        "cap",
+                        Some(format!(
+                            "token cap {} reached without a stop",
+                            variant.generation.cap()
+                        )),
+                    );
+                    continue;
+                }
             };
+            entry["emitted"] = json!(ids(&emitted));
+            entry["stop"] = json!(stop);
+            // A stop is emitted, never forwarded; everything before it is consumed.
+            let consumed: Vec<u32> =
+                emitted[..emitted.len() - usize::from(stop.is_some())].to_vec();
             let consumed_i32: Vec<i32> = consumed.iter().map(|&t| t as i32).collect();
             let text = tokenizer.decode(&consumed_i32);
             let (reasoning, content, calls) = match parse_turn(&text, &definitions) {
                 Ok(parsed) => parsed,
                 Err(detail) => {
-                    reject(&mut attempts, "grammar", detail);
+                    journal_entry(&mut entry, "grammar", Some(detail));
                     continue;
                 }
             };
             let wants_call = case.shape.tools();
             if wants_call && (calls.len() != 1 || stop != Some(OBSERVATION)) {
-                reject(
-                    &mut attempts,
+                journal_entry(
+                    &mut entry,
                     "grammar",
-                    format!(
+                    Some(format!(
                         "{} calls, stop {stop:?}; one call ending at <|observation|> required",
                         calls.len()
-                    ),
+                    )),
                 );
                 continue;
             }
             if !wants_call && !calls.is_empty() {
-                reject(
-                    &mut attempts,
+                journal_entry(
+                    &mut entry,
                     "grammar",
-                    format!("{} unexpected calls", calls.len()),
+                    Some(format!("{} unexpected calls", calls.len())),
                 );
                 continue;
             }
@@ -558,12 +707,12 @@ fn reuse_natural_generate() {
                     .iter()
                     .zip(turn1.iter().chain(&consumed))
                     .position(|(a, b)| a != b);
-                reject(
-                    &mut attempts,
+                journal_entry(
+                    &mut entry,
                     "round_trip",
-                    format!(
+                    Some(format!(
                         "the rendered second turn does not extend the consumed history (first difference at {at:?}; join {join})"
-                    ),
+                    )),
                 );
                 continue;
             }
@@ -577,7 +726,7 @@ fn reuse_natural_generate() {
                 Shape::ToolAny => None,
             };
             if let Some(detail) = geometry_error {
-                reject(&mut attempts, "geometry", detail);
+                journal_entry(&mut entry, "geometry", Some(detail));
                 continue;
             }
             // The stored document must reproduce these messages.
@@ -601,10 +750,11 @@ fn reuse_natural_generate() {
                 turn2.len(),
                 continuation.len()
             );
-            attempts.push(json!({"variant": variant.label, "outcome": "accepted"}));
+            journal_entry(&mut entry, "accepted", None);
             accepted = Some(json!({
                 "id": case.id, "shape": format!("{:?}", case.shape), "variant": variant.label,
-                "effort": variant.effort.as_str(), "generation": variant.generation.describe(),
+                "variant_index": index, "effort": variant.effort.as_str(),
+                "generation": variant.generation.describe(),
                 "conversation": doc,
                 "turn1": ids(&turn1), "emitted": ids(&emitted),
                 "stop": stop, "consumed": consumed.len(),
@@ -614,30 +764,127 @@ fn reuse_natural_generate() {
             }));
             break;
         }
-        let mut record = accepted.unwrap_or_else(|| {
-            panic!(
-                "{}: every preregistered variant was rejected: {attempts:?}",
-                case.id
-            )
-        });
-        record["attempts"] = json!(attempts);
-        cases.push(record);
+        match accepted {
+            Some(record) => cases.push(record),
+            None => {
+                write_fixture(&cases, false);
+                panic!(
+                    "{}: every preregistered variant was rejected (see {}); an incomplete fixture was written",
+                    case.id,
+                    journal_path.display()
+                );
+            }
+        }
     }
-    let qual: Value = serde_json::from_str(QUAL_V1_MANIFEST).unwrap();
-    let fixture = json!({
-        "name": "glm53-reuse-natural-v1",
-        "purpose": "Map #12 natural trajectories: the model's own turns (Exact lineage) and Exact greedy continuations, frozen before any Fast evaluation; replayed by glm5_next_metal::tests::natural::reuse_natural_evaluate.",
-        "artifact": qual["artifact"],
-        "retained_weight_bytes": weights.retained_bytes,
-        "frontier": frontier, "pool": pool, "continuation_max": CONTINUATION,
-        "producer": {"test": "glm5_next_metal::tests::natural::reuse_natural_generate",
-            "commit": commit, "dirty": dirty, "lineage": "exact", "prefill_rows": 512,
-            "renderer": chat::RENDERER, "template_sha256": chat::GGUF_TEMPLATE_SHA256},
-        "token_encoding": "space-separated token ids",
-        "cases": cases,
-    });
-    std::fs::write(&out, serde_json::to_string_pretty(&fixture).unwrap() + "\n").unwrap();
-    eprintln!("wrote {}", out.display());
+    write_fixture(&cases, true);
+    eprintln!("wrote {} and {}", out.display(), journal_path.display());
+}
+
+/// One frozen case, validated on the CPU.
+struct Frozen {
+    id: String,
+    shape: String,
+    turn1: Vec<u32>,
+    consumed: Vec<u32>,
+    suffix: Vec<u32>,
+    continuation: Vec<u32>,
+}
+
+impl Frozen {
+    fn join(&self) -> usize {
+        self.turn1.len() + self.consumed.len()
+    }
+
+    fn turn2(&self) -> Vec<u32> {
+        [
+            self.turn1.as_slice(),
+            self.consumed.as_slice(),
+            self.suffix.as_slice(),
+        ]
+        .concat()
+    }
+}
+
+/// Schema, token accounting and geometry of every case, before GPU work.
+fn validate_fixture(fixture: &Value, frontier: usize, pool: usize) -> Vec<Frozen> {
+    assert_eq!(fixture["name"], "glm53-reuse-natural-v1");
+    assert_eq!(fixture["complete"], true, "the fixture is incomplete");
+    assert_eq!(fixture["frontier"].as_u64(), Some(frontier as u64));
+    assert_eq!(fixture["pool"].as_u64(), Some(pool as u64));
+    let cases = fixture["cases"].as_array().expect("cases");
+    let ids: Vec<&str> = cases.iter().map(|c| c["id"].as_str().unwrap()).collect();
+    assert_eq!(
+        ids, EXPECTED_CASES,
+        "the fixture's cases differ from the cohort"
+    );
+    cases
+        .iter()
+        .map(|case| {
+            let id = case["id"].as_str().unwrap().to_string();
+            let emitted = parse_ids(&case["emitted"]);
+            let consumed_len = case["consumed"].as_u64().unwrap() as usize;
+            let stop = case["stop"].as_u64().map(|s| s as u32);
+            match stop {
+                Some(stop) => {
+                    assert!(
+                        chat::CHAT_STOPS.contains(&(stop as i32)),
+                        "{id}: stop {stop}"
+                    );
+                    assert_eq!(
+                        emitted.last(),
+                        Some(&stop),
+                        "{id}: the stop is the last emitted token"
+                    );
+                    assert_eq!(
+                        consumed_len + 1,
+                        emitted.len(),
+                        "{id}: consumed = emitted - stop"
+                    );
+                }
+                None => panic!("{id}: an accepted turn ends at a stop"),
+            }
+            let frozen = Frozen {
+                shape: case["shape"].as_str().unwrap().to_string(),
+                turn1: parse_ids(&case["turn1"]),
+                consumed: emitted[..consumed_len].to_vec(),
+                suffix: parse_ids(&case["suffix"]),
+                continuation: parse_ids(&case["continuation"]),
+                id,
+            };
+            let (id, join, second) = (&frozen.id, frozen.join(), frozen.turn2().len());
+            assert_eq!(case["join"].as_u64(), Some(join as u64), "{id}: join");
+            assert_eq!(
+                case["second_turn"].as_u64(),
+                Some(second as u64),
+                "{id}: second turn"
+            );
+            assert!(
+                !frozen.suffix.is_empty() && frozen.continuation.len() <= CONTINUATION,
+                "{id}"
+            );
+            assert!(
+                frozen
+                    .consumed
+                    .iter()
+                    .chain(&frozen.continuation)
+                    .all(|t| !chat::CHAT_STOPS.contains(&(*t as i32))),
+                "{id}: a stop inside consumed or continuation tokens"
+            );
+            match frozen.shape.as_str() {
+                "ChatDense" | "ToolDense" => {
+                    assert!(second + CONTINUATION + 1 < frontier, "{id}: geometry")
+                }
+                "ChatSparse" => assert!(frozen.turn1.len() > frontier, "{id}: geometry"),
+                "ToolAcross" => assert!(
+                    join < frontier && frontier < second && !join.is_multiple_of(pool),
+                    "{id}: geometry"
+                ),
+                "ToolAny" => {}
+                other => panic!("{id}: unknown shape {other}"),
+            }
+            frozen
+        })
+        .collect()
 }
 
 /// Persistent state bits at the prompt end and at the end of a run.
@@ -661,12 +908,14 @@ fn fast_policy(
     assert_eq!(reference.len(), fast.len(), "{label}: position count");
     let mut kls = Vec::with_capacity(fast.len());
     let mut flips = Vec::new();
+    let mut pass = true;
     for (position, (r, f)) in reference.iter().zip(fast).enumerate() {
         assert_finite(&format!("{label} reference {position}"), r);
         assert_finite(&format!("{label} fast {position}"), f);
         let kl = kl_divergence(r, f);
         let (r0, r1) = choice_regret(r, f);
         if !within(kl, FAST_KL) || !(r0 <= FAST_REGRET && r1 <= FAST_REGRET) {
+            pass = false;
             failures.push(format!("{label} position {position}: KL(exact||fast) {kl:.3e} (bound {FAST_KL:e}), regret {r0:.3}/{r1:.3} (bound {FAST_REGRET})"));
         }
         if (r0, r1) != (0.0, 0.0) {
@@ -676,67 +925,77 @@ fn fast_policy(
     }
     let (worst_kl, at) = worst(kls.iter().copied());
     let mean = kls.iter().sum::<f64>() / kls.len() as f64;
-    let pass = within(worst_kl, FAST_KL)
-        && flips.iter().all(|f| {
-            f[1].as_f64().unwrap() <= f64::from(FAST_REGRET)
-                && f[2].as_f64().unwrap() <= f64::from(FAST_REGRET)
-        });
     eprintln!(
         "  {label}: worst KL(exact||fast) {worst_kl:.3e} at {at}, mean {mean:.3e}, flips {flips:?}, pass {pass}"
     );
     json!({"worst_kl": worst_kl, "worst_at": at, "mean_kl": mean, "flips": flips, "kl": kls, "pass": pass})
 }
 
-/// Phase 2. Reads the fixture (`GLM53_REUSE_NATURAL` or the committed path)
-/// and writes the report to `GLM53_REUSE_NATURAL_REPORT`.
+/// Phase 2. Reads the fixture (`GLM53_REUSE_NATURAL` or the committed path),
+/// optionally a comma-separated case subset (`GLM53_REUSE_NATURAL_CASES`,
+/// reported as partial), and writes the report to
+/// `GLM53_REUSE_NATURAL_REPORT` with the evaluator revision from
+/// `GLM53_EVALUATOR_COMMIT`.
 #[test]
-#[ignore = "map #12 natural-trajectory qualification: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_REUSE_NATURAL_REPORT, the committed fixture and an idle GPU"]
+#[ignore = "map #12 natural-trajectory qualification: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_REUSE_NATURAL_REPORT, GLM53_EVALUATOR_COMMIT, the committed fixture and an idle GPU"]
 fn reuse_natural_evaluate() {
     let report_path = PathBuf::from(
         std::env::var("GLM53_REUSE_NATURAL_REPORT").expect("GLM53_REUSE_NATURAL_REPORT"),
     );
+    let evaluator = std::env::var("GLM53_EVALUATOR_COMMIT").expect("GLM53_EVALUATOR_COMMIT");
     let fixture_path = std::env::var_os("GLM53_REUSE_NATURAL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(FIXTURE));
-    let fixture: Value = serde_json::from_slice(
-        &std::fs::read(&fixture_path).unwrap_or_else(|e| panic!("{}: {e}", fixture_path.display())),
-    )
-    .unwrap();
-    let only: Option<Vec<String>> = std::env::var("GLM53_REUSE_NATURAL_CASES")
+    let fixture_bytes =
+        std::fs::read(&fixture_path).unwrap_or_else(|e| panic!("{}: {e}", fixture_path.display()));
+    let fixture: Value = serde_json::from_slice(&fixture_bytes).unwrap();
+    let subset: Option<Vec<String>> = std::env::var("GLM53_REUSE_NATURAL_CASES")
         .ok()
-        .map(|v| v.split(',').map(str::to_string).collect());
-    let _lease = production_lease();
+        .map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
+    if let Some(subset) = &subset {
+        assert!(
+            !subset.is_empty() && subset.iter().all(|s| !s.is_empty()),
+            "empty case selection"
+        );
+        for id in subset {
+            assert!(EXPECTED_CASES.contains(&id.as_str()), "unknown case {id:?}");
+        }
+    }
+    // CPU checks first: artifact identity, schema, accounting and geometry.
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
-    let ctx = MetalContext::new().expect("Metal context");
     let gguf = GgufFile::open(&path).unwrap();
+    assert_eq!(
+        fixture["artifact_identity"],
+        artifact_identity(&gguf),
+        "the fixture was generated from a different artifact"
+    );
+    let _lease = production_lease();
+    let ctx = MetalContext::new().expect("Metal context");
     let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
     assert_eq!(
         fixture["retained_weight_bytes"].as_u64(),
-        Some(weights.retained_bytes),
-        "the fixture was generated from different weights"
+        Some(weights.retained_bytes)
     );
     let frontier = weights.config.sparse_frontier() as usize;
-    assert_eq!(fixture["frontier"].as_u64(), Some(frontier as u64));
+    let pool = weights.config.indexer_pool as usize;
+    let frozen = validate_fixture(&fixture, frontier, pool);
     let mut failures = Vec::new();
     let mut reports = Vec::new();
-    for case in fixture["cases"].as_array().unwrap() {
-        let id = case["id"].as_str().unwrap();
-        if only
-            .as_ref()
-            .is_some_and(|only| !only.iter().any(|o| o == id))
-        {
+    for case in &frozen {
+        let id = case.id.as_str();
+        if subset.as_ref().is_some_and(|s| !s.iter().any(|o| o == id)) {
             continue;
         }
-        let turn1 = parse_ids(&case["turn1"]);
-        let emitted = parse_ids(&case["emitted"]);
-        let consumed = &emitted[..case["consumed"].as_u64().unwrap() as usize];
-        let suffix = parse_ids(&case["suffix"]);
-        let continuation = parse_ids(&case["continuation"]);
-        let join = turn1.len() + consumed.len();
-        let turn2: Vec<u32> = [turn1.as_slice(), consumed, suffix.as_slice()].concat();
+        let (turn1, consumed, suffix, continuation) = (
+            &case.turn1,
+            &case.consumed,
+            &case.suffix,
+            &case.continuation,
+        );
+        let (join, turn2) = (case.join(), case.turn2());
         let positions = continuation.len() + 1;
         let capacity = turn2.len() + continuation.len() + 1;
-        let frontier_case = matches!(case["shape"].as_str(), Some("ToolAcross" | "ChatSparse"));
+        let frontier_case = matches!(case.shape.as_str(), "ToolAcross" | "ChatSparse");
         eprintln!(
             "{id}: first {} + consumed {} + suffix {} = {} (join {join}, frontier {frontier}); {positions} positions",
             turn1.len(),
@@ -751,7 +1010,7 @@ fn reuse_natural_evaluate() {
          -> Run {
             let prompt_state = exact.then(|| state_bits(&s));
             let mut logits = vec![first];
-            for &token in &continuation {
+            for &token in continuation {
                 logits.push(s.forward(&ctx, token).unwrap());
             }
             let ms = started.elapsed().as_secs_f64() * 1e3;
@@ -767,12 +1026,12 @@ fn reuse_natural_evaluate() {
         let warm = |lineage: PackedLineage, rows: usize| -> Run {
             let mut s = session(&ctx, &weights, capacity, rows, lineage);
             let started = std::time::Instant::now();
-            s.prefill_packed(&ctx, &turn1).unwrap();
+            s.prefill_packed(&ctx, turn1).unwrap();
             for &token in consumed {
                 s.forward(&ctx, token).unwrap();
             }
             assert_eq!(s.position(), join);
-            let first = s.prefill_packed(&ctx, &suffix).unwrap();
+            let first = s.prefill_packed(&ctx, suffix).unwrap();
             finish(s, first, lineage == PackedLineage::Exact, started)
         };
         let starts = |from: usize, to: usize, rows: usize| -> Vec<usize> {
@@ -844,16 +1103,21 @@ fn reuse_natural_evaluate() {
                 "ms": {"cold": fast_cold.ms, "warm": fast_warm.ms},
             }));
         }
-        reports.push(json!({"id": id, "variant": case["variant"], "first": turn1.len(), "consumed": consumed.len(),
+        reports.push(json!({"id": id, "first": turn1.len(), "consumed": consumed.len(),
             "suffix": suffix.len(), "join": join, "second_turn": turn2.len(), "positions": positions,
             "exact_reference_ms": reference.ms, "exact": exact, "fast": fast}));
     }
+    let partial = subset.is_some();
     let report = json!({
         "schema": "glm53.reuse_natural_report.v1",
+        "partial": partial,
         "fixture": fixture_path.display().to_string(),
+        "fixture_sha256": sha256_hex(&fixture_bytes),
         "fixture_producer": fixture["producer"],
+        "evaluator_commit": evaluator,
         "policy": {"fast_vs_exact": {"kl_reference_fast": FAST_KL, "regret": FAST_REGRET},
-            "reuse_gate": {"kl_both_ways": 2e-2, "regret": 0.2}, "exact": "bitwise logits and persistent state"},
+            "reuse_gate": {"kl_both_ways": 2e-2, "regret": 0.2},
+            "exact": "bitwise logits and persistent state"},
         "schedules": SCHEDULES, "cases": reports, "failures": failures,
     });
     std::fs::write(
@@ -862,11 +1126,13 @@ fn reuse_natural_evaluate() {
     )
     .unwrap();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(!reports.is_empty(), "no case was evaluated");
 }
 
-/// Exact lineage priced against Fast: prompt prefill wall (allocation
-/// excluded; final logits included) at 512, 2048 and 4096 tokens, and a
-/// 64-token suffix after a reused prefix, in A-B-B-A order per length.
+/// Exact lineage priced against Fast: a fresh session's prompt prefill wall
+/// (allocation excluded; final logits included; weights and both lineages'
+/// dense and sparse pipelines warmed first) at 512, 2048 and 4096 tokens,
+/// and a 64-token suffix after a reused prefix, in A-B-B-A order per length.
 /// Timing, not qualification. Writes JSON to `GLM53_LINEAGE_COST_OUT`.
 #[test]
 #[ignore = "timing (map #12): loads the 109.5 GiB GLM-5.3 trunk; requires GLM53_GGUF, GLM53_LINEAGE_COST_OUT, no MTL_DEBUG_LAYER and an idle GPU"]
@@ -886,15 +1152,17 @@ fn packed_lineage_prefill_cost() {
         .map(|t| t as u32)
         .collect();
     const SUFFIX: usize = 64;
-    // Warm-up outside the measurement: first GPU use of the weights.
-    {
-        let mut s = session(&ctx, &weights, 1025, 512, PackedLineage::Fast);
-        s.prefill_packed(&ctx, &tokens[..1024]).unwrap();
+    // Warm-up outside the measurements: first GPU use of the weights, and
+    // each lineage's dense and sparse pipelines.
+    let warm_len = weights.config.sparse_frontier() as usize + 64;
+    for lineage in [PackedLineage::Fast, PackedLineage::Exact] {
+        let mut s = session(&ctx, &weights, warm_len + 1, 512, lineage);
+        s.prefill_packed(&ctx, &tokens[..warm_len]).unwrap();
     }
     let mut rows = Vec::new();
     for length in [512usize, 2048, 4096] {
         assert!(tokens.len() >= length);
-        for (order, lineage) in [
+        for (slot, lineage) in [
             PackedLineage::Fast,
             PackedLineage::Exact,
             PackedLineage::Exact,
@@ -906,7 +1174,7 @@ fn packed_lineage_prefill_cost() {
             let mut s = session(&ctx, &weights, length + 1, 512, lineage);
             let started = std::time::Instant::now();
             s.prefill_packed(&ctx, &tokens[..length]).unwrap();
-            let cold_ms = started.elapsed().as_secs_f64() * 1e3;
+            let fresh_ms = started.elapsed().as_secs_f64() * 1e3;
             drop(s);
             let mut s = session(&ctx, &weights, length + 1, 512, lineage);
             s.prefill_packed(&ctx, &tokens[..length - SUFFIX]).unwrap();
@@ -915,20 +1183,18 @@ fn packed_lineage_prefill_cost() {
                 .unwrap();
             let suffix_ms = started.elapsed().as_secs_f64() * 1e3;
             eprintln!(
-                "{length} tokens, {lineage:?} (slot {order}): cold {cold_ms:.0} ms ({:.1} tok/s); {SUFFIX}-token suffix after {} reused: {suffix_ms:.0} ms",
-                length as f64 / (cold_ms / 1e3),
+                "{length} tokens, {lineage:?} (slot {slot}): fresh prefill {fresh_ms:.0} ms ({:.1} tok/s); {SUFFIX}-token suffix after {} reused: {suffix_ms:.0} ms",
+                length as f64 / (fresh_ms / 1e3),
                 length - SUFFIX
             );
-            rows.push(
-                json!({"length": length, "lineage": format!("{lineage:?}"), "slot": order,
-                "cold_ms": cold_ms, "cold_tok_s": length as f64 / (cold_ms / 1e3),
-                "suffix_tokens": SUFFIX, "suffix_ms": suffix_ms}),
-            );
+            rows.push(json!({"length": length, "lineage": format!("{lineage:?}"), "slot": slot,
+                "fresh_prefill_ms": fresh_ms, "fresh_prefill_tok_s": length as f64 / (fresh_ms / 1e3),
+                "suffix_tokens": SUFFIX, "suffix_ms": suffix_ms}));
         }
     }
     let document = json!({
         "schema": "glm53.packed_lineage_prefill_cost.v1",
-        "method": "per length, Fast-Exact-Exact-Fast; fresh session per measurement (allocation excluded); prompt prefill including final logits; suffix measured after a same-lineage prefix prefill; 512-row chunks; one warm-up prefill before all rows",
+        "method": "per length, Fast-Exact-Exact-Fast; a fresh session per measurement (allocation excluded); prompt prefill including final logits; suffix measured after a same-lineage prefix prefill; 512-row chunks; weights and both lineages' dense and sparse pipelines warmed first",
         "prompt": "long_qualification_text (teacher-forced)",
         "rows": rows,
     });

@@ -30,6 +30,55 @@ pub(crate) fn read_math_options() -> anyhow::Result<MuseGlimmerRuntimeOptions> {
     })
 }
 
+pub(super) struct Prepared {
+    config: MuseGlimmerConfig,
+    pub(super) context_limit: usize,
+    pub(super) default_max_tokens: usize,
+    math_options: MuseGlimmerRuntimeOptions,
+}
+
+impl Prepared {
+    pub(super) fn new(
+        gguf: &GgufFile,
+        invocation: &crate::cli::ServeInvocation,
+    ) -> anyhow::Result<Self> {
+        let math_options = read_math_options()?;
+        let config =
+            MuseGlimmerConfig::from_gguf(gguf).context("bind Muse Glimmer serve contract")?;
+        let (context_limit, default_max_tokens) = super::fixed_session_limits(
+            qwen_llm::model_family::ModelFamily::MuseGlimmer,
+            config.context_length as usize,
+            invocation.max_context_tokens,
+            invocation.max_tokens,
+        )?;
+        Self::from_config(
+            gguf,
+            config,
+            context_limit,
+            default_max_tokens,
+            math_options,
+        )
+    }
+
+    fn from_config(
+        gguf: &GgufFile,
+        config: MuseGlimmerConfig,
+        context_limit: usize,
+        default_max_tokens: usize,
+        math_options: MuseGlimmerRuntimeOptions,
+    ) -> anyhow::Result<Self> {
+        config
+            .validate_stop_tokens(&gguf.stop_token_ids()?)
+            .context("Muse Glimmer serve stop-token contract")?;
+        Ok(Self {
+            config,
+            context_limit,
+            default_max_tokens,
+            math_options,
+        })
+    }
+}
+
 pub(crate) struct MuseGlimmerBackend {
     ctx: MetalContext,
     _gguf: GgufFile,
@@ -50,6 +99,43 @@ pub(crate) struct MuseGlimmerBackend {
 }
 
 impl MuseGlimmerBackend {
+    fn from_prepared(
+        ctx: MetalContext,
+        gguf: GgufFile,
+        model_id: String,
+        prepared: Prepared,
+        tokenizer: LlamaCppTokenizer,
+    ) -> anyhow::Result<Self> {
+        let loaded = MuseGlimmerLoadedModel::load_with_options(
+            &ctx,
+            &gguf,
+            prepared.context_limit,
+            prepared.math_options,
+        )
+        .context("load resident Muse Glimmer serve model")?;
+        let math_options = loaded.math_options();
+        Ok(Self {
+            ctx,
+            _gguf: gguf,
+            tokenizer,
+            loaded,
+            model_id,
+            default_max_tokens: prepared.default_max_tokens,
+            capacity: prepared.context_limit,
+            vocab_size: prepared.config.vocab_size,
+            eos_token_id: prepared.config.eos_token_id as i32,
+            eot_token_id: prepared.config.eot_token_id as i32,
+            profile: prepared.config.chat_template_profile,
+            consumed_tokens: Vec::new(),
+            prefix_reuse: qwen_llm::env_flag::read_default_on(PREFIX_REUSE_ENV),
+            math_options,
+            idle_residency: super::idle_residency::IdleResidency::new(
+                "muse_glimmer",
+                std::time::Duration::ZERO,
+            ),
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn new(
         ctx: MetalContext,
@@ -131,6 +217,38 @@ impl MuseGlimmerBackend {
     pub(crate) fn encode(&self, prompt: &str) -> Result<Vec<u32>, ServeError> {
         decode_loop::encode_checked(&self.tokenizer, prompt, false, self.vocab_size, "Muse")
     }
+}
+
+pub(super) fn start(
+    prepared: Prepared,
+    gguf: GgufFile,
+    invocation: &crate::cli::ServeInvocation,
+    listening: super::Listening,
+    idle_window: std::time::Duration,
+) -> anyhow::Result<()> {
+    crate::shutdown::checkpoint()?;
+    let ctx = MetalContext::new().context("initialize Metal context")?;
+    let load_started = Instant::now();
+    // llama.cpp's tokenizer initializes its Metal backend.
+    let tokenizer =
+        LlamaCppTokenizer::open(&invocation.model).context("load Muse Glimmer serve tokenizer")?;
+    prepared
+        .config
+        .validate_tokenizer(&tokenizer)
+        .context("Muse Glimmer serve tokenizer contract")?;
+    let mut backend = MuseGlimmerBackend::from_prepared(
+        ctx,
+        gguf,
+        listening.model_id.clone(),
+        prepared,
+        tokenizer,
+    )?;
+    let load_ms = load_started.elapsed().as_secs_f64() * 1e3;
+    backend.set_idle_residency(idle_window);
+    let math_options = backend.math_options();
+    tracing::info!(target: "qwen_diag", "serve limits: family=muse_glimmer max_context_tokens={} default_max_tokens={} snapshot_cache_bytes=0 matrix_prefill={} split_decode={}", backend.capacity, backend.default_max_tokens, math_options.matrix_prefill, math_options.split_decode);
+    crate::shutdown::checkpoint()?;
+    listening.serve(load_ms, &mut backend)
 }
 
 impl GenerationBackend for MuseGlimmerBackend {

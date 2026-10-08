@@ -673,7 +673,7 @@ fn gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one() {
         let hex = reference["samples"][0]["outcome"]["emitted_bytes_hex"]
             .as_str()
             .unwrap();
-        assert!(hex.is_ascii() && hex.len() % 2 == 0);
+        assert!(hex.is_ascii() && hex.len().is_multiple_of(2));
         let bytes = (0..hex.len())
             .step_by(2)
             .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())

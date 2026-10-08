@@ -49,6 +49,7 @@ use qwen_llm::deepseek_v4_metal::{
 };
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
+use qwen_llm::model_family::ModelFamily;
 use qwen_llm::sampling::Sampler;
 use qwen_llm::snapshot_policy::SnapshotPolicyConfig;
 use qwen_llm::tokenizer::Tokenizer;
@@ -65,6 +66,88 @@ struct Ds4Durable {
 /// A chosen warm start: matched prefix length, the snapshot (bound to the
 /// session's identity), and which tier supplied it.
 type WarmStart = (usize, Arc<DeepSeekV4CausalSnapshot>, &'static str);
+
+pub(super) struct Prepared {
+    context_limit: usize,
+    forward_limit: usize,
+    default_max_tokens: usize,
+    tokenizer: Tokenizer,
+    prefill_chunk_tokens: usize,
+    template_style: TemplateStyle,
+    release_sampling: qwen_llm::sampling::SamplingConfig,
+}
+
+impl Prepared {
+    pub(super) fn new(
+        gguf: &GgufFile,
+        invocation: &crate::cli::ServeInvocation,
+    ) -> anyhow::Result<Self> {
+        let context_limit = invocation.max_context_tokens.context(
+            "DeepSeek V4 serve requires --max-context-tokens: the session forward budget is fixed at startup",
+        )?;
+        let forward_limit = crate::deepseek_v4_forward_budget_for_context_limit(context_limit)?;
+        let tokenizer = Tokenizer::from_gguf(gguf).context("initialize DeepSeek V4 tokenizer")?;
+        let prefill_chunk_tokens = crate::deepseek_v4_prefill_chunk_tokens()?;
+        let release_sampling = crate::release_sampling::release_sampling(
+            crate::release_identity::ReleaseIdentity::detect(ModelFamily::DeepSeek4, gguf),
+            42,
+        );
+        Ok(Self {
+            context_limit,
+            forward_limit,
+            default_max_tokens: invocation
+                .max_tokens
+                .unwrap_or(super::DEFAULT_SERVE_MAX_TOKENS),
+            tokenizer,
+            prefill_chunk_tokens,
+            template_style: invocation.template_style,
+            release_sampling,
+        })
+    }
+}
+
+pub(super) fn start(
+    prepared: Prepared,
+    gguf: GgufFile,
+    invocation: &crate::cli::ServeInvocation,
+    listening: super::Listening,
+    idle_window: std::time::Duration,
+) -> anyhow::Result<()> {
+    crate::shutdown::checkpoint()?;
+    let ctx = MetalContext::new().context("initialize Metal context")?;
+    let context_limit = prepared.context_limit;
+    let template_style = prepared.template_style;
+    let release_sampling = prepared.release_sampling;
+    let mut backend = DeepSeekV4Backend::new_prepared(
+        ctx,
+        gguf,
+        listening.model_id.clone(),
+        prepared,
+        crate::DeepSeekV4MultigroupSelectorArg::Auto,
+        invocation.snapshot_cache_mib,
+        invocation.snapshot_policy,
+    )?;
+    let load_ms = backend.load_ms();
+    backend.template_style = template_style;
+    backend.release_sampling = Some(release_sampling);
+    backend.set_idle_residency(idle_window);
+    tracing::info!(target: "qwen_diag", "serve limits: family=deepseek_v4 max_context_tokens={} {}", context_limit, backend.snapshot_cache_plan);
+    match invocation.durable.resolve("deepseek_v4") {
+        Ok(Some(plan)) => {
+            if let Err(error) = backend.attach_durable(plan, &invocation.model) {
+                tracing::warn!(target: "qwen_diag", "serve durable: family=deepseek_v4 tier disabled: {error:#}");
+            }
+        }
+        Ok(None) => {
+            tracing::info!(target: "qwen_diag", "serve durable: family=deepseek_v4 tier off")
+        }
+        Err(error) => {
+            tracing::warn!(target: "qwen_diag", "serve durable: family=deepseek_v4 tier disabled: {error:#}")
+        }
+    }
+    crate::shutdown::checkpoint()?;
+    listening.serve(load_ms, &mut backend)
+}
 
 pub(crate) struct DeepSeekV4Backend {
     ctx: MetalContext,
@@ -161,8 +244,58 @@ impl DeepSeekV4Backend {
         snapshot_policy: SnapshotPolicyConfig,
     ) -> anyhow::Result<Self> {
         let tokenizer = Tokenizer::from_gguf(&gguf).context("initialize DeepSeek V4 tokenizer")?;
-        let vocab_size = tokenizer.n_vocab();
         let prefill_chunk_tokens = crate::deepseek_v4_prefill_chunk_tokens()?;
+        Self::new_with_cpu_state(
+            ctx,
+            gguf,
+            model_id,
+            default_max_tokens,
+            forward_limit,
+            selector,
+            snapshot_cache_mib,
+            snapshot_policy,
+            tokenizer,
+            prefill_chunk_tokens,
+        )
+    }
+
+    fn new_prepared(
+        ctx: MetalContext,
+        gguf: GgufFile,
+        model_id: String,
+        prepared: Prepared,
+        selector: crate::DeepSeekV4MultigroupSelectorArg,
+        snapshot_cache_mib: Option<u64>,
+        snapshot_policy: SnapshotPolicyConfig,
+    ) -> anyhow::Result<Self> {
+        Self::new_with_cpu_state(
+            ctx,
+            gguf,
+            model_id,
+            prepared.default_max_tokens,
+            prepared.forward_limit,
+            selector,
+            snapshot_cache_mib,
+            snapshot_policy,
+            prepared.tokenizer,
+            prepared.prefill_chunk_tokens,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_cpu_state(
+        ctx: MetalContext,
+        gguf: GgufFile,
+        model_id: String,
+        default_max_tokens: usize,
+        forward_limit: usize,
+        selector: crate::DeepSeekV4MultigroupSelectorArg,
+        snapshot_cache_mib: Option<u64>,
+        snapshot_policy: SnapshotPolicyConfig,
+        tokenizer: Tokenizer,
+        prefill_chunk_tokens: usize,
+    ) -> anyhow::Result<Self> {
+        let vocab_size = tokenizer.n_vocab();
 
         let load_t0 = Instant::now();
         let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, forward_limit)

@@ -99,6 +99,28 @@ impl Prepared {
     }
 }
 
+pub(super) fn start(
+    prepared: Prepared,
+    gguf: &GgufFile,
+    _invocation: &crate::cli::ServeInvocation,
+    listening: super::Listening,
+    idle_window: std::time::Duration,
+) -> anyhow::Result<()> {
+    crate::shutdown::checkpoint()?;
+    let ctx = qwen_llm::metal::MetalContext::new()?;
+    let started = std::time::Instant::now();
+    let model = qwen_llm::k2_horizon_runtime::K2LoadedModel::load(
+        &ctx,
+        gguf,
+        u32::try_from(prepared.capacity)?,
+    )?;
+    let load_ms = started.elapsed().as_secs_f64() * 1e3;
+    tracing::info!(target: "qwen_diag", "serve limits: family=k2_horizon raw_input_string_only capacity={} snapshot_cache_bytes=0", prepared.capacity);
+    let mut backend = K2Backend::new(&model, prepared, listening.model_id.clone());
+    backend.set_idle_residency(&ctx, idle_window);
+    listening.serve(load_ms, &mut backend)
+}
+
 pub(super) struct K2Backend<'model, 'ctx> {
     model: &'model K2LoadedModel<'ctx>,
     prepared: Prepared,

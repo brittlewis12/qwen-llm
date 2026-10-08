@@ -189,6 +189,38 @@ pub(super) fn load(
     Glm5NextWeights::load(ctx, gguf).context("load GLM-5.3 weights")
 }
 
+pub(super) fn start(
+    prepared: Prepared<'_>,
+    gguf: &GgufFile,
+    invocation: &crate::cli::ServeInvocation,
+    listening: super::Listening,
+    idle_window: std::time::Duration,
+) -> Result<()> {
+    crate::shutdown::checkpoint()?;
+    let ctx = MetalContext::new()?;
+    let started = std::time::Instant::now();
+    let weights = load(&ctx, gguf, &prepared)?;
+    let load_ms = started.elapsed().as_secs_f64() * 1e3;
+    let snapshot_cache_plan = super::SnapshotCachePlan::resolve(
+        invocation.snapshot_cache_mib,
+        invocation.snapshot_policy,
+        ctx.memory_signals(),
+    )?;
+    let limits = prepared.describe();
+    let mut backend = Glm5NextBackend::new(
+        &ctx,
+        &weights,
+        prepared,
+        listening.model_id.clone(),
+        idle_window,
+        snapshot_cache_plan,
+    );
+    tracing::info!(target: "qwen_diag", "serve limits: {limits} {}", backend.describe_snapshots());
+    let warm_up_ms = backend.warm_up()?;
+    tracing::info!(target: "qwen_diag", "serve startup: family=glm5_next load_ms={load_ms:.1} warm_up_ms={warm_up_ms:.1}");
+    listening.serve(load_ms, &mut backend)
+}
+
 pub(super) struct Glm5NextBackend<'w, 'g> {
     ctx: &'w MetalContext,
     weights: &'w Glm5NextWeights,

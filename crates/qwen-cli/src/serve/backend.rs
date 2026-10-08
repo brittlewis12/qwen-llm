@@ -27,6 +27,7 @@ use qwen_llm::metal_dflash::{
     dflash_capture_window_span, plan_prefill_scratch_with_matrix_max_pos_configured,
 };
 use qwen_llm::metal_forward::MetalForward;
+use qwen_llm::runtime::Runtime;
 use qwen_llm::runtime::{LoadedModel, Sequence, SequenceConfig};
 use qwen_llm::sampling::{SAMPLER_ALGORITHM_VERSION, Sampler, SamplingConfig};
 use qwen_llm::snapshot_policy::EntryId;
@@ -137,7 +138,7 @@ impl DflashPrefixReplayCache {
         let (_, histories) = self
             .enabled
             .then_some(())
-            .and_then(|()| self.entry.as_ref())
+            .and(self.entry.as_ref())
             .filter(|(cached_key, _)| cached_key == key)?;
         let sampled = key.temperature_bits != 0.0f32.to_bits();
         let distinct_seeds = histories
@@ -252,6 +253,141 @@ pub(crate) struct EngineBackend {
     /// The identified release's defaults for omitted sampling fields
     /// (`release_sampling`); `None` keeps [`request_sampler`]'s fallbacks.
     pub(super) release_sampling: Option<SamplingConfig>,
+}
+
+pub(super) struct Prepared {
+    template: super::items::QwenTemplate,
+    no_thinking_supported: bool,
+    release_sampling: qwen_llm::sampling::SamplingConfig,
+    declared_context: Option<usize>,
+}
+
+fn ensure_upstream_template_identified(
+    template: super::items::QwenTemplate,
+    template_style: super::items::TemplateStyle,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        template.verified() || template_style == super::items::TemplateStyle::House,
+        "--template-style upstream requires an identified Qwen release; this model uses the generic ChatML contract"
+    );
+    Ok(())
+}
+
+impl Prepared {
+    pub(super) fn new(
+        family: qwen_llm::model_family::ModelFamily,
+        gguf: &GgufFile,
+        invocation: &crate::cli::ServeInvocation,
+    ) -> anyhow::Result<Self> {
+        let identity = crate::prompt_template::identify_qwen_release_for_gguf(gguf)
+            .context("identify the loaded model's Qwen release")?;
+        if let Some(warning) = identity.warning() {
+            tracing::warn!(target: "qwen_diag", "serve: {warning}");
+        }
+        let template = identity.template.serve_template();
+        ensure_upstream_template_identified(template, invocation.template_style)?;
+        anyhow::ensure!(
+            invocation.lens_config.is_none()
+                || matches!(
+                    template,
+                    super::items::QwenTemplate::Qwen36 | super::items::QwenTemplate::Qwen38
+                ),
+            "--lens-config requires an identified Qwen3.6/3.8 native protocol"
+        );
+        let declared_context = match invocation.max_context_tokens {
+            Some(_) => None,
+            None => Some(
+                gguf.declared_context_length()
+                    .context("read the model's declared context length for the serve ceiling")?,
+            ),
+        };
+        Ok(Self {
+            template,
+            no_thinking_supported: template.verified(),
+            release_sampling: crate::release_sampling::release_sampling(
+                crate::release_identity::ReleaseIdentity::detect(family, gguf),
+                42,
+            ),
+            declared_context,
+        })
+    }
+}
+
+pub(super) fn start(
+    prepared: Prepared,
+    gguf: GgufFile,
+    invocation: &crate::cli::ServeInvocation,
+    listening: super::Listening,
+) -> anyhow::Result<()> {
+    crate::shutdown::checkpoint()?;
+    let registry = invocation
+        .lens_config
+        .as_deref()
+        .map(|path| {
+            super::native::registry::Registry::open(path, &gguf, &mut crate::shutdown::checkpoint)
+                .map(std::sync::Arc::new)
+        })
+        .transpose()
+        .context("open fitted Lens assets before Metal")?;
+    let runtime = Runtime::metal().context("initialize Metal runtime")?;
+    let load_started = Instant::now();
+    let loaded = runtime
+        .load_opened_gguf_with_config(
+            gguf,
+            invocation.model.clone(),
+            qwen_llm::runtime::LoadedModelConfig::default(),
+        )
+        .with_context(|| format!("load model {}", invocation.model.display()))?;
+    let load_ms = load_started.elapsed().as_secs_f64() * 1e3;
+    let snapshot_cache_plan = super::SnapshotCachePlan::resolve(
+        invocation.snapshot_cache_mib,
+        invocation.snapshot_policy,
+        loaded.context().memory_signals(),
+    )?;
+    loaded.set_prefix_cache_max_bytes(snapshot_cache_plan.bytes);
+    loaded.set_prefix_cache_policy(snapshot_cache_plan.policy);
+    let (context_ceiling, context_source) =
+        match (invocation.max_context_tokens, prepared.declared_context) {
+            (Some(explicit), _) => (explicit, "explicit"),
+            (None, Some(declared)) if declared < super::DEFAULT_SERVE_MAX_CONTEXT_TOKENS => {
+                (declared, "declared_context_length")
+            }
+            (None, _) => (
+                super::DEFAULT_SERVE_MAX_CONTEXT_TOKENS,
+                "default_hard_ceiling",
+            ),
+        };
+    let mut backend = EngineBackend::new(
+        loaded,
+        listening.model_id.clone(),
+        invocation
+            .max_tokens
+            .unwrap_or(super::DEFAULT_SERVE_MAX_TOKENS),
+        invocation.max_context_tokens,
+        context_ceiling,
+        invocation.drafter.as_deref(),
+        prepared.template,
+        prepared.no_thinking_supported,
+    )?;
+    backend.template_style = invocation.template_style;
+    backend.release_sampling = Some(prepared.release_sampling);
+    tracing::info!(target: "qwen_diag", "serve limits: family=qwen max_context_tokens={context_ceiling} context_source={context_source} {snapshot_cache_plan}");
+    backend.attach_lens_registry(registry)?;
+    match invocation.durable.resolve("qwen") {
+        Ok(Some(plan)) => {
+            if let Err(error) =
+                backend.attach_durable(plan, &invocation.model, snapshot_cache_plan.bytes)
+            {
+                tracing::warn!(target: "qwen_diag", "serve durable: family=qwen tier disabled: {error:#}");
+            }
+        }
+        Ok(None) => tracing::info!(target: "qwen_diag", "serve durable: family=qwen tier off"),
+        Err(error) => {
+            tracing::warn!(target: "qwen_diag", "serve durable: family=qwen tier disabled: {error:#}")
+        }
+    }
+    crate::shutdown::checkpoint()?;
+    listening.serve(load_ms, &mut backend)
 }
 
 impl EngineBackend {
@@ -2252,6 +2388,26 @@ impl EngineBackend {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn generic_qwen_template_refuses_upstream_style() {
+        let error = super::ensure_upstream_template_identified(
+            super::super::items::QwenTemplate::Generic,
+            super::super::items::TemplateStyle::Upstream,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "--template-style upstream requires an identified Qwen release; this model uses the generic ChatML contract"
+        );
+        assert!(
+            super::ensure_upstream_template_identified(
+                super::super::items::QwenTemplate::Generic,
+                super::super::items::TemplateStyle::House,
+            )
+            .is_ok()
+        );
+    }
+
     #[test]
     fn native_readout_admission_keeps_all_reserves_and_precedes_capture_allocation() {
         use qwen_llm::metal::{MetalMemorySignals, evaluate_metal_memory_admission_with_cpu_bytes};

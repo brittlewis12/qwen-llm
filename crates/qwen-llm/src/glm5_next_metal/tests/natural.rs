@@ -362,10 +362,12 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Identity of the opened artifact from metadata only (no weight bytes are
-/// read): shard file names and lengths, and a digest of the tensor table
-/// (name, dtype, shape, shard, data offset and length of every tensor).
-fn artifact_identity(gguf: &GgufFile) -> Value {
+/// Layout fingerprint of the opened artifact from metadata only (no weight
+/// bytes are read): shard file names and lengths, and a digest of the
+/// tensor table (name, dtype, shape, shard, data offset and length of every
+/// tensor). It matches the pinned artifact's layout; it does not verify
+/// weight bytes or tokenizer metadata.
+fn artifact_layout(gguf: &GgufFile) -> Value {
     let shards: Vec<Value> = gguf
         .shards
         .iter()
@@ -488,10 +490,11 @@ fn natural_continuation(
     (tokens, None)
 }
 
-/// Trims `pad.passage` from the front at whitespace boundaries (binary
-/// search: fewer leading bytes, fewer tokens) to the first start whose
-/// rendered first turn is at most `high` tokens; `Err` when that start is
-/// below `low` (the window is not reachable). Deterministic.
+/// Trims `pad.passage` from the front at whitespace boundaries until the
+/// rendered first turn fits the window: a binary search proposes a start
+/// (trimming usually lowers the count), and a linear scan over every start
+/// decides when the proposal does not fit. `Err` when no start fits.
+/// Deterministic.
 fn fit_padding(
     pad: &Pad,
     frontier: usize,
@@ -520,13 +523,17 @@ fn fit_padding(
             lo = mid + 1;
         }
     }
-    let n = count(&user(starts[lo]));
-    if n < low {
-        return Err(format!(
-            "padding window {low}..={high} not reachable: {n} tokens at the first fitting start"
-        ));
+    // Token counts need not fall monotonically as text is trimmed: accept
+    // the search's candidate only if it fits, else scan every start in
+    // order (least trimmed first) for the first that fits.
+    if (low..=high).contains(&count(&user(starts[lo]))) {
+        return Ok(user(starts[lo]));
     }
-    Ok(user(starts[lo]))
+    starts
+        .iter()
+        .map(|&start| user(start))
+        .find(|candidate| (low..=high).contains(&count(candidate)))
+        .ok_or_else(|| format!("no whitespace start fits the padding window {low}..={high}"))
 }
 
 /// Phase 1. Writes the fixture to `GLM53_REUSE_NATURAL_OUT` and journals
@@ -547,7 +554,7 @@ fn reuse_natural_generate() {
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
     let ctx = MetalContext::new().expect("Metal context");
     let gguf = GgufFile::open(&path).unwrap();
-    let identity = artifact_identity(&gguf);
+    let layout = artifact_layout(&gguf);
     let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
     let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
     let encode = |text: &str| -> Vec<u32> {
@@ -567,7 +574,7 @@ fn reuse_natural_generate() {
             "complete": complete,
             "purpose": "Map #12 natural trajectories: the model's own turns (Exact lineage) and Exact greedy continuations, frozen before any Fast evaluation; replayed by glm5_next_metal::tests::natural::reuse_natural_evaluate.",
             "declared_artifact": qual["artifact"],
-            "artifact_identity": identity,
+            "artifact_layout": layout,
             "retained_weight_bytes": weights.retained_bytes,
             "frontier": frontier, "pool": pool, "continuation_max": CONTINUATION,
             "expected_cases": EXPECTED_CASES,
@@ -961,14 +968,18 @@ fn reuse_natural_evaluate() {
             assert!(EXPECTED_CASES.contains(&id.as_str()), "unknown case {id:?}");
         }
     }
-    // CPU checks first: artifact identity, schema, accounting and geometry.
+    // CPU checks first: artifact layout, schema, accounting and geometry.
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
     let gguf = GgufFile::open(&path).unwrap();
     assert_eq!(
-        fixture["artifact_identity"],
-        artifact_identity(&gguf),
-        "the fixture was generated from a different artifact"
+        fixture["artifact_layout"],
+        artifact_layout(&gguf),
+        "the fixture was generated from an artifact with a different layout"
     );
+    let config = crate::glm5_next::Glm5NextConfig::from_gguf(&gguf).unwrap();
+    let frontier = config.sparse_frontier() as usize;
+    let pool = config.indexer_pool as usize;
+    let frozen = validate_fixture(&fixture, frontier, pool);
     let _lease = production_lease();
     let ctx = MetalContext::new().expect("Metal context");
     let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
@@ -976,9 +987,6 @@ fn reuse_natural_evaluate() {
         fixture["retained_weight_bytes"].as_u64(),
         Some(weights.retained_bytes)
     );
-    let frontier = weights.config.sparse_frontier() as usize;
-    let pool = weights.config.indexer_pool as usize;
-    let frozen = validate_fixture(&fixture, frontier, pool);
     let mut failures = Vec::new();
     let mut reports = Vec::new();
     for case in &frozen {

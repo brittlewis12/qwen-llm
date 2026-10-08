@@ -2322,7 +2322,34 @@ fn sampling_attribution_cli_is_narrow_and_fail_closed() {
         "--sampling-attribution",
     ])
     .unwrap();
-    assert!(validate_sampling_attribution_mode(&exact).is_ok());
+    // Process facts are supplied, never read from the test runner's terminal
+    // or environment (a terminal or an exported QWEN_* variable used to fail
+    // this test outside the code under test).
+    let clean = AttributionProcess::default();
+    assert!(validate_sampling_attribution(&exact, &clean).is_ok());
+    let terminal = AttributionProcess {
+        stdout_is_terminal: true,
+        ..AttributionProcess::default()
+    };
+    assert!(
+        validate_sampling_attribution(&exact, &terminal)
+            .unwrap_err()
+            .to_string()
+            .contains("redirected stdout")
+    );
+    let inherited = AttributionProcess {
+        qwen_variables: qwen_runtime_variables(
+            ["QWEN_METAL_LEASE_WAIT", "QWEN_BUILD_COMMIT", "PATH"].map(std::ffi::OsString::from),
+        ),
+        ..AttributionProcess::default()
+    };
+    assert_eq!(inherited.qwen_variables, ["QWEN_METAL_LEASE_WAIT"]);
+    assert!(
+        validate_sampling_attribution(&exact, &inherited)
+            .unwrap_err()
+            .to_string()
+            .contains("QWEN_METAL_LEASE_WAIT")
+    );
 
     let wrong_tokens = Args::try_parse_from([
         "qwen",
@@ -2346,7 +2373,7 @@ fn sampling_attribution_cli_is_narrow_and_fail_closed() {
     ])
     .unwrap();
     assert!(
-        validate_sampling_attribution_mode(&wrong_tokens)
+        validate_sampling_attribution(&wrong_tokens, &clean)
             .unwrap_err()
             .to_string()
             .contains("--tokens 128")

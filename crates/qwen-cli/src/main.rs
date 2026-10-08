@@ -479,7 +479,40 @@ fn validate_request_timing_mode(args: &Args) -> Result<()> {
     Ok(())
 }
 
+/// The process facts `--sampling-attribution` admits against. Kept apart from
+/// the argument contract so that contract is testable without depending on
+/// the test runner's terminal or inherited environment.
+#[derive(Debug, Default)]
+struct AttributionProcess {
+    stdout_is_terminal: bool,
+    /// Inherited `QWEN_*` variable names, `QWEN_BUILD_*` excluded.
+    qwen_variables: Vec<String>,
+}
+
+impl AttributionProcess {
+    fn current() -> Self {
+        Self {
+            stdout_is_terminal: std::io::stdout().is_terminal(),
+            qwen_variables: qwen_runtime_variables(std::env::vars_os().map(|(key, _)| key)),
+        }
+    }
+}
+
+fn qwen_runtime_variables(keys: impl IntoIterator<Item = std::ffi::OsString>) -> Vec<String> {
+    keys.into_iter()
+        .map(|key| key.to_string_lossy().into_owned())
+        .filter(|key| key.starts_with("QWEN_") && !key.starts_with("QWEN_BUILD_"))
+        .collect()
+}
+
 fn validate_sampling_attribution_mode(args: &Args) -> Result<()> {
+    if !args.sampling_attribution {
+        return Ok(());
+    }
+    validate_sampling_attribution(args, &AttributionProcess::current())
+}
+
+fn validate_sampling_attribution(args: &Args, process: &AttributionProcess) -> Result<()> {
     if !args.sampling_attribution {
         return Ok(());
     }
@@ -525,19 +558,13 @@ fn validate_sampling_attribution_mode(args: &Args) -> Result<()> {
         "--sampling-attribution requires add_special_tokens=true"
     );
     ensure!(
-        !std::io::stdout().is_terminal(),
+        !process.stdout_is_terminal,
         "--sampling-attribution requires redirected stdout"
     );
-    let qwen_environment: Vec<_> = std::env::vars_os()
-        .filter_map(|(key, value)| {
-            let key_text = key.to_string_lossy();
-            (key_text.starts_with("QWEN_") && !key_text.starts_with("QWEN_BUILD_"))
-                .then_some((key, value))
-        })
-        .collect();
     ensure!(
-        qwen_environment.is_empty(),
-        "--sampling-attribution rejects inherited non-build QWEN_* variables"
+        process.qwen_variables.is_empty(),
+        "--sampling-attribution rejects inherited non-build QWEN_* variables: {}",
+        process.qwen_variables.join(", ")
     );
     Ok(())
 }

@@ -818,8 +818,9 @@ Projection with coefficient 1 and a unit direction at `embedding` plus every
 layer's `mixer_output` and `ffn_output` is the activation form of a unit
 weight ablation `W <- (I - v v^T) W` on every residual writer.
 
-Module sites are ordinary dense Qwen only. MoE runs, Muse, Flash-Next, and
-native serve jobs refuse them before model work. They use the same serial event
+Module sites are ordinary dense Qwen and GLM-5.3-Flash only (GLM's sites are
+described below). Ordinary MoE runs, Muse, Flash-Next, and native serve jobs
+refuse them before model work. They use the same serial event
 scheduling as post-block operations, zero-coefficient controls emit no work,
 and operation-application records carry `site` only when it is not
 `post_block`.
@@ -840,7 +841,8 @@ For each reached site the run emits, in `direction_readouts`,
 `v` is the direction's prepared row at that layer after its declared
 normalization and all three scalars are accumulated in F64. Lens-row and raw
 directions are accepted; a plan may contain only direction readouts. They are
-ordinary-Qwen only.
+ordinary-Qwen only at the post-block residual; GLM-5.3-Flash reads at module
+sites instead (below).
 
 ### Muse Glimmer
 
@@ -968,6 +970,48 @@ nonzero norm; they are applied as stored with no normalization, lifting,
 padding, or branch replication. The direction is bound to one layer, and the
 operation must select exactly that layer.
 
+### GLM-5.3-Flash Module Directions
+
+GLM-5.3-Flash plans use raw residual directions (`raw_residual_f32le`, 4,096
+wide) at module sites, each a single hidden-size vector before GLM's
+four-stream mHC post mixes it in:
+
+| Site | Edits | Blocks |
+|---|---|---|
+| `embedding` | the token embedding row, before the stream repeat | 0 only |
+| `mixer_output` | the KDA or MLA output projection, before the attention mHC post | all |
+| `routed_experts_output` | the weighted routed-expert reduction | MoE blocks (3+) |
+| `shared_expert_output` | the shared expert's down projection, before the routed/shared add | MoE blocks (3+) |
+| `ffn_output` | the dense FFN down (blocks 0-2) or the routed/shared sum | all |
+
+A unit projection with coefficient `a` at a module's output is the activation
+form of `W' = W - a v v^T W` on that module's output projection. Every action
+except `coordinate_swap` is accepted; operations at one site run in array order.
+`post_block` is refused (GLM's post-block state is four mixed streams).
+
+`direction_readouts` name a `site` and a `point` (`before_operations` or
+`after_operations`) and emit `{id, direction, site, point, source_layer, phase,
+index, dot, h_norm_l2, v_norm_l2}`, with `h` the module output at that point.
+Lenses, live lens readouts, sweeps, transports, message documents, Open
+Responses and cohorts are refused before model work.
+
+Input is `--prompt` (raw text), `--token-ids`, or `--user` (with optional
+`--system`) rendered by the pinned GLM template; `--message-mode low|high`
+selects the reasoning effort (`auto`/`thinking` mean max; there is no
+non-thinking mode). `--assistant-prefill` with channel `final` appends exactly
+`</think>` and its text; channel `reasoning` appends its text inside the
+reasoning; prefill text containing template markers is refused. Chat input is
+recorded in `input_provenance` (template digest, effort, prefill and the exact
+appended bytes, rendered length and BLAKE3).
+
+Every prompt and generated token runs serially (Exact lineage;
+`serial_reason: glm5_next_serial_interventions`), with that token's operations
+and captures in its forward. `--logprobs-top-k N` and `--logprobs-token-ids
+a,b,...` add `generation_logprobs`: per generated position, the sampled token,
+the top N and the tracked IDs, as full-vocabulary log-softmax values before
+sampling filters. `docs/bench/2026-10-08-glm53-directions/` reproduces an
+archived llama.cpp dose-response study with this lane.
+
 ## Coordinates
 
 - Layers are zero-based block indices at the post-block residual.
@@ -1019,7 +1063,8 @@ selected-token J/R rows and workspace-template rows. Dense Qwen3.6 can project
 selected directions from its released matched J/R pair; dense Qwen3.8 can do so
 from its published J transport. Flash-Next runs use only explicit native hyper
 directions. Muse runs consume model-bound selected-token J/R rows for readout
-and all five post-block action kinds. Concurrent or speculative decode and
+and all five post-block action kinds. GLM-5.3-Flash runs are fully serial and
+use raw directions at module sites. Concurrent or speculative decode and
 prefix caching are not selected silently.
 
 Ordinary Qwen run/sweep arms share serial decode lifecycle ordering with the CLI

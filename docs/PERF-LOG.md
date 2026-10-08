@@ -6,6 +6,21 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-08 - GLM Native Directions Reproduce the Archived llama.cpp Dose-Response Study
+
+- `qwen-lens run` gains a GLM-5.3-Flash lane: raw directions, operations at
+  module sites (mixer, routed-expert, shared-expert and FFN outputs,
+  embedding), before/after module readouts, first-token top-k and tracked
+  logprobs, typed `</think>` prefill with provenance (`89b3ccb8` ..
+  `17ebacd4`, the never-merged directions lens work plus GLM sites).
+- Sweep (`docs/bench/2026-10-08-glm53-directions/`): projection at the
+  mixer and shared-expert outputs of blocks 15-36, 19 doses from -3 to 6,
+  8 prompts, prompt token IDs equal to llama.cpp's. Against the archived
+  adapter sweep on the same IQ3_XXS weights: labels 152/152, every flip
+  interval identical, first token 148/152 (near-ties), 8-token text
+  137/152; P("I") logprob difference median 0.011, maximum 0.64.
+  Behavioral concordance; no cross-engine numerical budget was calibrated.
+
 ## 2026-10-08 - MLA Tail Experiment Retained Off; Native IQ Capacity Queued
 
 - Guarded F32 grouped-Q8 tail batching removes repeated GEMV dispatches.

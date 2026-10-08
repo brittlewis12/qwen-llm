@@ -1,0 +1,62 @@
+{
+ "version": 1,
+ "lenses": [],
+ "directions": [
+  {
+   "id": "r",
+   "source": {
+    "kind": "raw_residual_f32le",
+    "path": "r.f32le",
+    "layout": "shared"
+   },
+   "normalization": "unit_l2"
+  }
+ ],
+ "operations": [
+  {
+   "id": "mixer",
+   "site": "mixer_output",
+   "scope": {
+    "layers": {
+     "kind": "range",
+     "start": 15,
+     "end": 36
+    },
+    "prefill": {
+     "kind": "all"
+    },
+    "decode": {
+     "kind": "all"
+    }
+   },
+   "action": {
+    "kind": "projection_ablate",
+    "direction": "r",
+    "coefficient": "<dose>"
+   }
+  },
+  {
+   "id": "shared",
+   "site": "shared_expert_output",
+   "scope": {
+    "layers": {
+     "kind": "range",
+     "start": 15,
+     "end": 36
+    },
+    "prefill": {
+     "kind": "all"
+    },
+    "decode": {
+     "kind": "all"
+    }
+   },
+   "action": {
+    "kind": "projection_ablate",
+    "direction": "r",
+    "coefficient": "<dose>"
+   }
+  }
+ ],
+ "readouts": []
+}

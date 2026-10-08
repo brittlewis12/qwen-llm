@@ -38,7 +38,7 @@ const DOCUMENTS: [(&str, &str, &[usize]); 22] = [
     ("prose", "docs/H4-MTP.md", &[512, 2048]),
     ("prose", "docs/CLI-UX.md", &[512, 2048]),
     ("prose", "docs/PLAN.md", &[512, 2048]),
-    ("prose", "docs/K2-HORIZON-PLAN.md", &[512, 2048]),
+    ("prose", "docs/APPLE-GPU-OPTIMIZATION.md", &[512, 2048]),
     ("prose", "docs/K2-HORIZON-REVIEW.md", &[512, 2048]),
     ("prose", "docs/LENS-COMPARATIVE-PHYSIOLOGY.md", &[512, 2048]),
     ("code", "crates/qwen-llm/src/sampling.rs", &[512, 2048]),

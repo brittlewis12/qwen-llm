@@ -145,6 +145,18 @@ pub(super) struct Glm5NextBackend<'w, 'g> {
     lineage: PackedLineage,
 }
 
+/// A session-creation failure: a typed memory refusal takes the shared
+/// status table (pressure 503, telemetry and size 500); anything else
+/// (geometry, invalid weights, GPU) is a 500 server error.
+fn session_error(error: Glm5NextMetalError) -> ServeError {
+    match &error {
+        Glm5NextMetalError::MemoryAdmission { denied, .. } => {
+            super::transport_memory::memory_refusal(&format!("{FAMILY} session"), denied)
+        }
+        _ => ServeError::server_error(format!("{FAMILY} session: {error}")),
+    }
+}
+
 impl<'w, 'g> Glm5NextBackend<'w, 'g> {
     pub(super) fn new(
         ctx: &'w MetalContext,
@@ -174,7 +186,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             self.prepared.prefill_rows,
             cpu_reserve,
         )
-        .map_err(|error| ServeError::server_error(format!("{FAMILY} session: {error}")))?;
+        .map_err(session_error)?;
         session.set_packed_lineage(self.lineage);
         Ok(session)
     }

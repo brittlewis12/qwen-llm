@@ -840,3 +840,39 @@ fn prefill_span_is_a_whole_multiple_of_the_physical_chunk() {
         }
     }
 }
+
+/// Lane audit B3: a typed pressure refusal of the K2 session is a 503; a
+/// telemetry refusal and any other failure stay 500.
+#[test]
+fn session_errors_map_typed_pressure_to_503_and_the_rest_to_500() {
+    use qwen_llm::k2_horizon_runtime::K2RuntimeError;
+    use qwen_llm::metal::{
+        MemoryAdmissionDenied, MetalMemoryAdmissionReason as R, MetalMemorySignals,
+    };
+    let denied = |reason| MemoryAdmissionDenied {
+        reason,
+        required_bytes: Some(1 << 30),
+        signals: MetalMemorySignals {
+            recommended_max_bytes: 1 << 34,
+            current_allocated_bytes: 1 << 34,
+            process_limit_remaining_bytes: None,
+        },
+        working_set_headroom_bytes: Some(0),
+    };
+    let pressure = K2RuntimeError::MemoryAdmission(denied(R::WorkingSetInsufficient));
+    assert!(pressure.is_memory_pressure());
+    let error = session_error(pressure);
+    assert_eq!(
+        (error.status, error.code),
+        (503, Some("memory_admission_denied"))
+    );
+    let error = session_error(K2RuntimeError::MemoryAdmission(denied(
+        R::ProcessSignalUnavailable,
+    )));
+    assert_eq!(
+        (error.status, error.code),
+        (500, Some("memory_signal_unavailable"))
+    );
+    let error = session_error(K2RuntimeError::Poisoned);
+    assert_eq!((error.status, error.code), (500, None));
+}

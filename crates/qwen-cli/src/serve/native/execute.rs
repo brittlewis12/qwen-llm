@@ -61,13 +61,26 @@ impl Outcome {
         }
         outcome
     }
+    /// A failure before any model forward. Only a typed memory refusal in
+    /// the cause chain is labelled as one (by its kind); anything else is a
+    /// preparation failure.
     pub(crate) fn preparation_failed(counters: Counters, cause: anyhow::Error) -> Self {
+        let refusal = cause
+            .chain()
+            .find_map(|e| e.downcast_ref::<qwen_llm::metal::MemoryAdmissionDenied>())
+            .map(|denied| super::super::transport_memory::refusal_kind(denied.reason).2);
         let mut outcome = classify(counters, cause, None);
         if outcome.reason == StopReason::ExecutionError {
-            outcome.error = Some(writer::error(
-                "memory_admission_denied",
-                "Native preparation failed before any model forward; see server diagnostics.",
-            ));
+            outcome.error = Some(match refusal {
+                Some(code) => writer::error(
+                    code,
+                    "Native memory admission refused the job before any model forward; see server diagnostics.",
+                ),
+                None => writer::error(
+                    "native_preparation_failed",
+                    "Native preparation failed before any model forward; see server diagnostics.",
+                ),
+            });
         }
         outcome
     }

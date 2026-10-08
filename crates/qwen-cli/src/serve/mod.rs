@@ -553,14 +553,22 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             let started = Instant::now();
             let weights = backend_glm5_next::load(&ctx, &gguf, &prepared)?;
             let load_ms = started.elapsed().as_secs_f64() * 1e3;
-            tracing::info!(target: "qwen_diag", "serve limits: {}", prepared.describe());
+            // Sized after load so an auto budget sees the resident model.
+            let snapshot_cache_plan = SnapshotCachePlan::resolve(
+                invocation.snapshot_cache_mib,
+                invocation.snapshot_policy,
+                ctx.memory_signals(),
+            )?;
+            let limits = prepared.describe();
             let mut backend = backend_glm5_next::Glm5NextBackend::new(
                 &ctx,
                 &weights,
                 prepared,
                 model_id.clone(),
                 idle_window,
+                snapshot_cache_plan,
             );
+            tracing::info!(target: "qwen_diag", "serve limits: {limits} {}", backend.describe_snapshots());
             let warm_up_ms = backend.warm_up()?;
             tracing::info!(target: "qwen_diag", "serve startup: family=glm5_next load_ms={load_ms:.1} warm_up_ms={warm_up_ms:.1}");
             return accept_loop(

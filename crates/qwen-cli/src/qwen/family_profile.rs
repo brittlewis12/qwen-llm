@@ -116,7 +116,7 @@ static GLM5_NEXT: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::Unsupported("family_no_speculation"),
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
-    serve_warmth: ServeWarmth::LiveSession,
+    serve_warmth: ServeWarmth::SnapshotsRam,
     durable_idle_publish: false,
     capabilities: glm5_next_capabilities,
 };

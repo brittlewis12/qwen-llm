@@ -56,6 +56,21 @@ pub(crate) trait GenerationSink {
 pub(crate) struct PreparedResponse {
     pub(crate) request: ServeRequest,
     pub(crate) prompt: String,
+    /// Boundaries the family renderer recorded in `prompt`, if any.
+    pub(crate) boundaries: Option<PromptBoundaries>,
+}
+
+/// Byte offsets into a rendered prompt that its renderer recorded while
+/// appending (never found by scanning the text). A backend maps them to
+/// token positions by tokenizing the prefix and verifying it against the
+/// prompt's tokens; families without boundaries render text only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PromptBoundaries {
+    /// End of the prefix shared by requests with the same instructions and
+    /// tools (before the first conversation turn).
+    pub(crate) shared_prefix_end: Option<usize>,
+    /// Start of the generation header, after the whole transcript.
+    pub(crate) generation_header_start: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +125,14 @@ pub(crate) trait GenerationBackend {
     /// Family-specific prompt rendering. Defaults to the Qwen ChatML path.
     fn render_prompt(&self, request: &ServeRequest) -> Result<String, ServeError> {
         self.request_profile().render(request)
+    }
+    /// [`Self::render_prompt`] plus the boundaries the renderer recorded;
+    /// families without boundaries keep the text-only default.
+    fn render_prepared(
+        &self,
+        request: &ServeRequest,
+    ) -> Result<(String, Option<PromptBoundaries>), ServeError> {
+        self.render_prompt(request).map(|prompt| (prompt, None))
     }
     /// Render is already done; `prompt` is the exact model input. The
     /// backend streams raw generated text into `sink` and returns the
@@ -817,8 +840,8 @@ fn handle_responses(
     if let Err(error) = backend.normalize_request(&mut request) {
         return write_serve_error(&mut writer, &error);
     }
-    let prompt = match backend.render_prompt(&request) {
-        Ok(prompt) => prompt,
+    let (prompt, boundaries) = match backend.render_prepared(&request) {
+        Ok(rendered) => rendered,
         Err(error) => return write_serve_error(&mut writer, &error),
     };
     let response_id = next_response_id();
@@ -830,7 +853,11 @@ fn handle_responses(
     if let Some(line) = history_reasoning_diagnostic(&request, &output_protocol) {
         eprintln!("{line}");
     }
-    let prepared = Arc::new(PreparedResponse { request, prompt });
+    let prepared = Arc::new(PreparedResponse {
+        request,
+        prompt,
+        boundaries,
+    });
     let request = &prepared.request;
     if !request.stream {
         let mut sink = CollectSink {

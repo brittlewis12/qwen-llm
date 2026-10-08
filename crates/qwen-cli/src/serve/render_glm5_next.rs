@@ -243,6 +243,14 @@ fn messages(request: &ServeRequest) -> Result<Vec<Message>, ServeError> {
 }
 
 pub(crate) fn render(request: &ServeRequest) -> Result<String, ServeError> {
+    render_with_boundaries(request).map(|(prompt, _)| prompt)
+}
+
+/// [`render`] plus the shared-prefix and generation-header byte offsets the
+/// engine renderer recorded while appending.
+pub(crate) fn render_with_boundaries(
+    request: &ServeRequest,
+) -> Result<(String, super::http::PromptBoundaries), ServeError> {
     if request.no_thinking {
         return Err(invalid(
             "x_qwen.no_thinking",
@@ -253,14 +261,20 @@ pub(crate) fn render(request: &ServeRequest) -> Result<String, ServeError> {
     }
     let definitions = definitions(request)?;
     let options = RenderOptions::generate(effort(request)?, request.strip_history_thinking);
-    chat::render_with_tools(&messages(request)?, &definitions, options).map_err(|error| {
-        let param = if error.code() == "glm5_next_chat_tools" {
-            "tools"
-        } else {
-            "input"
-        };
-        invalid(param, error.to_string())
-    })
+    let rendered = chat::render_with_boundaries(&messages(request)?, &definitions, options)
+        .map_err(|error| {
+            let param = if error.code() == "glm5_next_chat_tools" {
+                "tools"
+            } else {
+                "input"
+            };
+            invalid(param, error.to_string())
+        })?;
+    let boundaries = super::http::PromptBoundaries {
+        shared_prefix_end: Some(rendered.shared_prefix_end),
+        generation_header_start: rendered.generation_header_start,
+    };
+    Ok((rendered.text, boundaries))
 }
 
 #[cfg(test)]

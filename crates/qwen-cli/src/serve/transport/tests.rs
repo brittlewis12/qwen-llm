@@ -68,6 +68,7 @@ fn prepared() -> Arc<PreparedResponse> {
         )
         .unwrap(),
         prompt: "already rendered".into(),
+        boundaries: None,
     })
 }
 

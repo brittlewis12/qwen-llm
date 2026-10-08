@@ -187,6 +187,19 @@ impl RequestProfile {
         }
     }
 
+    /// [`Self::render`] plus the boundaries the family renderer recorded
+    /// (GLM-5.3 only; other families render text only).
+    pub(crate) fn render_prepared(
+        &self,
+        request: &ServeRequest,
+    ) -> Result<(String, Option<super::http::PromptBoundaries>), ServeError> {
+        match self {
+            Self::Glm5Next { .. } => render_glm5_next::render_with_boundaries(request)
+                .map(|(prompt, boundaries)| (prompt, Some(boundaries))),
+            _ => self.render(request).map(|prompt| (prompt, None)),
+        }
+    }
+
     pub(crate) fn output(&self, request: &ServeRequest) -> OutputProtocol {
         match self {
             Self::UnboundQwen => OutputProtocol::Qwen {

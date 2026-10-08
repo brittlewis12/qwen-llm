@@ -170,6 +170,14 @@ impl GenerationBackend for HttpProxy {
         self.profile.clone()
     }
 
+    /// The owner's family renders here, once, with its boundaries.
+    fn render_prepared(
+        &self,
+        request: &ServeRequest,
+    ) -> Result<(String, Option<super::http::PromptBoundaries>), ServeError> {
+        self.profile.render_prepared(request)
+    }
+
     /// Worker-side failures after generation (partition) reach the owner
     /// with this connection's completion.
     fn request_failed_on_server(&mut self) {

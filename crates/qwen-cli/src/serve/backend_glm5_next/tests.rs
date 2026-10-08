@@ -189,12 +189,17 @@ fn gpu_live_session_extends_resumes_and_resets() {
     // A CLI test links the production library: this takes the real lease.
     let ctx = MetalContext::new().unwrap();
     let weights = load(&ctx, &source, &prepared).unwrap();
+    // No snapshot cache: this test pins live-session behaviour alone.
+    let no_snapshots =
+        crate::serve::SnapshotCachePlan::resolve(Some(0), Default::default(), ctx.memory_signals())
+            .unwrap();
     let mut backend = Glm5NextBackend::new(
         &ctx,
         &weights,
         prepared,
         "glm".into(),
         std::time::Duration::ZERO,
+        no_snapshots,
     );
     eprintln!("warm_up_ms={:.1}", backend.warm_up().unwrap());
     let greedy = |input: Value, effort: &str| {
@@ -553,4 +558,355 @@ fn live_session_reuse_requires_the_same_prefill_lineage() {
     );
     assert_eq!(reuse_len(0, None, PackedLineage::Exact), 0);
     assert_eq!(lineage_name(PackedLineage::Exact), "exact");
+}
+
+/// Exact always has a snapshot schedule when the cache has a budget; Fast
+/// only with the opt-in; no budget means no splits and no captures.
+#[test]
+fn snapshot_schedules_follow_lineage_budget_and_opt_in() {
+    use PackedLineage::{Exact, Fast};
+    assert_eq!(snapshot_schedule(1, false, Exact), Some(Schedule::ExactV1));
+    assert_eq!(snapshot_schedule(1, true, Exact), Some(Schedule::ExactV1));
+    assert_eq!(snapshot_schedule(1, false, Fast), None);
+    assert_eq!(
+        snapshot_schedule(1, true, Fast),
+        Some(Schedule::FastSharedSplitV1)
+    );
+    for lineage in [Exact, Fast] {
+        assert_eq!(snapshot_schedule(0, true, lineage), None);
+    }
+}
+
+/// Cuts are renderer boundaries mapped through the tokenizer and kept only
+/// when the boundary's tokens are a strict prefix of the prompt's.
+#[test]
+fn cuts_are_verified_renderer_boundaries() {
+    // A toy tokenizer: one id per char, except "XY", which merges.
+    let encode = |text: &str| -> Result<Vec<u32>, ServeError> {
+        let mut ids = Vec::new();
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == 'X' && chars.peek() == Some(&'Y') {
+                chars.next();
+                ids.push(1000);
+            } else {
+                ids.push(c as u32);
+            }
+        }
+        Ok(ids)
+    };
+    let prompt = "sysSTUFF<u>hiXY<a>";
+    let tokens = encode(prompt).unwrap();
+    let at = |shared: Option<usize>, header: Option<usize>| {
+        Some(PromptBoundaries {
+            shared_prefix_end: shared,
+            generation_header_start: header,
+        })
+    };
+    let header = prompt.find("<a>");
+    assert_eq!(
+        cut_positions(
+            encode,
+            prompt,
+            &tokens,
+            at(Some(8), header),
+            Schedule::ExactV1
+        ),
+        vec![8, 14]
+    );
+    assert_eq!(
+        cut_positions(
+            encode,
+            prompt,
+            &tokens,
+            at(Some(8), header),
+            Schedule::FastSharedSplitV1
+        ),
+        vec![8]
+    );
+    assert!(cut_positions(encode, prompt, &tokens, None, Schedule::ExactV1).is_empty());
+    // Between X and Y the boundary's tokens are not a prefix: dropped.
+    let inside = prompt.find('Y');
+    assert_eq!(
+        cut_positions(
+            encode,
+            prompt,
+            &tokens,
+            at(inside, header),
+            Schedule::ExactV1
+        ),
+        vec![14]
+    );
+    // Empty or whole-prompt prefixes and out-of-range offsets cut nothing.
+    for offset in [0, prompt.len(), prompt.len() + 5] {
+        assert!(
+            cut_positions(
+                encode,
+                prompt,
+                &tokens,
+                at(Some(offset), None),
+                Schedule::ExactV1
+            )
+            .is_empty(),
+            "{offset}"
+        );
+    }
+    // Equal boundaries cut once.
+    assert_eq!(
+        cut_positions(
+            encode,
+            prompt,
+            &tokens,
+            at(Some(8), Some(8)),
+            Schedule::ExactV1
+        ),
+        vec![8]
+    );
+}
+
+/// The serve renderer reports where the shared instructions-and-tools
+/// prefix ends and where the generation header starts; authored text that
+/// spells a marker moves neither.
+#[test]
+fn serve_render_reports_the_shared_prefix_and_header() {
+    let profile = crate::serve::request_profile::RequestProfile::Glm5Next {
+        default_max_tokens: 64,
+        capacity: 4096,
+        max_piece_bytes: 64,
+    };
+    let body = json!({
+        "model": "glm",
+        "instructions": "Be brief. <|user|> here is just text.",
+        "tools": [{"type": "function", "name": "get_weather", "description": "Weather.",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}],
+        "input": [{"role": "user", "content": "Weather in Paris?"}],
+        "reasoning": {"effort": "low"}
+    });
+    let mut request = profile.parse(&body).unwrap();
+    profile.normalize(&mut request).unwrap();
+    let (prompt, boundaries) = profile.render_prepared(&request).unwrap();
+    assert_eq!(prompt, profile.render(&request).unwrap());
+    let boundaries = boundaries.unwrap();
+    let shared = boundaries.shared_prefix_end.unwrap();
+    assert!(prompt[..shared].ends_with("<|user|> here is just text."));
+    assert!(prompt[shared..].starts_with("<|user|>Weather in Paris?"));
+    let header = boundaries.generation_header_start.unwrap();
+    assert_eq!(&prompt[header..], "<|assistant|><think>");
+    // A different conversation with the same instructions and tools shares
+    // the prefix byte for byte.
+    let mut other = body.clone();
+    other["input"] = json!([{"role": "user", "content": "And in Rome?"}]);
+    let mut other = profile.parse(&other).unwrap();
+    profile.normalize(&mut other).unwrap();
+    let (other_prompt, other_boundaries) = profile.render_prepared(&other).unwrap();
+    assert_eq!(other_boundaries.unwrap().shared_prefix_end, Some(shared));
+    assert_eq!(other_prompt[..shared], prompt[..shared]);
+}
+
+/// A request rendered as serve renders it, with its boundaries.
+fn prepared_request(backend: &Glm5NextBackend<'_, '_>, body: Value) -> Arc<PreparedResponse> {
+    let mut request = backend.parse_request(&body).unwrap();
+    backend.normalize_request(&mut request).unwrap();
+    let (prompt, boundaries) = backend.render_prepared(&request).unwrap();
+    Arc::new(PreparedResponse {
+        request,
+        prompt,
+        boundaries,
+    })
+}
+
+/// Map #15 serve gates. A snapshot restore continues exactly the trajectory
+/// a miss runs on the same schedule: Exact hits equal a cold single prefill
+/// bitwise (Exact is segmentation-invariant); opt-in Fast hits equal a miss
+/// that splits at the same shared-prefix cut, as does a full cache; Fast and
+/// Exact entries never serve each other; a cancelled split prefill resumes
+/// onto the same schedule.
+#[test]
+#[ignore = "GLM53_GGUF GPU serve snapshot gates under MTL_DEBUG_LAYER=1; production CLI lease, no server process"]
+fn gpu_snapshots_continue_the_captured_trajectory() {
+    use qwen_llm::snapshot_policy::SnapshotPolicyConfig;
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    let path = gguf_path();
+    let source = GgufFile::open(&path).unwrap();
+    let prepared = Prepared::new(&source, &invocation(&path, Some(4096), Some(64))).unwrap();
+    let ctx = MetalContext::new().unwrap();
+    let weights = load(&ctx, &source, &prepared).unwrap();
+    let plan = |mib| {
+        crate::serve::SnapshotCachePlan::resolve(
+            Some(mib),
+            Default::default(),
+            ctx.memory_signals(),
+        )
+        .unwrap()
+    };
+    let mut backend = Glm5NextBackend::new(
+        &ctx,
+        &weights,
+        prepared,
+        "glm".into(),
+        std::time::Duration::ZERO,
+        plan(8192),
+    );
+    backend.warm_up().unwrap();
+    // ~1.3K tokens of instructions plus a tool: the shared cut is not a
+    // multiple of the 512-row chunk, so a split moves chunk alignment.
+    let instructions: String = (0..60)
+        .map(|i| format!("Rule {i}: when asked about topic {i}, answer in one short sentence. "))
+        .collect();
+    let body = |question: &str| {
+        json!({"model":"glm","instructions":instructions,
+            "tools":[{"type":"function","name":"get_weather","description":"Current weather for a city.",
+                "parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}],
+            "input":[{"role":"user","content":question}],
+            "reasoning":{"effort":"low"},"temperature":0,"max_output_tokens":8})
+    };
+    let a = prepared_request(
+        &backend,
+        body("What is 6 times 7? Reply with the number only."),
+    );
+    let b = prepared_request(
+        &backend,
+        body("What is 5 times 9? Reply with the number only."),
+    );
+    let tokenizer = backend.prepared.artifact.tokenizer();
+    let shared = tokenizer
+        .encode(
+            &a.prompt[..a.boundaries.unwrap().shared_prefix_end.unwrap()],
+            false,
+        )
+        .unwrap()
+        .len();
+    let a_len = tokenizer.encode(&a.prompt, false).unwrap().len();
+    assert!(shared > 1024 && shared % 512 != 0, "shared prefix {shared}");
+    eprintln!("shared prefix {shared} tokens, request A {a_len} tokens");
+
+    // Runs one request; returns (cached tokens, prefill logit bits, bytes).
+    let run = |backend: &mut Glm5NextBackend<'_, '_>, prepared: &Arc<PreparedResponse>| {
+        let mut sink = Sink::default();
+        let outcome = backend
+            .generate_prepared(Arc::clone(prepared), &mut sink)
+            .unwrap();
+        (
+            outcome.usage.cached_tokens,
+            backend.last_prefill_logits.clone(),
+            sink.bytes,
+        )
+    };
+    let reset = |backend: &mut Glm5NextBackend<'_, '_>, mib: u64, fast: bool, lineage| {
+        backend.session = None;
+        backend.history.clear();
+        backend.cache = SnapshotCache::new(mib << 20, SnapshotPolicyConfig::default());
+        backend.fast_snapshots = fast;
+        backend.lineage = lineage;
+    };
+    let mut failures = Vec::new();
+    let mut check = |label: &str, ok: bool| {
+        eprintln!("{label}: {ok}");
+        if !ok {
+            failures.push(label.to_string());
+        }
+    };
+
+    // Exact references: one cold prefill each (no cache, so no cuts).
+    reset(&mut backend, 0, false, PackedLineage::Exact);
+    let (_, exact_a, exact_a_bytes) = run(&mut backend, &a);
+    reset(&mut backend, 0, false, PackedLineage::Exact);
+    let (_, exact_b, exact_b_bytes) = run(&mut backend, &b);
+    // Exact with snapshots: A misses and captures at both cuts; B restores
+    // the shared prefix; an identical retry of A restores its transcript.
+    reset(&mut backend, 8192, false, PackedLineage::Exact);
+    let (cached, logits, bytes) = run(&mut backend, &a);
+    check("exact miss: no reuse", cached == 0);
+    check(
+        "exact miss == cold",
+        logits == exact_a && bytes == exact_a_bytes,
+    );
+    check("exact miss captured both cuts", backend.cache.len() == 2);
+    let (cached, logits, bytes) = run(&mut backend, &b);
+    check("exact B restores the shared prefix", cached == shared);
+    check(
+        "exact B hit == cold",
+        logits == exact_b && bytes == exact_b_bytes,
+    );
+    let (cached, logits, bytes) = run(&mut backend, &a);
+    check("exact A retry restores its transcript", cached == a_len - 2);
+    check(
+        "exact A retry == cold",
+        logits == exact_a && bytes == exact_a_bytes,
+    );
+
+    // Fast opt-in: the reference is a miss on the same schedule.
+    reset(&mut backend, 8192, true, PackedLineage::Fast);
+    let (cached, _, _) = run(&mut backend, &a);
+    check("fast A miss: no reuse", cached == 0);
+    reset(&mut backend, 8192, true, PackedLineage::Fast);
+    let (_, fast_b_miss, fast_b_bytes) = run(&mut backend, &b);
+    check(
+        "fast B miss captured the shared cut",
+        backend.cache.len() == 1,
+    );
+    backend.session = None;
+    backend.history.clear();
+    let (cached, logits, bytes) = run(&mut backend, &b);
+    check("fast B restores the shared prefix", cached == shared);
+    check(
+        "fast B hit == fast B miss",
+        logits == fast_b_miss && bytes == fast_b_bytes,
+    );
+    let (cached, logits, _) = run(&mut backend, &a);
+    check("fast A hit (from B's capture)", cached == shared);
+    let fast_a_hit = logits;
+    // A full cache (1 MiB) captures nothing but splits the same way.
+    reset(&mut backend, 1, true, PackedLineage::Fast);
+    let (cached, logits, bytes) = run(&mut backend, &b);
+    check(
+        "fast full: no reuse, nothing cached",
+        cached == 0 && backend.cache.len() == 0,
+    );
+    check(
+        "fast full == fast miss",
+        logits == fast_b_miss && bytes == fast_b_bytes,
+    );
+    // Fast without the opt-in is today's single cold prefill.
+    reset(&mut backend, 8192, false, PackedLineage::Fast);
+    let (_, unsplit, _) = run(&mut backend, &a);
+    check(
+        "fast without opt-in captures nothing",
+        backend.cache.len() == 0,
+    );
+    eprintln!(
+        "fast split vs unsplit A logits equal: {}",
+        unsplit == fast_a_hit
+    );
+
+    // Lineages never share entries: Fast entries serve no Exact request.
+    reset(&mut backend, 8192, true, PackedLineage::Fast);
+    run(&mut backend, &a);
+    backend.lineage = PackedLineage::Exact;
+    let (cached, logits, _) = run(&mut backend, &b);
+    check("exact B ignores fast entries", cached == 0);
+    check("exact B after fast entries == cold", logits == exact_b);
+
+    // A cancelled split prefill (tick 3: admission, chunk 1, chunk 2 of
+    // the shared segment) resumes on the same schedule.
+    for (lineage, fast) in [(PackedLineage::Exact, false), (PackedLineage::Fast, true)] {
+        reset(&mut backend, 8192, fast, lineage);
+        let reference = run(&mut backend, &b);
+        reset(&mut backend, 8192, fast, lineage);
+        let mut cancelled = Sink {
+            abort_tick: Some(3),
+            ..Sink::default()
+        };
+        let aborted = backend.generate_prepared(Arc::clone(&b), &mut cancelled);
+        check(
+            &format!("{lineage:?} cancel keeps 512 committed"),
+            matches!(aborted, Err(BackendFailure::Aborted(_))) && backend.history.len() == 512,
+        );
+        let (cached, logits, bytes) = run(&mut backend, &b);
+        check(
+            &format!("{lineage:?} resume == uninterrupted"),
+            cached == 512 && logits == reference.1 && bytes == reference.2,
+        );
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

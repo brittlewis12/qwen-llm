@@ -1,31 +1,81 @@
-//! GLM-5.3-Flash serve: borrowed resident weights and one live session kept
-//! across requests. A request reuses the session only when its prompt
-//! strictly extends exactly what the session consumed (a replayed
-//! conversation does: the model ends a turn by sampling `<|user|>`, the next
-//! turn's opener); anything else drops the session and prefills a fresh one.
-//! There is no snapshot cache yet. That is an implementation gap: the Qwen
-//! and Flash-Next hybrids also carry recurrent state and reuse prefixes by
-//! snapshotting it at boundaries (lane audit 2026-10-06).
+//! GLM-5.3-Flash serve: borrowed resident weights, one live session kept
+//! across requests and a RAM snapshot cache. A request continues the live
+//! session when its prompt strictly extends exactly what the session
+//! consumed (a replayed conversation does: the model ends a turn by
+//! sampling `<|user|>`, the next turn's opener), or restores the longest
+//! compatible snapshot when that reaches further; otherwise it prefills a
+//! fresh session.
+//!
+//! Snapshots are captured where the renderer recorded boundaries: the end
+//! of the shared instructions-and-tools prefix and, for Exact, the start of
+//! the generation header. A request of a snapshot schedule splits its
+//! prefill at those positions whether it hits, misses, finds the cache full
+//! or is denied capture, so a restore continues exactly the trajectory a
+//! miss would have run. Exact (`x_qwen.prefill_lineage: "exact"`) is
+//! segmentation-invariant, so its snapshots also equal a cold run. Fast
+//! snapshots split at the shared prefix only and stay off until their
+//! schedule qualifies (`QWEN_GLM_FAST_SNAPSHOTS=1` opts in for
+//! qualification).
 use super::decode_loop;
-use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
+use super::http::{
+    BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink, PreparedResponse,
+    PromptBoundaries,
+};
 use super::items::{ServeError, ServeRequest};
 use super::render_glm5_next::{self as render, FAMILY};
+use super::snapshot_cache::SnapshotCache;
 use anyhow::{Context, Result, ensure};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::glm5_next::Glm5NextPreparedArtifact;
 use qwen_llm::glm5_next_chat::{CHAT_STOPS, VerifiedChatProfile};
 use qwen_llm::glm5_next_metal::{
-    CapacityAdvice, DEFAULT_PREFILL_ROWS, Glm5NextMetalError, Glm5NextSession, Glm5NextWeights,
-    PackedLineage, prefetch_retained_with_cancel, preflight_session,
+    CapacityAdvice, DEFAULT_PREFILL_ROWS, Glm5NextMetalError, Glm5NextSession, Glm5NextSnapshot,
+    Glm5NextWeights, PackedLineage, prefetch_retained_with_cancel, preflight_session,
+    snapshot_bytes,
 };
 use qwen_llm::metal::MetalContext;
 use qwen_llm::model_family::ModelFamily;
 use qwen_llm::sampling::Sampler;
+use qwen_llm::snapshot_policy::EntryId;
 use std::io;
+use std::sync::Arc;
 use std::time::Instant;
 
-/// Default-on rollback lever for live-session reuse.
+/// Default-on rollback lever for live-session and snapshot reuse.
 const PREFIX_REUSE_ENV: &str = "QWEN_GLM_PREFIX_REUSE";
+/// Opt-in for Fast-lineage snapshots (shared-prefix split), pending the
+/// quality qualification of that prefill schedule.
+const FAST_SNAPSHOTS_ENV: &str = "QWEN_GLM_FAST_SNAPSHOTS";
+
+/// The prefill schedule a snapshot belongs to. A restore is valid only into
+/// a request that splits its prefill the same way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Schedule {
+    /// Exact lineage: cuts at the shared prefix end and the generation
+    /// header start. Packed Exact equals serial decode, so any cuts give the
+    /// same state.
+    ExactV1,
+    /// Fast lineage (opt-in): one cut at the shared prefix end.
+    FastSharedSplitV1,
+}
+
+impl Schedule {
+    fn name(self) -> &'static str {
+        match self {
+            Self::ExactV1 => "exact_v1",
+            Self::FastSharedSplitV1 => "fast_shared_split_v1",
+        }
+    }
+}
+
+/// What must match, beyond the token prefix, for a cached snapshot to be
+/// restored (weights instance and policy version are fixed per process and
+/// checked again by the engine).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CacheNamespace {
+    lineage: PackedLineage,
+    schedule: Schedule,
+}
 
 /// CPU startup facts: the admitted artifact, its verified chat profile and
 /// the session geometry fixed for the server's lifetime.
@@ -84,7 +134,7 @@ impl<'g> Prepared<'g> {
 
     pub(super) fn describe(&self) -> String {
         format!(
-            "family=glm5_next input=verified_chat_and_tools renderer={} capacity={} default_max_tokens={} prefill_rows={} snapshot_cache_bytes=0",
+            "family=glm5_next input=verified_chat_and_tools renderer={} capacity={} default_max_tokens={} prefill_rows={}",
             self.profile.renderer, self.capacity, self.default_max, self.prefill_rows
         )
     }
@@ -147,6 +197,161 @@ pub(super) struct Glm5NextBackend<'w, 'g> {
     /// Packed-prefill arithmetic for new sessions (tests compare warm and
     /// cold paths under `Exact`, which matches serial decode bitwise).
     lineage: PackedLineage,
+    cache: SnapshotCache<Glm5NextSnapshot, CacheNamespace>,
+    pub(super) snapshot_cache_plan: super::SnapshotCachePlan,
+    fast_snapshots: bool,
+    /// Bits of the last request's prefill logits (tests compare paths).
+    #[cfg(test)]
+    last_prefill_logits: Vec<u32>,
+}
+
+/// Why a cut's snapshot was or was not cached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CaptureOutcome {
+    Captured,
+    Present,
+    Ineligible,
+    Denied,
+    Failed,
+}
+
+impl CaptureOutcome {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Captured => "captured",
+            Self::Present => "present",
+            Self::Ineligible => "ineligible",
+            Self::Denied => "denied",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// The snapshot schedule of a request of `lineage`, or `None` when its
+/// prefill neither splits nor captures: no cache budget, or Fast without
+/// the opt-in.
+fn snapshot_schedule(
+    cache_bytes: u64,
+    fast_snapshots: bool,
+    lineage: PackedLineage,
+) -> Option<Schedule> {
+    if cache_bytes == 0 {
+        return None;
+    }
+    match lineage {
+        PackedLineage::Exact => Some(Schedule::ExactV1),
+        PackedLineage::Fast if fast_snapshots => Some(Schedule::FastSharedSplitV1),
+        PackedLineage::Fast => None,
+    }
+}
+
+/// Token positions where a request of `schedule` splits its prefill: each
+/// renderer boundary the schedule uses, mapped to a token position by
+/// encoding the prompt up to it and requiring that to be a prefix of the
+/// prompt's tokens. Sorted, unique and strictly inside the prompt; a
+/// boundary that fails is dropped with a diagnostic (it depends only on the
+/// prompt, so hits and misses still split alike).
+fn cut_positions(
+    encode: impl Fn(&str) -> Result<Vec<u32>, ServeError>,
+    prompt: &str,
+    tokens: &[u32],
+    boundaries: Option<PromptBoundaries>,
+    schedule: Schedule,
+) -> Vec<usize> {
+    let Some(boundaries) = boundaries else {
+        return Vec::new();
+    };
+    let wanted = match schedule {
+        Schedule::ExactV1 => [
+            ("shared_prefix", boundaries.shared_prefix_end),
+            ("generation_header", boundaries.generation_header_start),
+        ],
+        Schedule::FastSharedSplitV1 => [
+            ("shared_prefix", boundaries.shared_prefix_end),
+            ("generation_header", None),
+        ],
+    };
+    let mut cuts = Vec::new();
+    for (name, offset) in wanted {
+        let Some(offset) = offset else { continue };
+        let prefix = match prompt.get(..offset) {
+            Some(prefix) => encode(prefix).ok(),
+            None => None,
+        };
+        match prefix {
+            Some(ids)
+                if !ids.is_empty() && ids.len() < tokens.len() && tokens.starts_with(&ids) =>
+            {
+                cuts.push(ids.len());
+            }
+            _ => tracing::warn!(
+                target: "qwen_diag",
+                "serve: glm5_next {name} boundary at byte {offset} is not a token prefix of the prompt; not split there"
+            ),
+        }
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    cuts
+}
+
+/// Capture the session's state (committed exactly `prefix`) into the cache
+/// if it is new, fits and is admitted. Optional: every failure leaves the
+/// request running on the same schedule.
+fn capture_into(
+    cache: &mut SnapshotCache<Glm5NextSnapshot, CacheNamespace>,
+    session: &Glm5NextSession<'_>,
+    ctx: &MetalContext,
+    namespace: CacheNamespace,
+    prefix: &[u32],
+    estimate: Option<u64>,
+    reserve: u64,
+) -> CaptureOutcome {
+    if cache.entry_for_in(&namespace, prefix).is_some() {
+        return CaptureOutcome::Present;
+    }
+    let Some(entry_bytes) =
+        estimate.and_then(|payload| cache.strict_eligibility_in(&namespace, prefix, payload))
+    else {
+        return CaptureOutcome::Ineligible;
+    };
+    let Some(required) = entry_bytes.checked_add(reserve) else {
+        return CaptureOutcome::Ineligible;
+    };
+    if let Err((reason, signals)) = super::admit_snapshot_capture(
+        required,
+        || ctx.memory_signals(),
+        |bytes| cache.evict_for(bytes),
+    ) {
+        tracing::warn!(
+            target: "qwen_diag",
+            "serve: glm5_next snapshot not captured at {}: {reason:?} (required {required} bytes, signals {signals:?})",
+            prefix.len()
+        );
+        return CaptureOutcome::Denied;
+    }
+    let snapshot = match session.capture_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::warn!(
+                target: "qwen_diag",
+                "serve: glm5_next snapshot capture at {} failed: {error}",
+                prefix.len()
+            );
+            return CaptureOutcome::Failed;
+        }
+    };
+    let Some(bytes) = SnapshotCache::<Glm5NextSnapshot, CacheNamespace>::entry_bytes(
+        prefix.len(),
+        snapshot.bytes() as u64,
+    ) else {
+        return CaptureOutcome::Ineligible;
+    };
+    if cache.insert_strict_in(namespace, prefix.to_vec(), snapshot, bytes) {
+        CaptureOutcome::Captured
+    } else {
+        CaptureOutcome::Ineligible
+    }
 }
 
 /// A session-creation failure: a typed memory refusal takes the shared
@@ -196,6 +401,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         prepared: Prepared<'g>,
         model_id: String,
         idle_residency: std::time::Duration,
+        snapshot_cache_plan: super::SnapshotCachePlan,
     ) -> Self {
         Self {
             ctx,
@@ -207,7 +413,25 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             prefix_reuse: qwen_llm::env_flag::read_default_on(PREFIX_REUSE_ENV),
             idle_residency: super::idle_residency::IdleResidency::new("glm5_next", idle_residency),
             lineage: PackedLineage::default(),
+            cache: SnapshotCache::new(snapshot_cache_plan.bytes, snapshot_cache_plan.policy),
+            snapshot_cache_plan,
+            fast_snapshots: qwen_llm::env_flag::read_default_off(FAST_SNAPSHOTS_ENV),
+            #[cfg(test)]
+            last_prefill_logits: Vec::new(),
         }
+    }
+
+    /// The `serve limits` fragment for snapshots.
+    pub(super) fn describe_snapshots(&self) -> String {
+        format!(
+            "{} snapshot_schedules=exact{}",
+            self.snapshot_cache_plan,
+            if self.fast_snapshots {
+                ",fast_shared_split(opt-in)"
+            } else {
+                ""
+            }
+        )
     }
 
     fn fresh_session(
@@ -252,25 +476,14 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         self.idle_residency.note_activity();
         Ok(started.elapsed().as_secs_f64() * 1e3)
     }
-}
 
-impl GenerationBackend for Glm5NextBackend<'_, '_> {
-    fn model_id(&self) -> &str {
-        &self.model_id
-    }
-
-    fn request_profile(&self) -> super::request_profile::RequestProfile {
-        super::request_profile::RequestProfile::Glm5Next {
-            default_max_tokens: self.prepared.default_max,
-            capacity: self.prepared.capacity,
-            max_piece_bytes: self.prepared.max_piece_bytes,
-        }
-    }
-
-    fn generate(
+    /// One request: reuse (live session or snapshot), prefill split at the
+    /// schedule's cuts with optional captures, decode.
+    fn generate_with(
         &mut self,
         request: &ServeRequest,
         prompt: &str,
+        boundaries: Option<PromptBoundaries>,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
         self.idle_residency.before_request();
@@ -296,7 +509,6 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
         )?;
         sink.tick().map_err(BackendFailure::Aborted)?;
 
-        let prefill_t0 = Instant::now();
         // Taken before the session is used and republished only for a state
         // the session is known to hold, so a failure leaves no stale history.
         let history = std::mem::take(&mut self.history);
@@ -308,50 +520,160 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
             .session
             .as_ref()
             .and_then(Glm5NextSession::packed_lineage);
-        let reused = reuse_len(
+        let live = reuse_len(
             decode_loop::extending_prefix(&history, &tokens, committed, self.prefix_reuse),
             live_lineage,
             lineage,
         );
-        if reused == 0 {
-            // Release the old session's memory before allocating its successor.
-            self.session = None;
-            // A new session's buffers and this request's transport allowance
-            // are admitted as one requirement.
-            self.session = Some(self.fresh_session(reserve, lineage)?);
-        }
-        let ctx = self.ctx;
-        let session = self.session.as_mut().expect("session present");
-
-        let mut checkpoint_abort: Option<io::Error> = None;
-        let logits = session.prefill_packed_with_checkpoint(ctx, &tokens[reused..], &mut || {
-            sink.tick().map_err(|error| {
-                checkpoint_abort = Some(error);
-                "transport aborted during GLM-5.3 prefill".into()
-            })
+        let schedule = snapshot_schedule(self.cache.max_bytes(), self.fast_snapshots, lineage);
+        let namespace = schedule.map(|schedule| CacheNamespace { lineage, schedule });
+        let cuts = schedule.map_or_else(Vec::new, |schedule| {
+            cut_positions(
+                |text| decode_loop::encode_checked(tokenizer, text, false, vocab_size, FAMILY),
+                prompt,
+                &tokens,
+                boundaries,
+                schedule,
+            )
         });
-        let logits = match logits {
-            Ok(logits) => logits,
-            Err(error) => {
-                if let (Glm5NextMetalError::Cancelled(_), Some(abort)) = (&error, checkpoint_abort)
-                {
-                    // Cancelled at a chunk boundary: the committed prefix is
-                    // consistent, so a retry of this prompt resumes from it.
-                    let position = session.position();
-                    self.history = tokens[..position].to_vec();
-                    return Err(BackendFailure::Aborted(abort));
+        // The longest compatible snapshot, used only when it reaches past
+        // the live session's extension (ties keep the live session).
+        let hit = namespace
+            .filter(|_| self.prefix_reuse)
+            .and_then(|namespace| self.cache.peek_best_prefix_in(&namespace, &tokens))
+            .filter(|hit| hit.prefix_len > live);
+        let restore_t0 = Instant::now();
+        let mut restored: Option<EntryId> = None;
+        let matched = match hit {
+            Some(hit) => {
+                if live_lineage != Some(lineage) {
+                    self.session = None;
+                    self.session = Some(self.fresh_session(reserve, lineage)?);
                 }
+                let session = self.session.as_mut().expect("session present");
+                match session.restore_snapshot(&hit.value) {
+                    Ok(()) => {
+                        self.cache.touch(hit.id);
+                        restored = Some(hit.id);
+                        hit.prefix_len
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "qwen_diag",
+                            "serve: glm5_next snapshot restore at {} failed: {error}; prefilling a fresh session",
+                            hit.prefix_len
+                        );
+                        self.session = None;
+                        self.session = Some(self.fresh_session(reserve, lineage)?);
+                        0
+                    }
+                }
+                // The restored value's Arc drops here, before any capture
+                // admission could need its memory released.
+            }
+            None if live > 0 => live,
+            None => {
+                // Release the old session's memory before allocating its
+                // successor; its buffers and this request's transport
+                // allowance are admitted as one requirement.
                 self.session = None;
-                return Err(ServeError::server_error(format!("{FAMILY} prefill: {error}")).into());
+                self.session = Some(self.fresh_session(reserve, lineage)?);
+                0
             }
         };
+        let restore_ms = if restored.is_some() {
+            restore_t0.elapsed().as_secs_f64() * 1e3
+        } else {
+            0.0
+        };
+        let reuse_source = match (restored.is_some(), matched) {
+            (true, _) => "snapshot",
+            (false, 0) => "none",
+            (false, _) => "live",
+        };
+
+        let ctx = self.ctx;
+        let prefill_t0 = Instant::now();
+        let mut capture_ms = 0.0;
+        let mut captures = Vec::new();
+        // The entry this request restored or captured last stays pinned
+        // while a later cut is captured, so its admission cannot evict it.
+        let mut protect = restored;
+        let mut position = matched;
+        let mut logits = Vec::new();
+        let ends: Vec<usize> = cuts
+            .iter()
+            .copied()
+            .filter(|&cut| cut > matched)
+            .chain([tokens.len()])
+            .collect();
+        for end in ends {
+            let session = self.session.as_mut().expect("session present");
+            let mut checkpoint_abort: Option<io::Error> = None;
+            let result =
+                session.prefill_packed_with_checkpoint(ctx, &tokens[position..end], &mut || {
+                    sink.tick().map_err(|error| {
+                        checkpoint_abort = Some(error);
+                        "transport aborted during GLM-5.3 prefill".into()
+                    })
+                });
+            logits = match result {
+                Ok(logits) => logits,
+                Err(error) => {
+                    if let (Glm5NextMetalError::Cancelled(_), Some(abort)) =
+                        (&error, checkpoint_abort)
+                    {
+                        // Cancelled at a chunk boundary: the committed prefix
+                        // is consistent, so a retry of this prompt resumes
+                        // from it.
+                        let position = session.position();
+                        self.history = tokens[..position].to_vec();
+                        return Err(BackendFailure::Aborted(abort));
+                    }
+                    self.session = None;
+                    return Err(
+                        ServeError::server_error(format!("{FAMILY} prefill: {error}")).into(),
+                    );
+                }
+            };
+            position = end;
+            if end == tokens.len() {
+                break;
+            }
+            let namespace = namespace.expect("cuts come from a snapshot schedule");
+            let capture_t0 = Instant::now();
+            let pinned = protect.filter(|&id| self.cache.pin(id));
+            let outcome = capture_into(
+                &mut self.cache,
+                self.session.as_ref().expect("session present"),
+                ctx,
+                namespace,
+                &tokens[..end],
+                snapshot_bytes(&self.weights.config, end as u64),
+                reserve,
+            );
+            if let Some(id) = pinned {
+                self.cache.unpin(id);
+            }
+            capture_ms += capture_t0.elapsed().as_secs_f64() * 1e3;
+            protect = self
+                .cache
+                .entry_for_in(&namespace, &tokens[..end])
+                .or(protect);
+            captures.push(format!("{end}:{}", outcome.name()));
+        }
+        #[cfg(test)]
+        {
+            self.last_prefill_logits = logits.iter().map(|v| v.to_bits()).collect();
+        }
+        let session = self.session.as_mut().expect("session present");
         if let Err(abort) = sink.tick() {
             // The prompt is consumed but no retry can extend it (an equal
             // prompt has no fresh row): release the session now.
             self.session = None;
             return Err(BackendFailure::Aborted(abort));
         }
-        let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
+        let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3 - capture_ms;
         let generation = decode_loop::decode_serial(
             decode_loop::DecodeRequest {
                 family: FAMILY,
@@ -368,8 +690,8 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
         let generation = match generation {
             Ok(generation) => generation,
             Err(failure) => {
-                // A decode abort or failure clears the cache: a retry's
-                // prompt never extends a partially generated history.
+                // A decode abort or failure clears the live session: a
+                // retry's prompt never extends a partially generated history.
                 self.session = None;
                 return Err(failure);
             }
@@ -392,22 +714,70 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
         self.history = history;
         tracing::info!(
             target: "qwen_diag",
-            "serve phases: family=glm5_next prefill_ms={prefill_ms:.1} reused_tokens={reused} prefill_tokens={} decode_ms={:.1} required_forwards={required} capacity={} transitions={} lineage={}",
-            tokens.len() - reused,
+            "serve phases: family=glm5_next prefill_ms={prefill_ms:.1} reused_tokens={matched} reuse_source={reuse_source} restore_ms={restore_ms:.1} prefill_tokens={} decode_ms={:.1} required_forwards={required} capacity={} transitions={} lineage={} snapshot_schedule={} cuts={cuts:?} captures=[{}] snapshot_capture_ms={capture_ms:.1} snapshot_cache_bytes={} snapshot_cache_entries={}",
+            tokens.len() - matched,
             generation.wall_ms,
             self.prepared.capacity,
             generation.transitions,
             lineage_name(lineage),
+            schedule.map_or("none", Schedule::name),
+            captures.join(","),
+            self.cache.indexed_bytes(),
+            self.cache.len(),
         );
         Ok(super::outcome::finish_generation(
             tokens.len(),
             &generation,
-            reused,
-            0.0,
+            matched,
+            restore_ms,
         ))
+    }
+}
+
+impl GenerationBackend for Glm5NextBackend<'_, '_> {
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn request_profile(&self) -> super::request_profile::RequestProfile {
+        super::request_profile::RequestProfile::Glm5Next {
+            default_max_tokens: self.prepared.default_max,
+            capacity: self.prepared.capacity,
+            max_piece_bytes: self.prepared.max_piece_bytes,
+        }
+    }
+
+    fn render_prepared(
+        &self,
+        request: &ServeRequest,
+    ) -> Result<(String, Option<PromptBoundaries>), ServeError> {
+        self.request_profile().render_prepared(request)
+    }
+
+    fn generate(
+        &mut self,
+        request: &ServeRequest,
+        prompt: &str,
+        sink: &mut dyn GenerationSink,
+    ) -> Result<GenerationOutcome, BackendFailure> {
+        self.generate_with(request, prompt, None, sink)
+    }
+
+    fn generate_prepared(
+        &mut self,
+        prepared: Arc<PreparedResponse>,
+        sink: &mut dyn GenerationSink,
+    ) -> Result<GenerationOutcome, BackendFailure> {
+        self.generate_with(
+            &prepared.request,
+            &prepared.prompt,
+            prepared.boundaries,
+            sink,
+        )
     }
 
     fn idle(&mut self) {
+        super::log_expired_snapshots("glm5_next", &self.cache.sweep());
         let weights = self.weights;
         self.idle_residency
             .on_idle(self.ctx, || weights.retained_buffers());

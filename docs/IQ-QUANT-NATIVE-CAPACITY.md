@@ -1,7 +1,7 @@
 # Native IQ quant capacity queue
 
-Queued 2026-10-08 at the user's request, next after the completed GLM MLA tail
-screen (experimental selection remains off). This is a capacity/coverage task,
+Queued 2026-10-08 after the completed GLM MLA tail screen (experimental
+selection remains off). This is a capacity/coverage task,
 not a small-throughput optimization.
 No production admission or kernel selection changes are made by this note.
 
@@ -29,8 +29,8 @@ loaded for this investigation. Header length: 10,994,812 bytes; header-only
 SHA-256: `631c2d64c4b90efbe1b6cbae3c11f0103088db8ec2c4b9758e4f0582430a6d1c`.
 This is a descriptor binding, not a full weight-content integrity hash.
 
-The user's 75 GiB RSS and 7 tokens/s are reported measurements, not reproduced
-here. The reported expansion is credible, but it is not all IQ2_XXS:
+Reported 75 GiB RSS and 7 tokens/s are measurements, not reproduced here. The
+reported expansion is credible, but it is not all IQ2_XXS:
 
 | Unsupported storage cohort | Tensors | Source GiB | F32 GiB | Avoidable GiB |
 | --- | ---: | ---: | ---: | ---: |

@@ -100,15 +100,3 @@ are not blockers for the priorities above.
 F16 KV remains the default at 147456 logical bytes/token (72 GiB at 524288).
 The private Q8 cache uses 78336 bytes/token (46.875% less), but its recorded
 qualification failed; it is not promoted. No silent history loss is acceptable.
-
-## Integration Discipline
-
-Work proceeds on `feat/k2-horizon` in `/Users/tito/code/qwen-llm-k2-horizon`, with
-reviewed checkpoints integrated locally into main. No remote pushes are implied.
-Cross-family dispatch, shared serial-driver and family-profile reorganization
-belong to the concurrent maintenance lane, not this implementation packet.
-
-Use `cx` adversarial review before checkpoints. GPU checks use the production
-exclusive lease, real wired-memory gate and `MTL_DEBUG_LAYER=1`; do not alter
-foreign servers/jobs. Reuse retained evidence where appropriate rather than
-duplicating costly research runs. Preserve unrelated main-worktree changes.

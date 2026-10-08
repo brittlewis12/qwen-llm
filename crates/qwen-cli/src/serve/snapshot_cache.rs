@@ -86,6 +86,21 @@ impl<V, N: PartialEq> SnapshotCache<V, N> {
         })
     }
 
+    /// The entry cached in `namespace` under exactly `tokens`, without
+    /// recording a hit (expires stale entries first).
+    pub(crate) fn peek_exact_in(&mut self, namespace: &N, tokens: &[u32]) -> Option<PrefixHit<V>> {
+        self.sweep();
+        let (&id, entry) = self
+            .entries
+            .iter()
+            .find(|(_, entry)| entry.namespace == *namespace && entry.tokens == tokens)?;
+        Some(PrefixHit {
+            id,
+            prefix_len: entry.tokens.len(),
+            value: Arc::clone(&entry.value),
+        })
+    }
+
     /// Record a use of an entry (frecency and idle expiry).
     pub(crate) fn touch(&mut self, id: EntryId) {
         self.policy.touch(id);
@@ -351,6 +366,9 @@ mod tests {
             cache.entry_for_in(&1, &[1, 2]),
             cache.entry_for_in(&2, &[1, 2])
         );
+        assert_eq!(*cache.peek_exact_in(&1, &[1, 2]).unwrap().value, "fast");
+        assert!(cache.peek_exact_in(&1, &[1]).is_none());
+        assert!(cache.peek_exact_in(&3, &[1, 2]).is_none());
         // One budget: a third entry evicts the least recently used of either.
         let bytes = cache.strict_eligibility_in(&3, &[7], 6).unwrap();
         assert!(cache.insert_strict_in(3, vec![7], "other", bytes));

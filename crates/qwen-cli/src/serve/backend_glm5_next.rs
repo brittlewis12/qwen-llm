@@ -15,7 +15,12 @@
 //! segmentation-invariant, so its snapshots also equal a cold run. Fast
 //! snapshots split at the shared prefix only and stay off until their
 //! schedule qualifies (`QWEN_GLM_FAST_SNAPSHOTS=1` opts in for
-//! qualification).
+//! qualification). A Fast request restores only a snapshot ending exactly
+//! at its own verified cut, and publishes one only from a state on the
+//! canonical schedule (packed chunks from 0, no other cut, no decoded
+//! tokens); without a verified cut it neither restores nor captures.
+//! Memory-pressure refusals of the transport or a new session release the
+//! cache (except a snapshot being restored) and retry once.
 use super::decode_loop;
 use super::http::{
     BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink, PreparedResponse,
@@ -200,9 +205,16 @@ pub(super) struct Glm5NextBackend<'w, 'g> {
     cache: SnapshotCache<Glm5NextSnapshot, CacheNamespace>,
     pub(super) snapshot_cache_plan: super::SnapshotCachePlan,
     fast_snapshots: bool,
+    /// The live session's whole state is a Fast packed prefill of its
+    /// history in chunks from 0 (no other cuts, no decoded tokens), so a
+    /// Fast capture continuing it would equal a miss's.
+    live_canonical: bool,
     /// Bits of the last request's prefill logits (tests compare paths).
     #[cfg(test)]
     last_prefill_logits: Vec<u32>,
+    /// Treat every capture admission as denied (tests).
+    #[cfg(test)]
+    deny_captures: bool,
 }
 
 /// Why a cut's snapshot was or was not cached.
@@ -213,6 +225,8 @@ enum CaptureOutcome {
     Ineligible,
     Denied,
     Failed,
+    /// A Fast state not produced on the canonical schedule; not published.
+    NonCanonical,
 }
 
 impl CaptureOutcome {
@@ -223,6 +237,7 @@ impl CaptureOutcome {
             Self::Ineligible => "ineligible",
             Self::Denied => "denied",
             Self::Failed => "failed",
+            Self::NonCanonical => "noncanonical",
         }
     }
 }
@@ -366,6 +381,74 @@ fn session_error(error: Glm5NextMetalError) -> ServeError {
     }
 }
 
+/// A typed memory-pressure refusal (503 `memory_admission_denied`), which
+/// releasing cached snapshots may relieve; telemetry, size and overflow
+/// refusals are not retried.
+fn is_pressure_refusal(error: &ServeError) -> bool {
+    error.status == 503 && error.code == Some("memory_admission_denied")
+}
+
+/// Release every unpinned cached snapshot except `keep` (memory pressure:
+/// the cache is optional, a refused request is not).
+fn release_snapshots<V>(
+    cache: &mut SnapshotCache<V, CacheNamespace>,
+    keep: Option<EntryId>,
+) -> qwen_llm::snapshot_policy::Evicted {
+    let pinned = keep.filter(|&id| cache.pin(id));
+    let released = cache.evict_for(u64::MAX);
+    if let Some(id) = pinned {
+        cache.unpin(id);
+    }
+    if !released.is_empty() {
+        tracing::info!(
+            target: "qwen_diag",
+            "serve: glm5_next snapshot cache released for memory pressure; entries={} freed_bytes={}",
+            released.ids.len(),
+            released.bytes,
+        );
+    }
+    released
+}
+
+/// `attempt`, retried once after releasing cached snapshots (except
+/// `keep`) when it is refused for memory pressure and something was
+/// released.
+fn with_snapshot_release<T, V>(
+    cache: &mut SnapshotCache<V, CacheNamespace>,
+    keep: Option<EntryId>,
+    mut attempt: impl FnMut() -> Result<T, ServeError>,
+) -> Result<T, ServeError> {
+    match attempt() {
+        Err(error) if is_pressure_refusal(&error) => {
+            if release_snapshots(cache, keep).is_empty() {
+                return Err(error);
+            }
+            attempt()
+        }
+        other => other,
+    }
+}
+
+/// A session of the serve geometry reading prompts with `lineage`.
+fn new_session<'w>(
+    ctx: &'w MetalContext,
+    weights: &'w Glm5NextWeights,
+    prepared: &Prepared<'_>,
+    cpu_reserve: u64,
+    lineage: PackedLineage,
+) -> Result<Glm5NextSession<'w>, ServeError> {
+    let mut session = Glm5NextSession::with_prefill_rows_and_cpu_reserve(
+        ctx,
+        weights,
+        prepared.capacity,
+        prepared.prefill_rows,
+        cpu_reserve,
+    )
+    .map_err(session_error)?;
+    session.set_packed_lineage(lineage).map_err(session_error)?;
+    Ok(session)
+}
+
 /// The lineage this request reads its prompt with: `x_qwen.prefill_lineage`
 /// if sent, else the backend default.
 fn request_lineage(request: &ServeRequest, default: PackedLineage) -> PackedLineage {
@@ -416,8 +499,22 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             cache: SnapshotCache::new(snapshot_cache_plan.bytes, snapshot_cache_plan.policy),
             snapshot_cache_plan,
             fast_snapshots: qwen_llm::env_flag::read_default_off(FAST_SNAPSHOTS_ENV),
+            live_canonical: false,
             #[cfg(test)]
             last_prefill_logits: Vec::new(),
+            #[cfg(test)]
+            deny_captures: false,
+        }
+    }
+
+    fn deny_captures(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.deny_captures
+        }
+        #[cfg(not(test))]
+        {
+            false
         }
     }
 
@@ -439,16 +536,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         cpu_reserve: u64,
         lineage: PackedLineage,
     ) -> Result<Glm5NextSession<'w>, ServeError> {
-        let mut session = Glm5NextSession::with_prefill_rows_and_cpu_reserve(
-            self.ctx,
-            self.weights,
-            self.prepared.capacity,
-            self.prepared.prefill_rows,
-            cpu_reserve,
-        )
-        .map_err(session_error)?;
-        session.set_packed_lineage(lineage).map_err(session_error)?;
-        Ok(session)
+        new_session(self.ctx, self.weights, &self.prepared, cpu_reserve, lineage)
     }
 
     /// One short prefill on a throwaway session before the listener accepts,
@@ -503,10 +591,13 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         // A tool block's memory is admitted as it grows (the tools partition),
         // not reserved here at its rarely approached worst case.
         let reserve = sink.transport_reserve_bytes();
-        super::transport_memory::admit_resident_transport(
-            reserve,
-            MetalContext::process_limit_bytes_remaining(),
-        )?;
+        // Cached snapshots are optional: released before a pressure refusal.
+        with_snapshot_release(&mut self.cache, None, || {
+            super::transport_memory::admit_resident_transport(
+                reserve,
+                MetalContext::process_limit_bytes_remaining(),
+            )
+        })?;
         sink.tick().map_err(BackendFailure::Aborted)?;
 
         // Taken before the session is used and republished only for a state
@@ -525,8 +616,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             live_lineage,
             lineage,
         );
-        let schedule = snapshot_schedule(self.cache.max_bytes(), self.fast_snapshots, lineage);
-        let namespace = schedule.map(|schedule| CacheNamespace { lineage, schedule });
+        let mut schedule = snapshot_schedule(self.cache.max_bytes(), self.fast_snapshots, lineage);
         let cuts = schedule.map_or_else(Vec::new, |schedule| {
             cut_positions(
                 |text| decode_loop::encode_checked(tokenizer, text, false, vocab_size, FAMILY),
@@ -536,25 +626,48 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 schedule,
             )
         });
-        // The longest compatible snapshot, used only when it reaches past
-        // the live session's extension (ties keep the live session).
+        // Fast snapshots exist only at a verified shared-prefix cut: without
+        // one this request neither restores nor captures.
+        if schedule == Some(Schedule::FastSharedSplitV1) && cuts.is_empty() {
+            schedule = None;
+        }
+        let namespace = schedule.map(|schedule| CacheNamespace { lineage, schedule });
+        // Exact restores any compatible prefix (segmentation-invariant);
+        // Fast only a snapshot ending exactly at this request's cut. Used
+        // only when it reaches past the live extension (ties keep live).
         let hit = namespace
             .filter(|_| self.prefix_reuse)
-            .and_then(|namespace| self.cache.peek_best_prefix_in(&namespace, &tokens))
+            .and_then(|namespace| match namespace.schedule {
+                Schedule::ExactV1 => self.cache.peek_best_prefix_in(&namespace, &tokens),
+                Schedule::FastSharedSplitV1 => {
+                    self.cache.peek_exact_in(&namespace, &tokens[..cuts[0]])
+                }
+            })
             .filter(|hit| hit.prefix_len > live);
         let restore_t0 = Instant::now();
         let mut restored: Option<EntryId> = None;
+        // Whether the session's state at the current position equals a
+        // packed prefill of the same tokens in chunks from 0 (Fast captures
+        // publish only such states; Exact does not depend on it).
+        let mut canonical;
         let matched = match hit {
             Some(hit) => {
                 if live_lineage != Some(lineage) {
                     self.session = None;
-                    self.session = Some(self.fresh_session(reserve, lineage)?);
+                    self.session = Some(with_snapshot_release(
+                        &mut self.cache,
+                        Some(hit.id),
+                        || new_session(self.ctx, self.weights, &self.prepared, reserve, lineage),
+                    )?);
                 }
                 let session = self.session.as_mut().expect("session present");
                 match session.restore_snapshot(&hit.value) {
                     Ok(()) => {
                         self.cache.touch(hit.id);
                         restored = Some(hit.id);
+                        // Fast entries are captured only from canonical
+                        // states (below).
+                        canonical = lineage == PackedLineage::Fast;
                         hit.prefix_len
                     }
                     Err(error) => {
@@ -564,20 +677,29 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                             hit.prefix_len
                         );
                         self.session = None;
-                        self.session = Some(self.fresh_session(reserve, lineage)?);
+                        self.session = Some(with_snapshot_release(&mut self.cache, None, || {
+                            new_session(self.ctx, self.weights, &self.prepared, reserve, lineage)
+                        })?);
+                        canonical = true;
                         0
                     }
                 }
                 // The restored value's Arc drops here, before any capture
                 // admission could need its memory released.
             }
-            None if live > 0 => live,
+            None if live > 0 => {
+                canonical = self.live_canonical;
+                live
+            }
             None => {
                 // Release the old session's memory before allocating its
                 // successor; its buffers and this request's transport
                 // allowance are admitted as one requirement.
                 self.session = None;
-                self.session = Some(self.fresh_session(reserve, lineage)?);
+                self.session = Some(with_snapshot_release(&mut self.cache, None, || {
+                    new_session(self.ctx, self.weights, &self.prepared, reserve, lineage)
+                })?);
+                canonical = true;
                 0
             }
         };
@@ -591,14 +713,22 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             (false, 0) => "none",
             (false, _) => "live",
         };
+        // Whatever happens next, the live state's provenance is recomputed.
+        self.live_canonical = false;
 
         let ctx = self.ctx;
         let prefill_t0 = Instant::now();
         let mut capture_ms = 0.0;
         let mut captures = Vec::new();
-        // The entry this request restored or captured last stays pinned
-        // while a later cut is captured, so its admission cannot evict it.
-        let mut protect = restored;
+        // The entry this request restored, reused through the live session
+        // or captured last stays pinned while a later cut is captured, so
+        // that capture's admission cannot evict it.
+        let mut protect = restored.or_else(|| {
+            let namespace = namespace?;
+            let cut = cuts.iter().copied().filter(|&cut| cut <= matched).max()?;
+            self.cache.entry_for_in(&namespace, &tokens[..cut])
+        });
+        let rows = self.prepared.prefill_rows.max(1);
         let mut position = matched;
         let mut logits = Vec::new();
         let ends: Vec<usize> = cuts
@@ -608,6 +738,9 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             .chain([tokens.len()])
             .collect();
         for end in ends {
+            // Chunks of this segment start at `position`: they stay on the
+            // from-0 grid only if it is a multiple of the chunk rows.
+            canonical &= position % rows == 0;
             let session = self.session.as_mut().expect("session present");
             let mut checkpoint_abort: Option<io::Error> = None;
             let result =
@@ -628,6 +761,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                         // from it.
                         let position = session.position();
                         self.history = tokens[..position].to_vec();
+                        self.live_canonical = canonical && lineage == PackedLineage::Fast;
                         return Err(BackendFailure::Aborted(abort));
                     }
                     self.session = None;
@@ -643,15 +777,24 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             let namespace = namespace.expect("cuts come from a snapshot schedule");
             let capture_t0 = Instant::now();
             let pinned = protect.filter(|&id| self.cache.pin(id));
-            let outcome = capture_into(
-                &mut self.cache,
-                self.session.as_ref().expect("session present"),
-                ctx,
-                namespace,
-                &tokens[..end],
-                snapshot_bytes(&self.weights.config, end as u64),
-                reserve,
-            );
+            let outcome = if namespace.schedule == Schedule::FastSharedSplitV1 && !canonical {
+                // Live history segmented differently (an earlier cut, a
+                // cancellation off the chunk grid, decoded tokens): this
+                // state is not the one a miss would publish.
+                CaptureOutcome::NonCanonical
+            } else if self.deny_captures() {
+                CaptureOutcome::Denied
+            } else {
+                capture_into(
+                    &mut self.cache,
+                    self.session.as_ref().expect("session present"),
+                    ctx,
+                    namespace,
+                    &tokens[..end],
+                    snapshot_bytes(&self.weights.config, end as u64),
+                    reserve,
+                )
+            };
             if let Some(id) = pinned {
                 self.cache.unpin(id);
             }

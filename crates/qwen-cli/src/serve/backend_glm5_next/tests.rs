@@ -703,6 +703,80 @@ fn serve_render_reports_the_shared_prefix_and_header() {
     assert_eq!(other_prompt[..shared], prompt[..shared]);
 }
 
+/// Only a typed pressure refusal releases cached snapshots, at most once,
+/// and never the entry being kept; other refusals and successes leave the
+/// cache alone.
+#[test]
+fn pressure_refusals_release_snapshots_once_and_keep_the_hit() {
+    use qwen_llm::snapshot_policy::SnapshotPolicyConfig;
+    let ns = CacheNamespace {
+        lineage: PackedLineage::Exact,
+        schedule: Schedule::ExactV1,
+    };
+    let filled = || {
+        let mut cache: SnapshotCache<&'static str, CacheNamespace> =
+            SnapshotCache::new(1 << 20, SnapshotPolicyConfig::LRU);
+        assert!(cache.insert_strict_in(ns, vec![1], "keep", 10));
+        assert!(cache.insert_strict_in(ns, vec![2], "drop", 10));
+        cache
+    };
+    let pressure = || {
+        let mut error = ServeError::server_error("refused");
+        error.status = 503;
+        error.code = Some("memory_admission_denied");
+        error
+    };
+    assert!(is_pressure_refusal(&pressure()));
+    assert!(!is_pressure_refusal(&ServeError::server_error("telemetry")));
+
+    // Pressure, then success: the retry runs after releasing all but `keep`.
+    let mut cache = filled();
+    let keep = cache.entry_for_in(&ns, &[1]);
+    let mut attempts = 0;
+    let result = with_snapshot_release(&mut cache, keep, || {
+        attempts += 1;
+        if attempts == 1 {
+            Err(pressure())
+        } else {
+            Ok(attempts)
+        }
+    });
+    assert_eq!(result.unwrap(), 2);
+    assert!(cache.entry_for_in(&ns, &[1]).is_some());
+    assert!(cache.entry_for_in(&ns, &[2]).is_none());
+
+    // Persistent pressure: exactly one retry, then the refusal.
+    let mut cache = filled();
+    let mut attempts = 0;
+    let result: Result<(), ServeError> = with_snapshot_release(&mut cache, None, || {
+        attempts += 1;
+        Err(pressure())
+    });
+    assert_eq!((result.unwrap_err().status, attempts), (503, 2));
+    assert_eq!(cache.len(), 0);
+
+    // Nothing to release: no retry.
+    let mut attempts = 0;
+    let result: Result<(), ServeError> = with_snapshot_release(&mut cache, None, || {
+        attempts += 1;
+        Err(pressure())
+    });
+    assert!(result.is_err());
+    assert_eq!(attempts, 1);
+
+    // Other refusals and successes leave the cache alone.
+    let mut cache = filled();
+    let result: Result<(), ServeError> = with_snapshot_release(&mut cache, None, || {
+        Err(ServeError::server_error("telemetry"))
+    });
+    assert_eq!(result.unwrap_err().status, 500);
+    assert_eq!(
+        with_snapshot_release(&mut cache, None, || Ok(7)).unwrap(),
+        7
+    );
+    assert_eq!(cache.len(), 2);
+}
+
 /// A request rendered as serve renders it, with its boundaries.
 fn prepared_request(backend: &Glm5NextBackend<'_, '_>, body: Value) -> Arc<PreparedResponse> {
     let mut request = backend.parse_request(&body).unwrap();
@@ -753,13 +827,15 @@ fn gpu_snapshots_continue_the_captured_trajectory() {
     let instructions: String = (0..60)
         .map(|i| format!("Rule {i}: when asked about topic {i}, answer in one short sentence. "))
         .collect();
-    let body = |question: &str| {
+    let body_with = |instructions: &str, input: Value| {
         json!({"model":"glm","instructions":instructions,
             "tools":[{"type":"function","name":"get_weather","description":"Current weather for a city.",
                 "parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}],
-            "input":[{"role":"user","content":question}],
+            "input":input,
             "reasoning":{"effort":"low"},"temperature":0,"max_output_tokens":8})
     };
+    let body =
+        |question: &str| body_with(&instructions, json!([{"role":"user","content":question}]));
     let a = prepared_request(
         &backend,
         body("What is 6 times 7? Reply with the number only."),
@@ -795,6 +871,7 @@ fn gpu_snapshots_continue_the_captured_trajectory() {
     let reset = |backend: &mut Glm5NextBackend<'_, '_>, mib: u64, fast: bool, lineage| {
         backend.session = None;
         backend.history.clear();
+        backend.deny_captures = false;
         backend.cache = SnapshotCache::new(mib << 20, SnapshotPolicyConfig::default());
         backend.fast_snapshots = fast;
         backend.lineage = lineage;
@@ -908,5 +985,155 @@ fn gpu_snapshots_continue_the_captured_trajectory() {
             cached == 512 && logits == reference.1 && bytes == reference.2,
         );
     }
+
+    // Fast snapshots are taken and used only at this request's own
+    // verified cut. Two instruction sets where the first's shared prefix is
+    // a strict token prefix of the second's.
+    let short = format!("{}\n", instructions.trim_end());
+    let long = format!("{short}Extra rule: answer politely.\n");
+    let question =
+        json!([{"role":"user","content":"What is 6 times 7? Reply with the number only."}]);
+    let first = prepared_request(&backend, body_with(&short, question.clone()));
+    let second = prepared_request(&backend, body_with(&long, question));
+    // The GGUF tokenizer, independent of the backend's borrow.
+    let gguf_tokenizer = qwen_llm::tokenizer::Tokenizer::from_gguf(&source).unwrap();
+    let encode = |text: &str| -> Vec<u32> {
+        gguf_tokenizer
+            .encode(text, false)
+            .unwrap()
+            .into_iter()
+            .map(|id| id as u32)
+            .collect()
+    };
+    assert_eq!(encode(&a.prompt).len(), a_len);
+    let first_tokens = encode(&first.prompt);
+    let second_tokens = encode(&second.prompt);
+    let s1 = encode(&first.prompt[..first.boundaries.unwrap().shared_prefix_end.unwrap()]).len();
+    let s2 = encode(&second.prompt[..second.boundaries.unwrap().shared_prefix_end.unwrap()]).len();
+    assert!(
+        s1 < s2 && second_tokens.starts_with(&first_tokens[..s1]),
+        "fixture: the first shared prefix ({s1}) must be a token prefix of the second ({s2})"
+    );
+    let fast_ns = CacheNamespace {
+        lineage: PackedLineage::Fast,
+        schedule: Schedule::FastSharedSplitV1,
+    };
+    reset(&mut backend, 8192, true, PackedLineage::Fast);
+    let (_, second_miss, second_bytes) = run(&mut backend, &second);
+    // A cached shorter shared prefix is not this request's cut: a miss.
+    reset(&mut backend, 8192, true, PackedLineage::Fast);
+    run(&mut backend, &first);
+    backend.session = None;
+    backend.history.clear();
+    let (cached, logits, bytes) = run(&mut backend, &second);
+    check("fast ignores another request's shorter cut", cached == 0);
+    check(
+        "fast after a shorter cut == miss",
+        logits == second_miss && bytes == second_bytes,
+    );
+    // A live session cancelled right after the first request's cut (tick 5:
+    // admission, three chunks, then the next segment) continues into the
+    // second request, but its state is off the chunk grid: no Fast capture.
+    reset(&mut backend, 8192, true, PackedLineage::Fast);
+    let mut cancelled = Sink {
+        abort_tick: Some(5),
+        ..Sink::default()
+    };
+    let aborted = backend.generate_prepared(Arc::clone(&first), &mut cancelled);
+    check(
+        "fast cancel right after the cut",
+        matches!(aborted, Err(BackendFailure::Aborted(_))) && backend.history.len() == s1,
+    );
+    let (cached, _, _) = run(&mut backend, &second);
+    check(
+        "off-grid live state is continued but not published",
+        cached == s1
+            && backend
+                .cache
+                .entry_for_in(&fast_ns, &second_tokens[..s2])
+                .is_none(),
+    );
+    // Without renderer boundaries a Fast request neither restores nor
+    // captures.
+    reset(&mut backend, 8192, true, PackedLineage::Fast);
+    run(&mut backend, &a);
+    backend.session = None;
+    backend.history.clear();
+    let entries = backend.cache.len();
+    let mut sink = Sink::default();
+    let outcome = backend.generate(&a.request, &a.prompt, &mut sink).unwrap();
+    check(
+        "fast without boundaries: no restore, no capture",
+        outcome.usage.cached_tokens == 0 && backend.cache.len() == entries,
+    );
+
+    // Denied captures keep the same splits.
+    for (lineage, fast, reference) in [
+        (PackedLineage::Fast, true, &fast_b_miss),
+        (PackedLineage::Exact, false, &exact_b),
+    ] {
+        reset(&mut backend, 8192, fast, lineage);
+        backend.deny_captures = true;
+        let (cached, logits, _) = run(&mut backend, &b);
+        check(
+            &format!("{lineage:?} denied: same splits, nothing cached"),
+            cached == 0 && backend.cache.len() == 0 && logits == *reference,
+        );
+    }
+
+    // A continued live request keeps the shared entry it passed: with room
+    // for one entry beside a pinned one, its transcript capture is refused
+    // rather than evicting the shared snapshot.
+    reset(&mut backend, 8192, false, PackedLineage::Exact);
+    let mut sink = Sink::default();
+    let outcome = backend
+        .generate_prepared(Arc::clone(&a), &mut sink)
+        .unwrap();
+    let (reasoning, answer) = split(&sink.bytes, outcome.end);
+    let continued = prepared_request(
+        &backend,
+        body_with(
+            &instructions,
+            json!([
+                {"role":"user","content":"What is 6 times 7? Reply with the number only."},
+                {"type":"reasoning","content":reasoning},
+                {"role":"assistant","content":answer},
+                {"role":"user","content":"And 5 times 9?"}]),
+        ),
+    );
+    let entry = |n: usize| {
+        qwen_llm::glm5_next_metal::snapshot_bytes(&weights.config, n as u64).unwrap() + 4 * n as u64
+    };
+    let continued_len = encode(&continued.prompt).len();
+    let budget = entry(continued_len - 2) + entry(shared) / 2;
+    backend.session = None;
+    backend.history.clear();
+    backend.cache = SnapshotCache::new(budget, SnapshotPolicyConfig::default());
+    run(&mut backend, &a);
+    let exact_ns = CacheNamespace {
+        lineage: PackedLineage::Exact,
+        schedule: Schedule::ExactV1,
+    };
+    let a_tokens = encode(&a.prompt);
+    check(
+        "tight budget keeps the shared entry, refuses the transcript",
+        backend.cache.len() == 1
+            && backend
+                .cache
+                .entry_for_in(&exact_ns, &a_tokens[..shared])
+                .is_some(),
+    );
+    let (cached, _, _) = run(&mut backend, &continued);
+    check(
+        "continued request reuses the live session past both cuts",
+        cached > a_len,
+    );
+    check(
+        "the passed shared entry survives the continued capture",
+        backend
+            .cache
+            .entry_for_in(&exact_ns, &a_tokens[..shared])
+            .is_some(),
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

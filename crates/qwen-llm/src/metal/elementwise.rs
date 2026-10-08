@@ -1742,6 +1742,41 @@ pub fn encode_sigmoid_mul_gate_strided_f32(
     Ok(())
 }
 
+/// Test instrument (map #12 precision probe): rounds `x[0..n]` through half
+/// precision in place.
+#[cfg(test)]
+pub(crate) fn encode_round_trip_f16_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    n: usize,
+) -> Result<(), MetalError> {
+    if x.dtype != GgmlType::F32 || n as u64 > x.n_elements() {
+        return Err(MetalError::BadShape {
+            kernel: "round_trip_f16_f32",
+            detail: format!("{:?} with {} elements for n={n}", x.dtype, x.n_elements()),
+        });
+    }
+    let pso = ctx.pipeline("kernel_round_trip_f16_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &(n as u32));
+    enc.set_tensor(1, x);
+    let threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    enc.dispatch(
+        MTLSize {
+            width: n.div_ceil(threads),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Scatter F32 source bytes into a F16 destination buffer at offset.
 /// Used for KV cache append when the cache is F16. Counterpart of
 /// `encode_scatter_offset_f32` (F32 → F32).

@@ -115,6 +115,64 @@ fn stage_lineage(lineage: PackedLineage, stage: Stage) -> PackedLineage {
     lineage
 }
 
+#[cfg(test)]
+thread_local! {
+    static ROUND_EXACT_ACTIVATIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static ROUND_SCRATCH: std::cell::RefCell<Option<MetalTensor>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only precision probe (map #12): in this scope, Exact-lineage matrix
+/// inputs with quantized weights (projections, KDA expansions, routed
+/// experts' gate/up and down inputs) are rounded through half precision
+/// first, on a scratch copy, as half-staged batched kernels round theirs.
+/// Weights stay F32-dequantized; accumulation is the decode kernels'.
+#[cfg(test)]
+pub(super) struct RoundExactActivations(bool);
+
+#[cfg(test)]
+impl RoundExactActivations {
+    pub(super) fn set() -> Self {
+        Self(ROUND_EXACT_ACTIVATIONS.with(|s| s.replace(true)))
+    }
+}
+
+#[cfg(test)]
+impl Drop for RoundExactActivations {
+    fn drop(&mut self) {
+        ROUND_EXACT_ACTIVATIONS.with(|s| s.set(self.0));
+    }
+}
+
+/// Under [`RoundExactActivations`], a rounded scratch copy of `x[0..n]`
+/// (the packed encoder is serial, so one scratch is reused).
+#[cfg(test)]
+fn rounded_input(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    n: usize,
+) -> Result<Option<MetalTensor>> {
+    if !ROUND_EXACT_ACTIVATIONS.with(std::cell::Cell::get) {
+        return Ok(None);
+    }
+    ROUND_SCRATCH.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_none_or(|t| (t.n_elements() as usize) < n) {
+            *slot = Some(MetalTensor::zeros_f32(
+                ctx,
+                vec![n.max(512 * 16384) as u64],
+            )?);
+        }
+        let scratch = slot
+            .as_ref()
+            .expect("allocated")
+            .view_subrange(0, vec![n as u64]);
+        crate::metal::encode_copy_offset_f32(ctx, enc, x, 0, &scratch, n)?;
+        crate::metal::encode_round_trip_f16_f32(ctx, enc, &scratch, n)?;
+        Ok(Some(scratch))
+    })
+}
+
 /// Test-only scope in which `stages` run in their Exact form inside Fast
 /// sessions on this thread; the previous set is restored on drop.
 #[cfg(test)]
@@ -410,6 +468,14 @@ fn matmat(
     rows: usize,
 ) -> Result<()> {
     if lineage == PackedLineage::Exact {
+        #[cfg(test)]
+        let rounded = if weight.dtype != GgmlType::F32 {
+            rounded_input(ctx, enc, x, rows * n_in)?
+        } else {
+            None
+        };
+        #[cfg(test)]
+        let x = rounded.as_ref().unwrap_or(x);
         for row in 0..rows {
             let xr = x.view_subrange((row * n_in) as u64, vec![n_in as u64]);
             let yr = y.view_subrange((row * n_out) as u64, vec![n_out as u64]);
@@ -439,7 +505,13 @@ fn expand_rows(
     rows: usize,
 ) -> Result<()> {
     match lineage {
-        PackedLineage::Exact => super::low_rank_expand(ctx, enc, weight, x, y, n_in, n_out, rows),
+        PackedLineage::Exact => {
+            #[cfg(test)]
+            let rounded = rounded_input(ctx, enc, x, rows * n_in)?;
+            #[cfg(test)]
+            let x = rounded.as_ref().unwrap_or(x);
+            super::low_rank_expand(ctx, enc, weight, x, y, n_in, n_out, rows)
+        }
         PackedLineage::Fast => matmat(ctx, enc, lineage, weight, x, y, n_in, n_out, rows),
     }
 }
@@ -841,8 +913,14 @@ impl Glm5NextSession<'_> {
                     )?;
                     if stage_lineage(p.lineage, Stage::RoutedExperts) == PackedLineage::Exact {
                         let s = &self.s;
+                        #[cfg(test)]
+                        let rounded = rounded_input(ctx, &enc, &v(&p.normed), rows * h)?;
+                        #[cfg(test)]
+                        let normed = rounded.as_ref().unwrap_or(&p.normed);
+                        #[cfg(not(test))]
+                        let normed = &p.normed;
                         for row in 0..rows {
-                            let x = p.normed.view_subrange((row * h) as u64, vec![h as u64]);
+                            let x = normed.view_subrange((row * h) as u64, vec![h as u64]);
                             let ids_r = route.ids.view_subrange((row * k) as u64, vec![k as u64]);
                             let w_r = route
                                 .weights
@@ -864,6 +942,15 @@ impl Glm5NextSession<'_> {
                                 k,
                                 c.swiglu_clamp,
                             )?;
+                            #[cfg(test)]
+                            if ROUND_EXACT_ACTIVATIONS.with(std::cell::Cell::get) {
+                                crate::metal::encode_round_trip_f16_f32(
+                                    ctx,
+                                    &enc,
+                                    &s.expert_inner,
+                                    f * k,
+                                )?;
+                            }
                             crate::metal::encode_all_slots_down(
                                 ctx,
                                 &enc,

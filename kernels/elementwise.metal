@@ -586,6 +586,16 @@ kernel void kernel_scatter_offset_f32(
     y[args.dst_off + tid] = x[tid];
 }
 
+// Test instrument (map #12 precision probe): rounds F32 values through
+// half precision in place, as a half-staged matrix kernel rounds its inputs.
+kernel void kernel_round_trip_f16_f32(
+        constant uint & n [[buffer(0)]],
+        device float * x [[buffer(1)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= n) return;
+    x[tid] = float(half(x[tid]));
+}
+
 // Same but writes F16 destination from F32 source. Used for F16 KV
 // cache append. Precision: x is f32 in the model's residual stream,
 // half() conversion is fine for K/V (llama.cpp also defaults to f16

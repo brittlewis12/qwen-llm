@@ -1308,3 +1308,96 @@ fn reuse_natural_stage_attribution() {
     )
     .unwrap();
 }
+
+/// Map #12 precision probe (diagnostic; no bounds). On frozen cases (H2, H5
+/// by default; `GLM53_PROBE_CASES`) at 512 rows: Exact, Exact with every
+/// quantized-weight matrix input rounded through half first
+/// (`packed::RoundExactActivations`: activations as a half-staged kernel
+/// sees them, weights still F32-dequantized, decode accumulation), and
+/// Fast. If rounded Exact diverges from Exact about as much as Fast does,
+/// activation rounding is the dominant source; if it stays small, weight
+/// tiles or accumulation dominate. Writes JSON to `GLM53_PROBE_OUT`.
+#[test]
+#[ignore = "map #12 precision probe: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_PROBE_OUT and an idle GPU"]
+fn reuse_natural_activation_rounding_probe() {
+    use super::super::packed::RoundExactActivations;
+    let out = PathBuf::from(std::env::var("GLM53_PROBE_OUT").expect("GLM53_PROBE_OUT"));
+    let wanted: Vec<String> = std::env::var("GLM53_PROBE_CASES")
+        .unwrap_or_else(|_| "H2-code-context,H5-long-chat-sparse".into())
+        .split(',')
+        .map(str::to_string)
+        .collect();
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
+    let fixture: Value = serde_json::from_slice(&std::fs::read(&fixture_path).unwrap()).unwrap();
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let gguf = GgufFile::open(&path).unwrap();
+    assert_eq!(fixture["artifact_layout"], artifact_layout(&gguf));
+    let config = crate::glm5_next::Glm5NextConfig::from_gguf(&gguf).unwrap();
+    let frozen = validate_fixture(
+        &fixture,
+        config.sparse_frontier() as usize,
+        config.indexer_pool as usize,
+    );
+    for id in &wanted {
+        assert!(frozen.iter().any(|c| &c.id == id), "unknown case {id}");
+    }
+    let _lease = production_lease();
+    let ctx = MetalContext::new().expect("Metal context");
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let summary = |reference: &[Vec<f32>], other: &[Vec<f32>]| -> Value {
+        let kls: Vec<f64> = reference
+            .iter()
+            .zip(other)
+            .map(|(r, o)| kl_divergence(r, o))
+            .collect();
+        let flips: Vec<Value> = reference
+            .iter()
+            .zip(other)
+            .enumerate()
+            .filter_map(|(i, (r, o))| {
+                let (a, b) = choice_regret(r, o);
+                ((a, b) != (0.0, 0.0)).then(|| json!([i, a, b]))
+            })
+            .collect();
+        let (worst_kl, at) = worst(kls.iter().copied());
+        json!({"worst_kl": worst_kl, "worst_at": at, "mean_kl": kls.iter().sum::<f64>() / kls.len() as f64,
+            "prompt_end_kl": kls[0], "flips": flips})
+    };
+    let mut cases = Vec::new();
+    for case in frozen.iter().filter(|c| wanted.contains(&c.id)) {
+        let turn2 = case.turn2();
+        let capacity = turn2.len() + case.continuation.len() + 1;
+        let run = |lineage: PackedLineage| -> Vec<Vec<f32>> {
+            let mut s = session(&ctx, &weights, capacity, 512, lineage);
+            let mut logits = vec![s.prefill_packed(&ctx, &turn2).unwrap()];
+            for &token in &case.continuation {
+                logits.push(s.forward(&ctx, token).unwrap());
+            }
+            logits
+        };
+        let exact = run(PackedLineage::Exact);
+        let rounded = {
+            let _scope = RoundExactActivations::set();
+            run(PackedLineage::Exact)
+        };
+        let fast = run(PackedLineage::Fast);
+        let row = json!({
+            "id": case.id,
+            "rounded_exact_vs_exact": summary(&exact, &rounded),
+            "fast_vs_exact": summary(&exact, &fast),
+            "fast_vs_rounded_exact": summary(&rounded, &fast),
+        });
+        eprintln!("{}: {row}", case.id);
+        cases.push(row);
+    }
+    let document = json!({
+        "schema": "glm53.activation_rounding_probe.v1", "rows_per_chunk": 512,
+        "rounding": "Exact-lineage inputs to quantized-weight matrices (projections, KDA expansions, routed experts gate/up and down) rounded through half on a scratch copy; F32 router unrounded; weights F32-dequantized",
+        "cases": cases,
+    });
+    std::fs::write(
+        &out,
+        serde_json::to_string_pretty(&document).unwrap() + "\n",
+    )
+    .unwrap();
+}

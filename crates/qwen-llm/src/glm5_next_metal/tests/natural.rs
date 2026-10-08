@@ -44,7 +44,7 @@ const SCHEDULES: [usize; 2] = [512, 97];
 const FAST_KL: f64 = 2e-2;
 const FAST_REGRET: f32 = 0.2;
 /// Released `<|observation|>`: a turn that called tools ends with it.
-const OBSERVATION: u32 = 154_829;
+pub(super) const OBSERVATION: u32 = 154_829;
 /// The preregistered cohort, in order. A full qualification needs all of it.
 const EXPECTED_CASES: [&str; 6] = [
     "H1-short-chat",
@@ -56,7 +56,7 @@ const EXPECTED_CASES: [&str; 6] = [
 ];
 
 #[derive(Clone, Copy, Debug)]
-enum Generation {
+pub(super) enum Generation {
     Greedy {
         cap: usize,
     },
@@ -68,13 +68,13 @@ enum Generation {
 }
 
 impl Generation {
-    fn cap(self) -> usize {
+    pub(super) fn cap(self) -> usize {
         match self {
             Self::Greedy { cap } | Self::Sampled { cap, .. } => cap,
         }
     }
 
-    fn sampling(self) -> SamplingConfig {
+    pub(super) fn sampling(self) -> SamplingConfig {
         match self {
             Self::Greedy { .. } => SamplingConfig {
                 temperature: 0.0,
@@ -87,7 +87,7 @@ impl Generation {
         }
     }
 
-    fn describe(self) -> Value {
+    pub(super) fn describe(self) -> Value {
         let s = self.sampling();
         let mode = match self {
             Self::Greedy { .. } => "greedy",
@@ -151,7 +151,7 @@ struct Case {
     variants: Vec<Variant>,
 }
 
-fn weather_tool() -> Value {
+pub(super) fn weather_tool() -> Value {
     json!({"name": "get_weather", "description": "Get the weather forecast for a city.",
         "parameters": {"type": "object", "properties": {
             "city": {"type": "string", "description": "City name"},
@@ -159,7 +159,7 @@ fn weather_tool() -> Value {
             "required": ["city"]}})
 }
 
-fn currency_tool() -> Value {
+pub(super) fn currency_tool() -> Value {
     json!({"name": "convert_currency", "description": "Convert an amount between currencies at today's rate.",
         "parameters": {"type": "object", "properties": {
             "amount": {"type": "number"}, "from": {"type": "string"}, "to": {"type": "string"}},
@@ -294,7 +294,7 @@ fn cohort() -> Vec<Case> {
     cases
 }
 
-fn render(messages: &[Message], tools: &[ToolDefinition], effort: Effort) -> String {
+pub(super) fn render(messages: &[Message], tools: &[ToolDefinition], effort: Effort) -> String {
     let options = RenderOptions::generate(effort, false);
     if tools.is_empty() {
         chat::render(messages, options).unwrap()
@@ -337,7 +337,7 @@ fn document(messages: &[Message], tools: &[Value]) -> Value {
     doc
 }
 
-fn ids(tokens: &[u32]) -> String {
+pub(super) fn ids(tokens: &[u32]) -> String {
     tokens
         .iter()
         .map(u32::to_string)
@@ -345,7 +345,7 @@ fn ids(tokens: &[u32]) -> String {
         .join(" ")
 }
 
-fn parse_ids(value: &Value) -> Vec<u32> {
+pub(super) fn parse_ids(value: &Value) -> Vec<u32> {
     value
         .as_str()
         .expect("token ids are a string")
@@ -354,7 +354,7 @@ fn parse_ids(value: &Value) -> Vec<u32> {
         .collect()
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest;
     sha2::Sha256::digest(bytes)
         .iter()
@@ -367,7 +367,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// tensor table (name, dtype, shape, shard, data offset and length of every
 /// tensor). It matches the pinned artifact's layout; it does not verify
 /// weight bytes or tokenizer metadata.
-fn artifact_layout(gguf: &GgufFile) -> Value {
+pub(super) fn artifact_layout(gguf: &GgufFile) -> Value {
     let shards: Vec<Value> = gguf
         .shards
         .iter()
@@ -388,7 +388,7 @@ fn artifact_layout(gguf: &GgufFile) -> Value {
 }
 
 /// Exact or Fast session of `capacity` positions with `rows`-row chunks.
-fn session<'w>(
+pub(super) fn session<'w>(
     ctx: &MetalContext,
     weights: &'w Glm5NextWeights,
     capacity: usize,
@@ -438,7 +438,7 @@ fn generate_turn(
 /// serve's pre-opened partition splits it: one repeated leading `<think>` is
 /// dropped, reasoning ends at the first `</think>`, and the rest is visible
 /// text whose tool block starts at the first `<tool_call>`.
-fn parse_turn(
+pub(super) fn parse_turn(
     text: &str,
     tools: &[ToolDefinition],
 ) -> std::result::Result<(String, String, Vec<ToolCall>), String> {

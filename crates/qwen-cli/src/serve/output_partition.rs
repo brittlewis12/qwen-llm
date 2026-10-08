@@ -700,6 +700,92 @@ mod tests {
         );
     }
 
+    /// The ceiling holds on every growth path: incremental appends around
+    /// the 64 KiB step, markers split across pieces, DSML, and the UTF-8
+    /// replacement a dangling byte becomes at finish; a refused append
+    /// leaves the held bytes unchanged and publishes no tool text.
+    #[test]
+    fn tool_byte_ceiling_holds_on_every_growth_path() {
+        let step = super::super::partition_glm5_next::ADMISSION_STEP;
+        let partition = |grammar, ceiling| {
+            OutputPartition::with_headroom(
+                OutputProtocol::Qwen {
+                    preopened_reasoning: false,
+                    parse_tools: true,
+                    tool_grammar: grammar,
+                    tool_byte_ceiling: Some(ceiling),
+                },
+                || Some(0),
+            )
+        };
+        let held = |p: &OutputPartition| match p {
+            OutputPartition::Qwen(q) => (q.tool_buffer.len(), q.tool_buffer.capacity()),
+            _ => unreachable!(),
+        };
+        let no_tool_text = |events: &[PartitionEvent]| {
+            events.iter().all(|e| {
+                !matches!(e, PartitionEvent::Visible(t) if t.contains("<tool_call>") || t.contains("DSML"))
+            })
+        };
+        for (grammar, open) in [
+            (
+                ToolGrammar::QwenXml,
+                "<tool_call>\n<function=f>\n<parameter=a>\n",
+            ),
+            (
+                ToolGrammar::DeepSeekDsml,
+                "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"f\">\n<｜DSML｜parameter name=\"a\" string=\"true\">",
+            ),
+        ] {
+            // Around the step: the ceiling 10 bytes past one step; the
+            // marker split across two pieces.
+            let ceiling = step + 10;
+            let mut p = partition(grammar, ceiling);
+            let mut events = Vec::new();
+            let (head, tail) = open.split_at(5);
+            p.push(head.as_bytes(), &mut events);
+            p.push(tail.as_bytes(), &mut events);
+            let filler = "x".repeat(ceiling - open.len());
+            p.push(filler.as_bytes(), &mut events);
+            assert!(p.failure().is_none(), "{grammar:?}: exactly at the ceiling");
+            let (len, capacity) = held(&p);
+            assert_eq!(len, ceiling);
+            assert!(
+                capacity <= ceiling,
+                "{grammar:?}: reserved {capacity} > {ceiling}"
+            );
+            p.push(b"y", &mut events);
+            let failure = p.failure().cloned().expect("one byte past the ceiling");
+            assert_eq!((failure.status, failure.code), (500, None));
+            assert_eq!(
+                held(&p).0,
+                len,
+                "{grammar:?}: a refused append holds nothing more"
+            );
+            assert_eq!(
+                p.finish(GenerationEnd::StopToken(0), &mut events)
+                    .unwrap_err(),
+                failure
+            );
+            assert!(no_tool_text(&events), "{grammar:?}");
+
+            // A dangling byte becomes a 3-byte replacement at finish.
+            let mut p = partition(grammar, open.len() + 2);
+            let mut events = Vec::new();
+            p.push(open.as_bytes(), &mut events);
+            p.push(&[0xC3], &mut events);
+            assert!(
+                p.failure().is_none(),
+                "{grammar:?}: an incomplete byte is held"
+            );
+            let error = p
+                .finish(GenerationEnd::TokenLimit, &mut events)
+                .unwrap_err();
+            assert_eq!((error.status, error.code), (500, None), "{grammar:?}");
+            assert!(no_tool_text(&events), "{grammar:?}");
+        }
+    }
+
     fn run(protocol: OutputProtocol, chunks: &[&[u8]], end: GenerationEnd) -> Vec<PartitionEvent> {
         let mut partition = OutputPartition::new(protocol);
         let mut events = Vec::new();

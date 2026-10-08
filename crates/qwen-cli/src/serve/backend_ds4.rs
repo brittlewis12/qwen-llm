@@ -621,6 +621,16 @@ impl DeepSeekV4Backend {
     }
 }
 
+impl DeepSeekV4Backend {
+    /// The limits ceilings and generation both resolve against.
+    fn output_limits(&self) -> crate::serve::request_profile::OutputLimits {
+        crate::serve::request_profile::OutputLimits {
+            default_max_tokens: self.default_max_tokens,
+            max_piece_bytes: self.max_piece_bytes,
+        }
+    }
+}
+
 impl GenerationBackend for DeepSeekV4Backend {
     fn set_control_memory_reserve(&mut self, bytes: u64) {
         self.control_cpu_reserve = bytes;
@@ -683,10 +693,7 @@ impl GenerationBackend for DeepSeekV4Backend {
         super::request_profile::RequestProfile::DeepSeekV4 {
             style: self.template_style,
             sampling: self.release_sampling,
-            limits: crate::serve::request_profile::OutputLimits {
-                default_max_tokens: self.default_max_tokens,
-                max_piece_bytes: self.max_piece_bytes,
-            },
+            limits: self.output_limits(),
         }
     }
 
@@ -697,7 +704,8 @@ impl GenerationBackend for DeepSeekV4Backend {
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
         self.idle_residency.before_request();
-        let max_tokens = request.max_output_tokens.unwrap_or(self.default_max_tokens);
+        // One resolution, shared with the output ceiling.
+        let max_tokens = self.output_limits().max_tokens(request);
         // Sampling validation precedes tokenization, admission, residency
         // transfer, session allocation, and all model execution.
         let sampler = release_request_sampler(request, self.release_sampling)?;

@@ -128,11 +128,19 @@ impl RequestProfile {
                 "x_qwen.prefill_lineage is supported only by GLM-5.3-Flash; this family reads prompts one way",
             ));
         }
-        // The tool block's ceiling must be computable before generation.
+        // The tool block's ceiling must be computable before generation
+        // whenever the output protocol parses tools: always for ordinary
+        // Qwen and Flash-Next (undeclared tool syntax still parses), for
+        // DeepSeek V4 when tools are declared.
+        let parses_tools = match self {
+            Self::OrdinaryQwen { .. } | Self::FlashNext { .. } => true,
+            Self::DeepSeekV4 { .. } => !request.model_request.tools.is_empty(),
+            _ => false,
+        };
         if let Self::OrdinaryQwen { limits, .. }
         | Self::FlashNext { limits, .. }
         | Self::DeepSeekV4 { limits, .. } = self
-            && !request.model_request.tools.is_empty()
+            && parses_tools
             && super::output_memory::tool_byte_ceiling(
                 limits.max_tokens(request),
                 limits.max_piece_bytes,
@@ -245,14 +253,15 @@ impl RequestProfile {
     }
 
     pub(crate) fn output(&self, request: &ServeRequest) -> OutputProtocol {
-        // Normalization admitted the ceiling before any response bytes.
+        // Normalization admitted the ceiling before any response bytes;
+        // were it uncomputable here, fail closed (any tool block exceeds 0).
         let ceiling = |limits: &OutputLimits| {
             Some(
                 super::output_memory::tool_byte_ceiling(
                     limits.max_tokens(request),
                     limits.max_piece_bytes,
                 )
-                .unwrap_or(usize::MAX),
+                .unwrap_or(0),
             )
         };
         match self {
@@ -414,6 +423,17 @@ mod tests {
             let mut request = profile.parse(&body).unwrap();
             let error = profile.normalize(&mut request).unwrap_err();
             assert_eq!(error.status, 400);
+            // Without declared tools: ordinary Qwen and Flash-Next still parse
+            // tool syntax, so the ceiling is still required; DeepSeek V4 does
+            // not parse tools then.
+            let body = serde_json::json!({"model": "m", "input": "hi",
+                "max_output_tokens": usize::MAX / 2});
+            let mut request = profile.parse(&body).unwrap();
+            let refused = profile.normalize(&mut request).is_err();
+            assert_eq!(
+                refused,
+                !matches!(profile, RequestProfile::DeepSeekV4 { .. })
+            );
         }
     }
     use super::*;

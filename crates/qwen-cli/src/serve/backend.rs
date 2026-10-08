@@ -1026,6 +1026,16 @@ fn prefill_remaining(
     )
 }
 
+impl EngineBackend {
+    /// The limits ceilings and generation both resolve against.
+    fn output_limits(&self) -> crate::serve::request_profile::OutputLimits {
+        crate::serve::request_profile::OutputLimits {
+            default_max_tokens: self.default_max_tokens,
+            max_piece_bytes: self.max_piece_bytes,
+        }
+    }
+}
+
 impl GenerationBackend for EngineBackend {
     fn set_control_memory_reserve(&mut self, bytes: u64) {
         self.control_cpu_reserve = bytes;
@@ -1134,10 +1144,7 @@ impl GenerationBackend for EngineBackend {
             no_thinking_supported: self.no_thinking_supported,
             style: self.template_style,
             sampling: self.release_sampling,
-            limits: crate::serve::request_profile::OutputLimits {
-                default_max_tokens: self.default_max_tokens,
-                max_piece_bytes: self.max_piece_bytes,
-            },
+            limits: self.output_limits(),
         }
     }
 
@@ -1147,7 +1154,8 @@ impl GenerationBackend for EngineBackend {
         prompt: &str,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
-        let max_tokens = request.max_output_tokens.unwrap_or(self.default_max_tokens);
+        // One resolution, shared with the output ceiling.
+        let max_tokens = self.output_limits().max_tokens(request);
         if max_tokens == 0 {
             return Err(ServeError::invalid_request(
                 Some("max_output_tokens"),

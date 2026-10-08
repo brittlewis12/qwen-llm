@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-07 - #12 on Natural Trajectories: Fast Fails Like llama.cpp's Batched Prefill; #13 Screen Sizes Prefix Replay
+
+- **#12** (`docs/bench/2026-10-07-glm53-natural-reuse/`): six frozen natural
+  cases (the model's own turns, Exact-greedy continuations, fixture
+  `reuse-natural-v1.json` committed before any Fast run; serve's CPU round
+  trip renders every turn exactly). Exact warm equals cold bitwise in logits
+  and state everywhere. Fast vs Exact: worst KL 8e-3 to 0.18, flips with
+  regret up to ~1 (H2 code, H5 long chat); warm vs cold Fast up to 0.165.
+  The natural subtask fails; no bound changed.
+- **Attribution (H2):** every batched mat-mat family with half-staged
+  activations gives ~0.1 KL on its own (MLA projections 0.22, KDA
+  expansions 0.19, shared expert 0.16, KDA projections 0.14, dense FFN 0.10,
+  routed experts 0.07); the F32 families (router, MLA absorption) ~1e-2.
+- **Reference envelope:** llama.cpp batched vs its serial run on the same
+  tokens: H2 worst 0.17 with 4 flips, H1 4.2e-2; the same order as native
+  Fast vs Exact.
+- **Exact cost:** fresh prefill 39.5-40.3 tok/s vs Fast 186-197 (4.7-4.9x);
+  a 64-token suffix 1.6 s vs 0.8 s.
+- **Decision pending:** reference-anchored envelope (bound change) or
+  F32-staged batched prefill; Exact by default not recommended.
+- **#13** (`docs/bench/2026-10-07-glm53-agent-reuse-screen/`, scripted, no
+  opencode process): the patched client's continued step reuses 11,185 of
+  11,284 tokens (1.25 s to first token); a branch, a new session with the
+  same instructions and tools, and a return each replay ~11K tokens at
+  ~185 tok/s (~61 s). #15 is promoted on this measurement.
+
 ## 2026-10-08 - Existing Router Kernels Reach Flash Tails and GLM Packed Chunks
 
 - Flash-Next now admits strict E8P32 at N2045, without changing the

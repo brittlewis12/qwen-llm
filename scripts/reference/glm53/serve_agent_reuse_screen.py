@@ -204,7 +204,7 @@ class Screen:
         """Send `history`, then append results and continue while calls come."""
         response = self.send(
             first_label,
-            "cold" if session == "A" and not self.records else "continued",
+            "cold" if not self.records else "new_session",
             history,
         )
         for step in range(2, steps + 2):
@@ -262,7 +262,9 @@ def main():
             command, stdout=sink, stderr=subprocess.STDOUT, env=env
         )
     # Serve answers only to the loaded model's id (the GGUF file stem).
-    screen = Screen(args.addr, Path(args.model).stem, shape, args.effort, args.max_tokens, log)
+    screen = Screen(
+        args.addr, Path(args.model).stem, shape, args.effort, args.max_tokens, log
+    )
     error = None
     try:
         wait_listening(log, process, args.ready_timeout)

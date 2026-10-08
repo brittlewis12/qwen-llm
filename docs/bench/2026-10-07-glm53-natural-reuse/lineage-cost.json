@@ -1,0 +1,115 @@
+{
+  "schema": "glm53.packed_lineage_prefill_cost.v1",
+  "method": "per length, Fast-Exact-Exact-Fast; a fresh session per measurement (allocation excluded); prompt prefill including final logits; suffix measured after a same-lineage prefix prefill; 512-row chunks; weights and both lineages' dense and sparse pipelines warmed first",
+  "prompt": "long_qualification_text (teacher-forced)",
+  "rows": [
+    {
+      "length": 512,
+      "lineage": "Fast",
+      "slot": 0,
+      "fresh_prefill_ms": 2585.6829169999996,
+      "fresh_prefill_tok_s": 198.01345193324804,
+      "suffix_tokens": 64,
+      "suffix_ms": 850.034542
+    },
+    {
+      "length": 512,
+      "lineage": "Exact",
+      "slot": 1,
+      "fresh_prefill_ms": 12670.117417,
+      "fresh_prefill_tok_s": 40.41004381798619,
+      "suffix_tokens": 64,
+      "suffix_ms": 1615.393416
+    },
+    {
+      "length": 512,
+      "lineage": "Exact",
+      "slot": 2,
+      "fresh_prefill_ms": 12691.670333999999,
+      "fresh_prefill_tok_s": 40.34141972852792,
+      "suffix_tokens": 64,
+      "suffix_ms": 1602.206917
+    },
+    {
+      "length": 512,
+      "lineage": "Fast",
+      "slot": 3,
+      "fresh_prefill_ms": 2609.958042,
+      "fresh_prefill_tok_s": 196.17173600524876,
+      "suffix_tokens": 64,
+      "suffix_ms": 855.785958
+    },
+    {
+      "length": 2048,
+      "lineage": "Fast",
+      "slot": 0,
+      "fresh_prefill_ms": 10464.748792,
+      "fresh_prefill_tok_s": 195.70465003093406,
+      "suffix_tokens": 64,
+      "suffix_ms": 803.421792
+    },
+    {
+      "length": 2048,
+      "lineage": "Exact",
+      "slot": 1,
+      "fresh_prefill_ms": 51634.989958,
+      "fresh_prefill_tok_s": 39.66302698355993,
+      "suffix_tokens": 64,
+      "suffix_ms": 1642.9248329999998
+    },
+    {
+      "length": 2048,
+      "lineage": "Exact",
+      "slot": 2,
+      "fresh_prefill_ms": 51188.429584,
+      "fresh_prefill_tok_s": 40.0090414307249,
+      "suffix_tokens": 64,
+      "suffix_ms": 1637.180666
+    },
+    {
+      "length": 2048,
+      "lineage": "Fast",
+      "slot": 3,
+      "fresh_prefill_ms": 10462.076916000002,
+      "fresh_prefill_tok_s": 195.75463040879822,
+      "suffix_tokens": 64,
+      "suffix_ms": 795.722041
+    },
+    {
+      "length": 4096,
+      "lineage": "Fast",
+      "slot": 0,
+      "fresh_prefill_ms": 22253.241834,
+      "fresh_prefill_tok_s": 184.06306957675963,
+      "suffix_tokens": 64,
+      "suffix_ms": 846.39525
+    },
+    {
+      "length": 4096,
+      "lineage": "Exact",
+      "slot": 1,
+      "fresh_prefill_ms": 104036.840709,
+      "fresh_prefill_tok_s": 39.370668813914335,
+      "suffix_tokens": 64,
+      "suffix_ms": 1656.841666
+    },
+    {
+      "length": 4096,
+      "lineage": "Exact",
+      "slot": 2,
+      "fresh_prefill_ms": 103587.160208,
+      "fresh_prefill_tok_s": 39.54158017050908,
+      "suffix_tokens": 64,
+      "suffix_ms": 1654.125584
+    },
+    {
+      "length": 4096,
+      "lineage": "Fast",
+      "slot": 3,
+      "fresh_prefill_ms": 21831.4685,
+      "fresh_prefill_tok_s": 187.61907839594025,
+      "suffix_tokens": 64,
+      "suffix_ms": 853.8971250000001
+    }
+  ]
+}

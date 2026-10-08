@@ -72,8 +72,8 @@ pub enum K2RuntimeError {
     Poisoned,
     /// The device memory admission refused weights or a session; typed so a
     /// server can tell pressure from telemetry and size refusals.
-    #[error("K2 {0}")]
-    MemoryAdmission(crate::metal::MemoryAdmissionDenied),
+    #[error("K2 memory admission denied ({})", .0.reason.as_str())]
+    MemoryAdmission(#[source] crate::metal::MemoryAdmissionDenied),
 }
 
 impl K2RuntimeError {

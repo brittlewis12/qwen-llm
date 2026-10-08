@@ -502,10 +502,11 @@ pub struct MetalMemoryAdmission {
 }
 
 impl MetalMemoryAdmission {
-    /// The typed refusal of a decision that did not admit; `None` when it
-    /// admitted, so an admitted decision can never become a refusal.
+    /// The typed refusal of a decision that did not admit; `None` exactly
+    /// when it admitted. A contradictory decision (not admitted, admitted
+    /// reason) still refuses, and callers report it as inconsistent.
     pub fn refusal(&self) -> Option<MemoryAdmissionDenied> {
-        (!self.admitted && !self.reason.is_admitted()).then_some(MemoryAdmissionDenied {
+        (!self.admitted).then_some(MemoryAdmissionDenied {
             reason: self.reason,
             required_bytes: self.required_bytes,
             signals: self.signals,
@@ -1652,5 +1653,10 @@ mod admission_refusal_tests {
                 other => panic!("{other:?} for {admission:?}"),
             }
         }
+        // Never fails open: only `admitted` decides.
+        let mut contradictory = evaluate_metal_memory_admission(10, 0, signals(Some(50)), true);
+        contradictory.admitted = false;
+        let denied = contradictory.refusal().expect("not admitted refuses");
+        assert!(denied.reason.is_admitted() && !denied.reason.is_pressure());
     }
 }

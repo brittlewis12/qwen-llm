@@ -42,21 +42,17 @@ pub enum Glm5NextMetalError {
     #[error("GLM-5.3 cancelled: {0}")]
     Cancelled(String),
     /// The requested session was refused by the device memory admission.
-    /// `denied` keeps the typed decision (pressure vs telemetry vs size);
-    /// `fitting_capacity` is advice for pressure refusals only.
+    /// `denied` (the error source) keeps the typed decision: pressure,
+    /// telemetry or size. `advice` is evaluated for pressure refusals only.
     #[error(
-        "GLM-5.3 session needs {required_bytes} bytes but {budget_bytes} are available ({}); {}",
-        denied.reason.as_str(),
-        match fitting_capacity {
-            Some(n) => format!("the largest capacity that fits is {n} positions"),
-            None => "no capacity fits".to_string(),
-        }
+        "GLM-5.3 session refused by memory admission ({}); budget {budget_bytes} bytes; {advice}",
+        denied.reason.as_str()
     )]
     MemoryAdmission {
+        #[source]
         denied: crate::metal::MemoryAdmissionDenied,
-        required_bytes: u64,
         budget_bytes: u64,
-        fitting_capacity: Option<u64>,
+        advice: CapacityAdvice,
     },
     /// A shared encoder or command failed (GPU command status, a poisoned
     /// shared session, dispatch geometry), kept typed.
@@ -79,6 +75,28 @@ pub enum Glm5NextMetalError {
         row: Option<usize>,
         status: i32,
     },
+}
+
+/// What a refused session's budget would fit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CapacityAdvice {
+    /// No smaller capacity was evaluated (a telemetry or size refusal, or a
+    /// per-request session whose capacity is fixed).
+    NotEvaluated,
+    /// Evaluated: no capacity fits the budget.
+    NoneFits,
+    /// Evaluated: the largest capacity (positions) that fits.
+    Fits(u64),
+}
+
+impl std::fmt::Display for CapacityAdvice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotEvaluated => f.write_str("no smaller capacity was evaluated"),
+            Self::NoneFits => f.write_str("no capacity fits"),
+            Self::Fits(n) => write!(f, "the largest capacity that fits is {n} positions"),
+        }
+    }
 }
 
 impl From<crate::metal_forward::MfError> for Glm5NextMetalError {
@@ -171,26 +189,25 @@ pub fn preflight_session(
     };
     let budget = admission_budget(&admission);
     // A smaller capacity is advice only when memory, not telemetry, refused.
-    let fitting_capacity = denied
-        .reason
-        .is_pressure()
-        .then(|| {
-            Glm5NextMemoryLedger::max_capacity(
-                &model.config,
-                retained,
-                prefill_rows as u64,
-                budget,
-                &price,
-            )
-            .ok()
-            .flatten()
-        })
-        .flatten();
+    let advice = if denied.reason.is_pressure() {
+        match Glm5NextMemoryLedger::max_capacity(
+            &model.config,
+            retained,
+            prefill_rows as u64,
+            budget,
+            &price,
+        ) {
+            Ok(Some(n)) => CapacityAdvice::Fits(n),
+            Ok(None) => CapacityAdvice::NoneFits,
+            Err(_) => CapacityAdvice::NotEvaluated,
+        }
+    } else {
+        CapacityAdvice::NotEvaluated
+    };
     Err(Glm5NextMetalError::MemoryAdmission {
         denied,
-        required_bytes: ledger.peak_bytes(),
         budget_bytes: budget,
-        fitting_capacity,
+        advice,
     })
 }
 
@@ -971,9 +988,8 @@ impl<'w> Glm5NextSession<'w> {
         if let Some(denied) = admission.refusal() {
             return Err(Glm5NextMetalError::MemoryAdmission {
                 denied,
-                required_bytes: session_bytes.saturating_add(cpu_reserve_bytes),
                 budget_bytes: admission_budget(&admission),
-                fitting_capacity: None,
+                advice: CapacityAdvice::NotEvaluated,
             });
         }
         // Every buffer below comes from the spec lists the ledger priced.

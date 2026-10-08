@@ -17,7 +17,7 @@ use qwen_llm::glm5_next::{
 };
 use qwen_llm::glm5_next_chat::{self as chat, Effort, Message, RenderOptions};
 use qwen_llm::glm5_next_metal::{
-    DEFAULT_PREFILL_ROWS, Glm5NextMetalError, Glm5NextSession, Glm5NextWeights,
+    CapacityAdvice, DEFAULT_PREFILL_ROWS, Glm5NextMetalError, Glm5NextSession, Glm5NextWeights,
     prefetch_retained_with_cancel, preflight_session,
 };
 use serde_json::{Value, json};
@@ -385,13 +385,18 @@ fn capacity(args: &Args, prompt_tokens: usize, context: u32) -> Result<usize> {
 
 /// What to do when a session of `required` positions (prompt plus
 /// generation) does not fit and `fitting` positions would.
-fn admission_advice(fitting: Option<u64>, required: usize) -> String {
-    match fitting {
-        Some(n) if n as usize >= required => format!("pass --max-context-tokens {n} or less"),
-        Some(n) => format!(
+fn admission_advice(advice: CapacityAdvice, required: usize) -> String {
+    match advice {
+        CapacityAdvice::Fits(n) if n as usize >= required => {
+            format!("pass --max-context-tokens {n} or less")
+        }
+        CapacityAdvice::Fits(n) => format!(
             "this request needs {required} positions (prompt plus generation); shorten the prompt or --max-tokens to fit {n}"
         ),
-        None => "free device memory or use a smaller artifact".to_string(),
+        CapacityAdvice::NoneFits => "free device memory or use a smaller artifact".to_string(),
+        CapacityAdvice::NotEvaluated => {
+            "device memory telemetry could not decide; see the refusal reason".to_string()
+        }
     }
 }
 
@@ -408,13 +413,12 @@ fn preflight(
 ) -> Result<()> {
     match preflight_session(ctx, gguf, prepared.model(), capacity, prefill_rows) {
         Ok(_) => Ok(()),
-        Err(
-            error @ Glm5NextMetalError::MemoryAdmission {
-                fitting_capacity, ..
-            },
-        ) => {
+        Err(error @ Glm5NextMetalError::MemoryAdmission { advice, .. }) => {
             let required = required_forwards(FAMILY, prompt_tokens, args.tokens, None)?;
-            bail!("{error}; {}", admission_advice(fitting_capacity, required))
+            Err(error).context(format!(
+                "admit GLM-5.3 session: {}",
+                admission_advice(advice, required)
+            ))
         }
         Err(error) => Err(error).context("admit GLM-5.3 session"),
     }
@@ -836,11 +840,14 @@ mod tests {
     #[test]
     fn admission_advice_names_what_fits() {
         assert_eq!(
-            admission_advice(Some(649_040), 4_000),
+            admission_advice(CapacityAdvice::Fits(649_040), 4_000),
             "pass --max-context-tokens 649040 or less"
         );
-        assert!(admission_advice(Some(3_000), 4_000).contains("needs 4000 positions"));
-        assert!(admission_advice(None, 10).contains("free device memory"));
+        assert!(
+            admission_advice(CapacityAdvice::Fits(3_000), 4_000).contains("needs 4000 positions")
+        );
+        assert!(admission_advice(CapacityAdvice::NoneFits, 10).contains("free device memory"));
+        assert!(admission_advice(CapacityAdvice::NotEvaluated, 10).contains("telemetry"));
     }
 
     fn run_args(extra: &[&str]) -> Vec<String> {

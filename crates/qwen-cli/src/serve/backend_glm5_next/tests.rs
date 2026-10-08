@@ -478,9 +478,8 @@ fn session_errors_map_typed_pressure_to_503_and_the_rest_to_500() {
     use qwen_llm::metal::MetalMemoryAdmissionReason as R;
     let admission = |reason| Glm5NextMetalError::MemoryAdmission {
         denied: refusal(reason),
-        required_bytes: 3 << 30,
         budget_bytes: 1 << 30,
-        fitting_capacity: None,
+        advice: qwen_llm::glm5_next_metal::CapacityAdvice::NotEvaluated,
     };
     let pressure = admission(R::BothInsufficient);
     assert!(pressure.is_memory_pressure());

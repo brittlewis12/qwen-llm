@@ -13,7 +13,9 @@
 //! the block already holds. The check repeats at every step against current
 //! headroom, so earlier steps reserve nothing that later allocations could
 //! take, and once more before the block is parsed. A failed check ends the
-//! turn with `memory_admission_denied` (503) instead of growing unpriced.
+//! turn instead of growing unpriced: 503 `memory_admission_denied` under
+//! memory pressure, 500 `memory_signal_unavailable` when the process reports
+//! no budget.
 use super::items::ServeError;
 use super::output_partition::GenerationEnd;
 use super::partition::PartitionEvent;

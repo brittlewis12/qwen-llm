@@ -202,7 +202,7 @@ fn relative_error(actual: &[f32], expected: &[f32]) -> f64 {
 }
 
 /// KL(reference || native) over softmaxed logits; finite by construction.
-fn kl_divergence(reference: &[f32], native: &[f32]) -> f64 {
+pub(super) fn kl_divergence(reference: &[f32], native: &[f32]) -> f64 {
     assert_comparable("KL", native, reference);
     let log_softmax = |x: &[f32]| {
         let max = x.iter().cloned().fold(f32::NEG_INFINITY, f32::max) as f64;
@@ -253,13 +253,13 @@ fn within(value: f64, bound: f64) -> bool {
 /// (reference best - reference logit of native's choice, native best -
 /// native logit of reference's choice). Both are zero when top-1 agrees; a
 /// flip is a near-tie only if both are small.
-fn choice_regret(reference: &[f32], native: &[f32]) -> (f32, f32) {
+pub(super) fn choice_regret(reference: &[f32], native: &[f32]) -> (f32, f32) {
     assert_comparable("choice regret", native, reference);
     let (r, n) = (argmax(reference), argmax(native));
     (reference[r] - reference[n], native[n] - native[r])
 }
 
-fn argmax(x: &[f32]) -> usize {
+pub(super) fn argmax(x: &[f32]) -> usize {
     x.iter()
         .enumerate()
         .fold((0, f32::NEG_INFINITY), |best, (i, &v)| {
@@ -933,7 +933,7 @@ fn sparse_qualification_text() -> String {
 /// Over 4,300 tokens: the qualification passages and three rounds of the
 /// extra passages, for long-context checks where selection excludes about
 /// half of the visible pools (sparse-v2).
-fn long_qualification_text() -> String {
+pub(super) fn long_qualification_text() -> String {
     let mut text = QUALIFICATION_TEXT.to_string();
     for _ in 0..3 {
         for passage in SPARSE_EXTRA_PASSAGES {
@@ -1815,7 +1815,7 @@ fn sparse_decode_crosses_the_frontier_against_llama_cpp() {
 
 /// Timing runs hold the production lease but must not run under Metal API
 /// validation, which distorts timing.
-fn perf_lease() -> impl Sized {
+pub(super) fn perf_lease() -> impl Sized {
     assert!(
         std::env::var_os("MTL_DEBUG_LAYER").is_none(),
         "timing runs must not enable MTL_DEBUG_LAYER"

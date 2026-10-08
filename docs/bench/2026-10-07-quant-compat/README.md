@@ -136,8 +136,10 @@ packed smoke took 888 ms wall / 275 ms GPU. The longer coding request
 decoded at 27.08 output tokens/s over 4.25 s. These are smoke timings, not a
 controlled benchmark or a promise about cold external-drive latency.
 
-The selected packed optimization remains capability-gated off for this
-artifact; ordinary packed execution works. Coherent generation and matching
+The short smokes did not allocate selected packed scratch because their
+prompts stayed below the sparse frontier; this is not an artifact restriction.
+The subsequent `../2026-10-07-glm-flash-prefill-map/` packet confirms selected
+packed execution on this GSQ artifact through4096 tokens. Coherent generation and matching
 short continuations do not establish full-model numerical parity with an
 independent engine. That broader quality gate, other GSQ variants and a
 controlled performance comparison remain unclaimed.

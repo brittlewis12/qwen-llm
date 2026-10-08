@@ -19,6 +19,11 @@ use crate::metal::{
     encode_route_learned_rows,
 };
 
+// Diagnostic code and its scoped router substitution are absent from product builds.
+#[cfg(test)]
+#[path = "tests/router_prefill.rs"]
+mod router_prefill;
+
 /// Arithmetic lineage of packed prefill.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PackedLineage {
@@ -559,7 +564,8 @@ impl Glm5NextSession<'_> {
                         c.expert_ffn_size as usize,
                         c.expert_used_count as usize,
                     );
-                    matmat(
+                    #[cfg(test)]
+                    let router_overridden = router_prefill::encode_override(
                         ctx,
                         &enc,
                         p.lineage,
@@ -570,6 +576,21 @@ impl Glm5NextSession<'_> {
                         e,
                         rows,
                     )?;
+                    #[cfg(not(test))]
+                    let router_overridden = false;
+                    if !router_overridden {
+                        matmat(
+                            ctx,
+                            &enc,
+                            p.lineage,
+                            &moe.router,
+                            &v(&p.normed),
+                            &v(&p.router),
+                            h,
+                            e,
+                            rows,
+                        )?;
+                    }
                     let spec = LearnedRoute {
                         experts: e,
                         top_k: k,
@@ -749,6 +770,10 @@ impl Glm5NextSession<'_> {
         enc.end();
         command.commit();
         wait_completed(&command)?;
+        #[cfg(test)]
+        router_prefill::record_completed_command_gpu_time(|| {
+            (command.GPUStartTime(), command.GPUEndTime())
+        });
         Ok(())
     }
 

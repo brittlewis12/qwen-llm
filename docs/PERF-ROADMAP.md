@@ -34,6 +34,29 @@ Its disk-only native FP8 Engram and exact decoder dependency-suffix code are now
 inspectable. Compare total prefill plus residency transitions and following
 decode; the screenshot's 800 tok/s excludes the reported eight-second switch.
 
+## GLM / Flash-Next Prefill Lane — 2026-10-07
+
+The active focus of this lane is prefill throughput and TTFT. The measured
+force-rank, raw attempts, limits and diagnostic harnesses are in
+`docs/bench/2026-10-07-glm-flash-prefill-map/README.md`.
+
+1. Flash efficient router at actual planner widths (2045 first), then measure
+   the remaining frontier-scheduling benefit. Mixed suffix diagnostic saves
+   790 ms UD / 891 ms GSQ; these are not full-request speedup measurements.
+2. Density-aware expert down (GLM first) and cohort-specific Flash experts.
+   GLM active N32 panels are only43.85% occupied at512 rows; recoverable time
+   needs actual-route kernel replay, not an occupancy-as-speedup assumption.
+3. Narrow GLM router transfer: measured2.85% GPU saving at512,1.51% at128,
+   no benefit at32. Cheap execution packet alongside #2, not a large bottleneck.
+4. GLM128-row absorption tails: ordinary ragged-prefill sweep locates a
+   boundary penalty; isolate it before writing a tail-safe grouped kernel.
+5. Flash selected-QSA leaf attribution, then GDN/KDA preparation. Do not fund
+   a scan/attention rewrite from decode timings or whole-mixer budgets.
+
+This is a prefill-lane ordering, not a cancellation of other owners' product,
+snapshot or decode work below. No candidate defaults changed in the research
+packet. Cold placement, avoided prefill and warm engine throughput stay separate.
+
 ## Leverage Map — 2026-10-05 (after the GLM-5.3-Flash bring-up; re-ranked end of day)
 
 Active force-ranked queue. It supersedes the 2026-09-26 ordering below,

@@ -76,9 +76,15 @@ template's `tools_chat_one_round` case) and parses DSML tool calls into
 Responses `function_call` items.
 
 **F5 — Memory admission: implemented, live rerun pending.** Qwen requests are
-priced before execution and fail with `503` when denied; a process-memory
-shortfall first evicts unpinned RAM snapshots (keeping the one the request
-restores) and re-checks once. Qwen and DS4 boundary
+priced before execution; a process-memory shortfall first evicts unpinned RAM
+snapshots (keeping the one the request restores) and re-checks once. Every lane
+maps a memory refusal by kind (`serve/transport_memory.rs`, 2026-10-07): memory
+pressure is `503` `server_busy` / `memory_admission_denied`; a missing process
+signal is `500` `memory_signal_unavailable`, an invalid working-set signal `500`
+`memory_signal_invalid`, and an overflowing size `500` `memory_size_overflow`.
+GLM and K2 session refusals follow the same table; geometry, poisoning and GPU
+failures stay `500` `server_error`. A stream that already sent its headers
+reports the same code in `response.failed`. Qwen and DS4 boundary
 capture is memory-admitted and best-effort: denial or capture failure skips the
 snapshot while the request continues. Both caches are byte-bounded; DS4 session
 construction returns ownership on failure so residency remains recoverable.
@@ -878,7 +884,9 @@ and parses it, and never runs a tool.
       and `crates/qwen-llm/tests/glm53_tool_block_peak.rs`.
     - Headroom is read afresh at every step and once more before the
       parse, so an earlier step reserves nothing. A failed check ends the
-      turn with `memory_admission_denied` (503).
+      turn: `503` `memory_admission_denied` under memory pressure, or `500`
+      `memory_signal_unavailable` when the process budget signal is
+      unavailable (a reported zero means no limit and admits).
     - When not streaming, the partition runs after generation, so the
       check prices the block's parse and publication but cannot stop the
       collection itself. Collecting other output is not priced (map #14).

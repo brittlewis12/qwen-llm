@@ -61,13 +61,26 @@ impl Outcome {
         }
         outcome
     }
+    /// A failure before any model forward. Only a typed memory refusal in
+    /// the cause chain is labelled as one (by its kind); anything else is a
+    /// preparation failure.
     pub(crate) fn preparation_failed(counters: Counters, cause: anyhow::Error) -> Self {
+        let refusal = cause
+            .chain()
+            .find_map(|e| e.downcast_ref::<qwen_llm::metal::MemoryAdmissionDenied>())
+            .map(|denied| super::super::transport_memory::refusal_kind(denied.reason).2);
         let mut outcome = classify(counters, cause, None);
         if outcome.reason == StopReason::ExecutionError {
-            outcome.error = Some(writer::error(
-                "memory_admission_denied",
-                "Native preparation failed before any model forward; see server diagnostics.",
-            ));
+            outcome.error = Some(match refusal {
+                Some(code) => writer::error(
+                    code,
+                    "Native memory admission refused the job before any model forward; see server diagnostics.",
+                ),
+                None => writer::error(
+                    "native_preparation_failed",
+                    "Native preparation failed before any model forward; see server diagnostics.",
+                ),
+            });
         }
         outcome
     }
@@ -369,4 +382,68 @@ pub(super) fn run_engine(
         publish_sample(sink, pending, &state.counters, false, state.attempted);
     }
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qwen_llm::metal::{
+        MemoryAdmissionDenied, MetalMemoryAdmissionReason as R, MetalMemorySignals,
+    };
+
+    fn denied(reason: R) -> MemoryAdmissionDenied {
+        MemoryAdmissionDenied {
+            reason,
+            required_bytes: Some(1 << 30),
+            signals: MetalMemorySignals {
+                recommended_max_bytes: 1 << 34,
+                current_allocated_bytes: 1 << 34,
+                process_limit_remaining_bytes: Some(1 << 20),
+            },
+            working_set_headroom_bytes: Some(0),
+        }
+    }
+
+    fn code(outcome: &Outcome) -> Option<&str> {
+        outcome.error.as_ref().map(|e| e.code.as_str())
+    }
+
+    /// Only a typed refusal anywhere in the cause chain (through family
+    /// errors and anyhow context) is labelled as a memory refusal, by kind;
+    /// other preparation failures and cancellation are not.
+    #[test]
+    fn preparation_failures_are_labelled_by_their_typed_cause() {
+        let glm = qwen_llm::glm5_next_metal::Glm5NextMetalError::MemoryAdmission {
+            denied: denied(R::ProcessInsufficient),
+            budget_bytes: 1 << 20,
+            advice: qwen_llm::glm5_next_metal::CapacityAdvice::NotEvaluated,
+        };
+        let wrapped = anyhow::Error::new(glm).context("prepare GLM lens job");
+        let outcome = Outcome::preparation_failed(Counters::default(), wrapped);
+        assert_eq!(outcome.reason, StopReason::ExecutionError);
+        assert_eq!(code(&outcome), Some("memory_admission_denied"));
+
+        let k2 = qwen_llm::k2_horizon_runtime::K2RuntimeError::MemoryAdmission(denied(
+            R::ProcessSignalUnavailable,
+        ));
+        let outcome = Outcome::preparation_failed(
+            Counters::default(),
+            anyhow::Error::new(k2).context("prepare K2 lens job"),
+        );
+        assert_eq!(code(&outcome), Some("memory_signal_unavailable"));
+
+        let native =
+            anyhow::Error::new(denied(R::BothInsufficient)).context("native memory admission");
+        let outcome = Outcome::preparation_failed(Counters::default(), native);
+        assert_eq!(code(&outcome), Some("memory_admission_denied"));
+
+        let generic = anyhow::anyhow!("direction file is malformed").context("stage directions");
+        let outcome = Outcome::preparation_failed(Counters::default(), generic);
+        assert_eq!(code(&outcome), Some("native_preparation_failed"));
+
+        let cancelled = anyhow::Error::new(crate::ordinary_executor::ExecutionCancelled);
+        let outcome = Outcome::preparation_failed(Counters::default(), cancelled);
+        assert_eq!(outcome.reason, StopReason::Cancelled);
+        assert_eq!(code(&outcome), None);
+    }
 }

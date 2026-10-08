@@ -95,7 +95,7 @@ impl Glm5NextSession<'_> {
     /// to the token's logits bit for bit.
     pub fn readout(&mut self, ctx: &MetalContext, residual: &[f32]) -> Result<Vec<f32>> {
         if self.poisoned {
-            return invalid("session is poisoned by an earlier failed token");
+            return Err(Glm5NextMetalError::Poisoned);
         }
         let w = self.weights;
         let c = &w.config;

@@ -41,29 +41,100 @@ pub enum Glm5NextMetalError {
     /// where the session (if any) is consistent and unpoisoned.
     #[error("GLM-5.3 cancelled: {0}")]
     Cancelled(String),
-    /// The requested session does not fit device memory.
+    /// The requested session was refused by the device memory admission.
+    /// `denied` (the error source) keeps the typed decision: pressure,
+    /// telemetry or size. `advice` is evaluated for pressure refusals only.
     #[error(
-        "GLM-5.3 session needs {required_bytes} bytes but {budget_bytes} are available ({reason}); {}",
-        match fitting_capacity {
-            Some(n) => format!("the largest capacity that fits is {n} positions"),
-            None => "no capacity fits".to_string(),
-        }
+        "GLM-5.3 session refused by memory admission ({}); budget {budget_bytes} bytes; {advice}",
+        denied.reason.as_str()
     )]
     MemoryAdmission {
-        required_bytes: u64,
+        #[source]
+        denied: crate::metal::MemoryAdmissionDenied,
         budget_bytes: u64,
-        reason: String,
-        fitting_capacity: Option<u64>,
+        advice: CapacityAdvice,
     },
+    /// A shared encoder or command failed (GPU command status, a poisoned
+    /// shared session, dispatch geometry), kept typed.
+    #[error(transparent)]
+    Forward(crate::metal_forward::MfError),
+    /// An earlier token failed after its state began to change; the session
+    /// can only be dropped.
+    #[error("GLM-5.3 session is poisoned by an earlier failed token")]
+    Poisoned,
+    /// A kernel reported a validation status for one block (and row, in a
+    /// packed chunk): routing or sparse selection did not complete.
+    #[error(
+        "GLM-5.3 {stage} kernel validation failed in block {block}{} with status {status}",
+        row.map(|r| format!(" row {r}")).unwrap_or_default()
+    )]
+    KernelValidation {
+        stage: &'static str,
+        /// Model block index (MLA selector slots are mapped to blocks).
+        block: usize,
+        row: Option<usize>,
+        status: i32,
+    },
+}
+
+/// What a refused session's budget would fit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CapacityAdvice {
+    /// No smaller capacity was evaluated (a telemetry or size refusal, or a
+    /// per-request session whose capacity is fixed).
+    NotEvaluated,
+    /// Evaluated: no capacity fits the budget.
+    NoneFits,
+    /// Evaluated: the largest capacity (positions) that fits.
+    Fits(u64),
+}
+
+impl std::fmt::Display for CapacityAdvice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotEvaluated => f.write_str("no smaller capacity was evaluated"),
+            Self::NoneFits => f.write_str("no capacity fits"),
+            Self::Fits(n) => write!(f, "the largest capacity that fits is {n} positions"),
+        }
+    }
 }
 
 impl From<crate::metal_forward::MfError> for Glm5NextMetalError {
     fn from(error: crate::metal_forward::MfError) -> Self {
         match error {
             crate::metal_forward::MfError::Metal(error) => Self::Metal(error),
-            other => Self::Invalid(other.to_string()),
+            other => Self::Forward(other),
         }
     }
+}
+
+impl Glm5NextMetalError {
+    /// A device memory refusal caused by memory pressure (retryable once
+    /// memory frees), as opposed to telemetry, size or any other failure.
+    pub fn is_memory_pressure(&self) -> bool {
+        matches!(self, Self::MemoryAdmission { denied, .. } if denied.reason.is_pressure())
+    }
+}
+
+/// Budget a refused admission saw: working-set headroom, capped by the
+/// process limit when the process reports one.
+fn admission_budget(admission: &crate::metal::MetalMemoryAdmission) -> u64 {
+    let headroom = admission.working_set_headroom_bytes.unwrap_or(0);
+    match admission.signals.process_limit_remaining_bytes {
+        Some(process) if process > 0 => headroom.min(process),
+        _ => headroom,
+    }
+}
+
+/// Model block index of the `index`th MLA block.
+fn mla_block(config: &crate::glm5_next::Glm5NextConfig, index: usize) -> usize {
+    config
+        .blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| block.mixer == MixerKind::Mla)
+        .nth(index)
+        .map_or(usize::MAX, |(block, _)| block)
 }
 
 pub type Result<T> = std::result::Result<T, Glm5NextMetalError>;
@@ -113,28 +184,30 @@ pub fn preflight_session(
     )?;
     let admission =
         evaluate_metal_memory_admission(ledger.peak_bytes(), 0, ctx.memory_signals(), true);
-    if admission.admitted {
+    let Some(denied) = admission.refusal() else {
         return Ok(Glm5NextPreflight { ledger });
-    }
-    let headroom = admission.working_set_headroom_bytes.unwrap_or(0);
-    let budget = match admission.signals.process_limit_remaining_bytes {
-        Some(process) if process > 0 => headroom.min(process),
-        _ => headroom,
     };
-    let fitting_capacity = Glm5NextMemoryLedger::max_capacity(
-        &model.config,
-        retained,
-        prefill_rows as u64,
-        budget,
-        &price,
-    )
-    .ok()
-    .flatten();
+    let budget = admission_budget(&admission);
+    // A smaller capacity is advice only when memory, not telemetry, refused.
+    let advice = if denied.reason.is_pressure() {
+        match Glm5NextMemoryLedger::max_capacity(
+            &model.config,
+            retained,
+            prefill_rows as u64,
+            budget,
+            &price,
+        ) {
+            Ok(Some(n)) => CapacityAdvice::Fits(n),
+            Ok(None) => CapacityAdvice::NoneFits,
+            Err(_) => CapacityAdvice::NotEvaluated,
+        }
+    } else {
+        CapacityAdvice::NotEvaluated
+    };
     Err(Glm5NextMetalError::MemoryAdmission {
-        required_bytes: ledger.peak_bytes(),
+        denied,
         budget_bytes: budget,
-        reason: format!("{:?}", admission.reason),
-        fitting_capacity,
+        advice,
     })
 }
 
@@ -912,11 +985,12 @@ impl<'w> Glm5NextSession<'w> {
             ctx.memory_signals(),
             true,
         );
-        if !admission.admitted {
-            return invalid(format!(
-                "session does not fit: reason={:?} required={session_bytes} cpu_reserve={cpu_reserve_bytes}",
-                admission.reason
-            ));
+        if let Some(denied) = admission.refusal() {
+            return Err(Glm5NextMetalError::MemoryAdmission {
+                denied,
+                budget_bytes: admission_budget(&admission),
+                advice: CapacityAdvice::NotEvaluated,
+            });
         }
         // Every buffer below comes from the spec lists the ledger priced.
         let before = ctx.current_allocated_size();
@@ -963,6 +1037,11 @@ impl<'w> Glm5NextSession<'w> {
 
     pub fn position(&self) -> usize {
         self.position
+    }
+
+    /// Whether a failed token left the session unusable.
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
     }
 
     pub fn ledger(&self) -> &Glm5NextMemoryLedger {
@@ -1086,7 +1165,7 @@ impl<'w> Glm5NextSession<'w> {
     /// bad token or capacity overrun never leaves a partially advanced prefix.
     fn validate_request(&self, tokens: &[u32]) -> Result<()> {
         if self.poisoned {
-            return invalid("session is poisoned by an earlier failed token");
+            return Err(Glm5NextMetalError::Poisoned);
         }
         if tokens.is_empty() {
             return invalid("prefill requires at least one token");
@@ -1132,7 +1211,7 @@ impl<'w> Glm5NextSession<'w> {
         observer: &mut dyn FnMut(Glm5NextProbe, usize, &[f32]),
     ) -> Result<Option<Vec<f32>>> {
         if self.poisoned {
-            return invalid("session is poisoned by an earlier failed token");
+            return Err(Glm5NextMetalError::Poisoned);
         }
         let c = &self.weights.config;
         if token >= c.vocab_size {
@@ -1168,7 +1247,12 @@ impl<'w> Glm5NextSession<'w> {
             if let Some(route) = route {
                 let status = read_i32(&route.status)?[0];
                 if status != ROUTE_STATUS_READY {
-                    return invalid(format!("block {layer} route failed with status {status}"));
+                    return Err(Glm5NextMetalError::KernelValidation {
+                        stage: "route",
+                        block: layer,
+                        row: None,
+                        status,
+                    });
                 }
             }
         }
@@ -1179,9 +1263,12 @@ impl<'w> Glm5NextSession<'w> {
                 .enumerate()
                 .find(|(_, s)| **s != crate::metal::SELECT_STATUS_OK)
             {
-                return invalid(format!(
-                    "MLA block {index} sparse selection failed with status {status}"
-                ));
+                return Err(Glm5NextMetalError::KernelValidation {
+                    stage: "sparse selection",
+                    block: mla_block(c, index),
+                    row: None,
+                    status: *status,
+                });
             }
         }
         let logits = logits.then(|| read_f32(&self.s.logits)).transpose()?;

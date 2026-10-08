@@ -584,11 +584,10 @@ fn with_native_admission<T>(
         .context("native CPU reserve overflow")?;
     let (_, admission) =
         admit_with_pressure_relief(None::<((), u64)>, readout_gpu, cpu, admit, release)?;
-    anyhow::ensure!(
-        admission.admitted,
-        "native memory admission denied: {}",
-        admission.reason.as_str()
-    );
+    // Typed into the error chain, so the job's code names the refusal kind.
+    if let Some(denied) = admission.refusal() {
+        return Err(anyhow::Error::new(denied).context("native memory admission"));
+    }
     Ok(execute(
         admission
             .required_bytes
@@ -1206,21 +1205,10 @@ impl GenerationBackend for EngineBackend {
         .map_err(|error| {
             ServeError::server_error(format!("price request memory: {error:#}"))
         })?;
-        if !admission.admitted {
-            return Err(ServeError {
-                status: 503,
-                error_type: "server_busy",
-                code: Some("memory_admission_denied"),
-                param: None,
-                message: format!(
-                    "request memory admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
-                    admission.reason.as_str(),
-                    admission.required_bytes,
-                    admission.working_set_headroom_bytes,
-                    admission.signals.process_limit_remaining_bytes,
-                ),
-            }
-            .into());
+        // Pressure is 503; telemetry and size refusals are 500 with their
+        // own codes (one table across lanes, `transport_memory`).
+        if let Some(denied) = admission.refusal() {
+            return Err(super::transport_memory::memory_refusal("request memory", &denied).into());
         }
 
         let alloc_t0 = Instant::now();

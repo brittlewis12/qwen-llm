@@ -112,6 +112,18 @@ pub(super) struct K2Backend<'model, 'ctx> {
     ctx: Option<&'ctx qwen_llm::metal::MetalContext>,
 }
 
+/// A session-creation failure: a typed memory refusal takes the shared
+/// status table (pressure 503, telemetry and size 500); anything else is a
+/// 500 server error.
+fn session_error(error: qwen_llm::k2_horizon_runtime::K2RuntimeError) -> ServeError {
+    match &error {
+        qwen_llm::k2_horizon_runtime::K2RuntimeError::MemoryAdmission(denied) => {
+            super::transport_memory::memory_refusal("K2 session", denied)
+        }
+        _ => ServeError::server_error(format!("K2 session: {error}")),
+    }
+}
+
 impl<'model, 'ctx> K2Backend<'model, 'ctx> {
     pub(super) fn new(
         model: &'model K2LoadedModel<'ctx>,
@@ -219,7 +231,7 @@ impl GenerationBackend for K2Backend<'_, '_> {
             None => self
                 .model
                 .create_session_with_cpu_reserve(0, reserve)
-                .map_err(|e| ServeError::server_error(format!("K2 session: {e}")))?,
+                .map_err(session_error)?,
         };
         let session = self.session.insert(session);
         let reused = decode_loop::reusable_prefix(

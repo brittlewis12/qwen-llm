@@ -2,6 +2,8 @@ use super::*;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+mod natural;
+
 const ORACLE_DEFAULT: &str =
     "/Volumes/wdblack/weights-archive/.fetch/analysis/runs/glm53-oracle/ckpt-v1";
 
@@ -2267,14 +2269,15 @@ fn preflight_admits_fitting_sessions_and_reports_the_largest() {
     let context = model.config.context_length as usize;
     match preflight_session(&ctx, &gguf, model, context, 512) {
         Err(Glm5NextMetalError::MemoryAdmission {
-            required_bytes,
+            denied,
             budget_bytes,
-            fitting_capacity: Some(fitting),
-            ..
+            advice: CapacityAdvice::Fits(fitting),
         }) => {
+            let required_bytes = denied.required_bytes.expect("representable");
             eprintln!(
                 "1M refused: required {required_bytes}, budget {budget_bytes}, fitting {fitting}"
             );
+            assert!(denied.reason.is_pressure());
             assert!(required_bytes > budget_bytes);
             assert!((32_768..context as u64).contains(&fitting), "{fitting}");
             preflight_session(&ctx, &gguf, model, fitting as usize, 512).unwrap();

@@ -1,0 +1,17 @@
+serve durable: family=GLM-5.3-Flash tier unsupported; prefixes do not survive a restart
+serve prefetch: family=glm5_next windows=3 cold_windows=0 bytes_read=0 wall_ms=3.9
+serve limits: family=glm5_next input=verified_chat_and_tools renderer=glm53_flash_chat_v2 capacity=32768 default_max_tokens=1024 prefill_rows=512 snapshot_cache_bytes=0
+serve idle residency: family=glm5_next window_s=60 pulse_ms=500
+serve startup: family=glm5_next load_ms=11.0 warm_up_ms=1381.9
+serve: listening on http://127.0.0.1:8797 model=GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004 load_ms=11.0 lens_history=false (serial; POST /v1/responses, GET /v1/models)
+serve phases: family=glm5_next prefill_ms=60111.4 reused_tokens=0 prefill_tokens=11129 decode_ms=1960.5 required_forwards=12152 capacity=32768 transitions=56
+serve stats: version=serve_stats_v1 prompt_tokens=11129 generated_tokens=57 stop_reason=eos matched_tokens=0 restore_ms=0.0 decode_tps=29.07
+serve phases: family=glm5_next prefill_ms=1231.2 reused_tokens=11185 prefill_tokens=99 decode_ms=2235.8 required_forwards=12307 capacity=32768 transitions=64
+serve stats: version=serve_stats_v1 prompt_tokens=11284 generated_tokens=65 stop_reason=eos matched_tokens=11185 restore_ms=0.0 decode_tps=29.07
+serve phases: family=glm5_next prefill_ms=61144.3 reused_tokens=0 prefill_tokens=11128 decode_ms=1193.0 required_forwards=12151 capacity=32768 transitions=34
+serve stats: version=serve_stats_v1 prompt_tokens=11128 generated_tokens=35 stop_reason=eos matched_tokens=0 restore_ms=0.0 decode_tps=29.34
+serve phases: family=glm5_next prefill_ms=61303.4 reused_tokens=0 prefill_tokens=11123 decode_ms=5086.8 required_forwards=12146 capacity=32768 transitions=144
+serve stats: version=serve_stats_v1 prompt_tokens=11123 generated_tokens=145 stop_reason=eos matched_tokens=0 restore_ms=0.0 decode_tps=28.51
+serve phases: family=glm5_next prefill_ms=62827.8 reused_tokens=0 prefill_tokens=11366 decode_ms=3260.3 required_forwards=12389 capacity=32768 transitions=93
+serve stats: version=serve_stats_v1 prompt_tokens=11366 generated_tokens=94 stop_reason=eos matched_tokens=0 restore_ms=0.0 decode_tps=28.83
+Error: termination signal 2 received; unwinding for Metal teardown

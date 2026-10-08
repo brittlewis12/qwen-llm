@@ -123,6 +123,13 @@ fallback/counter/shared-caller isolation. The independent observer CPU test
 also passes. GPU work waited for another owner's long quality evaluation;
 no lease was bypassed or unrelated process terminated.
 
+Integration with concurrent main preserves its per-stage Exact attribution and
+typed-error changes. Workspace check including tests, release test rebuild,
+formatting, five policy/observer CPU tests and five typed-error/HTTP mapping
+tests pass after the merge resolution. The measured packets retain their
+premerge source bindings; later runs bind any changed backend-derived corpus
+and must compare token hashes before claiming identical input.
+
 Build using `cargo test -p qwen-llm --release --offline -j2 --lib --no-run`.
 Run only `glm5_next_metal::packed::expert_down::expert_down_packet` with
 `--ignored --exact --nocapture --test-threads=1`. The test acquires the lease.

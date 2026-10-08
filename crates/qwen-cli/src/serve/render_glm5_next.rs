@@ -264,6 +264,9 @@ pub(crate) fn render(request: &ServeRequest) -> Result<String, ServeError> {
 }
 
 #[cfg(test)]
+mod natural_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::serve::output_partition::GenerationEnd;

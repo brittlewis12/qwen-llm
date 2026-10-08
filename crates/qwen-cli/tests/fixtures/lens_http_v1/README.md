@@ -258,8 +258,10 @@ Likewise, post-acceptance matrix staging failures terminate the job with
 `artifact_preparation_failed`, zero consumption and no execution phase. The
 original accepted key continues to recover that terminal job, not new GPU work.
 GPU direction/readout setup failures before the first token forward use
-`diagnostic_preparation_failed`; sequence memory admission remains
-`memory_admission_denied`. Artifact errors retain their independent result status.
+`diagnostic_preparation_failed`; a sequence memory refusal is labelled by kind
+(`memory_admission_denied` under memory pressure; `memory_signal_unavailable`,
+`memory_signal_invalid` or `memory_size_overflow` otherwise), and any other
+preparation failure is `native_preparation_failed`. Artifact errors retain their independent result status.
 
 A definitive submission rejection includes top-level
 `admission:{schema_version:1,idempotency_key:string,state:"not_accepted"}` only

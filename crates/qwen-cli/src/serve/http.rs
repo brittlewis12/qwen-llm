@@ -1644,6 +1644,67 @@ mod tests {
         assert!(body_of(&response).ends_with("data: [DONE]\n\n"));
     }
 
+    /// A typed memory refusal from a session (lane audit B3): pressure is a
+    /// 503 `memory_admission_denied` envelope; missing telemetry is a 500 with
+    /// its own code. After stream headers, both are `response.failed` with
+    /// the same code (the HTTP status is already 200).
+    #[test]
+    fn typed_memory_refusals_reach_json_and_stream_with_their_codes() {
+        use qwen_llm::metal::{
+            MemoryAdmissionDenied, MetalMemoryAdmissionReason as R, MetalMemorySignals,
+        };
+        let refusal = |reason| {
+            super::super::transport_memory::memory_refusal(
+                "GLM-5.3-Flash session",
+                &MemoryAdmissionDenied {
+                    reason,
+                    required_bytes: Some(1 << 33),
+                    signals: MetalMemorySignals {
+                        recommended_max_bytes: 1 << 34,
+                        current_allocated_bytes: 1 << 34,
+                        process_limit_remaining_bytes: Some(1 << 30),
+                    },
+                    working_set_headroom_bytes: Some(0),
+                },
+            )
+        };
+        for (reason, status, code) in [
+            (R::WorkingSetInsufficient, "503", "memory_admission_denied"),
+            (
+                R::ProcessSignalUnavailable,
+                "500",
+                "memory_signal_unavailable",
+            ),
+        ] {
+            let mut backend = MockBackend::new(&[], StopReason::Eos);
+            backend.fail_with = Some(refusal(reason));
+            let response = roundtrip(
+                backend,
+                &post("/v1/responses", r#"{"model":"qwen-test","input":"q"}"#),
+            );
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status}")),
+                "{response}"
+            );
+            let envelope: Value = serde_json::from_str(body_of(&response)).unwrap();
+            assert_eq!(envelope["error"]["code"], code, "{envelope}");
+
+            let mut backend = MockBackend::new(&[], StopReason::Eos);
+            backend.fail_with = Some(refusal(reason));
+            let response = roundtrip(
+                backend,
+                &post(
+                    "/v1/responses",
+                    r#"{"model":"qwen-test","input":"q","stream":true}"#,
+                ),
+            );
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+            let failed = sse_payload(&response, "response.failed");
+            assert_eq!(failed["response"]["error"]["code"], code, "{failed}");
+            assert!(body_of(&response).ends_with("data: [DONE]\n\n"));
+        }
+    }
+
     #[test]
     fn token_limit_streams_incomplete_terminal() {
         let response = roundtrip(

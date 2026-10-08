@@ -29,6 +29,78 @@ mod router_prefill;
 #[path = "tests/expert_down.rs"]
 mod expert_down;
 
+/// Packed stage families that have a Fast and an Exact form (map #12
+/// attribution: one family at a time can run in its Exact form in tests).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Stage {
+    DenseFfn,
+    Router,
+    RoutedExperts,
+    SharedExpert,
+    KdaProjection,
+    KdaExpand,
+    MlaProjection,
+    MlaAbsorb,
+    IndexerProjection,
+}
+
+impl Stage {
+    #[cfg(test)]
+    pub(super) const ALL: [Stage; 9] = [
+        Stage::DenseFfn,
+        Stage::Router,
+        Stage::RoutedExperts,
+        Stage::SharedExpert,
+        Stage::KdaProjection,
+        Stage::KdaExpand,
+        Stage::MlaProjection,
+        Stage::MlaAbsorb,
+        Stage::IndexerProjection,
+    ];
+
+    #[cfg(test)]
+    fn bit(self) -> u16 {
+        1 << self as u16
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static EXACT_STAGES: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
+}
+
+/// A stage's lineage: the session's, except that tests may run chosen Fast
+/// stages in their Exact form ([`ExactStages`]). Product builds always use
+/// the session's lineage.
+fn stage_lineage(lineage: PackedLineage, stage: Stage) -> PackedLineage {
+    #[cfg(test)]
+    if lineage == PackedLineage::Fast && EXACT_STAGES.with(|s| s.get()) & stage.bit() != 0 {
+        return PackedLineage::Exact;
+    }
+    let _ = stage;
+    lineage
+}
+
+/// Test-only scope in which `stages` run in their Exact form inside Fast
+/// sessions on this thread; the previous set is restored on drop.
+#[cfg(test)]
+pub(super) struct ExactStages(u16);
+
+#[cfg(test)]
+impl ExactStages {
+    pub(super) fn set(stages: &[Stage]) -> Self {
+        let bits = stages.iter().fold(0, |bits, stage| bits | stage.bit());
+        Self(EXACT_STAGES.with(|s| s.replace(bits)))
+    }
+}
+
+#[cfg(test)]
+impl Drop for ExactStages {
+    fn drop(&mut self) {
+        EXACT_STAGES.with(|s| s.set(self.0));
+    }
+}
+
 /// Arithmetic lineage of packed prefill.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PackedLineage {
@@ -446,7 +518,7 @@ impl Glm5NextSession<'_> {
         want_logits: bool,
     ) -> Result<Option<Vec<f32>>> {
         if self.poisoned {
-            return invalid("session is poisoned by an earlier failed token");
+            return Err(Glm5NextMetalError::Poisoned);
         }
         let c = &self.weights.config;
         if let Some(&bad) = tokens.iter().find(|&&t| t >= c.vocab_size) {
@@ -489,10 +561,17 @@ impl Glm5NextSession<'_> {
         for (layer, route) in packed.routes.iter().enumerate() {
             if let Some(route) = route {
                 let status = read_i32(&rows_view(&route.status, tokens.len()))?;
-                if let Some(bad) = status.iter().find(|&&s| s != ROUTE_STATUS_READY) {
-                    return invalid(format!(
-                        "block {layer} packed route failed with status {bad}"
-                    ));
+                if let Some((row, &bad)) = status
+                    .iter()
+                    .enumerate()
+                    .find(|(_, s)| **s != ROUTE_STATUS_READY)
+                {
+                    return Err(Glm5NextMetalError::KernelValidation {
+                        stage: "packed route",
+                        block: layer,
+                        row: Some(row),
+                        status: bad,
+                    });
                 }
             }
         }
@@ -503,9 +582,12 @@ impl Glm5NextSession<'_> {
                 for row in dense..tokens.len() {
                     let code = status[block * sp.rows + row];
                     if code != crate::metal::SELECT_STATUS_OK {
-                        return invalid(format!(
-                            "MLA block {block} row {row} sparse selection failed with status {code}"
-                        ));
+                        return Err(Glm5NextMetalError::KernelValidation {
+                            stage: "packed sparse selection",
+                            block: super::mla_block(&self.weights.config, block),
+                            row: Some(row),
+                            status: code,
+                        });
                     }
                 }
             }
@@ -599,7 +681,7 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        p.lineage,
+                        stage_lineage(p.lineage, Stage::DenseFfn),
                         &dense.gate,
                         &v(&p.normed),
                         &v(&p.dense_gate),
@@ -610,7 +692,7 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        p.lineage,
+                        stage_lineage(p.lineage, Stage::DenseFfn),
                         &dense.up,
                         &v(&p.normed),
                         &v(&p.dense_up),
@@ -623,7 +705,7 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        p.lineage,
+                        stage_lineage(p.lineage, Stage::DenseFfn),
                         &dense.down,
                         &v(&p.dense_gate),
                         &v(&p.block_out),
@@ -643,9 +725,14 @@ impl Glm5NextSession<'_> {
                         c.expert_ffn_size as usize,
                         c.expert_used_count as usize,
                     );
-                    if router_e8p32_selected(p.lineage, h, e, moe.router.dtype, rows, || {
-                        router_e8p32_supported(ctx)
-                    }) {
+                    if router_e8p32_selected(
+                        stage_lineage(p.lineage, Stage::Router),
+                        h,
+                        e,
+                        moe.router.dtype,
+                        rows,
+                        || router_e8p32_supported(ctx),
+                    ) {
                         crate::metal::encode_mat_mat_f32_router_e8p32_strict(
                             ctx,
                             &enc,
@@ -662,7 +749,7 @@ impl Glm5NextSession<'_> {
                         matmat(
                             ctx,
                             &enc,
-                            p.lineage,
+                            stage_lineage(p.lineage, Stage::Router),
                             &moe.router,
                             &v(&p.normed),
                             &v(&p.router),
@@ -689,7 +776,7 @@ impl Glm5NextSession<'_> {
                         &route_weights,
                         &v(&route.status),
                     )?;
-                    if p.lineage == PackedLineage::Exact {
+                    if stage_lineage(p.lineage, Stage::RoutedExperts) == PackedLineage::Exact {
                         let s = &self.s;
                         for row in 0..rows {
                             let x = p.normed.view_subrange((row * h) as u64, vec![h as u64]);
@@ -778,7 +865,7 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        p.lineage,
+                        stage_lineage(p.lineage, Stage::SharedExpert),
                         &moe.shared.gate,
                         &v(&p.normed),
                         &v(&p.shared_gate),
@@ -789,7 +876,7 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        p.lineage,
+                        stage_lineage(p.lineage, Stage::SharedExpert),
                         &moe.shared.up,
                         &v(&p.normed),
                         &v(&p.shared_up),
@@ -805,7 +892,7 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        p.lineage,
+                        stage_lineage(p.lineage, Stage::SharedExpert),
                         &moe.shared.down,
                         &v(&p.shared_gate),
                         &v(&p.shared),
@@ -934,7 +1021,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            stage_lineage(p.lineage, Stage::KdaProjection),
             &kda.query,
             &x,
             &v(&p.q),
@@ -942,11 +1029,21 @@ impl Glm5NextSession<'_> {
             width,
             rows,
         )?;
-        matmat(ctx, enc, p.lineage, &kda.key, &x, &v(&p.k), h, width, rows)?;
         matmat(
             ctx,
             enc,
-            p.lineage,
+            stage_lineage(p.lineage, Stage::KdaProjection),
+            &kda.key,
+            &x,
+            &v(&p.k),
+            h,
+            width,
+            rows,
+        )?;
+        matmat(
+            ctx,
+            enc,
+            stage_lineage(p.lineage, Stage::KdaProjection),
             &kda.value,
             &x,
             &v(&p.v),
@@ -957,7 +1054,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            stage_lineage(p.lineage, Stage::KdaProjection),
             &kda.decay_a,
             &x,
             &v(&p.rank_a),
@@ -968,7 +1065,7 @@ impl Glm5NextSession<'_> {
         expand_rows(
             ctx,
             enc,
-            p.lineage,
+            stage_lineage(p.lineage, Stage::KdaExpand),
             &kda.decay_b,
             &v(&p.rank_a),
             &v(&p.raw_gate),
@@ -979,7 +1076,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            stage_lineage(p.lineage, Stage::KdaProjection),
             &kda.beta,
             &x,
             &v(&p.raw_beta),
@@ -990,7 +1087,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            stage_lineage(p.lineage, Stage::KdaProjection),
             &kda.gate_a,
             &x,
             &v(&p.rank_b),
@@ -1001,7 +1098,7 @@ impl Glm5NextSession<'_> {
         expand_rows(
             ctx,
             enc,
-            p.lineage,
+            stage_lineage(p.lineage, Stage::KdaExpand),
             &kda.gate_b,
             &v(&p.rank_b),
             &v(&p.output_gate),
@@ -1037,7 +1134,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            stage_lineage(p.lineage, Stage::KdaProjection),
             &kda.output,
             &v(&p.kda_out),
             &v(&p.block_out),
@@ -1071,7 +1168,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            stage_lineage(p.lineage, Stage::MlaProjection),
             &mla.query_a,
             &x,
             &v(&p.query_a),
@@ -1092,7 +1189,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            stage_lineage(p.lineage, Stage::MlaProjection),
             &mla.query_b,
             &v(&p.query_r),
             &v(&p.query),
@@ -1103,7 +1200,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            stage_lineage(p.lineage, Stage::MlaProjection),
             &mla.latent,
             &x,
             &v(&p.latent_raw),
@@ -1132,7 +1229,7 @@ impl Glm5NextSession<'_> {
         absorb_rows(
             ctx,
             enc,
-            p.lineage,
+            stage_lineage(p.lineage, Stage::MlaAbsorb),
             &mla.key_absorb,
             &p.query,
             &p.query_latent,
@@ -1148,7 +1245,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            stage_lineage(p.lineage, Stage::IndexerProjection),
             &mla.indexer.key,
             &x,
             &v(&p.index_key),
@@ -1159,7 +1256,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            stage_lineage(p.lineage, Stage::IndexerProjection),
             &mla.indexer.pool_gate,
             &x,
             &v(&p.index_gate),
@@ -1204,7 +1301,7 @@ impl Glm5NextSession<'_> {
         absorb_rows(
             ctx,
             enc,
-            p.lineage,
+            stage_lineage(p.lineage, Stage::MlaAbsorb),
             &mla.value_expand,
             &p.output_latent,
             &p.heads_out,
@@ -1216,7 +1313,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            stage_lineage(p.lineage, Stage::MlaProjection),
             &mla.output,
             &v(&p.heads_out),
             &v(&p.block_out),
@@ -1265,7 +1362,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            stage_lineage(p.lineage, Stage::IndexerProjection),
             &mla.indexer.query,
             &sub(&p.query_r, q_rank),
             &sub(&sp.index_query, query_width),
@@ -1285,7 +1382,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            stage_lineage(p.lineage, Stage::IndexerProjection),
             &mla.indexer.head_weights,
             &sub(&p.normed, h),
             &weights,

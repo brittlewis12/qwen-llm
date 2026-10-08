@@ -455,3 +455,65 @@ fn gpu_live_session_extends_resumes_and_resets() {
         assert_eq!(envelope["reasoning"], json!({"effort":"low"}));
     }
 }
+
+fn refusal(
+    reason: qwen_llm::metal::MetalMemoryAdmissionReason,
+) -> qwen_llm::metal::MemoryAdmissionDenied {
+    qwen_llm::metal::MemoryAdmissionDenied {
+        reason,
+        required_bytes: Some(3 << 30),
+        signals: qwen_llm::metal::MetalMemorySignals {
+            recommended_max_bytes: 112 << 30,
+            current_allocated_bytes: 111 << 30,
+            process_limit_remaining_bytes: Some(8 << 30),
+        },
+        working_set_headroom_bytes: Some(1 << 30),
+    }
+}
+
+/// Lane audit B3: only a typed pressure refusal of the session is a 503;
+/// telemetry refusals, geometry and kernel validation failures stay 500.
+#[test]
+fn session_errors_map_typed_pressure_to_503_and_the_rest_to_500() {
+    use qwen_llm::metal::MetalMemoryAdmissionReason as R;
+    let admission = |reason| Glm5NextMetalError::MemoryAdmission {
+        denied: refusal(reason),
+        budget_bytes: 1 << 30,
+        advice: qwen_llm::glm5_next_metal::CapacityAdvice::NotEvaluated,
+    };
+    let pressure = admission(R::BothInsufficient);
+    assert!(pressure.is_memory_pressure());
+    let error = session_error(pressure);
+    assert_eq!(
+        (error.status, error.error_type, error.code),
+        (503, "server_busy", Some("memory_admission_denied"))
+    );
+    assert!(
+        error.message.contains("both_insufficient"),
+        "{}",
+        error.message
+    );
+
+    let telemetry = admission(R::InvalidWorkingSetSignal);
+    assert!(!telemetry.is_memory_pressure());
+    let error = session_error(telemetry);
+    assert_eq!(
+        (error.status, error.code),
+        (500, Some("memory_signal_invalid"))
+    );
+
+    for other in [
+        Glm5NextMetalError::Invalid("capacity must be positive".into()),
+        Glm5NextMetalError::Poisoned,
+        Glm5NextMetalError::KernelValidation {
+            stage: "route",
+            block: 7,
+            row: None,
+            status: -1,
+        },
+    ] {
+        assert!(!other.is_memory_pressure());
+        let error = session_error(other);
+        assert_eq!((error.status, error.code), (500, None), "{}", error.message);
+    }
+}

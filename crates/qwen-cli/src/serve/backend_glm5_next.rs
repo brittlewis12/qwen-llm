@@ -10,13 +10,13 @@ use super::decode_loop;
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest};
 use super::render_glm5_next::{self as render, FAMILY};
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::glm5_next::Glm5NextPreparedArtifact;
 use qwen_llm::glm5_next_chat::{CHAT_STOPS, VerifiedChatProfile};
 use qwen_llm::glm5_next_metal::{
-    DEFAULT_PREFILL_ROWS, Glm5NextMetalError, Glm5NextSession, Glm5NextWeights, PackedLineage,
-    prefetch_retained_with_cancel, preflight_session,
+    CapacityAdvice, DEFAULT_PREFILL_ROWS, Glm5NextMetalError, Glm5NextSession, Glm5NextWeights,
+    PackedLineage, prefetch_retained_with_cancel, preflight_session,
 };
 use qwen_llm::metal::MetalContext;
 use qwen_llm::model_family::ModelFamily;
@@ -105,14 +105,18 @@ pub(super) fn load(
         prepared.prefill_rows,
     ) {
         Ok(_) => {}
-        Err(
-            error @ Glm5NextMetalError::MemoryAdmission {
-                fitting_capacity, ..
-            },
-        ) => match fitting_capacity {
-            Some(n) => bail!("{error}; pass --max-context-tokens {n} or less"),
-            None => bail!("{error}; free device memory or use a smaller artifact"),
-        },
+        Err(error @ Glm5NextMetalError::MemoryAdmission { advice, .. }) => {
+            let advice = match advice {
+                CapacityAdvice::Fits(n) => format!("pass --max-context-tokens {n} or less"),
+                CapacityAdvice::NoneFits => {
+                    "free device memory or use a smaller artifact".to_string()
+                }
+                CapacityAdvice::NotEvaluated => {
+                    "no smaller capacity was evaluated; see the refusal reason".to_string()
+                }
+            };
+            return Err(error).context(format!("admit GLM-5.3 serve session: {advice}"));
+        }
         Err(error) => return Err(error).context("admit GLM-5.3 serve session"),
     }
     let prefetch =
@@ -145,6 +149,18 @@ pub(super) struct Glm5NextBackend<'w, 'g> {
     lineage: PackedLineage,
 }
 
+/// A session-creation failure: a typed memory refusal takes the shared
+/// status table (pressure 503, telemetry and size 500); anything else
+/// (geometry, invalid weights, GPU) is a 500 server error.
+fn session_error(error: Glm5NextMetalError) -> ServeError {
+    match &error {
+        Glm5NextMetalError::MemoryAdmission { denied, .. } => {
+            super::transport_memory::memory_refusal(&format!("{FAMILY} session"), denied)
+        }
+        _ => ServeError::server_error(format!("{FAMILY} session: {error}")),
+    }
+}
+
 impl<'w, 'g> Glm5NextBackend<'w, 'g> {
     pub(super) fn new(
         ctx: &'w MetalContext,
@@ -174,7 +190,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             self.prepared.prefill_rows,
             cpu_reserve,
         )
-        .map_err(|error| ServeError::server_error(format!("{FAMILY} session: {error}")))?;
+        .map_err(session_error)?;
         session.set_packed_lineage(self.lineage);
         Ok(session)
     }

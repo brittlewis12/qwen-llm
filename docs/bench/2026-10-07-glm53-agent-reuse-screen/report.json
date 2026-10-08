@@ -1,0 +1,158 @@
+{
+  "schema": "glm53.serve_agent_reuse_screen.v1",
+  "model": "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+  "shape": "opencode-shape-v1.json",
+  "effort": "low",
+  "max_context_tokens": 32768,
+  "requests": [
+    {
+      "label": "A1",
+      "kind": "cold",
+      "status": "completed",
+      "input_items": 1,
+      "reasoning_items_sent": 0,
+      "output_items": [
+        "reasoning",
+        "function_call",
+        "function_call"
+      ],
+      "usage": {
+        "input_tokens": 11129,
+        "output_tokens": 57,
+        "total_tokens": 11186,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "first_delta_s": 60.13504904229194,
+      "wall_s": 62.09700233396143,
+      "serve_phases": "serve phases: family=glm5_next prefill_ms=60111.4 reused_tokens=0 prefill_tokens=11129 decode_ms=1960.5 required_forwards=12152 capacity=32768 transitions=56",
+      "reused_tokens": 0,
+      "prefill_tokens": 11129,
+      "prefill_ms": 60111.4,
+      "decode_ms": 1960.5
+    },
+    {
+      "label": "A2",
+      "kind": "continued",
+      "status": "completed",
+      "input_items": 6,
+      "reasoning_items_sent": 1,
+      "output_items": [
+        "reasoning",
+        "message"
+      ],
+      "usage": {
+        "input_tokens": 11284,
+        "output_tokens": 65,
+        "total_tokens": 11349,
+        "input_tokens_details": {
+          "cached_tokens": 11185
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "first_delta_s": 1.247587749734521,
+      "wall_s": 3.4839187916368246,
+      "serve_phases": "serve phases: family=glm5_next prefill_ms=1231.2 reused_tokens=11185 prefill_tokens=99 decode_ms=2235.8 required_forwards=12307 capacity=32768 transitions=64",
+      "reused_tokens": 11185,
+      "prefill_tokens": 99,
+      "prefill_ms": 1231.2,
+      "decode_ms": 2235.8
+    },
+    {
+      "label": "B",
+      "kind": "branch",
+      "status": "completed",
+      "input_items": 1,
+      "reasoning_items_sent": 0,
+      "output_items": [
+        "reasoning",
+        "function_call",
+        "function_call"
+      ],
+      "usage": {
+        "input_tokens": 11128,
+        "output_tokens": 35,
+        "total_tokens": 11163,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "first_delta_s": 61.158278999850154,
+      "wall_s": 62.35199395939708,
+      "serve_phases": "serve phases: family=glm5_next prefill_ms=61144.3 reused_tokens=0 prefill_tokens=11128 decode_ms=1193.0 required_forwards=12151 capacity=32768 transitions=34",
+      "reused_tokens": 0,
+      "prefill_tokens": 11128,
+      "prefill_ms": 61144.3,
+      "decode_ms": 1193.0
+    },
+    {
+      "label": "C1",
+      "kind": "continued",
+      "status": "completed",
+      "input_items": 1,
+      "reasoning_items_sent": 0,
+      "output_items": [
+        "reasoning",
+        "function_call"
+      ],
+      "usage": {
+        "input_tokens": 11123,
+        "output_tokens": 145,
+        "total_tokens": 11268,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "first_delta_s": 61.322116209194064,
+      "wall_s": 66.40930937509984,
+      "serve_phases": "serve phases: family=glm5_next prefill_ms=61303.4 reused_tokens=0 prefill_tokens=11123 decode_ms=5086.8 required_forwards=12146 capacity=32768 transitions=144",
+      "reused_tokens": 0,
+      "prefill_tokens": 11123,
+      "prefill_ms": 61303.4,
+      "decode_ms": 5086.8
+    },
+    {
+      "label": "A'",
+      "kind": "return",
+      "status": "completed",
+      "input_items": 9,
+      "reasoning_items_sent": 2,
+      "output_items": [
+        "reasoning",
+        "message"
+      ],
+      "usage": {
+        "input_tokens": 11366,
+        "output_tokens": 94,
+        "total_tokens": 11460,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "first_delta_s": 62.845842082984746,
+      "wall_s": 66.10648950003088,
+      "serve_phases": "serve phases: family=glm5_next prefill_ms=62827.8 reused_tokens=0 prefill_tokens=11366 decode_ms=3260.3 required_forwards=12389 capacity=32768 transitions=93",
+      "reused_tokens": 0,
+      "prefill_tokens": 11366,
+      "prefill_ms": 62827.8,
+      "decode_ms": 3260.3
+    }
+  ],
+  "error": null,
+  "exit_code": 130
+}

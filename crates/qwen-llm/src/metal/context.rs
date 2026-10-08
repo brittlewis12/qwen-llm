@@ -441,7 +441,54 @@ impl MetalMemoryAdmissionReason {
             Self::BothInsufficient => "both_insufficient",
         }
     }
+
+    pub fn is_admitted(self) -> bool {
+        matches!(
+            self,
+            Self::AdmittedWithProcessBudget | Self::AdmittedProcessBudgetOmitted
+        )
+    }
+
+    /// Memory pressure: the signals were valid and the request does not fit
+    /// (it may fit once memory frees). Missing or invalid telemetry and a
+    /// size that overflows are refusals of another kind.
+    pub fn is_pressure(self) -> bool {
+        matches!(
+            self,
+            Self::WorkingSetInsufficient | Self::ProcessInsufficient | Self::BothInsufficient
+        )
+    }
 }
+
+/// A refused [`MetalMemoryAdmission`], kept typed through error chains so
+/// callers can tell memory pressure ([`MetalMemoryAdmissionReason::is_pressure`])
+/// from unavailable or invalid memory telemetry and from a size that
+/// overflows. Built only from a decision that did not admit
+/// ([`MetalMemoryAdmission::refusal`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MemoryAdmissionDenied {
+    pub reason: MetalMemoryAdmissionReason,
+    /// `None` when the required size overflows.
+    pub required_bytes: Option<u64>,
+    pub signals: MetalMemorySignals,
+    pub working_set_headroom_bytes: Option<u64>,
+}
+
+impl std::fmt::Display for MemoryAdmissionDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let bytes = |value: Option<u64>| value.map_or("unknown".to_string(), |b| b.to_string());
+        write!(
+            f,
+            "memory admission denied ({}): required {} bytes, working-set headroom {} bytes, process remaining {} bytes",
+            self.reason.as_str(),
+            bytes(self.required_bytes),
+            bytes(self.working_set_headroom_bytes),
+            bytes(self.signals.process_limit_remaining_bytes),
+        )
+    }
+}
+
+impl std::error::Error for MemoryAdmissionDenied {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MetalMemoryAdmission {
@@ -452,6 +499,20 @@ pub struct MetalMemoryAdmission {
     pub required_bytes: Option<u64>,
     pub signals: MetalMemorySignals,
     pub working_set_headroom_bytes: Option<u64>,
+}
+
+impl MetalMemoryAdmission {
+    /// The typed refusal of a decision that did not admit; `None` exactly
+    /// when it admitted. A contradictory decision (not admitted, admitted
+    /// reason) still refuses, and callers report it as inconsistent.
+    pub fn refusal(&self) -> Option<MemoryAdmissionDenied> {
+        (!self.admitted).then_some(MemoryAdmissionDenied {
+            reason: self.reason,
+            required_bytes: self.required_bytes,
+            signals: self.signals,
+            working_set_headroom_bytes: self.working_set_headroom_bytes,
+        })
+    }
 }
 
 pub fn evaluate_metal_memory_admission_with_cpu_bytes(
@@ -1516,5 +1577,86 @@ mod tests {
             Err(e) => panic!("unexpected error: {e}"),
         };
         eprintln!("[metal] {}", ctx.describe());
+    }
+}
+
+#[cfg(test)]
+mod admission_refusal_tests {
+    use super::*;
+
+    fn signals(process: Option<u64>) -> MetalMemorySignals {
+        MetalMemorySignals {
+            recommended_max_bytes: 100,
+            current_allocated_bytes: 40,
+            process_limit_remaining_bytes: process,
+        }
+    }
+
+    /// An admitted decision never becomes a refusal; every refused decision
+    /// keeps its typed reason, and only valid-signal shortfalls are pressure.
+    #[test]
+    fn refusals_are_typed_and_only_shortfalls_are_pressure() {
+        use MetalMemoryAdmissionReason as R;
+        let cases = [
+            (
+                evaluate_metal_memory_admission(10, 0, signals(Some(50)), true),
+                None,
+            ),
+            (
+                evaluate_metal_memory_admission(10, 0, signals(Some(0)), true),
+                None,
+            ),
+            (
+                evaluate_metal_memory_admission(70, 0, signals(Some(500)), true),
+                Some((R::WorkingSetInsufficient, true)),
+            ),
+            (
+                evaluate_metal_memory_admission(30, 0, signals(Some(20)), true),
+                Some((R::ProcessInsufficient, true)),
+            ),
+            (
+                evaluate_metal_memory_admission(70, 0, signals(Some(20)), true),
+                Some((R::BothInsufficient, true)),
+            ),
+            (
+                evaluate_metal_memory_admission(10, 0, signals(None), true),
+                Some((R::ProcessSignalUnavailable, false)),
+            ),
+            (
+                evaluate_metal_memory_admission(u64::MAX, 1, signals(Some(50)), true),
+                Some((R::RequiredBytesOverflow, false)),
+            ),
+            (
+                evaluate_metal_memory_admission(
+                    10,
+                    0,
+                    MetalMemorySignals {
+                        recommended_max_bytes: 0,
+                        ..signals(Some(50))
+                    },
+                    true,
+                ),
+                Some((R::InvalidWorkingSetSignal, false)),
+            ),
+        ];
+        for (admission, expected) in cases {
+            let refusal = admission.refusal();
+            assert_eq!(refusal.is_none(), admission.admitted, "{admission:?}");
+            match (refusal, expected) {
+                (None, None) => assert!(admission.reason.is_admitted()),
+                (Some(denied), Some((reason, pressure))) => {
+                    assert_eq!(denied.reason, reason);
+                    assert_eq!(denied.reason.is_pressure(), pressure);
+                    assert_eq!(denied.required_bytes, admission.required_bytes);
+                    assert!(denied.to_string().contains(reason.as_str()));
+                }
+                other => panic!("{other:?} for {admission:?}"),
+            }
+        }
+        // Never fails open: only `admitted` decides.
+        let mut contradictory = evaluate_metal_memory_admission(10, 0, signals(Some(50)), true);
+        contradictory.admitted = false;
+        let denied = contradictory.refusal().expect("not admitted refuses");
+        assert!(denied.reason.is_admitted() && !denied.reason.is_pressure());
     }
 }

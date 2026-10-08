@@ -961,11 +961,19 @@ compatible only within one prefill lineage and schedule.
   start, so the split is a new Fast schedule that must pass the #12 quality
   cohort before it becomes a default. `QWEN_GLM_FAST_SNAPSHOTS=1` opts in
   for qualification: one cut at the shared prefix; a restored request equals
-  a miss on the same split, not an unsplit cold run.
+  a miss on the same split, not an unsplit cold run. A Fast request restores
+  only a snapshot ending exactly at its own verified cut and publishes one
+  only from a state on that schedule (packed chunks from 0; a live session
+  with an earlier cut, an off-grid cancellation or decoded tokens is
+  continued but not captured, outcome `noncanonical`); without a verified
+  cut it neither restores nor captures.
+
+A memory-pressure refusal of the transport allowance or of a new session
+releases cached snapshots (except one being restored) and retries once.
 
 The `serve phases:` line reports `reuse_source=live|snapshot|none`,
-`restore_ms`, `snapshot_schedule`, `cuts`, each cut's capture outcome
-(`captured`, `present`, `ineligible`, `denied`, `failed`),
+`restore_ms`, `boundary_ms` (CPU time verifying the cuts), `snapshot_schedule`, `cuts`, each cut's capture outcome
+(`captured`, `present`, `ineligible`, `denied`, `failed`, `noncanonical`),
 `snapshot_capture_ms` and the cache's bytes and entries.
 
 Checked under `MTL_DEBUG_LAYER=1` on UD-IQ3_XXS with a 1,173-token shared
@@ -975,7 +983,13 @@ restores the shared prefix and an identical retry restores its transcript,
 both equal to cold runs bit for bit (logits and bytes); opt-in Fast hits equal
 a miss on the same split, as does a full cache; Fast entries never serve an
 Exact request; a split prefill cancelled after its first chunk resumes onto
-the same schedule with the uninterrupted run's logits, in both lineages.
+the same schedule with the uninterrupted run's logits, in both lineages; a
+Fast request ignores another request's shorter cut and equals its own miss;
+a live session cancelled just after a cut continues into a longer prefix
+without publishing a Fast snapshot; a Fast request without boundaries
+neither restores nor captures; denied captures keep the splits; and a
+continued live request's transcript capture cannot evict the shared entry it
+passed.
 
 Checked under `MTL_DEBUG_LAYER=1` on UD-IQ3_XXS
 (`serve::backend_glm5_next::tests::gpu_live_session_extends_resumes_and_resets`):

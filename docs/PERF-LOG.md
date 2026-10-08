@@ -22,12 +22,20 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   restores equal cold runs. Fast (the default lineage) stays off; its
   shared-prefix split is a new schedule that enters the #12 quality cohort
   as a candidate arm before it can be a default. `QWEN_GLM_FAST_SNAPSHOTS=1`
-  opts in for that qualification and for #13's cost screen.
+  opts in for that qualification and for #13's cost screen. Fast restores
+  only at the request's own verified cut and publishes only states on the
+  canonical schedule (review: an older shorter cut or an off-grid live
+  session would otherwise publish a different trajectory). Pressure
+  refusals of the transport or a new session release the cache and retry
+  once.
 - GPU gate (Metal validation, 1,173-token shared prefix): Exact miss, shared
   hit and transcript hit equal cold runs bitwise (logits and bytes); Fast
-  hit equals a miss on the same split, as does a full cache; Fast entries
-  never serve Exact; split prefills cancelled after one chunk resume onto
-  the same schedule in both lineages. Observed, not relied on: for this
+  hit equals a miss on the same split, as do a full cache and denied
+  captures; Fast entries never serve Exact; split prefills cancelled after
+  one chunk resume onto the same schedule in both lineages; a shorter cached
+  cut is ignored, an off-grid live state is not published, boundary-less
+  Fast requests neither restore nor capture, and a continued request cannot
+  evict the shared entry it passed. Observed, not relied on: for this
   prompt the Fast split's logits equaled the unsplit Fast prefill's.
 - Next: the Fast shared-split quality arm (preregistered: segmentation
   algorithm, split points below and across the frontier and at pool

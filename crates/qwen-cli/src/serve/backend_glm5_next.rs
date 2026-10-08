@@ -617,6 +617,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             lineage,
         );
         let mut schedule = snapshot_schedule(self.cache.max_bytes(), self.fast_snapshots, lineage);
+        let boundary_t0 = Instant::now();
         let cuts = schedule.map_or_else(Vec::new, |schedule| {
             cut_positions(
                 |text| decode_loop::encode_checked(tokenizer, text, false, vocab_size, FAMILY),
@@ -626,6 +627,8 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 schedule,
             )
         });
+        // CPU cost of verifying boundaries (one prefix encode per cut).
+        let boundary_ms = boundary_t0.elapsed().as_secs_f64() * 1e3;
         // Fast snapshots exist only at a verified shared-prefix cut: without
         // one this request neither restores nor captures.
         if schedule == Some(Schedule::FastSharedSplitV1) && cuts.is_empty() {
@@ -857,7 +860,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         self.history = history;
         tracing::info!(
             target: "qwen_diag",
-            "serve phases: family=glm5_next prefill_ms={prefill_ms:.1} reused_tokens={matched} reuse_source={reuse_source} restore_ms={restore_ms:.1} prefill_tokens={} decode_ms={:.1} required_forwards={required} capacity={} transitions={} lineage={} snapshot_schedule={} cuts={cuts:?} captures=[{}] snapshot_capture_ms={capture_ms:.1} snapshot_cache_bytes={} snapshot_cache_entries={}",
+            "serve phases: family=glm5_next prefill_ms={prefill_ms:.1} reused_tokens={matched} reuse_source={reuse_source} restore_ms={restore_ms:.1} boundary_ms={boundary_ms:.1} prefill_tokens={} decode_ms={:.1} required_forwards={required} capacity={} transitions={} lineage={} snapshot_schedule={} cuts={cuts:?} captures=[{}] snapshot_capture_ms={capture_ms:.1} snapshot_cache_bytes={} snapshot_cache_entries={}",
             tokens.len() - matched,
             generation.wall_ms,
             self.prepared.capacity,

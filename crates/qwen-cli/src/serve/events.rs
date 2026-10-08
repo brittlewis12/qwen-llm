@@ -94,15 +94,33 @@ pub(crate) struct ServeStats {
     pub(crate) matched_tokens: usize,
     pub(crate) restore_ms: f64,
     pub(crate) prompt_tokens: usize,
+    /// The request's effective seed (a fresh draw when it chose none), so a
+    /// client can reproduce the response; attached by the HTTP layer.
+    pub(crate) seed: Option<u64>,
 }
 
 impl ServeStats {
     fn to_json(&self) -> Value {
-        json!({
+        let mut stats = json!({
             "version": "serve_stats_v1",
             "matched_tokens": self.matched_tokens,
             "restore_ms": self.restore_ms,
             "prompt_tokens": self.prompt_tokens,
+        });
+        if let Some(seed) = self.seed {
+            stats["seed"] = json!(seed);
+        }
+        stats
+    }
+
+    /// The opt-in echo for `request`, carrying its effective seed.
+    pub(crate) fn echo_for(
+        stats: Option<&Self>,
+        request: &super::items::ServeRequest,
+    ) -> Option<Self> {
+        stats.filter(|_| request.echo_stats).map(|stats| Self {
+            seed: request.seed,
+            ..stats.clone()
         })
     }
 }

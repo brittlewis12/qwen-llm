@@ -82,7 +82,7 @@ impl GenerationBackend for ProfileBackend {
             } => {
                 assert_eq!(request.max_output_tokens, Some(*default_max_tokens));
                 assert_eq!((request.top_k, request.min_p), (Some(0), Some(0.0)));
-                assert_eq!(request.seed, Some(42));
+                assert!(request.seed.is_some(), "a fresh seed is drawn");
             }
             _ => {}
         }
@@ -328,6 +328,12 @@ fn served_families_default_to_release_sampling_and_keep_explicit_fields() {
             if profile.normalize(&mut request).is_err() {
                 continue; // A family that refuses this effort is not under test here.
             }
+            // An omitted seed is a fresh draw per request, not a constant.
+            let mut again = profile.parse(&body).unwrap();
+            profile.normalize(&mut again).unwrap();
+            let seed = request.seed.expect("normalization draws a seed");
+            assert_ne!(Some(seed), again.seed, "{body}");
+            let release = &SamplingConfig { seed, ..*release };
             assert_eq!(
                 sampling_with_defaults(&request, *release),
                 *release,
@@ -403,9 +409,10 @@ fn k2_serve_defaults_to_release_sampling() {
         };
         let mut request = profile.parse(&body).unwrap();
         profile.normalize(&mut request).unwrap();
+        let seed = request.seed.expect("normalization draws a seed");
         assert_eq!(
             crate::serve::render_k2::sampling(&request),
-            qwen_llm::sampling::SamplingConfig::k2_horizon(42)
+            qwen_llm::sampling::SamplingConfig::k2_horizon(seed)
         );
         assert_eq!(
             (request.temperature_echo, request.top_p_echo),

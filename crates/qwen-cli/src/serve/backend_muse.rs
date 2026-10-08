@@ -8,7 +8,7 @@ use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
 use qwen_llm::muse_glimmer::{MuseGlimmerChatTemplateProfile, MuseGlimmerConfig};
 use qwen_llm::muse_glimmer_runtime::{MuseGlimmerLoadedModel, MuseGlimmerRuntimeOptions};
-use qwen_llm::sampling::{Sampler, SamplingConfig};
+use qwen_llm::sampling::Sampler;
 use qwen_llm::tokenizer::LlamaCppTokenizer;
 use std::io;
 use std::path::Path;
@@ -172,13 +172,10 @@ impl GenerationBackend for MuseGlimmerBackend {
     ) -> Result<GenerationOutcome, BackendFailure> {
         self.idle_residency.before_request();
         let max_tokens = request.max_output_tokens.unwrap_or(self.default_max_tokens);
-        let sampling = SamplingConfig {
-            temperature: request.temperature.unwrap_or(1.0),
-            top_k: request.top_k.unwrap_or(64),
-            top_p: request.top_p.unwrap_or(0.95),
-            min_p: request.min_p.unwrap_or(0.0),
-            seed: request.seed.unwrap_or(42),
-        };
+        let sampling = super::request_profile::sampling_with_defaults(
+            request,
+            super::render_muse::muse_release(),
+        );
         let mut sampler = Sampler::new(sampling)
             .map_err(|error| ServeError::invalid_request(None, format!("sampling: {error}")))?;
         let tokenize_t0 = Instant::now();

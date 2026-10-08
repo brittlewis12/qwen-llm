@@ -4,7 +4,7 @@ use super::items::{QwenTemplate, ServeError, ServeRequest, TemplateStyle};
 use super::output_partition::{OutputProtocol, ToolGrammar};
 use super::{render, render_ds4, render_glm5_next, render_k2, render_muse};
 use crate::release_identity::ReleaseIdentity;
-use crate::release_sampling::{decimal, release_sampling};
+use crate::release_sampling::{decimal, fresh_seed, release_sampling};
 use qwen_llm::muse_glimmer::MuseGlimmerChatTemplateProfile;
 use qwen_llm::sampling::SamplingConfig;
 use serde_json::Value;
@@ -236,9 +236,9 @@ pub(crate) fn flash_next_release() -> SamplingConfig {
     release_sampling(ReleaseIdentity::FlashNext, 42)
 }
 
-/// A request's sampler: each field it sets, else the release default. A
-/// backend samples from exactly this, so a request that bypassed
-/// normalization still gets the release's defaults.
+/// A request's sampler: each field it sets, else the release default, and a
+/// fresh seed when it chose none. A backend samples from exactly this, so a
+/// request that bypassed normalization still gets the release's defaults.
 pub(crate) fn sampling_with_defaults(
     request: &ServeRequest,
     release: SamplingConfig,
@@ -248,12 +248,13 @@ pub(crate) fn sampling_with_defaults(
         top_k: request.top_k.unwrap_or(release.top_k),
         top_p: request.top_p.unwrap_or(release.top_p),
         min_p: request.min_p.unwrap_or(release.min_p),
-        seed: request.seed.unwrap_or(release.seed),
+        seed: request.seed.unwrap_or_else(fresh_seed),
     }
 }
 
-/// Absent sampling fields take the release defaults, and the response echoes
-/// what was sampled.
+/// Absent sampling fields take the release defaults and an absent seed a
+/// fresh draw; the response echoes what was sampled (the seed under
+/// `x_qwen.stats`).
 pub(crate) fn fill_sampling_defaults(request: &mut ServeRequest, release: SamplingConfig) {
     if request.temperature.is_none() {
         request.temperature = Some(release.temperature);
@@ -265,7 +266,7 @@ pub(crate) fn fill_sampling_defaults(request: &mut ServeRequest, release: Sampli
     }
     request.top_k.get_or_insert(release.top_k);
     request.min_p.get_or_insert(release.min_p);
-    request.seed.get_or_insert(release.seed);
+    request.seed.get_or_insert_with(fresh_seed);
 }
 
 pub(super) fn qwen_preopens(template: QwenTemplate, request: &ServeRequest) -> bool {

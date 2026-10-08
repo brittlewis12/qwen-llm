@@ -16,22 +16,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const ATEM_VALUE_DELIMITERS: &[&str] = &["<atem:", "</atem:"];
 const TOOL_OUTPUT_DELIMITERS: &[&str] = &["<tool_output", "</tool_output>"];
 
+/// Muse Glimmer's release defaults (`release_sampling`); seeds are drawn per
+/// request.
+pub(crate) fn muse_release() -> SamplingConfig {
+    crate::release_sampling::release_sampling(
+        crate::release_identity::ReleaseIdentity::MuseGlimmer,
+        0,
+    )
+}
+
 pub(crate) fn normalize_request(
     request: &mut ServeRequest,
     default_max_tokens: usize,
 ) -> Result<(), ServeError> {
-    let defaults = SamplingConfig::muse_glimmer(42);
-    if request.temperature.is_none() {
-        request.temperature = Some(defaults.temperature);
-        request.temperature_echo = Some(1.0);
-    }
-    if request.top_p.is_none() {
-        request.top_p = Some(defaults.top_p);
-        request.top_p_echo = Some(0.95);
-    }
-    request.top_k.get_or_insert(defaults.top_k);
-    request.min_p.get_or_insert(defaults.min_p);
-    request.seed.get_or_insert(defaults.seed);
+    super::request_profile::fill_sampling_defaults(request, muse_release());
     request.max_output_tokens.get_or_insert(default_max_tokens);
     let strength = reasoning_strength(request)?;
     request.reasoning_effort = Some(strength.as_str().into());
@@ -326,7 +324,7 @@ mod tests {
         assert_eq!(request.top_p_echo, Some(0.95));
         assert_eq!(request.top_k, Some(64));
         assert_eq!(request.min_p, Some(0.0));
-        assert_eq!(request.seed, Some(42));
+        assert!(request.seed.is_some(), "a fresh seed is drawn");
         assert_eq!(request.max_output_tokens, Some(512));
         assert_eq!(request.reasoning_effort.as_deref(), Some("high"));
         assert_eq!(request.reasoning, Some(json!({"effort":"high"})));

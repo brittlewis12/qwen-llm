@@ -2256,6 +2256,7 @@ impl EngineBackend {
                 matched_tokens,
                 restore_ms,
                 prompt_tokens: prompt_ids.len(),
+                seed: None,
             }),
         })
     }

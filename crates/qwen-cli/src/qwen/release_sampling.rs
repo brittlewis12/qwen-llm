@@ -2,8 +2,10 @@
 //! release identity (`release_identity` owns detection). Each entry follows
 //! the release's own published `generation_config.json` or model card; the
 //! sampler has no penalties, so penalty-dependent card presets are not
-//! represented. Bench, lens, JSONL batches and sampling attribution keep
-//! their own explicit contracts and do not consult this table.
+//! represented. A request that chooses no seed gets a fresh one
+//! ([`fresh_seed`]), reported so the draw can be reproduced; no seed is
+//! hard-coded. Bench, lens, JSONL batches and sampling attribution keep their
+//! own explicit contracts and do not consult this module.
 
 use crate::release_identity::{QwenShape, QwenVersion, ReleaseIdentity};
 use crate::{Args, ExplicitCliOptions};
@@ -30,6 +32,23 @@ pub(crate) fn release_sampling(identity: ReleaseIdentity, seed: u64) -> Sampling
     }
 }
 
+/// A fresh seed for a request that chose none: the standard library's
+/// OS-seeded hasher keys mixed with a per-process counter and the clock.
+/// Callers record it (stderr for `qwen run`, `x_qwen.stats` for serve).
+pub(crate) fn fresh_seed() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static DRAWS: AtomicU64 = AtomicU64::new(0);
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(DRAWS.fetch_add(1, Ordering::Relaxed));
+    hasher.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos()),
+    );
+    hasher.finish()
+}
+
 /// A sampling value as its shortest decimal, so 0.95f32 reports 0.95 rather
 /// than 0.949999988 in JSON echoes and projections.
 pub(crate) fn decimal(value: f32) -> f64 {
@@ -49,14 +68,15 @@ pub(crate) fn projection(identity: ReleaseIdentity) -> serde_json::Value {
 }
 
 /// Fill each CLI sampling field the user did not pass from the release
-/// preset. `--prompt-lookup` is a greedy-only accelerator, so an omitted
-/// temperature means greedy there; an explicit positive one is a conflict
-/// the decode-policy check reports.
+/// preset, and draw a fresh seed when none was passed (returned, for the
+/// caller to report). `--prompt-lookup` is a greedy-only accelerator, so an
+/// omitted temperature means greedy there; an explicit positive one is a
+/// conflict the decode-policy check reports.
 pub(crate) fn apply_run_defaults(
     args: &mut Args,
     explicit: ExplicitCliOptions,
     release: SamplingConfig,
-) {
+) -> Option<u64> {
     if !explicit.temperature {
         args.temperature = if args.prompt_lookup {
             0.0
@@ -73,6 +93,10 @@ pub(crate) fn apply_run_defaults(
     if !explicit.min_p {
         args.min_p = release.min_p;
     }
+    (!explicit.seed).then(|| {
+        args.seed = fresh_seed();
+        args.seed
+    })
 }
 
 #[cfg(test)]
@@ -151,12 +175,17 @@ mod tests {
     fn run_defaults_fill_only_omitted_fields_and_prompt_lookup_implies_greedy() {
         let release = SamplingConfig::qwen3_release(0.6, 42);
         let (mut args, explicit) = run_args(&[]);
-        apply_run_defaults(&mut args, explicit, release);
+        let drawn = apply_run_defaults(&mut args, explicit, release);
         assert_eq!(effective(&args), (0.6, 20, 0.95, 0.0));
+        // No seed is hard-coded: an omitted one is drawn fresh and reported.
+        assert_eq!(drawn, Some(args.seed));
+        let (mut other, explicit) = run_args(&[]);
+        assert_ne!(apply_run_defaults(&mut other, explicit, release), drawn);
 
-        let (mut args, explicit) = run_args(&["--temp", "0", "--min-p", "0.05"]);
-        apply_run_defaults(&mut args, explicit, release);
+        let (mut args, explicit) = run_args(&["--temp", "0", "--min-p", "0.05", "--seed", "7"]);
+        assert_eq!(apply_run_defaults(&mut args, explicit, release), None);
         assert_eq!(effective(&args), (0.0, 20, 0.95, 0.05));
+        assert_eq!(args.seed, 7, "an explicit seed is kept");
 
         let (mut args, explicit) = flat_args(&[]);
         apply_run_defaults(&mut args, explicit, release);

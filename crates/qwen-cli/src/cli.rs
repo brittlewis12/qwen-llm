@@ -363,7 +363,7 @@ struct GenerationOverrides {
     #[arg(long)]
     min_p: Option<f32>,
 
-    /// Effective deterministic seed (default: 42).
+    /// Sampling seed; omitted, each request draws a fresh one and reports it on stderr.
     #[arg(long)]
     seed: Option<u64>,
 

@@ -448,7 +448,7 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   one text-session workspace sized at load and hands it back reset after
   every request: the Qwen3.8 contract (effort levels, thinking, tools).
   Absent sampling fields take the release `generation_config.json` (temperature
-  1.0, top-p 0.95, top-k 20, min-p 0, seed 42) at every effort, `no_thinking`
+  1.0, top-p 0.95, top-k 20, min-p 0; a fresh seed) at every effort, `no_thinking`
   included, and are echoed (see the wire subset's sampling defaults).
   Since 2026-09-23 it reuses prefixes through the shared serve snapshot
   cache: a request restores the longest cached strictly-shorter token prefix
@@ -585,7 +585,7 @@ Accepted fields are `model`, `input`, `stream`, `max_output_tokens`, `temperatur
 - Omitted `max_output_tokens` uses the explicit startup default. The full
   `prompt_tokens + max_output_tokens - 1` budget must fit capacity; no truncation.
 - Sampling defaults are the K2-Horizon card's (temperature 1.0, top-p 0.95;
-  top-k and min-p off; seed 42), raw and chat alike.
+  top-k and min-p off; a fresh seed per request), raw and chat alike.
   `x_qwen` accepts only `seed`, `top_k`, `min_p`, and `stats`.
 - `x_k2` accepts only boolean `add_special_tokens`; other families reject that
   extension. If supplied, `store` must be false and `truncation` must be `"disabled"`.
@@ -805,7 +805,7 @@ collapsed. `qwen run --messages` documents decode the same way.
   (reasoning at or before the last user turn dropped). `template_style` is
   refused at startup and per request, as for K2 and Muse.
 - Sampling defaults are the release `generation_config.json`: temperature
-  1.0, top-p 0.95, top-k and min-p off, seed 42; `max_output_tokens` defaults
+  1.0, top-p 0.95, top-k and min-p off, a fresh seed; `max_output_tokens` defaults
   to `--max-tokens` and must be within capacity.
 
 Output partitions on the pre-opened reasoning: bytes are a `reasoning` item
@@ -983,9 +983,12 @@ startup. Muse requires an explicit startup default:
   echoed in the response; `qwen info --json` reports it under `sampling`.
   Qwen3.x releases use temperature 1.0 / top-k 20 / top-p 0.95, except
   Qwen3.5-27B and Qwen3.5-122B-A10B at 0.6; DeepSeek V4 0731 uses 1.0 / top-p
-  1.0; Muse, K2, GLM and Flash-Next use their releases' presets. Seed 42.
+  1.0; Muse, K2, GLM and Flash-Next use their releases' presets. No seed is
+  hard-coded: an omitted `x_qwen.seed` is drawn fresh per request and echoed
+  by `x_qwen.stats`, so a response can be reproduced by sending it back.
   Converter-written `general.sampling.*` header keys are not consulted (tests
-  cross-check them). `qwen run` applies the same defaults.
+  cross-check them). `qwen run` applies the same defaults and reports a drawn
+  seed on stderr; `--requests-jsonl` keeps its fixed `--seed` default.
 - `reasoning.effort` — validated Qwen3.8 identities accept `none`, `low`,
   `medium`, and `xhigh`; absent defaults to `xhigh`. It is rejected on generic
   Qwen identities. DS4 applies its separate renderer rules. Muse accepts
@@ -1036,7 +1039,8 @@ startup. Muse requires an explicit startup default:
 - `/responses/compact` — not implemented (404); compaction is outside the
   S1–S4 arc and revisits with the WebSocket transport question.
 - `x_qwen.stats: true` — echoes `{matched_tokens, restore_ms,
-prompt_tokens}` into the response object, so thin clients (the game)
+prompt_tokens, seed}` into the response object (`seed` is the effective
+  one, drawn when the request chose none), so thin clients (the game)
   get per-request checkpoint stats without correlating server stderr
   (review R4). `usage` is always populated (agent clients budget on
   it).

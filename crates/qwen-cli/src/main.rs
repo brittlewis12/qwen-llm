@@ -320,12 +320,15 @@ fn run() -> Result<()> {
         );
     }
     // Day-to-day requests sample with the identified release's defaults for
-    // every field not passed; JSONL batches and sampling attribution keep
-    // their explicit sampler contracts.
+    // every field not passed, and a fresh seed unless one was chosen; JSONL
+    // batches and sampling attribution keep their explicit sampler contracts.
     if args.requests_jsonl.is_none() && !args.sampling_attribution {
         let identity = release_identity::ReleaseIdentity::detect(family, &gguf);
         let release = release_sampling::release_sampling(identity, args.seed);
-        release_sampling::apply_run_defaults(&mut args, explicit_options, release);
+        let drawn = release_sampling::apply_run_defaults(&mut args, explicit_options, release);
+        if let Some(seed) = drawn.filter(|_| args.temperature > 0.0) {
+            eprintln!("qwen: sampling seed {seed} (drawn; pass --seed {seed} to reproduce)");
+        }
     }
     // Checks on the effective sampler run once the defaults are known.
     validate_sampled_structural_sampling(&args)?;

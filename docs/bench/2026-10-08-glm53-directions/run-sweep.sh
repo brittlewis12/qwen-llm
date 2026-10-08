@@ -1,6 +1,6 @@
 #!/bin/zsh
 # Native dose-response sweep as run (binary built at 80d9a299, rebased as
-# 17ebacd4). Inputs: r.f32le is the archived direction's .npy payload
+# 54a66fd9). Inputs: r.f32le is the archived direction's .npy payload
 # (F32 x 4096, bytes unchanged); prompts.tsv holds the archived sweep's eight
 # prompts (id<TAB>text, from its scripts/sweep.py); sweep-plan-a<dose>.json is
 # plan-template.json with the dose filled in at both operations (at dose 0

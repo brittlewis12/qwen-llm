@@ -31,7 +31,7 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   cancellation-resume and snapshot restore equal the uninterrupted run
   within one lineage and one schedule (segmentation and serial-versus-packed
   spans); Exact equals token-by-token decoding and stays selectable per
-  request (`x_qwen.prefill_lineage`, `43d344a5`); bit-identity claims for
+  request (`x_qwen.prefill_lineage`, `f1b00b35`); bit-identity claims for
   Fast kernel changes are shown. Gate: any Fast change or new schedule that
   is not bit-identical passes the preregistered cohort's limits, with a
   fresh holdout for substantial changes (this cohort is now visible).
@@ -48,7 +48,7 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 ## 2026-10-08 - #15 GLM RAM Snapshots: Engine Capture and Restore Bitwise
 
 - `Glm5NextSession::capture_snapshot` / `restore_snapshot`
-  (`glm5_next_metal/snapshot.rs`, `4df5f2c4`): KDA conv tails and state,
+  (`glm5_next_metal/snapshot.rs`, `6d65d90e`): KDA conv tails and state,
   MLA latent rows `[0, n)`, completed pooled keys and the pending ring with
   its phase; bound to the weights instance, the prefill lineage and a policy
   version; restore validates before writing and refuses with a typed
@@ -71,8 +71,8 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 - `qwen-lens run` gains a GLM-5.3-Flash lane: raw directions, operations at
   module sites (mixer, routed-expert, shared-expert and FFN outputs,
   embedding), before/after module readouts, first-token top-k and tracked
-  logprobs, typed `</think>` prefill with provenance (`89b3ccb8` ..
-  `17ebacd4`, the never-merged directions lens work plus GLM sites).
+  logprobs, typed `</think>` prefill with provenance (`f8a499b1` ..
+  `54a66fd9`, the never-merged directions lens work plus GLM sites).
 - Sweep (`docs/bench/2026-10-08-glm53-directions/`): projection at the
   mixer and shared-expert outputs of blocks 15-36, 19 doses from -3 to 6,
   8 prompts, prompt token IDs equal to the reconstructed archived

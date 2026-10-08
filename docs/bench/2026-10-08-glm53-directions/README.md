@@ -40,8 +40,9 @@ label (refuse, hedge, comply).
 | Decoding | greedy, 8 tokens, one slot, no prompt cache | greedy, 8 tokens, serial prompt and decode (`glm5_next_serial_interventions`) |
 | Record | top 10 (rounded) | top 10 and tracked token 40 ("I"), unrounded |
 
-Native runs: built at `80d9a299` (rebased as `17ebacd4`; the rebase brought
-only a Fast-prefill kernel, which serial runs do not use), Metal API
+Native runs: built at `80d9a299` (rebased as `54a66fd9`; the rebases brought
+a Fast-prefill kernel and a test-only experiment, neither on the serial
+path these runs use), Metal API
 validation on, ~3 s per point (`run-sweep.sh`). Analysis:
 `scripts/reference/glm53/directions_sweep_compare.py` -> `compare.json`.
 

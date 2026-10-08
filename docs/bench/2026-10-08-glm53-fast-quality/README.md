@@ -20,8 +20,8 @@ would leave, remain unmeasured.
 
 `scripts/reference/glm53/quality-v1.json` (cohort) and
 `scripts/reference/glm53/quality_analysis.py` (limits and verdict logic)
-were committed (`942f859b`) before the GPU run; the analysis was amended
-(`02b08456`) after the cx 01a10cc preregistration review and before any
+were committed (`f5ada4b0`) before the GPU run; the analysis was amended
+(`34b6c534`) after the cx 01a10cc preregistration review and before any
 result was viewed (stricter tool scoring, separate text and tool
 verdicts, per-task sampled weighting, completeness checks); the numeric
 limits never changed.
@@ -38,7 +38,7 @@ limits never changed.
   (four with 1.5K or 5K tokens of context), greedy and seeded release
   sampling, exactly one correct call required.
 
-## Results (`report.json`, `verdict.json`; evaluated at `942f859b`, API validation on)
+## Results (`report.json`, `verdict.json`; evaluated at `f5ada4b0`, API validation on)
 
 | Fast 512 vs Exact | Observed | Central 90% | Limit | Verdict |
 |---|---:|---:|---:|---|
@@ -61,7 +61,7 @@ quality, and it does not address reuse consistency (which is a separate
 property: Exact reuse is bitwise; Fast warm and cold may differ, as
 llama.cpp's do).
 
-## What produces the drift (`rounding-probe.json`, `5e183317`)
+## What produces the drift (`rounding-probe.json`, `9904f4d3`)
 
 Exact lineage with every quantized-weight matrix input rounded through
 half precision first (weights still F32-dequantized, decode accumulation),
@@ -100,22 +100,24 @@ half-precision batched path (including llama.cpp's own). Options:
 3. Exact by default: 4.7-4.9x slower fresh prefill for no measured quality
    gain.
 
-`x_qwen.prefill_lineage: "exact"` (`43d344a5`) already serves evaluations
+`x_qwen.prefill_lineage: "exact"` (`f1b00b35`) already serves evaluations
 and reproducible comparisons.
 
 ## Provenance after rebase
 
 The raw artifacts record pre-rebase commits; the branch was rebased onto
-main before integration with no change to the harness or analysis.
-Mapping: `21917196` -> `6bf82db0` (cohort generation, recorded in
-`quality-v1.json`), `8781fe0b` -> `942f859b` (evaluator, recorded in
-`report.json` and `verdict.json`), `aaa79ca2` -> `02b08456`, `a2119edc` ->
-`5e183317`. The rebase brought in the sparse IQ3_S down retile for Fast
+main (twice) before integration with no change to the harness or analysis
+code that produced them.
+Mapping: `21917196` -> `599fa847` (cohort generation, recorded in
+`quality-v1.json`), `8781fe0b` -> `f5ada4b0` (evaluator, recorded in
+`report.json` and `verdict.json`), `aaa79ca2` -> `34b6c534`, `a2119edc` ->
+`9904f4d3`. The rebases brought in the sparse IQ3_S down retile for Fast
 prompts of 32-512 rows (`3a92067c`), which landed after this evaluation;
-its packet observed bit-identical endpoint and continuation outputs against
-the incumbent in all 120 comparisons at 32-512 and 4,096 rows
-(`../2026-10-08-glm-iq3-down-retile/`), so these results are expected to
-carry over. That is an observation, not a re-run.
+its packet observed bit-identical endpoint logits and four teacher-forced
+tokens against the incumbent in all 120 domain comparisons (after 128, 512
+and 4,096 rows; `../2026-10-08-glm-iq3-down-retile/`), so these results are
+expected to carry over. That is an observation, not a re-run. The MLA tail
+experiment (`c7f199f1`) is test-only and off by default.
 
 In `report.json`, each tool row's `correct` is the harness's lenient
 first-call diagnostic (renamed `lenient_first_call_correct` afterwards);

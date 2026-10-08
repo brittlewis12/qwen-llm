@@ -39,8 +39,7 @@ pub(crate) struct InfoArgs {
 #[derive(Debug, ClapArgs)]
 #[command(group(clap::ArgGroup::new("workbench").args(["lens_data_dir", "web_root"]).multiple(true)))]
 pub(crate) struct ServeArgs {
-    /// Supported Qwen, Qwen3.8-Flash-Next, DeepSeek V4, Muse Glimmer, K2 Horizon or
-    /// GLM-5.3-Flash GGUF.
+    /// Path to a GGUF model; `qwen info -m MODEL` reports its capabilities.
     #[arg(short = 'm', long)]
     model: PathBuf,
 
@@ -281,7 +280,7 @@ pub(crate) enum DocumentSource {
         .args(["user", "messages", "raw_prompt"])
 ))]
 pub(crate) struct RunArgs {
-    /// Path to a Qwen, DeepSeek V4, Muse Glimmer, K2 Horizon, or GLM-5.3-Flash GGUF file.
+    /// Path to a GGUF model; `qwen info -m MODEL` reports its capabilities.
     #[arg(short = 'm', long)]
     model: PathBuf,
 

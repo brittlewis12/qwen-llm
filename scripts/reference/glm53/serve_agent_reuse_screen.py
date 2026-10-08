@@ -131,14 +131,9 @@ def wait_listening(log, process, timeout):
 
 
 class Screen:
-    def __init__(self, addr, shape, effort, max_tokens, log):
-        self.addr, self.shape, self.effort, self.max_tokens, self.log = (
-            addr,
-            shape,
-            effort,
-            max_tokens,
-            log,
-        )
+    def __init__(self, addr, model_id, shape, effort, max_tokens, log):
+        self.addr, self.model_id, self.shape = addr, model_id, shape
+        self.effort, self.max_tokens, self.log = effort, max_tokens, log
         self.records = []
 
     def phases(self):
@@ -147,7 +142,7 @@ class Screen:
     def send(self, label, kind, input_items):
         before = len(self.phases())
         body = {
-            "model": "glm",
+            "model": self.model_id,
             "instructions": self.shape["instructions"],
             "tools": self.shape["tools"],
             "tool_choice": self.shape.get("tool_choice") or "auto",
@@ -266,7 +261,8 @@ def main():
         process = subprocess.Popen(
             command, stdout=sink, stderr=subprocess.STDOUT, env=env
         )
-    screen = Screen(args.addr, shape, args.effort, args.max_tokens, log)
+    # Serve answers only to the loaded model's id (the GGUF file stem).
+    screen = Screen(args.addr, Path(args.model).stem, shape, args.effort, args.max_tokens, log)
     error = None
     try:
         wait_listening(log, process, args.ready_timeout)

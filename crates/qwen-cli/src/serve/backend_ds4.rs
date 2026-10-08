@@ -91,6 +91,7 @@ pub(crate) struct DeepSeekV4Backend {
     /// The release's defaults for omitted sampling fields
     /// (`release_sampling`); `None` keeps `request_sampler`'s fallbacks.
     pub(super) release_sampling: Option<qwen_llm::sampling::SamplingConfig>,
+    load_ms: f64,
     control_cpu_reserve: u64,
     /// Off until [`DeepSeekV4Backend::set_idle_residency`].
     idle_residency: super::idle_residency::IdleResidency,
@@ -183,11 +184,12 @@ impl DeepSeekV4Backend {
             "DeepSeek V4 tokenizer vocabulary {vocab_size} differs from resident model {}",
             residency.config().vocab_size,
         );
+        let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
         tracing::info!(
             target: "qwen_diag",
             "serve: deepseek_v4 resident forward_limit={} load_ms={:.1}",
             session_capacity.forward_limit(),
-            load_t0.elapsed().as_secs_f64() * 1e3,
+            load_ms,
         );
         let config = residency.config().clone();
         // Sized after load so auto budgets see the resident model.
@@ -219,7 +221,12 @@ impl DeepSeekV4Backend {
             durable: None,
             template_style: TemplateStyle::House,
             release_sampling: None,
+            load_ms,
         })
+    }
+
+    pub(crate) fn load_ms(&self) -> f64 {
+        self.load_ms
     }
 
     /// Enable write-behind persistence and disk promotion. The strong

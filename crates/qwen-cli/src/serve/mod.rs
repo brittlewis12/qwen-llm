@@ -644,6 +644,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
                 invocation.snapshot_cache_mib,
                 invocation.snapshot_policy,
             )?;
+            let load_ms = backend.load_ms();
             backend.template_style = template_style;
             backend.release_sampling = Some(crate::release_sampling::release_sampling(
                 crate::release_identity::ReleaseIdentity::DeepSeekV4,
@@ -668,7 +669,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             accept_loop(
                 listener,
                 &model_id,
-                0.0,
+                load_ms,
                 &mut backend,
                 &mut trace,
                 workbench,

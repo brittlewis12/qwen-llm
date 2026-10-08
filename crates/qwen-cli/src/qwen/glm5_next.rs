@@ -395,7 +395,7 @@ fn admission_advice(advice: CapacityAdvice, required: usize) -> String {
         ),
         CapacityAdvice::NoneFits => "free device memory or use a smaller artifact".to_string(),
         CapacityAdvice::NotEvaluated => {
-            "device memory telemetry could not decide; see the refusal reason".to_string()
+            "no smaller capacity was evaluated; see the refusal reason".to_string()
         }
     }
 }
@@ -847,7 +847,7 @@ mod tests {
             admission_advice(CapacityAdvice::Fits(3_000), 4_000).contains("needs 4000 positions")
         );
         assert!(admission_advice(CapacityAdvice::NoneFits, 10).contains("free device memory"));
-        assert!(admission_advice(CapacityAdvice::NotEvaluated, 10).contains("telemetry"));
+        assert!(admission_advice(CapacityAdvice::NotEvaluated, 10).contains("no smaller capacity"));
     }
 
     fn run_args(extra: &[&str]) -> Vec<String> {

@@ -4,11 +4,13 @@ Question: with the patched opencode client's replay shape, does each
 continued agent step extend GLM's live session, and what do branches, new
 sessions sharing the prefix, and returns to an earlier session cost?
 
-Answer: a continued step extends exactly (11,185 of 11,284 tokens reused;
-1.25 s to the first token instead of ~60 s). Every request that does not
-strictly extend the live session replays the whole ~11K-token prefix of
-instructions and tool schemas at ~185 tok/s, about a minute each. That is
-the cost a RAM snapshot at the system/tools boundary (#15) would remove.
+Answer: in one scripted continued step, the request extends the live session
+exactly (11,185 of 11,284 tokens reused; 1.25 s to the first token instead of
+~60 s). Every request that does not strictly extend it replays the whole
+~11K-token prefix of instructions and tool schemas at ~185 tok/s, about a
+minute each. That exposes roughly a minute of potentially avoidable replay
+per matching-prefix hit for a RAM snapshot at the system/tools boundary
+(#15), less capture, restore and suffix costs.
 
 ## Method
 
@@ -38,8 +40,9 @@ the script after this run). Decode ran at 28.5-29.3 tok/s.
 
 ## Reading
 
-- The fixed client keeps continued steps on the live session (the 2026-10-06
-  fork fix works end to end with serve's own items).
+- The patched client's replay shape keeps a continued step on the live
+  session (one scripted step with serve's own items; not an end-to-end run
+  of the client).
 - GLM reuses only exact extensions of one live session, so a branch, a new
   session, a subagent with the same instructions and tools, or switching
   back pays the full prefix every time. For this prompt shape that is ~61 s

@@ -112,7 +112,7 @@ pub(super) fn load(
                     "free device memory or use a smaller artifact".to_string()
                 }
                 CapacityAdvice::NotEvaluated => {
-                    "device memory telemetry could not decide; see the refusal reason".to_string()
+                    "no smaller capacity was evaluated; see the refusal reason".to_string()
                 }
             };
             return Err(error).context(format!("admit GLM-5.3 serve session: {advice}"));

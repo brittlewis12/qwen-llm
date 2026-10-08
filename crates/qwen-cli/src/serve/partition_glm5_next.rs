@@ -14,8 +14,8 @@
 //! headroom, so earlier steps reserve nothing that later allocations could
 //! take, and once more before the block is parsed. A failed check ends the
 //! turn instead of growing unpriced: 503 `memory_admission_denied` under
-//! memory pressure, 500 `memory_signal_unavailable` when the process reports
-//! no budget.
+//! memory pressure, 500 `memory_signal_unavailable` when the process budget
+//! signal is unavailable.
 use super::items::ServeError;
 use super::output_partition::GenerationEnd;
 use super::partition::PartitionEvent;

@@ -94,7 +94,13 @@ def main():
             read_tail(files[m], positions) for m in ("serial", "batch")
         )
         assert n_s == n_b == expected, (cid, n_s, n_b, expected)
-        assert tok_s == tok_b
+        # Bind the oracle records to the fixture: the tail positions' input
+        # tokens are the last ids of turn 2 plus the continuation.
+        ids = (
+            case["turn1"].split() + case["emitted"].split()[: case["consumed"]]
+            + case["suffix"].split() + cont
+        )
+        assert tok_s == tok_b == [int(t) for t in ids[-positions:]], cid
         kl, flips = compare(serial, batched)
         row = {
             "id": cid,

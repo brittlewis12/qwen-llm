@@ -885,7 +885,8 @@ and parses it, and never runs a tool.
     - Headroom is read afresh at every step and once more before the
       parse, so an earlier step reserves nothing. A failed check ends the
       turn: `503` `memory_admission_denied` under memory pressure, or `500`
-      `memory_signal_unavailable` when the process reports no budget.
+      `memory_signal_unavailable` when the process budget signal is
+      unavailable (a reported zero means no limit and admits).
     - When not streaming, the partition runs after generation, so the
       check prices the block's parse and publication but cannot stop the
       collection itself. Collecting other output is not priced (map #14).

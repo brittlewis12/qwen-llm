@@ -8,12 +8,13 @@ unrelated-token continuations of the original reproducer? And what would the
 Exact lineage cost as a default?
 
 Answer: no. Exact reuse is bitwise everywhere. Fast diverges from Exact by KL
-up to 0.18 with occasional top-1 flips of regret up to ~1, warm and cold Fast
-differ by up to 0.165, and llama.cpp's own batched prefill diverges from its
-serial run by the same order on the same tokens. Per-stage attribution finds
-no single defective stage: every batched mat-mat stage that stages activations
-in half produces ~0.1 KL on its own. Exact prefill costs 4.7-4.9x Fast.
-No bound was changed.
+up to 0.18 with occasional top-1 flips of regret up to 1.50, warm and cold
+Fast differ by up to 0.165, and llama.cpp's own batched prefill diverges from
+its serial run by the same order on the same tokens (contextual evidence, not
+an acceptance envelope). On H2 at 512 rows, several Fast stage families
+independently produce substantial divergence and replacing any single family
+does not restore the policy; half staging is a candidate shared mechanism,
+not yet isolated. Exact prefill costs 4.7-4.9x Fast. No bound was changed.
 
 ## Design (jam and two reviews with cx 01a10cc)
 
@@ -58,8 +59,9 @@ on H4/H5).
 | H6 max sampled tool | 512 | 2.7e-2 (0) | 8.7e-3 (0) | 4.4e-2 / 0.00 |
 | H6 | 97 | 3.4e-2 (1) | 1.9e-2 (2) | 7.1e-3 / 0.18 |
 
-The largest flips: H2 Fast cold 97 at continuation position 18 (Exact-side
-regret 1.05), H5 Fast warm 512 at the prompt end (regrets 0.23 / 0.96).
+The largest flips: H2 Fast cold 97 at continuation position 29 (Exact-side
+regret 1.50) and position 18 (1.05), H5 Fast warm 512 at the prompt end
+(regrets 0.23 / 0.96).
 Divergence starts in the prompt prefill and carries into the serially
 decoded continuation.
 
@@ -83,18 +85,26 @@ measure sensitivity, not additive shares.
 | Indexer projections (H2 is dense) | 0 / 0 | 1.1e-1 |
 | All Fast (reference) | 1.1e-1 / 2.6e-2 | |
 
-Every family that runs the batched mat-mat with half-staged activations
-produces ~0.1 KL by itself; the two F32 families stay near 1e-2. Removing any
-one family leaves 0.11-0.26. The model amplifies small early perturbations
-(three dense blocks alone give 0.1).
+On H2 at 512 rows, several Fast stage families independently produce
+substantial divergence (~0.07-0.22 alone), and replacing any single family
+does not restore the policy (0.11-0.26 remain). Half staging is a candidate
+shared mechanism, not yet isolated: a substitution changes activation
+staging, arithmetic and reduction order together, and the batched Q6_K/Q8_0
+kernels also round dequantized weights into half tiles. The two F32 families'
+~1e-2 does not predict what an F32 path for the others would achieve. Small
+early perturbations are strongly amplified (three dense blocks alone give
+0.1).
 
 ## Reference engine envelope (`envelope.json`)
 
 `glm53_oracle` (llama.cpp `e845373ff`, the qual-v1 producer) serial and
 `--batch` over each second turn plus its continuation, compared at the same
-positions. Native Exact matches llama.cpp serial (P2/P4 gates). The oracle's
-batch covers the continuation too, so the prompt end is the closest analog.
-H5 exceeds the oracle's 4,096-ID limit.
+positions; the records' input tokens are checked against the fixture.
+Contextual evidence, not an acceptance envelope: the oracle batches the
+continuation (native decodes it serially) in one ubatch (native chunks 512
+rows), has no warm/cold schedule, H5 exceeds its 4,096-ID limit, and native
+Exact's agreement with llama.cpp serial was qualified on other prompts (P2/P4),
+not measured on this cohort. The prompt end is the closest analog.
 
 | Case | llama.cpp batched vs serial: prompt end / worst / flips | Native Fast cold 512 vs Exact: prompt end / worst / flips |
 |---|---:|---:|
@@ -121,21 +131,27 @@ both lineages' dense and sparse pipelines warmed first), F-E-E-F per length,
 
 Under the rule frozen with the design, a natural failure opens a Fast fix,
 with attribution first; Exact by default is considered only if Fast cannot
-be fixed, with its measured cost. Attribution and the reference envelope say
-the divergence belongs to half-staged batched prefill on this model, not to a
-defect in one stage, and the reference engine does not meet the 2e-2 policy
-either. Options, none taken:
+be fixed, with its measured cost. Attribution finds no single family whose
+replacement restores the policy, and the reference engine's batched prefill
+does not meet the 2e-2 policy on these prompts either. Options, none taken:
 
-- **A. Keep Fast; replace the one-prompt calibration with a reference-anchored
-  envelope** (for example, Fast vs Exact no worse than llama.cpp batched vs
-  serial on a frozen holdout, plus a regret bound on flips). A bound change:
-  needs an explicit decision.
-- **B. F32-staged batched prefill:** keep batching, stage activations in F32
-  for the mat-mat families (F32-tile variants exist for some dtypes, not for
-  the Q6_K/Q8_0 projections or the grouped IQ2_S/IQ3_S experts). The two F32
-  families' ~1e-2 suggests the size of the gain; kernel work and a pp cost to
-  measure.
-- **C. Exact by default:** 4.7-4.9x slower fresh prefill (a 13K-token agent
-  prompt ~70 s -> ~5.5 min); not recommended.
+- **B first (recommended, bounded feasibility):** on H2 and one implicated
+  family, separate activation rounding, weight-tile rounding and
+  accumulation order; prototype one F32-staged batched path and measure its
+  isolated numerical gain and throughput; widen only if useful, and recheck
+  H5 and warm/cold before any promotion. F32-tile variants exist for some
+  dtypes, not for the Q6_K/Q8_0 projections or the grouped IQ2_S/IQ3_S
+  experts. BF16 has more range but fewer significand bits than FP16, so it
+  is a candidate only if range is implicated; Exact for the last chunk alone
+  would leave earlier KDA state and MLA caches perturbed.
+- **A. A reference-anchored policy** (a bound change, needing an explicit
+  decision): a newly preregistered holdout, absolute regret limits and
+  task-quality evidence, not only matching another engine's drift, with a
+  separate reuse-consistency criterion; before it, a matched oracle
+  (chunked prompt, serial continuation, warm/cold schedules) and measured
+  cross-engine agreement on the cohort.
+- **C. Exact by default:** 4.7-4.9x slower fresh prefill (measured to 4,096
+  tokens; a 13K-token agent prompt extrapolates to ~5.5 min); a costly
+  fallback, not recommended.
 
 The original unrelated-token reproducer stays as is (known failing).

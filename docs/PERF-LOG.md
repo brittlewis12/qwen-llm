@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-08 - #12/#15 Fast Shared-Prefix Split: INCONCLUSIVE; Fast Snapshots Stay Opt-In
+
+- Preregistered `quality-split-v1` (`docs/bench/2026-10-08-glm53-fast-split-quality/`,
+  run at `d65a09a2`, Metal validation): grid (cut at the deployed agent
+  prefix's in-chunk offset), tail (17-20 tokens after the cut) and frontier
+  (cuts 2050-2053) arms against a full Exact rerun. Every gated limit passed
+  except the tail arm's overall NLL: +0.0011 nats/token, central 90%
+  [-0.0034, +0.0054] against 0.005. Tools 12/12 and 1.00 sampled in every
+  arm; agent-shaped cases (11,104-token opencode prefix) 8/8 first-call
+  checks in every arm.
+- Reported: split minus unsplit Fast intervals include zero; no split arm
+  is bitwise equal to unsplit Fast on any text item; this run's Exact and
+  Fast 512 reproduce the committed quality-v1 metrics exactly (38/38).
+- Decision by the rule: Fast snapshots stay opt-in; Exact snapshots are on.
+  Next: a fresh confirmatory cohort (`quality-split-v2`, v1 for planning
+  only: frozen hash-ordered selection, the same three gates and limits,
+  `fast_512` as a control, N fixed in advance from a simulated joint-gate
+  power; about 70-100 fresh documents for one gate), then the release
+  time-to-first-token screen.
+
 ## 2026-10-08 - #14 Output Memory, Packet 3: Qwen/DS4 Tool-Block Byte Ceilings
 
 - Ordinary Qwen, Flash-Next and DeepSeek V4 profiles now carry their

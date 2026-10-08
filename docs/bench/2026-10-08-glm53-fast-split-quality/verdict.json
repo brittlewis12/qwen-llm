@@ -1,0 +1,691 @@
+{
+  "schema": "glm53.quality_split_verdict.v1",
+  "text_split": "INCONCLUSIVE",
+  "tool_screen_split": "PASS",
+  "fast_shared_split_may_become_default": false,
+  "pending_review": false,
+  "decision_note": "subject also to a release-build time-to-first-token screen; investigation flags hold the decision until reviewed",
+  "comparisons_gated": {
+    "fast_split_grid_vs_exact_512": {
+      "overall_nll": {
+        "observed_mean": -0.00045801952807736064,
+        "central90": [
+          -0.005470739487728399,
+          0.004140845570131536
+        ],
+        "margin": 0.005,
+        "verdict": "PASS"
+      },
+      "overall_top1": {
+        "observed_mean": 0.002055921052631579,
+        "central90": [
+          -0.0028782894736842104,
+          0.0069901315789473685
+        ],
+        "margin": -0.01,
+        "verdict": "PASS"
+      },
+      "code_nll": {
+        "observed_mean": 0.0025571935520303135,
+        "central90": [
+          -0.003193766282304929,
+          0.007816962297677043
+        ],
+        "margin": 0.01,
+        "verdict": "PASS"
+      },
+      "long_nll": {
+        "observed_mean": -0.006254355087993491,
+        "central90": [
+          -0.019052011150921994,
+          0.0030054128536308178
+        ],
+        "margin": 0.01,
+        "verdict": "PASS"
+      },
+      "prose_nll": {
+        "observed_mean": -0.0012996067732164857,
+        "central90": [
+          -0.010767652910916118,
+          0.007489667967778077
+        ],
+        "margin": 0.01,
+        "verdict": "PASS"
+      }
+    },
+    "fast_split_tail_vs_exact_512": {
+      "overall_nll": {
+        "observed_mean": 0.0010617101620388593,
+        "central90": [
+          -0.0033495264462300774,
+          0.005396734580943389
+        ],
+        "margin": 0.005,
+        "verdict": "INCONCLUSIVE"
+      },
+      "overall_top1": {
+        "observed_mean": 0.0012335526315789473,
+        "central90": [
+          -0.0012335526315789473,
+          0.003700657894736842
+        ],
+        "margin": -0.01,
+        "verdict": "PASS"
+      },
+      "code_nll": {
+        "observed_mean": 0.004385887401240705,
+        "central90": [
+          0.0005770490466176096,
+          0.008012776435285123
+        ],
+        "margin": 0.01,
+        "verdict": "PASS"
+      },
+      "long_nll": {
+        "observed_mean": -0.004695396680311224,
+        "central90": [
+          -0.01061594899715044,
+          0.0012467229889308225
+        ],
+        "margin": 0.01,
+        "verdict": "PASS"
+      },
+      "prose_nll": {
+        "observed_mean": -0.00010355201128170455,
+        "central90": [
+          -0.009522400333580719,
+          0.00926388235262338
+        ],
+        "margin": 0.01,
+        "verdict": "PASS"
+      }
+    },
+    "fast_split_frontier_vs_exact_512": {
+      "long_nll": {
+        "observed_mean": -0.002763062756374964,
+        "central90": [
+          -0.013155538720818852,
+          0.004305125222644072
+        ],
+        "margin": 0.01,
+        "verdict": "PASS"
+      },
+      "long_top1": {
+        "observed_mean": 0.0026041666666666665,
+        "central90": [
+          -0.0078125,
+          0.013020833333333334
+        ],
+        "margin": -0.01,
+        "verdict": "PASS"
+      }
+    }
+  },
+  "comparisons_reported": {
+    "fast_512_vs_exact_512": {
+      "overall_nll": {
+        "observed_mean": 0.00040299094021620333,
+        "central90": [
+          -0.003911133859348426,
+          0.004604741941789727
+        ],
+        "margin": 0.005,
+        "verdict": "PASS"
+      },
+      "overall_top1": {
+        "observed_mean": 0.00041118421052631577,
+        "central90": [
+          -0.004111842105263158,
+          0.004934210526315789
+        ],
+        "margin": -0.01,
+        "verdict": "PASS"
+      },
+      "code_nll": {
+        "observed_mean": 0.003500488349200014,
+        "central90": [
+          -0.0014085162128194047,
+          0.008199785756342826
+        ],
+        "margin": 0.01,
+        "verdict": "PASS"
+      },
+      "long_nll": {
+        "observed_mean": -0.002258644339903295,
+        "central90": [
+          -0.008500460181564288,
+          0.004309867258682228
+        ],
+        "margin": 0.01,
+        "verdict": "PASS"
+      },
+      "prose_nll": {
+        "observed_mean": -0.001696393238722796,
+        "central90": [
+          -0.01043991839736852,
+          0.006806541218781423
+        ],
+        "margin": 0.01,
+        "verdict": "PASS"
+      }
+    },
+    "fast_split_grid_vs_fast_512": {
+      "overall_nll": {
+        "observed_mean": -0.0008610104682935638,
+        "central90": [
+          -0.0037283942862918924,
+          0.0018863622192655761
+        ],
+        "margin": 0.005,
+        "verdict": "PASS"
+      },
+      "overall_top1": {
+        "observed_mean": 0.001644736842105263,
+        "central90": [
+          -0.0012335526315789473,
+          0.004934210526315789
+        ],
+        "margin": -0.01,
+        "verdict": "PASS"
+      },
+      "code_nll": {
+        "observed_mean": -0.0009432947971697006,
+        "central90": [
+          -0.002665143520250348,
+          0.0008535915278949288
+        ],
+        "margin": 0.01,
+        "verdict": "PASS"
+      },
+      "long_nll": {
+        "observed_mean": -0.003995710748090196,
+        "central90": [
+          -0.015229392550238677,
+          0.005514411848067502
+        ],
+        "margin": 0.01,
+        "verdict": "PASS"
+      },
+      "prose_nll": {
+        "observed_mean": 0.00039678646550631025,
+        "central90": [
+          -0.004815889777331717,
+          0.005581607964546542
+        ],
+        "margin": 0.01,
+        "verdict": "PASS"
+      }
+    },
+    "fast_split_tail_vs_fast_512": {
+      "overall_nll": {
+        "observed_mean": 0.0006587192218226564,
+        "central90": [
+          -0.0025342596839176236,
+          0.003984177917292046
+        ],
+        "margin": 0.005,
+        "verdict": "PASS"
+      },
+      "overall_top1": {
+        "observed_mean": 0.0008223684210526315,
+        "central90": [
+          -0.0024671052631578946,
+          0.004111842105263158
+        ],
+        "margin": -0.01,
+        "verdict": "PASS"
+      },
+      "code_nll": {
+        "observed_mean": 0.0008853990520406908,
+        "central90": [
+          -0.0008124301763800994,
+          0.002554766626534308
+        ],
+        "margin": 0.01,
+        "verdict": "PASS"
+      },
+      "long_nll": {
+        "observed_mean": -0.002436752340407929,
+        "central90": [
+          -0.0062149745220064405,
+          0.0017919715039756607
+        ],
+        "margin": 0.01,
+        "verdict": "PASS"
+      },
+      "prose_nll": {
+        "observed_mean": 0.0015928412274410914,
+        "central90": [
+          -0.005709981286740343,
+          0.009274303028089084
+        ],
+        "margin": 0.01,
+        "verdict": "PASS"
+      }
+    },
+    "fast_split_frontier_vs_fast_512": {
+      "long_nll": {
+        "observed_mean": -0.0005044184164716692,
+        "central90": [
+          -0.010595384500522461,
+          0.00952956877244677
+        ],
+        "margin": 0.01,
+        "verdict": "PASS"
+      },
+      "long_top1": {
+        "observed_mean": 0.0,
+        "central90": [
+          -0.013020833333333334,
+          0.013020833333333334
+        ],
+        "margin": -0.01,
+        "verdict": "INCONCLUSIVE"
+      }
+    }
+  },
+  "reproduces_committed": {
+    "exact_512": {
+      "equal_summary_metrics": 38,
+      "equal_per_token_nll": 38,
+      "items": 38
+    },
+    "fast_512": {
+      "equal_summary_metrics": 38,
+      "equal_per_token_nll": 38,
+      "items": 38
+    }
+  },
+  "committed_sha256": "559a0041b866fce9d99591d458b5cc77253480f140439095bb6e81342b1d1d70",
+  "tools": {
+    "exact_512": {
+      "greedy_correct": 12,
+      "greedy_total": 12,
+      "sampled_mean": 1.0,
+      "sampled_by_group": {
+        "short": 1.0,
+        "long": 1.0
+      },
+      "sampled_by_task": {
+        "T01": 1.0,
+        "T02": 1.0,
+        "T03": 1.0,
+        "T04": 1.0,
+        "T05": 1.0,
+        "T06": 1.0,
+        "T07": 1.0,
+        "T08": 1.0,
+        "T09": 1.0,
+        "T10": 1.0,
+        "T11": 1.0,
+        "T12": 1.0
+      }
+    },
+    "fast_512": {
+      "greedy_correct": 12,
+      "greedy_total": 12,
+      "sampled_mean": 1.0,
+      "sampled_by_group": {
+        "short": 1.0,
+        "long": 1.0
+      },
+      "sampled_by_task": {
+        "T01": 1.0,
+        "T02": 1.0,
+        "T03": 1.0,
+        "T04": 1.0,
+        "T05": 1.0,
+        "T06": 1.0,
+        "T07": 1.0,
+        "T08": 1.0,
+        "T09": 1.0,
+        "T10": 1.0,
+        "T11": 1.0,
+        "T12": 1.0
+      }
+    },
+    "fast_split": {
+      "greedy_correct": 12,
+      "greedy_total": 12,
+      "sampled_mean": 1.0,
+      "sampled_by_group": {
+        "short": 1.0,
+        "long": 1.0
+      },
+      "sampled_by_task": {
+        "T01": 1.0,
+        "T02": 1.0,
+        "T03": 1.0,
+        "T04": 1.0,
+        "T05": 1.0,
+        "T06": 1.0,
+        "T07": 1.0,
+        "T08": 1.0,
+        "T09": 1.0,
+        "T10": 1.0,
+        "T11": 1.0,
+        "T12": 1.0
+      }
+    }
+  },
+  "agent": {
+    "exact": {
+      "correct": 8,
+      "total": 8,
+      "worst_prompt_end_kl": 0.0,
+      "rows": [
+        {
+          "task": "A1-read",
+          "mode": "greedy",
+          "correct": true,
+          "first_call": {
+            "name": "read",
+            "arguments": {
+              "filePath": "/work/project/crates/qwen-cli/src/main.rs"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.0
+        },
+        {
+          "task": "A1-read",
+          "mode": "sampled",
+          "correct": true,
+          "first_call": {
+            "name": "read",
+            "arguments": {
+              "filePath": "/work/project/crates/qwen-cli/src/main.rs"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.0
+        },
+        {
+          "task": "A2-grep",
+          "mode": "greedy",
+          "correct": true,
+          "first_call": {
+            "name": "grep",
+            "arguments": {
+              "pattern": "SnapshotCache"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.0
+        },
+        {
+          "task": "A2-grep",
+          "mode": "sampled",
+          "correct": true,
+          "first_call": {
+            "name": "grep",
+            "arguments": {
+              "pattern": "SnapshotCache"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.0
+        },
+        {
+          "task": "A3-bash",
+          "mode": "greedy",
+          "correct": true,
+          "first_call": {
+            "name": "bash",
+            "arguments": {
+              "command": "git log --oneline -5",
+              "description": "Show last 5 commits"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.0
+        },
+        {
+          "task": "A3-bash",
+          "mode": "sampled",
+          "correct": true,
+          "first_call": {
+            "name": "bash",
+            "arguments": {
+              "command": "git log --oneline -5",
+              "description": "Show last 5 commits"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.0
+        },
+        {
+          "task": "A4-glob",
+          "mode": "greedy",
+          "correct": true,
+          "first_call": {
+            "name": "glob",
+            "arguments": {
+              "pattern": "docs/**/*.md"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.0
+        },
+        {
+          "task": "A4-glob",
+          "mode": "sampled",
+          "correct": true,
+          "first_call": {
+            "name": "glob",
+            "arguments": {
+              "pattern": "docs/**/*.md"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.0
+        }
+      ]
+    },
+    "fast_512": {
+      "correct": 8,
+      "total": 8,
+      "worst_prompt_end_kl": 0.26964122915921196,
+      "rows": [
+        {
+          "task": "A1-read",
+          "mode": "greedy",
+          "correct": true,
+          "first_call": {
+            "name": "read",
+            "arguments": {
+              "filePath": "/work/project/crates/qwen-cli/src/main.rs"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.017707085267840875
+        },
+        {
+          "task": "A1-read",
+          "mode": "sampled",
+          "correct": true,
+          "first_call": {
+            "name": "read",
+            "arguments": {
+              "filePath": "/work/project/crates/qwen-cli/src/main.rs"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.017707085267840875
+        },
+        {
+          "task": "A2-grep",
+          "mode": "greedy",
+          "correct": true,
+          "first_call": {
+            "name": "grep",
+            "arguments": {
+              "pattern": "SnapshotCache"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.26964122915921196
+        },
+        {
+          "task": "A2-grep",
+          "mode": "sampled",
+          "correct": true,
+          "first_call": {
+            "name": "grep",
+            "arguments": {
+              "pattern": "SnapshotCache"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.26964122915921196
+        },
+        {
+          "task": "A3-bash",
+          "mode": "greedy",
+          "correct": true,
+          "first_call": {
+            "name": "bash",
+            "arguments": {
+              "command": "git log --oneline -5",
+              "description": "Show last 5 commits"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.09338994106861294
+        },
+        {
+          "task": "A3-bash",
+          "mode": "sampled",
+          "correct": true,
+          "first_call": {
+            "name": "bash",
+            "arguments": {
+              "command": "git log --oneline -5",
+              "description": "Show last 5 commits"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.09338994106861294
+        },
+        {
+          "task": "A4-glob",
+          "mode": "greedy",
+          "correct": true,
+          "first_call": {
+            "name": "glob",
+            "arguments": {
+              "pattern": "docs/**/*.md"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.1653059125248238
+        },
+        {
+          "task": "A4-glob",
+          "mode": "sampled",
+          "correct": true,
+          "first_call": {
+            "name": "glob",
+            "arguments": {
+              "pattern": "docs/**/*.md"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.1653059125248238
+        }
+      ]
+    },
+    "fast_split": {
+      "correct": 8,
+      "total": 8,
+      "worst_prompt_end_kl": 0.26964122915921196,
+      "rows": [
+        {
+          "task": "A1-read",
+          "mode": "greedy",
+          "correct": true,
+          "first_call": {
+            "name": "read",
+            "arguments": {
+              "filePath": "/work/project/crates/qwen-cli/src/main.rs"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.019553271054552727
+        },
+        {
+          "task": "A1-read",
+          "mode": "sampled",
+          "correct": true,
+          "first_call": {
+            "name": "read",
+            "arguments": {
+              "filePath": "/work/project/crates/qwen-cli/src/main.rs"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.019553271054552727
+        },
+        {
+          "task": "A2-grep",
+          "mode": "greedy",
+          "correct": true,
+          "first_call": {
+            "name": "grep",
+            "arguments": {
+              "pattern": "SnapshotCache"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.26964122915921196
+        },
+        {
+          "task": "A2-grep",
+          "mode": "sampled",
+          "correct": true,
+          "first_call": {
+            "name": "grep",
+            "arguments": {
+              "pattern": "SnapshotCache"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.26964122915921196
+        },
+        {
+          "task": "A3-bash",
+          "mode": "greedy",
+          "correct": true,
+          "first_call": {
+            "name": "bash",
+            "arguments": {
+              "command": "git log --oneline -5",
+              "description": "Show last 5 commits"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.09338994106861294
+        },
+        {
+          "task": "A3-bash",
+          "mode": "sampled",
+          "correct": true,
+          "first_call": {
+            "name": "bash",
+            "arguments": {
+              "command": "git log --oneline -5",
+              "description": "Show last 5 commits"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.09338994106861294
+        },
+        {
+          "task": "A4-glob",
+          "mode": "greedy",
+          "correct": true,
+          "first_call": {
+            "name": "glob",
+            "arguments": {
+              "pattern": "docs/**/*.md"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.1653059125248238
+        },
+        {
+          "task": "A4-glob",
+          "mode": "sampled",
+          "correct": true,
+          "first_call": {
+            "name": "glob",
+            "arguments": {
+              "pattern": "docs/**/*.md"
+            }
+          },
+          "prompt_end_kl_from_exact": 0.1653059125248238
+        }
+      ]
+    }
+  },
+  "investigate": [],
+  "manifest_sha256": "558049b2ebe3a6407cc0e0a85e530669e07b97aa53028f6cf7d6acc9dcdddeb4",
+  "evaluator_commit": "d65a09a2820cabab917547185be2880087f1e644"
+}

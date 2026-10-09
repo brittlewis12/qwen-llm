@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-08 - Saluki Now Loads Without Weight Inflation
+
+- Native IQ1_S/IQ1_M matrix execution plus qualified IQ1_M embedding gather
+  completes the IQ2 checkpoint:851 direct source-dtype bindings, zero weight
+  conversions,7.345690 GiB logical storage. Eliminated58.726997 GiB compared
+  with the original plan, including19.193573 GiB from this completion.
+- Loaded point samples:Metal7.349045 GiB,physicalfootprint7.513699 GiB,
+  RSS14.900940 GiB (copied weights plus mapped source pages). Not peaks,
+  not7.35GiB RSS, and no expanded baseline model was loaded.
+- All36S/31M tensors receive real-row primitive checks. Native embedding
+  matches66,560 independently decoded coefficients over anchors and actual
+  prompt IDs. Whole native packed/GEMV comparison:20finite outputs,10same-top1
+  comparisons, maxbidirectionalKL5.063457e-7. Ordinary concurrency remains on.
+- Fifteen primitive,11role,2adapter and2embedding tests passMetalvalidation;
+  independent source/data review approves. Autoembedding is scopeduntied27B;
+  expert/head native policies remain unchanged. No whole-speedup/quality claim.
+- Raw v2 evidence and limits: `docs/bench/2026-10-08-native-iq-capacity/README.md`.
+
 ## 2026-10-08 - Native Dense IQ2 Cuts Saluki Logical Weights by 39.533 GiB
 
 - Role-aware IQ2_XS/IQ2_XXS projection residency replaces persistent F32

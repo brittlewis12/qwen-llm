@@ -2225,6 +2225,12 @@ pub fn encode_get_rows_f32(
     n_rows: usize,
     n_cols: usize,
 ) -> Result<(), MetalError> {
+    if embed.dtype == GgmlType::IQ1_M {
+        // Same gather contract: IDs contain n_rows I32 elements; output has
+        // exactly n_rows*n_cols F32 elements, flat or shaped. The IQ1 primitive
+        // owns physical validation and hazard notes; no dequantized copy.
+        return super::encode_get_rows_iq1_m_f32(ctx, enc, embed, ids, y, n_rows, n_cols);
+    }
     if n_rows == 0 || n_cols == 0 {
         return Err(MetalError::BadShape {
             kernel: "get_rows",

@@ -5486,7 +5486,7 @@ fn metal_27b_q5_fallback_bench() {
     );
 }
 
-/// Metadata-only complete old/native IQ2_XS/IQ2_XXS storage plans. Reports logical
+/// Metadata-only complete old/native dense IQ storage plans. Reports logical
 /// weight bytes and remaining conversions, not realized allocations or RSS.
 /// IQ_CAPACITY_MODEL overrides the historical default fixture for this test.
 #[test]

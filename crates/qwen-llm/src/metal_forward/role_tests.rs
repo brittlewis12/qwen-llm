@@ -3,6 +3,13 @@ use super::*;
 use crate::loader::{AttnBlock, GdnBlock};
 use crate::model::ArchKind;
 
+const DENSE_NATIVE_IQ_DTYPES: [GgmlType; 4] = [
+    GgmlType::IQ2_XS,
+    GgmlType::IQ2_XXS,
+    GgmlType::IQ1_S,
+    GgmlType::IQ1_M,
+];
+
 fn desc(dtype: GgmlType, shape: &[u64]) -> TensorDesc {
     let (block, bytes) = dtype.storage_layout().unwrap_or((1, 1));
     TensorDesc {
@@ -27,8 +34,8 @@ fn dense_iq_role_storage_admits_only_dense_projections() {
             WeightRole::ExpertBank,
         ] {
             let legacy = weight_dtype_kept_native(dtype);
-            let added = role == WeightRole::DenseProjection
-                && matches!(dtype, GgmlType::IQ2_XS | GgmlType::IQ2_XXS);
+            let added =
+                role == WeightRole::DenseProjection && DENSE_NATIVE_IQ_DTYPES.contains(&dtype);
             assert_eq!(weight_role_dtype_supported(role, dtype), legacy || added);
             for enabled in [false, true] {
                 let actual = with_dense_iq_native_storage(enabled, || {
@@ -116,33 +123,42 @@ fn dense_iq_role_storage_checks_native_geometry() {
 }
 
 #[test]
-fn dense_iq_role_storage_xxs_requires_i32_dimensions() {
-    for shape in [[256, 3], [65_536, 262_144], [i32::MAX as u64 & !255, 1]] {
-        let tensor = desc(GgmlType::IQ2_XXS, &shape);
-        assert_eq!(
-            weight_storage_kind_with_policy(WeightRole::DenseProjection, &tensor, true).unwrap(),
-            ModelWeightStorageKind::Direct
-        );
-    }
-    for shape in [
-        vec![256],
-        vec![256, 3, 1],
-        vec![0, 3],
-        vec![256, 0],
-        vec![257, 3],
-        vec![1 << 31, 1],
-        vec![256, 1 << 31],
-    ] {
-        let tensor = desc(GgmlType::IQ2_XXS, &shape);
+fn dense_iq_role_storage_strict_codecs_require_i32_dimensions() {
+    for dtype in [GgmlType::IQ2_XXS, GgmlType::IQ1_S, GgmlType::IQ1_M] {
+        for shape in [[256, 3], [65_536, 262_144], [i32::MAX as u64 & !255, 1]] {
+            let tensor = desc(dtype, &shape);
+            assert_eq!(
+                weight_storage_kind_with_policy(WeightRole::DenseProjection, &tensor, true)
+                    .unwrap(),
+                ModelWeightStorageKind::Direct
+            );
+        }
+        for shape in [
+            vec![256],
+            vec![256, 3, 1],
+            vec![0, 3],
+            vec![256, 0],
+            vec![257, 3],
+            vec![1 << 31, 1],
+            vec![256, 1 << 31],
+        ] {
+            let tensor = desc(dtype, &shape);
+            assert!(
+                weight_storage_kind_with_policy(WeightRole::DenseProjection, &tensor, true)
+                    .is_err()
+            );
+        }
+        let mut tensor = desc(dtype, &[256, 3]);
+        tensor.n_bytes -= 1;
         assert!(
             weight_storage_kind_with_policy(WeightRole::DenseProjection, &tensor, true).is_err()
         );
     }
-    let mut tensor = desc(GgmlType::IQ2_XXS, &[256, 3]);
-    tensor.n_bytes -= 1;
-    assert!(weight_storage_kind_with_policy(WeightRole::DenseProjection, &tensor, true).is_err());
-    for dtype in [GgmlType::IQ2_XS, GgmlType::IQ2_XXS] {
-        assert!(!native_quant_embedding_supported(dtype, &[5120, 248320]));
+    for dtype in DENSE_NATIVE_IQ_DTYPES {
+        assert_eq!(
+            native_quant_embedding_supported(dtype, &[5120, 248320]),
+            dtype == GgmlType::IQ1_M
+        );
         assert!(!crate::workspace_lens::selected_readout_head_dtype_supported(dtype));
         assert!(!weight_dtype_kept_native(dtype));
     }
@@ -253,7 +269,7 @@ fn model<'a>(
 
 #[test]
 fn dense_iq_role_storage_complete_plans_preserve_excluded_roles() {
-    for dtype in [GgmlType::IQ2_XS, GgmlType::IQ2_XXS] {
+    for dtype in DENSE_NATIVE_IQ_DTYPES {
         let matrix = desc(dtype, &[256, 3]);
         let vector = desc(GgmlType::F32, &[256]);
         let bank = desc(dtype, &[256, 3, 2]);
@@ -280,7 +296,14 @@ fn dense_iq_role_storage_complete_plans_preserve_excluded_roles() {
             // Tied embedding/head uses the same descriptor, but neither gains admission.
             assert_eq!(native[0].kind, ModelWeightStorageKind::ConvertedF32);
             assert_eq!(native[2].kind, ModelWeightStorageKind::ConvertedF32);
-            assert!(model_weight_storage_requests(&model, true, false).is_err());
+            let embedding_plan = model_weight_storage_requests(&model, true, false);
+            if dtype == GgmlType::IQ1_M {
+                let requests = embedding_plan.unwrap();
+                assert_eq!(requests[0].kind, ModelWeightStorageKind::Direct);
+                assert_eq!(requests[2].kind, ModelWeightStorageKind::ConvertedF32);
+            } else {
+                assert!(embedding_plan.is_err());
+            }
             assert_eq!(
                 model_weight_storage_inventory_digest(&old)
                     == model_weight_storage_inventory_digest(&native),
@@ -292,7 +315,7 @@ fn dense_iq_role_storage_complete_plans_preserve_excluded_roles() {
 
 #[test]
 fn dense_iq_role_storage_ledger_rejects_different_policy_plan() {
-    for dtype in [GgmlType::IQ2_XS, GgmlType::IQ2_XXS] {
+    for dtype in DENSE_NATIVE_IQ_DTYPES {
         let tensor = desc(dtype, &[256, 3]);
         for native in [false, true] {
             with_dense_iq_native_storage(native, || {
@@ -343,7 +366,7 @@ fn dense_iq_role_storage_ledger_rejects_different_policy_plan() {
 
 #[test]
 fn dense_iq_role_storage_retained_plan_keeps_compressed_spans() {
-    for dtype in [GgmlType::IQ2_XS, GgmlType::IQ2_XXS] {
+    for dtype in DENSE_NATIVE_IQ_DTYPES {
         let tensor = desc(dtype, &[5120, 3]);
         let mut requests = Vec::new();
         push_native_weight_request(&mut requests, WeightRole::DenseProjection, &tensor).unwrap();
@@ -383,7 +406,7 @@ fn dense_iq_role_storage_prefill_capability_matches_dense_roles() {
 
 #[test]
 fn dense_iq_role_storage_resolved_choices_freeze_policy() {
-    for dtype in [GgmlType::IQ2_XS, GgmlType::IQ2_XXS] {
+    for dtype in DENSE_NATIVE_IQ_DTYPES {
         let matrix = desc(dtype, &[256, 3]);
         let vector = desc(GgmlType::F32, &[256]);
         let model = model(&matrix, &vector, &matrix, ArchKind::Dense);
@@ -520,6 +543,8 @@ impl TinyDenseIqFixture {
         let (tag, block_bytes) = match dtype {
             GgmlType::IQ2_XS => (17, 74),
             GgmlType::IQ2_XXS => (16, 66),
+            GgmlType::IQ1_S => (19, 50),
+            GgmlType::IQ1_M => (29, 56),
             _ => panic!("unsupported fixture dtype"),
         };
         let mut quant = vec![0u8; 3 * block_bytes];
@@ -527,6 +552,19 @@ impl TinyDenseIqFixture {
             block[..2].copy_from_slice(&0x3c00u16.to_le_bytes()); // finite, nonzero d
             for (i, byte) in block[2..].iter_mut().enumerate() {
                 *byte = (i as u8).wrapping_mul(17).wrapping_add(row as u8);
+            }
+        }
+        if dtype == GgmlType::IQ1_M {
+            // IQ1_M stores the half scale across the high nibbles of four
+            // scale words, not in the first two bytes. Pin d=1.0, retain
+            // deterministic low scale bits and quant grid/sign metadata.
+            for block in quant.chunks_exact_mut(56) {
+                for i in 0..4 {
+                    let at = 48 + 2 * i;
+                    let low = u16::from_le_bytes([block[at], block[at + 1]]) & 0x0fff;
+                    let bits = low | (((0x3c00u16 >> (4 * i)) & 0xf) << 12);
+                    block[at..at + 2].copy_from_slice(&bits.to_le_bytes());
+                }
             }
         }
         let vector = vec![0u8; 256 * 4];
@@ -610,7 +648,7 @@ fn assert_materialized(tensor: &MetalTensor, gguf: &GgufFile, desc: &TensorDesc,
 #[ignore = "requires Metal lease; tiny loader allocations, no GPU dispatch"]
 fn dense_iq_role_storage_private_loader_materializes_and_finishes() {
     let ctx = MetalContext::new().expect("owner must hold normal Metal lease");
-    for dtype in [GgmlType::IQ2_XS, GgmlType::IQ2_XXS] {
+    for dtype in DENSE_NATIVE_IQ_DTYPES {
         let fixture = TinyDenseIqFixture::new(dtype);
         let gguf = GgufFile::open(&fixture.0).unwrap();
         let matrix = gguf.tensors.iter().find(|t| t.name == "matrix").unwrap();
@@ -714,7 +752,7 @@ fn dense_iq_role_storage_private_loader_materializes_and_finishes() {
 #[ignore = "requires Metal lease; tiny prepared-model allocations, no GPU dispatch"]
 fn dense_iq_role_storage_prepared_load_honors_policy_across_scopes() {
     let ctx = MetalContext::new().expect("owner must hold normal Metal lease");
-    for dtype in [GgmlType::IQ2_XS, GgmlType::IQ2_XXS] {
+    for dtype in DENSE_NATIVE_IQ_DTYPES {
         let fixture = TinyDenseIqFixture::new(dtype);
         let gguf = GgufFile::open(&fixture.0).unwrap();
         let matrix = gguf.tensors.iter().find(|t| t.name == "matrix").unwrap();
@@ -772,12 +810,12 @@ fn dense_iq_role_storage_prepared_load_honors_policy_across_scopes() {
 
 #[test]
 #[ignore = "requires Metal lease; view validation only, no command submitted"]
-fn iq2_xxs_dispatch_views_check_prefix_and_physical_source() {
+fn native_iq_dispatch_views_check_prefix_and_physical_source() {
     let ctx = MetalContext::new().expect("owner must hold normal Metal lease");
     let x = MetalTensor::zeros_f32(&ctx, vec![1024]).unwrap();
     let y = MetalTensor::zeros_f32(&ctx, vec![32]).unwrap();
     for matrix in [false, true] {
-        let (xv, yv) = iq2_xxs_dispatch_views(&x, &y, 256, 3, 1, matrix).unwrap();
+        let (xv, yv) = native_iq_dispatch_views(&x, &y, 256, 3, 1, matrix).unwrap();
         assert_eq!(xv.shape, if matrix { vec![256, 1] } else { vec![256] });
         assert_eq!(yv.shape, if matrix { vec![3, 1] } else { vec![3] });
         assert_eq!(Retained::as_ptr(&xv.buffer), Retained::as_ptr(&x.buffer));
@@ -786,27 +824,27 @@ fn iq2_xxs_dispatch_views_check_prefix_and_physical_source() {
         assert_eq!(yv.offset, y.offset);
     }
     let offset_x = x.view_subrange(4, vec![768]);
-    let (xv, _) = iq2_xxs_dispatch_views(&offset_x, &y, 256, 3, 3, true).unwrap();
+    let (xv, _) = native_iq_dispatch_views(&offset_x, &y, 256, 3, 3, true).unwrap();
     assert_eq!(xv.offset, 16);
     assert_eq!(xv.shape, [256, 3]);
     let too_short = x.view_subrange(0, vec![255]);
-    assert!(iq2_xxs_dispatch_views(&too_short, &y, 256, 3, 1, true).is_err());
+    assert!(native_iq_dispatch_views(&too_short, &y, 256, 3, 1, true).is_err());
     let short_y = y.view_subrange(0, vec![2]);
-    assert!(iq2_xxs_dispatch_views(&x, &short_y, 256, 3, 1, true).is_err());
+    assert!(native_iq_dispatch_views(&x, &short_y, 256, 3, 1, true).is_err());
     for offset in [1, 4, u64::MAX - 3] {
         let mut invalid = x.clone();
         invalid.offset = offset;
-        assert!(iq2_xxs_dispatch_views(&invalid, &y, 256, 3, 1, true).is_err());
+        assert!(native_iq_dispatch_views(&invalid, &y, 256, 3, 1, true).is_err());
     }
     let mut invalid = x.clone();
     invalid.dtype = GgmlType::F16;
-    assert!(iq2_xxs_dispatch_views(&invalid, &y, 256, 3, 1, true).is_err());
+    assert!(native_iq_dispatch_views(&invalid, &y, 256, 3, 1, true).is_err());
     invalid = x.clone();
     invalid.shape = vec![u64::MAX, 2];
-    assert!(iq2_xxs_dispatch_views(&invalid, &y, 256, 3, 1, true).is_err());
+    assert!(native_iq_dispatch_views(&invalid, &y, 256, 3, 1, true).is_err());
     let mut readonly = y.clone();
     readonly.provenance = MetalTensorProvenance::OwnedWeightReadOnly;
-    assert!(iq2_xxs_dispatch_views(&x, &readonly, 256, 3, 1, true).is_err());
+    assert!(native_iq_dispatch_views(&x, &readonly, 256, 3, 1, true).is_err());
     for (k, m, n) in [
         (0, 3, 1),
         (257, 3, 1),
@@ -814,7 +852,7 @@ fn iq2_xxs_dispatch_views_check_prefix_and_physical_source() {
         (256, 1 << 31, 1),
         (256, 3, 1 << 31),
     ] {
-        assert!(iq2_xxs_dispatch_views(&x, &y, k, m, n, true).is_err());
+        assert!(native_iq_dispatch_views(&x, &y, k, m, n, true).is_err());
     }
     // Activations may be normalized; a flattened weight must still fail the
     // primitive's [K,M] contract rather than being silently reinterpreted.
@@ -831,123 +869,336 @@ fn iq2_xxs_dispatch_views_check_prefix_and_physical_source() {
 }
 
 #[test]
-#[ignore = "requires Metal lease; tiny IQ2_XXS packed dispatch integration"]
-fn iq2_xxs_dispatch_flat_packed_n1_policy_and_concurrent() {
+#[ignore = "requires Metal lease; tiny IQ1/IQ2_XXS packed dispatch integration"]
+fn native_iq_dispatch_flat_packed_n1_policy_and_concurrent() {
     let ctx = MetalContext::new().expect("owner must hold normal Metal lease");
-    let fixture = TinyDenseIqFixture::new(GgmlType::IQ2_XXS);
-    let gguf = GgufFile::open(&fixture.0).unwrap();
-    let desc = gguf.tensors.iter().find(|t| t.name == "matrix").unwrap();
-    let weight = MetalTensor::from_gguf_tensor(&ctx, desc, gguf.try_slice(desc).unwrap()).unwrap();
-    let decoded = crate::codec::dequant_to_f32(desc, gguf.try_slice(desc).unwrap()).unwrap();
-    let (k, m) = (256usize, 3usize);
-    const SENTINEL: f32 = 12345.0;
-    for n in [1usize, 3, 17] {
-        for flat in [false, true] {
-            for concurrent in [false, true] {
-                for allow_n1 in [false, true] {
-                    if n != 1 && allow_n1 {
-                        continue;
-                    }
-                    // Offset, overprovisioned source views exercise the real
-                    // packed scratch contract; adapter must touch only prefixes.
-                    let values: Vec<f32> = (0..k * (n + 1) + 4)
-                        .map(|i| ((i * 17 % 101) as f32 - 50.0) * 0.002)
-                        .collect();
-                    let input = MetalTensor::from_bytes(
-                        &ctx,
-                        bytemuck::cast_slice(&values),
-                        vec![values.len() as u64],
-                        GgmlType::F32,
-                    )
-                    .unwrap();
-                    let x = input.view_subrange(
-                        4,
-                        if flat {
-                            vec![(k * (n + 1)) as u64]
-                        } else {
-                            vec![k as u64, (n + 1) as u64]
-                        },
-                    );
-                    let initial = vec![SENTINEL; 2 * m * n + 7];
-                    let output = MetalTensor::from_bytes(
-                        &ctx,
-                        bytemuck::cast_slice(&initial),
-                        vec![initial.len() as u64],
-                        GgmlType::F32,
-                    )
-                    .unwrap();
-                    // Both source views overlap in spare capacity, but the
-                    // actual write prefixes are disjoint. Hazard notes must
-                    // use normalized views and occur exactly once per call.
-                    let y0 = output.view_subrange(
-                        4,
-                        if flat {
-                            vec![(2 * m * n + 3) as u64]
-                        } else {
-                            vec![m as u64, (2 * n + 1) as u64]
-                        },
-                    );
-                    let y1 = output.view_subrange(
-                        (4 + m * n) as u64,
-                        if flat {
-                            vec![(m * n + 3) as u64]
-                        } else {
-                            vec![m as u64, (n + 1) as u64]
-                        },
-                    );
-                    let cmd = ctx.queue.commandBuffer().unwrap();
-                    let enc = if concurrent {
-                        KernelEncoder::begin_concurrent(&cmd)
-                    } else {
-                        KernelEncoder::begin(&cmd)
-                    };
-                    encode_mat_mat_dispatch_with_policy(
-                        &ctx, &enc, &weight, &x, &y0, k, m, n, allow_n1,
-                    )
-                    .unwrap();
-                    if n == 1 {
-                        encode_mat_vec_dispatch(&ctx, &enc, &weight, &x, &y1, k, m).unwrap();
-                    } else {
-                        encode_mat_mat_dispatch_with_policy(
-                            &ctx, &enc, &weight, &x, &y1, k, m, n, allow_n1,
+    for dtype in [GgmlType::IQ2_XXS, GgmlType::IQ1_S, GgmlType::IQ1_M] {
+        let fixture = TinyDenseIqFixture::new(dtype);
+        let gguf = GgufFile::open(&fixture.0).unwrap();
+        let desc = gguf.tensors.iter().find(|t| t.name == "matrix").unwrap();
+        let weight =
+            MetalTensor::from_gguf_tensor(&ctx, desc, gguf.try_slice(desc).unwrap()).unwrap();
+        let decoded = crate::codec::dequant_to_f32(desc, gguf.try_slice(desc).unwrap()).unwrap();
+        let (k, m) = (256usize, 3usize);
+        const SENTINEL: f32 = 12345.0;
+        for n in [1usize, 3, 17] {
+            for flat in [false, true] {
+                for concurrent in [false, true] {
+                    for allow_n1 in [false, true] {
+                        if n != 1 && allow_n1 {
+                            continue;
+                        }
+                        // Offset, overprovisioned source views exercise the real
+                        // packed scratch contract; adapter must touch only prefixes.
+                        let values: Vec<f32> = (0..k * (n + 1) + 4)
+                            .map(|i| ((i * 17 % 101) as f32 - 50.0) * 0.002)
+                            .collect();
+                        let input = MetalTensor::from_bytes(
+                            &ctx,
+                            bytemuck::cast_slice(&values),
+                            vec![values.len() as u64],
+                            GgmlType::F32,
                         )
                         .unwrap();
-                    }
-                    enc.end();
-                    cmd.commit();
-                    crate::metal::wait_completed(&cmd).unwrap();
-                    let actual = unsafe {
-                        std::slice::from_raw_parts(
-                            output.buffer.contents().as_ptr().cast::<f32>(),
-                            initial.len(),
+                        let x = input.view_subrange(
+                            4,
+                            if flat {
+                                vec![(k * (n + 1)) as u64]
+                            } else {
+                                vec![k as u64, (n + 1) as u64]
+                            },
+                        );
+                        let initial = vec![SENTINEL; 2 * m * n + 7];
+                        let output = MetalTensor::from_bytes(
+                            &ctx,
+                            bytemuck::cast_slice(&initial),
+                            vec![initial.len() as u64],
+                            GgmlType::F32,
                         )
-                    };
-                    assert!(
-                        actual[..4]
-                            .iter()
-                            .chain(&actual[4 + 2 * m * n..])
-                            .all(|v| *v == SENTINEL)
-                    );
-                    let mut max_error = 0.0f32;
-                    let mut max_ref = 0.0f32;
-                    for q in 0..n {
-                        for row in 0..m {
-                            let expected: f32 = (0..k)
-                                .map(|i| decoded[row * k + i] * values[4 + q * k + i])
-                                .sum();
-                            max_ref = max_ref.max(expected.abs());
-                            for base in [4, 4 + m * n] {
-                                let observed = actual[base + q * m + row];
-                                assert!(observed.is_finite());
-                                max_error = max_error.max((observed - expected).abs());
+                        .unwrap();
+                        // Both source views overlap in spare capacity, but the
+                        // actual write prefixes are disjoint. Hazard notes must
+                        // use normalized views and occur exactly once per call.
+                        let y0 = output.view_subrange(
+                            4,
+                            if flat {
+                                vec![(2 * m * n + 3) as u64]
+                            } else {
+                                vec![m as u64, (2 * n + 1) as u64]
+                            },
+                        );
+                        let y1 = output.view_subrange(
+                            (4 + m * n) as u64,
+                            if flat {
+                                vec![(m * n + 3) as u64]
+                            } else {
+                                vec![m as u64, (n + 1) as u64]
+                            },
+                        );
+                        let cmd = ctx.queue.commandBuffer().unwrap();
+                        let enc = if concurrent {
+                            KernelEncoder::begin_concurrent(&cmd)
+                        } else {
+                            KernelEncoder::begin(&cmd)
+                        };
+                        encode_mat_mat_dispatch_with_policy(
+                            &ctx, &enc, &weight, &x, &y0, k, m, n, allow_n1,
+                        )
+                        .unwrap();
+                        if n == 1 {
+                            encode_mat_vec_dispatch(&ctx, &enc, &weight, &x, &y1, k, m).unwrap();
+                        } else {
+                            encode_mat_mat_dispatch_with_policy(
+                                &ctx, &enc, &weight, &x, &y1, k, m, n, allow_n1,
+                            )
+                            .unwrap();
+                        }
+                        enc.end();
+                        cmd.commit();
+                        crate::metal::wait_completed(&cmd).unwrap();
+                        let actual = unsafe {
+                            std::slice::from_raw_parts(
+                                output.buffer.contents().as_ptr().cast::<f32>(),
+                                initial.len(),
+                            )
+                        };
+                        assert!(
+                            actual[..4]
+                                .iter()
+                                .chain(&actual[4 + 2 * m * n..])
+                                .all(|v| *v == SENTINEL)
+                        );
+                        let mut max_error = 0.0f32;
+                        let mut max_ref = 0.0f32;
+                        for q in 0..n {
+                            for row in 0..m {
+                                let expected: f32 = (0..k)
+                                    .map(|i| decoded[row * k + i] * values[4 + q * k + i])
+                                    .sum();
+                                max_ref = max_ref.max(expected.abs());
+                                for base in [4, 4 + m * n] {
+                                    let observed = actual[base + q * m + row];
+                                    assert!(observed.is_finite());
+                                    max_error = max_error.max((observed - expected).abs());
+                                }
                             }
                         }
+                        eprintln!(
+                            "{dtype:?} dispatch N={n} flat={flat} concurrent={concurrent} allow_n1={allow_n1} max_abs={max_error} max_ref={max_ref}"
+                        );
+                        assert!(max_error <= 1e-4 * (1.0 + max_ref));
+                        assert_eq!(weight.shape, [256, 3]);
                     }
-                    eprintln!(
-                        "XXS dispatch N={n} flat={flat} concurrent={concurrent} allow_n1={allow_n1} max_abs={max_error} max_ref={max_ref}"
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn iq1_m_embedding_policy_is_role_and_fingerprint_scoped() {
+    let arch = crate::model::QWEN3_27B;
+    let shape = [5120, 248_320];
+    assert!(native_quant_embedding_supported(GgmlType::IQ1_M, &shape));
+    assert!(native_quant_embedding_default_promoted(
+        &arch,
+        false,
+        GgmlType::IQ1_M,
+        &shape
+    ));
+    assert!(!native_quant_embedding_default_promoted(
+        &arch,
+        true,
+        GgmlType::IQ1_M,
+        &shape
+    ));
+    assert!(!native_quant_embedding_default_promoted(
+        &arch,
+        false,
+        GgmlType::IQ1_S,
+        &shape
+    ));
+    for changed in [
+        crate::model::Arch {
+            kind: ArchKind::Moe,
+            ..arch
+        },
+        crate::model::Arch {
+            n_layer: 63,
+            ..arch
+        },
+        crate::model::Arch {
+            hidden_size: 4096,
+            ..arch
+        },
+    ] {
+        assert!(!native_quant_embedding_default_promoted(
+            &changed,
+            false,
+            GgmlType::IQ1_M,
+            &shape
+        ));
+    }
+    for shape in [
+        vec![256],
+        vec![256, 3, 1],
+        vec![0, 3],
+        vec![256, 0],
+        vec![257, 3],
+        vec![1 << 31, 3],
+        vec![256, 1 << 31],
+    ] {
+        assert!(!native_quant_embedding_supported(GgmlType::IQ1_M, &shape));
+    }
+    assert!(native_quant_embedding_supported(GgmlType::IQ1_M, &[256, 3]));
+    assert!(!native_quant_embedding_default_promoted(
+        &arch,
+        false,
+        GgmlType::IQ1_M,
+        &[256, 3]
+    ));
+    use NativeQuantEmbeddingMode::{Auto, Disabled, Forced, Invalid};
+    for (mode, tied, expected_native) in [
+        (Auto, false, true),
+        (Auto, true, false),
+        (Disabled, false, false),
+        (Forced, true, true),
+        (Invalid, false, false),
+    ] {
+        let promoted =
+            native_quant_embedding_default_promoted(&arch, tied, GgmlType::IQ1_M, &shape);
+        let selection = resolve_native_quant_embedding(mode, true, promoted);
+        let matrix = desc(GgmlType::IQ1_M, &shape);
+        let vector = desc(GgmlType::F32, &[5120]);
+        let mut model = model(&matrix, &vector, &matrix, ArchKind::Dense);
+        model.tied_embeddings = tied;
+        for dense_iq_native in [false, true] {
+            let choices = with_dense_iq_native_storage(dense_iq_native, || {
+                ResolvedWeightLoadChoices::resolve(selection, false)
+            });
+            let requests = with_dense_iq_native_storage(!dense_iq_native, || {
+                choices.storage_requests(&model).unwrap()
+            });
+            assert_eq!(choices.embedding_selection.uses_native(), expected_native);
+            assert_eq!(
+                requests[0].kind,
+                if expected_native {
+                    ModelWeightStorageKind::Direct
+                } else {
+                    ModelWeightStorageKind::ConvertedF32
+                }
+            );
+            assert_eq!(
+                requests[0].resident_bytes,
+                if expected_native {
+                    matrix.n_bytes
+                } else {
+                    5120 * 248_320 * 4
+                }
+            );
+            assert_eq!(requests[2].kind, ModelWeightStorageKind::ConvertedF32); // output head, even tied
+        }
+    }
+    let mut bad_embedding = desc(GgmlType::IQ1_M, &[256, 3]);
+    bad_embedding.n_bytes -= 1;
+    let vector = desc(GgmlType::F32, &[256]);
+    let malformed = model(&bad_embedding, &vector, &bad_embedding, ArchKind::Dense);
+    // Disable native projections: this rejection must come from the selected
+    // embedding contract, not from a later projection sharing its descriptor.
+    assert!(model_weight_storage_requests_with_policy(&malformed, true, false, false).is_err());
+}
+
+#[test]
+#[ignore = "requires Metal lease; tiny IQ1_M load and embedding gather"]
+fn iq1_m_embedding_loader_and_gather_use_frozen_choice() {
+    let ctx = MetalContext::new().expect("owner must hold normal Metal lease");
+    let fixture = TinyDenseIqFixture::new(GgmlType::IQ1_M);
+    let gguf = GgufFile::open(&fixture.0).unwrap();
+    let desc = gguf.tensors.iter().find(|t| t.name == "matrix").unwrap();
+    let decoded = crate::codec::dequant_to_f32(desc, gguf.try_slice(desc).unwrap()).unwrap();
+    let choices = ResolvedWeightLoadChoices::resolve(NativeQuantEmbeddingSelection::Forced, false);
+    let mut loader = MetalWeightLoader::new(&ctx, &gguf, DirectStorage::Copied, choices);
+    let mut malformed = desc.clone();
+    malformed.n_bytes -= 1;
+    assert!(loader.load_embedding(&malformed, true).is_err());
+    assert_eq!(loader.ledger.source_descriptors, 0);
+    loader.finish(false, &[]).unwrap();
+    use NativeQuantEmbeddingMode::{Auto, Disabled, Forced, Invalid};
+    for (mode, promoted) in [
+        (Auto, true),
+        (Auto, false),
+        (Forced, false),
+        (Disabled, true),
+        (Invalid, true),
+    ] {
+        let choices = with_dense_iq_native_storage(false, || {
+            ResolvedWeightLoadChoices::resolve(
+                resolve_native_quant_embedding(mode, true, promoted),
+                false,
+            )
+        });
+        let native = choices.embedding_selection.uses_native();
+        let embedding = with_dense_iq_native_storage(true, || {
+            let mut loader = MetalWeightLoader::new(&ctx, &gguf, DirectStorage::Copied, choices);
+            let embedding = loader
+                .load_embedding(desc, choices.embedding_selection.uses_native())
+                .unwrap();
+            assert_materialized(&embedding, &gguf, desc, native);
+            let head = loader.load_weight(WeightRole::OutputHead, desc).unwrap();
+            assert_materialized(&head, &gguf, desc, false);
+            let mut expected = Vec::new();
+            push_model_weight_request(
+                &mut expected,
+                desc,
+                if native {
+                    ModelWeightStorageKind::Direct
+                } else {
+                    ModelWeightStorageKind::ConvertedF32
+                },
+            )
+            .unwrap();
+            push_native_weight_request_with_policy(
+                &mut expected,
+                WeightRole::OutputHead,
+                desc,
+                choices.dense_iq_native,
+            )
+            .unwrap();
+            loader.finish(false, &expected).unwrap();
+            embedding
+        });
+        for shaped in [false, true] {
+            let ids_values = [2i32, 0, 2];
+            let ids = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&ids_values),
+                vec![3],
+                GgmlType::I32,
+            )
+            .unwrap();
+            let backing = MetalTensor::zeros_f32(&ctx, vec![772]).unwrap();
+            let output = backing.view_subrange(4, if shaped { vec![256, 3] } else { vec![768] });
+            let cmd = ctx.queue.commandBuffer().unwrap();
+            let enc = KernelEncoder::begin(&cmd);
+            encode_get_rows_f32(&ctx, &enc, &embedding, &ids, &output, 3, 256).unwrap();
+            enc.end();
+            cmd.commit();
+            crate::metal::wait_completed(&cmd).unwrap();
+            let actual = unsafe {
+                std::slice::from_raw_parts(
+                    (output.buffer.contents().as_ptr() as *const u8)
+                        .add(output.offset as usize)
+                        .cast::<f32>(),
+                    768,
+                )
+            };
+            for (row, id) in ids_values.into_iter().enumerate() {
+                for col in 0..256 {
+                    let expected = decoded[id as usize * 256 + col];
+                    assert!(actual[row * 256 + col].is_finite());
+                    assert!(
+                        (actual[row * 256 + col] - expected).abs() <= 1e-6 * (1.0 + expected.abs())
                     );
-                    assert!(max_error <= 1e-4 * (1.0 + max_ref));
-                    assert_eq!(weight.shape, [256, 3]);
                 }
             }
         }

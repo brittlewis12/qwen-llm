@@ -92,6 +92,10 @@ pub(super) fn native_quant_embedding_supported(dtype: GgmlType, shape: &[u64]) -
         && shape[0] > 0
         && shape[1] > 0
         && ((matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K) && shape[0].is_multiple_of(256))
+            || (dtype == GgmlType::IQ1_M
+                && shape[0].is_multiple_of(256)
+                && i32::try_from(shape[0]).is_ok()
+                && i32::try_from(shape[1]).is_ok())
             || (matches!(dtype, GgmlType::Q8_0 | GgmlType::IQ4_NL) && shape[0].is_multiple_of(32)))
 }
 
@@ -113,7 +117,7 @@ pub(super) fn native_quant_embedding_default_promoted(
         && arch.gdn_head_dim == 128
         && arch.gdn_conv_kernel == 4;
     common
-        && ((matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K)
+        && ((matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K | GgmlType::IQ1_M)
             && arch.kind == ArchKind::Dense
             && arch.n_layer == 64
             && arch.hidden_size == 5120

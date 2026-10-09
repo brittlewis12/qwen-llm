@@ -48,12 +48,15 @@ pub(crate) fn projection_weight_role(kind: crate::model::ArchKind) -> WeightRole
 }
 
 /// Executable native storage capability, independent of diagnostic rollback.
-/// Embeddings and routers retain their separate policies. The IQ2 additions
+/// Embeddings and routers retain their separate policies. The IQ additions
 /// are confined to dense-model projections; whole-model qualification is separate.
 pub(crate) fn weight_role_dtype_supported(role: WeightRole, dtype: GgmlType) -> bool {
     weight_dtype_kept_native(dtype)
         || (role == WeightRole::DenseProjection
-            && matches!(dtype, GgmlType::IQ2_XS | GgmlType::IQ2_XXS))
+            && matches!(
+                dtype,
+                GgmlType::IQ2_XS | GgmlType::IQ2_XXS | GgmlType::IQ1_S | GgmlType::IQ1_M
+            ))
 }
 
 #[cfg(test)]
@@ -85,7 +88,7 @@ pub(super) fn dense_iq_native_storage_enabled() -> bool {
 }
 
 /// Storage decision using the current diagnostic selection. Prepared loads use
-/// the explicit-policy helper below. Newly admitted IQ2 matrices must fit
+/// the explicit-policy helper below. Newly admitted IQ matrices must fit
 /// their primitive's dimensions, ulong weight addressing and exact GGML blocks.
 /// Invalid native geometry fails before allocation instead of inflating to F32.
 pub(crate) fn weight_storage_kind(
@@ -105,41 +108,13 @@ pub(crate) fn weight_storage_kind_with_policy(
 ) -> Result<ModelWeightStorageKind, MfError> {
     let native = weight_role_dtype_supported(role, desc.dtype)
         && !(role == WeightRole::DenseProjection
-            && matches!(desc.dtype, GgmlType::IQ2_XS | GgmlType::IQ2_XXS)
+            && matches!(
+                desc.dtype,
+                GgmlType::IQ2_XS | GgmlType::IQ2_XXS | GgmlType::IQ1_S | GgmlType::IQ1_M
+            )
             && !dense_iq_native);
     if native && !weight_dtype_kept_native(desc.dtype) {
-        let invalid = || {
-            MfError::LoadPolicy(format!(
-                "native {role:?} {:?} has invalid {:?} matrix storage: shape={:?} bytes={}",
-                desc.name, desc.dtype, desc.shape, desc.n_bytes,
-            ))
-        };
-        let [k, m] = desc.shape.as_slice() else {
-            return Err(invalid());
-        };
-        let (block, bytes) = desc.dtype.storage_layout().ok_or_else(invalid)?;
-        let elements = k.checked_mul(*m).ok_or_else(invalid)?;
-        // Both families widen weight row offsets before multiplying. XXS
-        // additionally requires positive i32 dimensions and a u32 row stride;
-        // XS uses u32 dimensions and a ulong row stride. No u32 bank-size cap.
-        let row_bytes = (k / block).checked_mul(bytes).ok_or_else(invalid)?;
-        let expected = row_bytes.checked_mul(*m).ok_or_else(invalid)?;
-        if *k == 0
-            || *m == 0
-            || !k.is_multiple_of(block)
-            || u32::try_from(*k).is_err()
-            || u32::try_from(*m).is_err()
-            || (desc.dtype == GgmlType::IQ2_XXS
-                && (i32::try_from(*k).is_err()
-                    || i32::try_from(*m).is_err()
-                    || u32::try_from(row_bytes).is_err()))
-            || usize::try_from(elements).is_err()
-            || expected != desc.n_bytes
-            || usize::try_from(expected).is_err()
-            || desc.data_offset.checked_add(expected).is_none()
-        {
-            return Err(invalid());
-        }
+        validate_native_iq_matrix_storage(desc)?;
     }
     Ok(if native {
         ModelWeightStorageKind::Direct
@@ -148,7 +123,47 @@ pub(crate) fn weight_storage_kind_with_policy(
     })
 }
 
-/// Complete descriptor plans for A (old storage) and B (native IQ2_XS/IQ2_XXS).
+/// Physical matrix storage contract shared by newly native projections and
+/// IQ1_M embeddings. Selection policy is resolved separately by each role.
+pub(super) fn validate_native_iq_matrix_storage(desc: &TensorDesc) -> Result<(), MfError> {
+    let invalid = || {
+        MfError::LoadPolicy(format!(
+            "native IQ {:?} has invalid {:?} matrix storage: shape={:?} bytes={}",
+            desc.name, desc.dtype, desc.shape, desc.n_bytes,
+        ))
+    };
+    let [k, m] = desc.shape.as_slice() else {
+        return Err(invalid());
+    };
+    let (block, bytes) = desc.dtype.storage_layout().ok_or_else(invalid)?;
+    let elements = k.checked_mul(*m).ok_or_else(invalid)?;
+    // All families widen weight row offsets before multiplying. IQ1/XXS
+    // additionally requires positive i32 dimensions and a u32 row stride;
+    // XS uses u32 dimensions and a ulong row stride. No u32 bank-size cap.
+    let row_bytes = (k / block).checked_mul(bytes).ok_or_else(invalid)?;
+    let expected = row_bytes.checked_mul(*m).ok_or_else(invalid)?;
+    if *k == 0
+        || *m == 0
+        || !k.is_multiple_of(block)
+        || u32::try_from(*k).is_err()
+        || u32::try_from(*m).is_err()
+        || (matches!(
+            desc.dtype,
+            GgmlType::IQ2_XXS | GgmlType::IQ1_S | GgmlType::IQ1_M
+        ) && (i32::try_from(*k).is_err()
+            || i32::try_from(*m).is_err()
+            || u32::try_from(row_bytes).is_err()))
+        || usize::try_from(elements).is_err()
+        || expected != desc.n_bytes
+        || usize::try_from(expected).is_err()
+        || desc.data_offset.checked_add(expected).is_none()
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+/// Complete descriptor plans for A (old storage) and B (native IQ2_XS/IQ2_XXS/IQ1_S/IQ1_M).
 /// No payload reads, allocations of model weights, or Metal context required.
 #[cfg(test)]
 pub(crate) fn dense_iq_native_storage_comparison_plans<'a>(
@@ -547,6 +562,9 @@ pub(crate) fn model_weight_storage_requests_with_policy<'a>(
         model.token_embd.dtype,
         GgmlType::F32 | GgmlType::F16 | GgmlType::BF16
     ) || native_quant_embedding;
+    if native_quant_embedding && model.token_embd.dtype == GgmlType::IQ1_M {
+        validate_native_iq_matrix_storage(model.token_embd)?;
+    }
     if embedding_direct {
         push_model_weight_request(
             &mut requests,

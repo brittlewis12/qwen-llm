@@ -1,5 +1,5 @@
 //! Whole Saluki native-IQ qualification, not a throughput benchmark.
-//! One admitted model, four sequential trajectories; no inflated-IQ2 baseline load.
+//! One admitted model, four sequential trajectories; no inflated-IQ baseline load.
 //! ```sh
 //! env -u MTL_DEBUG_LAYER QWEN_METAL_LEASE_WAIT=1 \
 //!   IQ_CAPACITY_MODEL_OUT=/tmp/saluki-native-model.jsonl \
@@ -8,7 +8,7 @@
 //!   -- --ignored --exact --nocapture --test-threads=1
 //! ```
 //! IQ_CAPACITY_GGUF optionally overrides the documented artifact. Owner supplies
-//! the parent module declaration. Requires both IQ2 storage/dispatch integrations.
+//! the parent module declaration. Requires IQ2/IQ1 native projections and IQ1_M gather.
 
 use super::super::*;
 use crate::metal::{
@@ -33,8 +33,62 @@ const ARTIFACT: &str =
 const CHUNK: u32 = 128;
 const CAPACITY: usize = 135;
 const CONTINUATIONS: usize = 4;
+const NATIVE_COHORTS: [(GgmlType, &str); 4] = [
+    (GgmlType::IQ2_XS, "iq2_xs"),
+    (GgmlType::IQ2_XXS, "iq2_xxs"),
+    (GgmlType::IQ1_S, "iq1_s"),
+    (GgmlType::IQ1_M, "iq1_m"),
+];
 const PROSE: &str = "A coastal town is replacing its old public library. The planning committee has three proposals: renovate the existing building, convert an empty school, or construct a smaller library beside the railway station. Residents want quiet reading rooms, reliable internet access, space for children's activities, and somewhere to meet during winter evenings. The existing building is central but has a leaking roof and narrow staircases. The school has large rooms and a garden, although its heating system is expensive to operate. The station site is easy to reach by bus but has less outdoor space. Explain how the committee should compare these options without assuming that the cheapest initial price gives the best result. Include accessibility, recurring costs, uncertainty about future attendance, and the inconvenience caused during construction. Suggest what information volunteers could collect in one month and what would require a professional survey. Finally, describe a fair way to publish the findings so residents can distinguish measured facts from estimates and express their priorities before the final decision.";
 const CODE: &str = include_str!("../../../../qwen-cli/src/serve/backend_glm5_next.rs");
+
+// Both whole trajectories and primitive gather probes use this tokenization.
+// Vocabulary loading happens before Metal context creation; no weights load.
+fn qualification_streams(gguf: &GgufFile) -> Vec<(&'static str, usize, Vec<i32>, String)> {
+    let tokenizer = Tokenizer::from_gguf(gguf).unwrap();
+    let texts = [
+        ("prose", 129, PROSE.to_owned()),
+        (
+            "code_review",
+            131,
+            format!(
+                "Review this Rust inference backend for a cache-state or prefill bug. Explain the failure and suggest a focused fix.\n\n{CODE}"
+            ),
+        ),
+    ];
+    texts
+        .into_iter()
+        .map(|(name, n, text)| {
+            let tokens: Vec<_> = tokenizer
+                .encode(&text, false)
+                .unwrap()
+                .into_iter()
+                .take(n + CONTINUATIONS)
+                .collect();
+            assert_eq!(tokens.len(), n + CONTINUATIONS, "natural stream too short");
+            (name, n, tokens, sha(text.as_bytes()))
+        })
+        .collect()
+}
+
+pub(super) fn qualification_gather_ids(gguf: &GgufFile) -> (Vec<i32>, Vec<Value>) {
+    let mut ids = Vec::with_capacity(6);
+    let mut origins = Vec::with_capacity(6);
+    for (stream, n, tokens, text_hash) in qualification_streams(gguf) {
+        let token_hash = sha(bytemuck::cast_slice(&tokens));
+        for (role, position) in [
+            ("first_prompt", 0),
+            ("last_prompt", n - 1),
+            ("first_continuation", n),
+        ] {
+            ids.push(tokens[position]);
+            origins.push(json!({"stream":stream,"prompt_rows":n,"role":role,"position_zero_based":position,
+                "token_id":tokens[position],"text_sha256":text_hash,"stream_tokens_sha256_i32_le":token_hash,
+                "special_token_policy":"encode(false), plain natural text; no extra template"}));
+        }
+    }
+    (ids, origins)
+}
 
 fn emit(out: &mut File, event: Value) {
     serde_json::to_writer(&mut *out, &event).unwrap();
@@ -272,7 +326,27 @@ fn census<R>(f: impl FnOnce() -> R) -> (R, Vec<DispatchCensusRow>) {
     let result = f();
     (result, dispatch_census_take())
 }
+// IQ1 S/M share projection PSOs. Only an observed dtype tag can distinguish
+// their dispatches; source inventory or launch geometry alone is not evidence.
+fn census_dtype(kernel: &str, tag: Option<&str>) -> Option<&'static str> {
+    for (_, name) in NATIVE_COHORTS {
+        if kernel.contains(&format!("{name}_")) {
+            return Some(name);
+        }
+    }
+    if kernel.contains("mat_vec_iq1_f32") || kernel.contains("mat_mat_iq1_f32") {
+        return match tag {
+            Some("iq1_s") => Some("iq1_s"),
+            Some("iq1_m") => Some("iq1_m"),
+            _ => None,
+        };
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
 fn witness(
+    model: &MetalModel,
     out: &mut File,
     stream: &str,
     phase: &str,
@@ -281,41 +355,93 @@ fn witness(
     require_concurrent: bool,
 ) {
     let mut counts = BTreeMap::<String, usize>::new();
-    let mut kernels = BTreeMap::<(String, bool), usize>::new();
+    let mut kernels = BTreeMap::<(String, Option<String>, bool), usize>::new();
     for r in &rows {
         *kernels
-            .entry((r.kernel.clone(), r.encoder_concurrent))
+            .entry((r.kernel.clone(), r.tag.clone(), r.encoder_concurrent))
             .or_default() += 1;
-        for dtype in ["iq2_xs", "iq2_xxs"] {
-            if r.kernel.contains(&format!("{dtype}_")) {
-                *counts.entry(dtype.into()).or_default() += 1;
-                if r.kernel.contains("mat_mat") {
-                    *counts.entry(format!("{dtype}_matrix")).or_default() += 1;
-                }
-                if r.encoder_concurrent {
-                    *counts.entry(format!("{dtype}_concurrent")).or_default() += 1;
-                }
+        if let Some(dtype) = census_dtype(&r.kernel, r.tag.as_deref()) {
+            *counts.entry(dtype.into()).or_default() += 1;
+            if r.kernel.contains("mat_mat") {
+                *counts.entry(format!("{dtype}_matrix")).or_default() += 1;
             }
+            if r.kernel.contains("mat_vec") {
+                *counts.entry(format!("{dtype}_vector")).or_default() += 1;
+            }
+            if r.kernel.contains("get_rows") {
+                *counts.entry(format!("{dtype}_gather")).or_default() += 1;
+            }
+            if r.encoder_concurrent {
+                *counts.entry(format!("{dtype}_concurrent")).or_default() += 1;
+            }
+        } else if r.kernel.contains("mat_vec_iq1_f32") || r.kernel.contains("mat_mat_iq1_f32") {
+            *counts
+                .entry("iq1_projection_without_dtype_tag".into())
+                .or_default() += 1;
         }
     }
+    // Only GDN front projections run in concurrent encoders in ordinary dense
+    // decode. FFN-only cohorts must not acquire an artificial concurrency gate.
+    let expected_concurrent: Vec<_> = NATIVE_COHORTS
+        .iter()
+        .filter(|(dtype, _)| {
+            require_concurrent
+                && model.blocks.iter().any(|block| match block {
+                    MetalBlock::Gdn(g) => {
+                        [&g.in_proj_qkv, &g.in_proj_z, &g.beta_proj, &g.alpha_proj]
+                            .iter()
+                            .any(|w| w.dtype == *dtype)
+                    }
+                    MetalBlock::Attn(_) => false,
+                })
+        })
+        .map(|(_, name)| *name)
+        .collect();
     let concurrent = rows.iter().filter(|r| r.encoder_concurrent).count();
-    let topology:Vec<_>=kernels.into_iter().map(|((kernel,concurrent),dispatches)|json!({"kernel":kernel,"concurrent":concurrent,"dispatches":dispatches})).collect();
+    let topology:Vec<_>=kernels.into_iter().map(|((kernel,tag,concurrent),dispatches)|json!({"kernel":kernel,"tag":tag,"concurrent":concurrent,"dispatches":dispatches})).collect();
     emit(
         out,
         json!({"event":"kernel_witness","stream":stream,"phase":phase,"counts":counts,
-        "dispatches":rows.len(),"concurrent_dispatches":concurrent,"kernels":topology,"benchmark":false}),
+        "dispatches":rows.len(),"concurrent_dispatches":concurrent,"kernels":topology,
+        "expected_concurrent_dtypes_from_realized_gdn_front":expected_concurrent,"benchmark":false,
+        "iq1_dtype_attribution":"observed iq1_s/iq1_m census tag for shared projection kernels; gather has a distinct IQ1_M kernel"}),
     );
-    for dtype in ["iq2_xs", "iq2_xxs"] {
+    assert_eq!(
+        counts
+            .get("iq1_projection_without_dtype_tag")
+            .copied()
+            .unwrap_or(0),
+        0,
+        "shared IQ1 projection kernels require observed iq1_s/iq1_m census tags; raw witness flushed"
+    );
+    for (_, dtype) in NATIVE_COHORTS {
         assert!(
             counts.get(dtype).copied().unwrap_or(0) > 0,
             "missing native {dtype} witness"
         );
-        if require_matrix {
-            assert!(
-                counts.get(&format!("{dtype}_matrix")).copied().unwrap_or(0) > 0,
-                "missing native {dtype} matrix witness"
-            );
-        }
+        let operation = if require_matrix { "matrix" } else { "vector" };
+        assert!(
+            counts
+                .get(&format!("{dtype}_{operation}"))
+                .copied()
+                .unwrap_or(0)
+                > 0,
+            "missing native {dtype} {operation} witness"
+        );
+    }
+    assert!(
+        counts.get("iq1_m_gather").copied().unwrap_or(0) > 0,
+        "missing IQ1_M embedding gather witness"
+    );
+    for dtype in expected_concurrent {
+        assert!(
+            counts
+                .get(&format!("{dtype}_concurrent"))
+                .copied()
+                .unwrap_or(0)
+                > 0,
+            "missing concurrent native {dtype} GDN front witness"
+        );
     }
     if require_concurrent {
         assert!(concurrent > 0, "ordinary decode concurrency missing");
@@ -457,7 +583,7 @@ fn trajectory(
                 "error":result.as_ref().err().map(ToString::to_string)}),
             );
             let logits = result.expect("ordinary packed prefill failed; raw attempt flushed");
-            witness(out, stream, "packed_prefill", rows, true, false);
+            witness(model, out, stream, "packed_prefill", rows, true, false);
             logits
         } else {
             for (i, &token) in tokens[..n - 1].iter().enumerate() {
@@ -469,7 +595,7 @@ fn trajectory(
                         json!({"event":"reference_first_token","stream":stream,"error":result.as_ref().err().map(ToString::to_string)}),
                     );
                     result.expect("ordinary GEMV reference failed");
-                    witness(out, stream, "reference_decode", rows, false, true);
+                    witness(model, out, stream, "reference_decode", rows, false, true);
                 } else {
                     let result = forward.single_token_no_tail(token, i as u32, &mut session);
                     if let Err(error) = &result {
@@ -525,6 +651,7 @@ fn trajectory(
             let logits = result.expect("ordinary continuation failed; raw record flushed");
             if step == 1 {
                 witness(
+                    model,
                     out,
                     stream,
                     &format!("{lineage}/continuation"),
@@ -555,6 +682,23 @@ fn trajectory(
 
 #[test]
 fn iq_capacity_model_cpu_metrics_and_ledger() {
+    assert_eq!(census_dtype("kernel_mat_vec_iq1_f32", None), None);
+    assert_eq!(
+        census_dtype("kernel_mat_vec_iq1_f32", Some("iq1_s")),
+        Some("iq1_s")
+    );
+    assert_eq!(
+        census_dtype("kernel_mat_mat_iq1_f32_mma", Some("iq1_m")),
+        Some("iq1_m")
+    );
+    assert_eq!(
+        census_dtype("kernel_get_rows_iq1_m_f32", None),
+        Some("iq1_m")
+    );
+    assert_eq!(
+        census_dtype("kernel_mat_vec_iq2_xxs_f32", None),
+        Some("iq2_xxs")
+    );
     let a = [-2.0, 1.0, 0.0];
     let same = comparison(&a, &a);
     assert_eq!(same["max_abs"], json!(0.0));
@@ -566,7 +710,7 @@ fn iq_capacity_model_cpu_metrics_and_ledger() {
 }
 
 #[test]
-#[ignore = "whole Saluki native IQ2 model; normal lease/admission; release; new IQ_CAPACITY_MODEL_OUT"]
+#[ignore = "whole Saluki native IQ model; normal lease/admission; release; new IQ_CAPACITY_MODEL_OUT"]
 fn iq_capacity_model_packet() {
     assert!(!cfg!(debug_assertions), "release qualification required");
     assert!(std::env::var_os("MTL_DEBUG_LAYER").is_none());
@@ -579,30 +723,7 @@ fn iq_capacity_model_packet() {
     let gguf = GgufFile::open(&path).unwrap();
     let bound = Model::from_gguf(&gguf).unwrap();
     assert_eq!(bound.arch.kind, ArchKind::Dense);
-    let tokenizer = Tokenizer::from_gguf(&gguf).unwrap();
-    let texts = [
-        ("prose", 129, PROSE.to_owned()),
-        (
-            "code_review",
-            131,
-            format!(
-                "Review this Rust inference backend for a cache-state or prefill bug. Explain the failure and suggest a focused fix.\n\n{CODE}"
-            ),
-        ),
-    ];
-    let streams: Vec<_> = texts
-        .iter()
-        .map(|(name, n, text)| {
-            let tokens: Vec<_> = tokenizer
-                .encode(text, false)
-                .unwrap()
-                .into_iter()
-                .take(n + CONTINUATIONS)
-                .collect();
-            assert_eq!(tokens.len(), n + CONTINUATIONS, "natural stream too short");
-            (*name, *n, tokens)
-        })
-        .collect();
+    let streams = qualification_streams(&gguf);
     let stamps = gguf.revalidate_retained_shard_stamps().unwrap();
     let _lease = acquire_metal_benchmark_lease().expect("production adaptive-wait lease");
     let ctx = MetalContext::new().unwrap();
@@ -637,31 +758,37 @@ fn iq_capacity_model_packet() {
             .iter()
             .any(|prefix| name.starts_with(prefix))
                 || name == "QWEN_KV_Q8"
+                || name == "QWEN_NATIVE_QUANT_EMBED"
         })
         .collect();
-    emit(
-        &mut out,
-        json!({"event":"header","schema":"iq_capacity.model.v1","device":ctx.describe(),"shards":shards,
-        "cases":[{"stream":"prose","rows":129},{"stream":"code_review","rows":131}],"chunk_rows":CHUNK,"capacity":CAPACITY,
-        "continuations":CONTINUATIONS,"trajectories":4,"weight_loads":1,
-         "environment":environment,"gpu_timing_collected":false,
-         "environment_absence":"unlisted variables matching captured QWEN_PREFILL/DECODE/GGUF/DENSE_GDN/METAL_LEASE/MATVEC/MATMAT prefixes and QWEN_KV_Q8 are unset",
-        "policy":"same native weights; reference serial tokens through ordinary GEMV, packed ordinary prefill; default decode concurrency remains enabled",
-        "scope":"numerical and capacity qualification; not benchmark, not inflated-baseline A/B, not language-quality proof",
-        "source_binding":{"packet":sha(include_bytes!("iq_capacity_model.rs")),"loader":sha(include_bytes!("../mod.rs")),
+    let source_binding: Value = json!({"packet":sha(include_bytes!("iq_capacity_model.rs")),"loader":sha(include_bytes!("../mod.rs")),
             "residency":sha(include_bytes!("../residency.rs")),"dispatch":sha(include_bytes!("../dispatch.rs")),
+            "embedding_policy":sha(include_bytes!("../support.rs")),"gather_dispatch":sha(include_bytes!("../../metal/elementwise.rs")),
             "token":sha(include_bytes!("../token.rs")),"gdn":sha(include_bytes!("../gdn.rs")),
             "prefill":sha(include_bytes!("../../metal_dflash.rs")),"codec":sha(include_bytes!("../../codec.rs")),
             "xxs":sha(include_bytes!("../../metal/iq2_xxs.rs")),"xxs_metal":sha(include_bytes!("../../../../../kernels/iq2_xxs.metal")),
             "xxs_grid":sha(include_bytes!("../../../../../kernels/iq2_xxs_grid.metalh")),
+            "iq1_dispatch":sha(include_bytes!("../../metal/iq1.rs")),
+            "iq1_kernel_decoder":sha(include_bytes!("../../../../../kernels/iq1.metal")),
+            "iq1_grid":sha(include_bytes!("../../../../../kernels/iq1_grid.metalh")),
             "gemv_dispatch":sha(include_bytes!("../../metal/mat_vec.rs")),"gemm_dispatch":sha(include_bytes!("../../metal/mat_mat.rs")),
             "xs_gemm":sha(include_bytes!("../../../../../kernels/mat_mat_iq2_xs.metal")),"code_corpus":sha(CODE.as_bytes()),
-            "metallib":sha(crate::KERNELS_METALLIB)}}),
+            "metallib":sha(crate::KERNELS_METALLIB)});
+    emit(
+        &mut out,
+        json!({"event":"header","schema":"iq_capacity.model.v2","device":ctx.describe(),"shards":shards,
+        "cases":[{"stream":"prose","rows":129},{"stream":"code_review","rows":131}],"chunk_rows":CHUNK,"capacity":CAPACITY,
+        "continuations":CONTINUATIONS,"trajectories":4,"weight_loads":1,
+         "environment":environment,"gpu_timing_collected":false,
+         "environment_absence":"unlisted variables matching captured QWEN_PREFILL/DECODE/GGUF/DENSE_GDN/METAL_LEASE/MATVEC/MATMAT prefixes and QWEN_KV_Q8/QWEN_NATIVE_QUANT_EMBED are unset",
+        "policy":"same native weights; reference serial tokens through ordinary GEMV, packed ordinary prefill; default decode concurrency remains enabled",
+        "scope":"numerical and capacity qualification; not benchmark, not inflated-baseline A/B, not language-quality proof",
+        "source_binding":source_binding}),
     );
-    for ((name, n, ids), (_, _, text)) in streams.iter().zip(&texts) {
+    for (name, n, ids, text_hash) in &streams {
         emit(
             &mut out,
-            json!({"event":"stream","name":name,"prompt_rows":n,"token_ids":ids,"text_sha256":sha(text.as_bytes()),
+            json!({"event":"stream","name":name,"prompt_rows":n,"token_ids":ids,"text_sha256":text_hash,
             "tokens_sha256_i32_le":sha(bytemuck::cast_slice(ids)),"special_token_policy":"encode(false), plain natural text; no extra template"}),
         );
     }
@@ -685,6 +812,8 @@ fn iq_capacity_model_packet() {
         &mut out,
         json!({"event":"prepared_policy","copied_topology_supported":copied,"no_copy":format!("{:?}",prepared.storage.no_copy_mode),
         "owned":format!("{:?}",prepared.storage.owned_mode),"parallel":format!("{:?}",prepared.storage.parallel_mode),
+        "native_embedding_selection":prepared.choices.embedding_selection.label(),
+        "embedding_source_dtype":format!("{:?}",bound.token_embd.dtype),"tied_embeddings":bound.tied_embeddings,
         "prefetch_advice":format!("{:?}",prepared.prefetch_advice()),"plan":prepared.expected.iter().map(request_json).collect::<Vec<_>>(),
         "plan_summary":plan_summary(&prepared.expected)}),
     );
@@ -697,7 +826,21 @@ fn iq_capacity_model_packet() {
         MetalLoadPrefetchAdvice::PreserveConfiguredPolicy
     );
     let requests = prepared.expected.clone();
-    for dtype in [GgmlType::IQ2_XS, GgmlType::IQ2_XXS] {
+    assert_eq!(
+        bound.token_embd.dtype,
+        GgmlType::IQ1_M,
+        "released Saluki embedding cohort"
+    );
+    assert!(
+        !bound.tied_embeddings,
+        "released untied embedding/head policy"
+    );
+    assert_eq!(
+        prepared.choices.embedding_selection,
+        NativeQuantEmbeddingSelection::AutoPromoted,
+        "qualification requires the default native IQ1_M embedding selection; policy flushed"
+    );
+    for (dtype, _) in NATIVE_COHORTS {
         let cohort: Vec<_> = gguf.tensors.iter().filter(|t| t.dtype == dtype).collect();
         assert!(!cohort.is_empty());
         let native_bytes: u64 = cohort.iter().map(|d| d.n_bytes).sum();
@@ -720,6 +863,21 @@ fn iq_capacity_model_packet() {
             );
         }
     }
+    let remaining_conversions: Vec<_> = requests
+        .iter()
+        .filter(|r| r.kind != ModelWeightStorageKind::Direct)
+        .map(request_json)
+        .collect();
+    emit(
+        &mut out,
+        json!({"event":"conversion_plan","remaining_converted_requests":remaining_conversions,
+        "all_conversions_eliminated":remaining_conversions.is_empty(),
+        "expectation":"released artifact formerly converted only IQ1_S/IQ1_M; source F32 norms are direct, not conversions"}),
+    );
+    assert!(
+        remaining_conversions.is_empty(),
+        "released-artifact zero-conversion target not met; plan flushed"
+    );
     // Match the actual optional derived-QKV loader predicate. Price its GPU
     // destination and its two simultaneous compressed CPU concatenation copies.
     let derived: Vec<u64> = bound
@@ -840,7 +998,7 @@ fn iq_capacity_model_packet() {
     drop(allocation);
     footprint(&ctx, &mut out, "loaded");
     audit(&metal, &requests, &lines, &derived, &mut out);
-    for (name, n, tokens) in streams {
+    for (name, n, tokens, _) in streams {
         eprintln!("IQ model {name} N{n}: native serial-token reference then ordinary packed");
         let reference = trajectory(&ctx, &metal, &mut out, name, &tokens, n, None);
         assert_eq!(reference.len(), CONTINUATIONS + 1);
@@ -850,7 +1008,7 @@ fn iq_capacity_model_packet() {
     footprint(&ctx, &mut out, "qualification_complete_weights_resident");
     emit(
         &mut out,
-        json!({"event":"complete","schema":"iq_capacity.model.v1","trajectories":4,"comparisons":10,
+        json!({"event":"complete","schema":"iq_capacity.model.v2","trajectories":4,"comparisons":10,
         "decision":"unscored_capacity_and_numerical_qualification_no_promotion"}),
     );
 }

@@ -5,7 +5,18 @@ screen (experimental selection remains off). This is a capacity/coverage task,
 not a small-throughput optimization.
 No production admission or kernel selection changes are made by this note.
 
-## 2026-10-08 implementation checkpoint
+## 2026-10-08 completed capacity fix
+
+All four projection cohorts plus the qualified IQ1_M embedding now execute
+natively. Saluki loads **851 direct bindings, zero conversions**, realizing
+7.345690 GiB logical weights and eliminating58.726997 GiB of expansion from
+the original plan. Loaded physical footprint7.513699 GiB and RSS14.900940 GiB
+are distinct point samples in the copied-plus-mapped topology, not peaks.
+Independent codec/gather checks and whole prefill/continuation qualification
+pass; embedding auto-promotion is scoped to the untied Dense27B fingerprint.
+See the packet's complete-result section for exact scope and remaining limits.
+
+## Earlier IQ2-only checkpoint
 
 Dense IQ2_XS and IQ2_XXS projections now have role-aware native storage and
 qualified ordinary execution. Saluki's actual load reconciles 784 direct
@@ -15,8 +26,8 @@ of about34.09 GiB, not26.539 GiB. Both native codecs pass real-weight primitive
 and short whole-model prefill/continuation checks. Exact evidence, limits and
 reproduction: `docs/bench/2026-10-08-native-iq-capacity/README.md`.
 
-IQ1_M (including embedding) and IQ1_S remain the next capacity tasks. The
-original investigation and staged plan below are retained as provenance;
+IQ1_M (including embedding) and IQ1_S were the next capacity tasks and are
+now complete above. The original investigation/staged plan remain provenance;
 their "current" storage totals describe the pre-change baseline.
 
 ## Verified scope versus reported measurements

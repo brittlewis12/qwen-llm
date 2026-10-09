@@ -7,7 +7,8 @@
 //!   metal_forward::tests::iq_capacity::iq_capacity_packet \
 //!   -- --ignored --exact --nocapture --test-threads=1
 //! ```
-//! IQ_CAPACITY_DTYPE=iq2_xxs selects the other cohort. IQ_CAPACITY_GGUF
+//! IQ_CAPACITY_DTYPE selects iq2_xs, iq2_xxs, iq1_s or iq1_m. IQ1_M also
+//! checks real embedding gather without an inflated embedding baseline. IQ_CAPACITY_GGUF
 //! optionally overrides the documented Saluki artifact. Numerical differences
 //! are reported, not automatically qualified; no bitwise or speed gate.
 
@@ -56,12 +57,16 @@ fn dimensions(d: &TensorDesc) -> (usize, usize, usize) {
         usize::try_from(d.shape[1]).unwrap(),
     );
     assert!(k > 0 && k.is_multiple_of(256) && m >= 3);
-    let block = match d.dtype {
+    let expected_block_bytes = match d.dtype {
         GgmlType::IQ2_XS => 74,
         GgmlType::IQ2_XXS => 66,
+        GgmlType::IQ1_S => 50,
+        GgmlType::IQ1_M => 56,
         _ => panic!("cohort dtype"),
     };
-    let row_bytes = k / 256 * block;
+    let (block_elements, block_bytes) = d.dtype.storage_layout().expect("canonical GGML layout");
+    assert_eq!((block_elements, block_bytes), (256, expected_block_bytes));
+    let row_bytes = k / block_elements as usize * block_bytes as usize;
     assert_eq!(d.n_bytes, (row_bytes * m) as u64);
     (k, m, row_bytes)
 }
@@ -189,7 +194,7 @@ fn encode(
     m: usize,
     n: usize,
 ) -> Result<(), MetalError> {
-    // IQ2_XXS deliberately validates rank as well as element count. Public
+    // New native primitives validate rank as well as element count. Public
     // GEMV takes [K]/[M], whereas the mat-mat APIs take [K,N]/[M,N].
     let vectors = (n == 1).then(|| {
         (
@@ -205,6 +210,12 @@ fn encode(
         (GgmlType::IQ2_XS, false) => encode_mat_mat_iq2_xs_f32(ctx, enc, w, x, y, k, m, n),
         (GgmlType::IQ2_XXS, true) => encode_mat_vec_iq2_xxs_f32(ctx, enc, w, x, y, k, m),
         (GgmlType::IQ2_XXS, false) => encode_mat_mat_iq2_xxs_f32(ctx, enc, w, x, y, k, m, n),
+        (GgmlType::IQ1_S | GgmlType::IQ1_M, true) => {
+            encode_mat_vec_iq1_f32(ctx, enc, w, x, y, k, m)
+        }
+        (GgmlType::IQ1_S | GgmlType::IQ1_M, false) => {
+            encode_mat_mat_iq1_f32(ctx, enc, w, x, y, k, m, n)
+        }
         _ => panic!("unexpected diagnostic dtype"),
     }
 }
@@ -242,7 +253,7 @@ fn command(
         && gpu_ms.is_finite()
         && gpu_ms > 0.0;
     let dispatches: Option<Vec<Value>> = census.then(|| dispatch_census_take().into_iter().map(|d|
-        json!({"kernel":d.kernel,"grid":[d.grid_width,d.grid_height,d.grid_depth],
+        json!({"kernel":d.kernel,"tag":d.tag,"grid":[d.grid_width,d.grid_height,d.grid_depth],
             "threads":[d.threads_width,d.threads_height,d.threads_depth],"concurrent":d.encoder_concurrent})).collect());
     event.as_object_mut().unwrap().extend(
         json!({"wall_ms":wall_ms,"gpu_start_s":gpu_start,"gpu_end_s":gpu_end,
@@ -588,6 +599,175 @@ fn representative(ctx: &MetalContext, gguf: &GgufFile, d: &TensorDesc, out: &mut
     }
 }
 
+// Full compressed embedding only. Retained positional reads avoid a full CPU
+// payload copy; each CPU oracle decodes just one actual vocabulary row.
+fn embedding_gather(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    d: &TensorDesc,
+    out: &mut File,
+    corpus_ids: &[i32],
+    corpus_origins: &[Value],
+) {
+    assert_eq!(d.dtype, GgmlType::IQ1_M);
+    let (k, vocab, row_bytes) = dimensions(d);
+    let ids: Vec<i32> = [0, vocab / 2, vocab - 1, vocab / 2, 0, vocab - 1]
+        .into_iter()
+        .map(|id| i32::try_from(id).unwrap())
+        .collect();
+    assert_eq!(corpus_ids.len(), ids.len());
+    assert_eq!(corpus_origins.len(), corpus_ids.len());
+    assert!(
+        corpus_ids
+            .iter()
+            .all(|&id| id >= 0 && (id as usize) < vocab)
+    );
+    let transaction = ctx.begin_allocation_transaction();
+    admit(
+        ctx,
+        out,
+        "embedding_gather",
+        &d.name,
+        &[
+            ("native_embedding", d.n_bytes),
+            ("ids_N6", (ids.len() * 4) as u64),
+            ("output_N6", (k * ids.len() * 4) as u64),
+        ],
+        &[
+            ("compressed_read_chunk", (READ * 4) as u64),
+            (
+                "one_compressed_row_and_codec_alignment",
+                (2 * row_bytes) as u64,
+            ),
+            ("one_decoded_row", (k * 4) as u64),
+            ("diagnostic_metadata", META_CPU),
+        ],
+    );
+    let mut native = MetalTensor {
+        buffer: ctx
+            .buffer_uninit(usize::try_from(d.n_bytes).unwrap())
+            .unwrap(),
+        offset: 0,
+        shape: d.shape.clone(),
+        dtype: d.dtype,
+        provenance: MetalTensorProvenance::OwnedWritable,
+    };
+    let mut bytes = vec![0u8; READ * 4];
+    let mut hash = Sha256::new();
+    let mut offset = 0u64;
+    while offset < d.n_bytes {
+        let count = (d.n_bytes - offset).min(bytes.len() as u64) as usize;
+        gguf.read_shard_exact_at(d.shard_idx, d.data_offset + offset, &mut bytes[..count])
+            .unwrap();
+        hash.update(&bytes[..count]);
+        // SAFETY: exclusive initialization; the checked range is within the
+        // newly allocated native buffer and no command references it yet.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                native
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(offset as usize),
+                count,
+            );
+        }
+        offset += count as u64;
+    }
+    drop(bytes);
+    native.provenance = MetalTensorProvenance::OwnedWeightReadOnly;
+    let ids_gpu = MetalTensor::from_bytes(
+        ctx,
+        bytemuck::cast_slice(&ids),
+        vec![ids.len() as u64],
+        GgmlType::I32,
+    )
+    .unwrap();
+    let y = MetalTensor::zeros_f32(ctx, vec![k as u64, ids.len() as u64]).unwrap();
+    drop(transaction);
+    emit(
+        out,
+        json!({"event":"embedding_gather_binding","tensor":descriptor(d),"ids":ids,
+        "corpus_ids":corpus_ids,"corpus_origins":corpus_origins,
+        "corpus_ids_sha256_i32_le":sha(bytemuck::cast_slice(corpus_ids)),
+        "source_payload_sha256":format!("{:x}",hash.finalize()),"native_buffer_bytes":native.buffer.length(),
+        "full_cpu_compressed_weight_bytes":0,"full_cpu_f32_weight_bytes":0,"f32_gpu_embedding_bytes":0,
+        "read_chunk_bytes":READ*4,"oracle":"canonical CPU codec, one selected vocabulary row at a time"}),
+    );
+    let mut compressed_row = vec![0u8; row_bytes];
+    let row_desc = TensorDesc {
+        name: d.name.clone(),
+        shape: vec![k as u64, 1],
+        dtype: d.dtype,
+        shard_idx: 0,
+        data_offset: 0,
+        n_bytes: row_bytes as u64,
+    };
+    let probes = [
+        ("anchors_N1", &ids[..1], None),
+        ("anchors_N6", ids.as_slice(), None),
+        ("whole_corpus_N6", corpus_ids, Some(corpus_origins)),
+    ];
+    for (probe, batch_ids, origins) in probes {
+        let n = batch_ids.len();
+        // SAFETY: owned writable IDs buffer; n<=6 was checked, and the prior
+        // command completed before this overwrite. Reuse the same allocations.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                batch_ids.as_ptr(),
+                ids_gpu.buffer.contents().as_ptr().cast::<i32>(),
+                n,
+            );
+        }
+        let id_view = ids_gpu.view_subrange(0, vec![n as u64]);
+        let mut y_view = y.view_subrange(0, vec![k as u64, n as u64]);
+        initialize(&mut y_view, |_| f32::NAN);
+        command(
+            ctx,
+            out,
+            json!({"event":"embedding_gather_attempt","tensor":d.name,"N":n,"K":k,
+            "probe":probe,"ids":batch_ids,"ids_sha256_i32_le":sha(bytemuck::cast_slice(batch_ids)),
+            "origins":origins,"measured":false,"comparison":"CPU selected-row oracle; every row coefficient, no F32 GPU table"}),
+            true,
+            |enc| encode_get_rows_iq1_m_f32(ctx, enc, &native, &id_view, &y_view, n, k),
+        );
+        let values = f32_values(&y_view);
+        for (slot, &id) in batch_ids.iter().enumerate() {
+            let source_offset = d.data_offset + id as u64 * row_bytes as u64;
+            gguf.read_shard_exact_at(d.shard_idx, source_offset, &mut compressed_row)
+                .unwrap();
+            let decoded = dequant_to_f32(&row_desc, &compressed_row).unwrap();
+            let actual = &values[slot * k..(slot + 1) * k];
+            let mut difference = Difference::default();
+            let mut nonfinite = 0;
+            let mut unequal_values = 0;
+            for (&reference, &value) in decoded.iter().zip(actual) {
+                if reference.is_finite() && value.is_finite() {
+                    difference.add(f64::from(reference), f64::from(value));
+                    unequal_values += usize::from(reference != value);
+                } else {
+                    nonfinite += 1;
+                }
+            }
+            emit(
+                out,
+                json!({"event":"embedding_gather_comparison","tensor":d.name,"N":n,"slot":slot,"id":id,
+                "probe":probe,"origin":origins.map(|o| &o[slot]),
+                "source_offset":source_offset,"source_row_sha256":sha(&compressed_row),
+                "cpu_f32_sha256":sha(bytemuck::cast_slice(&decoded)),"native_f32_sha256":sha(bytemuck::cast_slice(actual)),
+                "elements":k,"nonfinite_pairs":nonfinite,"unequal_values":unequal_values,"difference":difference.json(),
+                "numerical_decision":"unscored_no_bit_or_error_threshold_gate"}),
+            );
+            assert_eq!(
+                nonfinite, 0,
+                "nonfinite embedding gather; raw comparison flushed"
+            );
+        }
+    }
+}
+
 #[test]
 fn iq_capacity_cpu_bookkeeping() {
     assert_eq!(anchors(1), vec![0]);
@@ -620,31 +800,51 @@ fn iq_capacity_packet() {
     let dtype = match std::env::var("IQ_CAPACITY_DTYPE").as_deref() {
         Ok("iq2_xs") => GgmlType::IQ2_XS,
         Ok("iq2_xxs") => GgmlType::IQ2_XXS,
-        _ => panic!("IQ_CAPACITY_DTYPE must be iq2_xs or iq2_xxs"),
+        Ok("iq1_s") => GgmlType::IQ1_S,
+        Ok("iq1_m") => GgmlType::IQ1_M,
+        _ => panic!("IQ_CAPACITY_DTYPE must be iq2_xs, iq2_xxs, iq1_s or iq1_m"),
     };
     let mut out = File::options()
         .write(true)
         .create_new(true)
         .open(std::env::var_os("IQ_CAPACITY_OUT").expect("IQ_CAPACITY_OUT required"))
         .expect("new output file required");
-    let _lease = acquire_metal_benchmark_lease().expect("production GPU lease");
-    let ctx = MetalContext::new().unwrap();
     let path = std::env::var_os("IQ_CAPACITY_GGUF").unwrap_or_else(|| ARTIFACT.into());
     let gguf = GgufFile::open(path).unwrap();
+    // Same metadata-only vocabulary initialization as the whole packet, before
+    // Metal context/admission. The helper drops the tokenizer and full streams.
+    let gather_probe = (dtype == GgmlType::IQ1_M)
+        .then(|| super::iq_capacity_model::qualification_gather_ids(&gguf));
     let stamps = gguf.revalidate_retained_shard_stamps().unwrap();
+    let _lease = acquire_metal_benchmark_lease().expect("production GPU lease");
+    let ctx = MetalContext::new().unwrap();
     let cohort: Vec<_> = gguf.tensors.iter().filter(|d| d.dtype == dtype).collect();
-    let expected = if dtype == GgmlType::IQ2_XS { 39 } else { 119 };
+    let expected = match dtype {
+        GgmlType::IQ2_XS => 39,
+        GgmlType::IQ2_XXS => 119,
+        GgmlType::IQ1_S => 36,
+        GgmlType::IQ1_M => 31,
+        _ => unreachable!(),
+    };
     let inventory: Vec<_> = cohort.iter().map(|d| descriptor(d)).collect();
-    let shapes = if dtype == GgmlType::IQ2_XS {
-        [
+    let shapes = match dtype {
+        GgmlType::IQ2_XS => [
             ("ffn_gate.weight", 5120, 17408),
             ("ssm_out.weight", 6144, 5120),
-        ]
-    } else {
-        [
+        ],
+        GgmlType::IQ2_XXS => [
             ("ffn_down.weight", 17408, 5120),
             ("ffn_gate.weight", 5120, 17408),
-        ]
+        ],
+        GgmlType::IQ1_S => [
+            ("ffn_gate.weight", 5120, 17408),
+            ("ffn_down.weight", 17408, 5120),
+        ],
+        GgmlType::IQ1_M => [
+            ("ffn_up.weight", 5120, 17408),
+            ("ffn_down.weight", 17408, 5120),
+        ],
+        _ => unreachable!(),
     };
     let representatives: Vec<_> = shapes
         .iter()
@@ -663,9 +863,24 @@ fn iq_capacity_packet() {
         .into_iter()
         .map(|name| (name, std::env::var(name).ok()))
         .collect();
+    let source_binding: Value = json!({"packet":sha(include_bytes!("iq_capacity.rs")),"codec":sha(include_bytes!("../../codec.rs")),
+            "model_packet_corpus":sha(include_bytes!("iq_capacity_model.rs")),"tokenizer":sha(include_bytes!("../../tokenizer.rs")),
+            "gguf":sha(include_bytes!("../../gguf.rs")),"metal_module":sha(include_bytes!("../../metal/mod.rs")),
+            "mat_vec":sha(include_bytes!("../../metal/mat_vec.rs")),"mat_mat":sha(include_bytes!("../../metal/mat_mat.rs")),
+            "xxs_dispatch":sha(include_bytes!("../../metal/iq2_xxs.rs")),
+            "xxs_kernel":sha(include_bytes!("../../../../../kernels/iq2_xxs.metal")),
+            "xxs_grid":sha(include_bytes!("../../../../../kernels/iq2_xxs_grid.metalh")),
+            "iq1_dispatch":sha(include_bytes!("../../metal/iq1.rs")),
+            "iq1_kernel_decoder":sha(include_bytes!("../../../../../kernels/iq1.metal")),
+            "iq1_grid":sha(include_bytes!("../../../../../kernels/iq1_grid.metalh")),
+            "xs_grid":sha(include_bytes!("../../../../../kernels/iq2_xs_grid.metalh")),
+            "gemv_metal":sha(include_bytes!("../../../../../kernels/mat_vec.metal")),
+            "dispatch":sha(include_bytes!("../dispatch.rs")),"xs_gemm":sha(include_bytes!("../../../../../kernels/mat_mat_iq2_xs.metal")),
+            "metallib":sha(crate::KERNELS_METALLIB)});
     emit(
         &mut out,
-        json!({"event":"header","schema":"iq_capacity.primitive.v1","device":ctx.describe(),"dtype":format!("{:?}",dtype),
+        json!({"event":"header","schema":"iq_capacity.primitive.v2","device":ctx.describe(),"dtype":format!("{:?}",dtype),
+        "canonical_storage_layout":dtype.storage_layout(),"embedding_gather":dtype==GgmlType::IQ1_M,
         "cohort_count":cohort.len(),"expected_saluki_count":expected,"shards":shards,
         "cohort_source_bytes":source,"cohort_converted_f32_bytes":inflated,"cohort_native_logical_bytes":source,
         "cohort_avoidable_persistent_logical_bytes":inflated-source,
@@ -674,22 +889,13 @@ fn iq_capacity_packet() {
         "order":["warm_A","warm_B","B1","A1","A2","B2"],
         "policy":"A canonical CPU-decoded F32 via public F32 GEMV/GEMM; B public native IQ GEMV/GEMM including its automatic selection; no residency-policy dependency",
         "comparisons":"A1 versus B1, then A2 repeat/B2 native versus A1; each arm also has sampled CPU-codec F64 dot products",
-        "scope":"all selected tensors: 3 physical rows, N1/N3; performance: two whole representative matrices only; deterministic synthetic activations; no model/session/tokenizer/loader realization",
+        "scope":"all selected tensors including embedding: 3 physical rows, N1/N3; performance: two whole representative matrices; IQ1_M gather: anchor N1/N6 plus one N6 actual whole-corpus token batch, CPU every-coefficient oracle, no full F32 table; tokenizer metadata only, no model/session/loader realization",
         "capacity":"logical avoided inflation, not measured full-model RSS; both representative weight formats coexist solely for A/B; no whole CPU weight copies",
         "timing":"ordinary single command per attempt; warm arms census on, measured arms census off; initialization/readback/CPU oracle excluded; GPU time includes stalls",
         "decision":"unscored_diagnostic_no_promotion_or_bit_gate",
         "xxs_selection":"public Auto with capability fallback; no environment override",
         "env":kernel_env,
-        "source_binding":{"packet":sha(include_bytes!("iq_capacity.rs")),"codec":sha(include_bytes!("../../codec.rs")),
-            "gguf":sha(include_bytes!("../../gguf.rs")),"metal_module":sha(include_bytes!("../../metal/mod.rs")),
-            "mat_vec":sha(include_bytes!("../../metal/mat_vec.rs")),"mat_mat":sha(include_bytes!("../../metal/mat_mat.rs")),
-            "xxs_dispatch":sha(include_bytes!("../../metal/iq2_xxs.rs")),
-            "xxs_kernel":sha(include_bytes!("../../../../../kernels/iq2_xxs.metal")),
-            "xxs_grid":sha(include_bytes!("../../../../../kernels/iq2_xxs_grid.metalh")),
-            "xs_grid":sha(include_bytes!("../../../../../kernels/iq2_xs_grid.metalh")),
-            "gemv_metal":sha(include_bytes!("../../../../../kernels/mat_vec.metal")),
-            "dispatch":sha(include_bytes!("../dispatch.rs")),"xs_gemm":sha(include_bytes!("../../../../../kernels/mat_mat_iq2_xs.metal")),
-            "metallib":sha(crate::KERNELS_METALLIB)}}),
+        "source_binding":source_binding}),
     );
     assert_eq!(
         cohort.len(),
@@ -736,10 +942,21 @@ fn iq_capacity_packet() {
     for d in representatives {
         representative(&ctx, &gguf, d, &mut out);
     }
+    if dtype == GgmlType::IQ1_M {
+        let embedding = cohort
+            .iter()
+            .find(|d| d.name == "token_embd.weight")
+            .expect("IQ1_M cohort must contain the real token embedding");
+        let (ids, origins) = gather_probe
+            .as_ref()
+            .expect("whole-corpus gather IDs prepared");
+        embedding_gather(&ctx, &gguf, embedding, &mut out, ids, origins);
+    }
     assert_eq!(stamps, gguf.revalidate_retained_shard_stamps().unwrap());
     emit(
         &mut out,
-        json!({"event":"complete","schema":"iq_capacity.primitive.v1","tensors_sampled":cohort.len(),
-        "performance_attempts":72,"decision":"unscored_diagnostic_no_model_capacity_or_quality_claim"}),
+        json!({"event":"complete","schema":"iq_capacity.primitive.v2","tensors_sampled":cohort.len(),
+        "performance_attempts":72,"embedding_gather_attempts":if dtype==GgmlType::IQ1_M {3} else {0},
+        "decision":"unscored_diagnostic_no_model_capacity_or_quality_claim"}),
     );
 }

@@ -72,10 +72,14 @@ not a global whitelist change or a GPU-memory-limit increase. Scope, verified
 inventory and qualification plan: `docs/IQ-QUANT-NATIVE-CAPACITY.md`.
 
 Native dense IQ2_XS/IQ2_XXS now realize **39.533 GiB less logical weight
-storage** on Saluki:26.539 GiB remains, with67 IQ1 conversions. Role isolation,
+storage** on Saluki:26.539 GiB remained at the IQ2 checkpoint, with67 IQ1 conversions. Role isolation,
 ordinary concurrent projections, packed tails and short continuation qualify.
-Next: IQ1_M matrix/embedding and IQ1_S matrix support, not a claim that XS/XXS
-alone reaches file-size residency. Evidence: `docs/bench/2026-10-08-native-iq-capacity/`.
+Follow-up also complete: IQ1_M matrices/embedding and IQ1_S matrices eliminate
+the remaining conversions. Saluki now realizes7.345690 GiB logical weights,
+851 direct bindings andzero conversions (58.726997 GiB saved versus oldplan).
+Whole and independent embedding checks pass; loaded RSS14.900940 GiB and
+physical footprint7.513699 GiB stay separate from logical storage. Evidence:
+`docs/bench/2026-10-08-native-iq-capacity/`.
 Separate small follow-up: shared session pricing undercounts actual allocation
 by595,168 bytes in that packet; its retained2 GiB reserve covers the difference.
 

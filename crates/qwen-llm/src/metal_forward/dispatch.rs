@@ -21,11 +21,11 @@ pub(super) fn matmat_bf16_bfloat_act_enabled() -> bool {
     *ENABLED.get_or_init(|| crate::env_flag::read_default_on("QWEN_MATMAT_BF16_BFLOAT_ACT"))
 }
 
-/// IQ2_XXS primitives deliberately require exact vector/matrix ranks. Packed
+/// IQ1/IQ2_XXS primitives deliberately require exact vector/matrix ranks. Packed
 /// callers may supply flat scratch views (including unused trailing capacity).
 /// Check the source's physical extent and logical prefix before view_subrange,
 /// which asserts rather than returning an error. No activation/weight copy.
-pub(super) fn iq2_xxs_dispatch_views(
+pub(super) fn native_iq_dispatch_views(
     x: &MetalTensor,
     y: &MetalTensor,
     k: usize,
@@ -34,7 +34,7 @@ pub(super) fn iq2_xxs_dispatch_views(
     matrix: bool,
 ) -> Result<(MetalTensor, MetalTensor), MfError> {
     let bad = |detail: String| MetalError::BadShape {
-        kernel: "iq2_xxs_dispatch",
+        kernel: "native_iq_dispatch",
         detail,
     };
     for (name, dim) in [("K", k), ("M", m), ("N", n)] {
@@ -93,10 +93,18 @@ pub fn encode_mat_vec_dispatch(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MfError> {
-    if weight.dtype == GgmlType::IQ2_XXS {
-        // The XXS primitive records the normalized ranges itself. Do not also
+    if matches!(
+        weight.dtype,
+        GgmlType::IQ2_XXS | GgmlType::IQ1_S | GgmlType::IQ1_M
+    ) {
+        // The native IQ primitive records the normalized ranges itself. Do not also
         // run generic notes: duplicate writes would trigger concurrent hazards.
-        let (x, y) = iq2_xxs_dispatch_views(x, y, n_in, n_out, 1, false)?;
+        let (x, y) = native_iq_dispatch_views(x, y, n_in, n_out, 1, false)?;
+        if matches!(weight.dtype, GgmlType::IQ1_S | GgmlType::IQ1_M) {
+            return Ok(crate::metal::encode_mat_vec_iq1_f32(
+                ctx, enc, weight, &x, &y, n_in, n_out,
+            )?);
+        }
         return Ok(crate::metal::encode_mat_vec_iq2_xxs_f32(
             ctx, enc, weight, &x, &y, n_in, n_out,
         )?);
@@ -539,8 +547,14 @@ fn encode_mat_mat_dispatch_routed(
         GgmlType::IQ2_XS => Ok(crate::metal::encode_mat_mat_iq2_xs_f32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
         )?),
+        GgmlType::IQ1_S | GgmlType::IQ1_M => {
+            let (x, y) = native_iq_dispatch_views(x, y, n_in, n_out, n_query, true)?;
+            Ok(crate::metal::encode_mat_mat_iq1_f32(
+                ctx, enc, weight, &x, &y, n_in, n_out, n_query,
+            )?)
+        }
         GgmlType::IQ2_XXS => {
-            let (x, y) = iq2_xxs_dispatch_views(x, y, n_in, n_out, n_query, true)?;
+            let (x, y) = native_iq_dispatch_views(x, y, n_in, n_out, n_query, true)?;
             Ok(crate::metal::encode_mat_mat_iq2_xxs_f32(
                 ctx, enc, weight, &x, &y, n_in, n_out, n_query,
             )?)

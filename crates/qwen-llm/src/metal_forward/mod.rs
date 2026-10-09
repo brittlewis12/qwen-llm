@@ -1982,6 +1982,9 @@ impl<'a> MetalWeightLoader<'a> {
         desc: &TensorDesc,
         native_quant: bool,
     ) -> Result<MetalTensor, MfError> {
+        if native_quant && desc.dtype == GgmlType::IQ1_M {
+            validate_native_iq_matrix_storage(desc)?;
+        }
         if matches!(desc.dtype, GgmlType::F32 | GgmlType::F16 | GgmlType::BF16) || native_quant {
             self.load_direct(desc)
         } else {

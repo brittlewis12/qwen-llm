@@ -3,17 +3,15 @@
 //! The oracle analyzes exact decoded token bytes. It does not load model
 //! weights, execute Metal work, or estimate model probabilities.
 
-mod response_shape_runtime;
-
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
-use qwen_llm::gguf::GgufFile;
-use qwen_llm::tokenizer::NativeTokenizer;
-use response_shape_runtime::{
+use qwen_cli::response_shape_runtime::{
     CLAIM_SCOPE as RUNTIME_CLAIM_SCOPE, ResponseShapeRuntime, RuntimeCanonicalPath, RuntimeCounts,
     RuntimeEdge, RuntimeFingerprints, RuntimeState, RuntimeStateKind, SCHEMA as RUNTIME_SCHEMA,
     derive_path_bounds,
 };
+use qwen_llm::gguf::GgufFile;
+use qwen_llm::tokenizer::NativeTokenizer;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

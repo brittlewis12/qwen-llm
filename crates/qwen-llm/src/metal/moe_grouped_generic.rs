@@ -200,6 +200,35 @@ fn encode_generic_mm(
     max_count: u32,
 ) -> Result<(), MetalError> {
     debug_assert!(role != MoeGroupedGenericRole::Swiglu);
+    let args = generic_mm_args(
+        kernel, weight, src, counts, ids, out, n_in, n_out, n_expert, n_tokens, b_div, min_count,
+        max_count,
+    )?;
+    let name = moe_grouped_generic_pipeline_name(role, weight.dtype)
+        .expect("layout lookup succeeded in generic_mm_args");
+    dispatch_generic_mm(
+        ctx, enc, &name, 8192, &args, weight, src, counts, ids, out, n_out, n_expert, n_tokens,
+    )
+}
+
+/// Checked arguments of one grouped mat-mat (the generic and F32-operand
+/// down tiles share them).
+#[allow(clippy::too_many_arguments)]
+fn generic_mm_args(
+    kernel: &'static str,
+    weight: &MetalTensor,
+    src: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    n_tokens: usize,
+    b_div: usize,
+    min_count: u32,
+    max_count: u32,
+) -> Result<GenericMmArgs, MetalError> {
     let l = generic_layout_for(kernel, weight, n_in, n_out, n_expert)?;
     if n_out == 0 || b_div == 0 || n_tokens == 0 || n_expert == 0 {
         return Err(MetalError::BadShape {
@@ -231,30 +260,44 @@ fn encode_generic_mm(
             ),
         });
     }
-    let name = moe_grouped_generic_pipeline_name(role, weight.dtype)
-        .expect("layout lookup succeeded above");
-    let pso = ctx.pipeline(&name)?;
+    Ok(GenericMmArgs {
+        m: n_out as u32,
+        n: n_tokens as u32,
+        k: n_in as u32,
+        nb01: ((n_in / l.block_elems) * l.block_bytes) as u32,
+        stride_b: n_in as u32,
+        min_count,
+        max_count,
+        b_div: b_div as u32,
+        slot_limit: slot_count as u32,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_generic_mm(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    name: &str,
+    threadgroup_bytes: usize,
+    args: &GenericMmArgs,
+    weight: &MetalTensor,
+    src: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    out: &MetalTensor,
+    n_out: usize,
+    n_expert: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    let pso = ctx.pipeline(name)?;
     enc.set_pipeline(&pso);
-    enc.set_bytes(
-        0,
-        &GenericMmArgs {
-            m: n_out as u32,
-            n: n_tokens as u32,
-            k: n_in as u32,
-            nb01: ((n_in / l.block_elems) * l.block_bytes) as u32,
-            stride_b: n_in as u32,
-            min_count,
-            max_count,
-            b_div: b_div as u32,
-            slot_limit: slot_count as u32,
-        },
-    );
+    enc.set_bytes(0, args);
     enc.set_tensor(1, weight);
     enc.set_tensor(2, src);
     enc.set_tensor(3, counts);
     enc.set_tensor(4, ids);
     enc.set_tensor(5, out);
-    enc.set_threadgroup_memory(0, 8192);
+    enc.set_threadgroup_memory(0, threadgroup_bytes);
     enc.dispatch(
         MTLSize {
             width: n_tokens.div_ceil(32),
@@ -488,7 +531,37 @@ fn encode_fused_swiglu(
             })?
         }
     };
-    let pso = ctx.pipeline(&name)?;
+    dispatch_fused_swiglu(
+        ctx, enc, &name, 16384, l, w_gate, w_up, x_pack, counts, ids, inner, n_hidden, n_ffn,
+        n_expert, topk, n_tokens, min_count, max_count, clamp,
+    )
+}
+
+/// One fused gate/up dispatch of the half-staged or F32-operand grouped
+/// SwiGLU (same arguments, buffers and grid).
+#[allow(clippy::too_many_arguments)]
+fn dispatch_fused_swiglu(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    name: &str,
+    threadgroup_bytes: usize,
+    l: MoeGroupedGenericLayout,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+    min_count: u32,
+    max_count: u32,
+    clamp: Option<f32>,
+) -> Result<(), MetalError> {
+    let pso = ctx.pipeline(name)?;
     enc.set_pipeline(&pso);
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -526,7 +599,7 @@ fn encode_fused_swiglu(
     if let Some(clamp) = clamp {
         enc.set_bytes(7, &clamp);
     }
-    enc.set_threadgroup_memory(0, 16384);
+    enc.set_threadgroup_memory(0, threadgroup_bytes);
     enc.dispatch(
         MTLSize {
             width: n_tokens.div_ceil(16),
@@ -662,6 +735,152 @@ pub fn encode_moe_swiglu_f32_grouped_slots_generic(
         n_tokens,
         0,
         i32::MAX as u32,
+    )
+}
+
+/// F32-operand grouped down projection (`kernels/moe_grouped_f32.metal`,
+/// map #12 accuracy lane): the contract of
+/// [`encode_moe_down_f32_grouped_slots_generic`] with weights dequantized to
+/// F32 (ggml's order), unrounded activations and F32 accumulation, for the
+/// GLM-5.3 down types IQ3_S and IQ4_XS. Each slot's outputs depend only on
+/// its own activation row: not on its expert's count nor on its place in the
+/// bucket. Activation rows are read as `float2x4`; callers keep `inner`
+/// 16-byte aligned. 12 KiB of threadgroup memory.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_moe_down_f32x_grouped_slots(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "moe_down_f32x_grouped_slots";
+    let name = match weight.dtype {
+        GgmlType::IQ3_S => "kernel_moe_down_iq3_s_f32x_grouped_slots",
+        GgmlType::IQ4_XS => "kernel_moe_down_iq4_xs_f32x_grouped_slots",
+        other => {
+            return Err(MetalError::BadShape {
+                kernel: KERNEL,
+                detail: format!("no F32-operand grouped down for {other:?}"),
+            });
+        }
+    };
+    let args = generic_mm_args(
+        KERNEL,
+        weight,
+        inner,
+        counts,
+        ids,
+        out,
+        n_in,
+        n_out,
+        n_expert,
+        n_tokens,
+        1,
+        0,
+        i32::MAX as u32,
+    )?;
+    dispatch_generic_mm(
+        ctx,
+        enc,
+        name,
+        12 * 1024,
+        &args,
+        weight,
+        inner,
+        counts,
+        ids,
+        out,
+        n_out,
+        n_expert,
+        n_tokens,
+    )
+}
+
+/// F32-operand grouped gate/up with the clamped SwiGLU epilogue
+/// (`kernels/moe_grouped_f32.metal`, map #12 accuracy lane): the contract of
+/// [`encode_moe_swiglu_clamped_f32_grouped_slots_generic`] with weights
+/// dequantized to F32, unrounded activations and F32 accumulation, for the
+/// GLM-5.3 gate/up types IQ2_S and IQ3_S. 18 KiB of threadgroup memory.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_moe_swiglu_clamped_f32x_grouped_slots(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+    clamp: f32,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "moe_swiglu_clamped_f32x_grouped_slots";
+    let bad = |detail: String| MetalError::BadShape {
+        kernel: KERNEL,
+        detail,
+    };
+    if !clamp.is_finite() || clamp <= 0.0 {
+        return Err(bad(format!(
+            "clamp must be finite and positive, got {clamp}"
+        )));
+    }
+    if w_gate.dtype != w_up.dtype {
+        return Err(bad(format!(
+            "gate/up dtypes differ: {:?}/{:?}",
+            w_gate.dtype, w_up.dtype
+        )));
+    }
+    let name = match w_gate.dtype {
+        GgmlType::IQ2_S => "kernel_moe_swiglu_clamped_iq2_s_f32x_grouped_slots",
+        GgmlType::IQ3_S => "kernel_moe_swiglu_clamped_iq3_s_f32x_grouped_slots",
+        other => return Err(bad(format!("no F32-operand grouped SwiGLU for {other:?}"))),
+    };
+    if topk == 0
+        || n_ffn == 0
+        || n_tokens == 0
+        || n_expert == 0
+        || x_pack.n_elements() as usize != n_tokens * n_hidden
+        || counts.n_elements() as usize != n_expert
+        || ids.n_elements() as usize != n_expert * n_tokens
+        || inner.n_elements() as usize != n_tokens * topk * n_ffn
+    {
+        return Err(bad(
+            "degenerate shape or x/counts/ids/inner size mismatch".into()
+        ));
+    }
+    let l = generic_layout_for(KERNEL, w_gate, n_hidden, n_ffn, n_expert)?;
+    generic_layout_for(KERNEL, w_up, n_hidden, n_ffn, n_expert)?;
+    dispatch_fused_swiglu(
+        ctx,
+        enc,
+        name,
+        18 * 1024,
+        l,
+        w_gate,
+        w_up,
+        x_pack,
+        counts,
+        ids,
+        inner,
+        n_hidden,
+        n_ffn,
+        n_expert,
+        topk,
+        n_tokens,
+        0,
+        i32::MAX as u32,
+        Some(clamp),
     )
 }
 

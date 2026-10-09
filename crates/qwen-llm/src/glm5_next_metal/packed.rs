@@ -14,9 +14,10 @@
 
 use super::*;
 use crate::metal::{
-    GroupedDownPolicy, GroupedExperts, encode_grouped_routed_experts_with_down_policy,
-    encode_indexer_append_rows, encode_kda_prefill, encode_mhc4_post_rows, encode_mhc4_repeat_rows,
-    encode_rms_norm_mul_rows_f32, encode_route_learned_rows,
+    GroupedDownPolicy, GroupedExperts, encode_grouped_routed_experts_f32x,
+    encode_grouped_routed_experts_with_down_policy, encode_indexer_append_rows, encode_kda_prefill,
+    encode_mhc4_post_rows, encode_mhc4_repeat_rows, encode_rms_norm_mul_rows_f32,
+    encode_route_learned_rows,
 };
 use objc2_metal::MTLComputePipelineState;
 
@@ -135,9 +136,21 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Test-only census of [`StageMode::FastF32`] projections on this thread:
-/// per weight dtype, how many took an F32-operand tile (`true`) and how many
-/// fell back to the half-staged form (`false`). Recording stops on drop.
+/// Counts one [`StageMode::FastF32`] call under `label` (a weight dtype, or
+/// "routed experts") while an [`F32Census`] is active.
+#[cfg(test)]
+fn record_f32_census(label: String, taken: bool) {
+    F32_CENSUS.with(|census| {
+        if let Some(census) = census.borrow_mut().as_mut() {
+            *census.entry((label, taken)).or_default() += 1;
+        }
+    });
+}
+
+/// Test-only census of [`StageMode::FastF32`] calls on this thread: per
+/// weight dtype of a projection (and "routed experts"), how many took an
+/// F32-operand tile (`true`) and how many fell back to the half-staged form
+/// (`false`). Recording stops on drop.
 #[cfg(test)]
 pub(super) struct F32Census(());
 
@@ -191,11 +204,14 @@ pub(super) enum F32Tile {
     Q8_0,
     /// `encode_mat_mat_q6_k_f32_mm64x32` (`n_in % 256`).
     Q6K,
+    /// `encode_grouped_routed_experts_f32x` (gate/up IQ2_S or IQ3_S, down
+    /// IQ3_S or IQ4_XS).
+    RoutedExperts,
 }
 
 impl F32Tile {
     #[cfg(test)]
-    pub(super) const ALL: [F32Tile; 2] = [F32Tile::Q8_0, F32Tile::Q6K];
+    pub(super) const ALL: [F32Tile; 3] = [F32Tile::Q8_0, F32Tile::Q6K, F32Tile::RoutedExperts];
 
     #[cfg(test)]
     fn bit(self) -> u8 {
@@ -229,12 +245,7 @@ pub(super) struct F32Stages(u16, u8);
 
 #[cfg(test)]
 impl F32Stages {
-    /// Every F32-operand tile.
-    pub(super) fn set(stages: &[Stage]) -> Self {
-        Self::with_tiles(stages, &F32Tile::ALL)
-    }
-
-    /// Only `tiles`; other weight types stay half-staged.
+    /// `stages` may take only `tiles`; other calls stay half-staged.
     pub(super) fn with_tiles(stages: &[Stage], tiles: &[F32Tile]) -> Self {
         let bits = stages.iter().fold(0, |bits, stage| bits | stage.bit());
         let tile_bits = tiles.iter().fold(0, |bits, tile| bits | tile.bit());
@@ -640,13 +651,7 @@ fn matmat(
             _ => false,
         };
         #[cfg(test)]
-        F32_CENSUS.with(|census| {
-            if let Some(census) = census.borrow_mut().as_mut() {
-                *census
-                    .entry((format!("{:?}", weight.dtype), f32_tile))
-                    .or_default() += 1;
-            }
-        });
+        record_f32_census(format!("{:?}", weight.dtype), f32_tile);
         if f32_tile {
             return Ok(());
         }
@@ -1161,41 +1166,74 @@ impl Glm5NextSession<'_> {
                             )?;
                         }
                     } else {
-                        encode_grouped_routed_experts_with_down_policy(
-                            ctx,
-                            &enc,
-                            &GroupedExperts {
-                                gate_bank: &moe.gate_experts,
-                                up_bank: &moe.up_experts,
-                                down_bank: &moe.down_experts,
-                                input: &v(&p.normed),
-                                ids: &route_ids,
-                                weights: &route_weights,
-                                counts: &p.counts,
-                                slots: &flat(&p.slots, e * rows),
-                                inner: &p.inner.view_subrange(0, vec![f as u64, (k * rows) as u64]),
-                                slot_out: &p
-                                    .slot_out
-                                    .view_subrange(0, vec![h as u64, (k * rows) as u64]),
-                                output: &v(&p.routed),
-                            },
-                            h,
-                            f,
-                            e,
-                            k,
-                            rows,
-                            c.swiglu_clamp,
-                            grouped_down_policy(p.lineage, moe.down_experts.dtype, f, h, e, rows),
-                        )?;
+                        let grouped = GroupedExperts {
+                            gate_bank: &moe.gate_experts,
+                            up_bank: &moe.up_experts,
+                            down_bank: &moe.down_experts,
+                            input: &v(&p.normed),
+                            ids: &route_ids,
+                            weights: &route_weights,
+                            counts: &p.counts,
+                            slots: &flat(&p.slots, e * rows),
+                            inner: &p.inner.view_subrange(0, vec![f as u64, (k * rows) as u64]),
+                            slot_out: &p
+                                .slot_out
+                                .view_subrange(0, vec![h as u64, (k * rows) as u64]),
+                            output: &v(&p.routed),
+                        };
+                        let f32_mode =
+                            stage_mode(p.lineage, Stage::RoutedExperts) == StageMode::FastF32;
+                        let f32_taken = f32_mode
+                            && f32_tile_enabled(F32Tile::RoutedExperts)
+                            && moe.gate_experts.dtype == moe.up_experts.dtype
+                            && matches!(moe.gate_experts.dtype, GgmlType::IQ2_S | GgmlType::IQ3_S)
+                            && matches!(moe.down_experts.dtype, GgmlType::IQ3_S | GgmlType::IQ4_XS);
                         #[cfg(test)]
-                        expert_down::after_grouped(
-                            ctx,
-                            &enc,
-                            index,
-                            rows,
-                            moe.down_experts.dtype,
-                            p,
-                        )?;
+                        if f32_mode {
+                            record_f32_census("routed experts".into(), f32_taken);
+                        }
+                        if f32_taken {
+                            encode_grouped_routed_experts_f32x(
+                                ctx,
+                                &enc,
+                                &grouped,
+                                h,
+                                f,
+                                e,
+                                k,
+                                rows,
+                                c.swiglu_clamp,
+                            )?;
+                        } else {
+                            encode_grouped_routed_experts_with_down_policy(
+                                ctx,
+                                &enc,
+                                &grouped,
+                                h,
+                                f,
+                                e,
+                                k,
+                                rows,
+                                c.swiglu_clamp,
+                                grouped_down_policy(
+                                    p.lineage,
+                                    moe.down_experts.dtype,
+                                    f,
+                                    h,
+                                    e,
+                                    rows,
+                                ),
+                            )?;
+                            #[cfg(test)]
+                            expert_down::after_grouped(
+                                ctx,
+                                &enc,
+                                index,
+                                rows,
+                                moe.down_experts.dtype,
+                                p,
+                            )?;
+                        }
                     }
                     let sf = c.shared_expert_ffn_size as usize;
                     matmat(

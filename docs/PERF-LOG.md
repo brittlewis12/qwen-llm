@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-08 - GLM Fast Snapshots On by Default; Branches and New Sessions 58 s -> 0.5 s; Fast Accuracy Lane Opened
+
+- **Decision:** Fast snapshots are on by default (`b4c1e79f`;
+  `QWEN_GLM_FAST_SNAPSHOTS=0` turns them off). Grounds: the comparator for
+  enabling a schedule change is the schedule it replaces. Against unsplit
+  Fast (what serve already runs), every split arm's mean-NLL interval
+  includes zero and meets the cohort's limits (frontier long top-1 aside,
+  inconclusive on six documents); the preregistered comparison against
+  Exact was INCONCLUSIVE on one arm (0.0054 vs 0.005, Fast's own bound
+  being 0.0046). Withholding the split costs ~58 s per branch, new session
+  or return. This decision was taken after the results, on stated grounds;
+  it is not the preregistered qualification, which stays recorded as
+  INCONCLUSIVE.
+- **Rule for future schedule changes** (amending the adopted Fast policy):
+  a change to where Fast's prefill segments fall is preregistered as
+  non-inferiority against the incumbent Fast schedule at the cohort's
+  limits; a change to Fast's arithmetic keeps the comparison against Exact.
+- **Release screen** (`docs/bench/2026-10-08-glm53-fast-snapshot-screen/`,
+  opencode-shaped conversation, 11,104-token shared prefix): branch,
+  new-session and return requests restore in 5-11 ms and reach their first
+  delta in 0.50-1.73 s, against 57.7-59.6 s with snapshots off; one 28 ms
+  capture (0.27 GiB) on the cold request.
+- **Next: make Fast more accurate** (cx jam pending): the dense projection
+  families (KDA, MLA, shared expert, dense FFN; Q6_K/Q8_0) round both
+  activations and dequantized weights to half in their mat-mat tiles, and
+  the routed experts do the same; all-F32 Q8_0 tiles already exist (DS4,
+  GLM absorption), Q6_K and the expert tiles have none at prefill widths.
+
 ## 2026-10-08 - Saluki Now Loads Without Weight Inflation
 
 - Native IQ1_S/IQ1_M matrix execution plus qualified IQ1_M embedding gather
@@ -23,6 +51,7 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   independent source/data review approves. Autoembedding is scopeduntied27B;
   expert/head native policies remain unchanged. No whole-speedup/quality claim.
 - Raw v2 evidence and limits: `docs/bench/2026-10-08-native-iq-capacity/README.md`.
+
 
 ## 2026-10-08 - Native Dense IQ2 Cuts Saluki Logical Weights by 39.533 GiB
 
@@ -45,6 +74,7 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 - Next: IQ1_M matrices/embedding and IQ1_S matrices; remaining expansion
   ~19.194 GiB. Shared session-pricer undercount595,168 bytes is tracked
   separately; the existing2GiB reserve covered it in qualification.
+
 
 ## 2026-10-08 - #12/#15 Fast Shared-Prefix Split: INCONCLUSIVE; Fast Snapshots Stay Opt-In
 

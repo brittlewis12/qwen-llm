@@ -1,0 +1,216 @@
+{
+  "schema": "glm53.serve_agent_reuse_screen.v1",
+  "model": "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+  "shape": "opencode-shape-v1.json",
+  "effort": "low",
+  "max_context_tokens": 32768,
+  "requests": [
+    {
+      "label": "A1",
+      "kind": "cold",
+      "status": "completed",
+      "input_items": 1,
+      "reasoning_items_sent": 0,
+      "output_items": [
+        "reasoning",
+        "function_call",
+        "function_call"
+      ],
+      "usage": {
+        "input_tokens": 11129,
+        "output_tokens": 36,
+        "total_tokens": 11165,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "first_delta_s": 58.69447766710073,
+      "wall_s": 59.93711437564343,
+      "serve_phases": "serve phases: family=glm5_next prefill_ms=58612.6 reused_tokens=0 reuse_source=none restore_ms=0.0 boundary_ms=0.0 prefill_tokens=11129 decode_ms=1242.1 required_forwards=12152 capacity=32768 transitions=35 lineage=fast snapshot_schedule=none cuts=[] captures=[] snapshot_capture_ms=0.0 snapshot_cache_bytes=0 snapshot_cache_entries=0",
+      "reused_tokens": 0,
+      "prefill_tokens": 11129,
+      "prefill_ms": 58612.6,
+      "decode_ms": 1242.1
+    },
+    {
+      "label": "A2",
+      "kind": "continued",
+      "status": "completed",
+      "input_items": 6,
+      "reasoning_items_sent": 1,
+      "output_items": [
+        "reasoning",
+        "function_call"
+      ],
+      "usage": {
+        "input_tokens": 11207,
+        "output_tokens": 34,
+        "total_tokens": 11241,
+        "input_tokens_details": {
+          "cached_tokens": 11164
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "first_delta_s": 0.6484845420345664,
+      "wall_s": 1.8035628329962492,
+      "serve_phases": "serve phases: family=glm5_next prefill_ms=631.1 reused_tokens=11164 reuse_source=live restore_ms=0.0 boundary_ms=0.0 prefill_tokens=43 decode_ms=1154.6 required_forwards=12230 capacity=32768 transitions=33 lineage=fast snapshot_schedule=none cuts=[] captures=[] snapshot_capture_ms=0.0 snapshot_cache_bytes=0 snapshot_cache_entries=0",
+      "reused_tokens": 11164,
+      "prefill_tokens": 43,
+      "prefill_ms": 631.1,
+      "decode_ms": 1154.6
+    },
+    {
+      "label": "A3",
+      "kind": "continued",
+      "status": "completed",
+      "input_items": 9,
+      "reasoning_items_sent": 2,
+      "output_items": [
+        "reasoning",
+        "function_call"
+      ],
+      "usage": {
+        "input_tokens": 11266,
+        "output_tokens": 35,
+        "total_tokens": 11301,
+        "input_tokens_details": {
+          "cached_tokens": 11240
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "first_delta_s": 0.5631255842745304,
+      "wall_s": 1.7502278750762343,
+      "serve_phases": "serve phases: family=glm5_next prefill_ms=546.1 reused_tokens=11240 reuse_source=live restore_ms=0.0 boundary_ms=0.0 prefill_tokens=26 decode_ms=1186.7 required_forwards=12289 capacity=32768 transitions=34 lineage=fast snapshot_schedule=none cuts=[] captures=[] snapshot_capture_ms=0.0 snapshot_cache_bytes=0 snapshot_cache_entries=0",
+      "reused_tokens": 11240,
+      "prefill_tokens": 26,
+      "prefill_ms": 546.1,
+      "decode_ms": 1186.7
+    },
+    {
+      "label": "A4",
+      "kind": "continued",
+      "status": "completed",
+      "input_items": 12,
+      "reasoning_items_sent": 3,
+      "output_items": [
+        "reasoning",
+        "message"
+      ],
+      "usage": {
+        "input_tokens": 11379,
+        "output_tokens": 73,
+        "total_tokens": 11452,
+        "input_tokens_details": {
+          "cached_tokens": 11300
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "first_delta_s": 0.9853342501446605,
+      "wall_s": 3.540312540717423,
+      "serve_phases": "serve phases: family=glm5_next prefill_ms=963.4 reused_tokens=11300 reuse_source=live restore_ms=0.0 boundary_ms=0.0 prefill_tokens=79 decode_ms=2560.1 required_forwards=12402 capacity=32768 transitions=72 lineage=fast snapshot_schedule=none cuts=[] captures=[] snapshot_capture_ms=0.0 snapshot_cache_bytes=0 snapshot_cache_entries=0",
+      "reused_tokens": 11300,
+      "prefill_tokens": 79,
+      "prefill_ms": 963.4,
+      "decode_ms": 2560.1
+    },
+    {
+      "label": "B",
+      "kind": "branch",
+      "status": "completed",
+      "input_items": 1,
+      "reasoning_items_sent": 0,
+      "output_items": [
+        "reasoning",
+        "function_call",
+        "function_call"
+      ],
+      "usage": {
+        "input_tokens": 11128,
+        "output_tokens": 37,
+        "total_tokens": 11165,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "first_delta_s": 57.88053458277136,
+      "wall_s": 59.14909629058093,
+      "serve_phases": "serve phases: family=glm5_next prefill_ms=57771.9 reused_tokens=0 reuse_source=none restore_ms=0.0 boundary_ms=0.0 prefill_tokens=11128 decode_ms=1268.1 required_forwards=12151 capacity=32768 transitions=36 lineage=fast snapshot_schedule=none cuts=[] captures=[] snapshot_capture_ms=0.0 snapshot_cache_bytes=0 snapshot_cache_entries=0",
+      "reused_tokens": 0,
+      "prefill_tokens": 11128,
+      "prefill_ms": 57771.9,
+      "decode_ms": 1268.1
+    },
+    {
+      "label": "C1",
+      "kind": "new_session",
+      "status": "completed",
+      "input_items": 1,
+      "reasoning_items_sent": 0,
+      "output_items": [
+        "reasoning",
+        "function_call"
+      ],
+      "usage": {
+        "input_tokens": 11123,
+        "output_tokens": 81,
+        "total_tokens": 11204,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "first_delta_s": 57.670038416050375,
+      "wall_s": 60.48141716606915,
+      "serve_phases": "serve phases: family=glm5_next prefill_ms=57556.9 reused_tokens=0 reuse_source=none restore_ms=0.0 boundary_ms=0.0 prefill_tokens=11123 decode_ms=2810.9 required_forwards=12146 capacity=32768 transitions=80 lineage=fast snapshot_schedule=none cuts=[] captures=[] snapshot_capture_ms=0.0 snapshot_cache_bytes=0 snapshot_cache_entries=0",
+      "reused_tokens": 0,
+      "prefill_tokens": 11123,
+      "prefill_ms": 57556.9,
+      "decode_ms": 2810.9
+    },
+    {
+      "label": "A'",
+      "kind": "return",
+      "status": "completed",
+      "input_items": 15,
+      "reasoning_items_sent": 4,
+      "output_items": [
+        "reasoning",
+        "message"
+      ],
+      "usage": {
+        "input_tokens": 11469,
+        "output_tokens": 41,
+        "total_tokens": 11510,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "first_delta_s": 59.61315037496388,
+      "wall_s": 61.02243195939809,
+      "serve_phases": "serve phases: family=glm5_next prefill_ms=59498.2 reused_tokens=0 reuse_source=none restore_ms=0.0 boundary_ms=0.0 prefill_tokens=11469 decode_ms=1408.9 required_forwards=12492 capacity=32768 transitions=40 lineage=fast snapshot_schedule=none cuts=[] captures=[] snapshot_capture_ms=0.0 snapshot_cache_bytes=0 snapshot_cache_entries=0",
+      "reused_tokens": 0,
+      "prefill_tokens": 11469,
+      "prefill_ms": 59498.2,
+      "decode_ms": 1408.9
+    }
+  ],
+  "error": null,
+  "exit_code": 130
+}

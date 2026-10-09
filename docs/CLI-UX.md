@@ -288,7 +288,7 @@ rejects them. Output rows echo `input: {kind, template}`. (Until 2026-09-07
 templated rows also required a pinned template; they now follow the same
 family rule as `run --user` — plain chat renders the legacy bare ChatML
 contract on an unidentified release, visible as `template: "generic"`, while
-`no_thinking`/`reasoning_effort` still refuse there. `qwen info --json`
+`no_thinking`/`reasoning_effort` still refuse there. `qwen info -m MODEL --json`
 advertises the rule under `capabilities.input`.) This resolves the ambiguity
 the earlier review feared by making the input form structural, and it removed
 the chat-template re-implementation from `scripts/bench/text_capability_eval.py`
@@ -354,7 +354,7 @@ HTTP chat uses the same partitioner (see `SERVE.md#k2-horizon-verified-chat`).
 Benchmarks and lens inputs remain raw-only. Upstream sampling recommendations
 shown above are explicit options, not a change to the existing CLI defaults.
 
-Chat preparation and `qwen info --json` hash retained checkpoint bytes to verify
+Chat preparation and `qwen info -m MODEL --json` hash retained checkpoint bytes to verify
 the profile. This is read-only CPU work but can be expensive, especially in a debug
 build; no filename, cached identity or downloader declaration substitutes for that
 read. The embedded GGUF template and upstream template have separate digests:

@@ -145,7 +145,7 @@ pub(crate) struct Args {
     #[arg(short = 'n', long, hide_short_help = true, default_value_t = 64)]
     pub(crate) tokens: usize,
 
-    /// Sampling temperature; zero is greedy. Omitted on a single request, the identified release's preset applies (`qwen info --json` reports it; greedy with --prompt-lookup); the default shown applies to --requests-jsonl.
+    /// Sampling temperature; zero is greedy. Omitted on a single request, the identified release's preset applies (`qwen info -m MODEL --json` reports it; greedy with --prompt-lookup); the default shown applies to --requests-jsonl.
     #[arg(
         long = "temp",
         visible_alias = "temperature",

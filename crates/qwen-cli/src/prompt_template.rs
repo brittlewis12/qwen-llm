@@ -140,7 +140,7 @@ impl QwenReleaseIdentity {
         match &self.status {
             QwenReleaseStatus::Identified { .. } => None,
             QwenReleaseStatus::Unknown { reason, .. } => Some(format!(
-                "Qwen release not identified ({reason}); rendering the {} contract, which matches no released template; thinking controls and tools are unavailable (`qwen info --json` reports capabilities.template)",
+                "Qwen release not identified ({reason}); rendering the {} contract, which matches no released template; thinking controls and tools are unavailable (`qwen info -m MODEL --json` reports capabilities.template)",
                 self.template.serve_template().label()
             )),
         }

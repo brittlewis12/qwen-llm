@@ -1049,7 +1049,7 @@ startup. Muse requires an explicit startup default:
   `top_p`, `x_qwen.top_k`, `x_qwen.min_p`, `x_qwen.seed`) takes the loaded
   release's published preset, decided by release identity
   (`qwen/release_identity.rs` detects, `qwen/release_sampling.rs` decides) and
-  echoed in the response; `qwen info --json` reports it under `sampling`.
+  echoed in the response; `qwen info -m MODEL --json` reports it under `sampling`.
   Qwen3.x releases use temperature 1.0 / top-k 20 / top-p 0.95, except
   Qwen3.5-27B and Qwen3.5-122B-A10B at 0.6; DeepSeek V4 0731 uses 1.0 / top-p
   1.0; Muse, K2, GLM and Flash-Next use their releases' presets. No seed is
@@ -1088,7 +1088,7 @@ startup. Muse requires an explicit startup default:
   closed. Definitions render into the selected family tool block, byte-pinned
   to its renderer contract. An unidentified Qwen release refuses tools and
   replayed tool turns with code `tools_require_known_release` — the same
-  family rule as `qwen run --messages`, advertised by `qwen info --json`
+  family rule as `qwen run --messages`, advertised by `qwen info -m MODEL --json`
   under `capabilities.input.tools`.
   Function names must match `[A-Za-z0-9_.-]{1,64}` (the grammar `qwen run
   --messages` admits); replay `call_id` values are limited to 64 bytes.
@@ -1287,7 +1287,7 @@ because client model-pickers probe it).
   any name field, conflicting versions, or a foreign tokenizer) keeps the
   legacy generic ChatML contract (bare suffix, verbatim content) rather than
   guessing, logs a startup warning, and reports `capabilities.template`
-  `{status: unknown, reason, fields_consulted}` in `qwen info --json`.
+  `{status: unknown, reason, fields_consulted}` in `qwen info -m MODEL --json`.
   `qwen run`, `qwen-lens`, `qwen-bench`, and `qwen-census` render through the
   same code.
 - Tools on pinned templates render the way every released client feeds

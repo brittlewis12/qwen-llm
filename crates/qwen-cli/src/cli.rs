@@ -20,7 +20,7 @@ pub(crate) enum Command {
     Serve(ServeArgs),
     /// Inspect a model's metadata and capabilities, or without -m the Metal device, without running GPU work.
     #[command(
-        after_help = "Examples:\n  qwen info -m MODEL\n  qwen info -m MODEL --json\n  qwen info\n  qwen info --json\n\nWithout -m, info reports the Metal device and host facts the engine reads (GPU families, limits, memory, OS) and the macOS version the Metal libraries were built for.\n\n--json reports the detected family and whether --drafter would be admitted per lane (run, serve), with a stable reason code when refused. Eligible K2 JSON inspection also hashes retained checkpoint bytes on the CPU to verify chat identity; it checks cancellation between bounded reads. Text inspection does not perform that chat verification."
+        after_help = "Examples:\n  qwen info -m MODEL\n  qwen info -m MODEL --json\n  qwen info\n  qwen info --json\n\nWithout -m, info reports the Metal device and host facts the engine reads (GPU families, limits, memory, OS) and the macOS version the Metal libraries were built for.\n\nWith -m, --json reports the detected family and whether --drafter would be admitted per lane (run, serve), with a stable reason code when refused. Eligible K2 JSON inspection also hashes retained checkpoint bytes on the CPU to verify chat identity; it checks cancellation between bounded reads. Text inspection does not perform that chat verification."
     )]
     Info(InfoArgs),
 }
@@ -231,7 +231,7 @@ pub(crate) struct RunInvocation {
     pub(crate) input: RunInput,
     pub(crate) no_thinking: bool,
     /// Effort spelling as supplied; each family binds it against its own
-    /// levels after the model is detected (`qwen info --json` lists them).
+    /// levels after the model is detected (`qwen info -m MODEL --json` lists them).
     pub(crate) reasoning_effort: Option<String>,
     pub(crate) format: crate::chat_output::RunFormat,
     generation: GenerationOverrides,
@@ -314,7 +314,7 @@ pub(crate) struct RunArgs {
     no_thinking: bool,
 
     /// Reasoning depth, bound against the detected model's own levels (see
-    /// `qwen info --json` capabilities.reasoning). Qwen3.8: none/low/medium/xhigh,
+    /// `qwen info -m MODEL --json` capabilities.reasoning). Qwen3.8: none/low/medium/xhigh,
     /// default xhigh; DeepSeek V4: none/low/high/max, default none (ordinary
     /// chat); Muse: low/medium/high/xhigh, default high; verified K2 chat:
     /// high/medium/low, default high (no non-thinking transition); verified
@@ -346,7 +346,7 @@ struct GenerationOverrides {
     #[arg(short = 'n', long = "max-tokens", visible_alias = "tokens")]
     tokens: Option<usize>,
 
-    /// Sampling temperature (0 = greedy); omitted uses the identified release's preset (`qwen info --json` reports `sampling`).
+    /// Sampling temperature (0 = greedy); omitted uses the identified release's preset (`qwen info -m MODEL --json` reports `sampling`).
     #[arg(long = "temp", visible_alias = "temperature")]
     temperature: Option<f32>,
 

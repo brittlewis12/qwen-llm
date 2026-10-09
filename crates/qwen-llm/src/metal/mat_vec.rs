@@ -753,6 +753,7 @@ pub fn encode_mat_vec_iq2_xs_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
+    super::mat_mat::validate_iq2_xs_dense_bindings(weight, x, y, n_in, n_out, 1)?;
     if matvec_iq2_xs_fast_enabled() {
         return encode_mat_vec_lowbit_fast_f32(
             ctx,

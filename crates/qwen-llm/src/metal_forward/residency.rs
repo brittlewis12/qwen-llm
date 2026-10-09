@@ -2,10 +2,9 @@
 
 use super::*;
 
-/// Single source of truth for which weight dtypes the loader keeps in
-/// their native form (vs. dequant'ing to F32). Used by both `load_weight`
-/// in `MetalModel::load` and the byte-ledger diagnostic, so they stay
-/// in sync. If you add a new native quant kernel, list its dtype here.
+/// Legacy common native set, including resident expert banks. Dense-only
+/// additions belong in `weight_role_dtype_supported`, not this whitelist.
+/// Base-model planning and loading use `weight_storage_kind_with_policy`.
 ///
 /// Q8_0 added v0.73b.1 — DFlash drafter switches from F32-dequant
 /// resident (~7.4 GB) to native Q8_0 (~1.85 GB). F16/BF16 stay native once
@@ -30,6 +29,142 @@ pub fn weight_dtype_kept_native(dtype: GgmlType) -> bool {
             | GgmlType::IQ4_NL
             | GgmlType::IQ4_XS
     )
+}
+
+/// The consuming graph assigns the role; tensor names/rank never grant a role.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WeightRole {
+    DenseProjection,
+    MoeProjection,
+    OutputHead,
+    ExpertBank,
+}
+
+pub(crate) fn projection_weight_role(kind: crate::model::ArchKind) -> WeightRole {
+    match kind {
+        crate::model::ArchKind::Dense => WeightRole::DenseProjection,
+        crate::model::ArchKind::Moe => WeightRole::MoeProjection,
+    }
+}
+
+/// Executable native storage capability, independent of diagnostic rollback.
+/// Embeddings and routers retain their separate policies. The IQ2 additions
+/// are confined to dense-model projections; whole-model qualification is separate.
+pub(crate) fn weight_role_dtype_supported(role: WeightRole, dtype: GgmlType) -> bool {
+    weight_dtype_kept_native(dtype)
+        || (role == WeightRole::DenseProjection
+            && matches!(dtype, GgmlType::IQ2_XS | GgmlType::IQ2_XXS))
+}
+
+#[cfg(test)]
+thread_local! {
+    static DENSE_IQ_NATIVE_STORAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Select storage policy when preparing a load on this thread. Preparation
+/// freezes the choice: later scopes cannot change its plan or realization.
+/// Nested scopes/unwinding restore the previous selection. Existing tensors
+/// and kernel eligibility are unaffected.
+#[cfg(test)]
+pub(crate) fn with_dense_iq_native_storage<R>(enabled: bool, run: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DENSE_IQ_NATIVE_STORAGE.with(|slot| slot.set(self.0));
+        }
+    }
+    let _restore = Restore(DENSE_IQ_NATIVE_STORAGE.with(|slot| slot.replace(enabled)));
+    run()
+}
+
+pub(super) fn dense_iq_native_storage_enabled() -> bool {
+    #[cfg(test)]
+    return DENSE_IQ_NATIVE_STORAGE.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    true
+}
+
+/// Storage decision using the current diagnostic selection. Prepared loads use
+/// the explicit-policy helper below. Newly admitted IQ2 matrices must fit
+/// their primitive's dimensions, ulong weight addressing and exact GGML blocks.
+/// Invalid native geometry fails before allocation instead of inflating to F32.
+pub(crate) fn weight_storage_kind(
+    role: WeightRole,
+    desc: &TensorDesc,
+) -> Result<ModelWeightStorageKind, MfError> {
+    weight_storage_kind_with_policy(role, desc, dense_iq_native_storage_enabled())
+}
+
+/// Checked storage decision from an already resolved policy. Planning and
+/// realization must use the same frozen boolean, never reread thread-local
+/// state during materialization.
+pub(crate) fn weight_storage_kind_with_policy(
+    role: WeightRole,
+    desc: &TensorDesc,
+    dense_iq_native: bool,
+) -> Result<ModelWeightStorageKind, MfError> {
+    let native = weight_role_dtype_supported(role, desc.dtype)
+        && !(role == WeightRole::DenseProjection
+            && matches!(desc.dtype, GgmlType::IQ2_XS | GgmlType::IQ2_XXS)
+            && !dense_iq_native);
+    if native && !weight_dtype_kept_native(desc.dtype) {
+        let invalid = || {
+            MfError::LoadPolicy(format!(
+                "native {role:?} {:?} has invalid {:?} matrix storage: shape={:?} bytes={}",
+                desc.name, desc.dtype, desc.shape, desc.n_bytes,
+            ))
+        };
+        let [k, m] = desc.shape.as_slice() else {
+            return Err(invalid());
+        };
+        let (block, bytes) = desc.dtype.storage_layout().ok_or_else(invalid)?;
+        let elements = k.checked_mul(*m).ok_or_else(invalid)?;
+        // Both families widen weight row offsets before multiplying. XXS
+        // additionally requires positive i32 dimensions and a u32 row stride;
+        // XS uses u32 dimensions and a ulong row stride. No u32 bank-size cap.
+        let row_bytes = (k / block).checked_mul(bytes).ok_or_else(invalid)?;
+        let expected = row_bytes.checked_mul(*m).ok_or_else(invalid)?;
+        if *k == 0
+            || *m == 0
+            || !k.is_multiple_of(block)
+            || u32::try_from(*k).is_err()
+            || u32::try_from(*m).is_err()
+            || (desc.dtype == GgmlType::IQ2_XXS
+                && (i32::try_from(*k).is_err()
+                    || i32::try_from(*m).is_err()
+                    || u32::try_from(row_bytes).is_err()))
+            || usize::try_from(elements).is_err()
+            || expected != desc.n_bytes
+            || usize::try_from(expected).is_err()
+            || desc.data_offset.checked_add(expected).is_none()
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(if native {
+        ModelWeightStorageKind::Direct
+    } else {
+        ModelWeightStorageKind::ConvertedF32
+    })
+}
+
+/// Complete descriptor plans for A (old storage) and B (native IQ2_XS/IQ2_XXS).
+/// No payload reads, allocations of model weights, or Metal context required.
+#[cfg(test)]
+pub(crate) fn dense_iq_native_storage_comparison_plans<'a>(
+    model: &Model<'a>,
+    native_quant_embedding: bool,
+    router_f16: bool,
+) -> Result<[Vec<ModelWeightStorageRequest<'a>>; 2], MfError> {
+    let old = model_weight_storage_requests_with_policy(
+        model,
+        native_quant_embedding,
+        router_f16,
+        false,
+    )?;
+    let native =
+        model_weight_storage_requests_with_policy(model, native_quant_embedding, router_f16, true)?;
+    Ok([old, native])
 }
 
 pub(super) fn parse_gguf_owned_arena_mode(
@@ -346,15 +481,26 @@ pub(super) fn push_f32_weight_request<'a>(
     push_model_weight_request(requests, desc, kind)
 }
 
+#[cfg(test)]
 pub(super) fn push_native_weight_request<'a>(
     requests: &mut Vec<ModelWeightStorageRequest<'a>>,
+    role: WeightRole,
     desc: &'a TensorDesc,
 ) -> Result<(), MfError> {
-    if weight_dtype_kept_native(desc.dtype) {
-        push_model_weight_request(requests, desc, ModelWeightStorageKind::Direct)
-    } else {
-        push_f32_weight_request(requests, desc)
-    }
+    push_native_weight_request_with_policy(requests, role, desc, dense_iq_native_storage_enabled())
+}
+
+pub(super) fn push_native_weight_request_with_policy<'a>(
+    requests: &mut Vec<ModelWeightStorageRequest<'a>>,
+    role: WeightRole,
+    desc: &'a TensorDesc,
+    dense_iq_native: bool,
+) -> Result<(), MfError> {
+    push_model_weight_request(
+        requests,
+        desc,
+        weight_storage_kind_with_policy(role, desc, dense_iq_native)?,
+    )
 }
 
 pub fn native_quant_embedding_storage_supported(model: &Model<'_>) -> bool {
@@ -375,6 +521,20 @@ pub fn model_weight_storage_requests<'a>(
     model: &Model<'a>,
     native_quant_embedding: bool,
     router_f16: bool,
+) -> Result<Vec<ModelWeightStorageRequest<'a>>, MfError> {
+    model_weight_storage_requests_with_policy(
+        model,
+        native_quant_embedding,
+        router_f16,
+        dense_iq_native_storage_enabled(),
+    )
+}
+
+pub(crate) fn model_weight_storage_requests_with_policy<'a>(
+    model: &Model<'a>,
+    native_quant_embedding: bool,
+    router_f16: bool,
+    dense_iq_native: bool,
 ) -> Result<Vec<ModelWeightStorageRequest<'a>>, MfError> {
     if native_quant_embedding && !native_quant_embedding_storage_supported(model) {
         return Err(MfError::LoadPolicy(format!(
@@ -397,43 +557,124 @@ pub fn model_weight_storage_requests<'a>(
         push_f32_weight_request(&mut requests, model.token_embd)?;
     }
     push_f32_weight_request(&mut requests, model.output_norm)?;
-    push_native_weight_request(&mut requests, model.lm_head)?;
+    push_native_weight_request_with_policy(
+        &mut requests,
+        WeightRole::OutputHead,
+        model.lm_head,
+        dense_iq_native,
+    )?;
 
+    let projection_role = projection_weight_role(model.arch.kind);
     for block in &model.blocks {
         match block {
             Block::Gdn(gdn) => {
                 push_f32_weight_request(&mut requests, gdn.attn_norm)?;
                 push_f32_weight_request(&mut requests, gdn.post_attention_norm)?;
-                push_native_weight_request(&mut requests, gdn.ffn_gate)?;
-                push_native_weight_request(&mut requests, gdn.ffn_up)?;
-                push_native_weight_request(&mut requests, gdn.ffn_down)?;
-                push_native_weight_request(&mut requests, gdn.in_proj_qkv)?;
-                push_native_weight_request(&mut requests, gdn.in_proj_z)?;
-                push_native_weight_request(&mut requests, gdn.beta_proj)?;
-                push_native_weight_request(&mut requests, gdn.alpha_proj)?;
+                push_native_weight_request_with_policy(
+                    &mut requests,
+                    projection_role,
+                    gdn.ffn_gate,
+                    dense_iq_native,
+                )?;
+                push_native_weight_request_with_policy(
+                    &mut requests,
+                    projection_role,
+                    gdn.ffn_up,
+                    dense_iq_native,
+                )?;
+                push_native_weight_request_with_policy(
+                    &mut requests,
+                    projection_role,
+                    gdn.ffn_down,
+                    dense_iq_native,
+                )?;
+                push_native_weight_request_with_policy(
+                    &mut requests,
+                    projection_role,
+                    gdn.in_proj_qkv,
+                    dense_iq_native,
+                )?;
+                push_native_weight_request_with_policy(
+                    &mut requests,
+                    projection_role,
+                    gdn.in_proj_z,
+                    dense_iq_native,
+                )?;
+                push_native_weight_request_with_policy(
+                    &mut requests,
+                    projection_role,
+                    gdn.beta_proj,
+                    dense_iq_native,
+                )?;
+                push_native_weight_request_with_policy(
+                    &mut requests,
+                    projection_role,
+                    gdn.alpha_proj,
+                    dense_iq_native,
+                )?;
                 push_f32_weight_request(&mut requests, gdn.a_log)?;
                 push_f32_weight_request(&mut requests, gdn.dt_bias)?;
                 push_f32_weight_request(&mut requests, gdn.conv1d)?;
                 push_f32_weight_request(&mut requests, gdn.norm)?;
-                push_native_weight_request(&mut requests, gdn.out_proj)?;
+                push_native_weight_request_with_policy(
+                    &mut requests,
+                    projection_role,
+                    gdn.out_proj,
+                    dense_iq_native,
+                )?;
                 if let Some(moe) = gdn.ffn_moe.as_ref() {
-                    push_moe_weight_requests(&mut requests, moe, router_f16)?;
+                    push_moe_weight_requests(&mut requests, moe, router_f16, dense_iq_native)?;
                 }
             }
             Block::Attn(attn) => {
-                push_native_weight_request(&mut requests, attn.q)?;
-                push_native_weight_request(&mut requests, attn.k)?;
-                push_native_weight_request(&mut requests, attn.v)?;
+                push_native_weight_request_with_policy(
+                    &mut requests,
+                    projection_role,
+                    attn.q,
+                    dense_iq_native,
+                )?;
+                push_native_weight_request_with_policy(
+                    &mut requests,
+                    projection_role,
+                    attn.k,
+                    dense_iq_native,
+                )?;
+                push_native_weight_request_with_policy(
+                    &mut requests,
+                    projection_role,
+                    attn.v,
+                    dense_iq_native,
+                )?;
                 push_f32_weight_request(&mut requests, attn.attn_norm)?;
                 push_f32_weight_request(&mut requests, attn.post_attention_norm)?;
-                push_native_weight_request(&mut requests, attn.ffn_gate)?;
-                push_native_weight_request(&mut requests, attn.ffn_up)?;
-                push_native_weight_request(&mut requests, attn.ffn_down)?;
-                push_native_weight_request(&mut requests, attn.o)?;
+                push_native_weight_request_with_policy(
+                    &mut requests,
+                    projection_role,
+                    attn.ffn_gate,
+                    dense_iq_native,
+                )?;
+                push_native_weight_request_with_policy(
+                    &mut requests,
+                    projection_role,
+                    attn.ffn_up,
+                    dense_iq_native,
+                )?;
+                push_native_weight_request_with_policy(
+                    &mut requests,
+                    projection_role,
+                    attn.ffn_down,
+                    dense_iq_native,
+                )?;
+                push_native_weight_request_with_policy(
+                    &mut requests,
+                    projection_role,
+                    attn.o,
+                    dense_iq_native,
+                )?;
                 push_f32_weight_request(&mut requests, attn.q_norm)?;
                 push_f32_weight_request(&mut requests, attn.k_norm)?;
                 if let Some(moe) = attn.ffn_moe.as_ref() {
-                    push_moe_weight_requests(&mut requests, moe, router_f16)?;
+                    push_moe_weight_requests(&mut requests, moe, router_f16, dense_iq_native)?;
                 }
             }
         }

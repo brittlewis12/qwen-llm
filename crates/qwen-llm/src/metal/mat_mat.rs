@@ -987,6 +987,85 @@ pub(crate) fn encode_mat_mat_q2_k_f32_mm(
     )
 }
 
+/// Bounds for the actual uint expressions in kernel_mat_mat_iq2_xs_f32.
+/// Weight row/block offsets use ulong and have no u32 bank-size restriction.
+pub(crate) fn validate_iq2_xs_mat_mat_addressing(
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "iq2_xs_dense";
+    for (name, value) in [("K", n_in), ("M", n_out), ("N", n_query)] {
+        if value == 0 || u32::try_from(value).is_err() {
+            return Err(super::checks::bad_shape(
+                KERNEL,
+                format!("{name}={value} must fit nonzero u32"),
+            ));
+        }
+    }
+    if !n_in.is_multiple_of(256) {
+        return Err(super::checks::bad_shape(
+            KERNEL,
+            "K must be divisible by 256",
+        ));
+    }
+    // x + q*K + base + k0 is pointer arithmetic after the uint q*K.
+    // y[row + q*M] instead forms the entire final index in uint.
+    // Checking counts against u32::MAX would reject valid boundary addresses.
+    for (name, last) in [
+        ("input row start", (n_query - 1).checked_mul(n_in)),
+        (
+            "output index",
+            n_query.checked_mul(n_out).and_then(|v| v.checked_sub(1)),
+        ),
+    ] {
+        if last.is_none_or(|v| u32::try_from(v).is_err()) {
+            return Err(super::checks::bad_shape(
+                KERNEL,
+                format!("{name} exceeds u32 shader addressing: K={n_in} M={n_out} N={n_query}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Shared by direct GEMV/GEMM entry points; preserves flattened activation
+/// views while checking their physical bytes before any pipeline is encoded.
+pub(super) fn validate_iq2_xs_dense_bindings(
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "iq2_xs_dense";
+    validate_iq2_xs_mat_mat_addressing(n_in, n_out, n_query)?;
+    if weight.shape != [n_in as u64, n_out as u64] {
+        return Err(super::checks::bad_shape(
+            KERNEL,
+            "weight must be rank-2 [K,M]",
+        ));
+    }
+    for (name, tensor, dims, dtype, writable, alignment) in [
+        ("weight", weight, [n_in, n_out], GgmlType::IQ2_XS, false, 2),
+        ("input", x, [n_in, n_query], GgmlType::F32, false, 4),
+        ("output", y, [n_out, n_query], GgmlType::F32, true, 4),
+    ] {
+        let count = super::moe::checked_moe_product(KERNEL, name, &dims)?;
+        super::moe::validate_moe_decode_tensor(
+            KERNEL,
+            name,
+            tensor,
+            count,
+            &[dtype],
+            writable,
+            alignment,
+        )?;
+    }
+    super::checks::check_disjoint(KERNEL, y, &[(weight, "weight"), (x, "input")])
+}
+
 pub fn encode_mat_mat_iq2_xs_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -997,6 +1076,7 @@ pub fn encode_mat_mat_iq2_xs_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
+    validate_iq2_xs_dense_bindings(weight, x, y, n_in, n_out, n_query)?;
     encode_mat_mat_block256_f32(
         ctx,
         enc,

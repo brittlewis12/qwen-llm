@@ -4,6 +4,11 @@ use crate::gguf::GgufFile;
 use crate::loader::Model;
 use crate::sampling::{Sampler, SamplingConfig};
 
+#[path = "tests/iq_capacity.rs"]
+mod iq_capacity;
+#[path = "tests/iq_capacity_model.rs"]
+mod iq_capacity_model;
+
 fn metal_test_context() -> Option<MetalContext> {
     crate::test_fixtures::metal_context_or_skip()
 }
@@ -1835,6 +1840,7 @@ fn assert_gguf_parallel_a3b_q4_is_bit_exact(
                     embedding_selection,
                     router_f16: false,
                     fused_qkv_g8: false,
+                    dense_iq_native: dense_iq_native_storage_enabled(),
                 },
                 &expected,
                 DirectStorage::ForcedParallelCopied(storage),
@@ -2163,6 +2169,7 @@ fn assert_gguf_parallel_dense27b_q4_is_bit_exact(
                 embedding_selection,
                 router_f16: false,
                 fused_qkv_g8: false,
+                dense_iq_native: dense_iq_native_storage_enabled(),
             },
             &expected,
             DirectStorage::ForcedParallelCopied(storage),
@@ -5479,187 +5486,71 @@ fn metal_27b_q5_fallback_bench() {
     );
 }
 
-/// **Per-tensor byte ledger.** Audit what's actually loaded into Metal
-/// memory vs what came out of the GGUF. Specifically: which tensors
-/// got native dtype, which got dequant-fallback to F32, and how many
-/// bytes per category. Run before optimization to ground decisions.
+/// Metadata-only complete old/native IQ2_XS/IQ2_XXS storage plans. Reports logical
+/// weight bytes and remaining conversions, not realized allocations or RSS.
+/// IQ_CAPACITY_MODEL overrides the historical default fixture for this test.
 #[test]
 #[ignore]
 fn metal_27b_byte_ledger() {
-    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-    if !std::path::Path::new(model_path).exists() {
-        return;
-    }
-    let g = GgufFile::open(model_path).expect("open");
-    let m = Model::from_gguf(&g).expect("load");
-
-    // Walk loader::Model and classify each tensor.
-    // Loader emits: token_embd, output_norm, lm_head, then per-block.
-    // For each tensor, we ask: would MetalModel::load() preserve native
-    // or fallback to F32?
-    // Match the policy in MetalModel::load:
-    //   * load_f32 (ALWAYS dequant to F32): norms, ssm_a, ssm_dt, conv1d,
-    //     ssm_norm, q_norm, k_norm, output_norm; token_embd is F32 by
-    //     default and Q4_K/Q6_K/Q8_0-native under QWEN_NATIVE_QUANT_EMBED.
-    //   * load_weight (preserves F32/Q4_K/Q6_K, falls back to F32 for
-    //     others): all the mat_vec weights — lm_head, ffn_*, attn_q/k/v/o,
-    //     attn_qkv, attn_gate, in_proj_qkv, in_proj_z, beta_proj,
-    //     alpha_proj, out_proj
-    let mut stats: std::collections::BTreeMap<String, (u64, u64, u64)> =
-        std::collections::BTreeMap::new(); // role -> (gguf_bytes, metal_bytes, count)
-    let bump = |stats: &mut std::collections::BTreeMap<String, (u64, u64, u64)>,
-                role: &str,
-                gguf_b: u64,
-                metal_b: u64| {
-        let e = stats.entry(role.into()).or_insert((0, 0, 0));
-        e.0 += gguf_b;
-        e.1 += metal_b;
-        e.2 += 1;
-    };
-    let f32_size = |shape: &[u64]| -> u64 { shape.iter().product::<u64>() * 4 };
-
-    // Top-level tensors.
-    bump(
-        &mut stats,
-        "token_embd (F32 default; Q4_K/Q6_K/Q8_0 native opt-in)",
-        m.token_embd.n_bytes,
-        f32_size(&m.token_embd.shape),
+    let model_path = std::env::var("IQ_CAPACITY_MODEL")
+        .unwrap_or_else(|_| crate::test_fixtures::QWEN36_27B_Q4_K_M.path().to_owned());
+    assert!(
+        std::path::Path::new(&model_path).is_file(),
+        "missing {model_path}"
     );
-    bump(
-        &mut stats,
-        "output_norm (load_f32)",
-        m.output_norm.n_bytes,
-        f32_size(&m.output_norm.shape),
-    );
-    let lm_head_kept = weight_dtype_kept_native(m.lm_head.dtype);
-    bump(
-        &mut stats,
-        if lm_head_kept {
-            "lm_head (native)"
-        } else {
-            "lm_head (FALLBACK F32)"
-        },
-        m.lm_head.n_bytes,
-        if lm_head_kept {
-            m.lm_head.n_bytes
-        } else {
-            f32_size(&m.lm_head.shape)
-        },
-    );
-
-    for b in &m.blocks {
-        match b {
-            crate::loader::Block::Gdn(g) => {
-                let f32_descs: &[&TensorDesc] = &[
-                    g.attn_norm,
-                    g.post_attention_norm,
-                    g.a_log,
-                    g.dt_bias,
-                    g.conv1d,
-                    g.norm,
-                ];
-                for d in f32_descs {
-                    bump(
-                        &mut stats,
-                        "gdn f32-required",
-                        d.n_bytes,
-                        f32_size(&d.shape),
-                    );
+    let g = GgufFile::open(&model_path).expect("open");
+    let before = g.revalidate_retained_shard_stamps().expect("source stamps");
+    let m = Model::from_gguf(&g).expect("bind");
+    let native_embedding = production_native_quant_embedding_storage_enabled(&m);
+    let router_f16 = moe_router_f16_enabled();
+    let plans = dense_iq_native_storage_comparison_plans(&m, native_embedding, router_f16)
+        .expect("complete old/native storage plans");
+    for (native, requests) in [false, true].into_iter().zip(plans) {
+        let mut source_bytes = 0u64;
+        let mut resident_bytes = 0u64;
+        let mut converted_bytes = 0u64;
+        let mut converted_count = 0usize;
+        let rows = requests
+            .iter()
+            .map(|r| {
+                source_bytes = source_bytes
+                    .checked_add(r.desc.n_bytes)
+                    .expect("source sum");
+                resident_bytes = resident_bytes
+                    .checked_add(r.resident_bytes)
+                    .expect("resident sum");
+                if r.kind != ModelWeightStorageKind::Direct {
+                    converted_count += 1;
+                    converted_bytes = converted_bytes
+                        .checked_add(r.resident_bytes)
+                        .expect("converted sum");
                 }
-                let weight_descs: &[(&TensorDesc, &str)] = &[
-                    (g.in_proj_qkv, "gdn in_proj_qkv"),
-                    (g.in_proj_z, "gdn in_proj_z"),
-                    (g.beta_proj, "gdn beta_proj"),
-                    (g.alpha_proj, "gdn alpha_proj"),
-                    (g.out_proj, "gdn out_proj"),
-                    (g.ffn_gate, "gdn ffn_gate"),
-                    (g.ffn_up, "gdn ffn_up"),
-                    (g.ffn_down, "gdn ffn_down"),
-                ];
-                for (d, role) in weight_descs {
-                    let kept = weight_dtype_kept_native(d.dtype);
-                    let key = format!(
-                        "{role} ({:?}{})",
-                        d.dtype,
-                        if kept { "" } else { " FALLBACK→F32" }
-                    );
-                    bump(
-                        &mut stats,
-                        &key,
-                        d.n_bytes,
-                        if kept { d.n_bytes } else { f32_size(&d.shape) },
-                    );
-                }
-            }
-            crate::loader::Block::Attn(a) => {
-                let f32_descs: &[&TensorDesc] =
-                    &[a.attn_norm, a.post_attention_norm, a.q_norm, a.k_norm];
-                for d in f32_descs {
-                    bump(
-                        &mut stats,
-                        "attn f32-required",
-                        d.n_bytes,
-                        f32_size(&d.shape),
-                    );
-                }
-                let weight_descs: &[(&TensorDesc, &str)] = &[
-                    (a.q, "attn q"),
-                    (a.k, "attn k"),
-                    (a.v, "attn v"),
-                    (a.o, "attn o"),
-                    (a.ffn_gate, "attn ffn_gate"),
-                    (a.ffn_up, "attn ffn_up"),
-                    (a.ffn_down, "attn ffn_down"),
-                ];
-                for (d, role) in weight_descs {
-                    let kept = weight_dtype_kept_native(d.dtype);
-                    let key = format!(
-                        "{role} ({:?}{})",
-                        d.dtype,
-                        if kept { "" } else { " FALLBACK→F32" }
-                    );
-                    bump(
-                        &mut stats,
-                        &key,
-                        d.n_bytes,
-                        if kept { d.n_bytes } else { f32_size(&d.shape) },
-                    );
-                }
-            }
-        }
-    }
-
-    eprintln!("[ledger] role  count  gguf_MB  metal_MB  delta_MB");
-    let mut total_gguf = 0u64;
-    let mut total_metal = 0u64;
-    for (role, (gguf_b, metal_b, count)) in &stats {
-        let dg = *gguf_b as f64 / (1024.0 * 1024.0);
-        let dm = *metal_b as f64 / (1024.0 * 1024.0);
-        let delta = dm - dg;
+                serde_json::json!({
+                    "name": r.desc.name, "dtype": r.desc.dtype.wire_name(), "shape": r.desc.shape,
+                    "shard": r.desc.shard_idx, "offset": r.desc.data_offset,
+                    "source_bytes": r.desc.n_bytes, "kind": format!("{:?}", r.kind),
+                    "resident_bytes": r.resident_bytes,
+                })
+            })
+            .collect::<Vec<_>>();
         eprintln!(
-            "[ledger]   {role:60} {count:4}  {dg:8.2}  {dm:8.2}  {:+.2}",
-            delta
+            "{}",
+            serde_json::json!({
+                "schema": "dense_iq_storage_plan_v1", "model": model_path,
+                "native_dense_iq": native, "native_embedding": native_embedding,
+                "router_f16": router_f16, "inventory_digest": model_weight_storage_inventory_digest(&requests),
+                "source_bytes": source_bytes, "logical_resident_bytes": resident_bytes,
+                "converted_count": converted_count, "converted_resident_bytes": converted_bytes,
+                "remaining_inflation_bytes": resident_bytes.saturating_sub(source_bytes),
+                "semantics": "planned logical weight bytes, not measured RSS or throughput",
+                "requests": rows,
+            })
         );
-        total_gguf += gguf_b;
-        total_metal += metal_b;
     }
-    let total_gguf_gb = total_gguf as f64 / (1024.0 * 1024.0 * 1024.0);
-    let total_metal_gb = total_metal as f64 / (1024.0 * 1024.0 * 1024.0);
-    eprintln!("[ledger] === TOTALS ===");
-    eprintln!("[ledger]   gguf  bytes: {total_gguf_gb:.2} GiB");
-    eprintln!("[ledger]   metal bytes: {total_metal_gb:.2} GiB");
-    eprintln!(
-        "[ledger]   inflation:    {:+.2} GiB ({:+.1}% from quant fallbacks)",
-        total_metal_gb - total_gguf_gb,
-        (total_metal_gb / total_gguf_gb - 1.0) * 100.0
-    );
-    let bw_floor_native = total_gguf_gb * 1024.0 / 546.0; // ms at peak BW (note: GiB->GB unit fudge but consistent)
-    let bw_floor_metal = total_metal_gb * 1024.0 / 546.0;
-    eprintln!("[ledger]   bandwidth floor at GGUF native bytes: {bw_floor_native:.2} ms");
-    eprintln!("[ledger]   bandwidth floor at Metal bytes:       {bw_floor_metal:.2} ms");
-    eprintln!(
-        "[ledger]   estimated cost of fallbacks: {:+.2} ms",
-        bw_floor_metal - bw_floor_native
+    assert_eq!(
+        before,
+        g.revalidate_retained_shard_stamps()
+            .expect("final source stamps")
     );
 }
 

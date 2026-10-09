@@ -21,6 +21,66 @@ pub(super) fn matmat_bf16_bfloat_act_enabled() -> bool {
     *ENABLED.get_or_init(|| crate::env_flag::read_default_on("QWEN_MATMAT_BF16_BFLOAT_ACT"))
 }
 
+/// IQ2_XXS primitives deliberately require exact vector/matrix ranks. Packed
+/// callers may supply flat scratch views (including unused trailing capacity).
+/// Check the source's physical extent and logical prefix before view_subrange,
+/// which asserts rather than returning an error. No activation/weight copy.
+pub(super) fn iq2_xxs_dispatch_views(
+    x: &MetalTensor,
+    y: &MetalTensor,
+    k: usize,
+    m: usize,
+    n: usize,
+    matrix: bool,
+) -> Result<(MetalTensor, MetalTensor), MfError> {
+    let bad = |detail: String| MetalError::BadShape {
+        kernel: "iq2_xxs_dispatch",
+        detail,
+    };
+    for (name, dim) in [("K", k), ("M", m), ("N", n)] {
+        if dim == 0 || i32::try_from(dim).is_err() {
+            return Err(bad(format!("{name}={dim} must fit positive i32")).into());
+        }
+    }
+    if !k.is_multiple_of(256) || (!matrix && n != 1) {
+        return Err(bad("K must be block-aligned and GEMV requires N=1".into()).into());
+    }
+    let view = |name: &str, src: &MetalTensor, width: usize, writable: bool| {
+        let needed = width
+            .checked_mul(n)
+            .ok_or_else(|| bad(format!("{name} prefix overflow")))?;
+        if src.dtype != GgmlType::F32
+            || !src.offset.is_multiple_of(4)
+            || (writable && !src.is_writable())
+        {
+            return Err(bad(format!(
+                "{name} must be aligned F32{}",
+                if writable { " and writable" } else { "" }
+            )));
+        }
+        let (elements, bytes) = crate::metal::checked_ggml_shape_bytes(&src.shape, src.dtype)?;
+        if elements < needed
+            || src
+                .offset
+                .checked_add(bytes as u64)
+                .is_none_or(|end| end > src.buffer.length() as u64)
+        {
+            return Err(bad(format!(
+                "{name} source does not contain a physical {needed}-element prefix"
+            )));
+        }
+        Ok(src.view_subrange(
+            0,
+            if matrix {
+                vec![width as u64, n as u64]
+            } else {
+                vec![width as u64]
+            },
+        ))
+    };
+    Ok((view("input", x, k, false)?, view("output", y, m, true)?))
+}
+
 /// Dispatch the right `encode_mat_vec_*` based on `weight.dtype`. This
 /// is the single seam that lets the same MetalForward driver run on
 /// F32, Q4_K_M, Q6_K, etc. weights. New quant types plug in here.
@@ -33,6 +93,14 @@ pub fn encode_mat_vec_dispatch(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MfError> {
+    if weight.dtype == GgmlType::IQ2_XXS {
+        // The XXS primitive records the normalized ranges itself. Do not also
+        // run generic notes: duplicate writes would trigger concurrent hazards.
+        let (x, y) = iq2_xxs_dispatch_views(x, y, n_in, n_out, 1, false)?;
+        return Ok(crate::metal::encode_mat_vec_iq2_xxs_f32(
+            ctx, enc, weight, &x, &y, n_in, n_out,
+        )?);
+    }
     // Debug-only concurrent-pass hazard tracking (no-op on serial encoders
     // and in release builds). This is the chokepoint for the concurrent
     // GDN/attention front-projection encoders; a future edit that makes one
@@ -257,6 +325,9 @@ fn encode_mat_mat_dispatch_routed(
     allow_q8_fewrow: bool,
 ) -> Result<(), MfError> {
     validate_f32_q8_mat_mat_addressing(weight.dtype, n_in, n_out, n_query)?;
+    if weight.dtype == GgmlType::IQ2_XS {
+        crate::metal::validate_iq2_xs_mat_mat_addressing(n_in, n_out, n_query)?;
+    }
     // v0.77: n_query == 1 is exactly the mat-vec contract (x = [n_in],
     // y = [n_out]) — route to the production single-token kernels (c=1).
     // Before this arm, n=1 fell through the small-N table to the GENERIC
@@ -468,6 +539,12 @@ fn encode_mat_mat_dispatch_routed(
         GgmlType::IQ2_XS => Ok(crate::metal::encode_mat_mat_iq2_xs_f32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
         )?),
+        GgmlType::IQ2_XXS => {
+            let (x, y) = iq2_xxs_dispatch_views(x, y, n_in, n_out, n_query, true)?;
+            Ok(crate::metal::encode_mat_mat_iq2_xxs_f32(
+                ctx, enc, weight, &x, &y, n_in, n_out, n_query,
+            )?)
+        }
         GgmlType::IQ2_S => Ok(crate::metal::encode_mat_mat_iq2_s_f32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
         )?),

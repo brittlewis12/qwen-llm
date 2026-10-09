@@ -612,25 +612,12 @@ fn prefill_dense_ffn_fused_swiglu_q4_enabled(hidden: usize) -> bool {
     hidden <= 2048
 }
 
-fn prefill_mat_mat_dispatch_eligible(dtype: GgmlType) -> bool {
-    matches!(
+pub(crate) fn prefill_mat_mat_dispatch_eligible(dtype: GgmlType) -> bool {
+    // Capability is independent of the test-only storage rollback: existing
+    // native tensors must keep the same execution path in either scope.
+    crate::metal_forward::weight_role_dtype_supported(
+        crate::metal_forward::WeightRole::DenseProjection,
         dtype,
-        GgmlType::F32
-            | GgmlType::F16
-            | GgmlType::BF16
-            | GgmlType::Q2_K
-            | GgmlType::Q3_K
-            | GgmlType::IQ2_S
-            | GgmlType::IQ3_XXS
-            | GgmlType::IQ3_S
-            | GgmlType::Q4_0
-            | GgmlType::Q4_1
-            | GgmlType::Q4_K
-            | GgmlType::Q5_K
-            | GgmlType::Q6_K
-            | GgmlType::Q8_0
-            | GgmlType::IQ4_NL
-            | GgmlType::IQ4_XS
     )
 }
 

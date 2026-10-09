@@ -106,15 +106,31 @@ pub(super) fn push_moe_weight_requests<'a>(
     requests: &mut Vec<ModelWeightStorageRequest<'a>>,
     moe: &MoeFfn<'a>,
     router_f16: bool,
+    dense_iq_native: bool,
 ) -> Result<(), MfError> {
     if router_f16 {
         push_model_weight_request(requests, moe.gate_inp, ModelWeightStorageKind::ConvertedF16)?;
     } else {
         push_f32_weight_request(requests, moe.gate_inp)?;
     }
-    push_native_weight_request(requests, moe.gate_exps)?;
-    push_native_weight_request(requests, moe.up_exps)?;
-    push_native_weight_request(requests, moe.down_exps)?;
+    push_native_weight_request_with_policy(
+        requests,
+        WeightRole::ExpertBank,
+        moe.gate_exps,
+        dense_iq_native,
+    )?;
+    push_native_weight_request_with_policy(
+        requests,
+        WeightRole::ExpertBank,
+        moe.up_exps,
+        dense_iq_native,
+    )?;
+    push_native_weight_request_with_policy(
+        requests,
+        WeightRole::ExpertBank,
+        moe.down_exps,
+        dense_iq_native,
+    )?;
     push_f32_weight_request(requests, moe.gate_inp_shexp)
 }
 

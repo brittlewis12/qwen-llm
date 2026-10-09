@@ -72,7 +72,11 @@ pub fn validate_opened_output_head(
     }
     crate::codec::validate_dequantization(bound.lm_head, gguf.slice(bound.lm_head))
         .map_err(MfError::from)?;
-    let dtype = if crate::metal_forward::weight_dtype_kept_native(bound.lm_head.dtype) {
+    let dtype = if crate::metal_forward::weight_storage_kind(
+        crate::metal_forward::WeightRole::OutputHead,
+        bound.lm_head,
+    )? == crate::metal_forward::ModelWeightStorageKind::Direct
+    {
         bound.lm_head.dtype
     } else {
         GgmlType::F32

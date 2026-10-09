@@ -59,7 +59,7 @@ const EXCLUDED: &[(GgmlType, &str)] = &[];
 // Pure-CPU coverage tests (no Metal device).
 
 /// Enumerate the dtypes a Qwen MoE expert bank can have once resident on
-/// the GPU (`MetalModel::load` keeps `weight_dtype_kept_native` dtypes and
+/// the GPU (`MetalModel::load` uses the ExpertBank role capability and
 /// dequantizes every other dtype to F32) and require a grouped down and
 /// gate/up instantiation for each, unless explicitly EXCLUDED.
 #[test]
@@ -67,7 +67,12 @@ fn moe_grouped_generic_covers_every_resident_expert_dtype() {
     let mut resident: Vec<GgmlType> = ALL_GGML_TYPES
         .iter()
         .copied()
-        .filter(|&d| crate::metal_forward::weight_dtype_kept_native(d))
+        .filter(|&d| {
+            crate::metal_forward::weight_role_dtype_supported(
+                crate::metal_forward::WeightRole::ExpertBank,
+                d,
+            )
+        })
         .collect();
     // Non-native expert banks are converted to F32 at load.
     if !resident.contains(&GgmlType::F32) {

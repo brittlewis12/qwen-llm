@@ -61,7 +61,7 @@ force-rank, raw attempts, limits and diagnostic harnesses are in
    N512/527; establish complete-path conversion before widening its scope.
 5. GDN/KDA preparation including state update before recurrence redesign.
 
-User-requested capacity task is next after the completed GLM MLA tail screen:
+User-requested capacity task, first milestone completed after the MLA screen:
 native low-bit IQ residency for Saluki, starting with IQ2_XXS. Metadata inspection
 corrects the original attribution: 225 tensors across IQ2_XXS, IQ2_XS, IQ1_S and
 IQ1_M expand 3.841 GiB to 62.568 GiB F32. IQ2_XXS alone accounts for 32.068 GiB
@@ -70,6 +70,14 @@ file size. Existing IQ2_XS dense kernels are a cheap first coverage check;
 IQ1_M embedding gather is also required. This is role-aware capacity work,
 not a global whitelist change or a GPU-memory-limit increase. Scope, verified
 inventory and qualification plan: `docs/IQ-QUANT-NATIVE-CAPACITY.md`.
+
+Native dense IQ2_XS/IQ2_XXS now realize **39.533 GiB less logical weight
+storage** on Saluki:26.539 GiB remains, with67 IQ1 conversions. Role isolation,
+ordinary concurrent projections, packed tails and short continuation qualify.
+Next: IQ1_M matrix/embedding and IQ1_S matrix support, not a claim that XS/XXS
+alone reaches file-size residency. Evidence: `docs/bench/2026-10-08-native-iq-capacity/`.
+Separate small follow-up: shared session pricing undercounts actual allocation
+by595,168 bytes in that packet; its retained2 GiB reserve covers the difference.
 
 Completed: guarded GLM IQ3_S SmallCounts down at actual rows 32-512, retaining
 generic for counts 17+. Two-corpus final production screen saves 8.73-10.89%

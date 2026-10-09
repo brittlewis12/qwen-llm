@@ -930,6 +930,30 @@ struct ResolvedWeightLoadChoices {
     embedding_selection: NativeQuantEmbeddingSelection,
     router_f16: bool,
     fused_qkv_g8: bool,
+    dense_iq_native: bool,
+}
+
+impl ResolvedWeightLoadChoices {
+    fn resolve(embedding_selection: NativeQuantEmbeddingSelection, router_f16: bool) -> Self {
+        Self {
+            embedding_selection,
+            router_f16,
+            fused_qkv_g8: prefill_attn_fused_qkv_g8_enabled(),
+            dense_iq_native: dense_iq_native_storage_enabled(),
+        }
+    }
+
+    fn storage_requests<'a>(
+        &self,
+        model: &Model<'a>,
+    ) -> Result<Vec<ModelWeightStorageRequest<'a>>, MfError> {
+        model_weight_storage_requests_with_policy(
+            model,
+            self.embedding_selection.uses_native(),
+            self.router_f16,
+            self.dense_iq_native,
+        )
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1817,7 +1841,7 @@ struct MetalWeightLoader<'a> {
     ctx: &'a MetalContext,
     gguf: &'a GgufFile,
     direct_storage: DirectStorage,
-    router_f16: bool,
+    choices: ResolvedWeightLoadChoices,
     seen_forced: HashSet<(usize, u64, u64)>,
     ledger: WeightLoadLedger,
 }
@@ -1827,13 +1851,13 @@ impl<'a> MetalWeightLoader<'a> {
         ctx: &'a MetalContext,
         gguf: &'a GgufFile,
         direct_storage: DirectStorage,
-        router_f16: bool,
+        choices: ResolvedWeightLoadChoices,
     ) -> Self {
         Self {
             ctx,
             gguf,
             direct_storage,
-            router_f16,
+            choices,
             seen_forced: HashSet::new(),
             ledger: WeightLoadLedger::default(),
         }
@@ -1939,8 +1963,10 @@ impl<'a> MetalWeightLoader<'a> {
         Ok(tensor)
     }
 
-    fn load_weight(&mut self, desc: &TensorDesc) -> Result<MetalTensor, MfError> {
-        if weight_dtype_kept_native(desc.dtype) {
+    fn load_weight(&mut self, role: WeightRole, desc: &TensorDesc) -> Result<MetalTensor, MfError> {
+        if weight_storage_kind_with_policy(role, desc, self.choices.dense_iq_native)?
+            == ModelWeightStorageKind::Direct
+        {
             return self.load_direct(desc);
         }
         tracing::info!(
@@ -1964,7 +1990,7 @@ impl<'a> MetalWeightLoader<'a> {
     }
 
     fn load_router_weight(&mut self, desc: &TensorDesc) -> Result<MetalTensor, MfError> {
-        if !self.router_f16 {
+        if !self.choices.router_f16 {
             return self.load_f32(desc);
         }
         let f32 = crate::codec::dequant_to_f32(desc, self.gguf.slice(desc))?;
@@ -1985,7 +2011,7 @@ impl<'a> MetalWeightLoader<'a> {
         {
             self.load_direct(desc)
         } else {
-            self.load_weight(desc)
+            self.load_weight(WeightRole::ExpertBank, desc)
         }
     }
 
@@ -1994,7 +2020,7 @@ impl<'a> MetalWeightLoader<'a> {
             gate_inp: self.load_router_weight(moe.gate_inp)?,
             gate_exps: self.load_moe_expert(moe.gate_exps)?,
             up_exps: self.load_moe_expert(moe.up_exps)?,
-            down_exps: self.load_weight(moe.down_exps)?,
+            down_exps: self.load_weight(WeightRole::ExpertBank, moe.down_exps)?,
             gate_inp_shexp: self.load_f32(moe.gate_inp_shexp)?,
             gate_inp_cpu: crate::codec::dequant_to_f32(
                 moe.gate_inp,
@@ -2293,8 +2319,8 @@ impl MetalModel {
         };
         emit_native_quant_embedding_policy(model, embedding_selection);
         let router_f16 = moe_router_f16_enabled();
-        let expected =
-            model_weight_storage_requests(model, embedding_selection.uses_native(), router_f16)?;
+        let choices = ResolvedWeightLoadChoices::resolve(embedding_selection, router_f16);
+        let expected = choices.storage_requests(model)?;
         let auto = if auto_parallel_copy_a3b {
             match select_auto_parallel_copy_profile(
                 ctx,
@@ -2367,11 +2393,7 @@ impl MetalModel {
                 owned_mode,
                 parallel_mode,
             },
-            choices: ResolvedWeightLoadChoices {
-                embedding_selection,
-                router_f16,
-                fused_qkv_g8: prefill_attn_fused_qkv_g8_enabled(),
-            },
+            choices,
             expected,
             auto,
             auto_retained,
@@ -2472,8 +2494,8 @@ impl MetalModel {
         );
         emit_native_quant_embedding_policy(model, embedding_selection);
         let router_f16 = moe_router_f16_enabled();
-        let expected_storage_requests =
-            model_weight_storage_requests(model, embedding_selection.uses_native(), router_f16)?;
+        let choices = ResolvedWeightLoadChoices::resolve(embedding_selection, router_f16);
+        let expected_storage_requests = choices.storage_requests(model)?;
         let (direct_storage, exact_sentinel) = direct_storage_for_load(
             ctx,
             gguf,
@@ -2491,11 +2513,7 @@ impl MetalModel {
             ctx,
             gguf,
             model,
-            ResolvedWeightLoadChoices {
-                embedding_selection,
-                router_f16,
-                fused_qkv_g8: prefill_attn_fused_qkv_g8_enabled(),
-            },
+            choices,
             &expected_storage_requests,
             direct_storage,
             exact_sentinel,
@@ -2512,11 +2530,11 @@ impl MetalModel {
         exact_sentinel: bool,
     ) -> Result<Self, MfError> {
         let residency_set = create_a10b_parallel_residency_set(ctx, &direct_storage)?;
-        let mut loader = MetalWeightLoader::new(ctx, gguf, direct_storage, choices.router_f16);
+        let mut loader = MetalWeightLoader::new(ctx, gguf, direct_storage, choices);
         let token_embd =
             loader.load_embedding(model.token_embd, choices.embedding_selection.uses_native())?;
         let output_norm = loader.load_f32(model.output_norm)?;
-        let lm_head = loader.load_weight(model.lm_head)?;
+        let lm_head = loader.load_weight(WeightRole::OutputHead, model.lm_head)?;
 
         let load_attn_qkv_fused = |q: &MetalTensor,
                                    k: &MetalTensor,
@@ -2565,24 +2583,25 @@ impl MetalModel {
             )?))
         };
 
+        let projection_role = projection_weight_role(model.arch.kind);
         let mut blocks = Vec::with_capacity(model.blocks.len());
         for b in &model.blocks {
             match b {
                 Block::Gdn(g) => {
                     let attn_norm = loader.load_f32(g.attn_norm)?;
                     let post_attn_norm = loader.load_f32(g.post_attention_norm)?;
-                    let ffn_gate = loader.load_weight(g.ffn_gate)?;
-                    let ffn_up = loader.load_weight(g.ffn_up)?;
-                    let ffn_down = loader.load_weight(g.ffn_down)?;
-                    let in_proj_qkv = loader.load_weight(g.in_proj_qkv)?;
-                    let in_proj_z = loader.load_weight(g.in_proj_z)?;
-                    let beta_proj = loader.load_weight(g.beta_proj)?;
-                    let alpha_proj = loader.load_weight(g.alpha_proj)?;
+                    let ffn_gate = loader.load_weight(projection_role, g.ffn_gate)?;
+                    let ffn_up = loader.load_weight(projection_role, g.ffn_up)?;
+                    let ffn_down = loader.load_weight(projection_role, g.ffn_down)?;
+                    let in_proj_qkv = loader.load_weight(projection_role, g.in_proj_qkv)?;
+                    let in_proj_z = loader.load_weight(projection_role, g.in_proj_z)?;
+                    let beta_proj = loader.load_weight(projection_role, g.beta_proj)?;
+                    let alpha_proj = loader.load_weight(projection_role, g.alpha_proj)?;
                     let a_log = loader.load_f32(g.a_log)?;
                     let dt_bias = loader.load_f32(g.dt_bias)?;
                     let conv1d = loader.load_f32(g.conv1d)?;
                     let norm = loader.load_f32(g.norm)?;
-                    let out_proj = loader.load_weight(g.out_proj)?;
+                    let out_proj = loader.load_weight(projection_role, g.out_proj)?;
                     let ffn_moe = match g.ffn_moe.as_ref() {
                         Some(moe) => Some(loader.load_moe(moe)?),
                         None => None,
@@ -2606,17 +2625,17 @@ impl MetalModel {
                     }));
                 }
                 Block::Attn(a) => {
-                    let q = loader.load_weight(a.q)?;
-                    let k = loader.load_weight(a.k)?;
-                    let v = loader.load_weight(a.v)?;
+                    let q = loader.load_weight(projection_role, a.q)?;
+                    let k = loader.load_weight(projection_role, a.k)?;
+                    let v = loader.load_weight(projection_role, a.v)?;
                     let attn_norm = loader.load_f32(a.attn_norm)?;
                     let post_attn_norm = loader.load_f32(a.post_attention_norm)?;
-                    let ffn_gate = loader.load_weight(a.ffn_gate)?;
-                    let ffn_up = loader.load_weight(a.ffn_up)?;
-                    let ffn_down = loader.load_weight(a.ffn_down)?;
+                    let ffn_gate = loader.load_weight(projection_role, a.ffn_gate)?;
+                    let ffn_up = loader.load_weight(projection_role, a.ffn_up)?;
+                    let ffn_down = loader.load_weight(projection_role, a.ffn_down)?;
                     let qkv_fused = load_attn_qkv_fused(&q, &k, &v)?;
                     loader.record_derived(qkv_fused.as_ref())?;
-                    let o = loader.load_weight(a.o)?;
+                    let o = loader.load_weight(projection_role, a.o)?;
                     let q_norm = loader.load_f32(a.q_norm)?;
                     let k_norm = loader.load_f32(a.k_norm)?;
                     let ffn_moe = match a.ffn_moe.as_ref() {
@@ -3039,6 +3058,8 @@ mod native_embedding_pilot;
 mod snapshot_transfer_pilot;
 
 mod residency;
+#[cfg(test)]
+mod role_tests;
 mod session;
 #[cfg(test)]
 mod snapshot_segments_pilot;

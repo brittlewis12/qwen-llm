@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-08 - Native Dense IQ2 Cuts Saluki Logical Weights by 39.533 GiB
+
+- Role-aware IQ2_XS/IQ2_XXS projection residency replaces persistent F32
+  expansion. Output heads, embeddings, MoE projections/banks and the legacy
+  native whitelist retain prior policies. Prepared choices are frozen before
+  allocation; planner/loader realization matches all851 bindings.
+- One normally admitted Saluki load realizes26.539 GiB logical weights:
+  784 direct copies,67 remaining IQ1 conversions. Loaded Metal allocation,
+  RSS and physical footprint are recorded separately; no inflated baseline
+  model was loaded and no measured75-to27GiB RSS claim is made.
+- Canonical codec/F64 primitive checks cover all39XS/119XXStensor row samples.
+  Whole native packed128 versus native GEMV on N129/131 plus4 common tokens
+  yields10 comparisons, maxKL5.728e-7, same top1, finiteoutputs. Native decode
+  concurrency and matrix dispatch witnesses pass. This is not broad quality
+  or whole-model speedup evidence.
+- Final13IQXXS/dispatch and11role tests, XS checks, workspace/release checks
+  and independent adversarial review pass. GPU work waits for other owners.
+  Evidence: `docs/bench/2026-10-08-native-iq-capacity/README.md`.
+- Next: IQ1_M matrices/embedding and IQ1_S matrices; remaining expansion
+  ~19.194 GiB. Shared session-pricer undercount595,168 bytes is tracked
+  separately; the existing2GiB reserve covered it in qualification.
+
 ## 2026-10-08 - #15 GLM Serve Snapshots: Exact On by Default, Fast Opt-In Pending Its Quality Arm
 
 - GLM serve keeps a RAM snapshot cache (`--snapshot-cache-mib`, shared

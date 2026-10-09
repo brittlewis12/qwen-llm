@@ -17,6 +17,8 @@ defaults are in [SERVE.md](SERVE.md).
 The server binds to loopback and runs one request at a time. A concurrent
 request receives `503` with `Retry-After: 1`. Diagnostics go to stderr; use
 `RUST_LOG=warn,qwen_diag=info` to include the `serve stats:` line.
+Serve and `qwen bench` share the Metal process lease and cannot hold it at the
+same time. Set `QWEN_METAL_LEASE_WAIT=1` to wait for the lease.
 
 ## Configure the provider
 

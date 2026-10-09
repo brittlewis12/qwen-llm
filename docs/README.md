@@ -54,7 +54,7 @@
 - [INFERENCE-GRAPH](INFERENCE-GRAPH.md): semantic map of Qwen hybrid inference paths.
 - [K2-HORIZON-REVIEW](K2-HORIZON-REVIEW.md): archived adversarial review and findings for K2 Horizon.
 - [K2-HORIZON-REVIEW-REQUEST](K2-HORIZON-REVIEW-REQUEST.md): archived brief for the K2 Horizon review.
-- [LENS-MVP](LENS-MVP.md): original Lens MVP north star.
+- [LENS-MVP](LENS-MVP.md): archived capability and qualification record with a frozen gate.
 - [dsv4-paper](dsv4-paper.md): third-party DeepSeek V4 paper text.
 - [archive/](archive/): retained historical design and experiment records.
 - [experiments/](experiments/): retained Lens experiment inputs and rubrics.

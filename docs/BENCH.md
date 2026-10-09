@@ -45,5 +45,7 @@ For priorities: `docs/PERF-ROADMAP.md`.
 - No cross-day / thermal variance tracking — we mitigate by running
   lcpp and qwen in the same sweep so drift cancels in the ratio.
 - No auto-diff against the previous baseline.
-- `qwen bench prefix-cache` measures cold and warm time to first token (TTFT).
+- `qwen bench prefix-cache` reports a TTFT proxy: cold prefill or warm restore
+  plus suffix prefill, then first-token selection and one additional forward
+  pass after that token is chosen.
 - No census-to-active-bytes exporter in the bench tooling yet.

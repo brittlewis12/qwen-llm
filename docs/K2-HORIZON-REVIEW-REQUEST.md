@@ -62,6 +62,6 @@ Return:
 - Revised milestone ordering only if needed, with observable exit criteria.
 - First bounded implementation packet, executable without weights/GPU, with
   proposed touched files and targeted CPU-only tests.
-- Remaining decisions that truly require user input (do not invent blockers).
+- Decisions requiring an explicit choice (do not invent blockers).
 
 Prefer concrete objections and corrections over agreement or restating the plan.

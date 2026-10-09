@@ -162,11 +162,11 @@ detail.
   under `~/.cache/qwen-llm/serve-checkpoints` by default.
 - **Live-session reuse.** Muse Glimmer and K2 Horizon rewind their resident
   session to the longest common prefix. GLM-5.3-Flash continues its session
-  only when the new prompt extends the previous one exactly.
-- **GLM snapshot lineage.** GLM uses Fast lineage by default. Exact-lineage
-  snapshots (`x_qwen.prefill_lineage: "exact"`) are on by default; Fast-lineage
-  snapshots are opt-in with `QWEN_GLM_FAST_SNAPSHOTS=1` while that combination
-  is being qualified.
+  when the new prompt extends the previous one exactly, and otherwise
+  restores a snapshot. With its default Fast prefill, GLM snapshots only at
+  the end of the shared instructions-and-tools prefix; with Exact prefill
+  (`x_qwen.prefill_lineage: "exact"`) it also snapshots at the start of the
+  generation header.
 - **DFlash drafter.** `--drafter DRAFTER.gguf` enables speculative decoding.
 
 ## Lens

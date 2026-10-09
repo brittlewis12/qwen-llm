@@ -443,9 +443,11 @@ fn family_profiles_serve_history_or_standalone_assets_without_native_inference()
         RequestProfile::DeepSeekV4 {
             style: TemplateStyle::House,
             sampling: None,
+            limits: crate::serve::request_profile::OutputLimits::TEST,
         },
         RequestProfile::FlashNext {
             style: TemplateStyle::House,
+            limits: crate::serve::request_profile::OutputLimits::TEST,
         },
         RequestProfile::Muse {
             template: qwen_llm::muse_glimmer::MuseGlimmerChatTemplateProfile::UnslothLaunch,

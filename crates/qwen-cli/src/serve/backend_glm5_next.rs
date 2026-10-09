@@ -29,7 +29,7 @@ use super::http::{
 use super::items::{ServeError, ServeRequest};
 use super::render_glm5_next::{self as render, FAMILY};
 use super::snapshot_cache::SnapshotCache;
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::glm5_next::Glm5NextPreparedArtifact;
 use qwen_llm::glm5_next_chat::{CHAT_STOPS, VerifiedChatProfile};
@@ -99,11 +99,6 @@ impl<'g> Prepared<'g> {
         gguf: &'g GgufFile,
         invocation: &crate::cli::ServeInvocation,
     ) -> Result<Self> {
-        crate::drafter_policy::ensure_drafter_admitted(
-            qwen_llm::model_family::ModelFamily::Glm5Next,
-            crate::drafter_policy::Lane::Serve,
-            invocation.drafter.is_some(),
-        )?;
         let artifact = Glm5NextPreparedArtifact::inspect(gguf)
             .with_context(|| format!("admit {FAMILY} artifact"))?;
         let (capacity, default_max) = super::fixed_session_limits(
@@ -112,10 +107,6 @@ impl<'g> Prepared<'g> {
             invocation.max_context_tokens,
             invocation.max_tokens,
         )?;
-        ensure!(
-            capacity > 0 && default_max > 0,
-            "{FAMILY} serve needs positive --max-context-tokens and --max-tokens"
-        );
         // There is no raw serve lane: without a verified profile nothing renders.
         let profile = artifact.chat_profile().map_err(|error| {
             anyhow::anyhow!("{FAMILY} serve renders verified text chat: {error}")
@@ -187,6 +178,38 @@ pub(super) fn load(
     );
     crate::shutdown::checkpoint()?;
     Glm5NextWeights::load(ctx, gguf).context("load GLM-5.3 weights")
+}
+
+pub(super) fn start(
+    prepared: Prepared<'_>,
+    gguf: &GgufFile,
+    invocation: &crate::cli::ServeInvocation,
+    listening: super::Listening,
+    idle_window: std::time::Duration,
+) -> Result<()> {
+    crate::shutdown::checkpoint()?;
+    let ctx = MetalContext::new()?;
+    let started = std::time::Instant::now();
+    let weights = load(&ctx, gguf, &prepared)?;
+    let load_ms = started.elapsed().as_secs_f64() * 1e3;
+    let snapshot_cache_plan = super::SnapshotCachePlan::resolve(
+        invocation.snapshot_cache_mib,
+        invocation.snapshot_policy,
+        ctx.memory_signals(),
+    )?;
+    let limits = prepared.describe();
+    let mut backend = Glm5NextBackend::new(
+        &ctx,
+        &weights,
+        prepared,
+        listening.model_id.clone(),
+        idle_window,
+        snapshot_cache_plan,
+    );
+    tracing::info!(target: "qwen_diag", "serve limits: {limits} {}", backend.describe_snapshots());
+    let warm_up_ms = backend.warm_up()?;
+    tracing::info!(target: "qwen_diag", "serve startup: family=glm5_next load_ms={load_ms:.1} warm_up_ms={warm_up_ms:.1}");
+    listening.serve(load_ms, &mut backend)
 }
 
 pub(super) struct Glm5NextBackend<'w, 'g> {

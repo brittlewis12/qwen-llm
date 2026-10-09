@@ -32,6 +32,100 @@ use std::time::Instant;
 
 const FAMILY: &str = "Qwen3.8-Flash-Next";
 
+pub(super) struct Prepared {
+    context_limit: usize,
+    default_max_tokens: usize,
+    tokenizer: Tokenizer,
+    stop_tokens: Vec<i32>,
+    im_start: Option<u32>,
+    capacity: Qwen4ExpSessionCapacity,
+    decode_options: qwen_llm::qwen4exp_runtime::Qwen4ExpDecodeOptions,
+}
+
+impl Prepared {
+    pub(super) fn new(
+        gguf: &GgufFile,
+        invocation: &crate::cli::ServeInvocation,
+    ) -> anyhow::Result<Self> {
+        if let Some(failure) = crate::qwen4exp_prompt_capability_failure(
+            qwen_llm::model_family::ModelFamily::Qwen4Exp,
+            gguf,
+        ) {
+            anyhow::bail!(
+                "Qwen3.8-Flash-Next serve does not support the declared {}",
+                failure.as_str()
+            );
+        }
+        let config =
+            Qwen4ExpConfig::from_gguf(gguf).context("bind Qwen3.8-Flash-Next serve geometry")?;
+        let (context_limit, default_max_tokens) = super::fixed_session_limits(
+            qwen_llm::model_family::ModelFamily::Qwen4Exp,
+            config.context_length as usize,
+            invocation.max_context_tokens,
+            invocation.max_tokens,
+        )?;
+        let tokenizer = Tokenizer::from_gguf(gguf).context("load Qwen3.8-Flash-Next tokenizer")?;
+        anyhow::ensure!(
+            config == Qwen4ExpConfig::flash_next_reference(),
+            "Qwen3.8-Flash-Next runtime requires the released architecture contract"
+        );
+        let vocab_size = tokenizer.n_vocab();
+        anyhow::ensure!(
+            vocab_size == config.vocab_size,
+            "Qwen3.8-Flash-Next tokenizer vocabulary {vocab_size} differs from model vocabulary {}",
+            config.vocab_size
+        );
+        let stop_tokens = gguf
+            .stop_token_ids()
+            .context("load producer-declared Qwen3.8-Flash-Next stop tokens")?;
+        crate::qwen4exp::validate_qwen4exp_stop_tokens(&stop_tokens, vocab_size)?;
+        let im_start = tokenizer
+            .encode(IM_START_MARKER, false)
+            .ok()
+            .and_then(|ids| (ids.len() == 1).then(|| u32::try_from(ids[0]).ok())?);
+        let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, context_limit)
+            .context("derive Qwen3.8-Flash-Next resident session capacity")?;
+        let decode_options = crate::family_options::qwen4exp_decode_options_from_env()?;
+        Ok(Self {
+            context_limit,
+            default_max_tokens,
+            tokenizer,
+            stop_tokens,
+            im_start,
+            capacity,
+            decode_options,
+        })
+    }
+}
+
+pub(super) fn start(
+    prepared: Prepared,
+    gguf: GgufFile,
+    invocation: &crate::cli::ServeInvocation,
+    listening: super::Listening,
+    idle_window: std::time::Duration,
+) -> anyhow::Result<()> {
+    crate::shutdown::checkpoint()?;
+    let ctx = MetalContext::new().context("initialize Metal context")?;
+    let load_started = Instant::now();
+    let context_limit = prepared.context_limit;
+    let default_max_tokens = prepared.default_max_tokens;
+    let mut backend = FlashNextBackend::new(
+        ctx,
+        Box::leak(Box::new(gguf)),
+        listening.model_id.clone(),
+        prepared,
+        invocation.snapshot_cache_mib,
+        invocation.snapshot_policy,
+    )?;
+    backend.template_style = invocation.template_style;
+    backend.set_idle_residency(idle_window);
+    let load_ms = load_started.elapsed().as_secs_f64() * 1e3;
+    tracing::info!(target: "qwen_diag", "serve limits: family=qwen4exp max_context_tokens={context_limit} default_max_tokens={default_max_tokens} {}", backend.snapshot_cache_plan);
+    crate::shutdown::checkpoint()?;
+    listening.serve(load_ms, &mut backend)
+}
+
 pub(crate) struct FlashNextBackend {
     ctx: MetalContext,
     /// Serve holds the mapping for the process lifetime; the loaded model's
@@ -41,6 +135,8 @@ pub(crate) struct FlashNextBackend {
     loaded: Qwen4ExpLoadedModel<'static>,
     model_id: String,
     default_max_tokens: usize,
+    /// Longest decoded piece of one token (output ceilings).
+    max_piece_bytes: usize,
     forward_limit: usize,
     vocab_size: u32,
     stop_tokens: Vec<i32>,
@@ -63,56 +159,32 @@ impl FlashNextBackend {
         self.idle_residency = super::idle_residency::IdleResidency::new("qwen4exp", window);
     }
 
-    pub(crate) fn new(
+    pub(super) fn new(
         ctx: MetalContext,
         gguf: &'static GgufFile,
         model_id: String,
-        default_max_tokens: usize,
-        context_limit: usize,
+        prepared: Prepared,
         snapshot_cache_mib: Option<u64>,
         snapshot_policy: SnapshotPolicyConfig,
     ) -> anyhow::Result<Self> {
-        let tokenizer = Tokenizer::from_gguf(gguf).context("load Qwen3.8-Flash-Next tokenizer")?;
-        let config =
-            Qwen4ExpConfig::from_gguf(gguf).context("bind Qwen3.8-Flash-Next request geometry")?;
-        anyhow::ensure!(
-            config == Qwen4ExpConfig::flash_next_reference(),
-            "Qwen3.8-Flash-Next runtime requires the released architecture contract"
-        );
-        let vocab_size = tokenizer.n_vocab();
-        anyhow::ensure!(
-            vocab_size == config.vocab_size,
-            "Qwen3.8-Flash-Next tokenizer vocabulary {vocab_size} differs from model vocabulary {}",
-            config.vocab_size
-        );
-        let stop_tokens = gguf
-            .stop_token_ids()
-            .context("load producer-declared Qwen3.8-Flash-Next stop tokens")?;
-        crate::qwen4exp::validate_qwen4exp_stop_tokens(&stop_tokens, vocab_size)?;
-        let im_start = tokenizer
-            .encode(IM_START_MARKER, false)
-            .ok()
-            .and_then(|ids| (ids.len() == 1).then(|| u32::try_from(ids[0]).ok())?);
-        let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, context_limit)
-            .context("derive Qwen3.8-Flash-Next resident session capacity")?;
-        let decode_options = crate::family_options::qwen4exp_decode_options_from_env()?;
+        let vocab_size = prepared.tokenizer.n_vocab();
         // Packed prefill sized to the whole context; when that allocation
         // is refused, prompts prefill token by token as on the run lane.
         let (loaded, packed_fallback) = match Qwen4ExpLoadedModel::load_with_decode_options(
             &ctx,
             gguf,
-            capacity,
-            Some(context_limit),
-            decode_options,
+            prepared.capacity,
+            Some(prepared.context_limit),
+            prepared.decode_options,
         ) {
             Ok(loaded) => (loaded, None),
             Err(packed_error) => (
                 Qwen4ExpLoadedModel::load_with_decode_options(
                     &ctx,
                     gguf,
-                    capacity,
+                    prepared.capacity,
                     None,
-                    decode_options,
+                    prepared.decode_options,
                 )
                 .with_context(|| {
                     format!(
@@ -125,8 +197,8 @@ impl FlashNextBackend {
         tracing::info!(
             target: "qwen_diag",
             "serve: qwen4exp resident forward_limit={} qsa_physical_capacity={} packed_prefill_capacity={:?} packed_fallback={:?} guarded_topk={} hc_up_mix={}",
-            capacity.forward_limit(),
-            capacity.qsa_physical_capacity(),
+            prepared.capacity.forward_limit(),
+            prepared.capacity.qsa_physical_capacity(),
             loaded.packed_prefill_capacity(),
             packed_fallback,
             loaded.guarded_topk_enabled(),
@@ -141,14 +213,15 @@ impl FlashNextBackend {
         Ok(Self {
             ctx,
             gguf,
-            tokenizer,
+            max_piece_bytes: prepared.tokenizer.max_decoded_piece_bytes(),
+            tokenizer: prepared.tokenizer,
             loaded,
             model_id,
-            default_max_tokens,
-            forward_limit: capacity.forward_limit(),
+            default_max_tokens: prepared.default_max_tokens,
+            forward_limit: prepared.capacity.forward_limit(),
             vocab_size,
-            stop_tokens,
-            im_start,
+            stop_tokens: prepared.stop_tokens,
+            im_start: prepared.im_start,
             cache: SnapshotCache::new(snapshot_cache_plan.bytes, snapshot_cache_plan.policy),
             snapshot_cache_plan,
             template_style: super::items::TemplateStyle::House,
@@ -158,6 +231,16 @@ impl FlashNextBackend {
                 std::time::Duration::ZERO,
             ),
         })
+    }
+}
+
+impl FlashNextBackend {
+    /// The limits ceilings and generation both resolve against.
+    fn output_limits(&self) -> crate::serve::request_profile::OutputLimits {
+        crate::serve::request_profile::OutputLimits {
+            default_max_tokens: self.default_max_tokens,
+            max_piece_bytes: self.max_piece_bytes,
+        }
     }
 }
 
@@ -190,6 +273,7 @@ impl GenerationBackend for FlashNextBackend {
     fn request_profile(&self) -> super::request_profile::RequestProfile {
         super::request_profile::RequestProfile::FlashNext {
             style: self.template_style,
+            limits: self.output_limits(),
         }
     }
 
@@ -200,7 +284,8 @@ impl GenerationBackend for FlashNextBackend {
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
         self.idle_residency.before_request();
-        let max_tokens = request.max_output_tokens.unwrap_or(self.default_max_tokens);
+        // One resolution, shared with the output ceiling.
+        let max_tokens = self.output_limits().max_tokens(request);
         let mut sampler = Sampler::new(super::request_profile::sampling_with_defaults(
             request,
             super::request_profile::flash_next_release(),

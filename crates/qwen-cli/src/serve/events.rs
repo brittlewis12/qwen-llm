@@ -786,6 +786,7 @@ mod tests {
             preopened_reasoning: false,
             parse_tools: true,
             tool_grammar: ToolGrammar::QwenXml,
+            tool_byte_ceiling: None,
         })
     }
 
@@ -1160,6 +1161,7 @@ mod tests {
                             preopened_reasoning: preopened,
                             parse_tools: true,
                             tool_grammar: ToolGrammar::QwenXml,
+                            tool_byte_ceiling: None,
                         });
                         let mut events = Vec::new();
                         partition.push(generated.as_bytes(), &mut events);
@@ -1272,6 +1274,7 @@ mod tests {
                         preopened_reasoning: preopened,
                         parse_tools: true,
                         tool_grammar: ToolGrammar::DeepSeekDsml,
+                        tool_byte_ceiling: None,
                     });
                     let mut events = Vec::new();
                     for bytes in generated.as_bytes().chunks(chunk) {
@@ -1362,6 +1365,7 @@ mod tests {
                 preopened_reasoning: preopened,
                 parse_tools: true,
                 tool_grammar: ToolGrammar::DeepSeekDsml,
+                tool_byte_ceiling: None,
             });
             let mut events = Vec::new();
             partition.push(generated.as_bytes(), &mut events);
@@ -1493,6 +1497,7 @@ mod tests {
                 preopened_reasoning: true,
                 parse_tools: true,
                 tool_grammar: ToolGrammar::QwenXml,
+                tool_byte_ceiling: None,
             },
             &qwen,
         );
@@ -1521,6 +1526,7 @@ mod tests {
                 preopened_reasoning: true,
                 parse_tools: true,
                 tool_grammar: ToolGrammar::DeepSeekDsml,
+                tool_byte_ceiling: None,
             },
             &ds4,
         );

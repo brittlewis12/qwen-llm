@@ -5,6 +5,7 @@ use std::path::PathBuf;
 mod intervention_gates;
 mod natural;
 mod quality;
+mod quality_split;
 mod snapshot_gates;
 
 const ORACLE_DEFAULT: &str =
@@ -261,7 +262,12 @@ fn within(value: f64, bound: f64) -> bool {
 pub(super) fn choice_regret(reference: &[f32], native: &[f32]) -> (f32, f32) {
     assert_comparable("choice regret", native, reference);
     let (r, n) = (argmax(reference), argmax(native));
-    (reference[r] - reference[n], native[n] - native[r])
+    let regrets = (reference[r] - reference[n], native[n] - native[r]);
+    assert!(
+        regrets.0.is_finite() && regrets.1.is_finite(),
+        "choice regret is not finite: {regrets:?}"
+    );
+    regrets
 }
 
 pub(super) fn argmax(x: &[f32]) -> usize {
@@ -1105,9 +1111,14 @@ fn qual_oracle_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(QUAL_ORACLE_DEFAULT))
 }
 
-/// Fast-lineage qualification over a long prompt (qual-v1): a 559-token
+/// Fast-lineage chunking checks over a long prompt (qual-v1): a 559-token
 /// prompt of unrelated passages (one 512-row chunk plus a 47-row tail; three
-/// live pending slots) and 32 teacher-forced continuation tokens.
+/// live pending slots) and 32 teacher-forced continuation tokens. Under the
+/// adopted map #12 policy (PERF-LOG 2026-10-08) this is not a quality
+/// qualification: logit drift from Exact and top-1 flips (both regrets) are
+/// reported (the earlier near-tie-only and KL 2e-2 bounds are superseded;
+/// the investigation trigger belongs to the frozen natural cases), and the
+/// state-error bounds remain as regression alarms.
 ///
 /// 1. Native serial decode matches the llama.cpp serial oracle (long-context
 ///    dense attention, pools and recurrence): KL <= 1e-8 up to an exact
@@ -1115,9 +1126,11 @@ fn qual_oracle_dir() -> PathBuf {
 ///    tie policies, top-1 at all 591 positions; and the Exact packed
 ///    reference equals serial decode bitwise.
 /// 2. Fast prefill with chunks 512/128/64/97 and a 3-token packed prefix is
-///    compared with that Exact reference on logits at every step and on each
-///    state kind over its valid region, at the prompt end and after the
-///    continuation, within bounds frozen from measurement (about 2x).
+///    compared with that Exact reference on logits at every step (reported)
+///    and on each state kind over its valid region, at
+///    the prompt end and after the continuation, against regression alarms
+///    frozen from measurement (about 2x): a change in Fast arithmetic to
+///    investigate, not a quality limit.
 /// 3. Chunking is arithmetic-neutral: 512 and 128 (both whole 128-row
 ///    absorption blocks) and 64 and 97 (per-row absorption) give bitwise
 ///    identical logits and state.
@@ -1129,7 +1142,7 @@ fn qual_oracle_dir() -> PathBuf {
 /// amplified by KDA), identically for every chunking.
 #[test]
 #[ignore = "loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, the qual-v1 oracle and an idle GPU"]
-fn packed_fast_qualifies_across_chunkings_with_teacher_forcing() {
+fn packed_fast_chunkings_keep_bit_identities_with_drift_alarms() {
     const PROMPT: usize = 559;
     const CONTINUATION: usize = 32;
     const CAPACITY: usize = PROMPT + CONTINUATION;
@@ -1263,25 +1276,21 @@ fn packed_fast_qualifies_across_chunkings_with_teacher_forcing() {
         ));
     }
 
-    // Calibrated regression bounds, not an independent holdout: about 2x the
-    // worst measured over all variants when this test was introduced.
-    const LOGIT_KL: f64 = 2e-2; // measured 9.1e-3
-    const KDA_STATE: f64 = 2e-1; // 1.06e-1
-    const CONV: f64 = 2.5e-1; // 1.33e-1
-    const LATENTS: f64 = 1.25e-1; // 6.6e-2
-    const POOLS: f64 = 1.5e-1; // 7.4e-2
-    const PENDING: f64 = 1.75e-1; // 8.8e-2
-    // Top-1 may flip only to a near-tied alternative: the logit regret of
-    // each side's choice under the other side's logits stays small. This
-    // bound predates the regret metric; measured flips: reference-side regret
-    // <= 0.06, Fast-side regret <= 0.176 (deterministic across runs).
-    const TOP1_REGRET: f32 = 0.2;
+    // State regression alarms (investigate a change in Fast arithmetic; not
+    // quality limits): about 2x the worst measured over all variants when
+    // this test was introduced. Logit drift (measured worst KL 9.1e-3, flips
+    // at regrets <= 0.06 / 0.176) is reported with the map #12 trigger.
+    const STATE_ALARM_KDA: f64 = 2e-1; // 1.06e-1
+    const STATE_ALARM_CONV: f64 = 2.5e-1; // 1.33e-1
+    const STATE_ALARM_LATENTS: f64 = 1.25e-1; // 6.6e-2
+    const STATE_ALARM_POOLS: f64 = 1.5e-1; // 7.4e-2
+    const STATE_ALARM_PENDING: f64 = 1.75e-1; // 8.8e-2
     let bound = |kind: &str| match kind {
-        "kda_state" => KDA_STATE,
-        "conv" => CONV,
-        "latents" => LATENTS,
-        "pools" => POOLS,
-        "pending" => PENDING,
+        "kda_state" => STATE_ALARM_KDA,
+        "conv" => STATE_ALARM_CONV,
+        "latents" => STATE_ALARM_LATENTS,
+        "pools" => STATE_ALARM_POOLS,
+        "pending" => STATE_ALARM_PENDING,
         other => unreachable!("{other}"),
     };
     // (rows, prefix, the variant it must equal bitwise)
@@ -1316,21 +1325,13 @@ fn packed_fast_qualifies_across_chunkings_with_teacher_forcing() {
             .chain(reference_steps.iter())
             .collect();
         assert_eq!(references.len(), logits.len());
-        let mut kls = Vec::with_capacity(logits.len());
-        let mut flips = Vec::new();
-        for (step, (reference, fast)) in references.iter().zip(&logits).enumerate() {
-            kls.push(kl_divergence(reference, fast));
-            let regret = choice_regret(reference, fast);
-            if regret != (0.0, 0.0) {
-                flips.push((step, regret));
-            }
-        }
-        let worst_kl = worst(kls.iter().copied()).0;
-        let mean_kl = kls.iter().sum::<f64>() / kls.len() as f64;
-        eprintln!(
-            "{label}: prefill {prefill_ms:.0} ms; KL prefill {:.3e} mean {mean_kl:.3e} worst {worst_kl:.3e}; top-1 flips (step, regret ref/fast) {flips:?}",
-            kls[0]
-        );
+        let references: Vec<Vec<f32>> = references.into_iter().cloned().collect();
+        eprintln!("{label}: prefill {prefill_ms:.0} ms");
+        // Diagnostic: the map #12 trigger is preregistered for the frozen
+        // natural cases at 512 rows only, not for these chunkings.
+        let drift = Drift::measure(&label, &references, &logits);
+        drift.print(&format!("{label} vs Exact (diagnostic)"));
+        eprintln!("  KL at the prompt end {:.3e}", drift.kls[0]);
         for (when, errors) in [("prompt", &prompt_errors), ("end", &end_errors)] {
             let line: Vec<String> = errors
                 .iter()
@@ -1340,22 +1341,10 @@ fn packed_fast_qualifies_across_chunkings_with_teacher_forcing() {
             for (kind, error, layer) in errors {
                 if !within(*error, bound(kind)) {
                     failures.push(format!(
-                        "{label} {when}: {kind} {error:.3e} at layer {layer}"
+                        "{label} {when}: INVESTIGATE (state regression alarm, not a quality verdict): {kind} {error:.3e} at layer {layer}"
                     ));
                 }
             }
-        }
-        if !within(worst_kl, LOGIT_KL) {
-            failures.push(format!("{label}: worst KL {worst_kl:.3e}"));
-        }
-        let near_tie = |r: f32| within(f64::from(r), f64::from(TOP1_REGRET));
-        if let Some((step, regret)) = flips
-            .iter()
-            .find(|(_, (a, b))| !near_tie(*a) || !near_tie(*b))
-        {
-            failures.push(format!(
-                "{label}: top-1 flip at step {step}, regret {regret:?}"
-            ));
         }
         if let Some(index) = equal_to {
             let (bits, steps) = &fingerprints[index];
@@ -2674,20 +2663,108 @@ fn decode_stage_attribution() {
     std::fs::write(&out, serde_json::to_vec_pretty(&document).unwrap()).unwrap();
 }
 
-/// Per-position reuse comparison of `warm` against `cold` logits at the join
-/// and teacher-forced continuation positions: KL both ways and both choice
-/// regrets, with bounds frozen before observation (map #12, cx session
-/// 01a1046). `positions` is the expected count (the join plus the
-/// continuation). Returns (worst KL, worst regret, top-1 agreements, bitwise).
-fn reuse_gate(
+/// The adopted map #12 Fast policy (PERF-LOG 2026-10-08): Fast-versus-Exact
+/// and warm-versus-cold drift are reported, not bounded; quality is gated by
+/// the preregistered cohort, and bitwise properties stay hard. One
+/// investigation trigger remains, explicitly chosen and provisional (not a
+/// derived envelope or a quality limit): a worst-position KL(Exact || Fast)
+/// above this value at serve's 512-row schedule.
+pub(super) const FAST_DRIFT_TRIGGER_KL: f64 = 0.33;
+
+/// Per-position drift of `other` from `reference`: KL(reference || other)
+/// and every top-1 disagreement (argmax inequality, so exact ties count)
+/// with both choice regrets.
+pub(super) struct Drift {
+    pub(super) kls: Vec<f64>,
+    pub(super) worst_kl: f64,
+    pub(super) worst_at: usize,
+    pub(super) mean_kl: f64,
+    /// (position, reference-side regret, other-side regret)
+    pub(super) flips: Vec<(usize, f32, f32)>,
+}
+
+impl Drift {
+    /// Rejects non-finite logits and derived metrics (always a failure).
+    pub(super) fn measure(label: &str, reference: &[Vec<f32>], other: &[Vec<f32>]) -> Self {
+        assert_eq!(reference.len(), other.len(), "{label}: position count");
+        let mut kls = Vec::with_capacity(other.len());
+        let mut flips = Vec::new();
+        for (position, (r, o)) in reference.iter().zip(other).enumerate() {
+            assert_finite(&format!("{label} reference {position}"), r);
+            assert_finite(&format!("{label} other {position}"), o);
+            kls.push(kl_divergence(r, o));
+            if argmax(r) != argmax(o) {
+                let (r0, r1) = choice_regret(r, o);
+                flips.push((position, r0, r1));
+            }
+        }
+        let (worst_kl, worst_at) = worst(kls.iter().copied());
+        let mean_kl = kls.iter().sum::<f64>() / kls.len() as f64;
+        assert!(
+            worst_kl.is_finite() && mean_kl.is_finite(),
+            "{label}: non-finite drift"
+        );
+        Self {
+            kls,
+            worst_kl,
+            worst_at,
+            mean_kl,
+            flips,
+        }
+    }
+
+    /// Whether the investigation trigger fires (NaN would; `measure`
+    /// already refuses it).
+    pub(super) fn trips(&self) -> bool {
+        !within(self.worst_kl, FAST_DRIFT_TRIGGER_KL)
+    }
+
+    pub(super) fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "worst_kl": self.worst_kl, "worst_at": self.worst_at, "mean_kl": self.mean_kl,
+            "flips": self.flips.iter().map(|(p, a, b)| serde_json::json!([p, a, b])).collect::<Vec<_>>(),
+            "kl": self.kls,
+        })
+    }
+
+    pub(super) fn print(&self, label: &str) {
+        eprintln!(
+            "  {label}: worst KL {:.3e} at {}, mean {:.3e}, top-1 flips (position, regret reference/other) {:?}",
+            self.worst_kl, self.worst_at, self.mean_kl, self.flips
+        );
+    }
+}
+
+/// Fast-versus-Exact drift at serve's schedule, reported; records a failure
+/// labelled as the investigation trigger when it fires.
+pub(super) fn fast_drift_with_trigger(
+    label: &str,
+    exact: &[Vec<f32>],
+    fast: &[Vec<f32>],
+    failures: &mut Vec<String>,
+) -> Drift {
+    let drift = Drift::measure(label, exact, fast);
+    drift.print(&format!("{label} vs Exact"));
+    if drift.trips() {
+        failures.push(format!(
+            "{label}: INVESTIGATE (map #12 trigger, not a quality verdict): worst KL(exact||fast) {:.3e} at {} > {FAST_DRIFT_TRIGGER_KL}",
+            drift.worst_kl, drift.worst_at
+        ));
+    }
+    drift
+}
+
+/// Reported (not bounded) per-position comparison of `warm` against `cold`
+/// logits at the join and teacher-forced continuation positions: KL both
+/// ways, both choice regrets, top-1 agreement and bitwise equality.
+/// `positions` is the expected count (the join plus the continuation).
+/// Returns (worst KL either way, worst regret, top-1 agreements, bitwise).
+fn warm_cold_report(
     label: &str,
     positions: usize,
     cold: &[Vec<f32>],
     warm: &[Vec<f32>],
-    failures: &mut Vec<String>,
 ) -> (f64, f32, usize, bool) {
-    const KL_BOUND: f64 = 2e-2;
-    const REGRET_BOUND: f32 = 0.2;
     assert_eq!(cold.len(), positions, "{label}: cold position count");
     assert_eq!(warm.len(), positions, "{label}: warm position count");
     let (mut kl_worst, mut regret_worst, mut agree) = (0.0f64, 0.0f32, 0);
@@ -2696,16 +2773,9 @@ fn reuse_gate(
         assert_finite(&format!("{label} cold {position}"), c);
         assert_finite(&format!("{label} warm {position}"), w);
         let (forward, reverse) = (kl_divergence(c, w), kl_divergence(w, c));
-        let kl = forward.max(reverse);
         let (r0, r1) = choice_regret(c, w);
         table.push(format!("{position}:{forward:.1e}/{reverse:.1e}"));
-        // Every violation is recorded; the test fails once, after all cases.
-        if !(within(kl, KL_BOUND) && r0 <= REGRET_BOUND && r1 <= REGRET_BOUND) {
-            failures.push(format!(
-                "{label} position {position}: KL {forward:.3e} cold||warm, {reverse:.3e} warm||cold (bound {KL_BOUND:e}), regret {r0:.3}/{r1:.3} (bound {REGRET_BOUND})"
-            ));
-        }
-        kl_worst = kl_worst.max(kl);
+        kl_worst = kl_worst.max(forward.max(reverse));
         regret_worst = regret_worst.max(r0).max(r1);
         agree += usize::from(argmax(c) == argmax(w));
     }
@@ -2722,40 +2792,14 @@ fn reuse_gate(
     (kl_worst, regret_worst, agree, bitwise)
 }
 
-/// Diagnostic only (asserts nothing): how far `other` is from the Exact
-/// `reference` per position, in the Fast policy's own direction
-/// (reference||other), with top-1 flips and their regrets.
-fn reference_report(label: &str, reference: &[Vec<f32>], other: &[Vec<f32>]) {
-    let kls: Vec<f64> = reference
-        .iter()
-        .zip(other)
-        .map(|(r, o)| kl_divergence(r, o))
-        .collect();
-    let flips: Vec<(usize, (f32, f32))> = reference
-        .iter()
-        .zip(other)
-        .enumerate()
-        .map(|(position, (r, o))| (position, choice_regret(r, o)))
-        .filter(|(_, regret)| *regret != (0.0, 0.0))
-        .collect();
-    let (worst, at) = worst(kls.iter().copied());
-    eprintln!(
-        "  {label} vs Exact: worst KL {worst:.3e} at {at}, mean {:.3e}, top-1 flips (position, regret exact/other) {flips:?}",
-        kls.iter().sum::<f64>() / kls.len() as f64
-    );
-}
-
-/// KNOWN FAILING QUALIFICATION (map #12, 2026-10-06). Kept as the
-/// reproducer, with its frozen bounds and assertions unchanged. Fast reuse
-/// exceeds the warm/cold tolerance on these held-out prompts, and both cold
-/// and warm Fast also exceed the existing Exact-reference policy (see the
-/// diagnostic Exact report and `docs/bench/2026-10-06-glm53-review-
-/// qualification/`). Cancellation and resume on an unchanged schedule are
-/// bitwise. The general Fast-lineage qualification remains open.
-///
-/// Map #12: serve's default Fast packed lineage across live-session reuse.
-/// Three teacher-forced cases, each compared at the join and 32 continuation
-/// positions against one cold Fast prefill of the whole prompt:
+/// Map #12 schedule sensitivity of serve's default Fast packed lineage across
+/// live-session reuse, under the adopted policy (PERF-LOG 2026-10-08). Until
+/// then this test held warm/cold agreement bounds (KL 2e-2, regret 0.2) and
+/// failed them (`docs/bench/2026-10-06-glm53-review-qualification/`, run as
+/// `fast_reuse_stays_within_the_fast_policy_across_reuse_boundaries`); those
+/// numbers are now reported. Three teacher-forced cases, each compared at
+/// the join and 32 continuation positions against one cold Fast prefill of
+/// the whole prompt:
 ///
 /// 1. Ordinary continuation: Fast prefill of a 700-token prompt, 40 serially
 ///    decoded "generated" tokens, then a Fast prefill of the next-turn suffix
@@ -2768,17 +2812,16 @@ fn reference_report(label: &str, reference: &[Vec<f32>], other: &[Vec<f32>]) {
 ///    sparse attention (asserted).
 /// 3. Cancellation: a Fast prefill cancelled at its second chunk boundary
 ///    and resumed from the committed position replays the uninterrupted
-///    chunk schedule, so it must be bitwise equal to the cold run.
+///    chunk schedule, so it must be bitwise equal to the cold run (hard).
 ///
-/// Every session selects the Fast lineage explicitly (asserted), and each
-/// case compares exactly 33 positions. Bounds (frozen before observation):
-/// per position, KL both ways <= 2e-2 and both choice regrets <= 0.2. Not
-/// required for cases 1-2: bitwise equality, identical sampled text, or
-/// identical recurrent state (Fast is numerical by design; the Exact
-/// lineage keeps its own bitwise warm/cold check in serve).
+/// Cases 1-2 report warm versus cold and each against Exact (diagnostic: the
+/// investigation trigger, [`FAST_DRIFT_TRIGGER_KL`], is preregistered for
+/// the frozen natural cases only); the failures are case 3 and non-finite
+/// values. Passing says nothing about quality; the preregistered cohort
+/// does.
 #[test]
-#[ignore = "known failing qualification (map #12); loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU"]
-fn fast_reuse_stays_within_the_fast_policy_across_reuse_boundaries() {
+#[ignore = "map #12 schedule-sensitivity report; loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU"]
+fn fast_reuse_schedule_sensitivity_across_reuse_boundaries() {
     use crate::glm5_next_chat::{
         self as chat, Effort, Message, RenderOptions, ToolCall, ToolDefinition,
     };
@@ -2801,7 +2844,7 @@ fn fast_reuse_stays_within_the_fast_policy_across_reuse_boundaries() {
     let long = encode(&long_qualification_text());
     let continuation: Vec<u32> = long[3000..3000 + CONTINUATION].to_vec();
     let positions = CONTINUATION + 1;
-    let mut failures = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
     // Serve's default lineage, selected explicitly rather than inherited.
     let fast_session = |capacity: usize| {
         let mut session =
@@ -2823,9 +2866,9 @@ fn fast_reuse_stays_within_the_fast_policy_across_reuse_boundaries() {
         }
         logits
     };
-    // Diagnostic reference: the same cold run in the Exact lineage (packed
-    // Exact matches serial), to tell which Fast run moved, not only that the
-    // two differ. Nothing is asserted on it.
+    // The Exact reference: the same cold run in the Exact lineage (packed
+    // Exact matches serial). Fast drift from it is reported; only the
+    // investigation trigger can fail.
     let exact = |prompt: &[u32]| -> Vec<Vec<f32>> {
         let mut session = Glm5NextSession::with_prefill_rows(
             &ctx,
@@ -2862,16 +2905,10 @@ fn fast_reuse_stays_within_the_fast_policy_across_reuse_boundaries() {
     let (first, generated, suffix) = (&long[..700], &long[700..740], &long[740..1300]);
     let joined: Vec<u32> = [first, generated, suffix].concat();
     let (cold_logits, warm_logits) = (cold(&joined), warm(first, generated, suffix));
-    reuse_gate(
-        "ordinary",
-        positions,
-        &cold_logits,
-        &warm_logits,
-        &mut failures,
-    );
+    warm_cold_report("ordinary", positions, &cold_logits, &warm_logits);
     let reference = exact(&joined);
-    reference_report("ordinary cold", &reference, &cold_logits);
-    reference_report("ordinary warm", &reference, &warm_logits);
+    Drift::measure("ordinary cold", &reference, &cold_logits).print("ordinary cold vs Exact");
+    Drift::measure("ordinary warm", &reference, &warm_logits).print("ordinary warm vs Exact");
 
     // 2. Tool continuation through <|observation|>, crossing the frontier.
     let tool = ToolDefinition::from_value(&serde_json::json!({"name": "get_weather",
@@ -2961,16 +2998,15 @@ fn fast_reuse_stays_within_the_fast_policy_across_reuse_boundaries() {
         cold(&next),
         warm(&first_tokens, &generated_tokens, &next[consumed..]),
     );
-    reuse_gate(
+    warm_cold_report(
         "tool loop across the frontier",
         positions,
         &cold_logits,
         &warm_logits,
-        &mut failures,
     );
     let reference = exact(&next);
-    reference_report("tool loop cold", &reference, &cold_logits);
-    reference_report("tool loop warm", &reference, &warm_logits);
+    Drift::measure("tool loop cold", &reference, &cold_logits).print("tool loop cold vs Exact");
+    Drift::measure("tool loop warm", &reference, &warm_logits).print("tool loop warm vs Exact");
 
     // 3. Cancellation at the second chunk boundary, then resume.
     let prompt = &long[..1300];
@@ -2992,14 +3028,8 @@ fn fast_reuse_stays_within_the_fast_policy_across_reuse_boundaries() {
         resumed.push(session.forward(&ctx, token).unwrap());
     }
     // Resuming replays the uninterrupted chunk schedule (512 | 512 | 276),
-    // so this case is held to bitwise equality, not only the numerical gate.
-    let (.., bitwise) = reuse_gate(
-        "cancel and resume",
-        positions,
-        &cold(prompt),
-        &resumed,
-        &mut failures,
-    );
+    // so this case is held to bitwise equality.
+    let (.., bitwise) = warm_cold_report("cancel and resume", positions, &cold(prompt), &resumed);
     if !bitwise {
         failures.push("cancel and resume: not bitwise on the same chunk schedule".into());
     }

@@ -8,7 +8,7 @@
 //! before it grows. Before any push that would begin or extend the block
 //! beyond its capacity, the capacity grows by whole [`ADMISSION_STEP`]s, and
 //! the process must have headroom for the block's whole outstanding peak at
-//! the new capacity: [`tool_block_peak_bytes`] (text, parsed values with
+//! the new capacity: `checked_tool_block_peak_bytes` (text, parsed values with
 //! their container overhead, and the published serializations) less what
 //! the block already holds. The check repeats at every step against current
 //! headroom, so earlier steps reserve nothing that later allocations could
@@ -20,9 +20,7 @@ use super::items::ServeError;
 use super::output_partition::GenerationEnd;
 use super::partition::PartitionEvent;
 use super::partition_preopened::PreopenedPartition;
-use qwen_llm::glm5_next_chat::{
-    ToolDefinition, ToolOutputEnd, ToolOutputStream, tool_block_peak_bytes,
-};
+use qwen_llm::glm5_next_chat::{ToolDefinition, ToolOutputEnd, ToolOutputStream};
 
 /// Block capacity admitted per step.
 pub(crate) const ADMISSION_STEP: usize = 64 << 10;
@@ -45,7 +43,7 @@ impl Glm5NextToolsPartition {
         )
     }
 
-    fn with_headroom(
+    pub(crate) fn with_headroom(
         definitions: Vec<ToolDefinition>,
         max_bytes: usize,
         headroom: fn() -> Option<u64>,
@@ -59,11 +57,18 @@ impl Glm5NextToolsPartition {
         }
     }
 
+    /// A stored refusal or parse failure (the turn fails with it).
+    pub(crate) fn failure(&self) -> Option<&ServeError> {
+        self.failure.as_ref()
+    }
+
     /// Headroom for the block's outstanding peak at `capacity`, given what
     /// it already holds.
     fn admit_outstanding(&self, capacity: usize) -> Result<(), ServeError> {
         let held = self.tools.block_capacity();
-        let outstanding = tool_block_peak_bytes(capacity).saturating_sub(held);
+        let peak = qwen_llm::glm5_next_chat::checked_tool_block_peak_bytes(capacity)
+            .ok_or_else(|| super::output_memory::size_overflow("tool block"))?;
+        let outstanding = peak.saturating_sub(held);
         super::transport_memory::admit_resident_transport(outstanding as u64, (self.headroom)())
     }
 
@@ -160,6 +165,7 @@ impl Glm5NextToolsPartition {
 mod tests {
     use super::*;
     use crate::serve::output_partition::GenerationEnd;
+    use qwen_llm::glm5_next_chat::tool_block_peak_bytes;
     use serde_json::json;
 
     fn weather() -> ToolDefinition {

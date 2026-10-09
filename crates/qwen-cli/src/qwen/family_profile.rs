@@ -41,6 +41,10 @@ pub(crate) struct FamilyProfile {
     /// idle period (`--durable-idle-publish-secs`). A durable tier does not
     /// imply it: DeepSeek V4 writes behind on capture instead.
     pub(crate) durable_idle_publish: bool,
+    /// The backend can keep its named no-copy weight buffers wired while idle.
+    pub(crate) idle_residency_eligible: bool,
+    /// `--template-style upstream` is supported by the serve renderer.
+    pub(crate) upstream_template_style: bool,
     pub(crate) capabilities: fn(&GgufFile) -> Result<Value>,
 }
 
@@ -52,6 +56,8 @@ static QWEN35: FamilyProfile = FamilyProfile {
     serve_backend: true,
     serve_warmth: ServeWarmth::SnapshotsDurable,
     durable_idle_publish: true,
+    idle_residency_eligible: false,
+    upstream_template_style: true,
     capabilities: qwen35_capabilities,
 };
 
@@ -63,6 +69,8 @@ static QWEN35_MOE: FamilyProfile = FamilyProfile {
     serve_backend: true,
     serve_warmth: ServeWarmth::SnapshotsDurable,
     durable_idle_publish: true,
+    idle_residency_eligible: false,
+    upstream_template_style: true,
     capabilities: qwen35_moe_capabilities,
 };
 
@@ -74,6 +82,8 @@ static QWEN4EXP: FamilyProfile = FamilyProfile {
     serve_backend: true,
     serve_warmth: ServeWarmth::SnapshotsRam,
     durable_idle_publish: false,
+    idle_residency_eligible: true,
+    upstream_template_style: true,
     capabilities: qwen4exp_capabilities,
 };
 
@@ -85,6 +95,8 @@ static DEEPSEEK4: FamilyProfile = FamilyProfile {
     serve_backend: true,
     serve_warmth: ServeWarmth::SnapshotsDurable,
     durable_idle_publish: false,
+    idle_residency_eligible: true,
+    upstream_template_style: true,
     capabilities: deepseek4_capabilities,
 };
 
@@ -96,6 +108,8 @@ static MUSE_GLIMMER: FamilyProfile = FamilyProfile {
     serve_backend: true,
     serve_warmth: ServeWarmth::LiveSession,
     durable_idle_publish: false,
+    idle_residency_eligible: true,
+    upstream_template_style: false,
     capabilities: muse_glimmer_capabilities,
 };
 
@@ -107,6 +121,8 @@ static K2_HORIZON: FamilyProfile = FamilyProfile {
     serve_backend: true,
     serve_warmth: ServeWarmth::LiveSession,
     durable_idle_publish: false,
+    idle_residency_eligible: true,
+    upstream_template_style: false,
     capabilities: k2_capabilities,
 };
 
@@ -118,6 +134,8 @@ static GLM5_NEXT: FamilyProfile = FamilyProfile {
     serve_backend: true,
     serve_warmth: ServeWarmth::SnapshotsRam,
     durable_idle_publish: false,
+    idle_residency_eligible: true,
+    upstream_template_style: false,
     capabilities: glm5_next_capabilities,
 };
 
@@ -298,6 +316,23 @@ mod tests {
             let profile = profile(*family);
             assert_eq!(profile.family, *family);
             assert!(displays.insert(profile.display), "{}", profile.display);
+        }
+    }
+
+    #[test]
+    fn serve_profile_pins_idle_residency_and_upstream_template_support() {
+        for (family, idle_residency, upstream_template) in [
+            (ModelFamily::Qwen35, false, true),
+            (ModelFamily::Qwen35Moe, false, true),
+            (ModelFamily::Qwen4Exp, true, true),
+            (ModelFamily::DeepSeek4, true, true),
+            (ModelFamily::MuseGlimmer, true, false),
+            (ModelFamily::K2Horizon, true, false),
+            (ModelFamily::Glm5Next, true, false),
+        ] {
+            let profile = profile(family);
+            assert_eq!(profile.idle_residency_eligible, idle_residency);
+            assert_eq!(profile.upstream_template_style, upstream_template);
         }
     }
 

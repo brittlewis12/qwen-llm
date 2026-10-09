@@ -153,6 +153,7 @@ fn family_profiles_drive_real_http_json_and_sse_without_hook_overrides() {
                     temperature,
                     42,
                 )),
+                limits: crate::serve::request_profile::OutputLimits::TEST,
             },
             json!({"model":"test","input":"Hello","x_qwen":{"no_thinking":true}}),
             qwen_prompt.to_string(),
@@ -164,6 +165,7 @@ fn family_profiles_drive_real_http_json_and_sse_without_hook_overrides() {
     cases.push((
         RequestProfile::FlashNext {
             style: TemplateStyle::House,
+            limits: crate::serve::request_profile::OutputLimits::TEST,
         },
         json!({"model":"test","input":"Hello","x_qwen":{"no_thinking":true}}),
         qwen_prompt.into(),
@@ -176,6 +178,7 @@ fn family_profiles_drive_real_http_json_and_sse_without_hook_overrides() {
             RequestProfile::DeepSeekV4 {
                 style,
                 sampling: Some(qwen_llm::sampling::SamplingConfig::deepseek_v4_0731(42)),
+                limits: crate::serve::request_profile::OutputLimits::TEST,
             },
             json!({"model":"test","input":"Hello"}),
             ds_prompt.into(),
@@ -294,6 +297,7 @@ fn served_families_default_to_release_sampling_and_keep_explicit_fields() {
         (
             RequestProfile::FlashNext {
                 style: TemplateStyle::House,
+                limits: crate::serve::request_profile::OutputLimits::TEST,
             },
             SamplingConfig::qwen38_flash_next(42),
         ),
@@ -303,6 +307,7 @@ fn served_families_default_to_release_sampling_and_keep_explicit_fields() {
                 no_thinking_supported: true,
                 style: TemplateStyle::House,
                 sampling: Some(qwen35_27b),
+                limits: crate::serve::request_profile::OutputLimits::TEST,
             },
             qwen35_27b,
         ),
@@ -310,6 +315,7 @@ fn served_families_default_to_release_sampling_and_keep_explicit_fields() {
             RequestProfile::DeepSeekV4 {
                 style: TemplateStyle::House,
                 sampling: Some(ds4),
+                limits: crate::serve::request_profile::OutputLimits::TEST,
             },
             ds4,
         ),
@@ -382,6 +388,7 @@ fn served_families_default_to_release_sampling_and_keep_explicit_fields() {
         no_thinking_supported: true,
         style: TemplateStyle::House,
         sampling: None,
+        limits: crate::serve::request_profile::OutputLimits::TEST,
     };
     let mut request = undecided
         .parse(&json!({"model":"test","input":"Hello"}))
@@ -428,6 +435,7 @@ fn profiles_preserve_style_and_history_normalization_boundaries() {
         let profile = RequestProfile::DeepSeekV4 {
             style,
             sampling: None,
+            limits: crate::serve::request_profile::OutputLimits::TEST,
         };
         let mut request = profile.parse(&body).unwrap();
         assert_eq!(request.history_reasoning_missing, 1);
@@ -444,9 +452,11 @@ fn profiles_preserve_style_and_history_normalization_boundaries() {
             no_thinking_supported: true,
             style: TemplateStyle::Upstream,
             sampling: None,
+            limits: crate::serve::request_profile::OutputLimits::TEST,
         },
         RequestProfile::FlashNext {
             style: TemplateStyle::Upstream,
+            limits: crate::serve::request_profile::OutputLimits::TEST,
         },
     ] {
         assert_eq!(
@@ -555,6 +565,7 @@ fn style_overrides_are_applied_or_refused_before_execution() {
                     no_thinking_supported: true,
                     style: deployment,
                     sampling: None,
+                    limits: crate::serve::request_profile::OutputLimits::TEST,
                 },
                 expected_prompt: Some(prompt),
                 output: "answer".into(),
@@ -727,13 +738,16 @@ fn prefill_lineage_is_glm_only_and_refused_elsewhere() {
             no_thinking_supported: true,
             style: TemplateStyle::House,
             sampling: None,
+            limits: crate::serve::request_profile::OutputLimits::TEST,
         },
         RequestProfile::FlashNext {
             style: TemplateStyle::House,
+            limits: crate::serve::request_profile::OutputLimits::TEST,
         },
         RequestProfile::DeepSeekV4 {
             style: TemplateStyle::House,
             sampling: None,
+            limits: crate::serve::request_profile::OutputLimits::TEST,
         },
         RequestProfile::Muse {
             template: MuseGlimmerChatTemplateProfile::UnslothLaunch,

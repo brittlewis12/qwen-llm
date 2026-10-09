@@ -53,6 +53,9 @@ pub(crate) trait GenerationSink {
     }
 }
 
+/// Process headroom read before each admitted output growth step.
+pub(crate) type Headroom = fn() -> Option<u64>;
+
 pub(crate) struct PreparedResponse {
     pub(crate) request: ServeRequest,
     pub(crate) prompt: String,
@@ -165,6 +168,10 @@ pub(crate) trait GenerationBackend {
     /// failure (status 5xx: GPU or command-buffer faults, memory admission,
     /// internal validation), before its connection finishes.
     fn request_failed_on_server(&mut self) {}
+    /// Headroom the HTTP side admits output buffers against (tests inject).
+    fn output_headroom(&self) -> Headroom {
+        qwen_llm::metal::MetalContext::process_limit_bytes_remaining
+    }
 }
 
 struct TraceSseWriter<'a, 'b> {
@@ -652,17 +659,114 @@ fn shutdown_checkpoint() -> io::Result<()> {
         .map_err(|error| io::Error::new(io::ErrorKind::Interrupted, error.to_string()))
 }
 
+/// Non-streaming output, collected until generation ends: every original
+/// piece's bytes in one contiguous buffer plus each piece's end offset
+/// (map #14: was one allocation per piece). Both buffers admit each growth
+/// step against fresh process headroom before allocating
+/// ([`super::output_memory`]); a refusal stops generation and is answered
+/// with its typed error. A piece arriving in transport fragments reserves
+/// its whole length first, so its fragments never reallocate.
 struct CollectSink<'a> {
-    pieces: Vec<Vec<u8>>,
+    bytes: Vec<u8>,
+    ends: Vec<usize>,
     fragment_remaining: usize,
     stream: &'a TcpStream,
+    headroom: Headroom,
+}
+
+impl<'a> CollectSink<'a> {
+    fn new(stream: &'a TcpStream, headroom: Headroom) -> Self {
+        Self {
+            bytes: Vec::new(),
+            ends: Vec::new(),
+            fragment_remaining: 0,
+            stream,
+            headroom,
+        }
+    }
+
+    /// Admit, then reserve, room for `additional` bytes and one piece end.
+    /// Overflowing sizes are typed 500 `memory_size_overflow`; an admitted
+    /// allocation that fails is a typed server error.
+    fn reserve_piece(&mut self, additional: usize) -> io::Result<()> {
+        use super::output_memory::{
+            OUTPUT_STEP_BYTES, admit_growth, allocation_failure, grown_capacity, refusal_error,
+            size_overflow,
+        };
+        const WHAT: &str = "non-streaming output collection";
+        let overflow = || refusal_error(size_overflow(WHAT));
+        let word = size_of::<usize>();
+        let (byte_cap, end_cap) = (self.bytes.capacity(), self.ends.capacity());
+        let needed = self
+            .bytes
+            .len()
+            .checked_add(additional)
+            .ok_or_else(overflow)?;
+        let new_bytes = if needed > byte_cap {
+            grown_capacity(byte_cap, needed, OUTPUT_STEP_BYTES).ok_or_else(overflow)?
+        } else {
+            byte_cap
+        };
+        let new_ends = if self.ends.len() == end_cap {
+            let one_more = end_cap.checked_add(1).ok_or_else(overflow)?;
+            grown_capacity(end_cap, one_more, OUTPUT_STEP_BYTES / word).ok_or_else(overflow)?
+        } else {
+            end_cap
+        };
+        if (new_bytes, new_ends) == (byte_cap, end_cap) {
+            return Ok(());
+        }
+        // Byte sizes, checked; a vector cannot exceed isize::MAX bytes.
+        let bytes_of = |elements: usize, size: usize| {
+            elements
+                .checked_mul(size)
+                .filter(|&bytes| bytes <= isize::MAX as usize)
+                .map(|bytes| bytes as u64)
+                .ok_or_else(overflow)
+        };
+        let (old_b, new_b) = (bytes_of(byte_cap, 1)?, bytes_of(new_bytes, 1)?);
+        let (old_e, new_e) = (bytes_of(end_cap, word)?, bytes_of(new_ends, word)?);
+        // While a buffer grows, its old allocation is live during the copy.
+        let grown = |new: u64, old: u64| {
+            if new > old {
+                new.checked_add(old).ok_or_else(overflow)
+            } else {
+                Ok(old)
+            }
+        };
+        let held = old_b.checked_add(old_e).ok_or_else(overflow)?;
+        let peak = grown(new_b, old_b)?
+            .checked_add(grown(new_e, old_e)?)
+            .ok_or_else(overflow)?;
+        admit_growth(peak, held, (self.headroom)()).map_err(refusal_error)?;
+        self.bytes
+            .try_reserve_exact(new_bytes - self.bytes.len())
+            .map_err(|e| refusal_error(allocation_failure(WHAT, e)))?;
+        self.ends
+            .try_reserve_exact(new_ends - self.ends.len())
+            .map_err(|e| refusal_error(allocation_failure(WHAT, e)))?;
+        Ok(())
+    }
+
+    /// The original pieces, in order (every piece must be complete).
+    fn pieces(&self) -> impl Iterator<Item = &[u8]> {
+        let starts = std::iter::once(0).chain(self.ends.iter().copied());
+        starts
+            .zip(self.ends.iter().copied())
+            .map(|(start, end)| &self.bytes[start..end])
+    }
 }
 
 impl GenerationSink for CollectSink<'_> {
     fn piece(&mut self, bytes: &[u8]) -> io::Result<()> {
         shutdown_checkpoint()?;
         probe_peer(self.stream)?;
-        self.pieces.push(bytes.to_owned());
+        if self.fragment_remaining != 0 {
+            return Err(transport_error("previous output piece is incomplete"));
+        }
+        self.reserve_piece(bytes.len())?;
+        self.bytes.extend_from_slice(bytes);
+        self.ends.push(self.bytes.len());
         Ok(())
     }
     fn tick(&mut self) -> io::Result<()> {
@@ -676,19 +780,18 @@ impl GenerationSink for CollectSink<'_> {
             if self.fragment_remaining != 0 {
                 return Err(transport_error("previous output piece is incomplete"));
             }
-            let mut piece = Vec::new();
-            piece.try_reserve_exact(length).map_err(io::Error::other)?;
-            self.pieces.push(piece);
+            self.reserve_piece(length)?;
+            self.ends.push(self.bytes.len() + length);
             self.fragment_remaining = length;
+        }
+        if self.ends.is_empty() {
+            return Err(transport_error("output fragment has no original piece"));
         }
         let remaining = self
             .fragment_remaining
             .checked_sub(bytes.len())
             .ok_or_else(|| transport_error("output fragment exceeds original piece"))?;
-        self.pieces
-            .last_mut()
-            .ok_or_else(|| transport_error("output fragment has no original piece"))?
-            .extend_from_slice(bytes);
+        self.bytes.extend_from_slice(bytes);
         self.fragment_remaining = remaining;
         Ok(())
     }
@@ -706,6 +809,10 @@ impl<W: EventWrite> GenerationSink for StreamingSink<'_, '_, W> {
         self.partition.push(bytes, &mut events);
         for event in &events {
             self.stream.on_partition(event)?;
+        }
+        // A stored refusal already decides the turn: stop generating.
+        if let Some(failure) = self.partition.failure() {
+            return Err(super::output_memory::refusal_error(failure.clone()));
         }
         Ok(())
     }
@@ -860,35 +967,59 @@ fn handle_responses(
     });
     let request = &prepared.request;
     if !request.stream {
-        let mut sink = CollectSink {
-            pieces: Vec::new(),
-            fragment_remaining: 0,
-            stream,
-        };
+        let mut sink = CollectSink::new(stream, backend.output_headroom());
         match backend.generate_prepared(Arc::clone(&prepared), &mut sink) {
             Ok(outcome) => {
-                let mut partition = OutputPartition::new(output_protocol);
-                let mut partition_events = Vec::new();
-                for piece in &sink.pieces {
-                    partition.push(piece, &mut partition_events);
-                }
-                if let Err(error) = partition.finish(outcome.end, &mut partition_events) {
+                if sink.fragment_remaining != 0 {
+                    let error = ServeError::server_error("an output piece ended incomplete");
                     note_server_failure(backend, &error);
                     return write_serve_error(&mut writer, &error);
                 }
-                let envelope = super::events::build_response_object(
-                    &request,
+                // Each piece's events go straight into the response object
+                // (no second retained copy of the output as events).
+                let mut discard = super::events::DiscardEvents;
+                let mut response = ResponseStream::begin(
+                    &mut discard,
                     response_id,
+                    request.model.clone(),
                     created_at,
-                    &partition_events,
+                    super::events::envelope_echo(request),
+                )?;
+                response.set_allowed_tools(request.allowed_tools.clone());
+                let mut partition =
+                    OutputPartition::with_headroom(output_protocol, backend.output_headroom());
+                let mut events = Vec::new();
+                for piece in sink.pieces() {
+                    partition.push(piece, &mut events);
+                    for event in events.drain(..) {
+                        response.on_partition(&event)?;
+                    }
+                }
+                drop(sink);
+                if let Err(error) = partition.finish(outcome.end, &mut events) {
+                    note_server_failure(backend, &error);
+                    return write_serve_error(&mut writer, &error);
+                }
+                for event in events.drain(..) {
+                    response.on_partition(&event)?;
+                }
+                let envelope = response.finish(
                     response_stop_reason(outcome.end),
                     outcome.usage,
-                    ServeStats::echo_for(outcome.stats.as_ref(), &request).as_ref(),
+                    ServeStats::echo_for(outcome.stats.as_ref(), request).as_ref(),
                 )?;
                 write_json_response(&mut writer, 200, &envelope)
             }
             Err(BackendFailure::Serve(error)) => write_serve_error(&mut writer, &error),
-            Err(BackendFailure::Aborted(error)) => Err(error),
+            Err(BackendFailure::Aborted(error)) => match super::output_memory::refusal_in(&error) {
+                // Refused on this side: the backend saw only a stopped
+                // sink, so the server failure is reported here.
+                Some(refusal) => {
+                    note_server_failure(backend, refusal);
+                    write_serve_error(&mut writer, refusal)
+                }
+                None => Err(error),
+            },
         }
     } else {
         write!(
@@ -910,7 +1041,7 @@ fn handle_responses(
         response.set_allowed_tools(request.allowed_tools.clone());
         let mut sink = StreamingSink {
             stream: &mut response,
-            partition: OutputPartition::new(output_protocol),
+            partition: OutputPartition::with_headroom(output_protocol, backend.output_headroom()),
         };
         let outcome = backend.generate_prepared(Arc::clone(&prepared), &mut sink);
         let StreamingSink { partition, .. } = sink;
@@ -941,7 +1072,19 @@ fn handle_responses(
                 response.fail(&error)?;
                 sse.done()
             }
-            Err(BackendFailure::Aborted(error)) => Err(error),
+            Err(BackendFailure::Aborted(error)) => match super::output_memory::refusal_in(&error) {
+                // Refused on this side after the headers: the typed failure
+                // event, reported here (the backend saw a stopped sink).
+                // No raw-text fallback: the held output is dropped.
+                Some(refusal) => {
+                    let refusal = refusal.clone();
+                    note_server_failure(backend, &refusal);
+                    drop(partition);
+                    response.fail(&refusal)?;
+                    sse.done()
+                }
+                None => Err(error),
+            },
         }
     }
 }
@@ -973,6 +1116,12 @@ mod tests {
         end: GenerationEnd,
         protocol: OutputProtocol,
         fail_with: Option<ServeError>,
+        headroom: Option<Headroom>,
+        server_failures: Arc<std::sync::atomic::AtomicUsize>,
+        /// After its pieces, end as a sink-raised typed refusal would.
+        refuse_after: Option<ServeError>,
+        /// Pieces offered to the sink (including a refused one).
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl MockBackend {
@@ -988,8 +1137,13 @@ mod tests {
                     preopened_reasoning: false,
                     parse_tools: true,
                     tool_grammar: ToolGrammar::QwenXml,
+                    tool_byte_ceiling: None,
                 },
                 fail_with: None,
+                headroom: None,
+                server_failures: Arc::default(),
+                refuse_after: None,
+                attempts: Arc::default(),
             }
         }
 
@@ -1033,6 +1187,14 @@ mod tests {
         fn output_protocol(&self, _request: &ServeRequest) -> OutputProtocol {
             self.protocol.clone()
         }
+        fn output_headroom(&self) -> Headroom {
+            self.headroom
+                .unwrap_or(qwen_llm::metal::MetalContext::process_limit_bytes_remaining)
+        }
+        fn request_failed_on_server(&mut self) {
+            self.server_failures
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         fn generate(
             &mut self,
             _request: &ServeRequest,
@@ -1047,8 +1209,15 @@ mod tests {
             }
             sink.tick().map_err(BackendFailure::Aborted)?;
             for piece in &self.pieces {
+                self.attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 sink.piece(piece.as_bytes())
                     .map_err(BackendFailure::Aborted)?;
+            }
+            if let Some(error) = self.refuse_after.clone() {
+                return Err(BackendFailure::Aborted(
+                    super::super::output_memory::refusal_error(error),
+                ));
             }
             Ok(GenerationOutcome {
                 end: self.end,
@@ -1136,26 +1305,79 @@ mod tests {
         response.split("\r\n\r\n").nth(1).unwrap()
     }
 
+    /// One original piece's transport fragments reassemble without
+    /// reallocating (its whole length is reserved first), pieces keep their
+    /// boundaries in one contiguous buffer, and malformed fragments refuse.
     #[test]
-    fn nonstream_fragments_preserve_one_allocation_per_original_piece() {
+    fn nonstream_fragments_reassemble_each_original_piece_without_reallocation() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (stream, _) = listener.accept().unwrap();
-        let mut sink = CollectSink {
-            pieces: Vec::new(),
-            fragment_remaining: 0,
-            stream: &stream,
-        };
+        let mut sink = CollectSink::new(&stream, || Some(0));
+        assert!(sink.piece_fragment(b"x", None).is_err(), "no piece yet");
         sink.piece_fragment(b"abc", Some(7)).unwrap();
-        let pointer = sink.pieces[0].as_ptr();
+        let pointer = sink.bytes.as_ptr();
         sink.piece_fragment(b"defg", None).unwrap();
-        assert_eq!(sink.pieces.len(), 1);
-        assert_eq!(sink.pieces[0], b"abcdefg");
-        assert_eq!(sink.pieces[0].as_ptr(), pointer);
+        assert_eq!(sink.bytes.as_ptr(), pointer);
         assert_eq!(sink.fragment_remaining, 0);
-        sink.piece_fragment(b"next", Some(4)).unwrap();
-        assert_eq!(sink.pieces.len(), 2);
-        assert!(sink.piece_fragment(b"overflow", None).is_err());
+        assert!(
+            sink.piece(b"!").is_ok(),
+            "a whole piece after a completed one"
+        );
+        sink.piece_fragment(b"next", Some(5)).unwrap();
+        assert!(
+            sink.piece(b"?").is_err(),
+            "a whole piece inside a fragmented one"
+        );
+        assert!(sink.piece_fragment(b"!!", None).is_err(), "overflow");
+        sink.piece_fragment(b"!", None).unwrap();
+        let pieces: Vec<&[u8]> = sink.pieces().collect();
+        assert_eq!(pieces, [&b"abcdefg"[..], b"!", b"next!"]);
+    }
+
+    /// Each growth step admits its whole outstanding peak against fresh
+    /// headroom before allocating; a refusal leaves the buffers unchanged
+    /// and carries the typed error.
+    #[test]
+    fn nonstream_collection_admits_each_growth_step_before_allocating() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static HEADROOM: AtomicU64 = AtomicU64::new(u64::MAX);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let mut sink = CollectSink::new(&stream, || Some(HEADROOM.load(Ordering::SeqCst)));
+        let step = super::super::output_memory::OUTPUT_STEP_BYTES;
+        // The first step: 64 KiB of bytes plus 64 KiB of piece ends.
+        HEADROOM.store(2 * step as u64 - 1, Ordering::SeqCst);
+        let refused = sink.piece(b"a").unwrap_err();
+        let error = super::super::output_memory::refusal_in(&refused).unwrap();
+        assert_eq!(
+            (error.status, error.code),
+            (503, Some("memory_admission_denied"))
+        );
+        assert_eq!((sink.bytes.capacity(), sink.ends.capacity()), (0, 0));
+        HEADROOM.store(2 * step as u64, Ordering::SeqCst);
+        sink.piece(b"a").unwrap();
+        assert_eq!(sink.bytes.capacity(), step);
+        // Within capacity no admission is needed, whatever the headroom.
+        HEADROOM.store(1, Ordering::SeqCst);
+        sink.piece(&vec![b'b'; step - 1]).unwrap();
+        // The next step doubles the bytes: peak = old + new, held = old, so
+        // the outstanding is the new allocation alone.
+        let piece = *b"c";
+        HEADROOM.store(2 * step as u64 - 1, Ordering::SeqCst);
+        assert!(sink.piece(&piece).is_err());
+        assert_eq!(sink.bytes.len(), step);
+        HEADROOM.store(2 * step as u64, Ordering::SeqCst);
+        sink.piece(&piece).unwrap();
+        assert_eq!(sink.bytes.capacity(), 2 * step);
+        // An unreadable signal fails closed as telemetry (500).
+        let mut fresh = CollectSink::new(&stream, || None);
+        let error = fresh.piece(b"x").unwrap_err();
+        assert_eq!(
+            super::super::output_memory::refusal_in(&error).map(|e| e.status),
+            Some(500)
+        );
     }
 
     fn sse_payload(response: &str, event_type: &str) -> Value {
@@ -1729,6 +1951,159 @@ mod tests {
             let failed = sse_payload(&response, "response.failed");
             assert_eq!(failed["response"]["error"]["code"], code, "{failed}");
             assert!(body_of(&response).ends_with("data: [DONE]\n\n"));
+        }
+    }
+
+    /// A non-streaming response whose collected output is refused admission
+    /// answers with the typed refusal and reports a server failure once; a
+    /// streaming response does not collect raw output, and an admitted
+    /// non-streaming one is unchanged.
+    #[test]
+    fn nonstream_output_refusals_answer_typed_and_report_the_failure() {
+        let request = post("/v1/responses", r#"{"model":"qwen-test","input":"q"}"#);
+        let refused = |headroom: Headroom| {
+            let mut backend = MockBackend::new(&["hello ", "world"], StopReason::Eos);
+            backend.headroom = Some(headroom);
+            let failures = Arc::clone(&backend.server_failures);
+            (roundtrip(backend, &request), failures)
+        };
+        for (headroom, status, code) in [
+            ((|| Some(1)) as Headroom, "503", "memory_admission_denied"),
+            (|| None, "500", "memory_signal_unavailable"),
+        ] {
+            let (response, failures) = refused(headroom);
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status}")),
+                "{response}"
+            );
+            let envelope: Value = serde_json::from_str(body_of(&response)).unwrap();
+            assert_eq!(envelope["error"]["code"], code, "{envelope}");
+            assert_eq!(failures.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+        let (response, failures) = refused(|| Some(u64::MAX));
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let envelope: Value = serde_json::from_str(body_of(&response)).unwrap();
+        assert_eq!(envelope["output"][0]["content"][0]["text"], "hello world");
+        assert_eq!(failures.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let mut backend = MockBackend::new(&["hello ", "world"], StopReason::Eos);
+        backend.headroom = Some(|| Some(1));
+        let response = roundtrip(
+            backend,
+            &post(
+                "/v1/responses",
+                r#"{"model":"qwen-test","input":"q","stream":true}"#,
+            ),
+        );
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(body_of(&response).contains("response.completed"));
+
+        // A typed refusal after the SSE headers: response.failed with its
+        // code, [DONE], no success terminal, one server-failure report.
+        let mut backend = MockBackend::new(&["hello "], StopReason::Eos);
+        backend.refuse_after = Some(
+            super::super::transport_memory::admit_resident_transport(10, Some(1)).unwrap_err(),
+        );
+        let failures = Arc::clone(&backend.server_failures);
+        let response = roundtrip(
+            backend,
+            &post(
+                "/v1/responses",
+                r#"{"model":"qwen-test","input":"q","stream":true}"#,
+            ),
+        );
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let failed = sse_payload(&response, "response.failed");
+        assert_eq!(
+            failed["response"]["error"]["code"], "memory_admission_denied",
+            "{failed}"
+        );
+        assert!(!body_of(&response).contains("response.completed"));
+        assert!(body_of(&response).ends_with("data: [DONE]\n\n"));
+        assert_eq!(failures.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Map #14 packet 2 end to end: a Qwen or GLM tool block refused
+    /// admission stops a streaming generation at the refusing piece (later
+    /// pieces are never requested) and fails it with the typed code,
+    /// publishing no held tool text; non-streaming (whose partition runs
+    /// after generation) answers the JSON 503. Each reports one server
+    /// failure.
+    #[test]
+    fn tool_block_refusals_stop_streaming_and_fail_typed() {
+        use std::sync::atomic::Ordering;
+        let glm_tools = || OutputProtocol::Glm5NextTools {
+            definitions: vec![
+                qwen_llm::glm5_next_chat::ToolDefinition::from_value(&json!({
+                    "name": "f", "parameters": {"type": "object",
+                        "properties": {"a": {"type": "integer"}}}}))
+                .unwrap(),
+            ],
+            max_bytes: 1 << 20,
+        };
+        let cases: [(&str, Vec<&str>, Option<OutputProtocol>, usize); 2] = [
+            (
+                "qwen",
+                vec![
+                    "<think>plan</think>",
+                    "Calling.\n",
+                    "<tool_call>\n<function=f>\n",
+                    "<parameter=a>\n1\n</parameter>\n",
+                    "</function>\n</tool_call>",
+                ],
+                None,
+                3,
+            ),
+            (
+                "glm",
+                vec![
+                    "plan</think>",
+                    "<tool_call>f<arg_key>a</arg_key>",
+                    "<arg_value>1</arg_value></tool_call>",
+                ],
+                Some(glm_tools()),
+                2,
+            ),
+        ];
+        for (family, pieces, protocol, refusing_piece) in cases {
+            for streaming in [true, false] {
+                let mut backend = MockBackend::new(&pieces, StopReason::Eos);
+                if let Some(protocol) = protocol.clone() {
+                    backend.protocol = protocol;
+                }
+                // Room for collection steps (128 KiB), not a 64 KiB tool
+                // step at 256x.
+                backend.headroom = Some(|| Some(1 << 20));
+                let failures = Arc::clone(&backend.server_failures);
+                let attempts = Arc::clone(&backend.attempts);
+                let body = if streaming {
+                    r#"{"model":"qwen-test","input":"q","stream":true}"#
+                } else {
+                    r#"{"model":"qwen-test","input":"q"}"#
+                };
+                let response = roundtrip(backend, &post("/v1/responses", body));
+                if streaming {
+                    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+                    let failed = sse_payload(&response, "response.failed");
+                    assert_eq!(
+                        failed["response"]["error"]["code"], "memory_admission_denied",
+                        "{family}: {failed}"
+                    );
+                    assert!(!body_of(&response).contains("<tool_call>"), "{response}");
+                    assert!(!body_of(&response).contains("function_call"), "{response}");
+                    assert!(!body_of(&response).contains("response.completed"));
+                    assert_eq!(
+                        attempts.load(Ordering::SeqCst),
+                        refusing_piece,
+                        "{family}: generation stops at the refusing piece"
+                    );
+                } else {
+                    assert!(response.starts_with("HTTP/1.1 503"), "{family}: {response}");
+                    let envelope: Value = serde_json::from_str(body_of(&response)).unwrap();
+                    assert_eq!(envelope["error"]["code"], "memory_admission_denied");
+                    assert_eq!(attempts.load(Ordering::SeqCst), pieces.len());
+                }
+                assert_eq!(failures.load(Ordering::SeqCst), 1, "{family} {streaming}");
+            }
         }
     }
 

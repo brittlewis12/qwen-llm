@@ -25,11 +25,11 @@ use crate::sampling::Sampler;
 use serde_json::{Value, json};
 
 /// Relative to this crate's manifest directory.
-const FIXTURE: &str = "../../scripts/reference/glm53/quality-v1.json";
-const CONTINUATION: usize = 64;
+pub(super) const FIXTURE: &str = "../../scripts/reference/glm53/quality-v1.json";
+pub(super) const CONTINUATION: usize = 64;
 /// Tool-task generations stop at a released stop or this many tokens.
-const TOOL_CAP: usize = 256;
-const TOOL_SEEDS: [u64; 3] = [11, 12, 13];
+pub(super) const TOOL_CAP: usize = 256;
+pub(super) const TOOL_SEEDS: [u64; 3] = [11, 12, 13];
 
 /// (stratum, repository path, prefix lengths).
 const DOCUMENTS: [(&str, &str, &[usize]); 22] = [
@@ -244,7 +244,7 @@ fn padding(level: u8, passages: &str) -> String {
     format!("{}\n\n", &passages[..end])
 }
 
-fn tool_definitions() -> (Vec<Value>, Vec<ToolDefinition>) {
+pub(super) fn tool_definitions() -> (Vec<Value>, Vec<ToolDefinition>) {
     let tools = vec![weather_tool(), currency_tool()];
     let definitions = tools
         .iter()
@@ -345,7 +345,7 @@ impl Arm {
 }
 
 /// log p(token) under `logits` (f64 log-softmax).
-fn log_prob(logits: &[f32], token: u32) -> f64 {
+pub(super) fn log_prob(logits: &[f32], token: u32) -> f64 {
     let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max) as f64;
     let sum: f64 = logits.iter().map(|v| (*v as f64 - max).exp()).sum();
     logits[token as usize] as f64 - max - sum.ln()

@@ -74,6 +74,9 @@ pub(crate) enum OutputProtocol {
         preopened_reasoning: bool,
         parse_tools: bool,
         tool_grammar: ToolGrammar,
+        /// The tool block's proven byte ceiling (`None`: unbound test
+        /// profiles only).
+        tool_byte_ceiling: Option<usize>,
     },
     MuseAtem {
         eos_token_id: i32,
@@ -121,6 +124,15 @@ pub(crate) enum OutputPartition {
 
 impl OutputPartition {
     pub(crate) fn new(protocol: OutputProtocol) -> Self {
+        Self::with_headroom(
+            protocol,
+            qwen_llm::metal::MetalContext::process_limit_bytes_remaining,
+        )
+    }
+
+    /// [`Self::new`], with the process headroom its admitted tool buffers
+    /// (Qwen/DS4, GLM) check (serve passes the backend's; tests inject).
+    pub(crate) fn with_headroom(protocol: OutputProtocol, headroom: super::http::Headroom) -> Self {
         match protocol {
             OutputProtocol::RawText => Self::Raw(Utf8Assembler::new()),
             OutputProtocol::K2Chat { effort } => {
@@ -137,19 +149,25 @@ impl OutputPartition {
                 preopened_reasoning,
                 parse_tools,
                 tool_grammar,
-            } => Self::Qwen(QwenOutputPartition::new(
+                tool_byte_ceiling,
+            } => Self::Qwen(QwenOutputPartition::with_headroom(
                 preopened_reasoning,
                 parse_tools,
                 tool_grammar,
+                tool_byte_ceiling,
+                headroom,
             )),
             OutputProtocol::Glm5NextChat => Self::Preopened(super::render_glm5_next::partition()),
             OutputProtocol::Glm5NextTools {
                 definitions,
                 max_bytes,
-            } => Self::Glm5NextTools(super::partition_glm5_next::Glm5NextToolsPartition::new(
-                definitions,
-                max_bytes,
-            )),
+            } => Self::Glm5NextTools(
+                super::partition_glm5_next::Glm5NextToolsPartition::with_headroom(
+                    definitions,
+                    max_bytes,
+                    headroom,
+                ),
+            ),
             OutputProtocol::MuseAtem {
                 eos_token_id,
                 eot_token_id,
@@ -191,14 +209,21 @@ impl OutputPartition {
                 }
                 Ok(())
             }
-            Self::Qwen(partition) => {
-                partition.finish(events);
-                Ok(())
-            }
+            Self::Qwen(partition) => partition.finish(events),
             Self::Muse(partition) => partition.finish(end, events),
             Self::Preopened(partition) => partition.finish(end, events),
             Self::K2Tools(partition) => partition.finish(end, events),
             Self::Glm5NextTools(partition) => partition.finish(end, events),
+        }
+    }
+
+    /// A stored admission refusal or parse failure that already decides the
+    /// turn (generation can stop; `finish` returns it).
+    pub(crate) fn failure(&self) -> Option<&ServeError> {
+        match self {
+            Self::Qwen(partition) => partition.failure(),
+            Self::Glm5NextTools(partition) => partition.failure(),
+            Self::Raw(_) | Self::Preopened(_) | Self::K2Tools(_) | Self::Muse(_) => None,
         }
     }
 
@@ -218,6 +243,19 @@ impl OutputPartition {
     }
 }
 
+/// Qwen-XML and DeepSeek-V4-DSML output: the reasoning splitter, then
+/// visible text with the tool span held until the turn ends and parsed
+/// whole.
+///
+/// Memory (map #14 packet 2, as GLM's tool block): before the tool buffer
+/// grows past its capacity, the capacity grows by whole
+/// [`super::partition_glm5_next::ADMISSION_STEP`]s and the process must have
+/// headroom for the block's whole outstanding peak at the new capacity,
+/// `tool_block_peak_bytes` (GLM's 256x model; Qwen XML and DSML measured
+/// within it, worst 147.5 for the same shapes) less what the buffer holds;
+/// again before the parse. A refusal is stored and ends the turn with its
+/// typed error (503 `memory_admission_denied`; 500 when the signal is
+/// unavailable), never a raw-text fallback.
 pub(crate) struct QwenOutputPartition {
     reasoning: StreamPartition,
     utf8: Utf8Assembler,
@@ -225,6 +263,9 @@ pub(crate) struct QwenOutputPartition {
     tool_grammar: ToolGrammar,
     pending_visible: String,
     tool_buffer: String,
+    tool_byte_ceiling: Option<usize>,
+    failure: Option<ServeError>,
+    headroom: super::http::Headroom,
     /// The grammar's call separator seen right before the open marker: part
     /// of the call syntax when calls parse, visible text when they do not.
     tool_separator: &'static str,
@@ -283,7 +324,13 @@ mod raw_tests {
 }
 
 impl QwenOutputPartition {
-    fn new(preopened_reasoning: bool, parse_tools: bool, tool_grammar: ToolGrammar) -> Self {
+    fn with_headroom(
+        preopened_reasoning: bool,
+        parse_tools: bool,
+        tool_grammar: ToolGrammar,
+        tool_byte_ceiling: Option<usize>,
+        headroom: super::http::Headroom,
+    ) -> Self {
         Self {
             reasoning: if preopened_reasoning {
                 StreamPartition::with_preopened_reasoning()
@@ -300,12 +347,75 @@ impl QwenOutputPartition {
             tool_grammar,
             pending_visible: String::new(),
             tool_buffer: String::new(),
+            tool_byte_ceiling,
+            failure: None,
+            headroom,
             tool_separator: "",
             in_tool_span: false,
         }
     }
 
+    /// Headroom for the tool block's outstanding peak at `capacity`, given
+    /// what the buffer already holds.
+    fn admit_outstanding(&self, capacity: usize) -> Result<(), ServeError> {
+        let peak = qwen_llm::glm5_next_chat::checked_tool_block_peak_bytes(capacity)
+            .ok_or_else(|| super::output_memory::size_overflow("tool block"))?;
+        let outstanding = peak.saturating_sub(self.tool_buffer.capacity());
+        super::transport_memory::admit_resident_transport(outstanding as u64, (self.headroom)())
+    }
+
+    /// Before the tool buffer grows by `additional` bytes: admit and reserve
+    /// whole steps; on refusal, store it and leave the buffer unchanged.
+    fn grow_tool_buffer(&mut self, additional: usize) -> bool {
+        use super::partition_glm5_next::ADMISSION_STEP;
+        let Some(len) = self.tool_buffer.len().checked_add(additional) else {
+            self.failure = Some(super::output_memory::size_overflow("tool block"));
+            return false;
+        };
+        if let Some(ceiling) = self.tool_byte_ceiling
+            && len > ceiling
+        {
+            self.failure = Some(super::output_memory::ceiling_exceeded(
+                "tool block",
+                ceiling,
+            ));
+            return false;
+        }
+        if len <= self.tool_buffer.capacity() {
+            return true;
+        }
+        let Some(capacity) = len.div_ceil(ADMISSION_STEP).checked_mul(ADMISSION_STEP) else {
+            self.failure = Some(super::output_memory::size_overflow("tool block"));
+            return false;
+        };
+        // Never reserve past the ceiling (len is within it).
+        let capacity = self.tool_byte_ceiling.map_or(capacity, |c| capacity.min(c));
+        if let Err(error) = self.admit_outstanding(capacity) {
+            self.failure = Some(error);
+            return false;
+        }
+        if let Err(error) = self
+            .tool_buffer
+            .try_reserve_exact(capacity - self.tool_buffer.len())
+        {
+            self.failure = Some(super::output_memory::allocation_failure(
+                "tool block",
+                error,
+            ));
+            return false;
+        }
+        true
+    }
+
+    /// A stored refusal (generation should stop; the turn fails with it).
+    pub(crate) fn failure(&self) -> Option<&ServeError> {
+        self.failure.as_ref()
+    }
+
     fn push(&mut self, bytes: &[u8], events: &mut Vec<PartitionEvent>) {
+        if self.failure.is_some() {
+            return;
+        }
         let text = self.utf8.push(bytes);
         if !text.is_empty() {
             self.push_text(&text, events);
@@ -333,8 +443,13 @@ impl QwenOutputPartition {
     }
 
     fn push_visible(&mut self, text: &str, events: &mut Vec<PartitionEvent>) {
+        if self.failure.is_some() {
+            return;
+        }
         if self.in_tool_span {
-            self.tool_buffer.push_str(text);
+            if self.grow_tool_buffer(text.len()) {
+                self.tool_buffer.push_str(text);
+            }
             return;
         }
         self.pending_visible.push_str(text);
@@ -353,8 +468,10 @@ impl QwenOutputPartition {
             if !prose.is_empty() {
                 events.push(PartitionEvent::Visible(prose));
             }
-            self.tool_buffer.push_str(&calls);
             self.in_tool_span = true;
+            if self.grow_tool_buffer(calls.len()) {
+                self.tool_buffer.push_str(&calls);
+            }
             return;
         }
         // Also hold back a trailing separator that may precede the marker.
@@ -382,10 +499,16 @@ impl QwenOutputPartition {
         self.route_split(split, events);
     }
 
-    fn finish(mut self, events: &mut Vec<PartitionEvent>) {
+    fn finish(mut self, events: &mut Vec<PartitionEvent>) -> Result<(), ServeError> {
+        if let Some(failure) = self.failure.take() {
+            return Err(failure);
+        }
         self.flush_reasoning(events);
+        if let Some(failure) = self.failure.take() {
+            return Err(failure);
+        }
         if !self.parse_tools {
-            return;
+            return Ok(());
         }
         if !self.pending_visible.is_empty() {
             events.push(PartitionEvent::Visible(std::mem::take(
@@ -393,8 +516,10 @@ impl QwenOutputPartition {
             )));
         }
         if !self.in_tool_span {
-            return;
+            return Ok(());
         }
+        // The parse's peak, checked again against current headroom.
+        self.admit_outstanding(self.tool_buffer.capacity())?;
         let buffer = std::mem::take(&mut self.tool_buffer);
         let parsed = self.tool_grammar.parse(&buffer);
         if parsed.calls.is_empty() {
@@ -402,12 +527,13 @@ impl QwenOutputPartition {
                 "{}{buffer}",
                 self.tool_separator
             )));
-            return;
+            return Ok(());
         }
         if !parsed.visible.is_empty() {
             events.push(PartitionEvent::Visible(parsed.visible));
         }
         events.extend(parsed.calls.into_iter().map(PartitionEvent::FunctionCall));
+        Ok(())
     }
 
     fn abort(mut self, events: &mut Vec<PartitionEvent>) {
@@ -426,6 +552,239 @@ impl QwenOutputPartition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Map #14 packet 2: the Qwen-XML and DSML tool buffers admit each
+    /// 64 KiB step at the 256x outstanding peak against fresh headroom and
+    /// again before the parse; a refusal is stored (generation can stop),
+    /// publishes no raw tool text, and fails the turn with its typed error.
+    #[test]
+    fn qwen_and_dsml_tool_buffers_admit_each_step_and_refuse_typed() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static HEADROOM: AtomicU64 = AtomicU64::new(u64::MAX);
+        let step = super::super::partition_glm5_next::ADMISSION_STEP;
+        let peak = |bytes: usize| qwen_llm::glm5_next_chat::tool_block_peak_bytes(bytes) as u64;
+        for (grammar, open, body) in [
+            (
+                ToolGrammar::QwenXml,
+                "<tool_call>\n<function=f>\n<parameter=a>\n",
+                "\n</parameter>\n</function>\n</tool_call>",
+            ),
+            (
+                ToolGrammar::DeepSeekDsml,
+                "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"f\">\n<｜DSML｜parameter name=\"a\" string=\"true\">",
+                "</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+            ),
+        ] {
+            let partition = || {
+                OutputPartition::with_headroom(
+                    OutputProtocol::Qwen {
+                        preopened_reasoning: false,
+                        parse_tools: true,
+                        tool_grammar: grammar,
+                        tool_byte_ceiling: None,
+                    },
+                    || Some(HEADROOM.load(Ordering::SeqCst)),
+                )
+            };
+            let value = "x".repeat(step);
+            // Enough for the first step, not the second.
+            HEADROOM.store(peak(step), Ordering::SeqCst);
+            let mut p = partition();
+            let mut events = Vec::new();
+            p.push(format!("before {open}").as_bytes(), &mut events);
+            assert!(p.failure().is_none(), "{grammar:?}: first step admitted");
+            p.push(value.as_bytes(), &mut events);
+            let failure = p.failure().cloned().expect("second step refused");
+            assert_eq!(
+                (failure.status, failure.code),
+                (503, Some("memory_admission_denied"))
+            );
+            p.push(body.as_bytes(), &mut events);
+            let error = p
+                .finish(GenerationEnd::StopToken(0), &mut events)
+                .unwrap_err();
+            assert_eq!(error, failure);
+            let published: String = events
+                .iter()
+                .filter_map(|e| match e {
+                    PartitionEvent::Visible(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(published, "before ", "{grammar:?}: no raw tool text");
+
+            // Admitted growth, then too little headroom for the parse.
+            HEADROOM.store(u64::MAX, Ordering::SeqCst);
+            let mut p = partition();
+            let mut events = Vec::new();
+            p.push(format!("{open}{value}{body}").as_bytes(), &mut events);
+            assert!(p.failure().is_none());
+            HEADROOM.store(1, Ordering::SeqCst);
+            let error = p
+                .finish(GenerationEnd::StopToken(0), &mut events)
+                .unwrap_err();
+            assert_eq!(error.code, Some("memory_admission_denied"));
+
+            // With headroom the call parses and publishes.
+            let mut p = partition();
+            HEADROOM.store(u64::MAX, Ordering::SeqCst);
+            let mut events = Vec::new();
+            p.push(format!("{open}{value}{body}").as_bytes(), &mut events);
+            p.finish(GenerationEnd::StopToken(0), &mut events).unwrap();
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, PartitionEvent::FunctionCall(_))),
+                "{grammar:?}"
+            );
+        }
+        // An unreadable signal fails closed as telemetry (500).
+        let mut p = OutputPartition::with_headroom(
+            OutputProtocol::Qwen {
+                preopened_reasoning: false,
+                parse_tools: true,
+                tool_grammar: ToolGrammar::QwenXml,
+                tool_byte_ceiling: None,
+            },
+            || None,
+        );
+        p.push(b"<tool_call>\n", &mut Vec::new());
+        assert_eq!(
+            p.failure().map(|f| f.code),
+            Some(Some("memory_signal_unavailable"))
+        );
+    }
+
+    /// A tool block past its proven byte ceiling fails the turn as an
+    /// internal accounting error (typed 500, not pressure), publishes no raw
+    /// tool text, and never reserves past the ceiling.
+    #[test]
+    fn tool_byte_ceiling_bounds_the_block_and_its_reservation() {
+        let protocol = |ceiling| OutputProtocol::Qwen {
+            preopened_reasoning: false,
+            parse_tools: true,
+            tool_grammar: ToolGrammar::QwenXml,
+            tool_byte_ceiling: Some(ceiling),
+        };
+        let open = "<tool_call>\n<function=f>\n<parameter=a>\n";
+        let close = "\n</parameter>\n</function>\n</tool_call>";
+        let block = format!("{open}1{close}");
+        // Exactly at the ceiling: parses, and the buffer stays within it.
+        let mut p = OutputPartition::with_headroom(protocol(block.len()), || Some(0));
+        let mut events = Vec::new();
+        p.push(format!("x{block}").as_bytes(), &mut events);
+        if let OutputPartition::Qwen(qwen) = &p {
+            assert!(qwen.tool_buffer.capacity() <= block.len());
+        }
+        p.finish(GenerationEnd::StopToken(0), &mut events).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PartitionEvent::FunctionCall(_)))
+        );
+        // One byte past it: typed 500, no raw tool text.
+        let mut p = OutputPartition::with_headroom(protocol(block.len() - 1), || Some(0));
+        let mut events = Vec::new();
+        p.push(format!("x{block}").as_bytes(), &mut events);
+        let failure = p.failure().cloned().expect("ceiling exceeded");
+        assert_eq!((failure.status, failure.code), (500, None));
+        assert_eq!(
+            p.finish(GenerationEnd::StopToken(0), &mut events)
+                .unwrap_err(),
+            failure
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, PartitionEvent::Visible(t) if t.contains("<tool_call>")))
+        );
+    }
+
+    /// The ceiling holds on every growth path: incremental appends around
+    /// the 64 KiB step, markers split across pieces, DSML, and the UTF-8
+    /// replacement a dangling byte becomes at finish; a refused append
+    /// leaves the held bytes unchanged and publishes no tool text.
+    #[test]
+    fn tool_byte_ceiling_holds_on_every_growth_path() {
+        let step = super::super::partition_glm5_next::ADMISSION_STEP;
+        let partition = |grammar, ceiling| {
+            OutputPartition::with_headroom(
+                OutputProtocol::Qwen {
+                    preopened_reasoning: false,
+                    parse_tools: true,
+                    tool_grammar: grammar,
+                    tool_byte_ceiling: Some(ceiling),
+                },
+                || Some(0),
+            )
+        };
+        let held = |p: &OutputPartition| match p {
+            OutputPartition::Qwen(q) => (q.tool_buffer.len(), q.tool_buffer.capacity()),
+            _ => unreachable!(),
+        };
+        let no_tool_text = |events: &[PartitionEvent]| {
+            events.iter().all(|e| {
+                !matches!(e, PartitionEvent::Visible(t) if t.contains("<tool_call>") || t.contains("DSML"))
+            })
+        };
+        for (grammar, open) in [
+            (
+                ToolGrammar::QwenXml,
+                "<tool_call>\n<function=f>\n<parameter=a>\n",
+            ),
+            (
+                ToolGrammar::DeepSeekDsml,
+                "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"f\">\n<｜DSML｜parameter name=\"a\" string=\"true\">",
+            ),
+        ] {
+            // Around the step: the ceiling 10 bytes past one step; the
+            // marker split across two pieces.
+            let ceiling = step + 10;
+            let mut p = partition(grammar, ceiling);
+            let mut events = Vec::new();
+            let (head, tail) = open.split_at(5);
+            p.push(head.as_bytes(), &mut events);
+            p.push(tail.as_bytes(), &mut events);
+            let filler = "x".repeat(ceiling - open.len());
+            p.push(filler.as_bytes(), &mut events);
+            assert!(p.failure().is_none(), "{grammar:?}: exactly at the ceiling");
+            let (len, capacity) = held(&p);
+            assert_eq!(len, ceiling);
+            assert!(
+                capacity <= ceiling,
+                "{grammar:?}: reserved {capacity} > {ceiling}"
+            );
+            p.push(b"y", &mut events);
+            let failure = p.failure().cloned().expect("one byte past the ceiling");
+            assert_eq!((failure.status, failure.code), (500, None));
+            assert_eq!(
+                held(&p).0,
+                len,
+                "{grammar:?}: a refused append holds nothing more"
+            );
+            assert_eq!(
+                p.finish(GenerationEnd::StopToken(0), &mut events)
+                    .unwrap_err(),
+                failure
+            );
+            assert!(no_tool_text(&events), "{grammar:?}");
+
+            // A dangling byte becomes a 3-byte replacement at finish.
+            let mut p = partition(grammar, open.len() + 2);
+            let mut events = Vec::new();
+            p.push(open.as_bytes(), &mut events);
+            p.push(&[0xC3], &mut events);
+            assert!(
+                p.failure().is_none(),
+                "{grammar:?}: an incomplete byte is held"
+            );
+            let error = p
+                .finish(GenerationEnd::TokenLimit, &mut events)
+                .unwrap_err();
+            assert_eq!((error.status, error.code), (500, None), "{grammar:?}");
+            assert!(no_tool_text(&events), "{grammar:?}");
+        }
+    }
 
     fn run(protocol: OutputProtocol, chunks: &[&[u8]], end: GenerationEnd) -> Vec<PartitionEvent> {
         let mut partition = OutputPartition::new(protocol);
@@ -451,6 +810,7 @@ mod tests {
             preopened_reasoning,
             parse_tools: true,
             tool_grammar: ToolGrammar::QwenXml,
+            tool_byte_ceiling: None,
         };
         assert!(!OutputProtocol::RawText.reasons());
         assert!(
@@ -520,6 +880,7 @@ mod tests {
                 preopened_reasoning: false,
                 parse_tools: true,
                 tool_grammar: ToolGrammar::QwenXml,
+                tool_byte_ceiling: None,
             },
             &[
                 b"<think>plan</think>answer<tool_",
@@ -546,6 +907,7 @@ mod tests {
                 preopened_reasoning: false,
                 parse_tools: false,
                 tool_grammar: ToolGrammar::QwenXml,
+                tool_byte_ceiling: None,
             },
             &[call],
             GenerationEnd::StopToken(1),
@@ -565,6 +927,7 @@ mod tests {
                 preopened_reasoning: true,
                 parse_tools: true,
                 tool_grammar: ToolGrammar::QwenXml,
+                tool_byte_ceiling: None,
             },
             &[
                 b"plan</think>answer<tool_call>\n<function=ping>\n",
@@ -599,6 +962,7 @@ mod tests {
                 preopened_reasoning: true,
                 parse_tools: false,
                 tool_grammar: ToolGrammar::QwenXml,
+                tool_byte_ceiling: None,
             },
             &[b"plan</think><tool_call>\n<function=ping>\n</function>\n</tool_call>"],
             GenerationEnd::StopToken(1),
@@ -627,6 +991,7 @@ mod tests {
             preopened_reasoning: false,
             parse_tools: true,
             tool_grammar: ToolGrammar::QwenXml,
+            tool_byte_ceiling: None,
         });
         let mut qwen_events = Vec::new();
         qwen.push(b"answer<tool_", &mut qwen_events);
@@ -676,6 +1041,7 @@ mod tests {
             preopened_reasoning: false,
             parse_tools: true,
             tool_grammar: dsml,
+            tool_byte_ceiling: None,
         };
         let visible = |events: &[PartitionEvent]| {
             events

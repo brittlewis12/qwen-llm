@@ -28,6 +28,118 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   ~19.194 GiB. Shared session-pricer undercount595,168 bytes is tracked
   separately; the existing2GiB reserve covered it in qualification.
 
+## 2026-10-08 - #12/#15 Fast Shared-Prefix Split: INCONCLUSIVE; Fast Snapshots Stay Opt-In
+
+- Preregistered `quality-split-v1` (`docs/bench/2026-10-08-glm53-fast-split-quality/`,
+  run at `d65a09a2`, rebased as `9148817d`, Metal validation): grid (cut at the deployed agent
+  prefix's in-chunk offset), tail (17-20 tokens after the cut) and frontier
+  (cuts 2050-2053) arms against a full Exact rerun. Every gated limit passed
+  except the tail arm's overall NLL: +0.0011 nats/token, central 90%
+  [-0.0034, +0.0054] against 0.005. Tools 12/12 and 1.00 sampled in every
+  arm; agent-shaped cases (11,104-token opencode prefix) 8/8 first-call
+  checks in every arm.
+- Reported: split minus unsplit Fast intervals include zero; no split arm
+  is bitwise equal to unsplit Fast on any text item; this run's Exact and
+  Fast 512 reproduce the committed quality-v1 metrics exactly (38/38).
+- Decision by the rule: Fast snapshots stay opt-in; Exact snapshots are on.
+  Next: a fresh confirmatory cohort (`quality-split-v2`, v1 for planning
+  only: frozen hash-ordered selection, the same three gates and limits,
+  `fast_512` as a control, N fixed in advance from a simulated joint-gate
+  power; about 70-100 fresh documents for one gate), then the release
+  time-to-first-token screen.
+
+## 2026-10-08 - #14 Output Memory, Packet 3: Qwen/DS4 Tool-Block Byte Ceilings
+
+- Ordinary Qwen, Flash-Next and DeepSeek V4 profiles now carry their
+  backend's default token limit and longest decoded piece (computed once at
+  load); the output protocol's tool-block ceiling is the resolved limit x
+  longest piece x 3 (UTF-8 replacement), as GLM's (`a96df045`, `83dc518f`;
+  cx jam and reviews). Normalization refuses an uncomputable ceiling (400)
+  wherever the protocol parses tools (always for ordinary Qwen and
+  Flash-Next); the protocol fails closed otherwise; the backends resolve
+  their token limit through the same helper.
+- A block past its ceiling fails the turn as a typed 500 internal
+  accounting error (not pressure, no raw-text fallback); reservations never
+  pass the ceiling. With packet 2's admission, the Qwen/DS4 tool block is
+  bounded both by accepted length and by fresh headroom.
+- Scope: the retained tool-block text; UTF-8 assembly, held-back visible
+  text and the first marker's copy happen before the block's admission.
+  Remaining #14 items: K2 and Muse tool buffers, response accumulation and
+  streaming retention, trace bytes, K2's schema-work budget.
+
+## 2026-10-08 - #14 Output Memory, Packet 2: Qwen-XML and DeepSeek-DSML Tool Buffers Admitted
+
+- Measured first (`643fddfc`): Qwen XML and DS4 DSML tool blocks of GLM's
+  four shapes through the real handler in one-byte pieces peak at most
+  147.5 bytes per block byte, the same as GLM's (the shared argument parse
+  and publication dominate), so GLM's retained 256x model applies; four
+  shapes are evidence, not a bound.
+- Now (`c59aa130`, `9684df1d`; cx reviews): the Qwen/DS4 tool buffer admits
+  each 64 KiB step at the checked 256x outstanding peak against fresh
+  headroom and again before the parse (GLM's admission now uses the same
+  checked pricing); refusals are stored, inert and returned by `finish`.
+  A stored Qwen or GLM failure stops a streaming generation at the refusing
+  piece and fails it with the typed code, publishing no held tool text;
+  non-streaming answers the JSON error after collection.
+- Not yet: a request-derived byte ceiling for Qwen/DS4 (their profiles do
+  not carry the effective token limit and piece bytes), so admission bounds
+  memory against headroom, not accepted output length; K2 and Muse tool
+  buffers, response accumulation, streaming retention and trace bytes.
+
+## 2026-10-08 - #14 Output Memory, Packet 1: Admitted Contiguous Non-Streaming Collection, Typed Sink Refusals
+
+- Non-streaming responses held one allocation per output piece and a
+  retained event per piece until the body was written, unpriced in every
+  family. Measured end to end (test allocator, plain output in one-byte
+  pieces, 200,000 bytes): **246.5 bytes per output byte** above a minimal
+  response; streaming 5.2.
+- Now (`1c1c560c`, `ce4b1e57`; cx 01a10cc jam and reviews): one contiguous
+  buffer plus piece end offsets, each growth step admitted before
+  allocating (the step's whole peak less what is held, against fresh
+  process headroom, Batch 3a's typed refusals; checked arithmetic, typed
+  500 `memory_size_overflow`; a failed admitted reservation is a typed 500);
+  pieces replay into the partition one at a time with their events fed
+  straight into the response object. **16.3 bytes per output byte**; GLM's
+  non-streaming tool block worst ratio fell from ~205 to 146 (model 256).
+- A refusal raised inside a sink is carried as a typed error, not a
+  disconnect: JSON before headers, `response.failed` after, the server
+  failure reported once (direct and across the HTTP owner bridge).
+- Scope: admitted collection only. Response accumulation and terminal
+  copies, streaming retention, non-GLM tool parsers (Qwen/DS4, K2, Muse)
+  and trace bytes remain unpriced (next packets, in that order after the
+  tool parsers); K2's schema-work budget runs in parallel.
+
+## 2026-10-08 - #12 Fast Policy Adopted; Drift Tests Migrated; Fast Split Qualification Preregistered
+
+- **Adopted** (the position below, with the review qualifications): Fast
+  stays serve's default; bitwise properties are hard (reuse, cancel/resume
+  and restore within one lineage and schedule; Exact equals serial decode
+  and is selectable per request); any Fast change or new schedule that is
+  not bit-identical passes the preregistered quality cohort (a fresh
+  holdout for substantial or tuned changes); Fast-vs-Exact and warm-vs-cold
+  drift of the measured class are reported, not bounded; DFlash keeps its
+  serial-equivalent verification requirement.
+- **Investigation trigger** (explicitly chosen, provisional, not a quality
+  limit): worst-position KL(Exact || Fast) > 0.33 on the frozen natural
+  cases, Fast 512 rows, cold and warm (`reuse_natural_evaluate`, report
+  schema v2: per-arm change from the hash-pinned 2026-10-07 baseline; 97
+  rows diagnostic). Non-finite logits or metrics always fail; flips are
+  counted by argmax inequality with both regrets.
+- **Tests migrated** (`4490f96a` and review fixes): the warm/cold reproducer
+  is now `fast_reuse_schedule_sensitivity_across_reuse_boundaries`
+  (cancel/resume bitwise hard, drift reported); the chunking test is
+  `packed_fast_chunkings_keep_bit_identities_with_drift_alarms` (oracle and
+  bit identities hard, drift reported, state bounds kept as named
+  regression alarms). The trigger applies only where preregistered.
+- **Fast split qualification preregistered** (`quality-split-v1`, cx review
+  before any GPU run): a full Exact rerun; Fast 512 control; split arms at
+  the deployed agent prefix's in-chunk offset (11,104-token opencode
+  prefix, offset 352), with a short final segment, and across the sparse
+  frontier (long items); the tool tasks at their real 255-token boundary;
+  four agent-shaped cases at the deployed geometry (descriptive). Gates:
+  quality-v1's limits for every split arm, and the tool screen; otherwise
+  Fast snapshots stay opt-in.
+
 ## 2026-10-08 - #15 GLM Serve Snapshots: Exact On by Default, Fast Opt-In Pending Its Quality Arm
 
 - GLM serve keeps a RAM snapshot cache (`--snapshot-cache-mib`, shared
@@ -83,7 +195,8 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   sufficient source of drift of this size; its share within Fast and what
   F32 staging would leave are unmeasured. The F32-staging experiment is
   deprioritized given the cohort result, not refuted.
-- **Policy position** (proposed, not adopted; reviewed by cx 01a10cc):
+- **Policy position** (proposed here; adopted later the same day, entry
+  above; reviewed by cx 01a10cc):
   keep Fast as serve's default and replace the one-prompt agreement bound
   (KL 2e-2, regret 0.2) with separate properties. Bitwise: reuse,
   cancellation-resume and snapshot restore equal the uninterrupted run

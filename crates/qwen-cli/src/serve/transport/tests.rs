@@ -51,6 +51,7 @@ fn pipeline() -> (OwnerActivity, HttpProxy, Receiver<Work>) {
         activity,
         HttpProxy {
             extra_cpu_reserve: 0,
+            headroom: || Some(0),
             model_id: "test".into(),
             profile: RequestProfile::UnboundQwen,
             work,
@@ -628,4 +629,102 @@ fn real_streaming_partition_preserves_utf8_and_reasoning_across_bridge_boundarie
         assert_eq!(envelope["output"][1]["content"][0]["text"], text);
     }
     assert_eq!(envelopes[0]["usage"], envelopes[1]["usage"]);
+}
+
+/// A typed refusal raised by the HTTP side's sink crosses the bridge intact
+/// (the handler answers it with its code and reports the server failure);
+/// the owner sees only a stopped sink, so it reports nothing itself.
+#[test]
+fn http_side_output_refusals_cross_the_bridge_typed() {
+    struct Refusing;
+    impl GenerationSink for Refusing {
+        fn piece(&mut self, _bytes: &[u8]) -> io::Result<()> {
+            let refusal =
+                crate::serve::transport_memory::admit_resident_transport(10, Some(1)).unwrap_err();
+            Err(crate::serve::output_memory::refusal_error(refusal))
+        }
+        fn tick(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    struct Emitting {
+        failures: usize,
+    }
+    impl GenerationBackend for Emitting {
+        fn model_id(&self) -> &str {
+            "test"
+        }
+        fn generate(
+            &mut self,
+            _request: &ServeRequest,
+            _prompt: &str,
+            sink: &mut dyn GenerationSink,
+        ) -> Result<GenerationOutcome, BackendFailure> {
+            sink.piece(b"output").map_err(BackendFailure::Aborted)?;
+            Ok(outcome())
+        }
+        fn request_failed_on_server(&mut self) {
+            self.failures += 1;
+        }
+    }
+    let (mut activity, mut proxy, incoming) = pipeline();
+    let worker = std::thread::spawn(move || proxy.generate_prepared(prepared(), &mut Refusing));
+    let work = incoming.recv_timeout(WAIT).unwrap();
+    let mut backend = Emitting { failures: 0 };
+    execute(work, &mut backend);
+    let result = worker.join().unwrap();
+    let Err(BackendFailure::Aborted(error)) = result else {
+        panic!("expected the sink's refusal, got {result:?}");
+    };
+    let refusal = crate::serve::output_memory::refusal_in(&error).expect("typed refusal");
+    assert_eq!(
+        (refusal.status, refusal.code),
+        (503, Some("memory_admission_denied"))
+    );
+    assert_eq!(backend.failures, 0, "the owner saw a stopped sink only");
+    activity.drain_finished(|| {});
+}
+
+/// The whole bridged path: the HTTP side's collection is refused, the
+/// client gets the typed JSON 503, the owner's generation stops, and the
+/// server failure is reported exactly once (through the activity guard).
+#[test]
+fn bridged_output_refusal_answers_typed_and_reports_one_failure() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut backend = Backend(|sink: &mut dyn GenerationSink| {
+            for _ in 0..4 {
+                sink.piece(b"output").map_err(BackendFailure::Aborted)?;
+            }
+            Ok(outcome())
+        });
+        let mut activity = OwnerActivity::default();
+        let guard = activity.admission().try_admit().unwrap();
+        inject_proxy_headroom(|| Some(1));
+        handle_connection(stream, &mut backend, None, guard, || Ok(())).unwrap();
+        let mut failures = Vec::new();
+        activity.drain_finished_with_failures(|failed| failures.push(failed));
+        assert!(activity.is_settled());
+        failures
+    });
+    let body = r#"{"model":"test","input":"hi"}"#;
+    let mut client = TcpStream::connect(address).unwrap();
+    client.set_read_timeout(Some(WAIT)).unwrap();
+    client.write_all(format!("POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).unwrap();
+    let failures = server.join().unwrap();
+    assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+    let envelope: serde_json::Value =
+        serde_json::from_str(response.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(envelope["error"]["code"], "memory_admission_denied");
+    assert_eq!(
+        failures,
+        [true],
+        "one completion, reported as a server failure"
+    );
 }

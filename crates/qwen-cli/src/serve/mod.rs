@@ -32,6 +32,7 @@ mod jobs;
 pub(crate) mod lens_http;
 mod native;
 pub(crate) mod outcome;
+mod output_memory;
 pub(crate) mod output_partition;
 mod owner_activity;
 pub(crate) mod partition;
@@ -57,14 +58,15 @@ use anyhow::{Context, Result, bail, ensure};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalMemorySignals;
 use qwen_llm::model_family::ModelFamily;
-use qwen_llm::runtime::Runtime;
 use qwen_llm::snapshot_policy::{Evicted, SnapshotPolicyConfig};
 use std::net::{TcpListener, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, SyncSender, sync_channel};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const ADMISSION_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -73,6 +75,55 @@ struct Workbench {
     store: Option<Arc<jobs::store::JobStore>>,
     assets: Option<Arc<assets::WebAssets>>,
     access: lens_http::access::BrowserAccess,
+}
+
+pub(super) struct Listening {
+    listener: TcpListener,
+    trace: Option<http::TraceLog>,
+    model_id: String,
+    workbench: Option<Workbench>,
+}
+
+impl Listening {
+    fn open(
+        invocation: &crate::cli::ServeInvocation,
+        workbench: Option<Workbench>,
+    ) -> Result<Self> {
+        let listener = bind_loopback(&invocation.addr)?;
+        let trace = invocation
+            .trace_sse
+            .as_deref()
+            .map(http::TraceLog::open)
+            .transpose()
+            .context("open --trace-sse log")?;
+        let model_id = invocation
+            .model
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .context("model path has no printable file stem")?
+            .to_owned();
+        Ok(Self {
+            listener,
+            trace,
+            model_id,
+            workbench,
+        })
+    }
+
+    pub(super) fn serve(
+        mut self,
+        load_ms: f64,
+        backend: &mut dyn http::GenerationBackend,
+    ) -> Result<()> {
+        accept_loop(
+            self.listener,
+            &self.model_id,
+            load_ms,
+            backend,
+            &mut self.trace,
+            self.workbench,
+        )
+    }
 }
 
 pub(crate) const DEFAULT_SERVE_MAX_CONTEXT_TOKENS: usize = 262_144;
@@ -272,24 +323,8 @@ fn supports_serve_family(family: Option<ModelFamily>) -> bool {
     family.is_some_and(|family| profile(family).serve_backend)
 }
 
-/// Families whose serve backend names its no-copy weight buffers, so idle
-/// residency can keep them wired. Qwen's backend does not yet: its default
-/// weights are Metal-allocated copies (always wired), and the opt-in
-/// `QWEN_GGUF_NO_COPY` storage would need the hooks on both its request and
-/// native-inference paths. Exhaustive on purpose: a new family must decide.
-fn idle_residency_eligible(family: ModelFamily) -> bool {
-    match family {
-        ModelFamily::Glm5Next
-        | ModelFamily::K2Horizon
-        | ModelFamily::DeepSeek4
-        | ModelFamily::MuseGlimmer
-        | ModelFamily::Qwen4Exp => true,
-        ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => false,
-    }
-}
-
-/// Limits for a family whose resident session capacity is fixed at load
-/// (Muse Glimmer, Flash-Next): both ceilings must be explicit.
+/// Limits for a family whose resident session capacity is fixed at load:
+/// both ceilings must be explicit and positive.
 fn fixed_session_limits(
     family: ModelFamily,
     model_context: usize,
@@ -301,12 +336,20 @@ fn fixed_session_limits(
         format!("{family} serve requires --max-context-tokens because its resident session capacity is fixed at startup")
     })?;
     ensure!(
+        context_limit > 0,
+        "{family} --max-context-tokens must be greater than 0"
+    );
+    ensure!(
         context_limit <= model_context,
         "{family} --max-context-tokens {context_limit} exceeds model context {model_context}",
     );
     let default_max_tokens = max_tokens.with_context(|| {
         format!("{family} serve requires explicit --max-tokens; the generic 65536-token default exceeds its session capacity")
     })?;
+    ensure!(
+        default_max_tokens > 0,
+        "{family} --max-tokens must be greater than 0"
+    );
     ensure!(
         default_max_tokens <= context_limit,
         "{family} --max-tokens {default_max_tokens} exceeds --max-context-tokens {context_limit}"
@@ -422,7 +465,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     )?;
     // Idle residency needs a backend whose weights are no-copy GGUF windows.
     ensure!(
-        invocation.idle_residency_secs.unwrap_or(0) == 0 || idle_residency_eligible(family),
+        invocation.idle_residency_secs.unwrap_or(0) == 0 || profile(family).idle_residency_eligible,
         "--idle-residency-secs is not implemented for {} serve: its backend does not name its weight buffers (its default weights are Metal-allocated copies, which stay wired; QWEN_GGUF_NO_COPY storage is not yet covered)",
         family.architecture_name()
     );
@@ -468,10 +511,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         assets,
         access: lens_http::access::BrowserAccess::new(invocation.lens_allowed_origin.clone()),
     });
-    if matches!(
-        family,
-        ModelFamily::K2Horizon | ModelFamily::MuseGlimmer | ModelFamily::Glm5Next
-    ) {
+    if !profile(family).upstream_template_style {
         ensure!(
             template_style == items::TemplateStyle::House,
             "--template-style upstream is defined for Qwen and DeepSeek V4 serve; {} serve renders its release format",
@@ -480,11 +520,8 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     } else {
         tracing::info!(target: "qwen_diag", "serve: template_style={}", template_style.as_str());
     }
-    // Drafter admission is a header-level decision, settled once for every
-    // family before any lane binds, loads or opens the drafter: unsupported
-    // family/shape combinations are refused here with the shared code.
-    // `EngineBackend::new` still performs the GPU copy from the path;
-    // consolidating that reuse waits for the serve backend to settle.
+    // Drafter admission checks the model header before family preparation.
+    // EngineBackend::new performs the GPU copy from the path.
     let drafter = crate::drafter_policy::PreparedDrafter::prepare(
         invocation.drafter.as_deref(),
         &gguf,
@@ -492,364 +529,36 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         crate::drafter_policy::Lane::Serve,
     )?;
     drop(drafter);
-    // Keep K2 out of the generic serve admission and listener setup. Its
-    // resident plan and raw request contract are owned by the K2 lane.
     match family {
         ModelFamily::K2Horizon => {
             let prepared = backend_k2::Prepared::new(&gguf, &invocation)?;
-            // Fail cheap on a busy/invalid loopback address, after K2-only admission
-            // but before taking the GPU lease or loading weights.
-            let listener = bind_loopback(&invocation.addr)?;
-            let mut trace = invocation
-                .trace_sse
-                .as_deref()
-                .map(http::TraceLog::open)
-                .transpose()?;
-            let model_id = invocation
-                .model
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .context("model path has no printable file stem")?
-                .to_owned();
-            crate::shutdown::checkpoint()?;
-            let ctx = qwen_llm::metal::MetalContext::new()?;
-            let started = Instant::now();
-            let model = qwen_llm::k2_horizon_runtime::K2LoadedModel::load(
-                &ctx,
-                &gguf,
-                u32::try_from(prepared.capacity)?,
-            )?;
-            let load_ms = started.elapsed().as_secs_f64() * 1e3;
-            tracing::info!(target: "qwen_diag", "serve limits: family=k2_horizon raw_input_string_only capacity={} snapshot_cache_bytes=0", prepared.capacity);
-            let mut backend = backend_k2::K2Backend::new(&model, prepared, model_id.clone());
-            backend.set_idle_residency(&ctx, idle_window);
-            return accept_loop(
-                listener,
-                &model_id,
-                load_ms,
-                &mut backend,
-                &mut trace,
-                workbench,
-            );
+            let listening = Listening::open(&invocation, workbench)?;
+            backend_k2::start(prepared, &gguf, &invocation, listening, idle_window)
         }
         ModelFamily::Glm5Next => {
-            // CPU admission (artifact, limits, chat profile) before the
-            // listener; device admission, prefetch and load before accepting.
             let prepared = backend_glm5_next::Prepared::new(&gguf, &invocation)?;
-            let listener = bind_loopback(&invocation.addr)?;
-            let mut trace = invocation
-                .trace_sse
-                .as_deref()
-                .map(http::TraceLog::open)
-                .transpose()?;
-            let model_id = invocation
-                .model
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .context("model path has no printable file stem")?
-                .to_owned();
-            crate::shutdown::checkpoint()?;
-            let ctx = qwen_llm::metal::MetalContext::new()?;
-            let started = Instant::now();
-            let weights = backend_glm5_next::load(&ctx, &gguf, &prepared)?;
-            let load_ms = started.elapsed().as_secs_f64() * 1e3;
-            // Sized after load so an auto budget sees the resident model.
-            let snapshot_cache_plan = SnapshotCachePlan::resolve(
-                invocation.snapshot_cache_mib,
-                invocation.snapshot_policy,
-                ctx.memory_signals(),
-            )?;
-            let limits = prepared.describe();
-            let mut backend = backend_glm5_next::Glm5NextBackend::new(
-                &ctx,
-                &weights,
-                prepared,
-                model_id.clone(),
-                idle_window,
-                snapshot_cache_plan,
-            );
-            tracing::info!(target: "qwen_diag", "serve limits: {limits} {}", backend.describe_snapshots());
-            let warm_up_ms = backend.warm_up()?;
-            tracing::info!(target: "qwen_diag", "serve startup: family=glm5_next load_ms={load_ms:.1} warm_up_ms={warm_up_ms:.1}");
-            return accept_loop(
-                listener,
-                &model_id,
-                load_ms,
-                &mut backend,
-                &mut trace,
-                workbench,
-            );
+            let listening = Listening::open(&invocation, workbench)?;
+            backend_glm5_next::start(prepared, &gguf, &invocation, listening, idle_window)
         }
-        ModelFamily::Qwen35
-        | ModelFamily::Qwen35Moe
-        | ModelFamily::Qwen4Exp
-        | ModelFamily::DeepSeek4
-        | ModelFamily::MuseGlimmer => {}
-    }
-    // Bind before loading weights: an unresolvable, non-loopback, or busy
-    // address is a startup error, not something to discover after a
-    // multi-gigabyte load. Connections arriving during load queue in the
-    // kernel backlog and are answered once the accept loop starts.
-    let listener = bind_loopback(&invocation.addr)?;
-    let mut trace = invocation
-        .trace_sse
-        .as_deref()
-        .map(http::TraceLog::open)
-        .transpose()
-        .context("open --trace-sse log")?;
-    let model_id = invocation
-        .model
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .context("model path has no printable file stem")?
-        .to_owned();
-
-    match family {
-        ModelFamily::K2Horizon => unreachable!("K2 Horizon returned above"),
-        ModelFamily::Glm5Next => unreachable!("GLM-5.3-Flash returned above"),
         ModelFamily::MuseGlimmer => {
-            let math_options = backend_muse::read_math_options()?;
-            let config = qwen_llm::muse_glimmer::MuseGlimmerConfig::from_gguf(&gguf)
-                .context("bind Muse Glimmer serve contract")?;
-            let (context_limit, default_max_tokens) = fixed_session_limits(
-                ModelFamily::MuseGlimmer,
-                config.context_length as usize,
-                invocation.max_context_tokens,
-                invocation.max_tokens,
-            )?;
-            crate::shutdown::checkpoint()?;
-            let ctx = qwen_llm::metal::MetalContext::new().context("initialize Metal context")?;
-            let load_t0 = Instant::now();
-            let mut backend = backend_muse::MuseGlimmerBackend::new_with_options(
-                ctx,
-                gguf,
-                &invocation.model,
-                model_id.clone(),
-                default_max_tokens,
-                context_limit,
-                math_options,
-            )?;
-            let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
-            backend.set_idle_residency(idle_window);
-            let math_options = backend.math_options();
-            tracing::info!(target: "qwen_diag", "serve limits: family=muse_glimmer max_context_tokens={} default_max_tokens={} snapshot_cache_bytes=0 matrix_prefill={} split_decode={}", context_limit, default_max_tokens, math_options.matrix_prefill, math_options.split_decode);
-            crate::shutdown::checkpoint()?;
-            accept_loop(
-                listener,
-                &model_id,
-                load_ms,
-                &mut backend,
-                &mut trace,
-                workbench,
-            )
+            let prepared = backend_muse::Prepared::new(&gguf, &invocation)?;
+            let listening = Listening::open(&invocation, workbench)?;
+            backend_muse::start(prepared, gguf, &invocation, listening, idle_window)
         }
         ModelFamily::DeepSeek4 => {
-            // DS4 sizes its session from a forward budget fixed at startup, so
-            // serve must be told the context ceiling up front (the CLI's stdin
-            // JSONL lane has the same requirement).
-            let context_limit = invocation.max_context_tokens.context(
-                "DeepSeek V4 serve requires --max-context-tokens: the session forward budget is fixed at startup",
-            )?;
-            let forward_limit = crate::deepseek_v4_forward_budget_for_context_limit(context_limit)?;
-            crate::shutdown::checkpoint()?;
-            let ctx = qwen_llm::metal::MetalContext::new().context("initialize Metal context")?;
-            let mut backend = backend_ds4::DeepSeekV4Backend::new(
-                ctx,
-                gguf,
-                model_id.clone(),
-                invocation.max_tokens.unwrap_or(DEFAULT_SERVE_MAX_TOKENS),
-                forward_limit,
-                crate::DeepSeekV4MultigroupSelectorArg::Auto,
-                invocation.snapshot_cache_mib,
-                invocation.snapshot_policy,
-            )?;
-            backend.template_style = template_style;
-            backend.release_sampling = Some(crate::release_sampling::release_sampling(
-                crate::release_identity::ReleaseIdentity::DeepSeekV4,
-                42,
-            ));
-            backend.set_idle_residency(idle_window);
-            tracing::info!(target: "qwen_diag", "serve limits: family=deepseek_v4 max_context_tokens={} {}", context_limit, backend.snapshot_cache_plan);
-            match invocation.durable.resolve("deepseek_v4") {
-                Ok(Some(plan)) => {
-                    if let Err(error) = backend.attach_durable(plan, &invocation.model) {
-                        tracing::warn!(target: "qwen_diag", "serve durable: family=deepseek_v4 tier disabled: {error:#}");
-                    }
-                }
-                Ok(None) => {
-                    tracing::info!(target: "qwen_diag", "serve durable: family=deepseek_v4 tier off")
-                }
-                Err(error) => {
-                    tracing::warn!(target: "qwen_diag", "serve durable: family=deepseek_v4 tier disabled: {error:#}")
-                }
-            }
-            crate::shutdown::checkpoint()?;
-            accept_loop(
-                listener,
-                &model_id,
-                0.0,
-                &mut backend,
-                &mut trace,
-                workbench,
-            )
+            let prepared = backend_ds4::Prepared::new(&gguf, &invocation)?;
+            let listening = Listening::open(&invocation, workbench)?;
+            backend_ds4::start(prepared, gguf, &invocation, listening, idle_window)
         }
         ModelFamily::Qwen4Exp => {
-            if let Some(failure) =
-                crate::qwen4exp_prompt_capability_failure(ModelFamily::Qwen4Exp, &gguf)
-            {
-                bail!(
-                    "Qwen3.8-Flash-Next serve does not support the declared {}",
-                    failure.as_str()
-                );
-            }
-            let config = qwen_llm::qwen4exp::Qwen4ExpConfig::from_gguf(&gguf)
-                .context("bind Qwen3.8-Flash-Next serve geometry")?;
-            let (context_limit, default_max_tokens) = fixed_session_limits(
-                ModelFamily::Qwen4Exp,
-                config.context_length as usize,
-                invocation.max_context_tokens,
-                invocation.max_tokens,
-            )?;
-            crate::shutdown::checkpoint()?;
-            let ctx = qwen_llm::metal::MetalContext::new().context("initialize Metal context")?;
-            let load_t0 = Instant::now();
-            let mut backend = backend_qwen4exp::FlashNextBackend::new(
-                ctx,
-                Box::leak(Box::new(gguf)),
-                model_id.clone(),
-                default_max_tokens,
-                context_limit,
-                invocation.snapshot_cache_mib,
-                invocation.snapshot_policy,
-            )?;
-            backend.template_style = template_style;
-            backend.set_idle_residency(idle_window);
-            let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
-            tracing::info!(target: "qwen_diag", "serve limits: family=qwen4exp max_context_tokens={context_limit} default_max_tokens={default_max_tokens} {}", backend.snapshot_cache_plan);
-            crate::shutdown::checkpoint()?;
-            accept_loop(
-                listener,
-                &model_id,
-                load_ms,
-                &mut backend,
-                &mut trace,
-                workbench,
-            )
+            let prepared = backend_qwen4exp::Prepared::new(&gguf, &invocation)?;
+            let listening = Listening::open(&invocation, workbench)?;
+            backend_qwen4exp::start(prepared, gguf, &invocation, listening, idle_window)
         }
         ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {
-            // The same release identity `qwen run` resolves; serve must not render
-            // a Qwen3.8 model with the generic contract.
-            let identity = crate::prompt_template::identify_qwen_release_for_gguf(&gguf)
-                .context("identify the loaded model's Qwen release")?;
-            if let Some(warning) = identity.warning() {
-                tracing::warn!(target: "qwen_diag", "serve: {warning}");
-            }
-            let template = identity.template.serve_template();
-            ensure!(
-                invocation.lens_config.is_none()
-                    || matches!(
-                        template,
-                        items::QwenTemplate::Qwen36 | items::QwenTemplate::Qwen38
-                    ),
-                "--lens-config requires an identified Qwen3.6/3.8 native protocol"
-            );
-            let registry = invocation
-                .lens_config
-                .as_deref()
-                .map(|path| {
-                    native::registry::Registry::open(path, &gguf, &mut crate::shutdown::checkpoint)
-                        .map(Arc::new)
-                })
-                .transpose()
-                .context("open fitted Lens assets before Metal")?;
-            let no_thinking_supported = template.verified();
-            // Sampling defaults follow the release, size included (Qwen3.5-27B
-            // and -122B-A10B differ from the rest).
-            let release_sampling = crate::release_sampling::release_sampling(
-                crate::release_identity::ReleaseIdentity::detect(family, &gguf),
-                42,
-            );
-            ensure!(
-                template.verified() || template_style == items::TemplateStyle::House,
-                "--template-style upstream requires an identified Qwen release; this model uses the generic ChatML contract"
-            );
-            // Deriving the default ceiling from the model requires readable context
-            // metadata; an explicit --max-context-tokens does not.
-            let declared_context =
-                match invocation.max_context_tokens {
-                    Some(_) => None,
-                    None => Some(gguf.declared_context_length().context(
-                        "read the model's declared context length for the serve ceiling",
-                    )?),
-                };
-            crate::shutdown::checkpoint()?;
-            let runtime = Runtime::metal().context("initialize Metal runtime")?;
-            let load_t0 = Instant::now();
-            let loaded = runtime
-                .load_opened_gguf_with_config(
-                    gguf,
-                    invocation.model.clone(),
-                    qwen_llm::runtime::LoadedModelConfig::default(),
-                )
-                .with_context(|| format!("load model {}", invocation.model.display()))?;
-            let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
-            // Sized after load so auto budgets see the resident model.
-            let snapshot_cache_plan = SnapshotCachePlan::resolve(
-                invocation.snapshot_cache_mib,
-                invocation.snapshot_policy,
-                loaded.context().memory_signals(),
-            )?;
-            loaded.set_prefix_cache_max_bytes(snapshot_cache_plan.bytes);
-            loaded.set_prefix_cache_policy(snapshot_cache_plan.policy);
-            // Admission ceiling: explicit, else the smaller of the hard default and
-            // the model's declared context length.
-            let (context_ceiling, context_source) =
-                match (invocation.max_context_tokens, declared_context) {
-                    (Some(explicit), _) => (explicit, "explicit"),
-                    (None, Some(declared)) if declared < DEFAULT_SERVE_MAX_CONTEXT_TOKENS => {
-                        (declared, "declared_context_length")
-                    }
-                    (None, _) => (DEFAULT_SERVE_MAX_CONTEXT_TOKENS, "default_hard_ceiling"),
-                };
-            let mut backend = backend::EngineBackend::new(
-                loaded,
-                model_id.clone(),
-                invocation.max_tokens.unwrap_or(DEFAULT_SERVE_MAX_TOKENS),
-                invocation.max_context_tokens,
-                context_ceiling,
-                invocation.drafter.as_deref(),
-                template,
-                no_thinking_supported,
-            )?;
-            backend.template_style = template_style;
-            backend.release_sampling = Some(release_sampling);
-            tracing::info!(target: "qwen_diag", "serve limits: family=qwen max_context_tokens={context_ceiling} context_source={context_source} {snapshot_cache_plan}");
-            backend.attach_lens_registry(registry)?;
-            match invocation.durable.resolve("qwen") {
-                Ok(Some(plan)) => {
-                    if let Err(error) =
-                        backend.attach_durable(plan, &invocation.model, snapshot_cache_plan.bytes)
-                    {
-                        tracing::warn!(target: "qwen_diag", "serve durable: family=qwen tier disabled: {error:#}");
-                    }
-                }
-                Ok(None) => {
-                    tracing::info!(target: "qwen_diag", "serve durable: family=qwen tier off")
-                }
-                Err(error) => {
-                    tracing::warn!(target: "qwen_diag", "serve durable: family=qwen tier disabled: {error:#}")
-                }
-            }
-            crate::shutdown::checkpoint()?;
-
-            accept_loop(
-                listener,
-                &model_id,
-                load_ms,
-                &mut backend,
-                &mut trace,
-                workbench,
-            )
+            let prepared = backend::Prepared::new(family, &gguf, &invocation)?;
+            let listening = Listening::open(&invocation, workbench)?;
+            backend::start(prepared, gguf, &invocation, listening)
         }
     }
 }
@@ -1393,6 +1102,12 @@ mod tests {
         );
         assert!(
             fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, Some(7_168), None).is_err()
+        );
+        assert!(
+            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, Some(0), Some(2_048)).is_err()
+        );
+        assert!(
+            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, Some(7_168), Some(0)).is_err()
         );
         assert!(
             fixed_session_limits(

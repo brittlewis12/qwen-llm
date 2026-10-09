@@ -159,6 +159,8 @@ struct HttpProxy {
     control: Arc<Control>,
     activity: Arc<ActivityGuard>,
     extra_cpu_reserve: u64,
+    /// Headroom the HTTP side's output buffers admit against.
+    headroom: super::http::Headroom,
 }
 
 impl GenerationBackend for HttpProxy {
@@ -168,6 +170,10 @@ impl GenerationBackend for HttpProxy {
 
     fn request_profile(&self) -> RequestProfile {
         self.profile.clone()
+    }
+
+    fn output_headroom(&self) -> super::http::Headroom {
+        self.headroom
     }
 
     /// The owner's family renders here, once, with its boundaries.
@@ -324,6 +330,14 @@ std::thread_local! { static START_FAULT: std::cell::Cell<Option<StartFault>> = c
 pub(super) fn inject_start_fault(fault: StartFault) {
     START_FAULT.set(Some(fault));
 }
+#[cfg(test)]
+std::thread_local! { static PROXY_HEADROOM: std::cell::Cell<Option<super::http::Headroom>> = const { std::cell::Cell::new(None) }; }
+/// The next connection started on this thread admits its HTTP-side output
+/// against `headroom` (tests).
+#[cfg(test)]
+pub(super) fn inject_proxy_headroom(headroom: super::http::Headroom) {
+    PROXY_HEADROOM.set(Some(headroom));
+}
 
 impl Connection {
     pub(super) fn start(
@@ -401,7 +415,12 @@ impl Connection {
             control: Arc::clone(&control),
             activity: Arc::new(guard),
             extra_cpu_reserve,
+            headroom: qwen_llm::metal::MetalContext::process_limit_bytes_remaining,
         };
+        #[cfg(test)]
+        if let Some(headroom) = PROXY_HEADROOM.take() {
+            proxy.headroom = headroom;
+        }
         let cancel = CancelOnDrop(Arc::clone(&control));
         #[cfg(test)]
         anyhow::ensure!(

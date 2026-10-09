@@ -10,8 +10,33 @@ use qwen_llm::sampling::SamplingConfig;
 use serde_json::Value;
 use std::sync::Arc;
 
+/// A backend's output limits, for ceilings computed before generation: the
+/// token limit an omitted `max_output_tokens` resolves to, and the longest
+/// piece its decoder emits for one token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OutputLimits {
+    pub(crate) default_max_tokens: usize,
+    pub(crate) max_piece_bytes: usize,
+}
+
+impl OutputLimits {
+    /// The token limit a request resolves to (as the backends resolve it).
+    pub(crate) fn max_tokens(self, request: &ServeRequest) -> usize {
+        request.max_output_tokens.unwrap_or(self.default_max_tokens)
+    }
+
+    /// Test profiles' limits.
+    #[cfg(test)]
+    pub(crate) const TEST: Self = Self {
+        default_max_tokens: 4096,
+        max_piece_bytes: 64,
+    };
+}
+
 #[derive(Clone)]
 pub(crate) enum RequestProfile {
+    /// The trait default for test backends: no output limits, so no tool
+    /// byte ceiling (every production backend declares its own profile).
     UnboundQwen,
     OrdinaryQwen {
         template: QwenTemplate,
@@ -20,14 +45,17 @@ pub(crate) enum RequestProfile {
         /// The identified release's defaults for omitted sampling fields;
         /// `None` leaves them to the backend's legacy greedy fallbacks.
         sampling: Option<SamplingConfig>,
+        limits: OutputLimits,
     },
     FlashNext {
         style: TemplateStyle,
+        limits: OutputLimits,
     },
     DeepSeekV4 {
         style: TemplateStyle,
         /// As for `OrdinaryQwen`.
         sampling: Option<SamplingConfig>,
+        limits: OutputLimits,
     },
     Muse {
         template: MuseGlimmerChatTemplateProfile,
@@ -87,7 +115,7 @@ impl RequestProfile {
     pub(crate) fn template_style_default(&self) -> Option<TemplateStyle> {
         match self {
             Self::OrdinaryQwen { style, .. }
-            | Self::FlashNext { style }
+            | Self::FlashNext { style, .. }
             | Self::DeepSeekV4 { style, .. } => Some(*style),
             Self::UnboundQwen | Self::Muse { .. } | Self::K2 { .. } | Self::Glm5Next { .. } => None,
         }
@@ -98,6 +126,30 @@ impl RequestProfile {
             return Err(ServeError::invalid_request(
                 Some("x_qwen.prefill_lineage"),
                 "x_qwen.prefill_lineage is supported only by GLM-5.3-Flash; this family reads prompts one way",
+            ));
+        }
+        // The tool block's ceiling must be computable before generation
+        // whenever the output protocol parses tools: always for ordinary
+        // Qwen and Flash-Next (undeclared tool syntax still parses), for
+        // DeepSeek V4 when tools are declared.
+        let parses_tools = match self {
+            Self::OrdinaryQwen { .. } | Self::FlashNext { .. } => true,
+            Self::DeepSeekV4 { .. } => !request.model_request.tools.is_empty(),
+            _ => false,
+        };
+        if let Self::OrdinaryQwen { limits, .. }
+        | Self::FlashNext { limits, .. }
+        | Self::DeepSeekV4 { limits, .. } = self
+            && parses_tools
+            && super::output_memory::tool_byte_ceiling(
+                limits.max_tokens(request),
+                limits.max_piece_bytes,
+            )
+            .is_none()
+        {
+            return Err(ServeError::invalid_request(
+                Some("max_output_tokens"),
+                "max_output_tokens must be >= 1 and small enough to bound the tool block",
             ));
         }
         match self {
@@ -201,27 +253,44 @@ impl RequestProfile {
     }
 
     pub(crate) fn output(&self, request: &ServeRequest) -> OutputProtocol {
+        // Normalization admitted the ceiling before any response bytes;
+        // were it uncomputable here, fail closed (any tool block exceeds 0).
+        let ceiling = |limits: &OutputLimits| {
+            Some(
+                super::output_memory::tool_byte_ceiling(
+                    limits.max_tokens(request),
+                    limits.max_piece_bytes,
+                )
+                .unwrap_or(0),
+            )
+        };
         match self {
             Self::UnboundQwen => OutputProtocol::Qwen {
                 preopened_reasoning: false,
                 parse_tools: true,
                 tool_grammar: ToolGrammar::QwenXml,
+                tool_byte_ceiling: None,
             },
-            Self::OrdinaryQwen { template, .. } => OutputProtocol::Qwen {
+            Self::OrdinaryQwen {
+                template, limits, ..
+            } => OutputProtocol::Qwen {
                 preopened_reasoning: qwen_preopens(*template, request),
                 parse_tools: true,
                 tool_grammar: ToolGrammar::QwenXml,
+                tool_byte_ceiling: ceiling(limits),
             },
-            Self::FlashNext { .. } => OutputProtocol::Qwen {
+            Self::FlashNext { limits, .. } => OutputProtocol::Qwen {
                 preopened_reasoning: render::qwen_generation(request)
                     == render::QwenGeneration::PreOpen,
                 parse_tools: true,
                 tool_grammar: ToolGrammar::QwenXml,
+                tool_byte_ceiling: ceiling(limits),
             },
-            Self::DeepSeekV4 { .. } => OutputProtocol::Qwen {
+            Self::DeepSeekV4 { limits, .. } => OutputProtocol::Qwen {
                 preopened_reasoning: render_ds4::preopens_reasoning(request).unwrap_or(false),
                 parse_tools: !request.model_request.tools.is_empty(),
                 tool_grammar: ToolGrammar::DeepSeekDsml,
+                tool_byte_ceiling: ceiling(limits),
             },
             Self::Muse {
                 eos_token_id,
@@ -296,6 +365,77 @@ pub(super) fn qwen_preopens(template: QwenTemplate, request: &ServeRequest) -> b
 
 #[cfg(test)]
 mod tests {
+
+    /// Qwen-family tool ceilings: the resolved token limit (explicit or the
+    /// backend default) times the longest piece times 3; an uncomputable
+    /// ceiling is refused at normalization (400) when tools are declared.
+    #[test]
+    fn qwen_family_tool_ceilings_resolve_the_token_limit_and_refuse_overflow() {
+        let limits = OutputLimits {
+            default_max_tokens: 100,
+            max_piece_bytes: 16,
+        };
+        let profiles = [
+            RequestProfile::OrdinaryQwen {
+                template: QwenTemplate::Qwen35,
+                no_thinking_supported: true,
+                style: TemplateStyle::House,
+                sampling: None,
+                limits,
+            },
+            RequestProfile::FlashNext {
+                style: TemplateStyle::House,
+                limits,
+            },
+            RequestProfile::DeepSeekV4 {
+                style: TemplateStyle::House,
+                sampling: None,
+                limits,
+            },
+        ];
+        let tools = serde_json::json!([{"type": "function", "name": "f",
+            "parameters": {"type": "object", "properties": {}}}]);
+        for profile in &profiles {
+            for (max, ceiling) in [(None, 100 * 16 * 3), (Some(7), 7 * 16 * 3)] {
+                let mut body = serde_json::json!({"model": "m", "input": "hi", "tools": tools});
+                if let Some(max) = max {
+                    body["max_output_tokens"] = max.into();
+                }
+                let mut request = profile.parse(&body).unwrap();
+                profile.normalize(&mut request).unwrap();
+                match profile.output(&request) {
+                    OutputProtocol::Qwen {
+                        tool_byte_ceiling, ..
+                    } => assert_eq!(tool_byte_ceiling, Some(ceiling)),
+                    other => panic!("{other:?}"),
+                }
+            }
+            let mut body = serde_json::json!({"model": "m", "input": "hi", "tools": tools,
+                "max_output_tokens": u64::MAX});
+            if let Ok(mut request) = profile.parse(&body) {
+                let error = profile.normalize(&mut request).unwrap_err();
+                assert_eq!(
+                    (error.status, error.param.as_deref()),
+                    (400, Some("max_output_tokens"))
+                );
+            }
+            body["max_output_tokens"] = (usize::MAX / 2).into();
+            let mut request = profile.parse(&body).unwrap();
+            let error = profile.normalize(&mut request).unwrap_err();
+            assert_eq!(error.status, 400);
+            // Without declared tools: ordinary Qwen and Flash-Next still parse
+            // tool syntax, so the ceiling is still required; DeepSeek V4 does
+            // not parse tools then.
+            let body = serde_json::json!({"model": "m", "input": "hi",
+                "max_output_tokens": usize::MAX / 2});
+            let mut request = profile.parse(&body).unwrap();
+            let refused = profile.normalize(&mut request).is_err();
+            assert_eq!(
+                refused,
+                !matches!(profile, RequestProfile::DeepSeekV4 { .. })
+            );
+        }
+    }
     use super::*;
 
     #[test]

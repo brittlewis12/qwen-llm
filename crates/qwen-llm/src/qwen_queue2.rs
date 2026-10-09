@@ -1,9 +1,11 @@
-use crate::metal::{KernelEncoder, MetalContext, MetalError, MetalTensor};
+use crate::metal::{
+    KernelEncoder, MetalContext, MetalError, MetalTensor, SharedBufferPricingError,
+};
 use crate::metal_forward::{
     ATTN_V4_MAX_NWG, MetalAdditionalQueueResidencySetGuard, MetalBlock, MetalForward, MetalModel,
     MetalSession, MfError, kv_cache_dtype_for_arch,
 };
-use crate::model::ArchKind;
+use crate::model::{Arch, ArchKind};
 use crate::sampling::{GreedySelection, SamplingError};
 use crate::tensor::{GgmlType, ggml_type_layout_raw};
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue};
@@ -30,6 +32,12 @@ pub enum QwenQueue2Error {
         slot: usize,
         #[source]
         source: SamplingError,
+    },
+    #[error("Qwen queue2 session buffer ({logical_bytes} logical bytes): {source}")]
+    SharedBufferPricing {
+        logical_bytes: u64,
+        #[source]
+        source: SharedBufferPricingError,
     },
     #[error(transparent)]
     Metal(#[from] MetalError),
@@ -306,12 +314,44 @@ pub(crate) fn qwen_queue2_session_upper_bytes(
     model: &MetalModel,
     capacity: usize,
 ) -> Result<u64, QwenQueue2Error> {
+    let gdn_layers = model
+        .blocks
+        .iter()
+        .filter(|block| matches!(block, MetalBlock::Gdn(_)))
+        .count() as u64;
+    let attention_layers = model
+        .blocks
+        .iter()
+        .filter(|block| matches!(block, MetalBlock::Attn(_)))
+        .count() as u64;
+    session_upper_bytes_with_pricer(
+        &model.arch,
+        capacity,
+        gdn_layers,
+        attention_layers,
+        kv_cache_dtype_for_arch(&model.arch),
+        |logical_bytes| {
+            ctx.price_shared_buffer_upper(logical_bytes)
+                .map(|priced| priced.priced_upper_bytes)
+        },
+    )
+}
+
+// Mirrors MetalSession::fresh. Keep the inventory and checked arithmetic shared
+// with CPU regression tests; only the device's per-buffer quote is injectable.
+fn session_upper_bytes_with_pricer(
+    arch: &Arch,
+    capacity: usize,
+    gdn_layers: u64,
+    attention_layers: u64,
+    kv_dtype: GgmlType,
+    mut price_buffer: impl FnMut(u64) -> Result<u64, SharedBufferPricingError>,
+) -> Result<u64, QwenQueue2Error> {
     if capacity == 0 {
         return Err(QwenQueue2Error::Validation(
             "session capacity must be positive".into(),
         ));
     }
-    let arch = &model.arch;
     let checked_mul = |left: u64, right: u64, label: &'static str| {
         left.checked_mul(right)
             .ok_or_else(|| QwenQueue2Error::Validation(format!("{label} overflow")))
@@ -407,23 +447,19 @@ pub(crate) fn qwen_queue2_session_upper_bytes(
         if count == 0 {
             return Ok(());
         }
-        let priced = ctx.shared_buffer_size_and_align(logical_bytes)?.size;
+        // Each tensor is a standalone allocation, so round its quote before
+        // multiplying by the number of identical buffers, never afterward.
+        let priced =
+            price_buffer(logical_bytes).map_err(|source| QwenQueue2Error::SharedBufferPricing {
+                logical_bytes,
+                source,
+            })?;
         let repeated = checked_mul(priced, count, "priced session allocations")?;
         total = checked_add(total, repeated, "session allocation total")?;
         Ok(())
     };
     let f32_bytes = |elements: u64| checked_mul(elements, 4, "F32 allocation bytes");
 
-    let gdn_layers = model
-        .blocks
-        .iter()
-        .filter(|block| matches!(block, MetalBlock::Gdn(_)))
-        .count() as u64;
-    let attention_layers = model
-        .blocks
-        .iter()
-        .filter(|block| matches!(block, MetalBlock::Attn(_)))
-        .count() as u64;
     add_allocation(f32_bytes(gdn_conv_elems)?, gdn_layers)?;
     add_allocation(f32_bytes(gdn_state_elems)?, gdn_layers)?;
 
@@ -433,7 +469,7 @@ pub(crate) fn qwen_queue2_session_upper_bytes(
         kv_dim,
         "KV elements per layer",
     )?;
-    let kv_bytes = match kv_cache_dtype_for_arch(arch) {
+    let kv_bytes = match kv_dtype {
         GgmlType::F16 => checked_mul(kv_elements, 2, "F16 KV bytes")?,
         GgmlType::Q8_0 => {
             let (block, bytes) =
@@ -499,3 +535,7 @@ pub(crate) fn qwen_queue2_session_upper_bytes(
     add_allocation(4, 2)?;
     Ok(total)
 }
+
+#[cfg(test)]
+#[path = "qwen_queue2/pricing_tests.rs"]
+mod pricing_tests;

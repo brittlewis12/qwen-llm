@@ -386,11 +386,27 @@ mod tests {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../README.md")
     }
 
+    /// Lines with CRLF and trailing whitespace removed and table cells
+    /// trimmed, so cell padding a Markdown editor adds is not drift.
+    fn normalized_table_lines(block: &str) -> Vec<String> {
+        block
+            .lines()
+            .map(|line| {
+                let line = line.trim_end();
+                if line.starts_with('|') {
+                    line.split('|').map(str::trim).collect::<Vec<_>>().join("|")
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect()
+    }
+
     fn compare_readme_family_table(readme: &str) -> Result<(), String> {
         let actual = readme_family_table(readme)
             .ok_or_else(|| "README family table markers are missing".to_owned())?;
         let expected = render_readme_family_table();
-        if actual == expected {
+        if normalized_table_lines(actual) == normalized_table_lines(&expected) {
             return Ok(());
         }
         Err(format!(
@@ -435,6 +451,19 @@ mod tests {
         assert!(diff.contains("--- README block"));
         assert!(diff.contains("+++ generated block"));
         assert!(diff.contains("Regenerate with QWEN_REGENERATE_README_FAMILY_TABLE=1"));
+    }
+
+    #[test]
+    fn readme_family_table_ignores_cell_padding_and_line_endings() {
+        let readme = std::fs::read_to_string(readme_path()).expect("read README.md");
+        let padded = readme
+            .replacen(
+                "| none (request-shaped) |",
+                "|   none (request-shaped)   |",
+                1,
+            )
+            .replace('\n', "\r\n");
+        assert!(compare_readme_family_table(&padded).is_ok());
     }
 
     #[test]

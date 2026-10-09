@@ -162,8 +162,9 @@ detail.
   under `~/.cache/qwen-llm/serve-checkpoints` by default.
 - **Live-session reuse.** Muse Glimmer and K2 Horizon rewind their resident
   session to the longest common prefix. GLM-5.3-Flash continues its session
-  when the new prompt extends the previous one exactly, and otherwise
-  restores a snapshot. With its default Fast prefill, GLM snapshots only at
+  when the new prompt extends the previous one exactly; otherwise it restores
+  a compatible snapshot when one is cached, or prefills a fresh session.
+  With its default Fast prefill, GLM snapshots only at
   the end of the shared instructions-and-tools prefix; with Exact prefill
   (`x_qwen.prefill_lineage: "exact"`) it also snapshots at the start of the
   generation header.

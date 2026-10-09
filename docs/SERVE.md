@@ -956,11 +956,14 @@ compatible only within one prefill lineage and schedule.
 - Exact (`x_qwen.prefill_lineage: "exact"`) cuts at both boundaries. Packed
   Exact equals token-by-token decoding, so a restored request equals a cold
   run bit for bit. On by default whenever the cache has a budget.
-- Fast (the default lineage) is off: its prefill depends on where chunks
-  start, so the split is a new Fast schedule that must pass the #12 quality
-  cohort before it becomes a default. `QWEN_GLM_FAST_SNAPSHOTS=1` opts in
-  for qualification: one cut at the shared prefix; a restored request equals
-  a miss on the same split, not an unsplit cold run. A Fast request restores
+- Fast (the default lineage) is on by default (`QWEN_GLM_FAST_SNAPSHOTS=0`
+  turns it off): one cut at the shared prefix. Fast's prefill depends on
+  where chunks start, so a split request equals a miss on the same split,
+  not an unsplit cold run. Against the unsplit Fast it replaces, the split
+  showed no detectable quality change on the #12 cohort; the preregistered
+  comparison against Exact was inconclusive on one arm
+  (`docs/bench/2026-10-08-glm53-fast-split-quality/`; decision in PERF-LOG
+  2026-10-08). A Fast request restores
   only a snapshot ending exactly at its own verified cut and publishes one
   only from a state on that schedule (packed chunks from 0; a live session
   with an earlier cut, an off-grid cancellation or decoded tokens is
@@ -979,7 +982,7 @@ Checked under `MTL_DEBUG_LAYER=1` on UD-IQ3_XXS with a 1,173-token shared
 prefix (`serve::backend_glm5_next::tests::gpu_snapshots_continue_the_captured_trajectory`):
 Exact misses capture both cuts and equal a cold run; a second conversation
 restores the shared prefix and an identical retry restores its transcript,
-both equal to cold runs bit for bit (logits and bytes); opt-in Fast hits equal
+both equal to cold runs bit for bit (logits and bytes); Fast hits equal
 a miss on the same split, as does a full cache; Fast entries never serve an
 Exact request; a split prefill cancelled after its first chunk resumes onto
 the same schedule with the uninterrupted run's logits, in both lineages; a

@@ -13,9 +13,11 @@
 //! or is denied capture, so a restore continues exactly the trajectory a
 //! miss would have run. Exact (`x_qwen.prefill_lineage: "exact"`) is
 //! segmentation-invariant, so its snapshots also equal a cold run. Fast
-//! snapshots split at the shared prefix only and stay off until their
-//! schedule qualifies (`QWEN_GLM_FAST_SNAPSHOTS=1` opts in for
-//! qualification). A Fast request restores only a snapshot ending exactly
+//! snapshots split at the shared prefix only; they are on by default
+//! (decision of 2026-10-08, PERF-LOG: the split against the unsplit Fast it
+//! replaces showed no detectable quality change, while the preregistered
+//! comparison against Exact was inconclusive) and `QWEN_GLM_FAST_SNAPSHOTS=0`
+//! turns them off. A Fast request restores only a snapshot ending exactly
 //! at its own verified cut, and publishes one only from a state on the
 //! canonical schedule (packed chunks from 0, no other cut, no decoded
 //! tokens); without a verified cut it neither restores nor captures.
@@ -48,8 +50,8 @@ use std::time::Instant;
 
 /// Default-on rollback lever for live-session and snapshot reuse.
 const PREFIX_REUSE_ENV: &str = "QWEN_GLM_PREFIX_REUSE";
-/// Opt-in for Fast-lineage snapshots (shared-prefix split), pending the
-/// quality qualification of that prefill schedule.
+/// Default-on lever for Fast-lineage snapshots (shared-prefix split); `0`
+/// restores unsplit Fast prefill with live-session reuse only.
 const FAST_SNAPSHOTS_ENV: &str = "QWEN_GLM_FAST_SNAPSHOTS";
 
 /// The prefill schedule a snapshot belongs to. A restore is valid only into
@@ -60,7 +62,7 @@ enum Schedule {
     /// header start. Packed Exact equals serial decode, so any cuts give the
     /// same state.
     ExactV1,
-    /// Fast lineage (opt-in): one cut at the shared prefix end.
+    /// Fast lineage: one cut at the shared prefix end.
     FastSharedSplitV1,
 }
 
@@ -266,8 +268,8 @@ impl CaptureOutcome {
 }
 
 /// The snapshot schedule of a request of `lineage`, or `None` when its
-/// prefill neither splits nor captures: no cache budget, or Fast without
-/// the opt-in.
+/// prefill neither splits nor captures: no cache budget, or Fast with the
+/// lever off.
 fn snapshot_schedule(
     cache_bytes: u64,
     fast_snapshots: bool,
@@ -521,7 +523,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             lineage: PackedLineage::default(),
             cache: SnapshotCache::new(snapshot_cache_plan.bytes, snapshot_cache_plan.policy),
             snapshot_cache_plan,
-            fast_snapshots: qwen_llm::env_flag::read_default_off(FAST_SNAPSHOTS_ENV),
+            fast_snapshots: qwen_llm::env_flag::read_default_on(FAST_SNAPSHOTS_ENV),
             live_canonical: false,
             #[cfg(test)]
             last_prefill_logits: Vec::new(),
@@ -547,7 +549,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             "{} snapshot_schedules=exact{}",
             self.snapshot_cache_plan,
             if self.fast_snapshots {
-                ",fast_shared_split(opt-in)"
+                ",fast_shared_split"
             } else {
                 ""
             }

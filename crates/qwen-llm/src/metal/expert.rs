@@ -608,6 +608,35 @@ pub(crate) fn encode_grouped_routed_experts_f32x(
         shape: vec![t.n_elements()],
         ..t.clone()
     };
+    // Both tiles' checks (bindings, geometry, pipelines) before the first
+    // dispatch.
+    super::moe_grouped_generic::check_moe_swiglu_clamped_f32x_grouped_slots(
+        ctx,
+        b.gate_bank,
+        b.up_bank,
+        &flat(b.input),
+        b.counts,
+        b.slots,
+        &flat(b.inner),
+        hidden,
+        ffn,
+        experts,
+        top_k,
+        rows,
+        clamp,
+    )?;
+    super::moe_grouped_generic::check_moe_down_f32x_grouped_slots(
+        ctx,
+        b.down_bank,
+        &flat(b.inner),
+        b.counts,
+        b.slots,
+        &flat(b.slot_out),
+        ffn,
+        hidden,
+        experts,
+        rows,
+    )?;
     encode_moe_route_bucket_slots_f32(
         ctx,
         enc,

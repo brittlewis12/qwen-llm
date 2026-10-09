@@ -1445,15 +1445,18 @@ fn f32_dense_families() -> Vec<super::super::packed::Stage> {
 
 /// One F32-operand configuration of Fast: the stage families selected and
 /// the tiles they may take.
-struct F32Selection {
+pub(super) struct F32Selection {
     label: &'static str,
     stages: Vec<super::super::packed::Stage>,
     tiles: &'static [super::super::packed::F32Tile],
+    /// Every call of a selected stage runs on F32 operands (a tile, or an
+    /// F32 weight's own kernel); none stays half-staged.
+    complete: bool,
     description: &'static str,
 }
 
 impl F32Selection {
-    fn scope(&self) -> super::super::packed::F32Stages {
+    pub(super) fn scope(&self) -> super::super::packed::F32Stages {
         super::super::packed::F32Stages::with_tiles(&self.stages, self.tiles)
     }
 }
@@ -1461,7 +1464,7 @@ impl F32Selection {
 /// Q8_0 only; every dense projection (Q8_0 and Q6_K); and every dense
 /// projection plus the routed experts ("all": every quantized matrix
 /// operand of Fast in F32).
-fn f32_selections() -> [F32Selection; 3] {
+pub(super) fn f32_selections() -> [F32Selection; 3] {
     use super::super::packed::{F32Tile, Stage};
     let mut all = f32_dense_families();
     all.push(Stage::RoutedExperts);
@@ -1470,55 +1473,104 @@ fn f32_selections() -> [F32Selection; 3] {
             label: "fast_f32_q8",
             stages: f32_dense_families(),
             tiles: &[F32Tile::Q8_0],
+            complete: false,
             description: "every Q8_0 dense projection on the F32-operand tile",
         },
         F32Selection {
             label: "fast_f32_dense",
             stages: f32_dense_families(),
             tiles: &[F32Tile::Q8_0, F32Tile::Q6K],
+            complete: true,
             description: "every Q8_0 and Q6_K dense projection on F32-operand tiles (routed experts half-staged)",
         },
         F32Selection {
             label: "fast_f32_all",
             stages: all,
             tiles: &F32Tile::ALL,
+            complete: true,
             description: "every dense projection and the routed experts (gate/up, SwiGLU input to down) on F32-operand tiles",
         },
     ]
 }
 
-/// The census of one F32 selection: every call of an enabled tile's kind
-/// took the tile (no half-staged fallback), and each enabled tile ran.
-/// Returns the census as JSON.
-fn assert_f32_census(
+/// A selection's census against the half-staged run's on the same tokens
+/// and chunking ([`super::super::packed::F32Census`]): the same calls per
+/// stage family and weight kind (coverage); in selected stages every call of
+/// an enabled tile's kind took the tile and, for a complete selection, no
+/// call stayed half-staged; unselected stages kept their paths; each enabled
+/// tile ran. Returns the selection's census as JSON.
+pub(super) fn assert_f32_census(
     label: &str,
-    census: &std::collections::BTreeMap<(String, bool), usize>,
-    tiles: &[super::super::packed::F32Tile],
+    half: &super::super::packed::CensusCounts,
+    selected: &super::super::packed::CensusCounts,
+    selection: &F32Selection,
 ) -> Value {
-    use super::super::packed::F32Tile;
-    for tile in tiles {
-        let kind = match tile {
-            F32Tile::Q8_0 => "Q8_0",
-            F32Tile::Q6K => "Q6_K",
-            F32Tile::RoutedExperts => "routed experts",
-        };
-        let count = |taken: bool| census.get(&(kind.to_string(), taken)).copied().unwrap_or(0);
-        assert_eq!(
-            count(false),
-            0,
-            "{label}: {kind} calls fell back to half staging"
+    use super::super::packed::{CensusPath, F32Tile};
+    let totals = |census: &super::super::packed::CensusCounts| {
+        let mut totals = std::collections::BTreeMap::new();
+        for ((stage, kind, _), n) in census {
+            *totals.entry((*stage, kind.clone())).or_insert(0usize) += n;
+        }
+        totals
+    };
+    assert_eq!(
+        totals(half),
+        totals(selected),
+        "{label}: call coverage differs"
+    );
+    assert!(
+        half.keys().all(|(_, _, path)| *path != CensusPath::F32Tile),
+        "{label}: the half-staged run used an F32 tile"
+    );
+    let tile_of = |kind: &str| match kind {
+        "Q8_0" => Some(F32Tile::Q8_0),
+        "Q6_K" => Some(F32Tile::Q6K),
+        "experts" => Some(F32Tile::RoutedExperts),
+        _ => None,
+    };
+    for ((stage, kind, path), n) in selected {
+        let in_selection = selection.stages.contains(stage);
+        let enabled =
+            in_selection && tile_of(kind).is_some_and(|tile| selection.tiles.contains(&tile));
+        if enabled {
+            assert_eq!(
+                *path,
+                CensusPath::F32Tile,
+                "{label}: {n} {stage:?} {kind} calls fell back"
+            );
+        } else if in_selection {
+            assert_ne!(
+                *path,
+                CensusPath::F32Tile,
+                "{label}: {stage:?} {kind} took a disabled tile"
+            );
+        } else {
+            assert_eq!(
+                half.get(&(*stage, kind.clone(), *path)),
+                Some(n),
+                "{label}: unselected {stage:?} {kind} changed path"
+            );
+        }
+        if selection.complete && in_selection {
+            assert_ne!(
+                *path,
+                CensusPath::Half,
+                "{label}: {n} {stage:?} {kind} calls half-staged"
+            );
+        }
+    }
+    for tile in selection.tiles {
+        assert!(
+            selected
+                .keys()
+                .any(|(_, kind, path)| *path == CensusPath::F32Tile && tile_of(kind) == Some(*tile)),
+            "{label}: no {tile:?} call ran"
         );
-        assert!(count(true) > 0, "{label}: no {kind} call took its F32 tile");
     }
     Value::Object(
-        census
+        selected
             .iter()
-            .map(|((kind, taken), n)| {
-                (
-                    format!("{kind} {}", if *taken { "f32" } else { "half" }),
-                    json!(n),
-                )
-            })
+            .map(|((stage, kind, path), n)| (format!("{stage:?} {kind} {path:?}"), json!(n)))
             .collect(),
     )
 }
@@ -1538,7 +1590,8 @@ fn reuse_natural_f32_operand_probe() {
     use super::super::packed::F32Census;
     let out = PathBuf::from(std::env::var("GLM53_PROBE_OUT").expect("GLM53_PROBE_OUT"));
     let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
-    let fixture: Value = serde_json::from_slice(&std::fs::read(&fixture_path).unwrap()).unwrap();
+    let fixture_bytes = std::fs::read(&fixture_path).unwrap();
+    let fixture: Value = serde_json::from_slice(&fixture_bytes).unwrap();
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
     let gguf = GgufFile::open(&path).unwrap();
     assert_eq!(fixture["artifact_layout"], artifact_layout(&gguf));
@@ -1579,16 +1632,24 @@ fn reuse_natural_f32_operand_probe() {
         let mut row = json!({"id": case.id, "prompt_tokens": turn2.len(),
             "positions": exact.len()});
         let mut fast_bits = None;
+        let mut half_census = None;
         for (i, label) in labels.iter().enumerate() {
+            let census = F32Census::begin();
             let (logits, census) = match i.checked_sub(1).map(|j| &selections[j]) {
-                None => (run(PackedLineage::Fast), Value::Null),
+                None => {
+                    let logits = run(PackedLineage::Fast);
+                    half_census = Some(census.take());
+                    (logits, Value::Null)
+                }
                 Some(selection) => {
                     let _scope = selection.scope();
-                    let census = F32Census::begin();
                     let logits = run(PackedLineage::Fast);
                     let counts = census.take();
                     let label = format!("{} {label}", case.id);
-                    (logits, assert_f32_census(&label, &counts, selection.tiles))
+                    let half = half_census
+                        .as_ref()
+                        .expect("the half-staged arm runs first");
+                    (logits, assert_f32_census(&label, half, &counts, selection))
                 }
             };
             let drift = Drift::measure(&format!("{} {label}", case.id), &exact, &logits);
@@ -1641,6 +1702,10 @@ fn reuse_natural_f32_operand_probe() {
     let document = json!({
         "schema": "glm53.f32_operand_probe.v2", "rows_per_chunk": 512,
         "reference": "Exact cold on the same frozen continuation",
+        "fixture": {"path": FIXTURE, "sha256": sha256_hex(&fixture_bytes)},
+        "artifact_layout": fixture["artifact_layout"],
+        "evaluator_commit": std::env::var("GLM53_PROBE_COMMIT").ok(),
+        "cases_evaluated": wanted, "all_frozen_cases": wanted.len() == frozen.len(),
         "arms": arms, "summary": summary, "cases": cases,
     });
     std::fs::write(
@@ -1681,21 +1746,25 @@ fn fast_f32_operands_keep_chunk_identities() {
         }
         logits
     };
-    let half_512 = run(512);
     let [_, _, all] = f32_selections();
-    let f32_runs: Vec<(usize, Vec<Vec<f32>>)> = {
-        let _scope = all.scope();
-        let census = F32Census::begin();
-        [512, 128, 64, 97]
-            .map(|rows| {
-                let logits = run(rows);
-                let counts = census.take();
-                let value = assert_f32_census(&format!("{rows} rows"), &counts, all.tiles);
-                eprintln!("{rows} rows: census {value}");
-                (rows, logits)
-            })
-            .into()
-    };
+    let census = F32Census::begin();
+    let mut half_512 = None;
+    let f32_runs: Vec<(usize, Vec<Vec<f32>>)> = [512, 128, 64, 97]
+        .map(|rows| {
+            let half = run(rows);
+            let half_counts = census.take();
+            if rows == 512 {
+                half_512 = Some(half);
+            }
+            let _scope = all.scope();
+            let logits = run(rows);
+            let counts = census.take();
+            let value = assert_f32_census(&format!("{rows} rows"), &half_counts, &counts, &all);
+            eprintln!("{rows} rows: census {value}");
+            (rows, logits)
+        })
+        .into();
+    let half_512 = half_512.expect("512 rows ran");
     let bits = |rows: usize| logit_bits(&f32_runs.iter().find(|(r, _)| *r == rows).unwrap().1);
     assert_eq!(bits(512), bits(128), "512 vs 128 rows");
     assert_eq!(bits(64), bits(97), "64 vs 97 rows");
@@ -1714,10 +1783,11 @@ fn fast_f32_operands_keep_chunk_identities() {
 /// Release timing of the F32-operand selections (map #12 accuracy lane):
 /// Fast, every dense projection on F32-operand tiles, and those plus the
 /// routed experts, in A-B-C-C-B-A order twice after a warm-up of each: a
-/// fresh 2,048-token prompt in 512-row chunks, and 1-, 17- and 64-token
-/// suffixes after a reused same-arm prefix (the short spans a reused
-/// conversation prefills). Reports per-arm means to `GLM53_PROBE_OUT`.
-/// Diagnostic; no bounds.
+/// fresh 2,048-token prompt in 512-row chunks; 1-, 17- and 64-token
+/// suffixes ending at 2,048 after a reused same-arm prefix (the short spans
+/// a reused conversation prefills); and a 64-token suffix 512 tokens past
+/// the sparse frontier (sparse attention active). Reports per-arm means to
+/// `GLM53_PROBE_OUT`. Diagnostic; no bounds.
 #[test]
 #[ignore = "diagnostic timing: GLM53_GGUF, GLM53_PROBE_OUT, release build, no MTL_DEBUG_LAYER; loads 109.5 GiB under production lease"]
 fn fast_f32_operand_prefill_cost() {
@@ -1738,7 +1808,15 @@ fn fast_f32_operand_prefill_cost() {
         .map(|t| t as u32)
         .collect();
     const PROMPT: usize = 2048;
-    const SUFFIXES: [usize; 3] = [1, 17, 64];
+    // (suffix tokens, end position)
+    let frontier = weights.config.sparse_frontier() as usize;
+    let suffixes = [
+        (1, PROMPT),
+        (17, PROMPT),
+        (64, PROMPT),
+        (64, frontier + 512),
+    ];
+    assert!(tokens.len() >= frontier + 512);
     let [_, dense, all] = f32_selections();
     let arms: [(&str, Option<&F32Selection>); 3] = [
         ("half", None),
@@ -1754,11 +1832,11 @@ fn fast_f32_operand_prefill_cost() {
         let mut spans = vec![started.elapsed().as_secs_f64() * 1e3];
         assert_finite("timing logits", &logits);
         drop(s);
-        for n in SUFFIXES {
-            let mut s = session(&ctx, &weights, PROMPT + 8, 512, PackedLineage::Fast);
-            s.prefill_packed(&ctx, &tokens[..PROMPT - n]).unwrap();
+        for (n, end) in suffixes {
+            let mut s = session(&ctx, &weights, end + 8, 512, PackedLineage::Fast);
+            s.prefill_packed(&ctx, &tokens[..end - n]).unwrap();
             let started = std::time::Instant::now();
-            let logits = s.prefill_packed(&ctx, &tokens[PROMPT - n..PROMPT]).unwrap();
+            let logits = s.prefill_packed(&ctx, &tokens[end - n..end]).unwrap();
             spans.push(started.elapsed().as_secs_f64() * 1e3);
             assert_finite("suffix logits", &logits);
         }
@@ -1774,7 +1852,7 @@ fn fast_f32_operand_prefill_cost() {
         }
     }
     let labels = std::iter::once(format!("fresh {PROMPT}"))
-        .chain(SUFFIXES.map(|n| format!("{n}-token suffix after {}", PROMPT - n)));
+        .chain(suffixes.map(|(n, end)| format!("{n}-token suffix after {}", end - n)));
     let rows: Vec<Value> = labels
         .enumerate()
         .map(|(i, span)| {
@@ -1796,6 +1874,124 @@ fn fast_f32_operand_prefill_cost() {
         "rows": rows,
     });
     eprintln!("{document}");
+    std::fs::write(
+        &out,
+        serde_json::to_string_pretty(&document).unwrap() + "\n",
+    )
+    .unwrap();
+}
+
+/// Map #12 diagnostic (no bounds): does the drift left under the all-F32
+/// selection coincide with discrete routing changes? On frozen cases whose
+/// second-turn prompt fits one 512-row chunk (`GLM53_PROBE_CASES`; default
+/// H1, H3, H6), the prompt is prefilled under Exact, Fast and the all-F32
+/// selection, and the expert set each MoE block routed every prompt row to
+/// is compared with Exact's: rows changed per block, the first block with a
+/// change, and the prompt-end KL. Writes JSON to `GLM53_PROBE_OUT`.
+#[test]
+#[ignore = "map #12 route divergence: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_PROBE_OUT and an idle GPU"]
+fn reuse_natural_f32_route_divergence() {
+    let out = PathBuf::from(std::env::var("GLM53_PROBE_OUT").expect("GLM53_PROBE_OUT"));
+    let wanted: Vec<String> = std::env::var("GLM53_PROBE_CASES")
+        .unwrap_or_else(|_| "H1-short-chat,H3-tool-dense,H6-max-sampled-tool".into())
+        .split(',')
+        .map(str::to_string)
+        .collect();
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
+    let fixture: Value = serde_json::from_slice(&std::fs::read(&fixture_path).unwrap()).unwrap();
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let gguf = GgufFile::open(&path).unwrap();
+    assert_eq!(fixture["artifact_layout"], artifact_layout(&gguf));
+    let config = crate::glm5_next::Glm5NextConfig::from_gguf(&gguf).unwrap();
+    let frozen = validate_fixture(
+        &fixture,
+        config.sparse_frontier() as usize,
+        config.indexer_pool as usize,
+    );
+    for id in &wanted {
+        assert!(frozen.iter().any(|c| &c.id == id), "unknown case {id}");
+    }
+    let _lease = production_lease();
+    let ctx = MetalContext::new().expect("Metal context");
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let top_k = weights.config.expert_used_count as usize;
+    let [_, _, all] = f32_selections();
+    let mut cases = Vec::new();
+    for case in frozen.iter().filter(|c| wanted.contains(&c.id)) {
+        let turn2 = case.turn2();
+        assert!(turn2.len() <= 512, "{}: one 512-row chunk", case.id);
+        let run = |lineage: PackedLineage| -> (Vec<f32>, Vec<(usize, Vec<i32>)>) {
+            let mut s = session(&ctx, &weights, turn2.len() + 1, 512, lineage);
+            let logits = s.prefill_packed(&ctx, &turn2).unwrap();
+            let routes = s
+                .packed
+                .as_ref()
+                .expect("packed scratch")
+                .route_ids()
+                .into_iter()
+                .map(|(block, ids)| {
+                    let ids = super::super::read_i32(ids).unwrap();
+                    (block, ids[..turn2.len() * top_k].to_vec())
+                })
+                .collect();
+            (logits, routes)
+        };
+        let (exact_logits, exact_routes) = run(PackedLineage::Exact);
+        let fast = run(PackedLineage::Fast);
+        let f32_all = {
+            let _scope = all.scope();
+            run(PackedLineage::Fast)
+        };
+        let compare = |(logits, routes): &(Vec<f32>, Vec<(usize, Vec<i32>)>)| -> Value {
+            let mut first = None;
+            let mut total = 0usize;
+            let per_block: Vec<Value> = exact_routes
+                .iter()
+                .zip(routes)
+                .map(|((block, a), (other, b))| {
+                    assert_eq!(block, other);
+                    let changed = a
+                        .chunks_exact(top_k)
+                        .zip(b.chunks_exact(top_k))
+                        .filter(|(a, b)| {
+                            let (mut a, mut b) = (a.to_vec(), b.to_vec());
+                            a.sort_unstable();
+                            b.sort_unstable();
+                            a != b
+                        })
+                        .count();
+                    if changed > 0 && first.is_none() {
+                        first = Some(*block);
+                    }
+                    total += changed;
+                    json!([block, changed])
+                })
+                .collect();
+            json!({"prompt_end_kl": kl_divergence(&exact_logits, logits),
+                "route_set_rows_changed": total, "first_block_changed": first,
+                "rows_changed_by_block": per_block})
+        };
+        let row = json!({"id": case.id, "prompt_tokens": turn2.len(),
+            "moe_blocks": exact_routes.len(),
+            "fast": compare(&fast), "fast_f32_all": compare(&f32_all)});
+        eprintln!(
+            "{}: Fast {} rows changed (first block {}), prompt-end KL {:.3e}; all-F32 {} rows changed (first block {}), prompt-end KL {:.3e}",
+            case.id,
+            row["fast"]["route_set_rows_changed"],
+            row["fast"]["first_block_changed"],
+            row["fast"]["prompt_end_kl"].as_f64().unwrap(),
+            row["fast_f32_all"]["route_set_rows_changed"],
+            row["fast_f32_all"]["first_block_changed"],
+            row["fast_f32_all"]["prompt_end_kl"].as_f64().unwrap()
+        );
+        cases.push(row);
+    }
+    let document = json!({
+        "schema": "glm53.f32_route_divergence.v1", "rows_per_chunk": 512,
+        "reference": "Exact prompt prefill", "selection": all.description,
+        "evaluator_commit": std::env::var("GLM53_PROBE_COMMIT").ok(),
+        "cases": cases,
+    });
     std::fs::write(
         &out,
         serde_json::to_string_pretty(&document).unwrap() + "\n",

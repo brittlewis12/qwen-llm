@@ -4,7 +4,9 @@
 //! beside the half-staged grouped path's error, independence of each token's
 //! outputs from the rows sharing its dispatch, and refusals.
 
-use super::super::test_support::{dequant_expert, offset_tensor, tensor_backing_bytes};
+use super::super::test_support::{
+    assert_offset_guards, dequant_expert, offset_tensor, tensor_backing_bytes,
+};
 use super::tests::{
     EXPERTS, FFN, HIDDEN, TOP_K, bank, f32_tensor, read_f32, run, synthetic_bank, values,
 };
@@ -127,6 +129,11 @@ fn grouped(
                 .unwrap();
         }
     });
+    // f32_tensor surrounds each binding with 16 prefix and 20 suffix guard
+    // bytes; no write lands outside its view.
+    for tensor in [&output, &inner, &slot_out, &weights] {
+        assert_offset_guards(tensor, 16, 20);
+    }
     Routed {
         output: read_f32(&output),
         slot_out: read_f32(&slot_out),
@@ -284,8 +291,12 @@ fn grouped_f32x_experts_token_outputs_do_not_depend_on_the_dispatch() {
         .map(|i| ((i * 37 + i / 5) % 61) as f32 * 0.08 - 2.4)
         .collect();
     let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
-    for down_dtype in [GgmlType::IQ3_S, GgmlType::IQ4_XS] {
-        let b = banks(&ctx, GgmlType::IQ2_S, down_dtype);
+    for (gate_dtype, down_dtype) in [
+        (GgmlType::IQ2_S, GgmlType::IQ3_S),
+        (GgmlType::IQ2_S, GgmlType::IQ4_XS),
+        (GgmlType::IQ3_S, GgmlType::IQ4_XS),
+    ] {
+        let b = banks(&ctx, gate_dtype, down_dtype);
         let full = grouped(&ctx, &b, &x, &logits, ROWS, true);
         let mut counts = [0usize; EXPERTS];
         for &id in &full.ids {
@@ -308,13 +319,13 @@ fn grouped_f32x_experts_token_outputs_do_not_depend_on_the_dispatch() {
             assert_eq!(
                 part.ids,
                 full.ids[start * TOP_K..(start + rows) * TOP_K],
-                "{down_dtype:?} rows {start}..{}: routes",
+                "{gate_dtype:?}/{down_dtype:?} rows {start}..{}: routes",
                 start + rows
             );
             assert_eq!(
                 bits(&part.output),
                 bits(&full.output[start * HIDDEN..(start + rows) * HIDDEN]),
-                "{down_dtype:?} rows {start}..{}",
+                "{gate_dtype:?}/{down_dtype:?} rows {start}..{}",
                 start + rows
             );
             start += rows;
@@ -380,5 +391,195 @@ fn grouped_f32x_experts_refuse_types_without_a_tile() {
             matches!(result, Err(MetalError::BadShape { .. })),
             "{gate_dtype:?}/{down_dtype:?}: {result:?}"
         );
+    }
+}
+
+/// The F32 down tile called directly, on hand-built buckets: experts with 0,
+/// 1, 17 and 33 slots (a partial 32-slot tile and one past it), invalid slot
+/// ids (-1 and past the slot count) skipped, slots no bucket names left
+/// untouched; each written slot matches an F64 product of the llama.cpp-
+/// dequantized expert within 1e-5 relative RMS; guards intact.
+#[test]
+fn down_f32x_tile_buckets_edges_and_invalid_slots() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    const SLOTS: usize = 64;
+    for down_dtype in [GgmlType::IQ3_S, GgmlType::IQ4_XS] {
+        let down_bytes = synthetic_bank(down_dtype, FFN, HIDDEN, 11);
+        let down = bank(&ctx, &down_bytes, down_dtype, FFN, HIDDEN);
+        // Expert 1: slot 0; expert 2: slots 1..18; expert 3: slots 18..49
+        // plus two invalid ids (33 entries); experts 0 and 4.. empty.
+        let mut ids = vec![-7i32; EXPERTS * SLOTS];
+        let mut counts = vec![0i32; EXPERTS];
+        let mut bucket = |expert: usize, entries: Vec<i32>| {
+            counts[expert] = entries.len() as i32;
+            ids[expert * SLOTS..expert * SLOTS + entries.len()].copy_from_slice(&entries);
+        };
+        bucket(1, vec![0]);
+        bucket(2, (1..18).collect());
+        let mut third: Vec<i32> = (18..49).collect();
+        third.insert(5, -1);
+        third.insert(20, SLOTS as i32 + 3);
+        bucket(3, third);
+        let inner_values = values(FFN * SLOTS, 9);
+        let inner = f32_tensor(&ctx, &inner_values, vec![FFN as u64 * SLOTS as u64]);
+        let counts_t = offset_tensor(
+            &ctx,
+            16,
+            bytemuck::cast_slice(&counts),
+            16,
+            vec![EXPERTS as u64],
+            GgmlType::I32,
+        );
+        let ids_t = offset_tensor(
+            &ctx,
+            16,
+            bytemuck::cast_slice(&ids),
+            16,
+            vec![(EXPERTS * SLOTS) as u64],
+            GgmlType::I32,
+        );
+        let out = f32_tensor(
+            &ctx,
+            &vec![7.0; HIDDEN * SLOTS],
+            vec![HIDDEN as u64 * SLOTS as u64],
+        );
+        run(&ctx, |enc| {
+            encode_moe_down_f32x_grouped_slots(
+                &ctx, enc, &down, &inner, &counts_t, &ids_t, &out, FFN, HIDDEN, EXPERTS, SLOTS,
+            )
+            .unwrap();
+        });
+        assert_offset_guards(&out, 16, 20);
+        let got = read_f32(&out);
+        for (expert, slots) in [(1usize, 0..1usize), (2, 1..18), (3, 18..49)] {
+            let w = dequant_expert(&down_bytes, down_dtype, FFN, HIDDEN, expert);
+            let mut exact = Vec::new();
+            let mut actual = Vec::new();
+            for slot in slots {
+                let x = &inner_values[slot * FFN..(slot + 1) * FFN];
+                exact.extend((0..HIDDEN).map(|d| {
+                    w[d * FFN..(d + 1) * FFN]
+                        .iter()
+                        .zip(x)
+                        .map(|(&w, &x)| f64::from(w) * f64::from(x))
+                        .sum::<f64>()
+                }));
+                actual.extend_from_slice(&got[slot * HIDDEN..(slot + 1) * HIDDEN]);
+            }
+            let rms = relative_rms(&actual, &exact);
+            assert!(rms <= 1e-5, "{down_dtype:?} expert {expert}: {rms:e}");
+        }
+        assert!(
+            got[49 * HIDDEN..].iter().all(|&v| v == 7.0),
+            "{down_dtype:?}: unnamed slots untouched"
+        );
+    }
+}
+
+/// The F32 expert encoders refuse, before encoding, bindings their tiles
+/// cannot serve: activations not 16-byte aligned or not F32, a read-only
+/// output, an output aliasing its activations, and I32 ids given as F32.
+#[test]
+fn f32x_expert_encoders_refuse_bad_bindings() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    const SLOTS: usize = 8;
+    let b = banks(&ctx, GgmlType::IQ2_S, GgmlType::IQ3_S);
+    let counts = i32_zeros(&ctx, vec![EXPERTS as u64]);
+    let ids = i32_zeros(&ctx, vec![(EXPERTS * SLOTS) as u64]);
+    let x = f32_tensor(
+        &ctx,
+        &values(HIDDEN * SLOTS, 2),
+        vec![(HIDDEN * SLOTS) as u64],
+    );
+    let misaligned = offset_tensor(
+        &ctx,
+        4,
+        &vec![0u8; HIDDEN * SLOTS * 4],
+        4,
+        vec![(HIDDEN * SLOTS) as u64],
+        GgmlType::F32,
+    );
+    let inner = f32_tensor(&ctx, &vec![0.0; FFN * SLOTS], vec![(FFN * SLOTS) as u64]);
+    let read_only = MetalTensor {
+        provenance: MetalTensorProvenance::OwnedWeightReadOnly,
+        ..inner.clone()
+    };
+    let wrong_ids = MetalTensor {
+        dtype: GgmlType::F32,
+        ..ids.clone()
+    };
+    // Gate/up over SLOTS tokens with top-1: inner holds one row per token.
+    let swiglu = |x: &MetalTensor, ids: &MetalTensor, inner: &MetalTensor| {
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        let result = encode_moe_swiglu_clamped_f32x_grouped_slots(
+            &ctx, &enc, &b.gate, &b.up, x, &counts, ids, inner, HIDDEN, FFN, EXPERTS, 1, SLOTS,
+            CLAMP,
+        );
+        enc.end();
+        result
+    };
+    let aliasing = x.view_subrange(0, vec![(FFN * SLOTS) as u64]);
+    for (label, result) in [
+        ("valid", swiglu(&x, &ids, &inner)),
+        ("misaligned x", swiglu(&misaligned, &ids, &inner)),
+        ("read-only inner", swiglu(&x, &ids, &read_only)),
+        ("inner aliases x", swiglu(&x, &ids, &aliasing)),
+        ("F32 ids", swiglu(&x, &wrong_ids, &inner)),
+    ] {
+        if label == "valid" {
+            assert!(result.is_ok(), "{label}: {result:?}");
+        } else {
+            assert!(
+                matches!(result, Err(MetalError::BadShape { .. })),
+                "{label}: {result:?}"
+            );
+        }
+    }
+    let out = f32_tensor(
+        &ctx,
+        &vec![0.0; HIDDEN * SLOTS],
+        vec![(HIDDEN * SLOTS) as u64],
+    );
+    let down = |inner: &MetalTensor, out: &MetalTensor| {
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        let result = encode_moe_down_f32x_grouped_slots(
+            &ctx, &enc, &b.down, inner, &counts, &ids, out, FFN, HIDDEN, EXPERTS, SLOTS,
+        );
+        enc.end();
+        result
+    };
+    let misaligned_inner = offset_tensor(
+        &ctx,
+        4,
+        &vec![0u8; FFN * SLOTS * 4],
+        4,
+        vec![(FFN * SLOTS) as u64],
+        GgmlType::F32,
+    );
+    let out_read_only = MetalTensor {
+        provenance: MetalTensorProvenance::OwnedWeightReadOnly,
+        ..out.clone()
+    };
+    let out_aliasing = inner.view_subrange(0, vec![(FFN * SLOTS / 2) as u64]);
+    for (label, result) in [
+        ("valid", down(&inner, &out)),
+        ("misaligned inner", down(&misaligned_inner, &out)),
+        ("read-only out", down(&inner, &out_read_only)),
+        ("out aliases inner", down(&inner, &out_aliasing)),
+    ] {
+        if label == "valid" {
+            assert!(result.is_ok(), "{label}: {result:?}");
+        } else {
+            assert!(
+                matches!(result, Err(MetalError::BadShape { .. })),
+                "{label}: {result:?}"
+            );
+        }
     }
 }

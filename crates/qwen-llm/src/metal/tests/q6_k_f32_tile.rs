@@ -181,9 +181,12 @@ fn q6_f32_dequant_matches_independent_reference() {
 }
 
 /// Against an F64 product of the decoded weights, the F32 tile's error per
-/// output stays within the summation bound `K * 2^-24 * sum |x w|` for any
-/// order, and its relative RMS is far below the half-staged tile's on the
-/// same heavy-tailed activations (outlier channels at 50x).
+/// output stays within `gamma_K * sum |x w|` (`gamma_K = K u / (1 - K u)`,
+/// `u = 2^-24`: the classical bound for an F32 dot product with
+/// IEEE-rounded products and sums in any order, used here as this fixture's
+/// ceiling, since the hardware matrix unit's internal rounding is not
+/// specified), and its relative RMS is far below the half-staged tile's on
+/// the same heavy-tailed activations (outlier channels at 50x).
 #[test]
 fn q6_f32_tile_tracks_f64_and_beats_half_tile() {
     let Some(ctx) = metal_test_context() else {
@@ -215,7 +218,8 @@ fn q6_f32_tile_tracks_f64_and_beats_half_tile() {
     let half_tile = run_tile(&ctx, n_out, n_tokens, |enc, y| {
         crate::metal::encode_mat_mat_q6_k_f32(&ctx, enc, &weight, &x, y, n_in, n_out, n_tokens)
     });
-    let bound = n_in as f64 * 2f64.powi(-24);
+    let ku = n_in as f64 * 2f64.powi(-24);
+    let bound = ku / (1.0 - ku);
     let (mut f32_sq, mut half_sq, mut ref_sq, mut worst_scaled) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     for t in 0..n_tokens {
         for r in 0..n_out {

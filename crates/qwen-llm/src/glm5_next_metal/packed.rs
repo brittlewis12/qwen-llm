@@ -66,7 +66,7 @@ fn absorb_tail_rows(lineage: PackedLineage, rows: usize) -> usize {
 
 /// Packed stage families that have a Fast and an Exact form (map #12
 /// attribution: one family at a time can run in its Exact form in tests).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum Stage {
     DenseFfn,
     Router,
@@ -132,25 +132,43 @@ pub(super) enum StageMode {
 #[cfg(test)]
 thread_local! {
     static F32_STAGES: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
-    static F32_CENSUS: std::cell::RefCell<Option<std::collections::BTreeMap<(String, bool), usize>>> =
+    static F32_CENSUS: std::cell::RefCell<Option<CensusCounts>> =
         const { std::cell::RefCell::new(None) };
 }
 
-/// Counts one [`StageMode::FastF32`] call under `label` (a weight dtype, or
-/// "routed experts") while an [`F32Census`] is active.
+/// How a Fast-lineage matrix call ran, for [`F32Census`].
 #[cfg(test)]
-fn record_f32_census(label: String, taken: bool) {
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum CensusPath {
+    /// An F32-operand tile.
+    F32Tile,
+    /// The batched kernel of an F32 weight (F32 operands already).
+    F32Native,
+    /// A half-staged batched kernel.
+    Half,
+}
+
+/// Calls per (stage family, weight kind, path); the kind is the weight's
+/// dtype, or "experts" for the routed experts.
+#[cfg(test)]
+pub(super) type CensusCounts = std::collections::BTreeMap<(Stage, String, CensusPath), usize>;
+
+/// Counts one Fast-lineage call while an [`F32Census`] is active.
+#[cfg(test)]
+fn record_census(stage: Stage, kind: String, path: CensusPath) {
     F32_CENSUS.with(|census| {
         if let Some(census) = census.borrow_mut().as_mut() {
-            *census.entry((label, taken)).or_default() += 1;
+            *census.entry((stage, kind, path)).or_default() += 1;
         }
     });
 }
 
-/// Test-only census of [`StageMode::FastF32`] calls on this thread: per
-/// weight dtype of a projection (and "routed experts"), how many took an
-/// F32-operand tile (`true`) and how many fell back to the half-staged form
-/// (`false`). Recording stops on drop.
+/// Test-only census of every Fast-lineage matrix call of the stage families
+/// on this thread (Fast and [`StageMode::FastF32`] alike): per stage family
+/// and weight kind, how many ran on an F32-operand tile, on an F32 weight's
+/// own kernel, or half-staged. Comparing a half-staged run's census with a
+/// selection's shows both coverage (the same calls) and the path each took.
+/// Recording stops on drop.
 #[cfg(test)]
 pub(super) struct F32Census(());
 
@@ -162,7 +180,7 @@ impl F32Census {
     }
 
     /// The counts so far, restarting the census.
-    pub(super) fn take(&self) -> std::collections::BTreeMap<(String, bool), usize> {
+    pub(super) fn take(&self) -> CensusCounts {
         F32_CENSUS.with(|census| {
             census
                 .borrow_mut()
@@ -532,6 +550,19 @@ fn take_rows(b: &mut SpecBuffers, name: &str, rows: usize) -> Result<MetalTensor
     Ok(rows_view(&b.take(name)?, rows))
 }
 
+#[cfg(test)]
+impl PackedScratch {
+    /// Each MoE block's routed expert ids (`[top_k, rows]` I32, row-major by
+    /// row) as the last packed chunk left them, with the block index.
+    pub(super) fn route_ids(&self) -> Vec<(usize, &MetalTensor)> {
+        self.routes
+            .iter()
+            .enumerate()
+            .filter_map(|(block, route)| route.as_ref().map(|route| (block, &route.ids)))
+            .collect()
+    }
+}
+
 impl PackedScratch {
     pub(super) fn new(
         ctx: &MetalContext,
@@ -617,7 +648,8 @@ fn flat(t: &MetalTensor, n: usize) -> MetalTensor {
 fn matmat(
     ctx: &MetalContext,
     enc: &KernelEncoder,
-    mode: StageMode,
+    lineage: PackedLineage,
+    stage: Stage,
     weight: &MetalTensor,
     x: &MetalTensor,
     y: &MetalTensor,
@@ -625,6 +657,7 @@ fn matmat(
     n_out: usize,
     rows: usize,
 ) -> Result<()> {
+    let mode = stage_mode(lineage, stage);
     if mode == StageMode::FastF32 {
         // F32-operand tiles at every row count (one row included), so a
         // token's outputs do not depend on its chunking.
@@ -650,9 +683,9 @@ fn matmat(
             }
             _ => false,
         };
-        #[cfg(test)]
-        record_f32_census(format!("{:?}", weight.dtype), f32_tile);
         if f32_tile {
+            #[cfg(test)]
+            record_census(stage, format!("{:?}", weight.dtype), CensusPath::F32Tile);
             return Ok(());
         }
     }
@@ -672,6 +705,16 @@ fn matmat(
         }
         return Ok(());
     }
+    #[cfg(test)]
+    record_census(
+        stage,
+        format!("{:?}", weight.dtype),
+        if weight.dtype == GgmlType::F32 {
+            CensusPath::F32Native
+        } else {
+            CensusPath::Half
+        },
+    );
     crate::metal_forward::encode_mat_mat_dispatch_with_policy(
         ctx, enc, weight, x, y, n_in, n_out, rows, true,
     )?;
@@ -685,7 +728,8 @@ fn matmat(
 fn expand_rows(
     ctx: &MetalContext,
     enc: &KernelEncoder,
-    mode: StageMode,
+    lineage: PackedLineage,
+    stage: Stage,
     weight: &MetalTensor,
     x: &MetalTensor,
     y: &MetalTensor,
@@ -693,7 +737,7 @@ fn expand_rows(
     n_out: usize,
     rows: usize,
 ) -> Result<()> {
-    match mode {
+    match stage_mode(lineage, stage) {
         StageMode::Exact => {
             #[cfg(test)]
             let rounded = rounded_input(ctx, enc, x, rows * n_in)?;
@@ -702,7 +746,7 @@ fn expand_rows(
             super::low_rank_expand(ctx, enc, weight, x, y, n_in, n_out, rows)
         }
         StageMode::Fast | StageMode::FastF32 => {
-            matmat(ctx, enc, mode, weight, x, y, n_in, n_out, rows)
+            matmat(ctx, enc, lineage, stage, weight, x, y, n_in, n_out, rows)
         }
     }
 }
@@ -1007,7 +1051,8 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        stage_mode(p.lineage, Stage::DenseFfn),
+                        p.lineage,
+                        Stage::DenseFfn,
                         &dense.gate,
                         &v(&p.normed),
                         &v(&p.dense_gate),
@@ -1018,7 +1063,8 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        stage_mode(p.lineage, Stage::DenseFfn),
+                        p.lineage,
+                        Stage::DenseFfn,
                         &dense.up,
                         &v(&p.normed),
                         &v(&p.dense_up),
@@ -1031,7 +1077,8 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        stage_mode(p.lineage, Stage::DenseFfn),
+                        p.lineage,
+                        Stage::DenseFfn,
                         &dense.down,
                         &v(&p.dense_gate),
                         &v(&p.block_out),
@@ -1075,7 +1122,8 @@ impl Glm5NextSession<'_> {
                         matmat(
                             ctx,
                             &enc,
-                            stage_mode(p.lineage, Stage::Router),
+                            p.lineage,
+                            Stage::Router,
                             &moe.router,
                             &v(&p.normed),
                             &v(&p.router),
@@ -1189,9 +1237,15 @@ impl Glm5NextSession<'_> {
                             && matches!(moe.gate_experts.dtype, GgmlType::IQ2_S | GgmlType::IQ3_S)
                             && matches!(moe.down_experts.dtype, GgmlType::IQ3_S | GgmlType::IQ4_XS);
                         #[cfg(test)]
-                        if f32_mode {
-                            record_f32_census("routed experts".into(), f32_taken);
-                        }
+                        record_census(
+                            Stage::RoutedExperts,
+                            "experts".into(),
+                            if f32_taken {
+                                CensusPath::F32Tile
+                            } else {
+                                CensusPath::Half
+                            },
+                        );
                         if f32_taken {
                             encode_grouped_routed_experts_f32x(
                                 ctx,
@@ -1239,7 +1293,8 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        stage_mode(p.lineage, Stage::SharedExpert),
+                        p.lineage,
+                        Stage::SharedExpert,
                         &moe.shared.gate,
                         &v(&p.normed),
                         &v(&p.shared_gate),
@@ -1250,7 +1305,8 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        stage_mode(p.lineage, Stage::SharedExpert),
+                        p.lineage,
+                        Stage::SharedExpert,
                         &moe.shared.up,
                         &v(&p.normed),
                         &v(&p.shared_up),
@@ -1266,7 +1322,8 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        stage_mode(p.lineage, Stage::SharedExpert),
+                        p.lineage,
+                        Stage::SharedExpert,
                         &moe.shared.down,
                         &v(&p.shared_gate),
                         &v(&p.shared),
@@ -1397,7 +1454,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_mode(p.lineage, Stage::KdaProjection),
+            p.lineage,
+            Stage::KdaProjection,
             &kda.query,
             &x,
             &v(&p.q),
@@ -1408,7 +1466,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_mode(p.lineage, Stage::KdaProjection),
+            p.lineage,
+            Stage::KdaProjection,
             &kda.key,
             &x,
             &v(&p.k),
@@ -1419,7 +1478,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_mode(p.lineage, Stage::KdaProjection),
+            p.lineage,
+            Stage::KdaProjection,
             &kda.value,
             &x,
             &v(&p.v),
@@ -1430,7 +1490,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_mode(p.lineage, Stage::KdaProjection),
+            p.lineage,
+            Stage::KdaProjection,
             &kda.decay_a,
             &x,
             &v(&p.rank_a),
@@ -1441,7 +1502,8 @@ impl Glm5NextSession<'_> {
         expand_rows(
             ctx,
             enc,
-            stage_mode(p.lineage, Stage::KdaExpand),
+            p.lineage,
+            Stage::KdaExpand,
             &kda.decay_b,
             &v(&p.rank_a),
             &v(&p.raw_gate),
@@ -1452,7 +1514,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_mode(p.lineage, Stage::KdaProjection),
+            p.lineage,
+            Stage::KdaProjection,
             &kda.beta,
             &x,
             &v(&p.raw_beta),
@@ -1463,7 +1526,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_mode(p.lineage, Stage::KdaProjection),
+            p.lineage,
+            Stage::KdaProjection,
             &kda.gate_a,
             &x,
             &v(&p.rank_b),
@@ -1474,7 +1538,8 @@ impl Glm5NextSession<'_> {
         expand_rows(
             ctx,
             enc,
-            stage_mode(p.lineage, Stage::KdaExpand),
+            p.lineage,
+            Stage::KdaExpand,
             &kda.gate_b,
             &v(&p.rank_b),
             &v(&p.output_gate),
@@ -1510,7 +1575,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_mode(p.lineage, Stage::KdaProjection),
+            p.lineage,
+            Stage::KdaProjection,
             &kda.output,
             &v(&p.kda_out),
             &v(&p.block_out),
@@ -1544,7 +1610,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_mode(p.lineage, Stage::MlaProjection),
+            p.lineage,
+            Stage::MlaProjection,
             &mla.query_a,
             &x,
             &v(&p.query_a),
@@ -1565,7 +1632,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_mode(p.lineage, Stage::MlaProjection),
+            p.lineage,
+            Stage::MlaProjection,
             &mla.query_b,
             &v(&p.query_r),
             &v(&p.query),
@@ -1576,7 +1644,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_mode(p.lineage, Stage::MlaProjection),
+            p.lineage,
+            Stage::MlaProjection,
             &mla.latent,
             &x,
             &v(&p.latent_raw),
@@ -1621,7 +1690,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_mode(p.lineage, Stage::IndexerProjection),
+            p.lineage,
+            Stage::IndexerProjection,
             &mla.indexer.key,
             &x,
             &v(&p.index_key),
@@ -1632,7 +1702,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_mode(p.lineage, Stage::IndexerProjection),
+            p.lineage,
+            Stage::IndexerProjection,
             &mla.indexer.pool_gate,
             &x,
             &v(&p.index_gate),
@@ -1689,7 +1760,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_mode(p.lineage, Stage::MlaProjection),
+            p.lineage,
+            Stage::MlaProjection,
             &mla.output,
             &v(&p.heads_out),
             &v(&p.block_out),
@@ -1738,7 +1810,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_mode(p.lineage, Stage::IndexerProjection),
+            p.lineage,
+            Stage::IndexerProjection,
             &mla.indexer.query,
             &sub(&p.query_r, q_rank),
             &sub(&sp.index_query, query_width),
@@ -1758,7 +1831,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_mode(p.lineage, Stage::IndexerProjection),
+            p.lineage,
+            Stage::IndexerProjection,
             &mla.indexer.head_weights,
             &sub(&p.normed, h),
             &weights,

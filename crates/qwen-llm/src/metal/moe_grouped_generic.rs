@@ -738,14 +738,149 @@ pub fn encode_moe_swiglu_f32_grouped_slots_generic(
     )
 }
 
+/// Binding and device checks shared by the F32-operand grouped tiles
+/// (`kernels/moe_grouped_f32.metal`): F32 activations, 16-byte aligned
+/// (rows are read as `float2x4`); a writable F32 output overlapping no
+/// input; I32 counts and ids; 2-byte aligned banks (block fields are read
+/// as `half`/`ushort`); every binding inside its buffer; each dimension the
+/// kernels index with `int` within `i32`; four 32-wide SIMD groups and
+/// `threadgroup_bytes` of threadgroup memory.
+#[allow(clippy::too_many_arguments)]
+fn check_f32x_bindings(
+    ctx: &MetalContext,
+    kernel: &'static str,
+    name: &str,
+    threadgroup_bytes: usize,
+    banks: &[&MetalTensor],
+    activations: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    out: &MetalTensor,
+    dims: &[(Option<usize>, &str)],
+) -> Result<(), MetalError> {
+    use super::checks::{bad_shape, check_disjoint, check_physical};
+    for (tensor, dtype, label) in [
+        (activations, GgmlType::F32, "activations"),
+        (out, GgmlType::F32, "output"),
+        (counts, GgmlType::I32, "counts"),
+        (ids, GgmlType::I32, "ids"),
+    ] {
+        if tensor.dtype != dtype {
+            return Err(bad_shape(
+                kernel,
+                format!("{label} must be {dtype:?}, got {:?}", tensor.dtype),
+            ));
+        }
+    }
+    for bank in banks {
+        check_physical(kernel, bank, 2, false, "expert bank")?;
+    }
+    check_physical(kernel, activations, 16, false, "activations")?;
+    check_physical(kernel, counts, 4, false, "counts")?;
+    check_physical(kernel, ids, 4, false, "ids")?;
+    check_physical(kernel, out, 4, true, "output")?;
+    let mut inputs = vec![
+        (activations, "activations"),
+        (counts, "counts"),
+        (ids, "ids"),
+    ];
+    inputs.extend(banks.iter().map(|bank| (*bank, "expert bank")));
+    check_disjoint(kernel, out, &inputs)?;
+    for (value, label) in dims {
+        if value.is_none_or(|v| v > i32::MAX as usize) {
+            return Err(bad_shape(kernel, format!("{label} exceeds i32")));
+        }
+    }
+    if ctx.device.maxThreadgroupMemoryLength() < threadgroup_bytes {
+        return Err(bad_shape(
+            kernel,
+            format!("needs {threadgroup_bytes} bytes of threadgroup memory"),
+        ));
+    }
+    let pso = ctx.pipeline(name)?;
+    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 128 {
+        return Err(bad_shape(
+            kernel,
+            "needs four 32-thread SIMD groups per threadgroup",
+        ));
+    }
+    Ok(())
+}
+
+const DOWN_F32X_THREADGROUP_BYTES: usize = 12 * 1024;
+const SWIGLU_F32X_THREADGROUP_BYTES: usize = 18 * 1024;
+
+fn down_f32x_name(kernel: &'static str, dtype: GgmlType) -> Result<&'static str, MetalError> {
+    match dtype {
+        GgmlType::IQ3_S => Ok("kernel_moe_down_iq3_s_f32x_grouped_slots"),
+        GgmlType::IQ4_XS => Ok("kernel_moe_down_iq4_xs_f32x_grouped_slots"),
+        other => Err(MetalError::BadShape {
+            kernel,
+            detail: format!("no F32-operand grouped down for {other:?}"),
+        }),
+    }
+}
+
+/// Every check [`encode_moe_down_f32x_grouped_slots`] makes before encoding,
+/// without encoding (so a composition can refuse before its first dispatch).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_moe_down_f32x_grouped_slots(
+    ctx: &MetalContext,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "moe_down_f32x_grouped_slots";
+    let name = down_f32x_name(KERNEL, weight.dtype)?;
+    generic_mm_args(
+        KERNEL,
+        weight,
+        inner,
+        counts,
+        ids,
+        out,
+        n_in,
+        n_out,
+        n_expert,
+        n_tokens,
+        1,
+        0,
+        i32::MAX as u32,
+    )?;
+    let slots = out.n_elements() as usize / n_out;
+    check_f32x_bindings(
+        ctx,
+        KERNEL,
+        name,
+        DOWN_F32X_THREADGROUP_BYTES,
+        &[weight],
+        inner,
+        counts,
+        ids,
+        out,
+        &[
+            (Some(n_in), "n_in"),
+            (Some(n_out), "n_out"),
+            (Some(slots), "slot count"),
+            (n_expert.checked_mul(n_tokens), "ids"),
+        ],
+    )
+}
+
 /// F32-operand grouped down projection (`kernels/moe_grouped_f32.metal`,
 /// map #12 accuracy lane): the contract of
 /// [`encode_moe_down_f32_grouped_slots_generic`] with weights dequantized to
 /// F32 (ggml's order), unrounded activations and F32 accumulation, for the
 /// GLM-5.3 down types IQ3_S and IQ4_XS. Each slot's outputs depend only on
 /// its own activation row: not on its expert's count nor on its place in the
-/// bucket. Activation rows are read as `float2x4`; callers keep `inner`
-/// 16-byte aligned. 12 KiB of threadgroup memory.
+/// bucket. Bindings and device are checked before encoding
+/// ([`check_moe_down_f32x_grouped_slots`]). 12 KiB of threadgroup memory.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_moe_down_f32x_grouped_slots(
     ctx: &MetalContext,
@@ -761,16 +896,9 @@ pub fn encode_moe_down_f32x_grouped_slots(
     n_tokens: usize,
 ) -> Result<(), MetalError> {
     const KERNEL: &str = "moe_down_f32x_grouped_slots";
-    let name = match weight.dtype {
-        GgmlType::IQ3_S => "kernel_moe_down_iq3_s_f32x_grouped_slots",
-        GgmlType::IQ4_XS => "kernel_moe_down_iq4_xs_f32x_grouped_slots",
-        other => {
-            return Err(MetalError::BadShape {
-                kernel: KERNEL,
-                detail: format!("no F32-operand grouped down for {other:?}"),
-            });
-        }
-    };
+    check_moe_down_f32x_grouped_slots(
+        ctx, weight, inner, counts, ids, out, n_in, n_out, n_expert, n_tokens,
+    )?;
     let args = generic_mm_args(
         KERNEL,
         weight,
@@ -789,8 +917,8 @@ pub fn encode_moe_down_f32x_grouped_slots(
     dispatch_generic_mm(
         ctx,
         enc,
-        name,
-        12 * 1024,
+        down_f32x_name(KERNEL, weight.dtype)?,
+        DOWN_F32X_THREADGROUP_BYTES,
         &args,
         weight,
         inner,
@@ -803,15 +931,11 @@ pub fn encode_moe_down_f32x_grouped_slots(
     )
 }
 
-/// F32-operand grouped gate/up with the clamped SwiGLU epilogue
-/// (`kernels/moe_grouped_f32.metal`, map #12 accuracy lane): the contract of
-/// [`encode_moe_swiglu_clamped_f32_grouped_slots_generic`] with weights
-/// dequantized to F32, unrounded activations and F32 accumulation, for the
-/// GLM-5.3 gate/up types IQ2_S and IQ3_S. 18 KiB of threadgroup memory.
+/// Every check [`encode_moe_swiglu_clamped_f32x_grouped_slots`] makes before
+/// encoding, without encoding; returns the pipeline name.
 #[allow(clippy::too_many_arguments)]
-pub fn encode_moe_swiglu_clamped_f32x_grouped_slots(
+pub(crate) fn check_moe_swiglu_clamped_f32x_grouped_slots(
     ctx: &MetalContext,
-    enc: &KernelEncoder,
     w_gate: &MetalTensor,
     w_up: &MetalTensor,
     x_pack: &MetalTensor,
@@ -824,7 +948,7 @@ pub fn encode_moe_swiglu_clamped_f32x_grouped_slots(
     topk: usize,
     n_tokens: usize,
     clamp: f32,
-) -> Result<(), MetalError> {
+) -> Result<&'static str, MetalError> {
     const KERNEL: &str = "moe_swiglu_clamped_f32x_grouped_slots";
     let bad = |detail: String| MetalError::BadShape {
         kernel: KERNEL,
@@ -846,26 +970,78 @@ pub fn encode_moe_swiglu_clamped_f32x_grouped_slots(
         GgmlType::IQ3_S => "kernel_moe_swiglu_clamped_iq3_s_f32x_grouped_slots",
         other => return Err(bad(format!("no F32-operand grouped SwiGLU for {other:?}"))),
     };
+    let slots = n_tokens.checked_mul(topk);
+    let elements = |a: Option<usize>, b: usize| a.and_then(|a| a.checked_mul(b));
     if topk == 0
         || n_ffn == 0
         || n_tokens == 0
         || n_expert == 0
-        || x_pack.n_elements() as usize != n_tokens * n_hidden
+        || Some(x_pack.n_elements() as usize) != elements(Some(n_tokens), n_hidden)
         || counts.n_elements() as usize != n_expert
-        || ids.n_elements() as usize != n_expert * n_tokens
-        || inner.n_elements() as usize != n_tokens * topk * n_ffn
+        || Some(ids.n_elements() as usize) != elements(Some(n_expert), n_tokens)
+        || Some(inner.n_elements() as usize) != elements(slots, n_ffn)
     {
         return Err(bad(
             "degenerate shape or x/counts/ids/inner size mismatch".into()
         ));
     }
-    let l = generic_layout_for(KERNEL, w_gate, n_hidden, n_ffn, n_expert)?;
+    generic_layout_for(KERNEL, w_gate, n_hidden, n_ffn, n_expert)?;
     generic_layout_for(KERNEL, w_up, n_hidden, n_ffn, n_expert)?;
+    check_f32x_bindings(
+        ctx,
+        KERNEL,
+        name,
+        SWIGLU_F32X_THREADGROUP_BYTES,
+        &[w_gate, w_up],
+        x_pack,
+        counts,
+        ids,
+        inner,
+        &[
+            (Some(n_hidden), "n_hidden"),
+            (Some(n_ffn), "n_ffn"),
+            (slots, "slot count"),
+            (n_expert.checked_mul(n_tokens), "ids"),
+        ],
+    )?;
+    Ok(name)
+}
+
+/// F32-operand grouped gate/up with the clamped SwiGLU epilogue
+/// (`kernels/moe_grouped_f32.metal`, map #12 accuracy lane): the contract of
+/// [`encode_moe_swiglu_clamped_f32_grouped_slots_generic`] with weights
+/// dequantized to F32, unrounded activations and F32 accumulation, for the
+/// GLM-5.3 gate/up types IQ2_S and IQ3_S. Bindings and device are checked
+/// before encoding ([`check_moe_swiglu_clamped_f32x_grouped_slots`]). 18 KiB
+/// of threadgroup memory.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_moe_swiglu_clamped_f32x_grouped_slots(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+    clamp: f32,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "moe_swiglu_clamped_f32x_grouped_slots";
+    let name = check_moe_swiglu_clamped_f32x_grouped_slots(
+        ctx, w_gate, w_up, x_pack, counts, ids, inner, n_hidden, n_ffn, n_expert, topk, n_tokens,
+        clamp,
+    )?;
+    let l = generic_layout_for(KERNEL, w_gate, n_hidden, n_ffn, n_expert)?;
     dispatch_fused_swiglu(
         ctx,
         enc,
         name,
-        18 * 1024,
+        SWIGLU_F32X_THREADGROUP_BYTES,
         l,
         w_gate,
         w_up,

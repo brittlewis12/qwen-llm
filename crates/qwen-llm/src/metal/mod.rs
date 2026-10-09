@@ -291,6 +291,7 @@ mod checks;
 mod completion;
 mod context;
 mod device_facts;
+mod qualification;
 mod dflash;
 mod elementwise;
 mod encoder;
@@ -329,6 +330,13 @@ pub use census::*;
 pub use completion::*;
 pub use context::*;
 pub use device_facts::{DeviceFacts, GpuFamilySupport};
+pub use qualification::{
+    A3B_PARALLEL_COPY_AUTO, DEEPSEEK_V4_ALL_SLOTS_Q3Q4,
+    DEEPSEEK_V4_F16_MATRIX_SCORER, DEEPSEEK_V4_LONG_HCA,
+    DEEPSEEK_V4_MULTIGROUP_SELECTOR, DEEPSEEK_V4_PACKED_GROUPED_EXPERT,
+    DEEPSEEK_V4_PACKED_Q8_COMPRESSOR_MATRIX, DEEPSEEK_V4_RESIDENCY_SET,
+    PARALLEL_COPY_EXACT_UNIFIED, QUALIFICATIONS, Qualification, QualifiedMemory,
+};
 pub use dflash::*;
 pub use elementwise::*;
 pub use encoder::*;

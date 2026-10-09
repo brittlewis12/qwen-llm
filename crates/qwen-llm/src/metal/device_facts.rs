@@ -5,6 +5,7 @@
 
 use std::fmt;
 
+use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice, MTLGPUFamily};
 use serde::Serialize;
 
@@ -46,12 +47,10 @@ pub struct DeviceFacts {
 }
 
 impl DeviceFacts {
-    /// Query static device and host properties without creating a context,
-    /// acquiring the inference lease, loading a library, or creating a queue.
-    pub fn probe() -> Option<Self> {
-        let device = MTLCreateSystemDefaultDevice()?;
+    /// Read static facts for an already selected Metal device.
+    pub fn from_device(device: &ProtocolObject<dyn MTLDevice>) -> Self {
         let architecture = device.architecture().name().to_string();
-        Some(Self {
+        Self {
             version: DEVICE_FACTS_VERSION,
             name: device.name().to_string(),
             architecture,
@@ -73,7 +72,14 @@ impl DeviceFacts {
             os_version: query_sysctl_string("kern.osproductversion"),
             product_metallib_deployment_target: PRODUCT_METALLIB_TARGET,
             research_metallib_deployment_target: RESEARCH_METALLIB_TARGET,
-        })
+        }
+    }
+
+    /// Query static device and host properties without creating a context,
+    /// acquiring the inference lease, loading a library, or creating a queue.
+    pub fn probe() -> Option<Self> {
+        let device = MTLCreateSystemDefaultDevice()?;
+        Some(Self::from_device(&device))
     }
 
     pub fn format_report(&self) -> String {

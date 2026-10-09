@@ -41,6 +41,7 @@ impl PreopenedPartition {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn closed(&self) -> bool {
         self.closed
     }

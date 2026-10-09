@@ -914,15 +914,6 @@ fn fresh_packed_endpoint_fixture() {
 #[test]
 #[ignore = "requires QWEN_TAIL_PILOT_MODEL and QWEN_TAIL_PILOT_PROMPT; serial Metal pilot"]
 fn restored_suffix32_packed_matches_serial_greedy() {
-    struct Sink;
-    impl GenerationSink for Sink {
-        fn piece(&mut self, _: &[u8]) -> io::Result<()> {
-            panic!("prefill emitted")
-        }
-        fn tick(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
     let model = std::env::var("QWEN_TAIL_PILOT_MODEL").unwrap();
     let prompt = std::fs::read_to_string(std::env::var("QWEN_TAIL_PILOT_PROMPT").unwrap()).unwrap();
     let runtime = qwen_llm::runtime::Runtime::metal().unwrap();

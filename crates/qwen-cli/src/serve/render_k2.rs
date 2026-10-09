@@ -94,6 +94,7 @@ pub(crate) fn parse_request(body: &Value) -> Result<ServeRequest, ServeError> {
     Ok(request)
 }
 
+#[cfg(test)]
 pub(crate) fn normalize(
     request: &mut ServeRequest,
     default_max: usize,

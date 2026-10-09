@@ -276,6 +276,8 @@ fn ensure_upstream_template_identified(
 }
 
 impl Prepared {
+    /// Resolves Qwen release facts and CPU admissions without binding or Metal.
+    /// The fitted Lens registry is opened by [`start`] after listener bind.
     pub(super) fn new(
         family: qwen_llm::model_family::ModelFamily,
         gguf: &GgufFile,
@@ -315,6 +317,7 @@ impl Prepared {
     }
 }
 
+/// Opens fitted Lens assets after bind, then initializes Metal and serves.
 pub(super) fn start(
     prepared: Prepared,
     gguf: GgufFile,
@@ -842,6 +845,7 @@ fn request_capacity(
     }
 }
 
+#[cfg(test)]
 fn dflash_capture_elements(
     prompt_tokens: usize,
     features: usize,

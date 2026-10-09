@@ -13,8 +13,6 @@
 //! [`request_profile`] owns CPU request semantics; [`transport`] connects one
 //! admitted HTTP worker to the resident owner. [`owner_activity`] gates owner
 //! maintenance on complete request lifetimes, and [`trace`] owns the shared log.
-#![allow(dead_code)] // consumed incrementally; the HTTP slice wires the rest
-
 mod assets;
 pub(crate) mod backend;
 pub(crate) mod backend_ds4;
@@ -708,6 +706,7 @@ enum OwnerCheckpoint {
     DuringHandling,
 }
 
+#[cfg(test)]
 fn accept_loop_with_checkpoint(
     listener: TcpListener,
     model_id: &str,

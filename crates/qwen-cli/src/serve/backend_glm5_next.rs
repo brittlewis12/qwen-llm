@@ -97,6 +97,7 @@ pub(super) struct Prepared<'g> {
 }
 
 impl<'g> Prepared<'g> {
+    /// Inspects the GLM artifact and session limits using CPU metadata only.
     pub(super) fn new(
         gguf: &'g GgufFile,
         invocation: &crate::cli::ServeInvocation,
@@ -182,6 +183,7 @@ pub(super) fn load(
     Glm5NextWeights::load(ctx, gguf).context("load GLM-5.3 weights")
 }
 
+/// Performs device admission and model load after listener bind, then serves.
 pub(super) fn start(
     prepared: Prepared<'_>,
     gguf: &GgufFile,

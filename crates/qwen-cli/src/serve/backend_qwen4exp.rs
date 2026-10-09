@@ -43,6 +43,8 @@ pub(super) struct Prepared {
 }
 
 impl Prepared {
+    /// Checks the prompt contract, capacity, tokenizer stops, and decode
+    /// options from GGUF metadata without binding or initializing Metal.
     pub(super) fn new(
         gguf: &GgufFile,
         invocation: &crate::cli::ServeInvocation,
@@ -98,6 +100,7 @@ impl Prepared {
     }
 }
 
+/// Loads the prepared Flash-Next session after bind, then serves.
 pub(super) fn start(
     prepared: Prepared,
     gguf: GgufFile,
@@ -128,9 +131,6 @@ pub(super) fn start(
 
 pub(crate) struct FlashNextBackend {
     ctx: MetalContext,
-    /// Serve holds the mapping for the process lifetime; the loaded model's
-    /// CPU-resident PLE table borrows it.
-    gguf: &'static GgufFile,
     tokenizer: Tokenizer,
     loaded: Qwen4ExpLoadedModel<'static>,
     model_id: String,
@@ -212,7 +212,6 @@ impl FlashNextBackend {
         )?;
         Ok(Self {
             ctx,
-            gguf,
             max_piece_bytes: prepared.tokenizer.max_decoded_piece_bytes(),
             tokenizer: prepared.tokenizer,
             loaded,

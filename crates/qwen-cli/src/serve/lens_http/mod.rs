@@ -20,6 +20,7 @@ mod tests;
 
 pub(crate) struct AcceptedJob {
     pub(crate) id: String,
+    #[cfg(test)]
     pub(crate) request: Value,
     pub(crate) control: ExecutionControl,
 }
@@ -429,6 +430,7 @@ impl LensApi {
         let control = store.control(&id).map_err(ApiError::after_acceptance)?;
         if let Err(message) = reservation.enqueue(AcceptedJob {
             id: id.clone(),
+            #[cfg(test)]
             request,
             control,
         }) {

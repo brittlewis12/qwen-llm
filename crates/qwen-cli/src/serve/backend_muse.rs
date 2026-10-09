@@ -39,6 +39,8 @@ pub(super) struct Prepared {
 }
 
 impl Prepared {
+    /// Checks Muse metadata, limits, math options, and stop tokens without
+    /// opening llama.cpp's Metal-initializing tokenizer.
     pub(super) fn new(
         gguf: &GgufFile,
         invocation: &crate::cli::ServeInvocation,
@@ -195,6 +197,7 @@ impl MuseGlimmerBackend {
     }
 }
 
+/// Opens llama.cpp's tokenizer after bind and context creation, then loads and serves Muse.
 pub(super) fn start(
     prepared: Prepared,
     gguf: GgufFile,

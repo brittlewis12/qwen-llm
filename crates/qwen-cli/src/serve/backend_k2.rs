@@ -38,6 +38,8 @@ fn prefill_span(chunk_tokens: usize) -> usize {
 }
 
 impl Prepared {
+    /// Checks the K2 artifact, fixed limits, and request profile without a
+    /// listener or Metal context.
     pub(super) fn new(gguf: &GgufFile, invocation: &crate::cli::ServeInvocation) -> Result<Self> {
         let config = qwen_llm::k2_horizon::K2HorizonConfig::from_gguf(gguf)?;
         let (capacity, default_max) = super::fixed_session_limits(
@@ -74,6 +76,7 @@ impl Prepared {
     }
 }
 
+/// Initializes Metal, loads the admitted K2 artifact, and serves on the listener.
 pub(super) fn start(
     prepared: Prepared,
     gguf: &GgufFile,

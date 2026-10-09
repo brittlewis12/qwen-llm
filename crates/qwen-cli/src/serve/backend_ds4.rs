@@ -78,6 +78,8 @@ pub(super) struct Prepared {
 }
 
 impl Prepared {
+    /// Checks DS4 limits and resolves CPU tokenizer/prefill facts without
+    /// binding or initializing Metal.
     pub(super) fn new(
         gguf: &GgufFile,
         invocation: &crate::cli::ServeInvocation,
@@ -106,6 +108,7 @@ impl Prepared {
     }
 }
 
+/// Plans and loads DS4 residency after bind, then serves on the listener.
 pub(super) fn start(
     prepared: Prepared,
     gguf: GgufFile,

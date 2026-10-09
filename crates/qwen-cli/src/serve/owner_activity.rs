@@ -99,6 +99,7 @@ impl OwnerActivity {
         self.admission.clone()
     }
 
+    #[cfg(test)]
     pub(super) fn drain_finished(&mut self, mut callback: impl FnMut()) {
         self.drain_finished_with_failures(|_| callback());
     }

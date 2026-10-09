@@ -345,6 +345,7 @@ fn read_bounded_line<R: BufRead>(reader: &mut R, limit: usize) -> io::Result<Opt
 }
 
 /// Read one request. `Ok(None)` on clean EOF before a request line.
+#[cfg(test)]
 pub(crate) fn read_http_request<R: BufRead>(reader: &mut R) -> io::Result<Option<HttpRequest>> {
     read_http_request_admitted(reader, |_, _| Ok(()))
 }

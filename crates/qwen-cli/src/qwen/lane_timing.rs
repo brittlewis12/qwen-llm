@@ -1,7 +1,8 @@
 //! Phase-accounted request timing shared by lanes that separate setup from
 //! the loaded request (K2, GLM-5.3). Each family names its phases, which of
-//! them form the loaded request and the model load, and its encoding phase;
-//! the accumulator checks that phases never overlap or exceed the lane wall.
+//! them form the loaded request and the model load, and its encoding phase.
+//! Phases are additive buckets: the accumulator checks their total against
+//! the lane wall but cannot see two phases covering the same time.
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -91,6 +92,8 @@ impl<P: LanePhases> LaneTiming<P> {
             (false, None) => "phases_exceed_lane_wall",
             (false, Some(_)) => "valid",
         };
+        // A residual is meaningful only when every phase was counted exactly.
+        let residual = residual.filter(|_| accounting == "valid");
         if accounting != "valid" {
             tracing::warn!(
                 target: "qwen_diag",

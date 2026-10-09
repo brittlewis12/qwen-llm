@@ -117,15 +117,45 @@ mod tests {
         assert!(report.json["unclassified_host_overhead_ms"].is_null());
     }
 
-    /// A failed operation's own error is returned, not replaced by timing.
+    /// The operation's own result comes back even when recording its
+    /// duration overflows the phase (which used to replace it with an error).
     #[test]
-    fn measure_returns_the_operation_error() {
+    fn measure_returns_the_operation_result_when_recording_overflows() {
         let mut timing = Timing::default();
+        timing.record(Phase::Encoding, Duration::MAX);
+        let spin = || {
+            let start = std::time::Instant::now();
+            while start.elapsed().is_zero() {}
+        };
         let error = timing
             .measure(Phase::Encoding, || -> anyhow::Result<()> {
+                spin();
                 anyhow::bail!("encode failed")
             })
             .unwrap_err();
         assert_eq!(error.to_string(), "encode failed");
+        let value = timing
+            .measure(Phase::Encoding, || -> anyhow::Result<u32> {
+                spin();
+                Ok(7)
+            })
+            .unwrap();
+        assert_eq!(value, 7);
+        let report = timing.finish(Duration::MAX);
+        assert_eq!(report.json["accounting"], "phase_total_overflow");
+        assert!(report.json["unclassified_host_overhead_ms"].is_null());
+    }
+
+    /// Two phases that each fit but whose sum overflows are reported too.
+    #[test]
+    fn cross_phase_total_overflow_is_reported() {
+        let mut timing = Timing::default();
+        timing.record(Phase::ModelLoad, Duration::MAX);
+        timing.record(Phase::SessionSetup, Duration::from_secs(1));
+        let report = timing.finish(Duration::from_secs(1));
+        assert_eq!(report.json["accounting"], "phase_total_overflow");
+        assert!(report.load_ms.is_nan());
+        assert!(report.json["load_ms"].is_null() || report.json.get("load_ms").is_none());
+        assert!(report.json["unclassified_host_overhead_ms"].is_null());
     }
 }

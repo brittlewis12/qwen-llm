@@ -113,7 +113,10 @@ under `diagnostics.deepseek_v4`; K2 and GLM include phase timings,
 `diagnostics.<family>.timing`, with `accounting`: `valid`, or
 `phases_exceed_lane_wall` / `phase_total_overflow`, in which case the
 unclassified time is null; inconsistent accounting is logged and never fails
-the request. Phases are additive buckets: their sum is checked against the lane
+the request. If a phase total overflows, the affected sums are not numbers:
+the diagnostics serialize them as null, the record's `timing_ms.total` is
+written as 0 (with a warning), and GLM's stderr line prints
+`loaded_request_ms=NaN`; read `accounting` before trusting either. Phases are additive buckets: their sum is checked against the lane
 wall, but two phases covering the same time are not detected. There is no common TTFT, load, or transition-rate
 field. K2/GLM end-to-end lane wall and resident execution end immediately
 after generation, before final newline or Responses assembly, stats printing,

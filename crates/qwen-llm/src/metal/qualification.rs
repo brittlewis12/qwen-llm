@@ -121,7 +121,7 @@ pub static DEEPSEEK_V4_PACKED_SHARED_ROUTE_OVERLAP: Qualification = Qualificatio
     path: "deepseek_v4.packed_shared_route_overlap",
     device_model: DEVICE,
     memory: QualifiedMemory::Any,
-    evidence: "b788bbac (KILL)",
+    evidence: "PERF-LOG 2026-08-07: K160 Shared/Route Overlap Default GO (K216 overlap was killed in b788bbac)",
 };
 pub static DEEPSEEK_V4_PACKED_GROUPED_EXPERT: Qualification = Qualification {
     path: "deepseek_v4.packed_grouped_expert",

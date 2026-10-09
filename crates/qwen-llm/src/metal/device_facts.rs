@@ -274,7 +274,7 @@ mod tests {
                 {"path":"deepseek_v4.packed_q_a_raw_kv_matrix", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"6ea94010", "holds_for_device":false},
                 {"path":"deepseek_v4.packed_indexer_q_matrix", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"30c8ef59, 85a0ca34", "holds_for_device":false},
                 {"path":"deepseek_v4.packed_grouped_q3q4", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"c035668e, 795ee2e7", "holds_for_device":false},
-                {"path":"deepseek_v4.packed_shared_route_overlap", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"b788bbac (KILL)", "holds_for_device":false},
+                {"path":"deepseek_v4.packed_shared_route_overlap", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"PERF-LOG 2026-08-07: K160 Shared/Route Overlap Default GO (K216 overlap was killed in b788bbac)", "holds_for_device":false},
                 {"path":"deepseek_v4.packed_grouped_expert", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"da9e5d02", "holds_for_device":false},
                 {"path":"deepseek_v4.all_slots_q3q4_decode", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"PERF-LOG 2026-08-07: K160 All-Slot Decode Default GO", "holds_for_device":false},
                 {"path":"deepseek_v4.residency_set", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"PERF-LOG 2026-08-09: FRESH, K216, K160 Residency-Set Default GO; 2026-08-10 safety rollback", "holds_for_device":false},

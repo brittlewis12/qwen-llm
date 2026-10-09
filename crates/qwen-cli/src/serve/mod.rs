@@ -437,6 +437,39 @@ fn check_warmth_flags(
     Ok(())
 }
 
+fn open_workbench(invocation: &crate::cli::ServeInvocation) -> Result<Option<Workbench>> {
+    let assets = invocation
+        .web_root
+        .as_deref()
+        .map(assets::WebAssets::open)
+        .transpose()
+        .context("open prebuilt Lens client")?
+        .map(Arc::new);
+    let store = invocation
+        .lens_data_dir
+        .as_deref()
+        .map(|root| jobs::store::JobStore::open(root, jobs::store::Limits::default()).map(Arc::new))
+        .transpose()
+        .context("open durable Lens history")?;
+    Ok((store.is_some() || assets.is_some()).then_some(Workbench {
+        store,
+        assets,
+        access: lens_http::access::BrowserAccess::new(invocation.lens_allowed_origin.clone()),
+    }))
+}
+
+/// Startup stages are header admission, family preparation, workbench files,
+/// listener setup, then family start and acceptance. Header admission maps the
+/// target GGUF and may open a drafter header; it must not read weight payloads,
+/// bind, or initialize Metal. Family preparation inspects GGUF metadata and
+/// may build CPU tokenizers; it must not read large payloads, bind, initialize
+/// Metal, or open workbench files. Workbench setup reads web assets and may
+/// create job-store state; it must not bind or initialize Metal. Listener setup
+/// binds the socket and opens the trace log without initializing Metal. Family
+/// start initializes Metal and loads weights. Qwen opens and hashes fitted
+/// Lens payloads after bind but before Metal because the registry reads large
+/// payloads; Muse opens its llama.cpp tokenizer after Metal context creation
+/// because llama.cpp initializes its Metal backend there.
 pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     crate::shutdown::checkpoint()?;
     let gguf = GgufFile::open(&invocation.model)
@@ -485,13 +518,6 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             || matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe),
         "--lens-config requires the ordinary Qwen native executor"
     );
-    let assets = invocation
-        .web_root
-        .as_deref()
-        .map(assets::WebAssets::open)
-        .transpose()
-        .context("open prebuilt Lens client")?
-        .map(Arc::new);
     ensure!(
         invocation.lens_config.is_none() || invocation.lens_data_dir.is_some(),
         "--lens-config requires --lens-data-dir"
@@ -500,17 +526,6 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         invocation.lens_config.is_none() || template_style == items::TemplateStyle::House,
         "--lens-config requires qualified House native generation"
     );
-    let store = invocation
-        .lens_data_dir
-        .as_deref()
-        .map(|root| jobs::store::JobStore::open(root, jobs::store::Limits::default()).map(Arc::new))
-        .transpose()
-        .context("open durable Lens history")?;
-    let workbench = (store.is_some() || assets.is_some()).then_some(Workbench {
-        store,
-        assets,
-        access: lens_http::access::BrowserAccess::new(invocation.lens_allowed_origin.clone()),
-    });
     if !profile(family).upstream_template_style {
         ensure!(
             template_style == items::TemplateStyle::House,
@@ -532,31 +547,37 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     match family {
         ModelFamily::K2Horizon => {
             let prepared = backend_k2::Prepared::new(&gguf, &invocation)?;
+            let workbench = open_workbench(&invocation)?;
             let listening = Listening::open(&invocation, workbench)?;
             backend_k2::start(prepared, &gguf, &invocation, listening, idle_window)
         }
         ModelFamily::Glm5Next => {
             let prepared = backend_glm5_next::Prepared::new(&gguf, &invocation)?;
+            let workbench = open_workbench(&invocation)?;
             let listening = Listening::open(&invocation, workbench)?;
             backend_glm5_next::start(prepared, &gguf, &invocation, listening, idle_window)
         }
         ModelFamily::MuseGlimmer => {
             let prepared = backend_muse::Prepared::new(&gguf, &invocation)?;
+            let workbench = open_workbench(&invocation)?;
             let listening = Listening::open(&invocation, workbench)?;
             backend_muse::start(prepared, gguf, &invocation, listening, idle_window)
         }
         ModelFamily::DeepSeek4 => {
             let prepared = backend_ds4::Prepared::new(&gguf, &invocation)?;
+            let workbench = open_workbench(&invocation)?;
             let listening = Listening::open(&invocation, workbench)?;
             backend_ds4::start(prepared, gguf, &invocation, listening, idle_window)
         }
         ModelFamily::Qwen4Exp => {
             let prepared = backend_qwen4exp::Prepared::new(&gguf, &invocation)?;
+            let workbench = open_workbench(&invocation)?;
             let listening = Listening::open(&invocation, workbench)?;
             backend_qwen4exp::start(prepared, gguf, &invocation, listening, idle_window)
         }
         ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {
             let prepared = backend::Prepared::new(family, &gguf, &invocation)?;
+            let workbench = open_workbench(&invocation)?;
             let listening = Listening::open(&invocation, workbench)?;
             backend::start(prepared, gguf, &invocation, listening)
         }
@@ -1064,6 +1085,64 @@ mod tests {
         assert!(error.to_string().contains("requires a loopback"));
         let listener = bind_loopback("127.0.0.1:0").unwrap();
         assert!(listener.local_addr().unwrap().ip().is_loopback());
+    }
+
+    fn serve_invocation(model: std::path::PathBuf, addr: String) -> crate::cli::ServeInvocation {
+        crate::cli::ServeInvocation {
+            model,
+            addr,
+            max_tokens: None,
+            max_context_tokens: None,
+            snapshot_cache_mib: None,
+            snapshot_policy: SnapshotPolicyConfig::default(),
+            durable: durable::DurableSnapshotConfig::off(),
+            drafter: None,
+            trace_sse: None,
+            lens_data_dir: None,
+            lens_config: None,
+            web_root: None,
+            lens_allowed_origin: Vec::new(),
+            template_style: items::TemplateStyle::House,
+            idle_residency_secs: None,
+        }
+    }
+
+    #[test]
+    fn preparation_refusal_precedes_listener_bind() {
+        let fixture = crate::linear_transport::tests::fixture("serve-prebind-refusal", 2, 19);
+        let model = fixture.0.join("model.gguf");
+        crate::linear_transport::cpu_fixture::write_cpu_gguf(
+            &model, "qwen35", 2, "cpu-test", false,
+        );
+        let held = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = held.local_addr().unwrap();
+        let mut invocation = serve_invocation(model, address.to_string());
+        invocation.template_style = items::TemplateStyle::Upstream;
+        let error = run_serve(invocation).expect_err("generic Qwen cannot use upstream style");
+        assert_eq!(
+            error.to_string(),
+            "--template-style upstream requires an identified Qwen release; this model uses the generic ChatML contract"
+        );
+        drop(held);
+        let rebound = TcpListener::bind(address).expect("preparation refusal must not bind");
+        drop(rebound);
+    }
+
+    fn fail_before_serve(_listening: Listening) -> Result<()> {
+        Err(anyhow::anyhow!("injected family-start failure"))
+    }
+
+    #[test]
+    fn listening_releases_socket_when_start_fails() {
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = probe.local_addr().unwrap();
+        drop(probe);
+        let invocation = serve_invocation("synthetic-model.gguf".into(), address.to_string());
+        let listening = Listening::open(&invocation, None).unwrap();
+        let error = fail_before_serve(listening).unwrap_err();
+        assert_eq!(error.to_string(), "injected family-start failure");
+        let rebound = TcpListener::bind(address).expect("failed start must release listener");
+        drop(rebound);
     }
 
     #[test]

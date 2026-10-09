@@ -1,6 +1,7 @@
 # GLM-5.3-Flash serve with Fast snapshots on: agent-shaped release screen (map #13/#15, 2026-10-08)
 
-Question: with Fast snapshots on by default (`b4c1e79f`), what does an
+Question: with Fast snapshots on by default (`b8ab3693`; built as `b4c1e79f`
+before a rebase onto main), what does an
 agent-shaped conversation cost per request, against the same build with
 them off (`QWEN_GLM_FAST_SNAPSHOTS=0`)?
 

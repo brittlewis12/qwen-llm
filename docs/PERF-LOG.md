@@ -8,7 +8,7 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
 ## 2026-10-08 - GLM Fast Snapshots On by Default; Branches and New Sessions 58 s -> 0.5 s; Fast Accuracy Lane Opened
 
-- **Decision:** Fast snapshots are on by default (`b4c1e79f`;
+- **Decision:** Fast snapshots are on by default (`b8ab3693`;
   `QWEN_GLM_FAST_SNAPSHOTS=0` turns them off). An explicit exception accepts
   unresolved quality uncertainty in exchange for the measured latency
   benefit (~58 s per branch, new session or return). The preregistered

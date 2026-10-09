@@ -48,16 +48,16 @@ fn model_residency_set_scope_is_exact() {
     };
     assert!(deepseek_v4_residency_set_scope_qualified(
         true,
-        "Apple M4 Max",
+        true,
         43,
         160,
         &report,
     ));
     for (enabled, device, layers, experts) in [
-        (false, "Apple M4 Max", 43, 160),
-        (true, "Apple M3 Max", 43, 160),
-        (true, "Apple M4 Max", 42, 160),
-        (true, "Apple M4 Max", 43, 216),
+        (false, true, 43, 160),
+        (true, false, 43, 160),
+        (true, true, 42, 160),
+        (true, true, 43, 216),
     ] {
         assert!(!deepseek_v4_residency_set_scope_qualified(
             enabled, device, layers, experts, &report,
@@ -68,7 +68,7 @@ fn model_residency_set_scope_is_exact() {
     k216_report.source_bytes = DEEPSEEK_V4_REAP_K216_SOURCE_BYTES;
     assert!(deepseek_v4_residency_set_scope_qualified(
         true,
-        "Apple M4 Max",
+        true,
         43,
         216,
         &k216_report,
@@ -78,7 +78,7 @@ fn model_residency_set_scope_is_exact() {
     fresh_report.source_bytes = DEEPSEEK_V4_FRESH_SOURCE_BYTES;
     assert!(deepseek_v4_residency_set_scope_qualified(
         true,
-        "Apple M4 Max",
+        true,
         43,
         256,
         &fresh_report,
@@ -87,7 +87,7 @@ fn model_residency_set_scope_is_exact() {
     report.tensor_count -= 1;
     assert!(!deepseek_v4_residency_set_scope_qualified(
         true,
-        "Apple M4 Max",
+        true,
         43,
         160,
         &report,
@@ -96,7 +96,7 @@ fn model_residency_set_scope_is_exact() {
     report.source_bytes -= 1;
     assert!(!deepseek_v4_residency_set_scope_qualified(
         true,
-        "Apple M4 Max",
+        true,
         43,
         160,
         &report,
@@ -19354,7 +19354,7 @@ fn all_slot_q3q4_fast_scope_is_exactly_k160_m4() {
         routed_scale: 1.0,
     };
     assert!(deepseek_v4_all_slots_q3q4_scope_qualified(
-        DEEPSEEK_V4_ALL_SLOTS_Q3Q4_QUALIFIED_DEVICE,
+        true,
         qualified,
         GgmlType::Q3_K,
         GgmlType::Q3_K,
@@ -19375,7 +19375,7 @@ fn all_slot_q3q4_fast_scope_is_exactly_k160_m4() {
         },
     ] {
         assert!(!deepseek_v4_all_slots_q3q4_scope_qualified(
-            DEEPSEEK_V4_ALL_SLOTS_Q3Q4_QUALIFIED_DEVICE,
+            true,
             config,
             GgmlType::Q3_K,
             GgmlType::Q3_K,
@@ -19383,14 +19383,14 @@ fn all_slot_q3q4_fast_scope_is_exactly_k160_m4() {
         ));
     }
     assert!(!deepseek_v4_all_slots_q3q4_scope_qualified(
-        "Apple M3 Max",
+        false,
         qualified,
         GgmlType::Q3_K,
         GgmlType::Q3_K,
         GgmlType::Q4_K,
     ));
     assert!(!deepseek_v4_all_slots_q3q4_scope_qualified(
-        DEEPSEEK_V4_ALL_SLOTS_Q3Q4_QUALIFIED_DEVICE,
+        true,
         qualified,
         GgmlType::IQ3_XXS,
         GgmlType::Q3_K,

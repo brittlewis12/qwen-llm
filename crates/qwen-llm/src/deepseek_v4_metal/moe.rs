@@ -971,7 +971,7 @@ impl DeepSeekV4MoeScratch {
             "all-slot routed down bank",
         )?;
         if deepseek_v4_all_slots_q3q4_scope_qualified(
-            &ctx.device.name().to_string(),
+            crate::metal::DEEPSEEK_V4_ALL_SLOTS_Q3Q4.holds_for(ctx.device_facts()),
             c,
             gate_bank.dtype,
             up_bank.dtype,
@@ -1405,20 +1405,20 @@ impl DeepSeekV4MoeScratch {
     }
 }
 
-pub(super) const DEEPSEEK_V4_ALL_SLOTS_Q3Q4_QUALIFIED_DEVICE: &str = "Apple M4 Max";
+
 
 pub(super) const DEEPSEEK_V4_ALL_SLOTS_Q3Q4_EXPERT_COUNT: usize = 160;
 
 pub(super) const DEEPSEEK_V4_ALL_SLOTS_Q3Q4_FFN_SIZE: usize = 2_048;
 
 pub(super) fn deepseek_v4_all_slots_q3q4_scope_qualified(
-    device_name: &str,
+    device_qualified: bool,
     config: DeepSeekV4MoeConfig,
     gate_dtype: GgmlType,
     up_dtype: GgmlType,
     down_dtype: GgmlType,
 ) -> bool {
-    device_name == DEEPSEEK_V4_ALL_SLOTS_Q3Q4_QUALIFIED_DEVICE
+    device_qualified
         && config.hidden_size == DEEPSEEK_V4_HIDDEN_SIZE
         && config.ffn_size == DEEPSEEK_V4_ALL_SLOTS_Q3Q4_FFN_SIZE
         && config.expert_count == DEEPSEEK_V4_ALL_SLOTS_Q3Q4_EXPERT_COUNT

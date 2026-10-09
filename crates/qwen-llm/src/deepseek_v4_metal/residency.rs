@@ -512,13 +512,13 @@ pub(super) fn buffer_as_allocation(
 
 pub(super) fn deepseek_v4_residency_set_scope_qualified(
     enabled: bool,
-    device_name: &str,
+    device_qualified: bool,
     layer_count: u32,
     expert_count: u32,
     report: &DeepSeekV4ResidencyReport,
 ) -> bool {
     enabled
-        && device_name == "Apple M4 Max"
+        && device_qualified
         && layer_count as usize == DEEPSEEK_V4_LAYER_COUNT
         && report.tensor_count == DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT
         && ((expert_count == 160 && report.source_bytes == DEEPSEEK_V4_REAP_K160_SOURCE_BYTES)
@@ -535,7 +535,7 @@ fn log_deepseek_v4_artifact_qualification(
     config: &DeepSeekV4Config,
     report: &DeepSeekV4ResidencyReport,
 ) {
-    let device = ctx.device.name().to_string();
+    let facts = ctx.device_facts();
     let profile = match (
         report.tensor_count,
         config.expert_count,
@@ -550,12 +550,13 @@ fn log_deepseek_v4_artifact_qualification(
         }
         _ => "none",
     };
-    let qualified = profile != "none" && device == "Apple M4 Max";
+    let qualified = profile != "none" && crate::metal::DEEPSEEK_V4_RESIDENCY_SET.holds_for(facts);
     eprintln!(
-        "deepseek_v4: artifact profile={profile} tensor_count={} experts={} source_bytes={} device={device:?} identity_gated_fast_paths={}",
+        "deepseek_v4: artifact profile={profile} tensor_count={} experts={} source_bytes={} device={:?} identity_gated_fast_paths={}",
         report.tensor_count,
         config.expert_count,
         report.source_bytes,
+        facts.name,
         if qualified {
             "on"
         } else {
@@ -572,7 +573,7 @@ pub(super) fn create_deepseek_v4_residency_set(
 ) -> Option<DeepSeekV4ResidencySetGuard> {
     if !deepseek_v4_residency_set_scope_qualified(
         deepseek_v4_residency_set_enabled(),
-        &ctx.device.name().to_string(),
+        crate::metal::DEEPSEEK_V4_RESIDENCY_SET.holds_for(ctx.device_facts()),
         config.layer_count,
         config.expert_count,
         report,

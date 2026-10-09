@@ -998,7 +998,7 @@ fn packed_grouped_expert_mode_has_an_isolated_fail_closed_rollback() {
             (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216),
         ] {
             assert!(packed_grouped_iq2_matrix_scope_qualified(
-                PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
+                true,
                 1_328,
                 bytes,
                 experts,
@@ -1008,37 +1008,37 @@ fn packed_grouped_expert_mode_has_an_isolated_fail_closed_rollback() {
     }
     for (device, tensors, bytes, experts) in [
         (
-            "Apple M3 Max",
+            false,
             1_328,
             PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
             216,
         ),
         (
-            PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
+            true,
             1_327,
             PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
             216,
         ),
         (
-            PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
+            true,
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
             216,
         ),
         (
-            PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
+            true,
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
             160,
         ),
         (
-            PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
+            true,
             1_328,
             PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
             256,
         ),
         (
-            PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
+            true,
             1_328,
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
             216,
@@ -1049,14 +1049,14 @@ fn packed_grouped_expert_mode_has_an_isolated_fail_closed_rollback() {
         ));
     }
     assert!(!packed_grouped_iq2_matrix_scope_qualified(
-        PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
         216,
         255,
     ));
     assert!(!packed_grouped_iq2_matrix_scope_qualified(
-        PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
         MOE_EXPERT_COUNT,
@@ -1244,7 +1244,7 @@ fn packed_q8_compressor_matrix_scope_is_exact() {
             (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216),
         ] {
             assert!(qualified(
-                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+                true,
                 1_328,
                 bytes,
                 experts,
@@ -1261,7 +1261,7 @@ fn packed_q8_compressor_matrix_scope_is_exact() {
         (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216),
     ] {
         assert!(!qualified(
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            true,
             1_328,
             bytes,
             experts,
@@ -1269,63 +1269,63 @@ fn packed_q8_compressor_matrix_scope_is_exact() {
         ));
     }
     assert!(!qualified(
-        "Apple M3 Max",
+        false,
         1_328,
         PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
         256,
         DEEPSEEK_V4_PREFILL_MAX_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_327,
         PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
         256,
         DEEPSEEK_V4_PREFILL_MAX_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES - 1,
         256,
         DEEPSEEK_V4_PREFILL_MAX_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES - 1,
         160,
         PACKED_MATRIX_MIN_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES - 1,
         216,
         DEEPSEEK_V4_PREFILL_MAX_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
         216,
         337,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
         256,
         DEEPSEEK_V4_PREFILL_MAX_TOKENS,
     ));
     assert!(!packed_gpu_route_compact_scope_qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
         MOE_EXPERT_COUNT,
         337,
     ));
     assert!(packed_gpu_route_compact_scope_qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
         MOE_EXPERT_COUNT,
@@ -1357,7 +1357,7 @@ fn packed_router_e8p32_scope_is_exactly_k160_m4() {
         DEEPSEEK_V4_PREFILL_MAX_TOKENS,
     ] {
         assert!(qualified(
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            true,
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
             160,
@@ -1365,35 +1365,35 @@ fn packed_router_e8p32_scope_is_exactly_k160_m4() {
         ));
     }
     assert!(!qualified(
-        "Apple M3 Max",
+        false,
         1_328,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
         160,
         PACKED_MATRIX_MIN_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_327,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
         160,
         PACKED_MATRIX_MIN_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES - 1,
         160,
         PACKED_MATRIX_MIN_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
         216,
         PACKED_MATRIX_MIN_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
         160,
@@ -1430,7 +1430,7 @@ fn packed_q8_qa_kv_matrix_policy_is_scoped_and_fail_closed() {
         DEEPSEEK_V4_PREFILL_MAX_TOKENS,
     ] {
         assert!(qualified(
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            true,
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
             160,
@@ -1438,21 +1438,21 @@ fn packed_q8_qa_kv_matrix_policy_is_scoped_and_fail_closed() {
         ));
     }
     assert!(!qualified(
-        "Apple M3 Max",
+        false,
         1_328,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
         160,
         PACKED_MATRIX_MIN_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
         216,
         PACKED_MATRIX_MIN_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
         160,
@@ -1467,14 +1467,14 @@ fn packed_mxfp4_matrix_scope_covers_both_fresh_and_k216_full_widths() {
     };
     for tokens in [PACKED_MATRIX_MIN_TOKENS, DEEPSEEK_V4_PREFILL_MAX_TOKENS] {
         assert!(qualified(
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            true,
             1_328,
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
             MOE_EXPERT_COUNT,
             tokens,
         ));
         assert!(qualified(
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            true,
             1_328,
             PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
             216,
@@ -1482,35 +1482,35 @@ fn packed_mxfp4_matrix_scope_covers_both_fresh_and_k216_full_widths() {
         ));
     }
     assert!(!qualified(
-        "Apple M3 Max",
+        false,
         1_328,
         PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
         216,
         PACKED_MATRIX_MIN_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_327,
         PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
         216,
         PACKED_MATRIX_MIN_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES - 1,
         216,
         PACKED_MATRIX_MIN_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
         160,
         PACKED_MATRIX_MIN_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
         216,
@@ -1518,7 +1518,7 @@ fn packed_mxfp4_matrix_scope_covers_both_fresh_and_k216_full_widths() {
     ));
     for tokens in [PACKED_MATRIX_MIN_TOKENS, DEEPSEEK_V4_PREFILL_MAX_TOKENS] {
         assert!(!qualified(
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            true,
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
             160,
@@ -1526,14 +1526,14 @@ fn packed_mxfp4_matrix_scope_covers_both_fresh_and_k216_full_widths() {
         ));
     }
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
         MOE_EXPERT_COUNT,
         1_024,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
         216,
@@ -1556,7 +1556,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
         DEEPSEEK_V4_PREFILL_MAX_TOKENS,
     ] {
         assert!(qualified(
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            true,
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
             160,
@@ -1568,7 +1568,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
     }
     for (device, tensors, bytes, experts, gate, up, down) in [
         (
-            "Apple M3 Max",
+            false,
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
             160,
@@ -1577,7 +1577,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
             GgmlType::Q4_K,
         ),
         (
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            true,
             1_327,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
             160,
@@ -1586,7 +1586,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
             GgmlType::Q4_K,
         ),
         (
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            true,
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES - 1,
             160,
@@ -1595,7 +1595,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
             GgmlType::Q4_K,
         ),
         (
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            true,
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES + 1,
             160,
@@ -1604,7 +1604,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
             GgmlType::Q4_K,
         ),
         (
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            true,
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
             159,
@@ -1613,7 +1613,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
             GgmlType::Q4_K,
         ),
         (
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            true,
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
             161,
@@ -1622,7 +1622,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
             GgmlType::Q4_K,
         ),
         (
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            true,
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
             160,
@@ -1631,7 +1631,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
             GgmlType::Q4_K,
         ),
         (
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            true,
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
             160,
@@ -1640,7 +1640,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
             GgmlType::Q4_K,
         ),
         (
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            true,
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
             160,
@@ -1661,7 +1661,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
         ));
     }
     assert!(!packed_shared_route_overlap_scope_qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
         160,
@@ -1671,7 +1671,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
         GgmlType::Q4_K,
     ));
     assert!(packed_shared_route_overlap_scope_qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
         160,
@@ -1681,7 +1681,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
         GgmlType::Q4_K,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
         160,
@@ -1691,7 +1691,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
         GgmlType::Q4_K,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
         160,
@@ -1701,7 +1701,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
         GgmlType::Q4_K,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
         160,
@@ -1711,7 +1711,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
         GgmlType::Q4_K,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
         256,
@@ -1721,7 +1721,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
         GgmlType::Q4_K,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
         216,
@@ -1731,7 +1731,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
         GgmlType::Q4_K,
     ));
     assert!(!qualified(
-        "Apple M3 Max",
+        false,
         1_328,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
         160,
@@ -1741,7 +1741,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
         GgmlType::Q4_K,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_327,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
         160,
@@ -1751,7 +1751,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
         GgmlType::Q4_K,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
         160,
@@ -1761,7 +1761,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
         GgmlType::Q4_K,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
         160,
@@ -1778,42 +1778,42 @@ fn packed_indexer_q_matrix_scope_is_4096_only() {
         packed_indexer_q_matrix_scope_qualified(device, tensors, bytes, experts, tokens)
     };
     assert!(qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
         256,
         DEEPSEEK_V4_PREFILL_MAX_TOKENS,
     ));
     assert!(qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
         160,
         DEEPSEEK_V4_PREFILL_MAX_TOKENS,
     ));
     assert!(qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
         216,
         DEEPSEEK_V4_PREFILL_MAX_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
         256,
         PACKED_MATRIX_MIN_TOKENS,
     ));
     assert!(!qualified(
-        "Apple M3 Max",
+        false,
         1_328,
         PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
         256,
         DEEPSEEK_V4_PREFILL_MAX_TOKENS,
     ));
     assert!(!qualified(
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+        true,
         1_328,
         PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES + 1,
         256,
@@ -3165,7 +3165,7 @@ fn profile_q8_f32_mma_r2c4k64_attention_output_packet() {
     };
     assert_eq!(
         ctx.device.name().to_string(),
-        PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE
+        crate::metal::DEEPSEEK_V4_PACKED_GROUPED_EXPERT.device_model
     );
     const N: usize = 128;
     const SAMPLES: usize = 24;
@@ -5533,7 +5533,7 @@ fn profile_packed_grouped_fused_all_iq3_production_shape() {
     };
     assert_eq!(
         ctx.device.name().to_string(),
-        PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE
+        crate::metal::DEEPSEEK_V4_PACKED_GROUPED_EXPERT.device_model
     );
     assert!(
         packed_grouped_iq3_fused_candidate_supported(&ctx),

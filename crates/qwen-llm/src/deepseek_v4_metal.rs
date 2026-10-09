@@ -279,7 +279,7 @@ struct DeepSeekV4PublishedRows<'a> {
 #[cfg(not(test))]
 const DEEPSEEK_V4_F16_MATRIX_SCORER_MIN_VISIBLE_ROWS: usize = 16_384;
 #[cfg(not(test))]
-const DEEPSEEK_V4_F16_MATRIX_SCORER_QUALIFIED_DEVICE: &str = "Apple M4 Max";
+
 
 #[cfg(not(test))]
 crate::env_flag!(

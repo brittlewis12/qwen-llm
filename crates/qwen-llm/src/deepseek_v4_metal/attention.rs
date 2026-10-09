@@ -321,7 +321,7 @@ impl DeepSeekV4PositionZeroAttentionScratch {
         }
         #[cfg(not(test))]
         {
-            ctx.device.name().to_string() == DEEPSEEK_V4_LONG_HCA_QUALIFIED_DEVICE
+            crate::metal::DEEPSEEK_V4_LONG_HCA.holds_for(ctx.device_facts())
         }
     }
 
@@ -333,7 +333,7 @@ impl DeepSeekV4PositionZeroAttentionScratch {
         }
         #[cfg(not(test))]
         {
-            ctx.device.name().to_string() == DEEPSEEK_V4_LONG_HCA_QUALIFIED_DEVICE
+            crate::metal::DEEPSEEK_V4_LONG_HCA.holds_for(ctx.device_facts())
         }
     }
 

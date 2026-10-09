@@ -1802,9 +1802,6 @@ pub(super) const DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS: usize = 5;
 
 pub(super) const DEEPSEEK_V4_MULTIGROUP_SELECTOR_GROUPS: usize = 32;
 
-#[cfg(not(test))]
-pub(super) const DEEPSEEK_V4_MULTIGROUP_SELECTOR_QUALIFIED_DEVICE: &str = "Apple M4 Max";
-
 #[doc(hidden)]
 pub const DEEPSEEK_V4_MULTIGROUP_SELECTOR_MIN_VISIBLE_ROWS: usize = 196_608;
 
@@ -2033,7 +2030,7 @@ impl DeepSeekV4SparseCsaScratch {
         let selector_mode = DeepSeekV4SparseSelectorMode::Radix4;
         #[cfg(not(test))]
         let selector_mode = if multigroup.is_some()
-            && ctx.device.name().to_string() == DEEPSEEK_V4_MULTIGROUP_SELECTOR_QUALIFIED_DEVICE
+            && crate::metal::DEEPSEEK_V4_MULTIGROUP_SELECTOR.holds_for(ctx.device_facts())
             && deepseek_v4_multigroup_selector_enabled()
         {
             DeepSeekV4SparseSelectorMode::MultigroupProduction
@@ -2120,7 +2117,7 @@ impl DeepSeekV4SparseCsaScratch {
         #[cfg(not(test))]
         {
             visible_rows >= DEEPSEEK_V4_F16_MATRIX_SCORER_MIN_VISIBLE_ROWS
-                && ctx.device.name().to_string() == DEEPSEEK_V4_F16_MATRIX_SCORER_QUALIFIED_DEVICE
+                && crate::metal::DEEPSEEK_V4_F16_MATRIX_SCORER.holds_for(ctx.device_facts())
                 && deepseek_v4_f16_matrix_scorer_enabled()
         }
     }
@@ -2622,9 +2619,6 @@ pub(super) fn encode_dense_sink_attention_f16(
 }
 
 pub(super) const DEEPSEEK_V4_SPLITK_HCA_PARTITIONS: usize = 8;
-
-#[cfg(not(test))]
-pub(super) const DEEPSEEK_V4_LONG_HCA_QUALIFIED_DEVICE: &str = "Apple M4 Max";
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_cooperative_dense_sink_attention_f16(

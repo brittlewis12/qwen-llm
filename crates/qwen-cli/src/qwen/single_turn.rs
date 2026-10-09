@@ -2,6 +2,10 @@
 
 use super::*;
 
+fn request_stats_total_ms(encoding_ms: f64, preparation_ms: f64, execution_ms: f64) -> f64 {
+    encoding_ms + preparation_ms + execution_ms
+}
+
 pub(crate) fn run_single_turn(
     model_path: &Path,
     gguf: GgufFile,
@@ -435,6 +439,12 @@ pub(crate) fn execute_single_turn_request(
         prompt_ids.len(),
         args.tokens
     );
+    let stop_tokens = loaded
+        .gguf()
+        .stop_token_ids()
+        .context("load producer-declared stop tokens")?;
+    let sampling_config = cli_sampling_config(args)?;
+    let mut sampler = Sampler::new(sampling_config).context("initialize request sampler")?;
     let capacity_validation_ms = validation_t0.elapsed().as_secs_f64() * 1e3;
     let allocated = allocate_prefill_request_state(
         loaded,
@@ -443,6 +453,10 @@ pub(crate) fn execute_single_turn_request(
         capacity,
         durable_store.is_none(),
     )?;
+    // Request-state allocation is session setup; the contract's execution
+    // span begins only after it returns. Durable restore below remains inside
+    // execution, even though Qwen's prefill timer starts after restore.
+    let resident_execution_t0 = Instant::now();
     let chunk = allocated.chunk;
     let prefill_chunk_decision = allocated.decision;
     let mut scratch = allocated.scratch;
@@ -660,12 +674,6 @@ pub(crate) fn execute_single_turn_request(
     let mut first_delivery_ms = None;
     let mut first_callback_duration_ms = None;
     let mut first_delivery_allocated = None;
-    let stop_tokens = loaded
-        .gguf()
-        .stop_token_ids()
-        .context("load producer-declared stop tokens")?;
-    let sampling_config = cli_sampling_config(args)?;
-    let mut sampler = Sampler::new(sampling_config).context("initialize request sampler")?;
     let greedy_gpu_decision =
         resolve_greedy_gpu_decision(greedy_gpu_mode, sampling_config, args.prompt_lookup);
     let use_gpu_greedy = greedy_gpu_decision.enabled;
@@ -942,6 +950,9 @@ pub(crate) fn execute_single_turn_request(
             };
             (generation, None, sampling_attribution, sampled_structural)
         };
+    // Freeze execution at the generator boundary, before delivery fallback,
+    // newline output, checkpoint capture/publication, or stats work.
+    let resident_execution_ms = resident_execution_t0.elapsed().as_secs_f64() * 1e3;
     let mut inference_complete_ms = request_t0.elapsed().as_secs_f64() * 1e3;
     let pipeline_cache_generation_exit =
         timing_enabled.then(|| loaded.context().pipeline_cache_metrics());
@@ -1273,6 +1284,22 @@ pub(crate) fn execute_single_turn_request(
         tokenizer_init_ms,
         tokenization_ms,
         decode_ms: generation.wall_ms,
-        total_ms: total_request_ms,
+        total_ms: request_stats_total_ms(
+            tokenization_ms,
+            capacity_validation_ms,
+            resident_execution_ms,
+        ),
     })
+}
+
+#[cfg(test)]
+mod request_stats_timing_tests {
+    use super::request_stats_total_ms;
+
+    #[test]
+    fn total_sums_only_the_three_non_overlapping_contract_spans() {
+        // Model load, state allocation, and post-generator output are absent
+        // from the arguments, so none can enter the recorded total.
+        assert_eq!(request_stats_total_ms(11.0, 7.0, 13.0), 31.0);
+    }
 }

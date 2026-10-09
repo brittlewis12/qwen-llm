@@ -247,7 +247,7 @@ pub(crate) struct Args {
 
     /// Append one structured record per completed single-turn request as
     /// JSONL under the common cross-family envelope
-    /// (schema: qwen-llm.request-stats v1): status, usage, finish reason,
+    /// (schema: qwen-llm.request-stats v2): status, usage, finish reason,
     /// timing, throughput, output fingerprint, build identity.
     ///
     /// Supported on every family's single-turn lane (`run`, `-p`,

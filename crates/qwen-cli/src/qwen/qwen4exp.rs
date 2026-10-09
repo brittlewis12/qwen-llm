@@ -2,6 +2,10 @@
 
 use super::*;
 
+fn request_stats_total_ms(encoding_ms: f64, preparation_ms: f64, execution_ms: f64) -> f64 {
+    encoding_ms + preparation_ms + execution_ms
+}
+
 pub(crate) const QWEN4EXP_LAYER_PROFILE_ENV: &str = "QWEN4EXP_LAYER_PROFILE";
 
 pub(crate) const QWEN4EXP_PACKED_PREFILL_PROFILE_ENV: &str = "QWEN4EXP_PACKED_PREFILL_PROFILE";
@@ -446,6 +450,7 @@ pub(crate) fn run_qwen4exp_single_turn(
         .context("tokenize Qwen3.8-Flash-Next prompt")?;
     let encode_ms = encode_t0.elapsed().as_secs_f64() * 1e3;
     let tokenizer_ms = tokenizer_t0.elapsed().as_secs_f64() * 1e3;
+    let preparation_t0 = Instant::now();
     let required_forwards =
         required_forwards("Qwen3.8-Flash-Next", prompt_ids.len(), args.tokens, None)?;
     let config =
@@ -494,6 +499,7 @@ pub(crate) fn run_qwen4exp_single_turn(
     validate_qwen4exp_full_shard_prefetch_scope(full_shard_prefetch_enabled, gguf.shard_count())?;
     let packed_prefill_requested =
         !layer_profile_enabled && (packed_profile_enabled || prompt_tokens.len() > 1);
+    let preparation_ms = preparation_t0.elapsed().as_secs_f64() * 1e3;
     let prefill_request = if packed_profile_enabled {
         "packed_profile"
     } else if packed_prefill_requested {
@@ -792,6 +798,9 @@ pub(crate) fn run_qwen4exp_single_turn(
     let weights_first_use = measured_prefill_ms.is_none();
     let prefill_ms =
         measured_prefill_ms.unwrap_or_else(|| prefill_t0.elapsed().as_secs_f64() * 1e3);
+    // In packed profile mode `prefill_ms` is only the reported third pass;
+    // setup and the two comparison passes are outside the record total.
+    let post_prefill_t0 = Instant::now();
     let mut sampler = Sampler::new(sampling).context("initialize Qwen3.8-Flash-Next sampler")?;
     let stdout_handle = std::io::stdout();
     let mut stdout = stdout_handle.lock();
@@ -825,6 +834,11 @@ pub(crate) fn run_qwen4exp_single_turn(
             Ok(next_logits)
         },
     )?;
+    let resident_execution_ms = if measured_prefill_ms.is_some() {
+        prefill_ms + post_prefill_t0.elapsed().as_secs_f64() * 1e3
+    } else {
+        prefill_t0.elapsed().as_secs_f64() * 1e3
+    };
     if !generation.tokens.is_empty() {
         writeln!(stdout)?;
         stdout
@@ -883,7 +897,8 @@ pub(crate) fn run_qwen4exp_single_turn(
             output_tokens: generation.tokens.len() as u64,
             transitions: generation.transitions as u64,
             stop_reason: generation.stop_reason,
-            // Record semantics: encode-only tokenization; total without load.
+            // Record semantics: encoding + prompt preparation + reported
+            // prefill and generation; profile warm-up passes are omitted.
             tokenizer_ms: encode_ms,
             load_ms,
             prefill_ms,
@@ -891,7 +906,7 @@ pub(crate) fn run_qwen4exp_single_turn(
             decode_ms: generation.wall_ms,
             decode_tps,
             transition_tps,
-            total_ms: request_t0.elapsed().as_secs_f64() * 1e3 - load_ms,
+            total_ms: request_stats_total_ms(encode_ms, preparation_ms, resident_execution_ms),
             output_fingerprint: GeneratedTokenSha256Digest::of(&generation.tokens),
         };
         append_single_turn_stats_record(
@@ -904,4 +919,15 @@ pub(crate) fn run_qwen4exp_single_turn(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod request_stats_timing_tests {
+    use super::request_stats_total_ms;
+
+    #[test]
+    fn total_sums_encoding_preparation_and_reported_execution_once() {
+        // The caller passes only the reported profile pass, never either warm-up.
+        assert_eq!(request_stats_total_ms(11.0, 7.0, 13.0), 31.0);
+    }
 }

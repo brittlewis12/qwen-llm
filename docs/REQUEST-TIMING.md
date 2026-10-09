@@ -4,7 +4,7 @@ What `qwen run` timing fields measure today. A field name can measure a
 different interval in each execution path (lane). Values are host wall-clock
 milliseconds unless stated otherwise. This records current behaviour before
 any decision about comparability; changing a field's meaning is a request-stats
-contract change. The v1 record builder currently writes schema version 1.
+contract change. The common record builder writes schema version 2.
 
 Families: Qwen (Qwen3.5/3.6/3.8 dense and MoE, single turn); Flash-Next
 (Qwen3.8-Flash-Next); DS4 (DeepSeek V4); Muse (Muse Glimmer); K2 (Kimi K2
@@ -79,8 +79,31 @@ Other stderr fields:
 | `timing_ms.tokenization` | Encoding | Encoding only | Encoding (GLM also includes token-ID check) |
 | `timing_ms.prefill` | Sum of measured prefill calls | Same family-specific prefill interval as above | Same family-specific prefill interval as above |
 | `timing_ms.decode` | Decode loop wall | Decode loop wall | Decode loop wall |
-| `timing_ms.total` | Request clock through output completion, one span | Clock sample before record construction minus `load_ms`; includes earlier stats printing, excludes record emission. DS4 also includes optional request-trace writing. | Sum of encoding, request-preparation and resident-execution phases; encoding precedes loading configured for the request's required sequence capacity. |
+| `timing_ms.total` | Encoding + request preparation + resident execution | Encoding + request preparation + resident execution | Sum of the same three non-overlapping phases. |
 | `throughput_tps.prefill` / `.decode` | Present | Present | Present |
+
+Schema v2 changes `timing_ms.total` to the sum of encoding, request
+preparation, and resident execution for every lane. A v1 total from Qwen,
+Flash-Next, DS4, or Muse used a different wall-clock calculation and is not
+comparable to that lane's v2 total. K2 and GLM totals retain their v1 values.
+
+The encoding span is the existing prompt encode interval. Qwen preparation is
+the span covering its empty-prompt and capacity checks, stop-token loading,
+sampling-option resolution, and sampler initialization. Flash-Next preparation
+is one span covering forward-capacity, model geometry, token-range, stop-token,
+decode-option, and profile-option checks; it ends before optional shard
+prefetch and model loading. DS4 preparation sums two spans: required-forward
+and prompt-token range checks, plus stop-token range checks. Its durable-store
+admission and identity work are outside those spans. Muse preparation is one
+span covering token-range, capacity, stop-token, and runtime-option checks.
+Resident execution starts at prefill and ends immediately after the decode
+generator returns, before trailing output, completed-checkpoint capture/publication,
+stats output, or record writing. Qwen starts resident execution immediately
+after request-state allocation returns; this excludes session allocation and
+includes durable restore before its prefill timer starts. Qwen's warm-followup
+request has its own three spans and total. Flash-Next packed-profile totals
+include the reported third prefill pass and its generation only; both warm-up
+passes are excluded.
 
 `load_ms` and `transition_tps` are not common record fields. DS4 records them
 under `diagnostics.deepseek_v4`; K2 and GLM include phase timings,

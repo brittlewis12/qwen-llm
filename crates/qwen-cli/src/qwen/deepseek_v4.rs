@@ -2,6 +2,10 @@
 
 use super::*;
 
+fn request_stats_total_ms(encoding_ms: f64, preparation_ms: f64, execution_ms: f64) -> f64 {
+    encoding_ms + preparation_ms + execution_ms
+}
+
 pub(crate) const DEEPSEEK_V4_SNAPSHOT_MAX_RECORD_BYTES: u64 = 1024 * 1024 * 1024;
 
 pub(crate) const DEEPSEEK_V4_SNAPSHOT_IDENTITY_CACHE_DIR: &str = ".qwen-dsv4-model-identity-v2";
@@ -643,7 +647,6 @@ pub(crate) fn run_deepseek_v4_single_turn(
     validate_deepseek_v4_generation_mode(args, explicit)?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
     // The sidecar was preflighted with every other input before model open.
-    let request_start = std::time::Instant::now();
     let prefill_chunk_tokens = deepseek_v4_prefill_chunk_tokens()?;
     let prefetch_mode = configured_deepseek_v4_prefetch_mode()?;
     let sampling = cli_sampling_config(args)?;
@@ -703,6 +706,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
     // prompt encode alone; `tokenizer_ms` above (construction) stays on the
     // free-form stats line.
     let encode_ms = encode_t0.elapsed().as_secs_f64() * 1e3;
+    let preparation_t0 = Instant::now();
     let required_forwards = required_forwards(
         "DeepSeek V4",
         prompt_ids.len(),
@@ -716,6 +720,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
         .enumerate()
         .map(|(index, &token)| checked_token_id(token, vocab_size, &format!("prompt[{index}]")))
         .collect::<Result<Vec<_>>>()?;
+    let mut preparation_ms = preparation_t0.elapsed().as_secs_f64() * 1e3;
     let durable_store = deepseek_v4_checkpoint_store(args, staged_integrity)?;
     let durable_max_record_bytes = if durable_store.is_some() {
         durable_prefix_cache_max_entry_bytes(args)?
@@ -748,12 +753,14 @@ pub(crate) fn run_deepseek_v4_single_turn(
             );
         }
     }
+    let stop_validation_t0 = Instant::now();
     let stop_tokens = gguf
         .stop_token_ids()
         .context("load producer-declared DeepSeek V4 stop tokens")?;
     for &token in &stop_tokens {
         checked_token_id(token, vocab_size, "stop")?;
     }
+    preparation_ms += stop_validation_t0.elapsed().as_secs_f64() * 1e3;
     // Probe store occupancy before resolving the strong model identity so an
     // empty store with no planned capture skips identity work entirely.
     let durable_probe_t0 = Instant::now();
@@ -1256,6 +1263,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
             copy_deepseek_v4_logits(&session, vocab_size, "continuing")
         },
     )?;
+    let resident_execution_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
     drop(stdout);
     if durable_completed_eligible
         && durable_admitted
@@ -1420,10 +1428,10 @@ pub(crate) fn run_deepseek_v4_single_turn(
         append_request_trace(path, arrival_ms, prompt_ids.len(), generation.tokens.len())?;
     }
     if let Some(path) = args.request_stats_jsonl.as_ref() {
-        // Measure total request wall time at the outer boundary (not the sum
-        // of phase timings, which can miss inter-phase gaps).
-        // Record semantics: `total` is the request wall without model load.
-        let total_ms = request_start.elapsed().as_secs_f64() * 1e3 - load_ms;
+        // Preparation sums prompt range/token checks and stop-token checks;
+        // execution includes snapshot restore/publication during prefill and
+        // ends at generator return.
+        let total_ms = request_stats_total_ms(encode_ms, preparation_ms, resident_execution_ms);
         let measured = RequestStatsMeasured {
             input_tokens: prompt_ids.len() as u64,
             output_tokens: generation.tokens.len() as u64,
@@ -2244,4 +2252,15 @@ pub(crate) fn print_deepseek_v4_census(model_path: &Path) -> Result<()> {
     serde_json::to_writer_pretty(std::io::stdout().lock(), &census)?;
     println!();
     Ok(())
+}
+
+#[cfg(test)]
+mod request_stats_timing_tests {
+    use super::request_stats_total_ms;
+
+    #[test]
+    fn total_sums_only_the_three_non_overlapping_contract_spans() {
+        // Model load, session setup, and work after generator return are absent.
+        assert_eq!(request_stats_total_ms(11.0, 7.0, 13.0), 31.0);
+    }
 }

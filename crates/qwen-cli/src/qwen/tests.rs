@@ -4925,7 +4925,7 @@ fn sample_measured_ok() -> RequestStatsMeasured {
 }
 
 #[test]
-fn request_stats_record_v1_envelope_shape_is_stable() {
+fn request_stats_record_v2_envelope_shape_is_stable() {
     let measured = sample_measured_ok();
     let record = build_deepseek_v4_single_turn_stats_record(
         "inv-42-1234567890",
@@ -4938,7 +4938,7 @@ fn request_stats_record_v1_envelope_shape_is_stable() {
 
     // Common core
     assert_eq!(json["schema"], "qwen-llm.request-stats");
-    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["schema_version"], 2);
     assert_eq!(json["record_type"], "request_stats");
     assert_eq!(json["invocation_id"], "inv-42-1234567890");
     assert_eq!(json["request_index"], 0);

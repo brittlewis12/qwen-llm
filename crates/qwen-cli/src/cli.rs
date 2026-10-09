@@ -375,7 +375,7 @@ struct GenerationOverrides {
     #[arg(long, value_name = "GGUF")]
     drafter: Option<PathBuf>,
 
-    /// Append one `qwen-llm.request-stats` v1 record for this request as
+    /// Append one `qwen-llm.request-stats` v2 record for this request as
     /// JSONL: status, usage, finish reason, timing, throughput, output
     /// fingerprint. Raw stdout is unchanged.
     #[arg(long, value_name = "PATH")]

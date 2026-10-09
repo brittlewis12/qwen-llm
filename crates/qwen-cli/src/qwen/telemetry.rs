@@ -1549,15 +1549,18 @@ pub(crate) fn parse_build_dirty(raw: &str) -> bool {
 /// Field semantics are shared across lanes so records compare:
 /// - `tokenizer_ms` (record `timing_ms.tokenization`): encoding the prompt
 ///   only; tokenizer construction is load-time cost.
-/// - `total_ms` (record `timing_ms.total`): request wall from after the
-///   model is resident to the last token; model load is excluded and
-///   reported separately by lanes that measure it.
+/// - `total_ms` (record `timing_ms.total`): the sum of three non-overlapping
+///   spans: prompt encoding; CPU request preparation checks on the encoded
+///   prompt before execution; and resident execution from prompt prefill start
+///   through the decode generator's return. It excludes model load and session
+///   setup, output work after the generator returns, stats output, and record
+///   construction or writing.
 ///
 /// K2 and GLM-5.3 explicitly reconstruct `total_ms` from encoding, request
 /// preparation and resident execution spans (encoding precedes
 /// capacity-shaped loading) with the shared `lane_timing` accumulator. Their
 /// namespaced timing diagnostics report the separate continuous lane wall and
-/// all setup phases; this does not change other families' measurements.
+/// all setup phases. Schema v2 applies these total semantics to every lane.
 pub(crate) struct RequestStatsMeasured {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -1574,7 +1577,7 @@ pub(crate) struct RequestStatsMeasured {
     pub output_fingerprint: GeneratedTokenSha256Digest,
 }
 
-/// Build the `qwen-llm.request-stats` v1 record for a completed single-turn
+/// Build the `qwen-llm.request-stats` v2 record for a completed single-turn
 /// request. `input` is the representation the lane rendered (`raw` /
 /// `messages` plus an optional template label); `diagnostics` is the lane's
 /// own namespaced block, or `None` when it has nothing qualified to add.
@@ -1588,7 +1591,7 @@ pub(crate) fn build_single_turn_stats_record<'a>(
 ) -> RequestStatsRequestRecord<'a> {
     RequestStatsRequestRecord {
         schema: "qwen-llm.request-stats",
-        schema_version: 1,
+        schema_version: 2,
         record_type: "request_stats",
         invocation_id,
         request_index,
@@ -1642,7 +1645,7 @@ pub(crate) fn request_stats_input(
     }
 }
 
-/// Append one v1 record to the `--request-stats-jsonl` sidecar.
+/// Append one v2 record to the `--request-stats-jsonl` sidecar.
 pub(crate) fn append_single_turn_stats_record(
     path: &Path,
     request_index: u32,

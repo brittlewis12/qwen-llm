@@ -13,8 +13,6 @@
 //! [`request_profile`] owns CPU request semantics; [`transport`] connects one
 //! admitted HTTP worker to the resident owner. [`owner_activity`] gates owner
 //! maintenance on complete request lifetimes, and [`trace`] owns the shared log.
-#![allow(dead_code)] // consumed incrementally; the HTTP slice wires the rest
-
 mod assets;
 pub(crate) mod backend;
 pub(crate) mod backend_ds4;
@@ -53,7 +51,7 @@ pub(crate) mod utf8;
 
 pub(crate) use crate::open_responses::{items, render, tool_parse};
 
-use crate::family_profile::profile;
+use crate::family_profile::{self, ServeCapacity, ServeLimits, profile};
 use anyhow::{Context, Result, bail, ensure};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalMemorySignals;
@@ -323,38 +321,56 @@ fn supports_serve_family(family: Option<ModelFamily>) -> bool {
     family.is_some_and(|family| profile(family).serve_backend)
 }
 
-/// Limits for a family whose resident session capacity is fixed at load:
-/// both ceilings must be explicit and positive.
-fn fixed_session_limits(
-    family: ModelFamily,
-    model_context: usize,
+/// Resolves the capacity contract declared by a family's profile.
+fn resolve_serve_limits(
+    family: &family_profile::FamilyProfile,
+    model_context: Option<usize>,
     max_context_tokens: Option<usize>,
     max_tokens: Option<usize>,
-) -> Result<(usize, usize)> {
-    let family = profile(family).display;
-    let context_limit = max_context_tokens.with_context(|| {
-        format!("{family} serve requires --max-context-tokens because its resident session capacity is fixed at startup")
-    })?;
-    ensure!(
-        context_limit > 0,
-        "{family} --max-context-tokens must be greater than 0"
-    );
-    ensure!(
-        context_limit <= model_context,
-        "{family} --max-context-tokens {context_limit} exceeds model context {model_context}",
-    );
-    let default_max_tokens = max_tokens.with_context(|| {
-        format!("{family} serve requires explicit --max-tokens; the generic 65536-token default exceeds its session capacity")
-    })?;
-    ensure!(
-        default_max_tokens > 0,
-        "{family} --max-tokens must be greater than 0"
-    );
-    ensure!(
-        default_max_tokens <= context_limit,
-        "{family} --max-tokens {default_max_tokens} exceeds --max-context-tokens {context_limit}"
-    );
-    Ok((context_limit, default_max_tokens))
+) -> Result<Option<ServeLimits>> {
+    let display = family.display;
+    match family.serve_capacity {
+        ServeCapacity::RequestShaped => Ok(None),
+        ServeCapacity::FixedContext => {
+            let context_tokens = max_context_tokens.with_context(|| {
+                "DeepSeek V4 serve requires --max-context-tokens: the session forward budget is fixed at startup"
+            })?;
+            Ok(Some(ServeLimits {
+                context_tokens,
+                max_tokens: max_tokens.unwrap_or(DEFAULT_SERVE_MAX_TOKENS),
+            }))
+        }
+        ServeCapacity::FixedContextAndOutput => {
+            let context_tokens = max_context_tokens.with_context(|| {
+                format!("{display} serve requires --max-context-tokens because its resident session capacity is fixed at startup")
+            })?;
+            ensure!(
+                context_tokens > 0,
+                "{display} --max-context-tokens must be greater than 0"
+            );
+            let model_context =
+                model_context.context("fixed serve capacity requires model context metadata")?;
+            ensure!(
+                context_tokens <= model_context,
+                "{display} --max-context-tokens {context_tokens} exceeds model context {model_context}",
+            );
+            let max_tokens = max_tokens.with_context(|| {
+                format!("{display} serve requires explicit --max-tokens; the generic 65536-token default exceeds its session capacity")
+            })?;
+            ensure!(
+                max_tokens > 0,
+                "{display} --max-tokens must be greater than 0"
+            );
+            ensure!(
+                max_tokens <= context_tokens,
+                "{display} --max-tokens {max_tokens} exceeds --max-context-tokens {context_tokens}"
+            );
+            Ok(Some(ServeLimits {
+                context_tokens,
+                max_tokens,
+            }))
+        }
+    }
 }
 
 /// `qwen serve` entry: resident model, serial accept loop.
@@ -437,6 +453,39 @@ fn check_warmth_flags(
     Ok(())
 }
 
+fn open_workbench(invocation: &crate::cli::ServeInvocation) -> Result<Option<Workbench>> {
+    let assets = invocation
+        .web_root
+        .as_deref()
+        .map(assets::WebAssets::open)
+        .transpose()
+        .context("open prebuilt Lens client")?
+        .map(Arc::new);
+    let store = invocation
+        .lens_data_dir
+        .as_deref()
+        .map(|root| jobs::store::JobStore::open(root, jobs::store::Limits::default()).map(Arc::new))
+        .transpose()
+        .context("open durable Lens history")?;
+    Ok((store.is_some() || assets.is_some()).then_some(Workbench {
+        store,
+        assets,
+        access: lens_http::access::BrowserAccess::new(invocation.lens_allowed_origin.clone()),
+    }))
+}
+
+/// Startup stages are header admission, family preparation, workbench files,
+/// listener setup, then family start and acceptance. Header admission maps the
+/// target GGUF and may open a drafter header; it must not read weight payloads,
+/// bind, or initialize Metal. Family preparation inspects GGUF metadata and
+/// may build CPU tokenizers; it must not read large payloads, bind, initialize
+/// Metal, or open workbench files. Workbench setup reads web assets and may
+/// create job-store state; it must not bind or initialize Metal. Listener setup
+/// binds the socket and opens the trace log without initializing Metal. Family
+/// start initializes Metal and loads weights. Qwen opens and hashes fitted
+/// Lens payloads after bind but before Metal because the registry reads large
+/// payloads; Muse opens its llama.cpp tokenizer after Metal context creation
+/// because llama.cpp initializes its Metal backend there.
 pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     crate::shutdown::checkpoint()?;
     let gguf = GgufFile::open(&invocation.model)
@@ -485,13 +534,6 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             || matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe),
         "--lens-config requires the ordinary Qwen native executor"
     );
-    let assets = invocation
-        .web_root
-        .as_deref()
-        .map(assets::WebAssets::open)
-        .transpose()
-        .context("open prebuilt Lens client")?
-        .map(Arc::new);
     ensure!(
         invocation.lens_config.is_none() || invocation.lens_data_dir.is_some(),
         "--lens-config requires --lens-data-dir"
@@ -500,17 +542,6 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         invocation.lens_config.is_none() || template_style == items::TemplateStyle::House,
         "--lens-config requires qualified House native generation"
     );
-    let store = invocation
-        .lens_data_dir
-        .as_deref()
-        .map(|root| jobs::store::JobStore::open(root, jobs::store::Limits::default()).map(Arc::new))
-        .transpose()
-        .context("open durable Lens history")?;
-    let workbench = (store.is_some() || assets.is_some()).then_some(Workbench {
-        store,
-        assets,
-        access: lens_http::access::BrowserAccess::new(invocation.lens_allowed_origin.clone()),
-    });
     if !profile(family).upstream_template_style {
         ensure!(
             template_style == items::TemplateStyle::House,
@@ -532,31 +563,37 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     match family {
         ModelFamily::K2Horizon => {
             let prepared = backend_k2::Prepared::new(&gguf, &invocation)?;
+            let workbench = open_workbench(&invocation)?;
             let listening = Listening::open(&invocation, workbench)?;
             backend_k2::start(prepared, &gguf, &invocation, listening, idle_window)
         }
         ModelFamily::Glm5Next => {
             let prepared = backend_glm5_next::Prepared::new(&gguf, &invocation)?;
+            let workbench = open_workbench(&invocation)?;
             let listening = Listening::open(&invocation, workbench)?;
             backend_glm5_next::start(prepared, &gguf, &invocation, listening, idle_window)
         }
         ModelFamily::MuseGlimmer => {
             let prepared = backend_muse::Prepared::new(&gguf, &invocation)?;
+            let workbench = open_workbench(&invocation)?;
             let listening = Listening::open(&invocation, workbench)?;
             backend_muse::start(prepared, gguf, &invocation, listening, idle_window)
         }
         ModelFamily::DeepSeek4 => {
             let prepared = backend_ds4::Prepared::new(&gguf, &invocation)?;
+            let workbench = open_workbench(&invocation)?;
             let listening = Listening::open(&invocation, workbench)?;
             backend_ds4::start(prepared, gguf, &invocation, listening, idle_window)
         }
         ModelFamily::Qwen4Exp => {
             let prepared = backend_qwen4exp::Prepared::new(&gguf, &invocation)?;
+            let workbench = open_workbench(&invocation)?;
             let listening = Listening::open(&invocation, workbench)?;
             backend_qwen4exp::start(prepared, gguf, &invocation, listening, idle_window)
         }
         ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {
             let prepared = backend::Prepared::new(family, &gguf, &invocation)?;
+            let workbench = open_workbench(&invocation)?;
             let listening = Listening::open(&invocation, workbench)?;
             backend::start(prepared, gguf, &invocation, listening)
         }
@@ -687,6 +724,7 @@ enum OwnerCheckpoint {
     DuringHandling,
 }
 
+#[cfg(test)]
 fn accept_loop_with_checkpoint(
     listener: TcpListener,
     model_id: &str,
@@ -884,6 +922,20 @@ mod signal_tests;
 mod tests {
     use super::*;
 
+    fn muse_limits(
+        model_context: usize,
+        max_context_tokens: Option<usize>,
+        max_tokens: Option<usize>,
+    ) -> Result<ServeLimits> {
+        resolve_serve_limits(
+            profile(ModelFamily::MuseGlimmer),
+            Some(model_context),
+            max_context_tokens,
+            max_tokens,
+        )?
+        .context("Muse Glimmer test profile has no fixed serve capacity")
+    }
+
     #[test]
     fn durable_flags_are_refused_where_no_tier_exists_and_off_is_always_fine() {
         use crate::family_profile::profile;
@@ -1066,6 +1118,100 @@ mod tests {
         assert!(listener.local_addr().unwrap().ip().is_loopback());
     }
 
+    fn serve_invocation(model: std::path::PathBuf, addr: String) -> crate::cli::ServeInvocation {
+        crate::cli::ServeInvocation {
+            model,
+            addr,
+            max_tokens: None,
+            max_context_tokens: None,
+            snapshot_cache_mib: None,
+            snapshot_policy: SnapshotPolicyConfig::default(),
+            durable: durable::DurableSnapshotConfig::off(),
+            drafter: None,
+            trace_sse: None,
+            lens_data_dir: None,
+            lens_config: None,
+            web_root: None,
+            lens_allowed_origin: Vec::new(),
+            template_style: items::TemplateStyle::House,
+            idle_residency_secs: None,
+        }
+    }
+
+    fn generic_qwen_model(
+        label: &str,
+    ) -> (crate::linear_transport::tests::Fixture, std::path::PathBuf) {
+        let fixture = crate::linear_transport::tests::fixture(label, 2, 19);
+        let model = fixture.0.join("model.gguf");
+        crate::linear_transport::cpu_fixture::write_cpu_gguf(
+            &model, "qwen35", 2, "cpu-test", false,
+        );
+        (fixture, model)
+    }
+
+    fn assert_generic_qwen_upstream_refusal(invocation: crate::cli::ServeInvocation) {
+        let error = run_serve(invocation).expect_err("generic Qwen cannot use upstream style");
+        assert_eq!(
+            error.to_string(),
+            "--template-style upstream requires an identified Qwen release; this model uses the generic ChatML contract"
+        );
+    }
+
+    #[test]
+    fn preparation_refusal_precedes_listener_bind() {
+        let (_fixture, model) = generic_qwen_model("serve-prebind-refusal");
+        let held = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = held.local_addr().unwrap();
+        let mut invocation = serve_invocation(model, address.to_string());
+        invocation.template_style = items::TemplateStyle::Upstream;
+        assert_generic_qwen_upstream_refusal(invocation);
+        drop(held);
+        let rebound = TcpListener::bind(address).expect("preparation refusal must not bind");
+        drop(rebound);
+    }
+
+    #[test]
+    fn preparation_refusal_precedes_invalid_web_root() {
+        let (fixture, model) = generic_qwen_model("serve-invalid-web-root");
+        let mut invocation = serve_invocation(model, "0.0.0.0:0".into());
+        invocation.template_style = items::TemplateStyle::Upstream;
+        invocation.web_root = Some(fixture.0.join("missing-web-root"));
+
+        assert_generic_qwen_upstream_refusal(invocation);
+    }
+
+    #[test]
+    fn preparation_refusal_does_not_create_lens_store() {
+        let (fixture, model) = generic_qwen_model("serve-no-lens-store");
+        let lens_data_dir = fixture.0.join("missing-lens-store");
+        let mut invocation = serve_invocation(model, "0.0.0.0:0".into());
+        invocation.template_style = items::TemplateStyle::Upstream;
+        invocation.lens_data_dir = Some(lens_data_dir.clone());
+
+        assert_generic_qwen_upstream_refusal(invocation);
+        assert!(
+            !lens_data_dir.exists(),
+            "preparation refusal must not create the job-store directory"
+        );
+    }
+
+    fn fail_before_serve(_listening: Listening) -> Result<()> {
+        Err(anyhow::anyhow!("injected family-start failure"))
+    }
+
+    #[test]
+    fn listening_releases_socket_when_start_fails() {
+        let invocation = serve_invocation("synthetic-model.gguf".into(), "127.0.0.1:0".into());
+        let listening = Listening::open(&invocation, None).unwrap();
+        let address = listening.listener.local_addr().unwrap();
+        let competing = TcpListener::bind(address).expect_err("Listening must retain its socket");
+        assert_eq!(competing.kind(), std::io::ErrorKind::AddrInUse);
+        let error = fail_before_serve(listening).unwrap_err();
+        assert_eq!(error.to_string(), "injected family-start failure");
+        let rebound = TcpListener::bind(address).expect("failed start must release listener");
+        drop(rebound);
+    }
+
     #[test]
     fn serve_family_gate_lists_backends_explicitly() {
         for family in ModelFamily::ALL {
@@ -1083,45 +1229,89 @@ mod tests {
     #[test]
     fn muse_limits_require_explicit_bounded_capacity_and_output_default() {
         assert_eq!(
-            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, Some(7_168), Some(2_048),)
-                .unwrap(),
-            (7168, 2048)
+            muse_limits(131_072, Some(7_168), Some(2_048)).unwrap(),
+            ServeLimits {
+                context_tokens: 7168,
+                max_tokens: 2048
+            }
         );
         assert_eq!(
-            fixed_session_limits(
-                ModelFamily::MuseGlimmer,
-                131_072,
-                Some(131_072),
-                Some(16_384),
-            )
-            .unwrap(),
-            (131_072, 16_384)
+            muse_limits(131_072, Some(131_072), Some(16_384)).unwrap(),
+            ServeLimits {
+                context_tokens: 131_072,
+                max_tokens: 16_384
+            }
         );
-        assert!(
-            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, None, Some(2_048)).is_err()
-        );
-        assert!(
-            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, Some(7_168), None).is_err()
-        );
-        assert!(
-            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, Some(0), Some(2_048)).is_err()
-        );
-        assert!(
-            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, Some(7_168), Some(0)).is_err()
-        );
-        assert!(
-            fixed_session_limits(
-                ModelFamily::MuseGlimmer,
-                131_072,
-                Some(131_073),
-                Some(2_048)
-            )
-            .is_err()
-        );
-        assert!(
-            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, Some(1_024), Some(2_048))
-                .is_err()
-        );
+        assert!(muse_limits(131_072, None, Some(2_048)).is_err());
+        assert!(muse_limits(131_072, Some(7_168), None).is_err());
+        assert!(muse_limits(131_072, Some(0), Some(2_048)).is_err());
+        assert!(muse_limits(131_072, Some(7_168), Some(0)).is_err());
+        assert!(muse_limits(131_072, Some(131_073), Some(2_048)).is_err());
+        assert!(muse_limits(131_072, Some(1_024), Some(2_048)).is_err());
+    }
+
+    #[test]
+    fn capacity_limits_follow_each_family_profile() {
+        for family in ModelFamily::ALL {
+            let family_profile = profile(*family);
+            let expected_capacity = match family {
+                ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => ServeCapacity::RequestShaped,
+                ModelFamily::Qwen4Exp
+                | ModelFamily::MuseGlimmer
+                | ModelFamily::K2Horizon
+                | ModelFamily::Glm5Next => ServeCapacity::FixedContextAndOutput,
+                ModelFamily::DeepSeek4 => ServeCapacity::FixedContext,
+            };
+            assert_eq!(
+                family_profile.serve_capacity, expected_capacity,
+                "{family:?}"
+            );
+            let missing = resolve_serve_limits(family_profile, Some(8192), None, None);
+            match family_profile.serve_capacity {
+                ServeCapacity::RequestShaped => assert_eq!(missing.unwrap(), None),
+                ServeCapacity::FixedContext => assert_eq!(
+                    missing.unwrap_err().to_string(),
+                    "DeepSeek V4 serve requires --max-context-tokens: the session forward budget is fixed at startup"
+                ),
+                ServeCapacity::FixedContextAndOutput => assert_eq!(
+                    missing.unwrap_err().to_string(),
+                    format!(
+                        "{} serve requires --max-context-tokens because its resident session capacity is fixed at startup",
+                        family_profile.display
+                    )
+                ),
+            }
+
+            match family_profile.serve_capacity {
+                ServeCapacity::RequestShaped => {}
+                ServeCapacity::FixedContext => assert_eq!(
+                    resolve_serve_limits(family_profile, Some(8192), Some(4096), None).unwrap(),
+                    Some(ServeLimits {
+                        context_tokens: 4096,
+                        max_tokens: DEFAULT_SERVE_MAX_TOKENS,
+                    })
+                ),
+                ServeCapacity::FixedContextAndOutput => {
+                    assert_eq!(
+                        resolve_serve_limits(family_profile, Some(8192), Some(4096), None)
+                            .unwrap_err()
+                            .to_string(),
+                        format!(
+                            "{} serve requires explicit --max-tokens; the generic 65536-token default exceeds its session capacity",
+                            family_profile.display
+                        )
+                    );
+                    assert_eq!(
+                        resolve_serve_limits(family_profile, Some(8192), Some(4096), Some(512))
+                            .unwrap(),
+                        Some(ServeLimits {
+                            context_tokens: 4096,
+                            max_tokens: 512,
+                        })
+                    );
+                }
+            }
+        }
     }
 
     #[test]

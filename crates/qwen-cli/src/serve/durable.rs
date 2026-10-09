@@ -66,6 +66,7 @@ pub(crate) struct DurableSnapshotConfig {
 }
 
 impl DurableSnapshotConfig {
+    #[cfg(test)]
     pub(crate) const fn off() -> Self {
         Self {
             dir: DurableDir::Off,

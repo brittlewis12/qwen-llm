@@ -97,18 +97,21 @@ pub(super) struct Prepared<'g> {
 }
 
 impl<'g> Prepared<'g> {
+    /// Inspects the GLM artifact and session limits using CPU metadata only.
     pub(super) fn new(
         gguf: &'g GgufFile,
         invocation: &crate::cli::ServeInvocation,
     ) -> Result<Self> {
         let artifact = Glm5NextPreparedArtifact::inspect(gguf)
             .with_context(|| format!("admit {FAMILY} artifact"))?;
-        let (capacity, default_max) = super::fixed_session_limits(
-            ModelFamily::Glm5Next,
-            artifact.config().context_length as usize,
+        let limits = super::resolve_serve_limits(
+            super::profile(ModelFamily::Glm5Next),
+            Some(artifact.config().context_length as usize),
             invocation.max_context_tokens,
             invocation.max_tokens,
-        )?;
+        )?
+        .context("GLM-5.3-Flash profile has no fixed serve capacity")?;
+        let (capacity, default_max) = (limits.context_tokens, limits.max_tokens);
         // There is no raw serve lane: without a verified profile nothing renders.
         let profile = artifact.chat_profile().map_err(|error| {
             anyhow::anyhow!("{FAMILY} serve renders verified text chat: {error}")
@@ -182,6 +185,7 @@ pub(super) fn load(
     Glm5NextWeights::load(ctx, gguf).context("load GLM-5.3 weights")
 }
 
+/// Performs device admission and model load after listener bind, then serves.
 pub(super) fn start(
     prepared: Prepared<'_>,
     gguf: &GgufFile,

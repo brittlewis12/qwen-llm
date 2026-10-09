@@ -35,14 +35,6 @@ pub(crate) struct Glm5NextToolsPartition {
 }
 
 impl Glm5NextToolsPartition {
-    pub(crate) fn new(definitions: Vec<ToolDefinition>, max_bytes: usize) -> Self {
-        Self::with_headroom(
-            definitions,
-            max_bytes,
-            qwen_llm::metal::MetalContext::process_limit_bytes_remaining,
-        )
-    }
-
     pub(crate) fn with_headroom(
         definitions: Vec<ToolDefinition>,
         max_bytes: usize,

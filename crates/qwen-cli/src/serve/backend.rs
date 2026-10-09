@@ -276,11 +276,24 @@ fn ensure_upstream_template_identified(
 }
 
 impl Prepared {
+    /// Resolves Qwen release facts and CPU admissions without binding or Metal.
+    /// The fitted Lens registry is opened by [`start`] after listener bind.
     pub(super) fn new(
         family: qwen_llm::model_family::ModelFamily,
         gguf: &GgufFile,
         invocation: &crate::cli::ServeInvocation,
     ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            super::resolve_serve_limits(
+                super::profile(family),
+                None,
+                invocation.max_context_tokens,
+                invocation.max_tokens
+            )?
+            .is_none(),
+            "{} serve requires request-shaped capacity",
+            super::profile(family).display
+        );
         let identity = crate::prompt_template::identify_qwen_release_for_gguf(gguf)
             .context("identify the loaded model's Qwen release")?;
         if let Some(warning) = identity.warning() {
@@ -315,6 +328,7 @@ impl Prepared {
     }
 }
 
+/// Opens fitted Lens assets after bind, then initializes Metal and serves.
 pub(super) fn start(
     prepared: Prepared,
     gguf: GgufFile,
@@ -842,6 +856,7 @@ fn request_capacity(
     }
 }
 
+#[cfg(test)]
 fn dflash_capture_elements(
     prompt_tokens: usize,
     features: usize,

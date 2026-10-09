@@ -467,6 +467,7 @@ impl JobStore {
     /// `request` is the native adapter's validated, normalized specification.
     /// The caller enqueues only after this returns created=true; a lost HTTP
     /// response is recovered with the same key, not by resubmitting inference.
+    #[cfg(test)]
     pub(crate) fn accept(
         &self,
         key: &str,
@@ -790,18 +791,6 @@ impl JobStore {
                 status.observations.state = ObservationState::Partial;
             }
             status.result.complete = true;
-            Ok(true)
-        })
-    }
-
-    pub(crate) fn interrupt(&self, id: &str) -> Result<JobStatus> {
-        let control = self.control(id)?;
-        control.cancel();
-        self.update(id, |status| {
-            if status.state.terminal() {
-                return Ok(false);
-            }
-            status.interrupt();
             Ok(true)
         })
     }

@@ -71,7 +71,7 @@ use tracing_subscriber::registry::LookupSpan;
 /// tracing::info!(target: "qwen_diag", "[metal-load-ledger] source={source}");
 /// // NOT: tracing::info!(target: "qwen_diag", source, "[metal-load-ledger]");
 /// ```
-pub const DIAG_TARGET: &str = "qwen_diag";
+pub(crate) const DIAG_TARGET: &str = "qwen_diag";
 
 /// `FormatEvent` impl that emits events with `target = "qwen_diag"` as bare
 /// bodies and delegates everything else to the default `Full` formatter.

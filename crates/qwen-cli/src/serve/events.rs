@@ -134,9 +134,11 @@ pub(crate) trait EventWrite {
 }
 
 /// Test/collection sink.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct CollectEvents(pub(crate) Vec<(String, Value)>);
 
+#[cfg(test)]
 impl EventWrite for CollectEvents {
     fn event(&mut self, event_type: &str, payload: Value) -> io::Result<()> {
         self.0.push((event_type.to_owned(), payload));

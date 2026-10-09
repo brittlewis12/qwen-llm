@@ -29,6 +29,20 @@ pub(crate) enum ServeWarmth {
     LiveSession,
 }
 
+/// How `qwen serve` obtains its context and output limits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ServeCapacity {
+    RequestShaped,
+    FixedContext,
+    FixedContextAndOutput,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ServeLimits {
+    pub(crate) context_tokens: usize,
+    pub(crate) max_tokens: usize,
+}
+
 pub(crate) struct FamilyProfile {
     pub(crate) family: ModelFamily,
     pub(crate) display: &'static str,
@@ -36,6 +50,8 @@ pub(crate) struct FamilyProfile {
     pub(crate) fixed_cohort: FixedCohort,
     /// A `GenerationBackend` exists; not artifact or device admission.
     pub(crate) serve_backend: bool,
+    /// Startup sizing requirements for `qwen serve`.
+    pub(crate) serve_capacity: ServeCapacity,
     pub(crate) serve_warmth: ServeWarmth,
     /// The durable tier writes the latest continuation snapshot after an
     /// idle period (`--durable-idle-publish-secs`). A durable tier does not
@@ -54,6 +70,7 @@ static QWEN35: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::Dense,
     fixed_cohort: FixedCohort::Dense8,
     serve_backend: true,
+    serve_capacity: ServeCapacity::RequestShaped,
     serve_warmth: ServeWarmth::SnapshotsDurable,
     durable_idle_publish: true,
     idle_residency_eligible: false,
@@ -67,6 +84,7 @@ static QWEN35_MOE: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::MoeCliSerial,
     fixed_cohort: FixedCohort::Moe16,
     serve_backend: true,
+    serve_capacity: ServeCapacity::RequestShaped,
     serve_warmth: ServeWarmth::SnapshotsDurable,
     durable_idle_publish: true,
     idle_residency_eligible: false,
@@ -80,6 +98,7 @@ static QWEN4EXP: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::Unsupported("family_no_speculation"),
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
+    serve_capacity: ServeCapacity::FixedContextAndOutput,
     serve_warmth: ServeWarmth::SnapshotsRam,
     durable_idle_publish: false,
     idle_residency_eligible: true,
@@ -93,6 +112,7 @@ static DEEPSEEK4: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::Unsupported("family_no_speculation"),
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
+    serve_capacity: ServeCapacity::FixedContext,
     serve_warmth: ServeWarmth::SnapshotsDurable,
     durable_idle_publish: false,
     idle_residency_eligible: true,
@@ -106,6 +126,7 @@ static MUSE_GLIMMER: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::Unsupported("family_no_speculation"),
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
+    serve_capacity: ServeCapacity::FixedContextAndOutput,
     serve_warmth: ServeWarmth::LiveSession,
     durable_idle_publish: false,
     idle_residency_eligible: true,
@@ -119,6 +140,7 @@ static K2_HORIZON: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::Unsupported("family_no_speculation"),
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
+    serve_capacity: ServeCapacity::FixedContextAndOutput,
     serve_warmth: ServeWarmth::LiveSession,
     durable_idle_publish: false,
     idle_residency_eligible: true,
@@ -132,6 +154,7 @@ static GLM5_NEXT: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::Unsupported("family_no_speculation"),
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
+    serve_capacity: ServeCapacity::FixedContextAndOutput,
     serve_warmth: ServeWarmth::SnapshotsRam,
     durable_idle_publish: false,
     idle_residency_eligible: true,
@@ -309,6 +332,101 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    const README_TABLE_START: &str = "<!-- BEGIN GENERATED FAMILY PROFILE TABLE -->";
+    const README_TABLE_END: &str = "<!-- END GENERATED FAMILY PROFILE TABLE -->";
+
+    fn render_readme_family_table() -> String {
+        let mut rows = vec![
+            README_TABLE_START.to_owned(),
+            "| Family | `qwen serve` sizing flags | Snapshots | DFlash drafter |".to_owned(),
+            "|---|---|---|---|".to_owned(),
+        ];
+        for family in ModelFamily::ALL {
+            let family_profile = profile(*family);
+            let display = match family {
+                ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => format!(
+                    "{} ({})",
+                    family_profile.display,
+                    family.architecture_name()
+                ),
+                _ => family_profile.display.to_owned(),
+            };
+            let sizing = match family_profile.serve_capacity {
+                ServeCapacity::RequestShaped => "none (request-shaped)",
+                ServeCapacity::FixedContext => "`--max-context-tokens`",
+                ServeCapacity::FixedContextAndOutput => "`--max-context-tokens`, `--max-tokens`",
+            };
+            let snapshots = match family_profile.serve_warmth {
+                ServeWarmth::SnapshotsDurable => "RAM and disk",
+                ServeWarmth::SnapshotsRam => "RAM",
+                ServeWarmth::LiveSession => "none",
+            };
+            let drafter = match family_profile.drafter {
+                DrafterSupport::Dense => "`run`, `serve`",
+                DrafterSupport::MoeCliSerial => "`run`",
+                DrafterSupport::Unsupported(_) => "no",
+            };
+            rows.push(format!(
+                "| {display} | {sizing} | {snapshots} | {drafter} |"
+            ));
+        }
+        rows.push(README_TABLE_END.to_owned());
+        rows.join("\n")
+    }
+
+    fn readme_family_table(readme: &str) -> Option<&str> {
+        let (prefix, _) = readme.split_once(README_TABLE_START)?;
+        let start = prefix.len();
+        let (_, suffix) = readme[start..].split_once(README_TABLE_END)?;
+        let end = readme.len() - suffix.len();
+        Some(&readme[start..end])
+    }
+
+    fn readme_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../README.md")
+    }
+
+    /// Lines with CRLF and trailing whitespace removed and table cells
+    /// trimmed, so cell padding a Markdown editor adds is not drift.
+    fn normalized_table_lines(block: &str) -> Vec<String> {
+        block
+            .lines()
+            .map(|line| {
+                let line = line.trim_end();
+                if line.starts_with('|') {
+                    line.split('|').map(str::trim).collect::<Vec<_>>().join("|")
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect()
+    }
+
+    fn compare_readme_family_table(readme: &str) -> Result<(), String> {
+        let actual = readme_family_table(readme)
+            .ok_or_else(|| "README family table markers are missing".to_owned())?;
+        let expected = render_readme_family_table();
+        if normalized_table_lines(actual) == normalized_table_lines(&expected) {
+            return Ok(());
+        }
+        Err(format!(
+            "README family table differs from FamilyProfile.\n--- README block\n{actual}\n+++ generated block\n{expected}\nRegenerate with QWEN_REGENERATE_README_FAMILY_TABLE=1 cargo test -p qwen-cli --bin qwen family_profile::tests::regenerate_readme_family_table -- --ignored"
+        ))
+    }
+
+    fn replace_readme_family_table(readme: &str) -> Option<String> {
+        let (prefix, _) = readme.split_once(README_TABLE_START)?;
+        let start = prefix.len();
+        let (_, suffix) = readme[start..].split_once(README_TABLE_END)?;
+        let end = readme.len() - suffix.len();
+        Some(format!(
+            "{}{}{}",
+            &readme[..start],
+            render_readme_family_table(),
+            &readme[end..]
+        ))
+    }
+
     #[test]
     fn every_family_has_a_round_tripping_unique_profile() {
         let mut displays = BTreeSet::new();
@@ -317,6 +435,50 @@ mod tests {
             assert_eq!(profile.family, *family);
             assert!(displays.insert(profile.display), "{}", profile.display);
         }
+    }
+
+    #[test]
+    fn readme_family_table_matches_profiles() {
+        let readme = std::fs::read_to_string(readme_path()).expect("read README.md");
+        compare_readme_family_table(&readme).unwrap_or_else(|diff| panic!("{diff}"));
+    }
+
+    #[test]
+    fn readme_family_table_reports_edited_cells_as_drift() {
+        let readme = std::fs::read_to_string(readme_path()).expect("read README.md");
+        let edited = readme.replacen("none (request-shaped)", "request sizing", 1);
+        let diff = compare_readme_family_table(&edited).unwrap_err();
+        assert!(diff.contains("--- README block"));
+        assert!(diff.contains("+++ generated block"));
+        assert!(diff.contains("Regenerate with QWEN_REGENERATE_README_FAMILY_TABLE=1"));
+    }
+
+    #[test]
+    fn readme_family_table_ignores_cell_padding_and_line_endings() {
+        let readme = std::fs::read_to_string(readme_path()).expect("read README.md");
+        let padded = readme
+            .replacen(
+                "| none (request-shaped) |",
+                "|   none (request-shaped)   |",
+                1,
+            )
+            .replace('\n', "\r\n");
+        assert!(compare_readme_family_table(&padded).is_ok());
+    }
+
+    #[test]
+    #[ignore = "set QWEN_REGENERATE_README_FAMILY_TABLE=1 to rewrite the generated README block"]
+    fn regenerate_readme_family_table() {
+        assert_eq!(
+            std::env::var("QWEN_REGENERATE_README_FAMILY_TABLE").as_deref(),
+            Ok("1"),
+            "set QWEN_REGENERATE_README_FAMILY_TABLE=1"
+        );
+        let path = readme_path();
+        let readme = std::fs::read_to_string(&path).expect("read README.md");
+        let regenerated =
+            replace_readme_family_table(&readme).expect("README family table markers");
+        std::fs::write(path, regenerated).expect("write generated README family table");
     }
 
     #[test]

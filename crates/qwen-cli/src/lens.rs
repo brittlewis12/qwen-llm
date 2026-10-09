@@ -15,7 +15,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-mod bounded_file;
+use qwen_cli::bounded_file;
 mod full_lens;
 mod full_output;
 mod lens_compare;
@@ -44,18 +44,18 @@ mod plain_logit_lens;
 #[allow(dead_code)]
 mod prompt_template;
 mod published_pt;
-mod shutdown;
+use qwen_cli::shutdown;
 #[allow(dead_code)]
 mod template_lens;
-mod tracing_init;
-use bounded_file::{
-    open_regular_file, read_opened_file_exact, read_regular_file_bounded, read_regular_file_exact,
-};
 use full_lens::{
     CompareTransferArgs, ImportFullArgs, ReadFullArgs, TraceFullArgs, compare_transfer,
     import_full, read_full as read_qwen_full, trace_full as trace_qwen_full,
     trace_full_batch as trace_qwen_full_batch,
 };
+use qwen_cli::bounded_file::{
+    open_regular_file, read_opened_file_exact, read_regular_file_bounded, read_regular_file_exact,
+};
+use qwen_cli::tracing_init;
 
 const SHARD_SCHEMA: &str = "qwen.workspace_lens_row_shard";
 const CHECKPOINT_SCHEMA: &str = "qwen.workspace_lens_row_checkpoint";

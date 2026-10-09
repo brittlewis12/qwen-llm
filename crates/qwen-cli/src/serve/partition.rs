@@ -66,6 +66,7 @@ impl StreamPartition {
     /// True once the stream is known to have opened a think block that has
     /// not yet closed (used for `incomplete` reasoning items on
     /// token_limit, S0 F4).
+    #[cfg(test)]
     pub(crate) fn in_open_reasoning(&self) -> bool {
         self.phase == Phase::Reasoning
     }

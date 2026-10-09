@@ -145,29 +145,30 @@ detail.
 
 ## What differs by family
 
-| Family | `qwen serve` sizing flags | Reuse between requests | Kept across restarts | DFlash drafter |
-|---|---|---|---|---|
-| Qwen dense (`qwen35`) | none | snapshots | yes | `run`, `serve` |
-| Qwen MoE (`qwen35moe`) | none | snapshots | yes | `run` |
-| Qwen3.8 Flash-Next | both | snapshots | no | no |
-| DeepSeek V4 | `--max-context-tokens` | snapshots | yes | no |
-| GLM-5.3-Flash | both | live session; snapshots with Exact prefill | no | no |
-| Muse Glimmer | both | live session | no | no |
-| K2 Horizon | both | live session | no | no |
+<!-- BEGIN GENERATED FAMILY PROFILE TABLE -->
+| Family | `qwen serve` sizing flags | Snapshots | DFlash drafter |
+|---|---|---|---|
+| Qwen (qwen35) | none (request-shaped) | RAM and disk | `run`, `serve` |
+| Qwen MoE (qwen35moe) | none (request-shaped) | RAM and disk | `run` |
+| Qwen3.8-Flash-Next | `--max-context-tokens`, `--max-tokens` | RAM | no |
+| DeepSeek V4 | `--max-context-tokens` | RAM and disk | no |
+| Muse Glimmer | `--max-context-tokens`, `--max-tokens` | none | no |
+| K2 Horizon | `--max-context-tokens`, `--max-tokens` | none | no |
+| GLM-5.3-Flash | `--max-context-tokens`, `--max-tokens` | RAM | no |
+<!-- END GENERATED FAMILY PROFILE TABLE -->
 
-- **Sizing flags.** Ordinary Qwen sizes each request as it comes. The other
-  families allocate a fixed session at startup and need
-  `--max-context-tokens`, and all but DeepSeek V4 also `--max-tokens`.
-- **Snapshots** save model state at conversation boundaries; a later request
-  restores the longest one that matches its prompt. Qwen and DeepSeek V4 also
-  write them to disk (by default under `~/.cache/qwen-llm/serve-checkpoints`).
-- **Live session** reuses the one resident session: Muse Glimmer and K2
-  Horizon rewind it to the longest common prefix, and GLM-5.3-Flash continues
-  it only when the new prompt extends the previous one exactly.
-  GLM-5.3-Flash prefills with its Fast lineage by default; snapshots are on
-  for Exact prefill (`x_qwen.prefill_lineage: "exact"`) and opt-in for Fast
-  while that combination is being qualified.
-- **DFlash drafter** (`--drafter DRAFTER.gguf`) enables speculative decoding.
+- **Snapshots.** A snapshot saves model state at a conversation boundary; a
+  later request restores the longest matching prefix. The disk tier writes
+  under `~/.cache/qwen-llm/serve-checkpoints` by default.
+- **Live-session reuse.** Muse Glimmer and K2 Horizon rewind their resident
+  session to the longest common prefix. GLM-5.3-Flash continues its session
+  when the new prompt extends the previous one exactly; otherwise it restores
+  a compatible snapshot when one is cached, or prefills a fresh session.
+  With its default Fast prefill, GLM snapshots only at
+  the end of the shared instructions-and-tools prefix; with Exact prefill
+  (`x_qwen.prefill_lineage: "exact"`) it also snapshots at the start of the
+  generation header.
+- **DFlash drafter.** `--drafter DRAFTER.gguf` enables speculative decoding.
 
 ## Lens
 

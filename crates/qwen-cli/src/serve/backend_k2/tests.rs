@@ -276,12 +276,16 @@ fn gpu_verified_k2_chat_http_matches_raw_and_releases_sessions() {
 #[test]
 fn startup_limits_use_shared_fixed_capacity_admission() {
     let limits = |context, capacity, maximum| {
-        super::super::fixed_session_limits(
-            qwen_llm::model_family::ModelFamily::K2Horizon,
-            context,
+        super::super::resolve_serve_limits(
+            super::super::profile(qwen_llm::model_family::ModelFamily::K2Horizon),
+            Some(context),
             capacity,
             maximum,
         )
+        .map(|limits| {
+            let limits = limits.expect("K2 has a fixed context and output capacity");
+            (limits.context_tokens, limits.max_tokens)
+        })
     };
     assert_eq!(limits(8192, Some(32), Some(8)).unwrap(), (32, 8));
     assert_eq!(limits(8192, Some(256), Some(256)).unwrap(), (256, 256));

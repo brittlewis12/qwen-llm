@@ -110,7 +110,11 @@ profile reporting occurs after the generator-return sample.
 `load_ms` and `transition_tps` are not common record fields. DS4 records them
 under `diagnostics.deepseek_v4`; K2 and GLM include phase timings,
 `end_to_end_lane_ms` and `unclassified_host_overhead_ms` under
-`diagnostics.<family>.timing`. There is no common TTFT, load, or transition-rate
+`diagnostics.<family>.timing`, with `accounting`: `valid`, or
+`phases_exceed_lane_wall` / `phase_total_overflow`, in which case the
+unclassified time is null; inconsistent accounting is logged and never fails
+the request. Phases are additive buckets: their sum is checked against the lane
+wall, but two phases covering the same time are not detected. There is no common TTFT, load, or transition-rate
 field. K2/GLM end-to-end lane wall and resident execution end immediately
 after generation, before final newline or Responses assembly, stats printing,
 and record emission. Their stderr `total_ms` is sampled later. For raw K2/GLM

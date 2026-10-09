@@ -633,8 +633,8 @@ pub(crate) fn run(
             return Err(error);
         }
     };
-    timing.record(Phase::ResidentExecution, resident_t0.elapsed())?;
-    let report = timing.finish(lane_t0.elapsed())?;
+    timing.record(Phase::ResidentExecution, resident_t0.elapsed());
+    let report = timing.finish(lane_t0.elapsed());
     match output {
         Some(output) => {
             let (stop, end) = crate::serve::outcome::generation_end(&generation);
@@ -793,14 +793,14 @@ mod tests {
                 Phase::RequestPreparation,
                 Phase::ResidentExecution,
             ] {
-                timing.record(phase, Duration::from_millis(10)).unwrap();
+                timing.record(phase, Duration::from_millis(10));
             }
             let mut wall = Duration::from_millis(31);
             if let Some(phase) = extra {
-                timing.record(phase, Duration::from_secs(2)).unwrap();
+                timing.record(phase, Duration::from_secs(2));
                 wall += Duration::from_secs(2);
             }
-            timing.finish(wall).unwrap()
+            timing.finish(wall)
         };
         let base = example(None);
         assert_eq!(base.loaded_request_ms, 30.0);
@@ -827,12 +827,13 @@ mod tests {
             example(Some(Phase::Prefetch)).json["phases_ms"]["prefetch"],
             2000.0
         );
-        // Phases that exceed the lane wall are refused.
+        // Phases that exceed the lane wall are reported, not an error that
+        // would suppress the generated output.
         let mut timing = Timing::default();
-        timing
-            .record(Phase::Encoding, Duration::from_secs(2))
-            .unwrap();
-        assert!(timing.finish(Duration::from_secs(1)).is_err());
+        timing.record(Phase::Encoding, Duration::from_secs(2));
+        let report = timing.finish(Duration::from_secs(1));
+        assert_eq!(report.json["accounting"], "phases_exceed_lane_wall");
+        assert!(report.json["unclassified_host_overhead_ms"].is_null());
     }
 
     #[test]

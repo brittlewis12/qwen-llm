@@ -434,7 +434,8 @@ rendering and all model/tokenizer/session setup are excluded from this loaded-re
 metric, not hidden: `end_to_end_lane_ms` retains continuous wall time from entering
 the K2 run lane through generator return. Its named boundary excludes initial GGUF
 opening in the dispatcher, final output formatting and stats serialization.
-`unclassified_host_overhead_ms` makes the remaining nonoverlapping wall time visible.
+`unclassified_host_overhead_ms` is the lane wall minus the phase total (null, with
+`accounting` naming the problem, if the phases exceed the wall).
 Resident execution includes sampling/output callbacks; it is not GPU-only time.
 The existing `load_ms` diagnostic retains model/session setup meaning. Other
 families' telemetry is unchanged; these records are not steady-state benchmarks.

@@ -177,10 +177,12 @@ pub fn decode_scratch_specs(c: &Glm5NextConfig) -> Vec<BufferSpec> {
 }
 
 /// Row capacity of packed activation buffers for chunks of up to `rows`
-/// tokens: rounded up to a multiple of 32, the padded backing the F32-operand
-/// mat-mat tiles read (rows past a chunk are read, never written).
+/// tokens: enough that a view starting at any row below `rows` (sub-ranges
+/// such as the rows on either side of the sparse frontier) has its token
+/// count padded to 32 backed (the F32-operand mat-mat tiles read those rows,
+/// never write them): `rows + 31`, rounded up to a multiple of 32.
 pub fn packed_activation_rows(rows: u64) -> u64 {
-    rows.div_ceil(32).saturating_mul(32)
+    rows.saturating_add(31).div_ceil(32).saturating_mul(32)
 }
 
 /// Packed-prefill scratch for chunks of up to `rows` tokens. Activation

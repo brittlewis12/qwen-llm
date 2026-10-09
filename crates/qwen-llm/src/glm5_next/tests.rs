@@ -725,3 +725,19 @@ fn snapshot_bytes_at_the_agent_prefix() {
     );
     assert_eq!(crate::glm5_next_metal::snapshot_bytes(&c, u64::MAX), None);
 }
+
+/// Packed activation buffers back the F32-operand tiles' padded reads for
+/// any view starting below the chunk's rows (frontier sub-ranges).
+#[test]
+fn packed_activation_rows_back_padded_reads_from_any_start() {
+    for rows in 1u64..=600 {
+        let capacity = memory::packed_activation_rows(rows);
+        assert_eq!(capacity % 32, 0);
+        for start in 0..rows {
+            let padded = (rows - start).div_ceil(32) * 32;
+            assert!(start + padded <= capacity, "rows {rows} start {start}");
+        }
+    }
+    assert_eq!(memory::packed_activation_rows(512), 544);
+}
+

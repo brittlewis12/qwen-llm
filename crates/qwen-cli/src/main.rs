@@ -87,7 +87,7 @@ use messages::{
     render_deepseek_v4_0731_single_turn_prompt, render_qwen_chat_for_template,
     render_qwen38_single_turn_prompt,
 };
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLDevice};
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 use prompt_template::{QwenBoundGeneration, QwenReasoningControls, QwenUserPromptProtocol};
 use qwen_llm::checkpoint_identity::{
     CheckpointIdentityCache, IdentityCacheOutcome, checkpoint_content_identity,
@@ -1138,7 +1138,7 @@ fn run_info(info: cli::InfoInvocation) -> Result<()> {
         // Device facts only: no context, lease, library or command queue.
         let facts = qwen_llm::metal::DeviceFacts::probe().context("no default Metal device")?;
         if info.json {
-            println!("{}", serde_json::to_string_pretty(&facts)?);
+            println!("{}", serde_json::to_string_pretty(&facts.report())?);
         } else {
             println!("{facts}");
         }

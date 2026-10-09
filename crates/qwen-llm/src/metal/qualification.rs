@@ -5,8 +5,9 @@
 //! was checked.
 
 use super::DeviceFacts;
+use serde::Serialize;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum QualifiedMemory {
     Any,
     AtLeastGiB(u16),
@@ -18,6 +19,22 @@ pub struct Qualification {
     pub device_model: &'static str,
     pub memory: QualifiedMemory,
     pub evidence: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct QualificationStatus {
+    pub path: &'static str,
+    pub device_model: &'static str,
+    pub memory: QualifiedMemory,
+    pub evidence: &'static str,
+    pub holds_for_device: bool,
+}
+
+#[derive(Serialize)]
+pub struct DeviceFactsReport<'a> {
+    #[serde(flatten)]
+    pub facts: &'a DeviceFacts,
+    pub qualifications: Vec<QualificationStatus>,
 }
 
 impl Qualification {
@@ -38,31 +55,31 @@ pub static DEEPSEEK_V4_MULTIGROUP_SELECTOR: Qualification = Qualification {
     path: "deepseek_v4.multigroup_selector",
     device_model: DEVICE,
     memory: QualifiedMemory::Any,
-    evidence: "unrecorded",
+    evidence: "d52815a3",
 };
 pub static DEEPSEEK_V4_F16_MATRIX_SCORER: Qualification = Qualification {
     path: "deepseek_v4.f16_matrix_scorer",
     device_model: DEVICE,
     memory: QualifiedMemory::Any,
-    evidence: "unrecorded",
+    evidence: "PERF-LOG 2026-08-06 (F16 scorer KILL)",
 };
 pub static DEEPSEEK_V4_LONG_HCA: Qualification = Qualification {
     path: "deepseek_v4.long_hca",
     device_model: DEVICE,
     memory: QualifiedMemory::Any,
-    evidence: "unrecorded",
+    evidence: "e35f12d0",
 };
 pub static DEEPSEEK_V4_PACKED_Q8_COMPRESSOR_MATRIX: Qualification = Qualification {
     path: "deepseek_v4.packed_q8_compressor_matrix",
     device_model: DEVICE,
     memory: QualifiedMemory::Any,
-    evidence: "unrecorded",
+    evidence: "673830e4",
 };
 pub static DEEPSEEK_V4_PACKED_GROUPED_EXPERT: Qualification = Qualification {
     path: "deepseek_v4.packed_grouped_expert",
     device_model: DEVICE,
     memory: QualifiedMemory::Any,
-    evidence: "unrecorded",
+    evidence: "da9e5d02",
 };
 pub static DEEPSEEK_V4_ALL_SLOTS_Q3Q4: Qualification = Qualification {
     path: "deepseek_v4.all_slots_q3q4_decode",
@@ -80,13 +97,13 @@ pub static A3B_PARALLEL_COPY_AUTO: Qualification = Qualification {
     path: "metal_forward.a3b_parallel_copy_auto",
     device_model: DEVICE,
     memory: QualifiedMemory::AtLeastGiB(128),
-    evidence: "unrecorded",
+    evidence: "0a3cef59",
 };
 pub static PARALLEL_COPY_EXACT_UNIFIED: Qualification = Qualification {
     path: "metal_forward.exact_unified_parallel_copy_profiles",
     device_model: DEVICE,
     memory: QualifiedMemory::Any,
-    evidence: "unrecorded",
+    evidence: "8c223624, fba3b97a",
 };
 
 pub static QUALIFICATIONS: &[&Qualification] = &[
@@ -100,6 +117,28 @@ pub static QUALIFICATIONS: &[&Qualification] = &[
     &A3B_PARALLEL_COPY_AUTO,
     &PARALLEL_COPY_EXACT_UNIFIED,
 ];
+
+pub fn qualification_statuses(facts: &DeviceFacts) -> Vec<QualificationStatus> {
+    QUALIFICATIONS
+        .iter()
+        .map(|qualification| QualificationStatus {
+            path: qualification.path,
+            device_model: qualification.device_model,
+            memory: qualification.memory,
+            evidence: qualification.evidence,
+            holds_for_device: qualification.holds_for(facts),
+        })
+        .collect()
+}
+
+impl DeviceFacts {
+    pub fn report(&self) -> DeviceFactsReport<'_> {
+        DeviceFactsReport {
+            facts: self,
+            qualifications: qualification_statuses(self),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -140,5 +179,25 @@ mod tests {
         assert!(A3B_PARALLEL_COPY_AUTO.holds_for(&facts(DEVICE, Some(large))));
         assert!(!A3B_PARALLEL_COPY_AUTO.holds_for(&facts(DEVICE, Some(large - 1))));
         assert!(!A3B_PARALLEL_COPY_AUTO.holds_for(&facts(DEVICE, None)));
+    }
+
+    #[test]
+    fn every_record_preserves_the_original_model_gate() {
+        let qualified = facts(DEVICE, Some(128 * 1024 * 1024 * 1024));
+        let other = facts("Apple M5 Ultra", Some(256 * 1024 * 1024 * 1024));
+        for qualification in QUALIFICATIONS {
+            let name_gate = qualified.name == qualification.device_model;
+            let memory_gate = match qualification.memory {
+                QualifiedMemory::Any => true,
+                QualifiedMemory::AtLeastGiB(gib) => qualified
+                    .physical_memory_bytes
+                    .is_some_and(|bytes| bytes >= u64::from(gib) * 1024 * 1024 * 1024),
+            };
+            assert_eq!(
+                qualification.holds_for(&qualified),
+                name_gate && memory_gate
+            );
+            assert!(!qualification.holds_for(&other));
+        }
     }
 }

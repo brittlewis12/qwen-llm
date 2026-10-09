@@ -980,7 +980,7 @@ pub(super) fn parallel_copy_profile_matches(
     embedding_selection: NativeQuantEmbeddingSelection,
     profile: &ParallelCopyProfile,
 ) -> Result<bool, MfError> {
-    if !ctx.device.hasUnifiedMemory() {
+    if !ctx.device_facts().unified_memory {
         return Ok(false);
     }
     if let ParallelCopyDeviceConstraint::ExactUnified(qualification) = profile.device_constraint
@@ -1081,7 +1081,7 @@ pub(super) fn select_auto_parallel_copy_profile(
     embedding_selection: NativeQuantEmbeddingSelection,
 ) -> Result<Option<&'static ParallelCopyProfile>, MfError> {
     if !a3b_parallel_copy_auto_host_supported(
-        ctx.device.hasUnifiedMemory(),
+        ctx.device_facts().unified_memory,
         ctx.device_facts().physical_memory_bytes,
         ctx.device_facts(),
     ) {

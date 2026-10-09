@@ -86,8 +86,8 @@ impl DeepSeekV4MultigroupSelectorPlan {
         capacity: DeepSeekV4SessionCapacity,
     ) -> Result<Self> {
         let device_name = device_facts.name.clone();
-        let device_qualified = qwen_llm::metal::DEEPSEEK_V4_MULTIGROUP_SELECTOR
-            .holds_for(device_facts);
+        let device_qualified =
+            qwen_llm::metal::DEEPSEEK_V4_MULTIGROUP_SELECTOR.holds_for(device_facts);
         let geometry = match requested {
             DeepSeekV4MultigroupSelectorArg::Auto | DeepSeekV4MultigroupSelectorArg::Off => None,
             DeepSeekV4MultigroupSelectorArg::QualifiedExperimental => {

@@ -2724,7 +2724,6 @@ fn packed_q8_qa_kv_matrix_mode() -> PackedQaKvMatrixMode {
     })
 }
 
-
 const PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES: u64 = 104_202_502_492;
 const PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES: u64 = 89_920_886_108;
 const PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES: u64 = 89_060_075_612;
@@ -6106,7 +6105,6 @@ fn packed_grouped_iq3_fused_candidate_supported(ctx: &MetalContext) -> bool {
     fused.threadExecutionWidth() == 32 && fused.maxTotalThreadsPerThreadgroup() >= 128
 }
 
-
 const PACKED_GROUPED_EXPERT_MAX_TOKENS: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
 const PACKED_GPU_ROUTE_MAX_TOKENS: usize = 2_048;
 
@@ -6195,8 +6193,9 @@ fn packed_grouped_expert_policy(
     expert_count: usize,
 ) -> Result<PackedExpertPolicy, DeepSeekV4MetalError> {
     let enabled = match packed_grouped_expert_mode() {
-        PackedGroupedExpertMode::Auto => crate::metal::DEEPSEEK_V4_PACKED_GROUPED_EXPERT
-            .holds_for(ctx.device_facts()),
+        PackedGroupedExpertMode::Auto => {
+            crate::metal::DEEPSEEK_V4_PACKED_GROUPED_EXPERT.holds_for(ctx.device_facts())
+        }
         PackedGroupedExpertMode::ForceOn => true,
         PackedGroupedExpertMode::ForceOff => false,
     } && packed_grouped_expert_kernels_supported(ctx);
@@ -10384,7 +10383,7 @@ impl DeepSeekV4Session {
         }
         self.residency.validate_context(ctx)?;
         let n_tokens = checked_token_count(token_ids.len())?;
-            let residency_tensor_count = self.residency.report().tensor_count;
+        let residency_tensor_count = self.residency.report().tensor_count;
         let residency_source_bytes = self.residency.report().source_bytes;
         let expert_count = self.prefill.moe.expert_count;
         let route_policy = if route_policy == PackedRoutePolicy::Cpu
@@ -10618,7 +10617,7 @@ impl DeepSeekV4Session {
         layer_completed: &mut impl FnMut(usize),
     ) -> Result<(), DeepSeekV4MetalError> {
         let n_tokens = token_ids.len();
-            let residency_tensor_count = self.residency.report().tensor_count;
+        let residency_tensor_count = self.residency.report().tensor_count;
         let residency_source_bytes = self.residency.report().source_bytes;
         let expert_count = self.prefill.moe.expert_count;
         if packed_grouped_dense_attention_enabled() {
@@ -11631,7 +11630,8 @@ impl DeepSeekV4Session {
             let shared_down = self.layer_tensor(layer, "ffn_down_shexp.weight")?;
             let grouped_q3q4_qualified = packed_grouped_q3q4_enabled()
                 && packed_grouped_q3q4_scope_qualified(
-                    crate::metal::DEEPSEEK_V4_PACKED_Q8_COMPRESSOR_MATRIX.holds_for(ctx.device_facts()),
+                    crate::metal::DEEPSEEK_V4_PACKED_Q8_COMPRESSOR_MATRIX
+                        .holds_for(ctx.device_facts()),
                     self.residency.report().tensor_count,
                     self.residency.report().source_bytes,
                     self.prefill.moe.expert_count,
@@ -11820,7 +11820,7 @@ impl DeepSeekV4Session {
                 .map_or(0.0, |started| started.elapsed().as_secs_f64());
             let post_route_wait_started = trace_layers.then(std::time::Instant::now);
             expert_command.commit();
-            crate::metal::wait_unchecked(&expert_command);
+            crate::metal::wait_unchecked(expert_command);
             let post_route_wait_seconds = post_route_wait_started
                 .as_ref()
                 .map_or(0.0, |started| started.elapsed().as_secs_f64());
@@ -11831,7 +11831,7 @@ impl DeepSeekV4Session {
                     "packed layer {layer} shared-expert command failed: {error}"
                 ));
             }
-            if let Err(error) = crate::metal::command_buffer_completed(&expert_command) {
+            if let Err(error) = crate::metal::command_buffer_completed(expert_command) {
                 return invalid(format!("packed layer {layer} command failed: {error}"));
             }
             #[cfg(feature = "dsv4-diagnostics")]

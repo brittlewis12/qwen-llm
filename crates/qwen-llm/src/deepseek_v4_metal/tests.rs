@@ -47,11 +47,7 @@ fn model_residency_set_scope_is_exact() {
         required_alignment: GGUF_BINDING_ALIGNMENT,
     };
     assert!(deepseek_v4_residency_set_scope_qualified(
-        true,
-        true,
-        43,
-        160,
-        &report,
+        true, true, 43, 160, &report,
     ));
     for (enabled, device, layers, experts) in [
         (false, true, 43, 160),
@@ -86,20 +82,12 @@ fn model_residency_set_scope_is_exact() {
 
     report.tensor_count -= 1;
     assert!(!deepseek_v4_residency_set_scope_qualified(
-        true,
-        true,
-        43,
-        160,
-        &report,
+        true, true, 43, 160, &report,
     ));
     report.tensor_count += 1;
     report.source_bytes -= 1;
     assert!(!deepseek_v4_residency_set_scope_qualified(
-        true,
-        true,
-        43,
-        160,
-        &report,
+        true, true, 43, 160, &report,
     ));
 }
 

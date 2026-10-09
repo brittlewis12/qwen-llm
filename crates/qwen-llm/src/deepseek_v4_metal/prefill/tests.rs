@@ -998,45 +998,16 @@ fn packed_grouped_expert_mode_has_an_isolated_fail_closed_rollback() {
             (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216),
         ] {
             assert!(packed_grouped_iq2_matrix_scope_qualified(
-                true,
-                1_328,
-                bytes,
-                experts,
-                tokens,
+                true, 1_328, bytes, experts, tokens,
             ));
         }
     }
     for (device, tensors, bytes, experts) in [
-        (
-            false,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-            216,
-        ),
-        (
-            true,
-            1_327,
-            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-            216,
-        ),
-        (
-            true,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-            216,
-        ),
-        (
-            true,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-            160,
-        ),
-        (
-            true,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-            256,
-        ),
+        (false, 1_328, PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216),
+        (true, 1_327, PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216),
+        (true, 1_328, PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES, 216),
+        (true, 1_328, PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES, 160),
+        (true, 1_328, PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 256),
         (
             true,
             1_328,
@@ -1243,13 +1214,7 @@ fn packed_q8_compressor_matrix_scope_is_exact() {
             (PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES, 160),
             (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216),
         ] {
-            assert!(qualified(
-                true,
-                1_328,
-                bytes,
-                experts,
-                tokens,
-            ));
+            assert!(qualified(true, 1_328, bytes, experts, tokens,));
         }
     }
     for (bytes, experts) in [
@@ -1260,13 +1225,7 @@ fn packed_q8_compressor_matrix_scope_is_exact() {
         (PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES, 160),
         (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216),
     ] {
-        assert!(!qualified(
-            true,
-            1_328,
-            bytes,
-            experts,
-            255,
-        ));
+        assert!(!qualified(true, 1_328, bytes, experts, 255,));
     }
     assert!(!qualified(
         false,

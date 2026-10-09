@@ -1405,8 +1405,6 @@ impl DeepSeekV4MoeScratch {
     }
 }
 
-
-
 pub(super) const DEEPSEEK_V4_ALL_SLOTS_Q3Q4_EXPERT_COUNT: usize = 160;
 
 pub(super) const DEEPSEEK_V4_ALL_SLOTS_Q3Q4_FFN_SIZE: usize = 2_048;

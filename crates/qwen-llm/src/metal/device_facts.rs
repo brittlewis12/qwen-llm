@@ -23,7 +23,7 @@ pub struct GpuFamilySupport {
 
 /// Stable identifier of the serialized report; bump it when a field's
 /// name or meaning changes.
-pub const DEVICE_FACTS_VERSION: &str = "qwen_device_info_v1";
+pub const DEVICE_FACTS_VERSION: &str = "qwen_device_info_v2";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DeviceFacts {
@@ -83,7 +83,7 @@ impl DeviceFacts {
     }
 
     pub fn format_report(&self) -> String {
-        format!(
+        let mut report = format!(
             "device: {}\narchitecture: {}\nregistry_id: {}\ngpu_families: Apple7={} Apple8={} Apple9={} Apple10={} Metal3={} Metal4={}\nmax_threadgroup_memory: {} bytes\nmax_buffer_length: {} bytes\nrecommended_max_working_set: {} bytes\nunified_memory: {}\nhost_page_size: {}\nphysical_memory: {}\nos_version: {}\nproduct_metallib_deployment_target: {}\nresearch_metallib_deployment_target: {}",
             self.name,
             self.architecture,
@@ -107,7 +107,21 @@ impl DeviceFacts {
             optional_value(self.os_version.as_deref()),
             self.product_metallib_deployment_target,
             self.research_metallib_deployment_target,
-        )
+        );
+        report.push_str("\nqualifications:");
+        for status in super::qualification::qualification_statuses(self) {
+            let memory = match status.memory {
+                super::qualification::QualifiedMemory::Any => "any".to_string(),
+                super::qualification::QualifiedMemory::AtLeastGiB(gib) => {
+                    format!("at_least_{gib}_GiB")
+                }
+            };
+            report.push_str(&format!(
+                "\n  {}: device={} memory={} holds_for_device={} evidence={}",
+                status.path, status.device_model, memory, status.holds_for_device, status.evidence,
+            ));
+        }
+        report
     }
 }
 
@@ -201,7 +215,7 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&sample()).unwrap(),
             concat!(
-                r#"{"version":"qwen_device_info_v1","name":"Test GPU","architecture":"test-arch","#,
+                r#"{"version":"qwen_device_info_v2","name":"Test GPU","architecture":"test-arch","#,
                 r#""registry_id":42,"gpu_families":{"apple7":true,"apple8":false,"apple9":false,"#,
                 r#""apple10":false,"metal3":true,"metal4":false},"max_threadgroup_memory_bytes":32,"#,
                 r#""max_buffer_length_bytes":4096,"recommended_max_working_set_bytes":8192,"#,
@@ -220,5 +234,22 @@ mod tests {
         assert!(report.contains("host_page_size: 16384"));
         assert!(report.contains("physical_memory: unavailable"));
         assert!(report.contains("product_metallib_deployment_target: 15.0"));
+        assert!(report.contains("deepseek_v4.multigroup_selector: device=Apple M4 Max"));
+        assert!(report.contains("holds_for_device=false evidence=d52815a3"));
+    }
+
+    #[test]
+    fn device_facts_json_report_lists_qualification_results() {
+        let report = serde_json::to_value(sample().report()).unwrap();
+        assert_eq!(report["version"], DEVICE_FACTS_VERSION);
+        let qualifications = report["qualifications"].as_array().unwrap();
+        assert_eq!(
+            qualifications.len(),
+            super::super::qualification::QUALIFICATIONS.len()
+        );
+        assert_eq!(qualifications[0]["path"], "deepseek_v4.multigroup_selector");
+        assert_eq!(qualifications[0]["device_model"], "Apple M4 Max");
+        assert_eq!(qualifications[0]["evidence"], "d52815a3");
+        assert_eq!(qualifications[0]["holds_for_device"], false);
     }
 }

@@ -295,11 +295,8 @@ impl DeepSeekV4Backend {
         let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, forward_limit)
             .context("plan DeepSeek V4 residency for serve")?;
         let session_capacity = plan.session_capacity();
-        let selector_plan = DeepSeekV4MultigroupSelectorPlan::new(
-            selector,
-            ctx.device_facts(),
-            session_capacity,
-        )?;
+        let selector_plan =
+            DeepSeekV4MultigroupSelectorPlan::new(selector, ctx.device_facts(), session_capacity)?;
         let admitted = plan
             .admit(ctx.memory_signals())
             .context("admit DeepSeek V4 residency for serve")?;

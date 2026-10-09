@@ -426,7 +426,9 @@ const DENSE27B_PARALLEL_COPY_PROFILE: ParallelCopyProfile = ParallelCopyProfile 
     inventory_digest: "50e9af4e4f590fc85687a71f5602ce035e7fdf0e2a31e928b2c7a2be10458a07",
     embedding_dtype: GgmlType::Q4_K,
     embedding_shape: &[5120, 248_320],
-    device_constraint: ParallelCopyDeviceConstraint::ExactUnified(&crate::metal::PARALLEL_COPY_EXACT_UNIFIED),
+    device_constraint: ParallelCopyDeviceConstraint::ExactUnified(
+        &crate::metal::PARALLEL_COPY_EXACT_UNIFIED,
+    ),
     authentication: ParallelCopyAuthentication::DensePlannerFree,
     marker_contract: ParallelCopyMarkerContract::DenseSchema2,
     supports_direct_pread: true,
@@ -514,7 +516,9 @@ const A10B_PARALLEL_PREAD_PROFILE: ParallelCopyProfile = ParallelCopyProfile {
     inventory_digest: "b331c475123dbee3bc862a495266dee3996c5f3adabcd6fbeaff9bbabd71a4f8",
     embedding_dtype: GgmlType::Q8_0,
     embedding_shape: &[3072, 248_320],
-    device_constraint: ParallelCopyDeviceConstraint::ExactUnified(&crate::metal::PARALLEL_COPY_EXACT_UNIFIED),
+    device_constraint: ParallelCopyDeviceConstraint::ExactUnified(
+        &crate::metal::PARALLEL_COPY_EXACT_UNIFIED,
+    ),
     authentication: ParallelCopyAuthentication::A10bPlannerFree,
     marker_contract: ParallelCopyMarkerContract::A10bSchema2,
     supports_direct_pread: true,

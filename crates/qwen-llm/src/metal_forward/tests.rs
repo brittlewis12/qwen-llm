@@ -4,22 +4,25 @@ use crate::gguf::GgufFile;
 use crate::loader::Model;
 use crate::sampling::{Sampler, SamplingConfig};
 
-#[path = "tests/iq_capacity.rs"]
-mod iq_capacity;
-#[path = "tests/iq_capacity_model.rs"]
-mod iq_capacity_model;
 #[path = "tests/iq2_xs_mma.rs"]
 mod iq2_xs_mma;
 #[path = "tests/iq2_xs_mma_model.rs"]
 mod iq2_xs_mma_model;
+#[path = "tests/iq_capacity.rs"]
+mod iq_capacity;
+#[path = "tests/iq_capacity_model.rs"]
+mod iq_capacity_model;
 
 fn metal_test_context() -> Option<MetalContext> {
     crate::test_fixtures::metal_context_or_skip()
 }
 
-fn qualification_facts(name: &str, physical_memory_bytes: Option<u64>) -> crate::metal::DeviceFacts {
+fn qualification_facts(
+    name: &str,
+    physical_memory_bytes: Option<u64>,
+) -> crate::metal::DeviceFacts {
     crate::metal::DeviceFacts {
-        version: "qwen_device_info_v1",
+        version: "qwen_device_info_v2",
         name: name.into(),
         architecture: "test".into(),
         registry_id: 0,
@@ -1159,9 +1162,7 @@ fn parallel_copy_auto_host_gate_is_exact() {
     let memory_128 = Some(128 * 1024 * 1024 * 1024);
     let facts_128 = qualification_facts("Apple M4 Max", memory_128);
     assert!(a3b_parallel_copy_auto_host_supported(
-        true,
-        memory_128,
-        &facts_128,
+        true, memory_128, &facts_128,
     ));
     let facts_192 = qualification_facts("Apple M4 Max", Some(192 * 1024 * 1024 * 1024));
     assert!(a3b_parallel_copy_auto_host_supported(
@@ -1170,15 +1171,11 @@ fn parallel_copy_auto_host_gate_is_exact() {
         &facts_192,
     ));
     assert!(!a3b_parallel_copy_auto_host_supported(
-        false,
-        memory_128,
-        &facts_128,
+        false, memory_128, &facts_128,
     ));
     let other = qualification_facts("Apple M4 Pro", memory_128);
     assert!(!a3b_parallel_copy_auto_host_supported(
-        true,
-        memory_128,
-        &other,
+        true, memory_128, &other,
     ));
     let below = qualification_facts("Apple M4 Max", Some(128 * 1024 * 1024 * 1024 - 1));
     assert!(!a3b_parallel_copy_auto_host_supported(

@@ -1138,25 +1138,61 @@ mod tests {
         }
     }
 
-    #[test]
-    fn preparation_refusal_precedes_listener_bind() {
-        let fixture = crate::linear_transport::tests::fixture("serve-prebind-refusal", 2, 19);
+    fn generic_qwen_model(
+        label: &str,
+    ) -> (crate::linear_transport::tests::Fixture, std::path::PathBuf) {
+        let fixture = crate::linear_transport::tests::fixture(label, 2, 19);
         let model = fixture.0.join("model.gguf");
         crate::linear_transport::cpu_fixture::write_cpu_gguf(
             &model, "qwen35", 2, "cpu-test", false,
         );
-        let held = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = held.local_addr().unwrap();
-        let mut invocation = serve_invocation(model, address.to_string());
-        invocation.template_style = items::TemplateStyle::Upstream;
+        (fixture, model)
+    }
+
+    fn assert_generic_qwen_upstream_refusal(invocation: crate::cli::ServeInvocation) {
         let error = run_serve(invocation).expect_err("generic Qwen cannot use upstream style");
         assert_eq!(
             error.to_string(),
             "--template-style upstream requires an identified Qwen release; this model uses the generic ChatML contract"
         );
+    }
+
+    #[test]
+    fn preparation_refusal_precedes_listener_bind() {
+        let (_fixture, model) = generic_qwen_model("serve-prebind-refusal");
+        let held = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = held.local_addr().unwrap();
+        let mut invocation = serve_invocation(model, address.to_string());
+        invocation.template_style = items::TemplateStyle::Upstream;
+        assert_generic_qwen_upstream_refusal(invocation);
         drop(held);
         let rebound = TcpListener::bind(address).expect("preparation refusal must not bind");
         drop(rebound);
+    }
+
+    #[test]
+    fn preparation_refusal_precedes_invalid_web_root() {
+        let (fixture, model) = generic_qwen_model("serve-invalid-web-root");
+        let mut invocation = serve_invocation(model, "0.0.0.0:0".into());
+        invocation.template_style = items::TemplateStyle::Upstream;
+        invocation.web_root = Some(fixture.0.join("missing-web-root"));
+
+        assert_generic_qwen_upstream_refusal(invocation);
+    }
+
+    #[test]
+    fn preparation_refusal_does_not_create_lens_store() {
+        let (fixture, model) = generic_qwen_model("serve-no-lens-store");
+        let lens_data_dir = fixture.0.join("missing-lens-store");
+        let mut invocation = serve_invocation(model, "0.0.0.0:0".into());
+        invocation.template_style = items::TemplateStyle::Upstream;
+        invocation.lens_data_dir = Some(lens_data_dir.clone());
+
+        assert_generic_qwen_upstream_refusal(invocation);
+        assert!(
+            !lens_data_dir.exists(),
+            "preparation refusal must not create the job-store directory"
+        );
     }
 
     fn fail_before_serve(_listening: Listening) -> Result<()> {
@@ -1165,11 +1201,11 @@ mod tests {
 
     #[test]
     fn listening_releases_socket_when_start_fails() {
-        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = probe.local_addr().unwrap();
-        drop(probe);
-        let invocation = serve_invocation("synthetic-model.gguf".into(), address.to_string());
+        let invocation = serve_invocation("synthetic-model.gguf".into(), "127.0.0.1:0".into());
         let listening = Listening::open(&invocation, None).unwrap();
+        let address = listening.listener.local_addr().unwrap();
+        let competing = TcpListener::bind(address).expect_err("Listening must retain its socket");
+        assert_eq!(competing.kind(), std::io::ErrorKind::AddrInUse);
         let error = fail_before_serve(listening).unwrap_err();
         assert_eq!(error.to_string(), "injected family-start failure");
         let rebound = TcpListener::bind(address).expect("failed start must release listener");

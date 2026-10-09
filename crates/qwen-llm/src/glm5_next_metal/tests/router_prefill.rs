@@ -454,7 +454,7 @@ fn leaf_screen(ctx: &MetalContext, session: &Glm5NextSession<'_>, out: &mut std:
                     matmat(
                         ctx,
                         &enc,
-                        PackedLineage::Fast,
+                        super::super::packed::StageMode::Fast,
                         &moe.router,
                         &p.normed,
                         &p.router,

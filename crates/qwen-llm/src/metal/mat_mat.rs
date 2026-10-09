@@ -2709,6 +2709,125 @@ pub fn encode_mat_mat_q8_0_f32(
     Ok(())
 }
 
+/// Q8_0 x F32 mat-mat with every matrix operand in F32
+/// (`kernel_mat_mat_q8_0_f32_r2c4k64`): weights dequantized as
+/// `scale * (float)q` (only the stored Q8 scale is F16), activations loaded
+/// as F32, F32 accumulation; one 32-thread SIMD group per 16 outputs x 32
+/// tokens, K stepped by 64. Each output's dot product runs in a fixed order
+/// independent of the token count, so a token's outputs are bit-identical
+/// whatever `n_tokens` or chunk it is computed in.
+///
+/// Family-neutral (shared by DeepSeek V4 and GLM-5.3 Fast precision
+/// policies). Requirements, checked before encoding: Q8_0 weight
+/// `[n_in, n_out]`; `n_in % 64 == 0`, `n_out % 16 == 0`; F32 `x`
+/// `[n_in, n_tokens]` whose buffer backs `ceil(n_tokens / 32) * 32` rows
+/// from its offset (rows past `n_tokens` are read, never written, and never
+/// mix into a real token's outputs); F32 `y` `[n_out, n_tokens]` not
+/// overlapping the padded input or the weight; 4 KiB threadgroup memory.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_mat_q8_0_f32_r2c4k64(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "mat_mat_q8_0_f32_r2c4k64";
+    let bad = |detail: String| MetalError::BadShape {
+        kernel: KERNEL,
+        detail,
+    };
+    if weight.dtype != GgmlType::Q8_0
+        || x.dtype != GgmlType::F32
+        || y.dtype != GgmlType::F32
+        || n_tokens == 0
+        || !n_in.is_multiple_of(64)
+        || !n_out.is_multiple_of(16)
+    {
+        return Err(bad(format!(
+            "weight {:?}, x {:?}, y {:?}, n_in {n_in}, n_out {n_out}, n_tokens {n_tokens}",
+            weight.dtype, x.dtype, y.dtype
+        )));
+    }
+    let elements = |a: usize, b: usize| a.checked_mul(b).map(|n| n as u64);
+    if weight.n_elements() as u64 != elements(n_in, n_out).unwrap_or(u64::MAX)
+        || x.n_elements() as u64 != elements(n_in, n_tokens).unwrap_or(u64::MAX)
+        || y.n_elements() as u64 != elements(n_out, n_tokens).unwrap_or(u64::MAX)
+    {
+        return Err(bad("operand sizes do not match the geometry".into()));
+    }
+    let n = |v: usize| u32::try_from(v).map_err(|_| bad(format!("{v} exceeds u32")));
+    let padded_bytes = n_tokens
+        .div_ceil(32)
+        .checked_mul(32)
+        .and_then(|rows| rows.checked_mul(n_in))
+        .and_then(|elements| elements.checked_mul(size_of::<f32>()))
+        .ok_or_else(|| bad("padded input size overflow".into()))?;
+    let padded_end = x
+        .offset
+        .checked_add(padded_bytes as u64)
+        .ok_or_else(|| bad("padded input end overflow".into()))?;
+    if padded_end > x.buffer.length() as u64 {
+        return Err(bad(format!(
+            "x backs {} bytes from its offset; {padded_bytes} needed for {n_tokens} tokens padded to 32",
+            x.buffer.length() as u64 - x.offset
+        )));
+    }
+    let overlaps = |a: &MetalTensor, a_end: u64, b: &MetalTensor| {
+        Retained::as_ptr(&a.buffer) == Retained::as_ptr(&b.buffer)
+            && a.offset < b.offset + b.n_bytes() as u64
+            && b.offset < a_end
+    };
+    if overlaps(x, padded_end, y) || overlaps(weight, weight.offset + weight.n_bytes() as u64, y) {
+        return Err(bad("output overlaps an input".into()));
+    }
+    if ctx.device.maxThreadgroupMemoryLength() < 4_096 {
+        return Err(bad("needs 4 KiB of threadgroup memory".into()));
+    }
+    let pso = ctx.pipeline("kernel_mat_mat_q8_0_f32_r2c4k64")?;
+    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 32 {
+        return Err(bad("needs one 32-thread SIMD group".into()));
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+    }
+    let args = Args {
+        m: n(n_out)?,
+        n: n(n_tokens)?,
+        k: n(n_in)?,
+        nb01: n(n_in / 32 * 34)?,
+        stride_b: n(n_in)?,
+    };
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.set_threadgroup_memory(0, 4_096);
+    enc.dispatch(
+        MTLSize {
+            width: n_tokens.div_ceil(32),
+            height: n_out / 16,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// **EXPERIMENTAL — FAILED A-LITE GATE — NOT WIRED INTO PRODUCTION (v0.73c.2)**
 ///
 /// Layer-major fused SwiGLU FFN — Q4_K mat-mat × 2 + silu_mul, NR1=16.

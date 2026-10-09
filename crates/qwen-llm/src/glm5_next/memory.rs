@@ -176,11 +176,21 @@ pub fn decode_scratch_specs(c: &Glm5NextConfig) -> Vec<BufferSpec> {
     ]
 }
 
-/// Packed-prefill scratch for chunks of up to `rows` tokens. Products of
-/// dimensions saturate, so an absurd `rows` fails [`BufferSpec::bytes`]
-/// instead of wrapping to a small shape.
+/// Row capacity of packed activation buffers for chunks of up to `rows`
+/// tokens: rounded up to a multiple of 32, the padded backing the F32-operand
+/// mat-mat tiles read (rows past a chunk are read, never written).
+pub fn packed_activation_rows(rows: u64) -> u64 {
+    rows.div_ceil(32).saturating_mul(32)
+}
+
+/// Packed-prefill scratch for chunks of up to `rows` tokens. Activation
+/// buffers hold [`packed_activation_rows`] rows (the session exposes `rows`
+/// of them); routing buffers hold exactly `rows`. Products of dimensions
+/// saturate, so an absurd `rows` fails [`BufferSpec::bytes`] instead of
+/// wrapping to a small shape.
 pub fn packed_scratch_specs(c: &Glm5NextConfig, rows: u64) -> Vec<BufferSpec> {
-    let r = rows;
+    let r = packed_activation_rows(rows);
+    let routing_rows = rows;
     let h = c.hidden_size as u64;
     let w = c.kda_width() as u64;
     let heads = c.head_count as u64;
@@ -190,7 +200,7 @@ pub fn packed_scratch_specs(c: &Glm5NextConfig, rows: u64) -> Vec<BufferSpec> {
     let e = c.expert_count as u64;
     let z = BufferSpec::zeros;
     vec![
-        z("token", I32, &[r]),
+        z("token", I32, &[routing_rows]),
         z("embedding", F32, &[h, r]),
         z("residual_a", F32, &[h, 4, r]),
         z("residual_b", F32, &[h, 4, r]),
@@ -230,13 +240,13 @@ pub fn packed_scratch_specs(c: &Glm5NextConfig, rows: u64) -> Vec<BufferSpec> {
         z("dense_up", F32, &[c.dense_ffn_size as u64, r]),
         z("router", F32, &[e, r]),
         z("counts", I32, &[e]),
-        z("slots", I32, &[e.saturating_mul(r)]),
+        z("slots", I32, &[e.saturating_mul(routing_rows)]),
         z(
             "inner",
             F32,
-            &[c.expert_ffn_size as u64, k.saturating_mul(r)],
+            &[c.expert_ffn_size as u64, k.saturating_mul(routing_rows)],
         ),
-        z("slot_out", F32, &[h, k.saturating_mul(r)]),
+        z("slot_out", F32, &[h, k.saturating_mul(routing_rows)]),
         z("routed", F32, &[h, r]),
         z("shared_gate", F32, &[c.shared_expert_ffn_size as u64, r]),
         z("shared_up", F32, &[c.shared_expert_ffn_size as u64, r]),

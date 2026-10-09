@@ -115,6 +115,60 @@ fn stage_lineage(lineage: PackedLineage, stage: Stage) -> PackedLineage {
     lineage
 }
 
+/// How a stage computes its quantized projections in this session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum StageMode {
+    /// The decode kernels, row by row (bitwise equal to serial decode).
+    Exact,
+    /// Batched mat-mat tiles with half-staged operands.
+    Fast,
+    /// Batched mat-mat with F32 operands where an F32-operand tile exists
+    /// for the weight type (Q8_0 today); otherwise as [`StageMode::Fast`].
+    FastF32,
+}
+
+#[cfg(test)]
+thread_local! {
+    static F32_STAGES: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
+}
+
+/// A stage's projection mode: its lineage ([`stage_lineage`]), with Fast
+/// stages in their F32-operand form where tests choose ([`F32Stages`]).
+/// Product builds use the half-staged Fast form until an F32 configuration
+/// qualifies (map #12 accuracy lane).
+fn stage_mode(lineage: PackedLineage, stage: Stage) -> StageMode {
+    match stage_lineage(lineage, stage) {
+        PackedLineage::Exact => StageMode::Exact,
+        PackedLineage::Fast => {
+            #[cfg(test)]
+            if F32_STAGES.with(|s| s.get()) & stage.bit() != 0 {
+                return StageMode::FastF32;
+            }
+            StageMode::Fast
+        }
+    }
+}
+
+/// Test-only scope in which `stages` of Fast sessions on this thread use
+/// F32-operand tiles where one exists; the previous set is restored on drop.
+#[cfg(test)]
+pub(super) struct F32Stages(u16);
+
+#[cfg(test)]
+impl F32Stages {
+    pub(super) fn set(stages: &[Stage]) -> Self {
+        let bits = stages.iter().fold(0, |bits, stage| bits | stage.bit());
+        Self(F32_STAGES.with(|s| s.replace(bits)))
+    }
+}
+
+#[cfg(test)]
+impl Drop for F32Stages {
+    fn drop(&mut self) {
+        F32_STAGES.with(|s| s.set(self.0));
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static ROUND_EXACT_ACTIVATIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -377,6 +431,12 @@ impl PackedSparseScratch {
     }
 }
 
+/// An activation buffer allocated with padded rows
+/// ([`memory::packed_activation_rows`]), exposed with `rows` rows.
+fn take_rows(b: &mut SpecBuffers, name: &str, rows: usize) -> Result<MetalTensor> {
+    Ok(rows_view(&b.take(name)?, rows))
+}
+
 impl PackedScratch {
     pub(super) fn new(
         ctx: &MetalContext,
@@ -391,47 +451,47 @@ impl PackedScratch {
             rows,
             lineage: PackedLineage::Fast,
             token: b.take("token")?,
-            embedding: b.take("embedding")?,
-            residual: [b.take("residual_a")?, b.take("residual_b")?],
-            hc_partial_dots: b.take("hc_partial_dots")?,
-            hc_partial_sumsq: b.take("hc_partial_sumsq")?,
-            mixes: b.take("mixes")?,
-            pre: b.take("pre")?,
-            post: b.take("post")?,
-            comb: b.take("comb")?,
-            collapsed: b.take("collapsed")?,
-            normed: b.take("normed")?,
-            block_out: b.take("block_out")?,
-            q: b.take("q")?,
-            k: b.take("k")?,
-            v: b.take("v")?,
-            rank_a: b.take("rank_a")?,
-            raw_gate: b.take("raw_gate")?,
-            raw_beta: b.take("raw_beta")?,
-            rank_b: b.take("rank_b")?,
-            output_gate: b.take("output_gate")?,
-            kda_out: b.take("kda_out")?,
-            query_a: b.take("query_a")?,
-            query_r: b.take("query_r")?,
-            query: b.take("query")?,
-            latent_raw: b.take("latent_raw")?,
-            latent: b.take("latent")?,
-            query_latent: b.take("query_latent")?,
-            output_latent: b.take("output_latent")?,
-            heads_out: b.take("heads_out")?,
-            index_key: b.take("index_key")?,
-            index_gate: b.take("index_gate")?,
-            dense_gate: b.take("dense_gate")?,
-            dense_up: b.take("dense_up")?,
-            router: b.take("router")?,
+            embedding: take_rows(&mut b, "embedding", rows)?,
+            residual: [take_rows(&mut b, "residual_a", rows)?, take_rows(&mut b, "residual_b", rows)?],
+            hc_partial_dots: take_rows(&mut b, "hc_partial_dots", rows)?,
+            hc_partial_sumsq: take_rows(&mut b, "hc_partial_sumsq", rows)?,
+            mixes: take_rows(&mut b, "mixes", rows)?,
+            pre: take_rows(&mut b, "pre", rows)?,
+            post: take_rows(&mut b, "post", rows)?,
+            comb: take_rows(&mut b, "comb", rows)?,
+            collapsed: take_rows(&mut b, "collapsed", rows)?,
+            normed: take_rows(&mut b, "normed", rows)?,
+            block_out: take_rows(&mut b, "block_out", rows)?,
+            q: take_rows(&mut b, "q", rows)?,
+            k: take_rows(&mut b, "k", rows)?,
+            v: take_rows(&mut b, "v", rows)?,
+            rank_a: take_rows(&mut b, "rank_a", rows)?,
+            raw_gate: take_rows(&mut b, "raw_gate", rows)?,
+            raw_beta: take_rows(&mut b, "raw_beta", rows)?,
+            rank_b: take_rows(&mut b, "rank_b", rows)?,
+            output_gate: take_rows(&mut b, "output_gate", rows)?,
+            kda_out: take_rows(&mut b, "kda_out", rows)?,
+            query_a: take_rows(&mut b, "query_a", rows)?,
+            query_r: take_rows(&mut b, "query_r", rows)?,
+            query: take_rows(&mut b, "query", rows)?,
+            latent_raw: take_rows(&mut b, "latent_raw", rows)?,
+            latent: take_rows(&mut b, "latent", rows)?,
+            query_latent: take_rows(&mut b, "query_latent", rows)?,
+            output_latent: take_rows(&mut b, "output_latent", rows)?,
+            heads_out: take_rows(&mut b, "heads_out", rows)?,
+            index_key: take_rows(&mut b, "index_key", rows)?,
+            index_gate: take_rows(&mut b, "index_gate", rows)?,
+            dense_gate: take_rows(&mut b, "dense_gate", rows)?,
+            dense_up: take_rows(&mut b, "dense_up", rows)?,
+            router: take_rows(&mut b, "router", rows)?,
             counts: b.take("counts")?,
             slots: b.take("slots")?,
             inner: b.take("inner")?,
             slot_out: b.take("slot_out")?,
-            routed: b.take("routed")?,
-            shared_gate: b.take("shared_gate")?,
-            shared_up: b.take("shared_up")?,
-            shared: b.take("shared")?,
+            routed: take_rows(&mut b, "routed", rows)?,
+            shared_gate: take_rows(&mut b, "shared_gate", rows)?,
+            shared_up: take_rows(&mut b, "shared_up", rows)?,
+            shared: take_rows(&mut b, "shared", rows)?,
             routes: RouteRecord::for_blocks(ctx, c, Some(r))?,
             sparse: (capacity >= c.sparse_frontier() as usize)
                 .then(|| PackedSparseScratch::new(ctx, c, capacity as u64, r))
@@ -459,7 +519,7 @@ fn flat(t: &MetalTensor, n: usize) -> MetalTensor {
 fn matmat(
     ctx: &MetalContext,
     enc: &KernelEncoder,
-    lineage: PackedLineage,
+    mode: StageMode,
     weight: &MetalTensor,
     x: &MetalTensor,
     y: &MetalTensor,
@@ -467,7 +527,17 @@ fn matmat(
     n_out: usize,
     rows: usize,
 ) -> Result<()> {
-    if lineage == PackedLineage::Exact {
+    if mode == StageMode::FastF32
+        && weight.dtype == GgmlType::Q8_0
+        && n_in.is_multiple_of(64)
+        && n_out.is_multiple_of(16)
+    {
+        // Activation buffers are allocated with rows padded to 32
+        // (`memory::packed_activation_rows`), the backing this tile reads.
+        crate::metal::encode_mat_mat_q8_0_f32_r2c4k64(ctx, enc, weight, x, y, n_in, n_out, rows)?;
+        return Ok(());
+    }
+    if mode == StageMode::Exact {
         #[cfg(test)]
         let rounded = if weight.dtype != GgmlType::F32 {
             rounded_input(ctx, enc, x, rows * n_in)?
@@ -496,7 +566,7 @@ fn matmat(
 fn expand_rows(
     ctx: &MetalContext,
     enc: &KernelEncoder,
-    lineage: PackedLineage,
+    mode: StageMode,
     weight: &MetalTensor,
     x: &MetalTensor,
     y: &MetalTensor,
@@ -504,15 +574,17 @@ fn expand_rows(
     n_out: usize,
     rows: usize,
 ) -> Result<()> {
-    match lineage {
-        PackedLineage::Exact => {
+    match mode {
+        StageMode::Exact => {
             #[cfg(test)]
             let rounded = rounded_input(ctx, enc, x, rows * n_in)?;
             #[cfg(test)]
             let x = rounded.as_ref().unwrap_or(x);
             super::low_rank_expand(ctx, enc, weight, x, y, n_in, n_out, rows)
         }
-        PackedLineage::Fast => matmat(ctx, enc, lineage, weight, x, y, n_in, n_out, rows),
+        StageMode::Fast | StageMode::FastF32 => {
+            matmat(ctx, enc, mode, weight, x, y, n_in, n_out, rows)
+        }
     }
 }
 
@@ -816,7 +888,7 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        stage_lineage(p.lineage, Stage::DenseFfn),
+                        stage_mode(p.lineage, Stage::DenseFfn),
                         &dense.gate,
                         &v(&p.normed),
                         &v(&p.dense_gate),
@@ -827,7 +899,7 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        stage_lineage(p.lineage, Stage::DenseFfn),
+                        stage_mode(p.lineage, Stage::DenseFfn),
                         &dense.up,
                         &v(&p.normed),
                         &v(&p.dense_up),
@@ -840,7 +912,7 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        stage_lineage(p.lineage, Stage::DenseFfn),
+                        stage_mode(p.lineage, Stage::DenseFfn),
                         &dense.down,
                         &v(&p.dense_gate),
                         &v(&p.block_out),
@@ -884,7 +956,7 @@ impl Glm5NextSession<'_> {
                         matmat(
                             ctx,
                             &enc,
-                            stage_lineage(p.lineage, Stage::Router),
+                            stage_mode(p.lineage, Stage::Router),
                             &moe.router,
                             &v(&p.normed),
                             &v(&p.router),
@@ -1015,7 +1087,7 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        stage_lineage(p.lineage, Stage::SharedExpert),
+                        stage_mode(p.lineage, Stage::SharedExpert),
                         &moe.shared.gate,
                         &v(&p.normed),
                         &v(&p.shared_gate),
@@ -1026,7 +1098,7 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        stage_lineage(p.lineage, Stage::SharedExpert),
+                        stage_mode(p.lineage, Stage::SharedExpert),
                         &moe.shared.up,
                         &v(&p.normed),
                         &v(&p.shared_up),
@@ -1042,7 +1114,7 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        stage_lineage(p.lineage, Stage::SharedExpert),
+                        stage_mode(p.lineage, Stage::SharedExpert),
                         &moe.shared.down,
                         &v(&p.shared_gate),
                         &v(&p.shared),
@@ -1173,7 +1245,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::KdaProjection),
+            stage_mode(p.lineage, Stage::KdaProjection),
             &kda.query,
             &x,
             &v(&p.q),
@@ -1184,7 +1256,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::KdaProjection),
+            stage_mode(p.lineage, Stage::KdaProjection),
             &kda.key,
             &x,
             &v(&p.k),
@@ -1195,7 +1267,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::KdaProjection),
+            stage_mode(p.lineage, Stage::KdaProjection),
             &kda.value,
             &x,
             &v(&p.v),
@@ -1206,7 +1278,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::KdaProjection),
+            stage_mode(p.lineage, Stage::KdaProjection),
             &kda.decay_a,
             &x,
             &v(&p.rank_a),
@@ -1217,7 +1289,7 @@ impl Glm5NextSession<'_> {
         expand_rows(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::KdaExpand),
+            stage_mode(p.lineage, Stage::KdaExpand),
             &kda.decay_b,
             &v(&p.rank_a),
             &v(&p.raw_gate),
@@ -1228,7 +1300,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::KdaProjection),
+            stage_mode(p.lineage, Stage::KdaProjection),
             &kda.beta,
             &x,
             &v(&p.raw_beta),
@@ -1239,7 +1311,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::KdaProjection),
+            stage_mode(p.lineage, Stage::KdaProjection),
             &kda.gate_a,
             &x,
             &v(&p.rank_b),
@@ -1250,7 +1322,7 @@ impl Glm5NextSession<'_> {
         expand_rows(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::KdaExpand),
+            stage_mode(p.lineage, Stage::KdaExpand),
             &kda.gate_b,
             &v(&p.rank_b),
             &v(&p.output_gate),
@@ -1286,7 +1358,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::KdaProjection),
+            stage_mode(p.lineage, Stage::KdaProjection),
             &kda.output,
             &v(&p.kda_out),
             &v(&p.block_out),
@@ -1320,7 +1392,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::MlaProjection),
+            stage_mode(p.lineage, Stage::MlaProjection),
             &mla.query_a,
             &x,
             &v(&p.query_a),
@@ -1341,7 +1413,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::MlaProjection),
+            stage_mode(p.lineage, Stage::MlaProjection),
             &mla.query_b,
             &v(&p.query_r),
             &v(&p.query),
@@ -1352,7 +1424,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::MlaProjection),
+            stage_mode(p.lineage, Stage::MlaProjection),
             &mla.latent,
             &x,
             &v(&p.latent_raw),
@@ -1397,7 +1469,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::IndexerProjection),
+            stage_mode(p.lineage, Stage::IndexerProjection),
             &mla.indexer.key,
             &x,
             &v(&p.index_key),
@@ -1408,7 +1480,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::IndexerProjection),
+            stage_mode(p.lineage, Stage::IndexerProjection),
             &mla.indexer.pool_gate,
             &x,
             &v(&p.index_gate),
@@ -1465,7 +1537,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::MlaProjection),
+            stage_mode(p.lineage, Stage::MlaProjection),
             &mla.output,
             &v(&p.heads_out),
             &v(&p.block_out),
@@ -1514,7 +1586,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::IndexerProjection),
+            stage_mode(p.lineage, Stage::IndexerProjection),
             &mla.indexer.query,
             &sub(&p.query_r, q_rank),
             &sub(&sp.index_query, query_width),
@@ -1534,7 +1606,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::IndexerProjection),
+            stage_mode(p.lineage, Stage::IndexerProjection),
             &mla.indexer.head_weights,
             &sub(&p.normed, h),
             &weights,

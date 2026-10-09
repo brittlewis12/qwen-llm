@@ -1425,3 +1425,208 @@ fn reuse_natural_activation_rounding_probe() {
     )
     .unwrap();
 }
+
+/// Fast stages whose Q8_0 projections can take the F32-operand tile (map #12
+/// accuracy lane): KDA expansions; KDA beta/f_a/g_a; MLA q_b and kv_a (and
+/// all of block 11's projections); the indexer; block 11's shared expert.
+fn f32_q8_families() -> Vec<super::super::packed::Stage> {
+    use super::super::packed::Stage;
+    vec![
+        Stage::KdaExpand,
+        Stage::KdaProjection,
+        Stage::MlaProjection,
+        Stage::IndexerProjection,
+        Stage::SharedExpert,
+        Stage::DenseFfn,
+    ]
+}
+
+/// Map #12 accuracy probe (diagnostic; no bounds): on frozen cases (H2,
+/// H4, H5 by default; `GLM53_PROBE_CASES`) at 512 rows, Exact, Fast, Fast
+/// with F32-operand KDA expansions, and Fast with every Q8_0 projection on
+/// the F32-operand tile, each against Exact (worst and mean KL, prompt-end
+/// KL, flips with both regrets). Writes JSON to `GLM53_PROBE_OUT`.
+#[test]
+#[ignore = "map #12 F32 Q8 accuracy probe: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_PROBE_OUT and an idle GPU"]
+fn reuse_natural_f32_q8_probe() {
+    use super::super::packed::{F32Stages, Stage};
+    let out = PathBuf::from(std::env::var("GLM53_PROBE_OUT").expect("GLM53_PROBE_OUT"));
+    let wanted: Vec<String> = std::env::var("GLM53_PROBE_CASES")
+        .unwrap_or_else(|_| "H2-code-context,H4-tool-across-frontier,H5-long-chat-sparse".into())
+        .split(',')
+        .map(str::to_string)
+        .collect();
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
+    let fixture: Value = serde_json::from_slice(&std::fs::read(&fixture_path).unwrap()).unwrap();
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let gguf = GgufFile::open(&path).unwrap();
+    assert_eq!(fixture["artifact_layout"], artifact_layout(&gguf));
+    let config = crate::glm5_next::Glm5NextConfig::from_gguf(&gguf).unwrap();
+    let frozen = validate_fixture(
+        &fixture,
+        config.sparse_frontier() as usize,
+        config.indexer_pool as usize,
+    );
+    for id in &wanted {
+        assert!(frozen.iter().any(|c| &c.id == id), "unknown case {id}");
+    }
+    let _lease = production_lease();
+    let ctx = MetalContext::new().expect("Metal context");
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let mut cases = Vec::new();
+    for case in frozen.iter().filter(|c| wanted.contains(&c.id)) {
+        let turn2 = case.turn2();
+        let capacity = turn2.len() + case.continuation.len() + 1;
+        let run = |lineage: PackedLineage| -> Vec<Vec<f32>> {
+            let mut s = session(&ctx, &weights, capacity, 512, lineage);
+            let mut logits = vec![s.prefill_packed(&ctx, &turn2).unwrap()];
+            for &token in &case.continuation {
+                logits.push(s.forward(&ctx, token).unwrap());
+            }
+            logits
+        };
+        let exact = run(PackedLineage::Exact);
+        let fast = run(PackedLineage::Fast);
+        let expand = {
+            let _scope = F32Stages::set(&[Stage::KdaExpand]);
+            run(PackedLineage::Fast)
+        };
+        let all_q8 = {
+            let _scope = F32Stages::set(&f32_q8_families());
+            run(PackedLineage::Fast)
+        };
+        let measure = |label: &str, other: &[Vec<f32>]| {
+            let drift = Drift::measure(&format!("{} {label}", case.id), &exact, other);
+            drift.print(&format!("{} {label} vs Exact", case.id));
+            let mut value = drift.json();
+            value["prompt_end_kl"] = json!(drift.kls[0]);
+            value
+        };
+        let row = json!({
+            "id": case.id,
+            "fast": measure("fast", &fast),
+            "fast_f32_kda_expand": measure("fast f32 kda expand", &expand),
+            "fast_f32_q8_all": measure("fast f32 q8 all", &all_q8),
+            "f32_changed_fast": logit_bits(&all_q8) != logit_bits(&fast),
+        });
+        cases.push(row);
+    }
+    let document = json!({
+        "schema": "glm53.f32_q8_probe.v1", "rows_per_chunk": 512,
+        "arms": {"fast": "half-staged tiles", "fast_f32_kda_expand": "KDA expansions on the F32-operand Q8_0 tile",
+            "fast_f32_q8_all": "every Q8_0 projection of Fast on the F32-operand tile (Q6_K and experts unchanged)"},
+        "cases": cases,
+    });
+    std::fs::write(
+        &out,
+        serde_json::to_string_pretty(&document).unwrap() + "\n",
+    )
+    .unwrap();
+}
+
+/// The F32-operand Q8_0 tile keeps Fast's chunk identities: with every Q8_0
+/// projection on it, 512- and 128-row chunkings agree bitwise, as do 64 and
+/// 97 rows (the pairs the half-staged Fast already holds), at the prompt
+/// end and through decode; and the selection takes effect (logits differ
+/// from half-staged Fast).
+#[test]
+#[ignore = "map #12 F32 Q8 chunk identities: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU"]
+fn fast_f32_q8_keeps_chunk_identities() {
+    use super::super::packed::F32Stages;
+    let _lease = production_lease();
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let gguf = GgufFile::open(&path).unwrap();
+    let ctx = MetalContext::new().expect("Metal context");
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
+    let tokens: Vec<u32> = tokenizer
+        .encode(&long_qualification_text(), false)
+        .unwrap()
+        .into_iter()
+        .map(|t| t as u32)
+        .collect();
+    let (prompt, continuation) = (&tokens[..600], &tokens[600..608]);
+    let run = |rows: usize| -> Vec<Vec<f32>> {
+        let mut s = session(&ctx, &weights, 700, rows, PackedLineage::Fast);
+        let mut logits = vec![s.prefill_packed(&ctx, prompt).unwrap()];
+        for &token in continuation {
+            logits.push(s.forward(&ctx, token).unwrap());
+        }
+        logits
+    };
+    let half_512 = run(512);
+    let f32_runs: Vec<(usize, Vec<Vec<f32>>)> = {
+        let _scope = F32Stages::set(&f32_q8_families());
+        [512, 128, 64, 97].map(|rows| (rows, run(rows))).into()
+    };
+    let bits = |rows: usize| logit_bits(&f32_runs.iter().find(|(r, _)| *r == rows).unwrap().1);
+    assert_eq!(bits(512), bits(128), "512 vs 128 rows");
+    assert_eq!(bits(64), bits(97), "64 vs 97 rows");
+    assert_ne!(
+        bits(512),
+        logit_bits(&half_512),
+        "the F32 selection took effect"
+    );
+    for (rows, logits) in &f32_runs {
+        for (i, l) in logits.iter().enumerate() {
+            assert_finite(&format!("rows {rows} position {i}"), l);
+        }
+    }
+}
+
+/// Release timing of the F32-operand Q8_0 tile (map #12 accuracy lane):
+/// alternating Fast and Fast with every Q8_0 projection on it (ABBA, two
+/// rounds), a 2,048-token prompt in 512-row chunks; reports mean prefill
+/// wall per arm to `GLM53_PROBE_OUT`. Diagnostic; no bounds.
+#[test]
+#[ignore = "diagnostic timing: GLM53_GGUF, GLM53_PROBE_OUT, release build, no MTL_DEBUG_LAYER; loads 109.5 GiB under production lease"]
+fn fast_f32_q8_prefill_cost() {
+    use super::super::packed::F32Stages;
+    assert!(!cfg!(debug_assertions), "timing requires --release");
+    let out = PathBuf::from(std::env::var("GLM53_PROBE_OUT").expect("GLM53_PROBE_OUT"));
+    let _lease = super::perf_lease();
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let gguf = GgufFile::open(&path).unwrap();
+    let ctx = MetalContext::new().expect("Metal context");
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
+    let tokens: Vec<u32> = tokenizer
+        .encode(&long_qualification_text(), false)
+        .unwrap()
+        .into_iter()
+        .map(|t| t as u32)
+        .collect();
+    let prompt = &tokens[..2048];
+    let time = |f32_q8: bool| -> f64 {
+        let _scope = f32_q8.then(|| F32Stages::set(&f32_q8_families()));
+        let mut s = session(&ctx, &weights, 2048 + 8, 512, PackedLineage::Fast);
+        let started = std::time::Instant::now();
+        let logits = s.prefill_packed(&ctx, prompt).unwrap();
+        let ms = started.elapsed().as_secs_f64() * 1e3;
+        assert_finite("timing logits", &logits);
+        ms
+    };
+    // Warm-up of both arms, then ABBA twice.
+    time(false);
+    time(true);
+    let (mut half, mut f32) = (Vec::new(), Vec::new());
+    for _ in 0..2 {
+        half.push(time(false));
+        f32.push(time(true));
+        f32.push(time(true));
+        half.push(time(false));
+    }
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    let document = json!({
+        "schema": "glm53.f32_q8_cost.v1", "prompt_tokens": 2048, "rows_per_chunk": 512,
+        "order": "warm-up A,B; then (A,B,B,A) x 2", "half_ms": half, "f32_q8_ms": f32,
+        "half_mean_ms": mean(&half), "f32_q8_mean_ms": mean(&f32),
+        "relative_cost": mean(&f32) / mean(&half) - 1.0,
+    });
+    eprintln!("{document}");
+    std::fs::write(
+        &out,
+        serde_json::to_string_pretty(&document).unwrap() + "\n",
+    )
+    .unwrap();
+}

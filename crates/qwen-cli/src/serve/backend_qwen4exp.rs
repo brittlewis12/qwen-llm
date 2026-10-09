@@ -60,12 +60,14 @@ impl Prepared {
         }
         let config =
             Qwen4ExpConfig::from_gguf(gguf).context("bind Qwen3.8-Flash-Next serve geometry")?;
-        let (context_limit, default_max_tokens) = super::fixed_session_limits(
-            qwen_llm::model_family::ModelFamily::Qwen4Exp,
-            config.context_length as usize,
+        let limits = super::resolve_serve_limits(
+            super::profile(qwen_llm::model_family::ModelFamily::Qwen4Exp),
+            Some(config.context_length as usize),
             invocation.max_context_tokens,
             invocation.max_tokens,
-        )?;
+        )?
+        .context("Qwen3.8-Flash-Next profile has no fixed serve capacity")?;
+        let (context_limit, default_max_tokens) = (limits.context_tokens, limits.max_tokens);
         let tokenizer = Tokenizer::from_gguf(gguf).context("load Qwen3.8-Flash-Next tokenizer")?;
         anyhow::ensure!(
             config == Qwen4ExpConfig::flash_next_reference(),

@@ -7,7 +7,7 @@ use super::items::{ServeError, ServeRequest};
 #[cfg(test)]
 use super::output_partition::OutputProtocol;
 use super::render_k2;
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::k2_horizon_runtime::{K2LoadedModel, K2PreparedArtifact, K2RuntimePlan, K2Session};
 use qwen_llm::metal::host_page_size_bytes;
@@ -42,12 +42,14 @@ impl Prepared {
     /// listener or Metal context.
     pub(super) fn new(gguf: &GgufFile, invocation: &crate::cli::ServeInvocation) -> Result<Self> {
         let config = qwen_llm::k2_horizon::K2HorizonConfig::from_gguf(gguf)?;
-        let (capacity, default_max) = super::fixed_session_limits(
-            qwen_llm::model_family::ModelFamily::K2Horizon,
-            config.context_length as usize,
+        let limits = super::resolve_serve_limits(
+            super::profile(qwen_llm::model_family::ModelFamily::K2Horizon),
+            Some(config.context_length as usize),
             invocation.max_context_tokens,
             invocation.max_tokens,
-        )?;
+        )?
+        .context("K2 Horizon profile has no fixed serve capacity")?;
+        let (capacity, default_max) = (limits.context_tokens, limits.max_tokens);
         let artifact = K2PreparedArtifact::inspect(gguf)?;
         artifact.generation_stops()?;
         K2RuntimePlan::inspect(

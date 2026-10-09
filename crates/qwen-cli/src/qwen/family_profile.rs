@@ -29,6 +29,20 @@ pub(crate) enum ServeWarmth {
     LiveSession,
 }
 
+/// How `qwen serve` obtains its context and output limits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ServeCapacity {
+    RequestShaped,
+    FixedContext,
+    FixedContextAndOutput,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ServeLimits {
+    pub(crate) context_tokens: usize,
+    pub(crate) max_tokens: usize,
+}
+
 pub(crate) struct FamilyProfile {
     pub(crate) family: ModelFamily,
     pub(crate) display: &'static str,
@@ -36,6 +50,8 @@ pub(crate) struct FamilyProfile {
     pub(crate) fixed_cohort: FixedCohort,
     /// A `GenerationBackend` exists; not artifact or device admission.
     pub(crate) serve_backend: bool,
+    /// Startup sizing requirements for `qwen serve`.
+    pub(crate) serve_capacity: ServeCapacity,
     pub(crate) serve_warmth: ServeWarmth,
     /// The durable tier writes the latest continuation snapshot after an
     /// idle period (`--durable-idle-publish-secs`). A durable tier does not
@@ -54,6 +70,7 @@ static QWEN35: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::Dense,
     fixed_cohort: FixedCohort::Dense8,
     serve_backend: true,
+    serve_capacity: ServeCapacity::RequestShaped,
     serve_warmth: ServeWarmth::SnapshotsDurable,
     durable_idle_publish: true,
     idle_residency_eligible: false,
@@ -67,6 +84,7 @@ static QWEN35_MOE: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::MoeCliSerial,
     fixed_cohort: FixedCohort::Moe16,
     serve_backend: true,
+    serve_capacity: ServeCapacity::RequestShaped,
     serve_warmth: ServeWarmth::SnapshotsDurable,
     durable_idle_publish: true,
     idle_residency_eligible: false,
@@ -80,6 +98,7 @@ static QWEN4EXP: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::Unsupported("family_no_speculation"),
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
+    serve_capacity: ServeCapacity::FixedContextAndOutput,
     serve_warmth: ServeWarmth::SnapshotsRam,
     durable_idle_publish: false,
     idle_residency_eligible: true,
@@ -93,6 +112,7 @@ static DEEPSEEK4: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::Unsupported("family_no_speculation"),
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
+    serve_capacity: ServeCapacity::FixedContext,
     serve_warmth: ServeWarmth::SnapshotsDurable,
     durable_idle_publish: false,
     idle_residency_eligible: true,
@@ -106,6 +126,7 @@ static MUSE_GLIMMER: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::Unsupported("family_no_speculation"),
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
+    serve_capacity: ServeCapacity::FixedContextAndOutput,
     serve_warmth: ServeWarmth::LiveSession,
     durable_idle_publish: false,
     idle_residency_eligible: true,
@@ -119,6 +140,7 @@ static K2_HORIZON: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::Unsupported("family_no_speculation"),
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
+    serve_capacity: ServeCapacity::FixedContextAndOutput,
     serve_warmth: ServeWarmth::LiveSession,
     durable_idle_publish: false,
     idle_residency_eligible: true,
@@ -132,6 +154,7 @@ static GLM5_NEXT: FamilyProfile = FamilyProfile {
     drafter: DrafterSupport::Unsupported("family_no_speculation"),
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
+    serve_capacity: ServeCapacity::FixedContextAndOutput,
     serve_warmth: ServeWarmth::SnapshotsRam,
     durable_idle_publish: false,
     idle_residency_eligible: true,

@@ -283,6 +283,17 @@ impl Prepared {
         gguf: &GgufFile,
         invocation: &crate::cli::ServeInvocation,
     ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            super::resolve_serve_limits(
+                super::profile(family),
+                None,
+                invocation.max_context_tokens,
+                invocation.max_tokens
+            )?
+            .is_none(),
+            "{} serve requires request-shaped capacity",
+            super::profile(family).display
+        );
         let identity = crate::prompt_template::identify_qwen_release_for_gguf(gguf)
             .context("identify the loaded model's Qwen release")?;
         if let Some(warning) = identity.warning() {

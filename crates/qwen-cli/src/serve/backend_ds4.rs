@@ -84,9 +84,14 @@ impl Prepared {
         gguf: &GgufFile,
         invocation: &crate::cli::ServeInvocation,
     ) -> anyhow::Result<Self> {
-        let context_limit = invocation.max_context_tokens.context(
-            "DeepSeek V4 serve requires --max-context-tokens: the session forward budget is fixed at startup",
-        )?;
+        let limits = super::resolve_serve_limits(
+            super::profile(ModelFamily::DeepSeek4),
+            None,
+            invocation.max_context_tokens,
+            invocation.max_tokens,
+        )?
+        .context("DeepSeek V4 profile has no fixed serve capacity")?;
+        let context_limit = limits.context_tokens;
         let forward_limit = crate::deepseek_v4_forward_budget_for_context_limit(context_limit)?;
         let tokenizer = Tokenizer::from_gguf(gguf).context("initialize DeepSeek V4 tokenizer")?;
         let prefill_chunk_tokens = crate::deepseek_v4_prefill_chunk_tokens()?;
@@ -97,9 +102,7 @@ impl Prepared {
         Ok(Self {
             context_limit,
             forward_limit,
-            default_max_tokens: invocation
-                .max_tokens
-                .unwrap_or(super::DEFAULT_SERVE_MAX_TOKENS),
+            default_max_tokens: limits.max_tokens,
             tokenizer,
             prefill_chunk_tokens,
             template_style: invocation.template_style,

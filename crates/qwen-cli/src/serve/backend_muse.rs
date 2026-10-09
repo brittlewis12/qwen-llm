@@ -48,17 +48,18 @@ impl Prepared {
         let math_options = read_math_options()?;
         let config =
             MuseGlimmerConfig::from_gguf(gguf).context("bind Muse Glimmer serve contract")?;
-        let (context_limit, default_max_tokens) = super::fixed_session_limits(
-            qwen_llm::model_family::ModelFamily::MuseGlimmer,
-            config.context_length as usize,
+        let limits = super::resolve_serve_limits(
+            super::profile(qwen_llm::model_family::ModelFamily::MuseGlimmer),
+            Some(config.context_length as usize),
             invocation.max_context_tokens,
             invocation.max_tokens,
-        )?;
+        )?
+        .context("Muse Glimmer profile has no fixed serve capacity")?;
         Self::from_config(
             gguf,
             config,
-            context_limit,
-            default_max_tokens,
+            limits.context_tokens,
+            limits.max_tokens,
             math_options,
         )
     }

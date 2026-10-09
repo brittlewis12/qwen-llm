@@ -51,7 +51,7 @@ pub(crate) mod utf8;
 
 pub(crate) use crate::open_responses::{items, render, tool_parse};
 
-use crate::family_profile::profile;
+use crate::family_profile::{self, ServeCapacity, ServeLimits, profile};
 use anyhow::{Context, Result, bail, ensure};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalMemorySignals;
@@ -321,38 +321,56 @@ fn supports_serve_family(family: Option<ModelFamily>) -> bool {
     family.is_some_and(|family| profile(family).serve_backend)
 }
 
-/// Limits for a family whose resident session capacity is fixed at load:
-/// both ceilings must be explicit and positive.
-fn fixed_session_limits(
-    family: ModelFamily,
-    model_context: usize,
+/// Resolves the capacity contract declared by a family's profile.
+fn resolve_serve_limits(
+    family: &family_profile::FamilyProfile,
+    model_context: Option<usize>,
     max_context_tokens: Option<usize>,
     max_tokens: Option<usize>,
-) -> Result<(usize, usize)> {
-    let family = profile(family).display;
-    let context_limit = max_context_tokens.with_context(|| {
-        format!("{family} serve requires --max-context-tokens because its resident session capacity is fixed at startup")
-    })?;
-    ensure!(
-        context_limit > 0,
-        "{family} --max-context-tokens must be greater than 0"
-    );
-    ensure!(
-        context_limit <= model_context,
-        "{family} --max-context-tokens {context_limit} exceeds model context {model_context}",
-    );
-    let default_max_tokens = max_tokens.with_context(|| {
-        format!("{family} serve requires explicit --max-tokens; the generic 65536-token default exceeds its session capacity")
-    })?;
-    ensure!(
-        default_max_tokens > 0,
-        "{family} --max-tokens must be greater than 0"
-    );
-    ensure!(
-        default_max_tokens <= context_limit,
-        "{family} --max-tokens {default_max_tokens} exceeds --max-context-tokens {context_limit}"
-    );
-    Ok((context_limit, default_max_tokens))
+) -> Result<Option<ServeLimits>> {
+    let display = family.display;
+    match family.serve_capacity {
+        ServeCapacity::RequestShaped => Ok(None),
+        ServeCapacity::FixedContext => {
+            let context_tokens = max_context_tokens.with_context(|| {
+                "DeepSeek V4 serve requires --max-context-tokens: the session forward budget is fixed at startup"
+            })?;
+            Ok(Some(ServeLimits {
+                context_tokens,
+                max_tokens: max_tokens.unwrap_or(DEFAULT_SERVE_MAX_TOKENS),
+            }))
+        }
+        ServeCapacity::FixedContextAndOutput => {
+            let context_tokens = max_context_tokens.with_context(|| {
+                format!("{display} serve requires --max-context-tokens because its resident session capacity is fixed at startup")
+            })?;
+            ensure!(
+                context_tokens > 0,
+                "{display} --max-context-tokens must be greater than 0"
+            );
+            let model_context =
+                model_context.context("fixed serve capacity requires model context metadata")?;
+            ensure!(
+                context_tokens <= model_context,
+                "{display} --max-context-tokens {context_tokens} exceeds model context {model_context}",
+            );
+            let max_tokens = max_tokens.with_context(|| {
+                format!("{display} serve requires explicit --max-tokens; the generic 65536-token default exceeds its session capacity")
+            })?;
+            ensure!(
+                max_tokens > 0,
+                "{display} --max-tokens must be greater than 0"
+            );
+            ensure!(
+                max_tokens <= context_tokens,
+                "{display} --max-tokens {max_tokens} exceeds --max-context-tokens {context_tokens}"
+            );
+            Ok(Some(ServeLimits {
+                context_tokens,
+                max_tokens,
+            }))
+        }
+    }
 }
 
 /// `qwen serve` entry: resident model, serial accept loop.
@@ -904,6 +922,20 @@ mod signal_tests;
 mod tests {
     use super::*;
 
+    fn muse_limits(
+        model_context: usize,
+        max_context_tokens: Option<usize>,
+        max_tokens: Option<usize>,
+    ) -> Result<ServeLimits> {
+        resolve_serve_limits(
+            profile(ModelFamily::MuseGlimmer),
+            Some(model_context),
+            max_context_tokens,
+            max_tokens,
+        )?
+        .context("Muse Glimmer test profile has no fixed serve capacity")
+    }
+
     #[test]
     fn durable_flags_are_refused_where_no_tier_exists_and_off_is_always_fine() {
         use crate::family_profile::profile;
@@ -1161,45 +1193,89 @@ mod tests {
     #[test]
     fn muse_limits_require_explicit_bounded_capacity_and_output_default() {
         assert_eq!(
-            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, Some(7_168), Some(2_048),)
-                .unwrap(),
-            (7168, 2048)
+            muse_limits(131_072, Some(7_168), Some(2_048)).unwrap(),
+            ServeLimits {
+                context_tokens: 7168,
+                max_tokens: 2048
+            }
         );
         assert_eq!(
-            fixed_session_limits(
-                ModelFamily::MuseGlimmer,
-                131_072,
-                Some(131_072),
-                Some(16_384),
-            )
-            .unwrap(),
-            (131_072, 16_384)
+            muse_limits(131_072, Some(131_072), Some(16_384)).unwrap(),
+            ServeLimits {
+                context_tokens: 131_072,
+                max_tokens: 16_384
+            }
         );
-        assert!(
-            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, None, Some(2_048)).is_err()
-        );
-        assert!(
-            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, Some(7_168), None).is_err()
-        );
-        assert!(
-            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, Some(0), Some(2_048)).is_err()
-        );
-        assert!(
-            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, Some(7_168), Some(0)).is_err()
-        );
-        assert!(
-            fixed_session_limits(
-                ModelFamily::MuseGlimmer,
-                131_072,
-                Some(131_073),
-                Some(2_048)
-            )
-            .is_err()
-        );
-        assert!(
-            fixed_session_limits(ModelFamily::MuseGlimmer, 131_072, Some(1_024), Some(2_048))
-                .is_err()
-        );
+        assert!(muse_limits(131_072, None, Some(2_048)).is_err());
+        assert!(muse_limits(131_072, Some(7_168), None).is_err());
+        assert!(muse_limits(131_072, Some(0), Some(2_048)).is_err());
+        assert!(muse_limits(131_072, Some(7_168), Some(0)).is_err());
+        assert!(muse_limits(131_072, Some(131_073), Some(2_048)).is_err());
+        assert!(muse_limits(131_072, Some(1_024), Some(2_048)).is_err());
+    }
+
+    #[test]
+    fn capacity_limits_follow_each_family_profile() {
+        for family in ModelFamily::ALL {
+            let family_profile = profile(*family);
+            let expected_capacity = match family {
+                ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => ServeCapacity::RequestShaped,
+                ModelFamily::Qwen4Exp
+                | ModelFamily::MuseGlimmer
+                | ModelFamily::K2Horizon
+                | ModelFamily::Glm5Next => ServeCapacity::FixedContextAndOutput,
+                ModelFamily::DeepSeek4 => ServeCapacity::FixedContext,
+            };
+            assert_eq!(
+                family_profile.serve_capacity, expected_capacity,
+                "{family:?}"
+            );
+            let missing = resolve_serve_limits(family_profile, Some(8192), None, None);
+            match family_profile.serve_capacity {
+                ServeCapacity::RequestShaped => assert_eq!(missing.unwrap(), None),
+                ServeCapacity::FixedContext => assert_eq!(
+                    missing.unwrap_err().to_string(),
+                    "DeepSeek V4 serve requires --max-context-tokens: the session forward budget is fixed at startup"
+                ),
+                ServeCapacity::FixedContextAndOutput => assert_eq!(
+                    missing.unwrap_err().to_string(),
+                    format!(
+                        "{} serve requires --max-context-tokens because its resident session capacity is fixed at startup",
+                        family_profile.display
+                    )
+                ),
+            }
+
+            match family_profile.serve_capacity {
+                ServeCapacity::RequestShaped => {}
+                ServeCapacity::FixedContext => assert_eq!(
+                    resolve_serve_limits(family_profile, Some(8192), Some(4096), None).unwrap(),
+                    Some(ServeLimits {
+                        context_tokens: 4096,
+                        max_tokens: DEFAULT_SERVE_MAX_TOKENS,
+                    })
+                ),
+                ServeCapacity::FixedContextAndOutput => {
+                    assert_eq!(
+                        resolve_serve_limits(family_profile, Some(8192), Some(4096), None)
+                            .unwrap_err()
+                            .to_string(),
+                        format!(
+                            "{} serve requires explicit --max-tokens; the generic 65536-token default exceeds its session capacity",
+                            family_profile.display
+                        )
+                    );
+                    assert_eq!(
+                        resolve_serve_limits(family_profile, Some(8192), Some(4096), Some(512))
+                            .unwrap(),
+                        Some(ServeLimits {
+                            context_tokens: 4096,
+                            max_tokens: 512,
+                        })
+                    );
+                }
+            }
+        }
     }
 
     #[test]

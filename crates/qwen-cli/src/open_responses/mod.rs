@@ -1,15 +1,13 @@
 //! Pure Open Responses parsing and Qwen prompt rendering.
 
-#![allow(dead_code)] // each binary consumes a different subset of the shared protocol core
-
-pub(crate) mod items;
-pub(crate) mod render;
-pub(crate) mod tool_parse;
+pub mod items;
+pub mod render;
+pub mod tool_parse;
 
 use crate::model_request::Turn;
 use items::{QwenTemplate, ServeError, ServeRequest, TemplateStyle};
 
-pub(crate) fn bind_qwen_request(
+pub fn bind_qwen_request(
     request: &ServeRequest,
     template: QwenTemplate,
     no_thinking_supported: bool,

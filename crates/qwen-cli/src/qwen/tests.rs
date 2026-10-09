@@ -1075,168 +1075,6 @@ fn qwen4exp_serial_mode_rejects_inert_advanced_options() {
 }
 
 #[test]
-fn reasoning_controls_bind_through_each_family_table() {
-    use crate::messages::Qwen38ReasoningEffort;
-    use crate::open_responses::items::QwenTemplate;
-    use crate::prompt_template::{
-        QwenBoundGeneration, QwenReasoningControls, QwenUserPromptProtocol,
-    };
-
-    // Qwen3.8: every advertised level binds; `none` is the no-thinking mode;
-    // omission is upstream xhigh; a foreign level fails with the level list.
-    assert_eq!(
-        Qwen38GenerationMode::parse(None, false).unwrap(),
-        Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Xhigh)
-    );
-    for (name, expected) in Qwen38GenerationMode::LEVELS {
-        assert_eq!(
-            Qwen38GenerationMode::parse(Some(name), false).unwrap(),
-            *expected
-        );
-    }
-    assert_eq!(
-        Qwen38GenerationMode::parse(Some("none"), false).unwrap(),
-        Qwen38GenerationMode::NoThinking
-    );
-    assert_eq!(
-        Qwen38GenerationMode::parse(None, true).unwrap(),
-        Qwen38GenerationMode::NoThinking
-    );
-    let err = Qwen38GenerationMode::parse(Some("high"), false).unwrap_err();
-    assert_eq!(err.code, "reasoning_effort_invalid");
-    assert!(err.message.contains("none|low|medium|xhigh"), "{err}");
-    assert_eq!(
-        Qwen38GenerationMode::parse(Some("low"), true)
-            .unwrap_err()
-            .code,
-        "reasoning_conflict"
-    );
-
-    // DeepSeek: none/low/high/max; omission is chat; `xhigh` is foreign.
-    assert_eq!(
-        DeepSeekV4Reasoning::parse(None).unwrap(),
-        DeepSeekV4Reasoning::None
-    );
-    assert_eq!(
-        DeepSeekV4Reasoning::parse(Some("max")).unwrap(),
-        DeepSeekV4Reasoning::Max
-    );
-    assert!(
-        DeepSeekV4Reasoning::parse(Some("xhigh"))
-            .unwrap_err()
-            .message
-            .contains("none|low|high|max")
-    );
-
-    // Ordinary non-3.8 Qwen has no effort control and binds only the
-    // no-thinking transition, which needs a pinned template.
-    let pinned = QwenUserPromptProtocol::for_test(false, QwenTemplate::Qwen36);
-    assert_eq!(
-        pinned
-            .bind(QwenReasoningControls {
-                effort: None,
-                no_thinking: true
-            })
-            .unwrap(),
-        QwenBoundGeneration::Template(QwenGenerationMode::NoThinking)
-    );
-    assert_eq!(
-        pinned
-            .bind(QwenReasoningControls {
-                effort: Some("low"),
-                no_thinking: false
-            })
-            .unwrap_err()
-            .code,
-        "reasoning_effort_unsupported"
-    );
-    let generic = QwenUserPromptProtocol::for_test(false, QwenTemplate::Generic);
-    assert_eq!(
-        generic
-            .bind(QwenReasoningControls {
-                effort: None,
-                no_thinking: true
-            })
-            .unwrap_err()
-            .code,
-        "no_thinking_unsupported"
-    );
-    // The advertised capability is derived from the same tables.
-    let q38 = QwenUserPromptProtocol::for_test(true, QwenTemplate::Qwen38);
-    assert_eq!(
-        q38.reasoning_capability().levels,
-        Qwen38GenerationMode::level_names()
-    );
-    assert!(pinned.reasoning_capability().levels.is_empty());
-    assert!(matches!(
-        generic.reasoning_capability().no_thinking,
-        crate::prompt_template::Support::Unsupported { .. }
-    ));
-}
-
-#[test]
-fn input_forms_bind_through_one_family_table() {
-    use crate::open_responses::items::QwenTemplate;
-    use crate::prompt_template::{
-        InputCapability, QwenUserPromptProtocol, Support, qwen_tools_support,
-    };
-
-    // Ordinary Qwen: plain chat is ChatML everywhere; tools need the
-    // released tool block, so only a pinned template advertises them, and
-    // the refusal a lane raises is the advertised one.
-    for template in [
-        QwenTemplate::Qwen35,
-        QwenTemplate::Qwen36,
-        QwenTemplate::Qwen38,
-    ] {
-        let protocol = QwenUserPromptProtocol::for_test(template == QwenTemplate::Qwen38, template);
-        assert_eq!(
-            protocol.input_capability(),
-            InputCapability::all_supported(),
-            "{template:?}"
-        );
-        assert!(qwen_tools_support(template).require().is_ok());
-    }
-    let generic = QwenUserPromptProtocol::for_test(false, QwenTemplate::Generic).input_capability();
-    assert_eq!(generic.raw, Support::Supported);
-    assert_eq!(generic.user, Support::Supported);
-    assert_eq!(generic.messages, Support::Supported);
-    let refusal = generic.tools.require().unwrap_err();
-    assert_eq!(refusal.code, "tools_require_known_release");
-    assert_eq!(
-        qwen_tools_support(QwenTemplate::Generic)
-            .require()
-            .unwrap_err(),
-        refusal
-    );
-
-    // Every templated form shares one refusal when the protocol is absent;
-    // raw text still renders.
-    let raw_only = InputCapability::raw_only("prompt_protocol_unsupported", "x".into());
-    assert_eq!(raw_only.raw, Support::Supported);
-    for form in [&raw_only.user, &raw_only.messages, &raw_only.tools] {
-        assert_eq!(
-            form.require().unwrap_err().code,
-            "prompt_protocol_unsupported"
-        );
-    }
-    assert_eq!(
-        InputCapability::none("unknown_family", "x".into())
-            .raw
-            .require()
-            .unwrap_err()
-            .code,
-        "unknown_family"
-    );
-
-    // The projection carries the same status/code vocabulary as reasoning.
-    let json = serde_json::to_value(&generic).unwrap();
-    assert_eq!(json["user"], serde_json::json!({"status": "supported"}));
-    assert_eq!(json["tools"]["status"], "unsupported");
-    assert_eq!(json["tools"]["code"], "tools_require_known_release");
-}
-
-#[test]
 fn deepseek_v4_multigroup_selector_cli_contract_is_explicit_and_bounded() {
     let default =
         Args::try_parse_from(["qwen", "--model", "model.gguf", "--prompt", "hello"]).unwrap();
@@ -5398,21 +5236,30 @@ fn request_stats_fingerprint_newtype_bytes_only_from_of() {
 }
 
 mod jsonl_templated_rows {
-    use crate::open_responses::items::QwenTemplate;
-    use crate::{
-        JsonlInputLabel, JsonlRequest, JsonlRowProtocol, QwenUserPromptProtocol,
-        resolve_jsonl_request_input,
-    };
+    use crate::{JsonlInputLabel, JsonlRequest, JsonlRowProtocol, resolve_jsonl_request_input};
 
     fn row(json: &str) -> JsonlRequest {
         serde_json::from_str(json).unwrap()
     }
 
-    fn pinned() -> JsonlRowProtocol {
-        JsonlRowProtocol::Resolved(QwenUserPromptProtocol::for_test(
+    fn protocol_for(name: Option<&str>) -> crate::prompt_template::QwenUserPromptProtocol {
+        let fixture = crate::linear_transport::tests::fixture("jsonl-prompt-protocol", 2, 23);
+        let path = fixture.0.join("model.gguf");
+        crate::linear_transport::cpu_fixture::write_cpu_gguf(
+            &path,
+            "qwen35",
+            2,
+            &format!("qwen-release:{}", name.unwrap_or("generic")),
             false,
-            QwenTemplate::Qwen36,
-        ))
+        );
+        let gguf = qwen_llm::gguf::GgufFile::open(path).unwrap();
+        crate::jsonl::jsonl_user_prompt_protocol_for_gguf(&gguf)
+            .unwrap()
+            .unwrap()
+    }
+
+    fn pinned() -> JsonlRowProtocol {
+        JsonlRowProtocol::Resolved(protocol_for(Some("Qwen3.6")))
     }
 
     #[test]
@@ -5456,10 +5303,7 @@ mod jsonl_templated_rows {
         // The row parses (effort is a spelling bound per family), and the
         // binding names the model's accepted levels.
         let row = row(r#"{"user":"hi","reasoning_effort":"turbo"}"#);
-        let q38 = JsonlRowProtocol::Resolved(QwenUserPromptProtocol::for_test(
-            true,
-            QwenTemplate::Qwen38,
-        ));
+        let q38 = JsonlRowProtocol::Resolved(protocol_for(Some("Qwen3.8")));
         let err = resolve_jsonl_request_input(&row, 1, &q38).unwrap_err();
         assert!(
             format!("{err:#}").contains("none|low|medium|xhigh"),
@@ -5480,7 +5324,7 @@ mod jsonl_templated_rows {
             format!("{err:#}").contains("no reasoning-effort control"),
             "{err:#}"
         );
-        let q38 = QwenUserPromptProtocol::for_test(true, QwenTemplate::Qwen38);
+        let q38 = protocol_for(Some("Qwen3.8"));
         let err = resolve_jsonl_request_input(
             &row(r#"{"user":"hi","reasoning_effort":"low","no_thinking":true}"#),
             4,
@@ -5496,10 +5340,7 @@ mod jsonl_templated_rows {
     /// code because the transition bytes are unproven there.
     #[test]
     fn user_rows_on_unpinned_templates_follow_the_run_rule() {
-        let generic = JsonlRowProtocol::Resolved(QwenUserPromptProtocol::for_test(
-            false,
-            QwenTemplate::Generic,
-        ));
+        let generic = JsonlRowProtocol::Resolved(protocol_for(None));
         let (rendered, specials, label) =
             resolve_jsonl_request_input(&row(r#"{"user":"hi","system":"be terse"}"#), 2, &generic)
                 .unwrap();

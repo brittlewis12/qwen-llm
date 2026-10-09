@@ -15,21 +15,20 @@ use crate::open_responses::render::{
 use crate::open_responses::tool_parse::python_json;
 
 #[derive(Clone, Debug, Default, Deserialize)]
-pub(crate) struct ChatMessage {
-    pub(crate) role: String,
-    pub(crate) content: String,
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
     /// DeepSeek V4 release-encoder assistant reasoning field (vLLM name).
     #[serde(default)]
-    pub(crate) reasoning: Option<String>,
+    pub reasoning: Option<String>,
     /// OpenAI/SGLang-style alias for the same assistant reasoning field.
     #[serde(default)]
-    pub(crate) reasoning_content: Option<String>,
+    pub reasoning_content: Option<String>,
     #[serde(default, flatten)]
-    #[allow(dead_code)]
-    pub(crate) extra: BTreeMap<String, serde_json::Value>,
+    pub extra: BTreeMap<String, serde_json::Value>,
     /// Structured tool calls validated by the strict `qwen run` parser.
     #[serde(skip)]
-    pub(crate) tool_calls: Vec<ToolCall>,
+    pub tool_calls: Vec<ToolCall>,
 }
 
 /// DeepSeek V4 0731 reasoning selection for `--messages` encoding.
@@ -42,8 +41,7 @@ pub(crate) struct ChatMessage {
 /// stronger "Beyond maximum" text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 // Shared across binaries; qwen-bench never constructs the thinking modes.
-#[allow(dead_code)]
-pub(crate) enum DeepSeekV4Reasoning {
+pub enum DeepSeekV4Reasoning {
     None,
     Low,
     High,
@@ -56,9 +54,9 @@ pub(crate) enum DeepSeekV4Reasoning {
 /// user sees. Transports map it to their own error shape (anyhow on the CLI,
 /// `ServeError` with a param).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CapabilityError {
+pub struct CapabilityError {
     pub(crate) code: &'static str,
-    pub(crate) message: String,
+    pub message: String,
 }
 
 impl std::fmt::Display for CapabilityError {
@@ -70,7 +68,7 @@ impl std::fmt::Display for CapabilityError {
 impl std::error::Error for CapabilityError {}
 
 impl CapabilityError {
-    pub(crate) fn invalid_level(family: &str, levels: &[&str], got: &str) -> Self {
+    pub fn invalid_level(family: &str, levels: &[&str], got: &str) -> Self {
         Self {
             code: "reasoning_effort_invalid",
             message: format!(
@@ -82,7 +80,6 @@ impl CapabilityError {
 }
 
 // Shared across binaries; qwen-bench renders DeepSeek without binding controls.
-#[allow(dead_code)]
 impl DeepSeekV4Reasoning {
     /// Accepted `reasoning_effort` spellings and the tier each binds to —
     /// the one authority for every lane (legacy `--reasoning`, `run
@@ -96,11 +93,11 @@ impl DeepSeekV4Reasoning {
     ];
     pub(crate) const FALLBACK: Self = Self::None;
 
-    pub(crate) fn level_names() -> Vec<&'static str> {
+    pub fn level_names() -> Vec<&'static str> {
         Self::LEVELS.iter().map(|(name, _)| *name).collect()
     }
 
-    pub(crate) fn parse(effort: Option<&str>) -> Result<Self, CapabilityError> {
+    pub fn parse(effort: Option<&str>) -> Result<Self, CapabilityError> {
         let Some(effort) = effort else {
             return Ok(Self::FALLBACK);
         };
@@ -113,25 +110,25 @@ impl DeepSeekV4Reasoning {
             })
     }
 
-    pub(crate) fn is_thinking(self) -> bool {
+    pub fn is_thinking(self) -> bool {
         !matches!(self, Self::None)
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct DeepSeekV4EncodeOptions {
-    pub(crate) reasoning: DeepSeekV4Reasoning,
+pub struct DeepSeekV4EncodeOptions {
+    pub reasoning: DeepSeekV4Reasoning,
     /// Maps to the release encoder's `drop_thinking=False`. The official
     /// trigger is declared tool schemas; this explicit knob exists for
     /// no-tools workloads that want interleaved reasoning retention.
     /// Release history only.
-    pub(crate) preserve_reasoning: bool,
-    pub(crate) history: DeepSeekV4History,
+    pub preserve_reasoning: bool,
+    pub history: DeepSeekV4History,
 }
 
 /// How past assistant turns render.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum DeepSeekV4History {
+pub enum DeepSeekV4History {
     /// The release encoder: the whole transcript in the current tier. Chat
     /// renders every past turn `</think>content`; thinking renders every
     /// past turn as a thinking turn (reasoning kept or dropped per
@@ -168,11 +165,7 @@ const QWEN38_REASONING_EFFORT_XHIGH: &str = "Reasoning effort is set to xhigh. P
 const QWEN38_REASONING_EFFORT_LOW: &str = "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.";
 /// Whether the model renders the Qwen3.8 contract (Qwen3.8-27B releases and
 /// derivatives, Flash-Next).
-#[allow(dead_code)]
-pub(crate) fn supports_qwen38_release_prompt_protocol(
-    family: ModelFamily,
-    gguf: &GgufFile,
-) -> bool {
+pub fn supports_qwen38_release_prompt_protocol(family: ModelFamily, gguf: &GgufFile) -> bool {
     matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen4Exp)
         && crate::prompt_template::identify_qwen_release_for_gguf(gguf).is_ok_and(|identity| {
             matches!(
@@ -214,24 +207,22 @@ impl DeepSeekV4Reasoning {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum MessagesThinkingMode {
+pub enum MessagesThinkingMode {
     Auto,
     Preserve,
     Strip,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum QwenGenerationMode {
+pub enum QwenGenerationMode {
     #[default]
     Auto,
-    #[allow(dead_code)]
     Thinking,
     NoThinking,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
-pub(crate) enum Qwen38ReasoningEffort {
+pub enum Qwen38ReasoningEffort {
     Low,
     Medium,
     Xhigh,
@@ -257,8 +248,7 @@ impl Qwen38ReasoningEffort {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
-pub(crate) enum Qwen38GenerationMode {
+pub enum Qwen38GenerationMode {
     Thinking(Qwen38ReasoningEffort),
     NoThinking,
 }
@@ -280,13 +270,13 @@ impl Qwen38GenerationMode {
         ("xhigh", Self::Thinking(Qwen38ReasoningEffort::Xhigh)),
     ];
 
-    pub(crate) fn level_names() -> Vec<&'static str> {
+    pub fn level_names() -> Vec<&'static str> {
         Self::LEVELS.iter().map(|(name, _)| *name).collect()
     }
 
     /// Bind the request's controls. `no_thinking` and an effort level are
     /// two spellings of one decision, so both together is a conflict.
-    pub(crate) fn parse(effort: Option<&str>, no_thinking: bool) -> Result<Self, CapabilityError> {
+    pub fn parse(effort: Option<&str>, no_thinking: bool) -> Result<Self, CapabilityError> {
         if no_thinking && effort.is_some() {
             return Err(CapabilityError {
                 code: "reasoning_conflict",
@@ -308,7 +298,7 @@ impl Qwen38GenerationMode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MessageRenderSpanKind {
+pub enum MessageRenderSpanKind {
     MessageStartMarker,
     Role,
     MessageContent,
@@ -318,14 +308,12 @@ pub(crate) enum MessageRenderSpanKind {
     ThinkingChannelStartMarker,
     ThinkingChannelEndMarker,
     ReasoningInstructionContent,
-    #[allow(dead_code)] // Constructed by qwen-lens's typed generation input.
     AssistantPrefillContent,
     ContentSeparator,
 }
 
 impl MessageRenderSpanKind {
-    #[allow(dead_code)]
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::MessageStartMarker => "message_start_marker",
             Self::Role => "role",
@@ -343,13 +331,12 @@ impl MessageRenderSpanKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MessageRenderChannel {
+pub enum MessageRenderChannel {
     Thinking,
 }
 
 impl MessageRenderChannel {
-    #[allow(dead_code)]
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Thinking => "thinking",
         }
@@ -357,22 +344,22 @@ impl MessageRenderChannel {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct MessageRenderSpan {
-    pub(crate) kind: MessageRenderSpanKind,
-    pub(crate) message_index: Option<usize>,
-    pub(crate) role: Option<String>,
-    pub(crate) channel: Option<MessageRenderChannel>,
-    pub(crate) byte_start: usize,
-    pub(crate) byte_end: usize,
+pub struct MessageRenderSpan {
+    pub kind: MessageRenderSpanKind,
+    pub message_index: Option<usize>,
+    pub role: Option<String>,
+    pub channel: Option<MessageRenderChannel>,
+    pub byte_start: usize,
+    pub byte_end: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AnnotatedMessageRender {
-    pub(crate) text: String,
-    pub(crate) spans: Vec<MessageRenderSpan>,
+pub struct AnnotatedMessageRender {
+    pub text: String,
+    pub spans: Vec<MessageRenderSpan>,
 }
 
-pub(crate) fn messages_thinking_mode(preserve: bool, strip: bool) -> MessagesThinkingMode {
+pub fn messages_thinking_mode(preserve: bool, strip: bool) -> MessagesThinkingMode {
     if preserve {
         MessagesThinkingMode::Preserve
     } else if strip {
@@ -382,8 +369,7 @@ pub(crate) fn messages_thinking_mode(preserve: bool, strip: bool) -> MessagesThi
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn load_messages_prompt(
+pub fn load_messages_prompt(
     path: &Path,
     max_messages: Option<usize>,
     template: QwenTemplate,
@@ -400,7 +386,7 @@ pub(crate) fn load_messages_prompt(
     .map(|(prompt, _)| prompt)
 }
 
-pub(crate) fn load_messages_prompt_with_policy(
+pub fn load_messages_prompt_with_policy(
     path: &Path,
     max_messages: Option<usize>,
     template: QwenTemplate,
@@ -424,8 +410,7 @@ pub(crate) fn load_messages_prompt_with_policy(
     Ok((prompt, preserve_thinking))
 }
 
-#[allow(dead_code)]
-pub(crate) fn load_deepseek_v4_0731_messages_prompt(
+pub fn load_deepseek_v4_0731_messages_prompt(
     path: &Path,
     max_messages: Option<usize>,
     options: DeepSeekV4EncodeOptions,
@@ -450,8 +435,7 @@ pub(crate) fn load_deepseek_v4_0731_messages_prompt(
 /// thinking in `content`) round-trip through the release encoder's structured
 /// `reasoning` field semantics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)] // The bench binary shares this module without the DS4 CLI lanes.
-pub(crate) enum DeepSeekV4InlineThinking {
+pub enum DeepSeekV4InlineThinking {
     Verbatim,
     Strip,
     PromoteToReasoning,
@@ -605,7 +589,7 @@ fn load_messages_input_from_str(
     Ok((messages, meta))
 }
 
-pub(crate) fn messages_auto_preserve_thinking(meta: &serde_json::Value) -> bool {
+pub fn messages_auto_preserve_thinking(meta: &serde_json::Value) -> bool {
     if meta
         .get("preserve_thinking")
         .and_then(|value| value.as_bool())
@@ -622,7 +606,7 @@ pub(crate) fn messages_auto_preserve_thinking(meta: &serde_json::Value) -> bool 
         .unwrap_or(false)
 }
 
-pub(crate) fn parse_messages_input(
+pub fn parse_messages_input(
     value: serde_json::Value,
 ) -> Result<(Vec<ChatMessage>, serde_json::Value)> {
     match value {
@@ -658,7 +642,6 @@ pub(crate) fn parse_messages_input(
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)]
 struct StrictChatMessage {
     role: String,
     /// `null` (OpenAI-style assistant tool-call messages) reads as empty.
@@ -680,7 +663,6 @@ struct StrictChatMessage {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)]
 struct StrictMessagesWrapper {
     messages: Vec<StrictChatMessage>,
     /// OpenAI-shaped `{"type":"function","function":{...}}` or flat
@@ -691,14 +673,12 @@ struct StrictMessagesWrapper {
 
 /// A validated ordinary-chat or tool-continuation document for `qwen run`.
 #[derive(Debug, Default)]
-#[allow(dead_code)]
-pub(crate) struct StrictChat {
-    pub(crate) messages: Vec<ChatMessage>,
-    pub(crate) tools: Vec<ToolDefinition>,
+pub struct StrictChat {
+    pub messages: Vec<ChatMessage>,
+    pub tools: Vec<ToolDefinition>,
 }
 
-#[allow(dead_code)]
-pub(crate) fn parse_strict_messages_input(raw: &str, source: &str) -> Result<StrictChat> {
+pub fn parse_strict_messages_input(raw: &str, source: &str) -> Result<StrictChat> {
     let value: serde_json::Value = serde_json::from_str(raw)
         .map_err(|error| anyhow!("parse messages input {source}: {error}"))?;
     let (strict, tools) = match value {
@@ -842,7 +822,6 @@ fn parse_strict_tool_call(
     })
 }
 
-#[allow(dead_code)]
 fn validate_strict_messages(
     messages: Vec<StrictChatMessage>,
     tools: &[ToolDefinition],
@@ -975,11 +954,7 @@ fn validate_strict_messages(
 
 /// Strict ordinary chat only: the tool surface is rejected. Shared by every
 /// consumer that renders without tool support (Lens).
-#[allow(dead_code)]
-pub(crate) fn parse_strict_ordinary_chat_input(
-    raw: &str,
-    source: &str,
-) -> Result<Vec<ChatMessage>> {
+pub fn parse_strict_ordinary_chat_input(raw: &str, source: &str) -> Result<Vec<ChatMessage>> {
     let chat = parse_strict_messages_input(raw, source)?;
     ensure!(
         chat.tools.is_empty()
@@ -993,8 +968,7 @@ pub(crate) fn parse_strict_ordinary_chat_input(
 }
 
 /// Legacy unpinned-ChatML wrapper kept for probes and tests.
-#[allow(dead_code)]
-pub(crate) fn render_qwen_messages_prompt(
+pub fn render_qwen_messages_prompt(
     messages: &[ChatMessage],
     preserve_thinking: bool,
     append_generation_prompt: bool,
@@ -1004,7 +978,6 @@ pub(crate) fn render_qwen_messages_prompt(
 }
 
 /// Legacy unpinned-ChatML wrapper kept for probes and tests.
-#[allow(dead_code)]
 pub(crate) fn render_qwen_messages_prompt_annotated(
     messages: &[ChatMessage],
     preserve_thinking: bool,
@@ -1018,8 +991,8 @@ pub(crate) fn render_qwen_messages_prompt_annotated(
     )
 }
 
-/// Legacy unpinned-ChatML wrapper kept for probes and tests.
-#[allow(dead_code)]
+/// Test-only legacy unpinned-ChatML wrapper.
+#[cfg(test)]
 pub(crate) fn render_qwen_messages_prompt_with_generation(
     messages: &[ChatMessage],
     preserve_thinking: bool,
@@ -1036,8 +1009,7 @@ pub(crate) fn render_qwen_messages_prompt_with_generation(
 }
 
 /// Legacy unpinned-ChatML wrapper kept for probes and tests.
-#[allow(dead_code)]
-pub(crate) fn render_qwen_messages_prompt_with_generation_annotated(
+pub fn render_qwen_messages_prompt_with_generation_annotated(
     messages: &[ChatMessage],
     preserve_thinking: bool,
     append_generation_prompt: bool,
@@ -1084,7 +1056,7 @@ pub(crate) fn template_split_think(content: &str) -> (Option<String>, String) {
 /// Accepts the roles the released templates accept: a leading `system` or
 /// `developer`, `user`, `assistant`, and `tool` (consecutive results are
 /// coalesced into one tool-response turn).
-pub(crate) fn render_qwen_messages_prompt_for_template(
+pub fn render_qwen_messages_prompt_for_template(
     messages: &[ChatMessage],
     template: QwenTemplate,
     preserve_thinking: bool,
@@ -1104,7 +1076,7 @@ pub(crate) fn render_qwen_messages_prompt_for_template(
 
 /// Render a validated chat with declared tools. `qwen38_mode` supplies the
 /// Qwen3.8 effort/no-thinking controls when the template is Qwen3.8.
-pub(crate) fn render_qwen_chat_for_template(
+pub fn render_qwen_chat_for_template(
     messages: &[ChatMessage],
     tools: &[ToolDefinition],
     template: QwenTemplate,
@@ -1278,7 +1250,6 @@ pub(crate) fn render_qwen_chat_for_template(
     })
 }
 
-#[allow(dead_code)]
 pub(crate) fn render_qwen38_messages_prompt_with_generation(
     messages: &[ChatMessage],
     append_generation_prompt: bool,
@@ -1292,8 +1263,7 @@ pub(crate) fn render_qwen38_messages_prompt_with_generation(
     .text
 }
 
-#[allow(dead_code)]
-pub(crate) fn render_qwen38_messages_prompt_with_generation_annotated(
+pub fn render_qwen38_messages_prompt_with_generation_annotated(
     messages: &[ChatMessage],
     append_generation_prompt: bool,
     generation_mode: Qwen38GenerationMode,
@@ -1312,8 +1282,7 @@ pub(crate) fn render_qwen38_messages_prompt_with_generation_annotated(
     .expect("ordinary chat roles (system/developer, user, assistant, tool)")
 }
 
-#[allow(dead_code)]
-pub(crate) fn render_qwen38_single_turn_prompt(
+pub fn render_qwen38_single_turn_prompt(
     user: &str,
     system: Option<&str>,
     generation_mode: Qwen38GenerationMode,
@@ -1334,8 +1303,7 @@ pub(crate) fn render_qwen38_single_turn_prompt(
     render_qwen38_messages_prompt_with_generation(&messages, true, generation_mode)
 }
 
-#[allow(dead_code)]
-pub(crate) fn render_qwen_single_turn_prompt(
+pub fn render_qwen_single_turn_prompt(
     user: &str,
     system: Option<&str>,
     generation_mode: QwenGenerationMode,
@@ -1372,8 +1340,7 @@ pub(crate) fn render_qwen_single_turn_prompt_for_template(
         .text
 }
 
-#[allow(dead_code)]
-pub(crate) fn render_deepseek_v4_0731_single_turn_prompt(
+pub fn render_deepseek_v4_0731_single_turn_prompt(
     user: &str,
     system: Option<&str>,
     options: DeepSeekV4EncodeOptions,
@@ -1433,7 +1400,7 @@ pub(crate) fn render_deepseek_v4_0731_single_turn_prompt(
 ///
 /// Still excluded: developer messages, latest-reminder, tasks, response
 /// formats, and continuation (`wo_eos`).
-pub(crate) fn render_deepseek_v4_0731_messages_prompt(
+pub fn render_deepseek_v4_0731_messages_prompt(
     messages: &[ChatMessage],
     tools: &[ToolDefinition],
     options: DeepSeekV4EncodeOptions,
@@ -1675,8 +1642,7 @@ fn require_no_reasoning_field(
     Ok(())
 }
 
-#[allow(dead_code)]
-pub(crate) fn strip_think(text: &str) -> String {
+pub fn strip_think(text: &str) -> String {
     let trimmed = text.trim_start();
     if let Some(rest) = trimmed.strip_prefix("<think>")
         && let Some((_, tail)) = rest.split_once("</think>")

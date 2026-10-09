@@ -8,20 +8,20 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum AssistantPrefillChannel {
+pub enum AssistantPrefillChannel {
     Reasoning,
     Final,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AssistantPrefill {
-    pub(crate) channel: AssistantPrefillChannel,
-    pub(crate) text: String,
+pub struct AssistantPrefill {
+    pub channel: AssistantPrefillChannel,
+    pub text: String,
 }
 
 impl AssistantPrefill {
-    pub(crate) fn validate_qwen(&self) -> Result<()> {
+    pub fn validate_qwen(&self) -> Result<()> {
         for marker in [
             "<|im_start|>",
             "<|im_end|>",
@@ -62,7 +62,7 @@ const CLOSE_REASONING: &[TransitionSpan] = &[
     ("\n\n", MessageRenderSpanKind::ContentSeparator, None),
 ];
 
-pub(crate) fn qwen_transition(
+pub fn qwen_transition(
     protocol: QwenPromptTemplate,
     initial: QwenGeneration,
     prefill: &AssistantPrefill,

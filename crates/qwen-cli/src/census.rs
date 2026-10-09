@@ -1,13 +1,7 @@
 //! CPU-only census for loader source coverage and reconstructed prompt reuse.
 
-#[allow(dead_code)]
-mod messages;
-#[allow(dead_code)]
-mod model_request;
-mod open_responses;
+use qwen_cli::{messages, open_responses, prompt_template};
 mod payload_redundancy;
-#[allow(dead_code)]
-mod prompt_template;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, ValueEnum};

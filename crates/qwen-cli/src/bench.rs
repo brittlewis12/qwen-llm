@@ -51,16 +51,12 @@ mod identity;
 mod integrated_grammar_row;
 mod k2_request_bench;
 mod lm_head_screening_oracle;
-mod messages;
-#[allow(dead_code)]
-mod model_request;
 mod moe_gdn_repair;
 #[path = "bench/moe_micro.rs"]
 mod moe_micro;
 #[path = "bench/mtp.rs"]
 mod mtp;
 mod muse_glimmer_request_bench;
-mod open_responses;
 #[path = "bench/pld.rs"]
 mod pld;
 #[path = "bench/power.rs"]
@@ -77,8 +73,7 @@ mod prefix_cache;
 mod prefix_cache_vt_ab;
 #[path = "bench/proj_micro.rs"]
 mod proj_micro;
-#[allow(dead_code)]
-mod prompt_template;
+use qwen_cli::{messages, prompt_template};
 mod q4_mma_ceiling;
 mod residency_kill_child;
 use qwen_cli::response_shape_runtime;

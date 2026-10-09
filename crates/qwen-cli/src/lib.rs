@@ -1,4 +1,8 @@
 pub mod bounded_file;
+pub mod messages;
+pub mod model_request;
+pub mod open_responses;
+pub mod prompt_template;
 pub mod response_shape_runtime;
 pub mod shutdown;
 pub mod tracing_init;

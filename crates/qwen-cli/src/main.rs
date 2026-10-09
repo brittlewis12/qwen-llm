@@ -46,18 +46,14 @@ mod lens_intervention;
 mod lens_scope;
 #[allow(dead_code)] // Shared transport verification also serves CLI-only consumers.
 mod linear_transport;
-mod messages;
-mod model_request;
 #[path = "qwen/muse_glimmer.rs"]
 mod muse_glimmer;
-mod open_responses;
 mod ordinary_executor;
 #[path = "qwen/prefill_plan.rs"]
 mod prefill_plan;
 #[path = "qwen/prompt_lookup.rs"]
 mod prompt_lookup;
-#[allow(dead_code)]
-mod prompt_template;
+use qwen_cli::{messages, model_request, open_responses, prompt_template};
 #[path = "qwen/qwen4exp.rs"]
 mod qwen4exp;
 mod qwen_file_root;

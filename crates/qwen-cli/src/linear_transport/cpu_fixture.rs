@@ -8,19 +8,45 @@ pub(crate) fn write_cpu_gguf(
     token_claim: &str,
     bad_head: bool,
 ) {
+    // Tests use this marker to add the released Qwen tokenizer facts and name.
+    let name = token_claim.strip_prefix("qwen-release:");
+    let qwen_tokenizer = name.is_some();
     fn string(out: &mut Vec<u8>, text: &str) {
         out.extend_from_slice(&(text.len() as u64).to_le_bytes());
         out.extend_from_slice(text.as_bytes());
     }
     let mut metadata = Vec::new();
-    for (key, text) in [
+    let tokenizer_model = if qwen_tokenizer { "gpt2" } else { token_claim };
+    let mut string_metadata = vec![
         ("general.architecture", family),
-        ("tokenizer.ggml.model", token_claim),
-    ] {
+        ("tokenizer.ggml.model", tokenizer_model),
+    ];
+    if qwen_tokenizer {
+        string_metadata.push(("tokenizer.ggml.pre", "qwen35"));
+    }
+    for (key, text) in string_metadata {
         let mut entry = Vec::new();
         string(&mut entry, key);
         entry.extend_from_slice(&8u32.to_le_bytes());
         string(&mut entry, text);
+        metadata.push(entry);
+    }
+    if qwen_tokenizer {
+        let mut entry = Vec::new();
+        string(&mut entry, "tokenizer.ggml.tokens");
+        entry.extend_from_slice(&9u32.to_le_bytes());
+        entry.extend_from_slice(&8u32.to_le_bytes());
+        entry.extend_from_slice(&248_320u64.to_le_bytes());
+        for _ in 0..248_320 {
+            string(&mut entry, "");
+        }
+        metadata.push(entry);
+    }
+    if let Some(name) = name {
+        let mut entry = Vec::new();
+        string(&mut entry, "general.name");
+        entry.extend_from_slice(&8u32.to_le_bytes());
+        string(&mut entry, name);
         metadata.push(entry);
     }
     for (key, value) in [

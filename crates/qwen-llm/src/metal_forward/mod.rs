@@ -86,15 +86,27 @@ use crate::tensor::{GgmlType, TensorDesc, ggml_type_layout_raw};
 crate::env_flag!(default_off kv_q8_flag, "QWEN_KV_Q8");
 
 crate::env_flag!(default_on concurrent_gdn_moe_decode_enabled, "QWEN_DECODE_MOE_CONCURRENT_GDN");
-crate::env_flag!(default_on concurrent_gdn_dense_decode_enabled, "QWEN_DECODE_DENSE_CONCURRENT_GDN");
+crate::env_flag!(
+    /// Routes dense single-token decode through concurrent GDN front projections; disabling selects serial dense decode.
+    default_on concurrent_gdn_dense_decode_enabled,
+    "QWEN_DECODE_DENSE_CONCURRENT_GDN"
+);
 crate::env_flag!(default_on concurrent_shared_moe_decode_enabled, "QWEN_DECODE_MOE_CONCURRENT_SHARED");
-crate::env_flag!(default_on decode_shared_swiglu_q8_enabled, "QWEN_DECODE_SHARED_SWIGLU_Q8");
+crate::env_flag!(
+    /// Fuses eligible Q8_0 shared-expert gate/up SwiGLU into one kernel; disabling restores separate mat-vec and SwiGLU dispatches.
+    default_on decode_shared_swiglu_q8_enabled,
+    "QWEN_DECODE_SHARED_SWIGLU_Q8"
+);
 crate::env_flag!(default_on decode_moe_iq3_fused_swiglu_enabled, "QWEN_DECODE_MOE_IQ3_FUSED_SWIGLU");
 crate::env_flag!(default_on decode_moe_iq3_fast_swiglu_enabled, "QWEN_DECODE_MOE_IQ3_FAST_SWIGLU");
 crate::env_flag!(default_on decode_moe_q5_down_fused_enabled, "QWEN_DECODE_MOE_Q5_DOWN_FUSED");
 crate::env_flag!(default_on decode_moe_iq4_down_fast_enabled, "QWEN_DECODE_MOE_IQ4_DOWN_FAST");
 crate::env_flag!(default_on decode_moe_q5_down_k512_r2_enabled, "QWEN_DECODE_MOE_Q5_DOWN_K512_R2");
-crate::env_flag!(default_on decode_moe_fused_finalizer_enabled, "QWEN_DECODE_MOE_FUSED_FINALIZER");
+crate::env_flag!(
+    /// Fuses shared-expert accumulation, mixer update, and residual add in MoE decode; disabling restores separate accumulation and add passes.
+    default_on decode_moe_fused_finalizer_enabled,
+    "QWEN_DECODE_MOE_FUSED_FINALIZER"
+);
 crate::env_flag!(default_on decode_moe_grouped_finalizer_enabled, "QWEN_DECODE_MOE_GROUPED_FINALIZER");
 crate::env_flag!(default_on decode_attn_sigmoid_mul_enabled, "QWEN_DECODE_ATTN_SIGMOID_MUL");
 crate::env_flag!(default_off moe_router_f16_enabled, "QWEN_MOE_ROUTER_F16");
@@ -664,7 +676,11 @@ crate::env_flag!(default_off decode_gdn_noop_qkv_flag, "QWEN_DECODE_GDN_NOOP_QKV
 crate::env_flag!(default_off decode_gdn_noop_z_flag, "QWEN_DECODE_GDN_NOOP_Z");
 crate::env_flag!(default_off decode_gdn_noop_beta_flag, "QWEN_DECODE_GDN_NOOP_BETA");
 crate::env_flag!(default_off decode_gdn_noop_alpha_flag, "QWEN_DECODE_GDN_NOOP_ALPHA");
-crate::env_flag!(default_on decode_gdn_pair_l2_enabled, "QWEN_DECODE_GDN_PAIR_L2");
+crate::env_flag!(
+    /// Normalizes GDN query and key tensors with a paired L2 dispatch; disabling uses separate query and key normalization dispatches.
+    default_on decode_gdn_pair_l2_enabled,
+    "QWEN_DECODE_GDN_PAIR_L2"
+);
 
 crate::env_flag!(default_off phase_gdn_proj_split_enabled, "QWEN_PHASE_GDN_PROJ_SPLIT");
 crate::env_flag!(default_off phase_gdn_tail_split_enabled, "QWEN_PHASE_GDN_TAIL_SPLIT");

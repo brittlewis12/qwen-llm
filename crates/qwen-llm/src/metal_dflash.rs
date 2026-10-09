@@ -621,7 +621,11 @@ pub(crate) fn prefill_mat_mat_dispatch_eligible(dtype: GgmlType) -> bool {
     )
 }
 
-crate::env_flag!(default_on prefill_gdn_skinny_f32_e8p32_enabled, "QWEN_PREFILL_GDN_SKINNY_E8P32");
+crate::env_flag!(
+    /// Routes eligible F32 GDN alpha/beta prompt projections through E8xP32; disabling restores generic dense mat-mat dispatch.
+    default_on prefill_gdn_skinny_f32_e8p32_enabled,
+    "QWEN_PREFILL_GDN_SKINNY_E8P32"
+);
 
 crate::env_flag!(default_on prefill_gdn_pair_l2_enabled, "QWEN_PREFILL_GDN_PAIR_L2");
 

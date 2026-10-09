@@ -26,6 +26,9 @@
 //! `with_matmat_bf16_bfloat_act_override` in `metal_forward.rs`), not env
 //! mutation.
 //!
+//! New or touched `env_flag!` declarations carry a `///` line inside the
+//! invocation stating the setting's observable behavior.
+//!
 //! NOTE: a value outside both sets (e.g. a typo like `QWEN_FOO=ture`)
 //! silently resolves to the default, exactly as before. That's a deliberate
 //! bug-compatibility choice for this refactor; a warn-on-unrecognized pass
@@ -55,7 +58,8 @@ pub fn read_default_on(name: &str) -> bool {
     !std::env::var(name).as_deref().is_ok_and(env_value_falsy)
 }
 
-/// Declare a cached env-flag accessor function.
+/// Declare a cached env-flag accessor function. New declarations should carry
+/// a doc line inside the invocation stating the setting's observable behavior.
 ///
 /// ```ignore
 /// env_flag!(default_on  concurrent_gdn_dense_decode_enabled, "QWEN_DECODE_DENSE_CONCURRENT_GDN");
@@ -68,13 +72,15 @@ pub fn read_default_on(name: &str) -> bool {
 /// read a flag declaration without learning its default.
 #[macro_export]
 macro_rules! env_flag {
-    (default_on $fn_name:ident, $env:literal) => {
+    ($(#[$meta:meta])* default_on $fn_name:ident, $env:literal) => {
+        $(#[$meta])*
         fn $fn_name() -> bool {
             static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             *ENABLED.get_or_init(|| $crate::env_flag::read_default_on($env))
         }
     };
-    (default_off $fn_name:ident, $env:literal) => {
+    ($(#[$meta:meta])* default_off $fn_name:ident, $env:literal) => {
+        $(#[$meta])*
         fn $fn_name() -> bool {
             static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             *ENABLED.get_or_init(|| $crate::env_flag::read_default_off($env))
@@ -85,6 +91,18 @@ macro_rules! env_flag {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    crate::env_flag!(
+        /// Returns false while its test environment variable is unset.
+        default_off un_attributed_flag,
+        "QWEN_TEST_UNATTRIBUTED_FLAG"
+    );
+    crate::env_flag!(
+        /// Returns false while its test environment variable is unset.
+        #[allow(dead_code)]
+        default_off attributed_flag,
+        "QWEN_TEST_ATTRIBUTED_FLAG"
+    );
 
     #[test]
     fn truthy_and_falsy_sets_are_disjoint_and_exact() {
@@ -109,5 +127,11 @@ mod tests {
         // Use names that can't collide with real knobs.
         assert!(!read_default_off("QWEN_TEST_FLAG_THAT_IS_NEVER_SET"));
         assert!(read_default_on("QWEN_TEST_FLAG_THAT_IS_NEVER_SET"));
+    }
+
+    #[test]
+    fn env_flag_attributed_accessor_behaves_like_unattributed_accessor() {
+        assert_eq!(attributed_flag(), un_attributed_flag());
+        assert!(!attributed_flag());
     }
 }

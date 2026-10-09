@@ -200,6 +200,106 @@ def split_arguments(tokens: list[RustToken]) -> list[list[RustToken]]:
     return parts
 
 
+def parse_env_flag(
+    text: str, tokens: list[RustToken], opening: int, closing: int
+) -> tuple[str, str, str] | None:
+    """Parse the exact env_flag! declaration grammar and its in-call docs."""
+    args = split_arguments(tokens[opening + 1 : closing])
+    if len(args) != 2:
+        return None
+    declaration, variable = args
+    index = 0
+    while index < len(declaration) and declaration[index].value == "#":
+        if index + 1 >= len(declaration) or declaration[index + 1].value != "[":
+            return None
+        attr_end = matching(declaration, index + 1, "[", "]")
+        if attr_end is None:
+            return None
+        index = attr_end + 1
+    if (
+        index + 1 >= len(declaration)
+        or declaration[index].value not in ("default_on", "default_off")
+        or declaration[index + 1].kind != "ident"
+        or len(declaration) != index + 2
+        or len(variable) != 1
+        or variable[0].kind != "string"
+    ):
+        return None
+    polarity = declaration[index].value
+    docs_start = tokens[opening].offset + 1
+    docs_end = declaration[index].offset
+    docs = [
+        re.sub(r"^\s*/// ?", "", line).strip()
+        for line in text[docs_start:docs_end].splitlines()
+        if re.match(r"^\s*///", line)
+    ]
+    purpose = " ".join(part for part in docs if part) or "undocumented"
+    return polarity, variable[0].value, purpose
+
+
+def register_env_flag_declaration(
+    declared: dict[str, tuple[str, int, str]],
+    variable: str,
+    path: str,
+    line: int,
+    purpose: str,
+) -> tuple[bool, tuple[str, str, str, int, str] | None]:
+    """Keep the first declaration for each variable and report later ones."""
+    if variable in declared:
+        first_path, first_line, _first_purpose = declared[variable]
+        return False, (
+            variable,
+            "duplicate env_flag! declaration",
+            f"first at {first_path}:{first_line}",
+            line,
+            path,
+        )
+    declared[variable] = (path, line, purpose)
+    return True, None
+
+
+def self_test() -> None:
+    def parse(source: str) -> tuple[str, str, str] | None:
+        tokens = rust_tokens(source)
+        start = next(i for i, token in enumerate(tokens) if token.value == "(")
+        end = matching(tokens, start, "(", ")")
+        assert end is not None
+        return parse_env_flag(source, tokens, start, end)
+
+    assert parse(
+        'env_flag!(\n    /// Purpose from inside the invocation.\n'
+        '    default_off switch, "QWEN_SELF_TEST");'
+    ) == ("default_off", "QWEN_SELF_TEST", "Purpose from inside the invocation.")
+    assert parse(
+        'env_flag!(\n    /// First line.\n    /// Second line.\n'
+        '    #[allow(dead_code)]\n    default_on switch, "QWEN_SELF_TEST");'
+    ) == ("default_on", "QWEN_SELF_TEST", "First line. Second line.")
+    assert parse(
+        '/// Adjacent comments are not invocation documentation.\n'
+        'env_flag!(\n    #[allow(dead_code)]\n    default_on switch, "QWEN_SELF_TEST");'
+    ) == ("default_on", "QWEN_SELF_TEST", "undocumented")
+    assert parse('env_flag!(default_on, "QWEN_SELF_TEST");') is None
+    assert parse('env_flag!(default_on switch, NAME);') is None
+
+    declared: dict[str, tuple[str, int, str]] = {}
+    first, first_conflict = register_env_flag_declaration(
+        declared, "QWEN_DUP", "one.rs", 1, "first purpose"
+    )
+    second, second_conflict = register_env_flag_declaration(
+        declared, "QWEN_DUP", "two.rs", 2, "second purpose"
+    )
+    assert first and first_conflict is None
+    assert not second and second_conflict == (
+        "QWEN_DUP",
+        "duplicate env_flag! declaration",
+        "first at one.rs:1",
+        2,
+        "two.rs",
+    )
+    assert declared["QWEN_DUP"][2] == "first purpose"
+    print("env_knobs scanner self-tests: passed")
+
+
 def cfg_test_ranges(tokens: list[RustToken]) -> list[tuple[int, int]]:
     ranges: list[tuple[int, int]] = []
     for index in range(len(tokens) - 4):
@@ -756,11 +856,12 @@ def collect() -> tuple[dict[str, Knob], list[tuple[str, str, str, int, str]]]:
         lines: list[str],
         polarity: str | None = None,
         scope: str = "runtime",
+        purpose: str | None = None,
     ) -> None:
         if not is_knob(variable):
             return
         item = knobs.get(variable)
-        desc = description(lines, line)
+        desc = purpose if purpose is not None else description(lines, line)
         if item is None or (
             item.description == "undocumented" and desc != "undocumented"
         ):
@@ -779,6 +880,7 @@ def collect() -> tuple[dict[str, Knob], list[tuple[str, str, str, int, str]]]:
         if polarity:
             item.polarities.add(polarity)
 
+    declared_flags: dict[str, tuple[str, int, str]] = {}
     for rel, text, _, lines, tokens, test_ranges in sources:
         scope_at = (
             lambda offset: "test-only"
@@ -857,25 +959,31 @@ def collect() -> tuple[dict[str, Knob], list[tuple[str, str, str, int, str]]]:
             ):
                 close = matching(tokens, index + 2, "(", ")")
                 if close is not None:
-                    args = split_arguments(tokens[index + 3 : close])
-                    if (
-                        len(args) >= 2
-                        and args[0]
-                        and args[0][0].value in ("default_on", "default_off")
-                    ):
-                        parsed = value_for(args[1], token.offset)
-                        if parsed:
-                            variable, _, _ = parsed
-                            polarity = args[0][0].value
-                            add(
-                                variable,
-                                "bool " + polarity.replace("_", "-"),
-                                rel,
-                                line_number(text, token.offset),
-                                lines,
-                                polarity,
-                                scope_at(token.offset),
-                            )
+                    parsed_flag = parse_env_flag(text, tokens, index + 2, close)
+                    if parsed_flag:
+                        polarity, variable, purpose = parsed_flag
+                        declaration_line = line_number(text, token.offset)
+                        first_declaration, duplicate = register_env_flag_declaration(
+                            declared_flags,
+                            variable,
+                            rel,
+                            declaration_line,
+                            purpose,
+                        )
+                        if duplicate:
+                            conflicts.append(duplicate)
+                        if not first_declaration:
+                            continue
+                        add(
+                            variable,
+                            "bool " + polarity.replace("_", "-"),
+                            rel,
+                            declaration_line,
+                            lines,
+                            polarity,
+                            scope_at(token.offset),
+                            purpose,
+                        )
 
             # Direct env::var/var_os calls, including fully qualified paths.
             if (
@@ -995,7 +1103,15 @@ def render(knobs: dict[str, Knob], revision: str) -> str:
     ]
     for variable in sorted(knobs):
         item = knobs[variable]
-        escaped_description = item.description.replace("|", "\\|")
+        rendered_description = item.description
+        if item.polarities:
+            polarity = next(iter(item.polarities))
+            if polarity == "default_off":
+                parse_rule = "on for `1`/`true`/`TRUE`/`yes`/`YES`; any other value uses the default"
+            else:
+                parse_rule = "off for `0`/`false`/`FALSE`/`no`/`NO`; any other value uses the default"
+            rendered_description += f" Parse rule: {parse_rule}; read once per process."
+        escaped_description = rendered_description.replace("|", "\\|")
         scope = (
             "build"
             if "build" in item.scopes
@@ -1010,12 +1126,18 @@ def render(knobs: dict[str, Knob], revision: str) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--self-test", action="store_true", help="run scanner parser self-tests"
+    )
+    parser.add_argument(
         "--check", action="store_true", help="fail if docs/ENV.md is stale"
     )
     parser.add_argument(
         "--output", type=Path, help="write the generated reference to this path"
     )
     args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        return 0
     knobs, conflicts = collect()
     revision = subprocess.check_output(
         ["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, text=True

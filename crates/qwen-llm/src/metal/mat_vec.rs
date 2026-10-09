@@ -2,7 +2,11 @@
 
 use super::*;
 
-crate::env_flag!(default_on mat_vec_f32_lcpp_r2_enabled, "QWEN_MATVEC_F32_LCPP_R2");
+crate::env_flag!(
+    /// Uses the cooperative two-row F32 mat-vec kernel; disabling selects the single-row F32 mat-vec kernel.
+    default_on mat_vec_f32_lcpp_r2_enabled,
+    "QWEN_MATVEC_F32_LCPP_R2"
+);
 
 #[cfg(test)]
 pub(crate) fn mat_vec_f32_lcpp_r2_enabled_for_test() -> bool {

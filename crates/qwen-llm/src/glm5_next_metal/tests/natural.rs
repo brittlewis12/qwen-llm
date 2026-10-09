@@ -1426,10 +1426,13 @@ fn reuse_natural_activation_rounding_probe() {
     .unwrap();
 }
 
-/// Fast stages whose Q8_0 projections can take the F32-operand tile (map #12
-/// accuracy lane): KDA expansions; KDA beta/f_a/g_a; MLA q_b and kv_a (and
-/// all of block 11's projections); the indexer; block 11's shared expert.
-fn f32_q8_families() -> Vec<super::super::packed::Stage> {
+/// Fast stage families whose dense projections can take an F32-operand
+/// tile (map #12 accuracy lane): Q8_0 KDA expansions, KDA beta/f_a/g_a, MLA
+/// q_b and kv_a, the indexer and block 11's attention and shared expert;
+/// Q6_K KDA q/k/v/o, MLA q_a and wo, the shared expert and the dense FFN.
+/// The router and MLA absorption are F32 already; routed experts stay
+/// half-staged.
+fn f32_operand_families() -> Vec<super::super::packed::Stage> {
     use super::super::packed::Stage;
     vec![
         Stage::KdaExpand,
@@ -1441,21 +1444,64 @@ fn f32_q8_families() -> Vec<super::super::packed::Stage> {
     ]
 }
 
-/// Map #12 accuracy probe (diagnostic; no bounds): on frozen cases (H2,
-/// H4, H5 by default; `GLM53_PROBE_CASES`) at 512 rows, Exact, Fast, Fast
-/// with F32-operand KDA expansions, and Fast with every Q8_0 projection on
-/// the F32-operand tile, each against Exact (worst and mean KL, prompt-end
-/// KL, flips with both regrets). Writes JSON to `GLM53_PROBE_OUT`.
+/// The census of one F32 selection: every projection of an enabled tile's
+/// weight type took the tile (no half-staged fallback), and each enabled
+/// tile ran. Returns the census as JSON.
+fn assert_f32_census(
+    label: &str,
+    census: &std::collections::BTreeMap<(String, bool), usize>,
+    tiles: &[super::super::packed::F32Tile],
+) -> Value {
+    use super::super::packed::F32Tile;
+    for tile in tiles {
+        let dtype = match tile {
+            F32Tile::Q8_0 => "Q8_0",
+            F32Tile::Q6K => "Q6_K",
+        };
+        let count = |taken: bool| {
+            census
+                .get(&(dtype.to_string(), taken))
+                .copied()
+                .unwrap_or(0)
+        };
+        assert_eq!(
+            count(false),
+            0,
+            "{label}: {dtype} projections fell back to half staging"
+        );
+        assert!(
+            count(true) > 0,
+            "{label}: no {dtype} projection took its F32 tile"
+        );
+    }
+    Value::Object(
+        census
+            .iter()
+            .map(|((dtype, taken), n)| {
+                (
+                    format!("{dtype} {}", if *taken { "f32" } else { "half" }),
+                    json!(n),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// Map #12 accuracy probe (diagnostic; no bounds): on every frozen natural
+/// case (`GLM53_PROBE_CASES` narrows) at 512 rows, Fast, Fast with every
+/// Q8_0 projection on its F32-operand tile, and Fast with every Q8_0 and
+/// Q6_K projection on F32-operand tiles ("dense F32": only routed experts
+/// stay half-staged), each against Exact on the same frozen continuation:
+/// per case worst, mean and prompt-end KL and flips with both regrets; across
+/// cases the equal-case mean of per-position mean KL (the development
+/// summary) and the median and largest worst-position KL. A census asserts
+/// every selected projection took its tile. Writes JSON to
+/// `GLM53_PROBE_OUT`.
 #[test]
-#[ignore = "map #12 F32 Q8 accuracy probe: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_PROBE_OUT and an idle GPU"]
-fn reuse_natural_f32_q8_probe() {
-    use super::super::packed::{F32Stages, Stage};
+#[ignore = "map #12 F32-operand accuracy probe: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_PROBE_OUT and an idle GPU"]
+fn reuse_natural_f32_operand_probe() {
+    use super::super::packed::{F32Census, F32Stages, F32Tile};
     let out = PathBuf::from(std::env::var("GLM53_PROBE_OUT").expect("GLM53_PROBE_OUT"));
-    let wanted: Vec<String> = std::env::var("GLM53_PROBE_CASES")
-        .unwrap_or_else(|_| "H2-code-context,H4-tool-across-frontier,H5-long-chat-sparse".into())
-        .split(',')
-        .map(str::to_string)
-        .collect();
     let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
     let fixture: Value = serde_json::from_slice(&std::fs::read(&fixture_path).unwrap()).unwrap();
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
@@ -1467,13 +1513,23 @@ fn reuse_natural_f32_q8_probe() {
         config.sparse_frontier() as usize,
         config.indexer_pool as usize,
     );
+    let wanted: Vec<String> = match std::env::var("GLM53_PROBE_CASES") {
+        Ok(list) => list.split(',').map(str::to_string).collect(),
+        Err(_) => frozen.iter().map(|c| c.id.clone()).collect(),
+    };
     for id in &wanted {
         assert!(frozen.iter().any(|c| &c.id == id), "unknown case {id}");
     }
     let _lease = production_lease();
     let ctx = MetalContext::new().expect("Metal context");
     let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let arms: [(&str, &[F32Tile]); 3] = [
+        ("fast", &[]),
+        ("fast_f32_q8", &[F32Tile::Q8_0]),
+        ("fast_f32_dense", &F32Tile::ALL),
+    ];
     let mut cases = Vec::new();
+    let mut per_arm: Vec<Vec<(f64, f64)>> = vec![Vec::new(); arms.len()];
     for case in frozen.iter().filter(|c| wanted.contains(&c.id)) {
         let turn2 = case.turn2();
         let capacity = turn2.len() + case.continuation.len() + 1;
@@ -1486,36 +1542,68 @@ fn reuse_natural_f32_q8_probe() {
             logits
         };
         let exact = run(PackedLineage::Exact);
-        let fast = run(PackedLineage::Fast);
-        let expand = {
-            let _scope = F32Stages::set(&[Stage::KdaExpand]);
-            run(PackedLineage::Fast)
-        };
-        let all_q8 = {
-            let _scope = F32Stages::set(&f32_q8_families());
-            run(PackedLineage::Fast)
-        };
-        let measure = |label: &str, other: &[Vec<f32>]| {
-            let drift = Drift::measure(&format!("{} {label}", case.id), &exact, other);
+        let mut row = json!({"id": case.id, "prompt_tokens": turn2.len(),
+            "positions": exact.len()});
+        let mut fast_bits = None;
+        for (i, (label, tiles)) in arms.iter().enumerate() {
+            let (logits, census) = if tiles.is_empty() {
+                (run(PackedLineage::Fast), Value::Null)
+            } else {
+                let _scope = F32Stages::with_tiles(&f32_operand_families(), tiles);
+                let census = F32Census::begin();
+                let logits = run(PackedLineage::Fast);
+                let counts = census.take();
+                (
+                    logits,
+                    assert_f32_census(&format!("{} {label}", case.id), &counts, tiles),
+                )
+            };
+            let drift = Drift::measure(&format!("{} {label}", case.id), &exact, &logits);
             drift.print(&format!("{} {label} vs Exact", case.id));
             let mut value = drift.json();
             value["prompt_end_kl"] = json!(drift.kls[0]);
-            value
-        };
-        let row = json!({
-            "id": case.id,
-            "fast": measure("fast", &fast),
-            "fast_f32_kda_expand": measure("fast f32 kda expand", &expand),
-            "fast_f32_q8_all": measure("fast f32 q8 all", &all_q8),
-            "f32_changed_fast": logit_bits(&all_q8) != logit_bits(&fast),
-        });
+            value["census"] = census;
+            match &fast_bits {
+                None => fast_bits = Some(logit_bits(&logits)),
+                Some(bits) => value["differs_from_fast"] = json!(logit_bits(&logits) != *bits),
+            }
+            row[*label] = value;
+            per_arm[i].push((drift.mean_kl, drift.worst_kl));
+        }
         cases.push(row);
     }
+    assert!(!cases.is_empty(), "no case was evaluated");
+    let summary: serde_json::Map<String, Value> = arms
+        .iter()
+        .zip(&per_arm)
+        .map(|((label, _), values)| {
+            let mut worst: Vec<f64> = values.iter().map(|v| v.1).collect();
+            worst.sort_by(f64::total_cmp);
+            let median = if worst.len() % 2 == 1 {
+                worst[worst.len() / 2]
+            } else {
+                (worst[worst.len() / 2 - 1] + worst[worst.len() / 2]) / 2.0
+            };
+            let mean_of_means = values.iter().map(|v| v.0).sum::<f64>() / values.len() as f64;
+            eprintln!(
+                "{label}: equal-case mean of mean KL {mean_of_means:.4e}; worst KL median {median:.4e}, max {:.4e}",
+                worst[worst.len() - 1]
+            );
+            (
+                label.to_string(),
+                json!({"equal_case_mean_of_mean_kl": mean_of_means,
+                    "median_worst_kl": median, "max_worst_kl": worst[worst.len() - 1]}),
+            )
+        })
+        .collect();
     let document = json!({
-        "schema": "glm53.f32_q8_probe.v1", "rows_per_chunk": 512,
-        "arms": {"fast": "half-staged tiles", "fast_f32_kda_expand": "KDA expansions on the F32-operand Q8_0 tile",
-            "fast_f32_q8_all": "every Q8_0 projection of Fast on the F32-operand tile (Q6_K and experts unchanged)"},
-        "cases": cases,
+        "schema": "glm53.f32_operand_probe.v1", "rows_per_chunk": 512,
+        "reference": "Exact cold on the same frozen continuation",
+        "arms": {"fast": "half-staged tiles",
+            "fast_f32_q8": "every Q8_0 dense projection on the F32-operand tile",
+            "fast_f32_dense": "every Q8_0 and Q6_K dense projection on F32-operand tiles (routed experts half-staged)"},
+        "families": format!("{:?}", f32_operand_families()),
+        "summary": summary, "cases": cases,
     });
     std::fs::write(
         &out,
@@ -1524,15 +1612,16 @@ fn reuse_natural_f32_q8_probe() {
     .unwrap();
 }
 
-/// The F32-operand Q8_0 tile keeps Fast's chunk identities: with every Q8_0
-/// projection on it, 512- and 128-row chunkings agree bitwise, as do 64 and
-/// 97 rows (the pairs the half-staged Fast already holds), at the prompt
-/// end and through decode; and the selection takes effect (logits differ
-/// from half-staged Fast).
+/// F32-operand tiles keep Fast's chunk identities: with every Q8_0 and Q6_K
+/// dense projection on them, 512- and 128-row chunkings agree bitwise, as do
+/// 64 and 97 rows (the pairs the half-staged Fast already holds), at the
+/// prompt end and through decode; every selected projection took its tile
+/// at each chunking; and the selection takes effect (logits differ from
+/// half-staged Fast).
 #[test]
-#[ignore = "map #12 F32 Q8 chunk identities: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU"]
-fn fast_f32_q8_keeps_chunk_identities() {
-    use super::super::packed::F32Stages;
+#[ignore = "map #12 F32-operand chunk identities: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU"]
+fn fast_f32_dense_keeps_chunk_identities() {
+    use super::super::packed::{F32Census, F32Stages, F32Tile};
     let _lease = production_lease();
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
     let gguf = GgufFile::open(&path).unwrap();
@@ -1556,8 +1645,17 @@ fn fast_f32_q8_keeps_chunk_identities() {
     };
     let half_512 = run(512);
     let f32_runs: Vec<(usize, Vec<Vec<f32>>)> = {
-        let _scope = F32Stages::set(&f32_q8_families());
-        [512, 128, 64, 97].map(|rows| (rows, run(rows))).into()
+        let _scope = F32Stages::set(&f32_operand_families());
+        let census = F32Census::begin();
+        [512, 128, 64, 97]
+            .map(|rows| {
+                let logits = run(rows);
+                let counts = census.take();
+                let value = assert_f32_census(&format!("{rows} rows"), &counts, &F32Tile::ALL);
+                eprintln!("{rows} rows: census {value}");
+                (rows, logits)
+            })
+            .into()
     };
     let bits = |rows: usize| logit_bits(&f32_runs.iter().find(|(r, _)| *r == rows).unwrap().1);
     assert_eq!(bits(512), bits(128), "512 vs 128 rows");
@@ -1574,15 +1672,19 @@ fn fast_f32_q8_keeps_chunk_identities() {
     }
 }
 
-/// Release timing of the F32-operand Q8_0 tile (map #12 accuracy lane):
-/// alternating Fast and Fast with every Q8_0 projection on it (ABBA, two
-/// rounds), a 2,048-token prompt in 512-row chunks; reports mean prefill
-/// wall per arm to `GLM53_PROBE_OUT`. Diagnostic; no bounds.
+/// Release timing of the F32-operand dense tiles (map #12 accuracy lane):
+/// Fast against Fast with every Q8_0 and Q6_K dense projection on them, in
+/// A-B-B-A order twice after a warm-up of both: a fresh 2,048-token prompt
+/// in 512-row chunks, and 1-, 17- and 64-token suffixes after a reused
+/// same-arm prefix (the short spans a reused conversation prefills). Reports
+/// per-arm means to `GLM53_PROBE_OUT`. Diagnostic; no bounds.
 #[test]
 #[ignore = "diagnostic timing: GLM53_GGUF, GLM53_PROBE_OUT, release build, no MTL_DEBUG_LAYER; loads 109.5 GiB under production lease"]
-fn fast_f32_q8_prefill_cost() {
+fn fast_f32_dense_prefill_cost() {
     use super::super::packed::F32Stages;
-    assert!(!cfg!(debug_assertions), "timing requires --release");
+    if cfg!(debug_assertions) {
+        panic!("timing requires --release");
+    }
     let out = PathBuf::from(std::env::var("GLM53_PROBE_OUT").expect("GLM53_PROBE_OUT"));
     let _lease = super::perf_lease();
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
@@ -1596,32 +1698,56 @@ fn fast_f32_q8_prefill_cost() {
         .into_iter()
         .map(|t| t as u32)
         .collect();
-    let prompt = &tokens[..2048];
-    let time = |f32_q8: bool| -> f64 {
-        let _scope = f32_q8.then(|| F32Stages::set(&f32_q8_families()));
-        let mut s = session(&ctx, &weights, 2048 + 8, 512, PackedLineage::Fast);
+    const PROMPT: usize = 2048;
+    const SUFFIXES: [usize; 3] = [1, 17, 64];
+    // Per measurement: the fresh prompt's ms, then each suffix's.
+    let time = |f32_dense: bool| -> Vec<f64> {
+        let _scope = f32_dense.then(|| F32Stages::set(&f32_operand_families()));
+        let mut s = session(&ctx, &weights, PROMPT + 8, 512, PackedLineage::Fast);
         let started = std::time::Instant::now();
-        let logits = s.prefill_packed(&ctx, prompt).unwrap();
-        let ms = started.elapsed().as_secs_f64() * 1e3;
+        let logits = s.prefill_packed(&ctx, &tokens[..PROMPT]).unwrap();
+        let mut spans = vec![started.elapsed().as_secs_f64() * 1e3];
         assert_finite("timing logits", &logits);
-        ms
+        drop(s);
+        for n in SUFFIXES {
+            let mut s = session(&ctx, &weights, PROMPT + 8, 512, PackedLineage::Fast);
+            s.prefill_packed(&ctx, &tokens[..PROMPT - n]).unwrap();
+            let started = std::time::Instant::now();
+            let logits = s.prefill_packed(&ctx, &tokens[PROMPT - n..PROMPT]).unwrap();
+            spans.push(started.elapsed().as_secs_f64() * 1e3);
+            assert_finite("suffix logits", &logits);
+        }
+        spans
     };
-    // Warm-up of both arms, then ABBA twice.
     time(false);
     time(true);
-    let (mut half, mut f32) = (Vec::new(), Vec::new());
+    let (mut half, mut dense) = (Vec::new(), Vec::new());
     for _ in 0..2 {
         half.push(time(false));
-        f32.push(time(true));
-        f32.push(time(true));
+        dense.push(time(true));
+        dense.push(time(true));
         half.push(time(false));
     }
-    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    let labels = std::iter::once(format!("fresh {PROMPT}"))
+        .chain(SUFFIXES.map(|n| format!("{n}-token suffix after {}", PROMPT - n)));
+    let rows: Vec<Value> = labels
+        .enumerate()
+        .map(|(i, span)| {
+            let column = |runs: &[Vec<f64>]| runs.iter().map(|t| t[i]).collect::<Vec<_>>();
+            let (h, d) = (column(&half), column(&dense));
+            let (hm, dm) = (
+                h.iter().sum::<f64>() / h.len() as f64,
+                d.iter().sum::<f64>() / d.len() as f64,
+            );
+            json!({"span": span, "half_ms": h, "f32_dense_ms": d, "half_mean_ms": hm,
+                "f32_dense_mean_ms": dm, "relative_cost": dm / hm - 1.0})
+        })
+        .collect();
     let document = json!({
-        "schema": "glm53.f32_q8_cost.v1", "prompt_tokens": 2048, "rows_per_chunk": 512,
-        "order": "warm-up A,B; then (A,B,B,A) x 2", "half_ms": half, "f32_q8_ms": f32,
-        "half_mean_ms": mean(&half), "f32_q8_mean_ms": mean(&f32),
-        "relative_cost": mean(&f32) / mean(&half) - 1.0,
+        "schema": "glm53.f32_dense_cost.v1", "rows_per_chunk": 512,
+        "order": "warm-up A,B; then (A,B,B,A) x 2; a fresh session per measurement (allocation excluded)",
+        "arms": {"half": "Fast", "f32_dense": "Fast with every Q8_0 and Q6_K dense projection on F32-operand tiles"},
+        "rows": rows,
     });
     eprintln!("{document}");
     std::fs::write(

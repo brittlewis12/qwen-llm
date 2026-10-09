@@ -123,13 +123,48 @@ pub(super) enum StageMode {
     /// Batched mat-mat tiles with half-staged operands.
     Fast,
     /// Batched mat-mat with F32 operands where an F32-operand tile exists
-    /// for the weight type (Q8_0 today); otherwise as [`StageMode::Fast`].
+    /// for the weight type and geometry (Q8_0, Q6_K); otherwise as
+    /// [`StageMode::Fast`] ([`F32Census`] counts both outcomes in tests).
     FastF32,
 }
 
 #[cfg(test)]
 thread_local! {
     static F32_STAGES: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
+    static F32_CENSUS: std::cell::RefCell<Option<std::collections::BTreeMap<(String, bool), usize>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only census of [`StageMode::FastF32`] projections on this thread:
+/// per weight dtype, how many took an F32-operand tile (`true`) and how many
+/// fell back to the half-staged form (`false`). Recording stops on drop.
+#[cfg(test)]
+pub(super) struct F32Census(());
+
+#[cfg(test)]
+impl F32Census {
+    pub(super) fn begin() -> Self {
+        F32_CENSUS.with(|census| *census.borrow_mut() = Some(Default::default()));
+        Self(())
+    }
+
+    /// The counts so far, restarting the census.
+    pub(super) fn take(&self) -> std::collections::BTreeMap<(String, bool), usize> {
+        F32_CENSUS.with(|census| {
+            census
+                .borrow_mut()
+                .as_mut()
+                .map(std::mem::take)
+                .unwrap_or_default()
+        })
+    }
+}
+
+#[cfg(test)]
+impl Drop for F32Census {
+    fn drop(&mut self) {
+        F32_CENSUS.with(|census| *census.borrow_mut() = None);
+    }
 }
 
 /// A stage's projection mode: its lineage ([`stage_lineage`]), with Fast
@@ -149,16 +184,64 @@ fn stage_mode(lineage: PackedLineage, stage: Stage) -> StageMode {
     }
 }
 
-/// Test-only scope in which `stages` of Fast sessions on this thread use
-/// F32-operand tiles where one exists; the previous set is restored on drop.
+/// The F32-operand tiles a [`StageMode::FastF32`] projection may take.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum F32Tile {
+    /// `encode_mat_mat_q8_0_f32_r2c4k64` (`n_in % 64`, `n_out % 16`).
+    Q8_0,
+    /// `encode_mat_mat_q6_k_f32_mm64x32` (`n_in % 256`).
+    Q6K,
+}
+
+impl F32Tile {
+    #[cfg(test)]
+    pub(super) const ALL: [F32Tile; 2] = [F32Tile::Q8_0, F32Tile::Q6K];
+
+    #[cfg(test)]
+    fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
+
 #[cfg(test)]
-pub(super) struct F32Stages(u16);
+thread_local! {
+    static F32_TILES: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether a FastF32 projection may take `tile`: those the [`F32Stages`]
+/// scope names in tests; every tile in product builds (which never select
+/// FastF32 yet).
+#[cfg(test)]
+fn f32_tile_enabled(tile: F32Tile) -> bool {
+    F32_TILES.with(|t| t.get()) & tile.bit() != 0
+}
+
+#[cfg(not(test))]
+fn f32_tile_enabled(_: F32Tile) -> bool {
+    true
+}
+
+/// Test-only scope in which `stages` of Fast sessions on this thread use
+/// F32-operand tiles where one exists; the previous selection is restored on
+/// drop.
+#[cfg(test)]
+pub(super) struct F32Stages(u16, u8);
 
 #[cfg(test)]
 impl F32Stages {
+    /// Every F32-operand tile.
     pub(super) fn set(stages: &[Stage]) -> Self {
+        Self::with_tiles(stages, &F32Tile::ALL)
+    }
+
+    /// Only `tiles`; other weight types stay half-staged.
+    pub(super) fn with_tiles(stages: &[Stage], tiles: &[F32Tile]) -> Self {
         let bits = stages.iter().fold(0, |bits, stage| bits | stage.bit());
-        Self(F32_STAGES.with(|s| s.replace(bits)))
+        let tile_bits = tiles.iter().fold(0, |bits, tile| bits | tile.bit());
+        Self(
+            F32_STAGES.with(|s| s.replace(bits)),
+            F32_TILES.with(|t| t.replace(tile_bits)),
+        )
     }
 }
 
@@ -166,6 +249,7 @@ impl F32Stages {
 impl Drop for F32Stages {
     fn drop(&mut self) {
         F32_STAGES.with(|s| s.set(self.0));
+        F32_TILES.with(|t| t.set(self.1));
     }
 }
 
@@ -452,7 +536,10 @@ impl PackedScratch {
             lineage: PackedLineage::Fast,
             token: b.take("token")?,
             embedding: take_rows(&mut b, "embedding", rows)?,
-            residual: [take_rows(&mut b, "residual_a", rows)?, take_rows(&mut b, "residual_b", rows)?],
+            residual: [
+                take_rows(&mut b, "residual_a", rows)?,
+                take_rows(&mut b, "residual_b", rows)?,
+            ],
             hc_partial_dots: take_rows(&mut b, "hc_partial_dots", rows)?,
             hc_partial_sumsq: take_rows(&mut b, "hc_partial_sumsq", rows)?,
             mixes: take_rows(&mut b, "mixes", rows)?,
@@ -527,15 +614,42 @@ fn matmat(
     n_out: usize,
     rows: usize,
 ) -> Result<()> {
-    if mode == StageMode::FastF32
-        && weight.dtype == GgmlType::Q8_0
-        && n_in.is_multiple_of(64)
-        && n_out.is_multiple_of(16)
-    {
-        // Activation buffers are allocated with rows padded to 32
-        // (`memory::packed_activation_rows`), the backing this tile reads.
-        crate::metal::encode_mat_mat_q8_0_f32_r2c4k64(ctx, enc, weight, x, y, n_in, n_out, rows)?;
-        return Ok(());
+    if mode == StageMode::FastF32 {
+        // F32-operand tiles at every row count (one row included), so a
+        // token's outputs do not depend on its chunking.
+        let f32_tile = match weight.dtype {
+            GgmlType::Q8_0
+                if f32_tile_enabled(F32Tile::Q8_0)
+                    && n_in.is_multiple_of(64)
+                    && n_out.is_multiple_of(16) =>
+            {
+                // Activation buffers are allocated with rows padded to 32
+                // (`memory::packed_activation_rows`), the backing this tile
+                // reads.
+                crate::metal::encode_mat_mat_q8_0_f32_r2c4k64(
+                    ctx, enc, weight, x, y, n_in, n_out, rows,
+                )?;
+                true
+            }
+            GgmlType::Q6_K if f32_tile_enabled(F32Tile::Q6K) && n_in.is_multiple_of(256) => {
+                crate::metal::encode_mat_mat_q6_k_f32_mm64x32(
+                    ctx, enc, weight, x, y, n_in, n_out, rows,
+                )?;
+                true
+            }
+            _ => false,
+        };
+        #[cfg(test)]
+        F32_CENSUS.with(|census| {
+            if let Some(census) = census.borrow_mut().as_mut() {
+                *census
+                    .entry((format!("{:?}", weight.dtype), f32_tile))
+                    .or_default() += 1;
+            }
+        });
+        if f32_tile {
+            return Ok(());
+        }
     }
     if mode == StageMode::Exact {
         #[cfg(test)]

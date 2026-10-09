@@ -2753,9 +2753,9 @@ pub fn encode_mat_mat_q8_0_f32_r2c4k64(
         )));
     }
     let elements = |a: usize, b: usize| a.checked_mul(b).map(|n| n as u64);
-    if weight.n_elements() as u64 != elements(n_in, n_out).unwrap_or(u64::MAX)
-        || x.n_elements() as u64 != elements(n_in, n_tokens).unwrap_or(u64::MAX)
-        || y.n_elements() as u64 != elements(n_out, n_tokens).unwrap_or(u64::MAX)
+    if weight.n_elements() != elements(n_in, n_out).unwrap_or(u64::MAX)
+        || x.n_elements() != elements(n_in, n_tokens).unwrap_or(u64::MAX)
+        || y.n_elements() != elements(n_out, n_tokens).unwrap_or(u64::MAX)
     {
         return Err(bad("operand sizes do not match the geometry".into()));
     }
@@ -2778,10 +2778,10 @@ pub fn encode_mat_mat_q8_0_f32_r2c4k64(
     }
     let overlaps = |a: &MetalTensor, a_end: u64, b: &MetalTensor| {
         Retained::as_ptr(&a.buffer) == Retained::as_ptr(&b.buffer)
-            && a.offset < b.offset + b.n_bytes() as u64
+            && a.offset < b.offset + b.n_bytes()
             && b.offset < a_end
     };
-    if overlaps(x, padded_end, y) || overlaps(weight, weight.offset + weight.n_bytes() as u64, y) {
+    if overlaps(x, padded_end, y) || overlaps(weight, weight.offset + weight.n_bytes(), y) {
         return Err(bad("output overlaps an input".into()));
     }
     if ctx.device.maxThreadgroupMemoryLength() < 4_096 {
@@ -2821,6 +2821,120 @@ pub fn encode_mat_mat_q8_0_f32_r2c4k64(
         },
         MTLSize {
             width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Q6_K x F32 mat-mat with every matrix operand in F32
+/// (`kernel_mat_mat_q6_K_f32_mm64x32`): the 64-output x 32-token x 32-K,
+/// four-SIMD-group tile of `kernel_mat_mat_q6_K_f32` with F32 threadgroup
+/// tiles; weights dequantized as `(d * scale) * (q - 32)` (ggml's
+/// `dequantize_row_q6_K` order; only the stored super-block scale is F16),
+/// activations unrounded, F32 accumulation. Rows and tokens past the edge
+/// are clamped (never read) and outputs are stored only in range, so each
+/// output depends on its own weight row, token row and the fixed K order:
+/// not on `n_tokens`, nor on where a token sits in its 32-token tile. No
+/// padded input backing is needed.
+///
+/// Family-neutral (GLM-5.3 Fast stages select it in tests: map #12 accuracy
+/// lane). Requirements, checked before encoding: Q6_K weight of `n_in x
+/// n_out` elements, 2-byte aligned (block fields are read as `ushort` and
+/// `half`); `n_in % 256 == 0`; nonzero `n_in`, `n_out`, `n_tokens`; F32 `x`
+/// of `n_in x n_tokens` elements, 16-byte aligned (rows are read as
+/// `float2x4`); writable F32 `y` of `n_out x n_tokens` elements overlapping
+/// neither input; all three inside their buffers; 12 KiB threadgroup memory
+/// and 32-wide SIMD groups.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_mat_q6_k_f32_mm64x32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    use super::checks::{bad_shape, check_disjoint, check_physical, to_u32};
+    const KERNEL: &str = "mat_mat_q6_k_f32_mm64x32";
+    const THREADGROUP_BYTES: usize = 12 * 1024;
+    if weight.dtype != GgmlType::Q6_K || x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
+        return Err(bad_shape(
+            KERNEL,
+            format!(
+                "weight/x/y must be Q6_K/F32/F32, got {:?}/{:?}/{:?}",
+                weight.dtype, x.dtype, y.dtype
+            ),
+        ));
+    }
+    if n_in == 0 || n_out == 0 || n_tokens == 0 || !n_in.is_multiple_of(256) {
+        return Err(bad_shape(
+            KERNEL,
+            format!(
+                "n_in={n_in} must be a nonzero multiple of 256; n_out={n_out} and n_tokens={n_tokens} nonzero"
+            ),
+        ));
+    }
+    let elements = |a: usize, b: usize| a.checked_mul(b).map(|n| n as u64);
+    if Some(weight.n_elements()) != elements(n_in, n_out)
+        || Some(x.n_elements()) != elements(n_in, n_tokens)
+        || Some(y.n_elements()) != elements(n_out, n_tokens)
+    {
+        return Err(bad_shape(KERNEL, "operand sizes do not match the geometry"));
+    }
+    check_physical(KERNEL, weight, 2, false, "weight")?;
+    check_physical(KERNEL, x, 16, false, "x")?;
+    check_physical(KERNEL, y, 4, true, "y")?;
+    check_disjoint(KERNEL, y, &[(weight, "weight"), (x, "x")])?;
+    let args_m = to_u32(KERNEL, n_out, "n_out")?;
+    let args_n = to_u32(KERNEL, n_tokens, "n_tokens")?;
+    let args_k = to_u32(KERNEL, n_in, "n_in")?;
+    let nb01 = to_u32(KERNEL, n_in / 256 * 210, "row bytes")?;
+    if ctx.device.maxThreadgroupMemoryLength() < THREADGROUP_BYTES {
+        return Err(bad_shape(KERNEL, "needs 12 KiB of threadgroup memory"));
+    }
+    let pso = ctx.pipeline("kernel_mat_mat_q6_K_f32_mm64x32")?;
+    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 128 {
+        return Err(bad_shape(
+            KERNEL,
+            "needs four 32-thread SIMD groups per threadgroup",
+        ));
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+    }
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            m: args_m,
+            n: args_n,
+            k: args_k,
+            nb01,
+            stride_b: args_k,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.set_threadgroup_memory(0, THREADGROUP_BYTES);
+    enc.dispatch(
+        MTLSize {
+            width: n_tokens.div_ceil(32),
+            height: n_out.div_ceil(64),
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
             height: 1,
             depth: 1,
         },

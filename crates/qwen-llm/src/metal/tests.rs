@@ -753,3 +753,5 @@ fn packed_q2_attention_perf_audit_130k() {
         "[matrix-audit] ctx={n_pos} gpu_ms={ms:.3} (per-row baseline ~38.5 ms/layer at 130K)"
     );
 }
+
+mod q6_k_f32_tile;

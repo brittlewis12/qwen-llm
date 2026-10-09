@@ -1605,8 +1605,9 @@ fn reuse_natural_f32_operand_probe() {
         Ok(list) => list.split(',').map(str::to_string).collect(),
         Err(_) => frozen.iter().map(|c| c.id.clone()).collect(),
     };
-    for id in &wanted {
+    for (i, id) in wanted.iter().enumerate() {
         assert!(frozen.iter().any(|c| &c.id == id), "unknown case {id}");
+        assert!(!wanted[..i].contains(id), "case {id} requested twice");
     }
     let _lease = production_lease();
     let ctx = MetalContext::new().expect("Metal context");
@@ -1667,6 +1668,10 @@ fn reuse_natural_f32_operand_probe() {
         cases.push(row);
     }
     assert!(!cases.is_empty(), "no case was evaluated");
+    let evaluated: Vec<String> = cases
+        .iter()
+        .map(|c| c["id"].as_str().expect("case id").to_string())
+        .collect();
     let summary: serde_json::Map<String, Value> = labels
         .iter()
         .zip(&per_arm)
@@ -1705,7 +1710,8 @@ fn reuse_natural_f32_operand_probe() {
         "fixture": {"path": FIXTURE, "sha256": sha256_hex(&fixture_bytes)},
         "artifact_layout": fixture["artifact_layout"],
         "evaluator_commit": std::env::var("GLM53_PROBE_COMMIT").ok(),
-        "cases_evaluated": wanted, "all_frozen_cases": wanted.len() == frozen.len(),
+        "cases_evaluated": evaluated,
+        "all_frozen_cases": frozen.iter().all(|c| evaluated.contains(&c.id)),
         "arms": arms, "summary": summary, "cases": cases,
     });
     std::fs::write(
@@ -1887,7 +1893,9 @@ fn fast_f32_operand_prefill_cost() {
 /// H1, H3, H6), the prompt is prefilled under Exact, Fast and the all-F32
 /// selection, and the expert set each MoE block routed every prompt row to
 /// is compared with Exact's: rows changed per block, the first block with a
-/// change, and the prompt-end KL. Writes JSON to `GLM53_PROBE_OUT`.
+/// change, and the prompt-end KL. Set changes only: slot order and route
+/// weights are not compared, so an unchanged set does not mean unchanged
+/// routing arithmetic. Writes JSON to `GLM53_PROBE_OUT`.
 #[test]
 #[ignore = "map #12 route divergence: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_PROBE_OUT and an idle GPU"]
 fn reuse_natural_f32_route_divergence() {
@@ -1923,6 +1931,7 @@ fn reuse_natural_f32_route_divergence() {
         let run = |lineage: PackedLineage| -> (Vec<f32>, Vec<(usize, Vec<i32>)>) {
             let mut s = session(&ctx, &weights, turn2.len() + 1, 512, lineage);
             let logits = s.prefill_packed(&ctx, &turn2).unwrap();
+            assert_finite(&format!("{} {lineage:?}", case.id), &logits);
             let routes = s
                 .packed
                 .as_ref()
@@ -1943,6 +1952,7 @@ fn reuse_natural_f32_route_divergence() {
             run(PackedLineage::Fast)
         };
         let compare = |(logits, routes): &(Vec<f32>, Vec<(usize, Vec<i32>)>)| -> Value {
+            assert_eq!(routes.len(), exact_routes.len(), "MoE block count");
             let mut first = None;
             let mut total = 0usize;
             let per_block: Vec<Value> = exact_routes
@@ -1989,6 +1999,7 @@ fn reuse_natural_f32_route_divergence() {
     let document = json!({
         "schema": "glm53.f32_route_divergence.v1", "rows_per_chunk": 512,
         "reference": "Exact prompt prefill", "selection": all.description,
+        "compared": "expert sets per prompt row and MoE block (slot order and route weights not compared)",
         "evaluator_commit": std::env::var("GLM53_PROBE_COMMIT").ok(),
         "cases": cases,
     });

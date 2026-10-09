@@ -275,11 +275,22 @@ fn f32_operand_snapshot_restore_and_frontier_chunkings() {
     let mut a = fresh(&ctx, &weights, 512 + SUFFIX + STEPS + 8, lineage);
     a.prefill_packed(&ctx, &tokens[..512]).unwrap();
     let a_logits = continue_from(&ctx, &mut a, &tokens, 512);
+    let a_end = a.capture_snapshot().unwrap();
     drop(a);
     let mut b = fresh(&ctx, &weights, 512 + SUFFIX + STEPS + 8, lineage);
     b.restore_snapshot(&snapshot).unwrap();
-    if logit_bits(&a_logits) != logit_bits(&continue_from(&ctx, &mut b, &tokens, 512)) {
-        failures.push("cancelled boundary: logits differ".into());
+    let b_logits = continue_from(&ctx, &mut b, &tokens, 512);
+    let (logits_equal, state_equal) = (
+        logit_bits(&a_logits) == logit_bits(&b_logits),
+        a_end.same_state(&b.capture_snapshot().unwrap()),
+    );
+    eprintln!(
+        "F32 operands, cancelled boundary: logits bitwise {logits_equal}, end state equal {state_equal}"
+    );
+    if !(logits_equal && state_equal) {
+        failures.push(format!(
+            "cancelled boundary: logits {logits_equal}, end state {state_equal}"
+        ));
     }
 
     // 512- and 128-row chunkings past the frontier.

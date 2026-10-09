@@ -531,7 +531,7 @@ fn f32x_expert_encoders_refuse_bad_bindings() {
         ("inner aliases x", swiglu(&x, &ids, &aliasing)),
         ("F32 ids", swiglu(&x, &wrong_ids, &inner)),
     ] {
-        if label == "valid" {
+        if label.starts_with("valid") {
             assert!(result.is_ok(), "{label}: {result:?}");
         } else {
             assert!(
@@ -566,14 +566,24 @@ fn f32x_expert_encoders_refuse_bad_bindings() {
         provenance: MetalTensorProvenance::OwnedWeightReadOnly,
         ..out.clone()
     };
-    let out_aliasing = inner.view_subrange(0, vec![(FFN * SLOTS / 2) as u64]);
+    // A correctly sized output overlapping the second half of a correctly
+    // sized activation view in one backing buffer.
+    let shared = f32_tensor(
+        &ctx,
+        &vec![0.0; (FFN + HIDDEN) * SLOTS],
+        vec![((FFN + HIDDEN) * SLOTS) as u64],
+    );
+    let shared_inner = shared.view_subrange(0, vec![(FFN * SLOTS) as u64]);
+    let out_aliasing =
+        shared.view_subrange((FFN * SLOTS / 2) as u64, vec![(HIDDEN * SLOTS) as u64]);
     for (label, result) in [
         ("valid", down(&inner, &out)),
         ("misaligned inner", down(&misaligned_inner, &out)),
         ("read-only out", down(&inner, &out_read_only)),
-        ("out aliases inner", down(&inner, &out_aliasing)),
+        ("valid shared backing", down(&shared_inner, &out)),
+        ("out aliases inner", down(&shared_inner, &out_aliasing)),
     ] {
-        if label == "valid" {
+        if label.starts_with("valid") {
             assert!(result.is_ok(), "{label}: {result:?}");
         } else {
             assert!(
@@ -581,5 +591,39 @@ fn f32x_expert_encoders_refuse_bad_bindings() {
                 "{label}: {result:?}"
             );
         }
+    }
+}
+
+/// Absurd geometry is refused with an error, never a panic or a wrapped
+/// argument: token and expert counts whose products leave `i32`, and an
+/// inner width past `i32`.
+#[test]
+fn down_f32x_refuses_oversized_geometry() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    let b = banks(&ctx, GgmlType::IQ2_S, GgmlType::IQ3_S);
+    let counts = i32_zeros(&ctx, vec![EXPERTS as u64]);
+    let ids = i32_zeros(&ctx, vec![EXPERTS as u64 * 8]);
+    let inner = f32_tensor(&ctx, &vec![0.0; FFN * 8], vec![(FFN * 8) as u64]);
+    let out = f32_tensor(&ctx, &vec![0.0; HIDDEN * 8], vec![(HIDDEN * 8) as u64]);
+    for (label, n_in, n_expert, n_tokens) in [
+        ("tokens", FFN, EXPERTS, usize::MAX / 4),
+        ("ids product", FFN, usize::MAX / 2, 8),
+        ("inner width", usize::MAX - 255, EXPERTS, 8),
+    ] {
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            encode_moe_down_f32x_grouped_slots(
+                &ctx, &enc, &b.down, &inner, &counts, &ids, &out, n_in, HIDDEN, n_expert, n_tokens,
+            )
+        }));
+        enc.end();
+        let result = result.unwrap_or_else(|_| panic!("{label}: panicked"));
+        assert!(
+            matches!(result, Err(MetalError::BadShape { .. })),
+            "{label}: {result:?}"
+        );
     }
 }

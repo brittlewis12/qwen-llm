@@ -838,6 +838,26 @@ pub(crate) fn check_moe_down_f32x_grouped_slots(
 ) -> Result<(), MetalError> {
     const KERNEL: &str = "moe_down_f32x_grouped_slots";
     let name = down_f32x_name(KERNEL, weight.dtype)?;
+    // Bound every dimension and product the shared argument builder
+    // computes unchecked, before calling it.
+    let within_i32 = |v: Option<usize>| v.is_some_and(|v| v > 0 && v <= i32::MAX as usize);
+    let slots = (n_out > 0).then(|| out.n_elements() as usize / n_out);
+    if !within_i32(Some(n_in))
+        || !within_i32(Some(n_out))
+        || !within_i32(Some(n_expert))
+        || !within_i32(Some(n_tokens))
+        || !within_i32(n_expert.checked_mul(n_tokens))
+        || !within_i32(slots)
+        || slots.and_then(|s| s.checked_mul(n_in)).is_none()
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "dimensions n_in={n_in} n_out={n_out} n_expert={n_expert} n_tokens={n_tokens} \
+                 must be positive with every product within i32"
+            ),
+        });
+    }
     generic_mm_args(
         KERNEL,
         weight,
@@ -853,7 +873,6 @@ pub(crate) fn check_moe_down_f32x_grouped_slots(
         0,
         i32::MAX as u32,
     )?;
-    let slots = out.n_elements() as usize / n_out;
     check_f32x_bindings(
         ctx,
         KERNEL,
@@ -867,7 +886,7 @@ pub(crate) fn check_moe_down_f32x_grouped_slots(
         &[
             (Some(n_in), "n_in"),
             (Some(n_out), "n_out"),
-            (Some(slots), "slot count"),
+            (slots, "slot count"),
             (n_expert.checked_mul(n_tokens), "ids"),
         ],
     )

@@ -81,7 +81,7 @@ mod proj_micro;
 mod prompt_template;
 mod q4_mma_ceiling;
 mod residency_kill_child;
-mod response_shape_runtime;
+use qwen_cli::response_shape_runtime;
 #[path = "bench/roofline.rs"]
 mod roofline;
 mod rope_micro;

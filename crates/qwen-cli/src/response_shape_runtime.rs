@@ -4,8 +4,8 @@ use sha2::{Digest, Sha256};
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, VecDeque};
 
-pub(crate) const SCHEMA: &str = "response-shape-runtime/v1";
-pub(crate) const CLAIM_SCOPE: &str =
+pub const SCHEMA: &str = "response-shape-runtime/v1";
+pub const CLAIM_SCOPE: &str =
     "compiled exact response-shape table; no general grammar or performance authority";
 
 const VOCAB_ROWS: u32 = 248_320;
@@ -46,7 +46,7 @@ const FINGERPRINT_NAMES: [&str; 7] = [
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ResponseShapeRuntime {
+pub struct ResponseShapeRuntime {
     pub schema: String,
     pub claim_scope: String,
     pub grammar_id: String,
@@ -65,7 +65,7 @@ pub(crate) struct ResponseShapeRuntime {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RuntimeFingerprints {
+pub struct RuntimeFingerprints {
     pub grammar_file_sha256: String,
     pub trace_file_sha256: String,
     pub branch_manifest_file_sha256: String,
@@ -77,7 +77,7 @@ pub(crate) struct RuntimeFingerprints {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RuntimeCounts {
+pub struct RuntimeCounts {
     pub states: u32,
     pub branch_states: u32,
     pub singleton_states: u32,
@@ -88,7 +88,7 @@ pub(crate) struct RuntimeCounts {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum RuntimeStateKind {
+pub enum RuntimeStateKind {
     Branch,
     Singleton,
     Terminal,
@@ -106,7 +106,7 @@ impl RuntimeStateKind {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RuntimeState {
+pub struct RuntimeState {
     pub state_index: u32,
     pub kind: RuntimeStateKind,
     pub prefix_bytes: u32,
@@ -119,7 +119,7 @@ pub(crate) struct RuntimeState {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RuntimeEdge {
+pub struct RuntimeEdge {
     pub source_state_index: u32,
     pub token_id: i32,
     pub piece_bytes: u32,
@@ -129,7 +129,7 @@ pub(crate) struct RuntimeEdge {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RuntimeCanonicalPath {
+pub struct RuntimeCanonicalPath {
     pub path_index: u32,
     pub target_bytes: u32,
     pub target_hex: String,
@@ -141,7 +141,7 @@ pub(crate) struct RuntimeCanonicalPath {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RuntimePathBounds {
+pub struct RuntimePathBounds {
     pub minimum_root_to_terminal_tokens: u32,
     pub maximum_root_to_terminal_tokens: u32,
 }
@@ -161,8 +161,7 @@ impl RuntimeFingerprints {
 }
 
 impl ResponseShapeRuntime {
-    #[allow(dead_code)]
-    pub(crate) fn seal(mut self) -> Result<Self> {
+    pub fn seal(mut self) -> Result<Self> {
         ensure!(
             self.semantic_runtime_table_sha256.is_empty(),
             "runtime table must be unsealed before digest construction"
@@ -172,7 +171,7 @@ impl ResponseShapeRuntime {
         Ok(self)
     }
 
-    pub(crate) fn semantic_sha256(&self) -> Result<String> {
+    pub fn semantic_sha256(&self) -> Result<String> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"response-shape-runtime/v1\0");
         push_u32(&mut bytes, self.vocab_rows);
@@ -238,7 +237,7 @@ impl ResponseShapeRuntime {
         Ok(format!("{:x}", Sha256::digest(bytes)))
     }
 
-    pub(crate) fn validate_frozen(&self) -> Result<()> {
+    pub fn validate_frozen(&self) -> Result<()> {
         ensure!(self.schema == SCHEMA, "unexpected runtime schema");
         ensure!(self.claim_scope == CLAIM_SCOPE, "unexpected claim scope");
         ensure!(
@@ -584,7 +583,7 @@ impl ResponseShapeRuntime {
     }
 }
 
-pub(crate) fn derive_path_bounds(
+pub fn derive_path_bounds(
     states: &[RuntimeState],
     edges: &[RuntimeEdge],
 ) -> Result<RuntimePathBounds> {

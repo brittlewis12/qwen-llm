@@ -1,4 +1,5 @@
 pub mod bounded_file;
+pub mod response_shape_runtime;
 pub mod shutdown;
 pub mod tracing_init;
 

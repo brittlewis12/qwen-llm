@@ -86,7 +86,7 @@ mod response_shape_runtime;
 mod roofline;
 mod rope_micro;
 mod sampler_replay;
-mod shutdown;
+use qwen_cli::shutdown;
 #[path = "../source_identity.rs"]
 mod source_identity;
 #[path = "bench/suite.rs"]
@@ -99,7 +99,7 @@ mod timing;
 mod tok;
 #[path = "bench/topology.rs"]
 mod topology;
-mod tracing_init;
+use qwen_cli::tracing_init;
 #[path = "bench/vocab_audit.rs"]
 mod vocab_audit;
 

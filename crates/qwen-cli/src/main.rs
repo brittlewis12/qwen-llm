@@ -4,12 +4,11 @@
 mod admission;
 #[path = "qwen/args.rs"]
 mod args;
-#[allow(dead_code)] // Shared artifact readers also consumed by qwen-lens.
-mod bounded_file;
 mod cli;
 #[cfg(test)]
 mod test_alloc;
-use bounded_file::read_regular_file_bounded;
+use qwen_cli::bounded_file;
+use qwen_cli::bounded_file::read_regular_file_bounded;
 #[path = "qwen/chat_output.rs"]
 mod chat_output;
 mod concurrent_jsonl;
@@ -69,7 +68,7 @@ mod release_sampling;
 #[path = "qwen/run_options.rs"]
 mod run_options;
 mod serve;
-mod shutdown;
+use qwen_cli::shutdown;
 #[path = "qwen/single_turn.rs"]
 mod single_turn;
 #[path = "qwen/telemetry.rs"]
@@ -77,7 +76,7 @@ mod telemetry;
 #[cfg(test)]
 #[path = "qwen/tests.rs"]
 mod tests;
-mod tracing_init;
+use qwen_cli::tracing_init;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{CommandFactory, FromArgMatches, Parser, parser::ValueSource};

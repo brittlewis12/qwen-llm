@@ -7,7 +7,7 @@ use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-pub(crate) fn open_regular_file(path: &Path) -> Result<(File, usize)> {
+pub fn open_regular_file(path: &Path) -> Result<(File, usize)> {
     let lexical_metadata =
         std::fs::symlink_metadata(path).with_context(|| format!("inspect {}", path.display()))?;
     ensure!(
@@ -37,7 +37,7 @@ pub(crate) fn open_regular_file(path: &Path) -> Result<(File, usize)> {
 
 /// Reads from the current offset without reopening or seeking. Rejects a short
 /// read or trailing bytes, not same-length edits made through another descriptor.
-pub(crate) fn read_opened_file_exact(
+pub fn read_opened_file_exact(
     mut file: File,
     path: &Path,
     expected_length: usize,
@@ -60,7 +60,7 @@ pub(crate) fn read_opened_file_exact(
     Ok(bytes)
 }
 
-pub(crate) fn read_regular_file_exact(path: &Path, expected_length: usize) -> Result<Vec<u8>> {
+pub fn read_regular_file_exact(path: &Path, expected_length: usize) -> Result<Vec<u8>> {
     let (file, length) = open_regular_file(path)?;
     ensure!(
         length == expected_length,
@@ -72,7 +72,7 @@ pub(crate) fn read_regular_file_exact(path: &Path, expected_length: usize) -> Re
     read_opened_file_exact(file, path, expected_length)
 }
 
-pub(crate) fn read_regular_file_bounded(path: &Path, maximum_length: usize) -> Result<Vec<u8>> {
+pub fn read_regular_file_bounded(path: &Path, maximum_length: usize) -> Result<Vec<u8>> {
     let (file, length) = open_regular_file(path)?;
     ensure!(
         length <= maximum_length,

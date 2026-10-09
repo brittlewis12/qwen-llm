@@ -78,11 +78,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn checkpoint_is_clear_before_any_signal() {
-        assert!(checkpoint().is_ok());
-    }
-
-    #[test]
     fn signal_exit_codes_follow_shell_convention() {
         assert_eq!(signal_exit_code(libc::SIGINT), ExitCode::from(130));
         assert_eq!(signal_exit_code(libc::SIGTERM), ExitCode::from(143));

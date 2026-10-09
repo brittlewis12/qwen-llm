@@ -21,6 +21,7 @@
 - [PERF-ROADMAP](PERF-ROADMAP.md): ranked performance work across model families.
 - [PERF-LOG](PERF-LOG.md): append-only record of performance measurements and decisions.
 - [BENCH](BENCH.md): benchmark commands, evidence, and known measurement gaps.
+- [REQUEST-TIMING](REQUEST-TIMING.md): what each `qwen run` timing field measures in each family.
 - [PERF-TOOLS](PERF-TOOLS.md): profiling and performance instrumentation guide.
 - [PERF-TOOLS-SETUP](PERF-TOOLS-SETUP.md): setup instructions for profiling tools.
 - [APPLE-GPU-OPTIMIZATION](APPLE-GPU-OPTIMIZATION.md): Metal optimization guidance for Apple GPUs.

@@ -1134,10 +1134,20 @@ pub(crate) fn resolve_default_prefill_chunk(args: &mut Args, explicit: bool) {
 /// shape grows one consumed decision at a time, never as a hand-maintained
 /// capability table.
 fn run_info(info: cli::InfoInvocation) -> Result<()> {
+    let Some(model) = info.model else {
+        // Device facts only: no context, lease, library or command queue.
+        let facts = qwen_llm::metal::DeviceFacts::probe().context("no default Metal device")?;
+        if info.json {
+            println!("{}", serde_json::to_string_pretty(&facts)?);
+        } else {
+            println!("{facts}");
+        }
+        return Ok(());
+    };
     if !info.json {
-        return print_model_info(&info.model);
+        return print_model_info(&model);
     }
-    let (_, projection) = info_projection(&info.model)?;
+    let (_, projection) = info_projection(&model)?;
     println!("{}", serde_json::to_string_pretty(&projection)?);
     Ok(())
 }

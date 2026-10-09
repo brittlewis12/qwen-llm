@@ -18,18 +18,18 @@ pub(crate) enum Command {
         after_help = "Examples:\n  qwen serve -m MODEL\n  qwen serve -m MODEL --addr 127.0.0.1:8737 --max-tokens 65536\n  qwen serve -m Muse-Glimmer.gguf --max-context-tokens 7168 --max-tokens 2048\n  qwen serve -m MODEL --trace-sse /tmp/qwen.sse.jsonl\n\nEndpoints: POST /v1/responses (stream and non-stream), GET /v1/models.\nSerial: one request in flight; stateless (store:false only)."
     )]
     Serve(ServeArgs),
-    /// Inspect model metadata and capabilities without using the GPU.
+    /// Inspect a model's metadata and capabilities, or without -m the Metal device, without running GPU work.
     #[command(
-        after_help = "Examples:\n  qwen info -m MODEL\n  qwen info -m MODEL --json\n\n--json reports the detected family and whether --drafter would be admitted per lane (run, serve), with a stable reason code when refused. Eligible K2 JSON inspection also hashes retained checkpoint bytes on the CPU to verify chat identity; it checks cancellation between bounded reads. Text inspection does not perform that chat verification."
+        after_help = "Examples:\n  qwen info -m MODEL\n  qwen info -m MODEL --json\n  qwen info\n  qwen info --json\n\nWithout -m, info reports the Metal device and host facts the engine reads (GPU families, limits, memory, OS) and the macOS version the Metal libraries were built for.\n\n--json reports the detected family and whether --drafter would be admitted per lane (run, serve), with a stable reason code when refused. Eligible K2 JSON inspection also hashes retained checkpoint bytes on the CPU to verify chat identity; it checks cancellation between bounded reads. Text inspection does not perform that chat verification."
     )]
     Info(InfoArgs),
 }
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct InfoArgs {
-    /// Path to a GGUF file.
+    /// Path to a GGUF file; omit it to report the Metal device instead.
     #[arg(short = 'm', long)]
-    model: PathBuf,
+    model: Option<PathBuf>,
 
     /// Emit a machine-readable projection instead of the text summary.
     #[arg(long)]
@@ -200,7 +200,7 @@ pub(crate) enum Invocation {
 
 #[derive(Debug)]
 pub(crate) struct InfoInvocation {
-    pub(crate) model: PathBuf,
+    pub(crate) model: Option<PathBuf>,
     pub(crate) json: bool,
 }
 

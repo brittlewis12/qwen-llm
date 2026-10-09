@@ -60,7 +60,7 @@ Other stderr fields:
   has a GPU sample; otherwise GPU and outside-GPU values are unavailable.
   `prefill_ms` is the measured prefill interval. Packed-profile mode reports
   its third warmed pass; layer-profile mode measures first use. Both warm-up
-  passes, resets and profile reporting remain in the total clock.
+  passes, resets and profile reporting remain in the stderr total clock.
 - DS4 `prefetch_ms` is prefetch wall time. In single-turn DS4, explicit
   snapshot capture/publication occurs inside prefill. Durable prompt capture
   occurs inside prefill; durable publication, for prompt or completed-turn
@@ -90,9 +90,10 @@ comparable to that lane's v2 total. K2 and GLM totals retain their v1 values.
 The encoding span is the existing prompt encode interval. Qwen preparation is
 the span covering its empty-prompt and capacity checks, stop-token loading,
 sampling-option resolution, and sampler initialization. Flash-Next preparation
-is one span covering forward-capacity, model geometry, token-range, stop-token,
-decode-option, and profile-option checks; it ends before optional shard
-prefetch and model loading. DS4 preparation sums two spans: required-forward
+covers forward-capacity, model geometry, token-range, stop-token, decode-option,
+and profile-option checks before execution. In packed-profile mode it also
+includes the packed-capacity check made after load. DS4 preparation sums two
+spans: required-forward
 and prompt-token range checks, plus stop-token range checks. Its durable-store
 admission and identity work are outside those spans. Muse preparation is one
 span covering token-range, capacity, stop-token, and runtime-option checks.
@@ -101,9 +102,10 @@ generator returns, before trailing output, completed-checkpoint capture/publicat
 stats output, or record writing. Qwen starts resident execution immediately
 after request-state allocation returns; this excludes session allocation and
 includes durable restore before its prefill timer starts. Qwen's warm-followup
-request has its own three spans and total. Flash-Next packed-profile totals
-include the reported third prefill pass and its generation only; both warm-up
-passes are excluded.
+request has its own three spans and total. Flash-Next packed-profile execution
+is discontinuous: it includes the reported third prefill pass and generation,
+while excluding both warm-up passes, resets, and profile reporting. Layer
+profile reporting occurs after the generator-return sample.
 
 `load_ms` and `transition_tps` are not common record fields. DS4 records them
 under `diagnostics.deepseek_v4`; K2 and GLM include phase timings,
@@ -127,10 +129,10 @@ trailing newline after generation.
   transition time. A transition interval includes the whole transition
   callback (including validation/logits copying) and the following checkpoint,
   not only GPU forwards.
-- Qwen request 0 tokenizer construction overlaps `load_ms`, TTFT and record
-  total. DS4 prefetch is inside load; its tokenizer and record tokenization do
-  not overlap. K2/GLM recorded phases do not overlap; prefill and generation
-  lie within resident execution.
+- Qwen request 0 tokenizer construction overlaps `load_ms` and TTFT, but v2
+  record total excludes it. DS4 prefetch is inside load; its tokenizer and
+  record tokenization do not overlap. K2/GLM recorded phases do not overlap;
+  prefill and generation lie within resident execution.
 - For K2/GLM rates, the denominator is clamped to `f64::MIN_POSITIVE`, the
   smallest positive normal `f64`. Record serialization replaces negative or
   non-finite results with zero and preserves finite nonnegative results.

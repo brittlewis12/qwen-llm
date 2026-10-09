@@ -2,8 +2,18 @@
 
 use super::*;
 
-fn request_stats_total_ms(encoding_ms: f64, preparation_ms: f64, execution_ms: f64) -> f64 {
-    encoding_ms + preparation_ms + execution_ms
+fn request_stats_total_ms(
+    encoding_ms: f64,
+    preparation_ms: f64,
+    execution_start: Instant,
+    generator_return: Instant,
+) -> f64 {
+    encoding_ms
+        + preparation_ms
+        + generator_return
+            .duration_since(execution_start)
+            .as_secs_f64()
+            * 1e3
 }
 
 pub(crate) const DEEPSEEK_V4_SNAPSHOT_MAX_RECORD_BYTES: u64 = 1024 * 1024 * 1024;
@@ -1263,7 +1273,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
             copy_deepseek_v4_logits(&session, vocab_size, "continuing")
         },
     )?;
-    let resident_execution_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
+    let generator_return = Instant::now();
     drop(stdout);
     if durable_completed_eligible
         && durable_admitted
@@ -1431,7 +1441,8 @@ pub(crate) fn run_deepseek_v4_single_turn(
         // Preparation sums prompt range/token checks and stop-token checks;
         // execution includes snapshot restore/publication during prefill and
         // ends at generator return.
-        let total_ms = request_stats_total_ms(encode_ms, preparation_ms, resident_execution_ms);
+        let total_ms =
+            request_stats_total_ms(encode_ms, preparation_ms, prefill_t0, generator_return);
         let measured = RequestStatsMeasured {
             input_tokens: prompt_ids.len() as u64,
             output_tokens: generation.tokens.len() as u64,
@@ -2257,10 +2268,26 @@ pub(crate) fn print_deepseek_v4_census(model_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod request_stats_timing_tests {
     use super::request_stats_total_ms;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn total_sums_only_the_three_non_overlapping_contract_spans() {
-        // Model load, session setup, and work after generator return are absent.
-        assert_eq!(request_stats_total_ms(11.0, 7.0, 13.0), 31.0);
+        let base = Instant::now();
+        let load_end = base + Duration::from_millis(80);
+        let session_end = load_end + Duration::from_millis(20);
+        let execution_start = session_end;
+        let generator_return = execution_start + Duration::from_millis(13);
+        let output_done = generator_return + Duration::from_millis(9);
+        let stats_line = output_done + Duration::from_millis(7);
+
+        // Load/session precede execution; output and stats follow generator return.
+        assert_eq!(
+            request_stats_total_ms(11.0, 7.0, execution_start, generator_return),
+            31.0
+        );
+        assert!(stats_line > output_done && output_done > generator_return);
+        let load_session_output_stats_total =
+            18.0 + stats_line.duration_since(base).as_secs_f64() * 1e3;
+        assert!(31.0 < load_session_output_stats_total);
     }
 }

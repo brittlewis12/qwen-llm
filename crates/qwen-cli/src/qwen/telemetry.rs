@@ -1549,12 +1549,15 @@ pub(crate) fn parse_build_dirty(raw: &str) -> bool {
 /// Field semantics are shared across lanes so records compare:
 /// - `tokenizer_ms` (record `timing_ms.tokenization`): encoding the prompt
 ///   only; tokenizer construction is load-time cost.
-/// - `total_ms` (record `timing_ms.total`): the sum of three non-overlapping
-///   spans: prompt encoding; CPU request preparation checks on the encoded
-///   prompt before execution; and resident execution from prompt prefill start
-///   through the decode generator's return. It excludes model load and session
-///   setup, output work after the generator returns, stats output, and record
-///   construction or writing.
+/// - `total_ms` (record `timing_ms.total`): prompt encoding plus request
+///   preparation plus resident execution, with no overlap. Preparation
+///   boundaries vary: K2 and GLM include admission work before encoding;
+///   Qwen measures its post-encoding validation before request-state setup.
+///   Resident execution ends at generator return. Qwen durable restore is
+///   inside execution but precedes its prefill timer; Flash-Next packed-profile
+///   execution is discontinuous and uses the reported third prefill pass plus
+///   generation. Model load, pre-execution session setup, post-generator
+///   output, stats, and record writing are excluded.
 ///
 /// K2 and GLM-5.3 explicitly reconstruct `total_ms` from encoding, request
 /// preparation and resident execution spans (encoding precedes

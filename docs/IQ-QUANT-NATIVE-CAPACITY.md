@@ -73,15 +73,24 @@ delta that exceeded the old 192,719,648-byte quote by 595,168 bytes. The dynamic
 2 GiB reserve remains intact. Later packets record admission bounds but no isolated
 live-session allocation delta; they are not new measurements of that rounding gap.
 
-## Next experiment: Flash residual frontier screen
+## Flash residual frontier: measured, not promoted
 
-Next is the bounded Flash `2048+3+2045` versus `2048+2048` screen with the
-promoted production router enabled in both arms, using the existing lease,
-memory admission and checkpoint/continuation diagnostics. **The current-router
-residual has not been measured.** Historical router-disabled 199/282 ms deltas
-are not a current estimate, and the already-landed router saving must not be
-counted again. IQ2_XS acceleration has no direct reach into the retained GSQ/UD
-Flash artifacts, which contain no IQ2_XS tensors.
+The `2048+3+2045` versus `2048+2048` screen now uses the promoted router in
+both arms. Clean whole4096 rounds save about 2.4% on UD and 3.1% on GSQ;
+other rounds drift substantially, so pooled means are not a settled speed claim.
+UD matches across the tested schedules, while GSQ has deterministic distribution
+differences. Production scheduling remains unchanged.
+
+A bounded observer localizes GSQ's initial perturbation upstream of layer0 GDN.
+Uniform F32 activation arithmetic for BF16-weight suffix projections removes
+the captured layer0 difference, but not the full-model endpoint difference.
+Next: narrow the intervention to layer0 attention HC and compare identical-input
+projections against an independent oracle before quality/performance qualification.
+Evidence: `docs/bench/2026-10-09-flash-frontier/README.md`.
+
+These are residual scheduling/rebatching measurements, not another router win.
+IQ2_XS acceleration has no direct reach into these GSQ/UD Flash artifacts, which
+contain no IQ2_XS tensors.
 
 ## Earlier IQ2-only checkpoint
 

@@ -25,6 +25,9 @@ use objc2_metal::{
 const REQUIRED_HEAD_DIM: usize = 128;
 const REQUIRED_CONV_KERNEL: usize = 4;
 
+#[cfg(test)]
+pub(crate) mod frontier_capture;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Qwen4ExpGdnError {
     #[error(transparent)]
@@ -894,6 +897,11 @@ unsafe fn encode_gated_delta_net_packed_inner(
     )?;
     preflight_packed(ctx, weights)?;
 
+    #[cfg(test)]
+    let frontier = frontier_capture::before(ctx, enc, weights, conv_state, delta_state, tokens)?;
+    #[cfg(test)]
+    let _frontier_tag = frontier_capture::tag(frontier.as_ref());
+
     let g = scratch.geometry;
     let qkv = scratch.prefix_view("packed GDN QKV", &scratch.qkv, g.conv_width(), tokens)?;
     let gate = scratch.prefix_view("packed GDN gate", &scratch.gate, g.value_width(), tokens)?;
@@ -1047,21 +1055,33 @@ unsafe fn encode_gated_delta_net_packed_inner(
         enc,
         Qwen4ExpPackedProfileLabel::detail("gdn.recurrence", layer, MixerKind::GatedDeltaNet),
     )?;
-    encode_gdn_step_decay_packed_f32(
-        ctx,
-        enc,
-        &query_norm,
-        &key_norm,
-        &value,
-        &decay,
-        &beta,
-        delta_state,
-        &recurrent,
-        tokens,
-        g.value_heads,
-        g.key_heads,
-        g.head_dim,
-    )?;
+    let captured_recurrence = {
+        #[cfg(test)]
+        {
+            frontier_capture::checkpoint(ctx, enc, frontier.as_ref(), delta_state, scratch, tokens)?
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    };
+    if !captured_recurrence {
+        encode_gdn_step_decay_packed_f32(
+            ctx,
+            enc,
+            &query_norm,
+            &key_norm,
+            &value,
+            &decay,
+            &beta,
+            delta_state,
+            &recurrent,
+            tokens,
+            g.value_heads,
+            g.key_heads,
+            g.head_dim,
+        )?;
+    }
     end_optional(&mut profile, enc, marker)?;
     let marker = begin_optional(
         &mut profile,
@@ -1095,6 +1115,8 @@ unsafe fn encode_gated_delta_net_packed_inner(
         tokens,
     )?;
     end_optional(&mut profile, enc, marker)?;
+    #[cfg(test)]
+    frontier_capture::after(ctx, enc, frontier.as_ref(), input, scratch)?;
     Ok(output)
 }
 

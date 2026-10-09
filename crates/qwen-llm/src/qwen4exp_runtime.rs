@@ -242,6 +242,27 @@ struct Qwen4ExpPrefillExecutionPlan {
     contains_selection: bool,
 }
 
+// Diagnostic only: retain the production planner unless the exact measured
+// selected-capable frontier request is inside this unwind-safe thread scope.
+#[cfg(test)]
+thread_local! {
+    static QWEN4EXP_FRONTIER_SCHEDULE_OVERRIDE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+}
+
+#[cfg(test)]
+fn with_qwen4exp_frontier_schedule<R>(enabled: bool, work: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            QWEN4EXP_FRONTIER_SCHEDULE_OVERRIDE.with(|slot| slot.set(self.0));
+        }
+    }
+    let _restore = Restore(QWEN4EXP_FRONTIER_SCHEDULE_OVERRIDE.with(|slot| slot.replace(enabled)));
+    work()
+}
+
 #[cfg(test)]
 fn plan_qwen4exp_prefill_execution(
     token_count: usize,
@@ -292,6 +313,23 @@ fn plan_qwen4exp_prefill_execution_from(
         return invalid(format!(
             "packed prefill capacity {packed_capacity} is smaller than two tokens"
         ));
+    }
+    #[cfg(test)]
+    if packed_capacity == 2048
+        && selected_enabled
+        && dense_end == 2051
+        && matches!((start, token_count), (2048, 2048) | (0, 4096))
+        && QWEN4EXP_FRONTIER_SCHEDULE_OVERRIDE.with(|slot| slot.get())
+    {
+        return Ok(Qwen4ExpPrefillExecutionPlan {
+            packed_ranges: (start..end)
+                .step_by(packed_capacity)
+                .map(|position| position..position + packed_capacity)
+                .collect(),
+            packed_token_count: token_count,
+            scalar_start: end,
+            contains_selection: true,
+        });
     }
     let packed_end = if selected_enabled {
         end

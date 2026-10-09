@@ -1,0 +1,766 @@
+Flash frontier scheduling: UD and GSQ suffix/whole4096, 2026-10-09
+================================================================
+
+Checkpoint validation: all eight focused CPU tests pass in release and debug;
+`cargo check --offline -j2 -p qwen-cli` passes. Both resumed artifact packets and
+both layer0 observer packets completed under the normal lease and admission.
+Independent adversarial review approves retaining this diagnostic checkpoint,
+not promoting the schedule. Production scheduling and arithmetic defaults stay
+unchanged; the existing BF16 override helper now restores its state on unwind.
+Raw float sidecars remain local and git-ignored; verified lossless archives and
+original-hash manifests are retained alongside the JSONL evidence.
+
+**Uniform BF16 suffix intervention: layer0 divergence removed, endpoint divergence
+remains.** The new GSQ prose packet disables the BF16 bfloat-activation dispatch
+class only inside each complete suffix, equally in A and B and across all suffix
+layers. The prefix/checkpoint stays production. Both intervention sidecars are
+byte-identical: all 17 sections, eight captured rows and three delta-state
+snapshots match. This is strong bounded evidence that the dispatch class
+participates in the earlier layer0 seed mismatch. It is not a single-projection
+causal isolation, an accuracy oracle, a production proposal, or a speed result.
+
+[gsq-layer0-bf16-f32.jsonl](gsq-layer0-bf16-f32.jsonl) is retained unchanged:
+184,245 bytes, SHA256
+`7b892df015722f9b3bd25351dde17c663a07865b6468538a1a4388abdb1b71a8`.
+The owner reports a 71-second completion and passing RAII/mode CPU tests; this
+analysis did not rerun them. Header mode is `f32`, configured through
+`FLASH_FRONTIER_LAYER0_BF16_ACT=f32`. Weights, command widths, quant-kernel
+eligibility and router policy receive no override. The F32 label refers to the
+activation path for BF16-weight matmuls, not conversion of BF16 weights to F32.
+All four suffix calls are untimed diagnostics; there are no continuation steps.
+
+| Scope witness | BF16 bfloat-activation kernel calls | BF16 F32-activation kernel calls |
+|---|---:|---:|
+| Production prefix2048 | 194 | 12 |
+| A/off and A/on, each | 0 | 424 |
+| B/off and B/on, each | 0 | 218 |
+
+The prefix witness confirms production bfloat-activation use; suffix witnesses
+confirm complete suppression only during the scoped calls. Suffix counts agree
+with the retained census. Each suffix still has 48 strict-router calls, and A
+retains the 48 generic N3 calls. The tagged layer0 GDN dispatch sequences,
+including kernels, grids and thread shapes, exactly match the baseline for
+each schedule. Both observer-off/on gates pass endpoint/state and original
+dispatch concordance. These checks validate the diagnostic scope, not quality.
+
+`summarize_layer0.py` now accepts `--baseline` to independently audit both packets
+and recompute same-arm changes from the original F32LE files. It also checks the
+new BF16 witnesses against retained suffix census counts. Reproduce:
+
+```sh
+UV_CACHE_DIR=/tmp/flash-frontier-uv-cache uv run --no-project \
+  docs/bench/2026-10-09-flash-frontier/summarize_layer0.py \
+  docs/bench/2026-10-09-flash-frontier/gsq-layer0-bf16-f32.jsonl \
+  --baseline docs/bench/2026-10-09-flash-frontier/gsq-layer0.jsonl
+```
+
+Both audits pass. All 7,125,248 intervention values are finite. All 804 recorded
+A/B metric fields agree with independent recomputation; every A/B maxabs, RMS,
+relative L2 and different-bit count is zero. Specifically, input, QKV/gate,
+alpha/beta/decay, prepared Q/K/V, recurrence, normalized output, final GDN output,
+initial states and states after tokens 2048/2049/2050 all agree.
+
+The baseline comparison matters: both initial states also match their baseline
+counterparts exactly, confirming the captured state entering the suffix was
+unchanged. All first-three-row tensors and state snapshots in intervention A
+equal baseline A. Intervention B now equals those same values. But from 2051
+onward, the intervention changes both arms relative to their production-path
+baseline; it has not merely corrected B to an unchanged whole suffix A.
+
+| Same-arm baseline → intervention, eight-row aggregate | A relative L2 / maxabs | B relative L2 / maxabs |
+|---|---:|---:|
+| GDN input | 0.000355647 / 0.0118227 | 0.000665218 / 0.0251446 |
+| QKV | 0.000427484 / 0.0422668 | 0.000766133 / 0.0681438 |
+| GDN output | 0.000572320 / 0.000922024 | 0.001182714 / 0.00143987 |
+| Delta state after first3 | 0 / 0 | 0.000343741 / 0.00293636 |
+
+Cross-packet relative L2 uses the corresponding baseline arm as denominator;
+it is not the original within-packet A-normalized metric. The new A/B zero-error
+result applies only to the retained layer0 rows/states and matched final layer0
+state hashes, not all model activations.
+
+**Full-model endpoint under the hybrid prefix/suffix policy.** At position 4096,
+the A/B output logits remain different even with the entire suffix BF16 class
+forced to the F32-activation path. This is neither a fresh whole-prefill
+uniform-fallback experiment nor a timed whole-performance result.
+
+| A/B endpoint metric | Production suffix baseline | Uniform F32-activation suffix |
+|---|---:|---:|
+| KL(A‖B) | 0.00502608521 | 0.000158449810 |
+| KL(B‖A) | 0.00645067039 | 0.000172168944 |
+| Relative logit L2 | 0.0783402310 | 0.0723610708 |
+| Max absolute logit difference | 1.23584795 | 1.32744884 |
+| Shared top1 | 63280 | 63280 |
+| Differing persistent allocation hashes /121 | 120 | 117 |
+
+KL decreases by 96.85%/97.33%, but L2 decreases only 7.63% and maxabs increases
+7.41%. These are consistency changes between two new trajectories, not measured
+accuracy gains against a reference. Finite logits and position/QSA/PLE metadata
+agree. In the intervention, persistent indices 0–3 match: layer0 convolution,
+layer0 delta state, PLE state and layer1 convolution. Index 4 (layer1 delta state)
+is the first differing allocation in retained ordering; indices 4–120 and final
+hyper differ. This is not a trace of the first temporal divergence. Raw endpoint
+logit vectors are not retained, so endpoint KL is the harness result and
+cross-packet baseline-versus-intervention endpoint KL cannot be recomputed.
+
+**HC metadata now confirms the plausible upstream class.** Both layer0 attention
+and FFN HC down weights are BF16 `[10240,320]`; both up weights are BF16
+`[320,10240]`. Their norms and injection weights are F32. GDN itself remains
+Q6_K QKV/output, Q4_K gate and F32 alpha/beta; no BF16 GDN projection was changed.
+These metadata plus the disappearance of the mixed-input seed strengthen the
+HC arithmetic hypothesis. However, all eligible suffix layers were changed at
+once. The packet does not distinguish attention HC down versus up, prove that
+these two projections alone explain the endpoint effect, or exclude another
+upstream interaction. N64-versus-non-N64 GDN quant dispatches remain different
+between schedules yet produce equal captured outputs on the now-equal inputs.
+That is useful bounded negative evidence against blaming those GDN quant kernels
+for the original captured seed.
+
+**Checkpoint recommendation.** This is a useful stopping point for the broad
+class intervention: it answers whether that class can remove the captured
+layer0 mismatch. Do not spend another whole-timing matrix or infer promotion
+from lower KL. If one more causal screen is desired, keep production routing,
+prefix and all other suffix math, and restrict F32-activation dispatch to the
+identified layer0 attention HC down+up weights in both schedules. Reuse the
+eight-row/tape observer and within-arm concordance. If that reproduces the seed
+removal, narrow down/up individually only if the distinction would change an
+implementation decision. If the residual full-model difference becomes the
+priority, separately inspect layer1 input/state boundaries rather than assuming
+the remaining 117 hash differences all originate in QSA. A broader natural
+quality/continuation evaluation remains necessary before any production policy
+decision; no arbitrary cross-schedule bit-identity gate is introduced.
+
+**Bindings and compression.** This is a new observer executable, 45,782,456 bytes,
+SHA256 `f4fb777333f739b68e1f247ce4ce7a8acfa8eda5e5ecec0b229ee1732be5b518`.
+Packet and dispatch source hashes changed for the intervention/RAII work;
+capture, GDN and metallib hashes match the preceding layer0 capture. Preserve
+each packet's own bindings. Both raw 14,250,496-byte sidecars have SHA256
+`1b8459106c945f9cd4fae1da83a7f0821c6f5b6962f57013bf8bbbb6116547c1`.
+Their equality is verified from bytes, not only from the reported metrics.
+The verified standard
+[XZ archive](gsq-layer0-bf16-f32-sidecars.tar.xz) is 13,364,996 bytes (12.75 MiB),
+**53.11% smaller** than the 28,500,992 raw bytes; gzip saves only 5.67%.
+The 32 MiB XZ dictionary reuses the identical second bank. The
+[manifest](gsq-layer0-bf16-f32-sidecars.manifest.json) retains original member
+names/sizes/hashes and archive hash
+`019d0aba6f6f244da33abc5779994beabbce8de296dfb07af3bbb54fa32aca88`.
+Both members round-trip exactly. All raw evidence remains untouched; no GPU,
+builds, model-source edits, deletions or commits were performed for this analysis.
+
+**Baseline layer0 capture (before the class intervention): first recorded
+divergence is upstream of GDN.** The
+untimed GSQ prose capture starts with exactly equal convolution and delta states,
+but its mixed GDN input already differs at positions 2048–2050. Thus these data do
+not identify GDN recurrence, GDN quant projection, or selected QSA as the first
+source. The next bounded localization should move one stage earlier into the
+layer0 HC/residual mix. No production promotion or quality acceptance follows
+from this observer packet.
+
+[gsq-layer0.jsonl](gsq-layer0.jsonl) is retained unchanged (187,165 bytes, SHA256
+`9db580f381943324463181fa81176ab14016e2e15f11abfa14fab39e37dbe94f`).
+The owner reports 47 seconds and six passing CPU tests; neither was rerun here.
+The packet executes one prefix 2048 and restored Aoff/Aon/Boff/Bon suffixes with
+unchanged ordinary N3+N2045 versus N2048 commands and production routing. It has
+**no timed performance arms or continuation/quality screen**. The observer
+captures eight absolute rows 2048..2055 plus initial states and delta states after
+each of the first three tokens, without splitting B's recurrence into commands.
+
+[summarize_layer0.py](summarize_layer0.py) independently reads little-endian F32
+sidecars, verifies whole-file and all 34 section hashes/shapes/offsets, checks
+every captured value for finiteness, and recomputes aggregate/per-row metrics
+using Python binary64 and `math.fsum`. It checks 804 recorded metric fields;
+all agree, with largest relative summation-order discrepancy 1.521e-12. This
+audit tolerance only accommodates summation order, not model-quality error.
+Both original sidecars contain 3,562,624 floats (14,250,496 bytes) each;
+**all 7,125,248 captured values are finite**. Audit reports zero problems.
+
+```sh
+UV_CACHE_DIR=/tmp/flash-frontier-uv-cache uv run --no-project \
+  docs/bench/2026-10-09-flash-frontier/summarize_layer0.py \
+  docs/bench/2026-10-09-flash-frontier/gsq-layer0.jsonl
+```
+
+Initial delta state is identical across all 786,432 elements; initial convolution
+history is identical across all 30,720 elements. All 2560 GDN input elements
+differ in each of the first three rows. Input row 2048 has relative L2
+0.001070762 and maxabs 0.02514458. Input, QKV, gate, beta-after-sigmoid, alpha, and
+decay become bit-identical at every captured row 2051–2055. Convolved Q/K/V and
+their normalized Q/K remain different through 2053 and match at 2054–2055, consistent
+with the four-tap convolution carrying earlier differences. Recurrence, gated
+normalization and output remain different through the last captured row 2055.
+The observer is bounded to these eight rows: it does not establish when the
+entire later sequence reconverges or which stage dominates the endpoint KL.
+
+| Absolute row | Input relative L2 | QKV relative L2 | Normalized Q relative L2 | Recurrent relative L2 | GDN output relative L2 |
+|---|---:|---:|---:|---:|---:|
+| 2048 | 0.001070762 | 0.001524267 | 0.001703428 | 0.000600960 | 0.001963227 |
+| 2049 | 0.000425623 | 0.000454904 | 0.000764366 | 0.000426729 | 0.001087686 |
+| 2050 | 0.000980894 | 0.001001946 | 0.001437275 | 0.000404609 | 0.001413681 |
+| 2051 | 0 | 0 | 0.000381105 | 0.000091061 | 0.000275666 |
+| 2052 | 0 | 0 | 0.000241262 | 0.000046180 | 0.000182561 |
+| 2053 | 0 | 0 | 0.000193219 | 0.000058533 | 0.000228390 |
+| 2054 | 0 | 0 | 0 | 0.000022836 | 0.000043641 |
+| 2055 | 0 | 0 | 0 | 0.000022778 | 0.000038277 |
+
+At 2055, recurrent maxabs is 0.000324249 and output maxabs is 0.000026254;
+different-bit counts are 4388/6144 and 2557/2560 respectively. Near-ubiquitous bit
+differences alone are not an error-magnitude or quality criterion. The three
+full delta-state snapshots establish a state difference already after the first
+row, starting from the equal initial state:
+
+| State after processing | Different elements / 786432 | Relative L2 | Maxabs | RMS error |
+|---|---:|---:|---:|---:|
+| 2048 (first token) | 785656 | 0.000550261 | 0.004459143 | 0.000024978 |
+| 2049 (second token) | 786186 | 0.000387096 | 0.002370834 | 0.000017711 |
+| 2050 (after three; next position 2051) | 786247 | 0.000343749 | 0.002936363 | 0.000015717 |
+
+These snapshots do not isolate a recurrence arithmetic defect: Q/K/V, decay and
+beta already differ before the recurrence sees them. Matching initial state
+rules out an initial-state mismatch in this capture, not every possible
+upstream/input-path cause.
+
+**Actual layer0 dtypes and kernel evidence.** QKV is Q6_K `[2560,10240]`, gate
+Q4_K `[2560,6144]`, beta and alpha F32 `[2560,48]`, and output Q6_K `[6144,2560]`.
+Convolution, A, dt-bias and norm are F32. There are **no BF16 projections inside
+the captured GDN**. A's N3 and N2045 calls each use the non-N64 Q6_K/Q4_K
+matmuls; B uses their N64 kernels at N2048. The two F32 projection calls and
+`kernel_gdn_step_decay_packed_nsg4_f32` remain the same kernel families. Recurrence
+grid is `[32,48,1]`, threads `[32,4,1]` for all three command widths; loop length
+and history still differ. Full tagged GDN kernel/grid/thread sequences are in
+the JSONL and independent report.
+
+The quant kernel switch is real, but QKV and gate outputs at 2051–2055 are exact
+on equal captured inputs despite that switch. This is bounded evidence against
+calling N64 projection itself the demonstrated source of the first difference;
+it does not prove equivalence for arbitrary inputs or later layers. The earlier
+BF16 hypothesis must move upstream: width-dependent BF16 rounding inside HC is
+plausible, but this packet does not retain HC weight dtypes, intermediate values,
+or a causal counterfactual to establish it.
+
+[Layer0 composition](../../../crates/qwen-llm/src/qwen4exp_layers_zero_one.rs#L922)
+passes `attention.mixed()` from
+[packed gated residual mix](../../../crates/qwen-llm/src/qwen4exp_metal.rs#L718)
+directly into GDN. Next capture the same eight rows at hyper-input, HC-normalized
+input, down projection/low activation, up projection/raw gate, and mixed output;
+retain actual HC dtypes and tagged dispatches. First establish equal pre-HC
+inputs. Then a narrow diagnostic arithmetic override at the first divergent
+projection can test causality on identical inputs, preserving full command
+widths and current routing. Do not change GDN recurrence or QSA based solely on
+this packet. Any later promotion still needs a natural continuation/quality
+screen; this capture adds localization, not quality authority.
+
+**Observer/admission/source limits.** Both schedules pass exact observer-off/on
+endpoint and persistent/hyper-state concordance. The analysis independently
+checks the retained endpoint hashes/state records. The harness also asserts the
+original dispatch sequence, geometry and order match after excluding 30 A / 16 B
+tagged copy dispatches; complete original dispatch-order equivalence is a harness
+observation, not reconstructed from only the retained aggregate census. The
+checkpoint recurrence uses the existing kernel/grid and emits three state
+snapshots without adding command boundaries. Agreement in this run does not
+make observation overhead a performance result. Cross-schedule endpoint KL
+0.00502609/0.00645067 and relative L2 0.0783402 reproduce the earlier GSQ prose
+endpoint; these logit metrics remain recorded, not recomputed from GDN sidecars.
+
+Capture admission prices 14,303,232 GPU bytes for 14,250,496 logical bytes and
+352,172,032 CPU upper bytes including the checkpoint, two CPU capture copies,
+and margin. Observed capture allocation 14,254,080 bytes is below its price.
+Normal lease, model/session/capture memory gates and shard revalidation pass.
+This is a newly compiled observer binary: executable 45,760,040 bytes, SHA256
+`37863f8a7ec5ef380b60be39f2963b6b6069ab6a6805584f226293ec344df476`.
+The packet/capture/GDN source bindings differ from the timing binary; the
+metallib hash is unchanged. The old performance packets retain their own
+historical bindings. No executable was copied into this evidence directory.
+
+**Lossless retention.** The raw sidecars total **28,500,992 bytes (27.18 MiB)**.
+A deterministic tar with gzip9 is 26,884,221 bytes, saving only 5.67%; a standard
+tar with XZ/LZMA2 preset6 and 32 MiB dictionary is **20,792,856 bytes (19.83 MiB)**,
+saving **27.05%**. Both compression trials were decompressed and every extracted
+member SHA256 verified against the original JSONL. The recommended
+[gsq-layer0-sidecars.tar.xz](gsq-layer0-sidecars.tar.xz) and
+[hash manifest](gsq-layer0-sidecars.manifest.json) are retained durably. Originals
+are still present and unchanged; nothing was deleted or committed. For eventual
+git retention, use the archive plus manifest/JSONL/script rather than staging
+both compressed and uncompressed copies. This is a moderate reduction, not an
+order-of-magnitude compression claim.
+
+| Original member | Bytes | SHA256 |
+|---|---:|---|
+| gsq-layer0.jsonl.A.f32le | 14250496 | `f0c9ed5c60236f2ac5ccc15d9e42a505b85bec38ff06fdd6d80b68220a379266` |
+| gsq-layer0.jsonl.B.f32le | 14250496 | `9496952d7fb564b7c7180b15da9dbf29bccb25be57082adc6c2f2183f8134664` |
+
+Archive SHA256 is
+`cafa88738b1479cadcaff7ccd7a45a7f10a435d78bb07475e81a8e6ee391e2bc`.
+To independently repeat compression/roundtrip checks, add
+`--compression-dir /tmp/flash-layer0-new-compression-trial` to the analysis command;
+archive filenames must not already exist. To analyze an archive-only checkout,
+extract its two members beside the JSONL first. No custom float codec or lossy
+transformation is used.
+
+**Earlier timing and qualification evidence (retained).**
+
+Both artifacts now support a useful residual scheduling opportunity, but the
+gain should be described using the paired results and drift, not pooled means.
+UD's stable second prose whole round saves **197.11 ms GPU / 2.412%** and
+**198.59 ms wall / 2.424%**. GSQ's stable second SSH whole round saves
+**257.06 ms GPU / 3.070%** and **259.07 ms wall / 3.085%**. These are explicitly
+selected low-drift observations alongside every retained attempt below, not a
+new filtered benchmark score. Suffix and whole savings overlap; the old router
+transfer saving cannot be added to them.
+
+UD is an informative numerical control: its A/B logits and persistent state
+match exactly on both streams, both stages, endpoint and four continuations.
+GSQ retains reproducible differences beginning before QSA. **Prioritize the
+early-GDN observer and quality screen; no production promotion.** Exact UD
+agreement is an observation, not a new acceptance requirement for other artifacts.
+
+**Completed UD restart.** [ud-both-restart.jsonl](ud-both-restart.jsonl) completed
+after the GSQ-only analysis, directly in durable storage. The owner reports
+406 seconds; the packet does not measure process-total elapsed time. Raw bytes
+are unchanged: **3,166,239 bytes**, SHA256
+`3f201d32619ecc6b22ad0bbe1b443ebeb6e76ff05d38c366240d355d099d488e`.
+Compiled-source bindings and executable SHA256 match both completed GSQ packets.
+The same 4100 token IDs are used for each corresponding corpus across artifacts.
+All three UD shard stamps revalidate unchanged. Native admission passes with
+61,175,349,248 observed weight bytes, 2,161,442,816 session bytes, selected
+capacity2048/extent4100, and the same checkpoint bound and reserve as GSQ.
+Normal lease and diagnostic memory gates pass; process-budget admission remains
+`AdmittedProcessBudgetOmitted`, not a peak-RSS guarantee.
+
+```sh
+UV_CACHE_DIR=/tmp/flash-frontier-uv-cache uv run --no-project \
+  docs/bench/2026-10-09-flash-frontier/summarizer.py \
+  docs/bench/2026-10-09-flash-frontier/ud-both-restart.jsonl
+```
+
+Audit passes without problems: 32 timed attempts, eight excluded warm witnesses,
+170 finite logit vectors, 128 continuation steps, 164 finite comparison records,
+and matching causal metadata. The existing multi-case summarizer handles this
+packet unchanged. All timings have complete command GPU coverage. The same
+ordinary-driver and outside-timer preparation contract described for GSQ applies.
+
+| UD cell | GPU A → B mean ms | GPU saving ms (%) | Wall A → B mean ms | Wall saving ms (%) |
+|---|---:|---:|---:|---:|
+| Prose suffix | 4951.977 → 4937.014 | 14.963 (0.302%) | 4972.745 → 4959.954 | 12.791 (0.257%) |
+| Prose whole4096 | 8206.183 → 7974.814 | 231.370 (2.819%) | 8227.307 → 7995.706 | 231.602 (2.815%) |
+| Repeated SSH suffix | 4795.294 → 4605.217 | 190.077 (3.964%) | 4811.068 → 4621.048 | 190.020 (3.950%) |
+| Repeated SSH whole4096 | 9218.821 → 9029.745 | 189.075 (2.051%) | 9260.484 → 9066.959 | 193.525 (2.090%) |
+
+UD median GPU savings are -2.606%, 2.412%, 3.967%, and 2.223% in the table's
+order; wall medians save -2.723%, 2.424%, 3.989%, and 2.358%. The prose suffix
+mean/median disagreement is a warning against treating the aggregate as a clean
+mechanism estimate. All attempts remain included in the report.
+
+Paired savings below are A1/B1 then A2/B2; drift is A2/A1 then B2/B1, all in
+percent. Execution order is A1, B1, B2, A2. All pairs, including losses, are shown.
+
+| UD cell / round | Paired GPU savings | Paired wall savings | GPU A/B drift | Wall A/B drift |
+|---|---:|---:|---:|---:|
+| Prose suffix 1 | +3.533 / -11.266 | +3.254 / -11.248 | -12.169 / +1.306 | -12.178 / +0.986 |
+| Prose suffix 2 | +4.328 / +4.135 | +4.397 / +4.176 | -0.278 / -0.077 | -0.307 / -0.076 |
+| Prose whole 1 | +4.143 / +2.287 | +4.091 / +2.300 | -1.837 / +0.064 | -1.771 / +0.062 |
+| Prose whole 2 | +2.412 / +2.412 | +2.421 / +2.426 | +0.012 / +0.012 | +0.017 / +0.011 |
+| SSH suffix 1 | +3.927 / +3.980 | +3.788 / +3.994 | +0.071 / +0.016 | +0.233 / +0.019 |
+| SSH suffix 2 | +3.938 / +4.010 | +3.973 / +4.042 | +0.058 / -0.017 | +0.061 / -0.011 |
+| SSH whole 1 | +4.805 / -0.658 | +4.743 / -0.716 | +15.866 / +22.515 | +16.112 / +22.766 |
+| SSH whole 2 | +2.740 / +1.697 | +2.864 / +1.844 | -1.692 / -0.638 | -1.695 / -0.663 |
+
+UD has **14/16 improving GPU pairs and 14/16 improving wall pairs**, not all-pair
+qualification. Prose suffix round1 loses 173.02 ms GPU on average while A speeds
+up by 12.17%; round2 saves 202.95 ms / 4.232% with much smaller drift. SSH whole
+round1 contains a 22.52% B slowdown and one losing pair; it is not a stable gain
+estimate. Its second round saves 208.84 ms GPU / 2.223% and 222.91 ms wall /
+2.358%, but A's 1.69% drift is still appreciable relative to that saving.
+UD prose whole round2 and both SSH suffix rounds give cleaner evidence of a
+roughly 190–200 ms residual; the unstable results neither erase those observations
+nor qualify an artifact-wide percentage.
+
+**UD numerics, state and routing.** All 80 timed cross-schedule step comparisons
+have exactly zero KL in both directions, relative L2, maxabs and choice regret;
+logit bits and complete state digests agree. The four warm A/B endpoint
+comparisons agree too. No persistent allocation hashes differ (0/121), and final
+hyper matches, at every compared step. All 80 same-schedule A1/A2 and B1/B2 step
+comparisons also agree. Independently checked hashes match across rounds, warm
+versus measured endpoints, and suffix versus whole (20 corpus/arm/step groups).
+All positions, QSA lengths and PLE prior-token metadata agree. These results are
+bounded to the two retained repeated-text streams and four continuations.
+
+| UD corpus | Shared top1 IDs: endpoint, then continuation1–4 | Worst bidirectional KL / L2 / maxabs / regret |
+|---|---|---:|
+| Prose | 63280, 10993, 11, 321, 37715 | All zero |
+| Repeated SSH | 7854, 539, 4924, 20653, 279 | All zero |
+
+Both UD suffix arms witness 48 strict-router calls; both whole arms witness 96.
+A additionally has the 48 generic N3-router calls. Warm dispatch totals are
+9838→8021 suffix and 13983→12166 whole for both corpora. Unlike GSQ, the UD suffix
+census contains no N64 quant matmuls or bfloat-activation BF16 calls in either
+arm; ordinary BF16 matmul calls are 36→24. Actual expert-down cohorts are
+43 IQ4_NL and five Q8_0; gate/up are 47 IQ3_XXS and one IQ4_XS. Thus the exact UD
+result is a useful control for the common scheduling/checkpoint path and points
+toward artifact-specific projection arithmetic as a GSQ localization priority.
+It does not isolate a single causal kernel: weight values/dtypes differ as well.
+No token-level route-equivalence observation is retained.
+
+**Repeat budget and next action.** Another full `both` stages/`both` corpora packet
+is not worth running before the early-GDN observer: both artifacts already show
+a usable low-drift whole-cell signal, and repeating timings will not explain
+GSQ's quality difference. Do the GSQ early-GDN localization below first; use UD
+as an optional control if it helps discriminate a proposed cause. Keep routing
+production in every arm and keep all captures outside performance timing.
+
+After localization, if the candidate remains viable, the useful timing repeats
+are **GSQ prose whole** and **UD SSH whole**, the least settled whole cells.
+The existing harness supports `FLASH_FRONTIER_STAGE=whole` with
+`FLASH_FRONTIER_CORPORA=prose` or `both`; it cannot select SSH alone. Without a
+harness change, use GSQ whole/prose and UD whole/both, retaining the prose control
+rather than rerunning suffixes. Two warmed ABBA rounds remain a bounded screen.
+Current traces contain about 87 seconds of GSQ prose whole calls and 171 seconds
+of UD both-corpus whole calls including warm calls; loading, state inspection,
+continuations and other overhead are additional. Budget several minutes, not
+another full suffix-plus-whole matrix. Do not repeat until a favorable subset
+appears: predeclare the two rounds, retain every pair, and if drift remains of
+the same order as the gain, report timing magnitude unresolved and investigate
+the execution conditions. No arbitrary bit-identity or new numerical cutoff
+is implied. Production promotion remains deferred.
+
+**GSQ restart analysis (retained below).**
+
+The completed restart confirms a useful **ordinary whole4096 performance signal
+on both GSQ corpora**, with substantial timing drift that limits the headline
+mean. All 16 GPU and all 16 wall pairs improve across suffix and whole cells.
+The stable second SSH whole round saves **257.06 ms GPU / 3.070%** and
+**259.07 ms wall / 3.085%**. Do not promote yet: **early layer0 GDN localization
+and a quality screen are the next steps regardless of matching top1**. The
+candidate changes width-dependent arithmetic as well as command scheduling.
+Production remains the incumbent split planner.
+
+**Recovery provenance.** The owner reported a computer shutdown after the initial
+retained GSQ prose suffix run. Worktree, compiled binary, and that retained packet
+survived; incomplete GSQ/UD files under `/tmp` disappeared and no benchmark
+process survived. Those interrupted attempts have no retained results and are
+not scored, silently reconstructed, or merged into this packet. After recovery,
+the owner reported AC power, mounted drive, a passing scope CPU test, and a new
+GSQ `both` stages / `both` corpora run completing in 403 seconds. Elapsed process
+time and AC status are owner reports, not fields measured by the JSONL.
+
+[gsq-both-restart.jsonl](gsq-both-restart.jsonl) was written directly to this
+durable directory and is retained unchanged: **3,174,540 bytes**, SHA256
+`2bd1efe0efdc641c42d728af66859c45272666867e2cce06c8362501d9566660`.
+Its complete compiled-source binding and executable SHA256 exactly match the
+initial retained packet. The new packet completed with unchanged shard stamps,
+normal lease and memory gates, native selected-capable extent4100, and current
+production routing in both arms. Its weight/session/checkpoint allocation counts
+match the initial packet below. The recorded recommended working-set signal
+changed from 118 GiB to 96 GiB after recovery; normal admission still passed.
+This does not identify the cause of timing drift. No clock/thermal telemetry is
+retained. At the GSQ-only analysis checkpoint UD was running and its partial
+durable file was **not read**. Its subsequent completed analysis is above.
+
+Reproduce this analysis, naming only the completed file:
+
+```sh
+UV_CACHE_DIR=/tmp/flash-frontier-uv-cache uv run --no-project \
+  docs/bench/2026-10-09-flash-frontier/summarizer.py \
+  docs/bench/2026-10-09-flash-frontier/gsq-both-restart.jsonl
+```
+
+The summarizer now requires explicit input paths, preventing automatic discovery
+of a benchmark's growing JSONL. Multi-case audit passes with **zero problems**:
+32 timed attempts, eight excluded warm census attempts, 170 finite logit vectors,
+128 continuation steps, and 164 finite comparison records with matching causal
+metadata. All timed GPU aggregates have complete command coverage. Suffix A/B
+have two/one commands; ordinary whole A/B have three/two. Whole calls begin from
+reset and zeroed persistent state in one resident session. Preparation, logging,
+endpoint inspection and continuations remain outside timing; this is not cold
+placement/TTFT. The schema does not retain individual command GPU timestamps.
+
+| Restart cell | GPU A → B mean ms | GPU saving ms (%) | Wall A → B mean ms | Wall saving ms (%) |
+|---|---:|---:|---:|---:|
+| Prose suffix | 5459.719 → 5127.139 | 332.580 (6.092%) | 5475.777 → 5143.482 | 332.295 (6.068%) |
+| Prose whole4096 | 8914.343 → 8346.396 | 567.947 (6.371%) | 8934.083 → 8366.192 | 567.891 (6.356%) |
+| Repeated SSH suffix | 5077.117 → 4729.870 | 347.247 (6.839%) | 5093.394 → 4746.507 | 346.887 (6.811%) |
+| Repeated SSH whole4096 | 8632.610 → 8160.614 | 471.996 (5.468%) | 8653.189 → 8180.577 | 472.611 (5.462%) |
+
+All attempts remain included. Median GPU A→B is 5466.589→5122.357 ms for prose
+suffix (6.297%), 8879.583→8387.530 ms for prose whole (5.541%),
+4948.890→4718.667 ms for SSH suffix (4.652%), and 8386.648→8117.503 ms for SSH
+whole (3.209%). Corresponding wall median savings are 6.338%, 5.509%, 4.659%,
+and 3.220%. Means/medians are descriptive, not a calibrated confidence interval.
+
+In the following table, paired savings are A1/B1 then A2/B2; drift is A2/A1 then
+B2/B1. Each entry is a percentage. Execution order remains A1, B1, B2, A2.
+
+| Cell / round | Paired GPU savings | Paired wall savings | GPU A/B drift | Wall A/B drift |
+|---|---:|---:|---:|---:|
+| Prose suffix 1 | 2.686 / 6.691 | 2.573 / 6.645 | +8.313 / +3.856 | +8.466 / +3.933 |
+| Prose suffix 2 | 7.436 / 7.386 | 7.471 / 7.409 | -3.495 / -3.443 | -3.504 / -3.438 |
+| Prose whole 1 | 9.629 / 3.366 | 9.550 / 3.381 | -9.201 / -2.909 | -9.095 / -2.895 |
+| Prose whole 2 | 1.113 / 10.569 | 1.135 / 10.562 | +11.599 / +0.928 | +11.577 / +0.938 |
+| SSH suffix 1 | 12.149 / 3.981 | 12.022 / 3.965 | -9.376 / -0.951 | -9.214 / -0.900 |
+| SSH suffix 2 | 5.327 / 5.332 | 5.356 / 5.353 | -0.015 / -0.020 | -0.024 / -0.021 |
+| SSH whole 1 | 11.688 / 3.288 | 11.624 / 3.312 | -10.731 / -2.240 | -10.646 / -2.242 |
+| SSH whole 2 | 3.226 / 2.913 | 3.241 / 2.929 | -0.289 / +0.033 | -0.277 / +0.045 |
+
+The full prose mean is particularly uncertain: A changes -9.2% then +11.6%
+within rounds; individual whole GPU savings range 94.88–1005.40 ms. SSH's first
+whole A1 is also slow. Its second whole round has much smaller drift and saves
+257.06 ms on average; second suffix round saves 262.88 ms GPU / 5.329% and
+265.15 ms wall / 5.354%. These stable-round observations support the original
+roughly quarter-second residual, but are not grounds for discarding other
+attempts. Whole and suffix savings overlap and must never be added; nor should
+the new larger means be called an improvement over the earlier packet.
+
+**Restart numerics and repeatability.** Every recorded cross-schedule comparison
+agrees in top1 with zero regret in both directions. All 80 same-schedule A1/A2
+and B1/B2 step comparisons have zero KL/L2/maxabs and identical logits/state.
+The summarizer additionally verifies hashes across both rounds and warm versus
+measured endpoints, and across **suffix versus fresh whole** for each arm and
+corpus (20 step/arm/corpus groups, all equal). Thus restoring the prefix is not
+creating the observed numerical difference in this evidence.
+
+For prose, all endpoint and four-continuation metrics exactly reproduce the
+initial table below, in both stages: worst KL(A‖B)/KL(B‖A) is
+0.0429139/0.0950802 at continuation4; worst relative L2 0.137688 and maxabs
+2.777336 occur at continuation3. SSH is a distinct second stream: 2211 retained
+tokens are decoded with the identity-checked tokenizer, round-tripped exactly,
+then the whole text is repeated twice and truncated to 4100 tokens. Used-token
+SHA256 is `675aa61981cb1e69719263a3b10793b53e2fffc343d58e6602c7e7c82d695329`.
+It is not an uninterrupted natural 4K excerpt. SSH observations are identical
+across suffix and whole stages:
+
+| SSH step | KL(A‖B) | KL(B‖A) | Relative L2 | Max absolute logit difference | Shared top1 ID |
+|---|---:|---:|---:|---:|---:|
+| Prefill endpoint | 0.0000111972 | 0.0000132917 | 0.0720061 | 2.655254 | 7854 |
+| Continuation 1 | 0.0000426542 | 0.0000465782 | 0.0503001 | 0.624812 | 539 |
+| Continuation 2 | 0.0000219934 | 0.0000281090 | 0.0672371 | 1.528862 | 4924 |
+| Continuation 3 | 0.0000113826 | 0.0000135694 | 0.0431042 | 0.951006 | 20653 |
+| Continuation 4 | 0.000550126 | 0.00102399 | 0.0511982 | 1.788044 | 279 |
+
+Cross-schedule persistent hashes still differ at 120/121 allocations at every
+step of both corpora/stages, including layer0 GDN delta state. Only layer0
+convolution state (index0) agrees, and final hyper differs. Metadata agrees.
+These are hash observations, not state-error magnitudes, element counts or a
+state-finiteness scan. Matching greedy choices and much smaller SSH KL do not
+remove the need to understand the pre-QSA seed difference. Numeric metrics come
+from harness comparisons; raw logit/state values are not retained for independent
+recalculation.
+
+**Mechanism and next qualification.** Both suffix arms witness 48 strict-router
+calls; both whole arms witness 96. The N3 shoulder adds 48 generic router calls
+to A. Reviewer findings are corroborated by source/census: changing the command
+width also changes eligible projection arithmetic. In the prose suffix census,
+A has no N64 quant matmuls; B has 47 Q4_K, 35 Q5_K, and 128 Q6_K N64 calls.
+N2048 is divisible by64, N2045 is not; see
+[quant selection](../../../crates/qwen-llm/src/metal/mat_mat.rs#L2004).
+Eligible BF16 projections use the bfloat-activation path at N≥16, while N3 uses
+the other BF16 path; see
+[BF16 dispatch](../../../crates/qwen-llm/src/metal_forward/dispatch.rs#L531).
+Suffix A/B census counts are 194/194 bfloat-activation calls and 230/24 other
+BF16 matmul calls. These totals show path changes, not measured stage shares.
+The layer0 GDN delta-state difference precedes QSA, so later selection cannot
+be the sole source of divergence; it may amplify an earlier difference.
+
+The next bounded diagnostic should restore the same prefix and compare layer0
+input, QKV/gate/beta/alpha projections, decay, prepared normalized Q/K/V,
+recurrent output and delta state, aligned by absolute row across A's concatenated
+3+2045 and B's 2048. Begin with the first three rows, the 2051 boundary, and final
+state. Verify matching input/state before attributing a projection error. The
+[packed GDN sequence](../../../crates/qwen-llm/src/qwen4exp_gdn.rs#L880) supplies
+the existing stage boundaries. An intermediate recurrence state at position2051
+inside B may require a narrow observer hook; final-state hashes alone do not
+localize the first divergence. Admit any capture memory and keep observer runs
+outside performance arms. If inputs to recurrence already differ, isolate the
+width-dependent BF16/quant projection path before blaming the recurrence; if
+they agree, test recurrence across the split using identical prepared inputs.
+Do not assume equal final convolution-state hashes establish equality at every
+earlier row.
+
+Require this early-GDN localization **now, regardless of top1**, then a natural
+quality/continuation screen covering the identified arithmetic change before
+promotion. Compare finite values, meaningful error magnitudes, KL and choice
+regret; do not invent a bit-identity gate. Retain the original rollback/production
+schedule while qualifying. The completed UD evidence above adds bounded artifact
+transfer but does not resolve GSQ's numerical difference. If a credible whole
+saving disappears on stable repeats, wall
+regresses, or the quality screen reveals consequential degradation, demote or
+rework the candidate. No claims yet cover placement-cold behavior, 8K/deeper
+requests, or short prompts below the frontier. No GPU, builds, production-source
+edits or commits were performed for this analysis.
+
+**Initial retained prose suffix screen (pre-shutdown; historical).**
+
+The current-production-router suffix screen supports **expanding to ordinary
+whole4096 confirmation and UD**, not promoting the schedule yet. Across two
+warmed ABBA rounds, merging the dense shoulder saves **266.63 ms GPU (5.382% of
+the measured suffix)** and **265.86 ms ordinary-call wall (5.348%)**. Every paired
+GPU and wall comparison improves. Numerical differences are deterministic and
+top1 agrees through four continuations, but distribution/state differences are
+material enough to retain a qualification flag.
+
+This is a diagnostic-only scheduling scope. Production remains the incumbent
+split planner. The owner reported the scope CPU test passed and the leased
+packet completed in about 225 seconds; this analysis did not run Rust tests,
+builds, or GPU work. The JSONL establishes successful completion, lease/admission,
+and the observations below; it does not contain total process elapsed time.
+
+**Retained evidence and reproduction.** [gsq-prose-suffix.jsonl](gsq-prose-suffix.jsonl)
+is a byte-for-byte copy of `/tmp/flash-frontier-gsq-suffix-20261009.jsonl`:
+828,656 bytes, SHA256
+`577c021c08f5d177067f9b80800559a994b4ef8a01d747f418166cc727dd751d`.
+No raw fields were rewritten. Recompute the report from the repository root:
+
+```sh
+UV_CACHE_DIR=/tmp/flash-frontier-uv-cache uv run --no-project \
+  docs/bench/2026-10-09-flash-frontier/summarizer.py \
+  docs/bench/2026-10-09-flash-frontier/gsq-prose-suffix.jsonl
+```
+
+The dependency-free summarizer recalculates timings from individual
+`arm_complete` records, excluding both warm census attempts. It checks complete
+ABBA coverage, valid command GPU coverage, endpoint positions, finite reported
+logits, causal metadata, persistent hash comparisons, router census totals,
+admission, shard revalidation, and final completion. It exits nonzero on audit
+problems. On this packet: **zero audit problems**. KL/L2/maxabs/regrets are
+aggregated from harness-computed full-logit comparisons: raw logits and state
+values are not retained, so their hashes cannot independently reproduce those
+numerical metrics. Hash equality/differences are independently recomputed from
+the retained records.
+
+**Measurement contract.** The test is
+`qwen4exp_runtime::tests::prefill_map::frontier_schedule::native_frontier_schedule`,
+with `FLASH_FRONTIER_STAGE=suffix`, `FLASH_FRONTIER_CORPORA=prose`,
+`FLASH_PREFILL_MODEL` selecting the first shard below, and a new
+`FLASH_PREFILL_OUT`. The packet records Apple M4 Max, a production benchmark lease
+with wired gate passed, release execution, and no Metal debug layer. Both router
+and selected-QSA environments were unset/default-on; the strict router pipeline
+was supported. There is no N2045 router override.
+
+```text
+/Volumes/wdblack/weights-archive/qwen3.8-flash-next-gsq-rco-iq3_s/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf
+```
+
+The source prose is the retained natural-n512 roadmap text, repeated whole
+eight times with two-newline separators and tokenized without added specials.
+The first 4100 token IDs are retained, covering prefill4096 plus four handoff
+tokens. Tokenizer identity matches the released fixture identity. Used-token
+SHA256 (u32 little endian) is
+`0cc71705ddd73b629e2e0f1bf60bbaa8ecf9b4b3ff32e469719644f5737ce7aa`.
+This is one repeated natural stream, not eight independent quality cases.
+
+A common normal prefix2048 is executed once, then checkpointed. Each arm restores
+that checkpoint before its timer. A executes `[2048,2051)` then `[2051,4096)`;
+B executes `[2048,4096)`. Both use the ordinary runtime driver. GPU is the sum of
+complete valid command intervals; wall surrounds the ordinary continuation call
+and includes its normal staging/encoding/completion/publication. Restore,
+checkpoint, logging, readback/hashing, and four continuation steps are outside
+timing. There are no profilers/censuses inside timed arms. Eight timed attempts
+have valid GPU coverage (A: two samples each; B: one). Individual raw GPU start/end
+timestamps are not exposed by this schema.
+
+| Timing | A mean ms | B mean ms | Saved ms | Saving | A median ms | B median ms |
+|---|---:|---:|---:|---:|---:|---:|
+| Suffix GPU | 4954.404 | 4687.774 | 266.630 | 5.382% | 4950.883 | 4677.395 |
+| Ordinary-call wall | 4971.642 | 4705.783 | 265.859 | 5.348% | 4965.479 | 4695.052 |
+
+Percentages use `1 - B/A`; aggregate percentages use the ratio of arm means,
+not an unweighted average of pair percentages. Median reductions are 5.524%
+GPU and 5.446% wall.
+
+| Round / paired arms | GPU A → B ms | GPU saved ms (%) | Wall A → B ms | Wall saved ms (%) |
+|---|---:|---:|---:|---:|
+| 1 A1/B1 | 4965.647 → 4689.788 | 275.858 (5.555%) | 4974.634 → 4706.678 | 267.956 (5.386%) |
+| 1 A2/B2 | 4936.120 → 4665.002 | 271.118 (5.493%) | 4956.325 → 4683.426 | 272.900 (5.506%) |
+| 2 A1/B1 | 4988.413 → 4740.587 | 247.826 (4.968%) | 5009.291 → 4757.477 | 251.814 (5.027%) |
+| 2 A2/B2 | 4927.437 → 4655.720 | 271.717 (5.514%) | 4946.318 → 4675.551 | 270.767 (5.474%) |
+
+Actual execution order is A1, B1, B2, A2. Round means save 273.488 / 259.771 ms
+GPU (5.524% / 5.240%) and 270.428 / 261.291 ms wall (5.446% / 5.249%).
+GPU A2/A1 drift is -0.595% / -1.222%; B2/B1 is -0.529% / -1.790%.
+Wall drift is -0.368% / -1.257% for A and -0.494% / -1.722% for B.
+Round2 B1 is the slowest candidate; the residual survives that variation.
+Two rounds in one session establish a useful screen, not a population confidence
+interval. Checkpoint capture took 12.721 ms; timed-arm restores took 3.160–3.251 ms,
+all excluded from prefill timing.
+
+**Routing and attribution.** Warm witnesses show **48 strict-router calls in
+each suffix arm**. A also has 48 generic-router-shape calls in N3; its N2045
+command is strict. B's N2048 command is strict. Total witnessed dispatches fall
+from 9908 to 8021. These are observations of the untimed census arms; they do not
+attribute milliseconds to individual kernels or prove token-level expert routes
+match. The artifact's expert-down cohorts are 39 IQ4_NL and nine Q2_0, not IQ3_S
+despite the artifact name. Gate/up cohorts are 20 IQ2_S, 17 IQ3_XXS, ten IQ3_S,
+and one IQ4_XS.
+
+The measured win is scheduling/rebatching on the already-promoted router baseline,
+including removal of the tiny complete model pass and its command boundary.
+It must not be added to old mixed-schedule gains or treated as another router
+transfer. Historical strict-disabled 199/282 ms are not a current baseline.
+Dividing this 266.63 ms residual by the historical GSQ whole4096 8388.22 ms gives
+about **3.18% as a scale estimate only**; whole timing and denominator were not
+measured here, and the historical session had a different admitted extent.
+
+**Numerics and state.** All 43 observed full-logit vectors (248,320 elements each)
+report zero nonfinite logits: one prefix checkpoint, two warm endpoints, eight
+timed endpoints, and 32 continuations. All 41 comparison records have finite
+metrics and matching position/QSA-length/PLE-token metadata. The table gives
+the observed A→B comparison at endpoint and after each common continuation;
+all four timed cross-schedule observations at each step have identical metrics.
+Relative L2 is uncentered and normalized by A's logit norm; KL is in nats.
+
+| Step | KL(A‖B) | KL(B‖A) | Relative L2 | Max absolute logit difference | Shared top1 ID |
+|---|---:|---:|---:|---:|---:|
+| Prefill endpoint | 0.00502609 | 0.00645067 | 0.0783402 | 1.235848 | 63280 |
+| Continuation 1 | 0.0109660 | 0.0117731 | 0.0451948 | 0.986737 | 10993 |
+| Continuation 2 | 0.0235677 | 0.0294748 | 0.0753667 | 1.415041 | 11 |
+| Continuation 3 | 0.00976645 | 0.0147785 | 0.137688 | 2.777336 | 321 |
+| Continuation 4 | 0.0429139 | 0.0950802 | 0.102496 | 2.252436 | 37715 |
+
+Both choice-regret directions are zero at all steps. The four teacher tokens
+are `[63280,10993,11,321]`, also the common preceding greedy choices in this case.
+This remains a four-token, one-stream check, not broad generation/distribution
+qualification. Final KL grows beyond endpoint KL, although the progression is
+not monotonic. The endpoint L2/maxabs reproduce the older GSQ mixed-schedule
+observation; current production routing has not removed that numerical effect.
+
+Same-schedule A1/A2 and B1/B2 comparisons are exact in all 20 recorded step
+comparisons: zero KL/L2/maxabs, equal logit bits and complete state digests.
+The summarizer also verifies matching same-schedule hashes across both rounds
+and between the warm endpoint and measured endpoint. Thus the observed A/B
+differences repeat deterministically in this run rather than appearing as
+within-schedule drift.
+
+Cross-schedule hashes differ for **120 of 121 persistent allocations at every
+step**, plus final hyper. Only index0, layer0 GDN convolution state, matches;
+index1, layer0 GDN delta state, already differs. This rules out describing the
+state difference as exclusively a later selected-QSA phenomenon. Allocation
+hashes include inactive cache tails and say neither how many elements differ
+nor by how much; no persistent-state finiteness/value scan is retained. The
+shared restored storage and deterministic repeats help interpret the result,
+but these hashes do not prove corruption or establish a numerical tolerance.
+There is no captured per-token routing or selected-block equivalence witness.
+
+**Admission and binding.** Native combined admission and the diagnostic CPU gate
+passed without a scalar retry. Observed native weights are 55,110,090,752 bytes;
+session allocations are 2,161,442,816 bytes. Selected capability and selection
+are active, packed capacity2048, admitted extent4100. The checkpoint bound is
+223,007,744 bytes plus 100,663,296 bytes diagnostic margin; the normal Flash
+536,870,912-byte dynamic reserve is preserved. Admission reports
+`AdmittedProcessBudgetOmitted`: the process-budget signal was omitted by the
+normal gate, not a separately measured process-memory guarantee. Allocation
+counts are not peak RSS measurements. Both retained shard stamps revalidated
+unchanged at completion; no new full artifact content hash was computed.
+
+The JSONL header retains SHA256 of compiled runtime, packet, shared helper,
+session, checkpoint, QSA, MoE, GDN, dispatch, profile and metallib inputs. Key
+bindings are packet `894db81b0b30513536b8d0f5306be3680536da322c7b5487e24257bd6d7d434a`,
+runtime `c93855b590f6553b61c95c0768abc12726492a023c04d43819581d77c919b175`,
+and executable `e463b081cbb9fdfb3f42ad4c6fd7a386874dd65d29aa79b060f7f4940e322da0`.
+The recorded executable is under `/Users/tito/code/qwen-llm/target/release/deps/`;
+analysis used `/Users/tito/code/qwen-llm-quant-compat`, HEAD `2a322a65`, with the
+owner's uncommitted diagnostic source changes. Compiled hashes, not that HEAD
+alone or a later checkout, bind this historical run.
+
+The initial recommendation to expand measurements has now been exercised for
+GSQ by the completed restart above. Its results supersede the historical 3.18%
+whole-time scale estimate; they do not turn that earlier estimate into a
+measurement. Early-GDN localization and quality qualification are now required
+before promotion, regardless of unchanged top1.

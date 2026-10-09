@@ -1,0 +1,2 @@
+# Raw captures are retained losslessly in the checked-in sidecar archives.
+*.f32le

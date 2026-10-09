@@ -1,0 +1,23 @@
+{
+  "format": "standard USTAR tar compressed as XZ/LZMA2",
+  "method": "XZ/LZMA2 preset6 with32MiB dictionary, deterministic tar",
+  "archive": "gsq-layer0-sidecars.tar.xz",
+  "archive_bytes": 20792856,
+  "archive_sha256": "cafa88738b1479cadcaff7ccd7a45a7f10a435d78bb07475e81a8e6ee391e2bc",
+  "packet": "gsq-layer0.jsonl",
+  "packet_sha256": "9db580f381943324463181fa81176ab14016e2e15f11abfa14fab39e37dbe94f",
+  "members": [
+    {
+      "name": "gsq-layer0.jsonl.A.f32le",
+      "bytes": 14250496,
+      "sha256": "f0c9ed5c60236f2ac5ccc15d9e42a505b85bec38ff06fdd6d80b68220a379266"
+    },
+    {
+      "name": "gsq-layer0.jsonl.B.f32le",
+      "bytes": 14250496,
+      "sha256": "9496952d7fb564b7c7180b15da9dbf29bccb25be57082adc6c2f2183f8134664"
+    }
+  ],
+  "roundtrip_verified": true,
+  "originals_deleted": false
+}

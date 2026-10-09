@@ -3,14 +3,55 @@
 use super::*;
 
 pub fn with_matmat_bf16_bfloat_act_override<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
-    let previous = MATMAT_BF16_BFLOAT_ACT_OVERRIDE.with(|slot| {
-        let previous = slot.get();
-        slot.set(Some(enabled));
-        previous
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            MATMAT_BF16_BFLOAT_ACT_OVERRIDE.with(|slot| slot.set(self.0));
+        }
+    }
+    let _restore =
+        Restore(MATMAT_BF16_BFLOAT_ACT_OVERRIDE.with(|slot| slot.replace(Some(enabled))));
+    f()
+}
+
+#[test]
+fn bf16_bfloat_act_override_restores_nested_unwind_and_thread() {
+    let initial = MATMAT_BF16_BFLOAT_ACT_OVERRIDE.with(|slot| slot.get());
+    with_matmat_bf16_bfloat_act_override(true, || {
+        assert!(matmat_bf16_bfloat_act_enabled());
+        with_matmat_bf16_bfloat_act_override(false, || {
+            assert!(!matmat_bf16_bfloat_act_enabled());
+        });
+        assert!(matmat_bf16_bfloat_act_enabled());
+        assert!(
+            std::panic::catch_unwind(|| {
+                with_matmat_bf16_bfloat_act_override(false, || panic!("override unwind probe"))
+            })
+            .is_err()
+        );
+        assert!(matmat_bf16_bfloat_act_enabled());
+        assert!(
+            std::thread::spawn(|| MATMAT_BF16_BFLOAT_ACT_OVERRIDE
+                .with(|slot| slot.get())
+                .is_none())
+            .join()
+            .unwrap()
+        );
     });
-    let out = f();
-    MATMAT_BF16_BFLOAT_ACT_OVERRIDE.with(|slot| slot.set(previous));
-    out
+    assert_eq!(
+        MATMAT_BF16_BFLOAT_ACT_OVERRIDE.with(|slot| slot.get()),
+        initial
+    );
+    assert!(
+        std::panic::catch_unwind(|| {
+            with_matmat_bf16_bfloat_act_override(false, || panic!("outer unwind probe"))
+        })
+        .is_err()
+    );
+    assert_eq!(
+        MATMAT_BF16_BFLOAT_ACT_OVERRIDE.with(|slot| slot.get()),
+        initial
+    );
 }
 
 pub(super) fn matmat_bf16_bfloat_act_enabled() -> bool {

@@ -543,16 +543,17 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         }
     }
 
-    /// The `serve limits` fragment for snapshots.
+    /// The `serve limits` fragment for snapshots: the schedules that run
+    /// (none without a cache budget).
     pub(super) fn describe_snapshots(&self) -> String {
+        let schedules = match (self.cache.max_bytes() > 0, self.fast_snapshots) {
+            (false, _) => "none",
+            (true, true) => "exact,fast_shared_split",
+            (true, false) => "exact",
+        };
         format!(
-            "{} snapshot_schedules=exact{}",
-            self.snapshot_cache_plan,
-            if self.fast_snapshots {
-                ",fast_shared_split"
-            } else {
-                ""
-            }
+            "{} snapshot_schedules={schedules}",
+            self.snapshot_cache_plan
         )
     }
 

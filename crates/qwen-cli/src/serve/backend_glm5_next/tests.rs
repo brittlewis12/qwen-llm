@@ -561,9 +561,10 @@ fn live_session_reuse_requires_the_same_prefill_lineage() {
 }
 
 /// Exact always has a snapshot schedule when the cache has a budget; Fast
-/// only with the opt-in; no budget means no splits and no captures.
+/// only with its lever on (the default); no budget means no splits and no
+/// captures.
 #[test]
-fn snapshot_schedules_follow_lineage_budget_and_opt_in() {
+fn snapshot_schedules_follow_lineage_budget_and_lever() {
     use PackedLineage::{Exact, Fast};
     assert_eq!(snapshot_schedule(1, false, Exact), Some(Schedule::ExactV1));
     assert_eq!(snapshot_schedule(1, true, Exact), Some(Schedule::ExactV1));
@@ -791,7 +792,7 @@ fn prepared_request(backend: &Glm5NextBackend<'_, '_>, body: Value) -> Arc<Prepa
 
 /// Map #15 serve gates. A snapshot restore continues exactly the trajectory
 /// a miss runs on the same schedule: Exact hits equal a cold single prefill
-/// bitwise (Exact is segmentation-invariant); opt-in Fast hits equal a miss
+/// bitwise (Exact is segmentation-invariant); Fast hits equal a miss
 /// that splits at the same shared-prefix cut, as does a full cache; Fast and
 /// Exact entries never serve each other; a cancelled split prefill resumes
 /// onto the same schedule.
@@ -912,7 +913,7 @@ fn gpu_snapshots_continue_the_captured_trajectory() {
         logits == exact_a && bytes == exact_a_bytes,
     );
 
-    // Fast opt-in: the reference is a miss on the same schedule.
+    // Fast snapshots: the reference is a miss on the same schedule.
     reset(&mut backend, 8192, true, PackedLineage::Fast);
     let (cached, _, _) = run(&mut backend, &a);
     check("fast A miss: no reuse", cached == 0);
@@ -944,11 +945,11 @@ fn gpu_snapshots_continue_the_captured_trajectory() {
         "fast full == fast miss",
         logits == fast_b_miss && bytes == fast_b_bytes,
     );
-    // Fast without the opt-in is today's single cold prefill.
+    // Fast with the lever off is a single cold prefill.
     reset(&mut backend, 8192, false, PackedLineage::Fast);
     let (_, unsplit, _) = run(&mut backend, &a);
     check(
-        "fast without opt-in captures nothing",
+        "fast with the lever off captures nothing",
         backend.cache.len() == 0,
     );
     eprintln!(

@@ -40,8 +40,9 @@ per run; `phases.log` holds serve's `serve limits` and `serve phases:` lines.
   policy accepts), and the conversations diverged (session A took one tool
   step with snapshots on, three with them off). Request rows are therefore
   comparable by kind, not token for token.
-- The cold request's 2.1 s difference is within this screen's run-to-run
-  and order effects (on ran first); it is not attributed.
+- The cold request's 2.1 s difference is unresolved: one on/off pair (on
+  ran first) cannot separate the split's schedule overhead from order
+  effects and run-to-run variability.
 
 Scope: one scripted conversation in one release build; a cost screen, not
 a quality measurement (quality: `../2026-10-08-glm53-fast-split-quality/`).

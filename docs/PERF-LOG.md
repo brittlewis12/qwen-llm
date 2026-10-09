@@ -9,26 +9,29 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 ## 2026-10-08 - GLM Fast Snapshots On by Default; Branches and New Sessions 58 s -> 0.5 s; Fast Accuracy Lane Opened
 
 - **Decision:** Fast snapshots are on by default (`b4c1e79f`;
-  `QWEN_GLM_FAST_SNAPSHOTS=0` turns them off). Grounds: the comparator for
-  enabling a schedule change is the schedule it replaces. Against unsplit
-  Fast (what serve already runs), every split arm's mean-NLL interval
-  includes zero and meets the cohort's limits (frontier long top-1 aside,
-  inconclusive on six documents); the preregistered comparison against
-  Exact was INCONCLUSIVE on one arm (0.0054 vs 0.005, Fast's own bound
-  being 0.0046). Withholding the split costs ~58 s per branch, new session
-  or return. This decision was taken after the results, on stated grounds;
-  it is not the preregistered qualification, which stays recorded as
-  INCONCLUSIVE.
-- **Rule for future schedule changes** (amending the adopted Fast policy):
-  a change to where Fast's prefill segments fall is preregistered as
-  non-inferiority against the incumbent Fast schedule at the cohort's
-  limits; a change to Fast's arithmetic keeps the comparison against Exact.
+  `QWEN_GLM_FAST_SNAPSHOTS=0` turns them off). An explicit exception accepts
+  unresolved quality uncertainty in exchange for the measured latency
+  benefit (~58 s per branch, new session or return). The preregistered
+  comparison against Exact stays recorded as INCONCLUSIVE (one arm 0.0054
+  vs 0.005; unsplit Fast's own bound was 0.0046) and is not retroactively
+  qualified. Supporting, not qualifying: against unsplit Fast, the split
+  arms' mean-NLL bounds lie within the cohort's limits (grid +0.0019,
+  tail +0.0040, frontier long +0.0095 upper bounds), with the frontier arm's
+  long top-1 still INCONCLUSIVE (six documents).
+- **Rule for future schedule changes** (amending the adopted Fast policy),
+  preregistered: a schedule-only change (kernels, precision and dispatch
+  arithmetic unchanged, established by inspection, since segmentation can
+  change dispatch selection) is judged for non-inferiority both against
+  the incumbent Fast schedule and against a fixed, versioned reference
+  (the quality-v1 Exact reference), so successive changes cannot degrade
+  cumulatively; a change to Fast's arithmetic keeps the comparison against
+  Exact.
 - **Release screen** (`docs/bench/2026-10-08-glm53-fast-snapshot-screen/`,
   opencode-shaped conversation, 11,104-token shared prefix): branch,
   new-session and return requests restore in 5-11 ms and reach their first
   delta in 0.50-1.73 s, against 57.7-59.6 s with snapshots off; one 28 ms
   capture (0.27 GiB) on the cold request.
-- **Next: make Fast more accurate** (cx jam pending): the dense projection
+- **Next: make Fast more accurate** (cx 01a10cc jam): the dense projection
   families (KDA, MLA, shared expert, dense FFN; Q6_K/Q8_0) round both
   activations and dequantized weights to half in their mat-mat tiles, and
   the routed experts do the same; all-F32 Q8_0 tiles already exist (DS4,

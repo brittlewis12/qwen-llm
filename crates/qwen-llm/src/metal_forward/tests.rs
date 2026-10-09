@@ -17,6 +17,32 @@ fn metal_test_context() -> Option<MetalContext> {
     crate::test_fixtures::metal_context_or_skip()
 }
 
+fn qualification_facts(name: &str, physical_memory_bytes: Option<u64>) -> crate::metal::DeviceFacts {
+    crate::metal::DeviceFacts {
+        version: "qwen_device_info_v1",
+        name: name.into(),
+        architecture: "test".into(),
+        registry_id: 0,
+        gpu_families: crate::metal::GpuFamilySupport {
+            apple7: false,
+            apple8: false,
+            apple9: false,
+            apple10: false,
+            metal3: false,
+            metal4: false,
+        },
+        max_threadgroup_memory_bytes: 0,
+        max_buffer_length_bytes: 0,
+        recommended_max_working_set_bytes: 0,
+        unified_memory: true,
+        host_page_size_bytes: None,
+        physical_memory_bytes,
+        os_version: None,
+        product_metallib_deployment_target: "",
+        research_metallib_deployment_target: "",
+    }
+}
+
 fn snapshot_validation_fixture() -> SessionSnapshot {
     SessionSnapshot {
         identity: SnapshotIdentity {
@@ -1130,35 +1156,41 @@ fn prepared_auto_prefetch_advice_selector_table_is_fail_closed() {
 
 #[test]
 fn parallel_copy_auto_host_gate_is_exact() {
+    let memory_128 = Some(128 * 1024 * 1024 * 1024);
+    let facts_128 = qualification_facts("Apple M4 Max", memory_128);
     assert!(a3b_parallel_copy_auto_host_supported(
         true,
-        "Apple M4 Max",
-        Some(128 * 1024 * 1024 * 1024),
+        memory_128,
+        &facts_128,
     ));
+    let facts_192 = qualification_facts("Apple M4 Max", Some(192 * 1024 * 1024 * 1024));
     assert!(a3b_parallel_copy_auto_host_supported(
         true,
-        "Apple M4 Max",
         Some(192 * 1024 * 1024 * 1024),
+        &facts_192,
     ));
     assert!(!a3b_parallel_copy_auto_host_supported(
         false,
-        "Apple M4 Max",
-        Some(128 * 1024 * 1024 * 1024),
+        memory_128,
+        &facts_128,
     ));
+    let other = qualification_facts("Apple M4 Pro", memory_128);
     assert!(!a3b_parallel_copy_auto_host_supported(
         true,
-        "Apple M4 Pro",
-        Some(128 * 1024 * 1024 * 1024),
+        memory_128,
+        &other,
     ));
+    let below = qualification_facts("Apple M4 Max", Some(128 * 1024 * 1024 * 1024 - 1));
     assert!(!a3b_parallel_copy_auto_host_supported(
         true,
-        "Apple M4 Max",
         Some(128 * 1024 * 1024 * 1024 - 1),
+        &below,
     ));
+    let unavailable = qualification_facts("Apple M4 Max", None);
     assert!(!a3b_parallel_copy_auto_host_supported(
         true,
-        "Apple M4 Max",
         None,
+        &unavailable,
     ));
 }
 

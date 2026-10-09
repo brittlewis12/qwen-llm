@@ -983,8 +983,8 @@ pub(super) fn parallel_copy_profile_matches(
     if !ctx.device.hasUnifiedMemory() {
         return Ok(false);
     }
-    if let ParallelCopyDeviceConstraint::ExactUnified(name) = profile.device_constraint
-        && ctx.device.name().to_string() != name
+    if let ParallelCopyDeviceConstraint::ExactUnified(qualification) = profile.device_constraint
+        && !qualification.holds_for(ctx.device_facts())
     {
         return Ok(false);
     }
@@ -1063,28 +1063,13 @@ pub(super) fn select_parallel_copy_profile(
     })
 }
 
-pub(super) fn host_physical_memory_bytes() -> Option<u64> {
-    let mut bytes = 0u64;
-    let mut size = std::mem::size_of::<u64>();
-    let result = unsafe {
-        libc::sysctlbyname(
-            c"hw.memsize".as_ptr(),
-            (&mut bytes as *mut u64).cast(),
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    (result == 0 && size == std::mem::size_of::<u64>()).then_some(bytes)
-}
-
 pub(super) fn a3b_parallel_copy_auto_host_supported(
     unified_memory: bool,
-    device_name: &str,
     physical_memory_bytes: Option<u64>,
+    facts: &crate::metal::DeviceFacts,
 ) -> bool {
     unified_memory
-        && device_name == A3B_PARALLEL_COPY_AUTO_DEVICE
+        && crate::metal::A3B_PARALLEL_COPY_AUTO.holds_for(facts)
         && physical_memory_bytes.is_some_and(|bytes| bytes >= A3B_PARALLEL_COPY_AUTO_MIN_MEMORY)
 }
 
@@ -1097,8 +1082,8 @@ pub(super) fn select_auto_parallel_copy_profile(
 ) -> Result<Option<&'static ParallelCopyProfile>, MfError> {
     if !a3b_parallel_copy_auto_host_supported(
         ctx.device.hasUnifiedMemory(),
-        &ctx.device.name().to_string(),
-        host_physical_memory_bytes(),
+        ctx.device_facts().physical_memory_bytes,
+        ctx.device_facts(),
     ) {
         return Ok(None);
     }

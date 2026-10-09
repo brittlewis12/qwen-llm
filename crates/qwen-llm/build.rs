@@ -158,6 +158,13 @@ fn verify_effective_target(kernels_dir: &Path, target: &str, expected: &str) -> 
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    // The driver can report an error (e.g. an out-of-range minor version)
+    // and still exit 0 with a matching triple.
+    if transcript.contains("error:") {
+        anyhow::bail!(
+            "Metal target probe reported an error for requested macOS {target}:\n{transcript}"
+        );
+    }
     let tokens: Vec<_> = transcript
         .split_whitespace()
         .map(|token| token.trim_matches('"'))
@@ -183,9 +190,13 @@ fn verify_effective_target(kernels_dir: &Path, target: &str, expected: &str) -> 
 fn normalize_target_version(target: &str) -> anyhow::Result<String> {
     let parts = target
         .split('.')
-        .map(str::parse::<u32>)
-        .collect::<Result<Vec<_>, _>>()
-        .ok()
+        .map(|part| {
+            // Digits only: u32 parsing alone would accept "+15".
+            (!part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+                .then(|| part.parse::<u32>().ok())
+                .flatten()
+        })
+        .collect::<Option<Vec<_>>>()
         .filter(|parts| (1..=3).contains(&parts.len()))
         .ok_or_else(|| {
             anyhow::anyhow!(

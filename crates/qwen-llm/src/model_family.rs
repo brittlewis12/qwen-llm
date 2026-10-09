@@ -46,7 +46,7 @@ impl ModelFamily {
     }
 
     /// Stable family label for records and machine-readable surfaces
-    /// (request-stats `model.family`, `qwen info --json`). Dense and MoE
+    /// (request-stats `model.family`, `qwen info -m MODEL --json`). Dense and MoE
     /// ordinary Qwen share one label because they share every contract the
     /// records describe; `architecture_name` remains the GGUF spelling.
     pub fn record_label(self) -> &'static str {

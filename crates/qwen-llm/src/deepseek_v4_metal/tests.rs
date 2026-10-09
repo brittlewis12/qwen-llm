@@ -14,6 +14,36 @@ use objc2_metal::{MTLCommandBuffer, MTLCommandQueue};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+fn synthetic_device_facts(
+    name: &str,
+    memory: Option<u64>,
+    unified: bool,
+) -> crate::metal::DeviceFacts {
+    crate::metal::DeviceFacts {
+        version: "qwen_device_info_v2",
+        name: name.into(),
+        architecture: "test".into(),
+        registry_id: 0,
+        gpu_families: crate::metal::GpuFamilySupport {
+            apple7: false,
+            apple8: false,
+            apple9: false,
+            apple10: false,
+            metal3: false,
+            metal4: false,
+        },
+        max_threadgroup_memory_bytes: 0,
+        max_buffer_length_bytes: 0,
+        recommended_max_working_set_bytes: 0,
+        unified_memory: unified,
+        host_page_size_bytes: None,
+        physical_memory_bytes: memory,
+        os_version: None,
+        product_metallib_deployment_target: "",
+        research_metallib_deployment_target: "",
+    }
+}
+
 const LEGACY_CENSUS_MANIFEST: &str =
     include_str!("../../tests/fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_census_v1.json");
 #[cfg(feature = "dsv4-diagnostics")]
@@ -29,6 +59,12 @@ const LEGACY_CHECKPOINT_CONTENT_ID: [u8; 32] = [
 
 #[test]
 fn model_residency_set_scope_is_exact() {
+    assert_eq!(
+        deepseek_v4_residency_set_qualification().path,
+        "deepseek_v4.residency_set"
+    );
+    let m4 = synthetic_device_facts("Apple M4 Max", None, true);
+    let m3 = synthetic_device_facts("Apple M3 Max", None, true);
     let mut report = DeepSeekV4ResidencyReport {
         tensor_count: DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT,
         source_bytes: DEEPSEEK_V4_REAP_K160_SOURCE_BYTES,
@@ -47,13 +83,13 @@ fn model_residency_set_scope_is_exact() {
         required_alignment: GGUF_BINDING_ALIGNMENT,
     };
     assert!(deepseek_v4_residency_set_scope_qualified(
-        true, true, 43, 160, &report,
+        true, &m4, 43, 160, &report,
     ));
     for (enabled, device, layers, experts) in [
-        (false, true, 43, 160),
-        (true, false, 43, 160),
-        (true, true, 42, 160),
-        (true, true, 43, 216),
+        (false, &m4, 43, 160),
+        (true, &m3, 43, 160),
+        (true, &m4, 42, 160),
+        (true, &m4, 43, 216),
     ] {
         assert!(!deepseek_v4_residency_set_scope_qualified(
             enabled, device, layers, experts, &report,
@@ -64,7 +100,7 @@ fn model_residency_set_scope_is_exact() {
     k216_report.source_bytes = DEEPSEEK_V4_REAP_K216_SOURCE_BYTES;
     assert!(deepseek_v4_residency_set_scope_qualified(
         true,
-        true,
+        &m4,
         43,
         216,
         &k216_report,
@@ -74,7 +110,7 @@ fn model_residency_set_scope_is_exact() {
     fresh_report.source_bytes = DEEPSEEK_V4_FRESH_SOURCE_BYTES;
     assert!(deepseek_v4_residency_set_scope_qualified(
         true,
-        true,
+        &m4,
         43,
         256,
         &fresh_report,
@@ -82,13 +118,51 @@ fn model_residency_set_scope_is_exact() {
 
     report.tensor_count -= 1;
     assert!(!deepseek_v4_residency_set_scope_qualified(
-        true, true, 43, 160, &report,
+        true, &m4, 43, 160, &report,
     ));
     report.tensor_count += 1;
     report.source_bytes -= 1;
     assert!(!deepseek_v4_residency_set_scope_qualified(
-        true, true, 43, 160, &report,
+        true, &m4, 43, 160, &report,
     ));
+}
+
+#[test]
+fn singleton_indexer_and_hca_device_decisions_use_their_named_records() {
+    let matching = synthetic_device_facts("Apple M4 Max", None, false);
+    let variant = synthetic_device_facts("Apple M4 Pro", None, true);
+    assert_eq!(
+        crate::metal::DEEPSEEK_V4_MULTIGROUP_SELECTOR.path,
+        "deepseek_v4.multigroup_selector"
+    );
+    assert_eq!(
+        crate::metal::DEEPSEEK_V4_F16_MATRIX_SCORER.path,
+        "deepseek_v4.singleton_f16_matrix_scorer"
+    );
+    assert_eq!(
+        crate::metal::DEEPSEEK_V4_GROUPED_LONG_HCA.path,
+        "deepseek_v4.grouped_long_hca"
+    );
+    assert_eq!(
+        crate::metal::DEEPSEEK_V4_SPLITK_HCA.path,
+        "deepseek_v4.splitk_hca"
+    );
+    for decision in [
+        super::indexer::deepseek_v4_multigroup_selector_qualified(&matching),
+        super::indexer::deepseek_v4_f16_matrix_scorer_qualified(&matching),
+        super::attention::deepseek_v4_singleton_splitk_hca_qualified(&matching),
+        super::attention::deepseek_v4_singleton_grouped_long_hca_qualified(&matching),
+    ] {
+        assert!(decision);
+    }
+    assert!(!super::indexer::deepseek_v4_multigroup_selector_qualified(
+        &variant
+    ));
+    assert!(!super::indexer::deepseek_v4_f16_matrix_scorer_qualified(
+        &variant
+    ));
+    assert!(!super::attention::deepseek_v4_singleton_splitk_hca_qualified(&variant));
+    assert!(!super::attention::deepseek_v4_singleton_grouped_long_hca_qualified(&variant));
 }
 
 #[derive(serde::Deserialize)]
@@ -19334,6 +19408,12 @@ fn oracle_expert(
 
 #[test]
 fn all_slot_q3q4_fast_scope_is_exactly_k160_m4() {
+    assert_eq!(
+        deepseek_v4_all_slots_q3q4_qualification().path,
+        "deepseek_v4.all_slots_q3q4_decode"
+    );
+    let m4 = synthetic_device_facts("Apple M4 Max", None, true);
+    let m3 = synthetic_device_facts("Apple M3 Max", None, true);
     let qualified = DeepSeekV4MoeConfig {
         hidden_size: DEEPSEEK_V4_HIDDEN_SIZE,
         ffn_size: DEEPSEEK_V4_ALL_SLOTS_Q3Q4_FFN_SIZE,
@@ -19342,7 +19422,7 @@ fn all_slot_q3q4_fast_scope_is_exactly_k160_m4() {
         routed_scale: 1.0,
     };
     assert!(deepseek_v4_all_slots_q3q4_scope_qualified(
-        true,
+        &m4,
         qualified,
         GgmlType::Q3_K,
         GgmlType::Q3_K,
@@ -19363,7 +19443,7 @@ fn all_slot_q3q4_fast_scope_is_exactly_k160_m4() {
         },
     ] {
         assert!(!deepseek_v4_all_slots_q3q4_scope_qualified(
-            true,
+            &m4,
             config,
             GgmlType::Q3_K,
             GgmlType::Q3_K,
@@ -19371,14 +19451,14 @@ fn all_slot_q3q4_fast_scope_is_exactly_k160_m4() {
         ));
     }
     assert!(!deepseek_v4_all_slots_q3q4_scope_qualified(
-        false,
+        &m3,
         qualified,
         GgmlType::Q3_K,
         GgmlType::Q3_K,
         GgmlType::Q4_K,
     ));
     assert!(!deepseek_v4_all_slots_q3q4_scope_qualified(
-        true,
+        &m4,
         qualified,
         GgmlType::IQ3_XXS,
         GgmlType::Q3_K,

@@ -240,16 +240,49 @@ mod tests {
 
     #[test]
     fn device_facts_json_report_lists_qualification_results() {
-        let report = serde_json::to_value(sample().report()).unwrap();
-        assert_eq!(report["version"], DEVICE_FACTS_VERSION);
-        let qualifications = report["qualifications"].as_array().unwrap();
-        assert_eq!(
-            qualifications.len(),
-            super::super::qualification::QUALIFICATIONS.len()
-        );
-        assert_eq!(qualifications[0]["path"], "deepseek_v4.multigroup_selector");
-        assert_eq!(qualifications[0]["device_model"], "Apple M4 Max");
-        assert_eq!(qualifications[0]["evidence"], "d52815a3");
-        assert_eq!(qualifications[0]["holds_for_device"], false);
+        let expected = serde_json::json!({
+            "version": "qwen_device_info_v2",
+            "name": "Test GPU",
+            "architecture": "test-arch",
+            "registry_id": 42,
+            "gpu_families": {
+                "apple7": true,
+                "apple8": false,
+                "apple9": false,
+                "apple10": false,
+                "metal3": true,
+                "metal4": false
+            },
+            "max_threadgroup_memory_bytes": 32,
+            "max_buffer_length_bytes": 4096,
+            "recommended_max_working_set_bytes": 8192,
+            "unified_memory": true,
+            "host_page_size_bytes": 16384,
+            "physical_memory_bytes": null,
+            "os_version": "15.7",
+            "product_metallib_deployment_target": "15.0",
+            "research_metallib_deployment_target": "15.0",
+            "qualifications": [
+                {"path":"deepseek_v4.multigroup_selector", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"d52815a3", "holds_for_device":false},
+                {"path":"deepseek_v4.singleton_f16_matrix_scorer", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"PERF-LOG 2026-08-08: Far Lightning F16 Matrix Candidate HOLD; Real-History F16 Lightning KILL", "holds_for_device":false},
+                {"path":"deepseek_v4.grouped_long_hca", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"PERF-LOG 2026-08-07: Grouped Long-HCA Default GO", "holds_for_device":false},
+                {"path":"deepseek_v4.splitk_hca", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"PERF-LOG 2026-08-07: Eight-Way Split-K HCA Default GO", "holds_for_device":false},
+                {"path":"deepseek_v4.packed_q8_matrix_family", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"4d3ed878, c9e6b729, c74d791d, 673830e4, 85a0ca34", "holds_for_device":false},
+                {"path":"deepseek_v4.packed_gpu_route_compaction", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"878d0d49", "holds_for_device":false},
+                {"path":"deepseek_v4.packed_mxfp4_matrix", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"56a10b85, b1a534e8, f75f1eb1", "holds_for_device":false},
+                {"path":"deepseek_v4.packed_e8p32_router", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"6ea94010", "holds_for_device":false},
+                {"path":"deepseek_v4.packed_q_a_raw_kv_matrix", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"6ea94010", "holds_for_device":false},
+                {"path":"deepseek_v4.packed_indexer_q_matrix", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"30c8ef59, 85a0ca34", "holds_for_device":false},
+                {"path":"deepseek_v4.packed_grouped_q3q4", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"c035668e, 795ee2e7", "holds_for_device":false},
+                {"path":"deepseek_v4.packed_shared_route_overlap", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"b788bbac (KILL)", "holds_for_device":false},
+                {"path":"deepseek_v4.packed_grouped_expert", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"da9e5d02", "holds_for_device":false},
+                {"path":"deepseek_v4.all_slots_q3q4_decode", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"PERF-LOG 2026-08-07: K160 All-Slot Decode Default GO", "holds_for_device":false},
+                {"path":"deepseek_v4.residency_set", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"PERF-LOG 2026-08-09: FRESH, K216, K160 Residency-Set Default GO; 2026-08-10 safety rollback", "holds_for_device":false},
+                {"path":"metal_forward.a3b_parallel_copy_auto", "device_model":"Apple M4 Max", "memory":{"AtLeastGiB":128}, "evidence":"0a3cef59", "holds_for_device":false},
+                {"path":"metal_forward.exact_unified_parallel_copy_profiles", "device_model":"Apple M4 Max", "memory":"Any", "evidence":"8c223624, fba3b97a", "holds_for_device":false}
+            ]
+        });
+        let actual = serde_json::to_string_pretty(&sample().report()).unwrap();
+        assert_eq!(actual, serde_json::to_string_pretty(&expected).unwrap());
     }
 }

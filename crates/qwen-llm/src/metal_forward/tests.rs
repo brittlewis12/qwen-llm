@@ -20,6 +20,7 @@ fn metal_test_context() -> Option<MetalContext> {
 fn qualification_facts(
     name: &str,
     physical_memory_bytes: Option<u64>,
+    unified_memory: bool,
 ) -> crate::metal::DeviceFacts {
     crate::metal::DeviceFacts {
         version: "qwen_device_info_v2",
@@ -37,7 +38,7 @@ fn qualification_facts(
         max_threadgroup_memory_bytes: 0,
         max_buffer_length_bytes: 0,
         recommended_max_working_set_bytes: 0,
-        unified_memory: true,
+        unified_memory,
         host_page_size_bytes: None,
         physical_memory_bytes,
         os_version: None,
@@ -1159,40 +1160,42 @@ fn prepared_auto_prefetch_advice_selector_table_is_fail_closed() {
 
 #[test]
 fn parallel_copy_auto_host_gate_is_exact() {
-    let memory_128 = Some(128 * 1024 * 1024 * 1024);
-    let facts_128 = qualification_facts("Apple M4 Max", memory_128);
-    assert!(a3b_parallel_copy_auto_host_supported(
-        true, memory_128, &facts_128,
-    ));
-    let facts_192 = qualification_facts("Apple M4 Max", Some(192 * 1024 * 1024 * 1024));
-    assert!(a3b_parallel_copy_auto_host_supported(
-        true,
-        Some(192 * 1024 * 1024 * 1024),
-        &facts_192,
-    ));
-    assert!(!a3b_parallel_copy_auto_host_supported(
-        false, memory_128, &facts_128,
-    ));
-    let other = qualification_facts("Apple M4 Pro", memory_128);
-    assert!(!a3b_parallel_copy_auto_host_supported(
-        true, memory_128, &other,
-    ));
-    let below = qualification_facts("Apple M4 Max", Some(128 * 1024 * 1024 * 1024 - 1));
-    assert!(!a3b_parallel_copy_auto_host_supported(
-        true,
-        Some(128 * 1024 * 1024 * 1024 - 1),
-        &below,
-    ));
-    let unavailable = qualification_facts("Apple M4 Max", None);
-    assert!(!a3b_parallel_copy_auto_host_supported(
-        true,
-        None,
-        &unavailable,
-    ));
+    const GIB: u64 = 1024 * 1024 * 1024;
+    assert_eq!(
+        crate::metal::A3B_PARALLEL_COPY_AUTO.path,
+        "metal_forward.a3b_parallel_copy_auto"
+    );
+    for (memory, expected) in [
+        (None, false),
+        (Some(128 * GIB - 1), false),
+        (Some(128 * GIB), true),
+        (Some(192 * GIB), true),
+    ] {
+        let facts = qualification_facts("Apple M4 Max", memory, true);
+        assert_eq!(a3b_parallel_copy_auto_host_supported(&facts), expected);
+    }
+    let variant = qualification_facts("Apple M4 Pro", Some(192 * GIB), true);
+    assert!(!a3b_parallel_copy_auto_host_supported(&variant));
+    let non_unified = qualification_facts("Apple M4 Max", Some(192 * GIB), false);
+    assert!(!a3b_parallel_copy_auto_host_supported(&non_unified));
 }
 
 #[test]
 fn parallel_copy_profile_selection_is_exactly_one() {
+    assert_eq!(
+        crate::metal::PARALLEL_COPY_EXACT_UNIFIED.path,
+        "metal_forward.exact_unified_parallel_copy_profiles"
+    );
+    for profile in [
+        &DENSE27B_PARALLEL_COPY_PROFILE,
+        &A10B_PARALLEL_PREAD_PROFILE,
+    ] {
+        assert!(matches!(
+            profile.device_constraint,
+            ParallelCopyDeviceConstraint::ExactUnified(qualification)
+                if std::ptr::eq(qualification, &crate::metal::PARALLEL_COPY_EXACT_UNIFIED)
+        ));
+    }
     let selected = select_unique_parallel_copy_profile(&PARALLEL_COPY_PROFILES, |profile| {
         Ok(profile.id == ParallelCopyProfileId::Dense27bQ4kmV1)
     })

@@ -1063,14 +1063,8 @@ pub(super) fn select_parallel_copy_profile(
     })
 }
 
-pub(super) fn a3b_parallel_copy_auto_host_supported(
-    unified_memory: bool,
-    physical_memory_bytes: Option<u64>,
-    facts: &crate::metal::DeviceFacts,
-) -> bool {
-    unified_memory
-        && crate::metal::A3B_PARALLEL_COPY_AUTO.holds_for(facts)
-        && physical_memory_bytes.is_some_and(|bytes| bytes >= A3B_PARALLEL_COPY_AUTO_MIN_MEMORY)
+pub(super) fn a3b_parallel_copy_auto_host_supported(facts: &crate::metal::DeviceFacts) -> bool {
+    facts.unified_memory && crate::metal::A3B_PARALLEL_COPY_AUTO.holds_for(facts)
 }
 
 pub(super) fn select_auto_parallel_copy_profile(
@@ -1080,11 +1074,7 @@ pub(super) fn select_auto_parallel_copy_profile(
     expected: &[ModelWeightStorageRequest<'_>],
     embedding_selection: NativeQuantEmbeddingSelection,
 ) -> Result<Option<&'static ParallelCopyProfile>, MfError> {
-    if !a3b_parallel_copy_auto_host_supported(
-        ctx.device_facts().unified_memory,
-        ctx.device_facts().physical_memory_bytes,
-        ctx.device_facts(),
-    ) {
+    if !a3b_parallel_copy_auto_host_supported(ctx.device_facts()) {
         return Ok(None);
     }
     parallel_copy_profile_matches(

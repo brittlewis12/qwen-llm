@@ -512,18 +512,22 @@ pub(super) fn buffer_as_allocation(
 
 pub(super) fn deepseek_v4_residency_set_scope_qualified(
     enabled: bool,
-    device_qualified: bool,
+    facts: &crate::metal::DeviceFacts,
     layer_count: u32,
     expert_count: u32,
     report: &DeepSeekV4ResidencyReport,
 ) -> bool {
     enabled
-        && device_qualified
+        && deepseek_v4_residency_set_qualification().holds_for(facts)
         && layer_count as usize == DEEPSEEK_V4_LAYER_COUNT
         && report.tensor_count == DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT
         && ((expert_count == 160 && report.source_bytes == DEEPSEEK_V4_REAP_K160_SOURCE_BYTES)
             || (expert_count == 216 && report.source_bytes == DEEPSEEK_V4_REAP_K216_SOURCE_BYTES)
             || (expert_count == 256 && report.source_bytes == DEEPSEEK_V4_FRESH_SOURCE_BYTES))
+}
+
+pub(super) fn deepseek_v4_residency_set_qualification() -> &'static crate::metal::Qualification {
+    &crate::metal::DEEPSEEK_V4_RESIDENCY_SET
 }
 
 /// Which qualified artifact this is, if any. Several prefill, MoE, indexer
@@ -573,7 +577,7 @@ pub(super) fn create_deepseek_v4_residency_set(
 ) -> Option<DeepSeekV4ResidencySetGuard> {
     if !deepseek_v4_residency_set_scope_qualified(
         deepseek_v4_residency_set_enabled(),
-        crate::metal::DEEPSEEK_V4_RESIDENCY_SET.holds_for(ctx.device_facts()),
+        ctx.device_facts(),
         config.layer_count,
         config.expert_count,
         report,

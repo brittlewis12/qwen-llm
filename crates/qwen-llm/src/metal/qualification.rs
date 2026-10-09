@@ -58,22 +58,70 @@ pub static DEEPSEEK_V4_MULTIGROUP_SELECTOR: Qualification = Qualification {
     evidence: "d52815a3",
 };
 pub static DEEPSEEK_V4_F16_MATRIX_SCORER: Qualification = Qualification {
-    path: "deepseek_v4.f16_matrix_scorer",
+    path: "deepseek_v4.singleton_f16_matrix_scorer",
     device_model: DEVICE,
     memory: QualifiedMemory::Any,
-    evidence: "PERF-LOG 2026-08-06 (F16 scorer KILL)",
+    evidence: "PERF-LOG 2026-08-08: Far Lightning F16 Matrix Candidate HOLD; Real-History F16 Lightning KILL",
 };
-pub static DEEPSEEK_V4_LONG_HCA: Qualification = Qualification {
-    path: "deepseek_v4.long_hca",
+pub static DEEPSEEK_V4_GROUPED_LONG_HCA: Qualification = Qualification {
+    path: "deepseek_v4.grouped_long_hca",
     device_model: DEVICE,
     memory: QualifiedMemory::Any,
-    evidence: "e35f12d0",
+    evidence: "PERF-LOG 2026-08-07: Grouped Long-HCA Default GO",
 };
-pub static DEEPSEEK_V4_PACKED_Q8_COMPRESSOR_MATRIX: Qualification = Qualification {
-    path: "deepseek_v4.packed_q8_compressor_matrix",
+pub static DEEPSEEK_V4_SPLITK_HCA: Qualification = Qualification {
+    path: "deepseek_v4.splitk_hca",
     device_model: DEVICE,
     memory: QualifiedMemory::Any,
-    evidence: "673830e4",
+    evidence: "PERF-LOG 2026-08-07: Eight-Way Split-K HCA Default GO",
+};
+pub static DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY: Qualification = Qualification {
+    path: "deepseek_v4.packed_q8_matrix_family",
+    device_model: DEVICE,
+    memory: QualifiedMemory::Any,
+    evidence: "4d3ed878, c9e6b729, c74d791d, 673830e4, 85a0ca34",
+};
+pub static DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION: Qualification = Qualification {
+    path: "deepseek_v4.packed_gpu_route_compaction",
+    device_model: DEVICE,
+    memory: QualifiedMemory::Any,
+    evidence: "878d0d49",
+};
+pub static DEEPSEEK_V4_PACKED_MXFP4_MATRIX: Qualification = Qualification {
+    path: "deepseek_v4.packed_mxfp4_matrix",
+    device_model: DEVICE,
+    memory: QualifiedMemory::Any,
+    evidence: "56a10b85, b1a534e8, f75f1eb1",
+};
+pub static DEEPSEEK_V4_PACKED_E8P32_ROUTER: Qualification = Qualification {
+    path: "deepseek_v4.packed_e8p32_router",
+    device_model: DEVICE,
+    memory: QualifiedMemory::Any,
+    evidence: "6ea94010",
+};
+pub static DEEPSEEK_V4_PACKED_QA_RAW_KV_MATRIX: Qualification = Qualification {
+    path: "deepseek_v4.packed_q_a_raw_kv_matrix",
+    device_model: DEVICE,
+    memory: QualifiedMemory::Any,
+    evidence: "6ea94010",
+};
+pub static DEEPSEEK_V4_PACKED_INDEXER_Q_MATRIX: Qualification = Qualification {
+    path: "deepseek_v4.packed_indexer_q_matrix",
+    device_model: DEVICE,
+    memory: QualifiedMemory::Any,
+    evidence: "30c8ef59, 85a0ca34",
+};
+pub static DEEPSEEK_V4_PACKED_GROUPED_Q3Q4: Qualification = Qualification {
+    path: "deepseek_v4.packed_grouped_q3q4",
+    device_model: DEVICE,
+    memory: QualifiedMemory::Any,
+    evidence: "c035668e, 795ee2e7",
+};
+pub static DEEPSEEK_V4_PACKED_SHARED_ROUTE_OVERLAP: Qualification = Qualification {
+    path: "deepseek_v4.packed_shared_route_overlap",
+    device_model: DEVICE,
+    memory: QualifiedMemory::Any,
+    evidence: "b788bbac (KILL)",
 };
 pub static DEEPSEEK_V4_PACKED_GROUPED_EXPERT: Qualification = Qualification {
     path: "deepseek_v4.packed_grouped_expert",
@@ -85,13 +133,13 @@ pub static DEEPSEEK_V4_ALL_SLOTS_Q3Q4: Qualification = Qualification {
     path: "deepseek_v4.all_slots_q3q4_decode",
     device_model: DEVICE,
     memory: QualifiedMemory::Any,
-    evidence: "unrecorded",
+    evidence: "PERF-LOG 2026-08-07: K160 All-Slot Decode Default GO",
 };
 pub static DEEPSEEK_V4_RESIDENCY_SET: Qualification = Qualification {
     path: "deepseek_v4.residency_set",
     device_model: DEVICE,
     memory: QualifiedMemory::Any,
-    evidence: "unrecorded",
+    evidence: "PERF-LOG 2026-08-09: FRESH, K216, K160 Residency-Set Default GO; 2026-08-10 safety rollback",
 };
 pub static A3B_PARALLEL_COPY_AUTO: Qualification = Qualification {
     path: "metal_forward.a3b_parallel_copy_auto",
@@ -109,8 +157,16 @@ pub static PARALLEL_COPY_EXACT_UNIFIED: Qualification = Qualification {
 pub static QUALIFICATIONS: &[&Qualification] = &[
     &DEEPSEEK_V4_MULTIGROUP_SELECTOR,
     &DEEPSEEK_V4_F16_MATRIX_SCORER,
-    &DEEPSEEK_V4_LONG_HCA,
-    &DEEPSEEK_V4_PACKED_Q8_COMPRESSOR_MATRIX,
+    &DEEPSEEK_V4_GROUPED_LONG_HCA,
+    &DEEPSEEK_V4_SPLITK_HCA,
+    &DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY,
+    &DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION,
+    &DEEPSEEK_V4_PACKED_MXFP4_MATRIX,
+    &DEEPSEEK_V4_PACKED_E8P32_ROUTER,
+    &DEEPSEEK_V4_PACKED_QA_RAW_KV_MATRIX,
+    &DEEPSEEK_V4_PACKED_INDEXER_Q_MATRIX,
+    &DEEPSEEK_V4_PACKED_GROUPED_Q3Q4,
+    &DEEPSEEK_V4_PACKED_SHARED_ROUTE_OVERLAP,
     &DEEPSEEK_V4_PACKED_GROUPED_EXPERT,
     &DEEPSEEK_V4_ALL_SLOTS_Q3Q4,
     &DEEPSEEK_V4_RESIDENCY_SET,
@@ -173,8 +229,10 @@ mod tests {
 
     #[test]
     fn qualification_matches_model_and_memory() {
-        assert!(DEEPSEEK_V4_LONG_HCA.holds_for(&facts(DEVICE, None)));
-        assert!(!DEEPSEEK_V4_LONG_HCA.holds_for(&facts("Apple M5 Ultra", None)));
+        assert!(DEEPSEEK_V4_GROUPED_LONG_HCA.holds_for(&facts(DEVICE, None)));
+        assert!(DEEPSEEK_V4_SPLITK_HCA.holds_for(&facts(DEVICE, None)));
+        assert!(!DEEPSEEK_V4_GROUPED_LONG_HCA.holds_for(&facts("Apple M5 Ultra", None)));
+        assert!(!DEEPSEEK_V4_SPLITK_HCA.holds_for(&facts("Apple M5 Ultra", None)));
         let large = 128_u64 * 1024 * 1024 * 1024;
         assert!(A3B_PARALLEL_COPY_AUTO.holds_for(&facts(DEVICE, Some(large))));
         assert!(!A3B_PARALLEL_COPY_AUTO.holds_for(&facts(DEVICE, Some(large - 1))));
@@ -183,21 +241,59 @@ mod tests {
 
     #[test]
     fn every_record_preserves_the_original_model_gate() {
-        let qualified = facts(DEVICE, Some(128 * 1024 * 1024 * 1024));
-        let other = facts("Apple M5 Ultra", Some(256 * 1024 * 1024 * 1024));
-        for qualification in QUALIFICATIONS {
-            let name_gate = qualified.name == qualification.device_model;
-            let memory_gate = match qualification.memory {
-                QualifiedMemory::Any => true,
-                QualifiedMemory::AtLeastGiB(gib) => qualified
-                    .physical_memory_bytes
-                    .is_some_and(|bytes| bytes >= u64::from(gib) * 1024 * 1024 * 1024),
-            };
-            assert_eq!(
-                qualification.holds_for(&qualified),
-                name_gate && memory_gate
-            );
-            assert!(!qualification.holds_for(&other));
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let expected = [
+            ("deepseek_v4.multigroup_selector", QualifiedMemory::Any),
+            (
+                "deepseek_v4.singleton_f16_matrix_scorer",
+                QualifiedMemory::Any,
+            ),
+            ("deepseek_v4.grouped_long_hca", QualifiedMemory::Any),
+            ("deepseek_v4.splitk_hca", QualifiedMemory::Any),
+            ("deepseek_v4.packed_q8_matrix_family", QualifiedMemory::Any),
+            (
+                "deepseek_v4.packed_gpu_route_compaction",
+                QualifiedMemory::Any,
+            ),
+            ("deepseek_v4.packed_mxfp4_matrix", QualifiedMemory::Any),
+            ("deepseek_v4.packed_e8p32_router", QualifiedMemory::Any),
+            ("deepseek_v4.packed_q_a_raw_kv_matrix", QualifiedMemory::Any),
+            ("deepseek_v4.packed_indexer_q_matrix", QualifiedMemory::Any),
+            ("deepseek_v4.packed_grouped_q3q4", QualifiedMemory::Any),
+            (
+                "deepseek_v4.packed_shared_route_overlap",
+                QualifiedMemory::Any,
+            ),
+            ("deepseek_v4.packed_grouped_expert", QualifiedMemory::Any),
+            ("deepseek_v4.all_slots_q3q4_decode", QualifiedMemory::Any),
+            ("deepseek_v4.residency_set", QualifiedMemory::Any),
+            (
+                "metal_forward.a3b_parallel_copy_auto",
+                QualifiedMemory::AtLeastGiB(128),
+            ),
+            (
+                "metal_forward.exact_unified_parallel_copy_profiles",
+                QualifiedMemory::Any,
+            ),
+        ];
+        assert_eq!(QUALIFICATIONS.len(), expected.len());
+        for (qualification, (path, memory_requirement)) in QUALIFICATIONS.iter().zip(expected) {
+            assert_eq!(qualification.path, path);
+            assert_eq!(qualification.device_model, "Apple M4 Max");
+            assert_eq!(qualification.memory, memory_requirement);
+            for (memory, expected_hold) in [
+                (None, memory_requirement == QualifiedMemory::Any),
+                (
+                    Some(128 * GIB - 1),
+                    memory_requirement == QualifiedMemory::Any,
+                ),
+                (Some(128 * GIB), true),
+                (Some(192 * GIB), true),
+            ] {
+                let matching = facts("Apple M4 Max", memory);
+                assert_eq!(qualification.holds_for(&matching), expected_hold, "{path}");
+            }
+            assert!(!qualification.holds_for(&facts("Apple M4 Pro", Some(192 * GIB))));
         }
     }
 }

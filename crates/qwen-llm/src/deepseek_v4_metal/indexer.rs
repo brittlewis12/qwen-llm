@@ -1824,6 +1824,14 @@ pub(super) fn deepseek_v4_multigroup_selector_eligible(
         && visible_rows >= capacity_rows - capacity_rows / 4
 }
 
+pub(super) fn deepseek_v4_multigroup_selector_qualified(facts: &crate::metal::DeviceFacts) -> bool {
+    crate::metal::DEEPSEEK_V4_MULTIGROUP_SELECTOR.holds_for(facts)
+}
+
+pub(super) fn deepseek_v4_f16_matrix_scorer_qualified(facts: &crate::metal::DeviceFacts) -> bool {
+    crate::metal::DEEPSEEK_V4_F16_MATRIX_SCORER.holds_for(facts)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DeepSeekV4SparseSelectorMode {
     Radix4,
@@ -2030,7 +2038,7 @@ impl DeepSeekV4SparseCsaScratch {
         let selector_mode = DeepSeekV4SparseSelectorMode::Radix4;
         #[cfg(not(test))]
         let selector_mode = if multigroup.is_some()
-            && crate::metal::DEEPSEEK_V4_MULTIGROUP_SELECTOR.holds_for(ctx.device_facts())
+            && deepseek_v4_multigroup_selector_qualified(ctx.device_facts())
             && deepseek_v4_multigroup_selector_enabled()
         {
             DeepSeekV4SparseSelectorMode::MultigroupProduction
@@ -2117,7 +2125,7 @@ impl DeepSeekV4SparseCsaScratch {
         #[cfg(not(test))]
         {
             visible_rows >= DEEPSEEK_V4_F16_MATRIX_SCORER_MIN_VISIBLE_ROWS
-                && crate::metal::DEEPSEEK_V4_F16_MATRIX_SCORER.holds_for(ctx.device_facts())
+                && deepseek_v4_f16_matrix_scorer_qualified(ctx.device_facts())
                 && deepseek_v4_f16_matrix_scorer_enabled()
         }
     }

@@ -8,6 +8,32 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::os::unix::fs::PermissionsExt;
 
+fn selector_device_facts(name: &str) -> qwen_llm::metal::DeviceFacts {
+    qwen_llm::metal::DeviceFacts {
+        version: "qwen_device_info_v1",
+        name: name.into(),
+        architecture: "test".into(),
+        registry_id: 0,
+        gpu_families: qwen_llm::metal::GpuFamilySupport {
+            apple7: false,
+            apple8: false,
+            apple9: false,
+            apple10: false,
+            metal3: false,
+            metal4: false,
+        },
+        max_threadgroup_memory_bytes: 0,
+        max_buffer_length_bytes: 0,
+        recommended_max_working_set_bytes: 0,
+        unified_memory: true,
+        host_page_size_bytes: None,
+        physical_memory_bytes: None,
+        os_version: None,
+        product_metallib_deployment_target: "",
+        research_metallib_deployment_target: "",
+    }
+}
+
 #[test]
 fn muse_glimmer_forward_budget_counts_only_required_transitions() {
     assert_eq!(required_forwards("Muse Glimmer", 2, 1, None).unwrap(), 2);
@@ -1288,14 +1314,14 @@ fn deepseek_v4_multigroup_selector_cli_contract_is_explicit_and_bounded() {
     let shallow = DeepSeekV4SessionCapacity::for_forward_limit(4_096, 1_048_576).unwrap();
     let off = DeepSeekV4MultigroupSelectorPlan::new(
         DeepSeekV4MultigroupSelectorArg::Off,
-        "Apple M4 Pro",
+        &selector_device_facts("Apple M4 Pro"),
         shallow,
     )
     .unwrap();
     assert!(!off.sealed());
     let auto = DeepSeekV4MultigroupSelectorPlan::new(
         DeepSeekV4MultigroupSelectorArg::Auto,
-        "Apple M4 Max",
+        &selector_device_facts("Apple M4 Max"),
         DeepSeekV4SessionCapacity::for_forward_limit(786_432, 1_048_576).unwrap(),
     )
     .unwrap();
@@ -1307,7 +1333,7 @@ fn deepseek_v4_multigroup_selector_cli_contract_is_explicit_and_bounded() {
     assert!(
         DeepSeekV4MultigroupSelectorPlan::new(
             DeepSeekV4MultigroupSelectorArg::QualifiedExperimental,
-            "Apple M4 Pro",
+            &selector_device_facts("Apple M4 Pro"),
             DeepSeekV4SessionCapacity::for_forward_limit(786_432, 1_048_576).unwrap(),
         )
         .unwrap_err()
@@ -1316,7 +1342,7 @@ fn deepseek_v4_multigroup_selector_cli_contract_is_explicit_and_bounded() {
     );
     let unreachable_error = DeepSeekV4MultigroupSelectorPlan::new(
         DeepSeekV4MultigroupSelectorArg::QualifiedExperimental,
-        "Apple M4 Max",
+        &selector_device_facts("Apple M4 Max"),
         DeepSeekV4SessionCapacity::for_forward_limit(786_431, 1_048_576).unwrap(),
     )
     .unwrap_err();
@@ -1324,7 +1350,7 @@ fn deepseek_v4_multigroup_selector_cli_contract_is_explicit_and_bounded() {
 
     let qualified = DeepSeekV4MultigroupSelectorPlan::new(
         DeepSeekV4MultigroupSelectorArg::QualifiedExperimental,
-        "Apple M4 Max",
+        &selector_device_facts("Apple M4 Max"),
         DeepSeekV4SessionCapacity::for_forward_limit(786_432, 1_048_576).unwrap(),
     )
     .unwrap();

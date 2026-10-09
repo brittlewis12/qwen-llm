@@ -20,8 +20,6 @@ pub(crate) const DEEPSEEK_V4_SNAPSHOT_MAX_RECORD_BYTES: u64 = 1024 * 1024 * 1024
 
 pub(crate) const DEEPSEEK_V4_SNAPSHOT_IDENTITY_CACHE_DIR: &str = ".qwen-dsv4-model-identity-v2";
 
-pub(crate) const DEEPSEEK_V4_MULTIGROUP_SELECTOR_QUALIFIED_DEVICE: &str = "Apple M4 Max";
-
 pub(crate) const DEEPSEEK_V4_PREFETCH_ENV: &str = "QWEN_DSV4_PREFETCH";
 
 pub(crate) const DEEPSEEK_V4_PREFETCH_AUTO_THRESHOLD: f64 = 0.98;
@@ -84,18 +82,19 @@ pub(crate) struct DeepSeekV4MultigroupSelectorCompletionRecord<'a> {
 impl DeepSeekV4MultigroupSelectorPlan {
     pub(crate) fn new(
         requested: DeepSeekV4MultigroupSelectorArg,
-        device_name: impl Into<String>,
+        device_facts: &qwen_llm::metal::DeviceFacts,
         capacity: DeepSeekV4SessionCapacity,
     ) -> Result<Self> {
-        let device_name = device_name.into();
-        let device_qualified = device_name == DEEPSEEK_V4_MULTIGROUP_SELECTOR_QUALIFIED_DEVICE;
+        let device_name = device_facts.name.clone();
+        let device_qualified = qwen_llm::metal::DEEPSEEK_V4_MULTIGROUP_SELECTOR
+            .holds_for(device_facts);
         let geometry = match requested {
             DeepSeekV4MultigroupSelectorArg::Auto | DeepSeekV4MultigroupSelectorArg::Off => None,
             DeepSeekV4MultigroupSelectorArg::QualifiedExperimental => {
                 ensure!(
                     device_qualified,
                     "--deepseek-v4-multigroup-selector=qualified-experimental requires {}, got {}",
-                    DEEPSEEK_V4_MULTIGROUP_SELECTOR_QUALIFIED_DEVICE,
+                    qwen_llm::metal::DEEPSEEK_V4_MULTIGROUP_SELECTOR.device_model,
                     device_name,
                 );
                 Some(
@@ -875,7 +874,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
     );
     let selector_plan = DeepSeekV4MultigroupSelectorPlan::new(
         args.deepseek_v4_multigroup_selector,
-        ctx.device.name().to_string(),
+        ctx.device_facts(),
         session_capacity,
     )?;
     let restored_snapshot = if snapshot_file_exists {
@@ -1699,7 +1698,7 @@ pub(crate) fn run_deepseek_v4_requests_jsonl(
     );
     let selector_plan = DeepSeekV4MultigroupSelectorPlan::new(
         args.deepseek_v4_multigroup_selector,
-        ctx.device.name().to_string(),
+        ctx.device_facts(),
         session_capacity,
     )?;
     let memory_plan = load_plan.memory_plan().clone();

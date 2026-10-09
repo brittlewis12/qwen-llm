@@ -1,8 +1,10 @@
 # Adversarial review request: K2 Horizon milestones
 
-You are reviewing a proposed implementation, not implementing it. Read
+Archived review brief for the K2 Horizon review.
+
+This brief reviews a proposed implementation. Read
 `docs/K2-HORIZON-PLAN.md` and inspect relevant local source before judging reuse
-claims. Worktree is a fresh branch from main at `4d8716ab`.
+claims. The review snapshot was a fresh branch from main at `4d8716ab`.
 
 ## Hard boundaries
 
@@ -12,7 +14,7 @@ push. The shared machine is in use. An idle device or lock is not permission.
 No Task/Todo tools. Source reads/searches and read-only git operations are fine.
 Use gh if checking GitHub sources. No need to repeat broad web research.
 
-## User decisions (not open questions)
+## Decisions
 
 - Dense K2 Horizon 7B first, directly; compatible intermediate checkpoints are
   first-class in run/serve/bench/forward-only lens. MoVA later.
@@ -60,6 +62,6 @@ Return:
 - Revised milestone ordering only if needed, with observable exit criteria.
 - First bounded implementation packet, executable without weights/GPU, with
   proposed touched files and targeted CPU-only tests.
-- Remaining decisions that truly require user input (do not invent blockers).
+- Decisions requiring an explicit choice (do not invent blockers).
 
 Prefer concrete objections and corrections over agreement or restating the plan.

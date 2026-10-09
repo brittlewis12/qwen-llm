@@ -1,6 +1,6 @@
 # H6: Native vision for Qwen 3.5 / 3.6
 
-Status: implementation brief, 2026-08-06.
+Status: unstarted design; no vision implementation is present.
 
 ## 1. Decision
 

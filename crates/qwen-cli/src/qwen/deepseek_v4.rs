@@ -1471,10 +1471,8 @@ pub(crate) fn build_deepseek_v4_single_turn_stats_record<'a>(
             template: input_template,
         },
         measured,
-        Some(RequestStatsDiagnostics {
-            k2_horizon: None,
-            glm5_next: None,
-            deepseek_v4: Some(RequestStatsDeepSeekV4Diagnostics {
+        Some(FamilyDiagnostics::DeepseekV4(
+            RequestStatsDeepSeekV4Diagnostics {
                 schema_version: 1,
                 prefill_mode,
                 prefill_chunk_cap,
@@ -1487,8 +1485,8 @@ pub(crate) fn build_deepseek_v4_single_turn_stats_record<'a>(
                     measured.load_ms,
                     "diagnostics.deepseek_v4.load_ms",
                 ),
-            }),
-        }),
+            },
+        )),
     )
 }
 

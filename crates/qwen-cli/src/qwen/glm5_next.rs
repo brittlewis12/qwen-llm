@@ -746,10 +746,8 @@ pub(crate) fn run(
             ModelFamily::Glm5Next.record_label(),
             request_stats_input(source, chat_record.as_ref().map(|_| chat::RENDERER)),
             &measured,
-            Some(RequestStatsDiagnostics {
-                deepseek_v4: None,
-                k2_horizon: None,
-                glm5_next: Some(RequestStatsGlm5NextDiagnostics {
+            Some(FamilyDiagnostics::Glm5Next(
+                RequestStatsGlm5NextDiagnostics {
                     schema_version: 2,
                     prefill_mode,
                     prefill_rows: prefill_rows as u64,
@@ -762,8 +760,8 @@ pub(crate) fn run(
                     timing: report.json,
                     sampling: sampling_json(sampling),
                     chat: chat_record,
-                }),
-            }),
+                },
+            )),
         )?;
     }
     Ok(())

@@ -20,8 +20,13 @@ pub struct GpuFamilySupport {
     pub metal4: bool,
 }
 
+/// Stable identifier of the serialized report; bump it when a field's
+/// name or meaning changes.
+pub const DEVICE_FACTS_VERSION: &str = "qwen_device_info_v1";
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DeviceFacts {
+    pub version: &'static str,
     pub name: String,
     pub architecture: String,
     pub registry_id: u64,
@@ -34,8 +39,10 @@ pub struct DeviceFacts {
     pub host_page_size_bytes: Option<usize>,
     pub physical_memory_bytes: Option<u64>,
     pub os_version: Option<String>,
-    pub product_metallib_target: &'static str,
-    pub research_metallib_target: &'static str,
+    /// The macOS deployment target the libraries were configured to build
+    /// for; the research library may be empty when it has no sources.
+    pub product_metallib_deployment_target: &'static str,
+    pub research_metallib_deployment_target: &'static str,
 }
 
 impl DeviceFacts {
@@ -45,6 +52,7 @@ impl DeviceFacts {
         let device = MTLCreateSystemDefaultDevice()?;
         let architecture = device.architecture().name().to_string();
         Some(Self {
+            version: DEVICE_FACTS_VERSION,
             name: device.name().to_string(),
             architecture,
             registry_id: device.registryID(),
@@ -63,14 +71,14 @@ impl DeviceFacts {
             host_page_size_bytes: super::host_page_size_bytes().ok(),
             physical_memory_bytes: query_sysctl_value("hw.memsize"),
             os_version: query_sysctl_string("kern.osproductversion"),
-            product_metallib_target: PRODUCT_METALLIB_TARGET,
-            research_metallib_target: RESEARCH_METALLIB_TARGET,
+            product_metallib_deployment_target: PRODUCT_METALLIB_TARGET,
+            research_metallib_deployment_target: RESEARCH_METALLIB_TARGET,
         })
     }
 
     pub fn format_report(&self) -> String {
         format!(
-            "device: {}\narchitecture: {}\nregistry_id: {}\ngpu_families: Apple7={} Apple8={} Apple9={} Apple10={} Metal3={} Metal4={}\nmax_threadgroup_memory: {} bytes\nmax_buffer_length: {} bytes\nrecommended_max_working_set: {} bytes\nunified_memory: {}\nhost_page_size: {}\nphysical_memory: {}\nos_version: {}\nproduct_metallib_target: {}\nresearch_metallib_target: {}",
+            "device: {}\narchitecture: {}\nregistry_id: {}\ngpu_families: Apple7={} Apple8={} Apple9={} Apple10={} Metal3={} Metal4={}\nmax_threadgroup_memory: {} bytes\nmax_buffer_length: {} bytes\nrecommended_max_working_set: {} bytes\nunified_memory: {}\nhost_page_size: {}\nphysical_memory: {}\nos_version: {}\nproduct_metallib_deployment_target: {}\nresearch_metallib_deployment_target: {}",
             self.name,
             self.architecture,
             self.registry_id,
@@ -91,8 +99,8 @@ impl DeviceFacts {
                     .as_deref()
             ),
             optional_value(self.os_version.as_deref()),
-            self.product_metallib_target,
-            self.research_metallib_target,
+            self.product_metallib_deployment_target,
+            self.research_metallib_deployment_target,
         )
     }
 }
@@ -154,9 +162,9 @@ fn query_sysctl_string(name: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn device_facts_report_formats_values_and_unavailable_host_signals() {
-        let facts = DeviceFacts {
+    fn sample() -> DeviceFacts {
+        DeviceFacts {
+            version: DEVICE_FACTS_VERSION,
             name: "Test GPU".into(),
             architecture: "test-arch".into(),
             registry_id: 42,
@@ -175,14 +183,36 @@ mod tests {
             host_page_size_bytes: Some(16384),
             physical_memory_bytes: None,
             os_version: Some("15.7".into()),
-            product_metallib_target: "15.0",
-            research_metallib_target: "15.0",
-        };
-        let report = facts.format_report();
+            product_metallib_deployment_target: "15.0",
+            research_metallib_deployment_target: "15.0",
+        }
+    }
+
+    /// The JSON field names and order are the `qwen info --json` device
+    /// contract; a change here needs a new DEVICE_FACTS_VERSION.
+    #[test]
+    fn device_facts_json_is_pinned() {
+        assert_eq!(
+            serde_json::to_string(&sample()).unwrap(),
+            concat!(
+                r#"{"version":"qwen_device_info_v1","name":"Test GPU","architecture":"test-arch","#,
+                r#""registry_id":42,"gpu_families":{"apple7":true,"apple8":false,"apple9":false,"#,
+                r#""apple10":false,"metal3":true,"metal4":false},"max_threadgroup_memory_bytes":32,"#,
+                r#""max_buffer_length_bytes":4096,"recommended_max_working_set_bytes":8192,"#,
+                r#""unified_memory":true,"host_page_size_bytes":16384,"physical_memory_bytes":null,"#,
+                r#""os_version":"15.7","product_metallib_deployment_target":"15.0","#,
+                r#""research_metallib_deployment_target":"15.0"}"#
+            )
+        );
+    }
+
+    #[test]
+    fn device_facts_report_formats_values_and_unavailable_host_signals() {
+        let report = sample().format_report();
         assert!(report.contains("device: Test GPU"));
         assert!(report.contains("gpu_families: Apple7=true Apple8=false"));
         assert!(report.contains("host_page_size: 16384"));
         assert!(report.contains("physical_memory: unavailable"));
-        assert!(report.contains("product_metallib_target: 15.0"));
+        assert!(report.contains("product_metallib_deployment_target: 15.0"));
     }
 }

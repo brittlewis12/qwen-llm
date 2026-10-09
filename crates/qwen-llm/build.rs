@@ -30,8 +30,13 @@ fn main() -> anyhow::Result<()> {
     // macOS may not load on macOS 15. MSL 4 raises the target to macOS 26
     // even with -mmacosx-version-min, so MSL 4 kernels need their own library
     // built for macOS 26 rather than living in this one.
-    let target = std::env::var("MACOSX_DEPLOYMENT_TARGET")
-        .unwrap_or_else(|_| DEFAULT_METALLIB_TARGET.to_string());
+    let target = match std::env::var("MACOSX_DEPLOYMENT_TARGET") {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => DEFAULT_METALLIB_TARGET.to_string(),
+        Err(std::env::VarError::NotUnicode(value)) => {
+            anyhow::bail!("MACOSX_DEPLOYMENT_TARGET is not valid UTF-8: {value:?}")
+        }
+    };
     let target_suffix = normalize_target_version(&target)?;
     // The AIR version in the triple belongs to the compiler; only the macOS
     // part is checked.
@@ -157,31 +162,36 @@ fn verify_effective_target(kernels_dir: &Path, target: &str, expected: &str) -> 
         .split_whitespace()
         .map(|token| token.trim_matches('"'))
         .collect();
-    let observed = tokens
+    let triples: Vec<_> = tokens
         .windows(2)
-        .find_map(|pair| (pair[0] == "-triple").then_some(pair[1]));
-    if !observed.is_some_and(|triple| triple.starts_with("air64") && triple.ends_with(expected)) {
+        .filter_map(|pair| (pair[0] == "-triple").then_some(pair[1]))
+        .collect();
+    let [triple] = triples.as_slice() else {
         anyhow::bail!(
-            "Metal compiler effective target mismatch: requested macOS {target} (triple ending {expected}), observed {:?}",
-            observed
+            "Metal target probe: expected one -triple in the compiler transcript, found {triples:?}:\n{transcript}"
+        );
+    };
+    if !(triple.starts_with("air64") && triple.ends_with(expected)) {
+        anyhow::bail!(
+            "Metal compiler effective target mismatch: requested macOS {target} (triple ending {expected}), observed {triple}"
         );
     }
     Ok(())
 }
 
+/// `15`, `15.0` and `015.0.0` all normalize to the compiler's `15.0.0`.
 fn normalize_target_version(target: &str) -> anyhow::Result<String> {
-    let components: Vec<_> = target.split('.').collect();
-    if components.is_empty()
-        || components.len() > 3
-        || components.iter().any(|part| part.parse::<u32>().is_err())
-    {
-        anyhow::bail!(
-            "invalid MACOSX_DEPLOYMENT_TARGET {target:?}; expected a numeric macOS version such as 15.0"
-        );
-    }
-    Ok(match components.len() {
-        1 => format!("{}.0.0", components[0]),
-        2 => format!("{}.{}.0", components[0], components[1]),
-        _ => target.to_string(),
-    })
+    let parts = target
+        .split('.')
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
+        .filter(|parts| (1..=3).contains(&parts.len()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid MACOSX_DEPLOYMENT_TARGET {target:?}; expected a numeric macOS version such as 15.0"
+            )
+        })?;
+    let part = |index: usize| parts.get(index).copied().unwrap_or(0);
+    Ok(format!("{}.{}.{}", part(0), part(1), part(2)))
 }

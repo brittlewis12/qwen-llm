@@ -297,6 +297,7 @@ mod expert;
 mod gdn;
 mod indexer_pool;
 mod iq1;
+mod iq2_xs;
 mod iq2_xxs;
 pub(crate) mod iq3_s_down_retile;
 mod kda;
@@ -333,6 +334,9 @@ pub use expert::*;
 pub use gdn::*;
 pub use indexer_pool::*;
 pub use iq1::*;
+pub(crate) use iq2_xs::encode_mat_mat_iq2_xs_f32_scalar;
+#[cfg(test)]
+pub use iq2_xs::{Iq2XsMatMatVariant, with_iq2_xs_matmat_variant};
 pub use iq2_xxs::*;
 pub use kda::*;
 pub use keep_alive::*;

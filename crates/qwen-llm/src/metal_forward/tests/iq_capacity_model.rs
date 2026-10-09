@@ -90,15 +90,15 @@ pub(super) fn qualification_gather_ids(gguf: &GgufFile) -> (Vec<i32>, Vec<Value>
     (ids, origins)
 }
 
-fn emit(out: &mut File, event: Value) {
+pub(super) fn emit(out: &mut File, event: Value) {
     serde_json::to_writer(&mut *out, &event).unwrap();
     writeln!(out).unwrap();
     out.flush().unwrap();
 }
-fn sha(bytes: &[u8]) -> String {
+pub(super) fn sha(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
-fn footprint(ctx: &MetalContext, out: &mut File, phase: &str) {
+pub(super) fn footprint(ctx: &MetalContext, out: &mut File, phase: &str) {
     let pid = match PidSnapshot::now() {
         Ok(p) => json!({"resident_bytes":p.resident_size,"phys_footprint_bytes":p.phys_footprint,
             "pageins":p.pageins,"disk_read_bytes":p.diskio_bytesread}),
@@ -110,7 +110,7 @@ fn footprint(ctx: &MetalContext, out: &mut File, phase: &str) {
         "process":pid,"measurement":"point samples, not peaks; Metal allocation, RSS and physical footprint are distinct"}),
     );
 }
-fn price(ctx: &MetalContext, bytes: u64) -> u64 {
+pub(super) fn price(ctx: &MetalContext, bytes: u64) -> u64 {
     if bytes == 0 {
         return 0;
     }
@@ -118,7 +118,7 @@ fn price(ctx: &MetalContext, bytes: u64) -> u64 {
         .expect("device allocation pricing")
         .priced_upper_bytes
 }
-fn admit(
+pub(super) fn admit(
     ctx: &MetalContext,
     out: &mut File,
     phase: &str,
@@ -313,7 +313,7 @@ fn audit(
     );
 }
 
-fn census<R>(f: impl FnOnce() -> R) -> (R, Vec<DispatchCensusRow>) {
+pub(super) fn census<R>(f: impl FnOnce() -> R) -> (R, Vec<DispatchCensusRow>) {
     assert!(!dispatch_census_is_active(), "nested/external census");
     struct Reset;
     impl Drop for Reset {
@@ -459,7 +459,7 @@ fn log_z(a: &[f32]) -> f64 {
         .sum::<f64>()
         .ln()
 }
-fn comparison(reference: &[f32], actual: &[f32]) -> Value {
+pub(super) fn comparison(reference: &[f32], actual: &[f32]) -> Value {
     assert_eq!(reference.len(), actual.len());
     assert!(reference.iter().chain(actual).all(|v| v.is_finite()));
     let (za, zb) = (log_z(reference), log_z(actual));
@@ -680,6 +680,220 @@ fn trajectory(
     saved
 }
 
+// Shared copied-native loader: retain the existing admission, prefetch and
+// frozen-request audit sequence for the independent whole-model packets.
+pub(super) fn load_copied_native(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    bound: &Model<'_>,
+    stamps: &[crate::gguf::GgufShardStamp],
+    out: &mut File,
+) -> MetalModel {
+    footprint(ctx, out, "before_prepare");
+    let prepared =
+        MetalModel::prepare_load_with_options(ctx, gguf, bound, MetalModelLoadOptions::default())
+            .unwrap();
+    let copied = prepared.storage.no_copy_mode == GgufNoCopyMode::Disabled
+        && prepared.storage.owned_mode == GgufOwnedArenaMode::Disabled
+        && !prepared.storage.parallel_mode.is_forced()
+        && !matches!(&prepared.auto, PreparedAutoSelection::Selected(_))
+        && !matches!(
+            &prepared.auto_retained,
+            PreparedAutoRetainedSelection::Selected(_)
+        );
+    emit(
+        out,
+        json!({"event":"prepared_policy","copied_topology_supported":copied,"no_copy":format!("{:?}",prepared.storage.no_copy_mode),
+        "owned":format!("{:?}",prepared.storage.owned_mode),"parallel":format!("{:?}",prepared.storage.parallel_mode),
+        "native_embedding_selection":prepared.choices.embedding_selection.label(),
+        "embedding_source_dtype":format!("{:?}",bound.token_embd.dtype),"tied_embeddings":bound.tied_embeddings,
+        "prefetch_advice":format!("{:?}",prepared.prefetch_advice()),"plan":prepared.expected.iter().map(request_json).collect::<Vec<_>>(),
+        "plan_summary":plan_summary(&prepared.expected)}),
+    );
+    assert!(
+        copied,
+        "prepared topology is not canonical copied; refuse before prefetch/load"
+    );
+    assert_eq!(
+        prepared.prefetch_advice(),
+        MetalLoadPrefetchAdvice::PreserveConfiguredPolicy
+    );
+    let requests = prepared.expected.clone();
+    assert_eq!(
+        bound.token_embd.dtype,
+        GgmlType::IQ1_M,
+        "released Saluki embedding cohort"
+    );
+    assert!(
+        !bound.tied_embeddings,
+        "released untied embedding/head policy"
+    );
+    assert_eq!(
+        prepared.choices.embedding_selection,
+        NativeQuantEmbeddingSelection::AutoPromoted,
+        "qualification requires the default native IQ1_M embedding selection; policy flushed"
+    );
+    for (dtype, _) in NATIVE_COHORTS {
+        let cohort: Vec<_> = gguf.tensors.iter().filter(|t| t.dtype == dtype).collect();
+        assert!(!cohort.is_empty());
+        let native_bytes: u64 = cohort.iter().map(|d| d.n_bytes).sum();
+        let f32_bytes: u64 = cohort.iter().map(|d| d.n_elements() * 4).sum();
+        emit(
+            out,
+            json!({"event":"native_cohort_plan","dtype":format!("{dtype:?}"),
+            "file_tensors":cohort.len(),"native_logical_bytes":native_bytes,
+            "hypothetical_converted_f32_logical_bytes":f32_bytes,
+            "avoided_inflation_logical_bytes":f32_bytes-native_bytes,
+            "comparison_kind":"descriptor arithmetic, no inflated baseline allocated"}),
+        );
+        for d in cohort {
+            assert!(
+                requests
+                    .iter()
+                    .any(|r| r.desc.name == d.name && r.kind == ModelWeightStorageKind::Direct),
+                "{} not planned native; no inflated fallback load",
+                d.name
+            );
+        }
+    }
+    let remaining_conversions: Vec<_> = requests
+        .iter()
+        .filter(|r| r.kind != ModelWeightStorageKind::Direct)
+        .map(request_json)
+        .collect();
+    emit(
+        out,
+        json!({"event":"conversion_plan","remaining_converted_requests":remaining_conversions,
+        "all_conversions_eliminated":remaining_conversions.is_empty(),
+        "expectation":"released artifact formerly converted only IQ1_S/IQ1_M; source F32 norms are direct, not conversions"}),
+    );
+    assert!(
+        remaining_conversions.is_empty(),
+        "released-artifact zero-conversion target not met; plan flushed"
+    );
+    // Match the actual optional derived-QKV loader predicate. Price its GPU
+    // destination and its two simultaneous compressed CPU concatenation copies.
+    let derived: Vec<u64> = bound
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            Block::Attn(a)
+                if prepared.choices.fused_qkv_g8
+                    && a.q.dtype == GgmlType::Q8_0
+                    && a.k.dtype == a.q.dtype
+                    && a.v.dtype == a.q.dtype
+                    && a.q.shape.len() == 2
+                    && a.k.shape.len() == 2
+                    && a.v.shape.len() == 2
+                    && a.q.shape[0] == a.k.shape[0]
+                    && a.q.shape[0] == a.v.shape[0] =>
+            {
+                Some(a.q.n_bytes + a.k.n_bytes + a.v.n_bytes)
+            }
+            _ => None,
+        })
+        .collect();
+    let config = LoadedModelConfig::default();
+    let workers = if config.prefetch_workers == 0 {
+        crate::prefetch::DEFAULT_WORKERS
+    } else {
+        config.prefetch_workers
+    };
+    let chunk = if config.prefetch_chunk_bytes == 0 {
+        crate::prefetch::DEFAULT_CHUNK_BYTES
+    } else {
+        config.prefetch_chunk_bytes
+    };
+    let source_pages: u64 = stamps.iter().map(|s| s.size).sum();
+    let metal_bytes: u64 = requests
+        .iter()
+        .map(|r| price(ctx, r.resident_bytes))
+        .chain(derived.iter().map(|&n| price(ctx, n)))
+        .sum();
+    let concat_bytes = derived.iter().max().copied().unwrap_or(0) * 2;
+    let f16_conversion_cpu = requests
+        .iter()
+        .filter(|r| r.kind == ModelWeightStorageKind::ConvertedF16)
+        .map(|r| r.desc.n_elements() * 6) // F32 decode plus simultaneous F16 staging.
+        .max()
+        .unwrap_or(0);
+    let codec_staging = 256 * 1024u64; // canonical codec calls at most 65,536 elements.
+    let headroom = config.effective_prefetch_min_headroom_bytes();
+    let cpu_bytes = source_pages
+        + (workers * chunk) as u64
+        + concat_bytes
+        + f16_conversion_cpu
+        + codec_staging
+        + headroom;
+    let allocation = ctx.begin_allocation_transaction();
+    admit(
+        ctx,
+        out,
+        "before_prefetch_and_load",
+        metal_bytes,
+        cpu_bytes,
+        0,
+        json!({
+        "priced_copied_destinations_and_derived":metal_bytes,"source_mmap_residency_upper_bytes":source_pages,
+        "prefetch_worker_bytes":workers*chunk,"derived_concat_cpu_upper_bytes":concat_bytes,
+        "converted_f16_cpu_upper_bytes":f16_conversion_cpu,"codec_staging_upper_bytes":codec_staging,
+        "canonical_prefetch_headroom_bytes":headroom,"full_cpu_f32_model_bytes":0,
+        "note":"whole source-file residency conservatively includes already resident pages; converted F32 fills Metal storage directly"}),
+    );
+    // Bind metadata via retained descriptors in bounded reads, not a full model hash.
+    let mut bytes = vec![0u8; 1 << 20];
+    for (index, shard) in gguf.shards.iter().enumerate() {
+        let mut h = Sha256::new();
+        let mut offset = 0u64;
+        while offset < shard.tensor_data_start {
+            let n = (shard.tensor_data_start - offset).min(bytes.len() as u64) as usize;
+            gguf.read_shard_exact_at(index, offset, &mut bytes[..n])
+                .unwrap();
+            h.update(&bytes[..n]);
+            offset += n as u64;
+        }
+        emit(
+            out,
+            json!({"event":"header_binding","shard":index,"bytes_including_padding":offset,"sha256":format!("{:x}",h.finalize()),"full_payload_hash":false}),
+        );
+    }
+    drop(bytes);
+    let prefetch = prefetch_opened_gguf(gguf, &config);
+    emit(
+        out,
+        json!({"event":"prefetch","policy":format!("{:?}",prefetch.policy),"action":format!("{:?}",prefetch.action),
+        "wall_ms":prefetch.total_wall.as_secs_f64()*1e3,"bytes_returned":prefetch.bytes_returned_total(),"details":format!("{:?}",prefetch.shards)}),
+    );
+    footprint(ctx, out, "after_prefetch_before_load");
+    // Prefetch warms the file cache, not necessarily this process's mmap pages.
+    // Keep the full source-residency reservation through conversion; only the
+    // joined prefetch workers' temporary buffers can be removed here.
+    admit(
+        ctx,
+        out,
+        "before_load_recheck",
+        metal_bytes,
+        source_pages + concat_bytes + f16_conversion_cpu + codec_staging + headroom,
+        0,
+        json!({"source_mmap_residency_upper_bytes":source_pages,
+            "derived_concat_cpu_upper_bytes":concat_bytes,"converted_f16_cpu_upper_bytes":f16_conversion_cpu,
+            "codec_staging_upper_bytes":codec_staging,"canonical_prefetch_headroom_bytes":headroom,
+            "prefetch_worker_bytes":0,"note":"source reservation retained conservatively; file cache is not process mmap residency"}),
+    );
+    let start = Instant::now();
+    let (result, lines) = capture_metal_load_lines(|| MetalModel::load_prepared(prepared));
+    emit(
+        out,
+        json!({"event":"load_result","wall_ms":start.elapsed().as_secs_f64()*1e3,"raw_loader_lines":lines,
+        "error":result.as_ref().err().map(ToString::to_string)}),
+    );
+    let metal = result.expect("normal prepared load failed; raw record flushed");
+    drop(allocation);
+    footprint(ctx, out, "loaded");
+    audit(&metal, &requests, &lines, &derived, out);
+    metal
+}
+
 #[test]
 fn iq_capacity_model_cpu_metrics_and_ledger() {
     assert_eq!(census_dtype("kernel_mat_vec_iq1_f32", None), None);
@@ -792,212 +1006,7 @@ fn iq_capacity_model_packet() {
             "tokens_sha256_i32_le":sha(bytemuck::cast_slice(ids)),"special_token_policy":"encode(false), plain natural text; no extra template"}),
         );
     }
-    footprint(&ctx, &mut out, "before_prepare");
-    let prepared = MetalModel::prepare_load_with_options(
-        &ctx,
-        &gguf,
-        &bound,
-        MetalModelLoadOptions::default(),
-    )
-    .unwrap();
-    let copied = prepared.storage.no_copy_mode == GgufNoCopyMode::Disabled
-        && prepared.storage.owned_mode == GgufOwnedArenaMode::Disabled
-        && !prepared.storage.parallel_mode.is_forced()
-        && !matches!(&prepared.auto, PreparedAutoSelection::Selected(_))
-        && !matches!(
-            &prepared.auto_retained,
-            PreparedAutoRetainedSelection::Selected(_)
-        );
-    emit(
-        &mut out,
-        json!({"event":"prepared_policy","copied_topology_supported":copied,"no_copy":format!("{:?}",prepared.storage.no_copy_mode),
-        "owned":format!("{:?}",prepared.storage.owned_mode),"parallel":format!("{:?}",prepared.storage.parallel_mode),
-        "native_embedding_selection":prepared.choices.embedding_selection.label(),
-        "embedding_source_dtype":format!("{:?}",bound.token_embd.dtype),"tied_embeddings":bound.tied_embeddings,
-        "prefetch_advice":format!("{:?}",prepared.prefetch_advice()),"plan":prepared.expected.iter().map(request_json).collect::<Vec<_>>(),
-        "plan_summary":plan_summary(&prepared.expected)}),
-    );
-    assert!(
-        copied,
-        "prepared topology is not canonical copied; refuse before prefetch/load"
-    );
-    assert_eq!(
-        prepared.prefetch_advice(),
-        MetalLoadPrefetchAdvice::PreserveConfiguredPolicy
-    );
-    let requests = prepared.expected.clone();
-    assert_eq!(
-        bound.token_embd.dtype,
-        GgmlType::IQ1_M,
-        "released Saluki embedding cohort"
-    );
-    assert!(
-        !bound.tied_embeddings,
-        "released untied embedding/head policy"
-    );
-    assert_eq!(
-        prepared.choices.embedding_selection,
-        NativeQuantEmbeddingSelection::AutoPromoted,
-        "qualification requires the default native IQ1_M embedding selection; policy flushed"
-    );
-    for (dtype, _) in NATIVE_COHORTS {
-        let cohort: Vec<_> = gguf.tensors.iter().filter(|t| t.dtype == dtype).collect();
-        assert!(!cohort.is_empty());
-        let native_bytes: u64 = cohort.iter().map(|d| d.n_bytes).sum();
-        let f32_bytes: u64 = cohort.iter().map(|d| d.n_elements() * 4).sum();
-        emit(
-            &mut out,
-            json!({"event":"native_cohort_plan","dtype":format!("{dtype:?}"),
-            "file_tensors":cohort.len(),"native_logical_bytes":native_bytes,
-            "hypothetical_converted_f32_logical_bytes":f32_bytes,
-            "avoided_inflation_logical_bytes":f32_bytes-native_bytes,
-            "comparison_kind":"descriptor arithmetic, no inflated baseline allocated"}),
-        );
-        for d in cohort {
-            assert!(
-                requests
-                    .iter()
-                    .any(|r| r.desc.name == d.name && r.kind == ModelWeightStorageKind::Direct),
-                "{} not planned native; no inflated fallback load",
-                d.name
-            );
-        }
-    }
-    let remaining_conversions: Vec<_> = requests
-        .iter()
-        .filter(|r| r.kind != ModelWeightStorageKind::Direct)
-        .map(request_json)
-        .collect();
-    emit(
-        &mut out,
-        json!({"event":"conversion_plan","remaining_converted_requests":remaining_conversions,
-        "all_conversions_eliminated":remaining_conversions.is_empty(),
-        "expectation":"released artifact formerly converted only IQ1_S/IQ1_M; source F32 norms are direct, not conversions"}),
-    );
-    assert!(
-        remaining_conversions.is_empty(),
-        "released-artifact zero-conversion target not met; plan flushed"
-    );
-    // Match the actual optional derived-QKV loader predicate. Price its GPU
-    // destination and its two simultaneous compressed CPU concatenation copies.
-    let derived: Vec<u64> = bound
-        .blocks
-        .iter()
-        .filter_map(|b| match b {
-            Block::Attn(a)
-                if prepared.choices.fused_qkv_g8
-                    && a.q.dtype == GgmlType::Q8_0
-                    && a.k.dtype == a.q.dtype
-                    && a.v.dtype == a.q.dtype
-                    && a.q.shape.len() == 2
-                    && a.k.shape.len() == 2
-                    && a.v.shape.len() == 2
-                    && a.q.shape[0] == a.k.shape[0]
-                    && a.q.shape[0] == a.v.shape[0] =>
-            {
-                Some(a.q.n_bytes + a.k.n_bytes + a.v.n_bytes)
-            }
-            _ => None,
-        })
-        .collect();
-    let config = LoadedModelConfig::default();
-    let workers = if config.prefetch_workers == 0 {
-        crate::prefetch::DEFAULT_WORKERS
-    } else {
-        config.prefetch_workers
-    };
-    let chunk = if config.prefetch_chunk_bytes == 0 {
-        crate::prefetch::DEFAULT_CHUNK_BYTES
-    } else {
-        config.prefetch_chunk_bytes
-    };
-    let source_pages: u64 = stamps.iter().map(|s| s.size).sum();
-    let metal_bytes: u64 = requests
-        .iter()
-        .map(|r| price(&ctx, r.resident_bytes))
-        .chain(derived.iter().map(|&n| price(&ctx, n)))
-        .sum();
-    let concat_bytes = derived.iter().max().copied().unwrap_or(0) * 2;
-    let f16_conversion_cpu = requests
-        .iter()
-        .filter(|r| r.kind == ModelWeightStorageKind::ConvertedF16)
-        .map(|r| r.desc.n_elements() * 6) // F32 decode plus simultaneous F16 staging.
-        .max()
-        .unwrap_or(0);
-    let codec_staging = 256 * 1024u64; // canonical codec calls at most 65,536 elements.
-    let headroom = config.effective_prefetch_min_headroom_bytes();
-    let cpu_bytes = source_pages
-        + (workers * chunk) as u64
-        + concat_bytes
-        + f16_conversion_cpu
-        + codec_staging
-        + headroom;
-    let allocation = ctx.begin_allocation_transaction();
-    admit(
-        &ctx,
-        &mut out,
-        "before_prefetch_and_load",
-        metal_bytes,
-        cpu_bytes,
-        0,
-        json!({
-        "priced_copied_destinations_and_derived":metal_bytes,"source_mmap_residency_upper_bytes":source_pages,
-        "prefetch_worker_bytes":workers*chunk,"derived_concat_cpu_upper_bytes":concat_bytes,
-        "converted_f16_cpu_upper_bytes":f16_conversion_cpu,"codec_staging_upper_bytes":codec_staging,
-        "canonical_prefetch_headroom_bytes":headroom,"full_cpu_f32_model_bytes":0,
-        "note":"whole source-file residency conservatively includes already resident pages; converted F32 fills Metal storage directly"}),
-    );
-    // Bind metadata via retained descriptors in bounded reads, not a full model hash.
-    let mut bytes = vec![0u8; 1 << 20];
-    for (index, shard) in gguf.shards.iter().enumerate() {
-        let mut h = Sha256::new();
-        let mut offset = 0u64;
-        while offset < shard.tensor_data_start {
-            let n = (shard.tensor_data_start - offset).min(bytes.len() as u64) as usize;
-            gguf.read_shard_exact_at(index, offset, &mut bytes[..n])
-                .unwrap();
-            h.update(&bytes[..n]);
-            offset += n as u64;
-        }
-        emit(
-            &mut out,
-            json!({"event":"header_binding","shard":index,"bytes_including_padding":offset,"sha256":format!("{:x}",h.finalize()),"full_payload_hash":false}),
-        );
-    }
-    drop(bytes);
-    let prefetch = prefetch_opened_gguf(&gguf, &config);
-    emit(
-        &mut out,
-        json!({"event":"prefetch","policy":format!("{:?}",prefetch.policy),"action":format!("{:?}",prefetch.action),
-        "wall_ms":prefetch.total_wall.as_secs_f64()*1e3,"bytes_returned":prefetch.bytes_returned_total(),"details":format!("{:?}",prefetch.shards)}),
-    );
-    footprint(&ctx, &mut out, "after_prefetch_before_load");
-    // Prefetch warms the file cache, not necessarily this process's mmap pages.
-    // Keep the full source-residency reservation through conversion; only the
-    // joined prefetch workers' temporary buffers can be removed here.
-    admit(
-        &ctx,
-        &mut out,
-        "before_load_recheck",
-        metal_bytes,
-        source_pages + concat_bytes + f16_conversion_cpu + codec_staging + headroom,
-        0,
-        json!({"source_mmap_residency_upper_bytes":source_pages,
-            "derived_concat_cpu_upper_bytes":concat_bytes,"converted_f16_cpu_upper_bytes":f16_conversion_cpu,
-            "codec_staging_upper_bytes":codec_staging,"canonical_prefetch_headroom_bytes":headroom,
-            "prefetch_worker_bytes":0,"note":"source reservation retained conservatively; file cache is not process mmap residency"}),
-    );
-    let start = Instant::now();
-    let (result, lines) = capture_metal_load_lines(|| MetalModel::load_prepared(prepared));
-    emit(
-        &mut out,
-        json!({"event":"load_result","wall_ms":start.elapsed().as_secs_f64()*1e3,"raw_loader_lines":lines,
-        "error":result.as_ref().err().map(ToString::to_string)}),
-    );
-    let metal = result.expect("normal prepared load failed; raw record flushed");
-    drop(allocation);
-    footprint(&ctx, &mut out, "loaded");
-    audit(&metal, &requests, &lines, &derived, &mut out);
+    let metal = load_copied_native(&ctx, &gguf, &bound, &stamps, &mut out);
     for (name, n, tokens, _) in streams {
         eprintln!("IQ model {name} N{n}: native serial-token reference then ordinary packed");
         let reference = trajectory(&ctx, &metal, &mut out, name, &tokens, n, None);

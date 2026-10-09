@@ -1066,6 +1066,12 @@ pub(super) fn validate_iq2_xs_dense_bindings(
     super::checks::check_disjoint(KERNEL, y, &[(weight, "weight"), (x, "input")])
 }
 
+/// Checked IQ2_XS dense GEMM, retaining flattened activation/output views.
+/// N>1 uses F32 MMA when Apple7, SIMD32, TG64, TGM and 16-byte input alignment
+/// checks pass; otherwise it falls back to scalar before encoding. Direct N=1
+/// calls retain scalar; the generic dispatch's GEMV shortcut is unchanged.
+/// One dispatch; concurrent callers must ensure independent outputs and no
+/// cross-dispatch dependencies. This entry records its own hazard notes.
 pub fn encode_mat_mat_iq2_xs_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1076,19 +1082,7 @@ pub fn encode_mat_mat_iq2_xs_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    validate_iq2_xs_dense_bindings(weight, x, y, n_in, n_out, n_query)?;
-    encode_mat_mat_block256_f32(
-        ctx,
-        enc,
-        weight,
-        x,
-        y,
-        n_in,
-        n_out,
-        n_query,
-        GgmlType::IQ2_XS,
-        "kernel_mat_mat_iq2_xs_f32",
-    )
+    super::iq2_xs::encode_mat_mat(ctx, enc, weight, x, y, n_in, n_out, n_query)
 }
 
 crate::env_flag!(default_on matmat_iq2_s_mm_enabled, "QWEN_MATMAT_IQ2_S_MM");

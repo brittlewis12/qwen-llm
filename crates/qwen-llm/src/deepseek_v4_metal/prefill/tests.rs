@@ -3495,6 +3495,53 @@ fn profile_q8_f32_mma_r2c4k64_attention_output_packet() {
 }
 
 #[test]
+fn packed_iq2_xs_batch_projection_pins_scalar_under_dense_overrides() {
+    use crate::metal::{
+        Iq2XsMatMatVariant, dispatch_census_begin, dispatch_census_take, with_iq2_xs_matmat_variant,
+    };
+
+    let Ok(ctx) = MetalContext::new() else {
+        return;
+    };
+    let bank = grouped_test_bank(&ctx, GgmlType::IQ2_XS, 256, 17, 2, 1);
+    let weight = expert_weight_view(&bank, 256, 17, 1, "scalar policy expert").unwrap();
+    for n in [1, 12, 15, 33] {
+        let input = MetalTensor::zeros_f32(&ctx, vec![256, n]).unwrap();
+        let output = MetalTensor::zeros_f32(&ctx, vec![17, n]).unwrap();
+        for variant in [
+            None,
+            Some(Iq2XsMatMatVariant::Scalar),
+            Some(Iq2XsMatMatVariant::Auto),
+            Some(Iq2XsMatMatVariant::Mma),
+        ] {
+            // Inspect the real production helper without submitting GPU work.
+            let command = ctx.queue.commandBuffer().unwrap();
+            let enc = KernelEncoder::begin(&command);
+            dispatch_census_begin();
+            let (result, substitutions) = with_iq2_xs_matmat_variant(variant, || {
+                encode_batch_projection(
+                    &ctx,
+                    &enc,
+                    &weight,
+                    &input,
+                    &output,
+                    256,
+                    17,
+                    n as usize,
+                    "scalar policy expert",
+                )
+            });
+            enc.end();
+            let census = dispatch_census_take();
+            result.unwrap();
+            assert_eq!(substitutions, 0);
+            assert_eq!(census.len(), 1);
+            assert_eq!(census[0].kernel, "kernel_mat_mat_iq2_xs_f32");
+        }
+    }
+}
+
+#[test]
 fn packed_grouped_iq2_xs_iq3_xxs_matches_bucket_path() {
     let Ok(ctx) = MetalContext::new() else {
         return;

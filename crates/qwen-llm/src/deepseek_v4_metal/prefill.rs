@@ -1983,6 +1983,14 @@ fn encode_batch_projection(
         )
         .map_err(DeepSeekV4MetalError::Metal);
     }
+    // This helper also owns the production expert-bucket fallback and its
+    // grouped-kernel scalar references. Dense MMA changes that arithmetic.
+    if weight.dtype == GgmlType::IQ2_XS {
+        return crate::metal::encode_mat_mat_iq2_xs_f32_scalar(
+            ctx, enc, weight, input, output, n_in, n_out, n_tokens,
+        )
+        .map_err(DeepSeekV4MetalError::Metal);
+    }
     // DeepSeek's packed projections pin a bitwise matrix-tile lineage at
     // every N (the N=1 scalar-lineage gates); do not inherit the Qwen-tuned
     // N=1 mat-vec shortcut, which changed the accumulation order in

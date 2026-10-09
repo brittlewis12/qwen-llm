@@ -8,6 +8,10 @@ use crate::sampling::{Sampler, SamplingConfig};
 mod iq_capacity;
 #[path = "tests/iq_capacity_model.rs"]
 mod iq_capacity_model;
+#[path = "tests/iq2_xs_mma.rs"]
+mod iq2_xs_mma;
+#[path = "tests/iq2_xs_mma_model.rs"]
+mod iq2_xs_mma_model;
 
 fn metal_test_context() -> Option<MetalContext> {
     crate::test_fixtures::metal_context_or_skip()

@@ -1,9 +1,10 @@
 # Native IQ quant capacity queue
 
-Queued 2026-10-08 after the completed GLM MLA tail screen (experimental
-selection remains off). This is a capacity/coverage task,
-not a small-throughput optimization.
-No production admission or kernel selection changes are made by this note.
+Started 2026-10-08 after the GLM MLA tail screen (its experimental selection
+remains off). Native capacity coverage is complete for the qualified Saluki
+artifact; measured dense IQ2_XS prefill acceleration is promoted, and the DeepSeek
+family-scope regression is fixed and revalidated. This note
+records the implementation decisions and retains the original investigation below.
 
 ## 2026-10-08 completed capacity fix
 
@@ -15,6 +16,72 @@ are distinct point samples in the copied-plus-mapped topology, not peaks.
 Independent codec/gather checks and whole prefill/continuation qualification
 pass; embedding auto-promotion is scoped to the untied Dense27B fingerprint.
 See the packet's complete-result section for exact scope and remaining limits.
+
+## 2026-10-08 XS promotion, pricing fix and resolved family scope
+
+Production IQ2_XS matrix selection now sends `None` through guarded Auto for
+N>1: F32 MMA when device/pipeline support and alignment permit, otherwise native
+scalar fallback. A test-only forced-Scalar comparator is retained; there is no
+runtime force switch. N1 and ordinary GEMV decode remain unchanged.
+This changes execution speed, not the completed role-aware native storage policy.
+
+The prepromotion forced-Scalar/MMA whole packet measures 36.4–37.9% lower GPU
+time at 128 and 40.1–40.2% at 4096 across two natural corpora, with every paired
+GPU/wall comparison improving. A separate postpromotion actual-`None` confirmation
+at 129/chunk128 saves 35.8–36.7% GPU and 35.7–36.5% wall. Warm witnesses show
+39 MMA projections for the 128-row chunk and 39 unchanged GEMVs for the singleton
+tail. All ordinary continuations retain zero MMA substitutions. The owner reports
+all 12 promoted dense kernel tests passing with Metal API validation, followed
+by all 12 passing debug hazard tracking and a successful non-test cargo check.
+
+The broader `iq2_xs` suite subsequently exposed three DeepSeek scalar-lineage
+failures from a real selection-scope leak through shared `encode_batch_projection`.
+The owner fixed this with a checked explicit scalar entry and an IQ2_XS pin in
+the family helper, retaining the existing exact tests/tolerances and adding a
+scope regression. Final broad `iq2_xs` runs with Metal API validation report
+**22 passed, 0 failed, 3 ignored in release**, and **22 passed, 0 failed, 3 ignored
+in debug**. Both runs execute the three formerly failing DeepSeek tests and the
+new scope case. The ignored physical-bindings test separately passes in debug;
+the other two ignored tests are the retained leaf/whole packets executed earlier.
+The final non-test cargo check passes.
+
+Independent review approves the fix and confirms that the dense body still uses
+`scalar_only=false`, with shader/metallib unchanged. The reviewer found no need
+to repeat the whole packet for this family-scope correction. Test counts overlap
+the earlier dense qualification and should not be added as independent coverage.
+
+All whole-packet outputs are finite and endpoint/four-continuation top1 choices
+agree. Maximum bidirectional KL is 2.612e-6 in the 128/4096 packet and 1.830e-6 in
+the production 129 confirmation. These are two corpora on Apple M4 Max, short
+teacher-forced continuation checks and resident-prefill timings, not broad quality,
+free-running, placement-cold TTFT or postpromotion 4K remeasurement. Raw source
+bindings distinguish prepromotion leaf/main packets from the historical
+postpromotion default-path confirmation. All three packets precede the later
+family-scope correction; production129 no longer binds the current source tree.
+Raw evidence is unchanged: successful final tests and reviewer approval do not
+turn historical packet hashes into current-source bindings. No whole repeat was
+required or claimed. Exact timings, numerical differences, limits and commands:
+[IQ2_XS MMA evidence](bench/2026-10-08-iq2-xs-mma/README.md).
+
+The shared session pricer now uses `price_shared_buffer_upper` per allocation
+before multiplying by count, with typed pricing-error propagation. All 165
+allocations were already inventoried; the fix addresses standalone-buffer page
+rounding, not missing buffers. **Four CPU regressions pass in debug and four in
+release.** Capacity135's modeled
+193,593,344-byte upper bound covers the historical 193,314,816-byte allocation
+delta that exceeded the old 192,719,648-byte quote by 595,168 bytes. The dynamic
+2 GiB reserve remains intact. Later packets record admission bounds but no isolated
+live-session allocation delta; they are not new measurements of that rounding gap.
+
+## Next experiment: Flash residual frontier screen
+
+Next is the bounded Flash `2048+3+2045` versus `2048+2048` screen with the
+promoted production router enabled in both arms, using the existing lease,
+memory admission and checkpoint/continuation diagnostics. **The current-router
+residual has not been measured.** Historical router-disabled 199/282 ms deltas
+are not a current estimate, and the already-landed router saving must not be
+counted again. IQ2_XS acceleration has no direct reach into the retained GSQ/UD
+Flash artifacts, which contain no IQ2_XS tensors.
 
 ## Earlier IQ2-only checkpoint
 
@@ -30,7 +97,7 @@ IQ1_M (including embedding) and IQ1_S were the next capacity tasks and are
 now complete above. The original investigation/staged plan remain provenance;
 their "current" storage totals describe the pre-change baseline.
 
-## Verified scope versus reported measurements
+## Historical investigation: verified scope versus reported measurements
 
 Artifact:
 `/Volumes/wdblack/weights-archive/underdog-saluki-27b/Underdog-Saluki-27B-1.0-IQ2-mix.gguf`.
@@ -64,7 +131,7 @@ IQ2_XXS occurs only in ordinary rank-two matrices: 53 FFN down, 17 FFN gate,
 output head is already-native IQ3_S. No MoE bank is required by this artifact.
 Vision projectors beside the GGUF are out of scope.
 
-## Source diagnosis
+## Historical source diagnosis
 
 `metal_forward/residency.rs::weight_dtype_kept_native` excludes all four
 cohorts. `MetalWeightLoader::load_weight` therefore calls `load_f32`, allocating
@@ -74,7 +141,7 @@ directly into it; do not invent a second full-size F32 temporary in estimates.
 The storage planner accounts for `ConvertedF32`; mmap does not avoid a planned
 conversion. CPU IQ2_XXS decoding already exists; native Metal execution is the gap.
 
-## Execution queue
+## Original execution queue (capacity and XS acceleration now complete)
 
 1. Inventory role/dtype/shape, source bytes, planned resident bytes and execution
    coverage before allocation. Use one role-aware decision in planning/loading;

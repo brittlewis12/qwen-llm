@@ -12,6 +12,69 @@ confirm a concrete engine hypothesis.
 For append-only checkpoint history and exact current handoff state, see
 `docs/PERF-LOG.md`.
 
+## Active Phase Priorities - 2026-10-10
+
+User direction: prioritize **prefill and long-context decode**, in family order
+**GLM-5.3-Flash, Qwen3.8-Flash-Next, ordinary Qwen3.x**. Short/mid-context
+regressions, discontinuities and inefficient tails remain required controls,
+not the primary optimization queue. This supersedes the phase ordering in the
+dated maps below without relaxing correctness, quality or memory admission.
+
+1. **GLM expert prefill, coordinated with the existing GLM lane.** The new
+   512-row Fast-half UD-IQ3_XXS profile attributes 61.2% of spans at depth0 and
+   53.4% at depth4096 to routed experts; KDA is 21.7%/19.5%, MLA 6.8%/18.0%.
+   These are profiled span
+   shares, not ordinary-wall fractions. Wider gate/up token tiles and larger
+   chunks are the first implementation bet. Separate gate/up, down, routing and
+   reduction on fixed real inputs/routes before claiming a dequantization
+   bottleneck or multiplying one leaf result across the model. Preserve the
+   existing owner's work in `qwen-llm-directions` / `feat/glm53-p6`; do not launch
+   a duplicate kernel branch. Evidence:
+   `docs/bench/2026-10-09-glm53-prefill-attribution/README.md`.
+2. **This lane's next packet: Flash selected-QSA prefill and deep decode.** Use
+   current production scheduling and arithmetic, native UD and GSQ separately.
+   Measure ordinary suffix prefill and sustained teacher-forced decode at 32K
+   and 64K admitted prefix depths; use 8K as a slope/control point, and extend
+   to 128K only when admission and the measured mechanism justify it. These
+   are experiment samples, not new runtime limits. Start with one artifact and
+   one decisive deep cell before expanding. Attribute mixer-only parent spans
+   across all QSA layers, then split representative projection, index/selection,
+   QK and value work. Check both numerical observer concordance and timing
+   perturbation before trusting the fractions. The old layer7 134.61 ms selected
+   mixer is not an attention-leaf budget. Keep retired split-decode experiments off.
+3. **GLM MLA/KDA at depth, then ordinary-Qwen attention at depth.** Use the new
+   stage recorder to separate the depth-dependent MLA cost from constant
+   projection/recurrence work. For Qwen, prioritize deep suffix prefill and
+   long-context attention traffic over another dense27B shallow-decode rewrite.
+   Rebaseline llama.cpp only on the cells needed to evaluate these hypotheses;
+   retain engine version, artifact, precision, chunking, placement and timing
+   boundaries rather than extrapolating dated ratios.
+
+**Chunk size and precision are separate policy axes.** GLM now exposes
+`QWEN_GLM_FAST_PRECISION=half|dense_f32|f32` at serve startup; `half` remains the
+default. "Closer to Exact" is not demonstrated task-quality improvement, and
+the new modes do not change weight storage precision. Record the session's
+actual mode and snapshot compatibility in every comparison.
+
+The half-precision chunk screen measures 2048-row chunks at +14-16% throughput
+(12.4-13.8% less wall time), with packed scratch rising from 0.60 to 2.30 GiB.
+Favor qualifying the larger chunk for throughput-oriented sessions, not forcing
+it irrespective of long-context admission and retained snapshots. Establish
+the served split-schedule quality/continuation result and memory/cache tradeoff
+before changing the default. Select and bind the schedule consistently with
+snapshot policy; do not silently resize live sessions under pressure. The
+current strict router (128/512) and SmallCounts down (32-512) predicates decline
+at 1024/2048, so record their actual dispatches: the chunk experiment is not
+solely a weight-reuse experiment. Qualify any predicate widening separately.
+
+**Controls, not distractions.** Retain a small fresh/8K control and guards at
+sparse-frontier, chunk, pool and query-band boundaries (including neighboring
+sizes). A large regression or correctness failure blocks promotion; a tiny
+short-only opportunity does not displace a credible long-phase improvement.
+Keep first-use/placement, warm GPU, ordinary wall, snapshot hits and memory
+costs distinct. Do not re-run the falsified GLM decode codebook or register
+epilogue variants: the new packet reports slower and neutral results.
+
 ## V4.1 Bring-Up Prerequisite
 
 The source-verified architecture and correctness gates for DeepSeek V4.1 live in

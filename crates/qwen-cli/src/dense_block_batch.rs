@@ -555,6 +555,18 @@ pub fn run(args: DecodeDenseBlockBatchArgs) -> Result<()> {
                 };
                 let (cos_state, abs_state) = cosine_max_abs(&baseline_state, &candidate_state);
                 let (cos_conv, abs_conv) = cosine_max_abs(&baseline_conv, &candidate_conv);
+                super::ensure_comparison_metrics_finite(
+                    "dense block batch comparison",
+                    &[
+                        cos_x,
+                        f64::from(abs_x),
+                        relative_rms_x,
+                        cos_state,
+                        f64::from(abs_state),
+                        cos_conv,
+                        f64::from(abs_conv),
+                    ],
+                )?;
                 min_cos_x = min_cos_x.min(cos_x);
                 max_abs_x = max_abs_x.max(abs_x);
                 max_relative_rms_x = max_relative_rms_x.max(relative_rms_x);
@@ -1239,6 +1251,18 @@ pub fn run_attention(args: DecodeDenseAttnBatchArgs) -> Result<()> {
                 let relative_rms = f32_rms_delta(&baseline_x, &candidate_x) / baseline_rms;
                 let (cos_k, abs_k) = cosine_max_abs(&baseline_k, &candidate_k);
                 let (cos_v, abs_v) = cosine_max_abs(&baseline_v, &candidate_v);
+                super::ensure_comparison_metrics_finite(
+                    "dense attention batch comparison",
+                    &[
+                        cos_x,
+                        f64::from(abs_x),
+                        relative_rms,
+                        cos_k,
+                        f64::from(abs_k),
+                        cos_v,
+                        f64::from(abs_v),
+                    ],
+                )?;
                 min_cos_x = min_cos_x.min(cos_x);
                 max_abs_x = max_abs_x.max(abs_x);
                 max_relative_rms_x = max_relative_rms_x.max(relative_rms);
@@ -1250,6 +1274,10 @@ pub fn run_attention(args: DecodeDenseAttnBatchArgs) -> Result<()> {
                     (&baseline_v_projection, &candidate_v_projection),
                 ] {
                     let (cos, max_abs) = cosine_max_abs(baseline_projection, candidate_projection);
+                    super::ensure_comparison_metrics_finite(
+                        "dense attention projection comparison",
+                        &[cos, f64::from(max_abs)],
+                    )?;
                     min_cos_projection = min_cos_projection.min(cos);
                     max_abs_projection = max_abs_projection.max(max_abs);
                 }

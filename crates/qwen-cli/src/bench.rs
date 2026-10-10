@@ -194,6 +194,18 @@ use tok::*;
 use topology::*;
 use vocab_audit::*;
 
+fn ensure_comparison_metrics_finite(label: &str, metrics: &[f64]) -> Result<()> {
+    anyhow::ensure!(
+        !metrics.is_empty(),
+        "{label} comparison returned no metrics"
+    );
+    anyhow::ensure!(
+        metrics.iter().all(|metric| metric.is_finite()),
+        "{label} comparison produced a non-finite metric: {metrics:?}"
+    );
+    Ok(())
+}
+
 type MetalQueue = Retained<ProtocolObject<dyn MTLCommandQueue>>;
 type MetalCommand = Retained<ProtocolObject<dyn MTLCommandBuffer>>;
 type CapturedDownRouteTensors = (usize, Vec<(MetalTensor, MetalTensor, MetalTensor)>);
@@ -973,4 +985,17 @@ fn argmax_i32(logits: &[f32]) -> i32 {
         }
     }
     best.0 as i32
+}
+
+#[cfg(test)]
+mod comparison_metric_tests {
+    use super::ensure_comparison_metrics_finite;
+
+    #[test]
+    fn comparison_metric_validation_rejects_invalid_results() {
+        assert!(ensure_comparison_metrics_finite("valid", &[0.999, 0.01]).is_ok());
+        assert!(ensure_comparison_metrics_finite("empty", &[]).is_err());
+        assert!(ensure_comparison_metrics_finite("length", &[f64::NAN]).is_err());
+        assert!(ensure_comparison_metrics_finite("non-finite", &[f64::INFINITY]).is_err());
+    }
 }

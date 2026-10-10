@@ -212,6 +212,7 @@ pub(crate) fn run_decode_block_slice_replay(args: DecodeBlockSliceReplayArgs) ->
         for i in 0..check_tokens {
             let (cos, max_abs) =
                 cosine_max_abs(&read_f32_tensor(&base[i].x), &read_f32_tensor(&replay[i].x));
+            ensure_comparison_metrics_finite("block slice replay", &[cos, f64::from(max_abs)])?;
             if cos < min_cos || max_abs > max_abs_all {
                 worst_slot = i;
             }
@@ -457,6 +458,17 @@ pub(crate) fn run_decode_block_slice_trace(args: DecodeBlockSliceTraceArgs) -> R
             let shared_abs = (base_route.shared_gate - replay_route.shared_gate).abs();
             let logit_max_abs = f32_max_abs_delta(&base_route.logits, &replay_route.logits);
             let logit_rms = f32_rms_delta(&base_route.logits, &replay_route.logits);
+            ensure_comparison_metrics_finite(
+                "block slice router audit",
+                &[
+                    f64::from(weight_max_abs),
+                    f64::from(shared_abs),
+                    f64::from(logit_max_abs),
+                    logit_rms,
+                    f64::from(base_route.logit_margin),
+                    f64::from(replay_route.logit_margin),
+                ],
+            )?;
             max_logit_abs = max_logit_abs.max(logit_max_abs);
             max_logit_rms = max_logit_rms.max(logit_rms);
             min_base_margin = min_base_margin.min(base_route.logit_margin);
@@ -475,6 +487,10 @@ pub(crate) fn run_decode_block_slice_trace(args: DecodeBlockSliceTraceArgs) -> R
                 &read_f32_tensor(&base[slot].x),
                 &read_f32_tensor(&replay[slot].x),
             );
+            ensure_comparison_metrics_finite(
+                "block slice router audit activations",
+                &[h_cos, f64::from(h_abs), x_cos, f64::from(x_abs)],
+            )?;
             min_h_cos = min_h_cos.min(h_cos);
             min_x_cos = min_x_cos.min(x_cos);
             max_h_abs = max_h_abs.max(h_abs);
@@ -632,6 +648,15 @@ pub(crate) fn trace_block_slice_summary(
             }
             let logit_max_abs = f32_max_abs_delta(&base_route.logits, &replay_route.logits);
             let logit_rms = f32_rms_delta(&base_route.logits, &replay_route.logits);
+            ensure_comparison_metrics_finite(
+                "block slice batch router audit",
+                &[
+                    f64::from(logit_max_abs),
+                    logit_rms,
+                    f64::from(base_route.logit_margin),
+                    f64::from(replay_route.logit_margin),
+                ],
+            )?;
             out.max_logit_abs = out.max_logit_abs.max(logit_max_abs);
             out.max_logit_rms = out.max_logit_rms.max(logit_rms);
             out.min_base_margin = out.min_base_margin.min(base_route.logit_margin);
@@ -646,6 +671,10 @@ pub(crate) fn trace_block_slice_summary(
                 &read_f32_tensor(&base[slot].x),
                 &read_f32_tensor(&replay[slot].x),
             );
+            ensure_comparison_metrics_finite(
+                "block slice batch activation audit",
+                &[x_cos, f64::from(x_abs)],
+            )?;
             out.min_x_cos = out.min_x_cos.min(x_cos);
             out.max_x_abs = out.max_x_abs.max(x_abs);
         }
@@ -988,6 +1017,15 @@ pub(crate) fn trace_prepared_block_slice_summary(
             }
             let logit_max_abs = f32_max_abs_delta(&base_route.logits, &replay_route.logits);
             let logit_rms = f32_rms_delta(&base_route.logits, &replay_route.logits);
+            ensure_comparison_metrics_finite(
+                "block slice margin router audit",
+                &[
+                    f64::from(logit_max_abs),
+                    logit_rms,
+                    f64::from(base_route.logit_margin),
+                    f64::from(replay_route.logit_margin),
+                ],
+            )?;
             out.max_logit_abs = out.max_logit_abs.max(logit_max_abs);
             out.max_logit_rms = out.max_logit_rms.max(logit_rms);
             out.min_base_margin = out.min_base_margin.min(base_route.logit_margin);
@@ -1002,6 +1040,10 @@ pub(crate) fn trace_prepared_block_slice_summary(
                 &read_f32_tensor(&base[slot].x),
                 &read_f32_tensor(&replay[slot].x),
             );
+            ensure_comparison_metrics_finite(
+                "block slice margin activation audit",
+                &[x_cos, f64::from(x_abs)],
+            )?;
             out.min_x_cos = out.min_x_cos.min(x_cos);
             out.max_x_abs = out.max_x_abs.max(x_abs);
         }

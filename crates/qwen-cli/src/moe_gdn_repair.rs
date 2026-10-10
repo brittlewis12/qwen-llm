@@ -1,7 +1,7 @@
 use super::{
     GdnLayerReplayScratch, collect_gdn_layers, cosine_max_abs, encode_gdn_layer_replay,
-    f32_rms_delta, fresh_gdn_replay_sessions_with_capacity, fresh_prefill_scratch_for_prompt,
-    read_f32_tensor,
+    ensure_comparison_metrics_finite, f32_rms_delta, fresh_gdn_replay_sessions_with_capacity,
+    fresh_prefill_scratch_for_prompt, read_f32_tensor,
 };
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
@@ -517,12 +517,24 @@ fn packed_gateup_enabled() -> bool {
 }
 
 fn relative_rms(reference: &[f32], candidate: &[f32]) -> f64 {
+    if reference.is_empty()
+        || reference.len() != candidate.len()
+        || !reference
+            .iter()
+            .chain(candidate)
+            .all(|value| value.is_finite())
+    {
+        return f64::NAN;
+    }
     let rms = (reference
         .iter()
         .map(|value| (*value as f64).powi(2))
         .sum::<f64>()
         / reference.len() as f64)
         .sqrt();
+    if !rms.is_finite() {
+        return f64::NAN;
+    }
     f32_rms_delta(reference, candidate) / rms.max(f64::MIN_POSITIVE)
 }
 
@@ -597,23 +609,27 @@ fn numeric_evidence(
         let candidate_logits = &flat[slot * vocab..(slot + 1) * vocab];
         ensure_finite(&serial_logits, "serial logits", slot)?;
         ensure_finite(candidate_logits, "candidate logits", slot)?;
-        evidence.logit_cos = evidence
-            .logit_cos
-            .min(cosine_max_abs(&serial_logits, candidate_logits).0);
-        evidence.logit_rel_rms = evidence
-            .logit_rel_rms
-            .max(relative_rms(&serial_logits, candidate_logits));
+        let (logit_cos, logit_abs) = cosine_max_abs(&serial_logits, candidate_logits);
+        let logit_rel_rms = relative_rms(&serial_logits, candidate_logits);
+        ensure_comparison_metrics_finite(
+            "MoE GDN repair logits",
+            &[logit_cos, f64::from(logit_abs), logit_rel_rms],
+        )?;
+        evidence.logit_cos = evidence.logit_cos.min(logit_cos);
+        evidence.logit_rel_rms = evidence.logit_rel_rms.max(logit_rel_rms);
         evidence.logits_bitwise_equal &= f32_bits_equal(&serial_logits, candidate_logits);
         let serial_x = read_f32_tensor(&serial[slot].x);
         let candidate_x = read_f32_tensor(&candidate[slot].x);
         ensure_finite(&serial_x, "serial residual", slot)?;
         ensure_finite(&candidate_x, "candidate residual", slot)?;
-        evidence.x_cos = evidence
-            .x_cos
-            .min(cosine_max_abs(&serial_x, &candidate_x).0);
-        evidence.x_rel_rms = evidence
-            .x_rel_rms
-            .max(relative_rms(&serial_x, &candidate_x));
+        let (x_cos, x_abs) = cosine_max_abs(&serial_x, &candidate_x);
+        let x_rel_rms = relative_rms(&serial_x, &candidate_x);
+        ensure_comparison_metrics_finite(
+            "MoE GDN repair residual",
+            &[x_cos, f64::from(x_abs), x_rel_rms],
+        )?;
+        evidence.x_cos = evidence.x_cos.min(x_cos);
+        evidence.x_rel_rms = evidence.x_rel_rms.max(x_rel_rms);
         evidence.x_bitwise_equal &= f32_bits_equal(&serial_x, &candidate_x);
     }
     Ok(evidence)

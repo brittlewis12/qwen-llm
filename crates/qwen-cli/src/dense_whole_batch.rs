@@ -1,6 +1,7 @@
 use super::{
-    cosine_max_abs, env_flag_default_on, env_flag_enabled, f32_rms_delta,
-    fresh_gdn_replay_sessions_with_capacity, fresh_prefill_scratch_for_prompt, read_f32_tensor,
+    cosine_max_abs, ensure_comparison_metrics_finite, env_flag_default_on, env_flag_enabled,
+    f32_rms_delta, fresh_gdn_replay_sessions_with_capacity, fresh_prefill_scratch_for_prompt,
+    read_f32_tensor,
 };
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
@@ -174,6 +175,15 @@ fn run_serial_step(
 }
 
 fn relative_rms(reference: &[f32], candidate: &[f32]) -> f64 {
+    if reference.is_empty()
+        || reference.len() != candidate.len()
+        || !reference
+            .iter()
+            .chain(candidate)
+            .all(|value| value.is_finite())
+    {
+        return f64::NAN;
+    }
     let rms = (reference
         .iter()
         .map(|value| (*value as f64).powi(2))
@@ -182,8 +192,10 @@ fn relative_rms(reference: &[f32], candidate: &[f32]) -> f64 {
         .sqrt();
     if rms > 0.0 {
         f32_rms_delta(reference, candidate) / rms
-    } else {
+    } else if rms == 0.0 {
         0.0
+    } else {
+        f64::NAN
     }
 }
 
@@ -217,11 +229,15 @@ fn compare_step(
             "whole-model logits contain non-finite values at slot {slot}"
         );
         let (cos_logits, abs_logits) = cosine_max_abs(serial_logits, static_logits);
+        let relative_rms_logits = relative_rms(serial_logits, static_logits);
+        ensure_comparison_metrics_finite(
+            "whole-model logits",
+            &[cos_logits, f64::from(abs_logits), relative_rms_logits],
+        )?;
         evidence.min_cos_logits = evidence.min_cos_logits.min(cos_logits);
         evidence.max_abs_logits = evidence.max_abs_logits.max(abs_logits);
-        evidence.max_relative_rms_logits = evidence
-            .max_relative_rms_logits
-            .max(relative_rms(serial_logits, static_logits));
+        evidence.max_relative_rms_logits =
+            evidence.max_relative_rms_logits.max(relative_rms_logits);
 
         let serial_x = read_f32_tensor(&serial_sessions[slot].x);
         let static_x = read_f32_tensor(&static_sessions[slot].x);
@@ -231,11 +247,14 @@ fn compare_step(
             "whole-model residual contains non-finite values at slot {slot}"
         );
         let (cos_x, abs_x) = cosine_max_abs(&serial_x, &static_x);
+        let relative_rms_x = relative_rms(&serial_x, &static_x);
+        ensure_comparison_metrics_finite(
+            "whole-model residual",
+            &[cos_x, f64::from(abs_x), relative_rms_x],
+        )?;
         evidence.min_cos_x = evidence.min_cos_x.min(cos_x);
         evidence.max_abs_x = evidence.max_abs_x.max(abs_x);
-        evidence.max_relative_rms_x = evidence
-            .max_relative_rms_x
-            .max(relative_rms(&serial_x, &static_x));
+        evidence.max_relative_rms_x = evidence.max_relative_rms_x.max(relative_rms_x);
     }
     if enforce {
         ensure!(
@@ -259,6 +278,7 @@ fn update_pair_metrics(min_cos: &mut f64, max_abs: &mut f32, a: &[f32], b: &[f32
         "persistent state contains a non-finite value"
     );
     let (cos, abs) = cosine_max_abs(a, b);
+    ensure_comparison_metrics_finite("persistent state", &[cos, f64::from(abs)])?;
     *min_cos = min_cos.min(cos);
     *max_abs = max_abs.max(abs);
     Ok(())

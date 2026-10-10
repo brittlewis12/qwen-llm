@@ -211,21 +211,51 @@ pub(crate) fn cosine_max_abs(a: &[f32], b: &[f32]) -> (f64, f32) {
     }
 }
 
-#[cfg(test)]
-mod comparison_contract_tests {
-    use super::{cosine_max_abs, f32_max_abs_delta, f32_rms_delta, route_weight_max_abs};
+#[derive(Clone, Copy, Debug)]
+struct GdnReplayCheckMetrics {
+    min_cos: f64,
+    max_abs: f32,
+    worst_slot: usize,
+    has_non_finite: bool,
+}
 
-    #[test]
-    fn reporters_mark_uncomparable_inputs_non_finite() {
-        assert_eq!(f32_max_abs_delta(&[1.0, 3.0], &[1.5, 1.0]), 2.0);
-        assert_eq!(route_weight_max_abs(&[1.0], &[0.5]), 0.5);
-        assert_eq!(f32_rms_delta(&[1.0], &[3.0]), 2.0);
-        assert!(f32_max_abs_delta(&[1.0], &[1.0, 2.0]).is_nan());
-        assert!(route_weight_max_abs(&[1.0], &[f32::NAN]).is_nan());
-        assert!(f32_rms_delta(&[1.0], &[1.0, 2.0]).is_nan());
-        let (cos, max_abs) = cosine_max_abs(&[1.0], &[1.0, 2.0]);
-        assert!(cos.is_nan());
-        assert!(max_abs.is_nan());
+impl GdnReplayCheckMetrics {
+    fn new() -> Self {
+        Self {
+            min_cos: 1.0,
+            max_abs: 0.0,
+            worst_slot: 0,
+            has_non_finite: false,
+        }
+    }
+
+    fn record(&mut self, slot: usize, cos: f64, max_abs: f32) {
+        if !cos.is_finite() || !max_abs.is_finite() {
+            self.has_non_finite = true;
+            self.worst_slot = slot;
+            return;
+        }
+        if cos < self.min_cos || max_abs > self.max_abs {
+            self.worst_slot = slot;
+        }
+        self.min_cos = self.min_cos.min(cos);
+        self.max_abs = self.max_abs.max(max_abs);
+    }
+
+    fn finalize(mut self) -> Self {
+        if self.has_non_finite {
+            self.min_cos = f64::NAN;
+            self.max_abs = f32::NAN;
+        }
+        self
+    }
+
+    fn fails(self, min_cos_threshold: f64, max_abs_threshold: f32) -> bool {
+        self.has_non_finite
+            || !self.min_cos.is_finite()
+            || !self.max_abs.is_finite()
+            || self.min_cos < min_cos_threshold
+            || self.max_abs > max_abs_threshold
     }
 }
 
@@ -633,37 +663,29 @@ pub(crate) fn run_decode_gdn_layer_replay(args: DecodeGdnLayerReplayArgs) -> Res
             cmd.commit();
             qwen_llm::metal::wait_completed(&cmd)?;
 
-            let mut min_cos = 1.0f64;
-            let mut max_abs_all = 0.0f32;
-            let mut worst_slot = 0usize;
-            let mut non_finite = false;
+            let mut metrics = GdnReplayCheckMetrics::new();
             for i in 0..check_tokens {
                 let (cos, max_abs) =
                     cosine_max_abs(&read_f32_tensor(&base[i].h), &read_f32_tensor(&replay[i].h));
-                if !cos.is_finite() || !max_abs.is_finite() {
-                    non_finite = true;
-                    worst_slot = i;
-                    continue;
-                }
-                if cos < min_cos || max_abs > max_abs_all {
-                    worst_slot = i;
-                }
-                min_cos = min_cos.min(cos);
-                max_abs_all = max_abs_all.max(max_abs);
+                metrics.record(i, cos, max_abs);
             }
-            if non_finite {
-                min_cos = f64::NAN;
-                max_abs_all = f32::NAN;
-            }
+            let metrics = metrics.finalize();
             println!(
-                "check\t{}\t{}\t{}\tmin_cos_h={min_cos:.9}\tmax_abs_h={max_abs_all:.6}\tworst_slot={worst_slot}",
-                layer.block_i, layer.gdn_i, check_tokens
+                "check\t{}\t{}\t{}\tmin_cos_h={:.9}\tmax_abs_h={:.6}\tworst_slot={}",
+                layer.block_i,
+                layer.gdn_i,
+                check_tokens,
+                metrics.min_cos,
+                metrics.max_abs,
+                metrics.worst_slot
             );
-            if min_cos < 0.999 || max_abs_all > 1e-2 {
+            if metrics.fails(0.999, 1e-2) {
                 return Err(anyhow!(
-                    "GDN layer replay check failed: block={} gdn_i={} min_cos_h={min_cos:.9} max_abs_h={max_abs_all:.6}",
+                    "GDN layer replay check failed: block={} gdn_i={} min_cos_h={:.9} max_abs_h={:.6}",
                     layer.block_i,
-                    layer.gdn_i
+                    layer.gdn_i,
+                    metrics.min_cos,
+                    metrics.max_abs,
                 ));
             }
         }
@@ -896,34 +918,22 @@ pub(crate) fn run_decode_gdn_chain_replay(args: DecodeGdnChainReplayArgs) -> Res
         cmd.commit();
         qwen_llm::metal::wait_completed(&cmd)?;
 
-        let mut min_cos = 1.0f64;
-        let mut max_abs_all = 0.0f32;
-        let mut worst_slot = 0usize;
-        let mut non_finite = false;
+        let mut metrics = GdnReplayCheckMetrics::new();
         for i in 0..check_tokens {
             let (cos, max_abs) =
                 cosine_max_abs(&read_f32_tensor(&base[i].h), &read_f32_tensor(&replay[i].h));
-            if !cos.is_finite() || !max_abs.is_finite() {
-                non_finite = true;
-                worst_slot = i;
-                continue;
-            }
-            if cos < min_cos || max_abs > max_abs_all {
-                worst_slot = i;
-            }
-            min_cos = min_cos.min(cos);
-            max_abs_all = max_abs_all.max(max_abs);
+            metrics.record(i, cos, max_abs);
         }
-        if non_finite {
-            min_cos = f64::NAN;
-            max_abs_all = f32::NAN;
-        }
+        let metrics = metrics.finalize();
         println!(
-            "check\ttokens={check_tokens}\tmin_cos_h={min_cos:.9}\tmax_abs_h={max_abs_all:.6}\tworst_slot={worst_slot}"
+            "check\ttokens={check_tokens}\tmin_cos_h={:.9}\tmax_abs_h={:.6}\tworst_slot={}",
+            metrics.min_cos, metrics.max_abs, metrics.worst_slot
         );
-        if min_cos < 0.999 || max_abs_all > 5e-2 {
+        if metrics.fails(0.999, 5e-2) {
             return Err(anyhow!(
-                "GDN chain replay check failed: min_cos_h={min_cos:.9} max_abs_h={max_abs_all:.6}"
+                "GDN chain replay check failed: min_cos_h={:.9} max_abs_h={:.6}",
+                metrics.min_cos,
+                metrics.max_abs
             ));
         }
     }
@@ -1004,4 +1014,53 @@ pub(crate) fn run_decode_gdn_chain_replay(args: DecodeGdnChainReplayArgs) -> Res
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod comparison_contract_tests {
+    use super::{
+        GdnReplayCheckMetrics, cosine_max_abs, f32_max_abs_delta, f32_rms_delta,
+        route_weight_max_abs,
+    };
+
+    #[test]
+    fn reporters_mark_uncomparable_inputs_non_finite() {
+        assert_eq!(f32_max_abs_delta(&[1.0, 3.0], &[1.5, 1.0]), 2.0);
+        assert_eq!(route_weight_max_abs(&[1.0], &[0.5]), 0.5);
+        assert_eq!(f32_rms_delta(&[1.0], &[3.0]), 2.0);
+        assert!(f32_max_abs_delta(&[1.0], &[1.0, 2.0]).is_nan());
+        assert!(route_weight_max_abs(&[1.0], &[f32::NAN]).is_nan());
+        assert!(f32_rms_delta(&[1.0], &[1.0, 2.0]).is_nan());
+        let (cos, max_abs) = cosine_max_abs(&[1.0], &[1.0, 2.0]);
+        assert!(cos.is_nan());
+        assert!(max_abs.is_nan());
+        let (empty_cos, empty_abs) = cosine_max_abs(&[], &[]);
+        assert!(empty_cos.is_nan());
+        assert!(empty_abs.is_nan());
+    }
+
+    #[test]
+    fn replay_gate_rejects_invalid_samples_in_either_order() {
+        let passing = (0.9999, 0.001);
+        let violation = (0.9, 0.2);
+        let invalid = (f64::NAN, f32::NAN);
+        for samples in [[passing, invalid], [invalid, passing]] {
+            let mut metrics = GdnReplayCheckMetrics::new();
+            for (slot, (cos, abs)) in samples.into_iter().enumerate() {
+                metrics.record(slot, cos, abs);
+            }
+            let metrics = metrics.finalize();
+            assert!(metrics.fails(0.999, 0.05));
+            assert!(metrics.min_cos.is_nan() && metrics.max_abs.is_nan());
+        }
+        for samples in [[violation, invalid], [invalid, violation]] {
+            let mut metrics = GdnReplayCheckMetrics::new();
+            for (slot, (cos, abs)) in samples.into_iter().enumerate() {
+                metrics.record(slot, cos, abs);
+            }
+            let metrics = metrics.finalize();
+            assert!(metrics.fails(0.999, 0.05));
+            assert!(metrics.min_cos.is_nan() && metrics.max_abs.is_nan());
+        }
+    }
 }

@@ -811,6 +811,112 @@ pub(crate) fn emit_deepseek_v4_stage_profile(
     }
 }
 
+struct Ds4EncodedInput {
+    tokenizer: Tokenizer,
+    prompt_ids: Vec<i32>,
+    prompt_kind: &'static str,
+    completed_eligible: bool,
+    tokenizer_ms: f64,
+    encode_ms: f64,
+}
+
+struct Ds4PreparedTokens {
+    required_forwards: usize,
+    vocab_size: u32,
+    prompt_token_ids: Vec<u32>,
+    preparation_ms: f64,
+}
+
+fn ds4_encode_input(gguf: &GgufFile, args: &Args) -> Result<Ds4EncodedInput> {
+    let encode_options = deepseek_v4_encode_options(args)?;
+    let (prompt, prompt_source, completed_eligible) = if let Some(path) = args.messages.as_ref() {
+        let mut encode_options = encode_options;
+        let inline_thinking = if args.messages_strip_thinking {
+            DeepSeekV4InlineThinking::Strip
+        } else if args.messages_preserve_thinking {
+            // Tier presence is enforced by validate_deepseek_v4_generation_mode;
+            // the flag maps onto the release encoder's drop_thinking=False lane.
+            encode_options.preserve_reasoning = true;
+            DeepSeekV4InlineThinking::PromoteToReasoning
+        } else {
+            DeepSeekV4InlineThinking::Verbatim
+        };
+        // Preserved reasoning renders assistant turns byte-faithfully, so the
+        // next turn's re-rendered prompt strictly extends this turn's
+        // completed transcript; only then is a completed-turn checkpoint
+        // reusable.
+        let completed_eligible = ds4_completed_eligible(
+            true,
+            args.messages_strip_thinking,
+            args.messages_preserve_thinking,
+            encode_options.preserve_reasoning,
+        );
+        (
+            load_deepseek_v4_0731_messages_prompt(
+                path,
+                args.messages_max,
+                encode_options,
+                inline_thinking,
+            )
+            .context("render DeepSeek V4 0731 messages")?,
+            PromptSource::Messages,
+            completed_eligible,
+        )
+    } else {
+        let (prompt, source, _) = prompt_text(args)?;
+        (prompt, source, false)
+    };
+    let prompt_kind = ds4_prompt_kind(prompt_source, encode_options.reasoning);
+
+    let tokenizer_t0 = Instant::now();
+    let tokenizer = Tokenizer::from_gguf(gguf).context("load DeepSeek V4 tokenizer")?;
+    let tokenizer_ms = tokenizer_t0.elapsed().as_secs_f64() * 1e3;
+    let encode_t0 = Instant::now();
+    let prompt_ids = tokenizer
+        .encode(&prompt, false)
+        .context("tokenize raw DeepSeek V4 prompt")?;
+    // Record semantics (shared with every lane): `tokenization` is the
+    // prompt encode alone; `tokenizer_ms` above (construction) stays on the
+    // free-form stats line.
+    let encode_ms = encode_t0.elapsed().as_secs_f64() * 1e3;
+    Ok(Ds4EncodedInput {
+        tokenizer,
+        prompt_ids,
+        prompt_kind,
+        completed_eligible,
+        tokenizer_ms,
+        encode_ms,
+    })
+}
+
+fn ds4_prepare_tokens(
+    prompt_ids: &[i32],
+    tokenizer: &Tokenizer,
+    args: &Args,
+) -> Result<Ds4PreparedTokens> {
+    let preparation_t0 = Instant::now();
+    let required_forwards = required_forwards(
+        "DeepSeek V4",
+        prompt_ids.len(),
+        args.tokens,
+        Some(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY),
+    )?;
+    deepseek_v4_debug_dump_prompt_ids("single_turn", prompt_ids);
+    let vocab_size = tokenizer.n_vocab();
+    let prompt_token_ids = prompt_ids
+        .iter()
+        .enumerate()
+        .map(|(index, &token)| checked_token_id(token, vocab_size, &format!("prompt[{index}]")))
+        .collect::<Result<Vec<_>>>()?;
+    let preparation_ms = preparation_t0.elapsed().as_secs_f64() * 1e3;
+    Ok(Ds4PreparedTokens {
+        required_forwards,
+        vocab_size,
+        prompt_token_ids,
+        preparation_ms,
+    })
+}
+
 pub(crate) fn run_deepseek_v4_single_turn(
     model_path: &Path,
     gguf: GgufFile,
@@ -825,73 +931,18 @@ pub(crate) fn run_deepseek_v4_single_turn(
     let prefetch_mode = configured_deepseek_v4_prefetch_mode()?;
     let sampling = cli_sampling_config(args)?;
     let arrival_ms = unix_epoch_ms()?;
-    let encode_options = deepseek_v4_encode_options(args)?;
-    let (prompt, prompt_source, durable_completed_eligible) =
-        if let Some(path) = args.messages.as_ref() {
-            let mut encode_options = encode_options;
-            let inline_thinking = if args.messages_strip_thinking {
-                DeepSeekV4InlineThinking::Strip
-            } else if args.messages_preserve_thinking {
-                // Tier presence is enforced by validate_deepseek_v4_generation_mode;
-                // the flag maps onto the release encoder's drop_thinking=False lane.
-                encode_options.preserve_reasoning = true;
-                DeepSeekV4InlineThinking::PromoteToReasoning
-            } else {
-                DeepSeekV4InlineThinking::Verbatim
-            };
-            // Preserved reasoning renders assistant turns byte-faithfully, so the
-            // next turn's re-rendered prompt strictly extends this turn's
-            // completed transcript; only then is a completed-turn checkpoint
-            // reusable.
-            let completed_eligible = ds4_completed_eligible(
-                true,
-                args.messages_strip_thinking,
-                args.messages_preserve_thinking,
-                encode_options.preserve_reasoning,
-            );
-            (
-                load_deepseek_v4_0731_messages_prompt(
-                    path,
-                    args.messages_max,
-                    encode_options,
-                    inline_thinking,
-                )
-                .context("render DeepSeek V4 0731 messages")?,
-                PromptSource::Messages,
-                completed_eligible,
-            )
-        } else {
-            let (prompt, source, _) = prompt_text(args)?;
-            (prompt, source, false)
-        };
-    let prompt_kind = ds4_prompt_kind(prompt_source, encode_options.reasoning);
-
-    let tokenizer_t0 = Instant::now();
-    let tokenizer = Tokenizer::from_gguf(&gguf).context("load DeepSeek V4 tokenizer")?;
-    let tokenizer_ms = tokenizer_t0.elapsed().as_secs_f64() * 1e3;
-    let encode_t0 = Instant::now();
-    let prompt_ids = tokenizer
-        .encode(&prompt, false)
-        .context("tokenize raw DeepSeek V4 prompt")?;
-    // Record semantics (shared with every lane): `tokenization` is the
-    // prompt encode alone; `tokenizer_ms` above (construction) stays on the
-    // free-form stats line.
-    let encode_ms = encode_t0.elapsed().as_secs_f64() * 1e3;
-    let preparation_t0 = Instant::now();
-    let required_forwards = required_forwards(
-        "DeepSeek V4",
-        prompt_ids.len(),
-        args.tokens,
-        Some(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY),
-    )?;
-    deepseek_v4_debug_dump_prompt_ids("single_turn", &prompt_ids);
-    let vocab_size = tokenizer.n_vocab();
-    let prompt_token_ids = prompt_ids
-        .iter()
-        .enumerate()
-        .map(|(index, &token)| checked_token_id(token, vocab_size, &format!("prompt[{index}]")))
-        .collect::<Result<Vec<_>>>()?;
-    let mut preparation_ms = preparation_t0.elapsed().as_secs_f64() * 1e3;
+    let encoded = ds4_encode_input(&gguf, args)?;
+    let prompt_kind = encoded.prompt_kind;
+    let durable_completed_eligible = encoded.completed_eligible;
+    let tokenizer = encoded.tokenizer;
+    let prompt_ids = encoded.prompt_ids;
+    let tokenizer_ms = encoded.tokenizer_ms;
+    let encode_ms = encoded.encode_ms;
+    let prepared_tokens = ds4_prepare_tokens(&prompt_ids, &tokenizer, args)?;
+    let required_forwards = prepared_tokens.required_forwards;
+    let vocab_size = prepared_tokens.vocab_size;
+    let prompt_token_ids = prepared_tokens.prompt_token_ids;
+    let mut preparation_ms = prepared_tokens.preparation_ms;
     let durable_store = deepseek_v4_checkpoint_store(args, staged_integrity)?;
     let durable_max_record_bytes = if durable_store.is_some() {
         durable_prefix_cache_max_entry_bytes(args)?

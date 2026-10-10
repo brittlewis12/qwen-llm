@@ -54,6 +54,10 @@ pub mod k2_horizon_reference;
 pub mod k2_horizon_runtime;
 pub mod loader;
 pub mod metal;
+/// Deployment target used to compile the product Metal library.
+pub const PRODUCT_METALLIB_TARGET: &str = env!("QWEN_PRODUCT_METALLIB_TARGET");
+/// Deployment target used to compile the research Metal library.
+pub const RESEARCH_METALLIB_TARGET: &str = env!("QWEN_RESEARCH_METALLIB_TARGET");
 pub mod metal_dflash;
 pub mod metal_forward;
 pub mod metal_mtp;

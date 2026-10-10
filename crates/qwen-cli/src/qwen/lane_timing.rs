@@ -1,9 +1,10 @@
 //! Phase-accounted request timing shared by lanes that separate setup from
 //! the loaded request (K2, GLM-5.3). Each family names its phases, which of
-//! them form the loaded request and the model load, and its encoding phase;
-//! the accumulator checks that phases never overlap or exceed the lane wall.
+//! them form the loaded request and the model load, and its encoding phase.
+//! Phases are additive buckets: the accumulator checks their total against
+//! the lane wall but cannot see two phases covering the same time.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::{Value, json};
 use std::marker::PhantomData;
 use std::time::{Duration, Instant};
@@ -23,8 +24,13 @@ pub(crate) trait LanePhases: Copy + 'static {
     fn index(self) -> usize;
 }
 
+/// Accounting never fails a request: a timing inconsistency is reported in
+/// the lane's diagnostics and logged, and the generation and its output go
+/// ahead. Phases are additive buckets; nothing here detects two phases
+/// covering the same time, only a phase total that exceeds the lane wall.
 pub(crate) struct LaneTiming<P: LanePhases> {
     phases: Vec<Duration>,
+    overflowed: bool,
     _phases: PhantomData<P>,
 }
 
@@ -32,6 +38,7 @@ impl<P: LanePhases> Default for LaneTiming<P> {
     fn default() -> Self {
         Self {
             phases: vec![Duration::ZERO; P::PHASES.len()],
+            overflowed: false,
             _phases: PhantomData,
         }
     }
@@ -45,14 +52,18 @@ pub(crate) struct LaneReport {
 }
 
 impl<P: LanePhases> LaneTiming<P> {
-    pub(crate) fn record(&mut self, phase: P, elapsed: Duration) -> Result<()> {
+    pub(crate) fn record(&mut self, phase: P, elapsed: Duration) {
         let duration = &mut self.phases[phase.index()];
-        *duration = duration
-            .checked_add(elapsed)
-            .with_context(|| format!("{} timing phase overflow", P::FAMILY))?;
-        Ok(())
+        match duration.checked_add(elapsed) {
+            Some(total) => *duration = total,
+            None => {
+                *duration = Duration::MAX;
+                self.overflowed = true;
+            }
+        }
     }
 
+    /// Times `operation` into `phase` and returns the operation's own result.
     pub(crate) fn measure<T>(
         &mut self,
         phase: P,
@@ -60,39 +71,54 @@ impl<P: LanePhases> LaneTiming<P> {
     ) -> Result<T> {
         let start = Instant::now();
         let result = operation();
-        self.record(phase, start.elapsed())?;
+        self.record(phase, start.elapsed());
         result
     }
 
-    fn sum<'a>(&self, phases: impl IntoIterator<Item = &'a P>) -> Result<Duration> {
+    fn sum<'a>(&self, phases: impl IntoIterator<Item = &'a P>) -> Option<Duration> {
         phases.into_iter().try_fold(Duration::ZERO, |total, p| {
-            total
-                .checked_add(self.phases[p.index()])
-                .with_context(|| format!("{} timing total overflow", P::FAMILY))
+            total.checked_add(self.phases[p.index()])
         })
     }
 
-    pub(crate) fn finish(self, end_to_end: Duration) -> Result<LaneReport> {
-        let accounted = self.sum(P::PHASES.iter().map(|(p, _)| p))?;
-        let residual = end_to_end
-            .checked_sub(accounted)
-            .with_context(|| format!("{} timing phases overlap or exceed lane wall", P::FAMILY))?;
-        let loaded_request = self.sum(P::LOADED_REQUEST)?;
-        let load = self.sum(P::LOAD)?;
+    /// `accounting` is `"valid"`, or names the inconsistency; an invalid
+    /// report keeps the phase durations and reports the unclassified
+    /// residual as null rather than a clamped value.
+    pub(crate) fn finish(self, end_to_end: Duration) -> LaneReport {
+        let accounted = self.sum(P::PHASES.iter().map(|(p, _)| p));
+        let residual = accounted.and_then(|accounted| end_to_end.checked_sub(accounted));
+        let accounting = match (self.overflowed || accounted.is_none(), residual) {
+            (true, _) => "phase_total_overflow",
+            (false, None) => "phases_exceed_lane_wall",
+            (false, Some(_)) => "valid",
+        };
+        // A residual is meaningful only when every phase was counted exactly.
+        let residual = residual.filter(|_| accounting == "valid");
+        if accounting != "valid" {
+            tracing::warn!(
+                target: "qwen_diag",
+                "{} lane timing accounting {accounting}; generation and output are unaffected",
+                P::FAMILY
+            );
+        }
         let ms = |d: Duration| d.as_secs_f64() * 1e3;
+        let loaded_request = self.sum(P::LOADED_REQUEST).map_or(f64::NAN, ms);
+        let load = self.sum(P::LOAD).map_or(f64::NAN, ms);
         let phases: serde_json::Map<String, Value> = P::PHASES
             .iter()
             .map(|(p, name)| ((*name).into(), json!(ms(self.phases[p.index()]))))
             .collect();
-        Ok(LaneReport {
-            loaded_request_ms: ms(loaded_request),
-            load_ms: ms(load),
+        LaneReport {
+            loaded_request_ms: loaded_request,
+            load_ms: load,
             encoding_ms: ms(self.phases[P::ENCODING.index()]),
             json: json!({"schema_version":1,"unit":"milliseconds",
                 "loaded_request_policy":P::LOADED_REQUEST_POLICY,
                 "end_to_end_boundary":P::END_TO_END_BOUNDARY,
-                "phases_ms":phases,"loaded_request_ms":ms(loaded_request),
-                "end_to_end_lane_ms":ms(end_to_end),"unclassified_host_overhead_ms":ms(residual)}),
-        })
+                "accounting":accounting,
+                "phases_ms":phases,"loaded_request_ms":loaded_request,
+                "end_to_end_lane_ms":ms(end_to_end),
+                "unclassified_host_overhead_ms":residual.map(ms)}),
+        }
     }
 }

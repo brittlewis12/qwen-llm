@@ -46,18 +46,14 @@ mod lens_intervention;
 mod lens_scope;
 #[allow(dead_code)] // Shared transport verification also serves CLI-only consumers.
 mod linear_transport;
-mod messages;
-mod model_request;
 #[path = "qwen/muse_glimmer.rs"]
 mod muse_glimmer;
-mod open_responses;
 mod ordinary_executor;
 #[path = "qwen/prefill_plan.rs"]
 mod prefill_plan;
 #[path = "qwen/prompt_lookup.rs"]
 mod prompt_lookup;
-#[allow(dead_code)]
-mod prompt_template;
+use qwen_cli::{messages, model_request, open_responses, prompt_template};
 #[path = "qwen/qwen4exp.rs"]
 mod qwen4exp;
 mod qwen_file_root;
@@ -87,7 +83,7 @@ use messages::{
     render_deepseek_v4_0731_single_turn_prompt, render_qwen_chat_for_template,
     render_qwen38_single_turn_prompt,
 };
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLDevice};
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 use prompt_template::{QwenBoundGeneration, QwenReasoningControls, QwenUserPromptProtocol};
 use qwen_llm::checkpoint_identity::{
     CheckpointIdentityCache, IdentityCacheOutcome, checkpoint_content_identity,
@@ -1134,10 +1130,20 @@ pub(crate) fn resolve_default_prefill_chunk(args: &mut Args, explicit: bool) {
 /// shape grows one consumed decision at a time, never as a hand-maintained
 /// capability table.
 fn run_info(info: cli::InfoInvocation) -> Result<()> {
+    let Some(model) = info.model else {
+        // Device facts only: no context, lease, library or command queue.
+        let facts = qwen_llm::metal::DeviceFacts::probe().context("no default Metal device")?;
+        if info.json {
+            println!("{}", serde_json::to_string_pretty(&facts.report())?);
+        } else {
+            println!("{facts}");
+        }
+        return Ok(());
+    };
     if !info.json {
-        return print_model_info(&info.model);
+        return print_model_info(&model);
     }
-    let (_, projection) = info_projection(&info.model)?;
+    let (_, projection) = info_projection(&model)?;
     println!("{}", serde_json::to_string_pretty(&projection)?);
     Ok(())
 }

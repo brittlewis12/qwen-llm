@@ -23,21 +23,32 @@ use crate::model_request::{
 /// Spec error envelope. Serialized as `{"error": {...}}`; streamed inside
 /// `response.failed` by the HTTP layer.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ServeError {
-    pub(crate) status: u16,
-    pub(crate) error_type: &'static str,
-    pub(crate) code: Option<&'static str>,
-    pub(crate) param: Option<String>,
-    pub(crate) message: String,
+pub struct ServeError {
+    pub status: u16,
+    pub error_type: &'static str,
+    pub code: Option<&'static str>,
+    pub param: Option<String>,
+    pub message: String,
 }
 
 impl ServeError {
-    pub(crate) fn invalid_request(param: Option<&str>, message: impl Into<String>) -> Self {
+    pub fn invalid_request(param: Option<&str>, message: impl Into<String>) -> Self {
         Self {
             status: 400,
             error_type: "invalid_request",
             code: None,
             param: param.map(str::to_owned),
+            message: message.into(),
+        }
+    }
+
+    /// An engine-side failure (HTTP 500); never a client error.
+    pub fn server_error(message: impl Into<String>) -> Self {
+        Self {
+            status: 500,
+            error_type: "server_error",
+            code: None,
+            param: None,
             message: message.into(),
         }
     }
@@ -64,7 +75,7 @@ impl ServeError {
         }
     }
 
-    pub(crate) fn model_not_found(requested: &str, loaded: &str) -> Self {
+    pub fn model_not_found(requested: &str, loaded: &str) -> Self {
         Self {
             status: 404,
             error_type: "not_found",
@@ -74,7 +85,7 @@ impl ServeError {
         }
     }
 
-    pub(crate) fn to_json(&self) -> Value {
+    pub fn to_json(&self) -> Value {
         serde_json::json!({
             "error": {
                 "type": self.error_type,
@@ -90,7 +101,7 @@ impl ServeError {
 /// GGUF identity, mirroring the CLI's dispatch — serve must not render a
 /// Qwen3.8 model with the generic ChatML contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum QwenTemplate {
+pub enum QwenTemplate {
     /// No identified Qwen release. Keeps the legacy bare
     /// `<|im_start|>assistant\n` suffix and verbatim content.
     #[default]
@@ -104,12 +115,12 @@ pub(crate) enum QwenTemplate {
 
 impl QwenTemplate {
     /// Released templates, byte-checked against the Jinja oracle fixtures.
-    pub(crate) fn verified(self) -> bool {
+    pub fn verified(self) -> bool {
         self != Self::Generic
     }
 
     /// Stable protocol label for records and diagnostics.
-    pub(crate) fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Generic => "generic",
             Self::Qwen35 => "qwen35",
@@ -124,7 +135,7 @@ impl QwenTemplate {
 /// per request with `x_qwen.template_style`. Defined for identified Qwen
 /// releases and DeepSeek V4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum TemplateStyle {
+pub enum TemplateStyle {
     /// Serve's conventions: past turns render as they were generated,
     /// whatever this request's thinking mode, and reasoning history is kept.
     #[default]
@@ -136,7 +147,7 @@ pub(crate) enum TemplateStyle {
 }
 
 impl TemplateStyle {
-    pub(crate) fn parse(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "house" => Some(Self::House),
             "upstream" => Some(Self::Upstream),
@@ -144,7 +155,7 @@ impl TemplateStyle {
         }
     }
 
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::House => "house",
             Self::Upstream => "upstream",
@@ -157,78 +168,69 @@ impl TemplateStyle {
 /// choose (batched Fast, the default, or the slower Exact that matches
 /// token-by-token decoding); every other family refuses the field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PrefillLineage {
+pub enum PrefillLineage {
     Fast,
     Exact,
-}
-
-impl PrefillLineage {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Fast => "fast",
-            Self::Exact => "exact",
-        }
-    }
 }
 
 /// An explicit `x_qwen.history_thinking` request, kept distinct from its
 /// absence so it can override either template style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HistoryThinking {
+pub enum HistoryThinking {
     Preserve,
     Strip,
 }
 
 /// Validated transcript plus generation controls, ready for rendering.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ServeRequest {
-    pub(crate) model: String,
+pub struct ServeRequest {
+    pub model: String,
     /// Present only after the K2 family parser admits raw string input.
-    pub(crate) k2_raw_input: Option<String>,
-    pub(crate) k2_add_special_tokens: Option<bool>,
-    pub(crate) k2_chat: Option<qwen_llm::k2_horizon_chat::ChatInput>,
-    pub(crate) k2_tools: Option<qwen_llm::k2_horizon_chat::tools::ToolChatInput>,
-    pub(crate) instructions: Option<String>,
-    pub(crate) model_request: ModelRequest,
+    pub k2_raw_input: Option<String>,
+    pub k2_add_special_tokens: Option<bool>,
+    pub k2_chat: Option<qwen_llm::k2_horizon_chat::ChatInput>,
+    pub k2_tools: Option<qwen_llm::k2_horizon_chat::tools::ToolChatInput>,
+    pub instructions: Option<String>,
+    pub model_request: ModelRequest,
     /// Exact executable set. Empty means no calls are executable; narrowing
     /// does not alter the rendered tools block or invalidate prompt prefixes.
-    pub(crate) allowed_tools: Vec<String>,
-    pub(crate) tool_choice: Value,
-    pub(crate) reasoning: Option<Value>,
-    pub(crate) parallel_tool_calls: bool,
-    pub(crate) stream: bool,
-    pub(crate) max_output_tokens: Option<usize>,
-    pub(crate) temperature: Option<f32>,
-    pub(crate) temperature_echo: Option<f64>,
-    pub(crate) top_p: Option<f32>,
-    pub(crate) top_p_echo: Option<f64>,
-    pub(crate) seed: Option<u64>,
-    pub(crate) top_k: Option<usize>,
-    pub(crate) min_p: Option<f32>,
+    pub allowed_tools: Vec<String>,
+    pub tool_choice: Value,
+    pub reasoning: Option<Value>,
+    pub parallel_tool_calls: bool,
+    pub stream: bool,
+    pub max_output_tokens: Option<usize>,
+    pub temperature: Option<f32>,
+    pub temperature_echo: Option<f64>,
+    pub top_p: Option<f32>,
+    pub top_p_echo: Option<f64>,
+    pub seed: Option<u64>,
+    pub top_k: Option<usize>,
+    pub min_p: Option<f32>,
     /// Spec `reasoning.effort`, passed through verbatim (the AI SDK
     /// provider forwards arbitrary strings). Families that support tiers
     /// map it; others reject or ignore per their contract.
-    pub(crate) reasoning_effort: Option<String>,
-    pub(crate) no_thinking: bool,
+    pub reasoning_effort: Option<String>,
+    pub no_thinking: bool,
     /// Explicit thinking request for templates whose default is no-thinking
     /// (Qwen3.5). CLI-only today; no wire field sets it yet.
-    pub(crate) thinking_requested: bool,
+    pub thinking_requested: bool,
     /// Rendering family, resolved from the loaded model at startup rather
     /// than per request.
-    pub(crate) template: QwenTemplate,
+    pub template: QwenTemplate,
     /// Qwen3.8 generation mode bound once by `normalize_request`; `None`
     /// for templates without an effort control. Renderers read this rather
     /// than re-parsing `reasoning_effort`.
-    pub(crate) qwen38_mode: Option<crate::messages::Qwen38GenerationMode>,
+    pub qwen38_mode: Option<crate::messages::Qwen38GenerationMode>,
     /// Resolved: strip history reasoning before the last user query.
-    pub(crate) strip_history_thinking: bool,
+    pub strip_history_thinking: bool,
     /// As sent in `x_qwen.history_thinking`; overrides the template style.
-    pub(crate) history_thinking: Option<HistoryThinking>,
+    pub history_thinking: Option<HistoryThinking>,
     /// `None` until serve applies its deployment default.
-    pub(crate) template_style: Option<TemplateStyle>,
-    pub(crate) echo_stats: bool,
+    pub template_style: Option<TemplateStyle>,
+    pub echo_stats: bool,
     /// As sent in `x_qwen.prefill_lineage`; `None` means the family default.
-    pub(crate) prefill_lineage: Option<PrefillLineage>,
+    pub prefill_lineage: Option<PrefillLineage>,
     /// Assistant history turns (a message with the calls attached to it, or
     /// a call-only group) that arrived without a reasoning item. One rule for
     /// every family: such a turn renders exactly as the family's template
@@ -237,7 +239,7 @@ pub(crate) struct ServeRequest {
     /// contract keeps history verbatim. Counted after grouping is final, so
     /// this is an observed absence, not proof the client discarded reasoning.
     /// Serve logs it on thinking requests.
-    pub(crate) history_reasoning_missing: usize,
+    pub history_reasoning_missing: usize,
 }
 
 impl Default for ServeRequest {
@@ -406,7 +408,7 @@ fn f32_field(map: &serde_json::Map<String, Value>, key: &str) -> Result<Option<f
         .transpose()
 }
 
-pub(crate) fn parse_request(body: &Value) -> Result<ServeRequest, ServeError> {
+pub fn parse_request(body: &Value) -> Result<ServeRequest, ServeError> {
     parse_request_with(body, ArgumentsDecoding::Serde)
 }
 
@@ -424,7 +426,7 @@ pub(crate) enum ArgumentsDecoding {
 }
 
 /// [`parse_request`] with lossless argument decoding (GLM-5.3-Flash).
-pub(crate) fn parse_request_lossless(body: &Value) -> Result<ServeRequest, ServeError> {
+pub fn parse_request_lossless(body: &Value) -> Result<ServeRequest, ServeError> {
     parse_request_with(body, ArgumentsDecoding::Lossless)
 }
 

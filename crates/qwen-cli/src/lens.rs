@@ -25,9 +25,6 @@ mod lens_intervention;
 mod lens_run;
 mod lens_scope;
 pub mod linear_transport;
-#[allow(dead_code)]
-mod messages;
-mod model_request;
 mod muse_full_lens;
 mod muse_full_lens_artifact;
 mod muse_lens_artifact;
@@ -37,12 +34,10 @@ mod muse_lens_rows_fit;
 mod muse_lens_run;
 mod muse_published_full_lens;
 mod muse_published_full_lens_artifact;
-mod open_responses;
 #[allow(dead_code)] // Shared with qwen's request control and decode telemetry.
 mod ordinary_executor;
 mod plain_logit_lens;
-#[allow(dead_code)]
-mod prompt_template;
+use qwen_cli::{messages, model_request, open_responses, prompt_template};
 mod published_pt;
 use qwen_cli::shutdown;
 #[allow(dead_code)]

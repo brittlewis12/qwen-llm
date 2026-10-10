@@ -2408,6 +2408,11 @@ unqualified artifact is not silently slow.
 | F16 scorer | diagnostic scope | capability, keeping default off |
 | Residency set | wired memory | unchanged; stays opt-in (see below) |
 
+The C1 device-qualification report names the runtime optimization gates above;
+it is not a repository-wide rewrite of Apple device-name checks. Frozen
+experiment contracts in `dflash_k0s`, `dsv4_mhc_delete`, and
+`gguf_arena_floor` continue to compare exact device names by design.
+
 **Residency-set default (decided 2026-09-24).** The model-wide
 `MTLResidencySet` stays opt-in (`QWEN_DSV4_RESIDENCY_SET=1`) for every process,
 serve included. It may become a default only with evidence that a forced
@@ -2417,4 +2422,3 @@ the 2026-08-10 rollback showed ~98.7 GiB stranded until reboot. Prefill speed
 (the 2026-08-09 +21-24% warm figures) does not qualify it, however large, and
 scoping alternatives (per-command-buffer residency, hot windows only) count
 only if they pass that same kill test.
-

@@ -9,7 +9,7 @@ use qwen_llm::muse_glimmer::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum QwenPromptTemplate {
+pub enum QwenPromptTemplate {
     Qwen35,
     Qwen36,
     Qwen38,
@@ -19,7 +19,7 @@ pub(crate) enum QwenPromptTemplate {
 }
 
 impl QwenPromptTemplate {
-    pub(crate) const fn renderer_name(self) -> &'static str {
+    pub const fn renderer_name(self) -> &'static str {
         match self {
             Self::Qwen35 => "qwen3.5_messages_v1",
             Self::Qwen36 => "qwen3.6_messages_v1",
@@ -29,7 +29,7 @@ impl QwenPromptTemplate {
         }
     }
 
-    pub(crate) fn serve_template(self) -> QwenTemplate {
+    pub fn serve_template(self) -> QwenTemplate {
         match self {
             Self::Qwen35 => QwenTemplate::Qwen35,
             Self::Qwen36 => QwenTemplate::Qwen36,
@@ -40,13 +40,13 @@ impl QwenPromptTemplate {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ModelPromptTemplate {
+pub enum ModelPromptTemplate {
     Qwen(QwenPromptTemplate),
     MuseGlimmer(MuseGlimmerChatTemplateProfile),
     DeepSeekV4_0731,
 }
 
-pub(crate) fn resolve_model_prompt_template(gguf: &GgufFile) -> Result<ModelPromptTemplate> {
+pub fn resolve_model_prompt_template(gguf: &GgufFile) -> Result<ModelPromptTemplate> {
     let architecture = gguf
         .architecture()
         .context("model is missing general.architecture")?;
@@ -93,17 +93,17 @@ pub(crate) const QWEN_NAME_FIELDS: [&str; 5] = [
 /// Header facts consulted for release identity, in the order they are
 /// reported.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct QwenHeaderFacts<'a> {
-    pub(crate) architecture: &'a str,
-    pub(crate) tokenizer_model: Option<&'a str>,
-    pub(crate) tokenizer_pre: Option<&'a str>,
-    pub(crate) token_count: Option<usize>,
+pub struct QwenHeaderFacts<'a> {
+    pub architecture: &'a str,
+    pub tokenizer_model: Option<&'a str>,
+    pub tokenizer_pre: Option<&'a str>,
+    pub token_count: Option<usize>,
     /// Parallel to `QWEN_NAME_FIELDS`.
-    pub(crate) names: [Option<&'a str>; 5],
+    pub names: [Option<&'a str>; 5],
 }
 
 impl<'a> QwenHeaderFacts<'a> {
-    pub(crate) fn from_gguf(architecture: &'a str, gguf: &'a GgufFile) -> Result<Self> {
+    pub fn from_gguf(architecture: &'a str, gguf: &'a GgufFile) -> Result<Self> {
         Ok(Self {
             architecture,
             tokenizer_model: gguf.get_str("tokenizer.ggml.model"),
@@ -118,7 +118,7 @@ impl<'a> QwenHeaderFacts<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub(crate) enum QwenReleaseStatus {
+pub enum QwenReleaseStatus {
     Identified {
         version: &'static str,
         source: &'static str,
@@ -130,17 +130,17 @@ pub(crate) enum QwenReleaseStatus {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct QwenReleaseIdentity {
-    pub(crate) template: QwenPromptTemplate,
-    pub(crate) status: QwenReleaseStatus,
+pub struct QwenReleaseIdentity {
+    pub template: QwenPromptTemplate,
+    pub status: QwenReleaseStatus,
 }
 
 impl QwenReleaseIdentity {
-    pub(crate) fn warning(&self) -> Option<String> {
+    pub fn warning(&self) -> Option<String> {
         match &self.status {
             QwenReleaseStatus::Identified { .. } => None,
             QwenReleaseStatus::Unknown { reason, .. } => Some(format!(
-                "Qwen release not identified ({reason}); rendering the {} contract, which matches no released template; thinking controls and tools are unavailable (`qwen info --json` reports capabilities.template)",
+                "Qwen release not identified ({reason}); rendering the {} contract, which matches no released template; thinking controls and tools are unavailable (`qwen info -m MODEL --json` reports capabilities.template)",
                 self.template.serve_template().label()
             )),
         }
@@ -149,14 +149,14 @@ impl QwenReleaseIdentity {
 
 /// A tokenizer that is not the Qwen3.x release tokenizer, by header key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum QwenTokenizerMismatch {
+pub enum QwenTokenizerMismatch {
     Model,
     Pretokenizer,
     TokenCount,
 }
 
 impl QwenTokenizerMismatch {
-    pub(crate) fn header_key(self) -> &'static str {
+    pub fn header_key(self) -> &'static str {
         match self {
             Self::Model => "tokenizer.ggml.model",
             Self::Pretokenizer => "tokenizer.ggml.pre",
@@ -165,9 +165,7 @@ impl QwenTokenizerMismatch {
     }
 }
 
-pub(crate) fn qwen_tokenizer_gate(
-    facts: &QwenHeaderFacts<'_>,
-) -> Result<(), QwenTokenizerMismatch> {
+pub fn qwen_tokenizer_gate(facts: &QwenHeaderFacts<'_>) -> Result<(), QwenTokenizerMismatch> {
     if facts.tokenizer_model != Some(QWEN3_TOKENIZER_MODEL) {
         return Err(QwenTokenizerMismatch::Model);
     }
@@ -212,7 +210,7 @@ fn qwen_versions_in(text: &str) -> Vec<&'static str> {
     found
 }
 
-pub(crate) fn identify_qwen_release(facts: &QwenHeaderFacts<'_>) -> QwenReleaseIdentity {
+pub fn identify_qwen_release(facts: &QwenHeaderFacts<'_>) -> QwenReleaseIdentity {
     let consulted = || {
         let mut fields = vec![
             "general.architecture",
@@ -274,7 +272,7 @@ pub(crate) fn identify_qwen_release(facts: &QwenHeaderFacts<'_>) -> QwenReleaseI
     }
 }
 
-pub(crate) fn identify_qwen_release_for_gguf(gguf: &GgufFile) -> Result<QwenReleaseIdentity> {
+pub fn identify_qwen_release_for_gguf(gguf: &GgufFile) -> Result<QwenReleaseIdentity> {
     let architecture = gguf
         .architecture()
         .context("model is missing general.architecture")?;
@@ -292,7 +290,7 @@ pub(crate) fn resolve_serve_qwen_template(
     identify_qwen_release_for_gguf(gguf)
 }
 
-pub(crate) fn serve_qwen_template(
+pub fn serve_qwen_template(
     family: qwen_llm::model_family::ModelFamily,
     gguf: &GgufFile,
 ) -> Result<QwenTemplate> {
@@ -308,7 +306,7 @@ pub(crate) fn serve_qwen_template(
 }
 
 /// Template for any loaded GGUF; non-Qwen families get `Generic`.
-pub(crate) fn qwen_template_for_gguf(gguf: &GgufFile) -> Result<QwenTemplate> {
+pub fn qwen_template_for_gguf(gguf: &GgufFile) -> Result<QwenTemplate> {
     match qwen_llm::model_family::ModelFamily::detect(gguf) {
         Some(
             family @ (qwen_llm::model_family::ModelFamily::Qwen35
@@ -624,17 +622,17 @@ mod tests {
 /// resolved once per model from the GGUF header, so there is exactly one
 /// implementation of the released template bytes across lanes.
 #[derive(Clone, Debug)]
-pub(crate) struct QwenUserPromptProtocol {
+pub struct QwenUserPromptProtocol {
     identity: QwenReleaseIdentity,
 }
 
 /// Transport-neutral reasoning controls for one request.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct QwenReasoningControls<'a> {
+pub struct QwenReasoningControls<'a> {
     /// `reasoning_effort` spelling as supplied; `None` when omitted.
-    pub(crate) effort: Option<&'a str>,
+    pub effort: Option<&'a str>,
     /// The released non-thinking transition was requested.
-    pub(crate) no_thinking: bool,
+    pub no_thinking: bool,
 }
 
 impl QwenUserPromptProtocol {
@@ -659,7 +657,7 @@ impl QwenUserPromptProtocol {
     }
 
     /// `None` for families that do not render ordinary-Qwen chat.
-    pub(crate) fn resolve(family: ModelFamily, gguf: &GgufFile) -> Result<Option<Self>> {
+    pub fn resolve(family: ModelFamily, gguf: &GgufFile) -> Result<Option<Self>> {
         if !matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe) {
             return Ok(None);
         }
@@ -675,20 +673,16 @@ impl QwenUserPromptProtocol {
         )
     }
 
-    pub(crate) fn status(&self) -> &QwenReleaseStatus {
-        &self.identity.status
-    }
-
-    pub(crate) fn warning(&self) -> Option<String> {
+    pub fn warning(&self) -> Option<String> {
         self.identity.warning()
     }
 
-    pub(crate) fn template(&self) -> QwenTemplate {
+    pub fn template(&self) -> QwenTemplate {
         self.identity.template.serve_template()
     }
 
     /// Stable protocol label for records.
-    pub(crate) fn label(&self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         self.template().label()
     }
 
@@ -697,7 +691,7 @@ impl QwenUserPromptProtocol {
     /// fallback when omitted, and whether no-thinking exists. Derived from
     /// the same tables `bind` parses with, so the advertisement cannot drift
     /// from the parser.
-    pub(crate) fn reasoning_capability(&self) -> ReasoningCapability {
+    pub fn reasoning_capability(&self) -> ReasoningCapability {
         if self.is_qwen38() {
             ReasoningCapability {
                 levels: Qwen38GenerationMode::level_names(),
@@ -730,7 +724,7 @@ impl QwenUserPromptProtocol {
 
     /// Plain chat on an unidentified release is the legacy bare ChatML
     /// contract; the tool block exists only per release.
-    pub(crate) fn input_capability(&self) -> InputCapability {
+    pub fn input_capability(&self) -> InputCapability {
         InputCapability {
             raw: Support::Supported,
             user: Support::Supported,
@@ -742,7 +736,7 @@ impl QwenUserPromptProtocol {
     /// Bind the controls to this model's generation mode. Qwen3.8 identities
     /// bind effort levels (including `none`); every other ordinary Qwen has
     /// no effort control and binds only the no-thinking transition.
-    pub(crate) fn bind(
+    pub fn bind(
         &self,
         controls: QwenReasoningControls<'_>,
     ) -> Result<QwenBoundGeneration, CapabilityError> {
@@ -776,7 +770,7 @@ impl QwenUserPromptProtocol {
     }
 
     /// Render one user turn with optional system text under bound controls.
-    pub(crate) fn render(
+    pub fn render(
         &self,
         user: &str,
         system: Option<&str>,
@@ -800,7 +794,7 @@ impl QwenUserPromptProtocol {
 
 /// The bound generation decision for an ordinary-Qwen request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum QwenBoundGeneration {
+pub enum QwenBoundGeneration {
     Qwen38(Qwen38GenerationMode),
     Template(QwenGenerationMode),
 }
@@ -809,7 +803,7 @@ pub(crate) enum QwenBoundGeneration {
 /// code and the message a lane would refuse with.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub(crate) enum Support {
+pub enum Support {
     Supported,
     Unsupported { code: &'static str, message: String },
 }
@@ -817,7 +811,7 @@ pub(crate) enum Support {
 impl Support {
     /// The refusal a lane raises when a request uses an unsupported control:
     /// the same code and message the capability advertises.
-    pub(crate) fn require(&self) -> Result<(), CapabilityError> {
+    pub fn require(&self) -> Result<(), CapabilityError> {
         match self {
             Self::Supported => Ok(()),
             Self::Unsupported { code, message } => Err(CapabilityError {
@@ -847,22 +841,22 @@ pub(crate) fn qwen_tools_support(template: QwenTemplate) -> Support {
 /// template renders. A family-level fact from the header alone; a lane that
 /// has not implemented a form reports that gap itself.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct InputCapability {
+pub struct InputCapability {
     /// Untemplated text (`--raw-prompt`, batch `prompt`/`prompt_file`).
-    pub(crate) raw: Support,
+    pub raw: Support,
     /// One user turn with optional system text (`--user`, batch `user`).
-    pub(crate) user: Support,
+    pub user: Support,
     /// A chat document (`--messages`, serve items).
-    pub(crate) messages: Support,
+    pub messages: Support,
     /// Function-tool definitions and tool-call history inside a document.
-    pub(crate) tools: Support,
+    pub tools: Support,
 }
 
 impl InputCapability {
     /// A claim, not a default: a family may declare this only when every
     /// form has an oracle-backed renderer (DeepSeek V4: dual-source chat
     /// fixtures incl. tools; Muse Glimmer: released ATEM prompt tests).
-    pub(crate) fn all_supported() -> Self {
+    pub fn all_supported() -> Self {
         Self {
             raw: Support::Supported,
             user: Support::Supported,
@@ -872,7 +866,7 @@ impl InputCapability {
     }
 
     /// Raw text always renders; every templated form shares one refusal.
-    pub(crate) fn raw_only(code: &'static str, message: String) -> Self {
+    pub fn raw_only(code: &'static str, message: String) -> Self {
         let unsupported = Support::Unsupported { code, message };
         Self {
             raw: Support::Supported,
@@ -883,7 +877,7 @@ impl InputCapability {
     }
 
     /// Nothing renders (no recognised architecture).
-    pub(crate) fn none(code: &'static str, message: String) -> Self {
+    pub fn none(code: &'static str, message: String) -> Self {
         let unsupported = Support::Unsupported { code, message };
         Self {
             raw: unsupported.clone(),
@@ -898,10 +892,232 @@ impl InputCapability {
 /// accepts, what applies when omitted, and whether the explicit thinking
 /// controls exist. Built from the same tables the binders parse with.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct ReasoningCapability {
-    pub(crate) levels: Vec<&'static str>,
+pub struct ReasoningCapability {
+    pub levels: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) fallback: Option<&'static str>,
-    pub(crate) no_thinking: Support,
-    pub(crate) thinking: Support,
+    pub fallback: Option<&'static str>,
+    pub no_thinking: Support,
+    pub thinking: Support,
+}
+
+#[cfg(test)]
+mod protocol_binding_tests {
+    use super::*;
+    use crate::messages::DeepSeekV4Reasoning;
+
+    #[test]
+
+    fn reasoning_controls_bind_through_each_family_table() {
+        use crate::messages::Qwen38ReasoningEffort;
+
+        use crate::open_responses::items::QwenTemplate;
+
+        use crate::prompt_template::{
+            QwenBoundGeneration, QwenReasoningControls, QwenUserPromptProtocol,
+        };
+
+        // Qwen3.8: every advertised level binds; `none` is the no-thinking mode;
+
+        // omission is upstream xhigh; a foreign level fails with the level list.
+
+        assert_eq!(
+            Qwen38GenerationMode::parse(None, false).unwrap(),
+            Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Xhigh)
+        );
+
+        for (name, expected) in Qwen38GenerationMode::LEVELS {
+            assert_eq!(
+                Qwen38GenerationMode::parse(Some(name), false).unwrap(),
+                *expected
+            );
+        }
+
+        assert_eq!(
+            Qwen38GenerationMode::parse(Some("none"), false).unwrap(),
+            Qwen38GenerationMode::NoThinking
+        );
+
+        assert_eq!(
+            Qwen38GenerationMode::parse(None, true).unwrap(),
+            Qwen38GenerationMode::NoThinking
+        );
+
+        let err = Qwen38GenerationMode::parse(Some("high"), false).unwrap_err();
+
+        assert_eq!(err.code, "reasoning_effort_invalid");
+
+        assert!(err.message.contains("none|low|medium|xhigh"), "{err}");
+
+        assert_eq!(
+            Qwen38GenerationMode::parse(Some("low"), true)
+                .unwrap_err()
+                .code,
+            "reasoning_conflict"
+        );
+
+        // DeepSeek: none/low/high/max; omission is chat; `xhigh` is foreign.
+
+        assert_eq!(
+            DeepSeekV4Reasoning::parse(None).unwrap(),
+            DeepSeekV4Reasoning::None
+        );
+
+        assert_eq!(
+            DeepSeekV4Reasoning::parse(Some("max")).unwrap(),
+            DeepSeekV4Reasoning::Max
+        );
+
+        assert!(
+            DeepSeekV4Reasoning::parse(Some("xhigh"))
+                .unwrap_err()
+                .message
+                .contains("none|low|high|max")
+        );
+
+        // Ordinary non-3.8 Qwen has no effort control and binds only the
+
+        // no-thinking transition, which needs a pinned template.
+
+        let pinned = QwenUserPromptProtocol::for_test(false, QwenTemplate::Qwen36);
+
+        assert_eq!(
+            pinned
+                .bind(QwenReasoningControls {
+                    effort: None,
+
+                    no_thinking: true
+                })
+                .unwrap(),
+            QwenBoundGeneration::Template(QwenGenerationMode::NoThinking)
+        );
+
+        assert_eq!(
+            pinned
+                .bind(QwenReasoningControls {
+                    effort: Some("low"),
+
+                    no_thinking: false
+                })
+                .unwrap_err()
+                .code,
+            "reasoning_effort_unsupported"
+        );
+
+        let generic = QwenUserPromptProtocol::for_test(false, QwenTemplate::Generic);
+
+        assert_eq!(
+            generic
+                .bind(QwenReasoningControls {
+                    effort: None,
+
+                    no_thinking: true
+                })
+                .unwrap_err()
+                .code,
+            "no_thinking_unsupported"
+        );
+
+        // The advertised capability is derived from the same tables.
+
+        let q38 = QwenUserPromptProtocol::for_test(true, QwenTemplate::Qwen38);
+
+        assert_eq!(
+            q38.reasoning_capability().levels,
+            Qwen38GenerationMode::level_names()
+        );
+
+        assert!(pinned.reasoning_capability().levels.is_empty());
+
+        assert!(matches!(
+            generic.reasoning_capability().no_thinking,
+            crate::prompt_template::Support::Unsupported { .. }
+        ));
+    }
+
+    #[test]
+
+    fn input_forms_bind_through_one_family_table() {
+        use crate::open_responses::items::QwenTemplate;
+
+        use crate::prompt_template::{
+            InputCapability, QwenUserPromptProtocol, Support, qwen_tools_support,
+        };
+
+        // Ordinary Qwen: plain chat is ChatML everywhere; tools need the
+
+        // released tool block, so only a pinned template advertises them, and
+
+        // the refusal a lane raises is the advertised one.
+
+        for template in [
+            QwenTemplate::Qwen35,
+            QwenTemplate::Qwen36,
+            QwenTemplate::Qwen38,
+        ] {
+            let protocol =
+                QwenUserPromptProtocol::for_test(template == QwenTemplate::Qwen38, template);
+
+            assert_eq!(
+                protocol.input_capability(),
+                InputCapability::all_supported(),
+                "{template:?}"
+            );
+
+            assert!(qwen_tools_support(template).require().is_ok());
+        }
+
+        let generic =
+            QwenUserPromptProtocol::for_test(false, QwenTemplate::Generic).input_capability();
+
+        assert_eq!(generic.raw, Support::Supported);
+
+        assert_eq!(generic.user, Support::Supported);
+
+        assert_eq!(generic.messages, Support::Supported);
+
+        let refusal = generic.tools.require().unwrap_err();
+
+        assert_eq!(refusal.code, "tools_require_known_release");
+
+        assert_eq!(
+            qwen_tools_support(QwenTemplate::Generic)
+                .require()
+                .unwrap_err(),
+            refusal
+        );
+
+        // Every templated form shares one refusal when the protocol is absent;
+
+        // raw text still renders.
+
+        let raw_only = InputCapability::raw_only("prompt_protocol_unsupported", "x".into());
+
+        assert_eq!(raw_only.raw, Support::Supported);
+
+        for form in [&raw_only.user, &raw_only.messages, &raw_only.tools] {
+            assert_eq!(
+                form.require().unwrap_err().code,
+                "prompt_protocol_unsupported"
+            );
+        }
+
+        assert_eq!(
+            InputCapability::none("unknown_family", "x".into())
+                .raw
+                .require()
+                .unwrap_err()
+                .code,
+            "unknown_family"
+        );
+
+        // The projection carries the same status/code vocabulary as reasoning.
+
+        let json = serde_json::to_value(&generic).unwrap();
+
+        assert_eq!(json["user"], serde_json::json!({"status": "supported"}));
+
+        assert_eq!(json["tools"]["status"], "unsupported");
+
+        assert_eq!(json["tools"]["code"], "tools_require_known_release");
+    }
 }

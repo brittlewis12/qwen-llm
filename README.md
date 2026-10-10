@@ -95,7 +95,7 @@ cat question.txt | qwen run -m MODEL.gguf -n 4096 --user -
 - `--reasoning-effort` takes the levels the release defines, such as
   `none`, `low`, `medium` and `xhigh` on Qwen3.8. `--no-thinking` selects the
   release's non-thinking mode where it has one.
-- Sampling uses per-release presets, which `qwen info --json` reports.
+- Sampling uses per-release presets, which `qwen info -m MODEL --json` reports.
   `--temp 0` gives greedy decoding. A sampled run without `--seed` picks a
   seed and prints it.
 - stdout gets the generated text, including any reasoning and tool-call
@@ -112,7 +112,7 @@ qwen run -m MODEL.gguf -n 4096 --messages -
 
 The JSON is an array of chat messages, or `{ "messages": [...], "tools": [...] }`
 with OpenAI-style tool definitions. The exact message and tool-call fields
-vary by family. `qwen info --json` shows which input forms a given file
+vary by family. `qwen info -m MODEL --json` shows which input forms a given file
 accepts.
 
 `--raw-prompt '<text>'` sends exact model input with no template.

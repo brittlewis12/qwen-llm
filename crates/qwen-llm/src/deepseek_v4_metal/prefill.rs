@@ -2724,7 +2724,6 @@ fn packed_q8_qa_kv_matrix_mode() -> PackedQaKvMatrixMode {
     })
 }
 
-const PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE: &str = "Apple M4 Max";
 const PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES: u64 = 104_202_502_492;
 const PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES: u64 = 89_920_886_108;
 const PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES: u64 = 89_060_075_612;
@@ -2753,14 +2752,50 @@ fn packed_q8_partial_matrix_chunk_qualified(n_tokens: usize) -> bool {
     (256..=DEEPSEEK_V4_PREFILL_MAX_TOKENS).contains(&n_tokens)
 }
 
+fn packed_q8_matrix_family_qualification() -> &'static crate::metal::Qualification {
+    &crate::metal::DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY
+}
+
+fn packed_grouped_expert_qualification() -> &'static crate::metal::Qualification {
+    &crate::metal::DEEPSEEK_V4_PACKED_GROUPED_EXPERT
+}
+
+fn packed_gpu_route_compaction_qualification() -> &'static crate::metal::Qualification {
+    &crate::metal::DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION
+}
+
+fn packed_mxfp4_matrix_qualification() -> &'static crate::metal::Qualification {
+    &crate::metal::DEEPSEEK_V4_PACKED_MXFP4_MATRIX
+}
+
+fn packed_e8p32_router_qualification() -> &'static crate::metal::Qualification {
+    &crate::metal::DEEPSEEK_V4_PACKED_E8P32_ROUTER
+}
+
+fn packed_qa_raw_kv_matrix_qualification() -> &'static crate::metal::Qualification {
+    &crate::metal::DEEPSEEK_V4_PACKED_QA_RAW_KV_MATRIX
+}
+
+fn packed_indexer_q_matrix_qualification() -> &'static crate::metal::Qualification {
+    &crate::metal::DEEPSEEK_V4_PACKED_INDEXER_Q_MATRIX
+}
+
+fn packed_grouped_q3q4_qualification() -> &'static crate::metal::Qualification {
+    &crate::metal::DEEPSEEK_V4_PACKED_GROUPED_Q3Q4
+}
+
+fn packed_shared_route_overlap_qualification() -> &'static crate::metal::Qualification {
+    &crate::metal::DEEPSEEK_V4_PACKED_SHARED_ROUTE_OVERLAP
+}
+
 fn packed_router_e8p32_scope_qualified(
-    device_name: &str,
+    facts: &crate::metal::DeviceFacts,
     tensor_count: usize,
     source_bytes: u64,
     expert_count: usize,
     n_tokens: usize,
 ) -> bool {
-    device_name == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE
+    packed_e8p32_router_qualification().holds_for(facts)
         && tensor_count == 1_328
         && source_bytes == PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES
         && expert_count == 160
@@ -2768,13 +2803,13 @@ fn packed_router_e8p32_scope_qualified(
 }
 
 fn packed_q8_qa_kv_matrix_scope_qualified(
-    device_name: &str,
+    facts: &crate::metal::DeviceFacts,
     tensor_count: usize,
     source_bytes: u64,
     expert_count: usize,
     n_tokens: usize,
 ) -> bool {
-    device_name == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE
+    packed_qa_raw_kv_matrix_qualification().holds_for(facts)
         && tensor_count == 1_328
         && source_bytes == PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES
         && expert_count == 160
@@ -2782,7 +2817,7 @@ fn packed_q8_qa_kv_matrix_scope_qualified(
 }
 
 fn packed_q8_compressor_matrix_scope_qualified(
-    device_name: &str,
+    facts: &crate::metal::DeviceFacts,
     tensor_count: usize,
     source_bytes: u64,
     expert_count: usize,
@@ -2799,43 +2834,35 @@ fn packed_q8_compressor_matrix_scope_qualified(
         packed_q8_matrix_chunk_qualified(n_tokens)
     };
     chunk_qualified
-        && device_name == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE
+        && packed_q8_matrix_family_qualification().holds_for(facts)
         && tensor_count == 1_328
         && packed_q8_matrix_asset_qualified(source_bytes, expert_count)
 }
 
 fn packed_gpu_route_compact_scope_qualified(
-    device_name: &str,
+    facts: &crate::metal::DeviceFacts,
     tensor_count: usize,
     source_bytes: u64,
     expert_count: usize,
     n_tokens: usize,
 ) -> bool {
     packed_q8_matrix_chunk_qualified(n_tokens)
-        && packed_q8_compressor_matrix_scope_qualified(
-            device_name,
-            tensor_count,
-            source_bytes,
-            expert_count,
-            n_tokens,
-        )
+        && packed_gpu_route_compaction_qualification().holds_for(facts)
+        && tensor_count == 1_328
+        && packed_q8_matrix_asset_qualified(source_bytes, expert_count)
 }
 
 fn packed_indexer_q_matrix_scope_qualified(
-    device_name: &str,
+    facts: &crate::metal::DeviceFacts,
     tensor_count: usize,
     source_bytes: u64,
     expert_count: usize,
     n_tokens: usize,
 ) -> bool {
     n_tokens == DEEPSEEK_V4_PREFILL_MAX_TOKENS
-        && packed_q8_compressor_matrix_scope_qualified(
-            device_name,
-            tensor_count,
-            source_bytes,
-            expert_count,
-            n_tokens,
-        )
+        && packed_indexer_q_matrix_qualification().holds_for(facts)
+        && tensor_count == 1_328
+        && packed_q8_matrix_asset_qualified(source_bytes, expert_count)
 }
 
 fn packed_q8_compressor_matrix_for_chunk(
@@ -2845,7 +2872,7 @@ fn packed_q8_compressor_matrix_for_chunk(
 ) -> bool {
     packed_q8_compressor_matrix_enabled()
         && packed_q8_compressor_matrix_scope_qualified(
-            &ctx.device.name().to_string(),
+            ctx.device_facts(),
             residency.report().tensor_count,
             residency.report().source_bytes,
             residency.config().expert_count as usize,
@@ -2860,7 +2887,7 @@ fn packed_q8_shared_matrix_for_chunk(
 ) -> bool {
     packed_q8_shared_matrix_enabled()
         && packed_q8_compressor_matrix_scope_qualified(
-            &ctx.device.name().to_string(),
+            ctx.device_facts(),
             residency.report().tensor_count,
             residency.report().source_bytes,
             residency.config().expert_count as usize,
@@ -2904,7 +2931,7 @@ fn packed_q8_output_projection_for_chunk(
     let value = std::env::var("QWEN_DSV4_PACKED_Q8_OUTPUT").ok();
     let policy = parse_packed_q8_output_policy(value.as_deref())?;
     let profile_qualified = packed_q8_compressor_matrix_scope_qualified(
-        &ctx.device.name().to_string(),
+        ctx.device_facts(),
         residency.report().tensor_count,
         residency.report().source_bytes,
         residency.config().expert_count as usize,
@@ -2944,7 +2971,7 @@ fn packed_q8_qb_projection_for_chunk(
     let value = std::env::var("QWEN_DSV4_PACKED_Q8_QB").ok();
     let policy = parse_packed_q8_qb_policy(value.as_deref())?;
     let profile_qualified = packed_q8_compressor_matrix_scope_qualified(
-        &ctx.device.name().to_string(),
+        ctx.device_facts(),
         residency.report().tensor_count,
         residency.report().source_bytes,
         residency.config().expert_count as usize,
@@ -6029,7 +6056,7 @@ fn packed_mxfp4_matrix_candidate_supported(ctx: &MetalContext) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 fn packed_grouped_q3q4_scope_qualified(
-    device_name: &str,
+    facts: &crate::metal::DeviceFacts,
     tensor_count: usize,
     source_bytes: u64,
     expert_count: usize,
@@ -6038,8 +6065,29 @@ fn packed_grouped_q3q4_scope_qualified(
     up_dtype: GgmlType,
     down_dtype: GgmlType,
 ) -> bool {
-    device_name == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE
-        && tensor_count == 1_328
+    packed_grouped_q3q4_qualification().holds_for(facts)
+        && packed_grouped_q3q4_identity_scope_qualified(
+            tensor_count,
+            source_bytes,
+            expert_count,
+            n_tokens,
+            gate_dtype,
+            up_dtype,
+            down_dtype,
+        )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn packed_grouped_q3q4_identity_scope_qualified(
+    tensor_count: usize,
+    source_bytes: u64,
+    expert_count: usize,
+    n_tokens: usize,
+    gate_dtype: GgmlType,
+    up_dtype: GgmlType,
+    down_dtype: GgmlType,
+) -> bool {
+    tensor_count == 1_328
         && source_bytes == PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES
         && expert_count == 160
         && (n_tokens == PACKED_GROUPED_Q3Q4_NARROW_TOKENS
@@ -6051,7 +6099,7 @@ fn packed_grouped_q3q4_scope_qualified(
 
 #[allow(clippy::too_many_arguments)]
 fn packed_shared_route_overlap_scope_qualified(
-    device_name: &str,
+    facts: &crate::metal::DeviceFacts,
     tensor_count: usize,
     source_bytes: u64,
     expert_count: usize,
@@ -6061,8 +6109,8 @@ fn packed_shared_route_overlap_scope_qualified(
     down_dtype: GgmlType,
 ) -> bool {
     packed_q8_partial_matrix_chunk_qualified(n_tokens)
-        && packed_grouped_q3q4_scope_qualified(
-            device_name,
+        && packed_shared_route_overlap_qualification().holds_for(facts)
+        && packed_grouped_q3q4_identity_scope_qualified(
             tensor_count,
             source_bytes,
             expert_count,
@@ -6074,13 +6122,13 @@ fn packed_shared_route_overlap_scope_qualified(
 }
 
 fn packed_mxfp4_matrix_scope_qualified(
-    device_name: &str,
+    facts: &crate::metal::DeviceFacts,
     tensor_count: usize,
     source_bytes: u64,
     expert_count: usize,
     n_tokens: usize,
 ) -> bool {
-    device_name == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE
+    packed_mxfp4_matrix_qualification().holds_for(facts)
         && tensor_count == 1_328
         && (n_tokens == PACKED_MATRIX_MIN_TOKENS || n_tokens == DEEPSEEK_V4_PREFILL_MAX_TOKENS)
         && matches!(
@@ -6106,7 +6154,6 @@ fn packed_grouped_iq3_fused_candidate_supported(ctx: &MetalContext) -> bool {
     fused.threadExecutionWidth() == 32 && fused.maxTotalThreadsPerThreadgroup() >= 128
 }
 
-const PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE: &str = "Apple M4 Max";
 const PACKED_GROUPED_EXPERT_MAX_TOKENS: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
 const PACKED_GPU_ROUTE_MAX_TOKENS: usize = 2_048;
 
@@ -6134,6 +6181,17 @@ fn packed_grouped_expert_mode() -> PackedGroupedExpertMode {
     })
 }
 
+fn packed_grouped_expert_device_enabled(
+    mode: PackedGroupedExpertMode,
+    facts: &crate::metal::DeviceFacts,
+) -> bool {
+    match mode {
+        PackedGroupedExpertMode::Auto => packed_grouped_expert_qualification().holds_for(facts),
+        PackedGroupedExpertMode::ForceOn => true,
+        PackedGroupedExpertMode::ForceOff => false,
+    }
+}
+
 fn packed_grouped_iq2_mma16_qualified(n_tokens: usize) -> bool {
     matches!(
         n_tokens,
@@ -6149,7 +6207,7 @@ fn packed_grouped_iq2_matrix_execution_chunk_qualified(n_tokens: usize) -> bool 
 }
 
 fn packed_grouped_iq2_matrix_scope_qualified(
-    device_name: &str,
+    facts: &crate::metal::DeviceFacts,
     tensor_count: usize,
     source_bytes: u64,
     expert_count: usize,
@@ -6163,7 +6221,7 @@ fn packed_grouped_iq2_matrix_scope_qualified(
                 MOE_EXPERT_COUNT
             ) | (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216)
         );
-    device_name == PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE
+    packed_grouped_expert_qualification().holds_for(facts)
         && (packed_grouped_iq2_mma16_qualified(n_tokens)
             || (partial_asset_qualified && packed_q8_partial_matrix_chunk_qualified(n_tokens)))
 }
@@ -6194,12 +6252,9 @@ fn packed_grouped_expert_policy(
     source_bytes: u64,
     expert_count: usize,
 ) -> Result<PackedExpertPolicy, DeepSeekV4MetalError> {
-    let device_name = ctx.device.name().to_string();
-    let enabled = match packed_grouped_expert_mode() {
-        PackedGroupedExpertMode::Auto => device_name == PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
-        PackedGroupedExpertMode::ForceOn => true,
-        PackedGroupedExpertMode::ForceOff => false,
-    } && packed_grouped_expert_kernels_supported(ctx);
+    let enabled =
+        packed_grouped_expert_device_enabled(packed_grouped_expert_mode(), ctx.device_facts())
+            && packed_grouped_expert_kernels_supported(ctx);
     let f16_iq2 = packed_iq2_f16_mm64x32_enabled();
     let wide_iq2 = packed_iq2_mm64x32_enabled();
     let iq2_matrix_supported = if f16_iq2 {
@@ -6212,7 +6267,7 @@ fn packed_grouped_expert_policy(
     if packed_grouped_iq2_mma16_enabled()
         && enabled
         && packed_grouped_iq2_matrix_scope_qualified(
-            &device_name,
+            ctx.device_facts(),
             tensor_count,
             source_bytes,
             expert_count,
@@ -10384,7 +10439,6 @@ impl DeepSeekV4Session {
         }
         self.residency.validate_context(ctx)?;
         let n_tokens = checked_token_count(token_ids.len())?;
-        let device_name = ctx.device.name().to_string();
         let residency_tensor_count = self.residency.report().tensor_count;
         let residency_source_bytes = self.residency.report().source_bytes;
         let expert_count = self.prefill.moe.expert_count;
@@ -10393,7 +10447,7 @@ impl DeepSeekV4Session {
             && packed_gpu_route_compact_enabled()
             && token_ids.len() <= PACKED_GPU_ROUTE_MAX_TOKENS
             && packed_gpu_route_compact_scope_qualified(
-                &device_name,
+                ctx.device_facts(),
                 residency_tensor_count,
                 residency_source_bytes,
                 expert_count,
@@ -10411,7 +10465,7 @@ impl DeepSeekV4Session {
             };
         let mxfp4_matrix = packed_mxfp4_matrix_enabled()
             && packed_mxfp4_matrix_scope_qualified(
-                &device_name,
+                ctx.device_facts(),
                 residency_tensor_count,
                 residency_source_bytes,
                 expert_count,
@@ -10436,14 +10490,14 @@ impl DeepSeekV4Session {
             packed_q8_shared_matrix_for_chunk(ctx, &self.residency, token_ids.len());
         let router_e8p32_strict = packed_router_e8p32_strict_enabled()
             && packed_router_e8p32_scope_qualified(
-                &device_name,
+                ctx.device_facts(),
                 residency_tensor_count,
                 residency_source_bytes,
                 expert_count,
                 token_ids.len(),
             );
         let q_a_kv_matrix = if packed_q8_qa_kv_matrix_scope_qualified(
-            &device_name,
+            ctx.device_facts(),
             residency_tensor_count,
             residency_source_bytes,
             expert_count,
@@ -10455,7 +10509,7 @@ impl DeepSeekV4Session {
         };
         let indexer_q_matrix = packed_indexer_q_matrix_enabled()
             && packed_indexer_q_matrix_scope_qualified(
-                &device_name,
+                ctx.device_facts(),
                 residency_tensor_count,
                 residency_source_bytes,
                 expert_count,
@@ -10619,7 +10673,6 @@ impl DeepSeekV4Session {
         layer_completed: &mut impl FnMut(usize),
     ) -> Result<(), DeepSeekV4MetalError> {
         let n_tokens = token_ids.len();
-        let device_name = ctx.device.name().to_string();
         let residency_tensor_count = self.residency.report().tensor_count;
         let residency_source_bytes = self.residency.report().source_bytes;
         let expert_count = self.prefill.moe.expert_count;
@@ -10850,7 +10903,7 @@ impl DeepSeekV4Session {
             let overlap_shared_route = packed_shared_route_overlap_enabled()
                 && route_policy == PackedRoutePolicy::Cpu
                 && packed_shared_route_overlap_scope_qualified(
-                    &device_name,
+                    ctx.device_facts(),
                     residency_tensor_count,
                     residency_source_bytes,
                     expert_count,
@@ -10868,7 +10921,7 @@ impl DeepSeekV4Session {
             let overlap_shared_route = packed_shared_route_overlap_enabled()
                 && route_policy == PackedRoutePolicy::Cpu
                 && packed_shared_route_overlap_scope_qualified(
-                    &device_name,
+                    ctx.device_facts(),
                     residency_tensor_count,
                     residency_source_bytes,
                     expert_count,
@@ -11633,7 +11686,7 @@ impl DeepSeekV4Session {
             let shared_down = self.layer_tensor(layer, "ffn_down_shexp.weight")?;
             let grouped_q3q4_qualified = packed_grouped_q3q4_enabled()
                 && packed_grouped_q3q4_scope_qualified(
-                    &ctx.device.name().to_string(),
+                    ctx.device_facts(),
                     self.residency.report().tensor_count,
                     self.residency.report().source_bytes,
                     self.prefill.moe.expert_count,
@@ -11822,7 +11875,7 @@ impl DeepSeekV4Session {
                 .map_or(0.0, |started| started.elapsed().as_secs_f64());
             let post_route_wait_started = trace_layers.then(std::time::Instant::now);
             expert_command.commit();
-            crate::metal::wait_unchecked(&expert_command);
+            crate::metal::wait_unchecked(expert_command);
             let post_route_wait_seconds = post_route_wait_started
                 .as_ref()
                 .map_or(0.0, |started| started.elapsed().as_secs_f64());
@@ -11833,7 +11886,7 @@ impl DeepSeekV4Session {
                     "packed layer {layer} shared-expert command failed: {error}"
                 ));
             }
-            if let Err(error) = crate::metal::command_buffer_completed(&expert_command) {
+            if let Err(error) = crate::metal::command_buffer_completed(expert_command) {
                 return invalid(format!("packed layer {layer} command failed: {error}"));
             }
             #[cfg(feature = "dsv4-diagnostics")]

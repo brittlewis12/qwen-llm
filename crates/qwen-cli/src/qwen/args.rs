@@ -145,7 +145,7 @@ pub(crate) struct Args {
     #[arg(short = 'n', long, hide_short_help = true, default_value_t = 64)]
     pub(crate) tokens: usize,
 
-    /// Sampling temperature; zero is greedy. Omitted on a single request, the identified release's preset applies (`qwen info --json` reports it; greedy with --prompt-lookup); the default shown applies to --requests-jsonl.
+    /// Sampling temperature; zero is greedy. Omitted on a single request, the identified release's preset applies (`qwen info -m MODEL --json` reports it; greedy with --prompt-lookup); the default shown applies to --requests-jsonl.
     #[arg(
         long = "temp",
         visible_alias = "temperature",
@@ -247,7 +247,7 @@ pub(crate) struct Args {
 
     /// Append one structured record per completed single-turn request as
     /// JSONL under the common cross-family envelope
-    /// (schema: qwen-llm.request-stats v1): status, usage, finish reason,
+    /// (schema: qwen-llm.request-stats v2): status, usage, finish reason,
     /// timing, throughput, output fingerprint, build identity.
     ///
     /// Supported on every family's single-turn lane (`run`, `-p`,

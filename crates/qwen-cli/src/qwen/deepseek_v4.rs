@@ -2,11 +2,23 @@
 
 use super::*;
 
+fn request_stats_total_ms(
+    encoding_ms: f64,
+    preparation_ms: f64,
+    execution_start: Instant,
+    generator_return: Instant,
+) -> f64 {
+    encoding_ms
+        + preparation_ms
+        + generator_return
+            .duration_since(execution_start)
+            .as_secs_f64()
+            * 1e3
+}
+
 pub(crate) const DEEPSEEK_V4_SNAPSHOT_MAX_RECORD_BYTES: u64 = 1024 * 1024 * 1024;
 
 pub(crate) const DEEPSEEK_V4_SNAPSHOT_IDENTITY_CACHE_DIR: &str = ".qwen-dsv4-model-identity-v2";
-
-pub(crate) const DEEPSEEK_V4_MULTIGROUP_SELECTOR_QUALIFIED_DEVICE: &str = "Apple M4 Max";
 
 pub(crate) const DEEPSEEK_V4_PREFETCH_ENV: &str = "QWEN_DSV4_PREFETCH";
 
@@ -70,18 +82,19 @@ pub(crate) struct DeepSeekV4MultigroupSelectorCompletionRecord<'a> {
 impl DeepSeekV4MultigroupSelectorPlan {
     pub(crate) fn new(
         requested: DeepSeekV4MultigroupSelectorArg,
-        device_name: impl Into<String>,
+        device_facts: &qwen_llm::metal::DeviceFacts,
         capacity: DeepSeekV4SessionCapacity,
     ) -> Result<Self> {
-        let device_name = device_name.into();
-        let device_qualified = device_name == DEEPSEEK_V4_MULTIGROUP_SELECTOR_QUALIFIED_DEVICE;
+        let device_name = device_facts.name.clone();
+        let device_qualified =
+            qwen_llm::metal::DEEPSEEK_V4_MULTIGROUP_SELECTOR.holds_for(device_facts);
         let geometry = match requested {
             DeepSeekV4MultigroupSelectorArg::Auto | DeepSeekV4MultigroupSelectorArg::Off => None,
             DeepSeekV4MultigroupSelectorArg::QualifiedExperimental => {
                 ensure!(
                     device_qualified,
                     "--deepseek-v4-multigroup-selector=qualified-experimental requires {}, got {}",
-                    DEEPSEEK_V4_MULTIGROUP_SELECTOR_QUALIFIED_DEVICE,
+                    qwen_llm::metal::DEEPSEEK_V4_MULTIGROUP_SELECTOR.device_model,
                     device_name,
                 );
                 Some(
@@ -643,7 +656,6 @@ pub(crate) fn run_deepseek_v4_single_turn(
     validate_deepseek_v4_generation_mode(args, explicit)?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
     // The sidecar was preflighted with every other input before model open.
-    let request_start = std::time::Instant::now();
     let prefill_chunk_tokens = deepseek_v4_prefill_chunk_tokens()?;
     let prefetch_mode = configured_deepseek_v4_prefetch_mode()?;
     let sampling = cli_sampling_config(args)?;
@@ -703,6 +715,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
     // prompt encode alone; `tokenizer_ms` above (construction) stays on the
     // free-form stats line.
     let encode_ms = encode_t0.elapsed().as_secs_f64() * 1e3;
+    let preparation_t0 = Instant::now();
     let required_forwards = required_forwards(
         "DeepSeek V4",
         prompt_ids.len(),
@@ -716,6 +729,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
         .enumerate()
         .map(|(index, &token)| checked_token_id(token, vocab_size, &format!("prompt[{index}]")))
         .collect::<Result<Vec<_>>>()?;
+    let mut preparation_ms = preparation_t0.elapsed().as_secs_f64() * 1e3;
     let durable_store = deepseek_v4_checkpoint_store(args, staged_integrity)?;
     let durable_max_record_bytes = if durable_store.is_some() {
         durable_prefix_cache_max_entry_bytes(args)?
@@ -748,12 +762,14 @@ pub(crate) fn run_deepseek_v4_single_turn(
             );
         }
     }
+    let stop_validation_t0 = Instant::now();
     let stop_tokens = gguf
         .stop_token_ids()
         .context("load producer-declared DeepSeek V4 stop tokens")?;
     for &token in &stop_tokens {
         checked_token_id(token, vocab_size, "stop")?;
     }
+    preparation_ms += stop_validation_t0.elapsed().as_secs_f64() * 1e3;
     // Probe store occupancy before resolving the strong model identity so an
     // empty store with no planned capture skips identity work entirely.
     let durable_probe_t0 = Instant::now();
@@ -858,7 +874,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
     );
     let selector_plan = DeepSeekV4MultigroupSelectorPlan::new(
         args.deepseek_v4_multigroup_selector,
-        ctx.device.name().to_string(),
+        ctx.device_facts(),
         session_capacity,
     )?;
     let restored_snapshot = if snapshot_file_exists {
@@ -1256,6 +1272,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
             copy_deepseek_v4_logits(&session, vocab_size, "continuing")
         },
     )?;
+    let generator_return = Instant::now();
     drop(stdout);
     if durable_completed_eligible
         && durable_admitted
@@ -1420,10 +1437,11 @@ pub(crate) fn run_deepseek_v4_single_turn(
         append_request_trace(path, arrival_ms, prompt_ids.len(), generation.tokens.len())?;
     }
     if let Some(path) = args.request_stats_jsonl.as_ref() {
-        // Measure total request wall time at the outer boundary (not the sum
-        // of phase timings, which can miss inter-phase gaps).
-        // Record semantics: `total` is the request wall without model load.
-        let total_ms = request_start.elapsed().as_secs_f64() * 1e3 - load_ms;
+        // Preparation sums prompt range/token checks and stop-token checks;
+        // execution includes snapshot restore/publication during prefill and
+        // ends at generator return.
+        let total_ms =
+            request_stats_total_ms(encode_ms, preparation_ms, prefill_t0, generator_return);
         let measured = RequestStatsMeasured {
             input_tokens: prompt_ids.len() as u64,
             output_tokens: generation.tokens.len() as u64,
@@ -1680,7 +1698,7 @@ pub(crate) fn run_deepseek_v4_requests_jsonl(
     );
     let selector_plan = DeepSeekV4MultigroupSelectorPlan::new(
         args.deepseek_v4_multigroup_selector,
-        ctx.device.name().to_string(),
+        ctx.device_facts(),
         session_capacity,
     )?;
     let memory_plan = load_plan.memory_plan().clone();
@@ -2244,4 +2262,31 @@ pub(crate) fn print_deepseek_v4_census(model_path: &Path) -> Result<()> {
     serde_json::to_writer_pretty(std::io::stdout().lock(), &census)?;
     println!();
     Ok(())
+}
+
+#[cfg(test)]
+mod request_stats_timing_tests {
+    use super::request_stats_total_ms;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn total_sums_only_the_three_non_overlapping_contract_spans() {
+        let base = Instant::now();
+        let load_end = base + Duration::from_millis(80);
+        let session_end = load_end + Duration::from_millis(20);
+        let execution_start = session_end;
+        let generator_return = execution_start + Duration::from_millis(13);
+        let output_done = generator_return + Duration::from_millis(9);
+        let stats_line = output_done + Duration::from_millis(7);
+
+        // Load/session precede execution; output and stats follow generator return.
+        assert_eq!(
+            request_stats_total_ms(11.0, 7.0, execution_start, generator_return),
+            31.0
+        );
+        assert!(stats_line > output_done && output_done > generator_return);
+        let load_session_output_stats_total =
+            18.0 + stats_line.duration_since(base).as_secs_f64() * 1e3;
+        assert!(31.0 < load_session_output_stats_total);
+    }
 }

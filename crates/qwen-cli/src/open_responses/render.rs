@@ -49,12 +49,13 @@ const IM_START: &str = "<|im_start|>";
 const IM_END: &str = "<|im_end|>";
 const THINK_OPEN: &str = "<think>";
 const THINK_CLOSE: &str = "</think>";
+#[cfg(test)]
 const PRECLOSED_THINK: &str = "<think>\n\n</think>\n\n";
 
 /// What follows `<|im_start|>assistant\n` in the generation suffix, which
 /// also fixes the initial state of the output parser.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum QwenGeneration {
+pub enum QwenGeneration {
     /// Legacy unpinned ChatML: the model emits `<think>` itself if it wants to.
     Bare,
     /// `<think>\n`: the model continues inside an open think block.
@@ -65,7 +66,7 @@ pub(crate) enum QwenGeneration {
 
 /// Resolve the generation suffix for a bound request from its template's
 /// released default and the request's explicit controls.
-pub(crate) fn qwen_generation(request: &ServeRequest) -> QwenGeneration {
+pub fn qwen_generation(request: &ServeRequest) -> QwenGeneration {
     if request.no_thinking {
         return QwenGeneration::PreClosed;
     }
@@ -124,15 +125,15 @@ fn push_open_thinking(output: &mut AnnotatedPromptBuilder, context: SpanContext)
 /// (no `</think>` existed), which is the recorded checkpoint caveat for
 /// truncated turns.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SplitReasoning<'a> {
-    pub(crate) reasoning: Option<&'a str>,
-    pub(crate) visible: &'a str,
-    pub(crate) closed: bool,
+pub struct SplitReasoning<'a> {
+    pub reasoning: Option<&'a str>,
+    pub visible: &'a str,
+    pub closed: bool,
 }
 
 /// Headless split for pre-opened think blocks (DeepSeek V4 thinking
 /// tiers): everything before the first `</think>` is reasoning.
-pub(crate) fn split_preopened_reasoning(full: &str) -> SplitReasoning<'_> {
+pub fn split_preopened_reasoning(full: &str) -> SplitReasoning<'_> {
     match full.split_once(THINK_CLOSE) {
         Some((reasoning, visible)) => SplitReasoning {
             reasoning: Some(reasoning),
@@ -147,7 +148,7 @@ pub(crate) fn split_preopened_reasoning(full: &str) -> SplitReasoning<'_> {
     }
 }
 
-pub(crate) fn split_reasoning(full: &str) -> SplitReasoning<'_> {
+pub fn split_reasoning(full: &str) -> SplitReasoning<'_> {
     if let Some(rest) = full.strip_prefix(THINK_OPEN) {
         if let Some((reasoning, visible)) = rest.split_once(THINK_CLOSE) {
             SplitReasoning {
@@ -173,6 +174,7 @@ pub(crate) fn split_reasoning(full: &str) -> SplitReasoning<'_> {
 
 /// Unannotated inverse of `split_reasoning` for the exact-inverse test: the
 /// raw (untrimmed) think block, or the preclosed block when `no_thinking`.
+#[cfg(test)]
 fn render_assistant_body(
     reasoning: Option<&str>,
     visible: &str,
@@ -200,7 +202,7 @@ fn render_assistant_body(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum QwenServePromptSpanKind {
+pub enum QwenServePromptSpanKind {
     MessageStartMarker,
     Role,
     ContentSeparator,
@@ -218,7 +220,7 @@ pub(crate) enum QwenServePromptSpanKind {
 }
 
 impl QwenServePromptSpanKind {
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::MessageStartMarker => "message_start_marker",
             Self::Role => "role",
@@ -239,14 +241,14 @@ impl QwenServePromptSpanKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum QwenServePromptRole {
+pub enum QwenServePromptRole {
     System,
     User,
     Assistant,
 }
 
 impl QwenServePromptRole {
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::System => "system",
             Self::User => "user",
@@ -256,14 +258,14 @@ impl QwenServePromptRole {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum QwenServePromptChannel {
+pub enum QwenServePromptChannel {
     Thinking,
     ToolCall,
     ToolResult,
 }
 
 impl QwenServePromptChannel {
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Thinking => "thinking",
             Self::ToolCall => "tool_call",
@@ -273,21 +275,21 @@ impl QwenServePromptChannel {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct QwenServePromptSpan {
-    pub(crate) kind: QwenServePromptSpanKind,
-    pub(crate) message_index: Option<usize>,
-    pub(crate) tool_call_index: Option<usize>,
-    pub(crate) role: Option<QwenServePromptRole>,
-    pub(crate) channel: Option<QwenServePromptChannel>,
-    pub(crate) label: Option<String>,
-    pub(crate) byte_start: usize,
-    pub(crate) byte_end: usize,
+pub struct QwenServePromptSpan {
+    pub kind: QwenServePromptSpanKind,
+    pub message_index: Option<usize>,
+    pub tool_call_index: Option<usize>,
+    pub role: Option<QwenServePromptRole>,
+    pub channel: Option<QwenServePromptChannel>,
+    pub label: Option<String>,
+    pub byte_start: usize,
+    pub byte_end: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AnnotatedQwenServePrompt {
-    pub(crate) text: String,
-    pub(crate) spans: Vec<QwenServePromptSpan>,
+pub struct AnnotatedQwenServePrompt {
+    pub text: String,
+    pub spans: Vec<QwenServePromptSpan>,
 }
 
 #[derive(Clone, Copy)]
@@ -647,19 +649,17 @@ fn push_assistant_body(
 
 /// Render the full prompt for a validated request, including the
 /// generation suffix.
-pub(crate) fn render_qwen_serve_prompt(request: &ServeRequest) -> String {
+pub fn render_qwen_serve_prompt(request: &ServeRequest) -> String {
     render_qwen_serve_prompt_annotated(request).text
 }
 
-pub(crate) fn render_qwen_serve_prompt_annotated(
-    request: &ServeRequest,
-) -> AnnotatedQwenServePrompt {
+pub fn render_qwen_serve_prompt_annotated(request: &ServeRequest) -> AnnotatedQwenServePrompt {
     render_qwen_serve_prompt_annotated_with(request, true)
 }
 
 /// Render with or without the trailing generation suffix (transcript-only
 /// rendering is used by the census tooling).
-pub(crate) fn render_qwen_serve_prompt_annotated_with(
+pub fn render_qwen_serve_prompt_annotated_with(
     request: &ServeRequest,
     append_generation: bool,
 ) -> AnnotatedQwenServePrompt {
@@ -851,7 +851,7 @@ fn qwen38_generation_mode(request: &ServeRequest) -> Option<Qwen38GenerationMode
     }))
 }
 
-pub(crate) fn qwen_serve_generation_mode_name(request: &ServeRequest) -> &'static str {
+pub fn qwen_serve_generation_mode_name(request: &ServeRequest) -> &'static str {
     match qwen38_generation_mode(request) {
         Some(Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Low)) => "thinking_low",
         Some(Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Medium)) => "thinking_medium",
@@ -1322,10 +1322,12 @@ mod tests {
         Some(request)
     }
 
+    type OracleDivergence = (&'static str, fn(&str) -> String);
+
     fn assert_oracle_fixture(
         fixture_json: &str,
         template: QwenTemplate,
-        divergences: &[(&str, fn(&str) -> String)],
+        divergences: &[OracleDivergence],
         expected_checked: usize,
     ) {
         let fixture: serde_json::Value = serde_json::from_str(fixture_json).expect("fixture");

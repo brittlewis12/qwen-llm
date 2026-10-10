@@ -396,7 +396,7 @@ pub(crate) fn run_raw(
     let load_t0 = Instant::now();
     let ctx = MetalContext::new().context("initialize Metal for K2")?;
     let model = K2LoadedModel::load(&ctx, gguf, u32::try_from(capacity)?)?;
-    timing.record(Phase::ModelLoad, load_t0.elapsed())?;
+    timing.record(Phase::ModelLoad, load_t0.elapsed());
     let prefill = model.prefill_info(tokens.len());
     eprintln!(
         "k2_horizon: prefill={} chunk_tokens={} commands={} temporary_activation_bytes={}",
@@ -482,8 +482,8 @@ pub(crate) fn run_raw(
     timing.record(
         Phase::ResidentExecution,
         execution_end.duration_since(prefill_t0),
-    )?;
-    let timing = timing.finish(execution_end.duration_since(request_t0))?;
+    );
+    let timing = timing.finish(execution_end.duration_since(request_t0));
     let load_ms = timing.load_ms;
     match output {
         Some(output) => {

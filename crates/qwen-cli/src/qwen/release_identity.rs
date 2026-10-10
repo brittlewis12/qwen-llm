@@ -106,7 +106,7 @@ impl ReleaseIdentity {
         }
     }
 
-    /// Stable label for `qwen info --json` and diagnostics.
+    /// Stable label for `qwen info -m MODEL --json` and diagnostics.
     pub(crate) fn label(self) -> String {
         match self {
             Self::Qwen { version, shape } => {

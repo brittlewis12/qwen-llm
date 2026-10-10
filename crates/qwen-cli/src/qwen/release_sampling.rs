@@ -55,7 +55,7 @@ pub(crate) fn decimal(value: f32) -> f64 {
     value.to_string().parse().unwrap_or(f64::from(value))
 }
 
-/// The release decision as `qwen info --json` reports it.
+/// The release decision as `qwen info -m MODEL --json` reports it.
 pub(crate) fn projection(identity: ReleaseIdentity) -> serde_json::Value {
     let release = release_sampling(identity, 42);
     serde_json::json!({

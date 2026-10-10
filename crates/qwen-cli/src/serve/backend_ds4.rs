@@ -38,7 +38,6 @@ use super::render_ds4;
 use super::snapshot_cache::SnapshotCache;
 use crate::DeepSeekV4MultigroupSelectorPlan;
 use anyhow::Context as _;
-use objc2_metal::MTLDevice;
 use qwen_llm::checkpoint_identity::same_identity_sources;
 use qwen_llm::deepseek_v4::DeepSeekV4Config;
 use qwen_llm::deepseek_v4_checkpoint_store::{DeepSeekV4CheckpointStore, DeepSeekV4StoreContext};
@@ -296,11 +295,8 @@ impl DeepSeekV4Backend {
         let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, forward_limit)
             .context("plan DeepSeek V4 residency for serve")?;
         let session_capacity = plan.session_capacity();
-        let selector_plan = DeepSeekV4MultigroupSelectorPlan::new(
-            selector,
-            ctx.device.name().to_string(),
-            session_capacity,
-        )?;
+        let selector_plan =
+            DeepSeekV4MultigroupSelectorPlan::new(selector, ctx.device_facts(), session_capacity)?;
         let admitted = plan
             .admit(ctx.memory_signals())
             .context("admit DeepSeek V4 residency for serve")?;

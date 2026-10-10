@@ -210,18 +210,6 @@ impl DflashPrefixReplayCache {
     }
 }
 
-impl ServeError {
-    pub(crate) fn server_error(message: impl Into<String>) -> Self {
-        Self {
-            status: 500,
-            error_type: "server_error",
-            code: None,
-            param: None,
-            message: message.into(),
-        }
-    }
-}
-
 pub(crate) struct EngineBackend {
     loaded: LoadedModel,
     tokenizer: std::sync::Arc<Tokenizer>,

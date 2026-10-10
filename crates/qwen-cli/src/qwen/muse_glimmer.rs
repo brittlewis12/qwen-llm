@@ -2,6 +2,20 @@
 
 use super::*;
 
+fn request_stats_total_ms(
+    encoding_ms: f64,
+    preparation_ms: f64,
+    execution_start: Instant,
+    generator_return: Instant,
+) -> f64 {
+    encoding_ms
+        + preparation_ms
+        + generator_return
+            .duration_since(execution_start)
+            .as_secs_f64()
+            * 1e3
+}
+
 pub(crate) fn prepare_muse_glimmer_prompt(
     invocation: cli::Invocation,
     config: &MuseGlimmerConfig,
@@ -137,6 +151,7 @@ pub(crate) fn run_muse_glimmer_single_turn(
         .context("tokenize Muse Glimmer prompt")?;
     let encode_ms = encode_t0.elapsed().as_secs_f64() * 1e3;
     let tokenizer_ms = tokenizer_t0.elapsed().as_secs_f64() * 1e3;
+    let preparation_t0 = Instant::now();
     let prompt_tokens = prompt_ids
         .into_iter()
         .enumerate()
@@ -171,6 +186,7 @@ pub(crate) fn run_muse_glimmer_single_turn(
         )
         + prefill_scalar_tail_commands;
     let options = muse_runtime_options_from_env()?;
+    let preparation_ms = preparation_t0.elapsed().as_secs_f64() * 1e3;
     eprintln!(
         "muse_glimmer: loading {} for text generation",
         model_path.display()
@@ -278,6 +294,7 @@ pub(crate) fn run_muse_glimmer_single_turn(
                 .context("forward generated Muse Glimmer token")
         },
     )?;
+    let generator_return = Instant::now();
     if !generation.tokens.is_empty() {
         writeln!(stdout)?;
         stdout.flush().context("flush Muse Glimmer final newline")?;
@@ -321,7 +338,8 @@ pub(crate) fn run_muse_glimmer_single_turn(
             output_tokens: generation.tokens.len() as u64,
             transitions: generation.transitions as u64,
             stop_reason: generation.stop_reason,
-            // Record semantics: encode-only tokenization; total without load.
+            // Record semantics: encoding, encoded-prompt preparation, and
+            // prefill through generator return.
             tokenizer_ms: encode_ms,
             load_ms,
             prefill_ms,
@@ -329,7 +347,12 @@ pub(crate) fn run_muse_glimmer_single_turn(
             decode_ms: generation.wall_ms,
             decode_tps,
             transition_tps,
-            total_ms: request_t0.elapsed().as_secs_f64() * 1e3 - load_ms,
+            total_ms: request_stats_total_ms(
+                encode_ms,
+                preparation_ms,
+                prefill_t0,
+                generator_return,
+            ),
             output_fingerprint: GeneratedTokenSha256Digest::of(&generation.tokens),
         };
         append_single_turn_stats_record(
@@ -342,4 +365,31 @@ pub(crate) fn run_muse_glimmer_single_turn(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod request_stats_timing_tests {
+    use super::request_stats_total_ms;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn total_sums_only_the_three_non_overlapping_contract_spans() {
+        let base = Instant::now();
+        let load_end = base + Duration::from_millis(80);
+        let session_end = load_end + Duration::from_millis(20);
+        let execution_start = session_end;
+        let generator_return = execution_start + Duration::from_millis(13);
+        let output_done = generator_return + Duration::from_millis(9);
+        let stats_line = output_done + Duration::from_millis(7);
+
+        // Load/session precede execution; output and stats follow generator return.
+        assert_eq!(
+            request_stats_total_ms(11.0, 7.0, execution_start, generator_return),
+            31.0
+        );
+        assert!(stats_line > output_done && output_done > generator_return);
+        let load_session_output_stats_total =
+            18.0 + stats_line.duration_since(base).as_secs_f64() * 1e3;
+        assert!(31.0 < load_session_output_stats_total);
+    }
 }

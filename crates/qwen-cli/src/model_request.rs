@@ -1,11 +1,10 @@
 use serde_json::Value;
 
-#[allow(dead_code)] // Currently consumed by qwen-lens; shared with future native input.
-pub(crate) mod prefill;
+pub mod prefill;
 
 /// Origin of the model-facing system message before wire protocols converge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SystemSource {
+pub enum SystemSource {
     Instructions,
     System,
     Developer,
@@ -23,7 +22,7 @@ impl SystemSource {
 
 /// One validated conversation turn, independent of its wire representation.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Turn {
+pub enum Turn {
     User(String),
     Assistant {
         reasoning: Option<String>,
@@ -36,18 +35,18 @@ pub(crate) enum Turn {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ToolCall {
-    pub(crate) call_id: String,
-    pub(crate) name: String,
+pub struct ToolCall {
+    pub call_id: String,
+    pub name: String,
     /// Raw JSON string exactly as the provider replayed it.
-    pub(crate) arguments: String,
+    pub arguments: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ToolResult {
-    pub(crate) call_id: String,
-    pub(crate) name: String,
-    pub(crate) output: String,
+pub struct ToolResult {
+    pub call_id: String,
+    pub name: String,
+    pub output: String,
 }
 
 /// The tool-name grammar every lane admits: `[A-Za-z0-9_.-]{1,64}`. Dots are
@@ -66,26 +65,26 @@ pub(crate) fn tool_name_is_valid(name: &str) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ToolDefinition {
-    pub(crate) name: String,
-    pub(crate) description: Option<String>,
-    pub(crate) parameters: Value,
-    pub(crate) strict: Option<bool>,
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: Option<String>,
+    pub parameters: Value,
+    pub strict: Option<bool>,
 }
 
 /// Validated model-facing transcript and tool declarations.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) struct ModelRequest {
-    pub(crate) system: Option<String>,
-    pub(crate) system_source: Option<SystemSource>,
-    pub(crate) turns: Vec<Turn>,
-    pub(crate) tools: Vec<ToolDefinition>,
+pub struct ModelRequest {
+    pub system: Option<String>,
+    pub system_source: Option<SystemSource>,
+    pub turns: Vec<Turn>,
+    pub tools: Vec<ToolDefinition>,
 }
 
 impl ModelRequest {
     /// Whether rendering needs the family's tool block: declared tools or any
     /// replayed call/result turn.
-    pub(crate) fn has_tool_surface(&self) -> bool {
+    pub fn has_tool_surface(&self) -> bool {
         !self.tools.is_empty()
             || self.turns.iter().any(|turn| match turn {
                 Turn::Assistant { calls, .. } => !calls.is_empty(),

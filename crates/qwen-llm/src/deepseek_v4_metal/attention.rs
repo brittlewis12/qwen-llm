@@ -2,6 +2,18 @@
 
 use super::*;
 
+pub(super) fn deepseek_v4_singleton_splitk_hca_qualified(
+    facts: &crate::metal::DeviceFacts,
+) -> bool {
+    crate::metal::DEEPSEEK_V4_SPLITK_HCA.holds_for(facts)
+}
+
+pub(super) fn deepseek_v4_singleton_grouped_long_hca_qualified(
+    facts: &crate::metal::DeviceFacts,
+) -> bool {
+    crate::metal::DEEPSEEK_V4_GROUPED_LONG_HCA.holds_for(facts)
+}
+
 pub const DEEPSEEK_V4_HC_PARAMETER_COUNT: usize = 24;
 
 /// Numerical cache contract used by a native DeepSeek V4 execution path.
@@ -321,7 +333,7 @@ impl DeepSeekV4PositionZeroAttentionScratch {
         }
         #[cfg(not(test))]
         {
-            ctx.device.name().to_string() == DEEPSEEK_V4_LONG_HCA_QUALIFIED_DEVICE
+            deepseek_v4_singleton_splitk_hca_qualified(ctx.device_facts())
         }
     }
 
@@ -333,7 +345,7 @@ impl DeepSeekV4PositionZeroAttentionScratch {
         }
         #[cfg(not(test))]
         {
-            ctx.device.name().to_string() == DEEPSEEK_V4_LONG_HCA_QUALIFIED_DEVICE
+            deepseek_v4_singleton_grouped_long_hca_qualified(ctx.device_facts())
         }
     }
 

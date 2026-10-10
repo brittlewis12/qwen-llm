@@ -2,6 +2,20 @@
 
 use super::*;
 
+fn request_stats_total_ms(
+    encoding_ms: f64,
+    preparation_ms: f64,
+    execution_start: Instant,
+    generator_return: Instant,
+) -> f64 {
+    encoding_ms
+        + preparation_ms
+        + generator_return
+            .duration_since(execution_start)
+            .as_secs_f64()
+            * 1e3
+}
+
 pub(crate) fn run_single_turn(
     model_path: &Path,
     gguf: GgufFile,
@@ -435,6 +449,12 @@ pub(crate) fn execute_single_turn_request(
         prompt_ids.len(),
         args.tokens
     );
+    let stop_tokens = loaded
+        .gguf()
+        .stop_token_ids()
+        .context("load producer-declared stop tokens")?;
+    let sampling_config = cli_sampling_config(args)?;
+    let mut sampler = Sampler::new(sampling_config).context("initialize request sampler")?;
     let capacity_validation_ms = validation_t0.elapsed().as_secs_f64() * 1e3;
     let allocated = allocate_prefill_request_state(
         loaded,
@@ -443,6 +463,10 @@ pub(crate) fn execute_single_turn_request(
         capacity,
         durable_store.is_none(),
     )?;
+    // Request-state allocation is session setup; the contract's execution
+    // span begins only after it returns. Durable restore below remains inside
+    // execution, even though Qwen's prefill timer starts after restore.
+    let resident_execution_t0 = Instant::now();
     let chunk = allocated.chunk;
     let prefill_chunk_decision = allocated.decision;
     let mut scratch = allocated.scratch;
@@ -660,17 +684,12 @@ pub(crate) fn execute_single_turn_request(
     let mut first_delivery_ms = None;
     let mut first_callback_duration_ms = None;
     let mut first_delivery_allocated = None;
-    let stop_tokens = loaded
-        .gguf()
-        .stop_token_ids()
-        .context("load producer-declared stop tokens")?;
-    let sampling_config = cli_sampling_config(args)?;
-    let mut sampler = Sampler::new(sampling_config).context("initialize request sampler")?;
     let greedy_gpu_decision =
         resolve_greedy_gpu_decision(greedy_gpu_mode, sampling_config, args.prompt_lookup);
     let use_gpu_greedy = greedy_gpu_decision.enabled;
     #[allow(unused_assignments)]
     let mut dflash_stats: Option<DflashDecodeStats> = None;
+    let generator_return;
     let (generation, prompt_lookup_stats, sampling_attribution, sampled_structural) =
         if let Some(head) = dflash_head {
             // v0.77 DFlash speculative decode. Seed the drafter's cross-context
@@ -751,6 +770,7 @@ pub(crate) fn execute_single_turn_request(
                     Ok(())
                 },
             )?;
+            generator_return = Instant::now();
             sequence = result.sequence;
             let s = &result.stats;
             let steps = s.spec_steps.max(1) as f64;
@@ -821,6 +841,7 @@ pub(crate) fn execute_single_turn_request(
                     Ok(())
                 },
             )?;
+            generator_return = Instant::now();
             sequence = result.sequence;
             (result.generation, Some(result.stats), None, None)
         } else {
@@ -860,6 +881,7 @@ pub(crate) fn execute_single_turn_request(
                             Ok(next)
                         },
                     )?;
+                generator_return = Instant::now();
                 let clock_probe = sampling_clock_probe
                     .context("sampling attribution clock probe was not prepared")?
                     .clone();
@@ -904,44 +926,43 @@ pub(crate) fn execute_single_turn_request(
                         Ok(state)
                     },
                 )?;
+                generator_return = Instant::now();
                 (generation, None, Some(telemetry))
             } else if use_gpu_greedy {
-                (
-                    generate_gpu_greedy(
-                        logits,
-                        args.tokens,
-                        &stop_tokens,
-                        &mut sampler,
-                        &mut on_token,
-                        |token| {
-                            loaded
-                                .decode_token_greedy(&mut sequence, token)
-                                .context("decode token with GPU greedy selection")
-                        },
-                    )?,
-                    None,
-                    None,
-                )
+                let generation = generate_gpu_greedy(
+                    logits,
+                    args.tokens,
+                    &stop_tokens,
+                    &mut sampler,
+                    &mut on_token,
+                    |token| {
+                        loaded
+                            .decode_token_greedy(&mut sequence, token)
+                            .context("decode token with GPU greedy selection")
+                    },
+                )?;
+                generator_return = Instant::now();
+                (generation, None, None)
             } else {
-                (
-                    generate_serial(
-                        logits,
-                        args.tokens,
-                        &stop_tokens,
-                        &mut sampler,
-                        &mut on_token,
-                        |token| {
-                            loaded
-                                .decode_token(&mut sequence, token)
-                                .context("decode token")
-                        },
-                    )?,
-                    None,
-                    None,
-                )
+                let generation = generate_serial(
+                    logits,
+                    args.tokens,
+                    &stop_tokens,
+                    &mut sampler,
+                    &mut on_token,
+                    |token| {
+                        loaded
+                            .decode_token(&mut sequence, token)
+                            .context("decode token")
+                    },
+                )?;
+                generator_return = Instant::now();
+                (generation, None, None)
             };
             (generation, None, sampling_attribution, sampled_structural)
         };
+    // Every decode branch freezes this mark immediately after its generator
+    // returns, before branch-specific telemetry or output post-processing.
     let mut inference_complete_ms = request_t0.elapsed().as_secs_f64() * 1e3;
     let pipeline_cache_generation_exit =
         timing_enabled.then(|| loaded.context().pipeline_cache_metrics());
@@ -1273,6 +1294,38 @@ pub(crate) fn execute_single_turn_request(
         tokenizer_init_ms,
         tokenization_ms,
         decode_ms: generation.wall_ms,
-        total_ms: total_request_ms,
+        total_ms: request_stats_total_ms(
+            tokenization_ms,
+            capacity_validation_ms,
+            resident_execution_t0,
+            generator_return,
+        ),
     })
+}
+
+#[cfg(test)]
+mod request_stats_timing_tests {
+    use super::request_stats_total_ms;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn total_sums_only_the_three_non_overlapping_contract_spans() {
+        let base = Instant::now();
+        let load_end = base + Duration::from_millis(80);
+        let session_end = load_end + Duration::from_millis(20);
+        let execution_start = session_end;
+        let generator_return = execution_start + Duration::from_millis(13);
+        let output_done = generator_return + Duration::from_millis(9);
+        let stats_line = output_done + Duration::from_millis(7);
+
+        // Load/session precede execution; output and stats follow generator return.
+        assert_eq!(
+            request_stats_total_ms(11.0, 7.0, execution_start, generator_return),
+            31.0
+        );
+        assert!(stats_line > output_done && output_done > generator_return);
+        let load_session_output_stats_total =
+            18.0 + stats_line.duration_since(base).as_secs_f64() * 1e3;
+        assert!(31.0 < load_session_output_stats_total);
+    }
 }

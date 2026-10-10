@@ -2,6 +2,39 @@
 
 use super::*;
 
+fn request_stats_preparation_ms(initial_ms: f64, packed_capacity_validation_ms: f64) -> f64 {
+    initial_ms + packed_capacity_validation_ms
+}
+
+fn request_stats_total_ms(
+    encoding_ms: f64,
+    preparation_ms: f64,
+    prefill_start: Instant,
+    generator_return: Instant,
+    reported_pass: Option<(f64, Instant)>,
+) -> f64 {
+    encoding_ms
+        + preparation_ms
+        + flash_resident_execution_ms(prefill_start, generator_return, reported_pass)
+}
+
+fn flash_resident_execution_ms(
+    prefill_start: Instant,
+    generator_return: Instant,
+    reported_pass: Option<(f64, Instant)>,
+) -> f64 {
+    match reported_pass {
+        Some((reported_prefill_ms, generation_start)) => {
+            reported_prefill_ms
+                + generator_return
+                    .duration_since(generation_start)
+                    .as_secs_f64()
+                    * 1e3
+        }
+        None => generator_return.duration_since(prefill_start).as_secs_f64() * 1e3,
+    }
+}
+
 pub(crate) const QWEN4EXP_LAYER_PROFILE_ENV: &str = "QWEN4EXP_LAYER_PROFILE";
 
 pub(crate) const QWEN4EXP_PACKED_PREFILL_PROFILE_ENV: &str = "QWEN4EXP_PACKED_PREFILL_PROFILE";
@@ -446,6 +479,7 @@ pub(crate) fn run_qwen4exp_single_turn(
         .context("tokenize Qwen3.8-Flash-Next prompt")?;
     let encode_ms = encode_t0.elapsed().as_secs_f64() * 1e3;
     let tokenizer_ms = tokenizer_t0.elapsed().as_secs_f64() * 1e3;
+    let preparation_t0 = Instant::now();
     let required_forwards =
         required_forwards("Qwen3.8-Flash-Next", prompt_ids.len(), args.tokens, None)?;
     let config =
@@ -494,6 +528,7 @@ pub(crate) fn run_qwen4exp_single_turn(
     validate_qwen4exp_full_shard_prefetch_scope(full_shard_prefetch_enabled, gguf.shard_count())?;
     let packed_prefill_requested =
         !layer_profile_enabled && (packed_profile_enabled || prompt_tokens.len() > 1);
+    let mut preparation_ms = preparation_t0.elapsed().as_secs_f64() * 1e3;
     let prefill_request = if packed_profile_enabled {
         "packed_profile"
     } else if packed_prefill_requested {
@@ -639,12 +674,28 @@ pub(crate) fn run_qwen4exp_single_turn(
         .create_runner(&ctx)
         .context("bind Qwen3.8-Flash-Next execution graph")?;
 
+    if packed_profile_enabled {
+        let capacity_check_t0 = Instant::now();
+        let packed_capacity =
+            packed_prefill_capacity.expect("packed profile mode has an admitted packed workspace");
+        ensure!(
+            prompt_tokens.len() <= packed_capacity,
+            "{QWEN4EXP_PACKED_PREFILL_PROFILE_ENV} requires the complete prompt to fit packed capacity {packed_capacity}; got {} tokens",
+            prompt_tokens.len()
+        );
+        preparation_ms = request_stats_preparation_ms(
+            preparation_ms,
+            capacity_check_t0.elapsed().as_secs_f64() * 1e3,
+        );
+    }
+
     let prefill_t0 = Instant::now();
     let mut measured_prefill_ms = None;
     let mut prefill_timing = Qwen4ExpTimingTotals::default();
     let mut prefill_packed_tokens = 0;
     let mut prefill_scalar_tail_commands = prompt_tokens.len();
     let mut prefill_contains_selection = false;
+    let mut layer_profile_report = None;
     let logits = if layer_profile_enabled {
         let mut logits = None;
         for (index, &token) in prompt_tokens.iter().enumerate() {
@@ -657,10 +708,7 @@ pub(crate) fn run_qwen4exp_single_turn(
                     })?;
                 let next_logits = runner.logits()?.to_vec();
                 let timing = outcome.token;
-                match outcome.profile {
-                    Ok(profile) => emit_qwen4exp_layer_profile(&profile),
-                    Err(error) => eprintln!("qwen4exp layer_profile_warning: {error}"),
-                }
+                layer_profile_report = Some(outcome.profile);
                 (next_logits, timing)
             } else {
                 let next_logits = runner
@@ -677,13 +725,6 @@ pub(crate) fn run_qwen4exp_single_turn(
         }
         logits.expect("nonempty prompt produced endpoint logits")
     } else if packed_profile_enabled {
-        let packed_capacity =
-            packed_prefill_capacity.expect("packed profile mode has an admitted packed workspace");
-        ensure!(
-            prompt_tokens.len() <= packed_capacity,
-            "{QWEN4EXP_PACKED_PREFILL_PROFILE_ENV} requires the complete prompt to fit packed capacity {packed_capacity}; got {} tokens",
-            prompt_tokens.len()
-        );
         let packet_t0 = Instant::now();
 
         shutdown::checkpoint()?;
@@ -792,6 +833,9 @@ pub(crate) fn run_qwen4exp_single_turn(
     let weights_first_use = measured_prefill_ms.is_none();
     let prefill_ms =
         measured_prefill_ms.unwrap_or_else(|| prefill_t0.elapsed().as_secs_f64() * 1e3);
+    // In packed profile mode `prefill_ms` is only the reported third pass;
+    // setup and the two comparison passes are outside the record total.
+    let post_prefill_t0 = Instant::now();
     let mut sampler = Sampler::new(sampling).context("initialize Qwen3.8-Flash-Next sampler")?;
     let stdout_handle = std::io::stdout();
     let mut stdout = stdout_handle.lock();
@@ -825,6 +869,14 @@ pub(crate) fn run_qwen4exp_single_turn(
             Ok(next_logits)
         },
     )?;
+    let generator_return = Instant::now();
+    let reported_pass = measured_prefill_ms.map(|reported_ms| (reported_ms, post_prefill_t0));
+    if let Some(profile) = layer_profile_report {
+        match profile {
+            Ok(profile) => emit_qwen4exp_layer_profile(&profile),
+            Err(error) => eprintln!("qwen4exp layer_profile_warning: {error}"),
+        }
+    }
     if !generation.tokens.is_empty() {
         writeln!(stdout)?;
         stdout
@@ -883,7 +935,8 @@ pub(crate) fn run_qwen4exp_single_turn(
             output_tokens: generation.tokens.len() as u64,
             transitions: generation.transitions as u64,
             stop_reason: generation.stop_reason,
-            // Record semantics: encode-only tokenization; total without load.
+            // Record semantics: encoding + prompt preparation + reported
+            // prefill and generation; profile warm-up passes are omitted.
             tokenizer_ms: encode_ms,
             load_ms,
             prefill_ms,
@@ -891,7 +944,13 @@ pub(crate) fn run_qwen4exp_single_turn(
             decode_ms: generation.wall_ms,
             decode_tps,
             transition_tps,
-            total_ms: request_t0.elapsed().as_secs_f64() * 1e3 - load_ms,
+            total_ms: request_stats_total_ms(
+                encode_ms,
+                preparation_ms,
+                prefill_t0,
+                generator_return,
+                reported_pass,
+            ),
             output_fingerprint: GeneratedTokenSha256Digest::of(&generation.tokens),
         };
         append_single_turn_stats_record(
@@ -904,4 +963,62 @@ pub(crate) fn run_qwen4exp_single_turn(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod request_stats_timing_tests {
+    use super::{request_stats_preparation_ms, request_stats_total_ms};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn ordinary_total_ends_at_generator_return() {
+        let base = Instant::now();
+        let load_end = base + Duration::from_millis(80);
+        let prefill_start = load_end + Duration::from_millis(20);
+        let generator_return = prefill_start + Duration::from_millis(13);
+        let output_done = generator_return + Duration::from_millis(9);
+        let stats_line = output_done + Duration::from_millis(7);
+        // The helper ends at generator return, despite the later output/stats marks.
+        assert_eq!(
+            request_stats_total_ms(11.0, 7.0, prefill_start, generator_return, None),
+            31.0
+        );
+        assert!(stats_line > output_done && output_done > generator_return);
+        let load_output_stats_total = 18.0 + stats_line.duration_since(base).as_secs_f64() * 1e3;
+        assert!(31.0 < load_output_stats_total);
+    }
+
+    #[test]
+    fn packed_profile_total_counts_reported_pass_and_generation_only() {
+        let base = Instant::now();
+        let load_end = base + Duration::from_millis(80);
+        let session_end = load_end + Duration::from_millis(20);
+        let first_pass_start = session_end;
+        let reported_pass_start = first_pass_start + Duration::from_millis(100);
+        let generation_start = reported_pass_start + Duration::from_millis(30);
+        let generator_return = generation_start + Duration::from_millis(13);
+        let output_done = generator_return + Duration::from_millis(9);
+        let stats_line = output_done + Duration::from_millis(7);
+        // Neither the initial warm-up region nor the output/stats tail is selected.
+        assert_eq!(
+            request_stats_total_ms(
+                11.0,
+                7.0,
+                first_pass_start,
+                generator_return,
+                Some((30.0, generation_start)),
+            ),
+            61.0
+        );
+        assert!(reported_pass_start > first_pass_start);
+        assert!(stats_line > output_done && output_done > generator_return);
+        let warmup_output_stats_total =
+            18.0 + stats_line.duration_since(first_pass_start).as_secs_f64() * 1e3;
+        assert!(61.0 < warmup_output_stats_total);
+    }
+
+    #[test]
+    fn packed_profile_capacity_validation_is_preparation() {
+        assert_eq!(request_stats_preparation_ms(7.0, 5.0), 12.0);
+    }
 }

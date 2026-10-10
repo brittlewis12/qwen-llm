@@ -20,17 +20,17 @@
 use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ParsedCall {
-    pub(crate) name: String,
-    pub(crate) arguments: Map<String, Value>,
+pub struct ParsedCall {
+    pub name: String,
+    pub arguments: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ParsedEmission {
+pub struct ParsedEmission {
     /// Prose before the first call block (whole emission when no valid
     /// calls exist). Byte-verbatim slice of the input.
-    pub(crate) visible: String,
-    pub(crate) calls: Vec<ParsedCall>,
+    pub visible: String,
+    pub calls: Vec<ParsedCall>,
 }
 
 const CALL_OPEN: &str = "<tool_call>\n";
@@ -42,7 +42,7 @@ const PARAM_CLOSE: &str = "\n</parameter>\n";
 
 /// Parse a complete visible emission span (post-reasoning split). Never
 /// fails: malformed structure returns the whole span as visible text.
-pub(crate) fn parse_emission(emission: &str) -> ParsedEmission {
+pub fn parse_emission(emission: &str) -> ParsedEmission {
     let Some(first_call) = emission.find("<tool_call>") else {
         return ParsedEmission {
             visible: emission.to_owned(),
@@ -472,14 +472,14 @@ mod tests {
 /// when they are not JSON); anything after `</｜DSML｜tool_calls>` is
 /// ignored. Like `parse_emission`, a malformed block returns the whole span
 /// as visible text rather than failing.
-pub(crate) const DSML_TOOL_CALLS_OPEN: &str = "<｜DSML｜tool_calls>";
+pub const DSML_TOOL_CALLS_OPEN: &str = "<｜DSML｜tool_calls>";
 const DSML_TOOL_CALLS_CLOSE: &str = "</｜DSML｜tool_calls>";
 const DSML_INVOKE_OPEN: &str = "<｜DSML｜invoke name=\"";
 const DSML_INVOKE_CLOSE: &str = "</｜DSML｜invoke>";
 const DSML_PARAMETER_OPEN: &str = "<｜DSML｜parameter name=\"";
 const DSML_PARAMETER_CLOSE: &str = "</｜DSML｜parameter>";
 
-pub(crate) fn parse_dsml_emission(emission: &str) -> ParsedEmission {
+pub fn parse_dsml_emission(emission: &str) -> ParsedEmission {
     let Some(first_call) = emission.find(DSML_TOOL_CALLS_OPEN) else {
         return ParsedEmission {
             visible: emission.to_owned(),
@@ -540,11 +540,10 @@ fn parse_dsml_parameters(mut body: &str) -> Option<Map<String, Value>> {
         let is_string = if let Some(rest) = attrs.strip_prefix("true\">") {
             body = rest;
             true
-        } else if let Some(rest) = attrs.strip_prefix("false\">") {
+        } else {
+            let rest = attrs.strip_prefix("false\">")?;
             body = rest;
             false
-        } else {
-            return None;
         };
         let value_end = body.find(DSML_PARAMETER_CLOSE)?;
         let raw = &body[..value_end];

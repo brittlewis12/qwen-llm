@@ -290,6 +290,7 @@ mod census;
 mod checks;
 mod completion;
 mod context;
+mod device_facts;
 mod dflash;
 mod elementwise;
 mod encoder;
@@ -310,6 +311,7 @@ mod moe;
 mod moe_grouped_generic;
 mod norm;
 mod q2_0;
+mod qualification;
 mod research;
 mod rope;
 mod routing;
@@ -327,6 +329,7 @@ pub use bench::*;
 pub use census::*;
 pub use completion::*;
 pub use context::*;
+pub use device_facts::{DeviceFacts, GpuFamilySupport};
 pub use dflash::*;
 pub use elementwise::*;
 pub use encoder::*;
@@ -348,6 +351,16 @@ pub use moe::*;
 pub use moe_grouped_generic::*;
 pub use norm::*;
 pub use q2_0::*;
+pub use qualification::{
+    A3B_PARALLEL_COPY_AUTO, DEEPSEEK_V4_ALL_SLOTS_Q3Q4, DEEPSEEK_V4_F16_MATRIX_SCORER,
+    DEEPSEEK_V4_GROUPED_LONG_HCA, DEEPSEEK_V4_MULTIGROUP_SELECTOR, DEEPSEEK_V4_PACKED_E8P32_ROUTER,
+    DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION, DEEPSEEK_V4_PACKED_GROUPED_EXPERT,
+    DEEPSEEK_V4_PACKED_GROUPED_Q3Q4, DEEPSEEK_V4_PACKED_INDEXER_Q_MATRIX,
+    DEEPSEEK_V4_PACKED_MXFP4_MATRIX, DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY,
+    DEEPSEEK_V4_PACKED_QA_RAW_KV_MATRIX, DEEPSEEK_V4_PACKED_SHARED_ROUTE_OVERLAP,
+    DEEPSEEK_V4_RESIDENCY_SET, DEEPSEEK_V4_SPLITK_HCA, PARALLEL_COPY_EXACT_UNIFIED, QUALIFICATIONS,
+    Qualification, QualifiedMemory,
+};
 pub use research::*;
 pub use rope::*;
 pub use routing::*;

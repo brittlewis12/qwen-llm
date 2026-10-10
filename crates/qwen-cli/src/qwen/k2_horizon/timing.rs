@@ -60,16 +60,16 @@ mod tests {
             Phase::RequestPreparation,
             Phase::ResidentExecution,
         ] {
-            timing.record(phase, Duration::from_millis(10)).unwrap();
+            timing.record(phase, Duration::from_millis(10));
         }
         if let Some(phase) = extra {
-            timing.record(phase, Duration::from_secs(2)).unwrap();
+            timing.record(phase, Duration::from_secs(2));
         }
-        timing
-            .finish(Duration::from_millis(
-                31 + if extra.is_some() { 2000 } else { 0 },
-            ))
-            .unwrap()
+        let report = timing.finish(Duration::from_millis(
+            31 + if extra.is_some() { 2000 } else { 0 },
+        ));
+        assert_eq!(report.json["accounting"], "valid");
+        report
     }
     #[test]
     fn k2_setup_wait_and_verification_do_not_contaminate_loaded_request_time() {
@@ -99,19 +99,63 @@ mod tests {
         let chat = example(Some(Phase::Rendering));
         assert_eq!(chat.json["phases_ms"]["rendering"], 2000.);
     }
+    /// Inconsistent accounting is reported, never an error that could
+    /// suppress the generated output.
     #[test]
-    fn k2_timing_rejects_overlap_and_duration_overflow() {
+    fn k2_timing_reports_excess_and_overflow_without_failing() {
         let mut timing = Timing::default();
-        timing
-            .record(Phase::Encoding, Duration::from_secs(2))
+        timing.record(Phase::Encoding, Duration::from_secs(2));
+        let report = timing.finish(Duration::from_secs(1));
+        assert_eq!(report.json["accounting"], "phases_exceed_lane_wall");
+        assert!(report.json["unclassified_host_overhead_ms"].is_null());
+        assert_eq!(report.encoding_ms, 2000.);
+        let mut timing = Timing::default();
+        timing.record(Phase::ModelLoad, Duration::MAX);
+        timing.record(Phase::ModelLoad, Duration::from_nanos(1));
+        let report = timing.finish(Duration::from_secs(1));
+        assert_eq!(report.json["accounting"], "phase_total_overflow");
+        assert!(report.json["unclassified_host_overhead_ms"].is_null());
+    }
+
+    /// The operation's own result comes back even when recording its
+    /// duration overflows the phase (which used to replace it with an error).
+    #[test]
+    fn measure_returns_the_operation_result_when_recording_overflows() {
+        let mut timing = Timing::default();
+        timing.record(Phase::Encoding, Duration::MAX);
+        let spin = || {
+            let start = std::time::Instant::now();
+            while start.elapsed().is_zero() {}
+        };
+        let error = timing
+            .measure(Phase::Encoding, || -> anyhow::Result<()> {
+                spin();
+                anyhow::bail!("encode failed")
+            })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "encode failed");
+        let value = timing
+            .measure(Phase::Encoding, || -> anyhow::Result<u32> {
+                spin();
+                Ok(7)
+            })
             .unwrap();
-        assert!(timing.finish(Duration::from_secs(1)).is_err());
+        assert_eq!(value, 7);
+        let report = timing.finish(Duration::MAX);
+        assert_eq!(report.json["accounting"], "phase_total_overflow");
+        assert!(report.json["unclassified_host_overhead_ms"].is_null());
+    }
+
+    /// Two phases that each fit but whose sum overflows are reported too.
+    #[test]
+    fn cross_phase_total_overflow_is_reported() {
         let mut timing = Timing::default();
-        timing.record(Phase::ModelLoad, Duration::MAX).unwrap();
-        assert!(
-            timing
-                .record(Phase::ModelLoad, Duration::from_nanos(1))
-                .is_err()
-        );
+        timing.record(Phase::ModelLoad, Duration::MAX);
+        timing.record(Phase::SessionSetup, Duration::from_secs(1));
+        let report = timing.finish(Duration::from_secs(1));
+        assert_eq!(report.json["accounting"], "phase_total_overflow");
+        assert!(report.load_ms.is_nan());
+        assert!(report.json["load_ms"].is_null() || report.json.get("load_ms").is_none());
+        assert!(report.json["unclassified_host_overhead_ms"].is_null());
     }
 }

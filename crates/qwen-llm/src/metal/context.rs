@@ -357,6 +357,7 @@ pub(crate) fn acquire_metal_process_lease() -> Result<Arc<MetalProcessLease>, Me
 
 pub struct MetalContext {
     pub device: Device,
+    device_facts: Arc<super::DeviceFacts>,
     pub queue: Queue,
     pub library: Library,
     /// Research/bench probe kernels, loaded on first miss (see `pipeline`).
@@ -692,6 +693,7 @@ impl MetalContext {
     pub fn new() -> Result<Self, MetalError> {
         let process_lease = acquire_metal_process_lease()?;
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::NoDevice)?;
+        let device_facts = Arc::new(super::DeviceFacts::from_device(&device));
         let queue = device.newCommandQueue().ok_or(MetalError::NoQueue)?;
 
         let metallib_bytes = crate::KERNELS_METALLIB;
@@ -702,6 +704,7 @@ impl MetalContext {
 
         Ok(Self {
             device,
+            device_facts,
             queue,
             library,
             research_library: Arc::new(Mutex::new(None)),
@@ -717,12 +720,17 @@ impl MetalContext {
         let queue = self.device.newCommandQueue().ok_or(MetalError::NoQueue)?;
         Ok(Self {
             device: self.device.clone(),
+            device_facts: self.device_facts.clone(),
             queue,
             library: self.library.clone(),
             research_library: self.research_library.clone(),
             pso_cache: self.pso_cache.clone(),
             _process_lease: self._process_lease.clone(),
         })
+    }
+
+    pub fn device_facts(&self) -> &super::DeviceFacts {
+        &self.device_facts
     }
 
     /// Resolve a function from the research metallib, loading it on first use.

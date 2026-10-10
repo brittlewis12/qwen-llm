@@ -2222,8 +2222,8 @@ mod tests {
             let k_baseline = read_back_f32(&k_composed.buffer, k_len);
             let q_candidate = read_back_f32(&q_fused.buffer, q_len);
             let k_candidate = read_back_f32(&k_fused.buffer, k_len);
-            let q_max = max_abs_diff(&q_baseline, &q_candidate);
-            let k_max = max_abs_diff(&k_baseline, &k_candidate);
+            let q_max = max_abs_diff_finite("qk-norm-rope Q", &q_candidate, &q_baseline);
+            let k_max = max_abs_diff_finite("qk-norm-rope K", &k_candidate, &k_baseline);
             eprintln!(
                 "[qk-norm-rope] N={n_tokens} start={start_position} q_max={q_max:.3e} k_max={k_max:.3e}"
             );

@@ -1071,8 +1071,8 @@ mod tests {
             );
             assert_finite(&minimax.0, &format!("RoPE minimax Q at {position}"));
             assert_finite(&minimax.1, &format!("RoPE minimax K at {position}"));
-            let q_max = max_abs_diff(&baseline.0, &minimax.0);
-            let k_max = max_abs_diff(&baseline.1, &minimax.1);
+            let q_max = max_abs_diff_finite("RoPE minimax Q", &minimax.0, &baseline.0);
+            let k_max = max_abs_diff_finite("RoPE minimax K", &minimax.1, &baseline.1);
             assert!(
                 q_max <= 5.0e-3 && k_max <= 5.0e-3,
                 "RoPE minimax drift at position {position}: q={q_max} k={k_max} tolerance=0.005"
@@ -1395,8 +1395,8 @@ mod tests {
                 &minimax.1,
                 &format!("packed RoPE minimax K at {start_position}"),
             );
-            let q_max = max_abs_diff(&baseline.0, &minimax.0);
-            let k_max = max_abs_diff(&baseline.1, &minimax.1);
+            let q_max = max_abs_diff_finite("RoPE minimax Q", &minimax.0, &baseline.0);
+            let k_max = max_abs_diff_finite("RoPE minimax K", &minimax.1, &baseline.1);
             assert!(
                 q_max <= 5.0e-3 && k_max <= 5.0e-3,
                 "packed RoPE minimax drift at start {start_position}: q={q_max} k={k_max} tolerance=0.005"

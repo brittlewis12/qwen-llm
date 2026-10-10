@@ -1347,13 +1347,6 @@ pub(super) fn rope_neox_cpu_ref(
     }
 }
 
-pub(super) fn max_abs_diff(left: &[f32], right: &[f32]) -> f32 {
-    left.iter()
-        .zip(right)
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0, f32::max)
-}
-
 pub(super) fn assert_finite(values: &[f32], label: &str) {
     assert!(
         values.iter().all(|value| value.is_finite()),
@@ -2617,4 +2610,42 @@ pub(super) fn dflash_attn_two_range_readback(
         }
     })?;
     Ok(read_back_f32(&o_t.buffer, n * n_q_heads * head_dim))
+}
+
+/// The comparison contract kernel qualifications rely on: inputs that cannot
+/// be compared fail loudly instead of producing a small, plausible number.
+mod comparison_contract_tests {
+    use super::max_abs_diff_finite;
+
+    #[test]
+    fn equal_finite_inputs_report_the_largest_difference() {
+        assert_eq!(
+            max_abs_diff_finite("ok", &[1.0, -2.0, 3.5], &[1.0, -1.5, 3.0]),
+            0.5
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "length mismatch")]
+    fn unequal_lengths_fail() {
+        max_abs_diff_finite("short", &[1.0], &[1.0, 2.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "empty comparison")]
+    fn empty_inputs_fail() {
+        max_abs_diff_finite("empty", &[], &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-finite actual")]
+    fn nan_in_actual_fails() {
+        max_abs_diff_finite("nan", &[f32::NAN, 0.0], &[0.0, 0.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-finite expected")]
+    fn infinity_in_expected_fails() {
+        max_abs_diff_finite("inf", &[0.0, 0.0], &[0.0, f32::INFINITY]);
+    }
 }

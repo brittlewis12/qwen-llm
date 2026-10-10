@@ -2363,7 +2363,7 @@ fn real_q8_block_51_replay_and_vjp_smoke() {
         fit.values
             .iter()
             .map(|value| value.abs())
-            .fold(0.0_f32, f32::max), // comparison-tripwire: expected-gradient magnitude scale.
+            .fold(0.0_f32, f32::max),
     );
     assert!(j.input_cotangent.iter().all(|value| value.is_finite()));
     assert!(r.input_cotangent.iter().all(|value| value.is_finite()));

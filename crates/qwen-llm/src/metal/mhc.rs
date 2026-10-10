@@ -1698,7 +1698,7 @@ mod tests {
                             .map(|s| f64::from(x[s * h + d]).abs())
                             .sum::<f64>()
                     })
-                    .fold(0.0, f64::max) // comparison-tripwire: summed absolute activation envelope.
+                    .fold(0.0, f64::max)
                     * 2.0;
                 for (d, w) in want.iter().enumerate() {
                     let g = f64::from(collapsed[row * h + d]);

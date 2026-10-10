@@ -7,7 +7,7 @@ fn quantize(values: &[f32]) -> Vec<u8> {
         .chunks_exact(32)
         .flat_map(|values| {
             let mut block = [0u8; 34];
-            let maximum = values.iter().map(|v| v.abs()).fold(0.0_f32, f32::max); // comparison-tripwire: quantization scale magnitude.
+            let maximum = values.iter().map(|v| v.abs()).fold(0.0_f32, f32::max);
             let d = maximum / 127.;
             let scale = half::f16::from_f32(d);
             if values.iter().any(|v| !v.is_finite()) || !scale.is_finite() {
@@ -99,7 +99,7 @@ fn quantizer_contract_has_exact_ties_canonical_zero_and_visible_failures() {
     for index in [0, 1, 2, 3, 4, 5, 6, 11] {
         let values = fixtures[index];
         let bytes = quantize(&values);
-        let maximum = values.iter().map(|v| v.abs()).fold(0.0_f32, f32::max); // comparison-tripwire: quantization error bound scale.
+        let maximum = values.iter().map(|v| v.abs()).fold(0.0_f32, f32::max);
         let d = maximum / 127.;
         let d16 = half::f16::from_f32(d).to_f32();
         let bound = if d16 == 0. {
@@ -297,7 +297,7 @@ fn gpu_q8_store_bytes_and_inline_attention_match_independent_controls() {
                     .zip(dequantized.chunks_exact(32))
                     .zip(bytes.chunks_exact(34))
                 {
-                    let d = original.iter().map(|v| v.abs()).fold(0.0_f32, f32::max) / 127.; // comparison-tripwire: quantization scale magnitude.
+                    let d = original.iter().map(|v| v.abs()).fold(0.0_f32, f32::max) / 127.;
                     let d16 = half::f16::from_le_bytes(block[..2].try_into().unwrap()).to_f32();
                     let bound = 0.5 * f64::from(d)
                         + 127. * (f64::from(d) - f64::from(d16)).abs()

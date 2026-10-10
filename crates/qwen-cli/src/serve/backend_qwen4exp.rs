@@ -300,22 +300,19 @@ impl GenerationBackend for FlashNextBackend {
 
         let mut run = || -> Result<GenerationOutcome, BackendFailure> {
             let restore_t0 = Instant::now();
-            let matched_tokens = match self.cache.best_prefix(&prompt_ids) {
-                Some((prefix_len, snapshot)) => match runner.restore_snapshot(&snapshot) {
-                    Ok(()) if runner.next_position() == prefix_len => prefix_len,
-                    outcome => {
-                        tracing::warn!(
-                            "serve: qwen4exp restore of {prefix_len} tokens failed, cold prefilling: {:?}",
-                            outcome.err()
-                        );
-                        runner.reset().map_err(|error| {
-                            ServeError::server_error(format!("reset {FAMILY} session: {error}"))
-                        })?;
-                        0
-                    }
+            let matched_tokens = restore_best_prefix(
+                &mut self.cache,
+                &prompt_ids,
+                &mut runner,
+                |runner, snapshot| {
+                    runner.restore_snapshot(snapshot)?;
+                    Ok(runner.next_position())
                 },
-                None => 0,
-            };
+                |runner| runner.reset(),
+            )
+            .map_err(|error| {
+                ServeError::server_error(format!("reset {FAMILY} session: {error}"))
+            })?;
             let restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
 
             // Transcript-boundary capture: stop prefill before the generation
@@ -323,7 +320,7 @@ impl GenerationBackend for FlashNextBackend {
             let transcript_at = self
                 .im_start
                 .and_then(|im_start| transcript_boundary(&prompt_ids, im_start));
-            let transcript_split = transcript_at.filter(|&boundary| boundary > matched_tokens);
+            let transcript_split = transcript_split(transcript_at, matched_tokens);
             // A restore ending exactly on the transcript boundary (a resent or
             // regenerated turn) already holds the transcript snapshot; it is
             // protected like a fresh capture below.
@@ -476,10 +473,49 @@ fn prefill_segment(
             })
         })
         .map(|_| ());
+    map_prefill_result(result, checkpoint_abort)
+}
+
+fn map_prefill_result<T>(
+    result: Result<T, Qwen4ExpRuntimeError>,
+    checkpoint_abort: Option<io::Error>,
+) -> Result<T, BackendFailure> {
     result.map_err(|error| match checkpoint_abort {
         Some(error) => BackendFailure::Aborted(error),
         None => ServeError::server_error(format!("prefill {FAMILY} prompt: {error}")).into(),
     })
+}
+
+fn transcript_split(transcript_at: Option<usize>, matched_tokens: usize) -> Option<usize> {
+    transcript_at.filter(|&boundary| boundary > matched_tokens)
+}
+
+fn restore_best_prefix<V, R, E: std::fmt::Debug>(
+    cache: &mut SnapshotCache<V>,
+    tokens: &[u32],
+    runner: &mut R,
+    restore: impl FnOnce(&mut R, &V) -> Result<usize, E>,
+    reset: impl FnOnce(&mut R) -> Result<(), E>,
+) -> Result<usize, E> {
+    let Some(hit) = cache.peek_best_prefix_in(&(), tokens) else {
+        return Ok(0);
+    };
+    match restore(runner, &hit.value) {
+        Ok(position) if position == hit.prefix_len => {
+            cache.touch(hit.id);
+            Ok(hit.prefix_len)
+        }
+        outcome => {
+            tracing::warn!(
+                "serve: qwen4exp restore of {} tokens failed, cold prefilling: {:?}",
+                hit.prefix_len,
+                outcome.err()
+            );
+            cache.remove(hit.id);
+            reset(runner)?;
+            Ok(0)
+        }
+    }
 }
 
 /// Snapshot the runner's committed state under `tokens`; true when cached.

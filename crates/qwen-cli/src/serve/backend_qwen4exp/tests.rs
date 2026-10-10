@@ -64,6 +64,54 @@ fn invalid_sampling_is_refused_before_model_work() {
 }
 
 #[test]
+fn transcript_plan_splits_only_when_boundary_is_ahead_of_cache() {
+    assert_eq!(transcript_split(None, 4), None);
+    assert_eq!(transcript_split(Some(8), 4), Some(8));
+    assert_eq!(transcript_split(Some(4), 4), None);
+    assert_eq!(transcript_split(Some(2), 4), None);
+}
+
+#[test]
+fn prefill_failure_maps_checkpoint_abort_separately_from_runtime_error() {
+    let abort = map_prefill_result::<()>(
+        Err(Qwen4ExpRuntimeError::Invalid("prefill failed".into())),
+        Some(io::Error::new(io::ErrorKind::BrokenPipe, "client gone")),
+    );
+    assert!(matches!(abort, Err(BackendFailure::Aborted(_))));
+
+    let failure = map_prefill_result::<()>(
+        Err(Qwen4ExpRuntimeError::Invalid("prefill failed".into())),
+        None,
+    );
+    assert!(matches!(failure, Err(BackendFailure::Serve(error)) if error.status == 500));
+}
+
+#[test]
+fn failed_snapshot_restore_evicts_the_entry_and_resets_the_runner() {
+    let mut cache = SnapshotCache::new(1024, Default::default());
+    assert!(cache.insert_strict(vec![1, 2], "snapshot", 16));
+    let mut runner = 99;
+    let mut reset = false;
+    let matched = restore_best_prefix(
+        &mut cache,
+        &[1, 2, 3],
+        &mut runner,
+        |_, _| Err("corrupt snapshot"),
+        |runner| {
+            *runner = 0;
+            reset = true;
+            Ok::<_, &str>(())
+        },
+    )
+    .unwrap();
+    assert_eq!(matched, 0);
+    assert!(reset);
+    assert_eq!(runner, 0);
+    assert_eq!(cache.len(), 0);
+    assert_eq!(cache.indexed_bytes(), 0);
+}
+
+#[test]
 #[ignore = "GPU-only QWEN4EXP_Q3_K_XL resident/cold parity and request-abort coverage"]
 fn gpu_qwen4exp_resident_abort_and_transcript_cache_parity() {
     let _fixture = qwen_llm::test_fixtures::QWEN4EXP_Q3_K_XL;

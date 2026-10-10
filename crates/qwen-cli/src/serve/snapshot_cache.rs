@@ -206,6 +206,13 @@ impl<V, N: PartialEq> SnapshotCache<V, N> {
         evicted
     }
 
+    /// Remove a specific cached value when the caller proves it is unusable.
+    pub(crate) fn remove(&mut self, id: EntryId) -> Option<u64> {
+        let bytes = self.policy.remove(id)?;
+        self.entries.remove(&id);
+        Some(bytes)
+    }
+
     fn drop_entries(&mut self, evicted: &Evicted) {
         for id in &evicted.ids {
             self.entries.remove(id);

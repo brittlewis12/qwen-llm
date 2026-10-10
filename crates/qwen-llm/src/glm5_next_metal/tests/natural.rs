@@ -1813,19 +1813,20 @@ fn fast_f32_narrow_rows_match_the_wide_tiles() {
     let [_, _, all] = f32_selections();
     let _scope = all.scope();
     let frontier = weights.config.sparse_frontier() as usize;
-    // (prefix tokens, span tokens): the span is prefilled after the prefix.
-    // Spans end at 2,048, cross the sparse frontier, lie wholly past it
-    // (packed sparse attention), or are a prompt's 5-row last chunk.
+    // (prefix tokens, span tokens, narrow kernels expected): the span is
+    // prefilled after the prefix. Spans end at 2,048, cross the sparse
+    // frontier, lie wholly past it (packed sparse attention), or are a
+    // prompt's 5-row last chunk.
     let cases = [
-        (2047usize, 1usize),
-        (2046, 2),
-        (2044, 4),
-        (2040, 8),
-        (2039, 9),
-        (frontier - 4, 8),
-        (frontier + 17, 3),
-        (frontier + 300, 5),
-        (0, 1029),
+        (2047usize, 1usize, true),
+        (2046, 2, true),
+        (2044, 4, true),
+        (2040, 8, true),
+        (2039, 9, false),
+        (frontier - 4, 8, true),
+        (frontier + 17, 3, true),
+        (frontier + 300, 5, true),
+        (0, 1029, true),
     ];
     let census = F32Census::begin();
     let run = |prefix: usize, span: usize, narrow_rows: usize| {
@@ -1855,7 +1856,7 @@ fn fast_f32_narrow_rows_match_the_wide_tiles() {
         )
     };
     let mut failures = Vec::new();
-    for (prefix, span) in cases {
+    for (prefix, span, expect_narrow) in cases {
         let (narrow_logits, narrow_prompt, narrow_end, narrow_calls) = run(prefix, span, 8);
         let (wide_logits, wide_prompt, wide_end, wide_calls) = run(prefix, span, 0);
         let logits_equal = logit_bits(&narrow_logits) == logit_bits(&wide_logits);
@@ -1863,7 +1864,6 @@ fn fast_f32_narrow_rows_match_the_wide_tiles() {
         let state_equal = narrow_end.same_state(&wide_end);
         // The span's chunks of at most 8 rows ran narrow; none with the
         // limit at 0.
-        let expect_narrow = span <= 8 || span % 512 <= 8;
         let census_ok = wide_calls == 0 && (narrow_calls > 0) == expect_narrow;
         eprintln!(
             "prefix {prefix} + span {span}: logits bitwise {logits_equal}, prompt-end state equal {prompt_equal}, end state equal {state_equal}, narrow calls {narrow_calls} (wide-only run {wide_calls})"

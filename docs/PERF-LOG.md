@@ -6,7 +6,7 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
-## 2026-10-09 - #12 Narrow F32 Kernels Halve the One-Token F32 Penalty, Bitwise Equal to the Wide Tiles
+## 2026-10-09 - #12 Narrow F32 Kernels Recover About Half the One-Token F32 Penalty, Bitwise Equal to the Wide Tiles
 
 - **What** (`docs/bench/2026-10-09-glm53-fast-f32-operands/`, "Short
   spans"; cx 01a10cc jam and review): `kernel_mat_mat_q6_K_f32_r8c8` and
@@ -20,8 +20,8 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   frontier, a 5-row last chunk: logits, prompt-end and end state; census
   confirms where they ran).
 - **Cost** (release): one-token suffix 91 ms half-staged, 129 ms all-F32
-  with narrow kernels vs 167 ms wide-only (half the 76 ms penalty
-  recovered: the preregistered target); 2-token 166 vs 202; 4-token 207 vs
+  with narrow kernels vs 167 ms wide-only (approximately half of the 76 ms
+  penalty recovered in this screen, the target set beforehand); 2-token 166 vs 202; 4-token 207 vs
   242 (Fast 204); 8-token 274 vs 310; 9-token and fresh-prompt controls
   unchanged. Dense F32 alone: +5.1% fresh, +0.2-0.4% on 17-64-token
   suffixes, 128 ms on one token.

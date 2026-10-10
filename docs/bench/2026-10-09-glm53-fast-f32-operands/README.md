@@ -171,9 +171,10 @@ groups, SIMD-group barriers only) and `kernel_mat_mat_q8_0_f32_r2c1k64`
 | 64-token suffix at 2,048 | 733 ms | +0.3% | +17.2% | +17.4% |
 | 64-token suffix at 2,564 (sparse) | 838 ms | +0.4% | +19.8% | +20.0% |
 
-The narrow kernels recover half of the one-token penalty (76 -> 37 ms, the
-preregistered engineering target) and most of the 2- and 4-token
-penalties; the 9-token and fresh-prompt rows, unchanged by them, act as
+The narrow kernels recover approximately half of the one-token penalty in
+this screen (167 -> 129 ms against Fast's 91: 38 of 76 ms, the engineering
+target set beforehand; a screen mean, not a confidence bound) and most of
+the 2- and 4-token penalties; the 9-token and fresh-prompt rows, unchanged by them, act as
 noise controls. A residual one-token cost of ~37 ms remains for both F32
 candidates.
 

@@ -6,6 +6,42 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-09 - #12 GLM Fast with F32 Matrix Operands: Half the Drift from Exact at +13-16% Prefill; Dense-Only -30% at +4.5%
+
+- **What** (`docs/bench/2026-10-09-glm53-fast-f32-operands/`; cx 01a10cc
+  jam, review and confirmation): F32-operand tiles for every quantized matrix
+  operand of Fast packed prefill, selected per stage family in tests only
+  (product Fast unchanged): the shared Q8_0 tile, a new Q6_K tile
+  (`kernel_mat_mat_q6_K_f32_mm64x32`) and F32 copies of the grouped expert
+  gate/up and down tiles (`kernels/moe_grouped_f32.metal`; product half
+  kernels untouched). A census proves every selected call took its tile
+  and covers the same calls as the half run.
+- **Accuracy** (six frozen natural cases, 512 rows, against Exact;
+  diagnostic): equal-case mean of per-position KL 8.28e-3 (Fast), 8.40e-3
+  (Q8_0 only), 5.83e-3 (dense projections: five of six cases lower, H1
+  higher), 4.16e-3 (all F32). Under all F32, H3 and H6 match Exact to
+  reduction order (worst KL 1.8e-7, 5.5e-8); H1, H2 and H5 keep drift at a
+  few positions (largest worst KL 0.116 vs Fast's 0.113), coinciding with
+  routing changes that begin at a single row (H1: block 7, spreading to 654
+  row-blocks; Fast changes routes from the first MoE block on every case).
+  Closer agreement with Exact, not a demonstrated quality improvement.
+- **Bitwise properties hold under all F32:** 512 == 128 and 64 == 97 rows;
+  capture/restore at every pool residue and around the sparse frontier, a
+  cancelled boundary, and 512 vs 128 rows past the frontier, in logits and
+  end state. Kernel tests: Q6_K relative RMS 4.3e-7 vs the half tile's
+  2.3e-4; experts 1.8e-6 vs 4.7-6.1e-4; per-token outputs independent of
+  the dispatch.
+- **Cost** (release, ABC-CBA twice): fresh 2,048-token prompt +4.5% (dense),
+  +12.7% (all; +16.1% in an earlier run); 64-token suffixes at 2,048 and at
+  sparse depth -2.0%/-1.7% (dense) and +15.6%/+15.5% (all); 17-token
+  +1.9%/+4.3%; one-token suffix +78-84% (92 -> 164-170 ms: a 32-token tile
+  for one token where half Fast uses mat-vec).
+- **Next:** a one-row path keeping each candidate's per-token arithmetic;
+  one bounded packet on the F32 expert tiles' cost; then freeze the
+  surviving configurations (dense, all F32) and run a preregistered fresh
+  holdout against Exact under the deployed split schedule, selection rule
+  fixed before viewing.
+
 ## 2026-10-08 - GLM Fast Snapshots On by Default; Branches and New Sessions 58 s -> 0.5 s; Fast Accuracy Lane Opened
 
 - **Decision:** Fast snapshots are on by default (`b8ab3693`;

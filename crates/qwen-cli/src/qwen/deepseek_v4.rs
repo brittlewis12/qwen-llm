@@ -66,6 +66,7 @@ fn ds4_resolve_capture_target(
 struct Ds4DurableIntent {
     store: DeepSeekV4CheckpointStore,
     max_record_bytes: u64,
+    admitted: bool,
     capture: Ds4CaptureTarget,
 }
 
@@ -75,6 +76,15 @@ enum Ds4PersistenceIntent {
     None,
     Snapshot { path: PathBuf },
     Durable(Ds4DurableIntent),
+}
+
+impl Ds4PersistenceIntent {
+    fn durable(&self) -> Option<&Ds4DurableIntent> {
+        match self {
+            Self::Durable(intent) => Some(intent),
+            Self::None | Self::Snapshot { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -98,6 +108,48 @@ enum Ds4ResolvedPersistence {
     },
 }
 
+impl Ds4ResolvedPersistence {
+    fn durable(
+        &self,
+    ) -> Option<(
+        &Ds4DurableIntent,
+        Option<bool>,
+        f64,
+        Option<DeepSeekV4ModelContentId>,
+    )> {
+        match self {
+            Self::Durable {
+                intent,
+                has_blobs,
+                probe_ms,
+                content_id,
+            } => Some((intent, *has_blobs, *probe_ms, *content_id)),
+            Self::None | Self::SnapshotRestore { .. } | Self::SnapshotPublish { .. } => None,
+        }
+    }
+
+    fn content_id(&self) -> Option<DeepSeekV4ModelContentId> {
+        match self {
+            Self::None => None,
+            Self::SnapshotRestore { content_id, .. } | Self::SnapshotPublish { content_id, .. } => {
+                Some(*content_id)
+            }
+            Self::Durable { content_id, .. } => *content_id,
+        }
+    }
+
+    fn snapshot_path(&self) -> Option<&Path> {
+        match self {
+            Self::SnapshotRestore { path, .. } | Self::SnapshotPublish { path, .. } => Some(path),
+            Self::None | Self::Durable { .. } => None,
+        }
+    }
+
+    fn snapshot_exists(&self) -> bool {
+        matches!(self, Self::SnapshotRestore { .. })
+    }
+}
+
 #[allow(dead_code)]
 struct Ds4PendingPublication {
     prepared: DeepSeekV4PreparedCheckpoint,
@@ -110,6 +162,11 @@ struct Ds4PrefillOutcome {
     mode: &'static str,
     pending: Option<Ds4PendingPublication>,
     restore_ms: f64,
+}
+
+struct Ds4ValidatedSnapshot {
+    snapshot: qwen_llm::deepseek_v4_metal::DeepSeekV4CausalSnapshot,
+    restored_prefix: usize,
 }
 
 fn ds4_completed_eligible(
@@ -917,6 +974,157 @@ fn ds4_prepare_tokens(
     })
 }
 
+fn ds4_resolve_persistence_intent(
+    args: &Args,
+    gguf: &GgufFile,
+    staged_integrity: Option<StagedIntegrityMode>,
+    prompt_len: usize,
+    required_forwards: usize,
+    completed_eligible: bool,
+) -> Result<Ds4PersistenceIntent> {
+    let durable_store = deepseek_v4_checkpoint_store(args, staged_integrity)?;
+    let durable_max_record_bytes = if durable_store.is_some() {
+        durable_prefix_cache_max_entry_bytes(args)?
+    } else {
+        0
+    };
+    let initially_admitted = durable_store.is_some()
+        && args.durable_prefix_cache_min_tokens > 0
+        && prompt_len >= args.durable_prefix_cache_min_tokens;
+    let publish_prefix = deepseek_v4_durable_capture_prefix_len(prompt_len, initially_admitted)?;
+    let mut preflight_ok = true;
+    if let Some(publish_prefix) = publish_prefix {
+        let model = DeepSeekV4Model::from_gguf_flash_0731(gguf)
+            .context("bind durable DeepSeek V4 snapshot geometry")?;
+        let session_capacity = DeepSeekV4SessionCapacity::for_forward_limit(
+            required_forwards,
+            model.config.context_length,
+        )
+        .context("derive durable DeepSeek V4 snapshot session capacity")?;
+        let durable_record_admitted = causal_snapshot_record_bytes(
+            &model.config,
+            session_capacity,
+            u32::try_from(publish_prefix).context("DeepSeek V4 durable prefix exceeds u32")?,
+            durable_max_record_bytes,
+        );
+        if let Err(error) = durable_record_admitted.as_ref() {
+            preflight_ok = false;
+            eprintln!(
+                "warning: durable DeepSeek V4 prefix capture is not admissible; generation will continue without publication: {error}"
+            );
+        }
+    }
+    let capture = ds4_resolve_capture_target(
+        durable_store.is_some(),
+        args.durable_prefix_cache_min_tokens,
+        prompt_len,
+        completed_eligible,
+        preflight_ok,
+        publish_prefix,
+    );
+    let persistence = match (args.deepseek_v4_snapshot.as_ref(), durable_store) {
+        (Some(path), _) => Ds4PersistenceIntent::Snapshot { path: path.clone() },
+        (None, Some(store)) => Ds4PersistenceIntent::Durable(Ds4DurableIntent {
+            store,
+            max_record_bytes: durable_max_record_bytes,
+            admitted: capture.admitted,
+            capture: capture.target,
+        }),
+        (None, None) => Ds4PersistenceIntent::None,
+    };
+    Ok(persistence)
+}
+
+fn ds4_resolve_persistence(
+    intent: Ds4PersistenceIntent,
+    gguf: &GgufFile,
+    prompt_token_ids: &[u32],
+    required_forwards: usize,
+    has_blobs: Option<bool>,
+    probe_ms: f64,
+) -> Result<Ds4ResolvedPersistence> {
+    match intent {
+        Ds4PersistenceIntent::None => Ok(Ds4ResolvedPersistence::None),
+        Ds4PersistenceIntent::Snapshot { path } => {
+            let snapshot_parent = deepseek_v4_snapshot_parent(&path)?;
+            let exists = match path.symlink_metadata() {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("inspect DeepSeek V4 snapshot path {}", path.display())
+                    });
+                }
+            };
+            let publish_prefix = if exists {
+                None
+            } else {
+                let publish_prefix = deepseek_v4_snapshot_publish_prefix(prompt_token_ids.len())?;
+                let model = DeepSeekV4Model::from_gguf_flash_0731(gguf)
+                    .context("bind DeepSeek V4 snapshot geometry")?;
+                let session_capacity = DeepSeekV4SessionCapacity::for_forward_limit(
+                    required_forwards,
+                    model.config.context_length,
+                )
+                .context("derive DeepSeek V4 snapshot session capacity")?;
+                causal_snapshot_record_bytes(
+                    &model.config,
+                    session_capacity,
+                    u32::try_from(publish_prefix)
+                        .context("DeepSeek V4 snapshot prefix exceeds u32")?,
+                    DEEPSEEK_V4_SNAPSHOT_MAX_RECORD_BYTES,
+                )
+                .context("preflight DeepSeek V4 causal snapshot record budget")?;
+                Some(publish_prefix)
+            };
+            let identity_cache = deepseek_v4_snapshot_identity_cache(snapshot_parent)?;
+            let identity_t0 = Instant::now();
+            let report = checkpoint_content_identity(gguf, &identity_cache)
+                .context("derive strong ordered-shard DeepSeek V4 model identity")?;
+            eprintln!(
+                "deepseek_v4: checkpoint model identity cache={} hashed_bytes={} elapsed_ms={:.1}",
+                identity_cache_outcome_label(report.outcome),
+                report.bytes_hashed,
+                identity_t0.elapsed().as_secs_f64() * 1e3,
+            );
+            let content_id = DeepSeekV4ModelContentId::new(report.content_id);
+            Ok(match publish_prefix {
+                Some(publish_prefix) => Ds4ResolvedPersistence::SnapshotPublish {
+                    path,
+                    content_id,
+                    publish_prefix,
+                },
+                None => Ds4ResolvedPersistence::SnapshotRestore { path, content_id },
+            })
+        }
+        Ds4PersistenceIntent::Durable(intent) => {
+            let needs_identity =
+                ds4_identity_needed(true, prompt_token_ids.len(), has_blobs, intent.admitted);
+            let content_id = if needs_identity {
+                let identity_cache = intent.store.identity_cache();
+                let identity_t0 = Instant::now();
+                let report = checkpoint_content_identity(gguf, &identity_cache)
+                    .context("derive strong ordered-shard DeepSeek V4 model identity")?;
+                eprintln!(
+                    "deepseek_v4: checkpoint model identity cache={} hashed_bytes={} elapsed_ms={:.1}",
+                    identity_cache_outcome_label(report.outcome),
+                    report.bytes_hashed,
+                    identity_t0.elapsed().as_secs_f64() * 1e3,
+                );
+                Some(DeepSeekV4ModelContentId::new(report.content_id))
+            } else {
+                None
+            };
+            Ok(Ds4ResolvedPersistence::Durable {
+                intent,
+                has_blobs,
+                probe_ms,
+                content_id,
+            })
+        }
+    }
+}
+
 pub(crate) fn run_deepseek_v4_single_turn(
     model_path: &Path,
     gguf: GgufFile,
@@ -943,48 +1151,14 @@ pub(crate) fn run_deepseek_v4_single_turn(
     let vocab_size = prepared_tokens.vocab_size;
     let prompt_token_ids = prepared_tokens.prompt_token_ids;
     let mut preparation_ms = prepared_tokens.preparation_ms;
-    let durable_store = deepseek_v4_checkpoint_store(args, staged_integrity)?;
-    let durable_max_record_bytes = if durable_store.is_some() {
-        durable_prefix_cache_max_entry_bytes(args)?
-    } else {
-        0
-    };
-    let initially_durable_admitted = durable_store.is_some()
-        && args.durable_prefix_cache_min_tokens > 0
-        && prompt_token_ids.len() >= args.durable_prefix_cache_min_tokens;
-    let durable_publish_prefix =
-        deepseek_v4_durable_capture_prefix_len(prompt_token_ids.len(), initially_durable_admitted)?;
-    let mut durable_preflight_ok = true;
-    if let Some(publish_prefix) = durable_publish_prefix {
-        let model = DeepSeekV4Model::from_gguf_flash_0731(&gguf)
-            .context("bind durable DeepSeek V4 snapshot geometry")?;
-        let session_capacity = DeepSeekV4SessionCapacity::for_forward_limit(
-            required_forwards,
-            model.config.context_length,
-        )
-        .context("derive durable DeepSeek V4 snapshot session capacity")?;
-        let durable_record_admitted = causal_snapshot_record_bytes(
-            &model.config,
-            session_capacity,
-            u32::try_from(publish_prefix).context("DeepSeek V4 durable prefix exceeds u32")?,
-            durable_max_record_bytes,
-        );
-        if let Err(error) = durable_record_admitted.as_ref() {
-            durable_preflight_ok = false;
-            eprintln!(
-                "warning: durable DeepSeek V4 prefix capture is not admissible; generation will continue without publication: {error}"
-            );
-        }
-    }
-    let capture_resolution = ds4_resolve_capture_target(
-        durable_store.is_some(),
-        args.durable_prefix_cache_min_tokens,
+    let persistence_intent = ds4_resolve_persistence_intent(
+        args,
+        &gguf,
+        staged_integrity,
         prompt_token_ids.len(),
+        required_forwards,
         durable_completed_eligible,
-        durable_preflight_ok,
-        durable_publish_prefix,
-    );
-    let durable_admitted = capture_resolution.admitted;
+    )?;
     let stop_validation_t0 = Instant::now();
     let stop_tokens = gguf
         .stop_token_ids()
@@ -996,9 +1170,9 @@ pub(crate) fn run_deepseek_v4_single_turn(
     // Probe store occupancy before resolving the strong model identity so an
     // empty store with no planned capture skips identity work entirely.
     let durable_probe_t0 = Instant::now();
-    let durable_has_blobs: Option<bool> = match durable_store.as_ref() {
+    let durable_has_blobs: Option<bool> = match persistence_intent.durable() {
         None => None,
-        Some(store) => match store.has_managed_blobs() {
+        Some(intent) => match intent.store.has_managed_blobs() {
             Ok(has_blobs) => Some(has_blobs),
             Err(error) => {
                 eprintln!(
@@ -1010,72 +1184,28 @@ pub(crate) fn run_deepseek_v4_single_turn(
         },
     };
     let durable_probe_ms = durable_probe_t0.elapsed().as_secs_f64() * 1e3;
-    let durable_identity_needed = ds4_identity_needed(
-        durable_store.is_some(),
-        prompt_token_ids.len(),
+    let persistence = ds4_resolve_persistence(
+        persistence_intent,
+        &gguf,
+        &prompt_token_ids,
+        required_forwards,
         durable_has_blobs,
-        durable_admitted,
-    );
-    let (snapshot_model_content_id, snapshot_file_exists) = if args.deepseek_v4_snapshot.is_some()
-        || durable_identity_needed
-    {
-        let explicit_snapshot_path = args.deepseek_v4_snapshot.as_ref();
-        let snapshot_parent = explicit_snapshot_path
-            .map(|path| deepseek_v4_snapshot_parent(path))
-            .transpose()?;
-        let exists = if let Some(path) = explicit_snapshot_path {
-            match path.symlink_metadata() {
-                Ok(_) => true,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("inspect DeepSeek V4 snapshot path {}", path.display())
-                    });
-                }
-            }
-        } else {
-            false
-        };
-        if explicit_snapshot_path.is_some() && !exists {
-            let publish_prefix = deepseek_v4_snapshot_publish_prefix(prompt_token_ids.len())?;
-            let model = DeepSeekV4Model::from_gguf_flash_0731(&gguf)
-                .context("bind DeepSeek V4 snapshot geometry")?;
-            let session_capacity = DeepSeekV4SessionCapacity::for_forward_limit(
-                required_forwards,
-                model.config.context_length,
-            )
-            .context("derive DeepSeek V4 snapshot session capacity")?;
-            causal_snapshot_record_bytes(
-                &model.config,
-                session_capacity,
-                u32::try_from(publish_prefix).context("DeepSeek V4 snapshot prefix exceeds u32")?,
-                DEEPSEEK_V4_SNAPSHOT_MAX_RECORD_BYTES,
-            )
-            .context("preflight DeepSeek V4 causal snapshot record budget")?;
-        }
-        let identity_cache = if let Some(store) = durable_store.as_ref() {
-            store.identity_cache()
-        } else {
-            deepseek_v4_snapshot_identity_cache(
-                snapshot_parent.expect("explicit snapshot path resolved a parent"),
-            )?
-        };
-        let identity_t0 = Instant::now();
-        let report = checkpoint_content_identity(&gguf, &identity_cache)
-            .context("derive strong ordered-shard DeepSeek V4 model identity")?;
-        eprintln!(
-            "deepseek_v4: checkpoint model identity cache={} hashed_bytes={} elapsed_ms={:.1}",
-            identity_cache_outcome_label(report.outcome),
-            report.bytes_hashed,
-            identity_t0.elapsed().as_secs_f64() * 1e3,
-        );
-        (
-            Some(DeepSeekV4ModelContentId::new(report.content_id)),
-            explicit_snapshot_path.is_some() && exists,
-        )
-    } else {
-        (None, false)
-    };
+        durable_probe_ms,
+    )?;
+    let snapshot_file_exists = persistence.snapshot_exists();
+    let durable_admitted = persistence
+        .durable()
+        .is_some_and(|(intent, _, _, _)| intent.admitted);
+    let durable_max_record_bytes = persistence
+        .durable()
+        .map_or(0, |(intent, _, _, _)| intent.max_record_bytes);
+    let durable_store = persistence.durable().map(|(intent, _, _, _)| &intent.store);
+    let durable_has_blobs = persistence
+        .durable()
+        .and_then(|(_, has_blobs, _, _)| has_blobs);
+    let durable_probe_ms = persistence
+        .durable()
+        .map_or(durable_probe_ms, |(_, _, probe_ms, _)| probe_ms);
 
     eprintln!(
         "deepseek_v4: loading {} for generation; prompt_kind={} prompt_tokens={} max_generated_tokens={} reserved_forwards={}/{}",
@@ -1103,20 +1233,18 @@ pub(crate) fn run_deepseek_v4_single_turn(
         ctx.device_facts(),
         session_capacity,
     )?;
-    let restored_snapshot = if snapshot_file_exists {
-        let snapshot_path = args
-            .deepseek_v4_snapshot
-            .as_ref()
-            .expect("snapshot existence requires a snapshot path");
-        let model_content_id = snapshot_model_content_id
-            .expect("snapshot path resolved a model-content identity before planning");
+    let restored_snapshot = if let Ds4ResolvedPersistence::SnapshotRestore {
+        path: snapshot_path,
+        content_id: model_content_id,
+    } = &persistence
+    {
         let snapshot_t0 = Instant::now();
         let snapshot = load_causal_snapshot_file(
             snapshot_path,
             DeepSeekV4SnapshotCodecConstraints {
                 config: load_plan.config(),
                 session_capacity: load_plan.session_capacity(),
-                expected_model_content_id: model_content_id,
+                expected_model_content_id: *model_content_id,
                 max_record_bytes: DEEPSEEK_V4_SNAPSHOT_MAX_RECORD_BYTES,
             },
         )
@@ -1134,7 +1262,10 @@ pub(crate) fn run_deepseek_v4_single_turn(
             restored_prefix,
             snapshot_t0.elapsed().as_secs_f64() * 1e3,
         );
-        Some((snapshot, restored_prefix))
+        Some(Ds4ValidatedSnapshot {
+            snapshot,
+            restored_prefix,
+        })
     } else {
         None
     };
@@ -1171,7 +1302,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
         residency.config().vocab_size,
     );
     let residency_report = residency.report().clone();
-    let mut session = match snapshot_model_content_id {
+    let mut session = match persistence.content_id() {
         Some(model_content_id) => {
             DeepSeekV4Session::new_with_model_content_id(&ctx, residency, model_content_id)
         }
@@ -1200,13 +1331,16 @@ pub(crate) fn run_deepseek_v4_single_turn(
     let mut durable_capture_kind = "prompt";
     let mut durable_capture_ms = 0.0;
     let mut durable_restore_ms = durable_probe_ms;
-    let prefill_mode = if let Some(snapshot_path) = args.deepseek_v4_snapshot.as_ref() {
-        let model_content_id = snapshot_model_content_id
-            .expect("snapshot path resolved a model-content identity before residency");
+    let prefill_mode = if let Some(snapshot_path) = persistence.snapshot_path() {
+        let model_content_id = persistence
+            .content_id()
+            .ok_or_else(|| anyhow!("snapshot persistence lost its model-content identity"))?;
         if snapshot_file_exists {
-            let (snapshot, restored_prefix) = restored_snapshot
+            let restored = restored_snapshot
                 .as_ref()
-                .expect("existing snapshot was validated before residency");
+                .ok_or_else(|| anyhow!("existing snapshot was not validated before residency"))?;
+            let snapshot = &restored.snapshot;
+            let restored_prefix = &restored.restored_prefix;
             session
                 .restore_causal_snapshot(snapshot)
                 .context("restore DeepSeek V4 causal snapshot")?;
@@ -1273,7 +1407,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
         }
     } else {
         let (restored_prefix, durable_payload_bytes) = attempt_deepseek_v4_durable_restore(
-            durable_store.as_ref(),
+            durable_store,
             durable_has_blobs,
             &mut session,
             &prompt_token_ids,

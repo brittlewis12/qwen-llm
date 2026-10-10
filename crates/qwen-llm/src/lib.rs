@@ -32,6 +32,7 @@ pub(crate) mod checkpoint_fs;
 pub mod checkpoint_identity;
 pub mod checkpoint_store;
 pub mod codec;
+pub mod compare;
 pub mod deepseek_v4;
 pub mod deepseek_v4_cache;
 pub mod deepseek_v4_census;

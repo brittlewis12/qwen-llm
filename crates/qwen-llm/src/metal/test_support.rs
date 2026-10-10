@@ -47,21 +47,7 @@ pub(super) fn offset_tensor(
 /// NaN or infinity on either side fails the test instead of vanishing from
 /// the reduction (`f32::max` drops NaN).
 pub(super) fn max_abs_diff_finite(label: &str, actual: &[f32], expected: &[f32]) -> f32 {
-    assert_eq!(actual.len(), expected.len(), "{label}: length mismatch");
-    assert!(!expected.is_empty(), "{label}: empty comparison");
-    assert!(
-        actual.iter().all(|v| v.is_finite()),
-        "{label}: non-finite actual"
-    );
-    assert!(
-        expected.iter().all(|v| v.is_finite()),
-        "{label}: non-finite expected"
-    );
-    actual
-        .iter()
-        .zip(expected)
-        .map(|(a, e)| (a - e).abs())
-        .fold(0.0f32, f32::max)
+    crate::compare::assert_max_abs_diff_f32(label, actual.iter(), expected.iter())
 }
 
 pub(super) fn tensor_f32_at_offset(tensor: &MetalTensor) -> Vec<f32> {

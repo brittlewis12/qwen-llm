@@ -1518,8 +1518,9 @@ pub(super) fn assert_f32_census(
         totals(selected),
         "{label}: call coverage differs"
     );
+    let f32_path = |path: &CensusPath| matches!(path, CensusPath::F32Tile | CensusPath::F32Narrow);
     assert!(
-        half.keys().all(|(_, _, path)| *path != CensusPath::F32Tile),
+        half.keys().all(|(_, _, path)| !f32_path(path)),
         "{label}: the half-staged run used an F32 tile"
     );
     let tile_of = |kind: &str| match kind {
@@ -1533,15 +1534,13 @@ pub(super) fn assert_f32_census(
         let enabled =
             in_selection && tile_of(kind).is_some_and(|tile| selection.tiles.contains(&tile));
         if enabled {
-            assert_eq!(
-                *path,
-                CensusPath::F32Tile,
+            assert!(
+                f32_path(path),
                 "{label}: {n} {stage:?} {kind} calls fell back"
             );
         } else if in_selection {
-            assert_ne!(
-                *path,
-                CensusPath::F32Tile,
+            assert!(
+                !f32_path(path),
                 "{label}: {stage:?} {kind} took a disabled tile"
             );
         } else {
@@ -1563,7 +1562,7 @@ pub(super) fn assert_f32_census(
         assert!(
             selected
                 .keys()
-                .any(|(_, kind, path)| *path == CensusPath::F32Tile && tile_of(kind) == Some(*tile)),
+                .any(|(_, kind, path)| f32_path(path) && tile_of(kind) == Some(*tile)),
             "{label}: no {tile:?} call ran"
         );
     }
@@ -1787,10 +1786,13 @@ fn fast_f32_operands_keep_chunk_identities() {
 }
 
 /// The narrow F32-operand kernels change nothing in the model: under the
-/// all-F32 selection, 1-, 2-, 4-, 8- and 9-token suffixes after a reused
-/// prefix, and a prompt whose last chunk has 5 rows, give bitwise the same
-/// logits (prefill and four decode steps) and end state with spans of up to
-/// 8 rows on the narrow kernels as with every span on the wide tiles.
+/// all-F32 selection, 1-, 2-, 4-, 8- and 9-token suffixes ending at 2,048,
+/// spans crossing the sparse frontier and wholly past it (an off-grid
+/// prefix included), and a prompt whose last chunk has 5 rows, give bitwise
+/// the same logits (prefill and four decode steps), prompt-end state and end
+/// state with spans of up to 8 rows on the narrow kernels as with every span
+/// on the wide tiles; the census shows the narrow kernels ran exactly where
+/// expected.
 #[test]
 #[ignore = "map #12 narrow F32 kernels in the model: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU"]
 fn fast_f32_narrow_rows_match_the_wide_tiles() {
@@ -1807,17 +1809,25 @@ fn fast_f32_narrow_rows_match_the_wide_tiles() {
         .into_iter()
         .map(|t| t as u32)
         .collect();
+    use super::super::packed::{CensusPath, F32Census};
     let [_, _, all] = f32_selections();
     let _scope = all.scope();
+    let frontier = weights.config.sparse_frontier() as usize;
     // (prefix tokens, span tokens): the span is prefilled after the prefix.
+    // Spans end at 2,048, cross the sparse frontier, lie wholly past it
+    // (packed sparse attention), or are a prompt's 5-row last chunk.
     let cases = [
         (2047usize, 1usize),
         (2046, 2),
         (2044, 4),
         (2040, 8),
         (2039, 9),
+        (frontier - 4, 8),
+        (frontier + 17, 3),
+        (frontier + 300, 5),
         (0, 1029),
     ];
+    let census = F32Census::begin();
     let run = |prefix: usize, span: usize, narrow_rows: usize| {
         let _narrow = F32NarrowRows::set(narrow_rows);
         let end = prefix + span;
@@ -1825,24 +1835,42 @@ fn fast_f32_narrow_rows_match_the_wide_tiles() {
         if prefix > 0 {
             s.prefill_packed(&ctx, &tokens[..prefix]).unwrap();
         }
+        let _ = census.take();
         let mut logits = vec![s.prefill_packed(&ctx, &tokens[prefix..end]).unwrap()];
+        let narrow_calls = census
+            .take()
+            .iter()
+            .filter(|((_, _, path), _)| *path == CensusPath::F32Narrow)
+            .map(|(_, n)| n)
+            .sum::<usize>();
+        let prompt_end = s.capture_snapshot().unwrap();
         for &token in &tokens[end..end + 4] {
             logits.push(s.forward(&ctx, token).unwrap());
         }
-        (logits, s.capture_snapshot().unwrap())
+        (
+            logits,
+            prompt_end,
+            s.capture_snapshot().unwrap(),
+            narrow_calls,
+        )
     };
     let mut failures = Vec::new();
     for (prefix, span) in cases {
-        let (narrow_logits, narrow_end) = run(prefix, span, 8);
-        let (wide_logits, wide_end) = run(prefix, span, 0);
+        let (narrow_logits, narrow_prompt, narrow_end, narrow_calls) = run(prefix, span, 8);
+        let (wide_logits, wide_prompt, wide_end, wide_calls) = run(prefix, span, 0);
         let logits_equal = logit_bits(&narrow_logits) == logit_bits(&wide_logits);
+        let prompt_equal = narrow_prompt.same_state(&wide_prompt);
         let state_equal = narrow_end.same_state(&wide_end);
+        // The span's chunks of at most 8 rows ran narrow; none with the
+        // limit at 0.
+        let expect_narrow = span <= 8 || span % 512 <= 8;
+        let census_ok = wide_calls == 0 && (narrow_calls > 0) == expect_narrow;
         eprintln!(
-            "prefix {prefix} + span {span}: logits bitwise {logits_equal}, end state equal {state_equal}"
+            "prefix {prefix} + span {span}: logits bitwise {logits_equal}, prompt-end state equal {prompt_equal}, end state equal {state_equal}, narrow calls {narrow_calls} (wide-only run {wide_calls})"
         );
-        if !(logits_equal && state_equal) {
+        if !(logits_equal && prompt_equal && state_equal && census_ok) {
             failures.push(format!(
-                "prefix {prefix} + span {span}: logits {logits_equal}, end state {state_equal}"
+                "prefix {prefix} + span {span}: logits {logits_equal}, prompt-end state {prompt_equal}, end state {state_equal}, narrow census {narrow_calls}/{wide_calls}"
             ));
         }
     }

@@ -142,6 +142,8 @@ thread_local! {
 pub(super) enum CensusPath {
     /// An F32-operand tile.
     F32Tile,
+    /// A narrow F32-operand kernel for a short span (the tile's arithmetic).
+    F32Narrow,
     /// The batched kernel of an F32 weight (F32 operands already).
     F32Native,
     /// A half-staged batched kernel.
@@ -740,7 +742,15 @@ fn matmat(
         };
         if f32_tile {
             #[cfg(test)]
-            record_census(stage, format!("{:?}", weight.dtype), CensusPath::F32Tile);
+            record_census(
+                stage,
+                format!("{:?}", weight.dtype),
+                if narrow {
+                    CensusPath::F32Narrow
+                } else {
+                    CensusPath::F32Tile
+                },
+            );
             return Ok(());
         }
     }

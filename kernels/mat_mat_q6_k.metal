@@ -669,7 +669,9 @@ kernel void kernel_mat_mat_q6_K_f32_mm64x32(
 // block il of each 32-K step), the same slab layouts read by simdgroup_load,
 // and for every 32-K step four simdgroup_multiply_accumulate(mc, mb, ma, mc)
 // with the tokens-by-K activations on the left, in K order, from a zero
-// accumulator. A token's outputs therefore match the wide tile's bitwise.
+// accumulator: the wide tile's operation sequence per output. Bitwise
+// equality with the wide tile is qualification-tested
+// (metal/tests/f32_narrow_tiles.rs and the GLM model test), not assumed.
 // Rows and tokens past the edge are clamped (read, never stored); a group
 // wholly past the last row returns before any work.
 

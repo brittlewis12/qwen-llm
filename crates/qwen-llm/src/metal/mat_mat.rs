@@ -2751,7 +2751,8 @@ pub fn encode_mat_mat_q8_0_f32_r2c4k64(
 /// One-column companion of [`encode_mat_mat_q8_0_f32_r2c4k64`] for short
 /// spans (`kernel_mat_mat_q8_0_f32_r2c1k64`): the same weight tile,
 /// dequantization, K order and per-output matrix-multiply sequence over one
-/// 8-token column tile, so a token's outputs are bitwise those of R2C4K64.
+/// 8-token column tile (bitwise equality with R2C4K64 is
+/// qualification-tested, `metal/tests/f32_narrow_tiles.rs`).
 /// Same requirements, except that `x` backs `ceil(n_tokens / 8) * 8` rows.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_mat_mat_q8_0_f32_r2c1k64(
@@ -2815,6 +2816,8 @@ fn encode_q8_0_f32_r2k64(
         || x.dtype != GgmlType::F32
         || y.dtype != GgmlType::F32
         || n_tokens == 0
+        || n_in == 0
+        || n_out == 0
         || !n_in.is_multiple_of(64)
         || !n_out.is_multiple_of(16)
     {
@@ -2830,6 +2833,11 @@ fn encode_q8_0_f32_r2k64(
     {
         return Err(bad("operand sizes do not match the geometry".into()));
     }
+    // Physical extents before any padded-range arithmetic: Q8 blocks are
+    // read through `half` scales; activations and outputs as F32.
+    super::checks::check_physical(kernel, weight, 2, false, "weight")?;
+    super::checks::check_physical(kernel, x, 4, false, "x")?;
+    super::checks::check_physical(kernel, y, 4, true, "y")?;
     let n = |v: usize| u32::try_from(v).map_err(|_| bad(format!("{v} exceeds u32")));
     let padded_bytes = n_tokens
         .div_ceil(tokens_per_tile)
@@ -2844,7 +2852,7 @@ fn encode_q8_0_f32_r2k64(
     if padded_end > x.buffer.length() as u64 {
         return Err(bad(format!(
             "missing padded input backing: x backs {} bytes from its offset; {padded_bytes} needed for {n_tokens} tokens padded to {tokens_per_tile}",
-            x.buffer.length() as u64 - x.offset
+            (x.buffer.length() as u64).saturating_sub(x.offset)
         )));
     }
     let overlaps = |a: &MetalTensor, a_end: u64, b: &MetalTensor| {
@@ -2946,8 +2954,9 @@ pub fn encode_mat_mat_q6_k_f32_mm64x32(
 /// (`kernel_mat_mat_q6_K_f32_r8c8`): each SIMD group owns 8 outputs x 8
 /// tokens with its own 2 KiB slab and no threadgroup-wide barriers, and
 /// performs the wide tile's dequantization, slab layouts and per-output
-/// matrix-multiply sequence, so a token's outputs are bitwise those of the
-/// wide tile. Same requirements; 8 KiB threadgroup memory.
+/// matrix-multiply sequence (bitwise equality with the wide tile is
+/// qualification-tested, `metal/tests/f32_narrow_tiles.rs`). Same
+/// requirements; 8 KiB threadgroup memory.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_mat_mat_q6_k_f32_r8c8(
     ctx: &MetalContext,

@@ -320,10 +320,11 @@ kernel void kernel_mat_mat_q8_0_f32_r2c4k64(
 // One-column companion of R2C4K64 for short spans (map #12 accuracy lane):
 // the same 16-output F32 weight tile, dequantization, K order and
 // simdgroup_multiply_accumulate sequence per output element, over one
-// 8-token column tile instead of four. A token's outputs depend only on its
-// own activation row and that fixed order, so they are bitwise those of
-// R2C4K64. Reads 8 rows from each column tile's start (the host checks the
-// backing), writes only rows below N.
+// 8-token column tile instead of four: R2C4K64's operation sequence per
+// output. Bitwise equality with R2C4K64 is qualification-tested
+// (metal/tests/f32_narrow_tiles.rs and the GLM model test), not assumed.
+// Reads 8 rows from each column tile's start (the host checks the backing),
+// writes only rows below N.
 kernel void kernel_mat_mat_q8_0_f32_r2c1k64(
         constant mat_mat_q8_0_args & args   [[buffer(0)]],
         device const uchar         * srcA   [[buffer(1)]],

@@ -36,8 +36,9 @@ fn run_guarded(
     tensor_f32_at_offset(&output)
 }
 
-/// Activations with outlier channels and cancellation-heavy rows (pairs of
-/// near-opposite values).
+/// Activations with outlier channels (50x) and, on every third token,
+/// alternate channels negated and scaled by 0.999 (sign-mixed rows; not
+/// constructed to cancel against particular weights).
 fn activations(tokens: usize, n_in: usize, seed: u64) -> Vec<f32> {
     let mut stream = Stream(seed);
     (0..tokens * n_in)
@@ -87,15 +88,25 @@ fn bits(values: &[f32]) -> Vec<u32> {
 
 /// Q6_K: for spans of 1-8 tokens (and 9, 17) starting anywhere in a 32-token
 /// tile, the narrow kernel's outputs equal the wide tile's for the same
-/// tokens in a 512-token dispatch, bit for bit; K 256 to 4,096, full and
-/// partial 32-output groups (n_out 64 and 80).
+/// tokens in a 512-token dispatch, bit for bit; K 256 to 12,288 (the dense
+/// FFN down width); output counts 1, 7, 9, 64, 79 and 80 (partly valid
+/// SIMD groups, whose rows are clamped and stores masked, and wholly idle
+/// groups).
 #[test]
 fn q6_f32_narrow_matches_the_wide_tile_bitwise() {
     let Some(ctx) = metal_test_context() else {
         return;
     };
     const FULL: usize = 512;
-    for (n_in, n_out) in [(256usize, 80usize), (2048, 64), (4096, 80)] {
+    for (n_in, n_out) in [
+        (256usize, 1usize),
+        (256, 7),
+        (512, 9),
+        (256, 80),
+        (2048, 64),
+        (4096, 80),
+        (12288, 79),
+    ] {
         let (bytes, _) = q6_k_weight(n_in, n_out, 0x51ED_270B_27D0_9F3B ^ n_in as u64);
         let weight = offset_tensor(
             &ctx,
@@ -195,8 +206,10 @@ fn q8_f32_narrow_matches_the_wide_tile_bitwise() {
 }
 
 /// The narrow encoders refuse, before encoding: Q8_0 input without 8-row
-/// padded backing; Q6_K with a misaligned input, a non-256 K, or an output
-/// aliasing its input.
+/// padded backing, a misaligned or truncated weight, a truncated or
+/// read-only output, an input offset past its buffer, an output over the
+/// input's padding rows; Q6_K with a misaligned input, a non-256 K, or an
+/// output aliasing its input.
 #[test]
 fn f32_narrow_encoders_refuse_bad_bindings() {
     let Some(ctx) = metal_test_context() else {
@@ -225,6 +238,64 @@ fn f32_narrow_encoders_refuse_bad_bindings() {
     assert!(refused(encode(&|enc| {
         crate::metal::encode_mat_mat_q8_0_f32_r2c1k64(&ctx, enc, &q8, &tight, &y, 64, 16, 3)
     })));
+    // An 8-row backing with the valid control, then one fault at a time.
+    let padded = offset_tensor(
+        &ctx,
+        16,
+        bytemuck::cast_slice(&vec![0.5f32; 64 * 8 + 16 * 3]),
+        0,
+        vec![(64 * 8 + 16 * 3) as u64],
+        GgmlType::F32,
+    );
+    let x8 = padded.view_subrange(0, vec![64, 3]);
+    let q8_narrow = |w: &MetalTensor, x: &MetalTensor, y: &MetalTensor| {
+        encode(&|enc| crate::metal::encode_mat_mat_q8_0_f32_r2c1k64(&ctx, enc, w, x, y, 64, 16, 3))
+    };
+    assert!(q8_narrow(&q8, &x8, &y).is_ok(), "valid Q8 control");
+    let q8_misaligned = offset_tensor(&ctx, 1, &q8_bytes, 24, vec![64, 16], GgmlType::Q8_0);
+    assert!(
+        refused(q8_narrow(&q8_misaligned, &x8, &y)),
+        "misaligned weight"
+    );
+    let q8_truncated = offset_tensor(
+        &ctx,
+        32,
+        &q8_bytes[..q8_bytes.len() / 2],
+        0,
+        vec![64, 16],
+        GgmlType::Q8_0,
+    );
+    assert!(
+        refused(q8_narrow(&q8_truncated, &x8, &y)),
+        "truncated weight"
+    );
+    let y_truncated = offset_tensor(&ctx, 16, &[0u8; 16 * 4], 0, vec![16, 3], GgmlType::F32);
+    assert!(
+        refused(q8_narrow(&q8, &x8, &y_truncated)),
+        "truncated output"
+    );
+    let y_read_only = MetalTensor {
+        provenance: MetalTensorProvenance::OwnedWeightReadOnly,
+        ..y.clone()
+    };
+    assert!(
+        refused(q8_narrow(&q8, &x8, &y_read_only)),
+        "read-only output"
+    );
+    let x_past_end = MetalTensor {
+        offset: padded.buffer.length() as u64 + 16,
+        ..x8.clone()
+    };
+    assert!(
+        refused(q8_narrow(&q8, &x_past_end, &y)),
+        "input offset past its buffer"
+    );
+    let y_on_padding = padded.view_subrange(64 * 3, vec![16, 3]);
+    assert!(
+        refused(q8_narrow(&q8, &x8, &y_on_padding)),
+        "output over the padding rows"
+    );
+
     let (q6_bytes, _) = q6_k_weight(256, 64, 3);
     let q6 = offset_tensor(&ctx, 32, &q6_bytes, 24, vec![256, 64], GgmlType::Q6_K);
     let x = offset_tensor(

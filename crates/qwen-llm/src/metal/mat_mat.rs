@@ -2772,7 +2772,7 @@ pub fn encode_mat_mat_q8_0_f32_r2c4k64(
         .ok_or_else(|| bad("padded input end overflow".into()))?;
     if padded_end > x.buffer.length() as u64 {
         return Err(bad(format!(
-            "x backs {} bytes from its offset; {padded_bytes} needed for {n_tokens} tokens padded to 32",
+            "missing padded input backing: x backs {} bytes from its offset; {padded_bytes} needed for {n_tokens} tokens padded to 32",
             x.buffer.length() as u64 - x.offset
         )));
     }

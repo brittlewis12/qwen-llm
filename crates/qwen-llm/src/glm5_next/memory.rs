@@ -177,21 +177,32 @@ pub fn decode_scratch_specs(c: &Glm5NextConfig) -> Vec<BufferSpec> {
 }
 
 /// Row capacity of packed activation buffers for chunks of up to `rows`
-/// tokens: enough that a view starting at any row below `rows` (sub-ranges
-/// such as the rows on either side of the sparse frontier) has its token
-/// count padded to 32 backed (the F32-operand mat-mat tiles read those rows,
-/// never write them): `rows + 31`, rounded up to a multiple of 32.
+/// tokens: `rows` rounded up to a multiple of 32, so a view of the first
+/// `n <= rows` rows has its token count padded to 32 backed (the
+/// F32-operand Q8_0 tile reads whole 32-token tiles from a view's start,
+/// never writing past its rows). No extra rows at 32-multiple chunks.
 pub fn packed_activation_rows(rows: u64) -> u64 {
+    rows.div_ceil(32).saturating_mul(32)
+}
+
+/// Row capacity of the packed activation buffers the sparse span reads
+/// through views that start inside the chunk (`normed` and `query_r`, the
+/// indexer's per-row projections past the frontier): a view starting at
+/// any row below `rows` must still have its padded tokens backed, so
+/// `rows + 31`, rounded up to a multiple of 32.
+pub fn packed_offset_activation_rows(rows: u64) -> u64 {
     rows.saturating_add(31).div_ceil(32).saturating_mul(32)
 }
 
 /// Packed-prefill scratch for chunks of up to `rows` tokens. Activation
-/// buffers hold [`packed_activation_rows`] rows (the session exposes `rows`
-/// of them); routing buffers hold exactly `rows`. Products of dimensions
+/// buffers hold [`packed_activation_rows`] rows, and the two the sparse
+/// span reads from inside the chunk [`packed_offset_activation_rows`] (the
+/// session exposes `rows` of them); routing buffers hold exactly `rows`. Products of dimensions
 /// saturate, so an absurd `rows` fails [`BufferSpec::bytes`] instead of
 /// wrapping to a small shape.
 pub fn packed_scratch_specs(c: &Glm5NextConfig, rows: u64) -> Vec<BufferSpec> {
     let r = packed_activation_rows(rows);
+    let offset_rows = packed_offset_activation_rows(rows);
     let routing_rows = rows;
     let h = c.hidden_size as u64;
     let w = c.kda_width() as u64;
@@ -217,7 +228,7 @@ pub fn packed_scratch_specs(c: &Glm5NextConfig, rows: u64) -> Vec<BufferSpec> {
         z("post", F32, &[4, r]),
         z("comb", F32, &[4, 4, r]),
         z("collapsed", F32, &[h, r]),
-        z("normed", F32, &[h, r]),
+        z("normed", F32, &[h, offset_rows]),
         z("block_out", F32, &[h, r]),
         z("q", F32, &[w, r]),
         z("k", F32, &[w, r]),
@@ -229,7 +240,7 @@ pub fn packed_scratch_specs(c: &Glm5NextConfig, rows: u64) -> Vec<BufferSpec> {
         z("output_gate", F32, &[w, r]),
         z("kda_out", F32, &[w, r]),
         z("query_a", F32, &[c.q_lora_rank as u64, r]),
-        z("query_r", F32, &[c.q_lora_rank as u64, r]),
+        z("query_r", F32, &[c.q_lora_rank as u64, offset_rows]),
         z("query", F32, &[c.mla_width() as u64, r]),
         z("latent_raw", F32, &[kv, r]),
         z("latent", F32, &[kv, r]),

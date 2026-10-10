@@ -4164,7 +4164,7 @@ fn compare_gdn_state_conv_27b(sess_a: &MetalSession, sess_b: &MetalSession) -> G
 }
 
 fn max_abs_delta_27b(a: &[f32], b: &[f32]) -> f32 {
-    qwen_llm::compare::assert_max_abs_diff_f32("GDN 27B state", a.iter(), b.iter())
+    qwen_llm::compare::assert_max_abs_diff_f32("27B tensor comparison", a.iter(), b.iter())
 }
 
 #[cfg(test)]

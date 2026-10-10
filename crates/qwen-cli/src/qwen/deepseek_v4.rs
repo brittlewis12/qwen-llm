@@ -31,12 +31,6 @@ enum Ds4CaptureTarget {
     Completed,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Ds4CaptureResolution {
-    admitted: bool,
-    target: Ds4CaptureTarget,
-}
-
 fn ds4_resolve_capture_target(
     has_store: bool,
     min_tokens: usize,
@@ -44,10 +38,10 @@ fn ds4_resolve_capture_target(
     completed_eligible: bool,
     preflight_ok: bool,
     prompt_publish_prefix: Option<usize>,
-) -> Ds4CaptureResolution {
+) -> Ds4CaptureTarget {
     let initially_admitted = has_store && min_tokens > 0 && prompt_len >= min_tokens;
     let admitted = initially_admitted && (prompt_publish_prefix.is_none() || preflight_ok);
-    let target = if !admitted {
+    if !admitted {
         Ds4CaptureTarget::None
     } else if completed_eligible {
         Ds4CaptureTarget::Completed
@@ -55,26 +49,24 @@ fn ds4_resolve_capture_target(
         Ds4CaptureTarget::PromptBoundary { publish_prefix }
     } else {
         Ds4CaptureTarget::None
-    };
-    Ds4CaptureResolution { admitted, target }
+    }
 }
 
 #[derive(Debug)]
 struct Ds4DurableIntent {
     store: DeepSeekV4CheckpointStore,
     max_record_bytes: u64,
-    admitted: bool,
     capture: Ds4CaptureTarget,
 }
 
 #[derive(Debug)]
-enum Ds4PersistenceIntent {
+enum Ds4PersistenceIntent<'a> {
     None,
-    Snapshot { path: PathBuf },
+    Snapshot { path: &'a Path },
     Durable(Ds4DurableIntent),
 }
 
-impl Ds4PersistenceIntent {
+impl Ds4PersistenceIntent<'_> {
     fn durable(&self) -> Option<&Ds4DurableIntent> {
         match self {
             Self::Durable(intent) => Some(intent),
@@ -83,15 +75,14 @@ impl Ds4PersistenceIntent {
     }
 }
 
-#[derive(Debug)]
-enum Ds4ResolvedPersistence {
+enum Ds4ResolvedPersistence<'a> {
     None,
     SnapshotRestore {
-        path: PathBuf,
+        path: &'a Path,
         content_id: DeepSeekV4ModelContentId,
     },
     SnapshotPublish {
-        path: PathBuf,
+        path: &'a Path,
         content_id: DeepSeekV4ModelContentId,
         publish_prefix: usize,
     },
@@ -103,15 +94,15 @@ enum Ds4ResolvedPersistence {
     },
 }
 
-enum Ds4LoadedPersistence {
+enum Ds4LoadedPersistence<'a> {
     None,
     SnapshotRestore {
-        path: PathBuf,
+        path: &'a Path,
         content_id: DeepSeekV4ModelContentId,
         snapshot: Ds4ValidatedSnapshot,
     },
     SnapshotPublish {
-        path: PathBuf,
+        path: &'a Path,
         content_id: DeepSeekV4ModelContentId,
         publish_prefix: usize,
     },
@@ -123,7 +114,32 @@ enum Ds4LoadedPersistence {
     },
 }
 
-impl Ds4LoadedPersistence {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ds4PrefillPersistenceKind {
+    SnapshotRestore,
+    SnapshotPublish,
+    Durable,
+    None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ds4PrefillBranch {
+    SnapshotRestore,
+    SnapshotPublish,
+    Durable,
+}
+
+fn ds4_select_prefill_branch(kind: Ds4PrefillPersistenceKind) -> Ds4PrefillBranch {
+    match kind {
+        Ds4PrefillPersistenceKind::SnapshotRestore => Ds4PrefillBranch::SnapshotRestore,
+        Ds4PrefillPersistenceKind::SnapshotPublish => Ds4PrefillBranch::SnapshotPublish,
+        Ds4PrefillPersistenceKind::Durable | Ds4PrefillPersistenceKind::None => {
+            Ds4PrefillBranch::Durable
+        }
+    }
+}
+
+impl Ds4LoadedPersistence<'_> {
     fn durable(&self) -> Option<(&Ds4DurableIntent, Option<bool>, f64)> {
         match self {
             Self::Durable {
@@ -152,6 +168,15 @@ impl Ds4LoadedPersistence {
             Self::None | Self::Durable { .. } => None,
         }
     }
+
+    fn prefill_kind(&self) -> Ds4PrefillPersistenceKind {
+        match self {
+            Self::SnapshotRestore { .. } => Ds4PrefillPersistenceKind::SnapshotRestore,
+            Self::SnapshotPublish { .. } => Ds4PrefillPersistenceKind::SnapshotPublish,
+            Self::Durable { .. } => Ds4PrefillPersistenceKind::Durable,
+            Self::None => Ds4PrefillPersistenceKind::None,
+        }
+    }
 }
 
 struct Ds4PendingPublication {
@@ -174,26 +199,17 @@ struct Ds4ValidatedSnapshot {
     restored_prefix: usize,
 }
 
-struct Ds4LoadedSession {
-    ctx: MetalContext,
+struct Ds4LoadedSession<'a> {
     session: DeepSeekV4Session,
     memory_plan: qwen_llm::deepseek_v4_metal::DeepSeekV4MemoryPlan,
+    ctx: MetalContext,
     selector_plan: DeepSeekV4MultigroupSelectorPlan,
     prefetch_outcome: DeepSeekV4PrefetchOutcome,
     before_residency_bytes: u64,
     after_residency_bytes: u64,
     after_session_bytes: u64,
-    persistence: Ds4LoadedPersistence,
     load_ms: f64,
-}
-
-fn ds4_completed_eligible(
-    is_messages: bool,
-    strip_thinking: bool,
-    preserve_thinking: bool,
-    preserve_reasoning: bool,
-) -> bool {
-    is_messages && !strip_thinking && (preserve_thinking || preserve_reasoning)
+    persistence: Ds4LoadedPersistence<'a>,
 }
 
 fn ds4_prompt_kind(source: PromptSource, reasoning: DeepSeekV4Reasoning) -> &'static str {
@@ -212,9 +228,9 @@ fn ds4_identity_needed(
     has_store: bool,
     prompt_len: usize,
     has_blobs: Option<bool>,
-    admitted: bool,
+    capture: Ds4CaptureTarget,
 ) -> bool {
-    has_store && prompt_len >= 2 && (has_blobs == Some(true) || admitted)
+    has_store && prompt_len >= 2 && (has_blobs == Some(true) || capture != Ds4CaptureTarget::None)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -886,12 +902,32 @@ pub(crate) fn emit_deepseek_v4_stage_profile(
 }
 
 struct Ds4EncodedInput {
+    prompt: String,
     tokenizer: Tokenizer,
     prompt_ids: Vec<i32>,
     prompt_kind: &'static str,
     completed_eligible: bool,
     tokenizer_ms: f64,
     encode_ms: f64,
+}
+
+fn ds4_message_encoding_options(
+    mut options: DeepSeekV4EncodeOptions,
+    strip_thinking: bool,
+    preserve_thinking: bool,
+) -> (DeepSeekV4EncodeOptions, DeepSeekV4InlineThinking, bool) {
+    let inline_thinking = if strip_thinking {
+        DeepSeekV4InlineThinking::Strip
+    } else if preserve_thinking {
+        // Tier presence is enforced by validate_deepseek_v4_generation_mode;
+        // the flag maps onto the release encoder's drop_thinking=False lane.
+        options.preserve_reasoning = true;
+        DeepSeekV4InlineThinking::PromoteToReasoning
+    } else {
+        DeepSeekV4InlineThinking::Verbatim
+    };
+    let completed_eligible = options.preserve_reasoning;
+    (options, inline_thinking, completed_eligible)
 }
 
 struct Ds4RunOptions {
@@ -937,27 +973,15 @@ struct Ds4PreparedTokens {
 fn ds4_encode_input(gguf: &GgufFile, args: &Args) -> Result<Ds4EncodedInput> {
     let encode_options = deepseek_v4_encode_options(args)?;
     let (prompt, prompt_source, completed_eligible) = if let Some(path) = args.messages.as_ref() {
-        let mut encode_options = encode_options;
-        let inline_thinking = if args.messages_strip_thinking {
-            DeepSeekV4InlineThinking::Strip
-        } else if args.messages_preserve_thinking {
-            // Tier presence is enforced by validate_deepseek_v4_generation_mode;
-            // the flag maps onto the release encoder's drop_thinking=False lane.
-            encode_options.preserve_reasoning = true;
-            DeepSeekV4InlineThinking::PromoteToReasoning
-        } else {
-            DeepSeekV4InlineThinking::Verbatim
-        };
+        let (encode_options, inline_thinking, completed_eligible) = ds4_message_encoding_options(
+            encode_options,
+            args.messages_strip_thinking,
+            args.messages_preserve_thinking,
+        );
         // Preserved reasoning renders assistant turns byte-faithfully, so the
         // next turn's re-rendered prompt strictly extends this turn's
         // completed transcript; only then is a completed-turn checkpoint
         // reusable.
-        let completed_eligible = ds4_completed_eligible(
-            true,
-            args.messages_strip_thinking,
-            args.messages_preserve_thinking,
-            encode_options.preserve_reasoning,
-        );
         (
             load_deepseek_v4_0731_messages_prompt(
                 path,
@@ -987,6 +1011,7 @@ fn ds4_encode_input(gguf: &GgufFile, args: &Args) -> Result<Ds4EncodedInput> {
     // free-form stats line.
     let encode_ms = encode_t0.elapsed().as_secs_f64() * 1e3;
     Ok(Ds4EncodedInput {
+        prompt,
         tokenizer,
         prompt_ids,
         prompt_kind,
@@ -1024,14 +1049,14 @@ fn ds4_prepare_tokens(
     })
 }
 
-fn ds4_resolve_persistence_intent(
-    args: &Args,
+fn ds4_resolve_persistence_intent<'a>(
+    args: &'a Args,
     gguf: &GgufFile,
     staged_integrity: Option<StagedIntegrityMode>,
     prompt_len: usize,
     required_forwards: usize,
     completed_eligible: bool,
-) -> Result<Ds4PersistenceIntent> {
+) -> Result<Ds4PersistenceIntent<'a>> {
     let durable_store = deepseek_v4_checkpoint_store(args, staged_integrity)?;
     let durable_max_record_bytes = if durable_store.is_some() {
         durable_prefix_cache_max_entry_bytes(args)?
@@ -1073,12 +1098,11 @@ fn ds4_resolve_persistence_intent(
         publish_prefix,
     );
     let persistence = match (args.deepseek_v4_snapshot.as_ref(), durable_store) {
-        (Some(path), _) => Ds4PersistenceIntent::Snapshot { path: path.clone() },
+        (Some(path), _) => Ds4PersistenceIntent::Snapshot { path },
         (None, Some(store)) => Ds4PersistenceIntent::Durable(Ds4DurableIntent {
             store,
             max_record_bytes: durable_max_record_bytes,
-            admitted: capture.admitted,
-            capture: capture.target,
+            capture,
         }),
         (None, None) => Ds4PersistenceIntent::None,
     };
@@ -1123,18 +1147,18 @@ fn ds4_probe_store(intent: &Ds4PersistenceIntent) -> Ds4StoreProbeOutcome {
     }
 }
 
-fn ds4_resolve_persistence(
-    intent: Ds4PersistenceIntent,
+fn ds4_resolve_persistence<'a>(
+    intent: Ds4PersistenceIntent<'a>,
     gguf: &GgufFile,
     prompt_token_ids: &[u32],
     required_forwards: usize,
     has_blobs: Option<bool>,
     probe_ms: f64,
-) -> Result<Ds4ResolvedPersistence> {
+) -> Result<Ds4ResolvedPersistence<'a>> {
     match intent {
         Ds4PersistenceIntent::None => Ok(Ds4ResolvedPersistence::None),
         Ds4PersistenceIntent::Snapshot { path } => {
-            let snapshot_parent = deepseek_v4_snapshot_parent(&path)?;
+            let snapshot_parent = deepseek_v4_snapshot_parent(path)?;
             let exists = match path.symlink_metadata() {
                 Ok(_) => true,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
@@ -1187,7 +1211,7 @@ fn ds4_resolve_persistence(
         }
         Ds4PersistenceIntent::Durable(intent) => {
             let needs_identity =
-                ds4_identity_needed(true, prompt_token_ids.len(), has_blobs, intent.admitted);
+                ds4_identity_needed(true, prompt_token_ids.len(), has_blobs, intent.capture);
             let content_id = if needs_identity {
                 let identity_cache = intent.store.identity_cache();
                 let identity_t0 = Instant::now();
@@ -1213,7 +1237,7 @@ fn ds4_resolve_persistence(
     }
 }
 
-fn ds4_load_session(
+fn ds4_load_session<'a>(
     model_path: &Path,
     gguf: &GgufFile,
     args: &Args,
@@ -1224,8 +1248,8 @@ fn ds4_load_session(
     vocab_size: u32,
     prompt_token_ids: &[u32],
     prefetch_mode: DeepSeekV4PrefetchMode,
-    persistence: Ds4ResolvedPersistence,
-) -> Result<Ds4LoadedSession> {
+    persistence: Ds4ResolvedPersistence<'a>,
+) -> Result<Ds4LoadedSession<'a>> {
     eprintln!(
         "deepseek_v4: loading {} for generation; prompt_kind={} prompt_tokens={} max_generated_tokens={} reserved_forwards={}/{}",
         model_path.display(),
@@ -1255,7 +1279,7 @@ fn ds4_load_session(
         Ds4ResolvedPersistence::SnapshotRestore { path, content_id } => {
             let snapshot_t0 = Instant::now();
             let snapshot = load_causal_snapshot_file(
-                &path,
+                path,
                 DeepSeekV4SnapshotCodecConstraints {
                     config: load_plan.config(),
                     session_capacity: load_plan.session_capacity(),
@@ -1382,10 +1406,9 @@ fn ds4_prefill_session(
     before_residency_bytes: u64,
     after_residency_bytes: u64,
     after_session_bytes: u64,
-    persistence: &Ds4LoadedPersistence,
+    persistence: &Ds4LoadedPersistence<'_>,
     prompt_token_ids: &[u32],
     prefill_chunk_tokens: usize,
-    completed_eligible: bool,
     vocab_size: u32,
     tokenizer: &Tokenizer,
 ) -> Result<Ds4PrefillOutcome> {
@@ -1397,185 +1420,195 @@ fn ds4_prefill_session(
     let durable_store = durable.map(|(intent, _, _)| &intent.store);
     let durable_has_blobs = durable.and_then(|(_, has_blobs, _)| has_blobs);
     let durable_max_record_bytes = durable.map_or(0, |(intent, _, _)| intent.max_record_bytes);
-    let durable_admitted = durable.is_some_and(|(intent, _, _)| intent.admitted);
+    let durable_capture = durable.map_or(Ds4CaptureTarget::None, |(intent, _, _)| intent.capture);
     let durable_probe_ms = durable.map_or(0.0, |(_, _, probe_ms)| probe_ms);
     let mut durable_restore_ms = durable_probe_ms;
-    let prefill_mode = if let Ds4LoadedPersistence::SnapshotRestore {
-        path: snapshot_path,
-        snapshot: restored,
-        ..
-    } = persistence
-    {
-        let snapshot = &restored.snapshot;
-        let restored_prefix = &restored.restored_prefix;
-        session
-            .restore_causal_snapshot(snapshot)
-            .context("restore DeepSeek V4 causal snapshot")?;
-        let suffix_chunks = execute_deepseek_v4_prompt_suffix(
-            session,
-            ctx,
-            &prompt_token_ids[*restored_prefix..],
-            prefill_chunk_tokens,
-        )?;
-        eprintln!(
-            "deepseek_v4: snapshot restore path={} restored_tokens={} suffix_tokens={} suffix_chunks={} payload_bytes={}",
-            snapshot_path.display(),
-            restored_prefix,
-            prompt_token_ids.len() - *restored_prefix,
-            suffix_chunks,
-            snapshot.payload_bytes(),
-        );
-        ds4_prefill_mode_label(Ds4PrefillMode::CausalSnapshotRestore)
-    } else if let Ds4LoadedPersistence::SnapshotPublish {
-        path: snapshot_path,
-        content_id: model_content_id,
-        publish_prefix,
-    } = persistence
-    {
-        advance_deepseek_v4_prompt_prefix(
-            session,
-            ctx,
-            &prompt_token_ids[..*publish_prefix],
-            prefill_chunk_tokens,
-        )?;
-        let snapshot = session
-            .capture_causal_snapshot()
-            .context("capture DeepSeek V4 causal snapshot")?;
-        let report = publish_causal_snapshot_file(
-            snapshot_path,
-            &snapshot,
-            DeepSeekV4SnapshotCodecConstraints {
-                config: session.residency().config(),
-                session_capacity: session.capacity(),
-                expected_model_content_id: *model_content_id,
-                max_record_bytes: DEEPSEEK_V4_SNAPSHOT_MAX_RECORD_BYTES,
-            },
-        )
-        .with_context(|| {
-            format!(
-                "publish DeepSeek V4 causal snapshot {}",
-                snapshot_path.display()
-            )
-        })?;
-        execute_deepseek_v4_prompt_suffix(
-            session,
-            ctx,
-            &prompt_token_ids[*publish_prefix..],
-            prefill_chunk_tokens,
-        )?;
-        eprintln!(
-            "deepseek_v4: snapshot publish path={} outcome={} prefix_tokens={} payload_bytes={} record_bytes={}",
-            snapshot_path.display(),
-            match report.outcome {
-                DeepSeekV4SnapshotFileOutcome::Published => "published",
-                DeepSeekV4SnapshotFileOutcome::AlreadyPresent => "already_present",
-            },
-            publish_prefix,
-            snapshot.payload_bytes(),
-            report.record_bytes,
-        );
-        ds4_prefill_mode_label(Ds4PrefillMode::CausalSnapshotPublish)
-    } else {
-        let (restored_prefix, durable_payload_bytes) = attempt_deepseek_v4_durable_restore(
-            durable_store,
-            durable_has_blobs,
-            session,
-            prompt_token_ids,
-            durable_max_record_bytes,
-            durable_probe_ms,
-            &mut durable_restore_ms,
-        )?;
-        let checked_capture_boundary = deepseek_v4_durable_capture_prefix_len(
-            prompt_token_ids.len(),
-            durable_admitted && !completed_eligible,
-        )?;
-        let capture_boundary = match durable.map(|(intent, _, _)| intent.capture) {
-            Some(Ds4CaptureTarget::PromptBoundary { publish_prefix }) => {
-                checked_capture_boundary.map(|_| publish_prefix)
-            }
-            _ => checked_capture_boundary,
-        };
-        if let Some(publish_prefix) = capture_boundary {
-            if restored_prefix < publish_prefix {
-                advance_deepseek_v4_prompt_prefix(
-                    session,
-                    ctx,
-                    &prompt_token_ids[restored_prefix..publish_prefix],
-                    prefill_chunk_tokens,
-                )?;
-            }
-            let capture_t0 = Instant::now();
-            match session.prepare_durable_checkpoint() {
-                Ok(prepared) => durable_prepared = Some(prepared),
-                Err(error)
-                    if causal_snapshot_capture_error_kind(&error)
-                        == DeepSeekV4SnapshotCaptureErrorKind::Allocation =>
-                {
-                    eprintln!(
-                        "warning: durable DeepSeek V4 prefix capture allocation failed; continuing without publication: {error}"
-                    );
-                }
-                Err(error) => {
-                    return Err(error).context("capture durable DeepSeek V4 causal snapshot");
-                }
-            }
-            durable_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
+    let prefill_branch = ds4_select_prefill_branch(persistence.prefill_kind());
+    let prefill_mode = match prefill_branch {
+        Ds4PrefillBranch::SnapshotRestore => {
+            let Ds4LoadedPersistence::SnapshotRestore {
+                path: snapshot_path,
+                snapshot: restored,
+                ..
+            } = persistence
+            else {
+                unreachable!("loaded persistence kind owns its validated snapshot")
+            };
+            let snapshot = &restored.snapshot;
+            let restored_prefix = &restored.restored_prefix;
+            session
+                .restore_causal_snapshot(snapshot)
+                .context("restore DeepSeek V4 causal snapshot")?;
             let suffix_chunks = execute_deepseek_v4_prompt_suffix(
                 session,
                 ctx,
-                &prompt_token_ids[publish_prefix..],
+                &prompt_token_ids[*restored_prefix..],
                 prefill_chunk_tokens,
             )?;
-            if restored_prefix > 0 {
+            eprintln!(
+                "deepseek_v4: snapshot restore path={} restored_tokens={} suffix_tokens={} suffix_chunks={} payload_bytes={}",
+                snapshot_path.display(),
+                restored_prefix,
+                prompt_token_ids.len() - *restored_prefix,
+                suffix_chunks,
+                snapshot.payload_bytes(),
+            );
+            ds4_prefill_mode_label(Ds4PrefillMode::CausalSnapshotRestore)
+        }
+        Ds4PrefillBranch::SnapshotPublish => {
+            let Ds4LoadedPersistence::SnapshotPublish {
+                path: snapshot_path,
+                content_id: model_content_id,
+                publish_prefix,
+            } = persistence
+            else {
+                unreachable!("snapshot publish kind carries its path and capture prefix")
+            };
+            advance_deepseek_v4_prompt_prefix(
+                session,
+                ctx,
+                &prompt_token_ids[..*publish_prefix],
+                prefill_chunk_tokens,
+            )?;
+            let snapshot = session
+                .capture_causal_snapshot()
+                .context("capture DeepSeek V4 causal snapshot")?;
+            let report = publish_causal_snapshot_file(
+                snapshot_path,
+                &snapshot,
+                DeepSeekV4SnapshotCodecConstraints {
+                    config: session.residency().config(),
+                    session_capacity: session.capacity(),
+                    expected_model_content_id: *model_content_id,
+                    max_record_bytes: DEEPSEEK_V4_SNAPSHOT_MAX_RECORD_BYTES,
+                },
+            )
+            .with_context(|| {
+                format!(
+                    "publish DeepSeek V4 causal snapshot {}",
+                    snapshot_path.display()
+                )
+            })?;
+            execute_deepseek_v4_prompt_suffix(
+                session,
+                ctx,
+                &prompt_token_ids[*publish_prefix..],
+                prefill_chunk_tokens,
+            )?;
+            eprintln!(
+                "deepseek_v4: snapshot publish path={} outcome={} prefix_tokens={} payload_bytes={} record_bytes={}",
+                snapshot_path.display(),
+                match report.outcome {
+                    DeepSeekV4SnapshotFileOutcome::Published => "published",
+                    DeepSeekV4SnapshotFileOutcome::AlreadyPresent => "already_present",
+                },
+                publish_prefix,
+                snapshot.payload_bytes(),
+                report.record_bytes,
+            );
+            ds4_prefill_mode_label(Ds4PrefillMode::CausalSnapshotPublish)
+        }
+        Ds4PrefillBranch::Durable => {
+            let (restored_prefix, durable_payload_bytes) = attempt_deepseek_v4_durable_restore(
+                durable_store,
+                durable_has_blobs,
+                session,
+                prompt_token_ids,
+                durable_max_record_bytes,
+                durable_probe_ms,
+                &mut durable_restore_ms,
+            )?;
+            let capture_boundary = match durable_capture {
+                Ds4CaptureTarget::PromptBoundary { publish_prefix } => {
+                    deepseek_v4_durable_capture_prefix_len(prompt_token_ids.len(), true)?
+                        .map(|_| publish_prefix)
+                }
+                Ds4CaptureTarget::None | Ds4CaptureTarget::Completed => {
+                    deepseek_v4_durable_capture_prefix_len(prompt_token_ids.len(), false)?
+                }
+            };
+            if let Some(publish_prefix) = capture_boundary {
+                if restored_prefix < publish_prefix {
+                    advance_deepseek_v4_prompt_prefix(
+                        session,
+                        ctx,
+                        &prompt_token_ids[restored_prefix..publish_prefix],
+                        prefill_chunk_tokens,
+                    )?;
+                }
+                let capture_t0 = Instant::now();
+                match session.prepare_durable_checkpoint() {
+                    Ok(prepared) => durable_prepared = Some(prepared),
+                    Err(error)
+                        if causal_snapshot_capture_error_kind(&error)
+                            == DeepSeekV4SnapshotCaptureErrorKind::Allocation =>
+                    {
+                        eprintln!(
+                            "warning: durable DeepSeek V4 prefix capture allocation failed; continuing without publication: {error}"
+                        );
+                    }
+                    Err(error) => {
+                        return Err(error).context("capture durable DeepSeek V4 causal snapshot");
+                    }
+                }
+                durable_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
+                let suffix_chunks = execute_deepseek_v4_prompt_suffix(
+                    session,
+                    ctx,
+                    &prompt_token_ids[publish_prefix..],
+                    prefill_chunk_tokens,
+                )?;
+                if restored_prefix > 0 {
+                    eprintln!(
+                        "deepseek_v4: durable restore restored_tokens={} promoted_tokens={} suffix_tokens={} suffix_chunks={} payload_bytes={}",
+                        restored_prefix,
+                        publish_prefix - restored_prefix,
+                        prompt_token_ids.len() - publish_prefix,
+                        suffix_chunks,
+                        durable_payload_bytes,
+                    );
+                    ds4_prefill_mode_label(Ds4PrefillMode::DurablePrefixRestore)
+                } else {
+                    ds4_prefill_mode_label(Ds4PrefillMode::DurablePrefixCapture)
+                }
+            } else if restored_prefix > 0 {
+                let suffix_chunks = execute_deepseek_v4_prompt_suffix(
+                    session,
+                    ctx,
+                    &prompt_token_ids[restored_prefix..],
+                    prefill_chunk_tokens,
+                )?;
                 eprintln!(
-                    "deepseek_v4: durable restore restored_tokens={} promoted_tokens={} suffix_tokens={} suffix_chunks={} payload_bytes={}",
+                    "deepseek_v4: durable restore restored_tokens={} promoted_tokens=0 suffix_tokens={} suffix_chunks={} payload_bytes={}",
                     restored_prefix,
-                    publish_prefix - restored_prefix,
-                    prompt_token_ids.len() - publish_prefix,
+                    prompt_token_ids.len() - restored_prefix,
                     suffix_chunks,
                     durable_payload_bytes,
                 );
                 ds4_prefill_mode_label(Ds4PrefillMode::DurablePrefixRestore)
             } else {
-                ds4_prefill_mode_label(Ds4PrefillMode::DurablePrefixCapture)
-            }
-        } else if restored_prefix > 0 {
-            let suffix_chunks = execute_deepseek_v4_prompt_suffix(
-                session,
-                ctx,
-                &prompt_token_ids[restored_prefix..],
-                prefill_chunk_tokens,
-            )?;
-            eprintln!(
-                "deepseek_v4: durable restore restored_tokens={} promoted_tokens=0 suffix_tokens={} suffix_chunks={} payload_bytes={}",
-                restored_prefix,
-                prompt_token_ids.len() - restored_prefix,
-                suffix_chunks,
-                durable_payload_bytes,
-            );
-            ds4_prefill_mode_label(Ds4PrefillMode::DurablePrefixRestore)
-        } else {
-            let packed_chunk_count =
-                deepseek_v4_packed_chunk_count(prompt_token_ids.len(), prefill_chunk_tokens);
-            if packed_chunk_count > 0 {
-                execute_deepseek_v4_prompt_suffix(
-                    session,
-                    ctx,
-                    prompt_token_ids,
-                    prefill_chunk_tokens,
-                )?;
-                if packed_chunk_count == 1 {
-                    ds4_prefill_mode_label(Ds4PrefillMode::LayerMajor)
+                let packed_chunk_count =
+                    deepseek_v4_packed_chunk_count(prompt_token_ids.len(), prefill_chunk_tokens);
+                if packed_chunk_count > 0 {
+                    execute_deepseek_v4_prompt_suffix(
+                        session,
+                        ctx,
+                        prompt_token_ids,
+                        prefill_chunk_tokens,
+                    )?;
+                    if packed_chunk_count == 1 {
+                        ds4_prefill_mode_label(Ds4PrefillMode::LayerMajor)
+                    } else {
+                        ds4_prefill_mode_label(Ds4PrefillMode::LayerMajorChunks)
+                    }
                 } else {
-                    ds4_prefill_mode_label(Ds4PrefillMode::LayerMajorChunks)
+                    for (index, &token) in prompt_token_ids.iter().enumerate() {
+                        session
+                            .forward_token(ctx, token)
+                            .with_context(|| format!("forward DeepSeek V4 prompt token {index}"))?;
+                    }
+                    ds4_prefill_mode_label(Ds4PrefillMode::Singleton)
                 }
-            } else {
-                for (index, &token) in prompt_token_ids.iter().enumerate() {
-                    session
-                        .forward_token(ctx, token)
-                        .with_context(|| format!("forward DeepSeek V4 prompt token {index}"))?;
-                }
-                ds4_prefill_mode_label(Ds4PrefillMode::Singleton)
             }
         }
     };
@@ -1610,8 +1643,24 @@ fn ds4_prefill_session(
 struct Ds4GenerationOutcome {
     generation: GenerationResult,
     generator_return: Instant,
+    profiles: Ds4GenerationProfiles,
     #[cfg(feature = "dsv4-diagnostics")]
     temporal_capture: dsv4_temporal::TemporalCapture,
+}
+
+// Keep generation-local allocations until the single-turn reporting phase completes.
+#[allow(dead_code)]
+struct Ds4GenerationProfiles {
+    whole_profile_wait_residual_ms: Vec<f64>,
+    whole_profile_encode_cpu_ms: Vec<f64>,
+    whole_profile_outside_gpu_ms: Vec<f64>,
+    whole_profile_gpu_ms: Vec<f64>,
+    whole_profile_wall_ms: Vec<f64>,
+    whole_profile_positions: Vec<u32>,
+    stage_profile_aggregate: DeepSeekV4CliStageProfileAggregate,
+    stage_profile_next_group: usize,
+    profile_warmup_pending: bool,
+    sampler: Sampler,
 }
 
 fn ds4_generate(
@@ -1742,6 +1791,18 @@ fn ds4_generate(
     Ok(Ds4GenerationOutcome {
         generation,
         generator_return,
+        profiles: Ds4GenerationProfiles {
+            whole_profile_wait_residual_ms,
+            whole_profile_encode_cpu_ms,
+            whole_profile_outside_gpu_ms,
+            whole_profile_gpu_ms,
+            whole_profile_wall_ms,
+            whole_profile_positions,
+            stage_profile_aggregate,
+            stage_profile_next_group,
+            profile_warmup_pending,
+            sampler,
+        },
         #[cfg(feature = "dsv4-diagnostics")]
         temporal_capture,
     })
@@ -1793,13 +1854,16 @@ fn ds4_publish_after_generation(
                                 .context("capture completed DeepSeek V4 causal snapshot");
                         }
                     };
-                    let capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
                     if let Some(prepared) = prepared {
                         *pending_publication = Some(Ds4PendingPublication {
                             prepared,
                             kind: "completed",
-                            capture_ms,
+                            capture_ms: 0.0,
                         });
+                    }
+                    let capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
+                    if let Some(pending) = pending_publication.as_mut() {
+                        pending.capture_ms = capture_ms;
                     }
                 }
                 Err(error) => eprintln!(
@@ -2013,6 +2077,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
         arrival_ms,
     } = options;
     let encoded = ds4_encode_input(&gguf, args)?;
+    let _prompt = encoded.prompt;
     let prompt_kind = encoded.prompt_kind;
     let durable_completed_eligible = encoded.completed_eligible;
     let tokenizer = encoded.tokenizer;
@@ -2044,7 +2109,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
         store_probe.has_blobs,
         store_probe.probe_ms,
     )?;
-    let loaded = ds4_load_session(
+    let mut loaded = ds4_load_session(
         model_path,
         &gguf,
         args,
@@ -2057,30 +2122,18 @@ pub(crate) fn run_deepseek_v4_single_turn(
         prefetch_mode,
         persistence,
     )?;
-    let Ds4LoadedSession {
-        ctx,
-        mut session,
-        memory_plan,
-        selector_plan,
-        prefetch_outcome,
-        before_residency_bytes,
-        after_residency_bytes,
-        after_session_bytes,
-        persistence,
-        load_ms,
-    } = loaded;
+    let load_ms = loaded.load_ms;
 
     let prefill = ds4_prefill_session(
-        &ctx,
-        &mut session,
-        &memory_plan,
-        before_residency_bytes,
-        after_residency_bytes,
-        after_session_bytes,
-        &persistence,
+        &loaded.ctx,
+        &mut loaded.session,
+        &loaded.memory_plan,
+        loaded.before_residency_bytes,
+        loaded.after_residency_bytes,
+        loaded.after_session_bytes,
+        &loaded.persistence,
         &prompt_token_ids,
         prefill_chunk_tokens,
-        durable_completed_eligible,
         vocab_size,
         &tokenizer,
     )?;
@@ -2098,33 +2151,37 @@ pub(crate) fn run_deepseek_v4_single_turn(
         &stop_tokens,
         &tokenizer,
         vocab_size,
-        &ctx,
-        &mut session,
+        &loaded.ctx,
+        &mut loaded.session,
     )?;
-    let generation = generation_outcome.generation;
+    let Ds4GenerationOutcome {
+        generation,
+        profiles: _generation_profiles,
+        ..
+    } = generation_outcome;
     let generator_return = generation_outcome.generator_return;
     #[cfg(feature = "dsv4-diagnostics")]
     let temporal_capture = generation_outcome.temporal_capture;
     ds4_publish_after_generation(
-        &mut session,
-        &persistence,
+        &mut loaded.session,
+        &loaded.persistence,
         &mut pending_publication,
         generation.stop_reason,
         durable_restore_ms,
     )?;
     #[cfg(feature = "dsv4-diagnostics")]
-    ds4_write_temporal_diagnostics(temporal_capture, &session, args, vocab_size)?;
+    ds4_write_temporal_diagnostics(temporal_capture, &loaded.session, args, vocab_size)?;
     ds4_report_completion(
         args,
-        &selector_plan,
-        &session,
+        &loaded.selector_plan,
+        &loaded.session,
         &generation,
         prompt_kind,
         prefill_mode,
         prefill_chunk_tokens,
         prompt_ids.len(),
         tokenizer_ms,
-        &prefetch_outcome,
+        &loaded.prefetch_outcome,
         load_ms,
         prefill_ms,
         arrival_ms,
@@ -2933,12 +2990,12 @@ pub(crate) fn print_deepseek_v4_census(model_path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod request_stats_timing_tests {
-    use super::{DeepSeekV4Reasoning, PromptSource, StopReason};
     use super::{
-        Ds4CaptureTarget, Ds4CompletedCaptureDecision, Ds4PrefillMode,
-        ds4_completed_capture_decision, ds4_completed_eligible, ds4_identity_needed,
-        ds4_prefill_mode_label, ds4_prompt_kind, ds4_resolve_capture_target,
-        request_stats_total_ms,
+        Args, DeepSeekV4InlineThinking, DeepSeekV4Reasoning, Ds4CaptureTarget,
+        Ds4CompletedCaptureDecision, Ds4PrefillBranch, Ds4PrefillMode, Ds4PrefillPersistenceKind,
+        PromptSource, StopReason, deepseek_v4_encode_options, ds4_completed_capture_decision,
+        ds4_identity_needed, ds4_message_encoding_options, ds4_prefill_mode_label, ds4_prompt_kind,
+        ds4_resolve_capture_target, ds4_select_prefill_branch, request_stats_total_ms,
     };
     use std::time::{Duration, Instant};
 
@@ -2967,47 +3024,115 @@ mod request_stats_timing_tests {
     fn capture_intent_resolution_preserves_threshold_and_single_token_edges() {
         assert_eq!(
             ds4_resolve_capture_target(true, 0, 4, false, true, Some(3)),
-            super::Ds4CaptureResolution {
-                admitted: false,
-                target: Ds4CaptureTarget::None,
-            }
+            Ds4CaptureTarget::None
         );
-        assert!(!ds4_resolve_capture_target(true, 5, 4, false, true, Some(3)).admitted);
+        assert_eq!(
+            ds4_resolve_capture_target(true, 5, 4, false, true, Some(3)),
+            Ds4CaptureTarget::None
+        );
+        assert_eq!(
+            ds4_resolve_capture_target(true, 2, 4, false, true, Some(3)),
+            Ds4CaptureTarget::PromptBoundary { publish_prefix: 3 }
+        );
+        assert_eq!(
+            ds4_resolve_capture_target(false, 1, 4, false, true, Some(3)),
+            Ds4CaptureTarget::None
+        );
+        assert_eq!(
+            ds4_resolve_capture_target(true, 1, 1, false, true, None),
+            Ds4CaptureTarget::None
+        );
         assert_eq!(
             ds4_resolve_capture_target(true, 1, 1, true, true, None),
-            super::Ds4CaptureResolution {
-                admitted: true,
-                target: Ds4CaptureTarget::Completed,
-            }
+            Ds4CaptureTarget::Completed
         );
         assert_eq!(
             ds4_resolve_capture_target(true, 2, 4, true, false, Some(3)),
-            super::Ds4CaptureResolution {
-                admitted: false,
-                target: Ds4CaptureTarget::None,
-            }
+            Ds4CaptureTarget::None
         );
     }
 
     #[test]
-    fn identity_requirement_depends_on_store_length_inventory_and_admission() {
+    fn identity_requirement_depends_on_store_length_inventory_and_capture_target() {
         for has_blobs in [None, Some(false), Some(true)] {
-            for admitted in [false, true] {
-                let expected = has_blobs == Some(true) || admitted;
-                assert_eq!(ds4_identity_needed(true, 2, has_blobs, admitted), expected);
-                assert!(!ds4_identity_needed(true, 1, has_blobs, admitted));
+            for target in [
+                Ds4CaptureTarget::None,
+                Ds4CaptureTarget::PromptBoundary { publish_prefix: 3 },
+                Ds4CaptureTarget::Completed,
+            ] {
+                let expected = has_blobs == Some(true) || target != Ds4CaptureTarget::None;
+                assert_eq!(ds4_identity_needed(true, 2, has_blobs, target), expected);
+                assert!(!ds4_identity_needed(true, 1, has_blobs, target));
             }
         }
-        assert!(!ds4_identity_needed(false, 4, Some(true), true));
+        assert!(!ds4_identity_needed(
+            false,
+            4,
+            Some(true),
+            Ds4CaptureTarget::Completed
+        ));
     }
 
     #[test]
-    fn completed_eligibility_matches_message_flags() {
-        assert!(ds4_completed_eligible(true, false, true, false));
-        assert!(ds4_completed_eligible(true, false, false, true));
-        assert!(!ds4_completed_eligible(true, true, false, true));
-        assert!(!ds4_completed_eligible(false, false, true, true));
-        assert!(!ds4_completed_eligible(true, false, false, false));
+    fn completed_eligibility_uses_the_encoder_option_mutation() {
+        let (preserve, _) = Args::parse_with_explicit([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--messages",
+            "messages.json",
+            "--messages-preserve-thinking",
+            "--reasoning",
+            "high",
+        ]);
+        let base_options = deepseek_v4_encode_options(&preserve).unwrap();
+        assert!(!base_options.preserve_reasoning);
+        let (options, inline, completed_eligible) = ds4_message_encoding_options(
+            base_options,
+            preserve.messages_strip_thinking,
+            preserve.messages_preserve_thinking,
+        );
+        assert!(options.preserve_reasoning);
+        assert_eq!(inline, DeepSeekV4InlineThinking::PromoteToReasoning);
+        assert!(completed_eligible);
+
+        let (strip, _) = Args::parse_with_explicit([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--messages",
+            "messages.json",
+            "--messages-strip-thinking",
+        ]);
+        let base_options = deepseek_v4_encode_options(&strip).unwrap();
+        let (options, inline, completed_eligible) = ds4_message_encoding_options(
+            base_options,
+            strip.messages_strip_thinking,
+            strip.messages_preserve_thinking,
+        );
+        assert!(!options.preserve_reasoning);
+        assert_eq!(inline, DeepSeekV4InlineThinking::Strip);
+        assert!(!completed_eligible);
+
+        let (preserve_reasoning, _) = Args::parse_with_explicit([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--messages",
+            "messages.json",
+            "--reasoning",
+            "low",
+            "--preserve-reasoning",
+        ]);
+        let base_options = deepseek_v4_encode_options(&preserve_reasoning).unwrap();
+        let (options, inline, completed_eligible) = ds4_message_encoding_options(
+            base_options,
+            preserve_reasoning.messages_strip_thinking,
+            preserve_reasoning.messages_preserve_thinking,
+        );
+        assert!(options.preserve_reasoning);
+        assert_eq!(inline, DeepSeekV4InlineThinking::Verbatim);
+        assert!(completed_eligible);
     }
 
     #[test]
@@ -3059,6 +3184,26 @@ mod request_stats_timing_tests {
         assert_eq!(
             ds4_prefill_mode_label(Ds4PrefillMode::Singleton),
             "singleton"
+        );
+    }
+
+    #[test]
+    fn prefill_branch_selection_covers_every_loaded_persistence_state() {
+        assert_eq!(
+            ds4_select_prefill_branch(Ds4PrefillPersistenceKind::SnapshotRestore),
+            Ds4PrefillBranch::SnapshotRestore
+        );
+        assert_eq!(
+            ds4_select_prefill_branch(Ds4PrefillPersistenceKind::SnapshotPublish),
+            Ds4PrefillBranch::SnapshotPublish
+        );
+        assert_eq!(
+            ds4_select_prefill_branch(Ds4PrefillPersistenceKind::Durable),
+            Ds4PrefillBranch::Durable
+        );
+        assert_eq!(
+            ds4_select_prefill_branch(Ds4PrefillPersistenceKind::None),
+            Ds4PrefillBranch::Durable
         );
     }
 

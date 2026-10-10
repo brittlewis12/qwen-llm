@@ -17,6 +17,53 @@ fn metal_test_context() -> Option<MetalContext> {
     crate::test_fixtures::metal_context_or_skip()
 }
 
+fn max_abs_finite(label: &str, actual: &[f32], expected: &[f32]) -> f32 {
+    assert_eq!(actual.len(), expected.len(), "{label}: length mismatch");
+    assert!(!expected.is_empty(), "{label}: empty comparison");
+    assert!(
+        actual.iter().all(|value| value.is_finite()),
+        "{label}: non-finite actual"
+    );
+    assert!(
+        expected.iter().all(|value| value.is_finite()),
+        "{label}: non-finite expected"
+    );
+    actual
+        .iter()
+        .zip(expected)
+        .map(|(a, e)| (a - e).abs())
+        .fold(0.0f32, f32::max)
+}
+
+#[test]
+fn max_abs_finite_rejects_uncomparable_inputs() {
+    assert_eq!(max_abs_finite("ok", &[1.0, -2.0], &[1.0, -1.5]), 0.5);
+    assert!(
+        std::panic::catch_unwind(|| max_abs_finite("length", &[1.0], &[1.0, 2.0]))
+            .unwrap_err()
+            .downcast_ref::<String>()
+            .is_some_and(|message| message.contains("length mismatch"))
+    );
+    assert!(
+        std::panic::catch_unwind(|| max_abs_finite("empty", &[], &[]))
+            .unwrap_err()
+            .downcast_ref::<String>()
+            .is_some_and(|message| message.contains("empty comparison"))
+    );
+    assert!(
+        std::panic::catch_unwind(|| max_abs_finite("nan", &[f32::NAN], &[0.0]))
+            .unwrap_err()
+            .downcast_ref::<String>()
+            .is_some_and(|message| message.contains("non-finite actual"))
+    );
+    assert!(
+        std::panic::catch_unwind(|| max_abs_finite("inf", &[0.0], &[f32::INFINITY]))
+            .unwrap_err()
+            .downcast_ref::<String>()
+            .is_some_and(|message| message.contains("non-finite expected"))
+    );
+}
+
 fn qualification_facts(
     name: &str,
     physical_memory_bytes: Option<u64>,
@@ -4881,12 +4928,6 @@ fn dense_module_sites_are_placed_and_validated() {
             true,
         )
     };
-    let max_abs = |a: &[f32], b: &[f32]| {
-        a.iter()
-            .zip(b)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max)
-    };
     let fixed = PostBlockIntervention::Fixed {
         layer,
         direction: &direction,
@@ -4917,9 +4958,9 @@ fn dense_module_sites_are_placed_and_validated() {
     let ffn_fixed = run(&[], &[at(ModuleSite::FfnOutput, fixed)]).expect("ffn fixed");
     // The FFN reads the mixer output, so the same add there is a different edit.
     let mixer_fixed = run(&[], &[at(ModuleSite::MixerOutput, fixed)]).expect("mixer fixed");
-    let effect = max_abs(&post_fixed, &baseline);
-    let reassociation = max_abs(&ffn_fixed, &post_fixed);
-    let placement = max_abs(&mixer_fixed, &post_fixed);
+    let effect = max_abs_finite("fixed effect", &post_fixed, &baseline);
+    let reassociation = max_abs_finite("ffn/post reassociation", &ffn_fixed, &post_fixed);
+    let placement = max_abs_finite("mixer/post placement", &mixer_fixed, &post_fixed);
     eprintln!(
         "[dense-module-sites] effect={effect:e} ffn-vs-post={reassociation:e} mixer-vs-post={placement:e}"
     );
@@ -4944,13 +4985,21 @@ fn dense_module_sites_are_placed_and_validated() {
     )
     .expect("embed twice");
     assert!(
-        max_abs(&embed_once, &baseline) > 1e-4,
+        max_abs_finite("embedding projection effect", &embed_once, &baseline) > 1e-4,
         "embedding projection must act"
     );
     assert!(
-        max_abs(&embed_once, &embed_twice) <= 1e-4,
+        max_abs_finite(
+            "embedding projection idempotence",
+            &embed_once,
+            &embed_twice
+        ) <= 1e-4,
         "embedding projection must be idempotent: {}",
-        max_abs(&embed_once, &embed_twice)
+        max_abs_finite(
+            "embedding projection idempotence",
+            &embed_once,
+            &embed_twice
+        )
     );
 
     // Validation: embedding layer, layer bounds and session aliasing are refused.

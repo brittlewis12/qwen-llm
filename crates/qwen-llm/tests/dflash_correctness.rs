@@ -4136,6 +4136,10 @@ fn compare_gdn_state_conv_27b(sess_a: &MetalSession, sess_b: &MetalSession) -> G
         let a_state = read_tensor_f32_27b(&sess_a.gdn_state[gi]);
         let b_state = read_tensor_f32_27b(&sess_b.gdn_state[gi]);
         let state_cos = cosine_27b(&a_state, &b_state);
+        assert!(
+            state_cos.is_finite(),
+            "GDN state cosine is non-finite at layer {gi}: {state_cos}"
+        );
         if state_cos < summary.state_min_cos {
             summary.state_min_cos = state_cos;
             summary.state_worst_layer = gi;
@@ -4145,6 +4149,10 @@ fn compare_gdn_state_conv_27b(sess_a: &MetalSession, sess_b: &MetalSession) -> G
         let a_conv = read_tensor_f32_27b(&sess_a.gdn_conv[gi]);
         let b_conv = read_tensor_f32_27b(&sess_b.gdn_conv[gi]);
         let conv_cos = cosine_27b(&a_conv, &b_conv);
+        assert!(
+            conv_cos.is_finite(),
+            "GDN conv cosine is non-finite at layer {gi}: {conv_cos}"
+        );
         if conv_cos < summary.conv_min_cos {
             summary.conv_min_cos = conv_cos;
             summary.conv_worst_layer = gi;
@@ -4157,10 +4165,38 @@ fn compare_gdn_state_conv_27b(sess_a: &MetalSession, sess_b: &MetalSession) -> G
 
 fn max_abs_delta_27b(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len());
+    assert!(
+        a.iter().all(|value| value.is_finite()),
+        "GDN comparison actual contains a non-finite value"
+    );
+    assert!(
+        b.iter().all(|value| value.is_finite()),
+        "GDN comparison expected contains a non-finite value"
+    );
     a.iter()
         .zip(b)
-        .map(|(x, y)| (x - y).abs())
+        .map(|(x, y)| {
+            let delta = (x - y).abs();
+            assert!(delta.is_finite(), "GDN comparison difference is non-finite");
+            delta
+        })
         .fold(0.0f32, f32::max)
+}
+
+#[cfg(test)]
+mod comparison_contract_tests {
+    use super::max_abs_delta_27b;
+
+    #[test]
+    fn finite_values_report_largest_difference() {
+        assert_eq!(max_abs_delta_27b(&[1.0, -2.0, 3.0], &[1.0, -1.5, 1.0]), 2.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-finite value")]
+    fn nan_is_rejected() {
+        max_abs_delta_27b(&[f32::NAN], &[0.0]);
+    }
 }
 
 fn argmax_i32_27b(xs: &[f32]) -> i32 {
@@ -4272,6 +4308,10 @@ fn compare_kv_prefix_27b(
         let a_k = read_kv_prefix_f16_to_f32(&sess_a.kv_k[ai], kv_prefix_elems);
         let b_k = read_kv_prefix_f16_to_f32(&sess_b.kv_k[ai], kv_prefix_elems);
         let k_cos = cosine_27b(&a_k, &b_k);
+        assert!(
+            k_cos.is_finite(),
+            "GDN K cosine is non-finite at layer {ai}: {k_cos}"
+        );
         if k_cos < summary.k_min_cos {
             summary.k_min_cos = k_cos;
             summary.k_worst_layer = ai;
@@ -4281,6 +4321,10 @@ fn compare_kv_prefix_27b(
         let a_v = read_kv_prefix_f16_to_f32(&sess_a.kv_v[ai], kv_prefix_elems);
         let b_v = read_kv_prefix_f16_to_f32(&sess_b.kv_v[ai], kv_prefix_elems);
         let v_cos = cosine_27b(&a_v, &b_v);
+        assert!(
+            v_cos.is_finite(),
+            "GDN V cosine is non-finite at layer {ai}: {v_cos}"
+        );
         if v_cos < summary.v_min_cos {
             summary.v_min_cos = v_cos;
             summary.v_worst_layer = ai;

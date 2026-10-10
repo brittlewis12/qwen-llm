@@ -1900,11 +1900,30 @@ fn cosine_f32(a: &[f32], b: &[f32]) -> f64 {
 }
 
 fn max_abs_delta_f32(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len());
-    a.iter()
-        .zip(b)
-        .map(|(x, y)| (x - y).abs())
-        .fold(0.0f32, f32::max)
+    if a.len() != b.len() || !a.iter().chain(b).all(|value| value.is_finite()) {
+        return f32::NAN;
+    }
+    let mut maximum = 0.0f32;
+    for (x, y) in a.iter().zip(b) {
+        let delta = (x - y).abs();
+        if !delta.is_finite() {
+            return f32::NAN;
+        }
+        maximum = maximum.max(delta);
+    }
+    maximum
+}
+
+#[cfg(test)]
+mod comparison_contract_tests {
+    use super::max_abs_delta_f32;
+
+    #[test]
+    fn diagnostic_marks_uncomparable_inputs_non_finite() {
+        assert_eq!(max_abs_delta_f32(&[1.0, 3.0], &[1.5, 1.0]), 2.0);
+        assert!(max_abs_delta_f32(&[1.0], &[1.0, 2.0]).is_nan());
+        assert!(max_abs_delta_f32(&[1.0], &[f32::INFINITY]).is_nan());
+    }
 }
 
 fn emit_prefill_layer_phase(

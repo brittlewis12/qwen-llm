@@ -2,6 +2,37 @@
 
 use super::*;
 
+fn comparison_max_abs(a: &[f32], b: &[f32]) -> f32 {
+    if a.is_empty() || a.len() != b.len() || !a.iter().chain(b).all(|value| value.is_finite()) {
+        return f32::NAN;
+    }
+    let mut maximum = 0.0f32;
+    for (x, y) in a.iter().zip(b) {
+        let delta = (x - y).abs();
+        if !delta.is_finite() {
+            return f32::NAN;
+        }
+        maximum = maximum.max(delta);
+    }
+    maximum
+}
+
+fn report_max_f32(current: f32, candidate: f32) -> f32 {
+    if current.is_finite() && candidate.is_finite() {
+        current.max(candidate)
+    } else {
+        f32::NAN
+    }
+}
+
+fn report_max_f64(current: f64, candidate: f64) -> f64 {
+    if current.is_finite() && candidate.is_finite() {
+        current.max(candidate)
+    } else {
+        f64::NAN
+    }
+}
+
 pub(crate) fn run_decode_moe_router_repack_check(
     args: DecodeMoeRouterRepackCheckArgs,
 ) -> Result<()> {
@@ -144,16 +175,24 @@ pub(crate) fn run_decode_moe_router_repack_check(
                     set_mismatches += 1;
                     first_set_mismatch.get_or_insert((block_i, slot));
                 }
-                max_logit_abs =
-                    max_logit_abs.max(f32_max_abs_delta(&f32_route.logits, &gpu_route.logits));
-                max_logit_rms =
-                    max_logit_rms.max(f32_rms_delta(&f32_route.logits, &gpu_route.logits));
+                max_logit_abs = report_max_f32(
+                    max_logit_abs,
+                    f32_max_abs_delta(&f32_route.logits, &gpu_route.logits),
+                );
+                max_logit_rms = report_max_f64(
+                    max_logit_rms,
+                    f32_rms_delta(&f32_route.logits, &gpu_route.logits),
+                );
                 min_f32_margin = min_f32_margin.min(f32_route.logit_margin);
                 min_gpu_margin = min_gpu_margin.min(gpu_route.logit_margin);
-                max_weight_abs =
-                    max_weight_abs.max(route_weight_max_abs(&f32_route.weight, &gpu_route.weight));
-                max_shared_abs =
-                    max_shared_abs.max((f32_route.shared_gate - gpu_route.shared_gate).abs());
+                max_weight_abs = report_max_f32(
+                    max_weight_abs,
+                    route_weight_max_abs(&f32_route.weight, &gpu_route.weight),
+                );
+                max_shared_abs = report_max_f32(
+                    max_shared_abs,
+                    (f32_route.shared_gate - gpu_route.shared_gate).abs(),
+                );
 
                 let cmd = ctx.queue.commandBuffer().context("router ffn cmd")?;
                 let enc = KernelEncoder::begin(&cmd);
@@ -517,11 +556,7 @@ pub(crate) fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
         };
         let a = read(&ref_out);
         let b = read(&alt_out);
-        let max_abs = a
-            .iter()
-            .zip(&b)
-            .map(|(x, y)| (x - y).abs())
-            .fold(0.0f32, f32::max);
+        let max_abs = comparison_max_abs(&a, &b);
         let dot: f64 = a.iter().zip(&b).map(|(x, y)| *x as f64 * *y as f64).sum();
         let na = a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
         let nb = b.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
@@ -1277,4 +1312,18 @@ pub(crate) fn run_moe_gateup_micro(args: MoeGateupMicroArgs) -> Result<()> {
         weight_gb / (gpu / 1e3)
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod comparison_contract_tests {
+    use super::{comparison_max_abs, report_max_f32, report_max_f64};
+
+    #[test]
+    fn reporter_marks_uncomparable_inputs_non_finite() {
+        assert_eq!(comparison_max_abs(&[1.0, 3.0], &[1.5, 1.0]), 2.0);
+        assert!(comparison_max_abs(&[1.0], &[1.0, 2.0]).is_nan());
+        assert!(comparison_max_abs(&[1.0], &[f32::NAN]).is_nan());
+        assert!(report_max_f32(0.0, f32::NAN).is_nan());
+        assert!(report_max_f64(0.0, f64::INFINITY).is_nan());
+    }
 }

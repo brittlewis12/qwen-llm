@@ -2,6 +2,22 @@
 
 use super::*;
 
+#[cfg(test)]
+fn diagnostic_max_abs(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || !a.iter().chain(b).all(|value| value.is_finite()) {
+        return f32::NAN;
+    }
+    let mut maximum = 0.0f32;
+    for (x, y) in a.iter().zip(b) {
+        let delta = (x - y).abs();
+        if !delta.is_finite() {
+            return f32::NAN;
+        }
+        maximum = maximum.max(delta);
+    }
+    maximum
+}
+
 pub fn encode_mat_mat_f32_router_e8p32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -6068,6 +6084,13 @@ mod tests {
     use crate::metal::test_support::*;
 
     #[test]
+    fn diagnostic_max_abs_marks_uncomparable_inputs_non_finite() {
+        assert_eq!(diagnostic_max_abs(&[1.0, 3.0], &[1.5, 1.0]), 2.0);
+        assert!(diagnostic_max_abs(&[1.0], &[1.0, 2.0]).is_nan());
+        assert!(diagnostic_max_abs(&[1.0], &[f32::NAN]).is_nan());
+    }
+
+    #[test]
     #[ignore]
     fn mxfp4_f32_matrix_tile_k216_n4096_all_expert_floor() {
         run_mxfp4_f32_matrix_tile_k216_bucket_floor(24_576, [216; 2], 114, 600.0, 600.0, 0.75);
@@ -8370,13 +8393,6 @@ mod tests {
             dot / (aa.sqrt() * bb.sqrt()).max(1e-30)
         }
 
-        fn max_abs(a: &[f32], b: &[f32]) -> f32 {
-            a.iter()
-                .zip(b)
-                .map(|(&x, &y)| (x - y).abs())
-                .fold(0.0f32, f32::max)
-        }
-
         let hd = 256usize;
         let n_iters = 96usize;
         let warmup = 12usize;
@@ -8494,7 +8510,7 @@ mod tests {
                 eprintln!(
                     "[v4-hm-correct {label_shape} group={group:>2} tile={group_tile:>2} n_pos={n_pos:>6} nwg={nwg:>2} C={tile_c:>2}] cos={:.8} max_abs={:.3e}",
                     cosine(&y_tok_v, &y_hm_v),
-                    max_abs(&y_tok_v, &y_hm_v)
+                    diagnostic_max_abs(&y_tok_v, &y_hm_v)
                 );
 
                 let bench_tok = |label: &str, n: usize| {

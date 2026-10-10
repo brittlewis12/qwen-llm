@@ -146,34 +146,38 @@ pub(crate) fn read_route_fingerprint(
 }
 
 pub(crate) fn f32_max_abs_delta(a: &[f32], b: &[f32]) -> f32 {
-    a.iter()
-        .zip(b)
-        .map(|(x, y)| (x - y).abs())
-        .fold(0.0f32, f32::max)
+    if a.is_empty() || a.len() != b.len() || !a.iter().chain(b).all(|value| value.is_finite()) {
+        return f32::NAN;
+    }
+    let mut maximum = 0.0f32;
+    for (x, y) in a.iter().zip(b) {
+        let delta = (x - y).abs();
+        if !delta.is_finite() {
+            return f32::NAN;
+        }
+        maximum = maximum.max(delta);
+    }
+    maximum
 }
 
 pub(crate) fn f32_rms_delta(a: &[f32], b: &[f32]) -> f64 {
-    let n = a.len().min(b.len());
-    if n == 0 {
-        return 0.0;
+    if a.is_empty() || a.len() != b.len() || !a.iter().chain(b).all(|value| value.is_finite()) {
+        return f64::NAN;
     }
     let ss = a
         .iter()
         .zip(b)
-        .take(n)
         .map(|(x, y)| {
             let d = *x as f64 - *y as f64;
             d * d
         })
         .sum::<f64>();
-    (ss / n as f64).sqrt()
+    let rms = (ss / a.len() as f64).sqrt();
+    if rms.is_finite() { rms } else { f64::NAN }
 }
 
 pub(crate) fn route_weight_max_abs(a: &[f32], b: &[f32]) -> f32 {
-    a.iter()
-        .zip(b)
-        .map(|(x, y)| (x - y).abs())
-        .fold(0.0f32, f32::max)
+    f32_max_abs_delta(a, b)
 }
 
 pub(crate) fn same_i32_set(a: &[i32], b: &[i32]) -> bool {
@@ -188,11 +192,10 @@ pub(crate) fn same_i32_set(a: &[i32], b: &[i32]) -> bool {
 }
 
 pub(crate) fn cosine_max_abs(a: &[f32], b: &[f32]) -> (f64, f32) {
-    let max_abs = a
-        .iter()
-        .zip(b)
-        .map(|(x, y)| (x - y).abs())
-        .fold(0.0f32, f32::max);
+    let max_abs = f32_max_abs_delta(a, b);
+    if !max_abs.is_finite() {
+        return (f64::NAN, f32::NAN);
+    }
     let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
     let na = a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
     let nb = b.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
@@ -201,7 +204,29 @@ pub(crate) fn cosine_max_abs(a: &[f32], b: &[f32]) -> (f64, f32) {
     } else {
         1.0
     };
-    (cos, max_abs)
+    if cos.is_finite() {
+        (cos, max_abs)
+    } else {
+        (f64::NAN, f32::NAN)
+    }
+}
+
+#[cfg(test)]
+mod comparison_contract_tests {
+    use super::{cosine_max_abs, f32_max_abs_delta, f32_rms_delta, route_weight_max_abs};
+
+    #[test]
+    fn reporters_mark_uncomparable_inputs_non_finite() {
+        assert_eq!(f32_max_abs_delta(&[1.0, 3.0], &[1.5, 1.0]), 2.0);
+        assert_eq!(route_weight_max_abs(&[1.0], &[0.5]), 0.5);
+        assert_eq!(f32_rms_delta(&[1.0], &[3.0]), 2.0);
+        assert!(f32_max_abs_delta(&[1.0], &[1.0, 2.0]).is_nan());
+        assert!(route_weight_max_abs(&[1.0], &[f32::NAN]).is_nan());
+        assert!(f32_rms_delta(&[1.0], &[1.0, 2.0]).is_nan());
+        let (cos, max_abs) = cosine_max_abs(&[1.0], &[1.0, 2.0]);
+        assert!(cos.is_nan());
+        assert!(max_abs.is_nan());
+    }
 }
 
 pub(crate) fn fresh_gdn_replay_sessions(
@@ -611,14 +636,24 @@ pub(crate) fn run_decode_gdn_layer_replay(args: DecodeGdnLayerReplayArgs) -> Res
             let mut min_cos = 1.0f64;
             let mut max_abs_all = 0.0f32;
             let mut worst_slot = 0usize;
+            let mut non_finite = false;
             for i in 0..check_tokens {
                 let (cos, max_abs) =
                     cosine_max_abs(&read_f32_tensor(&base[i].h), &read_f32_tensor(&replay[i].h));
+                if !cos.is_finite() || !max_abs.is_finite() {
+                    non_finite = true;
+                    worst_slot = i;
+                    continue;
+                }
                 if cos < min_cos || max_abs > max_abs_all {
                     worst_slot = i;
                 }
                 min_cos = min_cos.min(cos);
                 max_abs_all = max_abs_all.max(max_abs);
+            }
+            if non_finite {
+                min_cos = f64::NAN;
+                max_abs_all = f32::NAN;
             }
             println!(
                 "check\t{}\t{}\t{}\tmin_cos_h={min_cos:.9}\tmax_abs_h={max_abs_all:.6}\tworst_slot={worst_slot}",
@@ -864,14 +899,24 @@ pub(crate) fn run_decode_gdn_chain_replay(args: DecodeGdnChainReplayArgs) -> Res
         let mut min_cos = 1.0f64;
         let mut max_abs_all = 0.0f32;
         let mut worst_slot = 0usize;
+        let mut non_finite = false;
         for i in 0..check_tokens {
             let (cos, max_abs) =
                 cosine_max_abs(&read_f32_tensor(&base[i].h), &read_f32_tensor(&replay[i].h));
+            if !cos.is_finite() || !max_abs.is_finite() {
+                non_finite = true;
+                worst_slot = i;
+                continue;
+            }
             if cos < min_cos || max_abs > max_abs_all {
                 worst_slot = i;
             }
             min_cos = min_cos.min(cos);
             max_abs_all = max_abs_all.max(max_abs);
+        }
+        if non_finite {
+            min_cos = f64::NAN;
+            max_abs_all = f32::NAN;
         }
         println!(
             "check\ttokens={check_tokens}\tmin_cos_h={min_cos:.9}\tmax_abs_h={max_abs_all:.6}\tworst_slot={worst_slot}"

@@ -7,14 +7,18 @@ tiles, selected per stage family in tests only (`packed::F32Stages`,
 `StageMode::FastF32`; product Fast is unchanged), and measures how close
 each configuration gets to Exact and what it costs.
 
-Commits: `f973ddde` (F32-operand Q8_0 tile, shared with DS4), `a64cf699`
-(padded activation backing), `a9c96c4b` (F32-operand Q6_K tile
-`kernel_mat_mat_q6_K_f32_mm64x32`), `56e558e1` (F32-operand routed experts,
-`kernels/moe_grouped_f32.metal`), `a369d266` and `3eca56e3` (review fixes).
+Commits: `f973ddde` (F32-operand Q8_0 tile, shared with DS4); `a64cf699`
+(padded activation backing, narrowed in `bf9b5a7c` to the two buffers the
+sparse span reads from inside a chunk: +0.69 MiB of release scratch);
+`a9c96c4b` (F32-operand Q6_K tile `kernel_mat_mat_q6_K_f32_mm64x32`);
+`56e558e1` (F32-operand routed experts, `kernels/moe_grouped_f32.metal`);
+`a369d266` and `3eca56e3` (review fixes).
 The JSON here was produced at `8e3a6047`, the tree of `a369d266` before
 rebasing onto later main commits (the JSON keeps the recorded hash): debug
 with Metal API validation for accuracy and gates, release without
-validation for timing.
+validation for timing. After the padding was narrowed (`bf9b5a7c`), the
+probe's sparse cases (H2, H4, H5) reproduced every metric and census
+exactly, and the F32 and product restore gates passed again.
 
 ## Configurations
 

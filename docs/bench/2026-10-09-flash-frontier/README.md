@@ -1,6 +1,14 @@
 Flash frontier scheduling: UD and GSQ suffix/whole4096, 2026-10-09
 ================================================================
 
+Final integration note: merge `d7317e0f` includes the concurrent GLM F32-operand
+work through `35ea0d05`. Independent source review confirms existing Flash
+dispatches and shared-helper behavior are preserved; the added kernels have no
+Flash callers. The merged CLI check and all 28 non-ignored runtime tests pass
+(32 released-model diagnostics remain explicitly ignored by that test filter).
+Prior GPU evidence retains its original bindings: this last additive merge is
+source-reviewed, not another GPU acquisition or a byte-identical metallib claim.
+
 Actual production-default confirmation — 2026-10-09 (current decision)
 -------------------------------------------------------------------
 

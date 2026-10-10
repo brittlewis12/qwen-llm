@@ -3,7 +3,7 @@
 use super::*;
 
 crate::env_flag!(
-    /// Uses the cooperative two-row F32 mat-vec kernel; disabling selects the single-row F32 mat-vec kernel.
+    /// Uses the cooperative F32 mat-vec kernel (two rows per threadgroup); disabling selects the kernel that computes one row per SIMD group.
     default_on mat_vec_f32_lcpp_r2_enabled,
     "QWEN_MATVEC_F32_LCPP_R2"
 );

@@ -200,6 +200,42 @@ def split_arguments(tokens: list[RustToken]) -> list[list[RustToken]]:
     return parts
 
 
+DOC_ITEM = re.compile(
+    r"^[ \t]*///(?!/)[ \t]?(?P<line>[^\n]*)$"
+    r'|#\[\s*doc\s*=\s*"(?P<attr>(?:[^"\\]|\\.)*)"\s*\]',
+    re.MULTILINE,
+)
+
+
+def strip_block_comments(source: str) -> str:
+    """Remove (nested) /* */ comments; doc lines inside them are not docs."""
+    out, depth, i = [], 0, 0
+    while i < len(source):
+        pair = source[i : i + 2]
+        if pair == "/*":
+            depth, i = depth + 1, i + 2
+        elif pair == "*/" and depth:
+            depth, i = depth - 1, i + 2
+        else:
+            if not depth:
+                out.append(source[i])
+            i += 1
+    return "".join(out)
+
+
+def doc_texts(segment: str) -> list[str]:
+    """Outer doc comments (`/// x`, not `////`) and `#[doc = "x"]`
+    attributes in source order; anything else is not documentation."""
+    texts = []
+    for match in DOC_ITEM.finditer(strip_block_comments(segment)):
+        text = match.group("line")
+        if text is None:
+            text = re.sub(r"\\(.)", r"\1", match.group("attr"))
+        if text.strip():
+            texts.append(text.strip())
+    return texts
+
+
 def parse_env_flag(
     text: str, tokens: list[RustToken], opening: int, closing: int
 ) -> tuple[str, str, str] | None:
@@ -228,12 +264,7 @@ def parse_env_flag(
     polarity = declaration[index].value
     docs_start = tokens[opening].offset + 1
     docs_end = declaration[index].offset
-    docs = [
-        re.sub(r"^\s*/// ?", "", line).strip()
-        for line in text[docs_start:docs_end].splitlines()
-        if re.match(r"^\s*///", line)
-    ]
-    purpose = " ".join(part for part in docs if part) or "undocumented"
+    purpose = " ".join(doc_texts(text[docs_start:docs_end])) or "undocumented"
     return polarity, variable[0].value, purpose
 
 
@@ -267,19 +298,25 @@ def self_test() -> None:
         return parse_env_flag(source, tokens, start, end)
 
     assert parse(
-        'env_flag!(\n    /// Purpose from inside the invocation.\n'
+        "env_flag!(\n    /// Purpose from inside the invocation.\n"
         '    default_off switch, "QWEN_SELF_TEST");'
     ) == ("default_off", "QWEN_SELF_TEST", "Purpose from inside the invocation.")
     assert parse(
-        'env_flag!(\n    /// First line.\n    /// Second line.\n'
+        "env_flag!(\n    /// First line.\n    /// Second line.\n"
         '    #[allow(dead_code)]\n    default_on switch, "QWEN_SELF_TEST");'
     ) == ("default_on", "QWEN_SELF_TEST", "First line. Second line.")
     assert parse(
-        '/// Adjacent comments are not invocation documentation.\n'
+        "/// Adjacent comments are not invocation documentation.\n"
         'env_flag!(\n    #[allow(dead_code)]\n    default_on switch, "QWEN_SELF_TEST");'
     ) == ("default_on", "QWEN_SELF_TEST", "undocumented")
+    assert parse(
+        "env_flag!(\n    //// Not a doc comment.\n"
+        "    /* /// Inside a block comment.\n    */\n"
+        '    #[doc = "From a doc attribute."]\n'
+        '    default_on switch, "QWEN_SELF_TEST");'
+    ) == ("default_on", "QWEN_SELF_TEST", "From a doc attribute.")
     assert parse('env_flag!(default_on, "QWEN_SELF_TEST");') is None
-    assert parse('env_flag!(default_on switch, NAME);') is None
+    assert parse("env_flag!(default_on switch, NAME);") is None
 
     declared: dict[str, tuple[str, int, str]] = {}
     first, first_conflict = register_env_flag_declaration(

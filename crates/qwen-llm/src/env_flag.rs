@@ -92,11 +92,8 @@ macro_rules! env_flag {
 mod tests {
     use super::*;
 
-    crate::env_flag!(
-        /// Returns false while its test environment variable is unset.
-        default_off un_attributed_flag,
-        "QWEN_TEST_UNATTRIBUTED_FLAG"
-    );
+    // No attributes at all: the original invocation syntax.
+    crate::env_flag!(default_off un_attributed_flag, "QWEN_TEST_UNATTRIBUTED_FLAG");
     crate::env_flag!(
         /// Returns false while its test environment variable is unset.
         #[allow(dead_code)]

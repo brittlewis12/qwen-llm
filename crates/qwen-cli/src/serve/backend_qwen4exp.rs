@@ -444,13 +444,14 @@ impl GenerationBackend for FlashNextBackend {
             ))
         };
         let outcome = run();
-        // The workspace goes back reset whatever the outcome; a failed reset
-        // leaves the backend without a session, which the next request
-        // reports as a server error rather than serving stale state.
         let workspace = runner.into_workspace();
-        self.loaded.restore_workspace(workspace).map_err(|error| {
-            ServeError::server_error(format!("reset Qwen3.8-Flash-Next session: {error}"))
-        })?;
+        if let Err(error) = self.loaded.restore_workspace(workspace) {
+            tracing::error!(
+                target: "qwen_diag",
+                "serve: qwen4exp workspace could not be returned ({error}); aborting"
+            );
+            std::process::abort();
+        }
         outcome
     }
 }

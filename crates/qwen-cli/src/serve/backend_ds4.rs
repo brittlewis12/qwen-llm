@@ -791,7 +791,7 @@ impl DeepSeekV4Backend {
         }
         let session_ms = session_t0.elapsed().as_secs_f64() * 1e3;
 
-        with_request_session(
+        super::with_request_session(
             self,
             session,
             |owner, session| {
@@ -1043,24 +1043,13 @@ impl DeepSeekV4Backend {
     }
 }
 
-fn with_request_session<O, S, T, E>(
-    owner: &mut O,
-    mut session: S,
-    run: impl FnOnce(&mut O, &mut S) -> Result<T, E>,
-    restore: impl FnOnce(&mut O, S),
-) -> Result<T, E> {
-    let result = run(owner, &mut session);
-    restore(owner, session);
-    result
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
     fn post_construction_transport_rejection_restores_session_without_execution() {
         let mut residency = None;
         let mut executed = false;
-        let result = super::with_request_session(
+        let result = super::super::with_request_session(
             &mut residency,
             "resident",
             |_, _| {

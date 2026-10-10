@@ -1,5 +1,91 @@
 use super::*;
+use qwen_llm::metal::MetalContext;
 use qwen_llm::qwen4exp::Qwen4ExpConfig;
+use serde_json::json;
+use std::io;
+
+fn gpu_backend(snapshot_cache_mib: u64) -> FlashNextBackend {
+    let path = qwen_llm::test_fixtures::QWEN4EXP_Q3_K_XL.required();
+    let gguf = Box::leak(Box::new(GgufFile::open(&path).unwrap()));
+    let invocation = crate::cli::ServeInvocation {
+        lens_data_dir: None,
+        lens_config: None,
+        web_root: None,
+        lens_allowed_origin: Vec::new(),
+        model: path.clone(),
+        addr: "127.0.0.1:0".into(),
+        max_tokens: Some(8),
+        max_context_tokens: Some(256),
+        snapshot_cache_mib: Some(snapshot_cache_mib),
+        snapshot_policy: Default::default(),
+        durable: crate::serve::durable::DurableSnapshotConfig::off(),
+        drafter: None,
+        trace_sse: None,
+        template_style: Default::default(),
+        idle_residency_secs: None,
+    };
+    let prepared = Prepared::new(gguf, &invocation).unwrap();
+    FlashNextBackend::new(
+        MetalContext::new().unwrap(),
+        gguf,
+        "flash-next-tests".into(),
+        prepared,
+        Some(snapshot_cache_mib),
+        Default::default(),
+    )
+    .unwrap()
+}
+
+#[derive(Default)]
+struct Sink {
+    bytes: Vec<u8>,
+    ticks: usize,
+    pieces: usize,
+    abort_tick: Option<usize>,
+    abort_piece: Option<usize>,
+}
+
+impl GenerationSink for Sink {
+    fn piece(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.pieces += 1;
+        if self.abort_piece == Some(self.pieces) {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "test disconnect"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn tick(&mut self) -> io::Result<()> {
+        self.ticks += 1;
+        if self.abort_tick == Some(self.ticks) {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "test disconnect"));
+        }
+        Ok(())
+    }
+}
+
+fn build_request(backend: &FlashNextBackend, input: &str) -> (ServeRequest, String) {
+    let body = json!({
+        "model":"flash-next-tests",
+        "input":[{"role":"user","content":input}],
+        "temperature":0,
+        "max_output_tokens":8,
+        "seed":42
+    });
+    let mut request = backend.parse_request(&body).unwrap();
+    backend.normalize_request(&mut request).unwrap();
+    let prompt = backend.render_prompt(&request).unwrap();
+    (request, prompt)
+}
+
+fn execute(
+    backend: &mut FlashNextBackend,
+    request: &ServeRequest,
+    prompt: &str,
+    sink: &mut Sink,
+) -> Result<GenerationOutcome, BackendFailure> {
+    backend.generate(request, prompt, sink)
+}
 
 #[test]
 fn startup_limits_use_flash_next_profile_and_require_bounded_capacity() {
@@ -112,13 +198,113 @@ fn failed_snapshot_restore_evicts_the_entry_and_resets_the_runner() {
 }
 
 #[test]
-#[ignore = "GPU-only QWEN4EXP_Q3_K_XL resident/cold parity and request-abort coverage"]
-fn gpu_qwen4exp_resident_abort_and_transcript_cache_parity() {
-    let _fixture = qwen_llm::test_fixtures::QWEN4EXP_Q3_K_XL;
+fn request_session_is_handed_back_after_success_and_failure() {
+    for fail in [false, true] {
+        let mut resident = None;
+        let result = crate::serve::with_request_session(
+            &mut resident,
+            "workspace",
+            |_, _| {
+                if fail {
+                    Err("request failed")
+                } else {
+                    Ok("request succeeded")
+                }
+            },
+            |slot, workspace| *slot = Some(workspace),
+        );
+        assert_eq!(resident, Some("workspace"));
+        assert_eq!(result.is_err(), fail);
+    }
+}
+
+#[test]
+#[ignore = "GPU-only QWEN4EXP_Q3_K_XL resident/cold parity and abort retry coverage"]
+fn gpu_qwen4exp_resident_abort_retry_and_transcript_cache_parity() {
+    let mut cold_backend = gpu_backend(0);
+    let (cold_request, cold_prompt) =
+        build_request(&cold_backend, "What is 2 + 2? Answer briefly.");
+    let mut cold_sink = Sink::default();
+    let cold_outcome = execute(
+        &mut cold_backend,
+        &cold_request,
+        &cold_prompt,
+        &mut cold_sink,
+    )
+    .unwrap();
+    assert_eq!(cold_outcome.usage.cached_tokens, 0);
+    let cold_bytes = cold_sink.bytes;
+    drop(cold_backend);
+
+    let mut backend = gpu_backend(64);
+    let (request, prompt) = build_request(&backend, "What is 2 + 2? Answer briefly.");
+    let mut warm = Sink::default();
+    execute(&mut backend, &request, &prompt, &mut warm).unwrap();
+    assert_eq!(warm.bytes, cold_bytes);
+
+    let token_ids = backend.tokenizer.encode(&prompt, false).unwrap();
+    let boundary = backend
+        .im_start
+        .and_then(|im_start| i32::try_from(im_start).ok())
+        .and_then(|im_start| transcript_boundary(&token_ids, im_start))
+        .expect("rendered Flash-Next prompt has a transcript boundary");
+    let mut resent = Sink::default();
+    let resent_outcome = execute(&mut backend, &request, &prompt, &mut resent).unwrap();
+    assert_eq!(resent_outcome.usage.cached_tokens, boundary);
+    assert_eq!(resent.bytes, cold_bytes);
+
+    let late_abort_tick = warm.ticks.saturating_sub(1).max(2);
+    for mut aborted in [
+        Sink {
+            abort_tick: Some(1),
+            ..Sink::default()
+        },
+        Sink {
+            abort_piece: Some(1),
+            ..Sink::default()
+        },
+        Sink {
+            abort_tick: Some(late_abort_tick),
+            ..Sink::default()
+        },
+    ] {
+        assert!(matches!(
+            execute(&mut backend, &request, &prompt, &mut aborted),
+            Err(BackendFailure::Aborted(_))
+        ));
+        let mut retry = Sink::default();
+        execute(&mut backend, &request, &prompt, &mut retry).unwrap();
+        assert_eq!(retry.bytes, cold_bytes);
+    }
+
+    let over_capacity = "overflow ".repeat(512);
+    let (request, prompt) = build_request(&backend, &over_capacity);
+    let mut refused = Sink::default();
+    assert!(execute(&mut backend, &request, &prompt, &mut refused).is_err());
+    assert_eq!(refused.ticks, 0);
 }
 
 #[test]
 #[ignore = "GPU-only QWEN4EXP_Q3_K_XL transcript snapshot restore parity"]
 fn gpu_qwen4exp_transcript_restore_matches_cold_run() {
-    let _fixture = qwen_llm::test_fixtures::QWEN4EXP_Q3_K_XL;
+    let question = "Summarize why cached prefixes are safe. Keep it short.";
+    let mut resident = gpu_backend(64);
+    let (request, prompt) = build_request(&resident, question);
+    let token_ids = resident.tokenizer.encode(&prompt, false).unwrap();
+    let boundary = resident
+        .im_start
+        .and_then(|im_start| i32::try_from(im_start).ok())
+        .and_then(|im_start| transcript_boundary(&token_ids, im_start))
+        .expect("rendered Flash-Next prompt has a transcript boundary");
+    let mut first = Sink::default();
+    execute(&mut resident, &request, &prompt, &mut first).unwrap();
+    let mut restored = Sink::default();
+    let outcome = execute(&mut resident, &request, &prompt, &mut restored).unwrap();
+    assert_eq!(outcome.usage.cached_tokens, boundary);
+
+    let mut cold = gpu_backend(0);
+    let (cold_request, cold_prompt) = build_request(&cold, question);
+    let mut cold_sink = Sink::default();
+    execute(&mut cold, &cold_request, &cold_prompt, &mut cold_sink).unwrap();
+    assert_eq!(restored.bytes, cold_sink.bytes);
 }

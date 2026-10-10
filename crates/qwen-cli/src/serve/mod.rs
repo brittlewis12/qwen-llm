@@ -373,6 +373,19 @@ fn resolve_serve_limits(
     }
 }
 
+/// Run work with an owned request session and return that session on every
+/// outcome, including errors and transport aborts.
+pub(super) fn with_request_session<O, S, T, E>(
+    owner: &mut O,
+    mut session: S,
+    run: impl FnOnce(&mut O, &mut S) -> Result<T, E>,
+    restore: impl FnOnce(&mut O, S),
+) -> Result<T, E> {
+    let result = run(owner, &mut session);
+    restore(owner, session);
+    result
+}
+
 /// `qwen serve` entry: resident model, serial accept loop.
 /// Refuse an explicit durable-tier request on a family that has none (the
 /// user would wait through a cold re-prefill after restart believing it was

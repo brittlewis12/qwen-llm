@@ -361,13 +361,11 @@ pub(super) fn verify(
                 let opposite = transform(source, &directions, &opposite)?;
                 let actual = after.iter().map(|&x| f64::from(x)).collect::<Vec<_>>();
                 distinguish_orders(&expected, &opposite, &actual, &opposite)?;
-                errors.push(
-                    expected
-                        .iter()
-                        .zip(&actual)
-                        .map(|(a, b)| (a - b).abs())
-                        .fold(0f64, f64::max),
-                );
+                errors.push(qwen_llm::compare::assert_max_abs_diff_f64(
+                    concat!(file!(), ":", line!()),
+                    expected.iter(),
+                    &actual,
+                ));
             } else {
                 ensure!(before == after && delta == 0., "no-op site changed");
                 ensure!(

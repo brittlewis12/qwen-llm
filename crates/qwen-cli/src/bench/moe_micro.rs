@@ -3,18 +3,7 @@
 use super::*;
 
 fn comparison_max_abs(a: &[f32], b: &[f32]) -> f32 {
-    if a.is_empty() || a.len() != b.len() || !a.iter().chain(b).all(|value| value.is_finite()) {
-        return f32::NAN;
-    }
-    let mut maximum = 0.0f32;
-    for (x, y) in a.iter().zip(b) {
-        let delta = (x - y).abs();
-        if !delta.is_finite() {
-            return f32::NAN;
-        }
-        maximum = maximum.max(delta);
-    }
-    maximum
+    qwen_llm::compare::report_max_abs_diff_f32(a.iter(), b.iter())
 }
 
 fn report_max_f32(current: f32, candidate: f32) -> f32 {

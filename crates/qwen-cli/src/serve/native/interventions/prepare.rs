@@ -202,13 +202,8 @@ fn projection_witness(
         .map(|(expected, &source)| (expected - f64::from(source)).powi(2))
         .sum::<f64>()
         .sqrt();
-    let bypass_tolerance_ratio = expected
-        .iter()
-        .zip(covector)
-        .map(|(expected, &source)| {
-            (expected - f64::from(source)).abs() / (1e-3 + 1e-4 * expected.abs())
-        })
-        .fold(0f64, f64::max);
+    let bypass_tolerance_ratio =
+        qwen_llm::compare::report_max_relative_diff_f64(expected.iter(), covector, 1e-3, 1e-4);
     for (&expected, &actual) in expected.iter().zip(actual) {
         let delta = (expected - f64::from(actual)).abs();
         ensure!(

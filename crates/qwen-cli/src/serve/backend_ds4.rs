@@ -1224,11 +1224,7 @@ mod tests {
             let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
             let na: f64 = a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
             let nb: f64 = b.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
-            let max_abs = a
-                .iter()
-                .zip(b)
-                .map(|(x, y)| (x - y).abs())
-                .fold(0f32, f32::max);
+            let max_abs = qwen_llm::compare::report_max_abs_diff_f32(a.iter(), b);
             eprintln!(
                 "{label:<34} cos={:.6} max_abs={max_abs:.3}",
                 dot / (na * nb)

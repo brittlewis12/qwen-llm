@@ -340,11 +340,7 @@ pub(crate) fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
     };
     let baseline = read_back(&out_baseline);
     let packed = read_back(&out_packed);
-    let max_abs = packed
-        .iter()
-        .zip(baseline.iter())
-        .map(|(a, b)| (a - b).abs())
-        .fold(0f32, f32::max);
+    let max_abs = qwen_llm::compare::report_max_abs_diff_f32(packed.iter(), baseline.iter());
     let dot: f64 = packed
         .iter()
         .zip(baseline.iter())
@@ -759,11 +755,8 @@ pub(crate) fn run_attn_layer_micro(args: AttnLayerMicroArgs) -> Result<()> {
     };
     let baseline_out = read_back(&baseline.mixer_out);
     let packed_out = read_back(&packed.mixer_out);
-    let max_abs = packed_out
-        .iter()
-        .zip(baseline_out.iter())
-        .map(|(a, b)| (a - b).abs())
-        .fold(0f32, f32::max);
+    let max_abs =
+        qwen_llm::compare::report_max_abs_diff_f32(packed_out.iter(), baseline_out.iter());
     let dot: f64 = packed_out
         .iter()
         .zip(baseline_out.iter())

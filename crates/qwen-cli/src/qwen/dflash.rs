@@ -1204,11 +1204,8 @@ where
                 }
                 eprintln!("[shadow-probe] row pos={pos} gap={ref_gap:.6e} delta={max_delta:.6e}");
                 if let Some((_, replay)) = replay_logits.iter().find(|(row, _)| *row == i) {
-                    let replay_delta = replay
-                        .iter()
-                        .zip(&ref_logits)
-                        .map(|(a, b)| (a - b).abs())
-                        .fold(0.0f32, f32::max);
+                    let replay_delta =
+                        qwen_llm::compare::report_max_abs_diff_f32(replay.iter(), &ref_logits);
                     eprintln!(
                         "[shadow-probe] replayed pos={pos} row={i} kept={fallback_replay_start} ref_gap={ref_gap:.6e} replay_delta={replay_delta:.6e} flip={}",
                         spec_tok != ref_tok

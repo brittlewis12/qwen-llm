@@ -27,19 +27,27 @@ pub(crate) fn max_abs_f32_pair(a: &MetalTensor, b: &MetalTensor) -> Result<f32> 
             && a.n_bytes() == b.n_bytes(),
         "state tensor shape or dtype mismatch"
     );
-    let mut max_abs = 0.0f32;
+    let n = a.n_elements() as usize;
+    let pa;
+    let pb;
     unsafe {
-        let pa = (a.buffer.contents().as_ptr() as *const u8).add(a.offset as usize) as *const f32;
-        let pb = (b.buffer.contents().as_ptr() as *const u8).add(b.offset as usize) as *const f32;
-        for i in 0..a.n_elements() as usize {
-            let delta = (*pa.add(i) - *pb.add(i)).abs();
-            if !delta.is_finite() {
-                return Ok(f32::INFINITY);
-            }
-            max_abs = max_abs.max(delta);
-        }
+        pa = std::slice::from_raw_parts(
+            (a.buffer.contents().as_ptr() as *const u8)
+                .add(a.offset as usize)
+                .cast::<f32>(),
+            n,
+        );
+        pb = std::slice::from_raw_parts(
+            (b.buffer.contents().as_ptr() as *const u8)
+                .add(b.offset as usize)
+                .cast::<f32>(),
+            n,
+        );
     }
-    Ok(max_abs)
+    Ok(qwen_llm::compare::report_max_abs_diff_f32(
+        pa.iter(),
+        pb.iter(),
+    ))
 }
 
 pub(crate) fn max_abs_f32_tensor_pairs(
@@ -51,8 +59,15 @@ pub(crate) fn max_abs_f32_tensor_pairs(
         "state tensor count mismatch"
     );
     let mut max_abs = 0.0f32;
+    if reference.is_empty() {
+        return Ok(f32::NAN);
+    }
     for (a, b) in reference.iter().zip(candidate) {
-        max_abs = max_abs.max(max_abs_f32_pair(a, b)?);
+        let difference = max_abs_f32_pair(a, b)?;
+        if !difference.is_finite() {
+            return Ok(f32::NAN);
+        }
+        max_abs = max_abs.max(difference);
     }
     Ok(max_abs)
 }
@@ -70,8 +85,14 @@ pub(crate) fn max_abs_f32_layers(
     let mut max_abs = 0.0f32;
     let mut max_layer = 0usize;
     let mut n_over = 0usize;
+    if reference.is_empty() {
+        return Ok((f32::NAN, 0, 0));
+    }
     for (li, (a, b)) in reference.iter().zip(candidate).enumerate() {
         let m = max_abs_f32_pair(a, b)?;
+        if !m.is_finite() {
+            return Ok((f32::NAN, li, n_over));
+        }
         if m > 1e-6 {
             n_over += 1;
         }
@@ -92,33 +113,51 @@ pub(crate) fn kv_bytes_metrics(
         reference.len() == candidate.len(),
         "KV byte length mismatch"
     );
-    let values: Box<dyn Iterator<Item = (f32, f32)> + '_> = match dtype {
-        GgmlType::F16 => Box::new(
-            reference
-                .chunks_exact(2)
-                .zip(candidate.chunks_exact(2))
-                .map(|(a, b)| {
-                    let a = half::f16::from_bits(u16::from_le_bytes([a[0], a[1]])).to_f32();
-                    let b = half::f16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32();
-                    (a, b)
-                }),
-        ),
-        GgmlType::F32 => Box::new(
-            reference
-                .chunks_exact(4)
-                .zip(candidate.chunks_exact(4))
-                .map(|(a, b)| {
-                    let a = f32::from_le_bytes([a[0], a[1], a[2], a[3]]);
-                    let b = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-                    (a, b)
-                }),
-        ),
-        other => anyhow::bail!("unsupported KV audit dtype {other:?}"),
+    let values = || -> Result<Box<dyn Iterator<Item = (f32, f32)> + '_>> {
+        match dtype {
+            GgmlType::F16 => {
+                anyhow::ensure!(
+                    reference.len().is_multiple_of(2),
+                    "invalid F16 KV byte length"
+                );
+                Ok(Box::new(
+                    reference
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .zip(candidate.as_chunks::<2>().0.iter())
+                        .map(|(a, b)| {
+                            let a = half::f16::from_bits(u16::from_le_bytes(*a)).to_f32();
+                            let b = half::f16::from_bits(u16::from_le_bytes(*b)).to_f32();
+                            (a, b)
+                        }),
+                ))
+            }
+            GgmlType::F32 => {
+                anyhow::ensure!(
+                    reference.len().is_multiple_of(4),
+                    "invalid F32 KV byte length"
+                );
+                Ok(Box::new(
+                    reference
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(candidate.as_chunks::<4>().0.iter())
+                        .map(|(a, b)| {
+                            let a = f32::from_le_bytes(*a);
+                            let b = f32::from_le_bytes(*b);
+                            (a, b)
+                        }),
+                ))
+            }
+            other => anyhow::bail!("unsupported KV audit dtype {other:?}"),
+        }
     };
-    let (mut max_abs, mut dot, mut reference_norm, mut candidate_norm) =
-        (0.0f32, 0.0f64, 0.0f64, 0.0f64);
-    for (a, b) in values {
-        max_abs = max_abs.max((a - b).abs());
+    let max_abs = qwen_llm::compare::report_max_abs_pairs_f32(values()?);
+    let (max_abs, mut dot, mut reference_norm, mut candidate_norm) =
+        (max_abs, 0.0f64, 0.0f64, 0.0f64);
+    for (a, b) in values()? {
         dot += a as f64 * b as f64;
         reference_norm += (a as f64).powi(2);
         candidate_norm += (b as f64).powi(2);
@@ -177,6 +216,13 @@ pub(crate) fn audit_mtp_target_state(
         &candidate_snapshot.kv_v_arena,
         kv_dtype,
     )?;
+    anyhow::ensure!(
+        kv_k_max_abs.is_finite()
+            && kv_k_cosine.is_finite()
+            && kv_v_max_abs.is_finite()
+            && kv_v_cosine.is_finite(),
+        "KV comparison produced non-finite metrics"
+    );
     let kv_payload_max_abs = kv_k_max_abs.max(kv_v_max_abs);
     let kv_payload_cosine = kv_k_cosine.min(kv_v_cosine);
     let reference_logits =
@@ -187,10 +233,16 @@ pub(crate) fn audit_mtp_target_state(
         reference_logits.len() == candidate_logits.len(),
         "continuation logits length mismatch"
     );
-    let mut continuation_logits_max_abs = 0.0f32;
+    let continuation_logits_max_abs = qwen_llm::compare::report_max_abs_diff_f32(
+        reference_logits.iter(),
+        candidate_logits.iter(),
+    );
+    anyhow::ensure!(
+        continuation_logits_max_abs.is_finite(),
+        "continuation logits comparison produced a non-finite metric"
+    );
     let (mut dot, mut reference_norm, mut candidate_norm) = (0.0f64, 0.0f64, 0.0f64);
     for (&a, &b) in reference_logits.iter().zip(&candidate_logits) {
-        continuation_logits_max_abs = continuation_logits_max_abs.max((a - b).abs());
         dot += a as f64 * b as f64;
         reference_norm += (a as f64).powi(2);
         candidate_norm += (b as f64).powi(2);
@@ -199,7 +251,9 @@ pub(crate) fn audit_mtp_target_state(
         dot / (reference_norm.sqrt() * candidate_norm.sqrt() + f64::MIN_POSITIVE);
     let continuation_argmax_equal = argmax_i32(&reference_logits) == argmax_i32(&candidate_logits);
     let continuation_token = argmax_i32(&reference_logits);
-    let resume_audit_pass = kv_position_equal
+    let resume_audit_pass = gdn_state_max_abs.is_finite()
+        && gdn_conv_max_abs.is_finite()
+        && kv_position_equal
         && kv_payload_cosine >= 0.99999
         && continuation_argmax_equal
         && continuation_logits_max_abs <= 5e-2

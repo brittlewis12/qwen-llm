@@ -24,6 +24,171 @@ pub(crate) const DEEPSEEK_V4_PREFETCH_ENV: &str = "QWEN_DSV4_PREFETCH";
 
 pub(crate) const DEEPSEEK_V4_PREFETCH_AUTO_THRESHOLD: f64 = 0.98;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+enum Ds4CaptureTarget {
+    None,
+    PromptBoundary { publish_prefix: usize },
+    Completed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+struct Ds4CaptureResolution {
+    admitted: bool,
+    target: Ds4CaptureTarget,
+}
+
+fn ds4_resolve_capture_target(
+    has_store: bool,
+    min_tokens: usize,
+    prompt_len: usize,
+    completed_eligible: bool,
+    preflight_ok: bool,
+    prompt_publish_prefix: Option<usize>,
+) -> Ds4CaptureResolution {
+    let initially_admitted = has_store && min_tokens > 0 && prompt_len >= min_tokens;
+    let admitted = initially_admitted && (prompt_publish_prefix.is_none() || preflight_ok);
+    let target = if !admitted {
+        Ds4CaptureTarget::None
+    } else if completed_eligible {
+        Ds4CaptureTarget::Completed
+    } else if let Some(publish_prefix) = prompt_publish_prefix {
+        Ds4CaptureTarget::PromptBoundary { publish_prefix }
+    } else {
+        Ds4CaptureTarget::None
+    };
+    Ds4CaptureResolution { admitted, target }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct Ds4DurableIntent {
+    store: DeepSeekV4CheckpointStore,
+    max_record_bytes: u64,
+    capture: Ds4CaptureTarget,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+enum Ds4PersistenceIntent {
+    None,
+    Snapshot { path: PathBuf },
+    Durable(Ds4DurableIntent),
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+enum Ds4ResolvedPersistence {
+    None,
+    SnapshotRestore {
+        path: PathBuf,
+        content_id: DeepSeekV4ModelContentId,
+    },
+    SnapshotPublish {
+        path: PathBuf,
+        content_id: DeepSeekV4ModelContentId,
+        publish_prefix: usize,
+    },
+    Durable {
+        intent: Ds4DurableIntent,
+        has_blobs: Option<bool>,
+        probe_ms: f64,
+        content_id: Option<DeepSeekV4ModelContentId>,
+    },
+}
+
+#[allow(dead_code)]
+struct Ds4PendingPublication {
+    prepared: DeepSeekV4PreparedCheckpoint,
+    kind: &'static str,
+    capture_ms: f64,
+}
+
+#[allow(dead_code)]
+struct Ds4PrefillOutcome {
+    mode: &'static str,
+    pending: Option<Ds4PendingPublication>,
+    restore_ms: f64,
+}
+
+fn ds4_completed_eligible(
+    is_messages: bool,
+    strip_thinking: bool,
+    preserve_thinking: bool,
+    preserve_reasoning: bool,
+) -> bool {
+    is_messages && !strip_thinking && (preserve_thinking || preserve_reasoning)
+}
+
+fn ds4_prompt_kind(source: PromptSource, reasoning: DeepSeekV4Reasoning) -> &'static str {
+    match source {
+        PromptSource::Inline | PromptSource::File => "raw",
+        PromptSource::Messages => match reasoning {
+            DeepSeekV4Reasoning::None => "messages_0731_chat",
+            DeepSeekV4Reasoning::Low | DeepSeekV4Reasoning::High | DeepSeekV4Reasoning::Max => {
+                "messages_0731_thinking"
+            }
+        },
+    }
+}
+
+fn ds4_identity_needed(
+    has_store: bool,
+    prompt_len: usize,
+    has_blobs: Option<bool>,
+    admitted: bool,
+) -> bool {
+    has_store && prompt_len >= 2 && (has_blobs == Some(true) || admitted)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ds4CompletedCaptureDecision {
+    NotRequested,
+    SkipTokenLimit,
+    Capture,
+}
+
+fn ds4_completed_capture_decision(
+    eligible: bool,
+    admitted: bool,
+    has_store: bool,
+    has_pending: bool,
+    has_snapshot: bool,
+    stop_reason: StopReason,
+) -> Ds4CompletedCaptureDecision {
+    if !eligible || !admitted || !has_store || has_pending || has_snapshot {
+        Ds4CompletedCaptureDecision::NotRequested
+    } else if matches!(stop_reason, StopReason::Eos) {
+        Ds4CompletedCaptureDecision::Capture
+    } else {
+        Ds4CompletedCaptureDecision::SkipTokenLimit
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ds4PrefillMode {
+    CausalSnapshotRestore,
+    CausalSnapshotPublish,
+    DurablePrefixRestore,
+    DurablePrefixCapture,
+    LayerMajor,
+    LayerMajorChunks,
+    Singleton,
+}
+
+fn ds4_prefill_mode_label(mode: Ds4PrefillMode) -> &'static str {
+    match mode {
+        Ds4PrefillMode::CausalSnapshotRestore => "causal_snapshot_restore",
+        Ds4PrefillMode::CausalSnapshotPublish => "causal_snapshot_publish",
+        Ds4PrefillMode::DurablePrefixRestore => "durable_prefix_restore",
+        Ds4PrefillMode::DurablePrefixCapture => "durable_prefix_capture",
+        Ds4PrefillMode::LayerMajor => "layer_major",
+        Ds4PrefillMode::LayerMajorChunks => "layer_major_chunks",
+        Ds4PrefillMode::Singleton => "singleton",
+    }
+}
+
 pub(crate) fn deepseek_v4_generation_stops(gguf: &GgufFile, vocab_size: u32) -> Result<Vec<i32>> {
     let stop_tokens = gguf
         .stop_token_ids()
@@ -678,7 +843,12 @@ pub(crate) fn run_deepseek_v4_single_turn(
             // next turn's re-rendered prompt strictly extends this turn's
             // completed transcript; only then is a completed-turn checkpoint
             // reusable.
-            let completed_eligible = encode_options.preserve_reasoning;
+            let completed_eligible = ds4_completed_eligible(
+                true,
+                args.messages_strip_thinking,
+                args.messages_preserve_thinking,
+                encode_options.preserve_reasoning,
+            );
             (
                 load_deepseek_v4_0731_messages_prompt(
                     path,
@@ -694,15 +864,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
             let (prompt, source, _) = prompt_text(args)?;
             (prompt, source, false)
         };
-    let prompt_kind = match prompt_source {
-        PromptSource::Inline | PromptSource::File => "raw",
-        PromptSource::Messages => match encode_options.reasoning {
-            DeepSeekV4Reasoning::None => "messages_0731_chat",
-            DeepSeekV4Reasoning::Low | DeepSeekV4Reasoning::High | DeepSeekV4Reasoning::Max => {
-                "messages_0731_thinking"
-            }
-        },
-    };
+    let prompt_kind = ds4_prompt_kind(prompt_source, encode_options.reasoning);
 
     let tokenizer_t0 = Instant::now();
     let tokenizer = Tokenizer::from_gguf(&gguf).context("load DeepSeek V4 tokenizer")?;
@@ -736,12 +898,13 @@ pub(crate) fn run_deepseek_v4_single_turn(
     } else {
         0
     };
-    let mut durable_admitted = durable_store.is_some()
+    let initially_durable_admitted = durable_store.is_some()
         && args.durable_prefix_cache_min_tokens > 0
         && prompt_token_ids.len() >= args.durable_prefix_cache_min_tokens;
-    if let Some(publish_prefix) =
-        deepseek_v4_durable_capture_prefix_len(prompt_token_ids.len(), durable_admitted)?
-    {
+    let durable_publish_prefix =
+        deepseek_v4_durable_capture_prefix_len(prompt_token_ids.len(), initially_durable_admitted)?;
+    let mut durable_preflight_ok = true;
+    if let Some(publish_prefix) = durable_publish_prefix {
         let model = DeepSeekV4Model::from_gguf_flash_0731(&gguf)
             .context("bind durable DeepSeek V4 snapshot geometry")?;
         let session_capacity = DeepSeekV4SessionCapacity::for_forward_limit(
@@ -756,12 +919,21 @@ pub(crate) fn run_deepseek_v4_single_turn(
             durable_max_record_bytes,
         );
         if let Err(error) = durable_record_admitted.as_ref() {
-            durable_admitted = false;
+            durable_preflight_ok = false;
             eprintln!(
                 "warning: durable DeepSeek V4 prefix capture is not admissible; generation will continue without publication: {error}"
             );
         }
     }
+    let capture_resolution = ds4_resolve_capture_target(
+        durable_store.is_some(),
+        args.durable_prefix_cache_min_tokens,
+        prompt_token_ids.len(),
+        durable_completed_eligible,
+        durable_preflight_ok,
+        durable_publish_prefix,
+    );
+    let durable_admitted = capture_resolution.admitted;
     let stop_validation_t0 = Instant::now();
     let stop_tokens = gguf
         .stop_token_ids()
@@ -787,9 +959,12 @@ pub(crate) fn run_deepseek_v4_single_turn(
         },
     };
     let durable_probe_ms = durable_probe_t0.elapsed().as_secs_f64() * 1e3;
-    let durable_identity_needed = durable_store.is_some()
-        && prompt_token_ids.len() >= 2
-        && (durable_has_blobs == Some(true) || durable_admitted);
+    let durable_identity_needed = ds4_identity_needed(
+        durable_store.is_some(),
+        prompt_token_ids.len(),
+        durable_has_blobs,
+        durable_admitted,
+    );
     let (snapshot_model_content_id, snapshot_file_exists) = if args.deepseek_v4_snapshot.is_some()
         || durable_identity_needed
     {
@@ -998,7 +1173,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
                 suffix_chunks,
                 snapshot.payload_bytes(),
             );
-            "causal_snapshot_restore"
+            ds4_prefill_mode_label(Ds4PrefillMode::CausalSnapshotRestore)
         } else {
             let publish_prefix = deepseek_v4_snapshot_publish_prefix(prompt_token_ids.len())?;
             advance_deepseek_v4_prompt_prefix(
@@ -1043,7 +1218,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
                 snapshot.payload_bytes(),
                 report.record_bytes,
             );
-            "causal_snapshot_publish"
+            ds4_prefill_mode_label(Ds4PrefillMode::CausalSnapshotPublish)
         }
     } else {
         let (restored_prefix, durable_payload_bytes) = attempt_deepseek_v4_durable_restore(
@@ -1101,9 +1276,9 @@ pub(crate) fn run_deepseek_v4_single_turn(
                     suffix_chunks,
                     durable_payload_bytes,
                 );
-                "durable_prefix_restore"
+                ds4_prefill_mode_label(Ds4PrefillMode::DurablePrefixRestore)
             } else {
-                "durable_prefix_capture"
+                ds4_prefill_mode_label(Ds4PrefillMode::DurablePrefixCapture)
             }
         } else if restored_prefix > 0 {
             let suffix_chunks = execute_deepseek_v4_prompt_suffix(
@@ -1119,7 +1294,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
                 suffix_chunks,
                 durable_payload_bytes,
             );
-            "durable_prefix_restore"
+            ds4_prefill_mode_label(Ds4PrefillMode::DurablePrefixRestore)
         } else {
             let packed_chunk_count =
                 deepseek_v4_packed_chunk_count(prompt_token_ids.len(), prefill_chunk_tokens);
@@ -1131,9 +1306,9 @@ pub(crate) fn run_deepseek_v4_single_turn(
                     prefill_chunk_tokens,
                 )?;
                 if packed_chunk_count == 1 {
-                    "layer_major"
+                    ds4_prefill_mode_label(Ds4PrefillMode::LayerMajor)
                 } else {
-                    "layer_major_chunks"
+                    ds4_prefill_mode_label(Ds4PrefillMode::LayerMajorChunks)
                 }
             } else {
                 for (index, &token) in prompt_token_ids.iter().enumerate() {
@@ -1141,7 +1316,7 @@ pub(crate) fn run_deepseek_v4_single_turn(
                         .forward_token(&ctx, token)
                         .with_context(|| format!("forward DeepSeek V4 prompt token {index}"))?;
                 }
-                "singleton"
+                ds4_prefill_mode_label(Ds4PrefillMode::Singleton)
             }
         }
     };
@@ -1274,13 +1449,15 @@ pub(crate) fn run_deepseek_v4_single_turn(
     )?;
     let generator_return = Instant::now();
     drop(stdout);
-    if durable_completed_eligible
-        && durable_admitted
-        && durable_store.is_some()
-        && durable_prepared.is_none()
-        && args.deepseek_v4_snapshot.is_none()
-    {
-        if matches!(generation.stop_reason, StopReason::Eos) {
+    match ds4_completed_capture_decision(
+        durable_completed_eligible,
+        durable_admitted,
+        durable_store.is_some(),
+        durable_prepared.is_some(),
+        args.deepseek_v4_snapshot.is_some(),
+        generation.stop_reason,
+    ) {
+        Ds4CompletedCaptureDecision::Capture => {
             // The session sits at the completed transcript boundary: every
             // prompt and generated token except the unconsumed terminal EOS.
             match causal_snapshot_record_bytes(
@@ -1315,13 +1492,15 @@ pub(crate) fn run_deepseek_v4_single_turn(
                     "warning: durable DeepSeek V4 completed capture is not admissible; continuing without publication: {error}"
                 ),
             }
-        } else {
+        }
+        Ds4CompletedCaptureDecision::SkipTokenLimit => {
             // A truncated turn's boundary can never prefix a retry of the
             // same prompt; publishing it would only pollute the budget.
             eprintln!(
                 "durable_prefix_cache: family=deepseek_v4 publish=skipped capture=completed reason=token_limit"
             );
         }
+        Ds4CompletedCaptureDecision::NotRequested => {}
     }
     if let (Some(store), Some(prepared)) = (durable_store.as_ref(), durable_prepared.as_ref()) {
         let publish_t0 = Instant::now();
@@ -2266,7 +2445,13 @@ pub(crate) fn print_deepseek_v4_census(model_path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod request_stats_timing_tests {
-    use super::request_stats_total_ms;
+    use super::{DeepSeekV4Reasoning, PromptSource, StopReason};
+    use super::{
+        Ds4CaptureTarget, Ds4CompletedCaptureDecision, Ds4PrefillMode,
+        ds4_completed_capture_decision, ds4_completed_eligible, ds4_identity_needed,
+        ds4_prefill_mode_label, ds4_prompt_kind, ds4_resolve_capture_target,
+        request_stats_total_ms,
+    };
     use std::time::{Duration, Instant};
 
     #[test]
@@ -2288,5 +2473,120 @@ mod request_stats_timing_tests {
         let load_session_output_stats_total =
             18.0 + stats_line.duration_since(base).as_secs_f64() * 1e3;
         assert!(31.0 < load_session_output_stats_total);
+    }
+
+    #[test]
+    fn capture_intent_resolution_preserves_threshold_and_single_token_edges() {
+        assert_eq!(
+            ds4_resolve_capture_target(true, 0, 4, false, true, Some(3)),
+            super::Ds4CaptureResolution {
+                admitted: false,
+                target: Ds4CaptureTarget::None,
+            }
+        );
+        assert!(!ds4_resolve_capture_target(true, 5, 4, false, true, Some(3)).admitted);
+        assert_eq!(
+            ds4_resolve_capture_target(true, 1, 1, true, true, None),
+            super::Ds4CaptureResolution {
+                admitted: true,
+                target: Ds4CaptureTarget::Completed,
+            }
+        );
+        assert_eq!(
+            ds4_resolve_capture_target(true, 2, 4, true, false, Some(3)),
+            super::Ds4CaptureResolution {
+                admitted: false,
+                target: Ds4CaptureTarget::None,
+            }
+        );
+    }
+
+    #[test]
+    fn identity_requirement_depends_on_store_length_inventory_and_admission() {
+        for has_blobs in [None, Some(false), Some(true)] {
+            for admitted in [false, true] {
+                let expected = has_blobs == Some(true) || admitted;
+                assert_eq!(ds4_identity_needed(true, 2, has_blobs, admitted), expected);
+                assert!(!ds4_identity_needed(true, 1, has_blobs, admitted));
+            }
+        }
+        assert!(!ds4_identity_needed(false, 4, Some(true), true));
+    }
+
+    #[test]
+    fn completed_eligibility_matches_message_flags() {
+        assert!(ds4_completed_eligible(true, false, true, false));
+        assert!(ds4_completed_eligible(true, false, false, true));
+        assert!(!ds4_completed_eligible(true, true, false, true));
+        assert!(!ds4_completed_eligible(false, false, true, true));
+        assert!(!ds4_completed_eligible(true, false, false, false));
+    }
+
+    #[test]
+    fn prompt_kind_uses_source_and_outer_reasoning_mode() {
+        assert_eq!(
+            ds4_prompt_kind(PromptSource::Inline, DeepSeekV4Reasoning::High),
+            "raw"
+        );
+        assert_eq!(
+            ds4_prompt_kind(PromptSource::File, DeepSeekV4Reasoning::None),
+            "raw"
+        );
+        assert_eq!(
+            ds4_prompt_kind(PromptSource::Messages, DeepSeekV4Reasoning::None),
+            "messages_0731_chat"
+        );
+        assert_eq!(
+            ds4_prompt_kind(PromptSource::Messages, DeepSeekV4Reasoning::Max),
+            "messages_0731_thinking"
+        );
+    }
+
+    #[test]
+    fn prefill_mode_labels_are_stable() {
+        assert_eq!(
+            ds4_prefill_mode_label(Ds4PrefillMode::CausalSnapshotRestore),
+            "causal_snapshot_restore"
+        );
+        assert_eq!(
+            ds4_prefill_mode_label(Ds4PrefillMode::CausalSnapshotPublish),
+            "causal_snapshot_publish"
+        );
+        assert_eq!(
+            ds4_prefill_mode_label(Ds4PrefillMode::DurablePrefixRestore),
+            "durable_prefix_restore"
+        );
+        assert_eq!(
+            ds4_prefill_mode_label(Ds4PrefillMode::DurablePrefixCapture),
+            "durable_prefix_capture"
+        );
+        assert_eq!(
+            ds4_prefill_mode_label(Ds4PrefillMode::LayerMajor),
+            "layer_major"
+        );
+        assert_eq!(
+            ds4_prefill_mode_label(Ds4PrefillMode::LayerMajorChunks),
+            "layer_major_chunks"
+        );
+        assert_eq!(
+            ds4_prefill_mode_label(Ds4PrefillMode::Singleton),
+            "singleton"
+        );
+    }
+
+    #[test]
+    fn completed_capture_decision_preserves_eos_and_token_limit_paths() {
+        assert_eq!(
+            ds4_completed_capture_decision(true, true, true, false, false, StopReason::Eos),
+            Ds4CompletedCaptureDecision::Capture
+        );
+        assert_eq!(
+            ds4_completed_capture_decision(true, true, true, false, false, StopReason::TokenLimit),
+            Ds4CompletedCaptureDecision::SkipTokenLimit
+        );
+        assert_eq!(
+            ds4_completed_capture_decision(true, true, true, true, false, StopReason::Eos),
+            Ds4CompletedCaptureDecision::NotRequested
+        );
     }
 }

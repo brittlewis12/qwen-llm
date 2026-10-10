@@ -454,7 +454,10 @@ fn leaf_screen(ctx: &MetalContext, session: &Glm5NextSession<'_>, out: &mut std:
                     matmat(
                         ctx,
                         &enc,
-                        PackedLineage::Fast,
+                        super::super::packed::Arith {
+                            lineage: PackedLineage::Fast,
+                            precision: FastPrecision::Half,
+                        },
                         super::super::packed::Stage::Router,
                         &moe.router,
                         &p.normed,

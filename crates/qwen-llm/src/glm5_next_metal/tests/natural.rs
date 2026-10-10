@@ -1724,8 +1724,9 @@ fn reuse_natural_f32_operand_probe() {
 /// projection and the routed experts on them, 512- and 128-row chunkings
 /// agree bitwise, as do 64 and 97 rows (the pairs the half-staged Fast
 /// already holds), at the prompt end and through decode; every selected call
-/// took its tile at each chunking; and the selection takes effect (logits
-/// differ from half-staged Fast).
+/// took its tile at each chunking; the selection takes effect (logits
+/// differ from half-staged Fast); and the product precisions
+/// (`FastPrecision`) reproduce the test selections bitwise.
 #[test]
 #[ignore = "map #12 F32-operand chunk identities: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU"]
 fn fast_f32_operands_keep_chunk_identities() {
@@ -1783,6 +1784,37 @@ fn fast_f32_operands_keep_chunk_identities() {
             assert_finite(&format!("rows {rows} position {i}"), l);
         }
     }
+    // The product settings run exactly the test selections: a session set
+    // to `FastPrecision::F32` (`DenseF32`) equals the all (dense) selection.
+    let [_, dense, _] = f32_selections();
+    let preset = |precision: FastPrecision| {
+        let mut s = session(&ctx, &weights, 700, 512, PackedLineage::Fast);
+        s.set_fast_precision(precision).unwrap();
+        let mut logits = vec![s.prefill_packed(&ctx, prompt).unwrap()];
+        for &token in continuation {
+            logits.push(s.forward(&ctx, token).unwrap());
+        }
+        logit_bits(&logits)
+    };
+    assert_eq!(
+        preset(FastPrecision::F32),
+        bits(512),
+        "F32 preset vs all selection"
+    );
+    let dense_512 = {
+        let _scope = dense.scope();
+        logit_bits(&run(512))
+    };
+    assert_eq!(
+        preset(FastPrecision::DenseF32),
+        dense_512,
+        "DenseF32 preset vs dense selection"
+    );
+    assert_eq!(
+        preset(FastPrecision::Half),
+        logit_bits(&half_512),
+        "Half preset"
+    );
 }
 
 /// The narrow F32-operand kernels change nothing in the model: under the

@@ -40,6 +40,9 @@ pub struct Glm5NextSnapshot {
     position: usize,
     weights_instance: u64,
     lineage: Option<PackedLineage>,
+    /// Operand precision of a Fast session's packed prefill (`None`: serial
+    /// or Exact, where it has no effect).
+    fast_precision: Option<FastPrecision>,
     policy_version: u32,
     layers: Vec<LayerRegions>,
 }
@@ -52,6 +55,12 @@ impl Glm5NextSnapshot {
     /// The packed lineage of the session that produced it (`None`: serial).
     pub fn lineage(&self) -> Option<PackedLineage> {
         self.lineage
+    }
+
+    /// The Fast operand precision of the session that produced it (`None`:
+    /// serial or Exact).
+    pub fn fast_precision(&self) -> Option<FastPrecision> {
+        self.fast_precision
     }
 
     /// Captured bytes (the regions; bookkeeping excluded).
@@ -74,6 +83,7 @@ impl Glm5NextSnapshot {
     pub(crate) fn same_state(&self, other: &Self) -> bool {
         self.position == other.position
             && self.lineage == other.lineage
+            && self.fast_precision == other.fast_precision
             && self.layers.len() == other.layers.len()
             && self
                 .layers
@@ -221,13 +231,14 @@ impl Glm5NextSession<'_> {
             position: n,
             weights_instance: self.weights.instance,
             lineage: self.packed_lineage(),
+            fast_precision: self.effective_fast_precision(),
             policy_version: SNAPSHOT_POLICY_VERSION,
             layers,
         })
     }
 
     /// Restores `snapshot` into this session: same weights instance,
-    /// lineage and policy; room for at least one more token; every region
+    /// lineage, Fast precision and policy; room for at least one more token; every region
     /// within its destination. Nothing is written until all checks pass;
     /// the session is then poisoned until every region is installed, and
     /// its position becomes the snapshot's.
@@ -247,6 +258,13 @@ impl Glm5NextSession<'_> {
                 "lineage {:?} differs from this session's {:?}",
                 snapshot.lineage,
                 self.packed_lineage()
+            ));
+        }
+        if snapshot.fast_precision != self.effective_fast_precision() {
+            return refuse(format!(
+                "Fast precision {:?} differs from this session's {:?}",
+                snapshot.fast_precision,
+                self.effective_fast_precision()
             ));
         }
         if snapshot.position >= self.capacity {

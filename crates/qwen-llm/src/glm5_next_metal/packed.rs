@@ -200,19 +200,26 @@ impl Drop for F32Census {
     }
 }
 
-/// A stage's projection mode: its lineage ([`stage_lineage`]), with Fast
-/// stages in their F32-operand form where tests choose ([`F32Stages`]).
-/// Product builds use the half-staged Fast form until an F32 configuration
-/// qualifies (map #12 accuracy lane).
-fn stage_mode(lineage: PackedLineage, stage: Stage) -> StageMode {
-    match stage_lineage(lineage, stage) {
+/// A stage's projection mode: its lineage ([`stage_lineage`]); Fast stages
+/// the session's [`FastPrecision`] selects run in their F32-operand form.
+/// Tests may substitute their own selection ([`F32Stages`]).
+fn stage_mode(arith: Arith, stage: Stage) -> StageMode {
+    match stage_lineage(arith.lineage, stage) {
         PackedLineage::Exact => StageMode::Exact,
         PackedLineage::Fast => {
             #[cfg(test)]
-            if F32_STAGES.with(|s| s.get()) & stage.bit() != 0 {
-                return StageMode::FastF32;
+            if let Some(stages) = test_f32_stages() {
+                return if stages & stage.bit() != 0 {
+                    StageMode::FastF32
+                } else {
+                    StageMode::Fast
+                };
             }
-            StageMode::Fast
+            if arith.precision.f32_stage(stage) {
+                StageMode::FastF32
+            } else {
+                StageMode::Fast
+            }
         }
     }
 }
@@ -284,12 +291,18 @@ impl Drop for F32NarrowRows {
     }
 }
 
-/// Whether a FastF32 projection may take `tile`: those the [`F32Stages`]
-/// scope names in tests; every tile in product builds (which never select
-/// FastF32 yet).
+/// The stage families a test's [`F32Stages`] scope selects, if one is active
+/// (it then replaces the session's precision).
+#[cfg(test)]
+fn test_f32_stages() -> Option<u16> {
+    Some(F32_STAGES.with(|s| s.get())).filter(|&stages| stages != 0)
+}
+
+/// Whether a FastF32 projection may take `tile`: every tile, unless a test's
+/// [`F32Stages`] scope names a subset.
 #[cfg(test)]
 fn f32_tile_enabled(tile: F32Tile) -> bool {
-    F32_TILES.with(|t| t.get()) & tile.bit() != 0
+    test_f32_stages().is_none() || F32_TILES.with(|t| t.get()) & tile.bit() != 0
 }
 
 #[cfg(not(test))]
@@ -402,6 +415,70 @@ impl Drop for ExactStages {
     }
 }
 
+/// Operand precision of Fast packed prefill's quantized matrices (map #12
+/// accuracy lane). F32 operands bring Fast closer to Exact at some prefill
+/// cost (`docs/bench/2026-10-09-glm53-fast-f32-operands/`): on the six
+/// frozen natural cases the mean KL against Exact falls 30% (`DenseF32`,
+/// +5% on a fresh 2,048-token prompt) or 50% (`F32`, +13-17%). Every
+/// setting keeps Fast's bitwise properties (chunk identities, snapshot
+/// restore); sessions of different precisions never share state.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FastPrecision {
+    /// Half-staged mat-mat tiles (the original Fast).
+    #[default]
+    Half,
+    /// Every dense projection (KDA, MLA, indexer, shared expert, dense FFN)
+    /// on F32-operand tiles; routed experts half-staged.
+    DenseF32,
+    /// Every quantized matrix operand in F32: dense projections and routed
+    /// experts.
+    F32,
+}
+
+impl FastPrecision {
+    /// Every precision, in order of increasing closeness to Exact.
+    pub const ALL: [FastPrecision; 3] = [Self::Half, Self::DenseF32, Self::F32];
+
+    /// The setting's name (`half`, `dense_f32`, `f32`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Half => "half",
+            Self::DenseF32 => "dense_f32",
+            Self::F32 => "f32",
+        }
+    }
+
+    /// The precision named `name` ([`FastPrecision::name`]).
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.name() == name)
+    }
+
+    /// Whether `stage` runs on F32-operand tiles in a Fast session.
+    fn f32_stage(self, stage: Stage) -> bool {
+        let dense = matches!(
+            stage,
+            Stage::KdaExpand
+                | Stage::KdaProjection
+                | Stage::MlaProjection
+                | Stage::IndexerProjection
+                | Stage::SharedExpert
+                | Stage::DenseFfn
+        );
+        match self {
+            Self::Half => false,
+            Self::DenseF32 => dense,
+            Self::F32 => dense || stage == Stage::RoutedExperts,
+        }
+    }
+}
+
+/// A packed chunk's arithmetic: lineage and, for Fast, operand precision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct Arith {
+    pub(super) lineage: PackedLineage,
+    pub(super) precision: FastPrecision,
+}
+
 /// Arithmetic lineage of packed prefill.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PackedLineage {
@@ -490,6 +567,7 @@ fn router_e8p32_supported(ctx: &MetalContext) -> bool {
 pub(super) struct PackedScratch {
     rows: usize,
     pub(super) lineage: PackedLineage,
+    pub(super) precision: FastPrecision,
     token: MetalTensor,
     embedding: MetalTensor,
     residual: [MetalTensor; 2],
@@ -592,6 +670,16 @@ fn take_rows(b: &mut SpecBuffers, name: &str, rows: usize) -> Result<MetalTensor
     Ok(rows_view(&b.take(name)?, rows))
 }
 
+impl PackedScratch {
+    /// This scratch's chunk arithmetic.
+    pub(super) fn arith(&self) -> Arith {
+        Arith {
+            lineage: self.lineage,
+            precision: self.precision,
+        }
+    }
+}
+
 #[cfg(test)]
 impl PackedScratch {
     /// Each MoE block's routed expert ids (`[top_k, rows]` I32, row-major by
@@ -618,6 +706,7 @@ impl PackedScratch {
         let scratch = Self {
             rows,
             lineage: PackedLineage::Fast,
+            precision: FastPrecision::Half,
             token: b.take("token")?,
             embedding: take_rows(&mut b, "embedding", rows)?,
             residual: [
@@ -690,7 +779,7 @@ fn flat(t: &MetalTensor, n: usize) -> MetalTensor {
 fn matmat(
     ctx: &MetalContext,
     enc: &KernelEncoder,
-    lineage: PackedLineage,
+    arith: Arith,
     stage: Stage,
     weight: &MetalTensor,
     x: &MetalTensor,
@@ -699,7 +788,7 @@ fn matmat(
     n_out: usize,
     rows: usize,
 ) -> Result<()> {
-    let mode = stage_mode(lineage, stage);
+    let mode = stage_mode(arith, stage);
     if mode == StageMode::FastF32 {
         // F32-operand tiles at every row count (one row included), so a
         // token's outputs do not depend on its chunking.
@@ -793,7 +882,7 @@ fn matmat(
 fn expand_rows(
     ctx: &MetalContext,
     enc: &KernelEncoder,
-    lineage: PackedLineage,
+    arith: Arith,
     stage: Stage,
     weight: &MetalTensor,
     x: &MetalTensor,
@@ -802,7 +891,7 @@ fn expand_rows(
     n_out: usize,
     rows: usize,
 ) -> Result<()> {
-    match stage_mode(lineage, stage) {
+    match stage_mode(arith, stage) {
         StageMode::Exact => {
             #[cfg(test)]
             let rounded = rounded_input(ctx, enc, x, rows * n_in)?;
@@ -811,7 +900,7 @@ fn expand_rows(
             super::low_rank_expand(ctx, enc, weight, x, y, n_in, n_out, rows)
         }
         StageMode::Fast | StageMode::FastF32 => {
-            matmat(ctx, enc, lineage, stage, weight, x, y, n_in, n_out, rows)
+            matmat(ctx, enc, arith, stage, weight, x, y, n_in, n_out, rows)
         }
     }
 }
@@ -1116,7 +1205,7 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        p.lineage,
+                        p.arith(),
                         Stage::DenseFfn,
                         &dense.gate,
                         &v(&p.normed),
@@ -1128,7 +1217,7 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        p.lineage,
+                        p.arith(),
                         Stage::DenseFfn,
                         &dense.up,
                         &v(&p.normed),
@@ -1142,7 +1231,7 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        p.lineage,
+                        p.arith(),
                         Stage::DenseFfn,
                         &dense.down,
                         &v(&p.dense_gate),
@@ -1187,7 +1276,7 @@ impl Glm5NextSession<'_> {
                         matmat(
                             ctx,
                             &enc,
-                            p.lineage,
+                            p.arith(),
                             Stage::Router,
                             &moe.router,
                             &v(&p.normed),
@@ -1295,7 +1384,7 @@ impl Glm5NextSession<'_> {
                             output: &v(&p.routed),
                         };
                         let f32_mode =
-                            stage_mode(p.lineage, Stage::RoutedExperts) == StageMode::FastF32;
+                            stage_mode(p.arith(), Stage::RoutedExperts) == StageMode::FastF32;
                         let f32_taken = f32_mode
                             && f32_tile_enabled(F32Tile::RoutedExperts)
                             && moe.gate_experts.dtype == moe.up_experts.dtype
@@ -1358,7 +1447,7 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        p.lineage,
+                        p.arith(),
                         Stage::SharedExpert,
                         &moe.shared.gate,
                         &v(&p.normed),
@@ -1370,7 +1459,7 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        p.lineage,
+                        p.arith(),
                         Stage::SharedExpert,
                         &moe.shared.up,
                         &v(&p.normed),
@@ -1387,7 +1476,7 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        p.lineage,
+                        p.arith(),
                         Stage::SharedExpert,
                         &moe.shared.down,
                         &v(&p.shared_gate),
@@ -1519,7 +1608,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            p.arith(),
             Stage::KdaProjection,
             &kda.query,
             &x,
@@ -1531,7 +1620,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            p.arith(),
             Stage::KdaProjection,
             &kda.key,
             &x,
@@ -1543,7 +1632,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            p.arith(),
             Stage::KdaProjection,
             &kda.value,
             &x,
@@ -1555,7 +1644,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            p.arith(),
             Stage::KdaProjection,
             &kda.decay_a,
             &x,
@@ -1567,7 +1656,7 @@ impl Glm5NextSession<'_> {
         expand_rows(
             ctx,
             enc,
-            p.lineage,
+            p.arith(),
             Stage::KdaExpand,
             &kda.decay_b,
             &v(&p.rank_a),
@@ -1579,7 +1668,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            p.arith(),
             Stage::KdaProjection,
             &kda.beta,
             &x,
@@ -1591,7 +1680,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            p.arith(),
             Stage::KdaProjection,
             &kda.gate_a,
             &x,
@@ -1603,7 +1692,7 @@ impl Glm5NextSession<'_> {
         expand_rows(
             ctx,
             enc,
-            p.lineage,
+            p.arith(),
             Stage::KdaExpand,
             &kda.gate_b,
             &v(&p.rank_b),
@@ -1640,7 +1729,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            p.arith(),
             Stage::KdaProjection,
             &kda.output,
             &v(&p.kda_out),
@@ -1675,7 +1764,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            p.arith(),
             Stage::MlaProjection,
             &mla.query_a,
             &x,
@@ -1697,7 +1786,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            p.arith(),
             Stage::MlaProjection,
             &mla.query_b,
             &v(&p.query_r),
@@ -1709,7 +1798,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            p.arith(),
             Stage::MlaProjection,
             &mla.latent,
             &x,
@@ -1755,7 +1844,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            p.arith(),
             Stage::IndexerProjection,
             &mla.indexer.key,
             &x,
@@ -1767,7 +1856,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            p.arith(),
             Stage::IndexerProjection,
             &mla.indexer.pool_gate,
             &x,
@@ -1825,7 +1914,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            p.arith(),
             Stage::MlaProjection,
             &mla.output,
             &v(&p.heads_out),
@@ -1875,7 +1964,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            p.arith(),
             Stage::IndexerProjection,
             &mla.indexer.query,
             &sub(&p.query_r, q_rank),
@@ -1896,7 +1985,7 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            p.lineage,
+            p.arith(),
             Stage::IndexerProjection,
             &mla.indexer.head_weights,
             &sub(&p.normed, h),

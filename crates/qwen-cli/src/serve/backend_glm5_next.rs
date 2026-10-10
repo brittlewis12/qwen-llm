@@ -36,9 +36,9 @@ use qwen_llm::gguf::GgufFile;
 use qwen_llm::glm5_next::Glm5NextPreparedArtifact;
 use qwen_llm::glm5_next_chat::{CHAT_STOPS, VerifiedChatProfile};
 use qwen_llm::glm5_next_metal::{
-    CapacityAdvice, DEFAULT_PREFILL_ROWS, Glm5NextMetalError, Glm5NextSession, Glm5NextSnapshot,
-    Glm5NextWeights, PackedLineage, prefetch_retained_with_cancel, preflight_session,
-    snapshot_bytes,
+    CapacityAdvice, DEFAULT_PREFILL_ROWS, FastPrecision, Glm5NextMetalError, Glm5NextSession,
+    Glm5NextSnapshot, Glm5NextWeights, PackedLineage, prefetch_retained_with_cancel,
+    preflight_session, snapshot_bytes,
 };
 use qwen_llm::metal::MetalContext;
 use qwen_llm::model_family::ModelFamily;
@@ -53,6 +53,25 @@ const PREFIX_REUSE_ENV: &str = "QWEN_GLM_PREFIX_REUSE";
 /// Default-on lever for Fast-lineage snapshots (shared-prefix split); `0`
 /// restores unsplit Fast prefill with live-session reuse only.
 const FAST_SNAPSHOTS_ENV: &str = "QWEN_GLM_FAST_SNAPSHOTS";
+/// Operand precision of Fast packed prefill: `half` (default), `dense_f32`
+/// (dense projections on F32-operand tiles) or `f32` (every quantized matrix
+/// operand); closer to Exact at some prefill cost
+/// (`docs/bench/2026-10-09-glm53-fast-f32-operands/`). Read at startup.
+const FAST_PRECISION_ENV: &str = "QWEN_GLM_FAST_PRECISION";
+
+/// The Fast precision `value` names (unset: `half`); any other value is a
+/// startup error naming the accepted ones.
+fn parse_fast_precision(value: Option<&str>) -> Result<FastPrecision> {
+    let Some(value) = value else {
+        return Ok(FastPrecision::Half);
+    };
+    FastPrecision::from_name(value.trim()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{FAST_PRECISION_ENV}={value:?} is not one of {}",
+            FastPrecision::ALL.map(FastPrecision::name).join(", ")
+        )
+    })
+}
 
 /// The prefill schedule a snapshot belongs to. A restore is valid only into
 /// a request that splits its prefill the same way.
@@ -94,6 +113,8 @@ pub(super) struct Prepared<'g> {
     profile: VerifiedChatProfile,
     /// Longest decoded token, for the tool block's byte budget.
     max_piece_bytes: usize,
+    /// Operand precision of every Fast session ([`FAST_PRECISION_ENV`]).
+    fast_precision: FastPrecision,
 }
 
 impl<'g> Prepared<'g> {
@@ -122,6 +143,8 @@ impl<'g> Prepared<'g> {
             0
         };
         let max_piece_bytes = artifact.tokenizer().max_decoded_piece_bytes();
+        let fast_precision =
+            parse_fast_precision(std::env::var(FAST_PRECISION_ENV).ok().as_deref())?;
         crate::shutdown::checkpoint()?;
         Ok(Self {
             artifact,
@@ -130,13 +153,18 @@ impl<'g> Prepared<'g> {
             prefill_rows,
             profile,
             max_piece_bytes,
+            fast_precision,
         })
     }
 
     pub(super) fn describe(&self) -> String {
         format!(
-            "family=glm5_next input=verified_chat_and_tools renderer={} capacity={} default_max_tokens={} prefill_rows={}",
-            self.profile.renderer, self.capacity, self.default_max, self.prefill_rows
+            "family=glm5_next input=verified_chat_and_tools renderer={} capacity={} default_max_tokens={} prefill_rows={} fast_precision={}",
+            self.profile.renderer,
+            self.capacity,
+            self.default_max,
+            self.prefill_rows,
+            self.fast_precision.name()
         )
     }
 }
@@ -475,6 +503,9 @@ fn new_session<'w>(
     )
     .map_err(session_error)?;
     session.set_packed_lineage(lineage).map_err(session_error)?;
+    session
+        .set_fast_precision(prepared.fast_precision)
+        .map_err(session_error)?;
     Ok(session)
 }
 

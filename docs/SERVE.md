@@ -969,6 +969,15 @@ compatible only within one prefill lineage and schedule.
   with an earlier cut, an off-grid cancellation or decoded tokens is
   continued but not captured, outcome `noncanonical`); without a verified
   cut it neither restores nor captures.
+- Fast operand precision (`QWEN_GLM_FAST_PRECISION`, read at startup and
+  shown as `fast_precision=` in the startup limits line): `half` (default)
+  stages quantized matrix operands in half precision; `dense_f32` runs the
+  dense projections on F32-operand tiles; `f32` also the routed experts.
+  On the six frozen natural cases these cut the mean KL against Exact by
+  30% and 50%, at about +5% and +13-17% on a fresh 2,048-token prompt
+  (`docs/bench/2026-10-09-glm53-fast-f32-operands/`). Every setting keeps
+  the bitwise properties above; one server uses one precision, and the
+  engine refuses to restore a snapshot of another.
 
 A memory-pressure refusal of the transport allowance or of a new session
 releases cached snapshots (except one being restored) and retries once.

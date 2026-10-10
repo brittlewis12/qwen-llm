@@ -208,7 +208,8 @@ fn snapshot_restore_equals_the_uninterrupted_run() {
 /// suffix equals the uninterrupted run in logits and end state at pool
 /// residues and around the sparse frontier, a capture at a cancelled
 /// prefill's committed boundary continues exactly, and 512- and 128-row
-/// chunkings of a prompt past the frontier agree in logits and end state.
+/// chunkings of a prompt past the frontier agree in logits and end state;
+/// captures of different Fast precisions refuse to restore into each other.
 #[test]
 #[ignore = "map #12 F32-operand snapshot gates: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU"]
 fn f32_operand_snapshot_restore_and_frontier_chunkings() {
@@ -224,6 +225,25 @@ fn f32_operand_snapshot_restore_and_frontier_chunkings() {
         .into_iter()
         .map(|t| t as u32)
         .collect();
+    // Precisions never share state: a Half Fast capture does not restore
+    // into an F32 Fast session, and precision is fixed once tokens commit.
+    {
+        let mut half = fresh(&ctx, &weights, 200, PackedLineage::Fast);
+        half.prefill_packed(&ctx, &tokens[..100]).unwrap();
+        let snapshot = half.capture_snapshot().unwrap();
+        assert_eq!(snapshot.fast_precision(), Some(FastPrecision::Half));
+        assert!(matches!(
+            half.set_fast_precision(FastPrecision::F32),
+            Err(Glm5NextMetalError::Invalid(_))
+        ));
+        let mut f32_session = fresh(&ctx, &weights, 200, PackedLineage::Fast);
+        f32_session.set_fast_precision(FastPrecision::F32).unwrap();
+        assert!(matches!(
+            f32_session.restore_snapshot(&snapshot),
+            Err(Glm5NextMetalError::SnapshotMismatch(_))
+        ));
+        assert_eq!(f32_session.position(), 0);
+    }
     let [_, _, all] = super::natural::f32_selections();
     let _scope = all.scope();
     let frontier = weights.config.sparse_frontier() as usize;

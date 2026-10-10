@@ -1066,6 +1066,44 @@ impl<'w> Glm5NextSession<'w> {
         self.packed.as_ref().map(|packed| packed.lineage)
     }
 
+    /// Selects the operand precision of Fast packed prefill before the
+    /// session commits work (no effect without packed scratch or in Exact
+    /// lineage). As with the lineage, re-selecting the current precision is
+    /// accepted and changing it after committed tokens is refused without
+    /// mutation, so state and snapshots never mix precisions.
+    pub fn set_fast_precision(&mut self, precision: FastPrecision) -> Result<()> {
+        let Some(packed) = self.packed.as_mut() else {
+            return Ok(());
+        };
+        if packed.precision == precision {
+            return Ok(());
+        }
+        if self.position > 0 {
+            return Err(Glm5NextMetalError::Invalid(format!(
+                "Fast precision cannot change from {:?} to {precision:?} after {} committed tokens; start a fresh session",
+                packed.precision, self.position
+            )));
+        }
+        packed.precision = precision;
+        Ok(())
+    }
+
+    /// The selected Fast operand precision, or `None` for a serial-only
+    /// session.
+    pub fn fast_precision(&self) -> Option<FastPrecision> {
+        self.packed.as_ref().map(|packed| packed.precision)
+    }
+
+    /// The precision that shapes this session's state: the selected one in
+    /// Fast lineage, `None` for Exact or serial sessions (precision has no
+    /// effect there).
+    fn effective_fast_precision(&self) -> Option<FastPrecision> {
+        self.packed
+            .as_ref()
+            .filter(|packed| packed.lineage == PackedLineage::Fast)
+            .map(|packed| packed.precision)
+    }
+
     pub fn position(&self) -> usize {
         self.position
     }
@@ -2119,7 +2157,7 @@ pub use interventions::{
 };
 mod snapshot;
 pub use lens::Glm5NextCapture;
-pub use packed::PackedLineage;
+pub use packed::{FastPrecision, PackedLineage};
 pub use snapshot::{Glm5NextSnapshot, SNAPSHOT_POLICY_VERSION, snapshot_bytes};
 
 #[cfg(test)]

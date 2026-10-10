@@ -32,6 +32,28 @@ fn gguf_path() -> String {
     std::env::var("GLM53_GGUF").expect("GLM53_GGUF (GLM-5.3-Flash shard 1)")
 }
 
+/// `QWEN_GLM_FAST_PRECISION`: unset is `half`; each named precision parses
+/// (surrounding space ignored); anything else is a startup error that names
+/// the accepted values.
+#[test]
+fn fast_precision_setting_parses_or_refuses() {
+    assert_eq!(parse_fast_precision(None).unwrap(), FastPrecision::Half);
+    for precision in FastPrecision::ALL {
+        assert_eq!(
+            parse_fast_precision(Some(precision.name())).unwrap(),
+            precision
+        );
+    }
+    assert_eq!(
+        parse_fast_precision(Some(" dense_f32\n")).unwrap(),
+        FastPrecision::DenseF32
+    );
+    for bad in ["", "F32", "fp32", "full"] {
+        let error = parse_fast_precision(Some(bad)).unwrap_err().to_string();
+        assert!(error.contains("half, dense_f32, f32"), "{bad:?}: {error}");
+    }
+}
+
 #[test]
 #[ignore = "CPU/header-only GLM53_GGUF startup refusals; never binds a socket or initializes Metal"]
 fn cpu_startup_refuses_bad_limits_before_listener_or_metal() {

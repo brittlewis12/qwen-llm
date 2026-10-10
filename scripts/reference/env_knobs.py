@@ -236,6 +236,25 @@ def doc_texts(segment: str) -> list[str]:
     return texts
 
 
+def declaration_doc_texts(source: str, offset: int) -> list[str]:
+    """Read only contiguous outer doc lines immediately before a declaration."""
+    line_start = source.rfind("\n", 0, offset) + 1
+    preceding = source[:line_start]
+    lines = preceding.splitlines(keepends=True)
+    start = len(lines)
+    while start:
+        line = lines[start - 1].strip()
+        if line.startswith("///") and not line.startswith("////"):
+            start -= 1
+        elif re.fullmatch(r'#\[\s*doc\s*=\s*"(?:[^"\\]|\\.)*"\s*\]', line):
+            start -= 1
+        elif not line:
+            start -= 1
+        else:
+            break
+    return doc_texts("".join(lines[start:]))
+
+
 def parse_env_flag(
     text: str, tokens: list[RustToken], opening: int, closing: int
 ) -> tuple[str, str, str] | None:
@@ -317,6 +336,26 @@ def self_test() -> None:
     ) == ("default_on", "QWEN_SELF_TEST", "From a doc attribute.")
     assert parse('env_flag!(default_on, "QWEN_SELF_TEST");') is None
     assert parse("env_flag!(default_on switch, NAME);") is None
+
+    def const_docs(source: str) -> list[str]:
+        offset = source.index("const NAME")
+        return declaration_doc_texts(source, offset)
+
+    assert const_docs(
+        '/// First line.\n/// Second line.\npub const NAME: &str = "QWEN_SELF_TEST";'
+    ) == ["First line.", "Second line."]
+    assert const_docs(
+        '#[doc = "Attribute purpose."]\nconst NAME: &str = "QWEN_SELF_TEST";'
+    ) == ["Attribute purpose."]
+    assert const_docs(
+        '//// Not documentation.\nconst NAME: &str = "QWEN_SELF_TEST";'
+    ) == []
+    assert const_docs(
+        '/*\n/// Inside a block comment.\n*/\nconst NAME: &str = "QWEN_SELF_TEST";'
+    ) == []
+    assert const_docs(
+        '/// Detached documentation.\n\nconst NAME: &str = "QWEN_SELF_TEST";'
+    ) == ["Detached documentation."]
 
     declared: dict[str, tuple[str, int, str]] = {}
     first, first_conflict = register_env_flag_declaration(
@@ -812,6 +851,7 @@ def collect() -> tuple[dict[str, Knob], list[tuple[str, str, str, int, str]]]:
 
     helper_defs: dict[tuple[str, tuple[str, ...], str], set[int]] = {}
     const_defs: dict[tuple[str, tuple[str, ...], str], list[tuple[str, str, int]]] = {}
+    const_purposes: dict[tuple[str, tuple[str, ...], str], str] = {}
     for rel, text, _, _, tokens, _ in sources:
         own_crate = crate_name(rel)
         for name, offset, indices in helper_string_parameters(tokens):
@@ -842,6 +882,9 @@ def collect() -> tuple[dict[str, Knob], list[tuple[str, str, str, int, str]]]:
                 const_defs.setdefault(key, []).append(
                     (value, rel, line_number(text, tokens[index].offset))
                 )
+                docs = declaration_doc_texts(text, tokens[index].offset)
+                if docs:
+                    const_purposes[key] = " ".join(docs)
 
     def find_constant(
         crate: str,
@@ -958,9 +1001,17 @@ def collect() -> tuple[dict[str, Knob], list[tuple[str, str, str, int, str]]]:
                     if len(candidates) == 1:
                         definition = candidates[0]
             if definition:
-                variable, _, offset = definition
-                return variable, "value", offset
+                variable, _, definition_line = definition
+                return variable, "value", definition_line
             return None
+
+        def purpose_for(argument: list[RustToken], at: int) -> str | None:
+            names = [token.value for token in argument if token.kind == "ident"]
+            if not names:
+                return None
+            current_path = module_at(rel, at)
+            target_crate, target_module, name = resolve_symbol(rel, current_path, names)
+            return const_purposes.get((target_crate, target_module, name))
 
         for index, token in enumerate(tokens):
             # env!("NAME") and option_env!("NAME") are compile-time reads.
@@ -1043,6 +1094,7 @@ def collect() -> tuple[dict[str, Knob], list[tuple[str, str, str, int, str]]]:
                             line_number(text, token.offset),
                             lines,
                             scope=scope_at(token.offset),
+                            purpose=purpose_for(args[0], token.offset),
                         )
 
             # Resolve helper calls locally or through the module's `use` paths.
@@ -1087,6 +1139,7 @@ def collect() -> tuple[dict[str, Knob], list[tuple[str, str, str, int, str]]]:
                         line_number(text, token.offset),
                         lines,
                         scope=scope_at(token.offset),
+                        purpose=purpose_for(args[arg_index], token.offset),
                     )
 
     # Test-fixture aliases live in the `test_fixtures` inventory as

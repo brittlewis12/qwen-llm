@@ -10,13 +10,41 @@ use qwen_llm::deepseek_v4_metal::{
 use qwen_llm::muse_glimmer_runtime::MuseGlimmerRuntimeOptions;
 use qwen_llm::qwen4exp_runtime::Qwen4ExpDecodeOptions;
 
+/// Enables HC up-mix for eligible Flash-Next singleton Q8 up projections.
+/// Defaults on; accepts `0` (off) or `1` (on); any other value, including
+/// non-UTF-8, errors with
+/// `QWEN4EXP_HC_UP_MIX must be 0 or 1`. Read per `qwen run` request, per
+/// `qwen serve` backend construction, and per `qwen-bench` setup.
 pub(crate) const QWEN4EXP_HC_UP_MIX_ENV: &str = "QWEN4EXP_HC_UP_MIX";
+/// Enables guarded top-k for Flash-Next N512/K10 singleton selection.
+/// Defaults on; accepts `0` (off) or `1` (on); any other value, including
+/// non-UTF-8, errors with
+/// `QWEN4EXP_GUARDED_TOPK must be 0 or 1`. Read per `qwen run` request, per
+/// `qwen serve` backend construction, and per `qwen-bench` setup.
 pub(crate) const QWEN4EXP_GUARDED_TOPK_ENV: &str = "QWEN4EXP_GUARDED_TOPK";
 
-/// `qwen run`'s Muse math levers (serve reads its own `QWEN_SERVE_MUSE_*`).
+/// Enables Muse split decode for `qwen run`. Defaults on; accepts `0` (off)
+/// or `1` (on); other UTF-8 values error with
+/// `QWEN_MUSE_SPLIT_DECODE must be 0 or 1, got {value:?}`, and non-UTF-8
+/// errors while reading with `read QWEN_MUSE_SPLIT_DECODE`. Read per request
+/// and per `qwen-bench` setup. Serve reads `QWEN_SERVE_MUSE_SPLIT_DECODE`
+/// during backend construction.
 pub(crate) const MUSE_SPLIT_DECODE_ENV: &str = "QWEN_MUSE_SPLIT_DECODE";
+/// Enables Muse matrix prefill for eligible `qwen run` prompts. Defaults on;
+/// accepts `0` (off) or `1` (on); other UTF-8 values error with
+/// `QWEN_MUSE_MATRIX_PREFILL must be 0 or 1, got {value:?}`, and non-UTF-8
+/// errors while reading with `read QWEN_MUSE_MATRIX_PREFILL`. Read per request
+/// and per `qwen-bench` setup. Serve reads `QWEN_SERVE_MUSE_MATRIX_PREFILL`
+/// during backend construction.
 pub(crate) const MUSE_MATRIX_PREFILL_ENV: &str = "QWEN_MUSE_MATRIX_PREFILL";
 
+/// Sets the DeepSeek V4 prefill chunk size. Defaults to 4096 tokens; accepts
+/// an integer in `1..=4096`. A non-integer errors with
+/// `QWEN_DSV4_PREFILL_CHUNK_TOKENS={value:?} is not an integer`; an
+/// out-of-range integer errors with
+/// `QWEN_DSV4_PREFILL_CHUNK_TOKENS must be in 1..=4096, got {chunk_tokens}`.
+/// A non-UTF-8 value is treated as unset. Read per `qwen run` request, during
+/// `qwen serve` backend preparation, and per `qwen-bench` setup.
 pub(crate) const DEEPSEEK_V4_PREFILL_CHUNK_ENV: &str = "QWEN_DSV4_PREFILL_CHUNK_TOKENS";
 
 /// `QWEN4EXP_GUARDED_TOPK` / `QWEN4EXP_HC_UP_MIX` rollbacks, shared by the
@@ -110,4 +138,95 @@ pub(crate) fn deepseek_v4_prefill_chunk_ranges(
         start += len;
     }
     ranges
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn qwen4exp_decode_flags_follow_the_documented_contract() {
+        for name in [QWEN4EXP_GUARDED_TOPK_ENV, QWEN4EXP_HC_UP_MIX_ENV] {
+            for (value, expected) in [
+                (None, true),
+                (Some(OsStr::new("0")), false),
+                (Some(OsStr::new("1")), true),
+            ] {
+                assert_eq!(parse_qwen4exp_decode_flag(value, name).unwrap(), expected);
+            }
+            for value in ["", "true", "false", " 1", "1 ", "2"] {
+                let error = parse_qwen4exp_decode_flag(Some(OsStr::new(value)), name).unwrap_err();
+                assert_eq!(error.to_string(), format!("{name} must be 0 or 1"));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStringExt;
+                let invalid = std::ffi::OsString::from_vec(vec![0xff]);
+                let error = parse_qwen4exp_decode_flag(Some(&invalid), name).unwrap_err();
+                assert_eq!(error.to_string(), format!("{name} must be 0 or 1"));
+            }
+        }
+    }
+
+    #[test]
+    fn muse_math_flags_follow_the_documented_contract() {
+        for name in [MUSE_SPLIT_DECODE_ENV, MUSE_MATRIX_PREFILL_ENV] {
+            for (value, expected) in [(None, true), (Some("0"), false), (Some("1"), true)] {
+                assert_eq!(parse_math_flag(name, value).unwrap(), expected);
+            }
+            for value in ["", "true", "false", " 1", "1 ", "2"] {
+                let error = parse_math_flag(name, Some(value)).unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    format!("{name} must be 0 or 1, got {value:?}")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn deepseek_v4_chunk_parser_and_non_utf8_wrapper_mapping_are_pinned() {
+        for (value, expected) in [
+            (None, DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS),
+            (Some("1"), 1),
+            (Some("2048"), 2_048),
+            (Some("4096"), DEEPSEEK_V4_PREFILL_MAX_TOKENS),
+        ] {
+            assert_eq!(
+                parse_deepseek_v4_prefill_chunk_tokens(value).unwrap(),
+                expected
+            );
+        }
+        for (value, expected_error) in [
+            (
+                "nope",
+                "QWEN_DSV4_PREFILL_CHUNK_TOKENS=\"nope\" is not an integer",
+            ),
+            (
+                "0",
+                "QWEN_DSV4_PREFILL_CHUNK_TOKENS must be in 1..=4096, got 0",
+            ),
+            (
+                "4097",
+                "QWEN_DSV4_PREFILL_CHUNK_TOKENS must be in 1..=4096, got 4097",
+            ),
+        ] {
+            let error = parse_deepseek_v4_prefill_chunk_tokens(Some(value)).unwrap_err();
+            assert_eq!(error.to_string(), expected_error);
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let invalid = std::ffi::OsString::from_vec(vec![0xff]);
+            let string_read: Result<String, std::env::VarError> =
+                Err(std::env::VarError::NotUnicode(invalid));
+            let value = string_read.ok();
+            assert_eq!(
+                parse_deepseek_v4_prefill_chunk_tokens(value.as_deref()).unwrap(),
+                DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS
+            );
+        }
+    }
 }

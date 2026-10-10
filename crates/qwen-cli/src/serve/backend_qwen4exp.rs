@@ -510,10 +510,11 @@ fn capture_snapshot(
         );
         return false;
     };
-    let signals = ctx.memory_signals();
-    if let Err(reason) =
-        super::snapshot_capture_admission(entry_bytes.saturating_add(control_cpu_reserve), signals)
-    {
+    if let Err((reason, signals)) = super::admit_snapshot_capture(
+        entry_bytes.saturating_add(control_cpu_reserve),
+        || ctx.memory_signals(),
+        |deficit| cache.evict_for(deficit),
+    ) {
         tracing::warn!(
             "serve: qwen4exp {boundary} snapshot denied by memory headroom; reason={reason:?} payload_bytes={payload_bytes} metal_current_bytes={} metal_recommended_bytes={} process_remaining_bytes={:?}",
             signals.current_allocated_bytes,

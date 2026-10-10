@@ -363,8 +363,8 @@ pub(super) fn verify(
                 distinguish_orders(&expected, &opposite, &actual, &opposite)?;
                 errors.push(qwen_llm::compare::assert_max_abs_diff_f64(
                     concat!(file!(), ":", line!()),
-                    expected.iter(),
                     &actual,
+                    expected.iter(),
                 ));
             } else {
                 ensure!(before == after && delta == 0., "no-op site changed");

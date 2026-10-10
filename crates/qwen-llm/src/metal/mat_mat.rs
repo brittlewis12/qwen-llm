@@ -6321,8 +6321,8 @@ mod tests {
         let fused = read_back_f32(&inner_fused.buffer, N * n_out);
         let max_abs = crate::compare::assert_max_abs_diff_f32(
             concat!(file!(), ":", line!()),
-            reference.iter(),
             &fused,
+            reference.iter(),
         );
         let bit_mismatches = reference
             .iter()

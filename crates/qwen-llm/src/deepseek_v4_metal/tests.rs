@@ -14,6 +14,46 @@ use objc2_metal::{MTLCommandBuffer, MTLCommandQueue};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+fn max_finite_metric(values: impl IntoIterator<Item = f64>) -> f64 {
+    let mut maximum = 0.0f64;
+    let mut count = 0usize;
+    for value in values {
+        if !value.is_finite() {
+            return f64::NAN;
+        }
+        maximum = maximum.max(value);
+        count += 1;
+    }
+    if count == 0 { f64::NAN } else { maximum }
+}
+
+fn sticky_max_f64(left: f64, right: f64) -> f64 {
+    if left.is_finite() && right.is_finite() {
+        left.max(right)
+    } else {
+        f64::NAN
+    }
+}
+
+fn clamp_finite_nonnegative(value: f64) -> f64 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        f64::NAN
+    }
+}
+
+#[test]
+fn diagnostic_metric_aggregation_keeps_invalid_values_in_both_orders() {
+    assert_eq!(max_finite_metric([0.25, 0.5]), 0.5);
+    for values in [[0.25, f64::NAN], [f64::NAN, 0.25]] {
+        assert!(!max_finite_metric(values).is_finite());
+    }
+    assert!(!sticky_max_f64(0.25, f64::NAN).is_finite());
+    assert!(!sticky_max_f64(f64::NAN, 0.25).is_finite());
+    assert!(!clamp_finite_nonnegative(f64::NAN).is_finite());
+}
+
 fn synthetic_device_facts(
     name: &str,
     memory: Option<u64>,
@@ -3441,28 +3481,31 @@ fn current_asset_packed_attention_split_attribution_packet() {
     let cohort_output_share_delta: [f64; 3] = std::array::from_fn(|cohort| {
         (cohort_output_shares[0][cohort] - cohort_output_shares[1][cohort]).abs()
     });
-    let transition_uncertainty = summaries
+    let transition_uncertainty = max_finite_metric(
+        summaries
+            .iter()
+            .map(|summary| (summary.gap_ms + summary.overlap_ms) / summary.command_gpu_ms),
+    );
+    let zero_perturbation = [0.0; 2];
+    let topology_uncertainty =
+        crate::compare::report_max_abs_diff_f64(perturbation.iter(), zero_perturbation.iter());
+    let coverage_deltas = summaries
         .iter()
-        .map(|summary| (summary.gap_ms + summary.overlap_ms) / summary.command_gpu_ms)
-        .reduce(f64::max)
-        .unwrap();
-    let topology_uncertainty = perturbation
-        .iter()
-        .map(|value| value.abs())
-        .reduce(f64::max)
-        .unwrap();
-    let coverage_uncertainty = summaries
-        .iter()
-        .map(|summary| (summary.raw_span_ms / summary.command_gpu_ms - 1.0).abs())
-        .reduce(f64::max)
-        .unwrap();
-    let common_uncertainty = transition_uncertainty.max(topology_uncertainty);
-    let body_observer_uncertainty = common_uncertainty.max(body_repeat_delta);
-    let output_observer_uncertainty = common_uncertainty.max(output_repeat_delta);
+        .map(|summary| summary.raw_span_ms / summary.command_gpu_ms - 1.0)
+        .collect::<Vec<_>>();
+    let zero_coverage_deltas = vec![0.0; coverage_deltas.len()];
+    let coverage_uncertainty = crate::compare::report_max_abs_diff_f64(
+        coverage_deltas.iter(),
+        zero_coverage_deltas.iter(),
+    );
+    let common_uncertainty = sticky_max_f64(transition_uncertainty, topology_uncertainty);
+    let body_observer_uncertainty = sticky_max_f64(common_uncertainty, body_repeat_delta);
+    let output_observer_uncertainty = sticky_max_f64(common_uncertainty, output_repeat_delta);
     let mean_body_share = (body_shares[0] + body_shares[1]) * 0.5;
     let mean_output_share = (output_shares[0] + output_shares[1]) * 0.5;
-    let lower_body_share = (mean_body_share - body_observer_uncertainty).max(0.0);
-    let lower_output_share = (mean_output_share - output_observer_uncertainty).max(0.0);
+    let lower_body_share = clamp_finite_nonnegative(mean_body_share - body_observer_uncertainty);
+    let lower_output_share =
+        clamp_finite_nonnegative(mean_output_share - output_observer_uncertainty);
     let normalized_body_ms = [
         body_shares[0] * interpolated_control_gpu_ms[0],
         body_shares[1] * interpolated_control_gpu_ms[1],
@@ -3474,10 +3517,12 @@ fn current_asset_packed_attention_split_attribution_packet() {
     let ordinary_gpu_median = median(&control_gpu_ms);
     let normalized_body_median_ms = median(&normalized_body_ms);
     let normalized_output_median_ms = median(&normalized_output_ms);
-    let lower_body_ms =
-        (normalized_body_median_ms - body_observer_uncertainty * ordinary_gpu_median).max(0.0);
-    let lower_output_ms =
-        (normalized_output_median_ms - output_observer_uncertainty * ordinary_gpu_median).max(0.0);
+    let lower_body_ms = clamp_finite_nonnegative(
+        normalized_body_median_ms - body_observer_uncertainty * ordinary_gpu_median,
+    );
+    let lower_output_ms = clamp_finite_nonnegative(
+        normalized_output_median_ms - output_observer_uncertainty * ordinary_gpu_median,
+    );
     let mean_cohort_body_share: [f64; 3] = std::array::from_fn(|cohort| {
         (cohort_body_shares[0][cohort] + cohort_body_shares[1][cohort]) * 0.5
     });
@@ -14888,8 +14933,8 @@ fn cooperative_dense_attention_matches_legacy_singleton_within_roundoff() {
             .count();
         let max_abs = crate::compare::assert_max_abs_diff_f32(
             concat!(file!(), ":", line!()),
-            legacy.iter(),
             &cooperative,
+            legacy.iter(),
         );
         let squared_error = legacy
             .iter()
@@ -14911,8 +14956,8 @@ fn cooperative_dense_attention_matches_legacy_singleton_within_roundoff() {
         let grouped = read_f32(&grouped);
         let grouped_max_abs = crate::compare::assert_max_abs_diff_f32(
             concat!(file!(), ":", line!()),
-            legacy.iter(),
             &grouped,
+            legacy.iter(),
         );
         let grouped_squared_error = legacy
             .iter()
@@ -14953,8 +14998,8 @@ fn cooperative_dense_attention_matches_legacy_singleton_within_roundoff() {
                 .count();
             let tiled_max_abs = crate::compare::assert_max_abs_diff_f32(
                 concat!(file!(), ":", line!()),
-                legacy.iter(),
                 &tiled,
+                legacy.iter(),
             );
             let tiled_squared_error = legacy
                 .iter()
@@ -15179,8 +15224,8 @@ fn cooperative_selected_attention_matches_legacy_singleton_within_roundoff() {
                 .count();
             let max_abs = crate::compare::assert_max_abs_diff_f32(
                 concat!(file!(), ":", line!()),
-                legacy.iter(),
                 &candidate,
+                legacy.iter(),
             );
             let squared_error = legacy
                 .iter()
@@ -17591,8 +17636,8 @@ fn profile_lightning_matrix_ceiling_at_far_context() {
         let relative_rms = (squared_error / reference_norm).sqrt();
         let max_abs = crate::compare::assert_max_abs_diff_f32(
             concat!(file!(), ":", line!()),
-            current_values.iter(),
             &matrix_values,
+            current_values.iter(),
         );
         let (current_ids, current_cutoff_margin) = stable_top_k(&current_values, 512);
         let (matrix_ids, matrix_cutoff_margin) = stable_top_k(&matrix_values, 512);

@@ -203,7 +203,7 @@ fn projection_witness(
         .sum::<f64>()
         .sqrt();
     let bypass_tolerance_ratio =
-        qwen_llm::compare::report_max_relative_diff_f64(expected.iter(), covector, 1e-3, 1e-4);
+        qwen_llm::compare::report_max_relative_diff_f64(covector, expected.iter(), 1e-3, 1e-4);
     for (&expected, &actual) in expected.iter().zip(actual) {
         let delta = (expected - f64::from(actual)).abs();
         ensure!(
@@ -226,6 +226,7 @@ fn transpose_projection_oracle_rejects_bypassed_covectors() {
         .flat_map(|x| half::f16::from_f32(x).to_bits().to_le_bytes())
         .collect();
     let (witness, _) = projection_witness(&matrix, &[1., 2.], &[7., 10.]).unwrap();
+    assert_eq!(witness["bypass_tolerance_ratio"].as_f64().unwrap(), 4000.);
     assert!(witness["bypass_tolerance_ratio"].as_f64().unwrap() > 10.);
     assert!(projection_witness(&matrix, &[1., 2.], &[1., 2.]).is_err());
 }

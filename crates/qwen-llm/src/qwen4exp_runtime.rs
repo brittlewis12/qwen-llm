@@ -3835,8 +3835,8 @@ mod tests {
         }
         let max_logit_delta = crate::compare::assert_max_abs_diff_f32(
             concat!(file!(), ":", line!()),
-            capture_logits.iter(),
             &intervened_logits,
+            capture_logits.iter(),
         );
         assert!(
             max_logit_delta.is_finite() && max_logit_delta > 0.0,

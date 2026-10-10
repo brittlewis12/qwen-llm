@@ -16,6 +16,371 @@ fn request_stats_total_ms(
             * 1e3
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QwenCaptureKind {
+    Prompt,
+    Completed(StopReason),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QwenCaptureTarget {
+    None,
+    PromptBoundary(usize),
+    Completed,
+}
+
+fn qwen_capture_target(policy: DurableCapturePolicy) -> QwenCaptureTarget {
+    match policy {
+        DurableCapturePolicy::Disabled => QwenCaptureTarget::None,
+        DurableCapturePolicy::ExplicitPrompt(prefix_len)
+        | DurableCapturePolicy::AutomaticPrompt(prefix_len) => {
+            QwenCaptureTarget::PromptBoundary(prefix_len)
+        }
+        DurableCapturePolicy::AutomaticCompleted => QwenCaptureTarget::Completed,
+    }
+}
+
+impl QwenCaptureKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Prompt => "prompt",
+            Self::Completed(_) => "completed",
+        }
+    }
+
+    fn stop_reason_label(self) -> &'static str {
+        match self {
+            Self::Prompt => "none",
+            Self::Completed(reason) => reason.as_str(),
+        }
+    }
+}
+
+struct QwenPendingPublication {
+    prepared: PreparedCheckpoint,
+    kind: QwenCaptureKind,
+    capture_ms: f64,
+}
+
+struct QwenRestoreOutcome {
+    prompt_logits: Option<Vec<f32>>,
+    restore_ms: f64,
+}
+
+struct QwenPromptCaptureOutcome {
+    logits: Vec<f32>,
+    pending: Option<QwenPendingPublication>,
+}
+
+struct QwenCompletedCaptureOutcome {
+    pending: Option<QwenPendingPublication>,
+}
+
+fn restore_qwen_durable_prefix(
+    loaded: &LoadedModel,
+    store: &DurableCheckpointStore,
+    sequence: &mut Sequence,
+    args: &Args,
+    prompt_ids: &[i32],
+    durable_max_record_bytes: u64,
+) -> Result<QwenRestoreOutcome> {
+    let restore_t0 = Instant::now();
+    let mut prompt_logits = None;
+    let mut inventory_failure_ms = None;
+    let has_blobs = match store.has_managed_blobs() {
+        Ok(has_blobs) => Some(has_blobs),
+        Err(error) => {
+            let restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
+            inventory_failure_ms = Some(restore_ms);
+            eprintln!(
+                "warning: durable prefix inventory failed after {:.1} ms; cold-prefilling: {error}",
+                restore_ms,
+            );
+            None
+        }
+    };
+    let restore_ms = if has_blobs == Some(true) {
+        let lookup_len = selected_single_turn_durable_lookup_len(args, prompt_ids.len());
+        match loaded.restore_durable_prefix(
+            store,
+            sequence,
+            &prompt_ids[..lookup_len],
+            durable_max_record_bytes,
+        ) {
+            Ok(attempt) => {
+                let restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
+                eprintln!(
+                    concat!(
+                        "durable_prefix_cache: identity_cache={} hashed_bytes={} ",
+                        "checkpoint_hit={} matched={} restored={} exact={} candidates={} ",
+                        "corrupt_removed={} restore_total_ms={:.1}"
+                    ),
+                    identity_cache_outcome_label(attempt.compatibility.outcome),
+                    attempt.compatibility.bytes_hashed,
+                    attempt.hit.is_some(),
+                    attempt.lookup.matched_prefix_len,
+                    attempt.lookup.restored_prefix_len,
+                    attempt.lookup.exact,
+                    attempt.lookup.candidates_examined,
+                    attempt.lookup.corrupt_entries_removed,
+                    restore_ms,
+                );
+                if let Some(hit) = attempt.hit {
+                    prompt_logits = hit.exact_final_logits;
+                }
+                restore_ms
+            }
+            Err(RuntimeError::CheckpointStore(error)) => {
+                let restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
+                eprintln!(
+                    "warning: durable prefix lookup failed after {:.1} ms; cold-prefilling: {error}",
+                    restore_ms,
+                );
+                restore_ms
+            }
+            Err(error) => return Err(error.into()),
+        }
+    } else if has_blobs == Some(false) {
+        let restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
+        eprintln!(
+            "durable_prefix_cache: store_empty=true restore_total_ms={:.1}",
+            restore_ms,
+        );
+        restore_ms
+    } else {
+        inventory_failure_ms.unwrap_or_else(|| restore_t0.elapsed().as_secs_f64() * 1e3)
+    };
+    Ok(QwenRestoreOutcome {
+        prompt_logits,
+        restore_ms,
+    })
+}
+
+fn capture_qwen_prompt_boundary(
+    loaded: &LoadedModel,
+    sequence: &Sequence,
+    prompt_ids: &[i32],
+    prefix_len: usize,
+    logits: Vec<f32>,
+    durable_max_record_bytes: u64,
+) -> Result<QwenPromptCaptureOutcome> {
+    let capture_t0 = Instant::now();
+    let estimated =
+        loaded.estimate_checkpoint_boundary_sizes(sequence, prefix_len, false, true, 0)?;
+    let pending = if estimated.record_bytes > durable_max_record_bytes {
+        eprintln!(
+            concat!(
+                "warning: durable prefix capture skipped: estimated_record_bytes={} ",
+                "estimated_snapshot_bytes={} max_entry_bytes={}"
+            ),
+            estimated.record_bytes, estimated.snapshot_bytes, durable_max_record_bytes,
+        );
+        None
+    } else {
+        match loaded.prepare_checkpoint_boundary(
+            sequence,
+            prompt_ids[..prefix_len].to_vec(),
+            None,
+            Some(logits.clone()),
+            None,
+            0,
+        ) {
+            Ok(prepared) => Some(QwenPendingPublication {
+                prepared,
+                kind: QwenCaptureKind::Prompt,
+                capture_ms: 0.0,
+            }),
+            Err(RuntimeError::MetalModel(MfError::Snapshot(
+                SnapshotValidationError::AllocationFailed { .. },
+            ))) => {
+                eprintln!(
+                    "warning: durable prefix capture allocation failed; continuing without publication"
+                );
+                None
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
+    Ok(QwenPromptCaptureOutcome {
+        logits,
+        pending: pending.map(|mut pending| {
+            pending.capture_ms = capture_ms;
+            pending
+        }),
+    })
+}
+
+fn capture_qwen_completed_boundary(
+    loaded: &LoadedModel,
+    sequence: &Sequence,
+    boundary: CompletedCheckpointBoundary,
+    prompt_ids: &[i32],
+    generated: &[i32],
+    stop_reason: StopReason,
+    durable_max_record_bytes: u64,
+) -> Result<QwenCompletedCaptureOutcome> {
+    let capture_t0 = Instant::now();
+    let estimated = loaded.estimate_checkpoint_boundary_sizes(
+        sequence,
+        boundary.consumed_prefix_len,
+        true,
+        false,
+        0,
+    )?;
+    let pending = if estimated.record_bytes > durable_max_record_bytes {
+        eprintln!(
+            concat!(
+                "warning: completed durable checkpoint skipped: estimated_record_bytes={} ",
+                "estimated_snapshot_bytes={} max_entry_bytes={}"
+            ),
+            estimated.record_bytes, estimated.snapshot_bytes, durable_max_record_bytes,
+        );
+        None
+    } else {
+        let consumed = boundary.consumed_tokens(prompt_ids, generated);
+        match loaded.prepare_checkpoint_boundary(
+            sequence,
+            consumed,
+            Some(boundary.pending_token),
+            None,
+            None,
+            0,
+        ) {
+            Ok(prepared) => Some(QwenPendingPublication {
+                prepared,
+                kind: QwenCaptureKind::Completed(stop_reason),
+                capture_ms: 0.0,
+            }),
+            Err(RuntimeError::MetalModel(MfError::Snapshot(
+                SnapshotValidationError::AllocationFailed { .. },
+            ))) => {
+                eprintln!(
+                    "warning: completed durable checkpoint allocation failed; continuing without publication"
+                );
+                None
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
+    Ok(QwenCompletedCaptureOutcome {
+        pending: pending.map(|mut pending| {
+            pending.capture_ms = capture_ms;
+            pending
+        }),
+    })
+}
+
+fn publish_qwen_pending_checkpoint(
+    loaded: &LoadedModel,
+    store: &DurableCheckpointStore,
+    pending: &QwenPendingPublication,
+    durable_max_record_bytes: u64,
+    durable_restore_ms: f64,
+    response_flushed_t0: Instant,
+) {
+    let prepared = &pending.prepared;
+    let capture_kind = pending.kind.label();
+    let stop_reason = pending.kind.stop_reason_label();
+    let durable_capture_ms = pending.capture_ms;
+    let publish_t0 = Instant::now();
+    match loaded.publish_prepared_checkpoint(store, prepared, durable_max_record_bytes) {
+        Ok(report) => {
+            let publish_elapsed = publish_t0.elapsed();
+            if store.staged_integrity_is_explicit() {
+                eprintln!(
+                    concat!(
+                        "durable_prefix_cache: publish={} capture={} matched_tokens={} ",
+                        "restored_tokens={} pending={} stop_reason={} blob_bytes={} ",
+                        "evicted={} staging_examined={} staging_removed={} ",
+                        "staging_allocated_bytes_reclaimed={} ",
+                        "staging_live={} staging_legacy={} staging_foreign={} ",
+                        "staging_truncated={} identity={} staged_integrity={} ",
+                        "staged_integrity_us={} capture_ms={:.1} publish_us={} ",
+                        "post_response_us={}"
+                    ),
+                    publish_outcome_label(report.store.outcome),
+                    capture_kind,
+                    prepared.matched_prefix_len(),
+                    prepared.restored_prefix_len(),
+                    prepared.has_pending_token(),
+                    stop_reason,
+                    report.store.blob_bytes,
+                    report.store.evicted_entries,
+                    report.store.staging_entries_examined,
+                    report.store.staging_entries_removed,
+                    report.store.staging_allocated_bytes_reclaimed,
+                    report.store.staging_live_entries,
+                    report.store.staging_legacy_entries,
+                    report.store.staging_foreign_entries,
+                    report.store.staging_cleanup_truncated,
+                    identity_cache_outcome_label(report.compatibility.outcome),
+                    report.store.staged_integrity.mode.as_str(),
+                    report.store.staged_integrity.elapsed.as_micros(),
+                    durable_capture_ms,
+                    publish_elapsed.as_micros(),
+                    response_flushed_t0.elapsed().as_micros(),
+                );
+            } else {
+                eprintln!(
+                    concat!(
+                        "durable_prefix_cache: publish={} capture={} matched_tokens={} ",
+                        "restored_tokens={} pending={} stop_reason={} blob_bytes={} ",
+                        "evicted={} staging_examined={} staging_removed={} ",
+                        "staging_allocated_bytes_reclaimed={} ",
+                        "staging_live={} staging_legacy={} staging_foreign={} ",
+                        "staging_truncated={} identity={} capture_ms={:.1} publish_ms={:.1}"
+                    ),
+                    publish_outcome_label(report.store.outcome),
+                    capture_kind,
+                    prepared.matched_prefix_len(),
+                    prepared.restored_prefix_len(),
+                    prepared.has_pending_token(),
+                    stop_reason,
+                    report.store.blob_bytes,
+                    report.store.evicted_entries,
+                    report.store.staging_entries_examined,
+                    report.store.staging_entries_removed,
+                    report.store.staging_allocated_bytes_reclaimed,
+                    report.store.staging_live_entries,
+                    report.store.staging_legacy_entries,
+                    report.store.staging_foreign_entries,
+                    report.store.staging_cleanup_truncated,
+                    identity_cache_outcome_label(report.compatibility.outcome),
+                    durable_capture_ms,
+                    publish_elapsed.as_secs_f64() * 1e3,
+                );
+            }
+        }
+        Err(error) => {
+            let publish_elapsed = publish_t0.elapsed();
+            if store.staged_integrity_is_explicit() {
+                eprintln!(
+                    concat!(
+                        "durable_prefix_cache: publish=failed staged_integrity={} ",
+                        "staged_integrity_us=none capture_ms={:.1} publish_us={} ",
+                        "post_response_us={} error={}"
+                    ),
+                    store.staged_integrity_mode().as_str(),
+                    durable_capture_ms,
+                    publish_elapsed.as_micros(),
+                    response_flushed_t0.elapsed().as_micros(),
+                    error,
+                );
+            } else {
+                eprintln!(
+                    concat!(
+                        "warning: durable prefix publication failed after response ",
+                        "(restore_ms={:.1} capture_ms={:.1}): {}"
+                    ),
+                    durable_restore_ms, durable_capture_ms, error,
+                );
+            }
+        }
+    }
+}
+
 pub(crate) fn run_single_turn(
     model_path: &Path,
     gguf: GgufFile,
@@ -487,76 +852,25 @@ pub(crate) fn execute_single_turn_request(
     let durable_capture_policy = durable_store.map_or(DurableCapturePolicy::Disabled, |_| {
         selected_single_turn_durable_policy(args, prompt_ids.len(), completed_checkpoint_eligible)
     });
-    let durable_prefix_len = durable_capture_policy.prompt_prefix_len();
-    let mut durable_prepared: Option<PreparedCheckpoint> = None;
-    let mut durable_capture_kind = None;
-    let mut durable_capture_stop_reason = None;
+    let durable_capture_target = qwen_capture_target(durable_capture_policy);
+    let mut durable_pending: Option<QwenPendingPublication> = None;
     let mut durable_restore_ms = 0.0;
-    let mut durable_capture_ms = 0.0;
     let mut prompt_logits = None;
     if let Some(store) = durable_store {
-        let restore_t0 = Instant::now();
-        let has_blobs = match store.has_managed_blobs() {
-            Ok(has_blobs) => Some(has_blobs),
-            Err(error) => {
-                durable_restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
-                eprintln!(
-                    "warning: durable prefix inventory failed after {:.1} ms; cold-prefilling: {error}",
-                    durable_restore_ms,
-                );
-                None
-            }
-        };
-        if has_blobs == Some(true) {
-            let lookup_len = selected_single_turn_durable_lookup_len(args, prompt_ids.len());
-            match loaded.restore_durable_prefix(
-                store,
-                &mut sequence,
-                &prompt_ids[..lookup_len],
-                durable_max_record_bytes,
-            ) {
-                Ok(attempt) => {
-                    durable_restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
-                    eprintln!(
-                        concat!(
-                            "durable_prefix_cache: identity_cache={} hashed_bytes={} ",
-                            "checkpoint_hit={} matched={} restored={} exact={} candidates={} ",
-                            "corrupt_removed={} restore_total_ms={:.1}"
-                        ),
-                        identity_cache_outcome_label(attempt.compatibility.outcome),
-                        attempt.compatibility.bytes_hashed,
-                        attempt.hit.is_some(),
-                        attempt.lookup.matched_prefix_len,
-                        attempt.lookup.restored_prefix_len,
-                        attempt.lookup.exact,
-                        attempt.lookup.candidates_examined,
-                        attempt.lookup.corrupt_entries_removed,
-                        durable_restore_ms,
-                    );
-                    if let Some(hit) = attempt.hit {
-                        prompt_logits = hit.exact_final_logits;
-                    }
-                }
-                Err(RuntimeError::CheckpointStore(error)) => {
-                    durable_restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
-                    eprintln!(
-                        "warning: durable prefix lookup failed after {:.1} ms; cold-prefilling: {error}",
-                        durable_restore_ms,
-                    );
-                }
-                Err(error) => return Err(error.into()),
-            }
-        } else if has_blobs == Some(false) {
-            durable_restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
-            eprintln!(
-                "durable_prefix_cache: store_empty=true restore_total_ms={:.1}",
-                durable_restore_ms,
-            );
-        }
+        let outcome = restore_qwen_durable_prefix(
+            loaded,
+            store,
+            &mut sequence,
+            args,
+            &prompt_ids,
+            durable_max_record_bytes,
+        )?;
+        prompt_logits = outcome.prompt_logits;
+        durable_restore_ms = outcome.restore_ms;
     }
 
     let mut prefill_ms = 0.0;
-    if let Some(prefix_len) = durable_prefix_len
+    if let QwenCaptureTarget::PromptBoundary(prefix_len) = durable_capture_target
         && prefix_len > sequence.position()
     {
         let position = sequence.position();
@@ -568,40 +882,16 @@ pub(crate) fn execute_single_turn_request(
             position,
         )?;
         prefill_ms += ms;
-        let capture_t0 = Instant::now();
-        let estimated =
-            loaded.estimate_checkpoint_boundary_sizes(&sequence, prefix_len, false, true, 0)?;
-        if estimated.record_bytes > durable_max_record_bytes {
-            eprintln!(
-                concat!(
-                    "warning: durable prefix capture skipped: estimated_record_bytes={} ",
-                    "estimated_snapshot_bytes={} max_entry_bytes={}"
-                ),
-                estimated.record_bytes, estimated.snapshot_bytes, durable_max_record_bytes,
-            );
-        } else {
-            match loaded.prepare_checkpoint_boundary(
-                &sequence,
-                prompt_ids[..prefix_len].to_vec(),
-                None,
-                Some(logits.clone()),
-                None,
-                0,
-            ) {
-                Ok(prepared) => {
-                    durable_prepared = Some(prepared);
-                    durable_capture_kind = Some("prompt");
-                }
-                Err(RuntimeError::MetalModel(MfError::Snapshot(
-                    SnapshotValidationError::AllocationFailed { .. },
-                ))) => eprintln!(
-                    "warning: durable prefix capture allocation failed; continuing without publication"
-                ),
-                Err(error) => return Err(error.into()),
-            }
-        }
-        durable_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
-        prompt_logits = Some(logits);
+        let outcome = capture_qwen_prompt_boundary(
+            loaded,
+            &sequence,
+            &prompt_ids,
+            prefix_len,
+            logits,
+            durable_max_record_bytes,
+        )?;
+        durable_pending = outcome.pending;
+        prompt_logits = Some(outcome.logits);
     }
     // v0.77: with a drafter loaded, the prompt prefill must also capture
     // the K target hidden layers the drafter conditions on. Windowed: an
@@ -968,7 +1258,7 @@ pub(crate) fn execute_single_turn_request(
         timing_enabled.then(|| loaded.context().pipeline_cache_metrics());
     let stop_reason = generation.stop_reason;
     let generated = generation.tokens;
-    let completed_boundary = if durable_capture_policy == DurableCapturePolicy::AutomaticCompleted {
+    let completed_boundary = if durable_capture_target == QwenCaptureTarget::Completed {
         Some(derive_completed_checkpoint_boundary(
             prompt_ids.len(),
             &generated,
@@ -997,46 +1287,18 @@ pub(crate) fn execute_single_turn_request(
     drop(stdout);
 
     if let Some(boundary) = completed_boundary {
-        let capture_t0 = Instant::now();
-        let estimated = loaded.estimate_checkpoint_boundary_sizes(
+        let outcome = capture_qwen_completed_boundary(
+            loaded,
             &sequence,
-            boundary.consumed_prefix_len,
-            true,
-            false,
-            0,
+            boundary,
+            &prompt_ids,
+            &generated,
+            stop_reason,
+            durable_max_record_bytes,
         )?;
-        if estimated.record_bytes > durable_max_record_bytes {
-            eprintln!(
-                concat!(
-                    "warning: completed durable checkpoint skipped: estimated_record_bytes={} ",
-                    "estimated_snapshot_bytes={} max_entry_bytes={}"
-                ),
-                estimated.record_bytes, estimated.snapshot_bytes, durable_max_record_bytes,
-            );
-        } else {
-            let consumed = boundary.consumed_tokens(&prompt_ids, &generated);
-            match loaded.prepare_checkpoint_boundary(
-                &sequence,
-                consumed,
-                Some(boundary.pending_token),
-                None,
-                None,
-                0,
-            ) {
-                Ok(prepared) => {
-                    durable_prepared = Some(prepared);
-                    durable_capture_kind = Some("completed");
-                    durable_capture_stop_reason = Some(stop_reason);
-                }
-                Err(RuntimeError::MetalModel(MfError::Snapshot(
-                    SnapshotValidationError::AllocationFailed { .. },
-                ))) => eprintln!(
-                    "warning: completed durable checkpoint allocation failed; continuing without publication"
-                ),
-                Err(error) => return Err(error.into()),
-            }
+        if outcome.pending.is_some() {
+            durable_pending = outcome.pending;
         }
-        durable_capture_ms += capture_t0.elapsed().as_secs_f64() * 1e3;
     }
 
     let ttft_ms = first_delivery_ms.context("generation produced no first-token delivery")?;
@@ -1074,102 +1336,15 @@ pub(crate) fn execute_single_turn_request(
     drop(scratch);
     let after_state_drop_allocated =
         timing_enabled.then(|| loaded.context().current_allocated_size());
-    if let (Some(store), Some(prepared)) = (durable_store, durable_prepared.as_ref()) {
-        let publish_t0 = Instant::now();
-        match loaded.publish_prepared_checkpoint(store, prepared, durable_max_record_bytes) {
-            Ok(report) => {
-                let publish_elapsed = publish_t0.elapsed();
-                if store.staged_integrity_is_explicit() {
-                    eprintln!(
-                        concat!(
-                            "durable_prefix_cache: publish={} capture={} matched_tokens={} ",
-                            "restored_tokens={} pending={} stop_reason={} blob_bytes={} ",
-                            "evicted={} staging_examined={} staging_removed={} ",
-                            "staging_allocated_bytes_reclaimed={} ",
-                            "staging_live={} staging_legacy={} staging_foreign={} ",
-                            "staging_truncated={} identity={} staged_integrity={} ",
-                            "staged_integrity_us={} capture_ms={:.1} publish_us={} ",
-                            "post_response_us={}"
-                        ),
-                        publish_outcome_label(report.store.outcome),
-                        durable_capture_kind.unwrap_or("unknown"),
-                        prepared.matched_prefix_len(),
-                        prepared.restored_prefix_len(),
-                        prepared.has_pending_token(),
-                        durable_capture_stop_reason.map_or("none", StopReason::as_str),
-                        report.store.blob_bytes,
-                        report.store.evicted_entries,
-                        report.store.staging_entries_examined,
-                        report.store.staging_entries_removed,
-                        report.store.staging_allocated_bytes_reclaimed,
-                        report.store.staging_live_entries,
-                        report.store.staging_legacy_entries,
-                        report.store.staging_foreign_entries,
-                        report.store.staging_cleanup_truncated,
-                        identity_cache_outcome_label(report.compatibility.outcome),
-                        report.store.staged_integrity.mode.as_str(),
-                        report.store.staged_integrity.elapsed.as_micros(),
-                        durable_capture_ms,
-                        publish_elapsed.as_micros(),
-                        response_flushed_t0.elapsed().as_micros(),
-                    );
-                } else {
-                    eprintln!(
-                        concat!(
-                            "durable_prefix_cache: publish={} capture={} matched_tokens={} ",
-                            "restored_tokens={} pending={} stop_reason={} blob_bytes={} ",
-                            "evicted={} staging_examined={} staging_removed={} ",
-                            "staging_allocated_bytes_reclaimed={} ",
-                            "staging_live={} staging_legacy={} staging_foreign={} ",
-                            "staging_truncated={} identity={} capture_ms={:.1} publish_ms={:.1}"
-                        ),
-                        publish_outcome_label(report.store.outcome),
-                        durable_capture_kind.unwrap_or("unknown"),
-                        prepared.matched_prefix_len(),
-                        prepared.restored_prefix_len(),
-                        prepared.has_pending_token(),
-                        durable_capture_stop_reason.map_or("none", StopReason::as_str),
-                        report.store.blob_bytes,
-                        report.store.evicted_entries,
-                        report.store.staging_entries_examined,
-                        report.store.staging_entries_removed,
-                        report.store.staging_allocated_bytes_reclaimed,
-                        report.store.staging_live_entries,
-                        report.store.staging_legacy_entries,
-                        report.store.staging_foreign_entries,
-                        report.store.staging_cleanup_truncated,
-                        identity_cache_outcome_label(report.compatibility.outcome),
-                        durable_capture_ms,
-                        publish_elapsed.as_secs_f64() * 1e3,
-                    );
-                }
-            }
-            Err(error) => {
-                let publish_elapsed = publish_t0.elapsed();
-                if store.staged_integrity_is_explicit() {
-                    eprintln!(
-                        concat!(
-                            "durable_prefix_cache: publish=failed staged_integrity={} ",
-                            "staged_integrity_us=none capture_ms={:.1} publish_us={} ",
-                            "post_response_us={} error={}"
-                        ),
-                        store.staged_integrity_mode().as_str(),
-                        durable_capture_ms,
-                        publish_elapsed.as_micros(),
-                        response_flushed_t0.elapsed().as_micros(),
-                        error,
-                    );
-                } else {
-                    eprintln!(
-                        concat!(
-                            "warning: durable prefix publication failed after response ",
-                            "(restore_ms={:.1} capture_ms={:.1}): {}"
-                        ),
-                        durable_restore_ms, durable_capture_ms, error,
-                    );
-                }
-            }
-        }
+    if let (Some(store), Some(pending)) = (durable_store, durable_pending.as_ref()) {
+        publish_qwen_pending_checkpoint(
+            loaded,
+            store,
+            pending,
+            durable_max_record_bytes,
+            durable_restore_ms,
+            response_flushed_t0,
+        );
     }
 
     let row = timing_values.map(|samples| {
@@ -1327,5 +1502,50 @@ mod request_stats_timing_tests {
         let load_session_output_stats_total =
             18.0 + stats_line.duration_since(base).as_secs_f64() * 1e3;
         assert!(31.0 < load_session_output_stats_total);
+    }
+}
+
+#[cfg(test)]
+mod persistence_decision_tests {
+    use super::super::durable_cache::DurableCapturePolicy;
+    use super::super::telemetry::StopReason;
+    use super::{QwenCaptureKind, QwenCaptureTarget, qwen_capture_target};
+
+    #[test]
+    fn durable_policy_selects_only_its_capture_boundary() {
+        assert_eq!(
+            qwen_capture_target(DurableCapturePolicy::Disabled),
+            QwenCaptureTarget::None
+        );
+        assert_eq!(
+            qwen_capture_target(DurableCapturePolicy::ExplicitPrompt(64)),
+            QwenCaptureTarget::PromptBoundary(64)
+        );
+        assert_eq!(
+            qwen_capture_target(DurableCapturePolicy::AutomaticPrompt(128)),
+            QwenCaptureTarget::PromptBoundary(128)
+        );
+        assert_eq!(
+            qwen_capture_target(DurableCapturePolicy::AutomaticCompleted),
+            QwenCaptureTarget::Completed
+        );
+    }
+
+    #[test]
+    fn capture_kind_preserves_publication_labels() {
+        assert_eq!(QwenCaptureKind::Prompt.label(), "prompt");
+        assert_eq!(QwenCaptureKind::Prompt.stop_reason_label(), "none");
+        assert_eq!(
+            QwenCaptureKind::Completed(StopReason::Eos).label(),
+            "completed"
+        );
+        assert_eq!(
+            QwenCaptureKind::Completed(StopReason::Eos).stop_reason_label(),
+            "eos"
+        );
+        assert_eq!(
+            QwenCaptureKind::Completed(StopReason::TokenLimit).stop_reason_label(),
+            "token_limit"
+        );
     }
 }

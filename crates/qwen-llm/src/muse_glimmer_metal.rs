@@ -1641,11 +1641,11 @@ mod tests {
         let online = read_f32(&online);
         assert!(materialized.iter().all(|value| value.is_finite()));
         assert!(online.iter().all(|value| value.is_finite()));
-        let max_abs = materialized
-            .iter()
-            .zip(&online)
-            .map(|(left, right)| (left - right).abs())
-            .fold(0.0_f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            materialized.iter(),
+            &online,
+        );
         let dot = materialized
             .iter()
             .zip(&online)
@@ -1792,11 +1792,11 @@ mod tests {
             run(true, 1);
             let av = read_f32(&a);
             let bv = read_f32(&b);
-            let max_abs = av
-                .iter()
-                .zip(&bv)
-                .map(|(a, b)| (a - b).abs())
-                .fold(0.0_f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                av.iter(),
+                &bv,
+            );
             let dot: f64 = av
                 .iter()
                 .zip(&bv)

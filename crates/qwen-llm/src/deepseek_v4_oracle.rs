@@ -1146,7 +1146,7 @@ pub fn attention_fp8_nope_bf16_rope_roundtrip_in_place(
     let (nope, rope) = output.split_at_mut(nope_dim);
     for block in nope.chunks_exact_mut(64) {
         bf16_roundtrip_in_place(block)?;
-        let mut maximum = block.iter().map(|value| value.abs()).fold(0.0, f32::max);
+        let mut maximum = block.iter().map(|value| value.abs()).fold(0.0, f32::max); // comparison-tripwire: quantization scale magnitude.
         maximum = maximum.max(1.0e-4);
         let scale = power_of_two_ceiling(maximum / 448.0);
         for value in block {
@@ -1176,7 +1176,7 @@ pub fn attention_fp8_nope_roundtrip_in_place(
     require_finite("attention cache row", values)?;
     let mut output = values.to_vec();
     for block in output[..nope_dim].chunks_exact_mut(64) {
-        let mut maximum = block.iter().map(|value| value.abs()).fold(0.0, f32::max);
+        let mut maximum = block.iter().map(|value| value.abs()).fold(0.0, f32::max); // comparison-tripwire: quantization scale magnitude.
         maximum = maximum.max(1.0e-4);
         let scale = power_of_two_ceiling(maximum / 448.0);
         for value in block {
@@ -1207,7 +1207,7 @@ pub fn fp4_activation_roundtrip_in_place(values: &mut [f32]) -> OracleResult<()>
     }
     require_finite("FP4 activation row", values)?;
     for block in values.chunks_exact_mut(32) {
-        let mut maximum = block.iter().map(|value| value.abs()).fold(0.0, f32::max);
+        let mut maximum = block.iter().map(|value| value.abs()).fold(0.0, f32::max); // comparison-tripwire: quantization scale magnitude.
         maximum = maximum.max(7.052_966e-38);
         let scale = power_of_two_ceiling(maximum / 6.0);
         for value in block {
@@ -1249,7 +1249,7 @@ pub fn pack_indexer_fp4_row(values: &[f32]) -> OracleResult<DeepSeekV4IndexerFp4
     for block_index in 0..INDEXER_FP4_BLOCK_COUNT {
         let value_start = block_index * INDEXER_FP4_BLOCK_VALUES;
         let block = &rounded[value_start..value_start + INDEXER_FP4_BLOCK_VALUES];
-        let maximum = block.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+        let maximum = block.iter().map(|value| value.abs()).fold(0.0f32, f32::max); // comparison-tripwire: quantization scale magnitude.
         let scale_code = encode_indexer_ue8m0_scale(maximum)?;
         let scale = decode_indexer_ue8m0_scale(scale_code)?;
         bytes[INDEXER_FP4_VALUE_BYTES + block_index] = scale_code;

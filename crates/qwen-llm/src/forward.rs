@@ -1411,11 +1411,11 @@ mod tests {
         let scaled: Vec<f32> = x.iter().map(|v| *v * scale).collect();
         let old = rms_norm(&scaled, &weight, eps);
         let folded = rms_norm(&x, &weight, eps * head_dim as f32);
-        let max_abs = old
-            .iter()
-            .zip(folded.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            old.iter(),
+            folded.iter(),
+        );
         assert!(max_abs < 2e-6, "scale-fold drift {max_abs}");
     }
 

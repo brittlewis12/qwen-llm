@@ -153,11 +153,11 @@ fn qualify_split_attention(timing: bool) {
         let candidate = read_f32(&output);
         let max_abs = compare(&candidate, &expected, "split/F64");
         if let Some(baseline) = &baseline {
-            let delta = candidate
-                .iter()
-                .zip(baseline)
-                .map(|(&a, &b)| (a - b).abs())
-                .fold(0.0_f32, f32::max);
+            let delta = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                candidate.iter(),
+                baseline,
+            );
             eprintln!("split_qsa diagnostic count={count} max_abs_incumbent={delta:.9e}");
         }
         assert!(read_f32(&active_partials).iter().all(|v| !v.is_nan()));

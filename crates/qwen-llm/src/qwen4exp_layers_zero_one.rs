@@ -2333,11 +2333,11 @@ mod tests {
             actual.iter().all(|value| value.is_finite()),
             "{label} finite"
         );
-        let maximum = actual
-            .iter()
-            .zip(expected)
-            .map(|(actual, expected)| (actual - expected).abs())
-            .fold(0.0_f32, f32::max);
+        let maximum = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            actual.iter(),
+            expected,
+        );
         let dot = actual
             .iter()
             .zip(expected)
@@ -2359,10 +2359,7 @@ mod tests {
     }
 
     fn max_delta(left: &[f32], right: &[f32]) -> f32 {
-        left.iter()
-            .zip(right)
-            .map(|(left, right)| (left - right).abs())
-            .fold(0.0_f32, f32::max)
+        crate::compare::assert_max_abs_diff_f32(concat!(file!(), ":", line!()), left.iter(), right)
     }
 
     fn standalone_gdn(

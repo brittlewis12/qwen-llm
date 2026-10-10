@@ -403,13 +403,7 @@ pub(super) fn validate_completed_command(
 }
 
 pub(super) fn max_abs_difference(left: &[f32], right: &[f32]) -> f32 {
-    if left.len() != right.len() {
-        return f32::INFINITY;
-    }
-    left.iter()
-        .zip(right)
-        .map(|(&left, &right)| finite_abs_difference(left, right))
-        .fold(0.0f32, f32::max)
+    crate::compare::report_max_abs_diff_f32(left.iter(), right.iter())
 }
 
 pub(super) fn finite_abs_difference(left: f32, right: f32) -> f32 {

@@ -5617,11 +5617,11 @@ mod tests {
             .zip(right)
             .filter(|(left, right)| left.to_bits() != right.to_bits())
             .count();
-        let max_abs = left
-            .iter()
-            .zip(right)
-            .map(|(&left, &right)| (left - right).abs())
-            .fold(0.0_f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            left.iter(),
+            right,
+        );
         assert_eq!(mismatches, 0, "{label}: max_abs={max_abs}");
     }
 
@@ -5747,11 +5747,11 @@ mod tests {
                 expected_projection_then_fixed.as_slice(),
             ),
         ] {
-            let max_abs = actual
-                .iter()
-                .zip(expected)
-                .map(|(&left, &right)| (left - right).abs())
-                .fold(0.0_f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                actual.iter(),
+                expected,
+            );
             assert!(max_abs < 1e-5, "ordered intervention max_abs={max_abs}");
         }
         assert!(

@@ -3833,11 +3833,11 @@ mod tests {
                 "post-layer hyper delta differs at index {index}"
             );
         }
-        let max_logit_delta = capture_logits
-            .iter()
-            .zip(&intervened_logits)
-            .map(|(&baseline, &actual)| (actual - baseline).abs())
-            .fold(0.0_f32, f32::max);
+        let max_logit_delta = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            capture_logits.iter(),
+            &intervened_logits,
+        );
         assert!(
             max_logit_delta.is_finite() && max_logit_delta > 0.0,
             "intervention did not affect downstream logits: {max_logit_delta}"

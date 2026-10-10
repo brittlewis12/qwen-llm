@@ -3665,13 +3665,12 @@ fn write_f32(tensor: &MetalTensor, values: &[f32]) -> Result<(), MuseGlimmerLens
 
 fn max_abs_difference(left: &[f32], right: &[f32]) -> Result<f32, MuseGlimmerLensError> {
     validate_len("replay comparison", left, right.len())?;
-    let mut maximum = 0.0_f32;
-    for (&left, &right) in left.iter().zip(right) {
-        let difference = (left - right).abs();
-        if !difference.is_finite() {
-            return invalid("non-finite replay error");
-        }
-        maximum = maximum.max(difference);
+    if left.is_empty() {
+        return invalid("empty replay comparison");
+    }
+    let maximum = crate::compare::report_max_abs_diff_f32(left.iter(), right.iter());
+    if !maximum.is_finite() {
+        return invalid("non-finite replay error");
     }
     Ok(maximum)
 }

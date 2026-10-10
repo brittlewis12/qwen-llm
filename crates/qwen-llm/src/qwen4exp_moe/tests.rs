@@ -3897,11 +3897,11 @@ fn real_cpu_oracle(
 fn assert_similarity(label: &str, actual: &[f32], expected: &[f32], max_abs: f32, cosine: f64) {
     assert_eq!(actual.len(), expected.len());
     assert!(actual.iter().all(|value| value.is_finite()));
-    let observed_max = actual
-        .iter()
-        .zip(expected)
-        .map(|(actual, expected)| (actual - expected).abs())
-        .fold(0.0_f32, f32::max);
+    let observed_max = crate::compare::assert_max_abs_diff_f32(
+        concat!(file!(), ":", line!()),
+        actual.iter(),
+        expected,
+    );
     let dot = actual
         .iter()
         .zip(expected)

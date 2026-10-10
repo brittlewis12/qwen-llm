@@ -261,11 +261,11 @@ mod tests {
                 "{label} has non-finite values"
             );
             let scale = expected.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-            let worst = actual
-                .iter()
-                .zip(expected)
-                .map(|(a, e)| (a - e).abs())
-                .fold(0.0f32, f32::max);
+            let worst = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                actual.iter(),
+                expected,
+            );
             assert!(
                 worst / scale <= relative,
                 "{label}: max abs {worst}, scale {scale}"

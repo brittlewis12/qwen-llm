@@ -1039,10 +1039,7 @@ mod tests {
     }
 
     fn max_delta(left: &[f32], right: &[f32]) -> f32 {
-        left.iter()
-            .zip(right)
-            .map(|(left, right)| (left - right).abs())
-            .fold(0.0, f32::max)
+        crate::compare::assert_max_abs_diff_f32(concat!(file!(), ":", line!()), left.iter(), right)
     }
 
     struct ResidualFixture {

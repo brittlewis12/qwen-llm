@@ -1637,11 +1637,11 @@ mod tests {
                 let mut fresh_gdn = GatedDeltaNetMetalWorkspace::new(&ctx, geometry.gdn()).unwrap();
                 let fresh_output =
                     standalone_gdn(&ctx, &attention_mixed, gdn_weights, &mut fresh_gdn);
-                let causal_delta = mixer_output
-                    .iter()
-                    .zip(fresh_output)
-                    .map(|(stateful, fresh)| (stateful - fresh).abs())
-                    .fold(0.0_f32, f32::max);
+                let causal_delta = crate::compare::assert_max_abs_diff_f32(
+                    concat!(file!(), ":", line!()),
+                    mixer_output.iter(),
+                    fresh_output,
+                );
                 assert!(causal_delta > 1e-5, "GDN causal delta={causal_delta}");
             }
             let after_attention =
@@ -1785,11 +1785,11 @@ mod tests {
     ) {
         assert_eq!(actual.len(), expected.len());
         assert!(actual.iter().all(|value| value.is_finite()));
-        let observed_max = actual
-            .iter()
-            .zip(expected)
-            .map(|(actual, expected)| (actual - expected).abs())
-            .fold(0.0_f32, f32::max);
+        let observed_max = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            actual.iter(),
+            expected,
+        );
         let dot = actual
             .iter()
             .zip(expected)
@@ -1858,11 +1858,11 @@ mod tests {
                 let mut fresh_gdn = GatedDeltaNetMetalWorkspace::new(&ctx, geometry.gdn()).unwrap();
                 let fresh_output =
                     standalone_gdn(&ctx, &attention_mixed, weights.gdn, &mut fresh_gdn);
-                let causal_delta = mixer_output
-                    .iter()
-                    .zip(fresh_output)
-                    .map(|(stateful, fresh)| (stateful - fresh).abs())
-                    .fold(0.0_f32, f32::max);
+                let causal_delta = crate::compare::assert_max_abs_diff_f32(
+                    concat!(file!(), ":", line!()),
+                    mixer_output.iter(),
+                    fresh_output,
+                );
                 assert!(causal_delta > 1e-5, "real GDN causal delta={causal_delta}");
             }
             let after_attention =

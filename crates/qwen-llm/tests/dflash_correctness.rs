@@ -4164,24 +4164,7 @@ fn compare_gdn_state_conv_27b(sess_a: &MetalSession, sess_b: &MetalSession) -> G
 }
 
 fn max_abs_delta_27b(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len());
-    assert!(!a.is_empty(), "GDN comparison is empty");
-    assert!(
-        a.iter().all(|value| value.is_finite()),
-        "GDN comparison actual contains a non-finite value"
-    );
-    assert!(
-        b.iter().all(|value| value.is_finite()),
-        "GDN comparison expected contains a non-finite value"
-    );
-    a.iter()
-        .zip(b)
-        .map(|(x, y)| {
-            let delta = (x - y).abs();
-            assert!(delta.is_finite(), "GDN comparison difference is non-finite");
-            delta
-        })
-        .fold(0.0f32, f32::max)
+    qwen_llm::compare::assert_max_abs_diff_f32("GDN 27B state", a.iter(), b.iter())
 }
 
 #[cfg(test)]
@@ -4194,13 +4177,13 @@ mod comparison_contract_tests {
     }
 
     #[test]
-    #[should_panic(expected = "non-finite value")]
+    #[should_panic(expected = "non-finite actual")]
     fn nan_is_rejected() {
         max_abs_delta_27b(&[f32::NAN], &[0.0]);
     }
 
     #[test]
-    #[should_panic(expected = "GDN comparison is empty")]
+    #[should_panic(expected = "empty comparison")]
     fn empty_comparison_is_rejected() {
         max_abs_delta_27b(&[], &[]);
     }

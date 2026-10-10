@@ -881,10 +881,7 @@ fn workspace_vjp_crosses_sources_in_caller_order_without_reversing_them() {
 fn replay_diagnostics_fail_closed_on_non_finite_values() {
     assert_eq!(finite_abs_difference(f32::NAN, 0.0), f32::INFINITY);
     assert_eq!(finite_abs_difference(0.0, f32::INFINITY), f32::INFINITY);
-    assert_eq!(
-        max_abs_difference(&[0.0, f32::NAN], &[0.0, 0.0]),
-        f32::INFINITY
-    );
+    assert!(max_abs_difference(&[0.0, f32::NAN], &[0.0, 0.0]).is_nan());
 }
 
 #[test]
@@ -1656,11 +1653,11 @@ fn dense_ffn_query_rows_match_serial_batches_and_do_not_cross_talk() {
                     rule,
                 )
                 .unwrap();
-                let max_abs = batched[start..end]
-                    .iter()
-                    .zip(&serial)
-                    .map(|(&batched, &serial)| (batched - serial).abs())
-                    .fold(0.0f32, f32::max);
+                let max_abs = crate::compare::assert_max_abs_diff_f32(
+                    concat!(file!(), ":", line!()),
+                    batched[start..end].iter(),
+                    serial.iter(),
+                );
                 assert!(
                     max_abs < 2e-5,
                     "{rule:?} batch {query_batches} query {query} error {max_abs}"
@@ -1711,11 +1708,11 @@ fn dense_ffn_query_rows_match_serial_batches_and_do_not_cross_talk() {
             let start = query * hidden_elements;
             let end = start + hidden_elements;
             if query == ACTIVE_QUERY {
-                let max_abs = isolated[start..end]
-                    .iter()
-                    .zip(&serial)
-                    .map(|(&batched, &serial)| (batched - serial).abs())
-                    .fold(0.0f32, f32::max);
+                let max_abs = crate::compare::assert_max_abs_diff_f32(
+                    concat!(file!(), ":", line!()),
+                    isolated[start..end].iter(),
+                    serial.iter(),
+                );
                 assert!(max_abs < 2e-5, "{rule:?} isolated query error {max_abs}");
             } else {
                 assert!(
@@ -1801,11 +1798,11 @@ fn gdn_block_composition_matches_distinct_row_and_temporal_oracles() {
                 rule,
             ));
         }
-        let max_abs = actual
-            .iter()
-            .zip(&expected)
-            .map(|(&actual, &expected)| (actual - expected).abs())
-            .fold(0.0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            actual.iter(),
+            &expected,
+        );
         assert!(max_abs < 2e-5, "{rule:?} rowwise FFN error {max_abs}");
 
         let block_rule = match rule {
@@ -1831,11 +1828,11 @@ fn gdn_block_composition_matches_distinct_row_and_temporal_oracles() {
             block_rule,
             |incoming, mixer_rule| {
                 assert_eq!(mixer_rule, expected_mixer_rule);
-                let incoming_error = incoming
-                    .iter()
-                    .zip(&expected)
-                    .map(|(&incoming, &expected)| (incoming - expected).abs())
-                    .fold(0.0f32, f32::max);
+                let incoming_error = crate::compare::assert_max_abs_diff_f32(
+                    concat!(file!(), ":", line!()),
+                    incoming.iter(),
+                    &expected,
+                );
                 assert!(incoming_error < 2e-5);
                 let mut branch = vec![0.0f32; incoming.len()];
                 for row in 0..ROWS {
@@ -1876,18 +1873,16 @@ fn gdn_block_composition_matches_distinct_row_and_temporal_oracles() {
                     };
             }
         }
-        let post_mixer_error = composition
-            .grad_post_mixer_residuals
-            .iter()
-            .zip(&expected)
-            .map(|(&actual, &expected)| (actual - expected).abs())
-            .fold(0.0f32, f32::max);
-        let full_error = composition
-            .values
-            .iter()
-            .zip(&expected_full)
-            .map(|(&actual, &expected)| (actual - expected).abs())
-            .fold(0.0f32, f32::max);
+        let post_mixer_error = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            composition.grad_post_mixer_residuals.iter(),
+            expected.iter(),
+        );
+        let full_error = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            composition.values.iter(),
+            expected_full.iter(),
+        );
         assert!(post_mixer_error < 2e-5);
         assert!(full_error < 4e-5, "{rule:?} full block error {full_error}");
     }
@@ -2012,11 +2007,11 @@ fn dense_ffn_vjp_composes_jacobian_and_relp_rules() {
                 rule,
             )
             .unwrap();
-            let max_abs = actual
-                .iter()
-                .zip(&expected)
-                .map(|(actual, expected)| (actual - expected).abs())
-                .fold(0.0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                actual.iter(),
+                &expected,
+            );
             assert!(
                 max_abs < 4e-5,
                 "rule={rule:?} n_query={n_query}: max error {max_abs}"

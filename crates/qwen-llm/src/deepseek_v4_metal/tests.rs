@@ -14886,11 +14886,11 @@ fn cooperative_dense_attention_matches_legacy_singleton_within_roundoff() {
             .zip(&cooperative)
             .filter(|(legacy, cooperative)| legacy.to_bits() != cooperative.to_bits())
             .count();
-        let max_abs = legacy
-            .iter()
-            .zip(&cooperative)
-            .map(|(legacy, cooperative)| (legacy - cooperative).abs())
-            .fold(0.0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            legacy.iter(),
+            &cooperative,
+        );
         let squared_error = legacy
             .iter()
             .zip(&cooperative)
@@ -14909,11 +14909,11 @@ fn cooperative_dense_attention_matches_legacy_singleton_within_roundoff() {
         assert!(max_abs <= 5e-7, "{label} max abs {max_abs}");
         assert!(relative_rms <= 1e-6, "{label} relative RMS {relative_rms}");
         let grouped = read_f32(&grouped);
-        let grouped_max_abs = legacy
-            .iter()
-            .zip(&grouped)
-            .map(|(legacy, grouped)| (legacy - grouped).abs())
-            .fold(0.0f32, f32::max);
+        let grouped_max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            legacy.iter(),
+            &grouped,
+        );
         let grouped_squared_error = legacy
             .iter()
             .zip(&grouped)
@@ -14951,11 +14951,11 @@ fn cooperative_dense_attention_matches_legacy_singleton_within_roundoff() {
                 .zip(&tiled)
                 .filter(|(legacy, tiled)| legacy.to_bits() != tiled.to_bits())
                 .count();
-            let tiled_max_abs = legacy
-                .iter()
-                .zip(&tiled)
-                .map(|(legacy, tiled)| (legacy - tiled).abs())
-                .fold(0.0f32, f32::max);
+            let tiled_max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                legacy.iter(),
+                &tiled,
+            );
             let tiled_squared_error = legacy
                 .iter()
                 .zip(&tiled)
@@ -15177,11 +15177,11 @@ fn cooperative_selected_attention_matches_legacy_singleton_within_roundoff() {
                 .zip(&candidate)
                 .filter(|(legacy, candidate)| legacy.to_bits() != candidate.to_bits())
                 .count();
-            let max_abs = legacy
-                .iter()
-                .zip(&candidate)
-                .map(|(legacy, candidate)| (legacy - candidate).abs())
-                .fold(0.0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                legacy.iter(),
+                &candidate,
+            );
             let squared_error = legacy
                 .iter()
                 .zip(&candidate)
@@ -17589,11 +17589,11 @@ fn profile_lightning_matrix_ceiling_at_far_context() {
             .map(|value| f64::from(*value).powi(2))
             .sum::<f64>();
         let relative_rms = (squared_error / reference_norm).sqrt();
-        let max_abs = current_values
-            .iter()
-            .zip(&matrix_values)
-            .map(|(current, matrix)| (current - matrix).abs())
-            .fold(0.0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            current_values.iter(),
+            &matrix_values,
+        );
         let (current_ids, current_cutoff_margin) = stable_top_k(&current_values, 512);
         let (matrix_ids, matrix_cutoff_margin) = stable_top_k(&matrix_values, 512);
         let selected_exchanges = current_ids

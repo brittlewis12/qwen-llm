@@ -2308,11 +2308,11 @@ mod tests {
                 maximum_relative_rms,
                 minimum_cosine,
             );
-            let observed_max = actual_row
-                .iter()
-                .zip(expected_row)
-                .map(|(actual, expected)| (actual - expected).abs())
-                .fold(0.0_f32, f32::max);
+            let observed_max = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                actual_row.iter(),
+                expected_row,
+            );
             assert!(
                 observed_max <= maximum_absolute,
                 "{label} token={token} max_abs={observed_max}"

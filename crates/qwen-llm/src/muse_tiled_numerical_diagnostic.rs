@@ -410,11 +410,10 @@ fn tiled_prefill_numerical_diagnostic() {
             let errors: Vec<f64> = [online, candidate]
                 .iter()
                 .map(|values| {
-                    (0..128)
-                        .map(|dim| {
-                            (values[row * 4096 + head * 128 + dim] as f64 - expected[dim]).abs()
-                        })
-                        .fold(0.0_f64, f64::max)
+                    crate::compare::report_max_abs_diff_f64(
+                        (0..128).map(|dim| f64::from(values[row * 4096 + head * 128 + dim])),
+                        expected.iter().copied(),
+                    )
                 })
                 .collect();
             eprintln!(

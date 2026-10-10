@@ -1970,11 +1970,11 @@ mod tests {
             .sum::<f64>();
         let relative_rms = (difference_square / expected_square.max(1e-30)).sqrt();
         let cosine = dot / (actual_square * expected_square).sqrt().max(1e-30);
-        let observed_max = actual
-            .iter()
-            .zip(expected)
-            .map(|(actual, expected)| (actual - expected).abs())
-            .fold(0.0_f32, f32::max);
+        let observed_max = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            actual.iter(),
+            expected,
+        );
         eprintln!(
             "[{label}] relative_rms={relative_rms:.3e} cosine={cosine:.9} max_abs={observed_max:.3e}"
         );

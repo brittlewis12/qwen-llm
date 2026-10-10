@@ -2345,12 +2345,11 @@ fn real_q8_block_51_replay_and_vjp_smoke() {
             .abs()
             .max(reverse_directional.abs())
             .max(1e-6);
-    let jr_max_abs_difference = j
-        .input_cotangent
-        .iter()
-        .zip(&r.input_cotangent)
-        .map(|(&j, &r)| (j - r).abs())
-        .fold(0.0_f32, f32::max);
+    let jr_max_abs_difference = crate::compare::assert_max_abs_diff_f32(
+        concat!(file!(), ":", line!()),
+        j.input_cotangent.iter(),
+        r.input_cotangent.iter(),
+    );
     eprintln!(
         "Muse Q8 block 51 T=3: post_attention_max_abs={} post_block_max_abs={} epsilon={} finite_difference={} reverse={} absolute_error={} relative_error={} jr_grad_max_abs_difference={} fit_max_abs={}",
         j.post_attention_replay_max_abs_error,
@@ -2364,7 +2363,7 @@ fn real_q8_block_51_replay_and_vjp_smoke() {
         fit.values
             .iter()
             .map(|value| value.abs())
-            .fold(0.0_f32, f32::max),
+            .fold(0.0_f32, f32::max), // comparison-tripwire: expected-gradient magnitude scale.
     );
     assert!(j.input_cotangent.iter().all(|value| value.is_finite()));
     assert!(r.input_cotangent.iter().all(|value| value.is_finite()));
@@ -2465,12 +2464,11 @@ fn real_q8_sliding_block_50_replay_and_vjp_smoke() {
             .abs()
             .max(reverse_directional.abs())
             .max(1e-6);
-    let jr_max_abs_difference = j
-        .input_cotangent
-        .iter()
-        .zip(&r.input_cotangent)
-        .map(|(&j, &r)| (j - r).abs())
-        .fold(0.0_f32, f32::max);
+    let jr_max_abs_difference = crate::compare::assert_max_abs_diff_f32(
+        concat!(file!(), ":", line!()),
+        j.input_cotangent.iter(),
+        r.input_cotangent.iter(),
+    );
     eprintln!(
         "Muse Q8 sliding block 50/source 49 T=3: post_attention_max_abs={} post_block_max_abs={} epsilon={} finite_difference={} reverse={} absolute_error={} relative_error={} jr_grad_max_abs_difference={}",
         j.post_attention_replay_max_abs_error,
@@ -2698,12 +2696,11 @@ fn real_q8_two_block_multi_source_composition_smoke() {
             .abs()
             .max(reverse_directional.abs())
             .max(1e-6);
-    let jr_max_abs_difference = composed_j
-        .values
-        .iter()
-        .zip(&composed_r.values)
-        .map(|(&j, &r)| (j - r).abs())
-        .fold(0.0_f32, f32::max);
+    let jr_max_abs_difference = crate::compare::assert_max_abs_diff_f32(
+        concat!(file!(), ":", line!()),
+        composed_j.values.iter(),
+        composed_r.values.iter(),
+    );
     eprintln!(
         "Muse Q8 chain 51->49: source50_diff={} source49_diff={} epsilon={} finite_difference={} reverse={} absolute_error={} relative_error={} jr_max_abs_difference={} block51_drift={}/{} block50_drift={}/{}",
         source_50_difference,

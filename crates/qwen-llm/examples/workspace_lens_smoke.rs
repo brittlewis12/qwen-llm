@@ -416,20 +416,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|&value| f64::from(value) * f64::from(value))
         .sum::<f64>()
         .sqrt();
-    let workspace_capture_max_abs_error = workspace_forward
+    let workspace_capture = workspace_forward
         .post_block_residuals(attn_layer)
-        .ok_or("workspace capture omitted attention target layer")?
-        .iter()
-        .zip(attn_forward.post_block_residuals())
-        .map(|(&left, &right)| (left - right).abs())
-        .fold(0.0f32, f32::max);
-    let workspace_one_block_max_abs_error = workspace_r_vjp
+        .ok_or("workspace capture omitted attention target layer")?;
+    let workspace_capture_max_abs_error = qwen_llm::compare::report_max_abs_diff_f32(
+        workspace_capture.iter(),
+        attn_forward.post_block_residuals().iter(),
+    );
+    let workspace_one_block = workspace_r_vjp
         .source_values(2)
-        .ok_or("workspace VJP omitted nearest source slot")?
-        .iter()
-        .zip(&attn_block_r_vjp.values)
-        .map(|(&left, &right)| (left - right).abs())
-        .fold(0.0f32, f32::max);
+        .ok_or("workspace VJP omitted nearest source slot")?;
+    let workspace_one_block_max_abs_error = qwen_llm::compare::report_max_abs_diff_f32(
+        workspace_one_block.iter(),
+        attn_block_r_vjp.values.iter(),
+    );
     if !workspace_source_zero_norm.is_finite()
         || !workspace_capture_max_abs_error.is_finite()
         || !workspace_one_block_max_abs_error.is_finite()

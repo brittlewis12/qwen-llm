@@ -239,7 +239,7 @@ def doc_texts(segment: str) -> list[str]:
 def declaration_doc_texts(source: str, offset: int) -> list[str]:
     """Read only contiguous outer doc lines immediately before a declaration."""
     line_start = source.rfind("\n", 0, offset) + 1
-    preceding = source[:line_start]
+    preceding = strip_block_comments(source[:line_start])
     lines = preceding.splitlines(keepends=True)
     start = len(lines)
     while start:
@@ -352,6 +352,9 @@ def self_test() -> None:
     ) == []
     assert const_docs(
         '/*\n/// Inside a block comment.\n*/\nconst NAME: &str = "QWEN_SELF_TEST";'
+    ) == []
+    assert const_docs(
+        '/*\n/// bogus\n*/ const NAME: &str = "QWEN_EDGE";'
     ) == []
     assert const_docs(
         '/// Detached documentation.\n\nconst NAME: &str = "QWEN_SELF_TEST";'

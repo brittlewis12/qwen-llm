@@ -42,9 +42,12 @@ pub(crate) const MUSE_MATRIX_PREFILL_ENV: &str = "QWEN_MUSE_MATRIX_PREFILL";
 /// an integer in `1..=4096`. A non-integer errors with
 /// `QWEN_DSV4_PREFILL_CHUNK_TOKENS={value:?} is not an integer`; an
 /// out-of-range integer errors with
-/// `QWEN_DSV4_PREFILL_CHUNK_TOKENS must be in 1..=4096, got {chunk_tokens}`.
-/// A non-UTF-8 value is treated as unset. Read per `qwen run` request, during
-/// `qwen serve` backend preparation, and per `qwen-bench` setup.
+/// `QWEN_DSV4_PREFILL_CHUNK_TOKENS must be in 1..=4096, got {chunk_tokens}`;
+/// this applies to successfully parsed `usize` values. Negative and larger
+/// than-`usize::MAX` values error as not integers. A non-UTF-8 value is
+/// treated as unset. Read during single-turn `qwen run` request setup, once
+/// before a `qwen run` JSONL request stream, during `qwen serve` backend
+/// preparation, and per `qwen-bench` setup.
 pub(crate) const DEEPSEEK_V4_PREFILL_CHUNK_ENV: &str = "QWEN_DSV4_PREFILL_CHUNK_TOKENS";
 
 /// `QWEN4EXP_GUARDED_TOPK` / `QWEN4EXP_HC_UP_MIX` rollbacks, shared by the
@@ -84,7 +87,13 @@ pub(crate) fn muse_runtime_options_from_env() -> Result<MuseGlimmerRuntimeOption
 }
 
 pub(crate) fn read_math_flag(name: &str) -> Result<bool> {
-    let value = std::env::var(name);
+    read_math_flag_result(name, std::env::var(name))
+}
+
+fn read_math_flag_result(
+    name: &str,
+    value: std::result::Result<String, std::env::VarError>,
+) -> Result<bool> {
     match value {
         Ok(value) => parse_math_flag(name, Some(&value)),
         Err(std::env::VarError::NotPresent) => parse_math_flag(name, None),
@@ -115,7 +124,13 @@ pub(crate) fn parse_deepseek_v4_prefill_chunk_tokens(value: Option<&str>) -> Res
 }
 
 pub(crate) fn deepseek_v4_prefill_chunk_tokens() -> Result<usize> {
-    let value = std::env::var(DEEPSEEK_V4_PREFILL_CHUNK_ENV).ok();
+    deepseek_v4_prefill_chunk_tokens_from_read_result(std::env::var(DEEPSEEK_V4_PREFILL_CHUNK_ENV))
+}
+
+fn deepseek_v4_prefill_chunk_tokens_from_read_result(
+    value: std::result::Result<String, std::env::VarError>,
+) -> Result<usize> {
+    let value = value.ok();
     parse_deepseek_v4_prefill_chunk_tokens(value.as_deref())
 }
 
@@ -185,6 +200,19 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn muse_environment_reader_reports_non_utf8_values() {
+        use std::os::unix::ffi::OsStringExt;
+
+        for name in [MUSE_SPLIT_DECODE_ENV, MUSE_MATRIX_PREFILL_ENV] {
+            let invalid = std::ffi::OsString::from_vec(vec![0xff]);
+            let read_result = Err(std::env::VarError::NotUnicode(invalid));
+            let error = read_math_flag_result(name, read_result).unwrap_err();
+            assert_eq!(error.to_string(), format!("read {name}"));
+        }
+    }
+
     #[test]
     fn deepseek_v4_chunk_parser_and_non_utf8_wrapper_mapping_are_pinned() {
         for (value, expected) in [
@@ -211,20 +239,31 @@ mod tests {
                 "4097",
                 "QWEN_DSV4_PREFILL_CHUNK_TOKENS must be in 1..=4096, got 4097",
             ),
+            (
+                "-1",
+                "QWEN_DSV4_PREFILL_CHUNK_TOKENS=\"-1\" is not an integer",
+            ),
         ] {
             let error = parse_deepseek_v4_prefill_chunk_tokens(Some(value)).unwrap_err();
             assert_eq!(error.to_string(), expected_error);
         }
 
+        let overflow = format!("{}0", usize::MAX);
+        let error = parse_deepseek_v4_prefill_chunk_tokens(Some(&overflow)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("QWEN_DSV4_PREFILL_CHUNK_TOKENS={overflow:?} is not an integer")
+        );
+
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStringExt;
             let invalid = std::ffi::OsString::from_vec(vec![0xff]);
-            let string_read: Result<String, std::env::VarError> =
-                Err(std::env::VarError::NotUnicode(invalid));
-            let value = string_read.ok();
             assert_eq!(
-                parse_deepseek_v4_prefill_chunk_tokens(value.as_deref()).unwrap(),
+                deepseek_v4_prefill_chunk_tokens_from_read_result(Err(
+                    std::env::VarError::NotUnicode(invalid),
+                ))
+                .unwrap(),
                 DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS
             );
         }

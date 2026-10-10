@@ -894,6 +894,39 @@ struct Ds4EncodedInput {
     encode_ms: f64,
 }
 
+struct Ds4RunOptions {
+    prefill_chunk_tokens: usize,
+    prefetch_mode: DeepSeekV4PrefetchMode,
+    sampling: qwen_llm::sampling::SamplingConfig,
+    arrival_ms: u128,
+}
+
+struct Ds4StopValidationOutcome {
+    stop_tokens: Vec<i32>,
+    preparation_ms: f64,
+}
+
+struct Ds4StoreProbeOutcome {
+    has_blobs: Option<bool>,
+    probe_ms: f64,
+}
+
+fn ds4_validate_run_options(args: &Args, explicit: ExplicitCliOptions) -> Result<Ds4RunOptions> {
+    validate_deepseek_v4_generation_mode(args, explicit)?;
+    ensure!(args.tokens > 0, "--tokens must be >= 1");
+    // The sidecar was preflighted with every other input before model open.
+    let prefill_chunk_tokens = deepseek_v4_prefill_chunk_tokens()?;
+    let prefetch_mode = configured_deepseek_v4_prefetch_mode()?;
+    let sampling = cli_sampling_config(args)?;
+    let arrival_ms = unix_epoch_ms()?;
+    Ok(Ds4RunOptions {
+        prefill_chunk_tokens,
+        prefetch_mode,
+        sampling,
+        arrival_ms,
+    })
+}
+
 struct Ds4PreparedTokens {
     required_forwards: usize,
     vocab_size: u32,
@@ -1052,7 +1085,7 @@ fn ds4_resolve_persistence_intent(
     Ok(persistence)
 }
 
-fn ds4_validate_stop_tokens(gguf: &GgufFile, vocab_size: u32) -> Result<(Vec<i32>, f64)> {
+fn ds4_validate_stop_tokens(gguf: &GgufFile, vocab_size: u32) -> Result<Ds4StopValidationOutcome> {
     let stop_validation_t0 = Instant::now();
     let stop_tokens = gguf
         .stop_token_ids()
@@ -1061,10 +1094,13 @@ fn ds4_validate_stop_tokens(gguf: &GgufFile, vocab_size: u32) -> Result<(Vec<i32
         checked_token_id(token, vocab_size, "stop")?;
     }
     let preparation_ms = stop_validation_t0.elapsed().as_secs_f64() * 1e3;
-    Ok((stop_tokens, preparation_ms))
+    Ok(Ds4StopValidationOutcome {
+        stop_tokens,
+        preparation_ms,
+    })
 }
 
-fn ds4_probe_store(intent: &Ds4PersistenceIntent) -> (Option<bool>, f64) {
+fn ds4_probe_store(intent: &Ds4PersistenceIntent) -> Ds4StoreProbeOutcome {
     // Probe store occupancy before resolving the strong model identity so an
     // empty store with no planned capture skips identity work entirely.
     let durable_probe_t0 = Instant::now();
@@ -1081,7 +1117,10 @@ fn ds4_probe_store(intent: &Ds4PersistenceIntent) -> (Option<bool>, f64) {
             }
         },
     };
-    (has_blobs, durable_probe_t0.elapsed().as_secs_f64() * 1e3)
+    Ds4StoreProbeOutcome {
+        has_blobs,
+        probe_ms: durable_probe_t0.elapsed().as_secs_f64() * 1e3,
+    }
 }
 
 fn ds4_resolve_persistence(
@@ -1695,7 +1734,7 @@ fn ds4_generate(
                     .forward_token(ctx, token)
                     .context("forward generated DeepSeek V4 token")?;
             }
-            copy_deepseek_v4_logits(&session, vocab_size, "continuing")
+            copy_deepseek_v4_logits(session, vocab_size, "continuing")
         },
     )?;
     let generator_return = Instant::now();
@@ -1819,6 +1858,146 @@ fn ds4_publish_after_generation(
     Ok(())
 }
 
+#[cfg(feature = "dsv4-diagnostics")]
+fn ds4_write_temporal_diagnostics(
+    temporal_capture: dsv4_temporal::TemporalCapture,
+    session: &DeepSeekV4Session,
+    args: &Args,
+    vocab_size: u32,
+) -> Result<()> {
+    if temporal_capture.requested_tokens() > 0 {
+        let mut report = temporal_capture.finish();
+        let final_logits = copy_deepseek_v4_logits(session, vocab_size, "temporal final")?;
+        let final_logits_sha256 =
+            hex_encode_bytes(&Sha256::digest(bytemuck::cast_slice(&final_logits)));
+        let final_causal_digest = if args.deepseek_v4_snapshot.is_some() {
+            let snapshot = session
+                .capture_causal_snapshot()
+                .context("capture final temporal DeepSeek V4 causal state")?;
+            Some(hex_encode_bytes(snapshot.causal_digest()))
+        } else {
+            None
+        };
+        report.attach_final_state(final_logits_sha256, final_causal_digest);
+        if let Some(path) = std::env::var_os(DEEPSEEK_V4_TEMPORAL_JSON_ENV) {
+            let path = PathBuf::from(path);
+            std::fs::write(
+                &path,
+                format!("{}\n", serde_json::to_string_pretty(&report)?),
+            )
+            .with_context(|| format!("write temporal report {}", path.display()))?;
+        }
+        eprintln!(
+            "deepseek_v4 temporal: {}",
+            serde_json::to_string(&report.summary())?
+        );
+    }
+    Ok(())
+}
+
+fn ds4_report_completion(
+    args: &Args,
+    selector_plan: &DeepSeekV4MultigroupSelectorPlan,
+    session: &DeepSeekV4Session,
+    generation: &GenerationResult,
+    prompt_kind: &'static str,
+    prefill_mode: &'static str,
+    prefill_chunk_tokens: usize,
+    prompt_len: usize,
+    tokenizer_ms: f64,
+    prefetch_outcome: &DeepSeekV4PrefetchOutcome,
+    load_ms: f64,
+    prefill_ms: f64,
+    arrival_ms: u128,
+    encode_ms: f64,
+    preparation_ms: f64,
+    prefill_t0: Instant,
+    generator_return: Instant,
+) -> Result<()> {
+    selector_plan.emit_completion("single_turn", session.multigroup_selector_telemetry())?;
+
+    let decode_tps = if generation.wall_ms > 0.0 {
+        generation.tokens.len() as f64 / (generation.wall_ms / 1e3)
+    } else {
+        0.0
+    };
+    let prefill_tps = if prefill_ms > 0.0 {
+        prompt_len as f64 / (prefill_ms / 1e3)
+    } else {
+        0.0
+    };
+    let transition_tps = if generation.transition_ms > 0.0 {
+        generation.transitions as f64 / (generation.transition_ms / 1e3)
+    } else {
+        0.0
+    };
+    let generated_ids_sha256 = generated_token_sha256(&generation.tokens);
+    eprintln!(
+        concat!(
+            "deepseek_v4 stats: prompt_kind={} prefill_mode={} prefill_chunk_cap={} prompt_tokens={} generated_tokens={} transitions={} ",
+            "stop_reason={} tokenizer_ms={:.1} prefetch_mode={} prefetch_ms={:.1} load_ms={:.1} prefill_ms={:.1} prefill_tps={:.2} ",
+            "generation_ms={:.1} decode_tps={:.2} transition_tps={:.2} build_commit={} build_dirty={} generated_ids_sha256={} ",
+            "weights_first_use=true"
+        ),
+        prompt_kind,
+        prefill_mode,
+        prefill_chunk_tokens,
+        prompt_len,
+        generation.tokens.len(),
+        generation.transitions,
+        generation.stop_reason.as_str(),
+        tokenizer_ms,
+        prefetch_outcome.mode.as_str(),
+        prefetch_outcome.wall_ms,
+        load_ms,
+        prefill_ms,
+        prefill_tps,
+        generation.wall_ms,
+        decode_tps,
+        transition_tps,
+        env!("QWEN_BUILD_COMMIT"),
+        env!("QWEN_BUILD_DIRTY"),
+        generated_ids_sha256,
+    );
+    if std::env::var_os("QWEN_DSV4_GENERATED_IDS").is_some() {
+        eprintln!("deepseek_v4 generated_ids: {:?}", generation.tokens);
+    }
+    if let Some(path) = args.trace_request.as_ref() {
+        append_request_trace(path, arrival_ms, prompt_len, generation.tokens.len())?;
+    }
+    if let Some(path) = args.request_stats_jsonl.as_ref() {
+        // Preparation sums prompt range/token checks and stop-token checks;
+        // execution includes snapshot restore/publication during prefill and
+        // ends at generator return.
+        let total_ms =
+            request_stats_total_ms(encode_ms, preparation_ms, prefill_t0, generator_return);
+        let measured = RequestStatsMeasured {
+            input_tokens: prompt_len as u64,
+            output_tokens: generation.tokens.len() as u64,
+            transitions: generation.transitions as u64,
+            stop_reason: generation.stop_reason,
+            tokenizer_ms: encode_ms,
+            load_ms,
+            prefill_ms,
+            prefill_tps,
+            decode_ms: generation.wall_ms,
+            decode_tps,
+            transition_tps,
+            total_ms,
+            output_fingerprint: GeneratedTokenSha256Digest::of(&generation.tokens),
+        };
+        let record = build_deepseek_v4_single_turn_stats_record(
+            &INVOCATION_ID,
+            prompt_kind,
+            prefill_mode,
+            prefill_chunk_tokens as u64,
+            &measured,
+        );
+        append_jsonl_record(path, &record, "request stats jsonl")?;
+    }
+    Ok(())
+}
+
 pub(crate) fn run_deepseek_v4_single_turn(
     model_path: &Path,
     gguf: GgufFile,
@@ -1826,13 +2005,13 @@ pub(crate) fn run_deepseek_v4_single_turn(
     explicit: ExplicitCliOptions,
     staged_integrity: Option<StagedIntegrityMode>,
 ) -> Result<()> {
-    validate_deepseek_v4_generation_mode(args, explicit)?;
-    ensure!(args.tokens > 0, "--tokens must be >= 1");
-    // The sidecar was preflighted with every other input before model open.
-    let prefill_chunk_tokens = deepseek_v4_prefill_chunk_tokens()?;
-    let prefetch_mode = configured_deepseek_v4_prefetch_mode()?;
-    let sampling = cli_sampling_config(args)?;
-    let arrival_ms = unix_epoch_ms()?;
+    let options = ds4_validate_run_options(args, explicit)?;
+    let Ds4RunOptions {
+        prefill_chunk_tokens,
+        prefetch_mode,
+        sampling,
+        arrival_ms,
+    } = options;
     let encoded = ds4_encode_input(&gguf, args)?;
     let prompt_kind = encoded.prompt_kind;
     let durable_completed_eligible = encoded.completed_eligible;
@@ -1853,16 +2032,17 @@ pub(crate) fn run_deepseek_v4_single_turn(
         required_forwards,
         durable_completed_eligible,
     )?;
-    let (stop_tokens, stop_validation_ms) = ds4_validate_stop_tokens(&gguf, vocab_size)?;
-    preparation_ms += stop_validation_ms;
-    let (durable_has_blobs, durable_probe_ms) = ds4_probe_store(&persistence_intent);
+    let stop_validation = ds4_validate_stop_tokens(&gguf, vocab_size)?;
+    preparation_ms += stop_validation.preparation_ms;
+    let stop_tokens = stop_validation.stop_tokens;
+    let store_probe = ds4_probe_store(&persistence_intent);
     let persistence = ds4_resolve_persistence(
         persistence_intent,
         &gguf,
         &prompt_token_ids,
         required_forwards,
-        durable_has_blobs,
-        durable_probe_ms,
+        store_probe.has_blobs,
+        store_probe.probe_ms,
     )?;
     let loaded = ds4_load_session(
         model_path,
@@ -1933,114 +2113,26 @@ pub(crate) fn run_deepseek_v4_single_turn(
         durable_restore_ms,
     )?;
     #[cfg(feature = "dsv4-diagnostics")]
-    if temporal_capture.requested_tokens() > 0 {
-        let mut report = temporal_capture.finish();
-        let final_logits = copy_deepseek_v4_logits(&session, vocab_size, "temporal final")?;
-        let final_logits_sha256 =
-            hex_encode_bytes(&Sha256::digest(bytemuck::cast_slice(&final_logits)));
-        let final_causal_digest = if args.deepseek_v4_snapshot.is_some() {
-            let snapshot = session
-                .capture_causal_snapshot()
-                .context("capture final temporal DeepSeek V4 causal state")?;
-            Some(hex_encode_bytes(snapshot.causal_digest()))
-        } else {
-            None
-        };
-        report.attach_final_state(final_logits_sha256, final_causal_digest);
-        if let Some(path) = std::env::var_os(DEEPSEEK_V4_TEMPORAL_JSON_ENV) {
-            let path = PathBuf::from(path);
-            std::fs::write(
-                &path,
-                format!("{}\n", serde_json::to_string_pretty(&report)?),
-            )
-            .with_context(|| format!("write temporal report {}", path.display()))?;
-        }
-        eprintln!(
-            "deepseek_v4 temporal: {}",
-            serde_json::to_string(&report.summary())?
-        );
-    }
-    selector_plan.emit_completion("single_turn", session.multigroup_selector_telemetry())?;
-
-    let decode_tps = if generation.wall_ms > 0.0 {
-        generation.tokens.len() as f64 / (generation.wall_ms / 1e3)
-    } else {
-        0.0
-    };
-    let prefill_tps = if prefill_ms > 0.0 {
-        prompt_ids.len() as f64 / (prefill_ms / 1e3)
-    } else {
-        0.0
-    };
-    let transition_tps = if generation.transition_ms > 0.0 {
-        generation.transitions as f64 / (generation.transition_ms / 1e3)
-    } else {
-        0.0
-    };
-    let generated_ids_sha256 = generated_token_sha256(&generation.tokens);
-    eprintln!(
-        concat!(
-            "deepseek_v4 stats: prompt_kind={} prefill_mode={} prefill_chunk_cap={} prompt_tokens={} generated_tokens={} transitions={} ",
-            "stop_reason={} tokenizer_ms={:.1} prefetch_mode={} prefetch_ms={:.1} load_ms={:.1} prefill_ms={:.1} prefill_tps={:.2} ",
-            "generation_ms={:.1} decode_tps={:.2} transition_tps={:.2} build_commit={} build_dirty={} generated_ids_sha256={} ",
-            "weights_first_use=true"
-        ),
+    ds4_write_temporal_diagnostics(temporal_capture, &session, args, vocab_size)?;
+    ds4_report_completion(
+        args,
+        &selector_plan,
+        &session,
+        &generation,
         prompt_kind,
         prefill_mode,
         prefill_chunk_tokens,
         prompt_ids.len(),
-        generation.tokens.len(),
-        generation.transitions,
-        generation.stop_reason.as_str(),
         tokenizer_ms,
-        prefetch_outcome.mode.as_str(),
-        prefetch_outcome.wall_ms,
+        &prefetch_outcome,
         load_ms,
         prefill_ms,
-        prefill_tps,
-        generation.wall_ms,
-        decode_tps,
-        transition_tps,
-        env!("QWEN_BUILD_COMMIT"),
-        env!("QWEN_BUILD_DIRTY"),
-        generated_ids_sha256,
-    );
-    if std::env::var_os("QWEN_DSV4_GENERATED_IDS").is_some() {
-        eprintln!("deepseek_v4 generated_ids: {:?}", generation.tokens);
-    }
-    if let Some(path) = args.trace_request.as_ref() {
-        append_request_trace(path, arrival_ms, prompt_ids.len(), generation.tokens.len())?;
-    }
-    if let Some(path) = args.request_stats_jsonl.as_ref() {
-        // Preparation sums prompt range/token checks and stop-token checks;
-        // execution includes snapshot restore/publication during prefill and
-        // ends at generator return.
-        let total_ms =
-            request_stats_total_ms(encode_ms, preparation_ms, prefill_t0, generator_return);
-        let measured = RequestStatsMeasured {
-            input_tokens: prompt_ids.len() as u64,
-            output_tokens: generation.tokens.len() as u64,
-            transitions: generation.transitions as u64,
-            stop_reason: generation.stop_reason,
-            tokenizer_ms: encode_ms,
-            load_ms,
-            prefill_ms,
-            prefill_tps,
-            decode_ms: generation.wall_ms,
-            decode_tps,
-            transition_tps,
-            total_ms,
-            output_fingerprint: GeneratedTokenSha256Digest::of(&generation.tokens),
-        };
-        let record = build_deepseek_v4_single_turn_stats_record(
-            &INVOCATION_ID,
-            prompt_kind,
-            prefill_mode,
-            prefill_chunk_tokens as u64,
-            &measured,
-        );
-        append_jsonl_record(path, &record, "request stats jsonl")?;
-    }
+        arrival_ms,
+        encode_ms,
+        preparation_ms,
+        prefill_t0,
+        generator_return,
+    )?;
     Ok(())
 }
 

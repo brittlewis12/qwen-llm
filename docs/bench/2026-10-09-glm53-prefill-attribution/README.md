@@ -84,8 +84,14 @@ Fixed chunk size, A-B-B-A twice:
 | 512 rows | 10,115 ms | 9,954 ms (-1.6%, within the walls' spread) | 1,447 -> 1,394 ms (-3.6%) |
 | 2,048 rows | 8,707 ms | 8,342 ms (-4.2%, spread +-0.3%) | 4,380 -> 4,097 ms (-6.5%) |
 
-Outputs are unchanged, so it is now the default for GLM's half-staged
-grouped path. Together with 2,048-row chunks, a fresh 2,048-token prompt
+A rerun after the review fixes (`640ebebe`, the JSON here) gave 10,348 ->
+10,099 ms at 512 rows (noisy) and 8,689 -> 8,331 ms at 2,048 rows (-4.1%),
+and short suffixes at 512-row chunks show no regression (bitwise equal;
+spans below 17 take the 16-token path alone): 8 tokens 232.5 vs 231.1 ms,
+17 tokens 383.9 vs 384.9, 64 tokens 732.0 vs 735.4, 128 tokens 1,066.4 vs
+1,065.6. Outputs are unchanged, so it is now the default for GLM's
+half-staged grouped path; the benefit at the default 512-row chunks is
+small and uncertain, the benefit at 2,048 rows clear. Together with 2,048-row chunks, a fresh 2,048-token prompt
 takes 8.3 s instead of 10.1 s (+21% throughput); the chunk-size default
 itself stays at 512 until its served-schedule quality, snapshot/admission
 tradeoff and router/SmallCounts dispatch witnesses are in.

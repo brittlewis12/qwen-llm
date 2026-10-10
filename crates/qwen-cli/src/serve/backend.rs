@@ -210,6 +210,22 @@ impl DflashPrefixReplayCache {
     }
 }
 
+struct PreparedRequestFront {
+    cpu_reserved: u64,
+    needs_scratch: bool,
+    dense: bool,
+    chunk: usize,
+    scratch: Option<MetalDFlashLayerMajorScratch>,
+    sequence: Sequence,
+    prefill_path: &'static str,
+    alloc_ms: f64,
+    restore_ms: f64,
+    restore: Option<qwen_llm::runtime::PrefixCacheRestore>,
+    matched_tokens: usize,
+    restored_prefix_len: usize,
+    prompt_logits: Option<Vec<f32>>,
+}
+
 pub(crate) struct EngineBackend {
     loaded: LoadedModel,
     tokenizer: std::sync::Arc<Tokenizer>,
@@ -1030,6 +1046,256 @@ fn prefill_remaining(
 }
 
 impl EngineBackend {
+    fn prepare_request_front(
+        &mut self,
+        prompt_ids: &[i32],
+        capacity: usize,
+        greedy: bool,
+        transport_reserve_bytes: u64,
+    ) -> Result<PreparedRequestFront, BackendFailure> {
+        let restore_t0 = Instant::now();
+        // Queue anything released since the last idle tick, then let a
+        // longer durable prefix (if any) enter RAM so the single cached
+        // lookup below restores it like any RAM hit.
+        self.drain_spills();
+        let promoted = self.promote_durable_prefix(prompt_ids);
+        let cached_lookup = self.loaded.lookup_cached_prefix(prompt_ids);
+        // Promotion and the lookup's expiry sweep can both release entries;
+        // queue them before admission so pressure relief is not blind to them.
+        self.drain_spills();
+        self.restore_source = restore_source(
+            cached_lookup
+                .as_ref()
+                .map(|lookup| lookup.matched_prefix_len()),
+            promoted,
+        );
+        // `restore_ms` is lookup (including any disk promotion) plus the
+        // restore copy; admission and allocation are reported separately.
+        let lookup_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
+        let exact_cached = cached_lookup
+            .as_ref()
+            .is_some_and(|lookup| lookup.is_exact_with_final_logits());
+        let dense = self.loaded.arch().kind == qwen_llm::model::ArchKind::Dense;
+        let serial_tail_max = serial_tail_max(self.loaded.arch().kind);
+        let needs_scratch = needs_prefill_scratch(
+            serial_tail_max,
+            prompt_ids.len(),
+            cached_lookup
+                .as_ref()
+                .map_or(0, |lookup| lookup.restored_prefix_len()),
+            exact_cached,
+        );
+        // The retained lookup pins the restore boundary through allocation.
+        // Packed execution still admits its complete fallback topology.
+        let prefill_scratch_upper_bytes = if !needs_scratch {
+            0
+        } else {
+            let legacy_chunk = crate::baseline_prefill_chunk(prompt_ids.len());
+            let legacy_plan = plan_prefill_scratch_with_matrix_max_pos_configured(
+                self.loaded.metal_model(),
+                u32::try_from(legacy_chunk)
+                    .map_err(|_| ServeError::server_error("prefill chunk does not fit u32"))?,
+                prompt_ids.len().max(legacy_chunk),
+                PrefillScratchConfig::default(),
+            )
+            .map_err(|error| ServeError::server_error(format!("plan prefill memory: {error}")))?;
+            legacy_plan
+                .priced_upper_bound(|logical_bytes| {
+                    Ok(self
+                        .loaded
+                        .context()
+                        .shared_buffer_size_and_align(logical_bytes)?
+                        .size)
+                })
+                .map_err(|error| {
+                    ServeError::server_error(format!("price prefill memory: {error}"))
+                })?
+        };
+        let packed_width = fresh_packed_width(
+            fresh_packed_enabled(std::env::var_os("QWEN_SERVE_FRESH_PACKED").as_deref()),
+            fresh_packed_arch(
+                &self.loaded.arch(),
+                self.template,
+                self.loaded.metal_model().lm_head.dtype,
+            ),
+            self.dflash_head.is_some(),
+            greedy,
+            cached_lookup.is_some(),
+            prompt_ids.len(),
+        )
+        .or_else(|| {
+            restored_packed_tail_width(
+                bounded_packed_dense_arch(&self.loaded.arch()),
+                self.dflash_head.is_some(),
+                prompt_ids.len(),
+                cached_lookup
+                    .as_ref()
+                    .map_or(0, |lookup| lookup.restored_prefix_len()),
+                exact_cached,
+            )
+        });
+        let packed_tail_plan = packed_width.and_then(|width| {
+            let plan = qwen_llm::metal_dflash::plan_single_chunk_prefill_scratch(
+                self.loaded.metal_model(),
+                width as u32,
+                prompt_ids.len(),
+                PrefillScratchConfig::default(),
+            )
+            .ok()?;
+            if plan.matrix_max_pos() < prompt_ids.len() as u64 {
+                return None;
+            }
+            let price = plan
+                .priced_upper_bound(|bytes| {
+                    Ok(self
+                        .loaded
+                        .context()
+                        .shared_buffer_size_and_align(bytes)?
+                        .size)
+                })
+                .ok()?;
+            (price <= RESTORED_TAIL_SCRATCH_LIMIT).then_some((plan, price))
+        });
+        // Durable writes queued or running hold a decoded copy of their
+        // snapshot that the memory signals may not show yet.
+        let cpu_reserved = super::transport_memory::combined_reserve(
+            self.durable_reserved_bytes(),
+            transport_reserve_bytes,
+        )?;
+        let (packed_tail_plan, admission) = admit_with_pressure_relief(
+            packed_tail_plan,
+            prefill_scratch_upper_bytes,
+            cpu_reserved,
+            |price, reserved| {
+                self.loaded
+                    .qwen_execution_memory_admission_with_additional_bytes(
+                        1,
+                        capacity,
+                        price,
+                        0,
+                        reserved,
+                    )
+            },
+            |deficit| {
+                // Keep the restore entry pinned while releasing disposable
+                // snapshots, then retry with the same complete CPU reservation.
+                let keep = cached_lookup
+                    .as_ref()
+                    .and_then(|lookup| self.loaded.pin_prepared_lookup(lookup));
+                let evicted = self.loaded.evict_prefix_cache_for(deficit);
+                if let Some(entry) = keep {
+                    self.loaded.unpin_prefix_cache_entry(entry);
+                }
+                if evicted.is_empty() {
+                    false
+                } else {
+                    tracing::info!(
+                        target: "qwen_diag",
+                        "serve: snapshot cache evicted for request admission; entries={} freed_bytes={} deficit_bytes={deficit}",
+                        evicted.ids.len(),
+                        evicted.bytes,
+                    );
+                    true
+                }
+            },
+        )
+        .map_err(|error| {
+            ServeError::server_error(format!("price request memory: {error:#}"))
+        })?;
+        // Pressure is 503; telemetry and size refusals are 500 with their
+        // own codes (one table across lanes, `transport_memory`).
+        if let Some(denied) = admission.refusal() {
+            return Err(super::transport_memory::memory_refusal("request memory", &denied).into());
+        }
+
+        let alloc_t0 = Instant::now();
+        let allocation = allocate_optional_tail(
+            packed_tail_plan,
+            |plan| {
+                allocate_single_chunk_request_state(&self.loaded, capacity, plan)
+                .inspect_err(|error| {
+                    tracing::warn!("serve: single-chunk tail allocation failed; retaining serial prefill: {error:#}");
+                })
+            },
+            || {
+                allocate_serve_request_state(
+                    &self.loaded,
+                    prompt_ids.len(),
+                    capacity,
+                    needs_scratch,
+                )
+            },
+        );
+        let (chunk, scratch, mut sequence) = allocation.map_err(|error| {
+            ServeError::server_error(format!("allocate request state: {error:#}"))
+        })?;
+        // Which prefill path the remainder takes, for the phases line: a slow
+        // path is never silent.
+        let prefill_path = if exact_cached {
+            "exact"
+        } else if scratch
+            .as_ref()
+            .is_some_and(|s| s.prefill_scratch_plan().is_single_chunk())
+        {
+            "single_chunk"
+        } else if scratch.is_none() {
+            "serial_tail"
+        } else {
+            "chunked"
+        };
+        if let Some(selected_scratch) = scratch
+            .as_ref()
+            .filter(|s| s.prefill_scratch_plan().is_single_chunk())
+        {
+            if cached_lookup.is_none() {
+                let plan = selected_scratch.prefill_scratch_plan();
+                tracing::info!(target: "qwen_diag", "serve prefill: fresh_packed rows={chunk} query_rows={} matrix_max_pos={}", plan.matrix_query_rows(), plan.matrix_max_pos());
+            } else {
+                tracing::info!(target: "qwen_diag", "serve prefill: restored_packed_tail rows={chunk}");
+            }
+        }
+        let alloc_ms = alloc_t0.elapsed().as_secs_f64() * 1e3;
+
+        // RAM prefix cache restore (dual-boundary entries from prior turns).
+        let restore_copy_t0 = Instant::now();
+        let restore = cached_lookup
+            .map(|lookup| {
+                self.loaded
+                    .restore_prepared_cached_prefix(lookup, &mut sequence, prompt_ids)
+            })
+            .transpose()
+            .map_err(|error| ServeError::server_error(format!("prefix restore: {error:#}")))?;
+        let restore_ms = lookup_ms + restore_copy_t0.elapsed().as_secs_f64() * 1e3;
+        let matched_tokens = restore
+            .as_ref()
+            .map_or(0, |restore| restore.matched_prefix_len);
+        let prompt_logits = restore
+            .as_ref()
+            .filter(|restore| restore.exact)
+            .and_then(|restore| restore.exact_final_logits.clone());
+        let restored_prefix_len = restore
+            .as_ref()
+            .map_or(0, |restore| restore.restored_prefix_len);
+
+        Ok(PreparedRequestFront {
+            cpu_reserved,
+            needs_scratch,
+            dense,
+            chunk,
+            scratch,
+            sequence,
+            prefill_path,
+            alloc_ms,
+            restore_ms,
+            restore,
+            matched_tokens,
+            restored_prefix_len,
+            prompt_logits,
+        })
+    }
+}
+
+impl EngineBackend {
     /// The limits ceilings and generation both resolve against.
     fn output_limits(&self) -> crate::serve::request_profile::OutputLimits {
         crate::serve::request_profile::OutputLimits {
@@ -1210,227 +1476,26 @@ impl GenerationBackend for EngineBackend {
             )
         })?;
 
-        let restore_t0 = Instant::now();
-        // Queue anything released since the last idle tick, then let a
-        // longer durable prefix (if any) enter RAM so the single cached
-        // lookup below restores it like any RAM hit.
-        self.drain_spills();
-        let promoted = self.promote_durable_prefix(&prompt_ids);
-        let cached_lookup = self.loaded.lookup_cached_prefix(&prompt_ids);
-        // Promotion and the lookup's expiry sweep can both release entries;
-        // queue them before admission so pressure relief is not blind to them.
-        self.drain_spills();
-        self.restore_source = restore_source(
-            cached_lookup
-                .as_ref()
-                .map(|lookup| lookup.matched_prefix_len()),
-            promoted,
-        );
-        // `restore_ms` is lookup (including any disk promotion) plus the
-        // restore copy; admission and allocation are reported separately.
-        let lookup_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
-        let exact_cached = cached_lookup
-            .as_ref()
-            .is_some_and(|lookup| lookup.is_exact_with_final_logits());
-        let dense = self.loaded.arch().kind == qwen_llm::model::ArchKind::Dense;
-        let serial_tail_max = serial_tail_max(self.loaded.arch().kind);
-        let needs_scratch = needs_prefill_scratch(
-            serial_tail_max,
-            prompt_ids.len(),
-            cached_lookup
-                .as_ref()
-                .map_or(0, |lookup| lookup.restored_prefix_len()),
-            exact_cached,
-        );
-        // The retained lookup pins the restore boundary through allocation.
-        // Packed execution still admits its complete fallback topology.
-        let prefill_scratch_upper_bytes = if !needs_scratch {
-            0
-        } else {
-            let legacy_chunk = crate::baseline_prefill_chunk(prompt_ids.len());
-            let legacy_plan = plan_prefill_scratch_with_matrix_max_pos_configured(
-                self.loaded.metal_model(),
-                u32::try_from(legacy_chunk)
-                    .map_err(|_| ServeError::server_error("prefill chunk does not fit u32"))?,
-                prompt_ids.len().max(legacy_chunk),
-                PrefillScratchConfig::default(),
-            )
-            .map_err(|error| ServeError::server_error(format!("plan prefill memory: {error}")))?;
-            legacy_plan
-                .priced_upper_bound(|logical_bytes| {
-                    Ok(self
-                        .loaded
-                        .context()
-                        .shared_buffer_size_and_align(logical_bytes)?
-                        .size)
-                })
-                .map_err(|error| {
-                    ServeError::server_error(format!("price prefill memory: {error}"))
-                })?
-        };
-        let packed_width = fresh_packed_width(
-            fresh_packed_enabled(std::env::var_os("QWEN_SERVE_FRESH_PACKED").as_deref()),
-            fresh_packed_arch(
-                &self.loaded.arch(),
-                self.template,
-                self.loaded.metal_model().lm_head.dtype,
-            ),
-            self.dflash_head.is_some(),
+        let front = self.prepare_request_front(
+            &prompt_ids,
+            capacity,
             sampler.config().temperature == 0.0,
-            cached_lookup.is_some(),
-            prompt_ids.len(),
-        )
-        .or_else(|| {
-            restored_packed_tail_width(
-                bounded_packed_dense_arch(&self.loaded.arch()),
-                self.dflash_head.is_some(),
-                prompt_ids.len(),
-                cached_lookup
-                    .as_ref()
-                    .map_or(0, |lookup| lookup.restored_prefix_len()),
-                exact_cached,
-            )
-        });
-        let packed_tail_plan = packed_width.and_then(|width| {
-            let plan = qwen_llm::metal_dflash::plan_single_chunk_prefill_scratch(
-                self.loaded.metal_model(),
-                width as u32,
-                prompt_ids.len(),
-                PrefillScratchConfig::default(),
-            )
-            .ok()?;
-            if plan.matrix_max_pos() < prompt_ids.len() as u64 {
-                return None;
-            }
-            let price = plan
-                .priced_upper_bound(|bytes| {
-                    Ok(self
-                        .loaded
-                        .context()
-                        .shared_buffer_size_and_align(bytes)?
-                        .size)
-                })
-                .ok()?;
-            (price <= RESTORED_TAIL_SCRATCH_LIMIT).then_some((plan, price))
-        });
-        // Durable writes queued or running hold a decoded copy of their
-        // snapshot that the memory signals may not show yet.
-        let cpu_reserved = super::transport_memory::combined_reserve(
-            self.durable_reserved_bytes(),
             sink.transport_reserve_bytes(),
         )?;
-        let (packed_tail_plan, admission) = admit_with_pressure_relief(
-            packed_tail_plan,
-            prefill_scratch_upper_bytes,
-            cpu_reserved,
-            |price, reserved| {
-                self.loaded
-                    .qwen_execution_memory_admission_with_additional_bytes(
-                        1,
-                        capacity,
-                        price,
-                        0,
-                        reserved,
-                    )
-            },
-            |deficit| {
-                // Keep the restore entry pinned while releasing disposable
-                // snapshots, then retry with the same complete CPU reservation.
-                let keep = cached_lookup
-                    .as_ref()
-                    .and_then(|lookup| self.loaded.pin_prepared_lookup(lookup));
-                let evicted = self.loaded.evict_prefix_cache_for(deficit);
-                if let Some(entry) = keep {
-                    self.loaded.unpin_prefix_cache_entry(entry);
-                }
-                if evicted.is_empty() {
-                    false
-                } else {
-                    tracing::info!(
-                        target: "qwen_diag",
-                        "serve: snapshot cache evicted for request admission; entries={} freed_bytes={} deficit_bytes={deficit}",
-                        evicted.ids.len(),
-                        evicted.bytes,
-                    );
-                    true
-                }
-            },
-        )
-        .map_err(|error| {
-            ServeError::server_error(format!("price request memory: {error:#}"))
-        })?;
-        // Pressure is 503; telemetry and size refusals are 500 with their
-        // own codes (one table across lanes, `transport_memory`).
-        if let Some(denied) = admission.refusal() {
-            return Err(super::transport_memory::memory_refusal("request memory", &denied).into());
-        }
-
-        let alloc_t0 = Instant::now();
-        let allocation = allocate_optional_tail(
-            packed_tail_plan,
-            |plan| {
-                allocate_single_chunk_request_state(&self.loaded, capacity, plan)
-                .inspect_err(|error| {
-                    tracing::warn!("serve: single-chunk tail allocation failed; retaining serial prefill: {error:#}");
-                })
-            },
-            || {
-                allocate_serve_request_state(
-                    &self.loaded,
-                    prompt_ids.len(),
-                    capacity,
-                    needs_scratch,
-                )
-            },
-        );
-        let (mut chunk, mut scratch, mut sequence) = allocation.map_err(|error| {
-            ServeError::server_error(format!("allocate request state: {error:#}"))
-        })?;
-        // Which prefill path the remainder takes, for the phases line: a slow
-        // path is never silent.
-        let prefill_path = if exact_cached {
-            "exact"
-        } else if scratch
-            .as_ref()
-            .is_some_and(|s| s.prefill_scratch_plan().is_single_chunk())
-        {
-            "single_chunk"
-        } else if scratch.is_none() {
-            "serial_tail"
-        } else {
-            "chunked"
-        };
-        if let Some(selected_scratch) = scratch
-            .as_ref()
-            .filter(|s| s.prefill_scratch_plan().is_single_chunk())
-        {
-            if cached_lookup.is_none() {
-                let plan = selected_scratch.prefill_scratch_plan();
-                tracing::info!(target: "qwen_diag", "serve prefill: fresh_packed rows={chunk} query_rows={} matrix_max_pos={}", plan.matrix_query_rows(), plan.matrix_max_pos());
-            } else {
-                tracing::info!(target: "qwen_diag", "serve prefill: restored_packed_tail rows={chunk}");
-            }
-        }
-        let mut alloc_ms = alloc_t0.elapsed().as_secs_f64() * 1e3;
+        let cpu_reserved = front.cpu_reserved;
+        let needs_scratch = front.needs_scratch;
+        let dense = front.dense;
+        let mut chunk = front.chunk;
+        let mut scratch = front.scratch;
+        let mut sequence = front.sequence;
+        let prefill_path = front.prefill_path;
+        let mut alloc_ms = front.alloc_ms;
+        let restore_ms = front.restore_ms;
+        let restore = front.restore;
+        let matched_tokens = front.matched_tokens;
+        let restored_prefix_len = front.restored_prefix_len;
+        let mut prompt_logits = front.prompt_logits;
         let forward = self.loaded.forward();
-
-        // RAM prefix cache restore (dual-boundary entries from prior turns).
-        let restore_copy_t0 = Instant::now();
-        let restore = cached_lookup
-            .map(|lookup| {
-                self.loaded
-                    .restore_prepared_cached_prefix(lookup, &mut sequence, &prompt_ids)
-            })
-            .transpose()
-            .map_err(|error| ServeError::server_error(format!("prefix restore: {error:#}")))?;
-        let restore_ms = lookup_ms + restore_copy_t0.elapsed().as_secs_f64() * 1e3;
-        let matched_tokens = restore
-            .as_ref()
-            .map_or(0, |restore| restore.matched_prefix_len);
-        let mut prompt_logits = restore
-            .as_ref()
-            .filter(|restore| restore.exact)
-            .and_then(|restore| restore.exact_final_logits.clone());
 
         // Windowed capture window for dense requests with a drafter head.
         // Doubles as (a) the drafter seed source on speculative requests and
@@ -1441,9 +1506,6 @@ impl GenerationBackend for EngineBackend {
         let restore_tail = restore
             .as_ref()
             .and_then(|restore| restore.capture_tail.clone());
-        let restored_prefix_len = restore
-            .as_ref()
-            .map_or(0, |restore| restore.restored_prefix_len);
         // Transcript-boundary split point (see `transcript_boundary`). A
         // drafter-capturing request takes it too: its capture window starts
         // `capture_ext` columns early so it also holds the window ending at
@@ -3042,28 +3104,30 @@ mod tests {
             .cache_prepared_checkpoint_strict(&checkpoint)
             .unwrap()
             .expect("cache insertion");
+        let family = qwen_llm::model_family::ModelFamily::detect(loaded.gguf()).unwrap();
+        let template = crate::prompt_template::serve_qwen_template(family, loaded.gguf()).unwrap();
+        let no_thinking = crate::supports_qwen_no_thinking_prompt(family, loaded.gguf());
+        let mut backend = EngineBackend::new(
+            loaded,
+            "front-helper-test".into(),
+            4,
+            Some(64),
+            64,
+            None,
+            template,
+            no_thinking,
+        )
+        .unwrap();
         // Restored at 8: remainders 1 and 12 stay serial, 13 is chunked.
         for length in [9, 20, 21] {
-            let lookup = loaded
-                .lookup_cached_prefix(&prompt[..length])
-                .expect("pending-token lookup");
-            assert_eq!(lookup.restored_prefix_len(), 8);
-            assert!(!lookup.is_exact_with_final_logits());
-            let needs_scratch = needs_prefill_scratch(
-                serial_tail_max(qwen_llm::model::ArchKind::Dense),
-                length,
-                lookup.restored_prefix_len(),
-                lookup.is_exact_with_final_logits(),
-            );
-            assert_eq!(needs_scratch, length == 21);
-            let (_, scratch, mut restored) =
-                allocate_serve_request_state(&loaded, length, 64, needs_scratch).unwrap();
-            assert_eq!(scratch.is_some(), length == 21);
-            let report = loaded
-                .restore_prepared_cached_prefix(lookup, &mut restored, &prompt[..length])
-                .unwrap();
-            assert_eq!(report.matched_prefix_len, 9);
-            assert_eq!(restored.position(), 8);
+            let front = backend
+                .prepare_request_front(&prompt[..length], 64, true, 0)
+                .unwrap_or_else(|_| panic!("front preparation length={length}"));
+            assert_eq!(front.needs_scratch, length == 21);
+            assert_eq!(front.scratch.is_some(), length == 21);
+            assert_eq!(front.matched_tokens, 9);
+            assert_eq!(front.restored_prefix_len, 8);
+            assert_eq!(front.sequence.position(), 8);
         }
     }
 
@@ -3074,6 +3138,88 @@ mod tests {
             ..ServeRequest::default()
         };
         assert!(request_sampler(&request).is_err());
+    }
+
+    #[test]
+    #[ignore = "loads a local model and runs Metal work"]
+    fn generate_restores_exact_prompt_logits() {
+        #[derive(Default)]
+        struct Sink(Vec<u8>);
+        impl GenerationSink for Sink {
+            fn piece(&mut self, bytes: &[u8]) -> io::Result<()> {
+                self.0.extend_from_slice(bytes);
+                Ok(())
+            }
+            fn tick(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let model = std::env::var("QWEN_NO_TAIL_TEST_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf".into());
+        let runtime = qwen_llm::runtime::Runtime::metal().unwrap();
+        let loaded = runtime.load_model(&model).unwrap();
+        let family = qwen_llm::model_family::ModelFamily::detect(loaded.gguf()).unwrap();
+        let template = crate::prompt_template::serve_qwen_template(family, loaded.gguf()).unwrap();
+        let no_thinking = crate::supports_qwen_no_thinking_prompt(family, loaded.gguf());
+        let mut backend = EngineBackend::new(
+            loaded,
+            "exact-logits-test".into(),
+            2,
+            Some(128),
+            128,
+            None,
+            template,
+            no_thinking,
+        )
+        .unwrap();
+        let request = crate::open_responses::items::parse_request(&serde_json::json!({
+            "model":"exact-logits-test", "input":"Exact restore",
+            "temperature":0.0, "max_output_tokens":2,
+        }))
+        .unwrap();
+        let prompt = "Exact restore";
+        let prompt_ids = backend.tokenizer.encode(prompt, false).unwrap();
+        let mut cold = Sink::default();
+        backend.generate(&request, prompt, &mut cold).unwrap();
+
+        let mut sequence = backend
+            .loaded
+            .create_sequence(SequenceConfig::new(128))
+            .unwrap();
+        let forward = backend.loaded.forward();
+        let mut logits = Vec::new();
+        for (position, &token) in prompt_ids.iter().enumerate() {
+            logits = forward
+                .single_token(token, position as u32, unsafe {
+                    sequence.metal_session_mut()
+                })
+                .unwrap();
+            sequence.advance_by(1).unwrap();
+        }
+        let checkpoint = backend
+            .loaded
+            .prepare_checkpoint_boundary(&sequence, prompt_ids.clone(), None, Some(logits), None, 0)
+            .unwrap();
+        backend
+            .loaded
+            .cache_prepared_checkpoint_strict(&checkpoint)
+            .unwrap()
+            .expect("exact prompt checkpoint insertion");
+
+        {
+            let front = backend
+                .prepare_request_front(&prompt_ids, 128, true, 0)
+                .unwrap();
+            assert_eq!(front.prefill_path, "exact");
+            assert_eq!(front.matched_tokens, prompt_ids.len());
+            assert!(front.prompt_logits.is_some());
+        }
+
+        let mut warm = Sink::default();
+        let outcome = backend.generate(&request, prompt, &mut warm).unwrap();
+        assert_eq!(warm.0, cold.0);
+        assert_eq!(outcome.usage.cached_tokens, prompt_ids.len());
     }
 
     #[test]

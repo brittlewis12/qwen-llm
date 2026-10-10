@@ -154,6 +154,9 @@ pub(crate) struct FlashNextBackend {
     idle_residency: super::idle_residency::IdleResidency,
 }
 
+#[cfg(test)]
+mod tests;
+
 impl FlashNextBackend {
     /// Keep the no-copy Metal weights wired for `window` after each request
     /// (the CPU-read PLE table stays in the page cache, outside the pulse).

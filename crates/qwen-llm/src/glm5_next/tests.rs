@@ -740,4 +740,3 @@ fn packed_activation_rows_back_padded_reads_from_any_start() {
     }
     assert_eq!(memory::packed_activation_rows(512), 544);
 }
-

@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-09 - GLM Prefill Is 61% Routed Experts; 2,048-Row Chunks Read Prompts 14-16% Faster
+
+- **Profiler:** `Glm5NextSession::prefill_chunk_stage_profiled` times one
+  packed chunk per stage per block (sampled encoders; logits bitwise equal
+  to an unprofiled chunk). Packet: `docs/bench/2026-10-09-glm53-prefill-attribution/`.
+- **Where prefill goes** (512-row chunk, Fast half): routed experts 61% at
+  depth 0 (1.37 s per chunk, ~2.7 ms/token), KDA 22%, MLA 7% rising to 18%
+  at depth 4,096, shared expert 4%, mHC 3%. Each expert sees ~14 tokens per
+  512-row chunk.
+- **Chunk size:** fresh 2,048/4,096-token prompts at 512 / 1,024 / 2,048
+  rows: 194 / 206 / 221 and 193 / 209 / 224 tok/s (+14-16% at 2,048 rows)
+  for 0.60 / 1.17 / 2.30 GiB of packed scratch.
+- **Decode experts** (10 of 30.5 ms/token): codebooks in threadgroup memory
+  (10% slower) and a register epilogue (no change) were both falsified,
+  bitwise equal, and not kept.
+- **Next:** wider grouped gate/up token tiles for large buckets (the
+  16-token tile re-dequantizes per 16 tokens), with larger chunks.
+
 ## 2026-10-09 - #12 Narrow F32 Kernels Recover About Half the One-Token F32 Penalty, Bitwise Equal to the Wide Tiles
 
 - **What** (`docs/bench/2026-10-09-glm53-fast-f32-operands/`, "Short

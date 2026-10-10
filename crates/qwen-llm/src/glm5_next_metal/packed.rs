@@ -671,6 +671,11 @@ fn take_rows(b: &mut SpecBuffers, name: &str, rows: usize) -> Result<MetalTensor
 }
 
 impl PackedScratch {
+    /// The most tokens one packed chunk holds.
+    pub(super) fn rows(&self) -> usize {
+        self.rows
+    }
+
     /// This scratch's chunk arithmetic.
     pub(super) fn arith(&self) -> Arith {
         Arith {
@@ -1148,7 +1153,8 @@ impl Glm5NextSession<'_> {
             .queue
             .commandBuffer()
             .ok_or_else(|| Glm5NextMetalError::Invalid("no command buffer".into()))?;
-        let enc = KernelEncoder::begin(&command);
+        let mut enc = KernelEncoder::begin(&command);
+        self.stage(&mut enc, Glm5NextStage::Embed, None)?;
         encode_get_rows_f32(
             ctx,
             &enc,
@@ -1162,6 +1168,7 @@ impl Glm5NextSession<'_> {
         let mut mla_index = 0;
         for (index, block) in w.blocks.iter().enumerate() {
             let (a, b) = (v(&p.residual[0]), v(&p.residual[1]));
+            self.stage(&mut enc, Glm5NextStage::AttentionPre, Some(index))?;
             self.encode_hc_pre_rows(
                 ctx,
                 &enc,
@@ -1172,6 +1179,7 @@ impl Glm5NextSession<'_> {
             )?;
             match (&block.mixer, &self.layers[index]) {
                 (MixerTensors::Kda(kda), LayerState::Kda { conv, state }) => {
+                    self.stage(&mut enc, Glm5NextStage::Kda, Some(index))?;
                     self.encode_kda_rows(ctx, &enc, rows, kda, conv, state)?
                 }
                 (
@@ -1182,11 +1190,13 @@ impl Glm5NextSession<'_> {
                         pooled,
                     },
                 ) => {
+                    self.stage(&mut enc, Glm5NextStage::MlaProjection, Some(index))?;
                     self.encode_mla_rows(ctx, &enc, rows, mla, latent, pending, pooled, mla_index)?;
                     mla_index += 1;
                 }
                 _ => return invalid(format!("block {index} state does not match its mixer")),
             }
+            self.stage(&mut enc, Glm5NextStage::AttentionPost, Some(index))?;
             encode_mhc4_post_rows(
                 ctx,
                 &enc,
@@ -1198,9 +1208,11 @@ impl Glm5NextSession<'_> {
                 &v(&p.comb),
                 &b,
             )?;
+            self.stage(&mut enc, Glm5NextStage::FfnPre, Some(index))?;
             self.encode_hc_pre_rows(ctx, &enc, rows, &b, &block.ffn_hc, &block.ffn_norm)?;
             match &block.ffn {
                 FfnTensors::Dense(dense) => {
+                    self.stage(&mut enc, Glm5NextStage::DenseFfn, Some(index))?;
                     let f = c.dense_ffn_size as usize;
                     matmat(
                         ctx,
@@ -1252,6 +1264,7 @@ impl Glm5NextSession<'_> {
                         c.expert_ffn_size as usize,
                         c.expert_used_count as usize,
                     );
+                    self.stage(&mut enc, Glm5NextStage::Router, Some(index))?;
                     if router_e8p32_selected(
                         stage_lineage(p.lineage, Stage::Router),
                         h,
@@ -1304,6 +1317,7 @@ impl Glm5NextSession<'_> {
                         &route_weights,
                         &v(&route.status),
                     )?;
+                    self.stage(&mut enc, Glm5NextStage::RoutedExperts, Some(index))?;
                     if stage_lineage(p.lineage, Stage::RoutedExperts) == PackedLineage::Exact {
                         let s = &self.s;
                         #[cfg(test)]
@@ -1443,6 +1457,7 @@ impl Glm5NextSession<'_> {
                             )?;
                         }
                     }
+                    self.stage(&mut enc, Glm5NextStage::SharedExpert, Some(index))?;
                     let sf = c.shared_expert_ffn_size as usize;
                     matmat(
                         ctx,
@@ -1494,6 +1509,7 @@ impl Glm5NextSession<'_> {
                     )?;
                 }
             }
+            self.stage(&mut enc, Glm5NextStage::FfnPost, Some(index))?;
             encode_mhc4_post_rows(
                 ctx,
                 &enc,
@@ -1507,6 +1523,7 @@ impl Glm5NextSession<'_> {
             )?;
         }
         if want_logits {
+            self.stage(&mut enc, Glm5NextStage::Head, None)?;
             // Head on the last row only.
             let s = &self.s;
             let last = p.residual[0].view_subrange(((rows - 1) * h * 4) as u64, vec![h as u64, 4]);
@@ -1532,6 +1549,9 @@ impl Glm5NextSession<'_> {
         enc.end();
         command.commit();
         wait_completed(&command)?;
+        if let Some(recorder) = self.stage_recorder.borrow_mut().as_mut() {
+            recorder.command_gpu_ms += (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+        }
         #[cfg(test)]
         router_prefill::record_completed_command_gpu_time(|| {
             (command.GPUStartTime(), command.GPUEndTime())

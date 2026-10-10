@@ -2663,6 +2663,186 @@ fn decode_stage_attribution() {
     std::fs::write(&out, serde_json::to_vec_pretty(&document).unwrap()).unwrap();
 }
 
+/// Packed-prefill stage attribution (map #9/#2 leverage, timing, no
+/// bounds): one 512-row chunk profiled as one command with a sampled encoder
+/// per stage of every block (`prefill_chunk_stage_profiled`), at prefix
+/// depths 0, 1,536 (dense attention) and 4,096 (sparse), in Fast with the
+/// default half precision and, at depth 0, `FastPrecision::F32`. Each
+/// profiled chunk's logits equal an unprofiled chunk's bitwise (the
+/// boundaries add encoders, not arithmetic); its unprofiled wall is the
+/// control. Spans are summed per stage over blocks. Writes JSON to
+/// `GLM53_STAGE_OUT`.
+#[test]
+#[ignore = "timing: loads the GLM-5.3 trunk; requires GLM53_GGUF, GLM53_STAGE_OUT, release, no MTL_DEBUG_LAYER and an idle GPU"]
+fn packed_prefill_stage_attribution() {
+    if cfg!(debug_assertions) {
+        panic!("timing requires --release");
+    }
+    let _lease = perf_lease();
+    let out = PathBuf::from(std::env::var("GLM53_STAGE_OUT").expect("GLM53_STAGE_OUT"));
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let ctx = MetalContext::new().expect("Metal context");
+    let gguf = GgufFile::open(&path).unwrap();
+    let tokens: Vec<u32> = crate::tokenizer::Tokenizer::from_gguf(&gguf)
+        .unwrap()
+        .encode(&long_qualification_text(), false)
+        .unwrap()
+        .into_iter()
+        .map(|id| id as u32)
+        .collect();
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    const CHUNK: usize = 512;
+    let mut cases = Vec::new();
+    for (depth, precision) in [
+        (0usize, FastPrecision::Half),
+        (0, FastPrecision::F32),
+        (1536, FastPrecision::Half),
+        (4096, FastPrecision::Half),
+    ] {
+        assert!(tokens.len() >= depth + CHUNK);
+        let fresh = |profiled: bool| {
+            let mut s =
+                Glm5NextSession::with_prefill_rows(&ctx, &weights, depth + CHUNK + 8, CHUNK)
+                    .unwrap();
+            s.set_fast_precision(precision).unwrap();
+            if depth > 0 {
+                s.prefill_packed(&ctx, &tokens[..depth]).unwrap();
+            }
+            let chunk = &tokens[depth..depth + CHUNK];
+            if profiled {
+                let (logits, report) = s.prefill_chunk_stage_profiled(&ctx, chunk).unwrap();
+                (logits, Some(report), 0.0)
+            } else {
+                let started = std::time::Instant::now();
+                let logits = s.prefill_packed(&ctx, chunk).unwrap();
+                (logits, None, started.elapsed().as_secs_f64() * 1e3)
+            }
+        };
+        // Warm-up, unprofiled wall (two runs), profiled run.
+        fresh(false);
+        let (plain_logits, _, wall_a) = fresh(false);
+        let (_, _, wall_b) = fresh(false);
+        let (profiled_logits, report, _) = fresh(true);
+        assert_eq!(
+            logit_bits(&[plain_logits]),
+            logit_bits(&[profiled_logits]),
+            "profiling changed the chunk's logits"
+        );
+        let report = report.expect("profiled");
+        let mut stage_ms: std::collections::BTreeMap<&'static str, f64> = Default::default();
+        for span in &report.spans {
+            *stage_ms.entry(span.stage.as_str()).or_default() += span.gpu_ms;
+        }
+        let wall = (wall_a + wall_b) / 2.0;
+        eprintln!(
+            "depth {depth} {}: unprofiled wall {wall:.1} ms ({:.1} tok/s); profiled command {:.1} ms, span sum {:.1} ms",
+            precision.name(),
+            CHUNK as f64 / (wall / 1e3),
+            report.command_gpu_ms,
+            report.span_sum_ms
+        );
+        let mut ranked: Vec<_> = stage_ms.iter().collect();
+        ranked.sort_by(|a, b| b.1.total_cmp(a.1));
+        for (stage, ms) in &ranked {
+            eprintln!(
+                "  {stage:18} {ms:8.2} ms  {:5.1}%  {:7.1} us/token",
+                100.0 * **ms / report.span_sum_ms,
+                **ms * 1e3 / CHUNK as f64
+            );
+        }
+        cases.push(serde_json::json!({
+            "depth": depth, "precision": precision.name(), "chunk_tokens": CHUNK,
+            "unprofiled_wall_ms": [wall_a, wall_b],
+            "profiled_command_gpu_ms": report.command_gpu_ms,
+            "profiled_span_sum_ms": report.span_sum_ms,
+            "stages_ms": stage_ms,
+        }));
+    }
+    let document = serde_json::json!({
+        "schema": "glm53.packed_prefill_stage_attribution.v1",
+        "method": "one 512-row chunk as one command, one timestamp-sampled encoder per stage per block; spans scaled to the command's GPU time and summed per stage",
+        "prompt": "long_qualification_text (teacher-forced)",
+        "cases": cases,
+    });
+    std::fs::write(&out, serde_json::to_vec_pretty(&document).unwrap()).unwrap();
+}
+
+/// Packed-prefill chunk size (timing, no bounds): fresh prompts of 2,048 and
+/// 4,096 tokens in Fast (half precision) with 512-, 1,024- and 2,048-row
+/// chunks, A-B-C-C-B-A per length after a warm-up of each; also the session's
+/// device ledger (packed scratch bytes). Larger chunks give each routed
+/// expert more tokens per weight tile. Writes JSON to `GLM53_STAGE_OUT`.
+#[test]
+#[ignore = "timing: loads the GLM-5.3 trunk; requires GLM53_GGUF, GLM53_STAGE_OUT, release, no MTL_DEBUG_LAYER and an idle GPU"]
+fn packed_prefill_rows_cost() {
+    if cfg!(debug_assertions) {
+        panic!("timing requires --release");
+    }
+    let _lease = perf_lease();
+    let out = PathBuf::from(std::env::var("GLM53_STAGE_OUT").expect("GLM53_STAGE_OUT"));
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let ctx = MetalContext::new().expect("Metal context");
+    let gguf = GgufFile::open(&path).unwrap();
+    let tokens: Vec<u32> = crate::tokenizer::Tokenizer::from_gguf(&gguf)
+        .unwrap()
+        .encode(&long_qualification_text(), false)
+        .unwrap()
+        .into_iter()
+        .map(|id| id as u32)
+        .collect();
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let row_options = [512usize, 1024, 2048];
+    let mut results = Vec::new();
+    for length in [2048usize, 4096] {
+        let time = |rows: usize| -> (f64, u64) {
+            let mut s =
+                Glm5NextSession::with_prefill_rows(&ctx, &weights, length + 8, rows).unwrap();
+            let scratch = s
+                .ledger()
+                .terms()
+                .iter()
+                .filter(|(name, _)| name.starts_with("packed"))
+                .map(|(_, bytes)| bytes)
+                .sum::<u64>();
+            let started = std::time::Instant::now();
+            let logits = s.prefill_packed(&ctx, &tokens[..length]).unwrap();
+            let ms = started.elapsed().as_secs_f64() * 1e3;
+            assert_finite("rows cost logits", &logits);
+            (ms, scratch)
+        };
+        for rows in row_options {
+            time(rows);
+        }
+        let mut samples: Vec<Vec<f64>> = vec![Vec::new(); row_options.len()];
+        let mut scratch = vec![0u64; row_options.len()];
+        for i in [0usize, 1, 2, 2, 1, 0] {
+            let (ms, bytes) = time(row_options[i]);
+            samples[i].push(ms);
+            scratch[i] = bytes;
+        }
+        for (i, rows) in row_options.iter().enumerate() {
+            let mean = samples[i].iter().sum::<f64>() / samples[i].len() as f64;
+            eprintln!(
+                "{length} tokens, {rows}-row chunks: {mean:.0} ms ({:.1} tok/s) {:?}; packed scratch {:.2} GiB",
+                length as f64 / (mean / 1e3),
+                samples[i].iter().map(|v| v.round()).collect::<Vec<_>>(),
+                scratch[i] as f64 / (1u64 << 30) as f64
+            );
+            results.push(
+                serde_json::json!({"length": length, "rows": rows, "ms": samples[i],
+                "mean_ms": mean, "packed_bytes": scratch[i]}),
+            );
+        }
+    }
+    std::fs::write(
+        &out,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "glm53.packed_prefill_rows_cost.v1", "order": "warm-up; A,B,C,C,B,A per length",
+            "results": results})).unwrap(),
+    )
+    .unwrap();
+}
+
 /// The adopted map #12 Fast policy (PERF-LOG 2026-10-08): Fast-versus-Exact
 /// and warm-versus-cold drift are reported, not bounded; quality is gated by
 /// the preregistered cohort, and bitwise properties stay hard. One

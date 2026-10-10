@@ -1140,12 +1140,43 @@ impl<'w> Glm5NextSession<'w> {
         ctx: &MetalContext,
         token: u32,
     ) -> Result<(Vec<f32>, Glm5NextStageReport)> {
+        self.stage_profiled(ctx, |session| session.forward(ctx, token))
+    }
+
+    /// Like [`Self::prefill_packed`] for one chunk (at most the session's
+    /// prefill rows; same kernels, same state and logits), encoding it as one
+    /// command with a timestamp-sampled encoder per stage of every block
+    /// (mHC pre/post, the KDA or MLA mixer, dense FFN, router, routed
+    /// experts, shared expert, head). As with decode, compare shares, not
+    /// the sum, with an unprofiled prefill.
+    pub fn prefill_chunk_stage_profiled(
+        &mut self,
+        ctx: &MetalContext,
+        tokens: &[u32],
+    ) -> Result<(Vec<f32>, Glm5NextStageReport)> {
+        let rows = self.packed.as_ref().map_or(0, |packed| packed.rows());
+        if tokens.is_empty() || tokens.len() > rows {
+            return invalid(format!(
+                "a profiled chunk has 1..={rows} tokens, not {}",
+                tokens.len()
+            ));
+        }
+        self.stage_profiled(ctx, |session| session.prefill_packed(ctx, tokens))
+    }
+
+    /// Runs `body` (one command) with a stage recorder and reports the
+    /// sampled spans scaled to the command's GPU time.
+    fn stage_profiled(
+        &mut self,
+        ctx: &MetalContext,
+        body: impl FnOnce(&mut Self) -> Result<Vec<f32>>,
+    ) -> Result<(Vec<f32>, Glm5NextStageReport)> {
         *self.stage_recorder.borrow_mut() = Some(StageRecorder {
             samples: ctx.timestamp_sample_buffer(STAGE_SAMPLE_CAPACITY)?,
             spans: Vec::new(),
             command_gpu_ms: 0.0,
         });
-        let result = self.forward(ctx, token);
+        let result = body(self);
         let recorder = self.stage_recorder.borrow_mut().take();
         let logits = result?;
         let recorder =

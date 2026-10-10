@@ -953,11 +953,11 @@ mod tests {
                 .unwrap();
                 let gpu = read_back_f32(&buf_t.buffer, total);
 
-                let max_abs = gpu
-                    .iter()
-                    .zip(buf_cpu.iter())
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0f32, f32::max);
+                let max_abs = crate::compare::assert_max_abs_diff_f32(
+                    concat!(file!(), ":", line!()),
+                    gpu.iter(),
+                    buf_cpu.iter(),
+                );
                 assert!(
                     max_abs < 1e-5,
                     "rope_neox n_heads={n_heads} pos={position}: max|Δ|={max_abs}"
@@ -1009,16 +1009,16 @@ mod tests {
 
             let q_gpu = read_back_f32(&q_t.buffer, q_len);
             let k_gpu = read_back_f32(&k_t.buffer, k_len);
-            let q_max = q_gpu
-                .iter()
-                .zip(q_cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
-            let k_max = k_gpu
-                .iter()
-                .zip(k_cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let q_max = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                q_gpu.iter(),
+                q_cpu.iter(),
+            );
+            let k_max = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                k_gpu.iter(),
+                k_cpu.iter(),
+            );
             assert!(q_max < 1e-5, "rope pair Q drift: {q_max}");
             assert!(k_max < 1e-5, "rope pair K drift: {k_max}");
         }
@@ -1294,11 +1294,11 @@ mod tests {
             .unwrap();
             let gpu = read_back_f32(&buf_t.buffer, total);
 
-            let max_abs = gpu
-                .iter()
-                .zip(buf_cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                gpu.iter(),
+                buf_cpu.iter(),
+            );
             assert!(
                 max_abs < 1e-5,
                 "rope_neox_packed n_tokens={n_tokens} n_heads={n_heads} start={start_position}: max|Δ|={max_abs}"

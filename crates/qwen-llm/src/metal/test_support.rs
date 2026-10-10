@@ -342,13 +342,7 @@ pub(super) fn dequant_expert(
 }
 
 pub(super) fn assert_moe_oracle_close(label: &str, actual: &[f32], expected: &[f32]) {
-    assert_eq!(actual.len(), expected.len());
-    assert!(actual.iter().all(|value| value.is_finite()));
-    let max_abs = actual
-        .iter()
-        .zip(expected)
-        .map(|(candidate, reference)| (candidate - reference).abs())
-        .fold(0.0f32, f32::max);
+    let max_abs = crate::compare::assert_max_abs_diff_f32(label, actual.iter(), expected.iter());
     let reference_scale = expected.iter().copied().map(f32::abs).fold(0.0, f32::max);
     let dot: f64 = actual
         .iter()
@@ -1013,11 +1007,11 @@ pub(super) fn ffn_swiglu_q4_K_matches_unfused() {
     .unwrap();
     let inner_fused = read_back_f32(&inner_fused_t.buffer, n_out);
 
-    let max_abs = inner_fused
-        .iter()
-        .zip(inner_ref.iter())
-        .map(|(a, b)| (a - b).abs())
-        .fold(0f32, f32::max);
+    let max_abs = crate::compare::assert_max_abs_diff_f32(
+        concat!(file!(), ":", line!()),
+        inner_fused.iter(),
+        inner_ref.iter(),
+    );
     let dot: f64 = inner_fused
         .iter()
         .zip(inner_ref.iter())
@@ -1194,11 +1188,11 @@ pub(super) fn run_attn_v4_q8_kv_compare(
 
     let y_f16 = read_back_f32(&out_f16.buffer, n_q * hd);
     let y_q8 = read_back_f32(&out_q8.buffer, n_q * hd);
-    let max_abs = y_f16
-        .iter()
-        .zip(y_q8.iter())
-        .map(|(a, b)| (a - b).abs())
-        .fold(0f32, f32::max);
+    let max_abs = crate::compare::assert_max_abs_diff_f32(
+        concat!(file!(), ":", line!()),
+        y_f16.iter(),
+        y_q8.iter(),
+    );
     let dot: f64 = y_f16
         .iter()
         .zip(y_q8.iter())

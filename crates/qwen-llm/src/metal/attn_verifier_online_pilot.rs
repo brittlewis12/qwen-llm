@@ -206,11 +206,12 @@ impl Pilot {
             let aa: f64 = a.iter().map(|&x| (x as f64).powi(2)).sum();
             let bb: f64 = b.iter().map(|&x| (x as f64).powi(2)).sum();
             worst_cos = worst_cos.min(dot / (aa * bb).sqrt());
-            max_abs = a
-                .iter()
-                .zip(b)
-                .map(|(&x, &y)| (x - y).abs())
-                .fold(max_abs, f32::max);
+            let row_max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                a.iter(),
+                b.iter(),
+            );
+            max_abs = max_abs.max(row_max_abs);
         }
         println!(
             "VERIFY_ONLINE_JSON {}",

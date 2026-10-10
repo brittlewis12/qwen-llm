@@ -3318,11 +3318,11 @@ mod tests {
             let x: Vec<f32> = (0..n_in).map(|i| ((i % 13) as f32 - 6.0) * 1e-2).collect();
             let cpu = crate::forward::mat_vec_pub(&w, n_in, n_out, &x);
             let gpu = mat_vec_f32_readback_for_test(&ctx, &w, &x, n_in, n_out).expect("gpu");
-            let max_abs = gpu
-                .iter()
-                .zip(cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                gpu.iter(),
+                cpu.iter(),
+            );
             eprintln!("[mat_vec n_in={n_in} n_out={n_out}] max|Δ|={max_abs:.2e}");
             assert!(max_abs < 1e-3);
         }
@@ -3361,11 +3361,11 @@ mod tests {
         })
         .unwrap();
         let gpu = read_back_f32(&y_t.buffer, n_out);
-        let max_abs = gpu
-            .iter()
-            .zip(cpu.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu.iter(),
+            cpu.iter(),
+        );
         assert!(max_abs < 1e-5, "fused beta sigmoid drift {max_abs}");
     }
 
@@ -3400,11 +3400,11 @@ mod tests {
         let cpu = crate::forward::mat_vec_pub(&weight_f32, n_in, n_out, &x);
         let gpu =
             mat_vec_q4_k_f32_readback_for_test(&ctx, g.slice(q4k), &x, n_in, n_out).expect("gpu");
-        let max_abs = gpu
-            .iter()
-            .zip(cpu.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu.iter(),
+            cpu.iter(),
+        );
         eprintln!("[q4_k] max|Δ|={max_abs:.2e}");
         assert!(max_abs < 1e-2);
     }
@@ -3710,11 +3710,11 @@ mod tests {
 
             let nc2_values = tensor_f32_at_offset(&nc2);
             let sequential_values = tensor_f32_at_offset(&sequential);
-            let max_abs = nc2_values
-                .iter()
-                .zip(&sequential_values)
-                .map(|(candidate, reference)| (candidate - reference).abs())
-                .fold(0.0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                nc2_values.iter(),
+                &sequential_values,
+            );
             assert!(
                 nc2_values
                     .iter()
@@ -3759,11 +3759,11 @@ mod tests {
         let cpu = crate::forward::mat_vec_pub(&weight_f32, n_in, n_out, &x);
         let gpu = mat_vec_q5_k_f32_readback_for_test(&ctx, g.slice(q5k), &x, n_in, n_out)
             .expect("metal q5k");
-        let max_abs = gpu
-            .iter()
-            .zip(cpu.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu.iter(),
+            cpu.iter(),
+        );
         eprintln!("[q5_k] max|Δ|={max_abs:.2e}");
         assert!(max_abs < 1e-2);
     }
@@ -3804,11 +3804,11 @@ mod tests {
         let cpu = crate::forward::mat_vec_pub(&weight_f32, n_in, n_out, &x);
         let gpu = mat_vec_q8_0_f32_readback_for_test(&ctx, g.slice(q8), &x, n_in, n_out)
             .expect("metal q8_0");
-        let max_abs = gpu
-            .iter()
-            .zip(cpu.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu.iter(),
+            cpu.iter(),
+        );
         eprintln!("[q8_0] max|Δ|={max_abs:.2e}");
         assert!(max_abs < 1e-2);
     }
@@ -3843,11 +3843,11 @@ mod tests {
         let cpu = crate::forward::mat_vec_pub(&weight_f32, n_in, n_out, &x);
         let gpu =
             mat_vec_q6_k_f32_readback_for_test(&ctx, g.slice(q6k), &x, n_in, n_out).expect("gpu");
-        let max_abs = gpu
-            .iter()
-            .zip(cpu.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu.iter(),
+            cpu.iter(),
+        );
         eprintln!("[q6_k] max|Δ|={max_abs:.2e}");
         assert!(max_abs < 1e-2);
     }

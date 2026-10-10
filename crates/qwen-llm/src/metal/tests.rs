@@ -411,11 +411,11 @@ fn chained_encoding_is_correct() {
     wait_completed(&cmd).expect("Metal command buffer failed");
     let gpu = read_back_f32(&y_t.buffer, n_out);
 
-    let max_abs = gpu
-        .iter()
-        .zip(cpu.iter())
-        .map(|(a, b)| (a - b).abs())
-        .fold(0f32, f32::max);
+    let max_abs = crate::compare::assert_max_abs_diff_f32(
+        concat!(file!(), ":", line!()),
+        gpu.iter(),
+        cpu.iter(),
+    );
     assert!(
         max_abs < 1e-3,
         "chained encoding diverged: max|Δ|={max_abs}"

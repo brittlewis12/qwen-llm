@@ -1832,10 +1832,11 @@ mod tests {
                     let magnitude = want.iter().fold(0.0f64, |m, v| m.max(v.abs()));
                     let bound = case.tolerance * magnitude;
                     let worst = |v: &[f32]| {
-                        v.iter()
-                            .zip(want)
-                            .map(|(a, e)| (*a as f64 - e).abs())
-                            .fold(0.0f64, f64::max)
+                        crate::compare::assert_max_abs_diff_f64(
+                            concat!(file!(), ":", line!()),
+                            v.iter(),
+                            want,
+                        )
                     };
                     assert!(
                         got.iter().all(|v| v.is_finite()),

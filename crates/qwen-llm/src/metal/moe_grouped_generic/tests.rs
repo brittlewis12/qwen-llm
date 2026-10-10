@@ -429,12 +429,9 @@ fn assert_close(label: &str, gpu: &[f32], cpu: &[f32]) {
         gpu.iter().all(|v| v.is_finite()),
         "{label}: non-finite GPU output"
     );
-    let max_abs = gpu
-        .iter()
-        .zip(cpu)
-        .map(|(a, b)| (a - b).abs())
-        .fold(0f32, f32::max);
-    let ref_max = cpu.iter().map(|v| v.abs()).fold(0f32, f32::max);
+    let max_abs =
+        crate::compare::assert_max_abs_diff_f32(concat!(file!(), ":", line!()), gpu.iter(), cpu);
+    let ref_max = cpu.iter().map(|v| v.abs()).fold(0f32, f32::max); // comparison-tripwire: reference magnitude scale.
     let dot: f64 = gpu
         .iter()
         .zip(cpu)
@@ -812,12 +809,12 @@ fn generic_grouped_moe_down_q5_k_matches_specialized() {
         generic.len()
     );
     assert_close("generic-vs-specialized-q5-down", &generic, &special);
-    let max_abs = generic
-        .iter()
-        .zip(&special)
-        .map(|(a, b)| (a - b).abs())
-        .fold(0f32, f32::max);
-    let ref_max = special.iter().map(|v| v.abs()).fold(0f32, f32::max);
+    let max_abs = crate::compare::assert_max_abs_diff_f32(
+        concat!(file!(), ":", line!()),
+        generic.iter(),
+        &special,
+    );
+    let ref_max = special.iter().map(|v| v.abs()).fold(0f32, f32::max); // comparison-tripwire: reference magnitude scale.
     assert!(
         max_abs <= 1e-5 * ref_max,
         "generic vs specialized Q5_K down drift {max_abs}"
@@ -925,12 +922,12 @@ fn generic_grouped_moe_gate_up_q4_k_q5_k_match_specialized() {
             &generic,
             &special,
         );
-        let max_abs = generic
-            .iter()
-            .zip(&special)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
-        let ref_max = special.iter().map(|v| v.abs()).fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            generic.iter(),
+            &special,
+        );
+        let ref_max = special.iter().map(|v| v.abs()).fold(0f32, f32::max); // comparison-tripwire: reference magnitude scale.
         assert!(
             max_abs <= 1e-5 * ref_max,
             "generic vs specialized {dtype:?} swiglu drift {max_abs}"

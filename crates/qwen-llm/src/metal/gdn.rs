@@ -2226,11 +2226,11 @@ mod tests {
         .unwrap();
         let unfused = read_back_f32(&unfused_t.buffer, n);
 
-        let max_abs = fused
-            .iter()
-            .zip(unfused.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            fused.iter(),
+            unfused.iter(),
+        );
         eprintln!("[gdn_alpha_chain] max|Δ|={max_abs:.2e}");
         assert!(
             max_abs < 1e-5,
@@ -2385,16 +2385,16 @@ mod tests {
             let out_gpu = read_back_f32(&out_t.buffer, conv_dim);
             let buf_gpu = read_back_f32(&buf_t.buffer, (K - 1) * conv_dim);
 
-            let max_out = out_gpu
-                .iter()
-                .zip(out_cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
-            let max_buf = buf_gpu
-                .iter()
-                .zip(buf_cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_out = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                out_gpu.iter(),
+                out_cpu.iter(),
+            );
+            let max_buf = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                buf_gpu.iter(),
+                buf_cpu.iter(),
+            );
             eprintln!(
                 "[ssm_conv conv_dim={conv_dim}] max|out_Δ|={max_out:.2e} max|buf_Δ|={max_buf:.2e}"
             );
@@ -2771,18 +2771,18 @@ mod tests {
             let state_gpu = read_back_f32(&state_t.buffer, n_v * hd * hd);
 
             // Output comparison.
-            let max_out = out_gpu
-                .iter()
-                .zip(out_cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_out = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                out_gpu.iter(),
+                out_cpu.iter(),
+            );
             // State comparison (this is the recurrent variable; correctness
             // here matters more than the output for multi-step decode).
-            let max_state = state_gpu
-                .iter()
-                .zip(state_cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_state = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                state_gpu.iter(),
+                state_cpu.iter(),
+            );
 
             eprintln!(
                 "[gdn_step n_v={n_v} n_k={n_k}] max|out_Δ|={max_out:.2e}  max|state_Δ|={max_state:.2e}"
@@ -2932,11 +2932,11 @@ mod tests {
             ("beta", &actual.grad_beta, &expected.grad_beta, 5e-5),
             ("state", &actual.grad_state, &expected.grad_state, 3e-6),
         ] {
-            let max_abs = gpu
-                .iter()
-                .zip(cpu)
-                .map(|(gpu, cpu)| (gpu - cpu).abs())
-                .fold(0.0f64, f64::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f64(
+                concat!(file!(), ":", line!()),
+                gpu.iter(),
+                cpu,
+            );
             assert!(max_abs < tolerance, "{name} VJP error {max_abs}");
         }
 
@@ -3263,11 +3263,11 @@ mod tests {
                 5e-6,
             ),
         ] {
-            let max_abs = gpu
-                .iter()
-                .zip(cpu)
-                .map(|(gpu, cpu)| (gpu - cpu).abs())
-                .fold(0.0f64, f64::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f64(
+                concat!(file!(), ":", line!()),
+                gpu.iter(),
+                cpu,
+            );
             assert!(max_abs < tolerance, "{name} temporal VJP error {max_abs}");
         }
 
@@ -3845,16 +3845,16 @@ mod tests {
         .unwrap();
         let split_qkv = read_back_f32(&split_grad_qkv_t.buffer, CONV_DIM);
         let split_state = read_back_f32(&split_grad_state_t.buffer, 3 * CONV_DIM);
-        let split_qkv_error = split_qkv
-            .iter()
-            .zip(&actual_qkv)
-            .map(|(split, joined)| (split - joined).abs())
-            .fold(0.0f32, f32::max);
-        let split_state_error = split_state
-            .iter()
-            .zip(&actual_state)
-            .map(|(split, joined)| (split - joined).abs())
-            .fold(0.0f32, f32::max);
+        let split_qkv_error = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            split_qkv.iter(),
+            &actual_qkv,
+        );
+        let split_state_error = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            split_state.iter(),
+            &actual_state,
+        );
         assert!(split_qkv_error < 2e-7, "split QKV error {split_qkv_error}");
         assert!(
             split_state_error < 2e-7,
@@ -3883,16 +3883,16 @@ mod tests {
                 * f64::from(weight[channel * 4 + 2])
                 + f64::from(grad_state_out[CONV_DIM + channel]);
         }
-        let max_qkv = actual_qkv
-            .iter()
-            .zip(&expected_qkv)
-            .map(|(actual, expected)| (f64::from(*actual) - expected).abs())
-            .fold(0.0f64, f64::max);
-        let max_state = actual_state
-            .iter()
-            .zip(&expected_state)
-            .map(|(actual, expected)| (f64::from(*actual) - expected).abs())
-            .fold(0.0f64, f64::max);
+        let max_qkv = crate::compare::assert_max_abs_diff_f64(
+            concat!(file!(), ":", line!()),
+            actual_qkv.iter(),
+            &expected_qkv,
+        );
+        let max_state = crate::compare::assert_max_abs_diff_f64(
+            concat!(file!(), ":", line!()),
+            actual_state.iter(),
+            &expected_state,
+        );
         assert!(max_qkv < 2e-6, "conv qkv VJP error {max_qkv}");
         assert!(max_state < 2e-6, "conv state VJP error {max_state}");
 
@@ -4155,11 +4155,11 @@ mod tests {
             ("qkv", &actual.grad_qkv, &expected.grad_qkv),
             ("initial_state", &actual.grad_state, &expected.grad_state),
         ] {
-            let max_abs = gpu
-                .iter()
-                .zip(cpu)
-                .map(|(gpu, cpu)| (gpu - cpu).abs())
-                .fold(0.0f64, f64::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f64(
+                concat!(file!(), ":", line!()),
+                gpu.iter(),
+                cpu,
+            );
             assert!(max_abs < 3e-6, "{name} temporal conv VJP error {max_abs}");
         }
 

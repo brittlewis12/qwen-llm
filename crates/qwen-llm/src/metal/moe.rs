@@ -4,18 +4,7 @@ use super::*;
 
 #[cfg(test)]
 fn diagnostic_max_abs(a: &[f32], b: &[f32]) -> f32 {
-    if a.is_empty() || a.len() != b.len() || !a.iter().chain(b).all(|value| value.is_finite()) {
-        return f32::NAN;
-    }
-    let mut maximum = 0.0f32;
-    for (x, y) in a.iter().zip(b) {
-        let delta = (x - y).abs();
-        if !delta.is_finite() {
-            return f32::NAN;
-        }
-        maximum = maximum.max(delta);
-    }
-    maximum
+    crate::compare::report_max_abs_diff_f32(a.iter(), b.iter())
 }
 
 pub fn encode_mat_mat_f32_router_e8p32(
@@ -6252,11 +6241,11 @@ mod tests {
         })
         .unwrap();
         let gpu = read_back_f32(&x_t.buffer, n_tokens * n_out);
-        let max_abs = gpu
-            .iter()
-            .zip(expected.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu.iter(),
+            expected.iter(),
+        );
         assert!(max_abs < 1e-6, "grouped finalizer drift {max_abs}");
     }
 
@@ -6573,11 +6562,11 @@ mod tests {
         })
         .expect("gpu iq3 matvec");
         let gpu = read_back_f32(&out_t.buffer, n_out);
-        let max_abs = gpu
-            .iter()
-            .zip(cpu.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu.iter(),
+            cpu.iter(),
+        );
         eprintln!("[moe-iq3-oracle] max|delta|={max_abs:.3e}");
         assert!(max_abs < 2e-4, "max|delta|={max_abs}");
     }
@@ -6668,11 +6657,11 @@ mod tests {
         })
         .expect("gpu direct iq3 swiglu");
         let gpu = read_back_f32(&out_gpu.buffer, n_ffn);
-        let max_abs = gpu
-            .iter()
-            .zip(cpu.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu.iter(),
+            cpu.iter(),
+        );
         let dot: f64 = gpu
             .iter()
             .zip(cpu.iter())
@@ -6704,11 +6693,11 @@ mod tests {
         })
         .expect("gpu fast direct iq3 swiglu");
         let fast = read_back_f32(&out_fast_gpu.buffer, n_ffn);
-        let fast_max_abs = fast
-            .iter()
-            .zip(cpu.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let fast_max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            fast.iter(),
+            cpu.iter(),
+        );
         let fast_dot: f64 = fast
             .iter()
             .zip(cpu.iter())
@@ -6836,11 +6825,11 @@ mod tests {
         })
         .expect("gpu grouped iq3 swiglu");
         let gpu = read_back_f32(&out_gpu.buffer, n_tokens * n_ffn);
-        let max_abs = gpu
-            .iter()
-            .zip(cpu.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu.iter(),
+            cpu.iter(),
+        );
         let dot: f64 = gpu
             .iter()
             .zip(cpu.iter())
@@ -6921,11 +6910,11 @@ mod tests {
         })
         .expect("gpu iq3s matvec");
         let gpu = read_back_f32(&out_t.buffer, n_out);
-        let max_abs = gpu
-            .iter()
-            .zip(cpu.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu.iter(),
+            cpu.iter(),
+        );
         eprintln!("[moe-iq3s-oracle] max|delta|={max_abs:.3e}");
         assert!(max_abs < 2e-4, "max|delta|={max_abs}");
     }
@@ -7016,11 +7005,11 @@ mod tests {
         })
         .expect("gpu direct iq3s swiglu");
         let gpu = read_back_f32(&out_gpu.buffer, n_ffn);
-        let max_abs = gpu
-            .iter()
-            .zip(cpu.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu.iter(),
+            cpu.iter(),
+        );
         let dot: f64 = gpu
             .iter()
             .zip(cpu.iter())
@@ -7052,11 +7041,11 @@ mod tests {
         })
         .expect("gpu fast direct iq3s swiglu");
         let fast = read_back_f32(&out_fast_gpu.buffer, n_ffn);
-        let fast_max_abs = fast
-            .iter()
-            .zip(cpu.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let fast_max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            fast.iter(),
+            cpu.iter(),
+        );
         let fast_dot: f64 = fast
             .iter()
             .zip(cpu.iter())
@@ -7184,11 +7173,11 @@ mod tests {
         })
         .expect("gpu grouped iq3s swiglu");
         let gpu = read_back_f32(&out_gpu.buffer, n_tokens * n_ffn);
-        let max_abs = gpu
-            .iter()
-            .zip(cpu.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu.iter(),
+            cpu.iter(),
+        );
         let dot: f64 = gpu
             .iter()
             .zip(cpu.iter())
@@ -7300,11 +7289,11 @@ mod tests {
         })
         .expect("gpu grouped iq4xs down");
         let gpu = read_back_f32(&out_gpu.buffer, n_tokens * n_out);
-        let max_abs = gpu
-            .iter()
-            .zip(cpu.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu.iter(),
+            cpu.iter(),
+        );
         let dot: f64 = gpu
             .iter()
             .zip(cpu.iter())
@@ -7343,11 +7332,11 @@ mod tests {
         })
         .expect("gpu fast iq4xs down");
         let fast = read_back_f32(&out_fast_gpu.buffer, n_out);
-        let fast_max_abs = fast
-            .iter()
-            .zip(cpu[..n_out].iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let fast_max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            fast.iter(),
+            cpu[..n_out].iter(),
+        );
         let fast_dot: f64 = fast
             .iter()
             .zip(cpu[..n_out].iter())
@@ -7451,11 +7440,11 @@ mod tests {
         })
         .expect("gpu direct q6 swiglu");
         let gpu = read_back_f32(&out_gpu.buffer, topk * n_ffn);
-        let max_abs = gpu
-            .iter()
-            .zip(cpu.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu.iter(),
+            cpu.iter(),
+        );
         let dot: f64 = gpu
             .iter()
             .zip(cpu.iter())
@@ -7583,11 +7572,11 @@ mod tests {
         })
         .expect("gpu grouped q6 swiglu");
         let gpu = read_back_f32(&out_gpu.buffer, n_tokens * n_ffn);
-        let max_abs = gpu
-            .iter()
-            .zip(cpu.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu.iter(),
+            cpu.iter(),
+        );
         let dot: f64 = gpu
             .iter()
             .zip(cpu.iter())
@@ -7732,11 +7721,11 @@ mod tests {
         })
         .expect("gpu direct q8 swiglu");
         let gpu_inner = read_back_f32(&inner_gpu.buffer, topk * n_ffn);
-        let inner_max = gpu_inner
-            .iter()
-            .zip(cpu_inner.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let inner_max = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu_inner.iter(),
+            cpu_inner.iter(),
+        );
         let inner_dot: f64 = gpu_inner
             .iter()
             .zip(cpu_inner.iter())
@@ -7767,11 +7756,11 @@ mod tests {
         })
         .expect("gpu direct q8 down weighted sum");
         let gpu_down = read_back_f32(&down_gpu_out.buffer, h);
-        let down_max = gpu_down
-            .iter()
-            .zip(cpu_down.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let down_max = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu_down.iter(),
+            cpu_down.iter(),
+        );
         let down_dot: f64 = gpu_down
             .iter()
             .zip(cpu_down.iter())
@@ -7938,11 +7927,11 @@ mod tests {
         let ng_inner: f64 = gpu_inner.iter().map(|v| (*v as f64) * (*v as f64)).sum();
         let nc_inner: f64 = cpu_inner.iter().map(|v| (*v as f64) * (*v as f64)).sum();
         let cos_inner = dot_inner / (ng_inner.sqrt() * nc_inner.sqrt()).max(1e-12);
-        let max_inner = gpu_inner
-            .iter()
-            .zip(cpu_inner.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_inner = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu_inner.iter(),
+            cpu_inner.iter(),
+        );
         eprintln!("[moe-q8-swiglu-oracle] cos={cos_inner:.6} max|delta|={max_inner:.3e}");
         assert!(cos_inner > 0.999, "inner cos={cos_inner}");
         assert!(max_inner < 2e-2, "inner max|delta|={max_inner}");
@@ -7981,11 +7970,11 @@ mod tests {
         let ng_down: f64 = gpu_down.iter().map(|v| (*v as f64) * (*v as f64)).sum();
         let nc_down: f64 = cpu_down.iter().map(|v| (*v as f64) * (*v as f64)).sum();
         let cos_down = dot_down / (ng_down.sqrt() * nc_down.sqrt()).max(1e-12);
-        let max_down = gpu_down
-            .iter()
-            .zip(cpu_down.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_down = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu_down.iter(),
+            cpu_down.iter(),
+        );
         eprintln!("[moe-q8-down-oracle] cos={cos_down:.6} max|delta|={max_down:.3e}");
         assert!(cos_down > 0.999, "down cos={cos_down}");
         assert!(max_down < 2e-2, "down max|delta|={max_down}");

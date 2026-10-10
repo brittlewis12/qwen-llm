@@ -3357,11 +3357,11 @@ mod tests {
         if let Some(i) = expected.iter().position(|v| !v.is_finite()) {
             return Err(format!("non-finite reference {} at {i}", expected[i]));
         }
-        Ok(got
-            .iter()
-            .zip(expected)
-            .map(|(g, e)| (f64::from(*g) - e).abs())
-            .fold(0.0, f64::max))
+        let error = crate::compare::report_max_abs_diff_f64(got.iter(), expected.iter());
+        if !error.is_finite() {
+            return Err("empty or non-finite comparison difference".to_string());
+        }
+        Ok(error)
     }
 
     /// Negative controls for the comparison predicate: NaN, infinity and a
@@ -3730,11 +3730,11 @@ mod tests {
             let got = unsafe {
                 std::slice::from_raw_parts(y.buffer.contents().as_ptr().cast::<f32>(), n_out)
             };
-            let max_abs = got
-                .iter()
-                .zip(expected.iter())
-                .map(|(actual, expected)| (actual - expected).abs())
-                .fold(0.0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                got.iter(),
+                expected.iter(),
+            );
             assert!(max_abs < 1e-5, "nonzero-offset matvec max error {max_abs}");
             (weak, source_probe)
         });
@@ -4180,11 +4180,11 @@ mod tests {
             })
             .expect("mat_vec encode");
             let gpu = read_back_f32(&y_t.buffer, n_out);
-            let max_abs = gpu
-                .iter()
-                .zip(cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                gpu.iter(),
+                cpu.iter(),
+            );
             eprintln!("[half-weight {dtype:?} mat_vec] max|Delta|={max_abs:.2e}");
             assert!(max_abs < 1e-3, "{dtype:?} mat_vec max_abs={max_abs}");
 
@@ -4218,11 +4218,11 @@ mod tests {
                 })
                 .expect("mat_mat encode");
                 let gpu_pack = read_back_f32(&y_pack_t.buffer, n_query * n_out);
-                let max_abs = gpu_pack
-                    .iter()
-                    .zip(cpu_pack.iter())
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0f32, f32::max);
+                let max_abs = crate::compare::assert_max_abs_diff_f32(
+                    concat!(file!(), ":", line!()),
+                    gpu_pack.iter(),
+                    cpu_pack.iter(),
+                );
                 eprintln!(
                     "[half-weight {dtype:?} mat_mat n_query={n_query}] max|Delta|={max_abs:.2e}"
                 );
@@ -4305,11 +4305,11 @@ mod tests {
                 let ng: f64 = gpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
                 let nc: f64 = cpu_pack.iter().map(|v| (*v as f64) * (*v as f64)).sum();
                 let cos = dot / (ng.sqrt() * nc.sqrt()).max(1e-12);
-                let max_abs = gpu
-                    .iter()
-                    .zip(cpu_pack.iter())
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0f32, f32::max);
+                let max_abs = crate::compare::assert_max_abs_diff_f32(
+                    concat!(file!(), ":", line!()),
+                    gpu.iter(),
+                    cpu_pack.iter(),
+                );
                 eprintln!(
                     "[bf16-bfloat-act n_out={n_out_case} n_query={n_query}] \
                      cos={cos:.6} max|Delta|={max_abs:.2e}"
@@ -4372,11 +4372,11 @@ mod tests {
             })
             .expect("mat_vec encode");
             let gpu = read_back_f32(&y_t.buffer, n_out);
-            let max_abs = gpu
-                .iter()
-                .zip(cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                gpu.iter(),
+                cpu.iter(),
+            );
             eprintln!("[q4-legacy {dtype:?} mat_vec] max|Delta|={max_abs:.2e}");
             assert!(max_abs < 1e-2, "{dtype:?} mat_vec max_abs={max_abs}");
 
@@ -4410,11 +4410,11 @@ mod tests {
                 })
                 .expect("mat_mat encode");
                 let gpu_pack = read_back_f32(&y_pack_t.buffer, n_query * n_out);
-                let max_abs = gpu_pack
-                    .iter()
-                    .zip(cpu_pack.iter())
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0f32, f32::max);
+                let max_abs = crate::compare::assert_max_abs_diff_f32(
+                    concat!(file!(), ":", line!()),
+                    gpu_pack.iter(),
+                    cpu_pack.iter(),
+                );
                 eprintln!(
                     "[q4-legacy {dtype:?} mat_mat n_query={n_query}] max|Delta|={max_abs:.2e}"
                 );
@@ -4474,11 +4474,11 @@ mod tests {
         })
         .expect("mat_vec encode");
         let gpu = read_back_f32(&y_t.buffer, n_out);
-        let max_abs = gpu
-            .iter()
-            .zip(cpu.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu.iter(),
+            cpu.iter(),
+        );
         eprintln!("[q3_k mat_vec] max|Delta|={max_abs:.2e}");
         assert!(max_abs < 1e-2, "Q3_K mat_vec max_abs={max_abs}");
 
@@ -4506,11 +4506,11 @@ mod tests {
             })
             .expect("mat_mat encode");
             let gpu_pack = read_back_f32(&y_pack_t.buffer, n_query * n_out);
-            let max_abs = gpu_pack
-                .iter()
-                .zip(cpu_pack.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                gpu_pack.iter(),
+                cpu_pack.iter(),
+            );
             eprintln!("[q3_k mat_mat n_query={n_query}] max|Delta|={max_abs:.2e}");
             assert!(max_abs < 1e-2, "Q3_K mat_mat max_abs={max_abs}");
         }
@@ -4570,11 +4570,11 @@ mod tests {
         })
         .expect("mat_vec encode");
         let gpu = read_back_f32(&y_t.buffer, n_out);
-        let max_abs = gpu
-            .iter()
-            .zip(cpu.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu.iter(),
+            cpu.iter(),
+        );
         eprintln!("[dense-iq2_s mat_vec] max|Delta|={max_abs:.2e}");
         assert!(max_abs < 1e-2, "IQ2_S mat_vec max_abs={max_abs}");
 
@@ -4604,11 +4604,11 @@ mod tests {
             })
             .expect("mat_mat encode");
             let gpu_pack = read_back_f32(&y_pack_t.buffer, n_query * n_out);
-            let max_abs = gpu_pack
-                .iter()
-                .zip(cpu_pack.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                gpu_pack.iter(),
+                cpu_pack.iter(),
+            );
             eprintln!("[dense-iq2_s mat_mat n_query={n_query}] max|Delta|={max_abs:.2e}");
             assert!(max_abs < 1e-2, "IQ2_S mat_mat max_abs={max_abs}");
         }
@@ -4680,11 +4680,11 @@ mod tests {
             })
             .expect("mat_vec encode");
             let gpu = read_back_f32(&y_t.buffer, n_out);
-            let max_abs = gpu
-                .iter()
-                .zip(cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                gpu.iter(),
+                cpu.iter(),
+            );
             eprintln!("[dense-iq3 {dtype:?} mat_vec] max|Delta|={max_abs:.2e}");
             assert!(max_abs < 1e-2, "{dtype:?} mat_vec max_abs={max_abs}");
 
@@ -4718,11 +4718,11 @@ mod tests {
                 })
                 .expect("mat_mat encode");
                 let gpu_pack = read_back_f32(&y_pack_t.buffer, n_query * n_out);
-                let max_abs = gpu_pack
-                    .iter()
-                    .zip(cpu_pack.iter())
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0f32, f32::max);
+                let max_abs = crate::compare::assert_max_abs_diff_f32(
+                    concat!(file!(), ":", line!()),
+                    gpu_pack.iter(),
+                    cpu_pack.iter(),
+                );
                 eprintln!(
                     "[dense-iq3 {dtype:?} mat_mat n_query={n_query}] max|Delta|={max_abs:.2e}"
                 );
@@ -4782,11 +4782,11 @@ mod tests {
         })
         .expect("mat_vec encode");
         let gpu = read_back_f32(&y_t.buffer, n_out);
-        let max_abs = gpu
-            .iter()
-            .zip(cpu.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            gpu.iter(),
+            cpu.iter(),
+        );
         eprintln!("[q2_k mat_vec] max|Delta|={max_abs:.2e}");
         assert!(max_abs < 1e-2, "Q2_K mat_vec max_abs={max_abs}");
 
@@ -4814,11 +4814,11 @@ mod tests {
             })
             .expect("mat_mat encode");
             let gpu_pack = read_back_f32(&y_pack_t.buffer, n_query * n_out);
-            let max_abs = gpu_pack
-                .iter()
-                .zip(cpu_pack.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                gpu_pack.iter(),
+                cpu_pack.iter(),
+            );
             eprintln!("[q2_k mat_mat n_query={n_query}] max|Delta|={max_abs:.2e}");
             assert!(max_abs < 1e-2, "Q2_K mat_mat max_abs={max_abs}");
         }
@@ -4887,11 +4887,11 @@ mod tests {
             })
             .expect("mat_vec encode");
             let gpu = read_back_f32(&y_t.buffer, n_out);
-            let max_abs = gpu
-                .iter()
-                .zip(cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                gpu.iter(),
+                cpu.iter(),
+            );
             eprintln!("[iq4 {dtype:?} mat_vec] max|Delta|={max_abs:.2e}");
             assert!(max_abs < 1e-2, "{dtype:?} mat_vec max_abs={max_abs}");
 
@@ -4925,11 +4925,11 @@ mod tests {
                 })
                 .expect("mat_mat encode");
                 let gpu_pack = read_back_f32(&y_pack_t.buffer, n_query * n_out);
-                let max_abs = gpu_pack
-                    .iter()
-                    .zip(cpu_pack.iter())
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0f32, f32::max);
+                let max_abs = crate::compare::assert_max_abs_diff_f32(
+                    concat!(file!(), ":", line!()),
+                    gpu_pack.iter(),
+                    cpu_pack.iter(),
+                );
                 eprintln!("[iq4 {dtype:?} mat_mat n_query={n_query}] max|Delta|={max_abs:.2e}");
                 assert!(max_abs < 1e-2, "{dtype:?} mat_mat max_abs={max_abs}");
             }
@@ -6319,11 +6319,11 @@ mod tests {
         .unwrap();
         let reference = read_back_f32(&inner_ref.buffer, N * n_out);
         let fused = read_back_f32(&inner_fused.buffer, N * n_out);
-        let max_abs = reference
-            .iter()
-            .zip(&fused)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            reference.iter(),
+            &fused,
+        );
         let bit_mismatches = reference
             .iter()
             .zip(&fused)

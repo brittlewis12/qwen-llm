@@ -2836,11 +2836,11 @@ mod tests {
             if row_id >= 0 && (row_id as usize) < N_VOCAB {
                 let expected =
                     &codec_decoded[row_id as usize * N_COLS..(row_id as usize + 1) * N_COLS];
-                let max_abs = output_row
-                    .iter()
-                    .zip(expected)
-                    .map(|(candidate, reference)| (candidate - reference).abs())
-                    .fold(0.0f32, f32::max);
+                let max_abs = crate::compare::assert_max_abs_diff_f32(
+                    concat!(file!(), ":", line!()),
+                    output_row.iter(),
+                    expected,
+                );
                 assert!(max_abs <= 1e-6, "row {lookup_row} max_abs={max_abs}");
             } else {
                 assert!(output_row.iter().all(|&value| value == 0.0));
@@ -3011,11 +3011,11 @@ mod tests {
             ("projection", projection, &expected[2]),
             ("source-to-target", source_to_target, &expected[3]),
         ] {
-            let max_abs = actual
-                .iter()
-                .zip(expected)
-                .map(|(actual, expected)| (actual - expected).abs())
-                .fold(0.0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                actual.iter(),
+                expected,
+            );
             let tolerance = if name == "residual-l2" { 1e-3 } else { 2e-5 };
             assert!(
                 max_abs <= tolerance,
@@ -3376,11 +3376,11 @@ mod tests {
             for v in cpu.iter_mut() {
                 *v /= s;
             }
-            let max_abs = gpu
-                .iter()
-                .zip(cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                gpu.iter(),
+                cpu.iter(),
+            );
             let total: f32 = gpu.iter().sum();
             assert!((total - 1.0).abs() < 1e-4, "softmax sum n={n}: {total}");
             assert!(max_abs < 1e-5, "softmax n={n} max|Δ|={max_abs}");
@@ -3592,11 +3592,11 @@ mod tests {
         .unwrap();
         let a = read_back_f32(&y_split.buffer, n_heads * head_dim);
         let b = read_back_f32(&y_fused.buffer, n_heads * head_dim);
-        let max_abs = a
-            .iter()
-            .zip(b.iter())
-            .map(|(x, y)| (x - y).abs())
-            .fold(0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            a.iter(),
+            b.iter(),
+        );
         assert!(
             max_abs < 1e-6,
             "fused strided gate epilogue diverged beyond ulp scale: max|Δ|={max_abs:.3e}"

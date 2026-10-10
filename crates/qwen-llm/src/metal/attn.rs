@@ -3637,11 +3637,11 @@ mod tests {
             .unwrap();
             let y_v4 = read_back_f32(&y_v4_t.buffer, n_q * hd);
             let nan_count = y_v4.iter().filter(|x| x.is_nan()).count();
-            let max_abs = y_v4
-                .iter()
-                .zip(y_naive.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                y_v4.iter(),
+                y_naive.iter(),
+            );
             eprintln!(
                 "[v4-nan-prime group={group} n_pos={n_pos} nwg={nwg} C={tile_c}] \
                  nans={nan_count} max|Δ|={max_abs:.2e}"
@@ -3771,11 +3771,11 @@ mod tests {
                     })
                     .unwrap();
                     let y_v4 = read_back_f32(&y_v4_t.buffer, n_q * hd);
-                    let max_abs = y_v4
-                        .iter()
-                        .zip(y_naive.iter())
-                        .map(|(a, b)| (a - b).abs())
-                        .fold(0f32, f32::max);
+                    let max_abs = crate::compare::assert_max_abs_diff_f32(
+                        concat!(file!(), ":", line!()),
+                        y_v4.iter(),
+                        y_naive.iter(),
+                    );
                     let dot: f64 = y_v4
                         .iter()
                         .zip(y_naive.iter())
@@ -4888,11 +4888,11 @@ mod tests {
                     &q, &k_f32, &v_f32, n_rows, base_pos, n_pos, n_q, n_kv, group, hd,
                 );
 
-                let max_abs = y_gpu
-                    .iter()
-                    .zip(y_ref.iter())
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0f32, f32::max);
+                let max_abs = crate::compare::assert_max_abs_diff_f32(
+                    concat!(file!(), ":", line!()),
+                    y_gpu.iter(),
+                    y_ref.iter(),
+                );
                 let dot: f64 = y_gpu
                     .iter()
                     .zip(y_ref.iter())
@@ -4982,11 +4982,11 @@ mod tests {
                 })
                 .unwrap();
                 let y_fused = read_back_f32(&fused_t.buffer, n_rows * n_q * hd);
-                let fmax_abs = y_fused
-                    .iter()
-                    .zip(y_ref.iter())
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0f32, f32::max);
+                let fmax_abs = crate::compare::assert_max_abs_diff_f32(
+                    concat!(file!(), ":", line!()),
+                    y_fused.iter(),
+                    y_ref.iter(),
+                );
                 let fdot: f64 = y_fused
                     .iter()
                     .zip(y_ref.iter())
@@ -4998,11 +4998,11 @@ mod tests {
                     .sum::<f64>()
                     .sqrt();
                 let fcos = fdot / (fna * nb);
-                let gpu_max_abs = y_fused
-                    .iter()
-                    .zip(y_gpu.iter())
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0f32, f32::max);
+                let gpu_max_abs = crate::compare::assert_max_abs_diff_f32(
+                    concat!(file!(), ":", line!()),
+                    y_fused.iter(),
+                    y_gpu.iter(),
+                );
                 eprintln!(
                     "[online group={group:>2} n_rows={n_rows:>4} base={base_pos:>4} n_pos={n_pos:>4}] max|Δ|={fmax_abs:.2e}  cos={fcos:.7}  vs3k|Δ|={gpu_max_abs:.2e}"
                 );
@@ -5088,11 +5088,11 @@ mod tests {
                     })
                     .unwrap();
                     let y_tiled = read_back_f32(&tiled_out.buffer, n_rows * n_q * hd);
-                    let tiled_max_abs = y_tiled
-                        .iter()
-                        .zip(y_fused.iter())
-                        .map(|(a, b)| (a - b).abs())
-                        .fold(0f32, f32::max);
+                    let tiled_max_abs = crate::compare::assert_max_abs_diff_f32(
+                        concat!(file!(), ":", line!()),
+                        y_tiled.iter(),
+                        y_fused.iter(),
+                    );
                     assert!(
                         tiled_max_abs < 5e-5,
                         concat!(
@@ -5230,11 +5230,11 @@ mod tests {
             one_shot(&ctx, |enc| encode_fused(enc)).unwrap();
             let y3k = read_back_f32(&out_3k.buffer, n_rows * n_q * hd);
             let yfused = read_back_f32(&out_fused.buffer, n_rows * n_q * hd);
-            let max_abs = y3k
-                .iter()
-                .zip(yfused.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                y3k.iter(),
+                yfused.iter(),
+            );
             assert!(
                 max_abs < 5e-3,
                 "fused vs sidecar diverged at {label}: max|Δ|={max_abs}"
@@ -5370,11 +5370,11 @@ mod tests {
             })
             .unwrap();
             let y_v4 = read_back_f32(&y_v4_t.buffer, n_q * hd);
-            let max_abs = y_v4
-                .iter()
-                .zip(y_naive.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                y_v4.iter(),
+                y_naive.iter(),
+            );
             let dot: f64 = y_v4
                 .iter()
                 .zip(y_naive.iter())
@@ -5531,11 +5531,11 @@ mod tests {
 
             let baseline = read_back_f32(&out_baseline.buffer, N_ROWS * N_Q * HD);
             let packed = read_back_f32(&out_packed.buffer, N_ROWS * N_Q * HD);
-            let max_abs = packed
-                .iter()
-                .zip(baseline.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                packed.iter(),
+                baseline.iter(),
+            );
             let dot: f64 = packed
                 .iter()
                 .zip(baseline.iter())

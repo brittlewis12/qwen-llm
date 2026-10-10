@@ -888,11 +888,11 @@ mod tests {
                 ("r_gate", &actual_r_gate, &expected_r_gate),
                 ("r_up", &actual_r_up, &expected_r_up),
             ] {
-                let max_abs = actual
-                    .iter()
-                    .zip(expected)
-                    .map(|(actual, expected)| (actual - expected).abs())
-                    .fold(0.0f32, f32::max);
+                let max_abs = crate::compare::assert_max_abs_diff_f32(
+                    concat!(file!(), ":", line!()),
+                    actual.iter(),
+                    expected,
+                );
                 assert!(max_abs < 2e-6, "rows={row_count} {label} error {max_abs}");
             }
 
@@ -1111,11 +1111,11 @@ mod tests {
                     n_query,
                 )
                 .unwrap();
-                let max_abs = actual
-                    .iter()
-                    .zip(&expected)
-                    .map(|(actual, expected)| (actual - expected).abs())
-                    .fold(0.0f32, f32::max);
+                let max_abs = crate::compare::assert_max_abs_diff_f32(
+                    concat!(file!(), ":", line!()),
+                    actual.iter(),
+                    &expected,
+                );
                 assert!(
                     max_abs < 1e-5,
                     "dtype={dtype:?} n_query={n_query}: max absolute error {max_abs}"
@@ -1160,11 +1160,11 @@ mod tests {
                 n_query,
             )
             .expect("Q8_0 activation VJP");
-            let max_abs = gpu
-                .iter()
-                .zip(&expected)
-                .map(|(actual, expected)| (actual - expected).abs())
-                .fold(0.0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                gpu.iter(),
+                &expected,
+            );
             assert!(
                 max_abs < 1e-4,
                 "n_query={n_query}: max absolute error {max_abs}"

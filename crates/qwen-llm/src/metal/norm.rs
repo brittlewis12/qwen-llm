@@ -1424,11 +1424,11 @@ mod tests {
             let gpu =
                 rms_norm_mul_f32_readback_for_test(&ctx, &x, &w, eps).expect("metal rms_norm");
 
-            let max_abs = gpu
-                .iter()
-                .zip(cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                gpu.iter(),
+                cpu.iter(),
+            );
             eprintln!("[rms_norm n={n}] max|Δ|={max_abs:.2e}");
             assert!(max_abs < 1e-4, "rms_norm n={n}: max|Δ|={max_abs}");
         }
@@ -1495,16 +1495,16 @@ mod tests {
                 RmsNormVjpRule::RelpDetachedScale,
             )
             .unwrap();
-            let max_j = actual_j
-                .iter()
-                .zip(&expected_j)
-                .map(|(actual, expected)| (actual - expected).abs())
-                .fold(0.0f32, f32::max);
-            let max_r = actual_r
-                .iter()
-                .zip(&expected_r)
-                .map(|(actual, expected)| (actual - expected).abs())
-                .fold(0.0f32, f32::max);
+            let max_j = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                actual_j.iter(),
+                &expected_j,
+            );
+            let max_r = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                actual_r.iter(),
+                &expected_r,
+            );
             assert!(max_j < 2e-5, "rows={row_count}: Jacobian error {max_j}");
             assert!(max_r < 2e-5, "rows={row_count}: RelP error {max_r}");
             assert!(
@@ -1568,16 +1568,16 @@ mod tests {
             let (x_gpu, y_gpu) = residual_rms_norm_mul_f32_readback_for_test(&ctx, &x, &r, &w, eps)
                 .expect("metal residual_rms_norm");
 
-            let max_x = x_gpu
-                .iter()
-                .zip(x_cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
-            let max_y = y_gpu
-                .iter()
-                .zip(y_cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_x = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                x_gpu.iter(),
+                x_cpu.iter(),
+            );
+            let max_y = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                y_gpu.iter(),
+                y_cpu.iter(),
+            );
             eprintln!("[residual_rms_norm n={n}] max_x={max_x:.2e} max_y={max_y:.2e}");
             assert!(max_x == 0.0, "residual add n={n}: max|Δ|={max_x}");
             assert!(max_y < 1e-4, "residual_rms_norm n={n}: max|Δ|={max_y}");
@@ -1609,11 +1609,11 @@ mod tests {
             let sq: f32 = x.iter().map(|v| v * v).sum();
             let scale = 1.0 / sq.sqrt().max(1e-6);
             let cpu: Vec<f32> = x.iter().map(|v| v * scale).collect();
-            let max_abs = gpu
-                .iter()
-                .zip(cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                gpu.iter(),
+                cpu.iter(),
+            );
             assert!(max_abs < 1e-5, "l2_norm n={n}: max|Δ|={max_abs}");
         }
     }
@@ -1657,11 +1657,11 @@ mod tests {
             .unwrap();
             let gpu = read_back_f32(&y_t.buffer, total);
 
-            let max_abs = gpu
-                .iter()
-                .zip(cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                gpu.iter(),
+                cpu.iter(),
+            );
             assert!(
                 max_abs < 1e-5,
                 "l2_norm_batched n_heads={n_heads} head_dim={head_dim}: max|Δ|={max_abs}"
@@ -1726,16 +1726,16 @@ mod tests {
             let q_gpu = read_back_f32(&q_y.buffer, total);
             let k_gpu = read_back_f32(&k_y.buffer, total);
 
-            let q_max = q_gpu
-                .iter()
-                .zip(q_cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
-            let k_max = k_gpu
-                .iter()
-                .zip(k_cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let q_max = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                q_gpu.iter(),
+                q_cpu.iter(),
+            );
+            let k_max = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                k_gpu.iter(),
+                k_cpu.iter(),
+            );
             assert!(
                 q_max < 1e-5 && k_max < 1e-5,
                 "l2_norm_pair n_heads={n_heads} head_dim={head_dim}: q={q_max} k={k_max}"
@@ -1788,11 +1788,11 @@ mod tests {
             .unwrap();
 
             let gpu = read_back_f32(&y_t.buffer, total);
-            let max_abs = gpu
-                .iter()
-                .zip(cpu.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+            let max_abs = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                gpu.iter(),
+                cpu.iter(),
+            );
             eprintln!("[rmsnorm_gated n_heads={n_heads} head_dim={head_dim}] max|Δ|={max_abs:.2e}");
             assert!(max_abs < 1e-4, "rmsnorm_gated drift {max_abs}");
         }
@@ -1866,11 +1866,11 @@ mod tests {
                 }
             }
         }
-        let max_abs = actual
-            .iter()
-            .zip(&expected)
-            .map(|(actual, expected)| (f64::from(*actual) - expected).abs())
-            .fold(0.0f64, f64::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f64(
+            concat!(file!(), ":", line!()),
+            actual.iter(),
+            &expected,
+        );
         assert!(max_abs < 2e-5, "L2 VJP error {max_abs}");
         for head in [1usize, 2, 3] {
             let base = head * HEAD_DIM;
@@ -1978,16 +1978,16 @@ mod tests {
                 expected_o[offset] = weighted_grad * scale - f64::from(o[offset]) * correction;
             }
         }
-        let max_o = actual_o
-            .iter()
-            .zip(&expected_o)
-            .map(|(actual, expected)| (f64::from(*actual) - expected).abs())
-            .fold(0.0f64, f64::max);
-        let max_z = actual_z
-            .iter()
-            .zip(&expected_z)
-            .map(|(actual, expected)| (f64::from(*actual) - expected).abs())
-            .fold(0.0f64, f64::max);
+        let max_o = crate::compare::assert_max_abs_diff_f64(
+            concat!(file!(), ":", line!()),
+            actual_o.iter(),
+            &expected_o,
+        );
+        let max_z = crate::compare::assert_max_abs_diff_f64(
+            concat!(file!(), ":", line!()),
+            actual_z.iter(),
+            &expected_z,
+        );
         assert!(max_o < 3e-5, "gated RMS grad_o error {max_o}");
         assert!(max_z < 2e-5, "gated RMS grad_z error {max_z}");
 

@@ -18,21 +18,7 @@ fn metal_test_context() -> Option<MetalContext> {
 }
 
 fn max_abs_finite(label: &str, actual: &[f32], expected: &[f32]) -> f32 {
-    assert_eq!(actual.len(), expected.len(), "{label}: length mismatch");
-    assert!(!expected.is_empty(), "{label}: empty comparison");
-    assert!(
-        actual.iter().all(|value| value.is_finite()),
-        "{label}: non-finite actual"
-    );
-    assert!(
-        expected.iter().all(|value| value.is_finite()),
-        "{label}: non-finite expected"
-    );
-    actual
-        .iter()
-        .zip(expected)
-        .map(|(a, e)| (a - e).abs())
-        .fold(0.0f32, f32::max)
+    crate::compare::assert_max_abs_diff_f32(label, actual.iter(), expected.iter())
 }
 
 #[test]
@@ -3399,11 +3385,11 @@ fn metal_gdn_block_matches_cpu() {
         .run_one_gdn_block_for_test(0, 0, &mut s)
         .expect("metal block 0");
 
-    let max_abs = metal_x
-        .iter()
-        .zip(cpu_x_after_block0.iter())
-        .map(|(a, b)| (a - b).abs())
-        .fold(0f32, f32::max);
+    let max_abs = crate::compare::assert_max_abs_diff_f32(
+        concat!(file!(), ":", line!()),
+        metal_x.iter(),
+        cpu_x_after_block0.iter(),
+    );
     let dot: f64 = metal_x
         .iter()
         .zip(cpu_x_after_block0.iter())
@@ -4394,12 +4380,16 @@ fn dense_ffn_capture_brackets_the_residual_update() {
         assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         assert!(command.error().is_none());
         let ffn_output = read_f32(&output, hidden_size);
-        let max_abs = pre
+        let pre_plus_ffn = pre
             .iter()
             .zip(&ffn_output[..hidden_size])
-            .zip(post)
-            .map(|((pre, ffn), post)| (pre + ffn - post).abs())
-            .fold(0.0f32, f32::max);
+            .map(|(pre, ffn)| pre + ffn)
+            .collect::<Vec<_>>();
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            pre_plus_ffn.iter(),
+            post.iter(),
+        );
         assert!(
             max_abs < 2e-4,
             "layer {layer} slot {slot}: captured FFN boundary error {max_abs}"
@@ -4456,11 +4446,11 @@ fn dense_fixed_add_seam_is_bounded_and_ordered() {
         )
     };
     let assert_close = |label: &str, actual: &[f32], expected: &[f32], tolerance: f32| {
-        let max_abs = actual
-            .iter()
-            .zip(expected)
-            .map(|(actual, expected)| (actual - expected).abs())
-            .fold(0.0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            actual.iter(),
+            expected,
+        );
         assert!(
             max_abs <= tolerance,
             "{label}: max|delta|={max_abs} > tolerance={tolerance}"
@@ -4616,11 +4606,11 @@ fn dense_fixed_add_seam_is_bounded_and_ordered() {
         &expected_reversed,
         2e-5,
     );
-    let max_order_delta = ordered_post
-        .iter()
-        .zip(&reversed_post)
-        .map(|(ordered, reversed)| (ordered - reversed).abs())
-        .fold(0.0f32, f32::max);
+    let max_order_delta = crate::compare::assert_max_abs_diff_f32(
+        concat!(file!(), ":", line!()),
+        ordered_post.iter(),
+        &reversed_post,
+    );
     assert!(
         max_order_delta > 1e-5,
         "intervention caller order was not observable: max|delta|={max_order_delta}"
@@ -4632,11 +4622,11 @@ fn dense_fixed_add_seam_is_bounded_and_ordered() {
             .all(|value| value.is_finite()),
         "ordered intervention logits contain NaN/Inf"
     );
-    let max_logit_delta = ordered_logits
-        .iter()
-        .zip(&reversed_logits)
-        .map(|(ordered, reversed)| (ordered - reversed).abs())
-        .fold(0.0f32, f32::max);
+    let max_logit_delta = crate::compare::assert_max_abs_diff_f32(
+        concat!(file!(), ":", line!()),
+        ordered_logits.iter(),
+        &reversed_logits,
+    );
     assert!(
         max_logit_delta > 1e-4,
         "intervention caller order did not change downstream logits: max|delta|={max_logit_delta}"
@@ -5072,11 +5062,11 @@ fn ordinary_moe_serial_post_block_fixed_add_seam() {
         values
     };
     let assert_close = |label: &str, actual: &[f32], expected: &[f32], tolerance: f32| {
-        let max_abs = actual
-            .iter()
-            .zip(expected)
-            .map(|(actual, expected)| (actual - expected).abs())
-            .fold(0.0f32, f32::max);
+        let max_abs = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            actual.iter(),
+            expected,
+        );
         assert!(
             max_abs <= tolerance,
             "{label}: max|delta|={max_abs} > tolerance={tolerance}"
@@ -5142,11 +5132,11 @@ fn ordinary_moe_serial_post_block_fixed_add_seam() {
             .all(|value| value.is_finite()),
         "ordinary MoE logits contain NaN/Inf"
     );
-    let max_logit_delta = intervention_logits
-        .iter()
-        .zip(&baseline_logits)
-        .map(|(intervention, baseline)| (intervention - baseline).abs())
-        .fold(0.0f32, f32::max);
+    let max_logit_delta = crate::compare::assert_max_abs_diff_f32(
+        concat!(file!(), ":", line!()),
+        intervention_logits.iter(),
+        &baseline_logits,
+    );
     assert!(
         max_logit_delta > 1e-4,
         "MoE fixed addition did not change downstream logits: max|delta|={max_logit_delta}"
@@ -5306,11 +5296,11 @@ fn metal_27b_gdn_block0_matches_cpu() {
         .run_one_gdn_block_for_test(0, 0, &mut s)
         .expect("metal block 0");
 
-    let max_abs = metal_x
-        .iter()
-        .zip(cpu_x.iter())
-        .map(|(a, b)| (a - b).abs())
-        .fold(0f32, f32::max);
+    let max_abs = crate::compare::assert_max_abs_diff_f32(
+        concat!(file!(), ":", line!()),
+        metal_x.iter(),
+        cpu_x.iter(),
+    );
     let dot: f64 = metal_x
         .iter()
         .zip(cpu_x.iter())
@@ -7865,11 +7855,11 @@ fn metal_attn_block_matches_cpu() {
         .run_one_attn_block_for_test(attn_block_idx, attn_idx_in_session, position, &mut s)
         .expect("metal attn block");
 
-    let max_abs = metal_x
-        .iter()
-        .zip(cpu_x.iter())
-        .map(|(a, b)| (a - b).abs())
-        .fold(0f32, f32::max);
+    let max_abs = crate::compare::assert_max_abs_diff_f32(
+        concat!(file!(), ":", line!()),
+        metal_x.iter(),
+        cpu_x.iter(),
+    );
     let dot: f64 = metal_x
         .iter()
         .zip(cpu_x.iter())

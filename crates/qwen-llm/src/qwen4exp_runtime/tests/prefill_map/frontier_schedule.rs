@@ -784,6 +784,9 @@ fn native_frontier_schedule() {
         include_bytes!("frontier_schedule.rs"),
         json!({
             "stage":stage,"corpora":corpora,"rounds":options.rounds,"capacity":CAPACITY,"packed_capacity":2048,"frontier":2051,
+            "metallib_build":{"language":"metal3.2","product_deployment_target":crate::PRODUCT_METALLIB_TARGET,
+                "research_deployment_target":crate::RESEARCH_METALLIB_TARGET,
+                "build_source_sha256":sha256_bytes(include_bytes!("../../../../build.rs"))},
             "candidate_mode":options.candidate_label(),"A_schedule_override":false,"B_schedule_override":options.arm_override(true),
             "A":"explicit forced incumbent: suffix3+2045 / whole2048+3+2045",
             "B":if options.candidate == FrontierCandidateMode::Production {

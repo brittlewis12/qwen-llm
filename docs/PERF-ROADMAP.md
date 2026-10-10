@@ -42,7 +42,9 @@ force-rank, raw attempts, limits and diagnostic harnesses are in
 
 1. Flash frontier scheduling: narrow default implemented and actual production
    `None` confirmed on UD/GSQ; scoped final tests pass and final review approves
-   with no fixes. Commit/integration remains outstanding. Guard is exactly
+   with no fixes. Integrated on main `83c91cec`; pinned Metal 3.2/macOS 15.0-target
+   whole confirmation reproduces all prior sampled endpoint/state records on
+   both artifacts (deployment target, not a macOS 15 host test). Guard is exactly
    selected-enabled, packed capacity 2048, dense_end=2051, and (start,count)
    (0,4096) or (2048,2048). The default groups 2048+2048 / suffix 2048; all other
    geometries retain the existing planner path. Arithmetic/router policies are

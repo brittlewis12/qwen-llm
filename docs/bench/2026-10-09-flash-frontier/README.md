@@ -4,18 +4,19 @@ Flash frontier scheduling: UD and GSQ suffix/whole4096, 2026-10-09
 Actual production-default confirmation — 2026-10-09 (current decision)
 -------------------------------------------------------------------
 
-**Narrow promotion is implemented in the worktree, actual `None` execution is
-confirmed on UD and GSQ, and the scoped final checks pass. Final independent
-review approves with no fixes; commit/integration has not yet occurred.** The
-joint basis is v1 NLL PASS on both artifacts plus fresh, separately frozen v2
-retrieval PASS on both artifacts.
+**Narrow promotion is integrated on main `83c91cec`; actual `None` execution
+is confirmed on UD and GSQ, and final independent review approved with no fixes.**
+The subsequent pinned-Metal-target confirmation preserves every sampled
+trajectory; see the [integration appendix](#integration-appendix-pinned-metal-target-at-83c91cec).
+The joint quality basis remains v1 NLL PASS on both artifacts plus fresh,
+separately frozen v2 retrieval PASS on both artifacts.
 GSQ's v1 retrieval remains INCONCLUSIVE (correct facts, missing required
 marker); it has not been rescored or converted into a v1 pass. The earlier
 "parked / v2 under review" decisions below are retained history, superseded
 by this joint review and actual-default confirmation. Validation is limited to
-the filters and checks below; this is not a full-suite or landed-commit claim.
+the filters and checks below; this is not a full-suite claim.
 
-**Final validation, owner-reported:**
+**Pre-integration final validation, owner-reported:**
 
 | Scope | Release | Debug |
 |---|---|---|
@@ -28,7 +29,9 @@ were executed separately as documented in the retained release packets; the
 32 ignored entries are not counted as passes in either filtered run. Final
 review verified the historical policy pins and requested no fixes. These
 results were supplied by the owner; this docs update ran no tests or builds.
-Commit/integration remains outstanding, and no landed hash is assigned.
+Integration subsequently completed at `83c91cec`; the owner also reports six
+planner CPU tests passed after the target-pinned rebuild. These six are an
+additional focused result, not a rerun claim for the entire table above.
 
 The source guard is exact: `selected_enabled`, packed capacity 2048,
 `dense_end=2051`, and `(start,count)` equal to **`(0,4096)` or `(2048,2048)`**.
@@ -146,8 +149,8 @@ Its motivation was the v1 formatting issue, so it is a fresh contract check,
 not an independent replication or retroactive repair of v1. GSQ v1 remains
 INCONCLUSIVE. No quality acquisition was rerun for this docs update. The scoped
 final checks above pass and the reviewer gives final approval with no fixes;
-commit/integration remains outstanding. Next Flash performance work is
-selected-QSA leaf attribution, not another layer0 bit-identity intervention or
+integration subsequently completed at `83c91cec`. Next Flash performance work
+is selected-QSA leaf attribution, not another layer0 bit-identity intervention or
 an enlarged scheduling speed claim.
 
 **Historical harnesses and source bindings.** The historical router packet and
@@ -1339,3 +1342,95 @@ GSQ by the completed restart above. Its results supersede the historical 3.18%
 whole-time scale estimate; they do not turn that earlier estimate into a
 measurement. Early-GDN localization and quality qualification are now required
 before promotion, regardless of unchanged top1.
+
+Integration appendix: pinned Metal target at 83c91cec
+--------------------------------------------------
+
+Main is integrated at `83c91cec25cd9d006bb8d24ea9e9a0497bd3987e`; the owner
+reports six planner CPU tests passed after rebuilding. New [UD](ud-merged-target-confirmation.jsonl)
+and [GSQ](gsq-merged-target-confirmation.jsonl) packets each contain one whole4096
+ABBA round per corpus, A=Some(false), production B=None. Normal lease/admission,
+router and complete-GPU-timing checks pass. The subsequent harness-metadata
+addition is separately source-bound; this is not a clean-commit binary claim.
+
+**Every sampled trajectory matches the prior production confirmation.** Per
+artifact: four warm endpoints plus eight timed arms ×(endpoint + four continued
+tokens), 44 whole records, both schedules, with no observations excluded.
+
+| Artifact | Logit hashes | Hyper hashes | Persistent tensor records (layout + hash) | Causal metadata / complete endpoint records | Teacher-token continuation records |
+|---|---:|---:|---:|---:|---:|
+| UD | 44/44 exact | 44/44 exact | 5,324/5,324 exact | 44/44 exact | 32/32 exact |
+| GSQ | 44/44 exact | 44/44 exact | 5,324/5,324 exact | 44/44 exact | 32/32 exact |
+
+All 88 endpoints are finite. Persistent equality includes all 121 records'
+indices, dtypes, shapes, byte counts and hashes; causal equality covers position,
+QSA lengths and PLE tokens. Both 4100-token arrays, complete prompt/text records,
+tokenizer identity, loaded-model metadata and MoE dtype cohorts match per
+artifact. Prompt/text hashes are independently recomputed. All five archived
+shard stamps match (path/device/inode/size/mtime/ctime), with successful runtime
+revalidation. This is stat/binding comparison, not new GGUF content hashing.
+
+**Compiled target:** both headers record `metal3.2`, product/research deployment
+targets `15.0`, from compiled constants. Bound `build.rs` passes the matching
+`-std`/`-mmacosx-version-min` flags and checks the effective compiler triple.
+This does **not** establish a macOS 15 host test; packets identify Apple M4 Max.
+
+| Binding | SHA256 |
+|---|---|
+| New executable, 47,228,568 bytes | `78db7dab29c36b801022d577672d05a320ce1b6e38ddd1409f984149d9b5f953` |
+| Prior executable, 47,118,952 bytes | `1f85ca7827e9a122bebe05d760c5a09a3561fd76675cf523c05f27a59ca974e1` |
+| Embedded product metallib, both builds | `fbbb7bd18a6c6a74cf0be61060159645b134e7e2670038e7120c81ea09677023` |
+| New compiled build.rs | `d1fa951c0acb15bf3f66942e5f945ab345cbc4f60f9df46030ee6c9d837c69b3` |
+| New frontier_schedule.rs | `e63c0e428d9795513e776f00d89824dc8421421f2c88f8fc09529f992a753308` |
+| New shared prefill_map.rs | `30d11df8d4de967451049e5e9000f61d024c11ae3ff255f2821eea37537927c1` |
+| Runtime, both builds | `c70552d890673af77eb4576254124b62349cd2070298243b12506cbc64934342` |
+
+The product metallib hash and runtime/session/checkpoint/QSA/MoE/GDN/dispatch/
+profile source hashes match the prior build. Only `packet_rs` and
+`shared_packet_rs` differ among pre-existing source-binding fields; target
+metadata is new. All prior hashes remain preserved. These matching
+trajectories and bindings support carrying the prior joint v1 NLL / v2
+retrieval qualification through integration without a full quality rerun.
+This is bounded evidence on retained streams, not a new quality study. GSQ's
+original A/B differences and INCONCLUSIVE v1 retrieval verdict remain intact.
+
+**New timings, not replacement estimates.** Warm arms excluded; all eight
+GPU/wall pairs favor B. Means use both observations per arm.
+
+| Artifact / corpus | Mean GPU A→B ms; saved % | Mean wall A→B ms; saved % | GPU pair savings % | Wall pair savings % |
+|---|---:|---:|---:|---:|
+| UD / prose | 8257.34→8107.89; 1.810% | 8282.74→8140.99; 1.711% | 0.953% / 2.683% | 0.717% / 2.721% |
+| UD / ssh_repeated | 8775.66→7983.74; 9.024% | 8801.58→8019.33; 8.888% | 13.550% / 3.998% | 13.326% / 3.974% |
+| GSQ / prose | 8536.43→8099.37; 5.120% | 8555.87→8121.93; 5.072% | 6.588% / 3.604% | 6.469% / 3.631% |
+| GSQ / ssh_repeated | 8382.86→8113.41; 3.214% | 8402.93→8137.72; 3.156% | 3.260% / 3.169% | 3.137% / 3.175% |
+
+UD SSH A drifts −9.943% GPU / −9.677% wall; its 9.024% mean saving is not a new
+headline. UD prose B drifts −3.523% GPU, GSQ prose A −3.152%; GSQ SSH is steadier
+(A/B −0.222%/−0.128%). Keep the historical UD ~2.4% result and GSQ's positive
+but uncertain magnitude. No recorded trajectory regression; these samples do
+not establish a compiler-induced performance change.
+
+Reproduce the complete CPU-only comparison, including ordinary timing audits:
+
+```sh
+UV_CACHE_DIR=/tmp/flash-frontier-uv-cache uv run --no-project \
+  docs/bench/2026-10-09-flash-frontier/compare_integration.py \
+  docs/bench/2026-10-09-flash-frontier/ud-production-confirmation.jsonl \
+  docs/bench/2026-10-09-flash-frontier/ud-merged-target-confirmation.jsonl \
+  docs/bench/2026-10-09-flash-frontier/gsq-production-confirmation.jsonl \
+  docs/bench/2026-10-09-flash-frontier/gsq-merged-target-confirmation.jsonl \
+  > /tmp/flash-merged-target-comparison.json
+```
+
+The retained [comparison report](merged-target-comparison.json) includes every
+endpoint result, full model/stat bindings, source hashes and unrounded timings;
+both audits report zero problems. New raw packet bindings:
+
+| Packet | Bytes | SHA256 |
+|---|---:|---|
+| ud-merged-target-confirmation.jsonl | 891,120 | `7f2acc511f0a3d3e5a8483f0476972e7b29c989e7233f9e9be9b5f11f939bed7` |
+| gsq-merged-target-confirmation.jsonl | 893,827 | `06cc458c7540757f2012634b84a23cee0c2332bd8f9b89ef3c2a534525e09922` |
+
+Raw packets are unchanged. This analysis performed no GPU work, build, quality
+rerun, model-source edit or commit. Prior binary sidecar archives/manifests are
+unmodified; these new JSONL-only confirmations need no duplicate binary archive.

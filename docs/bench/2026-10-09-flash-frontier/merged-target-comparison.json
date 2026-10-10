@@ -1,0 +1,3286 @@
+[
+  {
+    "prior": {
+      "path": "docs/bench/2026-10-09-flash-frontier/ud-production-confirmation.jsonl",
+      "bytes": 1729914,
+      "sha256": "eb7a2f0f310a0b785e7f3ef4d970fcbde6f17216e1a663f00b9f00feeeb6d6f8"
+    },
+    "current": {
+      "path": "docs/bench/2026-10-09-flash-frontier/ud-merged-target-confirmation.jsonl",
+      "bytes": 891120,
+      "sha256": "7f2acc511f0a3d3e5a8483f0476972e7b29c989e7233f9e9be9b5f11f939bed7"
+    },
+    "problems": [],
+    "model_bindings": {
+      "artifact": {
+        "equal": true,
+        "prior": [
+          {
+            "event": "artifact",
+            "shards": [
+              {
+                "path": "/Volumes/wdblack/weights-archive/qwen3.8-flash-next/UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf",
+                "shard": 0,
+                "device": 16777244,
+                "inode": 4140,
+                "bytes": 10946624,
+                "mtime_sec": 1787770339,
+                "mtime_nsec": 175856509,
+                "ctime_sec": 1787770339,
+                "ctime_nsec": 182632612
+              },
+              {
+                "path": "/Volumes/wdblack/weights-archive/qwen3.8-flash-next/UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00002-of-00003.gguf",
+                "shard": 1,
+                "device": 16777244,
+                "inode": 4139,
+                "bytes": 49983253824,
+                "mtime_sec": 1787773137,
+                "mtime_nsec": 454140414,
+                "ctime_sec": 1787773137,
+                "ctime_nsec": 505844173
+              },
+              {
+                "path": "/Volumes/wdblack/weights-archive/qwen3.8-flash-next/UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00003-of-00003.gguf",
+                "shard": 2,
+                "device": 16777244,
+                "inode": 4135,
+                "bytes": 39992153376,
+                "mtime_sec": 1787773176,
+                "mtime_nsec": 500382021,
+                "ctime_sec": 1787773176,
+                "ctime_nsec": 508891842
+              }
+            ]
+          }
+        ],
+        "current": [
+          {
+            "event": "artifact",
+            "shards": [
+              {
+                "path": "/Volumes/wdblack/weights-archive/qwen3.8-flash-next/UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf",
+                "shard": 0,
+                "device": 16777244,
+                "inode": 4140,
+                "bytes": 10946624,
+                "mtime_sec": 1787770339,
+                "mtime_nsec": 175856509,
+                "ctime_sec": 1787770339,
+                "ctime_nsec": 182632612
+              },
+              {
+                "path": "/Volumes/wdblack/weights-archive/qwen3.8-flash-next/UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00002-of-00003.gguf",
+                "shard": 1,
+                "device": 16777244,
+                "inode": 4139,
+                "bytes": 49983253824,
+                "mtime_sec": 1787773137,
+                "mtime_nsec": 454140414,
+                "ctime_sec": 1787773137,
+                "ctime_nsec": 505844173
+              },
+              {
+                "path": "/Volumes/wdblack/weights-archive/qwen3.8-flash-next/UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00003-of-00003.gguf",
+                "shard": 2,
+                "device": 16777244,
+                "inode": 4135,
+                "bytes": 39992153376,
+                "mtime_sec": 1787773176,
+                "mtime_nsec": 500382021,
+                "ctime_sec": 1787773176,
+                "ctime_nsec": 508891842
+              }
+            ]
+          }
+        ]
+      },
+      "tokenizer_binding": {
+        "equal": true,
+        "prior": [
+          {
+            "event": "tokenizer_binding",
+            "identity_sha256": "86a6193d6a6c9b43a71a207765f85fb3904addb3bba6dcd50b50bef076e5e89f",
+            "matches_retained_ssh_tokenizer": true
+          }
+        ],
+        "current": [
+          {
+            "event": "tokenizer_binding",
+            "identity_sha256": "86a6193d6a6c9b43a71a207765f85fb3904addb3bba6dcd50b50bef076e5e89f",
+            "matches_retained_ssh_tokenizer": true
+          }
+        ]
+      },
+      "ssh_source": {
+        "equal": true,
+        "prior": [
+          {
+            "event": "ssh_source",
+            "fixture_sha256": "874537119c68f6c566c4288ba17c1099694416edb001c4003249570894438e97",
+            "retained_tokens": 2211,
+            "artifact_tokenizer_exact_roundtrip": true,
+            "label": "ssh_repeated",
+            "extent_note": "whole retained natural SSH text repeated; not an uninterrupted 4096-token source excerpt"
+          }
+        ],
+        "current": [
+          {
+            "event": "ssh_source",
+            "fixture_sha256": "874537119c68f6c566c4288ba17c1099694416edb001c4003249570894438e97",
+            "retained_tokens": 2211,
+            "artifact_tokenizer_exact_roundtrip": true,
+            "label": "ssh_repeated",
+            "extent_note": "whole retained natural SSH text repeated; not an uninterrupted 4096-token source excerpt"
+          }
+        ]
+      },
+      "loaded": {
+        "equal": true,
+        "prior": [
+          {
+            "event": "loaded",
+            "admission": "Qwen4ExpRuntimeAdmission { aggregate: MetalMemoryAdmission { admitted: true, reason: AdmittedProcessBudgetOmitted, scratch_upper_bytes: 63348572160, reserve_bytes: 536870912, required_bytes: Some(63885443072), signals: MetalMemorySignals { recommended_max_bytes: 126701535232, current_allocated_bytes: 475136, process_limit_remaining_bytes: Some(0) }, working_set_headroom_bytes: Some(126701060096) }, weights: MetalMemoryAdmission { admitted: true, reason: AdmittedProcessBudgetOmitted, scratch_upper_bytes: 61175349248, reserve_bytes: 0, required_bytes: Some(61175349248), signals: MetalMemorySignals { recommended_max_bytes: 126701535232, current_allocated_bytes: 475136, process_limit_remaining_bytes: Some(0) }, working_set_headroom_bytes: Some(126701060096) }, session: MetalMemoryAdmission { admitted: true, reason: AdmittedProcessBudgetOmitted, scratch_upper_bytes: 2173222912, reserve_bytes: 536870912, required_bytes: Some(2710093824), signals: MetalMemorySignals { recommended_max_bytes: 126701535232, current_allocated_bytes: 61175824384, process_limit_remaining_bytes: Some(0) }, working_set_headroom_bytes: Some(65525710848) } }",
+            "weight_allocation_bytes": 61175349248,
+            "session_allocation_bytes": 2161442816,
+            "packed_capacity": 2048,
+            "selected_capable": true,
+            "selected_active": true
+          }
+        ],
+        "current": [
+          {
+            "event": "loaded",
+            "admission": "Qwen4ExpRuntimeAdmission { aggregate: MetalMemoryAdmission { admitted: true, reason: AdmittedProcessBudgetOmitted, scratch_upper_bytes: 63348572160, reserve_bytes: 536870912, required_bytes: Some(63885443072), signals: MetalMemorySignals { recommended_max_bytes: 126701535232, current_allocated_bytes: 475136, process_limit_remaining_bytes: Some(0) }, working_set_headroom_bytes: Some(126701060096) }, weights: MetalMemoryAdmission { admitted: true, reason: AdmittedProcessBudgetOmitted, scratch_upper_bytes: 61175349248, reserve_bytes: 0, required_bytes: Some(61175349248), signals: MetalMemorySignals { recommended_max_bytes: 126701535232, current_allocated_bytes: 475136, process_limit_remaining_bytes: Some(0) }, working_set_headroom_bytes: Some(126701060096) }, session: MetalMemoryAdmission { admitted: true, reason: AdmittedProcessBudgetOmitted, scratch_upper_bytes: 2173222912, reserve_bytes: 536870912, required_bytes: Some(2710093824), signals: MetalMemorySignals { recommended_max_bytes: 126701535232, current_allocated_bytes: 61175824384, process_limit_remaining_bytes: Some(0) }, working_set_headroom_bytes: Some(65525710848) } }",
+            "weight_allocation_bytes": 61175349248,
+            "session_allocation_bytes": 2161442816,
+            "packed_capacity": 2048,
+            "selected_capable": true,
+            "selected_active": true
+          }
+        ]
+      },
+      "moe_cohorts": {
+        "equal": true,
+        "prior": [
+          {
+            "event": "moe_cohorts",
+            "layers": [
+              {
+                "layer": 0,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 1,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 2,
+                "router": "F32",
+                "gate": "IQ4_XS",
+                "up": "IQ4_XS",
+                "down": "Q8_0"
+              },
+              {
+                "layer": 3,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 4,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "Q8_0"
+              },
+              {
+                "layer": 5,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 6,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 7,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 8,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 9,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 10,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 11,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 12,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 13,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 14,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 15,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 16,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 17,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 18,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 19,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 20,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 21,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 22,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 23,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 24,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 25,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 26,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 27,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 28,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 29,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 30,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "Q8_0"
+              },
+              {
+                "layer": 31,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 32,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 33,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 34,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 35,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 36,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 37,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 38,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 39,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 40,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 41,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 42,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 43,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 44,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 45,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 46,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "Q8_0"
+              },
+              {
+                "layer": 47,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "Q8_0"
+              }
+            ]
+          }
+        ],
+        "current": [
+          {
+            "event": "moe_cohorts",
+            "layers": [
+              {
+                "layer": 0,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 1,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 2,
+                "router": "F32",
+                "gate": "IQ4_XS",
+                "up": "IQ4_XS",
+                "down": "Q8_0"
+              },
+              {
+                "layer": 3,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 4,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "Q8_0"
+              },
+              {
+                "layer": 5,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 6,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 7,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 8,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 9,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 10,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 11,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 12,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 13,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 14,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 15,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 16,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 17,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 18,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 19,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 20,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 21,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 22,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 23,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 24,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 25,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 26,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 27,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 28,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 29,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 30,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "Q8_0"
+              },
+              {
+                "layer": 31,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 32,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 33,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 34,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 35,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 36,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 37,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 38,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 39,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 40,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 41,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 42,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 43,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 44,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 45,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 46,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "Q8_0"
+              },
+              {
+                "layer": 47,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "Q8_0"
+              }
+            ]
+          }
+        ]
+      },
+      "device": {
+        "equal": true,
+        "prior": [
+          {
+            "event": "device",
+            "description": "Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes",
+            "selected_requested": true,
+            "router_default_enabled": true,
+            "strict_router_pipeline_supported": true
+          }
+        ],
+        "current": [
+          {
+            "event": "device",
+            "description": "Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes",
+            "selected_requested": true,
+            "router_default_enabled": true,
+            "strict_router_pipeline_supported": true
+          }
+        ]
+      }
+    },
+    "prompts": [
+      {
+        "corpus": "prose",
+        "all_prompt_fields_equal": true,
+        "token_ids_equal": true,
+        "tokens": 4100,
+        "hashes_recomputed": [
+          true,
+          true
+        ],
+        "full_text_sha256": "9e2aeb1de356d5eeec0267ba381741971898d6b880adab40b6cb51c8d17316ba",
+        "ids_sha256_u32_le": "0cc71705ddd73b629e2e0f1bf60bbaa8ecf9b4b3ff32e469719644f5737ce7aa"
+      },
+      {
+        "corpus": "ssh_repeated",
+        "all_prompt_fields_equal": true,
+        "token_ids_equal": true,
+        "tokens": 4100,
+        "hashes_recomputed": [
+          true,
+          true
+        ],
+        "full_text_sha256": "6bde0ae0b93b11c56a55a94040840429ef3c199688662b086424761b5b97f50a",
+        "ids_sha256_u32_le": "675aa61981cb1e69719263a3b10793b53e2fffc343d58e6602c7e7c82d695329"
+      }
+    ],
+    "whole_endpoint_records": 44,
+    "matching_endpoint_records": 44,
+    "persistent_tensor_records_checked": 5324,
+    "endpoints": [
+      {
+        "label": "prose/whole4096/round1/A1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/A1/continuation1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/A1/continuation2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/A1/continuation3",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/A1/continuation4",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/A2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/A2/continuation1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/A2/continuation2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/A2/continuation3",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/A2/continuation4",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B1/continuation1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B1/continuation2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B1/continuation3",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B1/continuation4",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B2/continuation1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B2/continuation2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B2/continuation3",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B2/continuation4",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/warm_A",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/warm_B",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A1/continuation1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A1/continuation2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A1/continuation3",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A1/continuation4",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A2/continuation1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A2/continuation2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A2/continuation3",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A2/continuation4",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B1/continuation1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B1/continuation2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B1/continuation3",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B1/continuation4",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B2/continuation1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B2/continuation2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B2/continuation3",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B2/continuation4",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/warm_A",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/warm_B",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      }
+    ],
+    "continuation_input_records_equal": true,
+    "continuation_input_records": 32,
+    "source_binding_prior": {
+      "runtime_rs": "c70552d890673af77eb4576254124b62349cd2070298243b12506cbc64934342",
+      "packet_rs": "4c8b65cb84922d67a9a8ca98d5834f0750e6c453e784699eb66df6b060241e91",
+      "shared_packet_rs": "8026db693dff57497b4ac4dd455d5cf89ded5aa04cf8812ba3608dd681c47e9a",
+      "session_rs": "af37cbea38b1a9f682798e57ef9d35c6260fa03c1716908cd2e702173dd02c9a",
+      "checkpoint_rs": "c3efd77293270d369de629d9eb61b97f6a24a929018b083f47d63bbcccf0de95",
+      "qsa_rs": "f73a17389e7d7b01c953b37bcbf2655897eebf82122fe20bd948105db61e065d",
+      "moe_rs": "4052fa835ca4765d876fd200ebd51ad15ca8b57af1a6abe2fce1aa08344fa5ae",
+      "gdn_rs": "38652303abf583b30fba58b0a4446132fa05d28fcf1de53b4be5ad155cb7b928",
+      "dispatch_rs": "ff06bdf4a4f82a75136c180b8e7db85b1231590eaa2fe99bfae6cbf92b54b790",
+      "profile_rs": "08b060fc1bf9a90f419986047460b2aea91168af124873836577132449499d93",
+      "metallib": "fbbb7bd18a6c6a74cf0be61060159645b134e7e2670038e7120c81ea09677023",
+      "note": "SHA256 of compiled inputs; not a claim about runtime checkout HEAD"
+    },
+    "source_binding_current": {
+      "runtime_rs": "c70552d890673af77eb4576254124b62349cd2070298243b12506cbc64934342",
+      "packet_rs": "e63c0e428d9795513e776f00d89824dc8421421f2c88f8fc09529f992a753308",
+      "shared_packet_rs": "30d11df8d4de967451049e5e9000f61d024c11ae3ff255f2821eea37537927c1",
+      "session_rs": "af37cbea38b1a9f682798e57ef9d35c6260fa03c1716908cd2e702173dd02c9a",
+      "checkpoint_rs": "c3efd77293270d369de629d9eb61b97f6a24a929018b083f47d63bbcccf0de95",
+      "qsa_rs": "f73a17389e7d7b01c953b37bcbf2655897eebf82122fe20bd948105db61e065d",
+      "moe_rs": "4052fa835ca4765d876fd200ebd51ad15ca8b57af1a6abe2fce1aa08344fa5ae",
+      "gdn_rs": "38652303abf583b30fba58b0a4446132fa05d28fcf1de53b4be5ad155cb7b928",
+      "dispatch_rs": "ff06bdf4a4f82a75136c180b8e7db85b1231590eaa2fe99bfae6cbf92b54b790",
+      "profile_rs": "08b060fc1bf9a90f419986047460b2aea91168af124873836577132449499d93",
+      "metallib": "fbbb7bd18a6c6a74cf0be61060159645b134e7e2670038e7120c81ea09677023",
+      "note": "SHA256 of compiled inputs; not a claim about runtime checkout HEAD"
+    },
+    "changed_source_binding_fields": [
+      "packet_rs",
+      "shared_packet_rs"
+    ],
+    "metallib_build": {
+      "language": "metal3.2",
+      "product_deployment_target": "15.0",
+      "research_deployment_target": "15.0",
+      "build_source_sha256": "d1fa951c0acb15bf3f66942e5f945ab345cbc4f60f9df46030ee6c9d837c69b3"
+    },
+    "executable_prior": [
+      {
+        "event": "executable_binding",
+        "path": "/Users/tito/code/qwen-llm/target/release/deps/qwen_llm-de358c0a63485fd8",
+        "sha256": "1f85ca7827e9a122bebe05d760c5a09a3561fd76675cf523c05f27a59ca974e1",
+        "bytes": 47118952
+      }
+    ],
+    "executable_current": [
+      {
+        "event": "executable_binding",
+        "path": "/Users/tito/code/qwen-llm/target/release/deps/qwen_llm-de358c0a63485fd8",
+        "sha256": "78db7dab29c36b801022d577672d05a320ce1b6e38ddd1409f984149d9b5f953",
+        "bytes": 47228568
+      }
+    ],
+    "current_timing": [
+      {
+        "cell": "prose/whole4096",
+        "timed_attempts": 4,
+        "aggregate": {
+          "complete_gpu_ms": {
+            "A_mean_ms": 8257.33883333396,
+            "B_mean_ms": 8107.885624998744,
+            "mean_saved_ms": 149.4532083352169,
+            "mean_saving_percent": 1.80994399469101,
+            "A_median_ms": 8257.33883333396,
+            "B_median_ms": 8107.885624998744,
+            "median_saving_percent": 1.80994399469101
+          },
+          "ordinary_call_wall_ms": {
+            "A_mean_ms": 8282.7426665,
+            "B_mean_ms": 8140.985542,
+            "mean_saved_ms": 141.75712449999992,
+            "mean_saving_percent": 1.7114756573730627,
+            "A_median_ms": 8282.7426665,
+            "B_median_ms": 8140.985542,
+            "median_saving_percent": 1.7114756573730627
+          }
+        },
+        "rounds": [
+          {
+            "round": 1,
+            "complete_gpu_ms": {
+              "arms_ms": {
+                "A1": 8332.666333333691,
+                "B1": 8253.269458333307,
+                "B2": 7962.501791664181,
+                "A2": 8182.011333334231
+              },
+              "pairs": [
+                {
+                  "A": "A1",
+                  "B": "B1",
+                  "saved_ms": 79.39687500038417,
+                  "saving_percent": 0.9528387652193326
+                },
+                {
+                  "A": "A2",
+                  "B": "B2",
+                  "saved_ms": 219.50954167004966,
+                  "saving_percent": 2.682831063503277
+                }
+              ],
+              "mean_saved_ms": 149.4532083352169,
+              "mean_saving_percent": 1.80994399469101,
+              "A2_vs_A1_drift_percent": -1.8080047126906473,
+              "B2_vs_B1_drift_percent": -3.5230603839735086
+            },
+            "ordinary_call_wall_ms": {
+              "arms_ms": {
+                "A1": 8345.57925,
+                "B1": 8285.754667000001,
+                "B2": 7996.216417000001,
+                "A2": 8219.906083
+              },
+              "pairs": [
+                {
+                  "A": "A1",
+                  "B": "B1",
+                  "saved_ms": 59.82458299999962,
+                  "saving_percent": 0.7168415901149028
+                },
+                {
+                  "A": "A2",
+                  "B": "B2",
+                  "saved_ms": 223.6896659999993,
+                  "saving_percent": 2.7213165666530315
+                }
+              ],
+              "mean_saved_ms": 141.75712449999946,
+              "mean_saving_percent": 1.7114756573730627,
+              "A2_vs_A1_drift_percent": -1.5058651201472983,
+              "B2_vs_B1_drift_percent": -3.4944101248031822
+            }
+          }
+        ]
+      },
+      {
+        "cell": "ssh_repeated/whole4096",
+        "timed_attempts": 4,
+        "aggregate": {
+          "complete_gpu_ms": {
+            "A_mean_ms": 8775.661708333246,
+            "B_mean_ms": 7983.735500000876,
+            "mean_saved_ms": 791.9262083323702,
+            "mean_saving_percent": 9.02411960092272,
+            "A_median_ms": 8775.661708333246,
+            "B_median_ms": 7983.735500000876,
+            "median_saving_percent": 9.02411960092272
+          },
+          "ordinary_call_wall_ms": {
+            "A_mean_ms": 8801.583917,
+            "B_mean_ms": 8019.332458499999,
+            "mean_saved_ms": 782.2514585000008,
+            "mean_saving_percent": 8.887621431286984,
+            "A_median_ms": 8801.583917,
+            "B_median_ms": 8019.332458499999,
+            "median_saving_percent": 8.887621431286984
+          }
+        },
+        "rounds": [
+          {
+            "round": 1,
+            "complete_gpu_ms": {
+              "arms_ms": {
+                "A1": 9234.783791667724,
+                "B1": 7983.458083333971,
+                "B2": 7984.01291666778,
+                "A2": 8316.539624998768
+              },
+              "pairs": [
+                {
+                  "A": "A1",
+                  "B": "B1",
+                  "saved_ms": 1251.3257083337521,
+                  "saving_percent": 13.550135407206687
+                },
+                {
+                  "A": "A2",
+                  "B": "B2",
+                  "saved_ms": 332.5267083309882,
+                  "saving_percent": 3.998378211671627
+                }
+              ],
+              "mean_saved_ms": 791.9262083323702,
+              "mean_saving_percent": 9.02411960092272,
+              "A2_vs_A1_drift_percent": -9.94332068171927,
+              "B2_vs_B1_drift_percent": 0.006949787022314524
+            },
+            "ordinary_call_wall_ms": {
+              "arms_ms": {
+                "A1": 9249.088334,
+                "B1": 8016.577249999999,
+                "B2": 8022.087666999999,
+                "A2": 8354.0795
+              },
+              "pairs": [
+                {
+                  "A": "A1",
+                  "B": "B1",
+                  "saved_ms": 1232.5110840000007,
+                  "saving_percent": 13.325757517843606
+                },
+                {
+                  "A": "A2",
+                  "B": "B2",
+                  "saved_ms": 331.99183300000095,
+                  "saving_percent": 3.9740085427724336
+                }
+              ],
+              "mean_saved_ms": 782.2514585000013,
+              "mean_saving_percent": 8.887621431286984,
+              "A2_vs_A1_drift_percent": -9.676724901738842,
+              "B2_vs_B1_drift_percent": 0.06873777708560347
+            }
+          }
+        ]
+      }
+    ],
+    "limits": "Whole natural prose/SSH trajectories only; equality of retained digests, not new full-logit readbacks. No new GGUF content hashing, quality acquisition, OS compatibility test or performance threshold."
+  },
+  {
+    "prior": {
+      "path": "docs/bench/2026-10-09-flash-frontier/gsq-production-confirmation.jsonl",
+      "bytes": 1735328,
+      "sha256": "48fb67024a80842ebfa144bf84d9b8f96d9ac5963e56814bf06673a7fc18f5b6"
+    },
+    "current": {
+      "path": "docs/bench/2026-10-09-flash-frontier/gsq-merged-target-confirmation.jsonl",
+      "bytes": 893827,
+      "sha256": "06cc458c7540757f2012634b84a23cee0c2332bd8f9b89ef3c2a534525e09922"
+    },
+    "problems": [],
+    "model_bindings": {
+      "artifact": {
+        "equal": true,
+        "prior": [
+          {
+            "event": "artifact",
+            "shards": [
+              {
+                "path": "/Volumes/wdblack/weights-archive/qwen3.8-flash-next-gsq-rco-iq3_s/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+                "shard": 0,
+                "device": 16777244,
+                "inode": 9597,
+                "bytes": 54817524224,
+                "mtime_sec": 1791352088,
+                "mtime_nsec": 581996541,
+                "ctime_sec": 1791352088,
+                "ctime_nsec": 588800270
+              },
+              {
+                "path": "/Volumes/wdblack/weights-archive/qwen3.8-flash-next-gsq-rco-iq3_s/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf",
+                "shard": 1,
+                "device": 16777244,
+                "inode": 9589,
+                "bytes": 28800138432,
+                "mtime_sec": 1791349250,
+                "mtime_nsec": 549281082,
+                "ctime_sec": 1791349250,
+                "ctime_nsec": 556903593
+              }
+            ]
+          }
+        ],
+        "current": [
+          {
+            "event": "artifact",
+            "shards": [
+              {
+                "path": "/Volumes/wdblack/weights-archive/qwen3.8-flash-next-gsq-rco-iq3_s/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+                "shard": 0,
+                "device": 16777244,
+                "inode": 9597,
+                "bytes": 54817524224,
+                "mtime_sec": 1791352088,
+                "mtime_nsec": 581996541,
+                "ctime_sec": 1791352088,
+                "ctime_nsec": 588800270
+              },
+              {
+                "path": "/Volumes/wdblack/weights-archive/qwen3.8-flash-next-gsq-rco-iq3_s/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf",
+                "shard": 1,
+                "device": 16777244,
+                "inode": 9589,
+                "bytes": 28800138432,
+                "mtime_sec": 1791349250,
+                "mtime_nsec": 549281082,
+                "ctime_sec": 1791349250,
+                "ctime_nsec": 556903593
+              }
+            ]
+          }
+        ]
+      },
+      "tokenizer_binding": {
+        "equal": true,
+        "prior": [
+          {
+            "event": "tokenizer_binding",
+            "identity_sha256": "86a6193d6a6c9b43a71a207765f85fb3904addb3bba6dcd50b50bef076e5e89f",
+            "matches_retained_ssh_tokenizer": true
+          }
+        ],
+        "current": [
+          {
+            "event": "tokenizer_binding",
+            "identity_sha256": "86a6193d6a6c9b43a71a207765f85fb3904addb3bba6dcd50b50bef076e5e89f",
+            "matches_retained_ssh_tokenizer": true
+          }
+        ]
+      },
+      "ssh_source": {
+        "equal": true,
+        "prior": [
+          {
+            "event": "ssh_source",
+            "fixture_sha256": "874537119c68f6c566c4288ba17c1099694416edb001c4003249570894438e97",
+            "retained_tokens": 2211,
+            "artifact_tokenizer_exact_roundtrip": true,
+            "label": "ssh_repeated",
+            "extent_note": "whole retained natural SSH text repeated; not an uninterrupted 4096-token source excerpt"
+          }
+        ],
+        "current": [
+          {
+            "event": "ssh_source",
+            "fixture_sha256": "874537119c68f6c566c4288ba17c1099694416edb001c4003249570894438e97",
+            "retained_tokens": 2211,
+            "artifact_tokenizer_exact_roundtrip": true,
+            "label": "ssh_repeated",
+            "extent_note": "whole retained natural SSH text repeated; not an uninterrupted 4096-token source excerpt"
+          }
+        ]
+      },
+      "loaded": {
+        "equal": true,
+        "prior": [
+          {
+            "event": "loaded",
+            "admission": "Qwen4ExpRuntimeAdmission { aggregate: MetalMemoryAdmission { admitted: true, reason: AdmittedProcessBudgetOmitted, scratch_upper_bytes: 57283575808, reserve_bytes: 536870912, required_bytes: Some(57820446720), signals: MetalMemorySignals { recommended_max_bytes: 126701535232, current_allocated_bytes: 475136, process_limit_remaining_bytes: Some(0) }, working_set_headroom_bytes: Some(126701060096) }, weights: MetalMemoryAdmission { admitted: true, reason: AdmittedProcessBudgetOmitted, scratch_upper_bytes: 55110352896, reserve_bytes: 0, required_bytes: Some(55110352896), signals: MetalMemorySignals { recommended_max_bytes: 126701535232, current_allocated_bytes: 475136, process_limit_remaining_bytes: Some(0) }, working_set_headroom_bytes: Some(126701060096) }, session: MetalMemoryAdmission { admitted: true, reason: AdmittedProcessBudgetOmitted, scratch_upper_bytes: 2173222912, reserve_bytes: 536870912, required_bytes: Some(2710093824), signals: MetalMemorySignals { recommended_max_bytes: 126701535232, current_allocated_bytes: 55110565888, process_limit_remaining_bytes: Some(0) }, working_set_headroom_bytes: Some(71590969344) } }",
+            "weight_allocation_bytes": 55110090752,
+            "session_allocation_bytes": 2161442816,
+            "packed_capacity": 2048,
+            "selected_capable": true,
+            "selected_active": true
+          }
+        ],
+        "current": [
+          {
+            "event": "loaded",
+            "admission": "Qwen4ExpRuntimeAdmission { aggregate: MetalMemoryAdmission { admitted: true, reason: AdmittedProcessBudgetOmitted, scratch_upper_bytes: 57283575808, reserve_bytes: 536870912, required_bytes: Some(57820446720), signals: MetalMemorySignals { recommended_max_bytes: 126701535232, current_allocated_bytes: 475136, process_limit_remaining_bytes: Some(0) }, working_set_headroom_bytes: Some(126701060096) }, weights: MetalMemoryAdmission { admitted: true, reason: AdmittedProcessBudgetOmitted, scratch_upper_bytes: 55110352896, reserve_bytes: 0, required_bytes: Some(55110352896), signals: MetalMemorySignals { recommended_max_bytes: 126701535232, current_allocated_bytes: 475136, process_limit_remaining_bytes: Some(0) }, working_set_headroom_bytes: Some(126701060096) }, session: MetalMemoryAdmission { admitted: true, reason: AdmittedProcessBudgetOmitted, scratch_upper_bytes: 2173222912, reserve_bytes: 536870912, required_bytes: Some(2710093824), signals: MetalMemorySignals { recommended_max_bytes: 126701535232, current_allocated_bytes: 55110565888, process_limit_remaining_bytes: Some(0) }, working_set_headroom_bytes: Some(71590969344) } }",
+            "weight_allocation_bytes": 55110090752,
+            "session_allocation_bytes": 2161442816,
+            "packed_capacity": 2048,
+            "selected_capable": true,
+            "selected_active": true
+          }
+        ]
+      },
+      "moe_cohorts": {
+        "equal": true,
+        "prior": [
+          {
+            "event": "moe_cohorts",
+            "layers": [
+              {
+                "layer": 0,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 1,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "Q2_0"
+              },
+              {
+                "layer": 2,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 3,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 4,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 5,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 6,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 7,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 8,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "Q2_0"
+              },
+              {
+                "layer": 9,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 10,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "Q2_0"
+              },
+              {
+                "layer": 11,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 12,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "Q2_0"
+              },
+              {
+                "layer": 13,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "Q2_0"
+              },
+              {
+                "layer": 14,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 15,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 16,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 17,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 18,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 19,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 20,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "Q2_0"
+              },
+              {
+                "layer": 21,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "Q2_0"
+              },
+              {
+                "layer": 22,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 23,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 24,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 25,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 26,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 27,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 28,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 29,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 30,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "Q2_0"
+              },
+              {
+                "layer": 31,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 32,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 33,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 34,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 35,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 36,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "Q2_0"
+              },
+              {
+                "layer": 37,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 38,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 39,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 40,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 41,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 42,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 43,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 44,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 45,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 46,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 47,
+                "router": "F32",
+                "gate": "IQ4_XS",
+                "up": "IQ4_XS",
+                "down": "IQ4_NL"
+              }
+            ]
+          }
+        ],
+        "current": [
+          {
+            "event": "moe_cohorts",
+            "layers": [
+              {
+                "layer": 0,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 1,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "Q2_0"
+              },
+              {
+                "layer": 2,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 3,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 4,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 5,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 6,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 7,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 8,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "Q2_0"
+              },
+              {
+                "layer": 9,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 10,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "Q2_0"
+              },
+              {
+                "layer": 11,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 12,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "Q2_0"
+              },
+              {
+                "layer": 13,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "Q2_0"
+              },
+              {
+                "layer": 14,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 15,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 16,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 17,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 18,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 19,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 20,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "Q2_0"
+              },
+              {
+                "layer": 21,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "Q2_0"
+              },
+              {
+                "layer": 22,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 23,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 24,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 25,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 26,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 27,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 28,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 29,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 30,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "Q2_0"
+              },
+              {
+                "layer": 31,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 32,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 33,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 34,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 35,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 36,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "Q2_0"
+              },
+              {
+                "layer": 37,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 38,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 39,
+                "router": "F32",
+                "gate": "IQ2_S",
+                "up": "IQ2_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 40,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 41,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 42,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 43,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 44,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 45,
+                "router": "F32",
+                "gate": "IQ3_S",
+                "up": "IQ3_S",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 46,
+                "router": "F32",
+                "gate": "IQ3_XXS",
+                "up": "IQ3_XXS",
+                "down": "IQ4_NL"
+              },
+              {
+                "layer": 47,
+                "router": "F32",
+                "gate": "IQ4_XS",
+                "up": "IQ4_XS",
+                "down": "IQ4_NL"
+              }
+            ]
+          }
+        ]
+      },
+      "device": {
+        "equal": true,
+        "prior": [
+          {
+            "event": "device",
+            "description": "Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes",
+            "selected_requested": true,
+            "router_default_enabled": true,
+            "strict_router_pipeline_supported": true
+          }
+        ],
+        "current": [
+          {
+            "event": "device",
+            "description": "Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes",
+            "selected_requested": true,
+            "router_default_enabled": true,
+            "strict_router_pipeline_supported": true
+          }
+        ]
+      }
+    },
+    "prompts": [
+      {
+        "corpus": "prose",
+        "all_prompt_fields_equal": true,
+        "token_ids_equal": true,
+        "tokens": 4100,
+        "hashes_recomputed": [
+          true,
+          true
+        ],
+        "full_text_sha256": "9e2aeb1de356d5eeec0267ba381741971898d6b880adab40b6cb51c8d17316ba",
+        "ids_sha256_u32_le": "0cc71705ddd73b629e2e0f1bf60bbaa8ecf9b4b3ff32e469719644f5737ce7aa"
+      },
+      {
+        "corpus": "ssh_repeated",
+        "all_prompt_fields_equal": true,
+        "token_ids_equal": true,
+        "tokens": 4100,
+        "hashes_recomputed": [
+          true,
+          true
+        ],
+        "full_text_sha256": "6bde0ae0b93b11c56a55a94040840429ef3c199688662b086424761b5b97f50a",
+        "ids_sha256_u32_le": "675aa61981cb1e69719263a3b10793b53e2fffc343d58e6602c7e7c82d695329"
+      }
+    ],
+    "whole_endpoint_records": 44,
+    "matching_endpoint_records": 44,
+    "persistent_tensor_records_checked": 5324,
+    "endpoints": [
+      {
+        "label": "prose/whole4096/round1/A1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/A1/continuation1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/A1/continuation2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/A1/continuation3",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/A1/continuation4",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/A2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/A2/continuation1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/A2/continuation2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/A2/continuation3",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/A2/continuation4",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B1/continuation1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B1/continuation2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B1/continuation3",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B1/continuation4",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B2/continuation1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B2/continuation2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B2/continuation3",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/round1/B2/continuation4",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/warm_A",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "prose/whole4096/warm_B",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A1/continuation1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A1/continuation2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A1/continuation3",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A1/continuation4",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A2/continuation1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A2/continuation2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A2/continuation3",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/A2/continuation4",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B1/continuation1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B1/continuation2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B1/continuation3",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B1/continuation4",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B2/continuation1",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B2/continuation2",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B2/continuation3",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/round1/B2/continuation4",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/warm_A",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      },
+      {
+        "label": "ssh_repeated/whole4096/warm_B",
+        "whole_record_equal": true,
+        "logits_hash_equal": true,
+        "logit_count_equal": true,
+        "finite": true,
+        "hyper_hash_equal": true,
+        "causal_metadata_equal": true,
+        "state_record_equal": true,
+        "persistent_tensors_checked": 121,
+        "changed_persistent_indices": []
+      }
+    ],
+    "continuation_input_records_equal": true,
+    "continuation_input_records": 32,
+    "source_binding_prior": {
+      "runtime_rs": "c70552d890673af77eb4576254124b62349cd2070298243b12506cbc64934342",
+      "packet_rs": "4c8b65cb84922d67a9a8ca98d5834f0750e6c453e784699eb66df6b060241e91",
+      "shared_packet_rs": "8026db693dff57497b4ac4dd455d5cf89ded5aa04cf8812ba3608dd681c47e9a",
+      "session_rs": "af37cbea38b1a9f682798e57ef9d35c6260fa03c1716908cd2e702173dd02c9a",
+      "checkpoint_rs": "c3efd77293270d369de629d9eb61b97f6a24a929018b083f47d63bbcccf0de95",
+      "qsa_rs": "f73a17389e7d7b01c953b37bcbf2655897eebf82122fe20bd948105db61e065d",
+      "moe_rs": "4052fa835ca4765d876fd200ebd51ad15ca8b57af1a6abe2fce1aa08344fa5ae",
+      "gdn_rs": "38652303abf583b30fba58b0a4446132fa05d28fcf1de53b4be5ad155cb7b928",
+      "dispatch_rs": "ff06bdf4a4f82a75136c180b8e7db85b1231590eaa2fe99bfae6cbf92b54b790",
+      "profile_rs": "08b060fc1bf9a90f419986047460b2aea91168af124873836577132449499d93",
+      "metallib": "fbbb7bd18a6c6a74cf0be61060159645b134e7e2670038e7120c81ea09677023",
+      "note": "SHA256 of compiled inputs; not a claim about runtime checkout HEAD"
+    },
+    "source_binding_current": {
+      "runtime_rs": "c70552d890673af77eb4576254124b62349cd2070298243b12506cbc64934342",
+      "packet_rs": "e63c0e428d9795513e776f00d89824dc8421421f2c88f8fc09529f992a753308",
+      "shared_packet_rs": "30d11df8d4de967451049e5e9000f61d024c11ae3ff255f2821eea37537927c1",
+      "session_rs": "af37cbea38b1a9f682798e57ef9d35c6260fa03c1716908cd2e702173dd02c9a",
+      "checkpoint_rs": "c3efd77293270d369de629d9eb61b97f6a24a929018b083f47d63bbcccf0de95",
+      "qsa_rs": "f73a17389e7d7b01c953b37bcbf2655897eebf82122fe20bd948105db61e065d",
+      "moe_rs": "4052fa835ca4765d876fd200ebd51ad15ca8b57af1a6abe2fce1aa08344fa5ae",
+      "gdn_rs": "38652303abf583b30fba58b0a4446132fa05d28fcf1de53b4be5ad155cb7b928",
+      "dispatch_rs": "ff06bdf4a4f82a75136c180b8e7db85b1231590eaa2fe99bfae6cbf92b54b790",
+      "profile_rs": "08b060fc1bf9a90f419986047460b2aea91168af124873836577132449499d93",
+      "metallib": "fbbb7bd18a6c6a74cf0be61060159645b134e7e2670038e7120c81ea09677023",
+      "note": "SHA256 of compiled inputs; not a claim about runtime checkout HEAD"
+    },
+    "changed_source_binding_fields": [
+      "packet_rs",
+      "shared_packet_rs"
+    ],
+    "metallib_build": {
+      "language": "metal3.2",
+      "product_deployment_target": "15.0",
+      "research_deployment_target": "15.0",
+      "build_source_sha256": "d1fa951c0acb15bf3f66942e5f945ab345cbc4f60f9df46030ee6c9d837c69b3"
+    },
+    "executable_prior": [
+      {
+        "event": "executable_binding",
+        "path": "/Users/tito/code/qwen-llm/target/release/deps/qwen_llm-de358c0a63485fd8",
+        "sha256": "1f85ca7827e9a122bebe05d760c5a09a3561fd76675cf523c05f27a59ca974e1",
+        "bytes": 47118952
+      }
+    ],
+    "executable_current": [
+      {
+        "event": "executable_binding",
+        "path": "/Users/tito/code/qwen-llm/target/release/deps/qwen_llm-de358c0a63485fd8",
+        "sha256": "78db7dab29c36b801022d577672d05a320ce1b6e38ddd1409f984149d9b5f953",
+        "bytes": 47228568
+      }
+    ],
+    "current_timing": [
+      {
+        "cell": "prose/whole4096",
+        "timed_attempts": 4,
+        "aggregate": {
+          "complete_gpu_ms": {
+            "A_mean_ms": 8536.425854166737,
+            "B_mean_ms": 8099.372750000839,
+            "mean_saved_ms": 437.0531041658978,
+            "mean_saving_percent": 5.119860602462412,
+            "A_median_ms": 8536.425854166737,
+            "B_median_ms": 8099.372750000839,
+            "median_saving_percent": 5.119860602462412
+          },
+          "ordinary_call_wall_ms": {
+            "A_mean_ms": 8555.867,
+            "B_mean_ms": 8121.933270500001,
+            "mean_saved_ms": 433.9337294999996,
+            "mean_saving_percent": 5.071768056936832,
+            "A_median_ms": 8555.867,
+            "B_median_ms": 8121.933270500001,
+            "median_saving_percent": 5.071768056936832
+          }
+        },
+        "rounds": [
+          {
+            "round": 1,
+            "complete_gpu_ms": {
+              "arms_ms": {
+                "A1": 8673.108416665855,
+                "B1": 8101.698375001433,
+                "B2": 8097.047125000245,
+                "A2": 8399.743291667619
+              },
+              "pairs": [
+                {
+                  "A": "A1",
+                  "B": "B1",
+                  "saved_ms": 571.4100416644214,
+                  "saving_percent": 6.588295847500603
+                },
+                {
+                  "A": "A2",
+                  "B": "B2",
+                  "saved_ms": 302.6961666673742,
+                  "saving_percent": 3.6036359226316206
+                }
+              ],
+              "mean_saved_ms": 437.0531041658978,
+              "mean_saving_percent": 5.119860602462412,
+              "A2_vs_A1_drift_percent": -3.151870262257417,
+              "B2_vs_B1_drift_percent": -0.05741080185780456
+            },
+            "ordinary_call_wall_ms": {
+              "arms_ms": {
+                "A1": 8685.877375,
+                "B1": 8123.984458000001,
+                "B2": 8119.882083,
+                "A2": 8425.856625
+              },
+              "pairs": [
+                {
+                  "A": "A1",
+                  "B": "B1",
+                  "saved_ms": 561.8929169999992,
+                  "saving_percent": 6.469040405949766
+                },
+                {
+                  "A": "A2",
+                  "B": "B2",
+                  "saved_ms": 305.97454199999993,
+                  "saving_percent": 3.631376079817883
+                }
+              ],
+              "mean_saved_ms": 433.9337294999996,
+              "mean_saving_percent": 5.071768056936832,
+              "A2_vs_A1_drift_percent": -2.993603740577788,
+              "B2_vs_B1_drift_percent": -0.05049708085003157
+            }
+          }
+        ]
+      },
+      {
+        "cell": "ssh_repeated/whole4096",
+        "timed_attempts": 4,
+        "aggregate": {
+          "complete_gpu_ms": {
+            "A_mean_ms": 8382.861416665946,
+            "B_mean_ms": 8113.4084374998565,
+            "mean_saved_ms": 269.4529791660898,
+            "mean_saving_percent": 3.214331786881164,
+            "A_median_ms": 8382.861416665946,
+            "B_median_ms": 8113.4084374998565,
+            "median_saving_percent": 3.214331786881164
+          },
+          "ordinary_call_wall_ms": {
+            "A_mean_ms": 8402.931271000001,
+            "B_mean_ms": 8137.718979000001,
+            "mean_saved_ms": 265.21229200000016,
+            "mean_saving_percent": 3.1561878045497593,
+            "A_median_ms": 8402.931271000001,
+            "B_median_ms": 8137.718979000001,
+            "median_saving_percent": 3.1561878045497593
+          }
+        },
+        "rounds": [
+          {
+            "round": 1,
+            "complete_gpu_ms": {
+              "arms_ms": {
+                "A1": 8392.160874998808,
+                "B1": 8118.60812499981,
+                "B2": 8108.208749999903,
+                "A2": 8373.561958333084
+              },
+              "pairs": [
+                {
+                  "A": "A1",
+                  "B": "B1",
+                  "saved_ms": 273.5527499989985,
+                  "saving_percent": 3.259622331763712
+                },
+                {
+                  "A": "A2",
+                  "B": "B2",
+                  "saved_ms": 265.3532083331811,
+                  "saving_percent": 3.1689406450155944
+                }
+              ],
+              "mean_saved_ms": 269.4529791660898,
+              "mean_saving_percent": 3.214331786881164,
+              "A2_vs_A1_drift_percent": -0.22162249917219157,
+              "B2_vs_B1_drift_percent": -0.12809307752992272
+            },
+            "ordinary_call_wall_ms": {
+              "arms_ms": {
+                "A1": 8406.222417,
+                "B1": 8142.495583000001,
+                "B2": 8132.9423750000005,
+                "A2": 8399.640125
+              },
+              "pairs": [
+                {
+                  "A": "A1",
+                  "B": "B1",
+                  "saved_ms": 263.72683400000005,
+                  "saving_percent": 3.1372811819333046
+                },
+                {
+                  "A": "A2",
+                  "B": "B2",
+                  "saved_ms": 266.69774999999936,
+                  "saving_percent": 3.175109243147478
+                }
+              ],
+              "mean_saved_ms": 265.21229200000107,
+              "mean_saving_percent": 3.1561878045497593,
+              "A2_vs_A1_drift_percent": -0.07830261529471194,
+              "B2_vs_B1_drift_percent": -0.11732530773422845
+            }
+          }
+        ]
+      }
+    ],
+    "limits": "Whole natural prose/SSH trajectories only; equality of retained digests, not new full-logit readbacks. No new GGUF content hashing, quality acquisition, OS compatibility test or performance threshold."
+  }
+]

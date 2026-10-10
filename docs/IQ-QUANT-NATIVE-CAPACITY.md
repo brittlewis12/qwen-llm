@@ -92,8 +92,11 @@ review approves with no fixes and verifies the historical pins. Owner-reported
 32 ignored in each. HC capture CPU tests: 3 passed in each; GDN capture CPU
 tests: 3 passed in debug. The `qwen-cli` production check passes. Ignored
 benchmark acquisitions were executed separately per retained release packets;
-these scoped results do not claim a full-suite pass. Commit/integration remains
-outstanding, with no landed hash assigned.
+these scoped results do not claim a full-suite pass. Integration is now on main
+`83c91cec`. The subsequent Metal 3.2/macOS 15.0-target confirmation reproduces
+all sampled whole endpoint/state records on both artifacts; that target metadata
+is not a macOS 15 host test. The owner reports six planner CPU tests passed after
+the rebuild; this is an additional focused check, not a full-suite rerun.
 The earlier repeatable UD whole 4K saving remains about 2.4% GPU/wall; GSQ is
 positive with uncertain magnitude, and the latest one-round means do not
 replace that bounded interpretation. Next Flash performance work is

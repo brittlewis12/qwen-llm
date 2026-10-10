@@ -1097,8 +1097,10 @@ fn clamped_swiglu_n32_pipeline_name(dtype: GgmlType) -> Option<&'static str> {
 /// The 32-token tile keeps the 16-token tile's dequantization and per-output
 /// matrix-multiply sequence, so each slot's output is bitwise the same
 /// (qualification-tested); a bucket's weight tiles are dequantized once per
-/// 32 slots instead of 16. Dtypes without the wide tile use the 16-token
-/// path alone.
+/// 32 slots instead of 16. Dtypes without the wide tile, and spans shorter
+/// than `wide_min_count` (no bucket can reach it), use the 16-token path
+/// alone. Both dispatches' bindings and pipelines are checked before either
+/// is encoded.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_moe_swiglu_clamped_f32_grouped_slots_split(
     ctx: &MetalContext,
@@ -1118,47 +1120,73 @@ pub fn encode_moe_swiglu_clamped_f32_grouped_slots_split(
     wide_min_count: u32,
 ) -> Result<(), MetalError> {
     const KERNEL: &str = "moe_swiglu_clamped_grouped_slots_split";
-    let Some(wide) = clamped_swiglu_n32_pipeline_name(w_gate.dtype) else {
+    // A span shorter than the wide threshold has no bucket that large (a
+    // bucket holds at most `n_tokens` slots): the incumbent alone.
+    let wide = clamped_swiglu_n32_pipeline_name(w_gate.dtype)
+        .filter(|_| n_tokens >= wide_min_count as usize);
+    let Some(wide) = wide else {
         return encode_moe_swiglu_clamped_f32_grouped_slots_generic(
             ctx, enc, w_gate, w_up, x_pack, counts, ids, inner, n_hidden, n_ffn, n_expert, topk,
             n_tokens, clamp,
         );
     };
+    let bad = |detail: String| MetalError::BadShape {
+        kernel: KERNEL,
+        detail,
+    };
     if wide_min_count == 0 || wide_min_count > i32::MAX as u32 {
-        return Err(MetalError::BadShape {
-            kernel: KERNEL,
-            detail: format!("wide_min_count {wide_min_count} outside 1..=i32::MAX"),
-        });
+        return Err(bad(format!(
+            "wide_min_count {wide_min_count} outside 1..=i32::MAX"
+        )));
     }
-    // The incumbent's checks (clamp, dtypes, shapes, layout) on the narrow
-    // range, then the wide range with the same arguments.
     if !clamp.is_finite() || clamp <= 0.0 || w_gate.dtype != w_up.dtype {
-        return Err(MetalError::BadShape {
-            kernel: KERNEL,
-            detail: format!("clamp {clamp}, gate/up {:?}/{:?}", w_gate.dtype, w_up.dtype),
-        });
+        return Err(bad(format!(
+            "clamp {clamp}, gate/up {:?}/{:?}",
+            w_gate.dtype, w_up.dtype
+        )));
     }
+    let slots = n_tokens.checked_mul(topk);
+    let elements = |a: Option<usize>, b: usize| a.and_then(|a| a.checked_mul(b));
     if topk == 0
         || n_ffn == 0
         || n_tokens == 0
         || n_expert == 0
-        || x_pack.n_elements() as usize != n_tokens * n_hidden
+        || Some(x_pack.n_elements() as usize) != elements(Some(n_tokens), n_hidden)
         || counts.n_elements() as usize != n_expert
-        || ids.n_elements() as usize != n_expert * n_tokens
-        || inner.n_elements() as usize != n_tokens * topk * n_ffn
+        || Some(ids.n_elements() as usize) != elements(Some(n_expert), n_tokens)
+        || Some(inner.n_elements() as usize) != elements(slots, n_ffn)
     {
-        return Err(MetalError::BadShape {
-            kernel: KERNEL,
-            detail: "degenerate shape or x/counts/ids/inner size mismatch".into(),
-        });
+        return Err(bad(
+            "degenerate shape or x/counts/ids/inner size mismatch".into()
+        ));
     }
-    let narrow =
-        clamped_swiglu_pipeline_name(w_gate.dtype).ok_or_else(|| MetalError::BadShape {
-            kernel: KERNEL,
-            detail: format!("no clamped grouped SwiGLU for {:?}", w_gate.dtype),
-        })?;
+    let narrow = clamped_swiglu_pipeline_name(w_gate.dtype)
+        .ok_or_else(|| bad(format!("no clamped grouped SwiGLU for {:?}", w_gate.dtype)))?;
     let l = generic_layout_for(KERNEL, w_gate, n_hidden, n_ffn, n_expert)?;
     generic_layout_for(KERNEL, w_up, n_hidden, n_ffn, n_expert)?;
+    // Both pipelines and every binding checked before either dispatch:
+    // F32 activations 16-byte aligned, a writable output aliasing no input,
+    // I32 counts and ids, int-indexed dimensions within i32, 16 KiB of
+    // threadgroup memory, four 32-wide SIMD groups.
+    for name in [narrow.as_str(), wide] {
+        check_f32x_bindings(
+            ctx,
+            KERNEL,
+            name,
+            16384,
+            &[w_gate, w_up],
+            x_pack,
+            counts,
+            ids,
+            inner,
+            &[
+                (Some(n_hidden), "n_hidden"),
+                (Some(n_ffn), "n_ffn"),
+                (slots, "slot count"),
+                (n_expert.checked_mul(n_tokens), "ids"),
+            ],
+        )?;
+    }
     for (name, tokens_per_tile, min_count, max_count) in [
         (narrow.as_str(), 16, 0, wide_min_count - 1),
         (wide, 32, wide_min_count, i32::MAX as u32),

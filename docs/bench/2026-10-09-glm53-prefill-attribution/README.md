@@ -47,8 +47,10 @@ schedule (as the shared-prefix split does), not its kernels or precision.
 
 ## Deep contexts (`prefill.json`, `decode.json`)
 
-Same methods at deeper prefixes (deep cells repeat the qualification text's
-tokens; timing only):
+Same methods at deeper prefixes. Deep cells repeat the qualification
+text's tokens, so these are repeated-text timings: repetition can change
+route skew and which memory sparse selection reads, so they show this
+stream's depth behavior, not content-independent behavior.
 
 | Prefill chunk at depth | 0 | 4,096 | 16,384 |
 |---|---:|---:|---:|

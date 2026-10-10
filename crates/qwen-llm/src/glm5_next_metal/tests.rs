@@ -968,6 +968,14 @@ pub(super) fn deep_timing_tokens(tokens: &[u32], n: usize) -> Vec<u32> {
         .collect()
 }
 
+/// `GLM53_STAGE_OUT` as a path: absolute, or relative to the workspace
+/// root (tests run from the crate directory).
+fn stage_out_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(std::env::var("GLM53_STAGE_OUT").expect("GLM53_STAGE_OUT"))
+}
+
 /// Depths from `var` (comma-separated), or `default`.
 fn depths_from_env(var: &str, default: &[usize]) -> Vec<usize> {
     std::env::var(var).map_or_else(
@@ -2593,7 +2601,7 @@ fn stage_weight_bytes(gguf: &GgufFile, c: &Glm5NextConfig) -> BTreeMap<&'static 
 #[ignore = "timing: loads the GLM-5.3 trunk; requires GLM53_GGUF, GLM53_STAGE_OUT, no MTL_DEBUG_LAYER and an idle GPU"]
 fn decode_stage_attribution() {
     let _lease = perf_lease();
-    let out = PathBuf::from(std::env::var("GLM53_STAGE_OUT").expect("GLM53_STAGE_OUT"));
+    let out = stage_out_path();
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
     let ctx = MetalContext::new().expect("Metal context");
     let gguf = GgufFile::open(&path).unwrap();
@@ -2611,7 +2619,17 @@ fn decode_stage_attribution() {
     let (steps, warm) = (12usize, 4usize);
     // GLM53_DECODE_DEPTHS (default 64,4096); deep cells repeat the text.
     let depth_list = depths_from_env("GLM53_DECODE_DEPTHS", &[64, 4096]);
-    let deepest = *depth_list.iter().max().expect("a depth");
+    // One session advances through the cells: each consumes warm + 2 * steps
+    // tokens past its depth, so depths must increase by more than that.
+    let consumed = warm + 2 * steps;
+    assert!(!depth_list.is_empty(), "no decode depth");
+    for pair in depth_list.windows(2) {
+        assert!(
+            pair[1] > pair[0] + consumed,
+            "decode depths must increase by more than {consumed}: {depth_list:?}"
+        );
+    }
+    let deepest = *depth_list.last().expect("a depth");
     let capacity = deepest + 2 * (steps + warm) + 8;
     let tokens = deep_timing_tokens(&tokens, capacity);
     let mut session = Glm5NextSession::with_prefill_rows(&ctx, &weights, capacity, 512).unwrap();
@@ -2708,9 +2726,7 @@ fn packed_prefill_stage_attribution() {
     }
     let _lease = perf_lease();
     // Absolute, or relative to the workspace root (tests run from the crate).
-    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(std::env::var("GLM53_STAGE_OUT").expect("GLM53_STAGE_OUT"));
+    let out = stage_out_path();
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
     let ctx = MetalContext::new().expect("Metal context");
     let gguf = GgufFile::open(&path).unwrap();
@@ -2816,9 +2832,7 @@ fn packed_prefill_rows_cost() {
     }
     let _lease = perf_lease();
     // Absolute, or relative to the workspace root (tests run from the crate).
-    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(std::env::var("GLM53_STAGE_OUT").expect("GLM53_STAGE_OUT"));
+    let out = stage_out_path();
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
     let ctx = MetalContext::new().expect("Metal context");
     let gguf = GgufFile::open(&path).unwrap();
@@ -2897,9 +2911,7 @@ fn wide_gate_up_prefill_ab() {
         panic!("timing requires --release");
     }
     let _lease = perf_lease();
-    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(std::env::var("GLM53_STAGE_OUT").expect("GLM53_STAGE_OUT"));
+    let out = stage_out_path();
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
     let ctx = MetalContext::new().expect("Metal context");
     let gguf = GgufFile::open(&path).unwrap();
@@ -2969,10 +2981,51 @@ fn wide_gate_up_prefill_ab() {
             );
         }
     }
+    // Short spans at the default 512-row chunks (reused-conversation
+    // suffixes): spans below 17 take the 16-token path in both arms; 17 and
+    // more may put a few buckets on the wide tile.
+    let mut suffixes = Vec::new();
+    for span in [8usize, 17, 64, 128] {
+        let time = |wide: Option<u32>| {
+            let _wide = WideGateUp::set(wide);
+            let mut s =
+                Glm5NextSession::with_prefill_rows(&ctx, &weights, PROMPT + 8, 512).unwrap();
+            s.prefill_packed(&ctx, &tokens[..PROMPT - span]).unwrap();
+            let started = std::time::Instant::now();
+            let logits = s
+                .prefill_packed(&ctx, &tokens[PROMPT - span..PROMPT])
+                .unwrap();
+            (logits, started.elapsed().as_secs_f64() * 1e3)
+        };
+        let (a, _) = time(None);
+        let (b, _) = time(Some(17));
+        assert_eq!(
+            logit_bits(&[a]),
+            logit_bits(&[b]),
+            "{span}-token suffix differs"
+        );
+        let mut ms = [Vec::new(), Vec::new()];
+        for _ in 0..2 {
+            for (i, wide) in [(0usize, None), (1, Some(17)), (1, Some(17)), (0, None)] {
+                ms[i].push(time(wide).1);
+            }
+        }
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+        eprintln!(
+            "512-row chunks, {span}-token suffix after {}: n16 {:.1} ms {:?}, split {:.1} ms {:?}",
+            PROMPT - span,
+            mean(&ms[0]),
+            ms[0].iter().map(|v| v.round()).collect::<Vec<_>>(),
+            mean(&ms[1]),
+            ms[1].iter().map(|v| v.round()).collect::<Vec<_>>()
+        );
+        suffixes.push(serde_json::json!({"span": span, "n16_ms": ms[0], "split_ms": ms[1]}));
+    }
     std::fs::write(
         &out,
         serde_json::to_vec_pretty(&serde_json::json!({
-            "schema": "glm53.wide_gate_up_prefill_ab.v1", "prompt_tokens": PROMPT,
+            "schema": "glm53.wide_gate_up_prefill_ab.v2", "prompt_tokens": PROMPT,
+            "suffixes_at_512_rows": suffixes,
             "order": "bitwise check, then (A,B,B,A) x 2 per chunk size; one profiled chunk per arm",
             "results": rows_out}))
         .unwrap(),

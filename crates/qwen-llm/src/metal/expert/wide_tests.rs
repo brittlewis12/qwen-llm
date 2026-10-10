@@ -55,36 +55,41 @@ fn wide_gate_up_tile_matches_the_16_token_tile_bitwise() {
         &values(HIDDEN * ROWS, 6),
         vec![(HIDDEN * ROWS) as u64],
     );
-    for dtype in [GgmlType::IQ2_S, GgmlType::IQ3_S] {
+    // GLM's FFN width, and 80 outputs (a partial 64-row tile).
+    for (dtype, ffn) in [
+        (GgmlType::IQ2_S, FFN),
+        (GgmlType::IQ3_S, FFN),
+        (GgmlType::IQ2_S, 80),
+    ] {
         let gate = bank(
             &ctx,
-            &synthetic_bank(dtype, HIDDEN, FFN, 3),
+            &synthetic_bank(dtype, HIDDEN, ffn, 3),
             dtype,
             HIDDEN,
-            FFN,
+            ffn,
         );
         let up = bank(
             &ctx,
-            &synthetic_bank(dtype, HIDDEN, FFN, 5),
+            &synthetic_bank(dtype, HIDDEN, ffn, 5),
             dtype,
             HIDDEN,
-            FFN,
+            ffn,
         );
         let run_with = |wide: Option<u32>| {
             let inner = f32_tensor(
                 &ctx,
-                &vec![7.0; FFN * slot_limit],
-                vec![(FFN * slot_limit) as u64],
+                &vec![7.0; ffn * slot_limit],
+                vec![(ffn * slot_limit) as u64],
             );
             run(&ctx, |enc| {
                 match wide {
                 None => encode_moe_swiglu_clamped_f32_grouped_slots_generic(
-                    &ctx, enc, &gate, &up, &x, &counts_t, &ids_t, &inner, HIDDEN, FFN, EXPERTS,
+                    &ctx, enc, &gate, &up, &x, &counts_t, &ids_t, &inner, HIDDEN, ffn, EXPERTS,
                     TOP_K, ROWS, 10.0,
                 )
                 .unwrap(),
                 Some(min) => super::super::moe_grouped_generic::encode_moe_swiglu_clamped_f32_grouped_slots_split(
-                    &ctx, enc, &gate, &up, &x, &counts_t, &ids_t, &inner, HIDDEN, FFN, EXPERTS,
+                    &ctx, enc, &gate, &up, &x, &counts_t, &ids_t, &inner, HIDDEN, ffn, EXPERTS,
                     TOP_K, ROWS, 10.0, min,
                 )
                 .unwrap(),
@@ -99,7 +104,11 @@ fn wide_gate_up_tile_matches_the_16_token_tile_bitwise() {
         let narrow = run_with(None);
         // Every bucket wide, buckets from 17 wide, and from 33 wide.
         for min in [1u32, 17, 33] {
-            assert_eq!(run_with(Some(min)), narrow, "{dtype:?} wide from {min}");
+            assert_eq!(
+                run_with(Some(min)),
+                narrow,
+                "{dtype:?} ffn {ffn} wide from {min}"
+            );
         }
         // Slots no bucket names keep their initial value.
         let named: std::collections::HashSet<i32> =
@@ -108,7 +117,7 @@ fn wide_gate_up_tile_matches_the_16_token_tile_bitwise() {
         for slot in 0..slot_limit as i32 {
             if !named.contains(&slot) {
                 assert!(
-                    values[slot as usize * FFN..(slot as usize + 1) * FFN]
+                    values[slot as usize * ffn..(slot as usize + 1) * ffn]
                         .iter()
                         .all(|&v| v == 7.0)
                 );

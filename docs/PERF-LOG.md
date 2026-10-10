@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-09 - #12 Narrow F32 Kernels Halve the One-Token F32 Penalty, Bitwise Equal to the Wide Tiles
+
+- **What** (`docs/bench/2026-10-09-glm53-fast-f32-operands/`, "Short
+  spans"; cx 01a10cc jam and review): `kernel_mat_mat_q6_K_f32_r8c8` and
+  `kernel_mat_mat_q8_0_f32_r2c1k64` keep the wide F32 tiles' per-output
+  operation sequence over 8-token spans; FastF32 spans of at most 8 rows
+  take them (test-selected, as all F32 operands).
+- **Equivalence, qualified:** bitwise equal to the wide tiles in unit tests
+  (Q6_K K 256-12,288, Q8_0 K 64-4,096, spans 1-9 and 17 at several starts,
+  partial output groups, poisoned neighbours; validation and release) and
+  in the model (suffixes of 1-9 tokens, spans across and past the sparse
+  frontier, a 5-row last chunk: logits, prompt-end and end state; census
+  confirms where they ran).
+- **Cost** (release): one-token suffix 91 ms half-staged, 129 ms all-F32
+  with narrow kernels vs 167 ms wide-only (half the 76 ms penalty
+  recovered: the preregistered target); 2-token 166 vs 202; 4-token 207 vs
+  242 (Fast 204); 8-token 274 vs 310; 9-token and fresh-prompt controls
+  unchanged. Dense F32 alone: +5.1% fresh, +0.2-0.4% on 17-64-token
+  suffixes, 128 ms on one token.
+- **Next:** one bounded packet on the F32 expert tiles' cost (bucket
+  census, fixed-input timings, one variant), then the preregistered
+  holdout for the frozen candidates.
+
 ## 2026-10-09 - #12 GLM Fast with F32 Matrix Operands: Half the Drift from Exact at +13-16% Prefill; Dense-Only -30% at +4.5%
 
 - **What** (`docs/bench/2026-10-09-glm53-fast-f32-operands/`; cx 01a10cc

@@ -139,6 +139,44 @@ An earlier run at `e8640a0f` (the tree of `56e558e1` before rebasing) measured +
 with the same per-token arithmetic would address it without giving up the
 chunking identities.
 
+## Short spans: narrow kernels (`narrow-cost.json`)
+
+At one row the F32 tiles ran a 32-token tile for one token. Narrow
+companions keep each tile's per-output operation sequence (dequantization,
+operand orientation, K order and matrix-multiply chain) over 8-token spans:
+`kernel_mat_mat_q6_K_f32_r8c8` (four independent 8-output x 8-token SIMD
+groups, SIMD-group barriers only) and `kernel_mat_mat_q8_0_f32_r2c1k64`
+(R2C4K64 with one column tile). FastF32 spans of at most 8 rows take them.
+
+- **Bitwise equal to the wide tiles** (qualification, not assumed): unit
+  tests over Q6_K K 256-12,288 and Q8_0 K 64-4,096, spans of 1-9 and 17
+  tokens at several starts of a 512-token dispatch, partial output groups
+  and poisoned neighbours, in debug with Metal validation and in release;
+  in the model (all F32), 1/2/4/8/9-token suffixes, spans crossing the
+  sparse frontier and wholly past it, and a 5-row last chunk give identical
+  logits, prompt-end state and end state with and without the narrow
+  kernels, the census showing them exactly where expected.
+- **Cost** (release, A-B-C-D-D-C-B-A twice; D is all F32 with every span on
+  the wide tiles):
+
+| Span | Fast | Dense F32 | All F32 | All F32, wide only |
+|---|---:|---:|---:|---:|
+| Fresh 2,048 | 9,953 ms | +5.1% | +16.9% | +16.4% |
+| 1-token suffix | 91 ms | 128 ms | 129 ms | 167 ms |
+| 2-token suffix | 149 ms | 161 ms | 166 ms | 202 ms |
+| 4-token suffix | 204 ms | 198 ms | 207 ms | 242 ms |
+| 8-token suffix | 235 ms | 260 ms | 274 ms | 310 ms |
+| 9-token suffix (wide in both) | 300 ms | 304 ms | 319 ms | 321 ms |
+| 17-token suffix | 386 ms | +0.2% | +6.8% | +6.6% |
+| 64-token suffix at 2,048 | 733 ms | +0.3% | +17.2% | +17.4% |
+| 64-token suffix at 2,564 (sparse) | 838 ms | +0.4% | +19.8% | +20.0% |
+
+The narrow kernels recover half of the one-token penalty (76 -> 37 ms, the
+preregistered engineering target) and most of the 2- and 4-token
+penalties; the 9-token and fresh-prompt rows, unchanged by them, act as
+noise controls. A residual one-token cost of ~37 ms remains for both F32
+candidates.
+
 ## Reading
 
 - The half staging of matrix operands accounts for most of Fast's drift on
@@ -148,10 +186,11 @@ chunking identities.
   coincides with discrete routing changes; it is not removed by F32
   operands alone.
 - Dense F32 is nearly free on prompts of 17 tokens or more; all F32 costs
-  about 13-16% of prefill wall. Both pay about 75 ms on one-token suffixes.
+  about 13-17% of prefill wall. Both paid about 75 ms on one-token
+  suffixes with the wide tiles; the narrow kernels halve that to ~37 ms.
 
-Next (cx 01a10cc): a one-row path that keeps each candidate's per-token
-arithmetic; one bounded packet on the F32 expert tiles' cost; then freeze
+Next (cx 01a10cc): one bounded packet on the F32 expert tiles' cost (a
+bucket census and fixed-input timings first, then one variant); then freeze
 the surviving configurations and run a preregistered fresh holdout against
 Exact under the deployed split schedule, with the selection rule fixed
 before viewing results.

@@ -14,9 +14,10 @@
 
 use super::*;
 use crate::metal::{
-    GroupedDownPolicy, GroupedExperts, encode_grouped_routed_experts_with_down_policy,
-    encode_indexer_append_rows, encode_kda_prefill, encode_mhc4_post_rows, encode_mhc4_repeat_rows,
-    encode_rms_norm_mul_rows_f32, encode_route_learned_rows,
+    GroupedDownPolicy, GroupedExperts, encode_grouped_routed_experts_f32x,
+    encode_grouped_routed_experts_with_down_policy, encode_indexer_append_rows, encode_kda_prefill,
+    encode_mhc4_post_rows, encode_mhc4_repeat_rows, encode_rms_norm_mul_rows_f32,
+    encode_route_learned_rows,
 };
 use objc2_metal::MTLComputePipelineState;
 
@@ -65,7 +66,7 @@ fn absorb_tail_rows(lineage: PackedLineage, rows: usize) -> usize {
 
 /// Packed stage families that have a Fast and an Exact form (map #12
 /// attribution: one family at a time can run in its Exact form in tests).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum Stage {
     DenseFfn,
     Router,
@@ -113,6 +114,172 @@ fn stage_lineage(lineage: PackedLineage, stage: Stage) -> PackedLineage {
     }
     let _ = stage;
     lineage
+}
+
+/// How a stage computes its quantized projections in this session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum StageMode {
+    /// The decode kernels, row by row (bitwise equal to serial decode).
+    Exact,
+    /// Batched mat-mat tiles with half-staged operands.
+    Fast,
+    /// Batched mat-mat with F32 operands where an F32-operand tile exists
+    /// for the weight type and geometry (Q8_0, Q6_K); otherwise as
+    /// [`StageMode::Fast`] ([`F32Census`] counts both outcomes in tests).
+    FastF32,
+}
+
+#[cfg(test)]
+thread_local! {
+    static F32_STAGES: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
+    static F32_CENSUS: std::cell::RefCell<Option<CensusCounts>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// How a Fast-lineage matrix call ran, for [`F32Census`].
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum CensusPath {
+    /// An F32-operand tile.
+    F32Tile,
+    /// The batched kernel of an F32 weight (F32 operands already).
+    F32Native,
+    /// A half-staged batched kernel.
+    Half,
+}
+
+/// Calls per (stage family, weight kind, path); the kind is the weight's
+/// dtype, or "experts" for the routed experts.
+#[cfg(test)]
+pub(super) type CensusCounts = std::collections::BTreeMap<(Stage, String, CensusPath), usize>;
+
+/// Counts one Fast-lineage call while an [`F32Census`] is active.
+#[cfg(test)]
+fn record_census(stage: Stage, kind: String, path: CensusPath) {
+    F32_CENSUS.with(|census| {
+        if let Some(census) = census.borrow_mut().as_mut() {
+            *census.entry((stage, kind, path)).or_default() += 1;
+        }
+    });
+}
+
+/// Test-only census of every Fast-lineage matrix call of the stage families
+/// on this thread (Fast and [`StageMode::FastF32`] alike): per stage family
+/// and weight kind, how many ran on an F32-operand tile, on an F32 weight's
+/// own kernel, or half-staged. Comparing a half-staged run's census with a
+/// selection's shows both coverage (the same calls) and the path each took.
+/// Recording stops on drop.
+#[cfg(test)]
+pub(super) struct F32Census(());
+
+#[cfg(test)]
+impl F32Census {
+    pub(super) fn begin() -> Self {
+        F32_CENSUS.with(|census| *census.borrow_mut() = Some(Default::default()));
+        Self(())
+    }
+
+    /// The counts so far, restarting the census.
+    pub(super) fn take(&self) -> CensusCounts {
+        F32_CENSUS.with(|census| {
+            census
+                .borrow_mut()
+                .as_mut()
+                .map(std::mem::take)
+                .unwrap_or_default()
+        })
+    }
+}
+
+#[cfg(test)]
+impl Drop for F32Census {
+    fn drop(&mut self) {
+        F32_CENSUS.with(|census| *census.borrow_mut() = None);
+    }
+}
+
+/// A stage's projection mode: its lineage ([`stage_lineage`]), with Fast
+/// stages in their F32-operand form where tests choose ([`F32Stages`]).
+/// Product builds use the half-staged Fast form until an F32 configuration
+/// qualifies (map #12 accuracy lane).
+fn stage_mode(lineage: PackedLineage, stage: Stage) -> StageMode {
+    match stage_lineage(lineage, stage) {
+        PackedLineage::Exact => StageMode::Exact,
+        PackedLineage::Fast => {
+            #[cfg(test)]
+            if F32_STAGES.with(|s| s.get()) & stage.bit() != 0 {
+                return StageMode::FastF32;
+            }
+            StageMode::Fast
+        }
+    }
+}
+
+/// The F32-operand tiles a [`StageMode::FastF32`] projection may take.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum F32Tile {
+    /// `encode_mat_mat_q8_0_f32_r2c4k64` (`n_in % 64`, `n_out % 16`).
+    Q8_0,
+    /// `encode_mat_mat_q6_k_f32_mm64x32` (`n_in % 256`).
+    Q6K,
+    /// `encode_grouped_routed_experts_f32x` (gate/up IQ2_S or IQ3_S, down
+    /// IQ3_S or IQ4_XS).
+    RoutedExperts,
+}
+
+impl F32Tile {
+    #[cfg(test)]
+    pub(super) const ALL: [F32Tile; 3] = [F32Tile::Q8_0, F32Tile::Q6K, F32Tile::RoutedExperts];
+
+    #[cfg(test)]
+    fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static F32_TILES: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether a FastF32 projection may take `tile`: those the [`F32Stages`]
+/// scope names in tests; every tile in product builds (which never select
+/// FastF32 yet).
+#[cfg(test)]
+fn f32_tile_enabled(tile: F32Tile) -> bool {
+    F32_TILES.with(|t| t.get()) & tile.bit() != 0
+}
+
+#[cfg(not(test))]
+fn f32_tile_enabled(_: F32Tile) -> bool {
+    true
+}
+
+/// Test-only scope in which `stages` of Fast sessions on this thread use
+/// F32-operand tiles where one exists; the previous selection is restored on
+/// drop.
+#[cfg(test)]
+pub(super) struct F32Stages(u16, u8);
+
+#[cfg(test)]
+impl F32Stages {
+    /// `stages` may take only `tiles`; other calls stay half-staged.
+    pub(super) fn with_tiles(stages: &[Stage], tiles: &[F32Tile]) -> Self {
+        let bits = stages.iter().fold(0, |bits, stage| bits | stage.bit());
+        let tile_bits = tiles.iter().fold(0, |bits, tile| bits | tile.bit());
+        Self(
+            F32_STAGES.with(|s| s.replace(bits)),
+            F32_TILES.with(|t| t.replace(tile_bits)),
+        )
+    }
+}
+
+#[cfg(test)]
+impl Drop for F32Stages {
+    fn drop(&mut self) {
+        F32_STAGES.with(|s| s.set(self.0));
+        F32_TILES.with(|t| t.set(self.1));
+    }
 }
 
 #[cfg(test)]
@@ -377,6 +544,25 @@ impl PackedSparseScratch {
     }
 }
 
+/// An activation buffer allocated with padded rows
+/// ([`memory::packed_activation_rows`]), exposed with `rows` rows.
+fn take_rows(b: &mut SpecBuffers, name: &str, rows: usize) -> Result<MetalTensor> {
+    Ok(rows_view(&b.take(name)?, rows))
+}
+
+#[cfg(test)]
+impl PackedScratch {
+    /// Each MoE block's routed expert ids (`[top_k, rows]` I32, row-major by
+    /// row) as the last packed chunk left them, with the block index.
+    pub(super) fn route_ids(&self) -> Vec<(usize, &MetalTensor)> {
+        self.routes
+            .iter()
+            .enumerate()
+            .filter_map(|(block, route)| route.as_ref().map(|route| (block, &route.ids)))
+            .collect()
+    }
+}
+
 impl PackedScratch {
     pub(super) fn new(
         ctx: &MetalContext,
@@ -391,47 +577,50 @@ impl PackedScratch {
             rows,
             lineage: PackedLineage::Fast,
             token: b.take("token")?,
-            embedding: b.take("embedding")?,
-            residual: [b.take("residual_a")?, b.take("residual_b")?],
-            hc_partial_dots: b.take("hc_partial_dots")?,
-            hc_partial_sumsq: b.take("hc_partial_sumsq")?,
-            mixes: b.take("mixes")?,
-            pre: b.take("pre")?,
-            post: b.take("post")?,
-            comb: b.take("comb")?,
-            collapsed: b.take("collapsed")?,
-            normed: b.take("normed")?,
-            block_out: b.take("block_out")?,
-            q: b.take("q")?,
-            k: b.take("k")?,
-            v: b.take("v")?,
-            rank_a: b.take("rank_a")?,
-            raw_gate: b.take("raw_gate")?,
-            raw_beta: b.take("raw_beta")?,
-            rank_b: b.take("rank_b")?,
-            output_gate: b.take("output_gate")?,
-            kda_out: b.take("kda_out")?,
-            query_a: b.take("query_a")?,
-            query_r: b.take("query_r")?,
-            query: b.take("query")?,
-            latent_raw: b.take("latent_raw")?,
-            latent: b.take("latent")?,
-            query_latent: b.take("query_latent")?,
-            output_latent: b.take("output_latent")?,
-            heads_out: b.take("heads_out")?,
-            index_key: b.take("index_key")?,
-            index_gate: b.take("index_gate")?,
-            dense_gate: b.take("dense_gate")?,
-            dense_up: b.take("dense_up")?,
-            router: b.take("router")?,
+            embedding: take_rows(&mut b, "embedding", rows)?,
+            residual: [
+                take_rows(&mut b, "residual_a", rows)?,
+                take_rows(&mut b, "residual_b", rows)?,
+            ],
+            hc_partial_dots: take_rows(&mut b, "hc_partial_dots", rows)?,
+            hc_partial_sumsq: take_rows(&mut b, "hc_partial_sumsq", rows)?,
+            mixes: take_rows(&mut b, "mixes", rows)?,
+            pre: take_rows(&mut b, "pre", rows)?,
+            post: take_rows(&mut b, "post", rows)?,
+            comb: take_rows(&mut b, "comb", rows)?,
+            collapsed: take_rows(&mut b, "collapsed", rows)?,
+            normed: take_rows(&mut b, "normed", rows)?,
+            block_out: take_rows(&mut b, "block_out", rows)?,
+            q: take_rows(&mut b, "q", rows)?,
+            k: take_rows(&mut b, "k", rows)?,
+            v: take_rows(&mut b, "v", rows)?,
+            rank_a: take_rows(&mut b, "rank_a", rows)?,
+            raw_gate: take_rows(&mut b, "raw_gate", rows)?,
+            raw_beta: take_rows(&mut b, "raw_beta", rows)?,
+            rank_b: take_rows(&mut b, "rank_b", rows)?,
+            output_gate: take_rows(&mut b, "output_gate", rows)?,
+            kda_out: take_rows(&mut b, "kda_out", rows)?,
+            query_a: take_rows(&mut b, "query_a", rows)?,
+            query_r: take_rows(&mut b, "query_r", rows)?,
+            query: take_rows(&mut b, "query", rows)?,
+            latent_raw: take_rows(&mut b, "latent_raw", rows)?,
+            latent: take_rows(&mut b, "latent", rows)?,
+            query_latent: take_rows(&mut b, "query_latent", rows)?,
+            output_latent: take_rows(&mut b, "output_latent", rows)?,
+            heads_out: take_rows(&mut b, "heads_out", rows)?,
+            index_key: take_rows(&mut b, "index_key", rows)?,
+            index_gate: take_rows(&mut b, "index_gate", rows)?,
+            dense_gate: take_rows(&mut b, "dense_gate", rows)?,
+            dense_up: take_rows(&mut b, "dense_up", rows)?,
+            router: take_rows(&mut b, "router", rows)?,
             counts: b.take("counts")?,
             slots: b.take("slots")?,
             inner: b.take("inner")?,
             slot_out: b.take("slot_out")?,
-            routed: b.take("routed")?,
-            shared_gate: b.take("shared_gate")?,
-            shared_up: b.take("shared_up")?,
-            shared: b.take("shared")?,
+            routed: take_rows(&mut b, "routed", rows)?,
+            shared_gate: take_rows(&mut b, "shared_gate", rows)?,
+            shared_up: take_rows(&mut b, "shared_up", rows)?,
+            shared: take_rows(&mut b, "shared", rows)?,
             routes: RouteRecord::for_blocks(ctx, c, Some(r))?,
             sparse: (capacity >= c.sparse_frontier() as usize)
                 .then(|| PackedSparseScratch::new(ctx, c, capacity as u64, r))
@@ -460,6 +649,7 @@ fn matmat(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     lineage: PackedLineage,
+    stage: Stage,
     weight: &MetalTensor,
     x: &MetalTensor,
     y: &MetalTensor,
@@ -467,7 +657,39 @@ fn matmat(
     n_out: usize,
     rows: usize,
 ) -> Result<()> {
-    if lineage == PackedLineage::Exact {
+    let mode = stage_mode(lineage, stage);
+    if mode == StageMode::FastF32 {
+        // F32-operand tiles at every row count (one row included), so a
+        // token's outputs do not depend on its chunking.
+        let f32_tile = match weight.dtype {
+            GgmlType::Q8_0
+                if f32_tile_enabled(F32Tile::Q8_0)
+                    && n_in.is_multiple_of(64)
+                    && n_out.is_multiple_of(16) =>
+            {
+                // Activation buffers are allocated with rows padded to 32
+                // (`memory::packed_activation_rows`), the backing this tile
+                // reads.
+                crate::metal::encode_mat_mat_q8_0_f32_r2c4k64(
+                    ctx, enc, weight, x, y, n_in, n_out, rows,
+                )?;
+                true
+            }
+            GgmlType::Q6_K if f32_tile_enabled(F32Tile::Q6K) && n_in.is_multiple_of(256) => {
+                crate::metal::encode_mat_mat_q6_k_f32_mm64x32(
+                    ctx, enc, weight, x, y, n_in, n_out, rows,
+                )?;
+                true
+            }
+            _ => false,
+        };
+        if f32_tile {
+            #[cfg(test)]
+            record_census(stage, format!("{:?}", weight.dtype), CensusPath::F32Tile);
+            return Ok(());
+        }
+    }
+    if mode == StageMode::Exact {
         #[cfg(test)]
         let rounded = if weight.dtype != GgmlType::F32 {
             rounded_input(ctx, enc, x, rows * n_in)?
@@ -483,6 +705,16 @@ fn matmat(
         }
         return Ok(());
     }
+    #[cfg(test)]
+    record_census(
+        stage,
+        format!("{:?}", weight.dtype),
+        if weight.dtype == GgmlType::F32 {
+            CensusPath::F32Native
+        } else {
+            CensusPath::Half
+        },
+    );
     crate::metal_forward::encode_mat_mat_dispatch_with_policy(
         ctx, enc, weight, x, y, n_in, n_out, rows, true,
     )?;
@@ -497,6 +729,7 @@ fn expand_rows(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     lineage: PackedLineage,
+    stage: Stage,
     weight: &MetalTensor,
     x: &MetalTensor,
     y: &MetalTensor,
@@ -504,15 +737,17 @@ fn expand_rows(
     n_out: usize,
     rows: usize,
 ) -> Result<()> {
-    match lineage {
-        PackedLineage::Exact => {
+    match stage_mode(lineage, stage) {
+        StageMode::Exact => {
             #[cfg(test)]
             let rounded = rounded_input(ctx, enc, x, rows * n_in)?;
             #[cfg(test)]
             let x = rounded.as_ref().unwrap_or(x);
             super::low_rank_expand(ctx, enc, weight, x, y, n_in, n_out, rows)
         }
-        PackedLineage::Fast => matmat(ctx, enc, lineage, weight, x, y, n_in, n_out, rows),
+        StageMode::Fast | StageMode::FastF32 => {
+            matmat(ctx, enc, lineage, stage, weight, x, y, n_in, n_out, rows)
+        }
     }
 }
 
@@ -816,7 +1051,8 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        stage_lineage(p.lineage, Stage::DenseFfn),
+                        p.lineage,
+                        Stage::DenseFfn,
                         &dense.gate,
                         &v(&p.normed),
                         &v(&p.dense_gate),
@@ -827,7 +1063,8 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        stage_lineage(p.lineage, Stage::DenseFfn),
+                        p.lineage,
+                        Stage::DenseFfn,
                         &dense.up,
                         &v(&p.normed),
                         &v(&p.dense_up),
@@ -840,7 +1077,8 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        stage_lineage(p.lineage, Stage::DenseFfn),
+                        p.lineage,
+                        Stage::DenseFfn,
                         &dense.down,
                         &v(&p.dense_gate),
                         &v(&p.block_out),
@@ -884,7 +1122,8 @@ impl Glm5NextSession<'_> {
                         matmat(
                             ctx,
                             &enc,
-                            stage_lineage(p.lineage, Stage::Router),
+                            p.lineage,
+                            Stage::Router,
                             &moe.router,
                             &v(&p.normed),
                             &v(&p.router),
@@ -975,47 +1214,87 @@ impl Glm5NextSession<'_> {
                             )?;
                         }
                     } else {
-                        encode_grouped_routed_experts_with_down_policy(
-                            ctx,
-                            &enc,
-                            &GroupedExperts {
-                                gate_bank: &moe.gate_experts,
-                                up_bank: &moe.up_experts,
-                                down_bank: &moe.down_experts,
-                                input: &v(&p.normed),
-                                ids: &route_ids,
-                                weights: &route_weights,
-                                counts: &p.counts,
-                                slots: &flat(&p.slots, e * rows),
-                                inner: &p.inner.view_subrange(0, vec![f as u64, (k * rows) as u64]),
-                                slot_out: &p
-                                    .slot_out
-                                    .view_subrange(0, vec![h as u64, (k * rows) as u64]),
-                                output: &v(&p.routed),
-                            },
-                            h,
-                            f,
-                            e,
-                            k,
-                            rows,
-                            c.swiglu_clamp,
-                            grouped_down_policy(p.lineage, moe.down_experts.dtype, f, h, e, rows),
-                        )?;
+                        let grouped = GroupedExperts {
+                            gate_bank: &moe.gate_experts,
+                            up_bank: &moe.up_experts,
+                            down_bank: &moe.down_experts,
+                            input: &v(&p.normed),
+                            ids: &route_ids,
+                            weights: &route_weights,
+                            counts: &p.counts,
+                            slots: &flat(&p.slots, e * rows),
+                            inner: &p.inner.view_subrange(0, vec![f as u64, (k * rows) as u64]),
+                            slot_out: &p
+                                .slot_out
+                                .view_subrange(0, vec![h as u64, (k * rows) as u64]),
+                            output: &v(&p.routed),
+                        };
+                        let f32_mode =
+                            stage_mode(p.lineage, Stage::RoutedExperts) == StageMode::FastF32;
+                        let f32_taken = f32_mode
+                            && f32_tile_enabled(F32Tile::RoutedExperts)
+                            && moe.gate_experts.dtype == moe.up_experts.dtype
+                            && matches!(moe.gate_experts.dtype, GgmlType::IQ2_S | GgmlType::IQ3_S)
+                            && matches!(moe.down_experts.dtype, GgmlType::IQ3_S | GgmlType::IQ4_XS);
                         #[cfg(test)]
-                        expert_down::after_grouped(
-                            ctx,
-                            &enc,
-                            index,
-                            rows,
-                            moe.down_experts.dtype,
-                            p,
-                        )?;
+                        record_census(
+                            Stage::RoutedExperts,
+                            "experts".into(),
+                            if f32_taken {
+                                CensusPath::F32Tile
+                            } else {
+                                CensusPath::Half
+                            },
+                        );
+                        if f32_taken {
+                            encode_grouped_routed_experts_f32x(
+                                ctx,
+                                &enc,
+                                &grouped,
+                                h,
+                                f,
+                                e,
+                                k,
+                                rows,
+                                c.swiglu_clamp,
+                            )?;
+                        } else {
+                            encode_grouped_routed_experts_with_down_policy(
+                                ctx,
+                                &enc,
+                                &grouped,
+                                h,
+                                f,
+                                e,
+                                k,
+                                rows,
+                                c.swiglu_clamp,
+                                grouped_down_policy(
+                                    p.lineage,
+                                    moe.down_experts.dtype,
+                                    f,
+                                    h,
+                                    e,
+                                    rows,
+                                ),
+                            )?;
+                            #[cfg(test)]
+                            expert_down::after_grouped(
+                                ctx,
+                                &enc,
+                                index,
+                                rows,
+                                moe.down_experts.dtype,
+                                p,
+                            )?;
+                        }
                     }
                     let sf = c.shared_expert_ffn_size as usize;
                     matmat(
                         ctx,
                         &enc,
-                        stage_lineage(p.lineage, Stage::SharedExpert),
+                        p.lineage,
+                        Stage::SharedExpert,
                         &moe.shared.gate,
                         &v(&p.normed),
                         &v(&p.shared_gate),
@@ -1026,7 +1305,8 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        stage_lineage(p.lineage, Stage::SharedExpert),
+                        p.lineage,
+                        Stage::SharedExpert,
                         &moe.shared.up,
                         &v(&p.normed),
                         &v(&p.shared_up),
@@ -1042,7 +1322,8 @@ impl Glm5NextSession<'_> {
                     matmat(
                         ctx,
                         &enc,
-                        stage_lineage(p.lineage, Stage::SharedExpert),
+                        p.lineage,
+                        Stage::SharedExpert,
                         &moe.shared.down,
                         &v(&p.shared_gate),
                         &v(&p.shared),
@@ -1173,7 +1454,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::KdaProjection),
+            p.lineage,
+            Stage::KdaProjection,
             &kda.query,
             &x,
             &v(&p.q),
@@ -1184,7 +1466,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::KdaProjection),
+            p.lineage,
+            Stage::KdaProjection,
             &kda.key,
             &x,
             &v(&p.k),
@@ -1195,7 +1478,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::KdaProjection),
+            p.lineage,
+            Stage::KdaProjection,
             &kda.value,
             &x,
             &v(&p.v),
@@ -1206,7 +1490,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::KdaProjection),
+            p.lineage,
+            Stage::KdaProjection,
             &kda.decay_a,
             &x,
             &v(&p.rank_a),
@@ -1217,7 +1502,8 @@ impl Glm5NextSession<'_> {
         expand_rows(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::KdaExpand),
+            p.lineage,
+            Stage::KdaExpand,
             &kda.decay_b,
             &v(&p.rank_a),
             &v(&p.raw_gate),
@@ -1228,7 +1514,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::KdaProjection),
+            p.lineage,
+            Stage::KdaProjection,
             &kda.beta,
             &x,
             &v(&p.raw_beta),
@@ -1239,7 +1526,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::KdaProjection),
+            p.lineage,
+            Stage::KdaProjection,
             &kda.gate_a,
             &x,
             &v(&p.rank_b),
@@ -1250,7 +1538,8 @@ impl Glm5NextSession<'_> {
         expand_rows(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::KdaExpand),
+            p.lineage,
+            Stage::KdaExpand,
             &kda.gate_b,
             &v(&p.rank_b),
             &v(&p.output_gate),
@@ -1286,7 +1575,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::KdaProjection),
+            p.lineage,
+            Stage::KdaProjection,
             &kda.output,
             &v(&p.kda_out),
             &v(&p.block_out),
@@ -1320,7 +1610,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::MlaProjection),
+            p.lineage,
+            Stage::MlaProjection,
             &mla.query_a,
             &x,
             &v(&p.query_a),
@@ -1341,7 +1632,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::MlaProjection),
+            p.lineage,
+            Stage::MlaProjection,
             &mla.query_b,
             &v(&p.query_r),
             &v(&p.query),
@@ -1352,7 +1644,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::MlaProjection),
+            p.lineage,
+            Stage::MlaProjection,
             &mla.latent,
             &x,
             &v(&p.latent_raw),
@@ -1397,7 +1690,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::IndexerProjection),
+            p.lineage,
+            Stage::IndexerProjection,
             &mla.indexer.key,
             &x,
             &v(&p.index_key),
@@ -1408,7 +1702,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::IndexerProjection),
+            p.lineage,
+            Stage::IndexerProjection,
             &mla.indexer.pool_gate,
             &x,
             &v(&p.index_gate),
@@ -1465,7 +1760,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::MlaProjection),
+            p.lineage,
+            Stage::MlaProjection,
             &mla.output,
             &v(&p.heads_out),
             &v(&p.block_out),
@@ -1514,7 +1810,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::IndexerProjection),
+            p.lineage,
+            Stage::IndexerProjection,
             &mla.indexer.query,
             &sub(&p.query_r, q_rank),
             &sub(&sp.index_query, query_width),
@@ -1534,7 +1831,8 @@ impl Glm5NextSession<'_> {
         matmat(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::IndexerProjection),
+            p.lineage,
+            Stage::IndexerProjection,
             &mla.indexer.head_weights,
             &sub(&p.normed, h),
             &weights,

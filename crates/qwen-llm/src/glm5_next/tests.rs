@@ -484,8 +484,10 @@ fn ledger_terms_match_release_geometry() {
     // 512-row packed activations (largest: query/output latents 4096 G each,
     // slot outputs 4096 G). The fused mHC pre replaces the [16384, 512]
     // normalized rows (2048 G) with partials [24, 64, 512] (192 G) and
-    // [64, 512] (8 G).
-    let packed = 36_193 * G;
+    // [64, 512] (8 G). The normed rows and query_r back 32 more rows
+    // (`packed_offset_activation_rows`) for the sparse span's views that
+    // start inside the chunk: [4096, 32] 32 G and [1536, 32] 12 G.
+    let packed = (36_193 + 44) * G;
     // Sparse decode (capacity reaches the frontier): eleven sub-granule
     // buffers plus [8192] F32 pool scores (2 G), and split selected
     // attention partials for 64 heads x 17 splits: [512, 1088] F32 136 G and
@@ -724,4 +726,26 @@ fn snapshot_bytes_at_the_agent_prefix() {
         Some(kda + mla)
     );
     assert_eq!(crate::glm5_next_metal::snapshot_bytes(&c, u64::MAX), None);
+}
+
+/// Packed activation buffers back the F32-operand Q8_0 tile's padded reads
+/// for every prefix view of a chunk; the two buffers the sparse span reads
+/// from inside the chunk back them for views starting at any row.
+#[test]
+fn packed_activation_rows_back_padded_reads() {
+    for rows in 1u64..=600 {
+        let prefix = memory::packed_activation_rows(rows);
+        assert_eq!(prefix % 32, 0);
+        for n in 1..=rows {
+            assert!(n.div_ceil(32) * 32 <= prefix, "rows {rows} prefix {n}");
+        }
+        let offset = memory::packed_offset_activation_rows(rows);
+        assert_eq!(offset % 32, 0);
+        for start in 0..rows {
+            let padded = (rows - start).div_ceil(32) * 32;
+            assert!(start + padded <= offset, "rows {rows} start {start}");
+        }
+    }
+    assert_eq!(memory::packed_activation_rows(512), 512);
+    assert_eq!(memory::packed_offset_activation_rows(512), 544);
 }

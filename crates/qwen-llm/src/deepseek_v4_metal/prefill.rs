@@ -2037,86 +2037,17 @@ fn encode_q8_f32_mma_r2c4k64(
     {
         return invalid("packed Q8 F32 R2C4K64 projection has invalid geometry or storage");
     }
-    let padded_tokens = n_tokens.div_ceil(32) * 32;
-    let padded_elements = checked_mul(padded_tokens, n_in, "packed Q8 F32 R2C4K64 padded input")?;
-    let padded_bytes = checked_mul(
-        padded_elements,
-        std::mem::size_of::<f32>(),
-        "packed Q8 F32 R2C4K64 padded input bytes",
-    )?;
-    let padded_end = input
-        .offset
-        .checked_add(u64::try_from(padded_bytes).map_err(|_| {
-            DeepSeekV4MetalError::Invalid("packed Q8 F32 R2C4K64 padded input exceeds u64".into())
-        })?)
-        .ok_or_else(|| {
-            DeepSeekV4MetalError::Invalid("packed Q8 F32 R2C4K64 padded input end overflow".into())
-        })?;
-    if padded_end > input.buffer.length() as u64 || ctx.device.maxThreadgroupMemoryLength() < 4_096
-    {
-        return invalid("packed Q8 F32 R2C4K64 requires padded input backing and 4 KiB TGM");
-    }
-    let output_end = output.offset.checked_add(output.n_bytes()).ok_or_else(|| {
-        DeepSeekV4MetalError::Invalid("packed Q8 F32 R2C4K64 output end overflow".into())
-    })?;
-    let overlaps_padded_input = Retained::as_ptr(&input.buffer) == Retained::as_ptr(&output.buffer)
-        && input.offset < output_end
-        && output.offset < padded_end;
-    if overlaps_padded_input || packed_grouped_tensor_ranges_overlap(weight, output) {
-        return invalid("packed Q8 F32 R2C4K64 output overlaps an input");
-    }
-    let pso = ctx.pipeline("kernel_mat_mat_q8_0_f32_r2c4k64")?;
-    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 32 {
-        return invalid("packed Q8 F32 R2C4K64 requires one 32-thread SIMD group");
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Args {
-        m: u32,
-        n: u32,
-        k: u32,
-        nb01: u32,
-        stride_b: u32,
-    }
-    let row_bytes = checked_mul(n_in / 32, 34, "packed Q8 F32 R2C4K64 row bytes")?;
-    enc.set_pipeline(&pso);
-    enc.set_bytes(
-        0,
-        &Args {
-            m: u32::try_from(n_out).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("packed Q8 F32 output exceeds u32".into())
-            })?,
-            n: u32::try_from(n_tokens).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("packed Q8 F32 token count exceeds u32".into())
-            })?,
-            k: u32::try_from(n_in).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("packed Q8 F32 input exceeds u32".into())
-            })?,
-            nb01: u32::try_from(row_bytes).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("packed Q8 F32 row bytes exceed u32".into())
-            })?,
-            stride_b: u32::try_from(n_in).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("packed Q8 F32 stride exceeds u32".into())
-            })?,
-        },
-    );
-    enc.set_tensor(1, weight);
-    enc.set_tensor(2, input);
-    enc.set_tensor(3, output);
-    enc.set_threadgroup_memory(0, 4_096);
-    enc.dispatch(
-        MTLSize {
-            width: n_tokens.div_ceil(32),
-            height: n_out / 16,
-            depth: 1,
-        },
-        MTLSize {
-            width: 32,
-            height: 1,
-            depth: 1,
-        },
-    );
-    Ok(())
+    // The shared encoder checks padded backing, overlap, threadgroup
+    // memory and SIMD width, and encodes the same kernel and arguments.
+    crate::metal::encode_mat_mat_q8_0_f32_r2c4k64(
+        ctx, enc, weight, input, output, n_in, n_out, n_tokens,
+    )
+    .map_err(|error| match error {
+        crate::metal::MetalError::BadShape { detail, .. } => {
+            DeepSeekV4MetalError::Invalid(format!("packed Q8 F32 R2C4K64 projection: {detail}"))
+        }
+        other => DeepSeekV4MetalError::Metal(other),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -176,11 +176,34 @@ pub fn decode_scratch_specs(c: &Glm5NextConfig) -> Vec<BufferSpec> {
     ]
 }
 
-/// Packed-prefill scratch for chunks of up to `rows` tokens. Products of
-/// dimensions saturate, so an absurd `rows` fails [`BufferSpec::bytes`]
-/// instead of wrapping to a small shape.
+/// Row capacity of packed activation buffers for chunks of up to `rows`
+/// tokens: `rows` rounded up to a multiple of 32, so a view of the first
+/// `n <= rows` rows has its token count padded to 32 backed (the
+/// F32-operand Q8_0 tile reads whole 32-token tiles from a view's start,
+/// never writing past its rows). No extra rows at 32-multiple chunks.
+pub fn packed_activation_rows(rows: u64) -> u64 {
+    rows.div_ceil(32).saturating_mul(32)
+}
+
+/// Row capacity of the packed activation buffers the sparse span reads
+/// through views that start inside the chunk (`normed` and `query_r`, the
+/// indexer's per-row projections past the frontier): a view starting at
+/// any row below `rows` must still have its padded tokens backed, so
+/// `rows + 31`, rounded up to a multiple of 32.
+pub fn packed_offset_activation_rows(rows: u64) -> u64 {
+    rows.saturating_add(31).div_ceil(32).saturating_mul(32)
+}
+
+/// Packed-prefill scratch for chunks of up to `rows` tokens. Activation
+/// buffers hold [`packed_activation_rows`] rows, and the two the sparse
+/// span reads from inside the chunk [`packed_offset_activation_rows`] (the
+/// session exposes `rows` of them); routing buffers hold exactly `rows`. Products of dimensions
+/// saturate, so an absurd `rows` fails [`BufferSpec::bytes`] instead of
+/// wrapping to a small shape.
 pub fn packed_scratch_specs(c: &Glm5NextConfig, rows: u64) -> Vec<BufferSpec> {
-    let r = rows;
+    let r = packed_activation_rows(rows);
+    let offset_rows = packed_offset_activation_rows(rows);
+    let routing_rows = rows;
     let h = c.hidden_size as u64;
     let w = c.kda_width() as u64;
     let heads = c.head_count as u64;
@@ -190,7 +213,7 @@ pub fn packed_scratch_specs(c: &Glm5NextConfig, rows: u64) -> Vec<BufferSpec> {
     let e = c.expert_count as u64;
     let z = BufferSpec::zeros;
     vec![
-        z("token", I32, &[r]),
+        z("token", I32, &[routing_rows]),
         z("embedding", F32, &[h, r]),
         z("residual_a", F32, &[h, 4, r]),
         z("residual_b", F32, &[h, 4, r]),
@@ -205,7 +228,7 @@ pub fn packed_scratch_specs(c: &Glm5NextConfig, rows: u64) -> Vec<BufferSpec> {
         z("post", F32, &[4, r]),
         z("comb", F32, &[4, 4, r]),
         z("collapsed", F32, &[h, r]),
-        z("normed", F32, &[h, r]),
+        z("normed", F32, &[h, offset_rows]),
         z("block_out", F32, &[h, r]),
         z("q", F32, &[w, r]),
         z("k", F32, &[w, r]),
@@ -217,7 +240,7 @@ pub fn packed_scratch_specs(c: &Glm5NextConfig, rows: u64) -> Vec<BufferSpec> {
         z("output_gate", F32, &[w, r]),
         z("kda_out", F32, &[w, r]),
         z("query_a", F32, &[c.q_lora_rank as u64, r]),
-        z("query_r", F32, &[c.q_lora_rank as u64, r]),
+        z("query_r", F32, &[c.q_lora_rank as u64, offset_rows]),
         z("query", F32, &[c.mla_width() as u64, r]),
         z("latent_raw", F32, &[kv, r]),
         z("latent", F32, &[kv, r]),
@@ -230,13 +253,13 @@ pub fn packed_scratch_specs(c: &Glm5NextConfig, rows: u64) -> Vec<BufferSpec> {
         z("dense_up", F32, &[c.dense_ffn_size as u64, r]),
         z("router", F32, &[e, r]),
         z("counts", I32, &[e]),
-        z("slots", I32, &[e.saturating_mul(r)]),
+        z("slots", I32, &[e.saturating_mul(routing_rows)]),
         z(
             "inner",
             F32,
-            &[c.expert_ffn_size as u64, k.saturating_mul(r)],
+            &[c.expert_ffn_size as u64, k.saturating_mul(routing_rows)],
         ),
-        z("slot_out", F32, &[h, k.saturating_mul(r)]),
+        z("slot_out", F32, &[h, k.saturating_mul(routing_rows)]),
         z("routed", F32, &[h, r]),
         z("shared_gate", F32, &[c.shared_expert_ffn_size as u64, r]),
         z("shared_up", F32, &[c.shared_expert_ffn_size as u64, r]),

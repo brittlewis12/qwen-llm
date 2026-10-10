@@ -455,6 +455,7 @@ fn leaf_screen(ctx: &MetalContext, session: &Glm5NextSession<'_>, out: &mut std:
                         ctx,
                         &enc,
                         PackedLineage::Fast,
+                        super::super::packed::Stage::Router,
                         &moe.router,
                         &p.normed,
                         &p.router,

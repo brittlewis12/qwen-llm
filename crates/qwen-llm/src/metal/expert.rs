@@ -368,6 +368,88 @@ pub fn encode_grouped_routed_experts(
     )
 }
 
+/// The bindings [`encode_grouped_routed_experts_with_down_policy`] and the
+/// F32-operand form ([`encode_grouped_routed_experts_f32x`]) share: shapes,
+/// dtypes, expert banks, 16-byte activation alignment, and no output
+/// aliasing an input or another output.
+#[allow(clippy::too_many_arguments)]
+fn check_grouped_routed_experts(
+    kernel: &'static str,
+    enc: &KernelEncoder,
+    b: &GroupedExperts<'_>,
+    hidden: usize,
+    ffn: usize,
+    experts: usize,
+    top_k: usize,
+    rows: usize,
+) -> Result<(), MetalError> {
+    require_serial(kernel, enc)?;
+    if rows == 0 || top_k == 0 || top_k > ROUTE_MAX_TOP_K {
+        return Err(bad_shape(
+            kernel,
+            "rows and top-k must be positive (top-k <= 16)",
+        ));
+    }
+    let (h, f, e, k, r) = (
+        hidden as u64,
+        ffn as u64,
+        experts as u64,
+        top_k as u64,
+        rows as u64,
+    );
+    check_tensor(kernel, b.input, GgmlType::F32, &[h, r], false, "input")?;
+    check_tensor(kernel, b.ids, GgmlType::I32, &[k, r], false, "expert ids")?;
+    check_tensor(kernel, b.weights, GgmlType::F32, &[k, r], false, "weights")?;
+    check_tensor(kernel, b.counts, GgmlType::I32, &[e], true, "counts")?;
+    check_tensor(kernel, b.slots, GgmlType::I32, &[e * r], true, "slots")?;
+    check_tensor(kernel, b.inner, GgmlType::F32, &[f, k * r], true, "inner")?;
+    check_tensor(
+        kernel,
+        b.slot_out,
+        GgmlType::F32,
+        &[h, k * r],
+        true,
+        "slot outputs",
+    )?;
+    check_tensor(kernel, b.output, GgmlType::F32, &[h, r], true, "output")?;
+    check_expert_bank(kernel, b.gate_bank, hidden, ffn, experts, "gate bank")?;
+    check_expert_bank(kernel, b.up_bank, hidden, ffn, experts, "up bank")?;
+    check_expert_bank(kernel, b.down_bank, ffn, hidden, experts, "down bank")?;
+    // The grouped tiles load activation rows as float2x4 / float4 (16 bytes).
+    for (tensor, name) in [
+        (b.input, "input"),
+        (b.inner, "inner"),
+        (b.slot_out, "slot outputs"),
+    ] {
+        check_alignment(kernel, tensor, 16, name)?;
+    }
+    let inputs = [
+        (b.input, "input"),
+        (b.ids, "expert ids"),
+        (b.weights, "weights"),
+        (b.gate_bank, "gate bank"),
+        (b.up_bank, "up bank"),
+        (b.down_bank, "down bank"),
+    ];
+    let scratch = [
+        (b.counts, "counts"),
+        (b.slots, "slots"),
+        (b.inner, "inner"),
+        (b.slot_out, "slot outputs"),
+        (b.output, "output"),
+    ];
+    for (i, (written, name)) in scratch.iter().enumerate() {
+        check_disjoint(kernel, written, &inputs)
+            .map_err(|e| bad_shape(kernel, format!("{name}: {e}")))?;
+        for (other, other_name) in &scratch[i + 1..] {
+            if super::checks::overlaps(written, other) {
+                return Err(bad_shape(kernel, format!("{name} aliases {other_name}")));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GroupedDownPolicy {
     Incumbent,
@@ -388,69 +470,7 @@ pub(crate) fn encode_grouped_routed_experts_with_down_policy(
     down_policy: GroupedDownPolicy,
 ) -> Result<(), MetalError> {
     const K: &str = "grouped_routed_experts";
-    require_serial(K, enc)?;
-    if rows == 0 || top_k == 0 || top_k > ROUTE_MAX_TOP_K {
-        return Err(bad_shape(
-            K,
-            "rows and top-k must be positive (top-k <= 16)",
-        ));
-    }
-    let (h, f, e, k, r) = (
-        hidden as u64,
-        ffn as u64,
-        experts as u64,
-        top_k as u64,
-        rows as u64,
-    );
-    check_tensor(K, b.input, GgmlType::F32, &[h, r], false, "input")?;
-    check_tensor(K, b.ids, GgmlType::I32, &[k, r], false, "expert ids")?;
-    check_tensor(K, b.weights, GgmlType::F32, &[k, r], false, "weights")?;
-    check_tensor(K, b.counts, GgmlType::I32, &[e], true, "counts")?;
-    check_tensor(K, b.slots, GgmlType::I32, &[e * r], true, "slots")?;
-    check_tensor(K, b.inner, GgmlType::F32, &[f, k * r], true, "inner")?;
-    check_tensor(
-        K,
-        b.slot_out,
-        GgmlType::F32,
-        &[h, k * r],
-        true,
-        "slot outputs",
-    )?;
-    check_tensor(K, b.output, GgmlType::F32, &[h, r], true, "output")?;
-    check_expert_bank(K, b.gate_bank, hidden, ffn, experts, "gate bank")?;
-    check_expert_bank(K, b.up_bank, hidden, ffn, experts, "up bank")?;
-    check_expert_bank(K, b.down_bank, ffn, hidden, experts, "down bank")?;
-    // The grouped tiles load activation rows as float2x4 / float4 (16 bytes).
-    for (tensor, name) in [
-        (b.input, "input"),
-        (b.inner, "inner"),
-        (b.slot_out, "slot outputs"),
-    ] {
-        check_alignment(K, tensor, 16, name)?;
-    }
-    let inputs = [
-        (b.input, "input"),
-        (b.ids, "expert ids"),
-        (b.weights, "weights"),
-        (b.gate_bank, "gate bank"),
-        (b.up_bank, "up bank"),
-        (b.down_bank, "down bank"),
-    ];
-    let scratch = [
-        (b.counts, "counts"),
-        (b.slots, "slots"),
-        (b.inner, "inner"),
-        (b.slot_out, "slot outputs"),
-        (b.output, "output"),
-    ];
-    for (i, (written, name)) in scratch.iter().enumerate() {
-        check_disjoint(K, written, &inputs).map_err(|e| bad_shape(K, format!("{name}: {e}")))?;
-        for (other, other_name) in &scratch[i + 1..] {
-            if super::checks::overlaps(written, other) {
-                return Err(bad_shape(K, format!("{name} aliases {other_name}")));
-            }
-        }
-    }
+    check_grouped_routed_experts(K, enc, b, hidden, ffn, experts, top_k, rows)?;
     let flat = |t: &MetalTensor| MetalTensor {
         shape: vec![t.n_elements()],
         ..t.clone()
@@ -543,20 +563,146 @@ pub(crate) fn encode_grouped_routed_experts_with_down_policy(
     Ok(())
 }
 
+/// [`encode_grouped_routed_experts`] with F32 operands (map #12 accuracy
+/// lane): the same bucketing, clamped SwiGLU, down projection and weighted
+/// sum, with the gate/up and down tiles dequantizing weights to F32 and
+/// reading activations (the input and the SwiGLU output) unrounded
+/// (`kernels/moe_grouped_f32.metal`). Gate/up IQ2_S or IQ3_S; down IQ3_S
+/// or IQ4_XS (the GLM-5.3 expert types); other types are refused. A
+/// token's outputs depend on its own routes and activations only, not on
+/// which other tokens share its experts' buckets.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_grouped_routed_experts_f32x(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    b: &GroupedExperts<'_>,
+    hidden: usize,
+    ffn: usize,
+    experts: usize,
+    top_k: usize,
+    rows: usize,
+    clamp: f32,
+) -> Result<(), MetalError> {
+    const K: &str = "grouped_routed_experts_f32x";
+    check_grouped_routed_experts(K, enc, b, hidden, ffn, experts, top_k, rows)?;
+    // Refuse before encoding anything (the bucketing would otherwise run).
+    if b.gate_bank.dtype != b.up_bank.dtype
+        || !matches!(b.gate_bank.dtype, GgmlType::IQ2_S | GgmlType::IQ3_S)
+        || !matches!(b.down_bank.dtype, GgmlType::IQ3_S | GgmlType::IQ4_XS)
+    {
+        return Err(bad_shape(
+            K,
+            format!(
+                "no F32-operand tiles for gate/up/down {:?}/{:?}/{:?}",
+                b.gate_bank.dtype, b.up_bank.dtype, b.down_bank.dtype
+            ),
+        ));
+    }
+    if !clamp.is_finite() || clamp <= 0.0 {
+        return Err(bad_shape(
+            K,
+            format!("clamp must be finite and positive, got {clamp}"),
+        ));
+    }
+    let flat = |t: &MetalTensor| MetalTensor {
+        shape: vec![t.n_elements()],
+        ..t.clone()
+    };
+    // Both tiles' checks (bindings, geometry, pipelines) before the first
+    // dispatch.
+    super::moe_grouped_generic::check_moe_swiglu_clamped_f32x_grouped_slots(
+        ctx,
+        b.gate_bank,
+        b.up_bank,
+        &flat(b.input),
+        b.counts,
+        b.slots,
+        &flat(b.inner),
+        hidden,
+        ffn,
+        experts,
+        top_k,
+        rows,
+        clamp,
+    )?;
+    super::moe_grouped_generic::check_moe_down_f32x_grouped_slots(
+        ctx,
+        b.down_bank,
+        &flat(b.inner),
+        b.counts,
+        b.slots,
+        &flat(b.slot_out),
+        ffn,
+        hidden,
+        experts,
+        rows,
+    )?;
+    encode_moe_route_bucket_slots_f32(
+        ctx,
+        enc,
+        &flat(b.ids),
+        b.counts,
+        b.slots,
+        experts,
+        rows,
+        top_k,
+    )?;
+    super::moe_grouped_generic::encode_moe_swiglu_clamped_f32x_grouped_slots(
+        ctx,
+        enc,
+        b.gate_bank,
+        b.up_bank,
+        &flat(b.input),
+        b.counts,
+        b.slots,
+        &flat(b.inner),
+        hidden,
+        ffn,
+        experts,
+        top_k,
+        rows,
+        clamp,
+    )?;
+    super::moe_grouped_generic::encode_moe_down_f32x_grouped_slots(
+        ctx,
+        enc,
+        b.down_bank,
+        &flat(b.inner),
+        b.counts,
+        b.slots,
+        &flat(b.slot_out),
+        ffn,
+        hidden,
+        experts,
+        rows,
+    )?;
+    encode_moe_weighted_sum_packed_f32(
+        ctx,
+        enc,
+        &flat(b.slot_out),
+        &flat(b.weights),
+        &flat(b.output),
+        hidden,
+        top_k,
+        rows,
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{assert_moe_oracle_close, dequant_expert, offset_tensor};
     use super::*;
 
-    const EXPERTS: usize = 12;
-    const TOP_K: usize = 8;
-    const HIDDEN: usize = 4096;
-    const FFN: usize = 2048;
+    pub(super) const EXPERTS: usize = 12;
+    pub(super) const TOP_K: usize = 8;
+    pub(super) const HIDDEN: usize = 4096;
+    pub(super) const FFN: usize = 2048;
     const IDS: [i32; TOP_K] = [11, 3, 7, 0, 9, 5, 10, 2];
 
     /// Arbitrary quant payload bytes with a small finite F16 scale per block
     /// (every IQ2_S/IQ3_S/IQ4_XS byte pattern decodes).
-    fn synthetic_bank(dtype: GgmlType, n_in: usize, n_out: usize, seed: u64) -> Vec<u8> {
+    pub(super) fn synthetic_bank(dtype: GgmlType, n_in: usize, n_out: usize, seed: u64) -> Vec<u8> {
         let (block, block_bytes) = dtype.storage_layout().unwrap();
         let blocks = EXPERTS * n_out * (n_in / block as usize);
         let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
@@ -574,7 +720,7 @@ mod tests {
         bytes
     }
 
-    fn bank(
+    pub(super) fn bank(
         ctx: &MetalContext,
         bytes: &[u8],
         dtype: GgmlType,
@@ -591,7 +737,7 @@ mod tests {
         )
     }
 
-    fn f32_tensor(ctx: &MetalContext, values: &[f32], shape: Vec<u64>) -> MetalTensor {
+    pub(super) fn f32_tensor(ctx: &MetalContext, values: &[f32], shape: Vec<u64>) -> MetalTensor {
         offset_tensor(
             ctx,
             16,
@@ -613,7 +759,7 @@ mod tests {
         )
     }
 
-    fn read_f32(tensor: &MetalTensor) -> Vec<f32> {
+    pub(super) fn read_f32(tensor: &MetalTensor) -> Vec<f32> {
         super::super::test_support::tensor_f32_at_offset(tensor)
     }
 
@@ -630,13 +776,13 @@ mod tests {
             .collect()
     }
 
-    fn values(n: usize, seed: usize) -> Vec<f32> {
+    pub(super) fn values(n: usize, seed: usize) -> Vec<f32> {
         (0..n)
             .map(|i| (((i * 31 + seed * 17) % 97) as f32 - 48.0) * 0.021)
             .collect()
     }
 
-    fn run(ctx: &MetalContext, encode: impl FnOnce(&KernelEncoder)) {
+    pub(super) fn run(ctx: &MetalContext, encode: impl FnOnce(&KernelEncoder)) {
         let command = ctx.queue.commandBuffer().expect("command buffer");
         let encoder = KernelEncoder::begin(&command);
         encode(&encoder);
@@ -1132,3 +1278,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod f32x_tests;

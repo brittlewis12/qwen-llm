@@ -3106,6 +3106,88 @@ fn q8_f32_mma_r2c4k64_reduces_operand_rounding_and_preserves_guards() {
     }
 }
 
+/// The shared F32-operand Q8_0 tile computes each token's outputs
+/// independently of how many tokens share the dispatch and of whatever the
+/// padded rows past the last token hold (GLM's Fast chunk identities rely
+/// on it); the shared encoder refuses input without padded backing.
+#[test]
+fn q8_f32_r2c4k64_token_outputs_do_not_depend_on_the_dispatch() {
+    let Ok(ctx) = MetalContext::new() else {
+        return;
+    };
+    let run = |weight: &MetalTensor, input: &MetalTensor, n_in, n_out, n_tokens| {
+        let output = grouped_guarded_f32(&ctx, vec![n_out as u64, n_tokens as u64], 9.0);
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let result = crate::metal::encode_mat_mat_q8_0_f32_r2c4k64(
+            &ctx, &encoder, weight, input, &output, n_in, n_out, n_tokens,
+        );
+        encoder.end();
+        result.unwrap();
+        command.commit();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
+        assert!(command.error().is_none(), "{:?}", command.error());
+        assert_grouped_guards("Q8 F32 shared", &output);
+        host_read_f32(&output, "Q8 F32 shared").unwrap()
+    };
+    let (n_in, n_out, full) = (128usize, 32usize, 337usize);
+    let weight = q8_precision_test_weight(&ctx, n_in, n_out);
+    let values = q8_precision_test_input(full.div_ceil(32) * 32 * n_in);
+    let storage = |tokens: usize, poison: f32| {
+        // The first `tokens` rows real; padded rows poisoned.
+        let padded = tokens.div_ceil(32) * 32;
+        let mut data = values[..tokens * n_in].to_vec();
+        data.resize(padded * n_in, poison);
+        MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&data),
+            vec![n_in as u64, padded as u64],
+            GgmlType::F32,
+        )
+        .unwrap()
+    };
+    let reference = run(
+        &weight,
+        &storage(full, 0.0).view_subrange(0, vec![n_in as u64, full as u64]),
+        n_in,
+        n_out,
+        full,
+    );
+    for tokens in [1usize, 17, 31, 32, 33, 97, 128] {
+        for poison in [f32::NAN, f32::INFINITY, 1.0e30] {
+            let input = storage(tokens, poison).view_subrange(0, vec![n_in as u64, tokens as u64]);
+            let got = run(&weight, &input, n_in, n_out, tokens);
+            assert_eq!(
+                got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                reference[..tokens * n_out]
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                "N={tokens} poison={poison}"
+            );
+        }
+    }
+    // Without padded backing the shared encoder refuses before encoding.
+    let tight = MetalTensor::from_bytes(
+        &ctx,
+        bytemuck::cast_slice(&values[..17 * n_in]),
+        vec![n_in as u64, 17],
+        GgmlType::F32,
+    )
+    .unwrap();
+    let output = grouped_guarded_f32(&ctx, vec![n_out as u64, 17], 9.0);
+    let command = ctx.queue.commandBuffer().unwrap();
+    let encoder = KernelEncoder::begin(&command);
+    let refused = crate::metal::encode_mat_mat_q8_0_f32_r2c4k64(
+        &ctx, &encoder, &weight, &tight, &output, n_in, n_out, 17,
+    );
+    encoder.end();
+    assert!(matches!(
+        refused,
+        Err(crate::metal::MetalError::BadShape { .. })
+    ));
+}
+
 #[test]
 fn q8_f32_mma_r2c16k64_matches_r2c4k64_bits() {
     let Ok(ctx) = MetalContext::new() else {

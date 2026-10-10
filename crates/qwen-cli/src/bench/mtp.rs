@@ -286,8 +286,8 @@ pub(crate) fn merge_target_state_audit(
     aggregate.kv_payload_cosine = aggregate.kv_payload_cosine.min(next.kv_payload_cosine);
     aggregate.reference_final_position = next.reference_final_position;
     aggregate.candidate_final_position = next.candidate_final_position;
-    aggregate.gdn_state_max_abs = aggregate.gdn_state_max_abs.max(next.gdn_state_max_abs);
-    aggregate.gdn_conv_max_abs = aggregate.gdn_conv_max_abs.max(next.gdn_conv_max_abs);
+    aggregate.gdn_state_max_abs = sticky_max(aggregate.gdn_state_max_abs, next.gdn_state_max_abs);
+    aggregate.gdn_conv_max_abs = sticky_max(aggregate.gdn_conv_max_abs, next.gdn_conv_max_abs);
     aggregate.continuation_argmax_equal &= next.continuation_argmax_equal;
     aggregate.continuation_token = next.continuation_token;
     aggregate.continuation_logits_max_abs = aggregate
@@ -296,6 +296,14 @@ pub(crate) fn merge_target_state_audit(
     aggregate.continuation_logits_cosine = aggregate
         .continuation_logits_cosine
         .min(next.continuation_logits_cosine);
+}
+
+fn sticky_max(left: f32, right: f32) -> f32 {
+    if left.is_finite() && right.is_finite() {
+        left.max(right)
+    } else {
+        f32::NAN
+    }
 }
 
 pub(crate) const MTP_CONTINUATION_AUDIT_STEPS: usize = 16;
@@ -1287,4 +1295,40 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MtpTargetStateAudit, merge_target_state_audit};
+
+    fn audit(gdn_state_max_abs: f32, gdn_conv_max_abs: f32) -> MtpTargetStateAudit {
+        MtpTargetStateAudit {
+            resume_audit_pass: true,
+            kv_position_equal: true,
+            kv_payload_exact: true,
+            kv_payload_max_abs: 0.0,
+            kv_payload_cosine: 1.0,
+            reference_final_position: None,
+            candidate_final_position: None,
+            gdn_state_max_abs,
+            gdn_conv_max_abs,
+            continuation_argmax_equal: true,
+            continuation_token: 0,
+            continuation_logits_max_abs: 0.0,
+            continuation_logits_cosine: 1.0,
+        }
+    }
+
+    #[test]
+    fn gdn_metric_aggregation_keeps_invalid_values_in_both_orders() {
+        for (first, second) in [
+            (audit(0.25, 0.5), audit(f32::NAN, f32::NAN)),
+            (audit(f32::NAN, f32::NAN), audit(0.25, 0.5)),
+        ] {
+            let mut aggregate = first;
+            merge_target_state_audit(&mut aggregate, second);
+            assert!(!aggregate.gdn_state_max_abs.is_finite());
+            assert!(!aggregate.gdn_conv_max_abs.is_finite());
+        }
+    }
 }

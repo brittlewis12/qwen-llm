@@ -45,6 +45,49 @@ by the grouped gate/up tile's 16-token width (each 16-token tile
 dequantizes its weights again). Chunking changes Fast's arithmetic
 schedule (as the shared-prefix split does), not its kernels or precision.
 
+## Deep contexts (`prefill.json`, `decode.json`)
+
+Same methods at deeper prefixes (deep cells repeat the qualification text's
+tokens; timing only):
+
+| Prefill chunk at depth | 0 | 4,096 | 16,384 |
+|---|---:|---:|---:|
+| unprofiled wall (512 rows) | 2,212 ms | 2,668 ms | 2,616 ms |
+| routed experts | 61.1% | 53.3% | 51.0% |
+| KDA mixer | 21.8% | 19.5% | 20.1% |
+| MLA mixer (incl. attention) | 6.8% | 18.1% | 19.5% |
+
+| Decode at depth | 64 | 4,096 | 16,384 | 32,768 |
+|---|---:|---:|---:|---:|
+| ms per token (unprofiled) | 29.6 | 32.3 | 32.5 | 32.8 |
+
+Selected (sparse) attention bounds GLM's depth cost: past the frontier,
+prefill throughput and decode time stay nearly flat to 16K/32K. MLA's share
+plateaus near a fifth of prefill; routed experts stay the largest stage.
+
+## 32-token gate/up tile (`wide-gate-up-ab.json`, `wide_gate_up_prefill_ab`)
+
+`kernels/moe_grouped_n32.metal`: the clamped grouped SwiGLU with a 32-token
+tile (the 16-token tile's half dequantization and per-output
+matrix-multiply sequence; each SIMD group 32 rows x 16 tokens). Buckets of
+at least 17 slots take it, the rest the 16-token tile (two dispatches over
+disjoint count ranges). Per slot it is bitwise equal to the 16-token tile:
+unit test over bucket counts 0/1/15/16/17/31-33/63-65, permuted slots,
+IQ2_S and IQ3_S (validation and release); in the model, a fresh 2,048-token
+prompt gives identical logits and end state at 512- and 2,048-row chunks.
+Fixed chunk size, A-B-B-A twice:
+
+| Chunk size | 16-token tile | with 32-token tile | routed experts (one profiled chunk) |
+|---|---:|---:|---:|
+| 512 rows | 10,115 ms | 9,954 ms (-1.6%, within the walls' spread) | 1,447 -> 1,394 ms (-3.6%) |
+| 2,048 rows | 8,707 ms | 8,342 ms (-4.2%, spread +-0.3%) | 4,380 -> 4,097 ms (-6.5%) |
+
+Outputs are unchanged, so it is now the default for GLM's half-staged
+grouped path. Together with 2,048-row chunks, a fresh 2,048-token prompt
+takes 8.3 s instead of 10.1 s (+21% throughput); the chunk-size default
+itself stays at 512 until its served-schedule quality, snapshot/admission
+tradeoff and router/SmallCounts dispatch witnesses are in.
+
 ## Decode experts: two quick ideas falsified
 
 The decode routed-expert stage is 10 ms of 30.5 ms per token (IQ2_S gate/up

@@ -532,7 +532,7 @@ fn encode_fused_swiglu(
         }
     };
     dispatch_fused_swiglu(
-        ctx, enc, &name, 16384, l, w_gate, w_up, x_pack, counts, ids, inner, n_hidden, n_ffn,
+        ctx, enc, &name, 16384, 16, l, w_gate, w_up, x_pack, counts, ids, inner, n_hidden, n_ffn,
         n_expert, topk, n_tokens, min_count, max_count, clamp,
     )
 }
@@ -545,6 +545,7 @@ fn dispatch_fused_swiglu(
     enc: &KernelEncoder,
     name: &str,
     threadgroup_bytes: usize,
+    tokens_per_tile: usize,
     l: MoeGroupedGenericLayout,
     w_gate: &MetalTensor,
     w_up: &MetalTensor,
@@ -602,7 +603,7 @@ fn dispatch_fused_swiglu(
     enc.set_threadgroup_memory(0, threadgroup_bytes);
     enc.dispatch(
         MTLSize {
-            width: n_tokens.div_ceil(16),
+            width: n_tokens.div_ceil(tokens_per_tile),
             height: n_ffn.div_ceil(64),
             depth: n_expert,
         },
@@ -1061,6 +1062,7 @@ pub fn encode_moe_swiglu_clamped_f32x_grouped_slots(
         enc,
         name,
         SWIGLU_F32X_THREADGROUP_BYTES,
+        16,
         l,
         w_gate,
         w_up,
@@ -1077,6 +1079,114 @@ pub fn encode_moe_swiglu_clamped_f32x_grouped_slots(
         i32::MAX as u32,
         Some(clamp),
     )
+}
+
+/// Gate/up dtypes with a 32-token clamped grouped SwiGLU tile
+/// (`kernels/moe_grouped_n32.metal`).
+fn clamped_swiglu_n32_pipeline_name(dtype: GgmlType) -> Option<&'static str> {
+    match dtype {
+        GgmlType::IQ2_S => Some("kernel_moe_swiglu_clamped_iq2_s_f32_grouped_slots_n32"),
+        GgmlType::IQ3_S => Some("kernel_moe_swiglu_clamped_iq3_s_f32_grouped_slots_n32"),
+        _ => None,
+    }
+}
+
+/// [`encode_moe_swiglu_clamped_f32_grouped_slots_generic`] with buckets of at
+/// least `wide_min_count` slots on the 32-token tile and the rest on the
+/// 16-token tile: two dispatches over disjoint, exhaustive count ranges.
+/// The 32-token tile keeps the 16-token tile's dequantization and per-output
+/// matrix-multiply sequence, so each slot's output is bitwise the same
+/// (qualification-tested); a bucket's weight tiles are dequantized once per
+/// 32 slots instead of 16. Dtypes without the wide tile use the 16-token
+/// path alone.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_moe_swiglu_clamped_f32_grouped_slots_split(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+    clamp: f32,
+    wide_min_count: u32,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "moe_swiglu_clamped_grouped_slots_split";
+    let Some(wide) = clamped_swiglu_n32_pipeline_name(w_gate.dtype) else {
+        return encode_moe_swiglu_clamped_f32_grouped_slots_generic(
+            ctx, enc, w_gate, w_up, x_pack, counts, ids, inner, n_hidden, n_ffn, n_expert, topk,
+            n_tokens, clamp,
+        );
+    };
+    if wide_min_count == 0 || wide_min_count > i32::MAX as u32 {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("wide_min_count {wide_min_count} outside 1..=i32::MAX"),
+        });
+    }
+    // The incumbent's checks (clamp, dtypes, shapes, layout) on the narrow
+    // range, then the wide range with the same arguments.
+    if !clamp.is_finite() || clamp <= 0.0 || w_gate.dtype != w_up.dtype {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("clamp {clamp}, gate/up {:?}/{:?}", w_gate.dtype, w_up.dtype),
+        });
+    }
+    if topk == 0
+        || n_ffn == 0
+        || n_tokens == 0
+        || n_expert == 0
+        || x_pack.n_elements() as usize != n_tokens * n_hidden
+        || counts.n_elements() as usize != n_expert
+        || ids.n_elements() as usize != n_expert * n_tokens
+        || inner.n_elements() as usize != n_tokens * topk * n_ffn
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "degenerate shape or x/counts/ids/inner size mismatch".into(),
+        });
+    }
+    let narrow =
+        clamped_swiglu_pipeline_name(w_gate.dtype).ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("no clamped grouped SwiGLU for {:?}", w_gate.dtype),
+        })?;
+    let l = generic_layout_for(KERNEL, w_gate, n_hidden, n_ffn, n_expert)?;
+    generic_layout_for(KERNEL, w_up, n_hidden, n_ffn, n_expert)?;
+    for (name, tokens_per_tile, min_count, max_count) in [
+        (narrow.as_str(), 16, 0, wide_min_count - 1),
+        (wide, 32, wide_min_count, i32::MAX as u32),
+    ] {
+        dispatch_fused_swiglu(
+            ctx,
+            enc,
+            name,
+            16384,
+            tokens_per_tile,
+            l,
+            w_gate,
+            w_up,
+            x_pack,
+            counts,
+            ids,
+            inner,
+            n_hidden,
+            n_ffn,
+            n_expert,
+            topk,
+            n_tokens,
+            min_count,
+            max_count,
+            Some(clamp),
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

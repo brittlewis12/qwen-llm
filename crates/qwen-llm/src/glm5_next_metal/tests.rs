@@ -955,6 +955,31 @@ pub(super) fn long_qualification_text() -> String {
     text
 }
 
+/// At least `n` tokens for deep timing cells: [`long_qualification_text`]'s
+/// tokens (after `prefix`), repeated cyclically (timing only: repetition
+/// changes what sparse selection finds, not what it costs).
+pub(super) fn deep_timing_tokens(tokens: &[u32], n: usize) -> Vec<u32> {
+    assert!(!tokens.is_empty());
+    tokens
+        .iter()
+        .copied()
+        .cycle()
+        .take(n.max(tokens.len()))
+        .collect()
+}
+
+/// Depths from `var` (comma-separated), or `default`.
+fn depths_from_env(var: &str, default: &[usize]) -> Vec<usize> {
+    std::env::var(var).map_or_else(
+        |_| default.to_vec(),
+        |list| {
+            list.split(',')
+                .map(|d| d.trim().parse().expect("depth"))
+                .collect()
+        },
+    )
+}
+
 /// Prints the token ids of [`long_qualification_text`] for oracle runs (CPU
 /// only; requires GLM53_GGUF for the tokenizer).
 #[test]
@@ -2584,11 +2609,14 @@ fn decode_stage_attribution() {
     let c = &weights.config;
     let bytes = stage_weight_bytes(&gguf, c);
     let (steps, warm) = (12usize, 4usize);
-    let capacity = 4096 + 2 * (steps + warm) + 8;
-    assert!(tokens.len() >= capacity, "{} tokens", tokens.len());
+    // GLM53_DECODE_DEPTHS (default 64,4096); deep cells repeat the text.
+    let depth_list = depths_from_env("GLM53_DECODE_DEPTHS", &[64, 4096]);
+    let deepest = *depth_list.iter().max().expect("a depth");
+    let capacity = deepest + 2 * (steps + warm) + 8;
+    let tokens = deep_timing_tokens(&tokens, capacity);
     let mut session = Glm5NextSession::with_prefill_rows(&ctx, &weights, capacity, 512).unwrap();
     let mut depths = Vec::new();
-    for depth in [64usize, 4096] {
+    for depth in depth_list {
         let start = session.position();
         session.prefill_packed(&ctx, &tokens[start..depth]).unwrap();
         let mut next = depth;
@@ -2679,7 +2707,10 @@ fn packed_prefill_stage_attribution() {
         panic!("timing requires --release");
     }
     let _lease = perf_lease();
-    let out = PathBuf::from(std::env::var("GLM53_STAGE_OUT").expect("GLM53_STAGE_OUT"));
+    // Absolute, or relative to the workspace root (tests run from the crate).
+    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(std::env::var("GLM53_STAGE_OUT").expect("GLM53_STAGE_OUT"));
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
     let ctx = MetalContext::new().expect("Metal context");
     let gguf = GgufFile::open(&path).unwrap();
@@ -2693,12 +2724,17 @@ fn packed_prefill_stage_attribution() {
     let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
     const CHUNK: usize = 512;
     let mut cases = Vec::new();
-    for (depth, precision) in [
-        (0usize, FastPrecision::Half),
-        (0, FastPrecision::F32),
-        (1536, FastPrecision::Half),
-        (4096, FastPrecision::Half),
-    ] {
+    // GLM53_PREFILL_DEPTHS (default 0,1536,4096) in half precision, plus
+    // depth 0 in f32; deep cells repeat the text.
+    let mut cells: Vec<(usize, FastPrecision)> =
+        depths_from_env("GLM53_PREFILL_DEPTHS", &[0, 1536, 4096])
+            .into_iter()
+            .map(|depth| (depth, FastPrecision::Half))
+            .collect();
+    cells.insert(1, (0, FastPrecision::F32));
+    let deepest = cells.iter().map(|c| c.0).max().unwrap_or(0);
+    let tokens = deep_timing_tokens(&tokens, deepest + CHUNK);
+    for (depth, precision) in cells {
         assert!(tokens.len() >= depth + CHUNK);
         let fresh = |profiled: bool| {
             let mut s =
@@ -2779,7 +2815,10 @@ fn packed_prefill_rows_cost() {
         panic!("timing requires --release");
     }
     let _lease = perf_lease();
-    let out = PathBuf::from(std::env::var("GLM53_STAGE_OUT").expect("GLM53_STAGE_OUT"));
+    // Absolute, or relative to the workspace root (tests run from the crate).
+    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(std::env::var("GLM53_STAGE_OUT").expect("GLM53_STAGE_OUT"));
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
     let ctx = MetalContext::new().expect("Metal context");
     let gguf = GgufFile::open(&path).unwrap();
@@ -2839,6 +2878,104 @@ fn packed_prefill_rows_cost() {
         serde_json::to_vec_pretty(&serde_json::json!({
             "schema": "glm53.packed_prefill_rows_cost.v1", "order": "warm-up; A,B,C,C,B,A per length",
             "results": results})).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Grouped gate/up tile geometry at a fixed chunk size (GLM expert packet,
+/// timing plus a bitwise check): a fresh 2,048-token prompt at 512- and
+/// 2,048-row chunks with every bucket on the 16-token tile versus buckets
+/// of at least 17 slots on the 32-token tile. Within each chunk size the two
+/// arms give bitwise equal logits and end state (so identical routes); A-B-
+/// B-A unprofiled walls twice, and one profiled chunk per arm for the
+/// routed-expert stage. Writes JSON to `GLM53_STAGE_OUT`.
+#[test]
+#[ignore = "timing: loads the GLM-5.3 trunk; requires GLM53_GGUF, GLM53_STAGE_OUT, release, no MTL_DEBUG_LAYER and an idle GPU"]
+fn wide_gate_up_prefill_ab() {
+    use crate::metal::WideGateUp;
+    if cfg!(debug_assertions) {
+        panic!("timing requires --release");
+    }
+    let _lease = perf_lease();
+    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(std::env::var("GLM53_STAGE_OUT").expect("GLM53_STAGE_OUT"));
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let ctx = MetalContext::new().expect("Metal context");
+    let gguf = GgufFile::open(&path).unwrap();
+    let tokens: Vec<u32> = crate::tokenizer::Tokenizer::from_gguf(&gguf)
+        .unwrap()
+        .encode(&long_qualification_text(), false)
+        .unwrap()
+        .into_iter()
+        .map(|id| id as u32)
+        .collect();
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    const PROMPT: usize = 2048;
+    let mut rows_out = Vec::new();
+    for rows in [512usize, 2048] {
+        let arms: [(&str, Option<u32>); 2] = [("n16", None), ("n16+n32 from 17", Some(17))];
+        let run = |wide: Option<u32>| {
+            let _wide = WideGateUp::set(wide);
+            let mut s =
+                Glm5NextSession::with_prefill_rows(&ctx, &weights, PROMPT + 8, rows).unwrap();
+            let started = std::time::Instant::now();
+            let logits = s.prefill_packed(&ctx, &tokens[..PROMPT]).unwrap();
+            let ms = started.elapsed().as_secs_f64() * 1e3;
+            (logits, s.capture_snapshot().unwrap(), ms)
+        };
+        let profiled = |wide: Option<u32>| {
+            let _wide = WideGateUp::set(wide);
+            let mut s = Glm5NextSession::with_prefill_rows(&ctx, &weights, rows + 8, rows).unwrap();
+            let (_, report) = s
+                .prefill_chunk_stage_profiled(&ctx, &tokens[..rows])
+                .unwrap();
+            report
+                .spans
+                .iter()
+                .filter(|span| span.stage == Glm5NextStage::RoutedExperts)
+                .map(|span| span.gpu_ms)
+                .sum::<f64>()
+        };
+        let (base_logits, base_state, _) = run(arms[0].1);
+        let (wide_logits, wide_state, _) = run(arms[1].1);
+        assert_eq!(
+            logit_bits(&[base_logits]),
+            logit_bits(&[wide_logits]),
+            "{rows} rows: logits differ"
+        );
+        assert!(
+            base_state.same_state(&wide_state),
+            "{rows} rows: state differs"
+        );
+        let mut walls = [Vec::new(), Vec::new()];
+        for _ in 0..2 {
+            for i in [0usize, 1, 1, 0] {
+                walls[i].push(run(arms[i].1).2);
+            }
+        }
+        let experts = [profiled(arms[0].1), profiled(arms[1].1)];
+        for (i, (label, _)) in arms.iter().enumerate() {
+            let mean = walls[i].iter().sum::<f64>() / walls[i].len() as f64;
+            eprintln!(
+                "{rows}-row chunks, {label}: fresh {PROMPT} {mean:.0} ms ({:.1} tok/s) {:?}; routed experts in one profiled chunk {:.1} ms",
+                PROMPT as f64 / (mean / 1e3),
+                walls[i].iter().map(|v| v.round()).collect::<Vec<_>>(),
+                experts[i]
+            );
+            rows_out.push(
+                serde_json::json!({"rows": rows, "arm": label, "wall_ms": walls[i],
+                "mean_ms": mean, "profiled_chunk_routed_experts_ms": experts[i]}),
+            );
+        }
+    }
+    std::fs::write(
+        &out,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "glm53.wide_gate_up_prefill_ab.v1", "prompt_tokens": PROMPT,
+            "order": "bitwise check, then (A,B,B,A) x 2 per chunk size; one profiled chunk per arm",
+            "results": rows_out}))
+        .unwrap(),
     )
     .unwrap();
 }

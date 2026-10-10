@@ -1,0 +1,107 @@
+{
+  "schema": "glm53.packed_prefill_stage_attribution.v1",
+  "method": "one 512-row chunk as one command, one timestamp-sampled encoder per stage per block; spans scaled to the command's GPU time and summed per stage",
+  "prompt": "long_qualification_text (teacher-forced)",
+  "cases": [
+    {
+      "depth": 0,
+      "precision": "half",
+      "chunk_tokens": 512,
+      "unprofiled_wall_ms": [
+        2212.3958749999997,
+        2212.544833
+      ],
+      "profiled_command_gpu_ms": 2240.0718749995576,
+      "profiled_span_sum_ms": 2238.683367974144,
+      "stages_ms": {
+        "attention_post": 21.00746038449506,
+        "attention_pre": 15.497540283648172,
+        "dense_ffn": 36.7887096733359,
+        "embed": 0.6032090110404058,
+        "ffn_post": 21.05241238531781,
+        "ffn_pre": 15.441916282630098,
+        "head": 1.077084019713639,
+        "kda": 487.66396392560944,
+        "mla_projection": 153.21125480419292,
+        "routed_experts": 1367.3862700269788,
+        "router": 24.320000445123785,
+        "shared_expert": 94.63354673205762
+      }
+    },
+    {
+      "depth": 0,
+      "precision": "f32",
+      "chunk_tokens": 512,
+      "unprofiled_wall_ms": [
+        2709.591542,
+        2731.4803749999996
+      ],
+      "profiled_command_gpu_ms": 2781.7651250006747,
+      "profiled_span_sum_ms": 2780.3957460208594,
+      "stages_ms": {
+        "attention_post": 21.13474668850341,
+        "attention_pre": 17.5318747416047,
+        "dense_ffn": 40.71812439987183,
+        "embed": 1.8122079732905905,
+        "ffn_post": 21.48191368338665,
+        "ffn_pre": 16.327461759356066,
+        "head": 1.0576659844114835,
+        "kda": 576.6149095015032,
+        "mla_projection": 181.20849632924038,
+        "routed_experts": 1765.8020129745491,
+        "router": 26.314999612153727,
+        "shared_expert": 110.39133237298624
+      }
+    },
+    {
+      "depth": 4096,
+      "precision": "half",
+      "chunk_tokens": 512,
+      "unprofiled_wall_ms": [
+        2697.569542,
+        2637.9511669999997
+      ],
+      "profiled_command_gpu_ms": 2729.754583328031,
+      "profiled_span_sum_ms": 2728.225995327847,
+      "stages_ms": {
+        "attention_post": 21.315169002561426,
+        "attention_pre": 16.75216500201309,
+        "dense_ffn": 40.52691700487007,
+        "embed": 0.5525830000664032,
+        "ffn_post": 21.366249002567557,
+        "ffn_pre": 16.752832002013164,
+        "head": 1.0636250001278145,
+        "kda": 532.4509140639839,
+        "mla_projection": 492.60454405919563,
+        "routed_experts": 1455.1692481748662,
+        "router": 25.39696100305192,
+        "shared_expert": 104.27478801253058
+      }
+    },
+    {
+      "depth": 16384,
+      "precision": "half",
+      "chunk_tokens": 512,
+      "unprofiled_wall_ms": [
+        2558.1563750000005,
+        2674.408875
+      ],
+      "profiled_command_gpu_ms": 2677.817875002802,
+      "profiled_span_sum_ms": 2676.3499589803237,
+      "stages_ms": {
+        "attention_post": 21.163788324060356,
+        "attention_pre": 16.787709257053745,
+        "dense_ffn": 41.0168346280506,
+        "embed": 0.5569590085281677,
+        "ffn_post": 21.399042327662578,
+        "ffn_pre": 16.72583625610634,
+        "head": 1.068042016353881,
+        "kda": 538.7702582496611,
+        "mla_projection": 523.1759240108804,
+        "routed_experts": 1364.876189899012,
+        "router": 25.312333387582967,
+        "shared_expert": 105.49704161537286
+      }
+    }
+  ]
+}

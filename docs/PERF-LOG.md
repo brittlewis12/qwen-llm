@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-10 - GLM: 32-Token Gate/Up Tile On (Bitwise); Depth Cost Is Flat
+
+- **Wide gate/up tile** (`docs/bench/2026-10-09-glm53-prefill-attribution/`):
+  buckets of at least 17 slots take a 32-token clamped grouped SwiGLU tile
+  (`kernels/moe_grouped_n32.metal`), bitwise equal per slot to the 16-token
+  tile (unit tests; model logits and end state at 512 and 2,048 rows), so
+  outputs are unchanged and it is on by default. Fresh 2,048-token prompt:
+  -1.6% at 512-row chunks (noise-level), -4.2% at 2,048 rows (expert stage
+  -6.5%). With 2,048-row chunks: 10.1 -> 8.3 s.
+- **Depth:** prefill at 16K reads at the depth-0 rate (196 tok/s, MLA ~20%
+  share, experts 51%); decode is 29.6 / 32.3 / 32.5 / 32.8 ms per token at
+  64 / 4K / 16K / 32K. Selected attention bounds GLM's depth cost; routed
+  experts remain the lever.
+- **Chunk-size default stays 512** pending served-schedule quality, the
+  snapshot/admission tradeoff (+1.7 GiB scratch) and router/SmallCounts
+  dispatch witnesses (both decline at 1,024/2,048).
+
 ## 2026-10-09 - GLM Prefill Is 61% Routed Experts; 2,048-Row Chunks Read Prompts 14-16% Faster
 
 - **Profiler:** `Glm5NextSession::prefill_chunk_stage_profiled` times one

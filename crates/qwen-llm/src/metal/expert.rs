@@ -39,6 +39,47 @@ const GATE_UP_KERNELS: &[(GgmlType, &str)] = &[
     ),
 ];
 
+/// Buckets of at least this many slots take the 32-token gate/up tile in
+/// the half-staged grouped path (`None`: every bucket on the 16-token
+/// tile). Bitwise equal per slot to the 16-token tile (unit and GLM model
+/// tests), so outputs are unchanged; a large bucket dequantizes each weight
+/// tile once per 32 slots: GLM prefill 4.2% faster at 2,048-row chunks
+/// (expert stage -6.5%), 1.6% at 512
+/// (`docs/bench/2026-10-09-glm53-prefill-attribution/`). Tests may override
+/// it ([`WideGateUp`]).
+const GROUPED_GATE_UP_WIDE_MIN: Option<u32> = Some(17);
+
+#[cfg(test)]
+thread_local! {
+    static WIDE_GATE_UP: std::cell::Cell<Option<Option<u32>>> = const { std::cell::Cell::new(None) };
+}
+
+fn grouped_gate_up_wide_min() -> Option<u32> {
+    #[cfg(test)]
+    if let Some(value) = WIDE_GATE_UP.with(std::cell::Cell::get) {
+        return value;
+    }
+    GROUPED_GATE_UP_WIDE_MIN
+}
+
+/// Test-only scope selecting the grouped gate/up tile split.
+#[cfg(test)]
+pub(crate) struct WideGateUp(Option<Option<u32>>);
+
+#[cfg(test)]
+impl WideGateUp {
+    pub(crate) fn set(wide_min_count: Option<u32>) -> Self {
+        Self(WIDE_GATE_UP.with(|v| v.replace(Some(wide_min_count))))
+    }
+}
+
+#[cfg(test)]
+impl Drop for WideGateUp {
+    fn drop(&mut self) {
+        WIDE_GATE_UP.with(|v| v.set(self.0));
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct AllSlotsArgs {
@@ -503,22 +544,43 @@ pub(crate) fn encode_grouped_routed_experts_with_down_policy(
         rows,
         top_k,
     )?;
-    encode_moe_swiglu_clamped_f32_grouped_slots_generic(
-        ctx,
-        enc,
-        b.gate_bank,
-        b.up_bank,
-        &flat(b.input),
-        b.counts,
-        b.slots,
-        &flat(b.inner),
-        hidden,
-        ffn,
-        experts,
-        top_k,
-        rows,
-        clamp,
-    )?;
+    match grouped_gate_up_wide_min() {
+        Some(wide_min_count) => {
+            super::moe_grouped_generic::encode_moe_swiglu_clamped_f32_grouped_slots_split(
+                ctx,
+                enc,
+                b.gate_bank,
+                b.up_bank,
+                &flat(b.input),
+                b.counts,
+                b.slots,
+                &flat(b.inner),
+                hidden,
+                ffn,
+                experts,
+                top_k,
+                rows,
+                clamp,
+                wide_min_count,
+            )?
+        }
+        None => encode_moe_swiglu_clamped_f32_grouped_slots_generic(
+            ctx,
+            enc,
+            b.gate_bank,
+            b.up_bank,
+            &flat(b.input),
+            b.counts,
+            b.slots,
+            &flat(b.inner),
+            hidden,
+            ffn,
+            experts,
+            top_k,
+            rows,
+            clamp,
+        )?,
+    }
     if let Some(down) = prepared_down {
         down.encode()?;
     } else if b.down_bank.dtype == GgmlType::IQ4_XS {
@@ -1281,3 +1343,6 @@ mod tests {
 
 #[cfg(test)]
 mod f32x_tests;
+
+#[cfg(test)]
+mod wide_tests;

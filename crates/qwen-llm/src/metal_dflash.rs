@@ -1833,19 +1833,7 @@ fn diagnose_gdn_projection_matmat_vs_matvec(
 
     let mm = read_f32_tensor(matmat_out);
     let mv = read_f32_tensor(&matvec_out);
-    let mut min_cos = f64::INFINITY;
-    let mut worst_row = 0usize;
-    let mut worst_max_abs = 0.0f32;
-    for row in 0..n_query {
-        let start = row * n_out;
-        let end = start + n_out;
-        let cos = cosine_f32(&mm[start..end], &mv[start..end]);
-        if cos < min_cos {
-            min_cos = cos;
-            worst_row = row;
-            worst_max_abs = max_abs_delta_f32(&mm[start..end], &mv[start..end]);
-        }
-    }
+    let (min_cos, worst_row, worst_max_abs) = diagnostic_worst_cosine_row(&mm, &mv, n_query, n_out);
 
     eprintln!(
         "[prefill-gdn-proj-oracle] chunk={chunk_idx} start={chunk_start} \
@@ -1900,7 +1888,7 @@ fn cosine_f32(a: &[f32], b: &[f32]) -> f64 {
 }
 
 fn max_abs_delta_f32(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || !a.iter().chain(b).all(|value| value.is_finite()) {
+    if a.is_empty() || a.len() != b.len() || !a.iter().chain(b).all(|value| value.is_finite()) {
         return f32::NAN;
     }
     let mut maximum = 0.0f32;
@@ -1914,15 +1902,73 @@ fn max_abs_delta_f32(a: &[f32], b: &[f32]) -> f32 {
     maximum
 }
 
+fn diagnostic_worst_cosine_row(
+    actual: &[f32],
+    expected: &[f32],
+    n_rows: usize,
+    n_cols: usize,
+) -> (f64, usize, f32) {
+    if n_rows == 0
+        || n_cols == 0
+        || n_rows.checked_mul(n_cols) != Some(actual.len())
+        || actual.len() != expected.len()
+    {
+        return (f64::NAN, 0, f32::NAN);
+    }
+    let mut min_cos = f64::INFINITY;
+    let mut worst_row = 0usize;
+    let mut worst_max_abs = 0.0f32;
+    let mut invalid_row = false;
+    for row in 0..n_rows {
+        let start = row * n_cols;
+        let end = start + n_cols;
+        let actual_row = &actual[start..end];
+        let expected_row = &expected[start..end];
+        let cos = cosine_f32(actual_row, expected_row);
+        let max_abs = max_abs_delta_f32(actual_row, expected_row);
+        if !cos.is_finite() || !max_abs.is_finite() {
+            invalid_row = true;
+            worst_row = row;
+            continue;
+        }
+        if cos < min_cos {
+            min_cos = cos;
+            worst_row = row;
+            worst_max_abs = max_abs;
+        }
+    }
+    if invalid_row {
+        (f64::NAN, worst_row, f32::NAN)
+    } else {
+        (min_cos, worst_row, worst_max_abs)
+    }
+}
+
 #[cfg(test)]
 mod comparison_contract_tests {
-    use super::max_abs_delta_f32;
+    use super::{diagnostic_worst_cosine_row, max_abs_delta_f32};
 
     #[test]
     fn diagnostic_marks_uncomparable_inputs_non_finite() {
         assert_eq!(max_abs_delta_f32(&[1.0, 3.0], &[1.5, 1.0]), 2.0);
         assert!(max_abs_delta_f32(&[1.0], &[1.0, 2.0]).is_nan());
         assert!(max_abs_delta_f32(&[1.0], &[f32::INFINITY]).is_nan());
+        assert!(max_abs_delta_f32(&[], &[]).is_nan());
+    }
+
+    #[test]
+    fn invalid_dflash_rows_remain_visible_in_either_order() {
+        let valid = [1.0, 0.0];
+        let invalid = [f32::NAN, 0.0];
+        for actual in [
+            [valid[0], valid[1], invalid[0], invalid[1]],
+            [invalid[0], invalid[1], valid[0], valid[1]],
+        ] {
+            let (cos, _, max_abs) =
+                diagnostic_worst_cosine_row(&actual, &[1.0, 0.0, 1.0, 0.0], 2, 2);
+            assert!(cos.is_nan());
+            assert!(max_abs.is_nan());
+        }
     }
 }
 

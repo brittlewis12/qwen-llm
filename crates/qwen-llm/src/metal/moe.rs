@@ -4,7 +4,7 @@ use super::*;
 
 #[cfg(test)]
 fn diagnostic_max_abs(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || !a.iter().chain(b).all(|value| value.is_finite()) {
+    if a.is_empty() || a.len() != b.len() || !a.iter().chain(b).all(|value| value.is_finite()) {
         return f32::NAN;
     }
     let mut maximum = 0.0f32;
@@ -6088,6 +6088,7 @@ mod tests {
         assert_eq!(diagnostic_max_abs(&[1.0, 3.0], &[1.5, 1.0]), 2.0);
         assert!(diagnostic_max_abs(&[1.0], &[1.0, 2.0]).is_nan());
         assert!(diagnostic_max_abs(&[1.0], &[f32::NAN]).is_nan());
+        assert!(diagnostic_max_abs(&[], &[]).is_nan());
     }
 
     #[test]

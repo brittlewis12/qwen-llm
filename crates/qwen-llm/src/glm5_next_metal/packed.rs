@@ -242,6 +242,46 @@ thread_local! {
     static F32_TILES: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 
+/// Spans of at most this many rows take the narrow F32-operand kernels
+/// (`encode_mat_mat_q6_k_f32_r8c8`, `encode_mat_mat_q8_0_f32_r2c1k64`),
+/// bitwise equal per token to the wide tiles; tests may lower it
+/// ([`F32NarrowRows`]) to compare the two.
+const F32_NARROW_MAX_ROWS: usize = 8;
+
+#[cfg(test)]
+thread_local! {
+    static F32_NARROW_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(F32_NARROW_MAX_ROWS) };
+}
+
+#[cfg(test)]
+fn f32_narrow_max_rows() -> usize {
+    F32_NARROW_ROWS.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+fn f32_narrow_max_rows() -> usize {
+    F32_NARROW_MAX_ROWS
+}
+
+/// Test-only scope in which FastF32 spans of at most `rows` rows take the
+/// narrow kernels (0: none); the previous limit is restored on drop.
+#[cfg(test)]
+pub(super) struct F32NarrowRows(usize);
+
+#[cfg(test)]
+impl F32NarrowRows {
+    pub(super) fn set(rows: usize) -> Self {
+        Self(F32_NARROW_ROWS.with(|r| r.replace(rows)))
+    }
+}
+
+#[cfg(test)]
+impl Drop for F32NarrowRows {
+    fn drop(&mut self) {
+        F32_NARROW_ROWS.with(|r| r.set(self.0));
+    }
+}
+
 /// Whether a FastF32 projection may take `tile`: those the [`F32Stages`]
 /// scope names in tests; every tile in product builds (which never select
 /// FastF32 yet).
@@ -661,6 +701,9 @@ fn matmat(
     if mode == StageMode::FastF32 {
         // F32-operand tiles at every row count (one row included), so a
         // token's outputs do not depend on its chunking.
+        // Short spans take the narrow kernels, whose per-token outputs are
+        // bitwise the wide tiles'.
+        let narrow = rows <= f32_narrow_max_rows();
         let f32_tile = match weight.dtype {
             GgmlType::Q8_0
                 if f32_tile_enabled(F32Tile::Q8_0)
@@ -668,17 +711,29 @@ fn matmat(
                     && n_out.is_multiple_of(16) =>
             {
                 // Activation buffers are allocated with rows padded to 32
-                // (`memory::packed_activation_rows`), the backing this tile
-                // reads.
-                crate::metal::encode_mat_mat_q8_0_f32_r2c4k64(
-                    ctx, enc, weight, x, y, n_in, n_out, rows,
-                )?;
+                // (`memory::packed_activation_rows`), the backing these
+                // tiles read.
+                if narrow {
+                    crate::metal::encode_mat_mat_q8_0_f32_r2c1k64(
+                        ctx, enc, weight, x, y, n_in, n_out, rows,
+                    )?;
+                } else {
+                    crate::metal::encode_mat_mat_q8_0_f32_r2c4k64(
+                        ctx, enc, weight, x, y, n_in, n_out, rows,
+                    )?;
+                }
                 true
             }
             GgmlType::Q6_K if f32_tile_enabled(F32Tile::Q6K) && n_in.is_multiple_of(256) => {
-                crate::metal::encode_mat_mat_q6_k_f32_mm64x32(
-                    ctx, enc, weight, x, y, n_in, n_out, rows,
-                )?;
+                if narrow {
+                    crate::metal::encode_mat_mat_q6_k_f32_r8c8(
+                        ctx, enc, weight, x, y, n_in, n_out, rows,
+                    )?;
+                } else {
+                    crate::metal::encode_mat_mat_q6_k_f32_mm64x32(
+                        ctx, enc, weight, x, y, n_in, n_out, rows,
+                    )?;
+                }
                 true
             }
             _ => false,

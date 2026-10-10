@@ -1786,14 +1786,78 @@ fn fast_f32_operands_keep_chunk_identities() {
     }
 }
 
+/// The narrow F32-operand kernels change nothing in the model: under the
+/// all-F32 selection, 1-, 2-, 4-, 8- and 9-token suffixes after a reused
+/// prefix, and a prompt whose last chunk has 5 rows, give bitwise the same
+/// logits (prefill and four decode steps) and end state with spans of up to
+/// 8 rows on the narrow kernels as with every span on the wide tiles.
+#[test]
+#[ignore = "map #12 narrow F32 kernels in the model: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU"]
+fn fast_f32_narrow_rows_match_the_wide_tiles() {
+    use super::super::packed::F32NarrowRows;
+    let _lease = production_lease();
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let gguf = GgufFile::open(&path).unwrap();
+    let ctx = MetalContext::new().expect("Metal context");
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
+    let tokens: Vec<u32> = tokenizer
+        .encode(&long_qualification_text(), false)
+        .unwrap()
+        .into_iter()
+        .map(|t| t as u32)
+        .collect();
+    let [_, _, all] = f32_selections();
+    let _scope = all.scope();
+    // (prefix tokens, span tokens): the span is prefilled after the prefix.
+    let cases = [
+        (2047usize, 1usize),
+        (2046, 2),
+        (2044, 4),
+        (2040, 8),
+        (2039, 9),
+        (0, 1029),
+    ];
+    let run = |prefix: usize, span: usize, narrow_rows: usize| {
+        let _narrow = F32NarrowRows::set(narrow_rows);
+        let end = prefix + span;
+        let mut s = session(&ctx, &weights, end + 8, 512, PackedLineage::Fast);
+        if prefix > 0 {
+            s.prefill_packed(&ctx, &tokens[..prefix]).unwrap();
+        }
+        let mut logits = vec![s.prefill_packed(&ctx, &tokens[prefix..end]).unwrap()];
+        for &token in &tokens[end..end + 4] {
+            logits.push(s.forward(&ctx, token).unwrap());
+        }
+        (logits, s.capture_snapshot().unwrap())
+    };
+    let mut failures = Vec::new();
+    for (prefix, span) in cases {
+        let (narrow_logits, narrow_end) = run(prefix, span, 8);
+        let (wide_logits, wide_end) = run(prefix, span, 0);
+        let logits_equal = logit_bits(&narrow_logits) == logit_bits(&wide_logits);
+        let state_equal = narrow_end.same_state(&wide_end);
+        eprintln!(
+            "prefix {prefix} + span {span}: logits bitwise {logits_equal}, end state equal {state_equal}"
+        );
+        if !(logits_equal && state_equal) {
+            failures.push(format!(
+                "prefix {prefix} + span {span}: logits {logits_equal}, end state {state_equal}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Release timing of the F32-operand selections (map #12 accuracy lane):
-/// Fast, every dense projection on F32-operand tiles, and those plus the
-/// routed experts, in A-B-C-C-B-A order twice after a warm-up of each: a
-/// fresh 2,048-token prompt in 512-row chunks; 1-, 17- and 64-token
-/// suffixes ending at 2,048 after a reused same-arm prefix (the short spans
-/// a reused conversation prefills); and a 64-token suffix 512 tokens past
-/// the sparse frontier (sparse attention active). Reports per-arm means to
-/// `GLM53_PROBE_OUT`. Diagnostic; no bounds.
+/// Fast, every dense projection on F32-operand tiles, those plus the routed
+/// experts, and the latter with every span on the wide tiles (narrow
+/// kernels off), in A-B-C-D-D-C-B-A order twice after a warm-up of each: a
+/// fresh 2,048-token prompt in 512-row chunks; 1-, 2-, 4-, 8-, 9-, 17- and
+/// 64-token suffixes ending at 2,048 after a reused same-arm prefix (the
+/// short spans a reused conversation prefills); and a 64-token suffix 512
+/// tokens past the sparse frontier (sparse attention active). Reports
+/// per-arm means to `GLM53_PROBE_OUT`. Diagnostic; no bounds.
 #[test]
 #[ignore = "diagnostic timing: GLM53_GGUF, GLM53_PROBE_OUT, release build, no MTL_DEBUG_LAYER; loads 109.5 GiB under production lease"]
 fn fast_f32_operand_prefill_cost() {
@@ -1818,20 +1882,27 @@ fn fast_f32_operand_prefill_cost() {
     let frontier = weights.config.sparse_frontier() as usize;
     let suffixes = [
         (1, PROMPT),
+        (2, PROMPT),
+        (4, PROMPT),
+        (8, PROMPT),
+        (9, PROMPT),
         (17, PROMPT),
         (64, PROMPT),
         (64, frontier + 512),
     ];
     assert!(tokens.len() >= frontier + 512);
     let [_, dense, all] = f32_selections();
-    let arms: [(&str, Option<&F32Selection>); 3] = [
-        ("half", None),
-        (dense.label, Some(&dense)),
-        (all.label, Some(&all)),
+    // (label, selection, narrow kernels on)
+    let arms: [(&str, Option<&F32Selection>, bool); 4] = [
+        ("half", None, true),
+        (dense.label, Some(&dense), true),
+        (all.label, Some(&all), true),
+        ("fast_f32_all_wide_only", Some(&all), false),
     ];
     // Per measurement: the fresh prompt's ms, then each suffix's.
-    let time = |selection: Option<&F32Selection>| -> Vec<f64> {
+    let time = |selection: Option<&F32Selection>, narrow: bool| -> Vec<f64> {
         let _scope = selection.map(F32Selection::scope);
+        let _narrow = (!narrow).then(|| super::super::packed::F32NarrowRows::set(0));
         let mut s = session(&ctx, &weights, PROMPT + 8, 512, PackedLineage::Fast);
         let started = std::time::Instant::now();
         let logits = s.prefill_packed(&ctx, &tokens[..PROMPT]).unwrap();
@@ -1848,13 +1919,13 @@ fn fast_f32_operand_prefill_cost() {
         }
         spans
     };
-    for (_, selection) in &arms {
-        time(*selection);
+    for (_, selection, narrow) in &arms {
+        time(*selection, *narrow);
     }
     let mut runs: Vec<Vec<Vec<f64>>> = vec![Vec::new(); arms.len()];
     for _ in 0..2 {
-        for i in [0, 1, 2, 2, 1, 0] {
-            runs[i].push(time(arms[i].1));
+        for i in [0, 1, 2, 3, 3, 2, 1, 0] {
+            runs[i].push(time(arms[i].1, arms[i].2));
         }
     }
     let labels = std::iter::once(format!("fresh {PROMPT}"))
@@ -1864,7 +1935,7 @@ fn fast_f32_operand_prefill_cost() {
         .map(|(i, span)| {
             let mut row = json!({"span": span});
             let half_mean = runs[0].iter().map(|t| t[i]).sum::<f64>() / runs[0].len() as f64;
-            for ((label, _), arm) in arms.iter().zip(&runs) {
+            for ((label, _, _), arm) in arms.iter().zip(&runs) {
                 let ms: Vec<f64> = arm.iter().map(|t| t[i]).collect();
                 let mean = ms.iter().sum::<f64>() / ms.len() as f64;
                 row[*label] = json!({"ms": ms, "mean_ms": mean,
@@ -1874,9 +1945,10 @@ fn fast_f32_operand_prefill_cost() {
         })
         .collect();
     let document = json!({
-        "schema": "glm53.f32_operand_cost.v1", "rows_per_chunk": 512,
-        "order": "warm-up A,B,C; then (A,B,C,C,B,A) x 2; a fresh session per measurement (allocation excluded)",
-        "arms": {"half": "Fast", "fast_f32_dense": dense.description, "fast_f32_all": all.description},
+        "schema": "glm53.f32_operand_cost.v2", "rows_per_chunk": 512,
+        "order": "warm-up A,B,C,D; then (A,B,C,D,D,C,B,A) x 2; a fresh session per measurement (allocation excluded)",
+        "arms": {"half": "Fast", "fast_f32_dense": dense.description, "fast_f32_all": all.description,
+            "fast_f32_all_wide_only": "fast_f32_all with every span on the wide tiles (narrow kernels off)"},
         "rows": rows,
     });
     eprintln!("{document}");

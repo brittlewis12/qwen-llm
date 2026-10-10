@@ -6,7 +6,7 @@
 use super::*;
 
 /// Deterministic xorshift stream.
-struct Stream(u64);
+pub(super) struct Stream(pub(super) u64);
 
 impl Stream {
     fn next(&mut self) -> u64 {
@@ -17,7 +17,7 @@ impl Stream {
     }
 
     /// Uniform in [-1, 1).
-    fn unit(&mut self) -> f32 {
+    pub(super) fn unit(&mut self) -> f32 {
         (self.next() >> 40) as f32 / (1u64 << 23) as f32 - 1.0
     }
 }
@@ -72,7 +72,7 @@ fn ggml_dequantize_q6_k(block: &[u8; 210]) -> [f32; 256] {
 
 /// A Q6_K `[n_in, n_out]` weight (bytes, ggml-decoded F32 row-major) whose
 /// blocks cover signed and extreme scales and every quant, 31-33 included.
-fn q6_k_weight(n_in: usize, n_out: usize, seed: u64) -> (Vec<u8>, Vec<f32>) {
+pub(super) fn q6_k_weight(n_in: usize, n_out: usize, seed: u64) -> (Vec<u8>, Vec<f32>) {
     let mut stream = Stream(seed);
     let (mut bytes, mut decoded) = (Vec::new(), Vec::new());
     for row in 0..n_out {

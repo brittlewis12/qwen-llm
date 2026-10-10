@@ -657,3 +657,90 @@ kernel void kernel_mat_mat_q6_K_f32_mm64x32(
         }
     }
 }
+
+// =============================================================================
+// kernel_mat_mat_q6_K_f32_r8c8 -- short-span companion of
+// kernel_mat_mat_q6_K_f32_mm64x32 (map #12 accuracy lane).
+//
+// Each SIMD group owns 8 outputs x 8 tokens with a private 2 KiB
+// threadgroup slab and synchronizes only within itself (four independent
+// groups per threadgroup). Per output element it performs the wide tile's
+// exact sequence: the same dequantized values (dequantize_q6_K_float, sub-
+// block il of each 32-K step), the same slab layouts read by simdgroup_load,
+// and for every 32-K step four simdgroup_multiply_accumulate(mc, mb, ma, mc)
+// with the tokens-by-K activations on the left, in K order, from a zero
+// accumulator. A token's outputs therefore match the wide tile's bitwise.
+// Rows and tokens past the edge are clamped (read, never stored); a group
+// wholly past the last row returns before any work.
+
+[[max_total_threads_per_threadgroup(128)]]
+kernel void kernel_mat_mat_q6_K_f32_r8c8(
+        constant mat_mat_q6k_args & args   [[buffer(0)]],
+        device const uchar        * srcA   [[buffer(1)]], // Q6_K weight bytes [M, K]
+        device const float        * srcB   [[buffer(2)]], // F32 activations [N, K] row-major
+        device       float        * dst    [[buffer(3)]], // F32 output [N, M] row-major
+        threadgroup  float        * shmem  [[threadgroup(0)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const uint r0 = (tgpig.y * N_SIMD_GROUPS + (uint)sgitg) * 8u;
+    const uint c0 = tgpig.x * 8u;
+    if (r0 >= args.M) {
+        return; // uniform across the SIMD group; no threadgroup barriers follow
+    }
+    threadgroup float * slab_a = shmem + 512 * (uint)sgitg; // 4 K-blocks x (8 K x 8 rows)
+    threadgroup float * slab_b = slab_a + 256;               // 4 K-blocks x (8 tokens x 8 K)
+
+    // Lanes 0-15 dequantize: row lane / 2, sub-block parity lane % 2 (the
+    // wide tile's il0). Every lane loads 8 activations: token lane / 4,
+    // 8-wide K chunk lane % 4.
+    const uint lane = (uint)tiisg;
+    const uint a_row = min(lane / 2u, 7u);
+    const short il0 = (short)(lane % 2u);
+    device const uchar * row_ptr = srcA + (ulong)args.nb01 * min(r0 + a_row, args.M - 1u);
+    const uint b_token = lane / 4u;
+    const uint b_chunk = lane % 4u;
+    device const float * y_ptr = srcB
+        + (ulong)args.stride_b * min(c0 + b_token, args.N - 1u)
+        + (ulong)(8u * b_chunk);
+
+    simdgroup_float8x8 ma;
+    simdgroup_float8x8 mb;
+    simdgroup_float8x8 mc = make_filled_simdgroup_matrix<float, 8>(0.0f);
+
+    for (uint loop_k = 0; loop_k < args.K; loop_k += NK_MM) {
+        if (lane < 16u) {
+            const uint step = loop_k / NK_MM;
+            const short il = (short)(2u * (step % 8u)) + il0;
+            float4x4 temp_a;
+            dequantize_q6_K_float(row_ptr + (ulong)(step / 8u) * Q6K_BYTES, il, temp_a);
+            FOR_UNROLL (short i = 0; i < 16; ++i) {
+                const short sx = 2 * il0 + i / 8;
+                const short ly = i % 8;
+                slab_a[64 * sx + 8 * ly + (short)a_row] = temp_a[i / 4][i % 4];
+            }
+        }
+        *(threadgroup float2x4 *)(slab_b + 64 * b_chunk + 8 * b_token) =
+            *((device const float2x4 *)(y_ptr + loop_k));
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+
+        FOR_UNROLL (short ik = 0; ik < NK_MM / 8; ++ik) {
+            simdgroup_load(ma, slab_a + 64 * ik, 8, 0, false);
+            simdgroup_load(mb, slab_b + 64 * ik, 8, 0, false);
+            simdgroup_multiply_accumulate(mc, mb, ma, mc);
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // Stage (token-major, 8 x 8) and store the in-range outputs.
+    simdgroup_store(mc, slab_a, 8, 0, false);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    FOR_UNROLL (short part = 0; part < 2; ++part) {
+        const uint cell = lane * 2u + (uint)part;
+        const uint token = cell / 8u;
+        const uint row = cell % 8u;
+        if (c0 + token < args.N && r0 + row < args.M) {
+            dst[(ulong)(c0 + token) * args.M + r0 + row] = slab_a[cell];
+        }
+    }
+}

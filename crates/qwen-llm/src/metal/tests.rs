@@ -755,3 +755,4 @@ fn packed_q2_attention_perf_audit_130k() {
 }
 
 mod q6_k_f32_tile;
+mod f32_narrow_tiles;

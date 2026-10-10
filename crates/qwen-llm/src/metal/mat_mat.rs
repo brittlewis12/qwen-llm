@@ -2735,11 +2735,82 @@ pub fn encode_mat_mat_q8_0_f32_r2c4k64(
     n_out: usize,
     n_tokens: usize,
 ) -> Result<(), MetalError> {
-    const KERNEL: &str = "mat_mat_q8_0_f32_r2c4k64";
-    let bad = |detail: String| MetalError::BadShape {
-        kernel: KERNEL,
-        detail,
+    encode_q8_0_f32_r2k64(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        n_tokens,
+        Q8F32Columns::Four,
+    )
+}
+
+/// One-column companion of [`encode_mat_mat_q8_0_f32_r2c4k64`] for short
+/// spans (`kernel_mat_mat_q8_0_f32_r2c1k64`): the same weight tile,
+/// dequantization, K order and per-output matrix-multiply sequence over one
+/// 8-token column tile, so a token's outputs are bitwise those of R2C4K64.
+/// Same requirements, except that `x` backs `ceil(n_tokens / 8) * 8` rows.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_mat_q8_0_f32_r2c1k64(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    encode_q8_0_f32_r2k64(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        n_tokens,
+        Q8F32Columns::One,
+    )
+}
+
+/// Column tiles of the F32-operand Q8_0 kernels (8 tokens each).
+#[derive(Clone, Copy)]
+enum Q8F32Columns {
+    /// `kernel_mat_mat_q8_0_f32_r2c4k64`: 32 tokens per threadgroup.
+    Four,
+    /// `kernel_mat_mat_q8_0_f32_r2c1k64`: 8 tokens per threadgroup.
+    One,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_q8_0_f32_r2k64(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_tokens: usize,
+    columns: Q8F32Columns,
+) -> Result<(), MetalError> {
+    let (kernel, pipeline, tokens_per_tile): (&'static str, &str, usize) = match columns {
+        Q8F32Columns::Four => (
+            "mat_mat_q8_0_f32_r2c4k64",
+            "kernel_mat_mat_q8_0_f32_r2c4k64",
+            32,
+        ),
+        Q8F32Columns::One => (
+            "mat_mat_q8_0_f32_r2c1k64",
+            "kernel_mat_mat_q8_0_f32_r2c1k64",
+            8,
+        ),
     };
+    let bad = |detail: String| MetalError::BadShape { kernel, detail };
     if weight.dtype != GgmlType::Q8_0
         || x.dtype != GgmlType::F32
         || y.dtype != GgmlType::F32
@@ -2761,8 +2832,8 @@ pub fn encode_mat_mat_q8_0_f32_r2c4k64(
     }
     let n = |v: usize| u32::try_from(v).map_err(|_| bad(format!("{v} exceeds u32")));
     let padded_bytes = n_tokens
-        .div_ceil(32)
-        .checked_mul(32)
+        .div_ceil(tokens_per_tile)
+        .checked_mul(tokens_per_tile)
         .and_then(|rows| rows.checked_mul(n_in))
         .and_then(|elements| elements.checked_mul(size_of::<f32>()))
         .ok_or_else(|| bad("padded input size overflow".into()))?;
@@ -2772,7 +2843,7 @@ pub fn encode_mat_mat_q8_0_f32_r2c4k64(
         .ok_or_else(|| bad("padded input end overflow".into()))?;
     if padded_end > x.buffer.length() as u64 {
         return Err(bad(format!(
-            "missing padded input backing: x backs {} bytes from its offset; {padded_bytes} needed for {n_tokens} tokens padded to 32",
+            "missing padded input backing: x backs {} bytes from its offset; {padded_bytes} needed for {n_tokens} tokens padded to {tokens_per_tile}",
             x.buffer.length() as u64 - x.offset
         )));
     }
@@ -2787,7 +2858,7 @@ pub fn encode_mat_mat_q8_0_f32_r2c4k64(
     if ctx.device.maxThreadgroupMemoryLength() < 4_096 {
         return Err(bad("needs 4 KiB of threadgroup memory".into()));
     }
-    let pso = ctx.pipeline("kernel_mat_mat_q8_0_f32_r2c4k64")?;
+    let pso = ctx.pipeline(pipeline)?;
     if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 32 {
         return Err(bad("needs one 32-thread SIMD group".into()));
     }
@@ -2815,7 +2886,7 @@ pub fn encode_mat_mat_q8_0_f32_r2c4k64(
     enc.set_threadgroup_memory(0, 4_096);
     enc.dispatch(
         MTLSize {
-            width: n_tokens.div_ceil(32),
+            width: n_tokens.div_ceil(tokens_per_tile),
             height: n_out / 16,
             depth: 1,
         },
@@ -2858,12 +2929,96 @@ pub fn encode_mat_mat_q6_k_f32_mm64x32(
     n_out: usize,
     n_tokens: usize,
 ) -> Result<(), MetalError> {
+    encode_q6_k_f32(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        n_tokens,
+        Q6KF32Tile::Wide,
+    )
+}
+
+/// Short-span companion of [`encode_mat_mat_q6_k_f32_mm64x32`]
+/// (`kernel_mat_mat_q6_K_f32_r8c8`): each SIMD group owns 8 outputs x 8
+/// tokens with its own 2 KiB slab and no threadgroup-wide barriers, and
+/// performs the wide tile's dequantization, slab layouts and per-output
+/// matrix-multiply sequence, so a token's outputs are bitwise those of the
+/// wide tile. Same requirements; 8 KiB threadgroup memory.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_mat_q6_k_f32_r8c8(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    encode_q6_k_f32(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        n_tokens,
+        Q6KF32Tile::Narrow,
+    )
+}
+
+/// Geometry of the F32-operand Q6_K kernels.
+#[derive(Clone, Copy)]
+enum Q6KF32Tile {
+    /// 64 outputs x 32 tokens per threadgroup, 12 KiB.
+    Wide,
+    /// Four independent 8-output x 8-token SIMD groups per threadgroup, 8 KiB.
+    Narrow,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_q6_k_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_tokens: usize,
+    tile: Q6KF32Tile,
+) -> Result<(), MetalError> {
     use super::checks::{bad_shape, check_disjoint, check_physical, to_u32};
-    const KERNEL: &str = "mat_mat_q6_k_f32_mm64x32";
-    const THREADGROUP_BYTES: usize = 12 * 1024;
+    let (kernel, pipeline, threadgroup_bytes, tokens_per_tile, outputs_per_tile): (
+        &'static str,
+        &str,
+        usize,
+        usize,
+        usize,
+    ) = match tile {
+        Q6KF32Tile::Wide => (
+            "mat_mat_q6_k_f32_mm64x32",
+            "kernel_mat_mat_q6_K_f32_mm64x32",
+            12 * 1024,
+            32,
+            64,
+        ),
+        Q6KF32Tile::Narrow => (
+            "mat_mat_q6_k_f32_r8c8",
+            "kernel_mat_mat_q6_K_f32_r8c8",
+            8 * 1024,
+            8,
+            32,
+        ),
+    };
     if weight.dtype != GgmlType::Q6_K || x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
         return Err(bad_shape(
-            KERNEL,
+            kernel,
             format!(
                 "weight/x/y must be Q6_K/F32/F32, got {:?}/{:?}/{:?}",
                 weight.dtype, x.dtype, y.dtype
@@ -2872,7 +3027,7 @@ pub fn encode_mat_mat_q6_k_f32_mm64x32(
     }
     if n_in == 0 || n_out == 0 || n_tokens == 0 || !n_in.is_multiple_of(256) {
         return Err(bad_shape(
-            KERNEL,
+            kernel,
             format!(
                 "n_in={n_in} must be a nonzero multiple of 256; n_out={n_out} and n_tokens={n_tokens} nonzero"
             ),
@@ -2883,23 +3038,26 @@ pub fn encode_mat_mat_q6_k_f32_mm64x32(
         || Some(x.n_elements()) != elements(n_in, n_tokens)
         || Some(y.n_elements()) != elements(n_out, n_tokens)
     {
-        return Err(bad_shape(KERNEL, "operand sizes do not match the geometry"));
+        return Err(bad_shape(kernel, "operand sizes do not match the geometry"));
     }
-    check_physical(KERNEL, weight, 2, false, "weight")?;
-    check_physical(KERNEL, x, 16, false, "x")?;
-    check_physical(KERNEL, y, 4, true, "y")?;
-    check_disjoint(KERNEL, y, &[(weight, "weight"), (x, "x")])?;
-    let args_m = to_u32(KERNEL, n_out, "n_out")?;
-    let args_n = to_u32(KERNEL, n_tokens, "n_tokens")?;
-    let args_k = to_u32(KERNEL, n_in, "n_in")?;
-    let nb01 = to_u32(KERNEL, n_in / 256 * 210, "row bytes")?;
-    if ctx.device.maxThreadgroupMemoryLength() < THREADGROUP_BYTES {
-        return Err(bad_shape(KERNEL, "needs 12 KiB of threadgroup memory"));
+    check_physical(kernel, weight, 2, false, "weight")?;
+    check_physical(kernel, x, 16, false, "x")?;
+    check_physical(kernel, y, 4, true, "y")?;
+    check_disjoint(kernel, y, &[(weight, "weight"), (x, "x")])?;
+    let args_m = to_u32(kernel, n_out, "n_out")?;
+    let args_n = to_u32(kernel, n_tokens, "n_tokens")?;
+    let args_k = to_u32(kernel, n_in, "n_in")?;
+    let nb01 = to_u32(kernel, n_in / 256 * 210, "row bytes")?;
+    if ctx.device.maxThreadgroupMemoryLength() < threadgroup_bytes {
+        return Err(bad_shape(
+            kernel,
+            format!("needs {threadgroup_bytes} bytes of threadgroup memory"),
+        ));
     }
-    let pso = ctx.pipeline("kernel_mat_mat_q6_K_f32_mm64x32")?;
+    let pso = ctx.pipeline(pipeline)?;
     if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 128 {
         return Err(bad_shape(
-            KERNEL,
+            kernel,
             "needs four 32-thread SIMD groups per threadgroup",
         ));
     }
@@ -2926,11 +3084,11 @@ pub fn encode_mat_mat_q6_k_f32_mm64x32(
     enc.set_tensor(1, weight);
     enc.set_tensor(2, x);
     enc.set_tensor(3, y);
-    enc.set_threadgroup_memory(0, THREADGROUP_BYTES);
+    enc.set_threadgroup_memory(0, threadgroup_bytes);
     enc.dispatch(
         MTLSize {
-            width: n_tokens.div_ceil(32),
-            height: n_out.div_ceil(64),
+            width: n_tokens.div_ceil(tokens_per_tile),
+            height: n_out.div_ceil(outputs_per_tile),
             depth: 1,
         },
         MTLSize {

@@ -317,6 +317,87 @@ kernel void kernel_mat_mat_q8_0_f32_r2c4k64(
     }
 }
 
+// One-column companion of R2C4K64 for short spans (map #12 accuracy lane):
+// the same 16-output F32 weight tile, dequantization, K order and
+// simdgroup_multiply_accumulate sequence per output element, over one
+// 8-token column tile instead of four. A token's outputs depend only on its
+// own activation row and that fixed order, so they are bitwise those of
+// R2C4K64. Reads 8 rows from each column tile's start (the host checks the
+// backing), writes only rows below N.
+kernel void kernel_mat_mat_q8_0_f32_r2c1k64(
+        constant mat_mat_q8_0_args & args   [[buffer(0)]],
+        device const uchar         * srcA   [[buffer(1)]],
+        device const float         * srcB   [[buffer(2)]],
+        device       float         * dst    [[buffer(3)]],
+        threadgroup  float         * shmem  [[threadgroup(0)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint r0 = tgpig.y * 16u;
+    const uint c0 = tgpig.x * 8u;
+    const uint nb = args.K / QK8_0;
+    const ulong row_stride_bytes = (ulong)nb * Q8_0_BYTES;
+
+    simdgroup_float8x8 acc[2];
+    FOR_UNROLL (short rt = 0; rt < 2; ++rt) {
+        acc[rt] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    for (uint k0 = 0; k0 < args.K; k0 += 64u) {
+        FOR_UNROLL (short chunk = 0; chunk < 2; ++chunk) {
+            const uint cell = (uint)tiisg + 32u * (uint)chunk;
+            const uint row = cell / 4u;
+            const uint kchunk = cell % 4u;
+            const uint kbase = k0 + 16u * kchunk;
+            device const uchar * block = srcA
+                + (ulong)(r0 + row) * row_stride_bytes
+                + (ulong)(kbase / QK8_0) * Q8_0_BYTES;
+            const float scale = (float)((device const half *)block)[0];
+            device const int8_t * quants =
+                (device const int8_t *)(block + 2) + (kbase % QK8_0);
+            FOR_UNROLL (short i = 0; i < 16; ++i) {
+                shmem[row * 64u + kchunk * 16u + (uint)i] =
+                    scale * (float)quants[i];
+            }
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+
+        FOR_UNROLL (short kt = 0; kt < 8; ++kt) {
+            simdgroup_float8x8 activation;
+            simdgroup_load(
+                activation,
+                srcB + (ulong)c0 * args.stride_b + k0 + (uint)kt * 8u,
+                args.stride_b,
+                ulong2(0, 0),
+                true);
+            FOR_UNROLL (short rt = 0; rt < 2; ++rt) {
+                simdgroup_float8x8 weight;
+                simdgroup_load(
+                    weight,
+                    shmem + (uint)rt * 8u * 64u + (uint)kt * 8u,
+                    64);
+                simdgroup_multiply_accumulate(
+                    acc[rt], weight, activation, acc[rt]);
+            }
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    FOR_UNROLL (short rt = 0; rt < 2; ++rt) {
+        simdgroup_store(acc[rt], shmem, 8);
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        FOR_UNROLL (short part = 0; part < 2; ++part) {
+            const uint cell = (uint)tiisg * 2u + (uint)part;
+            const uint row = cell / 8u;
+            const uint col = cell % 8u;
+            if (c0 + col < args.N) {
+                dst[(ulong)(c0 + col) * args.M
+                    + r0 + (uint)rt * 8u + row] = shmem[cell];
+            }
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
 // Four-SIMDgroup extension of the accepted R2C4K64 arithmetic. Each SIMDgroup
 // owns an independent 16-output by 32-token result tile while all four reuse
 // the same F32 16x64 weight tile. Dot-product order and matrix operands remain

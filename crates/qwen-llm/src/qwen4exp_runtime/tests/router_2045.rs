@@ -10,6 +10,8 @@
 //! ```
 //! A pins only N2045 to generic; B admits only N2045 to strict E8P32, subject
 //! to the existing global rollback, geometry, dtype, and pipeline guards.
+//! Both arms pin the historical frontier planner for the entire invocation,
+//! including ordinary execution, so fresh4096 still reaches an N2045 tail.
 //! Fresh means reset state in one resident session, not placement-cold TTFT.
 //! Fresh-arm persistent storage is zeroed outside timing so inactive cache tails
 //! cannot masquerade as arithmetic differences after a preceding continuation.
@@ -28,36 +30,45 @@ const SSH: &[u8] = include_bytes!(
     "../../../../../docs/bench/2026-08-29-qwen4exp-selected-semantic/natural-ssh.u32le"
 );
 
+fn with_historical_router_schedule<R>(work: impl FnOnce() -> R) -> R {
+    with_qwen4exp_frontier_schedule_override(Some(false), work)
+}
+
 #[test]
 fn router_n2045_normal_planner_reachability() {
     let plan = |start, count, selected| {
         plan_qwen4exp_prefill_execution_from(start, count, Some(2048), selected, 2051).unwrap()
     };
-    for enabled in [false, true] {
-        candidate(enabled, || {
-            assert_eq!(
-                plan(0, 4096, true).packed_ranges,
-                vec![0..2048, 2048..2051, 2051..4096]
-            );
-            assert_eq!(plan(2051, 2045, true).packed_ranges, vec![2051..4096]);
-            assert_eq!(
-                plan(0, 8192, true).packed_ranges,
-                vec![0..2048, 2048..2051, 2051..4099, 4099..6147, 6147..8192]
-            );
-            for end in [4095, 4097, 4098, 4099] {
-                let p = plan(0, end, true);
-                assert_eq!(p.packed_ranges.last().unwrap().len(), end - 2051);
-                assert!(!p.packed_ranges.iter().any(|r| r.len() == 2045));
-            }
-            assert_eq!(plan(0, 512, true).packed_ranges, vec![0..512]);
-            // Capability=false stops packed traversal at the frontier; it does
-            // not disable scalar attention sparsity. Do not fake reachability.
-            let fallback = plan(0, 4096, false);
-            assert_eq!(fallback.packed_ranges, vec![0..2048, 2048..2051]);
-            assert_eq!(fallback.scalar_start, 2051);
-            assert!(plan(2051, 2045, false).packed_ranges.is_empty());
-        });
-    }
+    let production = plan(0, 4096, true);
+    assert_eq!(production.packed_ranges, vec![0..2048, 2048..4096]);
+    with_historical_router_schedule(|| {
+        for enabled in [false, true] {
+            candidate(enabled, || {
+                assert_eq!(
+                    plan(0, 4096, true).packed_ranges,
+                    vec![0..2048, 2048..2051, 2051..4096]
+                );
+                assert_eq!(plan(2051, 2045, true).packed_ranges, vec![2051..4096]);
+                assert_eq!(
+                    plan(0, 8192, true).packed_ranges,
+                    vec![0..2048, 2048..2051, 2051..4099, 4099..6147, 6147..8192]
+                );
+                for end in [4095, 4097, 4098, 4099] {
+                    let p = plan(0, end, true);
+                    assert_eq!(p.packed_ranges.last().unwrap().len(), end - 2051);
+                    assert!(!p.packed_ranges.iter().any(|r| r.len() == 2045));
+                }
+                assert_eq!(plan(0, 512, true).packed_ranges, vec![0..512]);
+                // Capability=false stops packed traversal at the frontier; it does
+                // not disable scalar attention sparsity. Do not fake reachability.
+                let fallback = plan(0, 4096, false);
+                assert_eq!(fallback.packed_ranges, vec![0..2048, 2048..2051]);
+                assert_eq!(fallback.scalar_start, 2051);
+                assert!(plan(2051, 2045, false).packed_ranges.is_empty());
+            });
+        }
+    });
+    assert_eq!(plan(0, 4096, true), production);
 }
 
 fn prompt(
@@ -212,7 +223,7 @@ fn arm(
         require(
             plan.packed_token_count == end - start
                 && plan.packed_ranges.last().is_some_and(|v| v.len() == 2045),
-            "normal production plan must end in the N2045 command",
+            "historical pinned plan must end in the N2045 command",
         )?;
         emit(
             out,
@@ -552,7 +563,9 @@ fn native_router_n2045() {
         "flash.router_n2045.v2",
         include_bytes!("router_2045.rs"),
         json!({
-            "candidate": "production N2045 strict router versus explicit historical generic override; planner unchanged",
+            "candidate": "production N2045 strict router versus explicit historical generic override; both arms use the historical frontier planner",
+            "frontier_schedule_override": false,
+            "planner_scope": "explicit Some(false) for the entire historical invocation, covering plan and ordinary execution; fresh4096 remains2048+3+2045; not the current production default",
             "hyper_observation": "v2 observes the actual final packed row; v1 incorrectly hashed stale singleton scratch at packed endpoints",
             "rollback": "QWEN4EXP_PACKED_ROUTER_E8P32_STRICT=0 remains authoritative; packet requires it enabled to measure candidate",
             "performance_predeclared": "each natural stream: >=3% mean whole4096 GPU saving, both ABBA GPU pairs improve, both ordinary-call wall pairs nonregress",
@@ -561,6 +574,6 @@ fn native_router_n2045() {
             "bounded_work": "two streams, fresh4096 and suffix2045 each warm A/B census then unprofiled ABBA with four continuations; one prose8192 A/B census sample",
         "measurement": "ordinary prefill call wall plus summed command GPU; reset, fresh-arm persistent zeroing, checkpoint, hashing, output and continuation excluded; warm census timing ineligible; not placement-cold TTFT"
         }),
-        packet,
+        |out| with_historical_router_schedule(|| packet(out)),
     );
 }

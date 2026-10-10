@@ -1,9 +1,16 @@
 //! Untimed layer-zero attribution with unchanged ordinary suffix command widths.
+//! FLASH_FRONTIER_LAYER0_HC=off (default), production, or f32downup. Enabled
+//! modes retain HC inputs/outputs and native weights and run bounded CPU oracles;
+//! they require FLASH_FRONTIER_LAYER0_BF16_ACT=production.
 use super::*;
 use crate::qwen4exp_gdn::GatedDeltaNetMetalWeights;
 use crate::qwen4exp_gdn::frontier_capture::{
     COPY_TAG, FrontierGdnCapture, GDN_TAG, with_frontier_gdn_capture,
 };
+use crate::qwen4exp_metal::frontier_hc;
+#[path = "frontier_hc_oracle.rs"]
+mod hc_oracle;
+use hc_oracle::{HcMode, Oracle};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Bf16Act {
@@ -64,9 +71,14 @@ fn bf16_witness(
 fn allocation(
     r: &Qwen4ExpTextRunner<'_, '_, '_>,
     out: &mut std::fs::File,
-) -> PacketResult<FrontierGdnCapture> {
+    hc_mode: HcMode,
+) -> PacketResult<(FrontierGdnCapture, Option<frontier_hc::Probe>)> {
     let weights = r.weights.zero_one.layer_zero.gdn;
-    let specs = FrontierGdnCapture::specs(weights.geometry);
+    let mut specs = FrontierGdnCapture::specs(weights.geometry);
+    let hc_enabled = hc_mode != HcMode::Off;
+    if hc_enabled {
+        specs.extend(frontier_hc::Probe::specs());
+    }
     let mut logical = 0u64;
     let mut priced = 0u64;
     let mut rows = Vec::new();
@@ -95,6 +107,13 @@ fn allocation(
     // checkpoint; include it again in this combined check before either exists.
     let cpu_bytes = checkpoint_bytes
         .checked_add(logical.checked_mul(2).ok_or("CPU capture overflow")?)
+        .and_then(|b| {
+            b.checked_add(if hc_enabled {
+                Oracle::WEIGHT_CPU_BYTES + (4 << 20)
+            } else {
+                0
+            })
+        })
         .and_then(|b| b.checked_add(MARGIN))
         .ok_or("CPU bound overflow")?;
     require(
@@ -115,6 +134,8 @@ fn allocation(
         json!({"event":"layer0_capture_admission","buffers":rows,
         "logical_bytes":logical,"priced_upper_bytes":priced,"cpu_upper_bytes":cpu_bytes,
         "checkpoint_bytes":checkpoint_bytes,"cpu_capture_copies":2,"cpu_other_margin":MARGIN,
+        "hc_weight_retention_bytes":if hc_enabled {Oracle::WEIGHT_CPU_BYTES} else {0},
+        "hc_oracle_working_bytes":if hc_enabled {4<<20} else {0},
         "admitted":admission.admitted,"admission":format!("{admission:?}")}),
     );
     require(
@@ -122,6 +143,14 @@ fn allocation(
         "capture admission refused; no diagnostic execution",
     )?;
     let bank = FrontierGdnCapture::new(r.ctx, weights)?;
+    let hc = if hc_enabled {
+        Some(frontier_hc::Probe::new(
+            r.ctx,
+            r.weights.zero_one.layer_zero.attention_residual.read,
+        )?)
+    } else {
+        None
+    };
     let observed = r
         .ctx
         .memory_signals()
@@ -132,7 +161,7 @@ fn allocation(
         json!({"event":"layer0_capture_allocation","observed_bytes":observed,"priced_upper_bytes":priced}),
     );
     require(observed <= priced, "capture allocation exceeded price")?;
-    Ok(bank)
+    Ok((bank, hc))
 }
 
 struct Observation {
@@ -196,7 +225,9 @@ fn suffix(
 }
 
 fn is_copy(row: &DispatchCensusRow) -> bool {
-    row.tag.as_deref().is_some_and(|t| t.starts_with(COPY_TAG))
+    row.tag
+        .as_deref()
+        .is_some_and(|t| t.starts_with(COPY_TAG) || t.starts_with(frontier_hc::COPY_TAG))
 }
 
 fn same_dispatch(a: &DispatchCensusRow, b: &DispatchCensusRow) -> bool {
@@ -231,6 +262,7 @@ fn concordance(
     a: &Observation,
     b: &Observation,
     candidate: bool,
+    hc_enabled: bool,
 ) -> PacketResult<()> {
     let bits_equal = a.endpoint.logits.len() == b.endpoint.logits.len()
         && a.endpoint
@@ -246,7 +278,8 @@ fn concordance(
             .zip(original)
             .all(|(a, b)| same_dispatch(a, b));
     let copies: Vec<_> = b.census.iter().filter(|r| is_copy(r)).collect();
-    let copies_valid = copies.len() == 2 + 14 * if candidate { 1 } else { 2 }
+    let copies_valid = copies.len()
+        == 2 + (14 + if hc_enabled { 5 } else { 0 }) * if candidate { 1 } else { 2 }
         && copies.iter().all(|r| r.kernel == "kernel_copy_offset_f32");
     emit(
         out,
@@ -396,7 +429,7 @@ fn hc_weight_metadata(
     json!(rows)
 }
 
-fn packet(out: &mut std::fs::File, bf16_act: Bf16Act) -> PacketResult<()> {
+fn packet(out: &mut std::fs::File, bf16_act: Bf16Act, hc_mode: HcMode) -> PacketResult<()> {
     with_native_artifact(out, |ctx, gguf, out| {
         let prompts = prompts(gguf, false, out)?;
         let tokens = &prompts[0].1;
@@ -405,7 +438,15 @@ fn packet(out: &mut std::fs::File, bf16_act: Bf16Act) -> PacketResult<()> {
                 r.packed_qsa_dense_end()? == 2051,
                 "probe requires frontier2051",
             )?;
-            let mut bank = allocation(r, out)?;
+            let (mut bank, mut hc) = allocation(r, out, hc_mode)?;
+            let oracle = if hc_mode != HcMode::Off {
+                Some(Oracle::new(
+                    r.weights.zero_one.layer_zero.attention_residual.read,
+                    out,
+                )?)
+            } else {
+                None
+            };
             emit(
                 out,
                 json!({"event":"layer0_weights","weights":weight_metadata(r.weights.zero_one.layer_zero.gdn),
@@ -433,17 +474,39 @@ fn packet(out: &mut std::fs::File, bf16_act: Bf16Act) -> PacketResult<()> {
             drop(prefix_census);
             let checkpoint = r.workspace.checkpoint_for_tests();
             let mut reference = Vec::new();
+            let mut hc_reference = Vec::new();
             let mut a_endpoint = None;
             for (label, candidate) in [("A", false), ("B", true)] {
                 r.workspace.restore_checkpoint_for_tests(&checkpoint);
-                let off = suffix(r, tokens, candidate, bf16_act, &format!("{label}/off"), out)?;
+                let (off, returned) =
+                    hc_oracle::scoped(hc.take(), hc_mode, candidate, false, || {
+                        suffix(r, tokens, candidate, bf16_act, &format!("{label}/off"), out)
+                    });
+                hc = returned;
+                let off = off?;
+                if let Some(probe) = &hc {
+                    hc_oracle::witness(
+                        probe,
+                        &off.census,
+                        candidate,
+                        &format!("{label}/off"),
+                        out,
+                    )?;
+                }
                 r.workspace.restore_checkpoint_for_tests(&checkpoint);
                 bank.candidate = candidate;
-                let (on, returned) = with_frontier_gdn_capture(bank, || {
-                    suffix(r, tokens, candidate, bf16_act, &format!("{label}/on"), out)
-                });
+                let ((on, returned), returned_hc) =
+                    hc_oracle::scoped(hc.take(), hc_mode, candidate, true, || {
+                        with_frontier_gdn_capture(bank, || {
+                            suffix(r, tokens, candidate, bf16_act, &format!("{label}/on"), out)
+                        })
+                    });
                 bank = returned;
+                hc = returned_hc;
                 let on = on?;
+                if let Some(probe) = &hc {
+                    hc_oracle::witness(probe, &on.census, candidate, &format!("{label}/on"), out)?;
+                }
                 require(bank.complete, "missing layer-zero capture")?;
                 let gdn_rows: Vec<_> = on.census.iter().filter(|r|r.tag.as_deref().is_some_and(|s|s.starts_with(GDN_TAG)))
                     .map(|r|json!({"tag":r.tag,"kernel":r.kernel,"encoder":r.encoder_ordinal,
@@ -459,7 +522,14 @@ fn packet(out: &mut std::fs::File, bf16_act: Bf16Act) -> PacketResult<()> {
                 } else {
                     reference = retain(&bank, label, out, None)?;
                 }
-                concordance(out, label, &off, &on, candidate)?;
+                if let (Some(oracle), Some(probe)) = (&oracle, &hc) {
+                    if candidate {
+                        oracle.retain(probe, label, Some(&hc_reference), out)?;
+                    } else {
+                        hc_reference = oracle.retain(probe, label, None, out)?;
+                    }
+                }
+                concordance(out, label, &off, &on, candidate, hc_mode != HcMode::Off)?;
                 if let Some(a) = &a_endpoint {
                     emit(
                         out,
@@ -537,6 +607,15 @@ fn native_frontier_layer0() {
             .as_deref(),
     )
     .unwrap();
+    let hc_mode = HcMode::parse(std::env::var("FLASH_FRONTIER_LAYER0_HC").ok().as_deref()).unwrap();
+    assert!(
+        hc_mode == HcMode::Off || bf16_act == Bf16Act::Production,
+        "HC probe excludes the broad suffix BF16 override"
+    );
+    assert!(
+        hc_mode == HcMode::Off || crate::env_flag::read_default_on("QWEN_MATMAT_BF16_BFLOAT_ACT"),
+        "HC attribution requires production BF16 activation policy enabled"
+    );
     let environment: BTreeMap<_, _> = [
         "QWEN_MATMAT_Q4_K_N64",
         "QWEN_MATMAT_Q5_K_N64",
@@ -559,12 +638,18 @@ fn native_frontier_layer0() {
             "corpus":"retained prose; GSQ artifact selected by FLASH_PREFILL_MODEL; current production router in both arms",
             "observer_gate":"exact same-schedule endpoint/state/census; cross-schedule metrics report only",
             "bf16_activation_mode":bf16_act.label(),
+            "hc_mode":hc_mode.label(),
+            "hc_scope":"off preserves the original probe; production/f32downup enable HC captures and oracle. Policy is active identically observer-off/on, only for both-identity-qualified layer0 attention down/up at actual suffix ranges. Prefix, injection, FFN HC, other layers and projection policies remain production. Existing broad HC overrides are rejected.",
+            "hc_source_sha256":sha256_bytes(include_bytes!("../../../qwen4exp_metal/frontier_hc.rs")),
+            "hc_integration_source_sha256":sha256_bytes(include_bytes!("../../../qwen4exp_metal.rs")),
+            "hc_oracle_source_sha256":sha256_bytes(include_bytes!("frontier_hc_oracle.rs")),
+            "hc_outputs":".hc.weights.bin (BF16 down/up and F32 norm); .A.hc.f32le/.B.hc.f32le; .A.hc.oracle.f64le/.B.hc.oracle.f64le, all create_new",
             "bf16_override_scope":"f32 disables the shared dense BF16 bfloat-activation path only inside each complete ordinary suffix call, equally for Aoff/Aon/Boff/Bon and all layers; production adds no override. Prefix2048 and its checkpoint always use production settings. No router, width, quantized-kernel or weight-dtype override.",
             "capture_source_sha256":sha256_bytes(include_bytes!("../../../qwen4exp_gdn/frontier_capture.rs")),
             "schedule_source_sha256":sha256_bytes(include_bytes!("frontier_schedule.rs")),
             "environment": environment,
             "binary_outputs":"FLASH_PREFILL_OUT.A.f32le and .B.f32le, create_new; per-tensor offsets/shapes/hashes in JSONL"
         }),
-        |out| packet(out, bf16_act),
+        |out| packet(out, bf16_act, hc_mode),
     );
 }

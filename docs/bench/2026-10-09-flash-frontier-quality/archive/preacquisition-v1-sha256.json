@@ -1,0 +1,90 @@
+{
+  "reason": "Preserve original pre-acquisition freeze before reviewer-discovered duplicated-answer repair. No GPU acquisition preceded supersession.",
+  "files": [
+    {
+      "file": "PROTOCOL.md",
+      "bytes": 5331,
+      "sha256": "d065edc34b95f6d9e128f0cac27f72d654dba735728bd202b1ad312252b64f5b"
+    },
+    {
+      "file": "README.md",
+      "bytes": 5171,
+      "sha256": "ea82f42f6c83d8a2f83ee0c7e5277305879563f91fecc548bc028bdd3f9b6f46"
+    },
+    {
+      "file": "analyze.py",
+      "bytes": 9476,
+      "sha256": "7d4c499bdcf8e5b64244b908f314fec2c8b125bb6aa24fe505b5389e8c2e3ba7"
+    },
+    {
+      "file": "bash.txt",
+      "bytes": 273005,
+      "sha256": "28b2fac006fd8fafb93410536c8ac51f44cf26f783e07028bd4f0059124cf875"
+    },
+    {
+      "file": "csh.txt",
+      "bytes": 226422,
+      "sha256": "ccff48e52e150c50dcf4e1932cf4fc4e4f8eae6ad193ceec78009bf6dcfcdd13"
+    },
+    {
+      "file": "curl.txt",
+      "bytes": 273499,
+      "sha256": "280a603a701785a6302e65e378b558a54722786ef87bb116854ac5897c6316a3"
+    },
+    {
+      "file": "find.txt",
+      "bytes": 28998,
+      "sha256": "d1c2a18da28e5f760bd66c937594b6200c40b0ab1dc02d162499b295a48e8252"
+    },
+    {
+      "file": "fixtures.json",
+      "bytes": 594535,
+      "sha256": "85ff5333762cbaae20049f696504ffd3879930967457a7ffa849b784b0459de0"
+    },
+    {
+      "file": "gsq-actual-template.jinja",
+      "bytes": 9993,
+      "sha256": "12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce"
+    },
+    {
+      "file": "launchctl.txt",
+      "bytes": 30654,
+      "sha256": "af9960dd23ba3cd07d11828831739cd72109b7282bbec34d7f2bd5c51c156f11"
+    },
+    {
+      "file": "produce.py",
+      "bytes": 11536,
+      "sha256": "aa4d6115020d486b3118a5be5d03d07562ce7c68d13886b595b2f4c9c6016965"
+    },
+    {
+      "file": "retrieval_after.txt",
+      "bytes": 14436,
+      "sha256": "42f67d0af3ef72d18318ac56e56a816dbbec3ee2c560123d5f515b3bd32ab2d6"
+    },
+    {
+      "file": "retrieval_before.txt",
+      "bytes": 14430,
+      "sha256": "84f2986e9cc523917ffa5a7ff5dd8bcd037ab1c6f5aafe2ee817205af4176027"
+    },
+    {
+      "file": "security.txt",
+      "bytes": 52679,
+      "sha256": "e3ac71d43a4b798bdb5a51f3a40393e91010dc3057b8a9587e9a17ab063a7980"
+    },
+    {
+      "file": "tar.txt",
+      "bytes": 45577,
+      "sha256": "d357aa616081041032df6802a13c6a93dc501c280b7c99a9f1c37c5c2b87d4dd"
+    },
+    {
+      "file": "tcpdump.txt",
+      "bytes": 77955,
+      "sha256": "7e65e3887fddacce48cfb375744c617a74a7960329d72d723148be45945bd81c"
+    },
+    {
+      "file": "ud-actual-template.jinja",
+      "bytes": 9993,
+      "sha256": "12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce"
+    }
+  ]
+}

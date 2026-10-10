@@ -40,11 +40,28 @@ The active focus of this lane is prefill throughput and TTFT. The measured
 force-rank, raw attempts, limits and diagnostic harnesses are in
 `docs/bench/2026-10-07-glm-flash-prefill-map/README.md`.
 
-1. Flash residual frontier scheduling: ordinary 2048+3+2045 versus 2048+2048
-   with production routers in both arms. N2045 router transfer already saves
-   about 7% whole4K on UD/GSQ. Old mixed-suffix gains and router-disabled
-   199/282 ms residuals do not establish today's incremental saving. Require
-   repeatable whole-call conversion (~1%+) before deeper qualification.
+1. Flash frontier scheduling: narrow default implemented and actual production
+   `None` confirmed on UD/GSQ; scoped final tests pass and final review approves
+   with no fixes. Commit/integration remains outstanding. Guard is exactly
+   selected-enabled, packed capacity 2048, dense_end=2051, and (start,count)
+   (0,4096) or (2048,2048). The default groups 2048+2048 / suffix 2048; all other
+   geometries retain the existing planner path. Arithmetic/router policies are
+   unchanged, but grouping reaches different width-dependent arithmetic and
+   GSQ's deterministic numerical differences remain. Independent review accepts
+   joint v1 NLL PASS on both artifacts + separately frozen v2 retrieval PASS on
+   both; GSQ v1 retrieval remains INCONCLUSIVE (correct facts, missing marker),
+   never rescored. Earlier UD whole confirmation supports ~2.4% GPU/wall savings;
+   GSQ remains positive with uncertain magnitude. New one-round actual-default
+   packets confirm both corpora/stages without turning drifting means into a
+   larger speed claim. No additional router gain is counted. Historical router
+   and map tests pin Some(false) without changing production; final review
+   verified those pins. Owner reports `qwen4exp_runtime::tests`: 28 passed,
+   0 failed, 32 ignored in each of release/debug; HC capture CPU: 3 passed in
+   each; GDN capture CPU: 3 passed in debug; `qwen-cli` production check passes.
+   Ignored benchmark acquisitions were executed separately per retained release
+   packets. These are scoped results, not a full-suite claim. Next Flash
+   experiment is selected-QSA leaf attribution (#3), not more HC bit-identity
+   work. Evidence: `docs/bench/2026-10-09-flash-frontier/README.md`.
 2. GLM ragged absorption/expansion: guarded F32 matrix-tail experiment is
    measured but stays off. N32/64/127/255 whole targets save roughly3-6%;
    code-N127 has reproducible distribution/continuation differences requiring

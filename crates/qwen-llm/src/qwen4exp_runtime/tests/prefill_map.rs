@@ -14,6 +14,8 @@
 //! repeated as whole text, then tokenized; both workloads use prefixes of the
 //! same token stream. First/warm/profiled passes use the incumbent planner.
 //! Historical N2045 generic routing is explicitly pinned by this entry point.
+//! The historical frontier planner is also pinned for the entire invocation;
+//! manually supplied mixed schedules remain explicit and unchanged.
 //! Suffix ABBA compares 3+2045 with 2048 from the same position-2048 checkpoint,
 //! once with the configured default router and once with strict routing off.
 //! Allocation, restore, hashes, JSONL and the one-token handoff are not timed.
@@ -758,6 +760,40 @@ fn packet(out: &mut std::fs::File) -> PacketResult<()> {
     })
 }
 
+fn with_historical_prefill_map_policies<R>(work: impl FnOnce() -> R) -> R {
+    with_qwen4exp_frontier_schedule_override(Some(false), || {
+        crate::qwen4exp_moe::with_qwen4exp_packed_router_n2045_override(false, work)
+    })
+}
+
+#[test]
+fn prefill_map_historical_schedule_pin_restores_production() {
+    let plan = |start, count| {
+        plan_qwen4exp_prefill_execution_from(start, count, Some(2048), true, 2051).unwrap()
+    };
+    let production_whole = plan(0, END);
+    let production_suffix = plan(PREFIX, END - PREFIX);
+    assert_eq!(production_whole.packed_ranges, vec![0..PREFIX, PREFIX..END]);
+    assert_eq!(production_suffix.packed_ranges, vec![PREFIX..END]);
+    with_historical_prefill_map_policies(|| {
+        let whole = plan(0, END);
+        let suffix = plan(PREFIX, END - PREFIX);
+        assert_eq!(
+            whole.packed_ranges,
+            vec![0..PREFIX, PREFIX..2051, 2051..END]
+        );
+        assert_eq!(suffix.packed_ranges, vec![PREFIX..2051, 2051..END]);
+        assert_eq!(whole.packed_token_count, END);
+        assert_eq!(suffix.packed_token_count, END - PREFIX);
+        assert_eq!(whole.scalar_start, END);
+        assert_eq!(suffix.scalar_start, END);
+        assert!(whole.contains_selection && suffix.contains_selection);
+        assert_eq!(plan(0, 512).packed_ranges, vec![0..512]);
+    });
+    assert_eq!(plan(0, END), production_whole);
+    assert_eq!(plan(PREFIX, END - PREFIX), production_suffix);
+}
+
 #[test]
 #[ignore = "production lease; FLASH_PREFILL_MODEL and new FLASH_PREFILL_OUT JSONL; release timing only"]
 fn native_prefill_map() {
@@ -766,13 +802,13 @@ fn native_prefill_map() {
         include_bytes!("prefill_map.rs"),
         json!({
             "historical_baseline": "N2045 explicitly pinned to generic router; other default widths unchanged",
+            "frontier_schedule_override": false,
+            "planner_scope": "explicit Some(false) for the entire historical invocation; planner-derived whole2048+3+2045 and suffix3+2045; manually supplied mixed suffix2048 unchanged; shared native scaffolding is unpinned",
             "measurement": "sum of private executor command intervals, excludes diagnostic gaps; not request TTFT",
             "allocation_scope": "both widths share full 4097-position admission",
             "bounded_work": "512/4096 first,warm,profiled; 2048 prefix; two router policies warm_A,warm_B,A1,B1,B2,A2 plus one handoff"
         }),
-        |out| {
-            crate::qwen4exp_moe::with_qwen4exp_packed_router_n2045_override(false, || packet(out))
-        },
+        |out| with_historical_prefill_map_policies(|| packet(out)),
     );
 }
 

@@ -1,0 +1,26 @@
+{
+  "v1_files": {
+    "tar.txt": "d357aa616081041032df6802a13c6a93dc501c280b7c99a9f1c37c5c2b87d4dd",
+    "produce.py": "e9b2755f78bf4ddde8c1bfe8b0f9643e7a2c644620473747fff6f575005441c9",
+    "bash.txt": "28b2fac006fd8fafb93410536c8ac51f44cf26f783e07028bd4f0059124cf875",
+    "retrieval_after.txt": "5560b5d75a2541f137c2c524de7471f23e2e9e58b57e0391e6796831ae0b2f4f",
+    "curl.txt": "280a603a701785a6302e65e378b558a54722786ef87bb116854ac5897c6316a3",
+    "gsq-quality.jsonl": "717848cd7d8d1e9c6e007e248c3e86a203eeeaa90d3abd51da24d877071ba334",
+    "ud-quality.jsonl": "30f5857a89b722c69131e950ba10db6bf56575bc14e3aa79d5997e2671c95dbf",
+    "ud-actual-template.jinja": "12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce",
+    "csh.txt": "ccff48e52e150c50dcf4e1932cf4fc4e4f8eae6ad193ceec78009bf6dcfcdd13",
+    "quality-analysis.json": "0199660681b6edb73dc73cb1fe7ec2d4c349d8760e9bf6631803cbb1afb37d8d",
+    "README.md": "865b76ce727e2d51a432b9dc3fd39557c74c54bc10304d79f465995039316c45",
+    "tcpdump.txt": "7e65e3887fddacce48cfb375744c617a74a7960329d72d723148be45945bd81c",
+    "security.txt": "e3ac71d43a4b798bdb5a51f3a40393e91010dc3057b8a9587e9a17ab063a7980",
+    "retrieval_before.txt": "eef9e9fdfd7e70b5c5e9f04ba6a30cec2a83fd0403cf5f8a76e657d306a904fc",
+    "launchctl.txt": "af9960dd23ba3cd07d11828831739cd72109b7282bbec34d7f2bd5c51c156f11",
+    "fixtures.json": "d592ccda9273cdc03b26bca284e8bb48e4aa8db404a3b140c2a51b37f009e73e",
+    "find.txt": "d1c2a18da28e5f760bd66c937594b6200c40b0ab1dc02d162499b295a48e8252",
+    "gsq-actual-template.jinja": "12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce",
+    "analyze.py": "80c55e896796ca6f018d916b318cb332c4d1353cf341e08d4eb4df7c1c6ac4ad",
+    "PROTOCOL.md": "0327801e6fd9630f985e9d7c52a12e235b8a4072b44c9756878325c8ca6ce1cc"
+  },
+  "v1_harness_before_child_declaration_sha256": "9ecff2592fe3a985c02ce16bfb9a1888ee53689fdd1ca4e30194e67e606005e9",
+  "source_change": "Only a child module declaration is authorized in the v1 harness; v1 fixture/policy/scoring/results are unchanged."
+}

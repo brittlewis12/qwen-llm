@@ -73,24 +73,35 @@ delta that exceeded the old 192,719,648-byte quote by 595,168 bytes. The dynamic
 2 GiB reserve remains intact. Later packets record admission bounds but no isolated
 live-session allocation delta; they are not new measurements of that rounding gap.
 
-## Flash residual frontier: measured, not promoted
+## Flash residual frontier: narrow default confirmed and reviewed
 
-The `2048+3+2045` versus `2048+2048` screen now uses the promoted router in
-both arms. Clean whole4096 rounds save about 2.4% on UD and 3.1% on GSQ;
-other rounds drift substantially, so pooled means are not a settled speed claim.
-UD matches across the tested schedules, while GSQ has deterministic distribution
-differences. Production scheduling remains unchanged.
+The current planner default groups 2048+2048 / suffix 2048 only for
+selected-enabled, packed capacity 2048, dense_end=2051 requests with (start,count)
+(0,4096) or (2048,2048). Actual production None versus explicit incumbent
+Some(false) completed on UD and GSQ, both corpora and both stages. Production
+router and arithmetic policies are unchanged; command grouping still changes
+width-dependent arithmetic and GSQ's numerical trajectory relative to the old
+schedule. The HC oracle localized the early seed to intended activation
+rounding; neither diagnostic HC F32 intervention is promoted.
 
-A bounded observer localizes GSQ's initial perturbation upstream of layer0 GDN.
-Uniform F32 activation arithmetic for BF16-weight suffix projections removes
-the captured layer0 difference, but not the full-model endpoint difference.
-Next: narrow the intervention to layer0 attention HC and compare identical-input
-projections against an independent oracle before quality/performance qualification.
-Evidence: `docs/bench/2026-10-09-flash-frontier/README.md`.
-
-These are residual scheduling/rebatching measurements, not another router win.
-IQ2_XS acceleration has no direct reach into these GSQ/UD Flash artifacts, which
-contain no IQ2_XS tensors.
+Independent review supports the narrow promotion using v1 NLL PASS on both
+artifacts plus separately frozen v2 retrieval PASS on both. GSQ's v1 retrieval
+remains INCONCLUSIVE (correct facts, missing marker), with no rescore. Final
+review approves with no fixes and verifies the historical pins. Owner-reported
+`qwen4exp_runtime::tests` passes in release and debug: 28 passed, 0 failed,
+32 ignored in each. HC capture CPU tests: 3 passed in each; GDN capture CPU
+tests: 3 passed in debug. The `qwen-cli` production check passes. Ignored
+benchmark acquisitions were executed separately per retained release packets;
+these scoped results do not claim a full-suite pass. Commit/integration remains
+outstanding, with no landed hash assigned.
+The earlier repeatable UD whole 4K saving remains about 2.4% GPU/wall; GSQ is
+positive with uncertain magnitude, and the latest one-round means do not
+replace that bounded interpretation. Next Flash performance work is
+selected-QSA leaf attribution. These are residual scheduling measurements,
+not another router or native-IQ kernel gain: these Flash artifacts have no
+IQ2_XS tensors. Historical router/map harnesses pin the incumbent schedule
+without changing production; retained packet hashes are not rebound to later
+helper edits. Evidence: `docs/bench/2026-10-09-flash-frontier/README.md`.
 
 ## Earlier IQ2-only checkpoint
 

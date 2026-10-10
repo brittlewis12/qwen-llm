@@ -242,18 +242,25 @@ struct Qwen4ExpPrefillExecutionPlan {
     contains_selection: bool,
 }
 
-// Diagnostic only: retain the production planner unless the exact measured
-// selected-capable frontier request is inside this unwind-safe thread scope.
+// None exercises production; explicit false retains the incumbent diagnostic arm.
 #[cfg(test)]
 thread_local! {
-    static QWEN4EXP_FRONTIER_SCHEDULE_OVERRIDE: std::cell::Cell<bool> = const {
-        std::cell::Cell::new(false)
+    static QWEN4EXP_FRONTIER_SCHEDULE_OVERRIDE: std::cell::Cell<Option<bool>> = const {
+        std::cell::Cell::new(None)
     };
 }
 
 #[cfg(test)]
 fn with_qwen4exp_frontier_schedule<R>(enabled: bool, work: impl FnOnce() -> R) -> R {
-    struct Restore(bool);
+    with_qwen4exp_frontier_schedule_override(Some(enabled), work)
+}
+
+#[cfg(test)]
+pub(crate) fn with_qwen4exp_frontier_schedule_override<R>(
+    enabled: Option<bool>,
+    work: impl FnOnce() -> R,
+) -> R {
+    struct Restore(Option<bool>);
     impl Drop for Restore {
         fn drop(&mut self) {
             QWEN4EXP_FRONTIER_SCHEDULE_OVERRIDE.with(|slot| slot.set(self.0));
@@ -314,12 +321,17 @@ fn plan_qwen4exp_prefill_execution_from(
             "packed prefill capacity {packed_capacity} is smaller than two tokens"
         ));
     }
+    let frontier_schedule = true;
     #[cfg(test)]
+    let frontier_schedule =
+        QWEN4EXP_FRONTIER_SCHEDULE_OVERRIDE.with(|slot| slot.get().unwrap_or(frontier_schedule));
+    // Only the qualified whole request and its matching suffix cross the
+    // dense frontier without splitting. Other request geometries stay below.
     if packed_capacity == 2048
         && selected_enabled
         && dense_end == 2051
         && matches!((start, token_count), (2048, 2048) | (0, 4096))
-        && QWEN4EXP_FRONTIER_SCHEDULE_OVERRIDE.with(|slot| slot.get())
+        && frontier_schedule
     {
         return Ok(Qwen4ExpPrefillExecutionPlan {
             packed_ranges: (start..end)
@@ -3490,7 +3502,7 @@ mod tests {
                 2 * C - 1,
                 true,
             ),
-            (2 * C, true, vec![0..C, C..D, D..2 * C], 2 * C, true),
+            (2 * C, true, vec![0..C, C..2 * C], 2 * C, true),
             (
                 2 * C + 1,
                 true,

@@ -16,6 +16,9 @@ use objc2_metal::{
 #[path = "qwen4exp_metal/projection_tests.rs"]
 mod projection_tests;
 
+#[cfg(test)]
+pub(crate) mod frontier_hc;
+
 const SIMD_WIDTH: usize = 32;
 
 #[path = "qwen4exp_hc_up.rs"]
@@ -739,6 +742,8 @@ pub(crate) unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'ctx
     )?;
 
     let hyper_hidden = scratch.branch_count * scratch.hidden_size;
+    #[cfg(test)]
+    let frontier = frontier_hc::before(ctx, enc, weights, hyper_input, tokens)?;
     let normalized = scratch.prefix_view(
         "packed HC normalized scratch",
         &scratch.normalized,
@@ -776,7 +781,18 @@ pub(crate) unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'ctx
         eps,
     )?;
     #[cfg(test)]
-    let down_overridden = encode_hc_packed_projection_override(
+    let down_overridden = frontier_hc::project(
+        ctx,
+        enc,
+        frontier.as_ref(),
+        frontier_hc::Role::Down,
+        weights.down,
+        &normalized,
+        &low,
+        hyper_hidden,
+        scratch.low_rank,
+        tokens,
+    )? || encode_hc_packed_projection_override(
         ctx,
         enc,
         Qwen4ExpHcPackedProjectionRole::Down,
@@ -803,7 +819,18 @@ pub(crate) unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'ctx
     }
     encode_hc_low_activation(ctx, enc, &low, scratch.branch_count)?;
     #[cfg(test)]
-    let up_overridden = encode_hc_packed_projection_override(
+    let up_overridden = frontier_hc::project(
+        ctx,
+        enc,
+        frontier.as_ref(),
+        frontier_hc::Role::Up,
+        weights.up,
+        &low,
+        &raw_gate,
+        scratch.low_rank,
+        hyper_hidden,
+        tokens,
+    )? || encode_hc_packed_projection_override(
         ctx,
         enc,
         Qwen4ExpHcPackedProjectionRole::Up,

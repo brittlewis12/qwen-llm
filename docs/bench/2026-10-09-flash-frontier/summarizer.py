@@ -33,6 +33,21 @@ def summarize(path):
 
     header, = event("header")
     check(header["schema"] == "flash.frontier_schedule.v1", "unknown schema")
+    declared_rounds = header["details"].get("rounds")
+    valid_rounds = type(declared_rounds) is int and declared_rounds > 0
+    check(valid_rounds, "missing/invalid declared round count")
+    expected_rounds = declared_rounds if valid_rounds else 0
+    # Older v1 packets declare two rounds but do not record scoped overrides.
+    # Do not reinterpret their missing override fields as production None.
+    candidate_mode = header["details"].get("candidate_mode")
+    if candidate_mode is not None:
+        check(candidate_mode in ("forced", "production"), "unknown candidate mode")
+        check(header["details"].get("A_schedule_override") is False,
+              "incumbent override is not explicit false")
+        expected_override = None if candidate_mode == "production" else True
+        check("B_schedule_override" in header["details"]
+              and header["details"]["B_schedule_override"] is expected_override,
+              "candidate header override disagrees with mode")
     check(events["complete"] == 1 and rows[-1]["event"] == "complete"
           and rows[-1].get("execution_complete") is True
           and rows[-1].get("error") is None, "missing/failed final completion")
@@ -54,6 +69,12 @@ def summarize(path):
     check(len(endpoints) == events["endpoint"], "duplicate endpoint label")
     for label, row in ends.items():
         begin = begins[label]
+        if candidate_mode is not None:
+            expected_override = (None if candidate_mode == "production" else True) if begin["candidate_schedule"] else False
+            check(begin.get("candidate_mode") == candidate_mode
+                  and "schedule_override" in begin
+                  and begin["schedule_override"] is expected_override,
+                  f"arm policy witness mismatch: {label}")
         ranges = begin["absolute_ranges"]
         expected = ([[2048, 4096]] if begin["candidate_schedule"] else
                     [[2048, 2051], [2051, 4096]])
@@ -90,19 +111,35 @@ def summarize(path):
     check(set(cells) == {f"{corpus}/{part}" for corpus in corpora for part in stages},
           "missing/unexpected prompt or stage cell")
     reports = []
+    abba_records = {(r["label"], r["round"]): r for r in event("abba")}
+    check(len(abba_records) == events["abba"] and set(abba_records) ==
+          {(cell, i) for cell in cells for i in range(1, expected_rounds + 1)},
+          "missing/duplicate/unexpected ABBA records")
     for cell, attempts in sorted(cells.items()):
-        expected = {(i, name) for i in range(1, header["details"]["rounds"] + 1)
-                    for name in ("A1", "B1", "B2", "A2")}
-        check({(i, name) for i, name, _ in attempts} == expected
-              and len(attempts) == len(expected), f"incomplete ABBA: {cell}")
+        expected = [(i, name) for i in range(1, expected_rounds + 1)
+                    for name in ("A1", "B1", "B2", "A2")]
+        check([(i, name) for i, name, _ in attempts] == expected,
+              f"incomplete/out-of-order ABBA: {cell}")
         rounds, aggregates = [], {}
         for i in sorted({i for i, _, _ in attempts}):
             arms = {name: r for j, name, r in attempts if j == i}
             if set(arms) != {"A1", "B1", "B2", "A2"}:
                 continue
+            recorded_abba = abba_records.get((cell, i), {})
+            check(recorded_abba.get("rounds", declared_rounds) == declared_rounds,
+                  f"ABBA round-count record disagrees with header: {cell}/{i}")
+            if candidate_mode is not None:
+                check(recorded_abba.get("rounds") == declared_rounds
+                      and recorded_abba.get("candidate_mode") == candidate_mode,
+                      f"ABBA options record disagrees with header: {cell}/{i}")
             timing = {}
             for key in ("complete_gpu_ms", "ordinary_call_wall_ms"):
                 v = {name: r[key] for name, r in arms.items()}
+                recorded_key = "gpu_ms" if key == "complete_gpu_ms" else key
+                recorded_timing = recorded_abba.get(recorded_key, {})
+                check(all(name in recorded_timing and math.isclose(recorded_timing[name], value,
+                           rel_tol=1e-12, abs_tol=1e-9) for name, value in v.items()),
+                      f"ABBA timings disagree with ordinary arm records: {cell}/{i}/{key}")
                 timing[key] = {
                     "arms_ms": v,
                     "pairs": [{"A": a, "B": b, "saved_ms": v[a] - v[b],
@@ -126,7 +163,7 @@ def summarize(path):
                         "aggregate": aggregates, "rounds": rounds})
     check(bool(reports), "no timed cells")
     check(events["continuation"] == 4 * len(measured), "missing/duplicate continuations")
-    check(events["comparison"] == len(cells) * (1 + 20 * header["details"]["rounds"]),
+    check(events["comparison"] == len(cells) * (1 + 20 * expected_rounds),
           "missing/duplicate comparison records")
 
     quality = defaultdict(list)
@@ -176,6 +213,21 @@ def summarize(path):
     check(len(witnesses) == 2 * len(cells) and all(r["valid"] for r in witnesses),
           "missing/invalid warm router witnesses")
     for row in event("warm_dispatch_witness"):
+        begin = begins[row["label"]]
+        if candidate_mode is not None:
+            check("schedule_override" in row
+                  and "schedule_override" in begin
+                  and row["schedule_override"] is begin["schedule_override"],
+                  f"census policy witness disagrees with arm: {row['label']}")
+        check([r["absolute_range"] for r in row["commands"]] == begin["absolute_ranges"],
+              f"census command ranges disagree with planner: {row['label']}")
+        for command in row["commands"]:
+            start, end = command["absolute_range"]
+            strict_calls = 0 if end - start == 3 else 48
+            check(command["rows"] == end - start
+                  and command["strict_router_calls"] == command["expected_strict_router_calls"] == strict_calls
+                  and command["generic_n3_router_shape_calls"] == (48 if end - start == 3 else 0),
+                  f"router command witness mismatch: {row['label']}/{start}")
         strict = row["all_kernels"]["kernel_counts"].get("kernel_mat_mat_f32_f32_router_e8p32_strict", 0)
         expected = 96 if begins[row["label"]]["start"] == 0 else 48
         check(strict == row["strict_router_calls"] == expected,
@@ -212,6 +264,8 @@ def summarize(path):
 
     return {"path": str(path), "bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
             "events": events, "problems": problems, "header": header,
+            "rounds_validated_from_header": declared_rounds,
+            "candidate_mode_witness": candidate_mode or "legacy_not_explicitly_recorded",
             "executable_binding": event("executable_binding"), "artifact": event("artifact"),
             "loaded": event("loaded"), "diagnostic_memory": event("diagnostic_memory_bound"),
             "timed_attempts": len(measured), "warm_attempts_excluded": len(ends) - len(measured),

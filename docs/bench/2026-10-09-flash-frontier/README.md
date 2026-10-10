@@ -1,6 +1,581 @@
 Flash frontier scheduling: UD and GSQ suffix/whole4096, 2026-10-09
 ================================================================
 
+Actual production-default confirmation — 2026-10-09 (current decision)
+-------------------------------------------------------------------
+
+**Narrow promotion is implemented in the worktree, actual `None` execution is
+confirmed on UD and GSQ, and the scoped final checks pass. Final independent
+review approves with no fixes; commit/integration has not yet occurred.** The
+joint basis is v1 NLL PASS on both artifacts plus fresh, separately frozen v2
+retrieval PASS on both artifacts.
+GSQ's v1 retrieval remains INCONCLUSIVE (correct facts, missing required
+marker); it has not been rescored or converted into a v1 pass. The earlier
+"parked / v2 under review" decisions below are retained history, superseded
+by this joint review and actual-default confirmation. Validation is limited to
+the filters and checks below; this is not a full-suite or landed-commit claim.
+
+**Final validation, owner-reported:**
+
+| Scope | Release | Debug |
+|---|---|---|
+| `qwen4exp_runtime::tests` | 28 passed, 0 failed, 32 ignored | 28 passed, 0 failed, 32 ignored |
+| HC capture CPU tests | 3 passed | 3 passed |
+| GDN capture CPU tests | Not reported in this final update | 3 passed |
+
+The `qwen-cli` production check also passes. Ignored benchmark acquisitions
+were executed separately as documented in the retained release packets; the
+32 ignored entries are not counted as passes in either filtered run. Final
+review verified the historical policy pins and requested no fixes. These
+results were supplied by the owner; this docs update ran no tests or builds.
+Commit/integration remains outstanding, and no landed hash is assigned.
+
+The source guard is exact: `selected_enabled`, packed capacity 2048,
+`dense_end=2051`, and `(start,count)` equal to **`(0,4096)` or `(2048,2048)`**.
+Those ordinary calls now group into `2048+2048` or a single suffix 2048 command.
+Other geometries retain the existing planner path. This changes command
+grouping, **not the arithmetic policy**: production router, quant kernels and
+BF16 activation-dispatch rules remain in effect. Grouping changes which
+width-dependent arithmetic is reached, so GSQ's deterministic schedule-dependent
+numerical differences remain part of the qualified behavior. The diagnostic
+uniform/narrow HC F32 interventions are not promoted.
+
+The new completed packets are
+[ud-production-confirmation.jsonl](ud-production-confirmation.jsonl) and
+[gsq-production-confirmation.jsonl](gsq-production-confirmation.jsonl). Each
+records **one ABBA round**, both natural corpora and both suffix/whole stages.
+A explicitly uses `Some(false)` for the incumbent planner; B explicitly uses
+**`None`**, exercising the actual production default, not forced `Some(true)`.
+All 24 arm records per artifact and all eight census witnesses per artifact
+bind the appropriate override and expected absolute ranges. The generic raw
+`diagnostic_only_no_promotion` / `production_change=false` fields describe the
+harness's non-mutating measurement role; they are not evidence that B uses the
+old planner. The explicit mode/override records and retained source guard
+identify the policy executed. Raw headers are preserved as emitted.
+
+**Complete timing evidence, without changing the headline to fit this run.**
+Warm census arms are excluded. Each artifact has 16 timed arms, eight excluded
+warm arms, and complete valid GPU coverage for every timed command. Wall time
+is the ordinary prefill/continuation call; reset/restore, JSON, endpoint
+readback/hashing and four continued tokens are outside it. All 16 adjacent GPU
+pairs and all 16 wall pairs across both packets favor B. Suffix and whole
+savings overlap and must not be added.
+
+| Artifact / corpus / stage | Mean GPU A→B ms | GPU saved ms / % | Mean wall A→B ms | Wall saved ms / % |
+|---|---:|---:|---:|---:|
+| UD / prose/suffix_at2048 | 4799.08→4586.07 | 213.01 / 4.439% | 4815.01→4607.16 | 207.85 / 4.317% |
+| UD / prose/whole4096 | 8368.24→8138.22 | 230.03 / 2.749% | 8389.45→8163.51 | 225.94 / 2.693% |
+| UD / ssh_repeated/suffix_at2048 | 4796.68→4605.33 | 191.35 / 3.989% | 4812.41→4625.46 | 186.94 / 3.885% |
+| UD / ssh_repeated/whole4096 | 8313.50→7978.09 | 335.42 / 4.035% | 8333.24→8003.76 | 329.48 / 3.954% |
+| GSQ / prose/suffix_at2048 | 5152.68→4963.14 | 189.54 / 3.678% | 5175.66→5010.15 | 165.51 / 3.198% |
+| GSQ / prose/whole4096 | 8503.12→8138.47 | 364.65 / 4.288% | 8529.53→8175.21 | 354.32 / 4.154% |
+| GSQ / ssh_repeated/suffix_at2048 | 4945.88→4678.57 | 267.31 / 5.405% | 4968.03→4710.72 | 257.31 / 5.179% |
+| GSQ / ssh_repeated/whole4096 | 8434.62→8116.08 | 318.54 / 3.777% | 8461.46→8153.35 | 308.11 / 3.641% |
+
+All pairs and drift below are from the sole declared round. P1=A1−B1;
+P2=A2−B2. Pair entries are saved milliseconds / percent. Drift entries are
+100×(A2/A1−1) / 100×(B2/B1−1). Complete raw arm timings, median summaries and
+numerical comparisons are in
+[production-confirmation-summary.json](production-confirmation-summary.json).
+
+| Artifact / corpus / stage | GPU P1; P2 saved ms / % | Wall P1; P2 saved ms / % | GPU drift A / B % | Wall drift A / B % |
+|---|---:|---:|---:|---:|
+| UD / prose/suffix_at2048 | 231.05 / 4.797%; 194.97 / 4.077% | 219.78 / 4.554%; 195.92 / 4.078% | -0.719% / +0.032% | -0.438% / +0.059% |
+| UD / prose/whole4096 | 231.53 / 2.759%; 228.53 / 2.738% | 218.21 / 2.597%; 233.68 / 2.790% | -0.531% / -0.510% | -0.334% / -0.532% |
+| UD / ssh_repeated/suffix_at2048 | 191.17 / 3.986%; 191.53 / 3.993% | 180.81 / 3.762%; 193.08 / 4.007% | +0.024% / +0.017% | +0.277% / +0.022% |
+| UD / ssh_repeated/whole4096 | 443.29 / 5.265%; 227.55 / 2.773% | 432.15 / 5.124%; 226.82 / 2.755% | -2.523% / +0.042% | -2.378% / +0.060% |
+| GSQ / prose/suffix_at2048 | 235.62 / 4.383%; 143.45 / 2.910% | 199.92 / 3.712%; 131.10 / 2.640% | -8.308% / -6.896% | -7.789% / -6.762% |
+| GSQ / prose/whole4096 | 373.43 / 4.405%; 355.87 / 4.173% | 349.09 / 4.111%; 359.54 / 4.196% | +0.593% / +0.837% | +0.909% / +0.819% |
+| GSQ / ssh_repeated/suffix_at2048 | 267.31 / 5.403%; 267.32 / 5.406% | 245.55 / 4.953%; 269.07 / 5.404% | -0.050% / -0.053% | +0.434% / -0.042% |
+| GSQ / ssh_repeated/whole4096 | 363.96 / 4.292%; 273.13 / 3.256% | 341.77 / 4.023%; 274.45 / 3.257% | -1.086% / -0.016% | -0.803% / -0.011% |
+
+Retain the earlier repeatable **UD ~2.4% warmed whole4K GPU/wall** headline,
+not the new 4.035% SSH GPU mean: that cell's A falls 2.523% within the round and
+its paired gains are 5.265% versus 2.773%. UD prose here saves 2.749% GPU / 2.693%
+wall with both pairs positive. GSQ whole prose saves 4.288% GPU / 4.154% wall
+and SSH 3.777% / 3.641% in this one round. These are positive execution-confirmation
+observations, not a new stable 4% GSQ claim. Earlier prose nonstationarity and
+this packet's 8.308%/6.896% same-arm GPU drift in prose *suffix* remain visible.
+Do not pool selected historical cells, replace the earlier headline, or infer
+cold placement, short-prompt, 8K or other-depth savings. Review supports the
+narrow promotion with GSQ's benefit direction positive and magnitude uncertain.
+
+**Default-policy and dispatch witnesses.** All normal production-lease,
+diagnostic memory-admission, completion and artifact-revalidation gates pass.
+Every suffix warm arm witnesses 48 strict-router calls; every whole warm arm
+witnesses 96 (48 prefix  + 48 suffix). A additionally witnesses 48 generic N3
+router calls. The N2045 command in A remains on its promoted strict router;
+this comparator is not the historical generic-router baseline. No router gain
+is added to these scheduling results.
+
+| Artifact / stage, either corpus | BF16 bfloat matmuls A / B | BF16 F32-activation matmuls A / B |
+|---|---:|---:|
+| GSQ suffix | 194 / 194 | 230 / 24 |
+| GSQ whole | 388 / 388 | 242 / 36 |
+| UD suffix | 0 / 0 | 36 / 24 |
+| UD whole | 0 / 0 | 48 / 36 |
+
+These counts confirm the original arithmetic paths, including GSQ bfloat
+activation dispatch, remain active. They do not imply schedule bit equivalence.
+All 180 retained endpoint records are finite (90 per artifact, including warm
+and prefix checkpoints). Within each schedule, repeated endpoints/state and
+four teacher-forced continuations agree exactly; the same schedule also agrees
+between restored suffix and fresh whole execution. Actual token arrays match
+the corresponding earlier `*-both-restart.jsonl`, and **all 90 matching endpoint
+records per artifact reproduce exactly**, including logits/state hashes.
+Thus actual `None` B reproduces the previously measured forced-B trajectory.
+
+UD's A/B logits and persistent state remain exact on these streams. GSQ still
+has 120/121 differing persistent hashes across schedules, with matching
+position/QSA/PLE metadata and top1 choices. Endpoint-plus-four-continuation
+maxima remain the historical values: prose KL(A‖B)/KL(B‖A)
+0.0429139/0.0950802, relative L2 0.137688, maxabs 2.77734; SSH
+0.000550126/0.00102399, relative L2 0.0720061, maxabs 2.65525. Choice regrets
+are zero. These logit metrics are retained source-computed observations,
+not recomputed from unavailable full logits; timings and hash/metadata
+comparisons are independently audited. These continued tokens are confirmation
+controls, not a rerun of the frozen NLL/retrieval quality studies.
+
+**Quality decision and remaining work.** Independent review accepts the joint
+[v1 NLL evidence](../2026-10-09-flash-frontier-quality/README.md) and
+[v2 retrieval evidence](../2026-10-09-flash-frontier-retrieval-v2/README.md)
+as support for this narrowly guarded promotion. V2 was frozen before its GPU
+acquisition with new facts and a new strict raw-JSON contract; both artifacts
+parse and answer both before/after-frontier cases correctly in both schedules.
+Its motivation was the v1 formatting issue, so it is a fresh contract check,
+not an independent replication or retroactive repair of v1. GSQ v1 remains
+INCONCLUSIVE. No quality acquisition was rerun for this docs update. The scoped
+final checks above pass and the reviewer gives final approval with no fixes;
+commit/integration remains outstanding. Next Flash performance work is
+selected-QSA leaf attribution, not another layer0 bit-identity intervention or
+an enlarged scheduling speed claim.
+
+**Historical harnesses and source bindings.** The historical router packet and
+`prefill_map` now explicitly pin `Some(false)` for their full invocations,
+covering both planning and execution. The router packet preserves its N2045
+router comparison under the old schedule; `prefill_map` separately preserves
+its older generic-N2045 router baseline. Shared native scaffolding stays
+unpinned, so this actual-default confirmation uses current production routing
+and B=None. Those test-only pins do not change production behavior. Their
+current helper source hashes may postdate these binaries; no historical raw
+header is rebound to current HEAD. The executable in both new packets is
+47,118,952 bytes, SHA256
+`1f85ca7827e9a122bebe05d760c5a09a3561fd76675cf523c05f27a59ca974e1`.
+
+**Analysis validation and reproduction.** `summarizer.py` validates a positive
+round count from each header, exact ABBA ordering/count, each ABBA record's
+optional legacy/new declared count, and agreement of recorded arm timings.
+New explicit mode/override fields are checked in every arm and census witness;
+legacy missing override fields are not reinterpreted as production None.
+All seven retained timing packets audit cleanly: five historical two-round
+packets and these two one-round packets. Four synthetic CPU-negative controls
+reject a false header count, false ABBA count, forced-true B in production mode,
+and a missing B override. They exercise the analyzer only, not model/GPU code.
+
+```sh
+UV_CACHE_DIR=/tmp/flash-frontier-uv-cache uv run --no-project \
+  docs/bench/2026-10-09-flash-frontier/summarizer.py \
+  docs/bench/2026-10-09-flash-frontier/ud-production-confirmation.jsonl \
+  docs/bench/2026-10-09-flash-frontier/gsq-production-confirmation.jsonl \
+  > /tmp/flash-production-confirmation-summary.json
+```
+
+| Raw binding | Bytes | SHA256 |
+|---|---:|---|
+| ud-production-confirmation.jsonl | 1,729,914 | `eb7a2f0f310a0b785e7f3ef4d970fcbde6f17216e1a663f00b9f00feeeb6d6f8` |
+| gsq-production-confirmation.jsonl | 1,735,328 | `48fb67024a80842ebfa144bf84d9b8f96d9ac5963e56814bf06673a7fc18f5b6` |
+
+**Git retention recommendation.** Keep all completed raw JSONLs unchanged,
+the derived summaries, analysis scripts and README. Keep these verified
+lossless sidecar archives with their matching `.manifest.json` files:
+
+| Archive | Bytes | Original payload represented |
+|---|---:|---|
+| `gsq-layer0-sidecars.tar.xz` | 20,792,856 | 28,500,992 bytes |
+| `gsq-layer0-bf16-f32-sidecars.tar.xz` | 13,364,996 | 28,500,992 bytes |
+| `gsq-hc-oracles-sidecars.tar.xz` | 33,354,224 | 92,719,104 bytes; shared HC weights stored once |
+
+The manifests bind every original filename and hash. Keep raw `.f32le`,
+`.f64le` and `.weights.bin` sidecars locally without also adding those duplicate
+payloads to git. The owner added `*.f64le` and `*.weights.bin` ignore rules;
+raw sidecars have not been deleted. No new binary archive is needed
+for these JSONL-only production confirmations; do not replace readable raw
+JSONLs with another compressed copy. Existing archive hashes were rechecked;
+prior full member round-trip verification remains recorded in the manifests.
+No GPU work, build, model-source edit or commit was performed for this update.
+
+Earlier whole-only performance confirmation (retained history)
+-------------------------------------------------------------
+
+Whole-only performance confirmation — 2026-10-09
+-------------------------------------------------------
+
+**Bounded headline: UD repeats about 2.4% whole-prefill GPU and wall savings
+on both natural corpora. GSQ improves in every pair, but does not establish a
+stable whole-prefill saving across both corpora; keep the GSQ headline and
+cross-artifact promotion parked.** GSQ prose drift is comparable to the claimed
+saving, so its 4.73% aggregate is not a reliable performance estimate. No round
+or pair was discarded, and these new runs are not pooled with selected older
+cells to rescue a headline.
+
+The completed raw packets are [ud-whole-confirm.jsonl](ud-whole-confirm.jsonl)
+and [gsq-whole-confirm.jsonl](gsq-whole-confirm.jsonl). Owner-reported process
+completion was 258 s UD / 336 s GSQ; those durations include work outside the
+prefill timer and are not the performance metric. Each packet contains two
+corpora, two warmed ABBA rounds per corpus, 16 timed whole4096 attempts and
+four census warm arms excluded from every timing summary below. All 32 timed
+attempts have valid complete GPU coverage (80 command samples in total).
+The normal lease, diagnostic memory gate, completion and shard-revalidation
+checks pass; the existing uv summarizer reports zero audit problems.
+
+A is ordinary fresh `2048+3+2045`; B is ordinary fresh `2048+2048`, both from
+position 0 with **current production routers and original arithmetic**. There
+is no restored-suffix timing, HC F32 intervention or profiled timed arm in this
+confirmation. Wall time encloses the ordinary `prefill` call. Preparation/reset,
+endpoint hashing/readback, JSON emission and four subsequent teacher-forced
+continuations are outside that timer. GPU time is the complete ordinary command
+sum: three commands for A, two for B. The harness retains validity and sample
+counts, not individual raw command timestamps.
+
+**Every cell's full two-round aggregate.** Means use all four A and four B
+observations in each cell. Savings are `(A−B)/A`; percentages compare means
+(or medians), rather than averaging pair percentages. These are descriptive
+summaries of repeated execution on two token streams, not confidence bounds
+or independent quality samples.
+
+| Artifact / corpus | Mean GPU A→B ms | GPU saved ms / % | Mean wall A→B ms | Wall saved ms / % | Median GPU / wall saving % |
+|---|---:|---:|---:|---:|---:|
+| UD / prose | 8176.49→7976.00 | 200.50 / 2.452% | 8205.64→8007.66 | 197.99 / 2.413% | 2.430% / 2.428% |
+| UD / ssh_repeated | 8177.70→7978.95 | 198.75 / 2.430% | 8208.12→8012.65 | 195.46 / 2.381% | 2.435% / 2.405% |
+| GSQ / prose | 9623.39→9168.42 | 454.97 / 4.728% | 9677.25→9225.48 | 451.77 / 4.668% | 4.834% / 4.890% |
+| GSQ / ssh_repeated | 8388.56→8133.67 | 254.89 / 3.039% | 8420.33→8167.96 | 252.37 / 2.997% | 3.297% / 3.323% |
+
+**All 16 adjacent ABBA pairs.** P1 compares A1−B1; P2 compares A2−B2 (B2 runs
+before A2). Positive means B is faster. All 16 GPU pairs and all 16 wall pairs
+are positive; GSQ prose's smallest pair is only 0.508% GPU / 0.482% wall.
+
+| Artifact / corpus | Round / pair | GPU saved ms / % | Wall saved ms / % |
+|---|---|---:|---:|
+| UD / prose | 1 / P1 | 205.80 / 2.515% | 188.33 / 2.298% |
+| UD / prose | 1 / P2 | 195.01 / 2.386% | 197.99 / 2.412% |
+| UD / prose | 2 / P1 | 205.86 / 2.517% | 207.71 / 2.529% |
+| UD / prose | 2 / P2 | 195.30 / 2.390% | 197.93 / 2.412% |
+| UD / ssh_repeated | 1 / P1 | 201.15 / 2.460% | 182.02 / 2.222% |
+| UD / ssh_repeated | 1 / P2 | 213.53 / 2.608% | 215.68 / 2.623% |
+| UD / ssh_repeated | 2 / P1 | 187.35 / 2.292% | 189.35 / 2.306% |
+| UD / ssh_repeated | 2 / P2 | 192.96 / 2.362% | 194.80 / 2.374% |
+| GSQ / prose | 1 / P1 | 446.45 / 4.813% | 425.11 / 4.576% |
+| GSQ / prose | 1 / P2 | 724.40 / 7.440% | 736.12 / 7.505% |
+| GSQ / prose | 2 / P1 | 48.44 / 0.508% | 46.33 / 0.482% |
+| GSQ / prose | 2 / P2 | 600.58 / 6.044% | 599.51 / 5.996% |
+| GSQ / ssh_repeated | 1 / P1 | 277.42 / 3.308% | 257.60 / 3.066% |
+| GSQ / ssh_repeated | 1 / P2 | 293.35 / 3.497% | 298.51 / 3.542% |
+| GSQ / ssh_repeated | 2 / P1 | 170.25 / 2.030% | 172.42 / 2.047% |
+| GSQ / ssh_repeated | 2 / P2 | 278.54 / 3.319% | 280.92 / 3.333% |
+
+**Every round's mean saving and same-arm drift.** Drift is 100×(A2/A1−1) or
+100×(B2/B1−1). A large difference between these drifts warns that ABBA has not
+removed nonstationarity; there is no retrospective stability cutoff or removal
+of inconvenient samples here. Complete arm timings are in
+[whole-confirm-summary.json](whole-confirm-summary.json).
+
+| Artifact / corpus / round | GPU mean saved ms / % | Wall mean saved ms / % | GPU drift A / B % | Wall drift A / B % |
+|---|---:|---:|---:|---:|
+| UD / prose / 1 | 200.41 / 2.451% | 193.16 / 2.355% | -0.126% / +0.006% | +0.143% / +0.025% |
+| UD / prose / 2 | 200.58 / 2.453% | 202.82 / 2.470% | -0.066% / +0.064% | -0.063% / +0.058% |
+| UD / ssh_repeated / 1 | 207.34 / 2.534% | 198.85 / 2.423% | +0.115% / -0.038% | +0.380% / -0.031% |
+| UD / ssh_repeated / 2 | 190.15 / 2.327% | 192.08 / 2.340% | -0.050% / -0.121% | -0.037% / -0.106% |
+| GSQ / prose / 1 | 585.42 / 6.158% | 580.61 / 6.080% | +4.961% / +2.064% | +5.581% / +2.340% |
+| GSQ / prose / 2 | 324.51 / 3.332% | 322.92 / 3.293% | +4.118% / -1.675% | +4.015% / -1.748% |
+| GSQ / ssh_repeated / 1 | 285.38 / 3.403% | 278.06 / 3.305% | +0.017% / -0.179% | +0.310% / -0.183% |
+| GSQ / ssh_repeated / 2 | 224.40 / 2.674% | 226.67 / 2.690% | +0.051% / -1.266% | +0.055% / -1.259% |
+
+UD's four round means span 2.327–2.534% GPU and 2.340–2.470% wall. Absolute
+same-arm drift stays below 0.127% GPU and 0.381% wall, substantially smaller
+than every paired gain. A roughly 0.20 s / 2.4% whole-call saving is supported
+for these two natural 4K streams under this confirmation's warmed conditions.
+This does not establish short-prompt, cold-placement or deeper-context savings.
+
+GSQ prose's GPU round means fall from 6.158% to 3.332%, while A drifts +4.961%
+and +4.118% within the two rounds. Wall A drift reaches +5.581%. GPU pair gains
+range 0.508–7.440%, wall 0.482–7.505%. The packet does not explain the cause of
+this timing drift, and a positive mean/median does not resolve it. GSQ SSH is
+more encouraging: all pairs save 2.030–3.497% GPU / 2.047–3.542% wall, and round
+means are 3.403% then 2.674% GPU. However B still drifts −1.266% in round 2; do not
+promote the SSH mean into a stable all-corpus GSQ claim. The old noisy whole
+packets and their later stable cells remain below as history, not additional
+selected observations in these aggregates.
+
+**Router, arithmetic and numerical controls.** All eight census warm witnesses
+show 96 strict-router calls per whole prefill in each arm: 48 in the common
+prefix and 48 in the suffix, including production N2045 in A. A also has 48
+N3 generic-router calls. These are additional scheduling savings after the
+landed router transfer; the old 7% router win and router-disabled 199/282 ms
+residuals are not additive budgets. GSQ's ordinary whole census retains 388
+BF16 bfloat-activation calls in both arms, with 242/36 BF16 F32-activation
+matmuls in A/B; this is the production width-dependent arithmetic, not either
+HC intervention. UD records 48/36 BF16 F32 matmuls and no bfloat matmuls.
+
+All 168 recorded endpoints/continuations (84 per artifact, including warm
+endpoints) are finite. Same-schedule repetitions, including warm endpoint
+versus ordinary timed endpoint and all four continuations, have identical
+logit and persistent-state hashes in both artifacts. Both packets' actual
+4100-token arrays and all 84 whole endpoint records also exactly reproduce
+the corresponding earlier `*-both-restart.jsonl` records. Timing drift here
+is not accompanied by a changed recorded numerical trajectory.
+
+UD has exact A/B logit/state agreement at both corpus endpoints and all four
+continuations. GSQ retains the known A/B differences: 120/121 persistent
+allocation hashes differ, while causal metadata agrees. Across endpoint plus
+four continuations, prose reaches KL(A‖B)/KL(B‖A) 0.0429139/0.0950802,
+relative L2 0.137688 and maxabs 2.77734; SSH reaches 0.000550126/0.00102399,
+relative L2 0.0720061 and maxabs 2.65525. All sampled top1 choices agree and
+choice regrets are zero. These logit metrics are source-computed observations
+(the raw JSONLs retain hashes, not full vectors); hash comparisons and timings
+were independently recomputed. Matching top1 and finite logits do not establish
+quality acceptance.
+
+**Quality status is separate and remains bounded.** The completed
+[v1 quality analysis](../2026-10-09-flash-frontier-quality/README.md) reports
+**both NLL screens PASS; retrieval UD PASS / GSQ INCONCLUSIVE**. GSQ emits the
+correct record/code facts in both schedules but omits the required
+`FINAL_JSON:` marker. Under the frozen v1 parser and incumbent-parse-failure
+rule, those are invalid fixtures/inconclusive, not passes and not evidence of
+a candidate-specific factual regression. There is no content-only rescore.
+The [fresh retrieval v2 contract](../2026-10-09-flash-frontier-retrieval-v2/README.md)
+was frozen before its GPU acquisition and is **under review**; no v2 verdict
+is claimed here. It is a separately versioned follow-up motivated by the v1
+format failure, not an independent replication or a rewrite of v1. Do not
+summarize the present state as “quality both pass.”
+
+**Decision.** UD's modest performance benefit is repeatable in this bounded
+confirmation, and its v1 quality verdict is PASS. GSQ does not yet support a
+stable both-corpus performance headline, independently of its inconclusive v1
+retrieval verdict. Keep cross-artifact promotion parked. Do not repeat the
+whole matrix or choose only favorable GSQ rounds to manufacture stability.
+Reopening GSQ performance requires a prospectively bounded prose confirmation
+that resolves the drift, plus separate owner judgment on the frozen quality
+contract; it does not require another HC bit-identity intervention. No
+production change follows from this analysis.
+
+Reproduce the complete audit (both raw packets remain unchanged):
+
+```sh
+UV_CACHE_DIR=/tmp/flash-frontier-uv-cache uv run --no-project \
+  docs/bench/2026-10-09-flash-frontier/summarizer.py \
+  docs/bench/2026-10-09-flash-frontier/ud-whole-confirm.jsonl \
+  docs/bench/2026-10-09-flash-frontier/gsq-whole-confirm.jsonl \
+  > /tmp/flash-whole-confirm-summary.json
+```
+
+| Binding | Bytes | SHA256 |
+|---|---:|---|
+| ud-whole-confirm.jsonl | 1,608,728 | `39ef5292448a9bc0f9cf78df5d98e7c6c5cdbc0ab91cae68a823a7e429de0792` |
+| gsq-whole-confirm.jsonl | 1,612,805 | `db40abd6cc0aa3f607238fe30d2e5b9e313bd54541a2fa6ea4a6733045df9b47` |
+| Both packet executables | 46,825,400 | `e29c8d92921e033d954fda6dc8df308964a9cf023aea1e49af2af50f297cffb7` |
+
+Compiled source and metallib hashes stay bound to these packet headers, not to
+an asserted current/future checkout HEAD. Only docs and derived analysis were
+written for this update; no GPU, build, model-source edit or commit was made.
+
+Earlier HC/oracle checkpoint (retained history)
+---------------------------------------------
+
+**Narrow layer0 attention HC + independent oracle checkpoint.** The
+first captured production mismatch is consistent with the intended
+width-dependent activation precision: equal normalized F32 inputs enter HC
+down; A's N3 uses F32 activations and B's N2048 uses BF16-RNE activations.
+Independent native-weight dots match each GPU path's own arithmetic closely.
+There is no kernel-bug signal in these captured projections. This does not
+establish model accuracy, validate every BF16 kernel shape, or justify schedule
+promotion. Production scheduling and arithmetic remain unchanged.
+
+[gsq-hc-production.jsonl](gsq-hc-production.jsonl) and
+[gsq-hc-f32downup.jsonl](gsq-hc-f32downup.jsonl) completed under the normal lease,
+memory admission and artifact-revalidation gates. The owner reports 93 s and
+621 s process completion and six passing new CPU tests. Those elapsed durations
+include untimed diagnostic work and are **not a performance comparison**.
+Both packets have exact observer-off/on endpoint, persistent-state and original
+dispatch concordance. No builds, GPU work or model-source edits were performed
+for this analysis. There are no new continuation or quality measurements.
+
+**First divergence, independently read from the raw sidecars.** Positions are
+absolute, zero-based. Hyper input and post-RMS-normalization input match for
+all eight retained rows, across both schedules and both modes. Initial GDN
+convolution and delta state also match across schedules and modes.
+
+| Production stage, rows 2048–2055 | First differing rows | A/B relative L2 (eight-row aggregate) | Maxabs |
+|---|---|---:|---:|
+| HC hyper input | none | 0 | 0 |
+| HC normalized input | none | 0 | 0 |
+| HC down, before SiLU | 2048–2050 only | 0.000177662266 | 0.0703735352 |
+| HC low, after SiLU(x/4), actual up input | 2048–2050 only | 0.000166063537 | 0.00967121124 |
+| HC raw up, before gated mix | 2048–2050 only | 0.00132279423 | 0.206161499 |
+| Mixed output entering GDN | 2048–2050 only | 0.000562197690 | 0.0251445770 |
+| GDN output | all eight rows | 0.00103500165 | 0.00143986940 |
+
+All 960 down/low values and 30,720 raw-up values in the first three rows differ;
+rows 2051–2055 are identical at those HC stages. Thus normalization is not the
+first captured divergence, and SiLU inherits a difference already present in
+down. This is localization, not a separate SiLU/mix accuracy oracle.
+
+With only layer0 attention HC down+up forced to their existing F32-activation
+path, all five HC sections and all 17 GDN sections are A/B byte-identical,
+including all eight rows and delta-state snapshots after each of the first
+three tokens. Production delta state after token 2050 had relative L2
+0.000343748815 and maxabs0.00293636322; narrow mode has zero difference.
+The new production GDN sidecars exactly reproduce the earlier production
+capture. The narrow GDN sidecars exactly reproduce the earlier *broad* suffix
+BF16-class intervention, SHA256
+`1b8459106c945f9cd4fae1da83a7f0821c6f5b6962f57013bf8bbbb6116547c1`.
+This narrows the sampled seed mechanism to the attention HC pair. It does not
+separately measure a down-only intervention. Narrow A preserves production A's
+first-three-row values, but changes its later rows too; this is not an unchanged
+A comparator at every suffix position.
+
+**Native-weight oracle.** Actual attention HC down/up are BF16
+`[10240,320]` / `[320,10240]`; norm is F32 `[10240]`. Their retained native bytes
+are identical between modes. The independent script decodes each BF16 word
+exactly and evaluates binary64 `math.fsum` dot products with either the original
+captured F32 input or that input rounded to BF16, round-to-nearest ties-to-even.
+Weight layout is contiguous K within each output row. Both modes retain the
+same 13,148,160-byte weight file; no F32 weight inflation is used as evidence.
+
+The script recomputed all 675,840 saved f64 oracle elements (24 distinct
+projection-input rows, reused only after exact byte-hash equality). Largest
+absolute discrepancy from the producer's sequential-f64 references is
+1.705303e-13. All captured floats, decoded weights and saved/recomputed oracles
+are finite. All 996 HC/oracle metric fields and 1,608 GDN metric fields checked
+across the two packets agree within summation rounding. Full per-row/per-arm
+RMS, relative L2 and maxabs against **both** references are retained in
+[hc-summary.json](hc-summary.json); A/B L2 normalizes by A, while oracle L2
+normalizes by its reference.
+
+| GPU cohort / captured rows | Reference matching dispatch | Down per-row relative L2 range | Up per-row relative L2 range |
+|---|---|---:|---:|
+| Production A, 2048–2050 | Original F32 input | 1.269e-6–1.601e-6 | 2.060e-7–2.104e-7 |
+| Production A, 2051–2055 | BF16-RNE input | 1.395e-6–1.733e-6 | 1.903e-7–3.397e-7 |
+| Production B, 2048–2055 | BF16-RNE input | 1.322e-6–1.733e-6 | 1.761e-7–3.397e-7 |
+| Narrow A and B, 2048–2055 | Original F32 input | 1.269e-6–1.601e-6 | 2.060e-7–3.345e-7 |
+
+Matched-reference maxabs is at most 0.000830940189 for down and0.000021632003
+for up. By contrast, production B against the original-F32 reference has
+per-row relative errors 0.0002745–0.0003909 down and0.0004161–0.0020088 up.
+Production A's first three rows disagree with the BF16-RNE reference at
+0.0002743–0.0003709 down and0.0011623–0.0023060 up. The small residuals against
+the dispatch-matched references support ordinary reduction rounding around
+the intended activation-precision change; an independent oracle is not expected
+to be bit-identical to Metal's reduction order.
+
+**Up inputs already differ upstream.** Every up reference uses that arm's actual
+captured `hc.low`. Production A and B do not share that input on rows 2048–2050.
+The raw-up A/B gap therefore combines the down/SiLU input change with the up
+activation-rounding change. These conditional oracles cannot assign the entire
+raw-up gap to the up kernel alone. Nor does closer agreement with a local
+F32-input dot establish better whole-model accuracy.
+
+**Scope witnesses.** Target counts are four total calls in A (two per role), two
+in B (one per role), independently checked in observer-off and observer-on.
+The scope identifies both actual layer0 attention HC weight buffers, offsets,
+shapes and dtypes. It excludes FFN HC, injection, all other layers and prefix.
+The header remains `bf16_activation_mode=production` in both packets; only
+`hc_mode` changes from `production` to `f32downup`.
+
+| Each observer off/on suffix | Target down/up policy | All BF16 bfloat calls | All BF16 F32-activation calls | Non-target bfloat calls |
+|---|---|---:|---:|---:|
+| Production A: N3 then N2045 | F32 then bfloat | 194 | 230 | 192 |
+| Production B: N2048 | bfloat | 194 | 24 | 192 |
+| Narrow A | F32 for both widths | 192 | 232 | 192 |
+| Narrow B | F32 | 192 | 26 | 192 |
+
+Both prefixes retain 194 bfloat / 12 F32-activation calls. Both suffix schedules
+retain 48 strict production-router calls; A still has its N3 generic router
+calls. Tagged GDN kernels/grids/thread shapes are unchanged per schedule
+between modes. This intervenes on HC arithmetic without overriding the
+N64 quant-kernel or routing policies. The capture fits its 15,319,040-byte GPU
+upper quote (observed 15,237,120); its CPU upper quote is 371,521,536 bytes.
+These are retained admission/accounting results, not measured latency savings.
+
+**Endpoint limitation.** The JSONL records the following finite endpoint logits;
+full logits are not sidecars, so these metrics are reported from the packet,
+not independently recomputed. Persistent hashes are independently compared.
+
+| Position 4096 metric | Production | Narrow attention HC down+up |
+|---|---:|---:|
+| KL(A‖B) | 0.00502608521 | 0.00656984370 |
+| KL(B‖A) | 0.00645067039 | 0.00514656820 |
+| Relative logit L2 | 0.0783402310 | 0.0580027486 |
+| Maxabs | 1.23584795 | 1.10804147 |
+| Shared top1 | 63280 | 63280 |
+| Differing persistent hashes /121 | 120 | 117 |
+
+Narrow mode makes indices 0–3 equal, while 4–120 remain different; production
+only index 0 matches. Position, QSA lengths and PLE token metadata match in both
+modes. Full-allocation hash differences include inactive tails and are not
+numerical state-error magnitudes. Forward KL increases even as layer0 becomes
+identical and relative logit L2 decreases. Eliminating this seed neither removes
+all downstream schedule effects nor establishes a quality improvement. The
+broader BF16-class intervention's smaller KL is a different intervention, not
+an additive or production-ready result.
+
+**Decision / next budget.** Retain this checkpoint and close the specific
+"unexplained early GDN seed / possible HC leaf bug" lead for the captured GSQ
+case: dispatch-dependent activation rounding explains the first down mismatch,
+and the narrow pair is sufficient to remove the sampled layer0 propagation.
+Do not chase layer0 bit identity as the performance objective, promote this
+F32 intervention, or use matching top1 as a quality gate. The useful next
+qualification is a bounded natural GSQ held-out quality/continuation screen of
+the **production-arithmetic** mixed schedule against the incumbent, with
+predeclared task/NLL acceptance criteria. Existing stable whole cells suggest
+roughly 2–3% incremental savings, with substantial drift elsewhere; no new timing
+or larger ceiling comes from these observers. If quality fails or whole savings
+do not repeat, park the schedule and return to selected-QSA leaf attribution.
+Further layer-by-layer localization is justified only by a concrete failed
+quality case, not by nonzero KL alone. UD's matching sampled continuations are
+a useful control, not GSQ quality authority.
+
+**Reproduction and lossless retention.** No third-party Python packages:
+
+```sh
+UV_CACHE_DIR=/tmp/flash-frontier-uv-cache uv run --no-project \
+  docs/bench/2026-10-09-flash-frontier/summarize_hc.py \
+  docs/bench/2026-10-09-flash-frontier/gsq-hc-production.jsonl \
+  docs/bench/2026-10-09-flash-frontier/gsq-hc-f32downup.jsonl \
+  --output /tmp/flash-hc-summary.json
+```
+
+The retained run additionally supplied
+`--archive docs/bench/2026-10-09-flash-frontier/gsq-hc-oracles-sidecars.tar.xz`.
+Archive creation refuses overwrite. The archive uses standard tar hardlinks
+for byte-identical files, including the shared native-weight file, then
+XZ/LZMA2 with a 32 MiB dictionary. All 14 original filenames, lengths and SHA256s
+round-trip exactly; the originals remain untouched. Raw total 92,719,104 bytes
+becomes 33,354,224 bytes (35.97% retained). Unique uncompressed payload after
+hardlink deduplication is 62,965,248 bytes. Retain the archive and
+[manifest](gsq-hc-oracles-sidecars.manifest.json) for git, instead of additionally
+adding the raw `.f32le`, `.f64le` or `.weights.bin` duplicates. The JSONLs stay raw.
+Extraction into an empty directory with `tar -xJf` recreates both modes' names.
+
+| Retained binding | Bytes | SHA256 |
+|---|---:|---|
+| Production JSONL | 222,764 | `7453a76f0af80e244eafc76c3c7b46607cc8e8ea266fe5f5620cb9b671db52a9` |
+| Narrow JSONL | 216,699 | `3dd37b8ec21d45f742760228d310a7f9bb29fc2fd6ea395ce4161070c7904caa` |
+| Shared native HC weights, raw | 13,148,160 | `4ef0e8f82276e3899153de27997b93ce4230e9c65b29ab71855daf5f73fcb4e8` |
+| Combined sidecar archive | 33,354,224 | `b2f677bb49e331a9cf4a1db674b005fb820099fe17afbd3c73a80952b20bc645` |
+| Packet executable, both modes | 46,011,064 | `dbbc1a3c562ece5a173dc132bb9af21cb42ba5fd727f728cea263cbd4e78b5fc` |
+
+Source/metallib bindings remain the packet's historical bindings, retained in
+the raw headers and generated summary; they are not asserted to equal a future
+HEAD. The observer integration, HC scope and CPU-oracle sources are
+`qwen4exp_runtime/tests/prefill_map/frontier_layer0.rs`,
+`qwen4exp_metal/frontier_hc.rs` and
+`qwen4exp_runtime/tests/prefill_map/frontier_hc_oracle.rs` under
+`crates/qwen-llm/src/`. All files below describe earlier checkpoints; their
+proposed narrow-HC follow-up is now completed above.
+
+Earlier broad-class and GDN checkpoints (retained history)
+--------------------------------------------------------
+
 Checkpoint validation: all eight focused CPU tests pass in release and debug;
 `cargo check --offline -j2 -p qwen-cli` passes. Both resumed artifact packets and
 both layer0 observer packets completed under the normal lease and admission.

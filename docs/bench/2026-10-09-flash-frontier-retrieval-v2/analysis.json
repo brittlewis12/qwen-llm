@@ -1,0 +1,975 @@
+{
+  "schema": "flash.frontier_retrieval.analysis.v2",
+  "artifact_pooling": false,
+  "v1_reclassified": false,
+  "results": [
+    {
+      "artifact": "gsq",
+      "file": "docs/bench/2026-10-09-flash-frontier-retrieval-v2/gsq-retrieval.jsonl",
+      "file_sha256": "81fe67ffed741a99d4bf2213fc504250bd1fca98ce6ea8ca35384885cecab504",
+      "fixture_sha256": "352557183db3eac478ed4a40aa265fe1f366e982b7958b81ff33a900cd9d8bce",
+      "v1_reclassified": false,
+      "automatic_promotion": false,
+      "verdict": "PASS",
+      "cases": [
+        {
+          "id": "v2_before",
+          "expected": {
+            "record": "P-28",
+            "code": "amber-lantern-6149"
+          },
+          "A": {
+            "parsed": true,
+            "correct": true,
+            "answer": {
+              "code": "amber-lantern-6149",
+              "record": "P-28"
+            },
+            "generated_text": "{\"code\":\"amber-lantern-6149\",\"record\":\"P-28\"}",
+            "generated_bytes": [
+              123,
+              34,
+              99,
+              111,
+              100,
+              101,
+              34,
+              58,
+              34,
+              97,
+              109,
+              98,
+              101,
+              114,
+              45,
+              108,
+              97,
+              110,
+              116,
+              101,
+              114,
+              110,
+              45,
+              54,
+              49,
+              52,
+              57,
+              34,
+              44,
+              34,
+              114,
+              101,
+              99,
+              111,
+              114,
+              100,
+              34,
+              58,
+              34,
+              80,
+              45,
+              50,
+              56,
+              34,
+              125
+            ],
+            "generated_token_count": 20,
+            "stopped_on_eos": true,
+            "state": {
+              "position": 4116,
+              "qsa_lengths": [
+                [
+                  3,
+                  4116
+                ],
+                [
+                  7,
+                  4116
+                ],
+                [
+                  11,
+                  4116
+                ],
+                [
+                  15,
+                  4116
+                ],
+                [
+                  19,
+                  4116
+                ],
+                [
+                  23,
+                  4116
+                ],
+                [
+                  27,
+                  4116
+                ],
+                [
+                  31,
+                  4116
+                ],
+                [
+                  35,
+                  4116
+                ],
+                [
+                  39,
+                  4116
+                ],
+                [
+                  43,
+                  4116
+                ],
+                [
+                  47,
+                  4116
+                ]
+              ],
+              "ple_prior_tokens": [
+                23,
+                8934
+              ]
+            }
+          },
+          "B": {
+            "parsed": true,
+            "correct": true,
+            "answer": {
+              "code": "amber-lantern-6149",
+              "record": "P-28"
+            },
+            "generated_text": "{\"code\":\"amber-lantern-6149\",\"record\":\"P-28\"}",
+            "generated_bytes": [
+              123,
+              34,
+              99,
+              111,
+              100,
+              101,
+              34,
+              58,
+              34,
+              97,
+              109,
+              98,
+              101,
+              114,
+              45,
+              108,
+              97,
+              110,
+              116,
+              101,
+              114,
+              110,
+              45,
+              54,
+              49,
+              52,
+              57,
+              34,
+              44,
+              34,
+              114,
+              101,
+              99,
+              111,
+              114,
+              100,
+              34,
+              58,
+              34,
+              80,
+              45,
+              50,
+              56,
+              34,
+              125
+            ],
+            "generated_token_count": 20,
+            "stopped_on_eos": true,
+            "state": {
+              "position": 4116,
+              "qsa_lengths": [
+                [
+                  3,
+                  4116
+                ],
+                [
+                  7,
+                  4116
+                ],
+                [
+                  11,
+                  4116
+                ],
+                [
+                  15,
+                  4116
+                ],
+                [
+                  19,
+                  4116
+                ],
+                [
+                  23,
+                  4116
+                ],
+                [
+                  27,
+                  4116
+                ],
+                [
+                  31,
+                  4116
+                ],
+                [
+                  35,
+                  4116
+                ],
+                [
+                  39,
+                  4116
+                ],
+                [
+                  43,
+                  4116
+                ],
+                [
+                  47,
+                  4116
+                ]
+              ],
+              "ple_prior_tokens": [
+                23,
+                8934
+              ]
+            }
+          },
+          "verdict": "PASS"
+        },
+        {
+          "id": "v2_after",
+          "expected": {
+            "record": "W-57",
+            "code": "jade-harbor-2856"
+          },
+          "A": {
+            "parsed": true,
+            "correct": true,
+            "answer": {
+              "code": "jade-harbor-2856",
+              "record": "W-57"
+            },
+            "generated_text": "{\"code\":\"jade-harbor-2856\",\"record\":\"W-57\"}",
+            "generated_bytes": [
+              123,
+              34,
+              99,
+              111,
+              100,
+              101,
+              34,
+              58,
+              34,
+              106,
+              97,
+              100,
+              101,
+              45,
+              104,
+              97,
+              114,
+              98,
+              111,
+              114,
+              45,
+              50,
+              56,
+              53,
+              54,
+              34,
+              44,
+              34,
+              114,
+              101,
+              99,
+              111,
+              114,
+              100,
+              34,
+              58,
+              34,
+              87,
+              45,
+              53,
+              55,
+              34,
+              125
+            ],
+            "generated_token_count": 20,
+            "stopped_on_eos": true,
+            "state": {
+              "position": 4116,
+              "qsa_lengths": [
+                [
+                  3,
+                  4116
+                ],
+                [
+                  7,
+                  4116
+                ],
+                [
+                  11,
+                  4116
+                ],
+                [
+                  15,
+                  4116
+                ],
+                [
+                  19,
+                  4116
+                ],
+                [
+                  23,
+                  4116
+                ],
+                [
+                  27,
+                  4116
+                ],
+                [
+                  31,
+                  4116
+                ],
+                [
+                  35,
+                  4116
+                ],
+                [
+                  39,
+                  4116
+                ],
+                [
+                  43,
+                  4116
+                ],
+                [
+                  47,
+                  4116
+                ]
+              ],
+              "ple_prior_tokens": [
+                22,
+                8934
+              ]
+            }
+          },
+          "B": {
+            "parsed": true,
+            "correct": true,
+            "answer": {
+              "code": "jade-harbor-2856",
+              "record": "W-57"
+            },
+            "generated_text": "{\"code\":\"jade-harbor-2856\",\"record\":\"W-57\"}",
+            "generated_bytes": [
+              123,
+              34,
+              99,
+              111,
+              100,
+              101,
+              34,
+              58,
+              34,
+              106,
+              97,
+              100,
+              101,
+              45,
+              104,
+              97,
+              114,
+              98,
+              111,
+              114,
+              45,
+              50,
+              56,
+              53,
+              54,
+              34,
+              44,
+              34,
+              114,
+              101,
+              99,
+              111,
+              114,
+              100,
+              34,
+              58,
+              34,
+              87,
+              45,
+              53,
+              55,
+              34,
+              125
+            ],
+            "generated_token_count": 20,
+            "stopped_on_eos": true,
+            "state": {
+              "position": 4116,
+              "qsa_lengths": [
+                [
+                  3,
+                  4116
+                ],
+                [
+                  7,
+                  4116
+                ],
+                [
+                  11,
+                  4116
+                ],
+                [
+                  15,
+                  4116
+                ],
+                [
+                  19,
+                  4116
+                ],
+                [
+                  23,
+                  4116
+                ],
+                [
+                  27,
+                  4116
+                ],
+                [
+                  31,
+                  4116
+                ],
+                [
+                  35,
+                  4116
+                ],
+                [
+                  39,
+                  4116
+                ],
+                [
+                  43,
+                  4116
+                ],
+                [
+                  47,
+                  4116
+                ]
+              ],
+              "ple_prior_tokens": [
+                22,
+                8934
+              ]
+            }
+          },
+          "verdict": "PASS"
+        }
+      ],
+      "scope": "two fresh raw-JSON retrieval cases; format-motivated follow-up, not independent replication"
+    },
+    {
+      "artifact": "ud",
+      "file": "docs/bench/2026-10-09-flash-frontier-retrieval-v2/ud-retrieval.jsonl",
+      "file_sha256": "38df7e6ea80e6686428fc4b34e1fdca1d7d71061ab1b94455a4230327613b26d",
+      "fixture_sha256": "352557183db3eac478ed4a40aa265fe1f366e982b7958b81ff33a900cd9d8bce",
+      "v1_reclassified": false,
+      "automatic_promotion": false,
+      "verdict": "PASS",
+      "cases": [
+        {
+          "id": "v2_before",
+          "expected": {
+            "record": "P-28",
+            "code": "amber-lantern-6149"
+          },
+          "A": {
+            "parsed": true,
+            "correct": true,
+            "answer": {
+              "code": "amber-lantern-6149",
+              "record": "P-28"
+            },
+            "generated_text": "{\"code\":\"amber-lantern-6149\",\"record\":\"P-28\"}",
+            "generated_bytes": [
+              123,
+              34,
+              99,
+              111,
+              100,
+              101,
+              34,
+              58,
+              34,
+              97,
+              109,
+              98,
+              101,
+              114,
+              45,
+              108,
+              97,
+              110,
+              116,
+              101,
+              114,
+              110,
+              45,
+              54,
+              49,
+              52,
+              57,
+              34,
+              44,
+              34,
+              114,
+              101,
+              99,
+              111,
+              114,
+              100,
+              34,
+              58,
+              34,
+              80,
+              45,
+              50,
+              56,
+              34,
+              125
+            ],
+            "generated_token_count": 20,
+            "stopped_on_eos": true,
+            "state": {
+              "position": 4116,
+              "qsa_lengths": [
+                [
+                  3,
+                  4116
+                ],
+                [
+                  7,
+                  4116
+                ],
+                [
+                  11,
+                  4116
+                ],
+                [
+                  15,
+                  4116
+                ],
+                [
+                  19,
+                  4116
+                ],
+                [
+                  23,
+                  4116
+                ],
+                [
+                  27,
+                  4116
+                ],
+                [
+                  31,
+                  4116
+                ],
+                [
+                  35,
+                  4116
+                ],
+                [
+                  39,
+                  4116
+                ],
+                [
+                  43,
+                  4116
+                ],
+                [
+                  47,
+                  4116
+                ]
+              ],
+              "ple_prior_tokens": [
+                23,
+                8934
+              ]
+            }
+          },
+          "B": {
+            "parsed": true,
+            "correct": true,
+            "answer": {
+              "code": "amber-lantern-6149",
+              "record": "P-28"
+            },
+            "generated_text": "{\"code\":\"amber-lantern-6149\",\"record\":\"P-28\"}",
+            "generated_bytes": [
+              123,
+              34,
+              99,
+              111,
+              100,
+              101,
+              34,
+              58,
+              34,
+              97,
+              109,
+              98,
+              101,
+              114,
+              45,
+              108,
+              97,
+              110,
+              116,
+              101,
+              114,
+              110,
+              45,
+              54,
+              49,
+              52,
+              57,
+              34,
+              44,
+              34,
+              114,
+              101,
+              99,
+              111,
+              114,
+              100,
+              34,
+              58,
+              34,
+              80,
+              45,
+              50,
+              56,
+              34,
+              125
+            ],
+            "generated_token_count": 20,
+            "stopped_on_eos": true,
+            "state": {
+              "position": 4116,
+              "qsa_lengths": [
+                [
+                  3,
+                  4116
+                ],
+                [
+                  7,
+                  4116
+                ],
+                [
+                  11,
+                  4116
+                ],
+                [
+                  15,
+                  4116
+                ],
+                [
+                  19,
+                  4116
+                ],
+                [
+                  23,
+                  4116
+                ],
+                [
+                  27,
+                  4116
+                ],
+                [
+                  31,
+                  4116
+                ],
+                [
+                  35,
+                  4116
+                ],
+                [
+                  39,
+                  4116
+                ],
+                [
+                  43,
+                  4116
+                ],
+                [
+                  47,
+                  4116
+                ]
+              ],
+              "ple_prior_tokens": [
+                23,
+                8934
+              ]
+            }
+          },
+          "verdict": "PASS"
+        },
+        {
+          "id": "v2_after",
+          "expected": {
+            "record": "W-57",
+            "code": "jade-harbor-2856"
+          },
+          "A": {
+            "parsed": true,
+            "correct": true,
+            "answer": {
+              "code": "jade-harbor-2856",
+              "record": "W-57"
+            },
+            "generated_text": "{\"code\":\"jade-harbor-2856\",\"record\":\"W-57\"}",
+            "generated_bytes": [
+              123,
+              34,
+              99,
+              111,
+              100,
+              101,
+              34,
+              58,
+              34,
+              106,
+              97,
+              100,
+              101,
+              45,
+              104,
+              97,
+              114,
+              98,
+              111,
+              114,
+              45,
+              50,
+              56,
+              53,
+              54,
+              34,
+              44,
+              34,
+              114,
+              101,
+              99,
+              111,
+              114,
+              100,
+              34,
+              58,
+              34,
+              87,
+              45,
+              53,
+              55,
+              34,
+              125
+            ],
+            "generated_token_count": 20,
+            "stopped_on_eos": true,
+            "state": {
+              "position": 4116,
+              "qsa_lengths": [
+                [
+                  3,
+                  4116
+                ],
+                [
+                  7,
+                  4116
+                ],
+                [
+                  11,
+                  4116
+                ],
+                [
+                  15,
+                  4116
+                ],
+                [
+                  19,
+                  4116
+                ],
+                [
+                  23,
+                  4116
+                ],
+                [
+                  27,
+                  4116
+                ],
+                [
+                  31,
+                  4116
+                ],
+                [
+                  35,
+                  4116
+                ],
+                [
+                  39,
+                  4116
+                ],
+                [
+                  43,
+                  4116
+                ],
+                [
+                  47,
+                  4116
+                ]
+              ],
+              "ple_prior_tokens": [
+                22,
+                8934
+              ]
+            }
+          },
+          "B": {
+            "parsed": true,
+            "correct": true,
+            "answer": {
+              "code": "jade-harbor-2856",
+              "record": "W-57"
+            },
+            "generated_text": "{\"code\":\"jade-harbor-2856\",\"record\":\"W-57\"}",
+            "generated_bytes": [
+              123,
+              34,
+              99,
+              111,
+              100,
+              101,
+              34,
+              58,
+              34,
+              106,
+              97,
+              100,
+              101,
+              45,
+              104,
+              97,
+              114,
+              98,
+              111,
+              114,
+              45,
+              50,
+              56,
+              53,
+              54,
+              34,
+              44,
+              34,
+              114,
+              101,
+              99,
+              111,
+              114,
+              100,
+              34,
+              58,
+              34,
+              87,
+              45,
+              53,
+              55,
+              34,
+              125
+            ],
+            "generated_token_count": 20,
+            "stopped_on_eos": true,
+            "state": {
+              "position": 4116,
+              "qsa_lengths": [
+                [
+                  3,
+                  4116
+                ],
+                [
+                  7,
+                  4116
+                ],
+                [
+                  11,
+                  4116
+                ],
+                [
+                  15,
+                  4116
+                ],
+                [
+                  19,
+                  4116
+                ],
+                [
+                  23,
+                  4116
+                ],
+                [
+                  27,
+                  4116
+                ],
+                [
+                  31,
+                  4116
+                ],
+                [
+                  35,
+                  4116
+                ],
+                [
+                  39,
+                  4116
+                ],
+                [
+                  43,
+                  4116
+                ],
+                [
+                  47,
+                  4116
+                ]
+              ],
+              "ple_prior_tokens": [
+                22,
+                8934
+              ]
+            }
+          },
+          "verdict": "PASS"
+        }
+      ],
+      "scope": "two fresh raw-JSON retrieval cases; format-motivated follow-up, not independent replication"
+    }
+  ]
+}

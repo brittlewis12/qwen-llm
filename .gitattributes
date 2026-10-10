@@ -1,1 +1,5 @@
 crates/qwen-llm/tests/fixtures/*.patch -whitespace
+# Frozen rendered prompts retain the template's trailing blank line.
+docs/bench/2026-10-09-flash-frontier-quality/retrieval_*.txt whitespace=-blank-at-eof
+docs/bench/2026-10-09-flash-frontier-quality/archive/preacquisition-v1/retrieval_*.txt whitespace=-blank-at-eof
+docs/bench/2026-10-09-flash-frontier-retrieval-v2/v2_*.txt whitespace=-blank-at-eof

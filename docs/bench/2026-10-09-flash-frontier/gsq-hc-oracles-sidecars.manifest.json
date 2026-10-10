@@ -1,0 +1,96 @@
+{
+  "format": "deterministic USTAR + XZ/LZMA2 preset6, dictionary32MiB; identical bytes use tar hardlinks",
+  "packets": [
+    {
+      "path": "gsq-hc-production.jsonl",
+      "sha256": "7453a76f0af80e244eafc76c3c7b46607cc8e8ea266fe5f5620cb9b671db52a9"
+    },
+    {
+      "path": "gsq-hc-f32downup.jsonl",
+      "sha256": "3dd37b8ec21d45f742760228d310a7f9bb29fc2fd6ea395ce4161070c7904caa"
+    }
+  ],
+  "originals_deleted": false,
+  "original_members": [
+    {
+      "path": "gsq-hc-f32downup.jsonl.A.f32le",
+      "bytes": 14250496,
+      "sha256": "1b8459106c945f9cd4fae1da83a7f0821c6f5b6962f57013bf8bbbb6116547c1"
+    },
+    {
+      "path": "gsq-hc-f32downup.jsonl.A.hc.f32le",
+      "bytes": 1003520,
+      "sha256": "13237db2a2640f5c5a9dfa6b22c8f1625d2657fd6ff3a3ca061ec3b738bd8ce3"
+    },
+    {
+      "path": "gsq-hc-f32downup.jsonl.A.hc.oracle.f64le",
+      "bytes": 1351680,
+      "sha256": "8f593de69e07991cec33a6ccabd5eb0d25ca2842a78b66985bf4d42e30c7211d"
+    },
+    {
+      "path": "gsq-hc-f32downup.jsonl.B.f32le",
+      "bytes": 14250496,
+      "sha256": "1b8459106c945f9cd4fae1da83a7f0821c6f5b6962f57013bf8bbbb6116547c1",
+      "hardlink_to": "gsq-hc-f32downup.jsonl.A.f32le"
+    },
+    {
+      "path": "gsq-hc-f32downup.jsonl.B.hc.f32le",
+      "bytes": 1003520,
+      "sha256": "13237db2a2640f5c5a9dfa6b22c8f1625d2657fd6ff3a3ca061ec3b738bd8ce3",
+      "hardlink_to": "gsq-hc-f32downup.jsonl.A.hc.f32le"
+    },
+    {
+      "path": "gsq-hc-f32downup.jsonl.B.hc.oracle.f64le",
+      "bytes": 1351680,
+      "sha256": "8f593de69e07991cec33a6ccabd5eb0d25ca2842a78b66985bf4d42e30c7211d",
+      "hardlink_to": "gsq-hc-f32downup.jsonl.A.hc.oracle.f64le"
+    },
+    {
+      "path": "gsq-hc-f32downup.jsonl.hc.weights.bin",
+      "bytes": 13148160,
+      "sha256": "4ef0e8f82276e3899153de27997b93ce4230e9c65b29ab71855daf5f73fcb4e8"
+    },
+    {
+      "path": "gsq-hc-production.jsonl.A.f32le",
+      "bytes": 14250496,
+      "sha256": "f0c9ed5c60236f2ac5ccc15d9e42a505b85bec38ff06fdd6d80b68220a379266"
+    },
+    {
+      "path": "gsq-hc-production.jsonl.A.hc.f32le",
+      "bytes": 1003520,
+      "sha256": "e6b5c8b111fd50fbb25a0431bd66618dd67613c08d86c5310424fb20b34b0865"
+    },
+    {
+      "path": "gsq-hc-production.jsonl.A.hc.oracle.f64le",
+      "bytes": 1351680,
+      "sha256": "be5be69732b7df3dc4f4bb4f77a14d0bbc8e63d2d7ac0f9c3452eb82b5b6d5ae"
+    },
+    {
+      "path": "gsq-hc-production.jsonl.B.f32le",
+      "bytes": 14250496,
+      "sha256": "9496952d7fb564b7c7180b15da9dbf29bccb25be57082adc6c2f2183f8134664"
+    },
+    {
+      "path": "gsq-hc-production.jsonl.B.hc.f32le",
+      "bytes": 1003520,
+      "sha256": "192add8af019b156c8c54111ce5fe2532e53604a4a5301782310b57e15ebfc39"
+    },
+    {
+      "path": "gsq-hc-production.jsonl.B.hc.oracle.f64le",
+      "bytes": 1351680,
+      "sha256": "f3f131cce557d4fe99ed247721d3992fe9ccb414bfdcb19d4f7f706e90d9dc37"
+    },
+    {
+      "path": "gsq-hc-production.jsonl.hc.weights.bin",
+      "bytes": 13148160,
+      "sha256": "4ef0e8f82276e3899153de27997b93ce4230e9c65b29ab71855daf5f73fcb4e8",
+      "hardlink_to": "gsq-hc-f32downup.jsonl.hc.weights.bin"
+    }
+  ],
+  "archive": "gsq-hc-oracles-sidecars.tar.xz",
+  "bytes": 33354224,
+  "sha256": "b2f677bb49e331a9cf4a1db674b005fb820099fe17afbd3c73a80952b20bc645",
+  "original_bytes": 92719104,
+  "unique_payload_bytes": 62965248,
+  "all_original_members_roundtrip_verified": true
+}

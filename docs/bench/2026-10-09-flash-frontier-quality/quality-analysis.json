@@ -1,0 +1,232 @@
+{
+  "schema": "flash.frontier_quality.analysis.v1",
+  "artifact_pooling": false,
+  "results": [
+    {
+      "artifact": "gsq",
+      "file": "docs/bench/2026-10-09-flash-frontier-quality/gsq-quality.jsonl",
+      "file_sha256": "717848cd7d8d1e9c6e007e248c3e86a203eeeaa90d3abd51da24d877071ba334",
+      "fixture_sha256": "d592ccda9273cdc03b26bca284e8bb48e4aa8db404a3b140c2a51b37f009e73e",
+      "documents": [
+        {
+          "id": "bash",
+          "nll_A": 0.22665273347615056,
+          "nll_B": 0.22915591425588325,
+          "delta_B_minus_A": 0.002503180779732689,
+          "accuracy_A": 0.984375,
+          "accuracy_B": 0.984375
+        },
+        {
+          "id": "csh",
+          "nll_A": 0.7705229011825586,
+          "nll_B": 0.760241299591838,
+          "delta_B_minus_A": -0.010281601590720668,
+          "accuracy_A": 0.8125,
+          "accuracy_B": 0.8125
+        },
+        {
+          "id": "curl",
+          "nll_A": 0.0017313324970935826,
+          "nll_B": 0.0017149994029370954,
+          "delta_B_minus_A": -1.633309415648718e-05,
+          "accuracy_A": 1.0,
+          "accuracy_B": 1.0
+        },
+        {
+          "id": "find",
+          "nll_A": 0.02069501706203238,
+          "nll_B": 0.018713997214572467,
+          "delta_B_minus_A": -0.001981019847459912,
+          "accuracy_A": 1.0,
+          "accuracy_B": 1.0
+        },
+        {
+          "id": "launchctl",
+          "nll_A": 1.1032904031622335,
+          "nll_B": 1.0927048594365392,
+          "delta_B_minus_A": -0.010585543725694313,
+          "accuracy_A": 0.6875,
+          "accuracy_B": 0.6875
+        },
+        {
+          "id": "security",
+          "nll_A": 0.0037693535222527376,
+          "nll_B": 0.003584858754286481,
+          "delta_B_minus_A": -0.00018449476796625645,
+          "accuracy_A": 1.0,
+          "accuracy_B": 1.0
+        },
+        {
+          "id": "tar",
+          "nll_A": 0.07608947418782991,
+          "nll_B": 0.07759243373582274,
+          "delta_B_minus_A": 0.0015029595479928298,
+          "accuracy_A": 0.984375,
+          "accuracy_B": 0.984375
+        },
+        {
+          "id": "tcpdump",
+          "nll_A": 0.9721219174385528,
+          "nll_B": 0.9718810734701243,
+          "delta_B_minus_A": -0.00024084396842849465,
+          "accuracy_A": 0.828125,
+          "accuracy_B": 0.828125
+        }
+      ],
+      "pooled_delta_nll": -0.002410462083337577,
+      "limit": 0.009950330853168092,
+      "paired_document_bootstrap_central95": [
+        -0.0059520297237727615,
+        0.0006294569687010582
+      ],
+      "resamples": 20000,
+      "seed": 20261009,
+      "uncertainty_gate": false,
+      "document_resampling_units": 8,
+      "accuracy_A": 0.912109375,
+      "accuracy_B": 0.912109375,
+      "retrieval": [
+        {
+          "id": "retrieval_before",
+          "A": {
+            "parsed": false,
+            "correct": false
+          },
+          "B": {
+            "parsed": false,
+            "correct": false
+          },
+          "verdict": "INCONCLUSIVE_INVALID_FIXTURE"
+        },
+        {
+          "id": "retrieval_after",
+          "A": {
+            "parsed": false,
+            "correct": false
+          },
+          "B": {
+            "parsed": false,
+            "correct": false
+          },
+          "verdict": "INCONCLUSIVE_INVALID_FIXTURE"
+        }
+      ],
+      "verdict": "INCONCLUSIVE",
+      "automatic_promotion": false,
+      "claim": "passes/fails this frozen technical-text and controlled no-thinking retrieval screen; not broad chat quality or statistical non-inferiority"
+    },
+    {
+      "artifact": "ud",
+      "file": "docs/bench/2026-10-09-flash-frontier-quality/ud-quality.jsonl",
+      "file_sha256": "30f5857a89b722c69131e950ba10db6bf56575bc14e3aa79d5997e2671c95dbf",
+      "fixture_sha256": "d592ccda9273cdc03b26bca284e8bb48e4aa8db404a3b140c2a51b37f009e73e",
+      "documents": [
+        {
+          "id": "bash",
+          "nll_A": 0.13049768172612905,
+          "nll_B": 0.13049768172612905,
+          "delta_B_minus_A": 0.0,
+          "accuracy_A": 0.953125,
+          "accuracy_B": 0.953125
+        },
+        {
+          "id": "csh",
+          "nll_A": 0.7462031432371469,
+          "nll_B": 0.7462031432371469,
+          "delta_B_minus_A": 0.0,
+          "accuracy_A": 0.84375,
+          "accuracy_B": 0.84375
+        },
+        {
+          "id": "curl",
+          "nll_A": 0.003217363525781414,
+          "nll_B": 0.003217363525781414,
+          "delta_B_minus_A": 0.0,
+          "accuracy_A": 1.0,
+          "accuracy_B": 1.0
+        },
+        {
+          "id": "find",
+          "nll_A": 0.05572755492722089,
+          "nll_B": 0.05572755492722089,
+          "delta_B_minus_A": 0.0,
+          "accuracy_A": 0.96875,
+          "accuracy_B": 0.96875
+        },
+        {
+          "id": "launchctl",
+          "nll_A": 1.0443509779067681,
+          "nll_B": 1.0443509779067681,
+          "delta_B_minus_A": 0.0,
+          "accuracy_A": 0.703125,
+          "accuracy_B": 0.703125
+        },
+        {
+          "id": "security",
+          "nll_A": 0.0034040958899571937,
+          "nll_B": 0.0034040958899571937,
+          "delta_B_minus_A": 0.0,
+          "accuracy_A": 1.0,
+          "accuracy_B": 1.0
+        },
+        {
+          "id": "tar",
+          "nll_A": 0.07966385299362015,
+          "nll_B": 0.07966385299362015,
+          "delta_B_minus_A": 0.0,
+          "accuracy_A": 0.96875,
+          "accuracy_B": 0.96875
+        },
+        {
+          "id": "tcpdump",
+          "nll_A": 0.9305870165398819,
+          "nll_B": 0.9305870165398819,
+          "delta_B_minus_A": 0.0,
+          "accuracy_A": 0.828125,
+          "accuracy_B": 0.828125
+        }
+      ],
+      "pooled_delta_nll": 0.0,
+      "limit": 0.009950330853168092,
+      "paired_document_bootstrap_central95": [
+        0.0,
+        0.0
+      ],
+      "resamples": 20000,
+      "seed": 20261009,
+      "uncertainty_gate": false,
+      "document_resampling_units": 8,
+      "accuracy_A": 0.908203125,
+      "accuracy_B": 0.908203125,
+      "retrieval": [
+        {
+          "id": "retrieval_before",
+          "A": {
+            "parsed": true,
+            "correct": true
+          },
+          "B": {
+            "parsed": true,
+            "correct": true
+          },
+          "verdict": "PASS"
+        },
+        {
+          "id": "retrieval_after",
+          "A": {
+            "parsed": true,
+            "correct": true
+          },
+          "B": {
+            "parsed": true,
+            "correct": true
+          },
+          "verdict": "PASS"
+        }
+      ],
+      "verdict": "PASS",
+      "automatic_promotion": false,
+      "claim": "passes/fails this frozen technical-text and controlled no-thinking retrieval screen; not broad chat quality or statistical non-inferiority"
+    }
+  ]
+}

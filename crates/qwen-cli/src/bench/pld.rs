@@ -383,6 +383,11 @@ pub(crate) fn run_pld(args: PldArgs) -> Result<()> {
         stats.lookup_ms, stats.index_update_ms, stats.serial_ms, stats.verify_ms, stats.restore_ms,
     );
 
+    if trace_events {
+        for event in &events {
+            eprintln!("[pld-event] {}", serde_json::to_string(event)?);
+        }
+    }
     let identical = ref_generated == candidate_generated;
     anyhow::ensure!(identical, "PLD generated tokens differ from serial target");
     let pending_terminal_token = *ref_generated.last().context("PLD emitted no tokens")?;
@@ -395,6 +400,9 @@ pub(crate) fn run_pld(args: PldArgs) -> Result<()> {
         expected_position,
         pending_terminal_token,
     )?;
+    if trace_events {
+        eprintln!("[pld-audit step=0] {audit:?}");
+    }
     for offset in 1..PLD_CONTINUATION_AUDIT_STEPS {
         let next_token = audit.continuation_token;
         let next = audit_mtp_target_state(
@@ -404,6 +412,9 @@ pub(crate) fn run_pld(args: PldArgs) -> Result<()> {
             expected_position + offset,
             next_token,
         )?;
+        if trace_events {
+            eprintln!("[pld-audit step={offset}] {next:?}");
+        }
         merge_target_state_audit(&mut audit, next);
     }
     audit.resume_audit_pass &= audit.gdn_state_max_abs <= 1e-2;

@@ -370,6 +370,10 @@ struct GenerationOverrides {
     #[arg(long)]
     max_context_tokens: Option<usize>,
 
+    /// Experimental Qwen prompt lookup for copying/editing; defaults to greedy. Packed arithmetic may change tokens relative to ordinary decoding.
+    #[arg(long, conflicts_with = "drafter")]
+    prompt_lookup: bool,
+
     /// DFlash drafter GGUF for speculative decode. Sampled DFlash2 proposals
     /// use sparse rejection sampling against the packed target verifier.
     #[arg(long, value_name = "GGUF")]
@@ -438,6 +442,9 @@ impl GenerationOverrides {
         }
         if let Some(value) = self.max_context_tokens {
             args.max_context_tokens = Some(value);
+        }
+        if self.prompt_lookup {
+            args.prompt_lookup = true;
         }
         if let Some(value) = self.drafter.as_ref() {
             args.drafter = Some(value.clone());
@@ -890,6 +897,60 @@ mod tests {
         assert_eq!(overridden.tokens, 512);
         assert_eq!(overridden.temperature, 0.7);
         assert_eq!(overridden.seed, 7);
+    }
+
+    #[test]
+    fn run_prompt_lookup_reaches_existing_policy_without_overriding_sampling() {
+        for input in ["--user", "--raw-prompt", "--messages"] {
+            let (args, _) = parse(&[
+                "qwen",
+                "run",
+                "-m",
+                "model.gguf",
+                input,
+                "input",
+                "--prompt-lookup",
+            ]);
+            assert!(args.prompt_lookup);
+        }
+        let (args, _) = parse(&[
+            "qwen",
+            "run",
+            "-m",
+            "model.gguf",
+            "--user",
+            "hi",
+            "--prompt-lookup",
+            "--temp",
+            "0.7",
+        ]);
+        assert_eq!(args.temperature, 0.7);
+        assert!(
+            crate::validate_sampling_decode_policy(
+                crate::cli_sampling_config(&args).unwrap(),
+                args.prompt_lookup,
+            )
+            .is_err()
+        );
+        assert!(
+            Args::try_parse_from([
+                "qwen",
+                "run",
+                "-m",
+                "model.gguf",
+                "--user",
+                "hi",
+                "--prompt-lookup",
+                "--drafter",
+                "draft.gguf",
+            ])
+            .is_err()
+        );
+        assert!(
+            !parse(&["qwen", "run", "-m", "model.gguf", "--user", "hi"])
+                .0
+                .prompt_lookup
+        );
     }
 
     #[test]

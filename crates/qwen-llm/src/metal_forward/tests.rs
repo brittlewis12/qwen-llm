@@ -12,6 +12,8 @@ mod iq2_xs_mma_model;
 mod iq_capacity;
 #[path = "tests/iq_capacity_model.rs"]
 mod iq_capacity_model;
+#[path = "tests/scalar_capture.rs"]
+mod scalar_capture;
 
 fn metal_test_context() -> Option<MetalContext> {
     crate::test_fixtures::metal_context_or_skip()

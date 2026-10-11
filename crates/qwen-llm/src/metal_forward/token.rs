@@ -958,20 +958,7 @@ impl<'a> MetalForward<'a> {
         Ok(())
     }
 
-    /// Same as [`single_token`] but ALSO copies the hidden state for the MTP
-    /// carry into `hidden_dst`. By default this is the pre-output_norm residual;
-    /// `post_norm_hidden` instead captures the final RMSNorm output.
-    ///
-    /// `hidden_dst` must be a zero-copy F32 tensor of shape `[H]`. It's
-    /// kept GPU-resident so the next MTP draft call can consume it
-    /// without a CPU readback. The copy happens inside the same command
-    /// buffer as the forward, so `hidden_dst` is up-to-date by the time
-    /// this call returns (which commits + waits).
-    ///
-    /// Caller must ensure `hidden_dst` is not aliased with any tensor
-    /// the next forward call writes (typically allocate it as part of
-    /// the MTP session arena).
-    /// Multi-layer hidden-state capture variant of [`single_token`].
+    /// Multi-layer hidden-state capture for ordinary dense and MoE models.
     /// Captures the residual stream `s.x` (post-FFN, post-residual) at
     /// each layer index in `target_layer_ids`, writing into the
     /// caller-supplied `hidden_dst` of shape `[K · H]` where
@@ -983,8 +970,9 @@ impl<'a> MetalForward<'a> {
     ///
     /// All scatters happen inside the same command buffer as the
     /// forward, so `hidden_dst` is up-to-date by the time this returns.
-    /// `target_layer_ids` may be empty (degenerate case: produces no
-    /// hidden capture; equivalent to `single_token`).
+    /// `target_layer_ids` may be empty. This uses the serial block encoders,
+    /// so it need not be bit-identical to concurrent decode dispatch. The F32
+    /// destination must not alias mutable session storage.
     ///
     /// Used by H5 to bootstrap `target_ctx` from prompt prefill: per
     /// docs/H5-DFLASH.md §1.1, the DFlash drafter consumes K=5 target
@@ -999,16 +987,13 @@ impl<'a> MetalForward<'a> {
         target_layer_ids: &[u32],
         hidden_dst: &MetalTensor,
     ) -> Result<Vec<f32>, MfError> {
-        self.single_token_with_hidden_sites(
+        self.single_token_with_post_block_interventions(
             token_id,
             position,
             session,
             target_layer_ids,
-            Some(hidden_dst),
-            None,
+            hidden_dst,
             &[],
-            false,
-            true,
         )
     }
 
@@ -1811,104 +1796,14 @@ impl<'a> MetalForward<'a> {
         target_layer_ids: &[u32],
         hidden_dst: &MetalTensor,
     ) -> Result<(), MfError> {
-        session.ensure_usable()?;
-        if self.model.arch.kind == ArchKind::Moe {
-            return Err(MfError::UnsupportedMoe);
-        }
-        let arch = &self.model.arch;
-        if token_id < 0 || (token_id as u32) >= arch.vocab_size {
-            return Err(MfError::BadToken(token_id, arch.vocab_size));
-        }
-        let h = arch.hidden_size as usize;
-        let k = target_layer_ids.len();
-        if hidden_dst.n_elements() as usize != k * h {
-            return Err(MfError::Metal(MetalError::BadShape {
-                kernel: "single_token_with_multi_hidden_no_tail.hidden_dst",
-                detail: format!(
-                    "expected {} elements (K={k} layers × H={h}), got {}",
-                    k * h,
-                    hidden_dst.n_elements()
-                ),
-            }));
-        }
-        for &lid in target_layer_ids {
-            if (lid as usize) >= self.model.blocks.len() {
-                return Err(MfError::Metal(MetalError::BadShape {
-                    kernel: "single_token_with_multi_hidden_no_tail.target_layer_ids",
-                    detail: format!("layer id {lid} >= n_layer {}", self.model.blocks.len()),
-                }));
-            }
-        }
-
-        unsafe {
-            let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
-            *ptr = token_id;
-        }
-
-        let cmd_buf = self
-            .ctx
-            .queue
-            .commandBuffer()
-            .ok_or_else(|| MfError::CommandBuffer {
-                status: "unavailable".into(),
-                error: "Metal did not provide a command buffer".into(),
-            })?;
-        let enc = KernelEncoder::begin(&cmd_buf);
-
-        encode_get_rows_f32(
-            self.ctx,
-            &enc,
-            &self.model.token_embd,
-            &session.ids_buf,
-            &session.x,
-            1,
-            h,
-        )?;
-
-        let mut gdn_idx = 0usize;
-        let mut attn_idx = 0usize;
-        for (il, block) in self.model.blocks.iter().enumerate() {
-            self.encode_block(
-                &enc,
-                il,
-                block,
-                &mut gdn_idx,
-                &mut attn_idx,
-                position,
-                session,
-            )?;
-            // Capture post-residual-#2 hidden at any matching layer
-            // (matches v0.74.4 capture-point semantics). Runs inside
-            // the same command buffer, before the next block writes
-            // session.x.
-            for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
-                if lid as usize == il {
-                    encode_scatter_offset_f32(
-                        self.ctx,
-                        &enc,
-                        &session.x,
-                        hidden_dst,
-                        k_idx * h,
-                        h,
-                    )?;
-                }
-            }
-        }
-
-        // SKIP final RMSNorm + lm_head + readback.
-        enc.end();
-        cmd_buf.commit();
-        crate::metal::wait_unchecked(&cmd_buf);
-        let status = cmd_buf.status();
-        let error = cmd_buf.error();
-        if status != MTLCommandBufferStatus::Completed || error.is_some() {
-            session.poison("multi-hidden no-tail forward command failed");
-            return Err(MfError::CommandBuffer {
-                status: format!("{status:?}"),
-                error: format!("{error:?}"),
-            });
-        }
-        Ok(())
+        self.single_token_with_post_block_interventions_no_tail(
+            token_id,
+            position,
+            session,
+            target_layer_ids,
+            hidden_dst,
+            &[],
+        )
     }
 
     pub fn single_token_with_hidden(

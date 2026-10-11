@@ -209,16 +209,69 @@ DOC_ITEM = re.compile(
 
 def strip_block_comments(source: str) -> str:
     """Remove (nested) /* */ comments; doc lines inside them are not docs."""
-    out, depth, i = [], 0, 0
+    out, i = [], 0
     while i < len(source):
-        pair = source[i : i + 2]
-        if pair == "/*":
-            depth, i = depth + 1, i + 2
-        elif pair == "*/" and depth:
-            depth, i = depth - 1, i + 2
-        else:
-            if not depth:
+        raw_start = i + 1 if source.startswith("b", i) else i
+        if source.startswith("//", i):
+            end = source.find("\n", i)
+            end = len(source) if end < 0 else end
+            out.append(source[i:end])
+            i = end
+        elif source.startswith("/*", i):
+            depth, start = 1, i
+            i += 2
+            while i < len(source) and depth:
+                if source.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif source.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+            comment = source[start:i]
+            out.append("".join("\n" if char == "\n" else " " for char in comment))
+        elif raw_start < len(source) and source[raw_start] == "r":
+            quote = raw_start + 1
+            while quote < len(source) and source[quote] == "#":
+                quote += 1
+            if quote < len(source) and source[quote] == '"':
+                hashes = quote - raw_start - 1
+                terminator = '"' + "#" * hashes
+                end = source.find(terminator, quote + 1)
+                end = len(source) if end < 0 else end + len(terminator)
+                out.append(source[i:end])
+                i = end
+            else:
                 out.append(source[i])
+                i += 1
+        elif source[i] == '"' or (source[i] == "b" and source.startswith('"', i + 1)):
+            start = i
+            if source[i] == "b":
+                i += 1
+            i += 1
+            while i < len(source):
+                if source[i] == "\\":
+                    i = min(i + 2, len(source))
+                elif source[i] == '"':
+                    i += 1
+                    break
+                else:
+                    i += 1
+            out.append(source[start:i])
+        elif source[i] == "'":
+            start = i
+            end = i + 1
+            if end < len(source) and source[end] == "\\":
+                end += 2
+            else:
+                end += 1
+            if end < len(source) and source[end] == "'":
+                out.append(source[start : end + 1])
+                i = end + 1
+            else:
+                out.append(source[i])
+                i += 1
+        else:
+            out.append(source[i])
             i += 1
     return "".join(out)
 
@@ -356,6 +409,16 @@ def self_test() -> None:
     assert const_docs(
         '/*\n/// bogus\n*/ const NAME: &str = "QWEN_EDGE";'
     ) == []
+    assert const_docs(
+        'const PREFIX: &str = "/*";\n'
+        '/// Legitimate purpose after a string opener.\n'
+        'const NAME: &str = "QWEN_SELF_TEST";'
+    ) == ["Legitimate purpose after a string opener."]
+    assert const_docs(
+        '// opener /*\n'
+        '/// Legitimate purpose after a line-comment opener.\n'
+        'const NAME: &str = "QWEN_SELF_TEST";'
+    ) == ["Legitimate purpose after a line-comment opener."]
     assert const_docs(
         '/// Detached documentation.\n\nconst NAME: &str = "QWEN_SELF_TEST";'
     ) == ["Detached documentation."]

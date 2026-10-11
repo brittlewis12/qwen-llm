@@ -1509,6 +1509,24 @@ pub fn encode_attn_decode_v4_reduce_only_f32(
     Ok(())
 }
 
+// Shared with attn_v4_prefill_args in kernels/attn_v4.metal, including the
+// precision selector even for entry points that always stage Q in F16.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct AttnV4PrefillArgs {
+    n_rows: u32,
+    n_q_heads: u32,
+    n_kv_heads: u32,
+    head_dim: u32,
+    n_pos: u32,
+    kv_stride: u32,
+    n_partitions: u32,
+    rows_per_partition: u32,
+    base_pos: u32,
+    q_f32: u32,
+    scale: f32,
+}
+
 /// Packed two-query attention for dense Qwen's 24Q/4KV group-6 shape.
 /// Both causal rows share each K/V load while retaining independent online
 /// softmax state and outputs.
@@ -1681,26 +1699,11 @@ pub fn encode_attn_prefill_v4_g6_q2_c32_f32(
         detail: format!("base_pos={base_pos} does not fit u32"),
     })?;
     let scale = (1.0f32 / (HEAD_DIM as f32).sqrt()) * std::f32::consts::LOG2_E;
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct MainArgs {
-        n_rows: u32,
-        n_q_heads: u32,
-        n_kv_heads: u32,
-        head_dim: u32,
-        n_pos: u32,
-        kv_stride: u32,
-        n_partitions: u32,
-        rows_per_partition: u32,
-        base_pos: u32,
-        q_f32: u32,
-        scale: f32,
-    }
     let main = ctx.pipeline("kernel_attn_prefill_v4_g6_q2_c32_f32")?;
     enc.set_pipeline(&main);
     enc.set_bytes(
         0,
-        &MainArgs {
+        &AttnV4PrefillArgs {
             n_rows: n_rows_u32,
             n_q_heads: N_Q_HEADS as u32,
             n_kv_heads: N_KV_HEADS as u32,
@@ -1844,25 +1847,11 @@ pub fn encode_attn_prefill_v4_g8_t2_q2_c64_main_only_f32(
     let kv_stride = N_KV_HEADS * HEAD_DIM;
     let scale = (1.0f32 / (HEAD_DIM as f32).sqrt()) * std::f32::consts::LOG2_E;
 
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct MainArgs {
-        n_rows: u32,
-        n_q_heads: u32,
-        n_kv_heads: u32,
-        head_dim: u32,
-        n_pos: u32,
-        kv_stride: u32,
-        n_partitions: u32,
-        rows_per_partition: u32,
-        base_pos: u32,
-        scale: f32,
-    }
     let pso_main = ctx.pipeline("kernel_attn_prefill_v4_g8_t2_q2_c64_f32")?;
     enc.set_pipeline(&pso_main);
     enc.set_bytes(
         0,
-        &MainArgs {
+        &AttnV4PrefillArgs {
             n_rows: n_rows as u32,
             n_q_heads: N_Q_HEADS as u32,
             n_kv_heads: N_KV_HEADS as u32,
@@ -1872,6 +1861,7 @@ pub fn encode_attn_prefill_v4_g8_t2_q2_c64_main_only_f32(
             n_partitions: nwg as u32,
             rows_per_partition: rows_per_partition as u32,
             base_pos: base_pos as u32,
+            q_f32: 0,
             scale,
         },
     );
@@ -2073,25 +2063,11 @@ pub fn encode_attn_prefill_v4_g8_t2_q4_c64_main_only_f32(
     let kv_stride = N_KV_HEADS * HEAD_DIM;
     let scale = (1.0f32 / (HEAD_DIM as f32).sqrt()) * std::f32::consts::LOG2_E;
 
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct MainArgs {
-        n_rows: u32,
-        n_q_heads: u32,
-        n_kv_heads: u32,
-        head_dim: u32,
-        n_pos: u32,
-        kv_stride: u32,
-        n_partitions: u32,
-        rows_per_partition: u32,
-        base_pos: u32,
-        scale: f32,
-    }
     let pso_main = ctx.pipeline("kernel_attn_prefill_v4_g8_t2_q4_c64_f32")?;
     enc.set_pipeline(&pso_main);
     enc.set_bytes(
         0,
-        &MainArgs {
+        &AttnV4PrefillArgs {
             n_rows: n_rows as u32,
             n_q_heads: N_Q_HEADS as u32,
             n_kv_heads: N_KV_HEADS as u32,
@@ -2101,6 +2077,7 @@ pub fn encode_attn_prefill_v4_g8_t2_q4_c64_main_only_f32(
             n_partitions: nwg as u32,
             rows_per_partition: rows_per_partition as u32,
             base_pos: base_pos as u32,
+            q_f32: 0,
             scale,
         },
     );
@@ -2215,25 +2192,11 @@ pub fn encode_attn_prefill_v4_g16_t4_q2_c64_main_only_f32(
     let kv_stride = N_KV_HEADS * HEAD_DIM;
     let scale = (1.0f32 / (HEAD_DIM as f32).sqrt()) * std::f32::consts::LOG2_E;
 
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct MainArgs {
-        n_rows: u32,
-        n_q_heads: u32,
-        n_kv_heads: u32,
-        head_dim: u32,
-        n_pos: u32,
-        kv_stride: u32,
-        n_partitions: u32,
-        rows_per_partition: u32,
-        base_pos: u32,
-        scale: f32,
-    }
     let pso_main = ctx.pipeline("kernel_attn_prefill_v4_g16_t4_q2_c64_f32")?;
     enc.set_pipeline(&pso_main);
     enc.set_bytes(
         0,
-        &MainArgs {
+        &AttnV4PrefillArgs {
             n_rows: n_rows as u32,
             n_q_heads: N_Q_HEADS as u32,
             n_kv_heads: N_KV_HEADS as u32,
@@ -2243,6 +2206,7 @@ pub fn encode_attn_prefill_v4_g16_t4_q2_c64_main_only_f32(
             n_partitions: nwg as u32,
             rows_per_partition: rows_per_partition as u32,
             base_pos: base_pos as u32,
+            q_f32: 0,
             scale,
         },
     );
@@ -2439,25 +2403,11 @@ pub fn encode_attn_prefill_v4_g16_t4_q4_c64_main_only_f32(
     let kv_stride = N_KV_HEADS * HEAD_DIM;
     let scale = (1.0f32 / (HEAD_DIM as f32).sqrt()) * std::f32::consts::LOG2_E;
 
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct MainArgs {
-        n_rows: u32,
-        n_q_heads: u32,
-        n_kv_heads: u32,
-        head_dim: u32,
-        n_pos: u32,
-        kv_stride: u32,
-        n_partitions: u32,
-        rows_per_partition: u32,
-        base_pos: u32,
-        scale: f32,
-    }
     let pso_main = ctx.pipeline("kernel_attn_prefill_v4_g16_t4_q4_c64_f32")?;
     enc.set_pipeline(&pso_main);
     enc.set_bytes(
         0,
-        &MainArgs {
+        &AttnV4PrefillArgs {
             n_rows: n_rows as u32,
             n_q_heads: N_Q_HEADS as u32,
             n_kv_heads: N_KV_HEADS as u32,
@@ -2467,6 +2417,7 @@ pub fn encode_attn_prefill_v4_g16_t4_q4_c64_main_only_f32(
             n_partitions: nwg as u32,
             rows_per_partition: rows_per_partition as u32,
             base_pos: base_pos as u32,
+            q_f32: 0,
             scale,
         },
     );
@@ -5398,6 +5349,104 @@ mod tests {
                 max_abs < 5e-3,
                 "group8 subgroup max|Δ| too high at n_pos={n_pos}: {max_abs}"
             );
+        }
+    }
+
+    #[test]
+    fn attn_v4_prefill_argument_layout() {
+        assert_eq!(std::mem::size_of::<AttnV4PrefillArgs>(), 44);
+        assert_eq!(std::mem::offset_of!(AttnV4PrefillArgs, q_f32), 36);
+        assert_eq!(std::mem::offset_of!(AttnV4PrefillArgs, scale), 40);
+    }
+
+    #[test]
+    #[ignore = "Metal GPU; run with MTL_DEBUG_LAYER=1"]
+    fn attn_v4_prefill_moe_variants_match_causal_softmax() {
+        let ctx = MetalContext::new().unwrap();
+        let n_rows = 7;
+        let base_pos = 3;
+        let hd = 256;
+        let n_kv = 2;
+        let n_pos = base_pos + n_rows;
+        for group in [8, 16] {
+            let n_q = n_kv * group;
+            let q: Vec<f32> = (0..n_rows * n_q * hd)
+                .map(|i| 1.0 + ((i / hd) % n_q % 3) as f32 * 0.125)
+                .collect();
+            let k: Vec<u16> = (0..n_pos * n_kv * hd)
+                .map(|i| half::f16::from_f32((i / (n_kv * hd)) as f32 / 32.0).to_bits())
+                .collect();
+            let v: Vec<u16> = (0..n_pos * n_kv * hd)
+                .map(|i| {
+                    let value = i / (n_kv * hd) + (i / hd) % n_kv + i % hd % 3;
+                    half::f16::from_f32(value as f32 * 0.125).to_bits()
+                })
+                .collect();
+            let q = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&q),
+                vec![q.len() as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let k = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&k),
+                vec![k.len() as u64],
+                GgmlType::F16,
+            )
+            .unwrap();
+            let v = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&v),
+                vec![v.len() as u64],
+                GgmlType::F16,
+            )
+            .unwrap();
+            for qt in [2, 4] {
+                for nwg in [1, 4, 16] {
+                    let o = MetalTensor::zeros_f32(&ctx, vec![(n_rows * n_q * nwg * hd) as u64])
+                        .unwrap();
+                    let ml = MetalTensor::zeros_f32(&ctx, vec![(n_rows * n_q * nwg * 2) as u64])
+                        .unwrap();
+                    let out =
+                        MetalTensor::zeros_f32(&ctx, vec![(n_rows * n_q * hd) as u64]).unwrap();
+                    let encode = match (group, qt) {
+                        (8, 2) => encode_attn_prefill_v4_g8_t2_q2_c64_f32,
+                        (8, 4) => encode_attn_prefill_v4_g8_t2_q4_c64_f32,
+                        (16, 2) => encode_attn_prefill_v4_g16_t4_q2_c64_f32,
+                        (16, 4) => encode_attn_prefill_v4_g16_t4_q4_c64_f32,
+                        _ => unreachable!(),
+                    };
+                    one_shot(&ctx, |enc| {
+                        encode(&ctx, enc, &q, &k, &v, &o, &ml, &out, n_rows, base_pos, nwg)
+                    })
+                    .unwrap();
+                    let actual = read_back_f32(&out.buffer, n_rows * n_q * hd);
+                    for row in 0..n_rows {
+                        for head in 0..n_q {
+                            let q = 1.0 + (head % 3) as f64 * 0.125;
+                            let weights: Vec<f64> = (0..=base_pos + row)
+                                .map(|pos| (q * pos as f64 * 0.5).exp())
+                                .collect();
+                            let mean_pos = weights
+                                .iter()
+                                .enumerate()
+                                .map(|(pos, w)| pos as f64 * w)
+                                .sum::<f64>()
+                                / weights.iter().sum::<f64>();
+                            for dim in 0..hd {
+                                let expected = (mean_pos + (head / group + dim % 3) as f64) * 0.125;
+                                let value = actual[(row * n_q + head) * hd + dim] as f64;
+                                assert!(
+                                    (value - expected).abs() < 1e-4,
+                                    "g{group} q{qt} nwg={nwg} row={row} head={head} dim={dim}: {value} != {expected}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

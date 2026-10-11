@@ -1052,6 +1052,29 @@ impl<'w> Glm5NextSession<'w> {
         Self::with_prefill_rows_and_cpu_reserve(ctx, weights, capacity, prefill_rows, 0)
     }
 
+    /// Prices validated session geometry without allocating device buffers.
+    pub fn plan_memory(
+        ctx: &MetalContext,
+        weights: &Glm5NextWeights,
+        capacity: usize,
+        prefill_rows: usize,
+    ) -> Result<Glm5NextMemoryLedger> {
+        if prefill_rows > 0 && !weights.packed_prefill_admitted {
+            return invalid("packed prefill is not admitted for these weights' dtypes");
+        }
+        if capacity == 0 {
+            return invalid("capacity must be positive");
+        }
+        Ok(Glm5NextMemoryLedger::new_with_generic_hc(
+            &weights.config,
+            weights.retained_bytes,
+            capacity as u64,
+            prefill_rows as u64,
+            needs_generic_hc(&weights.blocks, |t| t.dtype),
+            &device_price(ctx),
+        )?)
+    }
+
     /// Like [`Self::with_prefill_rows`], admitting the session buffers
     /// together with caller-owned future CPU storage (serve transport and
     /// control allowances) in one decision, so neither spends headroom the
@@ -1064,22 +1087,9 @@ impl<'w> Glm5NextSession<'w> {
         cpu_reserve_bytes: u64,
     ) -> Result<Self> {
         let c = &weights.config;
-        if prefill_rows > 0 && !weights.packed_prefill_admitted {
-            return invalid("packed prefill is not admitted for these weights' dtypes");
-        }
-        if capacity == 0 {
-            return invalid("capacity must be positive");
-        }
         let sparse_capacity = capacity >= c.sparse_frontier() as usize;
         let generic_hc = needs_generic_hc(&weights.blocks, |t| t.dtype);
-        let ledger = Glm5NextMemoryLedger::new_with_generic_hc(
-            c,
-            weights.retained_bytes,
-            capacity as u64,
-            prefill_rows as u64,
-            generic_hc,
-            &device_price(ctx),
-        )?;
+        let ledger = Self::plan_memory(ctx, weights, capacity, prefill_rows)?;
         let session_bytes = ledger.peak_bytes() - weights.retained_bytes;
         // Admission and the allocations it prices form one transaction.
         let _allocation = ctx.begin_allocation_transaction();

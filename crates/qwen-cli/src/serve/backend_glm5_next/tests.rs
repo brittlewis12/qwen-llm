@@ -32,6 +32,324 @@ fn gguf_path() -> String {
     std::env::var("GLM53_GGUF").expect("GLM53_GGUF (GLM-5.3-Flash shard 1)")
 }
 
+#[test]
+fn snapshot_namespaces_isolate_prefill_rows() {
+    let ns = CacheNamespace {
+        lineage: PackedLineage::Fast,
+        schedule: Schedule::FastSharedSplitV1,
+        rows: 512,
+    };
+    let mut cache = SnapshotCache::new(1024, Default::default());
+    assert!(cache.insert_strict_in(ns, vec![1, 2], "snapshot", 10));
+    assert!(cache.peek_exact_in(&ns, &[1, 2]).is_some());
+    assert!(
+        cache
+            .peek_exact_in(&CacheNamespace { rows: 2048, ..ns }, &[1, 2])
+            .is_none()
+    );
+}
+
+#[test]
+#[ignore = "GLM53_GGUF CPU metadata-only real ledger planning; no Metal context"]
+fn cpu_prefill_plan_generic_hc_and_sparse_ledger() {
+    use qwen_llm::glm5_next::memory::{Glm5NextMemoryLedger, apple_16k_price};
+    use qwen_llm::metal::MetalMemorySignals;
+    let path = gguf_path();
+    let source = GgufFile::open(&path).unwrap();
+    let prepared = Prepared::new(&source, &invocation(&path, Some(4096), Some(1))).unwrap();
+    let ledger = |rows, generic| {
+        Glm5NextMemoryLedger::new_with_generic_hc(
+            prepared.artifact.config(),
+            0,
+            4096,
+            rows as u64,
+            generic,
+            &apple_16k_price,
+        )
+        .unwrap()
+    };
+    let generic = ledger(2048, true);
+    assert!(generic.session_buffer_bytes() > ledger(2048, false).session_buffer_bytes());
+    assert!(
+        generic
+            .terms()
+            .iter()
+            .any(|&(name, bytes)| name == "packed_sparse" && bytes > 0)
+    );
+    let price = prefill_plan::Price::from_ledger(&generic);
+    assert!(
+        price.admission > price.buffers,
+        "dynamic reserve stays in admission"
+    );
+    let signals = MetalMemorySignals {
+        recommended_max_bytes: price.admission - 1,
+        current_allocated_bytes: 0,
+        process_limit_remaining_bytes: Some(0),
+    };
+    let plan = prefill_plan::select(
+        &prefill_plan::candidates(4096, true),
+        signals,
+        0,
+        None,
+        |rows| Ok(prefill_plan::Price::from_ledger(&ledger(rows, true))),
+    )
+    .unwrap();
+    assert!(plan.rows < 2048);
+    assert_eq!(ledger(plan.rows, true).capacity(), 4096);
+}
+
+#[test]
+#[ignore = "GLM53_GGUF adaptive 2048-row serve cold/hit/cancel/continuation; MTL_DEBUG_LAYER=1; requires snapshot headroom"]
+fn gpu_adaptive_prefill_cold_hit_and_continuation() {
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    let path = gguf_path();
+    let source = GgufFile::open(&path).unwrap();
+    let prepared = Prepared::new(&source, &invocation(&path, Some(4096), Some(1))).unwrap();
+    let ctx = MetalContext::new().unwrap();
+    let weights = load(&ctx, &source, &prepared).unwrap();
+    let cache = crate::serve::SnapshotCachePlan::resolve(
+        Some(8192),
+        Default::default(),
+        ctx.memory_signals(),
+    )
+    .unwrap();
+    let mut backend = Glm5NextBackend::new(
+        &ctx,
+        &weights,
+        prepared,
+        "glm".into(),
+        std::time::Duration::ZERO,
+        cache,
+    );
+    backend.prefix_reuse = true;
+    backend.fast_snapshots = true;
+    backend.lineage = PackedLineage::Fast;
+    backend.warm_up().unwrap();
+    assert_eq!(backend.frozen_rows, None);
+    let instructions: String = (0..120)
+        .map(|i| format!("Rule {i}: when asked about topic {i}, answer in one short sentence. "))
+        .collect();
+    let prompt = prepared_request(
+        &backend,
+        json!({
+            "model":"glm", "instructions":instructions,
+            "input":[{"role":"user","content":QUESTION}],
+            "reasoning":{"effort":"low"}, "temperature":0, "max_output_tokens":1
+        }),
+    );
+    let encode = |text: &str| {
+        decode_loop::encode_checked(
+            backend.prepared.artifact.tokenizer(),
+            text,
+            false,
+            backend.prepared.artifact.config().vocab_size,
+            FAMILY,
+        )
+    };
+    let tokens = encode(&prompt.prompt).unwrap();
+    let cuts = cut_positions(
+        encode,
+        &prompt.prompt,
+        &tokens,
+        prompt.boundaries,
+        Schedule::FastSharedSplitV1,
+    );
+    assert_eq!(cuts.len(), 1);
+    let shared = cuts[0];
+    assert!(
+        shared > 2048 && shared < tokens.len(),
+        "fixture must exercise a full 2048-row chunk plus tail: shared={shared}, prompt={}",
+        tokens.len()
+    );
+    assert!(tokens.len() + 32 < backend.prepared.capacity);
+    let prefix_bytes = SnapshotCache::<Glm5NextSnapshot, CacheNamespace>::entry_bytes(
+        shared,
+        snapshot_bytes(&weights.config, shared as u64).unwrap(),
+    )
+    .unwrap();
+    assert!(prefix_bytes <= backend.cache.max_bytes());
+    let scenario = plan_session(
+        &ctx,
+        &weights,
+        &backend.prepared,
+        2048,
+        Sink::default().transport_reserve_bytes(),
+        Some(prefix_bytes),
+    )
+    .unwrap();
+    assert_eq!(
+        scenario.rows, 2048,
+        "this opt-in gate requires 2048-row session plus useful-prefix headroom: {scenario:?}"
+    );
+    assert!(scenario.preserved);
+    let run = |label: &str, backend: &mut Glm5NextBackend<'_, '_>| {
+        let started = Instant::now();
+        let mut sink = Sink::default();
+        let outcome = backend
+            .generate_prepared(prompt.clone(), &mut sink)
+            .unwrap();
+        eprintln!(
+            "adaptive {label}: rows={:?} shared_rows={shared} prompt_rows={} cached_rows={} elapsed_ms={:.1}",
+            backend.frozen_rows,
+            tokens.len(),
+            outcome.usage.cached_tokens,
+            started.elapsed().as_secs_f64() * 1e3
+        );
+        (
+            outcome.usage.cached_tokens,
+            backend.last_prefill_logits.clone(),
+            sink.bytes,
+        )
+    };
+    let cold = run("cold", &mut backend);
+    assert_eq!(cold.0, 0);
+    assert_eq!(
+        backend.frozen_rows,
+        Some(2048),
+        "actual allocation must exercise the admitted 2048-row scenario"
+    );
+    assert_eq!(backend.prepared.capacity, 4096);
+    assert_eq!(
+        backend.session.as_ref().unwrap().ledger().prefill_rows(),
+        2048
+    );
+    let namespace = CacheNamespace {
+        lineage: PackedLineage::Fast,
+        schedule: Schedule::FastSharedSplitV1,
+        rows: 2048,
+    };
+    assert!(
+        backend
+            .cache
+            .peek_exact_in(&namespace, &tokens[..shared])
+            .is_some()
+    );
+    assert!(
+        backend
+            .cache
+            .peek_exact_in(
+                &CacheNamespace {
+                    rows: 512,
+                    ..namespace
+                },
+                &tokens[..shared]
+            )
+            .is_none()
+    );
+    backend.session = None;
+    backend.history.clear();
+    let hit = run("snapshot_hit", &mut backend);
+    assert_eq!(hit.0, shared);
+    assert_eq!(hit.1, cold.1, "hit and miss use the same frozen schedule");
+    assert_eq!(hit.2, cold.2);
+
+    backend.session = None;
+    backend.history.clear();
+    backend.cache = SnapshotCache::new(
+        backend.cache.max_bytes(),
+        backend.snapshot_cache_plan.policy,
+    );
+    // Admission tick, first chunk tick, then cancellation before chunk two.
+    let mut cancelled = Sink {
+        abort_tick: Some(3),
+        ..Sink::default()
+    };
+    let started = Instant::now();
+    assert!(matches!(
+        backend.generate_prepared(prompt.clone(), &mut cancelled),
+        Err(BackendFailure::Aborted(_))
+    ));
+    eprintln!(
+        "adaptive cancelled: rows={:?} committed_rows={} elapsed_ms={:.1}",
+        backend.frozen_rows,
+        backend.history.len(),
+        started.elapsed().as_secs_f64() * 1e3
+    );
+    assert_eq!(backend.frozen_rows, Some(2048));
+    assert_eq!(backend.history, tokens[..2048]);
+    assert_eq!(backend.session.as_ref().unwrap().position(), 2048);
+    assert!(backend.live_canonical);
+    assert_eq!(
+        backend.cache.len(),
+        0,
+        "cancel occurs before the shared cut"
+    );
+    let retry = run("cancel_retry", &mut backend);
+    assert_eq!(retry.0, 2048);
+    assert_eq!(
+        retry.1, cold.1,
+        "chunk-boundary retry keeps the uninterrupted schedule"
+    );
+    assert_eq!(retry.2, cold.2);
+    assert!(
+        backend
+            .cache
+            .peek_exact_in(&namespace, &tokens[..shared])
+            .is_some()
+    );
+
+    // With one output token no sampled token is forwarded. Append a special
+    // token to keep the original generation header's tokenization intact.
+    let continuation = format!("{}<|user|>Continue.", prompt.prompt);
+    let previous = backend.history.len();
+    assert_eq!(backend.history, tokens);
+    let continued_tokens = decode_loop::encode_checked(
+        backend.prepared.artifact.tokenizer(),
+        &continuation,
+        false,
+        backend.prepared.artifact.config().vocab_size,
+        FAMILY,
+    )
+    .unwrap();
+    assert!(continued_tokens.starts_with(&backend.history));
+    assert!((1..=32).contains(&(continued_tokens.len() - previous)));
+    let started = Instant::now();
+    let continued = backend
+        .generate(&prompt.request, &continuation, &mut Sink::default())
+        .unwrap();
+    eprintln!(
+        "adaptive short_suffix: rows={:?} suffix_rows={} cached_rows={} elapsed_ms={:.1}",
+        backend.frozen_rows,
+        continued_tokens.len() - previous,
+        continued.usage.cached_tokens,
+        started.elapsed().as_secs_f64() * 1e3
+    );
+    assert_eq!(continued.usage.cached_tokens, previous);
+    assert_eq!(backend.history, continued_tokens);
+    assert_eq!(backend.frozen_rows, Some(2048));
+
+    // Test-only pinned schedules isolate the throughput tradeoff using the
+    // same resident weights, request, snapshot policy, and transport reserve.
+    // Reverse the order on the second pair; compare identity within a plan,
+    // not between different floating-point execution schedules.
+    for rows in [512, 2048, 2048, 512] {
+        backend.session = None;
+        backend.history.clear();
+        backend.cache = SnapshotCache::new(
+            backend.cache.max_bytes(),
+            backend.snapshot_cache_plan.policy,
+        );
+        backend.frozen_rows = Some(rows);
+        let cold = run("comparison_cold", &mut backend);
+        assert_eq!(cold.0, 0);
+        eprintln!(
+            "adaptive comparison_memory: rows={rows} session_buffer_bytes={}",
+            backend
+                .session
+                .as_ref()
+                .unwrap()
+                .ledger()
+                .session_buffer_bytes()
+        );
+        backend.session = None;
+        backend.history.clear();
+        let hit = run("comparison_hit", &mut backend);
+        assert_eq!(hit.0, shared);
+        assert_eq!(hit.1, cold.1);
+        assert_eq!(hit.2, cold.2);
+    }
+}
+
 /// `QWEN_GLM_FAST_PRECISION`: unset is `half`; each named precision parses
 /// (surrounding space ignored); anything else is a startup error that names
 /// the accepted values.
@@ -207,7 +525,7 @@ fn gpu_live_session_extends_resumes_and_resets() {
     let path = gguf_path();
     let source = GgufFile::open(&path).unwrap();
     let prepared = Prepared::new(&source, &invocation(&path, Some(1024), Some(64))).unwrap();
-    assert_eq!(prepared.prefill_rows, 512);
+    assert_eq!(prepared.prefill_rows, 1024);
     // A CLI test links the production library: this takes the real lease.
     let ctx = MetalContext::new().unwrap();
     let weights = load(&ctx, &source, &prepared).unwrap();
@@ -223,6 +541,7 @@ fn gpu_live_session_extends_resumes_and_resets() {
         std::time::Duration::ZERO,
         no_snapshots,
     );
+    backend.frozen_rows = Some(512);
     eprintln!("warm_up_ms={:.1}", backend.warm_up().unwrap());
     let greedy = |input: Value, effort: &str| {
         json!({"model":"glm","input":input,"reasoning":{"effort":effort},
@@ -735,6 +1054,7 @@ fn pressure_refusals_release_snapshots_once_and_keep_the_hit() {
     let ns = CacheNamespace {
         lineage: PackedLineage::Exact,
         schedule: Schedule::ExactV1,
+        rows: 512,
     };
     let filled = || {
         let mut cache: SnapshotCache<&'static str, CacheNamespace> =
@@ -844,6 +1164,8 @@ fn gpu_snapshots_continue_the_captured_trajectory() {
         std::time::Duration::ZERO,
         plan(8192),
     );
+    // These existing trajectory gates explicitly exercise the 512-row contract.
+    backend.frozen_rows = Some(512);
     backend.warm_up().unwrap();
     // ~1.3K tokens of instructions plus a tool: the shared cut is not a
     // multiple of the 512-row chunk, so a split moves chunk alignment.
@@ -1040,6 +1362,7 @@ fn gpu_snapshots_continue_the_captured_trajectory() {
     let fast_ns = CacheNamespace {
         lineage: PackedLineage::Fast,
         schedule: Schedule::FastSharedSplitV1,
+        rows: 512,
     };
     reset(&mut backend, 8192, true, PackedLineage::Fast);
     let (_, second_miss, second_bytes) = run(&mut backend, &second);
@@ -1136,6 +1459,7 @@ fn gpu_snapshots_continue_the_captured_trajectory() {
     let exact_ns = CacheNamespace {
         lineage: PackedLineage::Exact,
         schedule: Schedule::ExactV1,
+        rows: 512,
     };
     let a_tokens = encode(&a.prompt);
     check(

@@ -36,9 +36,9 @@ use qwen_llm::gguf::GgufFile;
 use qwen_llm::glm5_next::Glm5NextPreparedArtifact;
 use qwen_llm::glm5_next_chat::{CHAT_STOPS, VerifiedChatProfile};
 use qwen_llm::glm5_next_metal::{
-    CapacityAdvice, DEFAULT_PREFILL_ROWS, FastPrecision, Glm5NextMetalError, Glm5NextSession,
-    Glm5NextSnapshot, Glm5NextWeights, PackedLineage, prefetch_retained_with_cancel,
-    preflight_session, snapshot_bytes,
+    CapacityAdvice, FastPrecision, Glm5NextMetalError, Glm5NextSession, Glm5NextSnapshot,
+    Glm5NextWeights, PackedLineage, prefetch_retained_with_cancel, preflight_session,
+    snapshot_bytes,
 };
 use qwen_llm::metal::MetalContext;
 use qwen_llm::model_family::ModelFamily;
@@ -47,6 +47,8 @@ use qwen_llm::snapshot_policy::EntryId;
 use std::io;
 use std::sync::Arc;
 use std::time::Instant;
+
+mod prefill_plan;
 
 /// Default-on rollback lever for live-session and snapshot reuse.
 const PREFIX_REUSE_ENV: &str = "QWEN_GLM_PREFIX_REUSE";
@@ -101,10 +103,11 @@ impl Schedule {
 struct CacheNamespace {
     lineage: PackedLineage,
     schedule: Schedule,
+    rows: usize,
 }
 
 /// CPU startup facts: the admitted artifact, its verified chat profile and
-/// the session geometry fixed for the server's lifetime.
+/// the fixed context capacity and maximum prefill workspace width.
 pub(super) struct Prepared<'g> {
     artifact: Glm5NextPreparedArtifact<'g>,
     pub(super) capacity: usize,
@@ -138,7 +141,7 @@ impl<'g> Prepared<'g> {
             anyhow::anyhow!("{FAMILY} serve renders verified text chat: {error}")
         })?;
         let prefill_rows = if artifact.packed_prefill() {
-            DEFAULT_PREFILL_ROWS.min(capacity)
+            2048.min(capacity)
         } else {
             0
         };
@@ -159,7 +162,7 @@ impl<'g> Prepared<'g> {
 
     pub(super) fn describe(&self) -> String {
         format!(
-            "family=glm5_next input=verified_chat_and_tools renderer={} capacity={} default_max_tokens={} prefill_rows={} fast_precision={}",
+            "family=glm5_next input=verified_chat_and_tools renderer={} capacity={} default_max_tokens={} prefill_rows_max={} fast_precision={}",
             self.profile.renderer,
             self.capacity,
             self.default_max,
@@ -176,27 +179,34 @@ pub(super) fn load(
     gguf: &GgufFile,
     prepared: &Prepared<'_>,
 ) -> Result<Glm5NextWeights> {
-    match preflight_session(
-        ctx,
-        gguf,
-        prepared.artifact.model(),
-        prepared.capacity,
-        prepared.prefill_rows,
-    ) {
-        Ok(_) => {}
-        Err(error @ Glm5NextMetalError::MemoryAdmission { advice, .. }) => {
-            let advice = match advice {
-                CapacityAdvice::Fits(n) => format!("pass --max-context-tokens {n} or less"),
-                CapacityAdvice::NoneFits => {
-                    "free device memory or use a smaller artifact".to_string()
-                }
-                CapacityAdvice::NotEvaluated => {
-                    "no smaller capacity was evaluated; see the refusal reason".to_string()
-                }
-            };
-            return Err(error).context(format!("admit GLM-5.3 serve session: {advice}"));
+    for rows in prefill_plan::candidates(prepared.capacity, prepared.artifact.packed_prefill()) {
+        match preflight_session(
+            ctx,
+            gguf,
+            prepared.artifact.model(),
+            prepared.capacity,
+            rows,
+        ) {
+            Ok(_) => break,
+            Err(Glm5NextMetalError::MemoryAdmission { denied, .. })
+                if rows != 0 && denied.reason.is_pressure() =>
+            {
+                continue;
+            }
+            Err(error @ Glm5NextMetalError::MemoryAdmission { advice, .. }) => {
+                let advice = match advice {
+                    CapacityAdvice::Fits(n) => format!("pass --max-context-tokens {n} or less"),
+                    CapacityAdvice::NoneFits => {
+                        "free device memory or use a smaller artifact".to_string()
+                    }
+                    CapacityAdvice::NotEvaluated => {
+                        "no smaller capacity was evaluated; see the refusal reason".to_string()
+                    }
+                };
+                return Err(error).context(format!("admit GLM-5.3 serve session: {advice}"));
+            }
+            Err(error) => return Err(error).context("admit GLM-5.3 serve session"),
         }
-        Err(error) => return Err(error).context("admit GLM-5.3 serve session"),
     }
     let prefetch =
         prefetch_retained_with_cancel(ctx, gguf, 0.98, &|| crate::shutdown::checkpoint().is_err())
@@ -266,6 +276,7 @@ pub(super) struct Glm5NextBackend<'w, 'g> {
     /// history in chunks from 0 (no other cuts, no decoded tokens), so a
     /// Fast capture continuing it would equal a miss's.
     live_canonical: bool,
+    frozen_rows: Option<usize>,
     /// Bits of the last request's prefill logits (tests compare paths).
     #[cfg(test)]
     last_prefill_logits: Vec<u32>,
@@ -493,12 +504,13 @@ fn new_session<'w>(
     prepared: &Prepared<'_>,
     cpu_reserve: u64,
     lineage: PackedLineage,
+    rows: usize,
 ) -> Result<Glm5NextSession<'w>, ServeError> {
     let mut session = Glm5NextSession::with_prefill_rows_and_cpu_reserve(
         ctx,
         weights,
         prepared.capacity,
-        prepared.prefill_rows,
+        rows,
         cpu_reserve,
     )
     .map_err(session_error)?;
@@ -507,6 +519,30 @@ fn new_session<'w>(
         .set_fast_precision(prepared.fast_precision)
         .map_err(session_error)?;
     Ok(session)
+}
+
+fn plan_session(
+    ctx: &MetalContext,
+    weights: &Glm5NextWeights,
+    prepared: &Prepared<'_>,
+    maximum_rows: usize,
+    reserve: u64,
+    prefix: Option<u64>,
+) -> Result<prefill_plan::Plan, ServeError> {
+    prefill_plan::select(
+        &prefill_plan::candidates(
+            maximum_rows.min(prepared.capacity),
+            prepared.artifact.packed_prefill(),
+        ),
+        ctx.memory_signals(),
+        reserve,
+        prefix,
+        |rows| {
+            let ledger = Glm5NextSession::plan_memory(ctx, weights, prepared.capacity, rows)
+                .map_err(session_error)?;
+            Ok(prefill_plan::Price::from_ledger(&ledger))
+        },
+    )
 }
 
 /// The lineage this request reads its prompt with: `x_qwen.prefill_lineage`
@@ -560,6 +596,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             snapshot_cache_plan,
             fast_snapshots: qwen_llm::env_flag::read_default_on(FAST_SNAPSHOTS_ENV),
             live_canonical: false,
+            frozen_rows: None,
             #[cfg(test)]
             last_prefill_logits: Vec::new(),
             #[cfg(test)]
@@ -592,12 +629,20 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         )
     }
 
+    #[cfg(test)]
     fn fresh_session(
         &self,
         cpu_reserve: u64,
         lineage: PackedLineage,
     ) -> Result<Glm5NextSession<'w>, ServeError> {
-        new_session(self.ctx, self.weights, &self.prepared, cpu_reserve, lineage)
+        new_session(
+            self.ctx,
+            self.weights,
+            &self.prepared,
+            cpu_reserve,
+            lineage,
+            self.frozen_rows.unwrap_or(self.prepared.prefill_rows),
+        )
     }
 
     /// One short prefill on a throwaway session before the listener accepts,
@@ -612,9 +657,19 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             .into_iter()
             .map(|id| u32::try_from(id).context("warm-up token id"))
             .collect::<Result<Vec<_>>>()?;
-        let mut session = self
-            .fresh_session(0, self.lineage)
-            .map_err(|e| anyhow::anyhow!(e.message))?;
+        let plan = |maximum| plan_session(self.ctx, self.weights, &self.prepared, maximum, 0, None);
+        let initial = plan(tokens.len()).map_err(|e| anyhow::anyhow!(e.message))?;
+        let (mut session, _) = prefill_plan::create_with_pressure_retry(initial, plan, |rows| {
+            new_session(
+                self.ctx,
+                self.weights,
+                &self.prepared,
+                0,
+                self.lineage,
+                rows,
+            )
+        })
+        .map_err(|e| anyhow::anyhow!(e.message))?;
         session
             .prefill_packed_with_checkpoint(self.ctx, &tokens, &mut || {
                 crate::shutdown::checkpoint().map_err(|e| e.to_string())
@@ -695,7 +750,49 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         if schedule == Some(Schedule::FastSharedSplitV1) && cuts.is_empty() {
             schedule = None;
         }
-        let namespace = schedule.map(|schedule| CacheNamespace { lineage, schedule });
+        let mut plan = if self.frozen_rows.is_none() {
+            // The earliest verified cut is the shared prefix when present,
+            // otherwise Exact's transcript prefix. Reserve just this entry.
+            let prefix = prefill_plan::eligible_prefix(
+                self.prefix_reuse,
+                schedule.is_some(),
+                cuts.first().copied(),
+                self.cache.max_bytes(),
+                |cut| {
+                    let payload =
+                        snapshot_bytes(&self.weights.config, cut as u64).ok_or_else(|| {
+                            ServeError::server_error("GLM prefix snapshot size overflow")
+                        })?;
+                    let bytes = SnapshotCache::<Glm5NextSnapshot, CacheNamespace>::entry_bytes(
+                        cut, payload,
+                    )
+                    .ok_or_else(|| ServeError::server_error("GLM prefix entry size overflow"))?;
+                    Ok(bytes)
+                },
+            )?;
+            Some(plan_session(
+                self.ctx,
+                self.weights,
+                &self.prepared,
+                self.prepared.prefill_rows,
+                reserve,
+                prefix,
+            )?)
+        } else {
+            None
+        };
+        let mut selected_rows = self
+            .frozen_rows
+            .unwrap_or_else(|| plan.expect("unfrozen plan").rows);
+        // Before the first successful allocation there are no compatible
+        // snapshots; its tentative width may still shrink under pressure.
+        let namespace = self.frozen_rows.and_then(|rows| {
+            schedule.map(|schedule| CacheNamespace {
+                lineage,
+                schedule,
+                rows,
+            })
+        });
         // Exact restores any compatible prefix (segmentation-invariant);
         // Fast only a snapshot ending exactly at this request's cut. Used
         // only when it reaches past the live extension (ties keep live).
@@ -721,7 +818,16 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                     self.session = Some(with_snapshot_release(
                         &mut self.cache,
                         Some(hit.id),
-                        || new_session(self.ctx, self.weights, &self.prepared, reserve, lineage),
+                        || {
+                            new_session(
+                                self.ctx,
+                                self.weights,
+                                &self.prepared,
+                                reserve,
+                                lineage,
+                                selected_rows,
+                            )
+                        },
                     )?);
                 }
                 let session = self.session.as_mut().expect("session present");
@@ -745,7 +851,14 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                         drop(hit);
                         self.session = None;
                         self.session = Some(with_snapshot_release(&mut self.cache, None, || {
-                            new_session(self.ctx, self.weights, &self.prepared, reserve, lineage)
+                            new_session(
+                                self.ctx,
+                                self.weights,
+                                &self.prepared,
+                                reserve,
+                                lineage,
+                                selected_rows,
+                            )
                         })?);
                         canonical = true;
                         0
@@ -763,13 +876,54 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 // successor; its buffers and this request's transport
                 // allowance are admitted as one requirement.
                 self.session = None;
-                self.session = Some(with_snapshot_release(&mut self.cache, None, || {
-                    new_session(self.ctx, self.weights, &self.prepared, reserve, lineage)
-                })?);
+                let ctx = self.ctx;
+                let weights = self.weights;
+                let prepared = &self.prepared;
+                let mut create = |rows| {
+                    with_snapshot_release(&mut self.cache, None, || {
+                        new_session(ctx, weights, prepared, reserve, lineage, rows)
+                    })
+                };
+                let created = if let Some(initial) = plan {
+                    let (session, actual) = prefill_plan::create_with_pressure_retry(
+                        initial,
+                        |maximum| {
+                            plan_session(
+                                ctx,
+                                weights,
+                                prepared,
+                                maximum,
+                                reserve,
+                                initial.prefix_bytes,
+                            )
+                        },
+                        &mut create,
+                    )?;
+                    selected_rows = actual.rows;
+                    plan = Some(actual);
+                    Ok(session)
+                } else {
+                    create(selected_rows)
+                };
+                self.session = Some(prefill_plan::freeze_after_creation(
+                    &mut self.frozen_rows,
+                    selected_rows,
+                    created,
+                )?);
                 canonical = true;
                 0
             }
         };
+        if let Some(plan) = plan {
+            tracing::info!(target: "qwen_diag",
+                "serve: glm5_next prefill plan rows={} session_bytes={} prefix_budget={} prefix_preference_held={}",
+                plan.rows, plan.price.buffers, plan.prefix_bytes.unwrap_or(0), plan.preserved);
+        }
+        let namespace = schedule.map(|schedule| CacheNamespace {
+            lineage,
+            schedule,
+            rows: selected_rows,
+        });
         let restore_ms = if restored.is_some() {
             restore_t0.elapsed().as_secs_f64() * 1e3
         } else {
@@ -795,7 +949,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             let cut = cuts.iter().copied().filter(|&cut| cut <= matched).max()?;
             self.cache.entry_for_in(&namespace, &tokens[..cut])
         });
-        let rows = self.prepared.prefill_rows.max(1);
+        let rows = selected_rows.max(1);
         let mut position = matched;
         let mut logits = Vec::new();
         let ends: Vec<usize> = cuts

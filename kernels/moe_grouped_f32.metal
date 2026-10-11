@@ -1,10 +1,10 @@
 // F32-operand grouped-slot expert tiles (map #12 accuracy lane). Copies of
 // moe.metal's kernel_moe_grouped_slots_mm_generic (EPI 0: the down
 // projection) and moe_swiglu_grouped_slots_n16_body (clamped SwiGLU) with F32
-// threadgroup tiles and simdgroup_float8x8 operands, and F32 dequantizers for
-// the GLM-5.3 expert types: the arithmetic of quant_tiles.h's
-// qt_dequantize_{iq2_s,iq3_s,iq4_xs} (ggml's order) without the half
-// narrowing. The half-staged product kernels are untouched.
+// threadgroup tiles and simdgroup_float8x8 operands. Down supports every
+// native decoder in native_dequant_f32.h, without half narrowing. Existing
+// IQ3_S/IQ4_XS down and fused gate/up retain their original dequantizers
+// and arithmetic. The half-staged product kernels are untouched.
 //
 // Each output row's K reduction runs in a fixed order over its own weight row
 // and its own slot's activation row; rows and slots past a tile's edge are
@@ -14,6 +14,7 @@
 #include <metal_stdlib>
 using namespace metal;
 #include "quant_tiles.h"
+#include "native_dequant_f32.h"
 
 #define F32X_FOR_UNROLL(x) _Pragma("clang loop unroll(full)") for (x)
 
@@ -424,6 +425,22 @@ kernel void kernel_moe_swiglu_clamped_grouped_slots_f32x(
 
 typedef decltype(kernel_moe_down_grouped_slots_f32x<QT_IQ3_S_BYTES, QT_IQ3_S_NL, f32x_dequantize_iq3_s>) f32x_down_t;
 typedef decltype(kernel_moe_swiglu_clamped_grouped_slots_f32x<QT_IQ2_S_BYTES, QT_IQ2_S_NL, f32x_dequantize_iq2_s>) f32x_swiglu_t;
+
+template [[host_name("kernel_moe_down_q2_0_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_Q2_0_BYTES, QT_Q2_0_NL, latent_dequantize_q2_0>;
+template [[host_name("kernel_moe_down_q2_K_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_Q2_K_BYTES, QT_Q2_K_NL, latent_dequantize_q2_K>;
+template [[host_name("kernel_moe_down_q3_K_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_Q3_K_BYTES, QT_Q3_K_NL, latent_dequantize_q3_K>;
+template [[host_name("kernel_moe_down_q4_K_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_Q4_K_BYTES, QT_Q4_K_NL, latent_dequantize_q4_K>;
+template [[host_name("kernel_moe_down_q5_K_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_Q5_K_BYTES, QT_Q5_K_NL, latent_dequantize_q5_K>;
+template [[host_name("kernel_moe_down_q6_K_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_Q6_K_BYTES, QT_Q6_K_NL, latent_dequantize_q6_K>;
+template [[host_name("kernel_moe_down_q8_0_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_Q8_0_BYTES, QT_Q8_0_NL, latent_dequantize_q8_0>;
+template [[host_name("kernel_moe_down_q4_0_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_Q4_0_BYTES, QT_Q4_0_NL, latent_dequantize_q4_0>;
+template [[host_name("kernel_moe_down_q4_1_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_Q4_1_BYTES, QT_Q4_1_NL, latent_dequantize_q4_1>;
+template [[host_name("kernel_moe_down_iq2_s_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_IQ2_S_BYTES, QT_IQ2_S_NL, latent_dequantize_iq2_s>;
+template [[host_name("kernel_moe_down_iq3_xxs_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_IQ3_XXS_BYTES, QT_IQ3_XXS_NL, latent_dequantize_iq3_xxs>;
+template [[host_name("kernel_moe_down_iq4_nl_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_IQ4_NL_BYTES, QT_IQ4_NL_NL, latent_dequantize_iq4_nl>;
+template [[host_name("kernel_moe_down_f32_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_F32_BYTES, QT_F32_NL, latent_dequantize_f32>;
+template [[host_name("kernel_moe_down_f16_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_F16_BYTES, QT_F16_NL, latent_dequantize_f16>;
+template [[host_name("kernel_moe_down_bf16_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_BF16_BYTES, QT_BF16_NL, latent_dequantize_bf16>;
 
 template [[host_name("kernel_moe_down_iq3_s_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_IQ3_S_BYTES, QT_IQ3_S_NL, f32x_dequantize_iq3_s>;
 template [[host_name("kernel_moe_down_iq4_xs_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_IQ4_XS_BYTES, QT_IQ4_XS_NL, f32x_dequantize_iq4_xs>;

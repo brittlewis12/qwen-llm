@@ -922,15 +922,44 @@ fn check_f32x_bindings(
 const DOWN_F32X_THREADGROUP_BYTES: usize = 12 * 1024;
 const SWIGLU_F32X_THREADGROUP_BYTES: usize = 18 * 1024;
 
-fn down_f32x_name(kernel: &'static str, dtype: GgmlType) -> Result<&'static str, MetalError> {
+/// Native-storage pipeline with F32 weight/activation operands and accumulation.
+/// This is the source of truth for DOWN dtype capability; it does not imply
+/// support for fused gate/up or validate geometry, bindings, or the device.
+pub fn moe_down_f32x_grouped_slots_pipeline_name(dtype: GgmlType) -> Option<&'static str> {
     match dtype {
-        GgmlType::IQ3_S => Ok("kernel_moe_down_iq3_s_f32x_grouped_slots"),
-        GgmlType::IQ4_XS => Ok("kernel_moe_down_iq4_xs_f32x_grouped_slots"),
-        other => Err(MetalError::BadShape {
-            kernel,
-            detail: format!("no F32-operand grouped down for {other:?}"),
-        }),
+        GgmlType::Q2_0 => Some("kernel_moe_down_q2_0_f32x_grouped_slots"),
+        GgmlType::Q2_K => Some("kernel_moe_down_q2_K_f32x_grouped_slots"),
+        GgmlType::Q3_K => Some("kernel_moe_down_q3_K_f32x_grouped_slots"),
+        GgmlType::Q4_K => Some("kernel_moe_down_q4_K_f32x_grouped_slots"),
+        GgmlType::Q5_K => Some("kernel_moe_down_q5_K_f32x_grouped_slots"),
+        GgmlType::Q6_K => Some("kernel_moe_down_q6_K_f32x_grouped_slots"),
+        GgmlType::Q8_0 => Some("kernel_moe_down_q8_0_f32x_grouped_slots"),
+        GgmlType::Q4_0 => Some("kernel_moe_down_q4_0_f32x_grouped_slots"),
+        GgmlType::Q4_1 => Some("kernel_moe_down_q4_1_f32x_grouped_slots"),
+        GgmlType::IQ2_S => Some("kernel_moe_down_iq2_s_f32x_grouped_slots"),
+        GgmlType::IQ3_XXS => Some("kernel_moe_down_iq3_xxs_f32x_grouped_slots"),
+        GgmlType::IQ3_S => Some("kernel_moe_down_iq3_s_f32x_grouped_slots"),
+        GgmlType::IQ4_NL => Some("kernel_moe_down_iq4_nl_f32x_grouped_slots"),
+        GgmlType::IQ4_XS => Some("kernel_moe_down_iq4_xs_f32x_grouped_slots"),
+        GgmlType::F32 => Some("kernel_moe_down_f32_f32x_grouped_slots"),
+        GgmlType::F16 => Some("kernel_moe_down_f16_f32x_grouped_slots"),
+        GgmlType::BF16 => Some("kernel_moe_down_bf16_f32x_grouped_slots"),
+        _ => None,
     }
+}
+
+/// Whether a native F32-operand grouped DOWN pipeline exists for `dtype`.
+/// K must be a positive multiple of max(32, storage block elements); use
+/// `check_moe_down_f32x_grouped_slots` to preflight a concrete dispatch.
+pub fn moe_down_f32x_grouped_slots_supported(dtype: GgmlType) -> bool {
+    moe_down_f32x_grouped_slots_pipeline_name(dtype).is_some()
+}
+
+fn down_f32x_name(kernel: &'static str, dtype: GgmlType) -> Result<&'static str, MetalError> {
+    moe_down_f32x_grouped_slots_pipeline_name(dtype).ok_or_else(|| MetalError::BadShape {
+        kernel,
+        detail: format!("no F32-operand grouped down for {dtype:?}"),
+    })
 }
 
 /// Every check [`encode_moe_down_f32x_grouped_slots`] makes before encoding,
@@ -983,8 +1012,13 @@ pub(crate) fn check_moe_down_f32x_grouped_slots(
         n_tokens,
         1,
         0,
-        i32::MAX as u32,
+        n_tokens as u32,
     )?;
+    // The shared check covers half/ushort bank fields. Native F32 additionally
+    // loads scalar floats, so its base must be aligned to four bytes.
+    if weight.dtype == GgmlType::F32 {
+        super::checks::check_physical(KERNEL, weight, 4, false, "F32 expert bank")?;
+    }
     check_f32x_bindings(
         ctx,
         KERNEL,
@@ -1007,9 +1041,12 @@ pub(crate) fn check_moe_down_f32x_grouped_slots(
 /// F32-operand grouped down projection (`kernels/moe_grouped_f32.metal`,
 /// map #12 accuracy lane): the contract of
 /// [`encode_moe_down_f32_grouped_slots_generic`] with weights dequantized to
-/// F32 (ggml's order), unrounded activations and F32 accumulation, for the
-/// GLM-5.3 down types IQ3_S and IQ4_XS. Each slot's outputs depend only on
-/// its own activation row: not on its expert's count nor on its place in the
+/// F32 (ggml's order), unrounded activations and F32 accumulation, for every
+/// dtype accepted by [`moe_down_f32x_grouped_slots_supported`]. No repacking,
+/// materialization, or scratch allocation. K is aligned to max(32, storage
+/// block elements); M may have a partial tile. Counts outside 0..=n_tokens
+/// and slot ids outside the output's slot range are skipped. Each slot's outputs
+/// depend only on its own activation row: not on its expert's count or place in the
 /// bucket. Bindings and device are checked before encoding
 /// ([`check_moe_down_f32x_grouped_slots`]). 12 KiB of threadgroup memory.
 #[allow(clippy::too_many_arguments)]
@@ -1043,7 +1080,7 @@ pub fn encode_moe_down_f32x_grouped_slots(
         n_tokens,
         1,
         0,
-        i32::MAX as u32,
+        n_tokens as u32,
     )?;
     dispatch_generic_mm(
         ctx,

@@ -1136,24 +1136,16 @@ fn f32_precision_fallback_policy_checks_dtype_geometry_and_expert_combination() 
             StageMode::Exact
         );
         for gate in [GgmlType::IQ2_S, GgmlType::IQ3_S] {
-            for down in [GgmlType::Q4_K, GgmlType::IQ3_XXS] {
+            for down in [GgmlType::Q4_K, GgmlType::IQ3_XXS, GgmlType::IQ4_XS] {
                 assert_eq!(
                     expert_mode(arith, gate, gate, down),
                     if precision == FastPrecision::F32 {
-                        StageMode::Exact
+                        StageMode::FastF32
                     } else {
                         StageMode::Fast
                     }
                 );
             }
-            assert_eq!(
-                expert_mode(arith, gate, gate, GgmlType::IQ4_XS),
-                if precision == FastPrecision::F32 {
-                    StageMode::FastF32
-                } else {
-                    StageMode::Fast
-                }
-            );
         }
     }
 }
@@ -1171,10 +1163,12 @@ fn disabling_f32_tiles_preserves_requested_operand_precision() {
             StageMode::Exact
         );
     }
-    assert_eq!(
-        expert_mode(arith, GgmlType::IQ2_S, GgmlType::IQ2_S, GgmlType::IQ4_XS),
-        StageMode::Exact
-    );
+    for down in [GgmlType::IQ4_XS, GgmlType::IQ3_XXS, GgmlType::Q4_K] {
+        assert_eq!(
+            expert_mode(arith, GgmlType::IQ2_S, GgmlType::IQ2_S, down),
+            StageMode::Exact
+        );
+    }
 }
 
 #[test]
@@ -1270,28 +1264,94 @@ fn q2_k_dense_half_and_f32_requests_dispatch_different_operand_paths() {
 }
 
 #[test]
+fn expert_f32_capability_tracks_primitive_down_and_retains_fused_pair_contract() {
+    use crate::metal::{
+        grouped_routed_experts_f32x_supported, moe_down_f32x_grouped_slots_supported,
+    };
+    use GgmlType::*;
+    let down_types: Vec<_> = (0..=255).map(GgmlType::from_raw).collect();
+    assert_eq!(
+        down_types
+            .iter()
+            .filter(|&&t| moe_down_f32x_grouped_slots_supported(t))
+            .count(),
+        17
+    );
+    for &down in &down_types {
+        for (gate, up) in [
+            (IQ2_S, IQ2_S),
+            (IQ3_S, IQ3_S),
+            (IQ2_S, IQ3_S),
+            (IQ3_S, IQ2_S),
+            (Q4_K, Q4_K),
+            (F32, F32),
+            (IQ2_XS, IQ2_XS),
+        ] {
+            let supported = gate == up
+                && matches!(gate, IQ2_S | IQ3_S)
+                && moe_down_f32x_grouped_slots_supported(down);
+            assert_eq!(
+                grouped_routed_experts_f32x_supported(gate, up, down),
+                supported
+            );
+            assert_eq!(
+                expert_mode(
+                    Arith {
+                        lineage: PackedLineage::Fast,
+                        precision: FastPrecision::F32
+                    },
+                    gate,
+                    up,
+                    down
+                ),
+                if supported {
+                    StageMode::FastF32
+                } else {
+                    StageMode::Exact
+                },
+                "{gate:?}/{up:?}/{down:?}"
+            );
+            assert_eq!(
+                expert_mode(
+                    Arith {
+                        lineage: PackedLineage::Exact,
+                        precision: FastPrecision::F32
+                    },
+                    gate,
+                    up,
+                    down
+                ),
+                StageMode::Exact
+            );
+        }
+    }
+}
+
+#[test]
 fn expert_half_and_f32_requests_dispatch_grouped_or_all_slot_paths() {
-    use crate::metal::{dispatch_census_begin, dispatch_census_take};
+    use crate::metal::{
+        dispatch_census_begin, dispatch_census_take, grouped_clamped_gate_up_supported,
+        grouped_expert_down_supported, moe_down_f32x_grouped_slots_pipeline_name,
+    };
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     let (h, f, e, k, rows) = (256usize, 256usize, 3usize, 2usize, 3usize);
+    let clamp = 0.2;
     let values: Vec<f32> = (0..h * rows)
         .map(|i| (i % 71) as f32 * 0.01713 - 0.5)
         .collect();
+    let route_ids = [2i32, 0, 1, 2, 0, 1];
+    let route_weights = [0.7f32, 0.3, 0.2, 0.8, 0.6, 0.4];
     let input = tensor(&ctx, &values, vec![h as u64, rows as u64]);
     let ids = MetalTensor::from_bytes(
         &ctx,
-        bytemuck::cast_slice(&[2i32, 0, 1, 2, 0, 1]),
+        bytemuck::cast_slice(&route_ids),
         vec![k as u64, rows as u64],
         GgmlType::I32,
     )
     .unwrap();
-    let weights = tensor(
-        &ctx,
-        &[0.7, 0.3, 0.2, 0.8, 0.6, 0.4],
-        vec![k as u64, rows as u64],
-    );
+    let weights = tensor(&ctx, &route_weights, vec![k as u64, rows as u64]);
     let status = MetalTensor::from_bytes(
         &ctx,
         bytemuck::cast_slice(&[ROUTE_STATUS_READY; 3]),
@@ -1305,38 +1365,64 @@ fn expert_half_and_f32_requests_dispatch_grouped_or_all_slot_paths() {
     let slot_out = empty(&ctx, vec![h as u64, (k * rows) as u64]);
     let row_inner = empty(&ctx, vec![f as u64, k as u64]);
     let row_out = empty(&ctx, vec![h as u64, k as u64]);
-    let (gate, _) = bank(&ctx, GgmlType::IQ2_S, vec![h as u64, f as u64, e as u64]);
-    let (up, _) = bank(&ctx, GgmlType::IQ2_S, vec![h as u64, f as u64, e as u64]);
-    for down_dtype in [GgmlType::Q4_K, GgmlType::IQ3_XXS] {
-        let (down, _) = bank(&ctx, down_dtype, vec![f as u64, h as u64, e as u64]);
-        let exact = empty(&ctx, vec![h as u64, rows as u64]);
-        run(&ctx, |enc| {
-            encode_expert_rows(
-                &ctx,
-                enc,
-                &ExpertRowBuffers {
-                    gate: &gate,
-                    up: &up,
-                    down: &down,
-                    input: &input,
-                    ids: &ids,
-                    weights: &weights,
-                    status: &status,
-                    inner: &row_inner,
-                    slot_out: &row_out,
-                    output: &exact,
-                },
-                h,
-                f,
-                e,
-                k,
-                rows,
-                10.0,
-            )
-            .unwrap()
-        });
-        let exact = read_f32(&exact).unwrap();
-        for precision in FastPrecision::ALL {
+    let (gate, gate_cpu) = bank(&ctx, GgmlType::IQ2_S, vec![h as u64, f as u64, e as u64]);
+    let (up, up_cpu) = bank(&ctx, GgmlType::IQ2_S, vec![h as u64, f as u64, e as u64]);
+    for down_dtype in [
+        GgmlType::Q4_K,
+        GgmlType::IQ3_XXS,
+        GgmlType::Q2_0,
+        GgmlType::BF16,
+        GgmlType::IQ2_XS,
+        GgmlType::MXFP4,
+    ] {
+        let (down, down_cpu) = bank(&ctx, down_dtype, vec![f as u64, h as u64, e as u64]);
+        // Independent GGML dequantization plus scalar F64 dot products; the
+        // oracle rounds each projection to F32 before clamped SwiGLU/summing.
+        let mut expected = vec![0.0f32; h * rows];
+        for row in 0..rows {
+            for slot in 0..k {
+                let expert = route_ids[row * k + slot] as usize;
+                let dot = |w: &[f32], out: usize| {
+                    (0..h)
+                        .map(|i| w[(expert * f + out) * h + i] as f64 * values[row * h + i] as f64)
+                        .sum::<f64>() as f32
+                };
+                let g: Vec<f32> = (0..f).map(|o| dot(&gate_cpu, o)).collect();
+                let u: Vec<f32> = (0..f).map(|o| dot(&up_cpu, o)).collect();
+                let act = crate::deepseek_v4_oracle::clamped_swiglu(&g, &u, clamp).unwrap();
+                for o in 0..h {
+                    let v = (0..f)
+                        .map(|i| down_cpu[(expert * h + o) * f + i] as f64 * act[i] as f64)
+                        .sum::<f64>() as f32;
+                    expected[row * h + o] += route_weights[row * k + slot] * v;
+                }
+            }
+        }
+        let mut exact_bits = None;
+        for (lineage, precision, disable_tile) in [
+            (PackedLineage::Exact, FastPrecision::Half, false),
+            (PackedLineage::Fast, FastPrecision::Half, false),
+            (PackedLineage::Fast, FastPrecision::DenseF32, false),
+            (PackedLineage::Fast, FastPrecision::F32, false),
+            (PackedLineage::Fast, FastPrecision::F32, true),
+        ] {
+            let _tiles = disable_tile.then(|| F32Stages::with_tiles(&[Stage::RoutedExperts], &[]));
+            let f32_pipeline = moe_down_f32x_grouped_slots_pipeline_name(down_dtype);
+            let expected_mode = if lineage == PackedLineage::Exact {
+                StageMode::Exact
+            } else if precision == FastPrecision::F32 {
+                if !disable_tile && f32_pipeline.is_some() {
+                    StageMode::FastF32
+                } else {
+                    StageMode::Exact
+                }
+            } else if grouped_clamped_gate_up_supported(gate.dtype, up.dtype)
+                && grouped_expert_down_supported(down_dtype)
+            {
+                StageMode::Fast
+            } else {
+                StageMode::Exact
+            };
             let output = empty(&ctx, vec![h as u64, rows as u64]);
             let buffers = GroupedExperts {
                 gate_bank: &gate,
@@ -1358,10 +1444,7 @@ fn expert_half_and_f32_requests_dispatch_grouped_or_all_slot_paths() {
                 let mode = encode_experts(
                     &ctx,
                     enc,
-                    Arith {
-                        lineage: PackedLineage::Fast,
-                        precision,
-                    },
+                    Arith { lineage, precision },
                     &buffers,
                     &status,
                     &row_inner,
@@ -1371,82 +1454,107 @@ fn expert_half_and_f32_requests_dispatch_grouped_or_all_slot_paths() {
                     e,
                     k,
                     rows,
-                    10.0,
+                    clamp,
                 )
                 .unwrap();
                 assert_eq!(
-                    mode,
-                    if precision == FastPrecision::F32 {
-                        StageMode::Exact
-                    } else {
-                        StageMode::Fast
-                    }
+                    mode, expected_mode,
+                    "{down_dtype:?}/{precision:?} tiles disabled={disable_tile}"
                 );
                 kernels = dispatch_census_take();
             });
-            let counts = census.take();
+            let census_counts = census.take();
+            if lineage == PackedLineage::Fast {
+                let path = match expected_mode {
+                    StageMode::FastF32 => CensusPath::F32Tile,
+                    StageMode::Fast => CensusPath::Half,
+                    StageMode::Exact => CensusPath::RowBaseline,
+                };
+                assert_eq!(
+                    census_counts.get(&(Stage::RoutedExperts, "experts".into(), path)),
+                    Some(&1)
+                );
+            }
+            match expected_mode {
+                StageMode::FastF32 => {
+                    assert_eq!(
+                        kernels
+                            .iter()
+                            .filter(|r| r.kernel == f32_pipeline.unwrap())
+                            .count(),
+                        1,
+                        "{kernels:?}"
+                    );
+                    assert_eq!(
+                        kernels
+                            .iter()
+                            .filter(|r| r.kernel
+                                == "kernel_moe_swiglu_clamped_iq2_s_f32x_grouped_slots")
+                            .count(),
+                        1,
+                        "{kernels:?}"
+                    );
+                    assert!(
+                        !kernels.iter().any(|r| r.kernel.contains("all_slots_")
+                            || (r.kernel.contains("grouped_slots") && !r.kernel.contains("f32x"))),
+                        "{kernels:?}"
+                    );
+                }
+                StageMode::Fast => {
+                    assert!(
+                        kernels.iter().any(|r| r.kernel.contains("grouped_slots")),
+                        "{kernels:?}"
+                    );
+                    assert!(
+                        !kernels
+                            .iter()
+                            .any(|r| r.kernel.contains("all_slots_") || r.kernel.contains("f32x")),
+                        "{kernels:?}"
+                    );
+                }
+                StageMode::Exact => {
+                    assert_eq!(
+                        kernels
+                            .iter()
+                            .filter(|r| r.kernel.contains("all_slots_swiglu_iq2_s"))
+                            .count(),
+                        rows,
+                        "{kernels:?}"
+                    );
+                    assert!(
+                        !kernels.iter().any(|r| r.kernel.contains("grouped_slots")),
+                        "{kernels:?}"
+                    );
+                }
+            }
             let got = read_f32(&output).unwrap();
-            assert!(got.iter().all(|v| v.is_finite()));
-            if precision == FastPrecision::F32 {
-                assert_eq!(
-                    counts.get(&(
-                        Stage::RoutedExperts,
-                        "experts".into(),
-                        CensusPath::RowBaseline
-                    )),
-                    Some(&1)
-                );
-                assert_eq!(
-                    kernels
-                        .iter()
-                        .filter(|r| r.kernel.contains("all_slots_swiglu_iq2_s"))
-                        .count(),
-                    rows,
-                    "{kernels:?}"
-                );
-                let down_name = if down_dtype == GgmlType::Q4_K {
-                    "all_slots_down_q4_K"
+            let scale = expected
+                .iter()
+                .copied()
+                .map(f32::abs)
+                .fold(0.0f32, f32::max);
+            let worst = got
+                .iter()
+                .zip(&expected)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            assert!(scale > 1e-7 && expected.iter().chain(&got).all(|v| v.is_finite()));
+            assert!(
+                worst
+                    <= (if expected_mode == StageMode::Fast {
+                        5e-3
+                    } else {
+                        1e-3
+                    }) * scale,
+                "{down_dtype:?}/{precision:?} {expected_mode:?}: error {worst}, scale {scale}"
+            );
+            if expected_mode == StageMode::Exact {
+                let bits: Vec<u32> = got.iter().map(|v| v.to_bits()).collect();
+                if let Some(reference) = &exact_bits {
+                    assert_eq!(&bits, reference);
                 } else {
-                    "all_slots_down_iq3_xxs"
-                };
-                assert_eq!(
-                    kernels
-                        .iter()
-                        .filter(|r| r.kernel.contains(down_name))
-                        .count(),
-                    rows,
-                    "{kernels:?}"
-                );
-                assert!(
-                    !kernels.iter().any(|r| r.kernel.contains("grouped_slots")),
-                    "{kernels:?}"
-                );
-                assert_eq!(
-                    got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-                    exact.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
-                );
-            } else {
-                assert_eq!(
-                    counts.get(&(Stage::RoutedExperts, "experts".into(), CensusPath::Half)),
-                    Some(&1)
-                );
-                assert!(
-                    kernels
-                        .iter()
-                        .any(|r| r.kernel.contains("swiglu_clamped_iq2_s")
-                            && r.kernel.contains("grouped_slots")),
-                    "{kernels:?}"
-                );
-                let down_name = if down_dtype == GgmlType::Q4_K {
-                    "down_q4_K"
-                } else {
-                    "down_iq3_xxs"
-                };
-                assert!(kernels.iter().any(|r| r.kernel.contains(down_name) && r.kernel.contains("grouped_slots")), "{kernels:?}");
-                assert!(
-                    !kernels.iter().any(|r| r.kernel.contains("all_slots_")),
-                    "{kernels:?}"
-                );
+                    exact_bits = Some(bits);
+                }
             }
         }
     }

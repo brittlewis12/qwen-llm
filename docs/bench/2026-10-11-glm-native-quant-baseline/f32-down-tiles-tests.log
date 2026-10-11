@@ -1,0 +1,17 @@
+
+running 11 tests
+test metal::expert::f32x_tests::down::down_f32x_all_native_decoders_match_cpu_and_preserve_slot_independence ... 2026-10-11 13:45:08.840 qwen_llm-de358c0a63485fd8[12132:20372292] Metal API Validation Enabled
+ok
+test metal::expert::f32x_tests::down::down_f32x_capability_matches_native_instantiations ... ok
+test metal::expert::f32x_tests::down::down_f32x_dense_weights_preserve_large_and_small_f32_range ... ok
+test metal::expert::f32x_tests::down::down_f32x_iq3_xxs_glm_dimensions_match_cpu ... ok
+test metal::expert::f32x_tests::down::down_f32x_native_preflight_rejects_bad_shapes_types_and_alignment ... ok
+test metal::expert::f32x_tests::down_f32x_refuses_oversized_geometry ... ok
+test metal::expert::f32x_tests::down_f32x_tile_buckets_edges_and_invalid_slots ... ok
+test metal::expert::f32x_tests::f32x_expert_encoders_refuse_bad_bindings ... ok
+test metal::expert::f32x_tests::grouped_f32x_experts_refuse_types_without_a_tile ... ok
+test metal::expert::f32x_tests::grouped_f32x_experts_token_outputs_do_not_depend_on_the_dispatch ... ok
+test metal::expert::f32x_tests::grouped_f32x_experts_track_decode_and_f64_beyond_half ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 1907 filtered out; finished in 4.79s
+

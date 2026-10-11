@@ -92,6 +92,16 @@ pub fn grouped_expert_down_supported(dtype: GgmlType) -> bool {
     dtype == GgmlType::IQ4_XS || moe_grouped_generic_supported(dtype)
 }
 
+/// Storage-type capability of the whole F32-operand grouped composition.
+/// Gate/up retains its equal-type fused IQ2_S/IQ3_S tiles; down follows the
+/// primitive's actual pipeline mapping. Concrete bindings and geometry are
+/// preflighted by `encode_grouped_routed_experts_f32x` before any dispatch.
+pub fn grouped_routed_experts_f32x_supported(gate: GgmlType, up: GgmlType, down: GgmlType) -> bool {
+    gate == up
+        && matches!(gate, GgmlType::IQ2_S | GgmlType::IQ3_S)
+        && moe_down_f32x_grouped_slots_supported(down)
+}
+
 /// Buckets of at least this many slots take the 32-token gate/up tile in
 /// the half-staged grouped path (`None`: every bucket on the 16-token
 /// tile). Bitwise equal per slot to the 16-token tile (unit and GLM model
@@ -686,8 +696,9 @@ pub(crate) fn encode_grouped_routed_experts_with_down_policy(
 /// lane): the same bucketing, clamped SwiGLU, down projection and weighted
 /// sum, with the gate/up and down tiles dequantizing weights to F32 and
 /// reading activations (the input and the SwiGLU output) unrounded
-/// (`kernels/moe_grouped_f32.metal`). Gate/up IQ2_S or IQ3_S; down IQ3_S
-/// or IQ4_XS (the GLM-5.3 expert types); other types are refused. A
+/// (`kernels/moe_grouped_f32.metal`). Equal-type gate/up IQ2_S or IQ3_S;
+/// down follows [`moe_down_f32x_grouped_slots_supported`]. Other combinations
+/// are refused by [`grouped_routed_experts_f32x_supported`]. A
 /// token's outputs depend on its own routes and activations only, not on
 /// which other tokens share its experts' buckets.
 #[allow(clippy::too_many_arguments)]
@@ -705,9 +716,7 @@ pub(crate) fn encode_grouped_routed_experts_f32x(
     const K: &str = "grouped_routed_experts_f32x";
     check_grouped_routed_experts(K, enc, b, hidden, ffn, experts, top_k, rows)?;
     // Refuse before encoding anything (the bucketing would otherwise run).
-    if b.gate_bank.dtype != b.up_bank.dtype
-        || !matches!(b.gate_bank.dtype, GgmlType::IQ2_S | GgmlType::IQ3_S)
-        || !matches!(b.down_bank.dtype, GgmlType::IQ3_S | GgmlType::IQ4_XS)
+    if !grouped_routed_experts_f32x_supported(b.gate_bank.dtype, b.up_bank.dtype, b.down_bank.dtype)
     {
         return Err(bad_shape(
             K,

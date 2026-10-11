@@ -334,7 +334,8 @@ fn grouped_f32x_experts_token_outputs_do_not_depend_on_the_dispatch() {
     }
 }
 
-/// Expert types without an F32-operand tile are refused before encoding.
+/// Gate/up types without a fused F32-operand tile are refused before encoding.
+/// DOWN capability is covered directly by the child tests.
 #[test]
 fn grouped_f32x_experts_refuse_types_without_a_tile() {
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
@@ -343,7 +344,7 @@ fn grouped_f32x_experts_refuse_types_without_a_tile() {
     const ROWS: usize = 4;
     for (gate_dtype, down_dtype) in [
         (GgmlType::IQ4_XS, GgmlType::IQ3_S),
-        (GgmlType::IQ2_S, GgmlType::IQ2_S),
+        (GgmlType::IQ4_XS, GgmlType::IQ4_XS),
     ] {
         let b = banks(&ctx, gate_dtype, down_dtype);
         let (h, f, k, e, r) = (
@@ -627,3 +628,6 @@ fn down_f32x_refuses_oversized_geometry() {
         );
     }
 }
+
+#[path = "f32x_down_tests.rs"]
+mod down;

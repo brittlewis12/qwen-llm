@@ -48,6 +48,10 @@ mod expert_down;
 mod mla_tail;
 
 #[cfg(test)]
+#[path = "tests/f32_down_ab.rs"]
+mod f32_down_ab;
+
+#[cfg(test)]
 thread_local! {
     static ABSORB_TAIL: std::cell::Cell<(Option<bool>, usize)> = const { std::cell::Cell::new((None, 0)) };
 }
@@ -246,8 +250,8 @@ pub(super) enum F32Tile {
     Q8_0,
     /// `encode_mat_mat_q6_k_f32_mm64x32` (`n_in % 256`).
     Q6K,
-    /// `encode_grouped_routed_experts_f32x` (gate/up IQ2_S or IQ3_S, down
-    /// IQ3_S or IQ4_XS).
+    /// `encode_grouped_routed_experts_f32x`; eligibility follows the whole-pair
+    /// `grouped_routed_experts_f32x_supported` capability.
     RoutedExperts,
 }
 
@@ -849,24 +853,52 @@ fn expert_row_fallback(
         || !crate::metal::grouped_expert_down_supported(down)
 }
 
+// Same-binary diagnostic control only: production always uses the full
+// primitive capability. A closure keeps the restoring guard on this thread.
+#[cfg(test)]
+thread_local! {
+    static ORIGINAL_F32_DOWN_SUPPORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn with_original_f32_down_support<R>(original: bool, body: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ORIGINAL_F32_DOWN_SUPPORT.with(|support| support.set(self.0));
+        }
+    }
+    let _restore = Restore(ORIGINAL_F32_DOWN_SUPPORT.with(|support| support.replace(original)));
+    body()
+}
+
+fn grouped_f32_expert_tile_supported(gate: GgmlType, up: GgmlType, down: GgmlType) -> bool {
+    #[cfg(test)]
+    if ORIGINAL_F32_DOWN_SUPPORT.with(std::cell::Cell::get)
+        && !matches!(down, GgmlType::IQ3_S | GgmlType::IQ4_XS)
+    {
+        return false;
+    }
+    crate::metal::grouped_routed_experts_f32x_supported(gate, up, down)
+}
+
 /// Precision is part of capability: ordinary grouped kernels stage half,
 /// so F32 requests may only use an eligible F32 tile or all-slot decode.
 fn expert_mode(arith: Arith, gate: GgmlType, up: GgmlType, down: GgmlType) -> StageMode {
-    let requested = stage_mode(arith, Stage::RoutedExperts);
-    let f32_tile = f32_tile_enabled(F32Tile::RoutedExperts)
-        && gate == up
-        && matches!(gate, GgmlType::IQ2_S | GgmlType::IQ3_S)
-        && matches!(down, GgmlType::IQ3_S | GgmlType::IQ4_XS);
-    if expert_row_fallback(
-        stage_lineage(arith.lineage, Stage::RoutedExperts),
-        gate,
-        up,
-        down,
-    ) || (requested == StageMode::FastF32 && !f32_tile)
-    {
-        StageMode::Exact
-    } else {
-        requested
+    match stage_mode(arith, Stage::RoutedExperts) {
+        StageMode::FastF32 => {
+            if f32_tile_enabled(F32Tile::RoutedExperts)
+                && grouped_f32_expert_tile_supported(gate, up, down)
+            {
+                StageMode::FastF32
+            } else {
+                StageMode::Exact
+            }
+        }
+        StageMode::Fast if !expert_row_fallback(PackedLineage::Fast, gate, up, down) => {
+            StageMode::Fast
+        }
+        _ => StageMode::Exact,
     }
 }
 

@@ -841,14 +841,6 @@ fn packed_fallback_policy_preserves_available_fast_paths() {
             assert!(expert_row_fallback(PackedLineage::Exact, gate, gate, down));
         }
     }
-    for gate in [GgmlType::IQ2_XS, GgmlType::IQ3_XXS, GgmlType::Q3_K] {
-        assert!(expert_row_fallback(
-            PackedLineage::Fast,
-            gate,
-            gate,
-            GgmlType::IQ4_XS
-        ));
-    }
     assert!(expert_row_fallback(
         PackedLineage::Fast,
         GgmlType::IQ2_S,
@@ -867,13 +859,16 @@ fn packed_fallback_policy_preserves_available_fast_paths() {
         GgmlType::IQ3_S,
         GgmlType::IQ3_S
     ));
-    // Capability must test the gate/up pair, not just the two individual types.
-    assert!(expert_row_fallback(
-        PackedLineage::Fast,
-        GgmlType::IQ2_S,
-        GgmlType::IQ3_S,
-        GgmlType::IQ4_XS
-    ));
+    // Mixed pairs follow the actual grouped capability, not dtype equality.
+    assert_eq!(
+        expert_row_fallback(
+            PackedLineage::Fast,
+            GgmlType::IQ2_S,
+            GgmlType::IQ3_S,
+            GgmlType::IQ4_XS,
+        ),
+        !grouped_clamped_gate_up_supported(GgmlType::IQ2_S, GgmlType::IQ3_S)
+    );
 }
 
 #[test]
@@ -995,12 +990,6 @@ fn packed_expert_baseline_reuses_decode_scratch_and_matches_oracle() {
         (GgmlType::IQ2_S, GgmlType::MXFP4),
         (GgmlType::Q3_K, GgmlType::MXFP4),
     ] {
-        assert!(expert_row_fallback(
-            PackedLineage::Fast,
-            gate_dtype,
-            gate_dtype,
-            down_dtype
-        ));
         let (gate, gate_cpu) = bank(&ctx, gate_dtype, vec![h as u64, f as u64, e as u64]);
         let (up, up_cpu) = bank(&ctx, gate_dtype, vec![h as u64, f as u64, e as u64]);
         let (down, down_cpu) = bank(&ctx, down_dtype, vec![f as u64, h as u64, e as u64]);
@@ -1458,6 +1447,221 @@ fn expert_half_and_f32_requests_dispatch_grouped_or_all_slot_paths() {
                     !kernels.iter().any(|r| r.kernel.contains("all_slots_")),
                     "{kernels:?}"
                 );
+            }
+        }
+    }
+}
+
+#[test]
+fn mixed_expert_precision_policy_requires_an_actual_pair_tile() {
+    use crate::metal::{grouped_clamped_gate_up_supported, grouped_expert_down_supported};
+    for (gate, up, down) in [
+        (GgmlType::IQ2_S, GgmlType::IQ3_S, GgmlType::IQ4_XS),
+        (GgmlType::IQ3_S, GgmlType::IQ2_S, GgmlType::IQ3_S),
+        (GgmlType::Q4_K, GgmlType::F16, GgmlType::Q6_K),
+        (GgmlType::IQ2_XS, GgmlType::Q8_0, GgmlType::F32),
+    ] {
+        for lineage in [PackedLineage::Exact, PackedLineage::Fast] {
+            for precision in [
+                FastPrecision::Half,
+                FastPrecision::F32,
+                FastPrecision::DenseF32,
+            ] {
+                let grouped = lineage == PackedLineage::Fast
+                    && precision != FastPrecision::F32
+                    && grouped_clamped_gate_up_supported(gate, up)
+                    && grouped_expert_down_supported(down);
+                assert_eq!(
+                    expert_mode(Arith { lineage, precision }, gate, up, down),
+                    if grouped {
+                        StageMode::Fast
+                    } else {
+                        StageMode::Exact
+                    },
+                    "{gate:?}/{up:?}/{down:?} {lineage:?}/{precision:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn mixed_native_experts_dispatch_by_capability_and_match_oracle() {
+    use crate::metal::{
+        dispatch_census_begin, dispatch_census_take, grouped_clamped_gate_up_supported,
+        grouped_expert_down_supported,
+    };
+    use GgmlType::*;
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    let (h, f, e, k, rows) = (256usize, 256usize, 3usize, 2usize, 3usize);
+    let clamp = 0.2;
+    let x: Vec<f32> = (0..h * rows)
+        .map(|i| (i % 71) as f32 * 0.01713 - 0.5)
+        .collect();
+    let input = tensor(&ctx, &x, vec![h as u64, rows as u64]);
+    let route_ids = [2i32, 0, 1, 2, 0, 1];
+    let route_weights = [0.7f32, 0.3, 0.2, 0.8, 0.6, 0.4];
+    let ids = MetalTensor::from_bytes(
+        &ctx,
+        bytemuck::cast_slice(&route_ids),
+        vec![k as u64, rows as u64],
+        I32,
+    )
+    .unwrap();
+    let weights = tensor(&ctx, &route_weights, vec![k as u64, rows as u64]);
+    let status = MetalTensor::from_bytes(
+        &ctx,
+        bytemuck::cast_slice(&[ROUTE_STATUS_READY; 3]),
+        vec![rows as u64],
+        I32,
+    )
+    .unwrap();
+    let counts = MetalTensor::zeros_i32(&ctx, vec![e as u64]).unwrap();
+    let slots = MetalTensor::zeros_i32(&ctx, vec![(e * rows) as u64]).unwrap();
+    let inner = empty(&ctx, vec![f as u64, (k * rows) as u64]);
+    let slot_out = empty(&ctx, vec![h as u64, (k * rows) as u64]);
+    let row_inner = empty(&ctx, vec![f as u64, k as u64]);
+    let row_out = empty(&ctx, vec![h as u64, k as u64]);
+    for (gate_type, up_type, down_type, native_passes_per_row) in [
+        (Q4_K, F16, Q6_K, 3),
+        (IQ2_S, IQ3_S, Q8_0, 3),
+        (BF16, Q2_K, IQ2_S, 3),
+        (IQ2_XS, Q8_0, F32, 3),
+        (Q8_0, Q8_0, BF16, 3),
+        (Q5_K, Q4_0, Q4_1, 3),
+        (F32, BF16, IQ4_NL, 3),
+        // Down has an F32 tile, but mixed gate/up must still use row decode.
+        (IQ2_S, IQ3_S, IQ4_XS, 2),
+    ] {
+        let (gate, gcpu) = bank(&ctx, gate_type, vec![h as u64, f as u64, e as u64]);
+        let (up, ucpu) = bank(&ctx, up_type, vec![h as u64, f as u64, e as u64]);
+        let (down, dcpu) = bank(&ctx, down_type, vec![f as u64, h as u64, e as u64]);
+        let mut expected = vec![0.0f32; h * rows];
+        for row in 0..rows {
+            for slot in 0..k {
+                let expert = route_ids[row * k + slot] as usize;
+                let dot = |w: &[f32], out: usize| {
+                    (0..h)
+                        .map(|i| w[(expert * f + out) * h + i] as f64 * x[row * h + i] as f64)
+                        .sum::<f64>() as f32
+                };
+                let g: Vec<f32> = (0..f).map(|o| dot(&gcpu, o)).collect();
+                let u: Vec<f32> = (0..f).map(|o| dot(&ucpu, o)).collect();
+                let act = crate::deepseek_v4_oracle::clamped_swiglu(&g, &u, clamp).unwrap();
+                for o in 0..h {
+                    let v = (0..f)
+                        .map(|i| dcpu[(expert * h + o) * f + i] as f64 * act[i] as f64)
+                        .sum::<f64>() as f32;
+                    expected[row * h + o] += route_weights[row * k + slot] * v;
+                }
+            }
+        }
+        let mut decode_bits = None;
+        for (lineage, precision) in [
+            (PackedLineage::Exact, FastPrecision::Half),
+            (PackedLineage::Fast, FastPrecision::F32),
+            (PackedLineage::Fast, FastPrecision::Half),
+            (PackedLineage::Fast, FastPrecision::DenseF32),
+        ] {
+            let output = empty(&ctx, vec![h as u64, rows as u64]);
+            let b = GroupedExperts {
+                gate_bank: &gate,
+                up_bank: &up,
+                down_bank: &down,
+                input: &input,
+                ids: &ids,
+                weights: &weights,
+                counts: &counts,
+                slots: &slots,
+                inner: &inner,
+                slot_out: &slot_out,
+                output: &output,
+            };
+            let grouped = lineage == PackedLineage::Fast
+                && precision != FastPrecision::F32
+                && grouped_clamped_gate_up_supported(gate_type, up_type)
+                && grouped_expert_down_supported(down_type);
+            let mut kernels = Vec::new();
+            run(&ctx, |enc| {
+                dispatch_census_begin();
+                let mode = encode_experts(
+                    &ctx,
+                    enc,
+                    Arith { lineage, precision },
+                    &b,
+                    &status,
+                    &row_inner,
+                    &row_out,
+                    h,
+                    f,
+                    e,
+                    k,
+                    rows,
+                    clamp,
+                )
+                .unwrap();
+                assert_eq!(
+                    mode,
+                    if grouped {
+                        StageMode::Fast
+                    } else {
+                        StageMode::Exact
+                    }
+                );
+                kernels = dispatch_census_take();
+            });
+            if grouped {
+                assert!(
+                    kernels.iter().any(|r| r.kernel.contains("grouped_slots")),
+                    "{kernels:?}"
+                );
+                assert!(
+                    !kernels
+                        .iter()
+                        .any(|r| r.kernel.starts_with("kernel_expert_native_")),
+                    "{kernels:?}"
+                );
+            } else {
+                // Native gate/up takes two passes. Down remains optimized when
+                // available and otherwise takes one native pass; scratch is reused.
+                assert_eq!(
+                    kernels
+                        .iter()
+                        .filter(|r| r.kernel.starts_with("kernel_expert_native_"))
+                        .count(),
+                    rows * native_passes_per_row,
+                    "{kernels:?}"
+                );
+                assert!(
+                    !kernels.iter().any(|r| r.kernel.contains("grouped_slots")),
+                    "{kernels:?}"
+                );
+            }
+            let got = read_f32(&output).unwrap();
+            let scale = expected
+                .iter()
+                .copied()
+                .map(f32::abs)
+                .fold(0.0f32, f32::max);
+            let worst = got
+                .iter()
+                .zip(&expected)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            assert!(scale > 1e-7 && expected.iter().chain(&got).all(|v| v.is_finite()));
+            assert!(
+                worst <= (if grouped { 5e-3 } else { 2e-4 }) * scale,
+                "{gate_type:?}/{up_type:?}/{down_type:?} {lineage:?}/{precision:?}: error {worst}, scale {scale}"
+            );
+            if !grouped {
+                let bits: Vec<u32> = got.iter().map(|v| v.to_bits()).collect();
+                if let Some(reference) = &decode_bits {
+                    assert_eq!(&bits, reference);
+                } else {
+                    decode_bits = Some(bits);
+                }
             }
         }
     }

@@ -5,6 +5,7 @@ use crate::metal::test_support::{
 };
 
 const SOURCE: &str = include_str!("../../../../../kernels/latent_grouped.metal");
+const DECODERS: &str = include_str!("../../../../../kernels/native_dequant_f32.h");
 const TILES: &str = include_str!("../../../../../kernels/quant_tiles.h");
 
 fn function_source<'a>(source: &'a str, name: &str) -> &'a str {
@@ -48,7 +49,7 @@ fn grouped_native_decoder_and_storage_mapping_matches_shared_tiles() {
             .replace("half4x4", "float4x4")
             .replace("(half)", "(float)")
             .replace("half(", "float(");
-        let exact = function_source(SOURCE, &format!("latent_dequantize_{suffix}"));
+        let exact = function_source(DECODERS, &format!("latent_dequantize_{suffix}"));
         assert_eq!(
             normalize(&canonical),
             normalize(exact),

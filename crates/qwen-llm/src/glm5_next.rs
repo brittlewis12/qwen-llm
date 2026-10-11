@@ -958,7 +958,7 @@ fn bind_moe<'a>(
         return Err(tensor_error(
             &n("ffn_up_exps.weight"),
             format!(
-                "gate and up banks must share a dtype supported by all-slot dispatch; got {:?}/{:?}",
+                "no executable all-slot gate/up composition for {:?}/{:?}",
                 gate_experts.dtype, up_experts.dtype,
             ),
         ));

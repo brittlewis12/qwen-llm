@@ -1,0 +1,11 @@
+
+running 5 tests
+test metal::expert_native::tests::native_all_down_formats_cpu_oracle_offsets_and_slot_isolation ... 2026-10-11 12:57:17.157 qwen_llm-de358c0a63485fd8[97788:19413826] Metal API Validation Enabled
+ok
+test metal::expert_native::tests::native_capabilities_match_actual_dispatch_and_abi ... ok
+test metal::expert_native::tests::native_dense_preserves_f32_operands_and_range ... ok
+test metal::expert_native::tests::native_mixed_gate_up_cpu_oracles_and_route_rejection ... ok
+test metal::expert_native::tests::native_validation_rejects_before_any_dispatch ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1897 filtered out; finished in 0.10s
+

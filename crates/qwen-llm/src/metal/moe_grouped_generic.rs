@@ -10,10 +10,10 @@
 //! per-token fallback.
 //!
 //! Numerics: like llama.cpp's Metal `mul_mm`, tiles stage weights and
-//! activations in half and accumulate in f32. Quantized weights fit half by
-//! construction (f16 block scales); F32/BF16 weights or activations beyond
-//! +-65504 would overflow, a limit every quantized MMA prefill path shares
-//! for activations and no trained weight approaches.
+//! activations in half and accumulate in f32. Decoded weights and activations
+//! must fit half for finite results, including native F32/BF16 banks. Storage
+//! dtype support does not imply F32 operand precision; callers requesting it
+//! must use a supported F32-operand tile or retain their per-row path.
 
 use super::*;
 
@@ -633,11 +633,41 @@ pub fn clamped_swiglu_pipeline_name(dtype: GgmlType) -> Option<String> {
         })
 }
 
-/// Grouped expert-major fused gate/up with the clamped SwiGLU epilogue
-/// (DeepSeek V4 / GLM-5.3): `inner[slot] = silu(min(g, clamp)) *
-/// clamp(u, -clamp, clamp)` for every routed slot. Same layouts as
-/// [`encode_moe_swiglu_f32_grouped_slots_generic`]; gate and up must share a
-/// dtype listed in [`MOE_GROUPED_CLAMPED_SWIGLU_DTYPES`].
+/// Actual Half-operand recipe for clamped grouped gate/up. This does not
+/// advertise F32 operands: even dense F32/BF16 banks are staged through half.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MoeGroupedClampedRecipe {
+    /// Incumbent same-type IQ2_S/IQ3_S fused tile (optionally split n16/n32).
+    Fused { pipeline: String },
+    /// Down projects gate into inner, then UpClamped reads and updates inner.
+    GateThenUpClamped { gate: String, up: String },
+}
+
+/// Independently select both native storage types from the generic layouts.
+/// Capability queries and encoding share this recipe; no conversion is implied.
+pub fn moe_grouped_clamped_recipe(gate: GgmlType, up: GgmlType) -> Option<MoeGroupedClampedRecipe> {
+    if gate == up {
+        if let Some(pipeline) = clamped_swiglu_pipeline_name(gate) {
+            return Some(MoeGroupedClampedRecipe::Fused { pipeline });
+        }
+    }
+    Some(MoeGroupedClampedRecipe::GateThenUpClamped {
+        gate: moe_grouped_generic_pipeline_name(MoeGroupedGenericRole::Down, gate)?,
+        up: format!(
+            "kernel_moe_up_clamped_{}_f32_grouped_slots_clamped",
+            moe_grouped_generic_layout(up)?.suffix,
+        ),
+    })
+}
+
+/// Grouped expert-major gate/up with the clamped SwiGLU epilogue:
+/// `inner[slot] = silu(min(g, clamp)) * clamp(u, -clamp, clamp)`.
+/// Independent native bank dtypes are supported by [`moe_grouped_clamped_recipe`].
+/// Fused IQ2_S/IQ3_S pairs retain their existing dispatch; every other pair
+/// needs a serial encoder for Down (b_div=topk), then UpClamped in place.
+/// No activation or weight scratch is allocated. Operands are Half, sums F32.
+/// Each bank's K must align to its generic layout, at least 32; M may tail.
+/// Counts must be <= n_tokens, slots unique and in [0, n_tokens * topk).
 #[allow(clippy::too_many_arguments)]
 pub fn encode_moe_swiglu_clamped_f32_grouped_slots_generic(
     ctx: &MetalContext,
@@ -662,25 +692,106 @@ pub fn encode_moe_swiglu_clamped_f32_grouped_slots_generic(
             detail: format!("clamp must be finite and positive, got {clamp}"),
         });
     }
-    if w_gate.dtype != w_up.dtype {
-        return Err(MetalError::BadShape {
-            kernel: KERNEL,
-            detail: format!("gate/up dtypes differ: {:?}/{:?}", w_gate.dtype, w_up.dtype),
-        });
-    }
-    if topk == 0
-        || n_ffn == 0
-        || n_tokens == 0
-        || n_expert == 0
-        || x_pack.n_elements() as usize != n_tokens * n_hidden
+    let bad = |detail: &str| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: detail.into(),
+    };
+    let recipe = moe_grouped_clamped_recipe(w_gate.dtype, w_up.dtype)
+        .ok_or_else(|| bad("no clamped grouped recipe for gate/up storage types"))?;
+    let slots = n_tokens.checked_mul(topk);
+    let x_elements = n_tokens.checked_mul(n_hidden);
+    let id_elements = n_expert.checked_mul(n_tokens);
+    let inner_elements = slots.and_then(|n| n.checked_mul(n_ffn));
+    if [
+        Some(n_hidden),
+        Some(n_ffn),
+        Some(n_expert),
+        Some(n_tokens),
+        Some(topk),
+        slots,
+        x_elements,
+        id_elements,
+        inner_elements,
+    ]
+    .iter()
+    .any(|v| v.is_none_or(|v| v == 0 || v > i32::MAX as usize))
+        || Some(x_pack.n_elements() as usize) != x_elements
         || counts.n_elements() as usize != n_expert
-        || ids.n_elements() as usize != n_expert * n_tokens
-        || inner.n_elements() as usize != n_tokens * topk * n_ffn
+        || Some(ids.n_elements() as usize) != id_elements
+        || Some(inner.n_elements() as usize) != inner_elements
     {
-        return Err(MetalError::BadShape {
-            kernel: KERNEL,
-            detail: "degenerate shape or x/counts/ids/inner size mismatch".into(),
-        });
+        return Err(bad(
+            "degenerate, overflowing or mismatched x/counts/ids/inner shape",
+        ));
+    }
+    if let MoeGroupedClampedRecipe::GateThenUpClamped { gate, up } = recipe {
+        super::checks::require_serial(KERNEL, enc)?;
+        // Check BOTH banks, bindings and pipelines before writing gate into
+        // inner, so an unsupported/malformed up bank cannot leave half a recipe.
+        let gate_args = generic_mm_args(
+            KERNEL,
+            w_gate,
+            x_pack,
+            counts,
+            ids,
+            inner,
+            n_hidden,
+            n_ffn,
+            n_expert,
+            n_tokens,
+            topk,
+            0,
+            i32::MAX as u32,
+        )?;
+        let up_args = generic_mm_args(
+            KERNEL,
+            w_up,
+            x_pack,
+            counts,
+            ids,
+            inner,
+            n_hidden,
+            n_ffn,
+            n_expert,
+            n_tokens,
+            topk,
+            0,
+            i32::MAX as u32,
+        )?;
+        for bank in [w_gate, w_up] {
+            super::checks::check_physical(
+                KERNEL,
+                bank,
+                if bank.dtype == GgmlType::F32 { 4 } else { 2 },
+                false,
+                "expert bank",
+            )?;
+        }
+        for name in [&gate, &up] {
+            check_f32x_bindings(
+                ctx,
+                KERNEL,
+                name,
+                8192,
+                &[w_gate, w_up],
+                x_pack,
+                counts,
+                ids,
+                inner,
+                &[(slots, "slot count"), (id_elements, "ids")],
+            )?;
+        }
+        dispatch_generic_mm(
+            ctx, enc, &gate, 8192, &gate_args, w_gate, x_pack, counts, ids, inner, n_ffn, n_expert,
+            n_tokens,
+        )?;
+        // Buffer 6 is private to UpClamped; existing Down/UpSiluMul ABIs stay
+        // unchanged. Serial dispatch order makes the gate projection visible.
+        enc.set_bytes(6, &clamp);
+        return dispatch_generic_mm(
+            ctx, enc, &up, 8192, &up_args, w_up, x_pack, counts, ids, inner, n_ffn, n_expert,
+            n_tokens,
+        );
     }
     encode_fused_swiglu(
         ctx,
@@ -1098,8 +1209,8 @@ fn clamped_swiglu_n32_pipeline_name(dtype: GgmlType) -> Option<&'static str> {
 /// matrix-multiply sequence, so each slot's output is bitwise the same
 /// (qualification-tested); a bucket's weight tiles are dequantized once per
 /// 32 slots instead of 16. Dtypes without the wide tile, and spans shorter
-/// than `wide_min_count` (no bucket can reach it), use the 16-token path
-/// alone. Both dispatches' bindings and pipelines are checked before either
+/// than `wide_min_count` (no bucket can reach it), use the generic recipe
+/// (fused n16 or Down + UpClamped). Both dispatches' bindings and pipelines are checked before either
 /// is encoded.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_moe_swiglu_clamped_f32_grouped_slots_split(
@@ -1123,7 +1234,7 @@ pub fn encode_moe_swiglu_clamped_f32_grouped_slots_split(
     // A span shorter than the wide threshold has no bucket that large (a
     // bucket holds at most `n_tokens` slots): the incumbent alone.
     let wide = clamped_swiglu_n32_pipeline_name(w_gate.dtype)
-        .filter(|_| n_tokens >= wide_min_count as usize);
+        .filter(|_| w_gate.dtype == w_up.dtype && n_tokens >= wide_min_count as usize);
     let Some(wide) = wide else {
         return encode_moe_swiglu_clamped_f32_grouped_slots_generic(
             ctx, enc, w_gate, w_up, x_pack, counts, ids, inner, n_hidden, n_ffn, n_expert, topk,
@@ -1219,3 +1330,339 @@ pub fn encode_moe_swiglu_clamped_f32_grouped_slots_split(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod clamped_tests {
+    use super::*;
+    use crate::metal::test_support::{
+        assert_offset_guards, dequant_expert, metal_test_context, offset_tensor,
+        tensor_backing_bytes, tensor_f32_at_offset,
+    };
+
+    const METAL: &str = include_str!("../../../../kernels/moe.metal");
+
+    #[test]
+    fn clamped_recipes_cover_independent_layouts_and_real_entry_points() {
+        for gate in MOE_GROUPED_GENERIC_LAYOUTS {
+            for up in MOE_GROUPED_GENERIC_LAYOUTS {
+                let recipe = moe_grouped_clamped_recipe(gate.dtype, up.dtype).unwrap();
+                assert!(grouped_clamped_gate_up_supported(gate.dtype, up.dtype));
+                let names = match recipe {
+                    MoeGroupedClampedRecipe::Fused { pipeline } => {
+                        assert_eq!(gate.dtype, up.dtype);
+                        assert!(MOE_GROUPED_CLAMPED_SWIGLU_DTYPES.contains(&gate.dtype));
+                        vec![pipeline]
+                    }
+                    MoeGroupedClampedRecipe::GateThenUpClamped { gate: g, up: u } => {
+                        assert!(g.contains(&format!("down_{}_", gate.suffix)));
+                        assert!(u.contains(&format!("up_clamped_{}_", up.suffix)));
+                        let entry = METAL
+                            .lines()
+                            .find(|line| line.contains(&format!("[[host_name(\"{u}\")]]")))
+                            .unwrap();
+                        assert!(entry.contains(&format!("qt_dequantize_{}, 2>", up.suffix)));
+                        vec![g, u]
+                    }
+                };
+                for name in names {
+                    assert_eq!(
+                        METAL.matches(&format!("[[host_name(\"{name}\")]]")).count(),
+                        1
+                    );
+                }
+            }
+        }
+        for unsupported in [GgmlType::IQ2_XS, GgmlType::MXFP4, GgmlType::Unknown] {
+            assert!(moe_grouped_clamped_recipe(unsupported, GgmlType::Q2_K).is_none());
+            assert!(moe_grouped_clamped_recipe(GgmlType::Q2_K, unsupported).is_none());
+        }
+    }
+
+    // Arbitrary valid quant payloads; the independent CPU codec supplies the
+    // decoded weights. No Metal decoder tables or indexing appear in the oracle.
+    fn bank_bytes(dtype: GgmlType, k: usize, m: usize, experts: usize, seed: u64) -> Vec<u8> {
+        let mut state = seed;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (state >> 32) as u8
+        };
+        if dtype == GgmlType::BF16 {
+            return (0..k * m * experts)
+                .flat_map(|_| {
+                    half::bf16::from_f32((f32::from(next()) - 128.0) / 256.0).to_le_bytes()
+                })
+                .collect();
+        }
+        let (block, bytes) = dtype.storage_layout().unwrap();
+        let scales: &[usize] = match dtype {
+            GgmlType::Q2_K => &[80, 82],
+            GgmlType::Q3_K => &[108],
+            GgmlType::Q6_K => &[208],
+            GgmlType::IQ2_S | GgmlType::IQ3_S => &[0],
+            _ => unreachable!(),
+        };
+        let mut bank = Vec::new();
+        for _ in 0..k * m * experts / block as usize {
+            let mut data: Vec<u8> = (0..bytes).map(|_| next()).collect();
+            for &offset in scales {
+                let d = (1.0 + f32::from(next() % 7)) / 2048.0;
+                data[offset..offset + 2].copy_from_slice(&half::f16::from_f32(d).to_le_bytes());
+            }
+            bank.extend(data);
+        }
+        bank
+    }
+
+    fn view(ctx: &MetalContext, dtype: GgmlType, data: &[u8], shape: Vec<u64>) -> MetalTensor {
+        offset_tensor(ctx, 32, data, 32, shape, dtype)
+    }
+
+    fn half_dot(w: &[f32], x: &[f32]) -> f32 {
+        w.iter()
+            .zip(x)
+            .map(|(&a, &b)| {
+                f64::from(half::f16::from_f32(a).to_f32())
+                    * f64::from(half::f16::from_f32(b).to_f32())
+            })
+            .sum::<f64>() as f32
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_oracle(
+        ctx: &MetalContext,
+        gate_type: GgmlType,
+        up_type: GgmlType,
+        gb: &[u8],
+        ub: &[u8],
+        k: usize,
+        m: usize,
+        rows: usize,
+        experts: usize,
+        routes: &[i32],
+        x: &[f32],
+        clamp: f32,
+    ) {
+        let topk = routes.len() / rows;
+        let gate = view(ctx, gate_type, gb, vec![k as u64, m as u64, experts as u64]);
+        let up = view(ctx, up_type, ub, vec![k as u64, m as u64, experts as u64]);
+        let input = view(
+            ctx,
+            GgmlType::F32,
+            bytemuck::cast_slice(x),
+            vec![x.len() as u64],
+        );
+        let route = view(
+            ctx,
+            GgmlType::I32,
+            bytemuck::cast_slice(routes),
+            vec![routes.len() as u64],
+        );
+        let counts = view(
+            ctx,
+            GgmlType::I32,
+            bytemuck::cast_slice(&vec![0i32; experts]),
+            vec![experts as u64],
+        );
+        let slots = view(
+            ctx,
+            GgmlType::I32,
+            bytemuck::cast_slice(&vec![-1i32; experts * rows]),
+            vec![(experts * rows) as u64],
+        );
+        let inner = view(
+            ctx,
+            GgmlType::F32,
+            bytemuck::cast_slice(&vec![f32::NAN; routes.len() * m]),
+            vec![(routes.len() * m) as u64],
+        );
+        for e in 0..experts {
+            assert!(routes.iter().filter(|&&id| id == e as i32).count() <= rows);
+        }
+        let inputs = [&gate, &up, &input, &route];
+        let before: Vec<_> = inputs.iter().map(|t| tensor_backing_bytes(t)).collect();
+        dispatch_census_begin();
+        one_shot(ctx, |enc| {
+            encode_moe_route_bucket_slots_f32(
+                ctx, enc, &route, &counts, &slots, experts, rows, topk,
+            )?;
+            // Always exercise the public split dispatcher, including mixed IQ
+            // pairs above its 17-slot threshold (must select the two-pass recipe).
+            encode_moe_swiglu_clamped_f32_grouped_slots_split(
+                ctx, enc, &gate, &up, &input, &counts, &slots, &inner, k, m, experts, topk, rows,
+                clamp, 17,
+            )
+        })
+        .unwrap();
+        let dispatches = dispatch_census_take();
+        let MoeGroupedClampedRecipe::GateThenUpClamped { gate: g, up: u } =
+            moe_grouped_clamped_recipe(gate_type, up_type).unwrap()
+        else {
+            panic!("two-pass fixture")
+        };
+        assert_eq!(dispatches.len(), 3); // bucket, Down, UpClamped; no activation pass
+        assert_eq!(dispatches[1].kernel, g);
+        assert_eq!(dispatches[2].kernel, u);
+        let decoded_g: Vec<_> = (0..experts)
+            .map(|e| dequant_expert(gb, gate_type, k, m, e))
+            .collect();
+        let decoded_u: Vec<_> = (0..experts)
+            .map(|e| dequant_expert(ub, up_type, k, m, e))
+            .collect();
+        let actual = tensor_f32_at_offset(&inner);
+        for (slot, &expert) in routes.iter().enumerate() {
+            let e = expert as usize;
+            let x_row = &x[slot / topk * k..][..k];
+            for channel in 0..m {
+                let g = half_dot(&decoded_g[e][channel * k..][..k], x_row).min(clamp);
+                let u = half_dot(&decoded_u[e][channel * k..][..k], x_row).clamp(-clamp, clamp);
+                // f64 nonlinear oracle; Half operand rounding is explicit.
+                let gf = f64::from(g);
+                let expected = (gf / (1.0 + (-gf).exp()) * f64::from(u)) as f32;
+                let got = actual[slot * m + channel];
+                assert!(got.is_finite() && expected.is_finite());
+                assert!(
+                    (got - expected).abs() <= 0.003 * (1.0 + expected.abs()),
+                    "{gate_type:?}/{up_type:?} rows={rows} M={m} slot={slot} channel={channel}: {got} != {expected}"
+                );
+            }
+        }
+        for t in [&counts, &slots, &inner] {
+            assert_offset_guards(t, 32, 32);
+        }
+        for (t, bytes) in inputs.iter().zip(before) {
+            assert_eq!(tensor_backing_bytes(t), bytes);
+        }
+    }
+
+    #[test]
+    fn mixed_clamped_independent_oracle_tails_routes_and_offsets() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let pairs = [
+            (GgmlType::Q2_K, GgmlType::Q3_K),
+            (GgmlType::IQ2_S, GgmlType::IQ3_S),
+            (GgmlType::Q6_K, GgmlType::BF16),
+        ];
+        for (a, b) in pairs {
+            for (g, u) in [(a, b), (b, a)] {
+                for rows in [1, 3, 17, 129] {
+                    for m in [1, 3, 17, 129] {
+                        let (k, experts) = (256, 4);
+                        let gb = bank_bytes(g, k, m, experts, 17);
+                        let ub = bank_bytes(u, k, m, experts, 93);
+                        // Expert 0 fills a whole bucket. The second route cycles
+                        // among other experts; at rows >= 3 swap two routes to
+                        // include a duplicate expert in a token without exceeding
+                        // the existing rows-per-bucket storage contract.
+                        let mut routes: Vec<i32> =
+                            (0..rows).flat_map(|r| [0, 1 + (r % 3) as i32]).collect();
+                        if rows >= 3 {
+                            routes.swap(1, 2);
+                        }
+                        let x: Vec<f32> = (0..rows * k)
+                            .map(|i| ((i * 17 % 83) as f32 - 41.0) / 64.0)
+                            .collect();
+                        run_oracle(&ctx, g, u, &gb, &ub, k, m, rows, experts, &routes, &x, 0.37);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clamped_boundary_is_finite_and_gate_is_only_upper_clamped() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let values = [
+            -65504.0, -80.0, -2.25, -2.0, -1.75, -0.0, 1.75, 2.0, 2.25, 80.0, 65504.0,
+        ];
+        let k = 32;
+        let m = values.len() * values.len();
+        let mut g = vec![0.0f32; k * m];
+        let mut u = vec![0.0f32; k * m];
+        for (i, &gv) in values.iter().enumerate() {
+            for (j, &uv) in values.iter().enumerate() {
+                g[(i * values.len() + j) * k] = gv;
+                u[(i * values.len() + j) * k] = uv;
+            }
+        }
+        let mut x = vec![0.0; k];
+        x[0] = 1.0;
+        run_oracle(
+            &ctx,
+            GgmlType::F32,
+            GgmlType::F32,
+            bytemuck::cast_slice(&g),
+            bytemuck::cast_slice(&u),
+            k,
+            m,
+            1,
+            1,
+            &[0],
+            &x,
+            2.0,
+        );
+    }
+
+    #[test]
+    fn clamped_two_pass_rejects_concurrency_and_bad_up_before_dispatch() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let bank = view(
+            &ctx,
+            GgmlType::F32,
+            bytemuck::cast_slice(&[0.0f32; 32]),
+            vec![32, 1, 1],
+        );
+        let x = view(
+            &ctx,
+            GgmlType::F32,
+            bytemuck::cast_slice(&[0.0f32; 32]),
+            vec![32],
+        );
+        let counts = view(&ctx, GgmlType::I32, bytemuck::cast_slice(&[1i32]), vec![1]);
+        let ids = view(&ctx, GgmlType::I32, bytemuck::cast_slice(&[0i32]), vec![1]);
+        let inner = view(
+            &ctx,
+            GgmlType::F32,
+            bytemuck::cast_slice(&[123.0f32]),
+            vec![1],
+        );
+        for case in 0..7 {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let enc = if case == 0 {
+                KernelEncoder::begin_concurrent(&command)
+            } else {
+                KernelEncoder::begin(&command)
+            };
+            let mut up = bank.clone();
+            let clamp = match case {
+                3 => 0.0,
+                4 => -1.0,
+                5 => f32::NAN,
+                6 => f32::INFINITY,
+                _ => 2.0,
+            };
+            if case == 1 {
+                up.shape = vec![1];
+            }
+            if case == 2 {
+                up.offset += 2;
+            }
+            dispatch_census_begin();
+            let result = encode_moe_swiglu_clamped_f32_grouped_slots_generic(
+                &ctx, &enc, &bank, &up, &x, &counts, &ids, &inner, 32, 1, 1, 1, 1, clamp,
+            );
+            enc.end();
+            assert!(result.is_err(), "case {case}");
+            assert!(
+                dispatch_census_take().is_empty(),
+                "case {case}: partial encoding"
+            );
+            assert_eq!(tensor_f32_at_offset(&inner), [123.0]);
+        }
+    }
+}

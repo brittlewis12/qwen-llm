@@ -107,7 +107,7 @@ pub fn coverage(role: TensorRole, dtype: GgmlType) -> Option<RoleCoverage> {
         all_slots_down_supported, all_slots_gate_up_supported, get_rows_pipeline_name,
         grouped_projection_supported,
     };
-    use crate::metal_forward::{mat_mat_dispatch_supported, mat_vec_dispatch_supported};
+    use crate::metal_forward::mat_vec_dispatch_supported;
     use GgmlType as T;
     use TensorRole as R;
     Some(match role {
@@ -118,12 +118,9 @@ pub fn coverage(role: TensorRole, dtype: GgmlType) -> Option<RoleCoverage> {
         // Packed execution can use per-row GEMV when GEMM is unavailable.
         // An optional optimization must not narrow admission.
         R::Projection | R::F32Projection if mat_vec_dispatch_supported(dtype) => both(DENSE),
-        // Generic HC delegates to dense dispatch, with an explicit per-row
-        // GEMV composition for MXFP4. Q8_0 may use the fused pre fast path.
-        R::HyperMix
-            if mat_vec_dispatch_supported(dtype)
-                && (mat_mat_dispatch_supported(dtype) || dtype == T::MXFP4) =>
-        {
+        // HC batches F32 projection where supported and otherwise uses row
+        // GEMV. Grouped projection is optional, not an admission requirement.
+        R::HyperMix if mat_vec_dispatch_supported(dtype) => {
             both("encode_mhc4_pre_generic / fused Q8_0 pre")
         }
         R::LatentAbsorb if grouped_projection_supported(dtype) => {
@@ -131,7 +128,7 @@ pub fn coverage(role: TensorRole, dtype: GgmlType) -> Option<RoleCoverage> {
         }
         // Packed execution falls back to all-slot row decode when the grouped
         // clamped gate/up pair or grouped down kernel is unavailable. Binding
-        // additionally checks the actual gate/up pair for equal types.
+        // additionally checks the actual independently typed gate/up pair.
         R::ExpertGateUp if all_slots_gate_up_supported(dtype, dtype) => split(
             Support::Kernel("encode_all_slots_gate_up_swiglu"),
             Support::Kernel("optional grouped clamped SwiGLU / all-slot row decode"),

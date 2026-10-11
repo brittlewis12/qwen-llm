@@ -1,5 +1,7 @@
-//! Routed-expert decode projections over every selected slot in one dispatch,
-//! shared by DeepSeek V4 and GLM-5.3-Flash.
+//! Routed-expert decode projections over every selected slot, shared by
+//! DeepSeek V4 and GLM-5.3-Flash. Existing fused kernels stay preferred; the
+//! native F32 fallback uses two gate/up passes and one down pass, without
+//! extra scratch or weight expansion. Packed fallback repeats this per row.
 //!
 //! Banks are `[n_in, n_out, experts]` (contiguous per-expert matrices). Expert
 //! ids (I32 `[top_k]`) and route status (I32 `[1]`) come from
@@ -66,20 +68,24 @@ fn all_slots_down_kernel(dtype: GgmlType) -> Option<(&'static str, usize, usize,
     })
 }
 
-/// All-slot clamped gate/up requires equal storage types. Mixed pairs need a
-/// separate composition and must not be inferred from individual capabilities.
+/// Optimized equal-type fused kernels or independently typed native banks.
+/// Native composition reuses the output for gate then clamped SwiGLU.
 pub fn all_slots_gate_up_supported(gate: GgmlType, up: GgmlType) -> bool {
-    gate == up && all_slots_gate_up_kernel(gate).is_some()
+    (gate == up && all_slots_gate_up_kernel(gate).is_some())
+        || all_slots_gate_up_native_supported(gate, up)
 }
 
 pub fn all_slots_down_supported(dtype: GgmlType) -> bool {
-    dtype == GgmlType::IQ4_XS || all_slots_down_kernel(dtype).is_some()
+    dtype == GgmlType::IQ4_XS
+        || all_slots_down_kernel(dtype).is_some()
+        || all_slots_down_native_supported(dtype)
 }
 
 /// Capability of the packed clamped path used by `encode_grouped_routed_experts`.
-/// The unclamped generic two-pass path does not implement this contract.
+/// Uses the actual Half-operand recipe, including independently typed banks.
+/// This capability does not imply an F32-operand grouped tile.
 pub fn grouped_clamped_gate_up_supported(gate: GgmlType, up: GgmlType) -> bool {
-    gate == up && clamped_swiglu_pipeline_name(gate).is_some()
+    super::moe_grouped_generic::moe_grouped_clamped_recipe(gate, up).is_some()
 }
 
 pub fn grouped_expert_down_supported(dtype: GgmlType) -> bool {
@@ -198,6 +204,12 @@ pub fn encode_all_slots_gate_up_swiglu(
     clamp: f32,
 ) -> Result<(), MetalError> {
     const K: &str = "all_slots_gate_up_swiglu";
+    if gate_bank.dtype != up_bank.dtype || all_slots_gate_up_kernel(gate_bank.dtype).is_none() {
+        return encode_all_slots_gate_up_swiglu_native(
+            ctx, enc, gate_bank, up_bank, input, ids, status, output, n_in, n_out, experts, top_k,
+            clamp,
+        );
+    }
     require_serial(K, enc)?;
     if !clamp.is_finite() || clamp <= 0.0 {
         return Err(bad_shape(K, "clamp must be finite and positive"));
@@ -219,9 +231,6 @@ pub fn encode_all_slots_gate_up_swiglu(
             (status, "route status"),
         ],
     )?;
-    if gate_bank.dtype != up_bank.dtype {
-        return Err(bad_shape(K, "gate and up banks must share a dtype"));
-    }
     let kernel = all_slots_gate_up_kernel(gate_bank.dtype)
         .ok_or_else(|| bad_shape(K, format!("no all-slot kernel for {:?}", gate_bank.dtype)))?;
     if !n_in.is_multiple_of(256) {
@@ -280,6 +289,11 @@ pub fn encode_all_slots_down(
     top_k: usize,
 ) -> Result<(), MetalError> {
     const K: &str = "all_slots_down";
+    if bank.dtype != GgmlType::IQ4_XS && all_slots_down_kernel(bank.dtype).is_none() {
+        return encode_all_slots_down_native(
+            ctx, enc, bank, input, ids, status, output, n_in, n_out, experts, top_k,
+        );
+    }
     require_serial(K, enc)?;
     check_route(K, ids, status, top_k)?;
     check_expert_bank(K, bank, n_in, n_out, experts, "down bank")?;
@@ -385,7 +399,7 @@ pub fn encode_all_slots_down(
 
 /// Buffers for [`encode_grouped_routed_experts`] over `rows` tokens.
 pub struct GroupedExperts<'a> {
-    /// Routed expert banks; gate and up share a dtype.
+    /// Independently typed native routed expert banks (Half tile operands).
     pub gate_bank: &'a MetalTensor,
     pub up_bank: &'a MetalTensor,
     pub down_bank: &'a MetalTensor,
@@ -407,11 +421,14 @@ pub struct GroupedExperts<'a> {
 }
 
 /// Expert-major routed experts for packed prefill: bucket routes by expert,
-/// fused gate/up with the clamped SwiGLU epilogue, grouped down, and the
+/// gate/up with the clamped SwiGLU epilogue, grouped down, and the
 /// weighted sum over each row's slots. Expert weights are read once per tile
 /// of routed tokens instead of once per routed token. Invalid route ids
 /// (failed rows) are dropped by bucketing; callers must check per-row route
-/// status after the command, as for decode.
+/// status after the command, as for decode. Each expert bucket must contain
+/// at most `rows` slots (the router normally selects distinct experts per row).
+/// This entry point stages operands in Half; F32 precision requires the
+/// separately supported F32 tiles or a per-row native composition.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_grouped_routed_experts(
     ctx: &MetalContext,
@@ -1400,8 +1417,14 @@ fn expert_capability_names_have_shader_implementations() {
             assert!(decode.contains(name), "{dtype:?}: {name}");
         }
         if grouped_clamped_gate_up_supported(dtype, dtype) {
-            let name = clamped_swiglu_pipeline_name(dtype).unwrap();
-            assert!(packed.contains(&name), "{dtype:?}: {name}");
+            use super::moe_grouped_generic::{MoeGroupedClampedRecipe, moe_grouped_clamped_recipe};
+            let names = match moe_grouped_clamped_recipe(dtype, dtype).unwrap() {
+                MoeGroupedClampedRecipe::Fused { pipeline } => vec![pipeline],
+                MoeGroupedClampedRecipe::GateThenUpClamped { gate, up } => vec![gate, up],
+            };
+            for name in names {
+                assert!(packed.contains(&name), "{dtype:?}: {name}");
+            }
         }
         if grouped_expert_down_supported(dtype) && dtype != GgmlType::IQ4_XS {
             let name =
@@ -1413,11 +1436,11 @@ fn expert_capability_names_have_shader_implementations() {
     assert!(grouped_expert_down_supported(GgmlType::IQ3_XXS));
     assert!(all_slots_down_supported(GgmlType::MXFP4));
     assert!(!grouped_expert_down_supported(GgmlType::MXFP4));
-    assert!(!all_slots_gate_up_supported(
+    assert!(all_slots_gate_up_supported(
         GgmlType::IQ2_S,
         GgmlType::IQ3_S
     ));
-    assert!(!grouped_clamped_gate_up_supported(
+    assert!(grouped_clamped_gate_up_supported(
         GgmlType::IQ2_S,
         GgmlType::IQ3_S
     ));

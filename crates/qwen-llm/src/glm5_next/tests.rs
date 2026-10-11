@@ -394,12 +394,10 @@ fn binder_refuses_structural_drift() {
         })
         .contains("inconsistent")
     );
-    // A Q2_K gate bank lacks an all-slot path; NextN may use it.
+    // IQ1_M still lacks an all-slot path; NextN remains census-only.
     assert!(
         refuse(&|t| {
-            let i = find(t, "blk.20.ffn_gate_exps.weight");
-            t[i].dtype = GgmlType::Q2_K;
-            t[i].n_bytes = 4096 * 2048 * 288 / 256 * 84;
+            retype(t, "blk.20.ffn_gate_exps.weight", GgmlType::IQ1_M);
         })
         .contains("no executable path")
     );
@@ -417,10 +415,10 @@ fn coverage_matrix_names_remaining_adaptations() {
         .map(|r| (r.role, r.dtype, r.tensors))
         .collect::<Vec<_>>();
     assert!(pending.is_empty(), "{pending:?}");
-    // Trunk IQ2_S down has no all-slot path.
-    assert!(coverage::coverage(TensorRole::ExpertDown, GgmlType::IQ2_S).is_none());
-    // Absent pairs have no path rather than an implicit F32 expansion.
-    assert!(coverage::coverage(TensorRole::ExpertGateUp, GgmlType::Q8_0).is_none());
+    // Native all-slot composition covers these without expanding weights.
+    assert!(coverage::coverage(TensorRole::ExpertDown, GgmlType::IQ2_S).is_some());
+    assert!(coverage::coverage(TensorRole::ExpertGateUp, GgmlType::Q8_0).is_some());
+    assert!(coverage::coverage(TensorRole::ExpertGateUp, GgmlType::IQ1_M).is_none());
     assert!(coverage::coverage(TensorRole::LatentAbsorb, GgmlType::Q6_K).is_some());
 }
 
@@ -507,7 +505,7 @@ fn binding_accepts_alternate_native_quant_mixtures() {
 }
 
 #[test]
-fn binding_rejects_unimplemented_codecs_and_uncomposed_expert_pairs() {
+fn binding_rejects_unimplemented_codecs_not_independently_typed_experts() {
     use GgmlType::*;
     for (name, dtype) in [
         ("token_embd.weight", Q5_K), // dense support does not imply gather support
@@ -521,7 +519,7 @@ fn binding_rejects_unimplemented_codecs_and_uncomposed_expert_pairs() {
         ("blk.3.indexer.proj.weight", Q1_0),
         ("blk.3.ffn_gate_exps.weight", IQ1_M), // dense support, no all-slot gate/up
         ("blk.3.ffn_gate_exps.weight", MXFP4), // down support, no all-slot gate/up
-        ("blk.3.ffn_down_exps.weight", IQ2_S), // packed, no all-slot down
+        ("blk.3.ffn_down_exps.weight", IQ1_M), // dense support, no all-slot down
         ("output_norm.weight", F16),
     ] {
         let mut tensors = release_tensors();
@@ -536,13 +534,10 @@ fn binding_rejects_unimplemented_codecs_and_uncomposed_expert_pairs() {
     }
     let mut tensors = release_tensors();
     retype(&mut tensors, "blk.3.ffn_up_exps.weight", IQ3_S);
-    let err = Glm5NextModel::bind(config(), &tensors)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("gate and up banks must share a dtype"),
-        "{err}"
-    );
+    let mixed = Glm5NextModel::bind(config(), &tensors).unwrap();
+    mixed
+        .validate_execution(ExecutionMode::PackedPrefill)
+        .unwrap();
     // NextN remains census-only, including otherwise unexecutable mixed pairs.
     let mut tensors = release_tensors();
     retype(&mut tensors, "blk.45.ffn_up_exps.weight", Q4_K);
@@ -590,23 +585,50 @@ fn expert_admission_uses_all_slot_capability_with_optional_grouped_prefill() {
             assert!(model.pending_coverage().is_empty(), "{gate_up:?}/{down:?}");
         }
     }
-    // Row fallback does not compose gate/up banks with different codecs.
+    // Independently typed native composition is the baseline for both modes.
     let mut tensors = release_tensors();
     retype(&mut tensors, "blk.3.ffn_gate_exps.weight", IQ2_XS);
     retype(&mut tensors, "blk.3.ffn_up_exps.weight", IQ3_XXS);
-    let err = Glm5NextModel::bind(config(), &tensors)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("gate and up banks must share a dtype"),
-        "{err}"
-    );
+    let mixed = Glm5NextModel::bind(config(), &tensors).unwrap();
+    mixed
+        .validate_execution(ExecutionMode::PackedPrefill)
+        .unwrap();
+}
+
+#[test]
+fn native_expert_binding_covers_independent_gate_up_and_down_types() {
+    let native: Vec<_> = (0..=255)
+        .map(GgmlType::from_raw)
+        .filter(|&t| crate::metal::all_slots_gate_up_native_supported(t, t))
+        .collect();
+    assert_eq!(native.len(), 18);
+    for (i, &gate) in native.iter().enumerate() {
+        let up = native[(i + 1) % native.len()];
+        let down = native[(i + 2) % native.len()];
+        let mut tensors = release_tensors();
+        retype(&mut tensors, "blk.3.ffn_gate_exps.weight", gate);
+        retype(&mut tensors, "blk.3.ffn_up_exps.weight", up);
+        retype(&mut tensors, "blk.3.ffn_down_exps.weight", down);
+        let model = Glm5NextModel::bind(config(), &tensors).unwrap();
+        for mode in [ExecutionMode::SerialDecode, ExecutionMode::PackedPrefill] {
+            model.validate_execution(mode).unwrap();
+        }
+        assert!(
+            model.pending_coverage().is_empty(),
+            "{gate:?}/{up:?}/{down:?}"
+        );
+    }
+    for &gate in &native {
+        for &up in &native {
+            assert!(crate::metal::all_slots_gate_up_supported(gate, up));
+        }
+    }
 }
 
 #[test]
 fn role_admission_corresponds_to_dispatch_capabilities() {
     use crate::metal::*;
-    use crate::metal_forward::{mat_mat_dispatch_supported, mat_vec_dispatch_supported};
+    use crate::metal_forward::mat_vec_dispatch_supported;
     use TensorRole::*;
     for raw in 0..=255 {
         let dtype = GgmlType::from_raw(raw);
@@ -633,8 +655,7 @@ fn role_admission_corresponds_to_dispatch_capabilities() {
         }
         assert_eq!(
             admitted(HyperMix),
-            mat_vec_dispatch_supported(dtype)
-                && (mat_mat_dispatch_supported(dtype) || dtype == GgmlType::MXFP4),
+            mat_vec_dispatch_supported(dtype),
             "{dtype:?}"
         );
         assert_eq!(

@@ -1,0 +1,54 @@
+
+running 48 tests
+test metal::moe_grouped_generic::clamped_tests::clamped_boundary_is_finite_and_gate_is_only_upper_clamped ... 2026-10-11 12:57:17.266 qwen_llm-de358c0a63485fd8[97790:19413840] Metal API Validation Enabled
+ok
+test metal::moe_grouped_generic::clamped_tests::clamped_recipes_cover_independent_layouts_and_real_entry_points ... ok
+test metal::moe_grouped_generic::clamped_tests::clamped_two_pass_rejects_concurrency_and_bad_up_before_dispatch ... ok
+test metal::moe_grouped_generic::clamped_tests::mixed_clamped_independent_oracle_tails_routes_and_offsets ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_case_list_covers_mapping ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_down_bf16_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_down_f16_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_down_f32_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_down_iq2_s_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_down_iq3_s_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_down_iq3_xxs_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_down_iq4_nl_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_down_iq4_xs_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_down_q2_0_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_down_q2_k_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_down_q3_k_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_down_q4_0_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_down_q4_1_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_down_q4_k_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_down_q5_k_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_down_q5_k_matches_specialized ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_down_q6_k_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_down_q8_0_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_bf16_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_f16_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_f32_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_iq2_s_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_iq3_s_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_iq3_xxs_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_iq4_nl_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_iq4_xs_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_mixed_iq4_xs_q8_0_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_mixed_q4_k_q5_k_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_mixed_rejects_concurrent_encoder ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_q2_0_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_q2_k_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_q3_k_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_q4_0_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_q4_1_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_q4_k_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_q4_k_q5_k_match_specialized ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_q5_k_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_q6_k_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_gate_up_q8_0_matches_cpu ... ok
+test metal::moe_grouped_generic::tests::generic_grouped_moe_rejects_bad_contracts ... ok
+test metal::moe_grouped_generic::tests::moe_grouped_generic_covers_every_resident_expert_dtype ... ok
+test metal::moe_grouped_generic::tests::moe_grouped_generic_layout_matches_ggml_storage ... ok
+test metal::moe_grouped_generic::tests::moe_grouped_generic_mapping_matches_metal_source ... ok
+
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 1854 filtered out; finished in 1.01s
+

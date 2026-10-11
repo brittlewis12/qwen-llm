@@ -170,7 +170,7 @@ pub(crate) struct Args {
     #[arg(long, hide_short_help = true, default_value_t = 42)]
     pub(crate) seed: u64,
 
-    /// Enable experimental dense-27B Q4_K_M prompt-lookup decode.
+    /// Enable experimental dense-Qwen prompt-lookup decode (most useful for copying/editing; packed arithmetic may differ from scalar decoding).
     #[arg(long, hide_short_help = true)]
     pub(crate) prompt_lookup: bool,
 

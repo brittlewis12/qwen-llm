@@ -283,32 +283,34 @@ pub struct PromptLookupBlockLayout {
     pub moe: bool,
 }
 
-/// The qualified prompt-lookup layout: dense 27B, Q6_K lm_head, Q4_K gate/up,
-/// Q4_K or Q6_K down, no routed experts. Pure over layout facts; no weights.
+/// Prompt lookup needs no MTP head and imposes no additional dense model-size
+/// or quant-mixture restriction. The verifier batches supported operations and
+/// otherwise uses the ordinary GEMV dispatch. Model loading and the encoders
+/// still validate geometry. Packed arithmetic is not scalar-bit-identical.
 pub fn check_prompt_lookup_n8_layout(
     arch: &crate::model::Arch,
     lm_head: GgmlType,
     blocks: impl IntoIterator<Item = PromptLookupBlockLayout>,
 ) -> Result<(), String> {
-    if *arch != crate::model::QWEN3_27B {
-        return Err(format!(
-            "prompt lookup currently requires the dense 27B architecture; loaded {:?}",
-            arch.kind
-        ));
+    use crate::metal_forward::mat_vec_dispatch_supported;
+    if arch.kind == crate::model::ArchKind::Moe {
+        return Err(
+            "packed prompt lookup on MoE targets has unresolved numerical differences in resumed state; ordinary decoding remains available".into(),
+        );
     }
-    if lm_head != GgmlType::Q6_K {
+    if !mat_vec_dispatch_supported(lm_head) {
         return Err(format!(
-            "prompt lookup currently requires the validated Q4_K_M layout; lm_head is {lm_head:?}"
+            "prompt lookup has no target lm_head dispatch for {lm_head:?}"
         ));
     }
     for (index, block) in blocks.into_iter().enumerate() {
         if block.moe
-            || block.gate != GgmlType::Q4_K
-            || block.up != GgmlType::Q4_K
-            || !matches!(block.down, GgmlType::Q4_K | GgmlType::Q6_K)
+            || !mat_vec_dispatch_supported(block.gate)
+            || !mat_vec_dispatch_supported(block.up)
+            || !mat_vec_dispatch_supported(block.down)
         {
             return Err(format!(
-                "prompt lookup requires dense-27B Q4_K_M gate/up=Q4_K and down=Q4_K/Q6_K; block \
+                "prompt lookup requires executable dense FFN operations; block \
                  {index} has gate/up/down={:?}/{:?}/{:?}, moe={}",
                 block.gate, block.up, block.down, block.moe
             ));

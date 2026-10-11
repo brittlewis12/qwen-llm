@@ -351,7 +351,7 @@ fn run() -> Result<()> {
         | ModelFamily::Qwen4Exp
         | ModelFamily::DeepSeek4 => {}
     }
-    // Prompt lookup's qualified layout is a header fact; other families
+    // Prompt lookup's target-operation support is a header fact; other families
     // reject the flag in their own pre-load validators.
     if args.prompt_lookup
         && matches!(
@@ -1177,7 +1177,7 @@ fn project_info(model: &Path, gguf: &GgufFile) -> Result<serde_json::Value> {
             }),
         }
     };
-    // Prompt lookup is a run-lane feature whose qualified layout is a header
+    // Prompt lookup is a run-lane feature whose target operations are a header
     // fact for ordinary Qwen; other families reject the flag outright.
     let prompt_lookup = match family {
         Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe) => {

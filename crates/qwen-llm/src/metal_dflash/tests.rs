@@ -14714,26 +14714,56 @@ mod prompt_lookup_layout_gate {
     }
 
     #[test]
-    fn non_27b_architecture_is_refused_before_blocks_are_inspected() {
-        let err = check_prompt_lookup_n8_layout(&QWEN3_0_8B, GgmlType::Q6_K, std::iter::empty())
-            .unwrap_err();
-        assert!(err.contains("dense 27B architecture"), "{err}");
+    fn dense_sizes_and_mtp_metadata_do_not_restrict_target_only_verification() {
+        for mut arch in [QWEN3_0_8B, QWEN3_27B] {
+            for mtp_layers in [0, 1, 2] {
+                arch.mtp_n_hidden_layers = mtp_layers;
+                assert_eq!(
+                    check_prompt_lookup_n8_layout(
+                        &arch,
+                        GgmlType::Q6_K,
+                        vec![q4km_block(); arch.n_layer as usize],
+                    ),
+                    Ok(()),
+                );
+            }
+        }
     }
 
     #[test]
-    fn q8_lm_head_is_refused() {
-        let err = check_prompt_lookup_n8_layout(&QWEN3_27B, GgmlType::Q8_0, std::iter::empty())
+    fn independently_quantized_operations_use_dispatch_support() {
+        for dtype in [
+            GgmlType::Q8_0,
+            GgmlType::F32,
+            GgmlType::BF16,
+            GgmlType::IQ2_S,
+            GgmlType::IQ3_S,
+        ] {
+            let blocks = [PromptLookupBlockLayout {
+                gate: dtype,
+                ..q4km_block()
+            }];
+            assert_eq!(
+                check_prompt_lookup_n8_layout(&QWEN3_27B, dtype, blocks),
+                Ok(())
+            );
+        }
+    }
+
+    #[test]
+    fn missing_lm_head_dispatch_is_refused() {
+        let err = check_prompt_lookup_n8_layout(&QWEN3_27B, GgmlType::I32, std::iter::empty())
             .unwrap_err();
-        assert!(err.contains("lm_head is Q8_0"), "{err}");
+        assert!(err.contains("no target lm_head dispatch for I32"), "{err}");
     }
 
     #[test]
     fn a_single_offending_block_names_its_index_and_dtypes() {
         let mut blocks = vec![q4km_block(); 64];
-        blocks[17].gate = GgmlType::Q8_0;
+        blocks[17].gate = GgmlType::I32;
         let err = check_prompt_lookup_n8_layout(&QWEN3_27B, GgmlType::Q6_K, blocks).unwrap_err();
         assert!(
-            err.contains("block 17 has gate/up/down=Q8_0/Q4_K/Q6_K, moe=false"),
+            err.contains("block 17 has gate/up/down=I32/Q4_K/Q6_K, moe=false"),
             "{err}"
         );
     }
@@ -14744,5 +14774,12 @@ mod prompt_lookup_layout_gate {
         blocks[0].moe = true;
         let err = check_prompt_lookup_n8_layout(&QWEN3_27B, GgmlType::Q6_K, blocks).unwrap_err();
         assert!(err.contains("moe=true"), "{err}");
+        let arch = crate::model::Arch {
+            kind: crate::model::ArchKind::Moe,
+            ..QWEN3_27B
+        };
+        let err =
+            check_prompt_lookup_n8_layout(&arch, GgmlType::Q6_K, std::iter::empty()).unwrap_err();
+        assert!(err.contains("unresolved numerical differences"), "{err}");
     }
 }

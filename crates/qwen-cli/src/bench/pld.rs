@@ -383,7 +383,13 @@ pub(crate) fn run_pld(args: PldArgs) -> Result<()> {
     }
     audit.resume_audit_pass &= audit.gdn_state_max_abs <= 1e-2;
     audit.resume_audit_pass &= audit.gdn_conv_max_abs <= 1e-1;
-    anyhow::ensure!(audit.resume_audit_pass, "PLD terminal resume audit failed");
+    anyhow::ensure!(
+        audit.resume_audit_pass,
+        "PLD terminal resume audit failed (accepted={}/{}, restores={}): {audit:?}",
+        stats.accepted,
+        stats.drafts_scored,
+        stats.restore_calls,
+    );
 
     let decode_speedup = ref_decode_ms / stats.decode_ms;
     let total_speedup = ref_total_ms / candidate_total_ms;

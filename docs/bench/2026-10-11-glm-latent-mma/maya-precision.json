@@ -1,0 +1,2649 @@
+{
+  "schema": "glm53.grouped_latent_precision_probe.v1",
+  "model": "/Volumes/wdblack/weights-archive/glm-5.3-flash-maya-m/Maya-M/GLM-5.3-Flash-Maya-M-IQ2_S-00001-of-00003.gguf",
+  "test_binary": "/Users/tito/code/qwen-llm/target/release/deps/qwen_llm-de358c0a63485fd8",
+  "prompt_tokens": [
+    154822,
+    154824,
+    154822,
+    154824,
+    785,
+    3840,
+    315,
+    56925,
+    6559,
+    12027,
+    448,
+    34067,
+    9286,
+    1948,
+    60500,
+    44346,
+    11,
+    1293,
+    1573,
+    17924,
+    85389,
+    1033,
+    3204,
+    13,
+    22691,
+    68337,
+    1349,
+    279,
+    28392,
+    11,
+    279,
+    9754,
+    323,
+    279,
+    12457,
+    315,
+    279,
+    3015,
+    26,
+    807,
+    11685,
+    23858,
+    11,
+    44528,
+    11,
+    9314,
+    323,
+    7343,
+    13,
+    6065,
+    23566,
+    11,
+    67968,
+    2471,
+    13929,
+    1119,
+    9716,
+    11,
+    323,
+    279,
+    11286,
+    1948,
+    1105,
+    26189,
+    15447,
+    11,
+    6872,
+    323,
+    279,
+    8863,
+    315,
+    6708,
+    13,
+    64550,
+    1783,
+    9494,
+    311,
+    2506,
+    9614,
+    11,
+    69015,
+    25573,
+    323,
+    6950,
+    8548,
+    807,
+    1030,
+    2581,
+    2270,
+    382,
+    31409,
+    580,
+    4813,
+    1352,
+    1380,
+    803,
+    11788,
+    17047,
+    304,
+    12400,
+    1091,
+    97263,
+    304,
+    7324,
+    13,
+    6065,
+    10788,
+    279,
+    11788,
+    1367,
+    11354,
+    1119,
+    33827,
+    77,
+    323,
+    1221,
+    1119,
+    27855,
+    6303,
+    9848,
+    11,
+    892,
+    12027,
+    311,
+    6396,
+    1212,
+    1181,
+    1828,
+    4680,
+    13,
+    362,
+    33419,
+    92980,
+    10792,
+    1172,
+    264,
+    2421,
+    36073,
+    264,
+    1042,
+    3143,
+    1181,
+    12816,
+    714,
+    10591,
+    518,
+    1181,
+    12255,
+    11,
+    76082,
+    279,
+    4845,
+    20478,
+    1119,
+    264,
+    7205,
+    547,
+    6083,
+    323,
+    15319,
+    293,
+    616,
+    388,
+    3041,
+    504,
+    862,
+    2530,
+    13,
+    3197,
+    279,
+    9972,
+    4116,
+    1011,
+    11,
+    279,
+    9848,
+    4065,
+    29897,
+    82,
+    323,
+    10896,
+    4815,
+    4313,
+    32650,
+    11,
+    42891,
+    323,
+    43112,
+    6946,
+    429,
+    3255,
+    1181,
+    4741,
+    5545,
+    13,
+    55638,
+    30426,
+    35526,
+    1526,
+    13824,
+    9848,
+    24072,
+    311,
+    1349,
+    43433,
+    315,
+    30471,
+    3720,
+    382,
+    33,
+    1765,
+    15989,
+    12027,
+    448,
+    19790,
+    11,
+    3015,
+    11,
+    12015,
+    323,
+    40258,
+    13,
+    95788,
+    44347,
+    973,
+    279,
+    19790,
+    323,
+    15342,
+    37161,
+    27701,
+    2656,
+    1119,
+    458,
+    35297,
+    3922,
+    429,
+    44302,
+    279,
+    6819,
+    8944,
+    553,
+    72784,
+    13,
+    11948,
+    264,
+    6301,
+    9995,
+    279,
+    40258,
+    323,
+    23094,
+    2225,
+    46310,
+    11,
+    323,
+    279,
+    30235,
+    39084,
+    304,
+    8122,
+    13,
+    576,
+    75225,
+    20770,
+    279,
+    75541,
+    311,
+    1936,
+    7329,
+    23439,
+    11,
+    15342,
+    432,
+    11059,
+    3055,
+    803,
+    323,
+    12199,
+    279,
+    1909,
+    773,
+    432,
+    646,
+    9222,
+    40817,
+    13,
+    758,
+    264,
+    4017,
+    23322,
+    279,
+    39397,
+    58864,
+    4412,
+    323,
+    279,
+    1560,
+    3551,
+    7289,
+    438,
+    68575,
+    288,
+    17811,
+    14758,
+    1064,
+    382,
+    6583,
+    1573,
+    76795,
+    18492,
+    11,
+    36358,
+    32899,
+    279,
+    32720,
+    2348,
+    279,
+    8355,
+    9754,
+    323,
+    13677,
+    429,
+    1045,
+    315,
+    1105,
+    22869,
+    7726,
+    28312,
+    13,
+    96919,
+    8541,
+    429,
+    32720,
+    5821,
+    389,
+    25528,
+    3077,
+    288,
+    448,
+    279,
+    8058,
+    518,
+    825,
+    5244,
+    11,
+    40742,
+    700,
+    6144,
+    5671,
+    304,
+    6144,
+    3039,
+    11,
+    323,
+    20625,
+    2937,
+    14247,
+    1493,
+    6872,
+    504,
+    264,
+    3175,
+    10121,
+    315,
+    27864,
+    7556,
+    13,
+    11196,
+    41305,
+    990,
+    279,
+    1852,
+    37401,
+    311,
+    18773,
+    2163,
+    32720,
+    11,
+    29033,
+    4628,
+    369,
+    63322,
+    311,
+    279,
+    15942,
+    12934,
+    1849,
+    382,
+    32,
+    25664,
+    31890,
+    40708,
+    374,
+    264,
+    8231,
+    315,
+    21954,
+    315,
+    9034,
+    315,
+    7337,
+    11,
+    264,
+    2421,
+    7739,
+    37038,
+    323,
+    264,
+    3175,
+    27811,
+    13,
+    1752,
+    11213,
+    3947,
+    19245,
+    311,
+    6530,
+    308,
+    38608,
+    323,
+    78055,
+    11,
+    323,
+    979,
+    807,
+    470,
+    807,
+    2736,
+    264,
+    63863,
+    3408,
+    15242,
+    6693,
+    9207,
+    323,
+    8089,
+    3291,
+    862,
+    29184,
+    279,
+    5106,
+    323,
+    6010,
+    315,
+    279,
+    3607,
+    13,
+    27278,
+    279,
+    65030,
+    11,
+    14640,
+    39243,
+    1936,
+    35841,
+    3614,
+    11,
+    5395,
+    82077,
+    323,
+    8404,
+    862,
+    26123,
+    3080,
+    308,
+    38608,
+    12039,
+    724,
+    1119,
+    25664,
+    382,
+    32162,
+    5109,
+    614,
+    60388,
+    20929,
+    5380,
+    2474,
+    59866,
+    487,
+    13,
+    21909,
+    74454,
+    18618,
+    429,
+    1052,
+    525,
+    70956,
+    1657,
+    315,
+    1105,
+    448,
+    458,
+    5693,
+    773,
+    2805,
+    429,
+    432,
+    2058,
+    7951,
+    304,
+    60938,
+    13971,
+    13,
+    14616,
+    862,
+    7981,
+    8457,
+    25304,
+    25,
+    49116
+  ],
+  "teacher_forced_tokens": [
+    15418,
+    700,
+    438
+  ],
+  "prefill_rows": 512,
+  "capacity": 515,
+  "cpu_reserve_bytes": 22160384,
+  "q6_calls_per_chunk": 22,
+  "purpose": "test precision-dependent downstream amplification of Q6 scalar->MMA; surrounding precision also changes eligible dispatches; not routing-causality proof",
+  "scope": "one natural prompt, not a quality cohort; neither old Fast nor Exact is assumed quality truth",
+  "arms": {
+    "E": "native Exact, forced scalar Q6",
+    "HalfA": "Fast Half, scalar Q6",
+    "HalfB": "Fast Half, Q6 MMA",
+    "F32A": "Fast F32, scalar Q6",
+    "F32B": "Fast F32, Q6 MMA"
+  },
+  "regret_definition": "Exact best logit minus Exact logit of the arm's top-1 choice",
+  "token_logprob_alignment": "first three logits rows predict the three teacher-forced tokens; final row has no scored target",
+  "timing": "F32 A/B warmups, then untraced A1 B1 B2 A2; ordinary full512 prefill wall including wait/readback; allocation, continuation, diagnostics excluded",
+  "observations": {
+    "E": {
+      "exact_to_arm": {
+        "kl_a_to_b_by_step": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "top1_changes": 0,
+        "rows": [
+          {
+            "position": 511,
+            "a_top1": 2803,
+            "b_top1": 2803,
+            "exact_top1": 2803,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 512,
+            "a_top1": 700,
+            "b_top1": 700,
+            "exact_top1": 700,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 513,
+            "a_top1": 25943,
+            "b_top1": 25943,
+            "exact_top1": 25943,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 514,
+            "a_top1": 5109,
+            "b_top1": 5109,
+            "exact_top1": 5109,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          }
+        ]
+      },
+      "continuation_logprobs": [
+        {
+          "token_position": 512,
+          "conditioning_position": 511,
+          "token": 15418,
+          "log_probability": -2.669078353166465
+        },
+        {
+          "token_position": 513,
+          "conditioning_position": 512,
+          "token": 700,
+          "log_probability": -0.008120457602315357
+        },
+        {
+          "token_position": 514,
+          "conditioning_position": 513,
+          "token": 438,
+          "log_probability": -2.1639772838321165
+        }
+      ],
+      "q6_census": null
+    },
+    "HalfA": {
+      "exact_to_arm": {
+        "kl_a_to_b_by_step": [
+          0.001991011189164027,
+          0.0002135076317994729,
+          0.00718368730077427,
+          0.000052619195815120695
+        ],
+        "top1_changes": 0,
+        "rows": [
+          {
+            "position": 511,
+            "a_top1": 2803,
+            "b_top1": 2803,
+            "exact_top1": 2803,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 512,
+            "a_top1": 700,
+            "b_top1": 700,
+            "exact_top1": 700,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 513,
+            "a_top1": 25943,
+            "b_top1": 25943,
+            "exact_top1": 25943,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 514,
+            "a_top1": 5109,
+            "b_top1": 5109,
+            "exact_top1": 5109,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          }
+        ]
+      },
+      "continuation_logprobs": [
+        {
+          "token_position": 512,
+          "conditioning_position": 511,
+          "token": 15418,
+          "log_probability": -2.721470228404496
+        },
+        {
+          "token_position": 513,
+          "conditioning_position": 512,
+          "token": 700,
+          "log_probability": -0.006825991409249919
+        },
+        {
+          "token_position": 514,
+          "conditioning_position": 513,
+          "token": 438,
+          "log_probability": -2.3365926523790232
+        }
+      ],
+      "q6_census": {
+        "q6_mma": [],
+        "q6_scalar": [
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          }
+        ]
+      }
+    },
+    "HalfB": {
+      "exact_to_arm": {
+        "kl_a_to_b_by_step": [
+          0.006021519051227302,
+          0.00002520820402415603,
+          0.0008382670780192584,
+          0.00004967369886918299
+        ],
+        "top1_changes": 0,
+        "rows": [
+          {
+            "position": 511,
+            "a_top1": 2803,
+            "b_top1": 2803,
+            "exact_top1": 2803,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 512,
+            "a_top1": 700,
+            "b_top1": 700,
+            "exact_top1": 700,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 513,
+            "a_top1": 25943,
+            "b_top1": 25943,
+            "exact_top1": 25943,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 514,
+            "a_top1": 5109,
+            "b_top1": 5109,
+            "exact_top1": 5109,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          }
+        ]
+      },
+      "continuation_logprobs": [
+        {
+          "token_position": 512,
+          "conditioning_position": 511,
+          "token": 15418,
+          "log_probability": -2.4672076010817827
+        },
+        {
+          "token_position": 513,
+          "conditioning_position": 512,
+          "token": 700,
+          "log_probability": -0.008618923591074365
+        },
+        {
+          "token_position": 514,
+          "conditioning_position": 513,
+          "token": 438,
+          "log_probability": -2.165156656788999
+        }
+      ],
+      "q6_census": {
+        "q6_mma": [
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          }
+        ],
+        "q6_scalar": []
+      }
+    },
+    "F32A": {
+      "source_run": "A1",
+      "exact_to_arm": {
+        "kl_a_to_b_by_step": [
+          1.8430369265579725e-10,
+          2.2400365840748675e-12,
+          3.057940025573306e-10,
+          1.583306976069442e-11
+        ],
+        "top1_changes": 0,
+        "rows": [
+          {
+            "position": 511,
+            "a_top1": 2803,
+            "b_top1": 2803,
+            "exact_top1": 2803,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 512,
+            "a_top1": 700,
+            "b_top1": 700,
+            "exact_top1": 700,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 513,
+            "a_top1": 25943,
+            "b_top1": 25943,
+            "exact_top1": 25943,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 514,
+            "a_top1": 5109,
+            "b_top1": 5109,
+            "exact_top1": 5109,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          }
+        ]
+      },
+      "continuation_logprobs": [
+        {
+          "token_position": 512,
+          "conditioning_position": 511,
+          "token": 15418,
+          "log_probability": -2.669065748185395
+        },
+        {
+          "token_position": 513,
+          "conditioning_position": 512,
+          "token": 700,
+          "log_probability": -0.008120561465756144
+        },
+        {
+          "token_position": 514,
+          "conditioning_position": 513,
+          "token": 438,
+          "log_probability": -2.1639386529557294
+        }
+      ]
+    },
+    "F32B": {
+      "source_run": "B1",
+      "exact_to_arm": {
+        "kl_a_to_b_by_step": [
+          4.264178826543615e-10,
+          6.582056214863074e-12,
+          5.26474914050458e-10,
+          2.4727655503272865e-11
+        ],
+        "top1_changes": 0,
+        "rows": [
+          {
+            "position": 511,
+            "a_top1": 2803,
+            "b_top1": 2803,
+            "exact_top1": 2803,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 512,
+            "a_top1": 700,
+            "b_top1": 700,
+            "exact_top1": 700,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 513,
+            "a_top1": 25943,
+            "b_top1": 25943,
+            "exact_top1": 25943,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 514,
+            "a_top1": 5109,
+            "b_top1": 5109,
+            "exact_top1": 5109,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          }
+        ]
+      },
+      "continuation_logprobs": [
+        {
+          "token_position": 512,
+          "conditioning_position": 511,
+          "token": 15418,
+          "log_probability": -2.669126465887278
+        },
+        {
+          "token_position": 513,
+          "conditioning_position": 512,
+          "token": 700,
+          "log_probability": -0.00812039050303268
+        },
+        {
+          "token_position": 514,
+          "conditioning_position": 513,
+          "token": 438,
+          "log_probability": -2.1639021307244475
+        }
+      ]
+    }
+  },
+  "within_precision": {
+    "Half": {
+      "kl_a_to_b_by_step": [
+        0.008988121698601664,
+        0.00028024150247778727,
+        0.009725739134464407,
+        0.0000669628890434692
+      ],
+      "top1_changes": 0,
+      "rows": [
+        {
+          "position": 511,
+          "a_top1": 2803,
+          "b_top1": 2803,
+          "exact_top1": 2803,
+          "top1_changed": false,
+          "exact_side_regret_a": 0.0,
+          "exact_side_regret_b": 0.0
+        },
+        {
+          "position": 512,
+          "a_top1": 700,
+          "b_top1": 700,
+          "exact_top1": 700,
+          "top1_changed": false,
+          "exact_side_regret_a": 0.0,
+          "exact_side_regret_b": 0.0
+        },
+        {
+          "position": 513,
+          "a_top1": 25943,
+          "b_top1": 25943,
+          "exact_top1": 25943,
+          "top1_changed": false,
+          "exact_side_regret_a": 0.0,
+          "exact_side_regret_b": 0.0
+        },
+        {
+          "position": 514,
+          "a_top1": 5109,
+          "b_top1": 5109,
+          "exact_top1": 5109,
+          "top1_changed": false,
+          "exact_side_regret_a": 0.0,
+          "exact_side_regret_b": 0.0
+        }
+      ]
+    },
+    "F32": {
+      "kl_a_to_b_by_step": [
+        2.9824923529886044e-10,
+        4.6989210467030145e-12,
+        1.8009139806741234e-10,
+        2.926375028604906e-12
+      ],
+      "top1_changes": 0,
+      "rows": [
+        {
+          "position": 511,
+          "a_top1": 2803,
+          "b_top1": 2803,
+          "exact_top1": 2803,
+          "top1_changed": false,
+          "exact_side_regret_a": 0.0,
+          "exact_side_regret_b": 0.0
+        },
+        {
+          "position": 512,
+          "a_top1": 700,
+          "b_top1": 700,
+          "exact_top1": 700,
+          "top1_changed": false,
+          "exact_side_regret_a": 0.0,
+          "exact_side_regret_b": 0.0
+        },
+        {
+          "position": 513,
+          "a_top1": 25943,
+          "b_top1": 25943,
+          "exact_top1": 25943,
+          "top1_changed": false,
+          "exact_side_regret_a": 0.0,
+          "exact_side_regret_b": 0.0
+        },
+        {
+          "position": 514,
+          "a_top1": 5109,
+          "b_top1": 5109,
+          "exact_top1": 5109,
+          "top1_changed": false,
+          "exact_side_regret_a": 0.0,
+          "exact_side_regret_b": 0.0
+        }
+      ]
+    }
+  },
+  "f32_warmups": [
+    {
+      "arm": "F32A",
+      "q6_census": {
+        "q6_mma": [],
+        "q6_scalar": [
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              128,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32",
+            "grid": [
+              64,
+              128,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "arm": "F32B",
+      "q6_census": {
+        "q6_mma": [
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              32,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          },
+          {
+            "kernel": "kernel_latent_grouped_q6_K_f32_r2c16k64",
+            "grid": [
+              4,
+              16,
+              64
+            ],
+            "threads": [
+              128,
+              1,
+              1
+            ]
+          }
+        ],
+        "q6_scalar": []
+      }
+    }
+  ],
+  "f32_abba": [
+    {
+      "label": "A1",
+      "arm": "F32A",
+      "prefill_wall_ms": 3234.80475,
+      "tokens_per_second": 158.27848651452612,
+      "a1_to_run": {
+        "kl_a_to_b_by_step": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "top1_changes": 0,
+        "rows": [
+          {
+            "position": 511,
+            "a_top1": 2803,
+            "b_top1": 2803,
+            "exact_top1": 2803,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 512,
+            "a_top1": 700,
+            "b_top1": 700,
+            "exact_top1": 700,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 513,
+            "a_top1": 25943,
+            "b_top1": 25943,
+            "exact_top1": 25943,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 514,
+            "a_top1": 5109,
+            "b_top1": 5109,
+            "exact_top1": 5109,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          }
+        ]
+      },
+      "exact_to_run": {
+        "kl_a_to_b_by_step": [
+          1.8430369265579725e-10,
+          2.2400365840748675e-12,
+          3.057940025573306e-10,
+          1.583306976069442e-11
+        ],
+        "top1_changes": 0,
+        "rows": [
+          {
+            "position": 511,
+            "a_top1": 2803,
+            "b_top1": 2803,
+            "exact_top1": 2803,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 512,
+            "a_top1": 700,
+            "b_top1": 700,
+            "exact_top1": 700,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 513,
+            "a_top1": 25943,
+            "b_top1": 25943,
+            "exact_top1": 25943,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 514,
+            "a_top1": 5109,
+            "b_top1": 5109,
+            "exact_top1": 5109,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          }
+        ]
+      },
+      "continuation_logprobs": [
+        {
+          "token_position": 512,
+          "conditioning_position": 511,
+          "token": 15418,
+          "log_probability": -2.669065748185395
+        },
+        {
+          "token_position": 513,
+          "conditioning_position": 512,
+          "token": 700,
+          "log_probability": -0.008120561465756144
+        },
+        {
+          "token_position": 514,
+          "conditioning_position": 513,
+          "token": 438,
+          "log_probability": -2.1639386529557294
+        }
+      ]
+    },
+    {
+      "label": "B1",
+      "arm": "F32B",
+      "prefill_wall_ms": 3085.970292,
+      "tokens_per_second": 165.91216102348662,
+      "a1_to_run": {
+        "kl_a_to_b_by_step": [
+          2.9824923529886044e-10,
+          4.6989210467030145e-12,
+          1.8009139806741234e-10,
+          2.926375028604906e-12
+        ],
+        "top1_changes": 0,
+        "rows": [
+          {
+            "position": 511,
+            "a_top1": 2803,
+            "b_top1": 2803,
+            "exact_top1": 2803,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 512,
+            "a_top1": 700,
+            "b_top1": 700,
+            "exact_top1": 700,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 513,
+            "a_top1": 25943,
+            "b_top1": 25943,
+            "exact_top1": 25943,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 514,
+            "a_top1": 5109,
+            "b_top1": 5109,
+            "exact_top1": 5109,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          }
+        ]
+      },
+      "exact_to_run": {
+        "kl_a_to_b_by_step": [
+          4.264178826543615e-10,
+          6.582056214863074e-12,
+          5.26474914050458e-10,
+          2.4727655503272865e-11
+        ],
+        "top1_changes": 0,
+        "rows": [
+          {
+            "position": 511,
+            "a_top1": 2803,
+            "b_top1": 2803,
+            "exact_top1": 2803,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 512,
+            "a_top1": 700,
+            "b_top1": 700,
+            "exact_top1": 700,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 513,
+            "a_top1": 25943,
+            "b_top1": 25943,
+            "exact_top1": 25943,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 514,
+            "a_top1": 5109,
+            "b_top1": 5109,
+            "exact_top1": 5109,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          }
+        ]
+      },
+      "continuation_logprobs": [
+        {
+          "token_position": 512,
+          "conditioning_position": 511,
+          "token": 15418,
+          "log_probability": -2.669126465887278
+        },
+        {
+          "token_position": 513,
+          "conditioning_position": 512,
+          "token": 700,
+          "log_probability": -0.00812039050303268
+        },
+        {
+          "token_position": 514,
+          "conditioning_position": 513,
+          "token": 438,
+          "log_probability": -2.1639021307244475
+        }
+      ]
+    },
+    {
+      "label": "B2",
+      "arm": "F32B",
+      "prefill_wall_ms": 3096.065209,
+      "tokens_per_second": 165.37119389851972,
+      "a1_to_run": {
+        "kl_a_to_b_by_step": [
+          2.9824923529886044e-10,
+          4.6989210467030145e-12,
+          1.8009139806741234e-10,
+          2.926375028604906e-12
+        ],
+        "top1_changes": 0,
+        "rows": [
+          {
+            "position": 511,
+            "a_top1": 2803,
+            "b_top1": 2803,
+            "exact_top1": 2803,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 512,
+            "a_top1": 700,
+            "b_top1": 700,
+            "exact_top1": 700,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 513,
+            "a_top1": 25943,
+            "b_top1": 25943,
+            "exact_top1": 25943,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 514,
+            "a_top1": 5109,
+            "b_top1": 5109,
+            "exact_top1": 5109,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          }
+        ]
+      },
+      "exact_to_run": {
+        "kl_a_to_b_by_step": [
+          4.264178826543615e-10,
+          6.582056214863074e-12,
+          5.26474914050458e-10,
+          2.4727655503272865e-11
+        ],
+        "top1_changes": 0,
+        "rows": [
+          {
+            "position": 511,
+            "a_top1": 2803,
+            "b_top1": 2803,
+            "exact_top1": 2803,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 512,
+            "a_top1": 700,
+            "b_top1": 700,
+            "exact_top1": 700,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 513,
+            "a_top1": 25943,
+            "b_top1": 25943,
+            "exact_top1": 25943,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 514,
+            "a_top1": 5109,
+            "b_top1": 5109,
+            "exact_top1": 5109,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          }
+        ]
+      },
+      "continuation_logprobs": [
+        {
+          "token_position": 512,
+          "conditioning_position": 511,
+          "token": 15418,
+          "log_probability": -2.669126465887278
+        },
+        {
+          "token_position": 513,
+          "conditioning_position": 512,
+          "token": 700,
+          "log_probability": -0.00812039050303268
+        },
+        {
+          "token_position": 514,
+          "conditioning_position": 513,
+          "token": 438,
+          "log_probability": -2.1639021307244475
+        }
+      ]
+    },
+    {
+      "label": "A2",
+      "arm": "F32A",
+      "prefill_wall_ms": 3304.709,
+      "tokens_per_second": 154.930434116892,
+      "a1_to_run": {
+        "kl_a_to_b_by_step": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "top1_changes": 0,
+        "rows": [
+          {
+            "position": 511,
+            "a_top1": 2803,
+            "b_top1": 2803,
+            "exact_top1": 2803,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 512,
+            "a_top1": 700,
+            "b_top1": 700,
+            "exact_top1": 700,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 513,
+            "a_top1": 25943,
+            "b_top1": 25943,
+            "exact_top1": 25943,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 514,
+            "a_top1": 5109,
+            "b_top1": 5109,
+            "exact_top1": 5109,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          }
+        ]
+      },
+      "exact_to_run": {
+        "kl_a_to_b_by_step": [
+          1.8430369265579725e-10,
+          2.2400365840748675e-12,
+          3.057940025573306e-10,
+          1.583306976069442e-11
+        ],
+        "top1_changes": 0,
+        "rows": [
+          {
+            "position": 511,
+            "a_top1": 2803,
+            "b_top1": 2803,
+            "exact_top1": 2803,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 512,
+            "a_top1": 700,
+            "b_top1": 700,
+            "exact_top1": 700,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 513,
+            "a_top1": 25943,
+            "b_top1": 25943,
+            "exact_top1": 25943,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          },
+          {
+            "position": 514,
+            "a_top1": 5109,
+            "b_top1": 5109,
+            "exact_top1": 5109,
+            "top1_changed": false,
+            "exact_side_regret_a": 0.0,
+            "exact_side_regret_b": 0.0
+          }
+        ]
+      },
+      "continuation_logprobs": [
+        {
+          "token_position": 512,
+          "conditioning_position": 511,
+          "token": 15418,
+          "log_probability": -2.669065748185395
+        },
+        {
+          "token_position": 513,
+          "conditioning_position": 512,
+          "token": 700,
+          "log_probability": -0.008120561465756144
+        },
+        {
+          "token_position": 514,
+          "conditioning_position": 513,
+          "token": 438,
+          "log_probability": -2.1639386529557294
+        }
+      ]
+    }
+  ],
+  "numeric_pass_bound": null,
+  "performance_assertion": false,
+  "f32_timing_summary": {
+    "a_mean_ms": 3269.756875,
+    "b_mean_ms": 3091.0177505,
+    "a_over_b_wall_ratio": 1.0578253309839736,
+    "a_tokens_per_second": 156.58656578250944,
+    "b_tokens_per_second": 165.6412357765268
+  }
+}

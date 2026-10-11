@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-11 - GLM Leverage Refresh and Precision-Scoped Latent MMA
+
+- Re-ranked against main `27b49476`: serving workspace selection, wide gate/up,
+  native quant baselines, F32 expert down and native HC decode are completed.
+  High-count expert down is next, followed by depth-dependent attention.
+- Grouped Q6_K latent F32 MMA gives paired explicit-F32 Maya prefill gains of
+  5.8% at 512 tokens and 8.5% at 2048. No new persistent scratch or weight
+  expansion. Matrix prefixes compose with scalar tails. Half, DenseF32, Exact,
+  decode and the Q8 path keep their prior production selection/arithmetic.
+- The forced Half/MMA experiment gained roughly 9% but exceeded its 1e-3
+  diagnostic KL bound, reaching 0.013. Against native scalar Exact, neither
+  Half arm is uniformly closer; all-F32 greatly reduces this amplification.
+  Preserve the failed experiment, do not call old Fast ground truth or claim
+  task-quality improvement. F32 probes had no top-token changes; max A/B KL
+  through three continuation steps was 3e-10/4.8e-5 at 512/2048 respectively.
+- Scalar8 retained per-output arithmetic and whole-model bits but had neutral
+  timings (0.996-1.006x), so is test-only rather than a new default.
+- Final targeted suites: 10 grouped-latent, 86 GLM and 15 HC tests passed under
+  Metal validation. The model probes ran separately; the original forced Half
+  diagnostic remains a recorded failure, not a passing test claim.
+- Packet: `docs/bench/2026-10-11-glm-latent-mma/` (raw attempts, precision probe,
+  unchanged UD control and scalar8 falsifier). Updated `PERF-ROADMAP.md` records
+  the next implementation bets and distinguishes baseline support from optional
+  optimization selection.
+
 ## 2026-10-10 - GLM: 32-Token Gate/Up Tile On (Bitwise); Depth Cost Is Flat
 
 - **Wide gate/up tile** (`docs/bench/2026-10-09-glm53-prefill-attribution/`):

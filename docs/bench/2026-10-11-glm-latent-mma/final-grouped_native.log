@@ -1,0 +1,16 @@
+
+running 10 tests
+test metal::latent::grouped_native_tests::grouped_native_all_shared_formats_and_q8_dispatch_preservation ... 2026-10-11 16:44:44.250 qwen_llm-de358c0a63485fd8[92410:23741070] Metal API Validation Enabled
+ok
+test metal::latent::grouped_native_tests::grouped_native_decoder_and_storage_mapping_matches_shared_tiles ... ok
+test metal::latent::grouped_native_tests::grouped_native_exact_preserves_f32_operands_and_dense_range_with_channel_tails ... ok
+test metal::latent::grouped_native_tests::grouped_native_rejects_invalid_bindings_without_dispatch ... ok
+test metal::latent::grouped_native_tests::grouped_native_required_shapes_offsets_and_head_isolation ... ok
+test metal::latent::grouped_native_tests::grouped_q6_mma_actual_shapes_match_decoded_cpu_and_scoped_scalar ... ok
+test metal::latent::grouped_native_tests::grouped_q6_mma_geometry_capacity_and_native_source_contract ... ok
+test metal::latent::grouped_native_tests::grouped_q6_scalar8_policy_is_bitwise_scalar4_at_real_shapes ... ok
+test metal::latent::grouped_native_tests::grouped_scalar8_override_is_nested_unwind_safe_and_thread_local ... ok
+test metal::latent::grouped_native_tests::grouped_scalar_baseline_override_is_nested_unwind_safe_and_thread_local ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 1932 filtered out; finished in 3.72s
+

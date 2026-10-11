@@ -56,6 +56,10 @@ mod f32_down_ab;
 mod hc_decode_ab;
 
 #[cfg(test)]
+#[path = "tests/latent_mma_ab.rs"]
+mod latent_mma_ab;
+
+#[cfg(test)]
 thread_local! {
     static ABSORB_TAIL: std::cell::Cell<(Option<bool>, usize)> = const { std::cell::Cell::new((None, 0)) };
 }
@@ -1171,15 +1175,23 @@ fn expand_rows(
     }
 }
 
+/// Only the full F32 Fast lane opts into the changed grouped reduction.
+/// Half, DenseF32, and Exact keep scalar per-output arithmetic.
+fn latent_mma_allowed(arith: Arith) -> bool {
+    stage_lineage(arith.lineage, Stage::MlaAbsorb) == PackedLineage::Fast
+        && arith.precision == FastPrecision::F32
+}
+
 /// Per-head latent absorption or expansion over `rows` token-major rows:
 /// Q8 retains its existing tiles in Fast and per-row GEMV in Exact. Other
 /// native dtypes use grouped F32-operand dispatch in both lineages, with no
-/// activation rounding, repacking, or expanded weight bank.
+/// activation rounding, repacking, or expanded weight bank. Q6 MMA is allowed
+/// only in Fast + F32; other modes retain scalar arithmetic.
 #[allow(clippy::too_many_arguments)]
 fn absorb_rows(
     ctx: &MetalContext,
     enc: &KernelEncoder,
-    lineage: PackedLineage,
+    arith: Arith,
     weight: &MetalTensor,
     input: &MetalTensor,
     output: &MetalTensor,
@@ -1188,9 +1200,10 @@ fn absorb_rows(
     groups: usize,
     rows: usize,
 ) -> Result<()> {
+    let lineage = stage_lineage(arith.lineage, Stage::MlaAbsorb);
     let (in_width, out_width) = (n_in * groups, n_out * groups);
     if weight.dtype != GgmlType::Q8_0 {
-        crate::metal::encode_mat_mat_grouped_f32(
+        crate::metal::encode_mat_mat_grouped_f32_with_policy(
             ctx,
             enc,
             weight,
@@ -1200,6 +1213,7 @@ fn absorb_rows(
             n_out,
             groups,
             rows,
+            latent_mma_allowed(arith),
         )?;
         return Ok(());
     }
@@ -2036,7 +2050,7 @@ impl Glm5NextSession<'_> {
         absorb_rows(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::MlaAbsorb),
+            p.arith(),
             &mla.key_absorb,
             &p.query,
             &p.query_latent,
@@ -2110,7 +2124,7 @@ impl Glm5NextSession<'_> {
         absorb_rows(
             ctx,
             enc,
-            stage_lineage(p.lineage, Stage::MlaAbsorb),
+            p.arith(),
             &mla.value_expand,
             &p.output_latent,
             &p.heads_out,
@@ -2510,7 +2524,19 @@ mod absorb_tail_policy_tests {
                     dispatch_census_begin();
                     let (result, substitutions) = with_absorb_tail_variant(variant, || {
                         absorb_rows(
-                            &ctx, &enc, lineage, &weight, &input, &output, k, m, groups, rows,
+                            &ctx,
+                            &enc,
+                            Arith {
+                                lineage,
+                                precision: FastPrecision::Half,
+                            },
+                            &weight,
+                            &input,
+                            &output,
+                            k,
+                            m,
+                            groups,
+                            rows,
                         )
                     });
                     let census = dispatch_census_take();

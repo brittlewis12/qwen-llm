@@ -1,0 +1,34 @@
+
+running 1 test
+test glm5_next_metal::packed::latent_mma_ab::grouped_latent_scalar8_ab ... latent Half scalar8 full512 warmup A: Q6 MMA/scalar=0/22, Q8 launches=0
+latent Half scalar8 full512 warmup B: Q6 MMA/scalar=0/22, Q8 launches=0
+latent Half scalar8 full512 A1: 2466.51 ms, 207.581 tokens/s, bit-identical=true, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent Half scalar8 full512 B1: 2441.49 ms, 209.708 tokens/s, bit-identical=true, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent Half scalar8 full512 B2: 2553.36 ms, 200.520 tokens/s, bit-identical=true, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent Half scalar8 full512 A2: 2508.61 ms, 204.097 tokens/s, bit-identical=true, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent Half scalar8 full512 ABBA mean: A=2487.56 ms B=2497.42 ms A/B=0.996x; no performance threshold
+latent Half scalar8 full2048 warmup A: Q6 MMA/scalar=0/22, Q8 launches=0
+latent Half scalar8 full2048 warmup B: Q6 MMA/scalar=0/22, Q8 launches=0
+latent Half scalar8 full2048 A1: 9863.12 ms, 207.642 tokens/s, bit-identical=true, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent Half scalar8 full2048 B1: 9757.06 ms, 209.899 tokens/s, bit-identical=true, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent Half scalar8 full2048 B2: 9687.84 ms, 211.399 tokens/s, bit-identical=true, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent Half scalar8 full2048 A2: 9696.97 ms, 211.200 tokens/s, bit-identical=true, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent Half scalar8 full2048 ABBA mean: A=9780.04 ms B=9722.45 ms A/B=1.006x; no performance threshold
+latent Half scalar8 suffix129_after512 warmup A: Q6 MMA/scalar=0/22, Q8 launches=0
+latent Half scalar8 suffix129_after512 warmup B: Q6 MMA/scalar=0/22, Q8 launches=0
+latent Half scalar8 suffix129_after512 A1: 1268.77 ms, 101.673 tokens/s, bit-identical=true, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent Half scalar8 suffix129_after512 B1: 1256.20 ms, 102.691 tokens/s, bit-identical=true, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent Half scalar8 suffix129_after512 B2: 1243.57 ms, 103.733 tokens/s, bit-identical=true, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent Half scalar8 suffix129_after512 A2: 1234.72 ms, 104.477 tokens/s, bit-identical=true, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent Half scalar8 suffix129_after512 ABBA mean: A=1251.75 ms B=1249.89 ms A/B=1.001x; no performance threshold
+latent Half scalar8 suffix512_after4096 warmup A: Q6 MMA/scalar=0/22, Q8 launches=0
+latent Half scalar8 suffix512_after4096 warmup B: Q6 MMA/scalar=0/22, Q8 launches=0
+latent Half scalar8 suffix512_after4096 A1: 3014.22 ms, 169.861 tokens/s, bit-identical=true, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent Half scalar8 suffix512_after4096 B1: 2985.13 ms, 171.517 tokens/s, bit-identical=true, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent Half scalar8 suffix512_after4096 B2: 2953.33 ms, 173.364 tokens/s, bit-identical=true, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent Half scalar8 suffix512_after4096 A2: 2933.48 ms, 174.536 tokens/s, bit-identical=true, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent Half scalar8 suffix512_after4096 ABBA mean: A=2973.85 ms B=2969.23 ms A/B=1.002x; no performance threshold
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1939 filtered out; finished in 267.73s
+

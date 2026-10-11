@@ -449,7 +449,10 @@ fn leaf(ctx: &MetalContext, weights: &Glm5NextWeights, tokens: &[u32], out: &mut
                             absorb_rows(
                                 ctx,
                                 enc,
-                                PackedLineage::Fast,
+                                Arith {
+                                    lineage: PackedLineage::Fast,
+                                    precision: FastPrecision::Half,
+                                },
                                 weight,
                                 input,
                                 output,

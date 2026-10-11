@@ -12,6 +12,65 @@ confirm a concrete engine hypothesis.
 For append-only checkpoint history and exact current handoff state, see
 `docs/PERF-LOG.md`.
 
+## Current Leverage - 2026-10-11
+
+Reoriented on main `27b49476` with cx, retaining the requested family/phase
+priority: GLM prefill and long-context decode first, then Flash-Next and Qwen.
+This section supersedes stale next-step claims in the dated maps below.
+
+**Completed, not the next queue:** 32-token expert gate/up tiles; live-budget
+selection of GLM serving workspaces up to 2048 rows; general native quant and
+mixed-expert baselines; equivalent metadata normalization; native HC decode;
+F32-operand grouped expert down. Maya's paired explicit-F32 512-token prefill
+improved 1.955x and its paired decode improved 8.8%. These are different phase
+and precision measurements, not a combined speedup or a quality verdict.
+Evidence: `docs/bench/2026-10-11-glm-native-quant-baseline/`.
+
+**Grouped Q6_K latent matrix execution completed for explicit F32:** same-binary
+Maya ABBA gains are 5.8% at 512 tokens and 8.5% at 2048, without extra persistent
+scratch. F32 scalar/matrix KL is at most 3e-10 and 4.8e-5 respectively through
+three common decode steps; no top-token changes in these probes. Default Half,
+DenseF32, Exact and decode retain scalar4. Forced Half/MMA showed about 9% gains
+but KL up to 0.013; comparison with scalar Exact found neither Half arm uniformly
+closer. That is precision-dependent amplification, not a task-quality verdict.
+The arithmetic-preserving scalar8 alternative was bit-identical but neutral
+(0.996-1.006x), so stays test-only. UD's unchanged Q8 control was bit-identical.
+Evidence: `docs/bench/2026-10-11-glm-latent-mma/`.
+
+1. **High-count expert down reuse.** Experts remain the largest prefill stage
+   (about 1.71 s and 57-61% of profiled N512 spans in the retained Maya/UD runs).
+   The wider gate/up tile is already done. At N2048, average expert bucket
+   occupancy is roughly 57 slots versus 14 at N512; a wider down token tile is
+   a plausible next reuse opportunity. Separate gate/up, down, bucket and
+   reduction costs on representative real routes, then test a bounded wider
+   tile with the current tile retained for small counts. Do not multiply a leaf
+   microbenchmark across the model without measuring whole-prefill conversion.
+2. **Depth-dependent GLM attention.** Use one admitted deep cell plus a shallower
+   control to separate scoring, selection and selected attention. Historical UD
+   decode only rose from about 32.3 to 32.8 ms between 4K and 32K; current Maya
+   deep costs are unmeasured. Shared latent-row loads across heads are a concrete
+   hypothesis, not an established bottleneck. If scoring dominates, target it
+   instead. Keep Flash selected-QSA work coordinated with its existing lane.
+3. **Half-mode latent numerics, when it beats the opportunities above.** Keep
+   the measured MMA candidate available to diagnostics. A useful follow-up
+   evaluates task consequences or localizes amplification on real inputs,
+   rather than optimizing for agreement with old Fast alone. The diagnostic
+   1e-3 bound and historical Exact/Fast 0.33 trigger answer different questions;
+   neither is an artifact-admission rule or a task-quality result.
+
+Serving width, precision, placement and snapshot reuse are separate variables.
+Use the current workspace policy, not the superseded fixed-512 assumption, when
+claiming serving gains. Larger chunks also cost memory and cancellation latency;
+they are not universally better. Preserve requested context/precision and live
+memory checks without inventing diagnostic memory reservations.
+
+**Working discipline:** baseline execution follows primitive capabilities;
+missing optimization or missing artifact measurements is not an admission veto.
+Use small independent GPU oracles and paired whole-model witnesses for the
+actual mechanism. Integrate validated checkpoints continuously. Do not reopen
+completed work, add artifact-certification gates, or weaken numerical checks to
+turn an inconclusive experiment into a win.
+
 ## Active Phase Priorities - 2026-10-10
 
 User direction: prioritize **prefill and long-context decode**, in family order

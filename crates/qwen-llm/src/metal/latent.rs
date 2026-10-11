@@ -920,7 +920,7 @@ pub fn grouped_projection_supported(dtype: GgmlType) -> bool {
     GROUPED_PROJECTION_DTYPES.contains(&dtype)
 }
 
-/// Generic pipeline name, independent of the specialized Q8 dispatch choice.
+/// Scalar baseline pipeline name, independent of specialized Q8 and Q6_K MMA dispatch.
 pub fn grouped_projection_pipeline_name(dtype: GgmlType) -> Option<String> {
     let suffix = match dtype {
         GgmlType::Q2_0 => "q2_0",
@@ -955,6 +955,156 @@ struct GroupedProjectionArgs {
     row_bytes: u32,
     input_stride: u32,
     output_stride: u32,
+}
+
+#[cfg(test)]
+const GROUPED_Q6_SCALAR8_KERNEL: &str = "kernel_latent_grouped_q6_K_f32_scalar8";
+const GROUPED_Q6_MMA_KERNEL: &str = "kernel_latent_grouped_q6_K_f32_r2c16k64";
+const GROUPED_MMA_SCRATCH_BYTES: usize = 16 * 64 * std::mem::size_of::<f32>();
+
+// This checks storage/tile geometry, not a model-family or head-count whitelist.
+fn grouped_projection_mma_eligible(dtype: GgmlType, args: &GroupedProjectionArgs) -> bool {
+    dtype == GgmlType::Q6_K
+        && args.k > 0
+        && args.k.is_multiple_of(256)
+        && args.m > 0
+        && args.m.is_multiple_of(16)
+        && args.groups > 0
+        && args.rows >= 128
+}
+
+#[cfg(test)]
+thread_local! {
+    static GROUPED_PROJECTION_SCALAR_BASELINE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static GROUPED_PROJECTION_SCALAR8: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Select the pre-MMA scalar native baseline during a synchronous diagnostic.
+/// `true` installs `Some(true)`, forcing old scalar4 (disables MMA and scalar8).
+/// `false` installs `Some(false)`, permitting MMA regardless of caller policy,
+/// subject to unchanged geometry/capacity checks. Outside an override (`None`),
+/// caller policy applies and non-MMA work uses scalar4 unless the separate
+/// test-only scalar8 experiment is explicitly enabled.
+/// Q8 specialization and decode behavior are unaffected. State belongs
+/// to the calling thread, supports nesting, and is restored during unwinding.
+/// The closure must encode on this thread; the setting does not propagate to
+/// worker threads or remain active for work deferred until after it returns.
+#[cfg(test)]
+pub(crate) fn with_grouped_projection_scalar_baseline_override<R>(
+    enabled: bool,
+    f: impl FnOnce() -> R,
+) -> R {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            GROUPED_PROJECTION_SCALAR_BASELINE.with(|state| state.set(self.0));
+        }
+    }
+    let _restore =
+        Restore(GROUPED_PROJECTION_SCALAR_BASELINE.with(|state| state.replace(Some(enabled))));
+    f()
+}
+
+/// Test-only scalar8 experiment for whole-call Q6_K scalar work with >=8 rows.
+/// This does not disable MMA; use `allow_mma = false` to compare scalar8/4.
+/// The scalar-baseline override `Some(true)` always wins and forces scalar4;
+/// MMA remainders also remain scalar4. `false` disables the experiment within
+/// a nested scope. Thread-local, restores nesting/unwinding, no environment
+/// toggle, and no scalar8 host selection is compiled into production builds.
+#[cfg(test)]
+pub(crate) fn with_grouped_projection_scalar8_override<R>(
+    enabled: bool,
+    f: impl FnOnce() -> R,
+) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            GROUPED_PROJECTION_SCALAR8.with(|state| state.set(self.0));
+        }
+    }
+    let _restore = Restore(GROUPED_PROJECTION_SCALAR8.with(|state| state.replace(enabled)));
+    f()
+}
+
+#[cfg(test)]
+fn grouped_projection_scalar8_enabled() -> bool {
+    GROUPED_PROJECTION_SCALAR8.with(|state| state.get())
+}
+
+fn grouped_projection_scalar_baseline() -> Option<bool> {
+    #[cfg(test)]
+    {
+        GROUPED_PROJECTION_SCALAR_BASELINE.with(|state| state.get())
+    }
+    #[cfg(not(test))]
+    {
+        None
+    }
+}
+
+// Some(false) preserves same-binary MMA diagnostics even for callers which
+// deliberately disallow MMA in production (for example Half lineage).
+fn grouped_projection_policy(allow_mma: bool, baseline: Option<bool>) -> (bool, bool) {
+    (
+        baseline.map_or(allow_mma, |scalar4| !scalar4),
+        baseline == Some(true),
+    )
+}
+
+fn grouped_projection_scalar_preflight(
+    candidate: Result<Pipeline, MetalError>,
+    device_bytes: usize,
+) -> Result<Pipeline, MetalError> {
+    let pso = candidate?;
+    if pso.threadExecutionWidth() != 32
+        || pso.maxTotalThreadsPerThreadgroup() < 128
+        || pso.staticThreadgroupMemoryLength() > device_bytes
+    {
+        return Err(bad_shape(
+            "grouped_projection",
+            "needs four 32-lane simdgroups",
+        ));
+    }
+    Ok(pso)
+}
+
+fn grouped_projection_mma_capacity(
+    simd_width: usize,
+    max_threads: usize,
+    static_bytes: usize,
+    device_bytes: usize,
+) -> Result<(), MetalError> {
+    if simd_width != 32
+        || max_threads < 128
+        || static_bytes
+            .checked_add(GROUPED_MMA_SCRATCH_BYTES)
+            .is_none_or(|bytes| bytes > device_bytes)
+    {
+        return Err(bad_shape(
+            "grouped_projection",
+            "MMA needs four 32-lane simdgroups and 4096 bytes plus static threadgroup memory",
+        ));
+    }
+    Ok(())
+}
+
+// All failures here select whole-call scalar; the caller preflights that
+// fallback before dispatching anything. Keep
+// pipeline lookup separate so missing/failed candidates can be tested without
+// compiling or dispatching GPU work.
+fn grouped_projection_mma_preflight(
+    candidate: Result<Pipeline, MetalError>,
+    device_bytes: usize,
+) -> Option<Pipeline> {
+    let pso = candidate.ok()?;
+    grouped_projection_mma_capacity(
+        pso.threadExecutionWidth(),
+        pso.maxTotalThreadsPerThreadgroup(),
+        pso.staticThreadgroupMemoryLength(),
+        device_bytes,
+    )
+    .ok()?;
+    Some(pso)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1082,11 +1232,30 @@ fn validate_grouped_projection(
 ///
 /// No caller scratch, repacking or expanded weight bank. Generic kernels
 /// decode 16 weights per lane into F32 registers and reuse them for up to four
-/// tokens. F32/BF16 weights and F32 activations are never narrowed to half;
+/// tokens (eight only for the explicitly enabled test-only Q6_K experiment).
+/// F32/BF16 weights and F32 activations are never narrowed to half;
 /// accumulation is F32. "Exact" means operand precision, not bitwise agreement
 /// with another reduction order or strict IEEE behavior under Metal fast math.
 /// Q8 decode, full 128-token tiles and eligible 8-token tails retain the
 /// existing Q8 kernels unchanged (internal threadgroup scratch only).
+///
+/// Q6_K uses F32 MMA for the complete 128-row prefix when `K % 256 == 0`,
+/// `M % 16 == 0`, and `rows >= 128`, for any positive group count. The remaining
+/// `rows % 128` tokens use one scalar dispatch on bounded tail views. Thus
+/// 129/255 rows dispatch 128 MMA rows plus 1/127 scalar rows; 512 rows use one
+/// MMA dispatch. Whole bindings are validated before creating either view,
+/// and both pipelines are preflighted before the first dispatch. An unavailable
+/// MMA pipeline or insufficient MMA capacity falls back to whole-call scalar.
+/// No padding or extra device allocation is required. Each MMA tile
+/// stages 16x64 decoded F32 weights in 4096 transient threadgroup bytes and
+/// reads F32 activations directly. The shared native decoder and operand
+/// precision are unchanged; MMA changes the F32 reduction order within the
+/// existing Exact allowance. No half staging, repacking, or persistent scratch.
+/// Ineligible Q6_K calls and the test-scoped baseline override retain the
+/// whole-call scalar4 path. Scalar8 is retained only as an explicit test-only
+/// experiment; production fallback and MMA remainders always use scalar4.
+/// Other formats and decode are unchanged.
+/// This public encoder delegates with `allow_mma = true`.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_mat_mat_grouped_f32(
     ctx: &MetalContext,
@@ -1098,6 +1267,32 @@ pub fn encode_mat_mat_grouped_f32(
     n_out: usize,
     groups: usize,
     rows: usize,
+) -> Result<(), MetalError> {
+    encode_mat_mat_grouped_f32_with_policy(
+        ctx, enc, weight, input, output, n_in, n_out, groups, rows, true,
+    )
+}
+
+/// [`encode_mat_mat_grouped_f32`] with caller-controlled MMA permission.
+/// `allow_mma = false` selects scalar4; it does not change operands, shapes,
+/// or Q8 dispatch. Scalar8 is available only through its explicit test scope.
+/// `true` permits the existing Q6_K MMA prefix plus scalar4 remainder.
+/// Test override `Some(true)` forces old scalar4; `Some(false)` permits MMA
+/// regardless of this argument; `None` follows this argument. Missing/unsupported
+/// scalar8 candidates fall back to scalar4 before any dispatch. Whole-call
+/// scalar bindings are borrowed without cloning shapes or allocating views.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_mat_mat_grouped_f32_with_policy(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    groups: usize,
+    rows: usize,
+    allow_mma: bool,
 ) -> Result<(), MetalError> {
     const K: &str = "grouped_projection";
     require_serial(K, enc)?;
@@ -1132,23 +1327,116 @@ pub fn encode_mat_mat_grouped_f32(
             }
         }
     }
+    let (allow_mma, _force_scalar4) =
+        grouped_projection_policy(allow_mma, grouped_projection_scalar_baseline());
+    // Resolve both candidates before creating views or encoding any dispatch.
+    let mma = if allow_mma && grouped_projection_mma_eligible(weight.dtype, &args) {
+        grouped_projection_mma_preflight(
+            ctx.pipeline(GROUPED_Q6_MMA_KERNEL),
+            ctx.device.maxThreadgroupMemoryLength(),
+        )
+    } else {
+        None
+    };
+    // Production fallback is always scalar4. Scalar8 host selection and its
+    // pipeline lookup are compiled only for explicitly scoped experiments.
     let kernel = grouped_projection_pipeline_name(weight.dtype).expect("validated native dtype");
-    let pso = ctx.pipeline(&kernel)?;
-    if pso.threadExecutionWidth() != 32
-        || pso.maxTotalThreadsPerThreadgroup() < 128
-        || pso.staticThreadgroupMemoryLength() > ctx.device.maxThreadgroupMemoryLength()
-    {
-        return Err(bad_shape(K, "needs four 32-lane simdgroups"));
-    }
+    let pso = grouped_projection_scalar_preflight(
+        ctx.pipeline(&kernel),
+        ctx.device.maxThreadgroupMemoryLength(),
+    )?;
+    let scalar_tokens = 4;
+    #[cfg(test)]
+    let (pso, scalar_tokens) = {
+        let scalar8 = if grouped_projection_scalar8_enabled()
+            && mma.is_none()
+            && !_force_scalar4
+            && weight.dtype == GgmlType::Q6_K
+            && rows >= 8
+        {
+            grouped_projection_scalar_preflight(
+                ctx.pipeline(GROUPED_Q6_SCALAR8_KERNEL),
+                ctx.device.maxThreadgroupMemoryLength(),
+            )
+            .ok()
+        } else {
+            None
+        };
+        match scalar8 {
+            Some(candidate) => (candidate, 8),
+            None => (pso, scalar_tokens),
+        }
+    };
+    let (args, scalar_tail) = if let Some(mma) = mma {
+        let prefix_rows = rows / 128 * 128;
+        let tail_rows = rows - prefix_rows;
+        // view_subrange checks the logical bounds and preserves buffer offsets
+        // and provenance. Full validation above proved all extent products and
+        // ranges fit; these are subranges of those same contiguous F32 tensors.
+        let view = |tensor: &MetalTensor, stride: u32, start: usize, count: usize| {
+            tensor.view_subrange(
+                start as u64 * u64::from(stride),
+                vec![u64::from(stride), count as u64],
+            )
+        };
+        let prefix_input = view(input, args.input_stride, 0, prefix_rows);
+        let prefix_output = view(output, args.output_stride, 0, prefix_rows);
+        let tail = (tail_rows > 0).then(|| {
+            (
+                view(input, args.input_stride, prefix_rows, tail_rows),
+                view(output, args.output_stride, prefix_rows, tail_rows),
+            )
+        });
+        let prefix_args = GroupedProjectionArgs {
+            rows: prefix_rows as u32,
+            ..args
+        };
+        enc.set_pipeline(&mma);
+        enc.set_bytes(0, &prefix_args);
+        enc.set_tensor(1, weight);
+        enc.set_tensor(2, &prefix_input);
+        enc.set_tensor(3, &prefix_output);
+        enc.set_threadgroup_memory(0, GROUPED_MMA_SCRATCH_BYTES);
+        enc.dispatch(
+            MTLSize {
+                width: prefix_rows / 128,
+                height: n_out / 16,
+                depth: groups,
+            },
+            MTLSize {
+                width: 128,
+                height: 1,
+                depth: 1,
+            },
+        );
+        let Some((tail_input, tail_output)) = tail else {
+            return Ok(());
+        };
+        (
+            GroupedProjectionArgs {
+                rows: tail_rows as u32,
+                ..args
+            },
+            Some((tail_input, tail_output)),
+        )
+    } else {
+        (args, None)
+    };
+    let (scalar_input, scalar_output) = scalar_tail
+        .as_ref()
+        .map(|(input, output)| (input, output))
+        .unwrap_or((input, output));
+    // No fallible work remains after the prefix. The unchanged scalar kernel
+    // indexes tokens relative to these bounded tail views (or the whole call).
     enc.set_pipeline(&pso);
     enc.set_bytes(0, &args);
     enc.set_tensor(1, weight);
-    enc.set_tensor(2, input);
-    enc.set_tensor(3, output);
+    enc.set_tensor(2, scalar_input);
+    enc.set_tensor(3, scalar_output);
     enc.dispatch(
         MTLSize {
             width: n_out.div_ceil(4),
-            height: rows.div_ceil(4),
+            height: (args.rows as usize).div_ceil(scalar_tokens),
             depth: groups,
         },
         MTLSize {

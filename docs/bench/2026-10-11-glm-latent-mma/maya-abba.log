@@ -1,0 +1,58 @@
+
+running 1 test
+test glm5_next_metal::packed::latent_mma_ab::grouped_latent_mma_ab ... latent MMA full512 warmup A: Q6 MMA/scalar=0/22, Q8 launches=0
+latent MMA full512 warmup B: Q6 MMA/scalar=22/0, Q8 launches=0
+latent MMA full512 A1: 2510.91 ms, 203.910 tokens/s, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent MMA full512 B1: 2333.97 ms, 219.368 tokens/s, KL(A1||run) at join + 3 decode steps [0.008988121698601664, 0.00028024150247778727, 0.009725739134464407, 6.69628890434692e-5]
+latent MMA full512 B2: 2459.74 ms, 208.152 tokens/s, KL(A1||run) at join + 3 decode steps [0.008988121698601664, 0.00028024150247778727, 0.009725739134464407, 6.69628890434692e-5]
+latent MMA full512 A2: 2715.69 ms, 188.534 tokens/s, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent MMA full512 ABBA mean: A=2613.30 ms B=2396.86 ms A/B=1.090x; no performance threshold
+latent MMA full2048 warmup A: Q6 MMA/scalar=0/22, Q8 launches=0
+latent MMA full2048 warmup B: Q6 MMA/scalar=22/0, Q8 launches=0
+latent MMA full2048 A1: 10245.49 ms, 199.893 tokens/s, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent MMA full2048 B1: 9185.34 ms, 222.964 tokens/s, KL(A1||run) at join + 3 decode steps [0.0011828498936671391, 2.1463269585301545e-7, 0.0004940327768870746, 0.012873888451590435]
+latent MMA full2048 B2: 9034.88 ms, 226.677 tokens/s, KL(A1||run) at join + 3 decode steps [0.0011828498936671391, 2.1463269585301545e-7, 0.0004940327768870746, 0.012873888451590435]
+latent MMA full2048 A2: 9667.95 ms, 211.834 tokens/s, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent MMA full2048 ABBA mean: A=9956.72 ms B=9110.11 ms A/B=1.093x; no performance threshold
+latent MMA suffix129_after512 warmup A: Q6 MMA/scalar=0/22, Q8 launches=0
+latent MMA suffix129_after512 warmup B: Q6 MMA/scalar=22/22, Q8 launches=0
+latent MMA suffix129_after512 A1: 1237.91 ms, 104.208 tokens/s, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent MMA suffix129_after512 B1: 1185.37 ms, 108.827 tokens/s, KL(A1||run) at join + 3 decode steps [0.0028516414302674343, 0.012529699825612212, 0.00019672910036599528, 0.00353084259407318]
+latent MMA suffix129_after512 B2: 1174.62 ms, 109.823 tokens/s, KL(A1||run) at join + 3 decode steps [0.0028516414302674343, 0.012529699825612212, 0.00019672910036599528, 0.00353084259407318]
+latent MMA suffix129_after512 A2: 1206.60 ms, 106.912 tokens/s, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent MMA suffix129_after512 ABBA mean: A=1222.25 ms B=1179.99 ms A/B=1.036x; no performance threshold
+latent MMA suffix512_after4096 warmup A: Q6 MMA/scalar=0/22, Q8 launches=0
+latent MMA suffix512_after4096 warmup B: Q6 MMA/scalar=22/0, Q8 launches=0
+latent MMA suffix512_after4096 A1: 3109.53 ms, 164.655 tokens/s, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent MMA suffix512_after4096 B1: 2789.27 ms, 183.560 tokens/s, KL(A1||run) at join + 3 decode steps [2.1644067712914153e-9, 5.014737529267667e-8, 1.6841644776670674e-5, 9.172686692011708e-8]
+latent MMA suffix512_after4096 B2: 2733.77 ms, 187.287 tokens/s, KL(A1||run) at join + 3 decode steps [2.1644067712914153e-9, 5.014737529267667e-8, 1.6841644776670674e-5, 9.172686692011708e-8]
+latent MMA suffix512_after4096 A2: 2894.70 ms, 176.875 tokens/s, KL(A1||run) at join + 3 decode steps [0.0, 0.0, 0.0, 0.0]
+latent MMA suffix512_after4096 ABBA mean: A=3002.11 ms B=2761.52 ms A/B=1.087x; no performance threshold
+
+thread 'glm5_next_metal::packed::latent_mma_ab::grouped_latent_mma_ab' (22748607) panicked at crates/qwen-llm/src/glm5_next_metal/tests/latent_mma_ab.rs:384:5:
+[
+    "full512 B1 position 511: KL(A1||run)=8.988122e-3 > 0.001",
+    "full512 B1 position 513: KL(A1||run)=9.725739e-3 > 0.001",
+    "full512 B2 position 511: KL(A1||run)=8.988122e-3 > 0.001",
+    "full512 B2 position 513: KL(A1||run)=9.725739e-3 > 0.001",
+    "full2048 B1 position 2047: KL(A1||run)=1.182850e-3 > 0.001",
+    "full2048 B1 position 2050: KL(A1||run)=1.287389e-2 > 0.001",
+    "full2048 B2 position 2047: KL(A1||run)=1.182850e-3 > 0.001",
+    "full2048 B2 position 2050: KL(A1||run)=1.287389e-2 > 0.001",
+    "suffix129_after512 B1 position 640: KL(A1||run)=2.851641e-3 > 0.001",
+    "suffix129_after512 B1 position 641: KL(A1||run)=1.252970e-2 > 0.001",
+    "suffix129_after512 B1 position 643: KL(A1||run)=3.530843e-3 > 0.001",
+    "suffix129_after512 B2 position 640: KL(A1||run)=2.851641e-3 > 0.001",
+    "suffix129_after512 B2 position 641: KL(A1||run)=1.252970e-2 > 0.001",
+    "suffix129_after512 B2 position 643: KL(A1||run)=3.530843e-3 > 0.001",
+]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    glm5_next_metal::packed::latent_mma_ab::grouped_latent_mma_ab
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1933 filtered out; finished in 336.05s
+

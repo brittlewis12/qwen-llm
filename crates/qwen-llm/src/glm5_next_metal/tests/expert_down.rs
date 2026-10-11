@@ -914,11 +914,12 @@ fn domain_cell(
     for (label, b) in DOMAIN_ARMS {
         // Same device pricing/admission inputs as the ordinary session constructor.
         // Checking here permits an explicit optional-long skip before allocation.
-        let ledger = Glm5NextMemoryLedger::new(
+        let ledger = Glm5NextMemoryLedger::new_with_generic_hc(
             &weights.config,
             weights.retained_bytes,
             capacity as u64,
             chunk_rows as u64,
+            needs_generic_hc(&weights.blocks, |t| t.dtype),
             &device_price(ctx),
         )
         .unwrap();

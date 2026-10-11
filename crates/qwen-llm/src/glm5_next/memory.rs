@@ -176,6 +176,32 @@ pub fn decode_scratch_specs(c: &Glm5NextConfig) -> Vec<BufferSpec> {
     ]
 }
 
+/// One reusable decode row and unit RMS weights for generic HC. Packed HC
+/// shares `ones`, but owns a chunk-sized normalized activation buffer below.
+/// Allocate only when an executed HC mix is not Q8_0; never expand weights.
+pub fn generic_hc_scratch_specs(c: &Glm5NextConfig) -> Vec<BufferSpec> {
+    let width = u64::from(c.hidden_size) * 4;
+    vec![
+        BufferSpec::zeros("normalized", F32, &[width, 1]),
+        BufferSpec::zeros("ones", F32, &[width]),
+    ]
+}
+
+/// Normalized generic HC activations for the admitted packed chunk capacity.
+/// Exact and Fast share this F32 buffer across layers; `ones` comes from
+/// decode scratch. No padding or weight expansion: 16 * hidden * rows bytes
+/// (32 MiB at hidden=4096, rows=512). Decode-only sessions allocate none.
+pub fn packed_generic_hc_scratch_specs(c: &Glm5NextConfig, rows: u64) -> Vec<BufferSpec> {
+    if rows == 0 {
+        return Vec::new();
+    }
+    vec![BufferSpec::zeros(
+        "hc_normalized",
+        F32,
+        &[u64::from(c.hidden_size) * 4, rows],
+    )]
+}
+
 /// Row capacity of packed activation buffers for chunks of up to `rows`
 /// tokens: `rows` rounded up to a multiple of 32, so a view of the first
 /// `n <= rows` rows has its token count padded to 32 backed (the
@@ -406,12 +432,33 @@ pub struct Glm5NextPhasePeaks {
 impl Glm5NextMemoryLedger {
     /// Prices a session of `capacity` positions whose packed chunks hold up
     /// to `prefill_rows` tokens (`0`: decode-only; at most `capacity`), with
-    /// every buffer priced by `price`.
+    /// every buffer priced by `price`. This compatibility constructor assumes
+    /// Q8-only HC; use `new_with_generic_hc` for model-aware admission.
     pub fn new(
         config: &Glm5NextConfig,
         retained_weight_bytes: u64,
         capacity: u64,
         prefill_rows: u64,
+        price: BufferPricer<'_>,
+    ) -> Result<Self> {
+        Self::new_with_generic_hc(
+            config,
+            retained_weight_bytes,
+            capacity,
+            prefill_rows,
+            false,
+            price,
+        )
+    }
+
+    /// Model-aware pricing: include bounded generic HC scratch if any
+    /// executed HC mix is not Q8_0. `new` retains the Q8-only accounting.
+    pub fn new_with_generic_hc(
+        config: &Glm5NextConfig,
+        retained_weight_bytes: u64,
+        capacity: u64,
+        prefill_rows: u64,
+        generic_hc: bool,
         price: BufferPricer<'_>,
     ) -> Result<Self> {
         config.validate_release()?;
@@ -438,7 +485,13 @@ impl Glm5NextMemoryLedger {
         let times = |n: u64, bytes: u64| n.checked_mul(bytes).ok_or_else(overflow);
         let kda_state = times(kda, priced(&kda_state_specs(c), price)?)?;
         let mla_state = times(mla, priced(&mla_state_specs(c, capacity), price)?)?;
-        let decode_scratch = priced(&decode_scratch_specs(c), price)?;
+        let decode_scratch = priced(&decode_scratch_specs(c), price)?
+            .checked_add(if generic_hc {
+                priced(&generic_hc_scratch_specs(c), price)?
+            } else {
+                0
+            })
+            .ok_or_else(overflow)?;
         let decode_routes = times(moe, priced(&route_specs(c, None), price)?)?;
         let sparse_decode = if capacity >= u64::from(c.sparse_frontier()) {
             priced(&sparse_decode_specs(c, capacity), price)?
@@ -454,7 +507,13 @@ impl Glm5NextMemoryLedger {
             (0, 0)
         } else {
             (
-                priced(&packed_scratch_specs(c, prefill_rows), price)?,
+                priced(&packed_scratch_specs(c, prefill_rows), price)?
+                    .checked_add(if generic_hc {
+                        priced(&packed_generic_hc_scratch_specs(c, prefill_rows), price)?
+                    } else {
+                        0
+                    })
+                    .ok_or_else(overflow)?,
                 times(moe, priced(&route_specs(c, Some(prefill_rows)), price)?)?,
             )
         };
@@ -554,8 +613,34 @@ impl Glm5NextMemoryLedger {
         budget_bytes: u64,
         price: BufferPricer<'_>,
     ) -> Result<Option<u64>> {
+        Self::max_capacity_with_generic_hc(
+            config,
+            retained_weight_bytes,
+            prefill_rows,
+            budget_bytes,
+            false,
+            price,
+        )
+    }
+
+    /// Capacity advice using the same optional HC scratch as live admission.
+    pub fn max_capacity_with_generic_hc(
+        config: &Glm5NextConfig,
+        retained_weight_bytes: u64,
+        prefill_rows: u64,
+        budget_bytes: u64,
+        generic_hc: bool,
+        price: BufferPricer<'_>,
+    ) -> Result<Option<u64>> {
         let fits = |capacity: u64| -> Result<bool> {
-            let ledger = Self::new(config, retained_weight_bytes, capacity, prefill_rows, price)?;
+            let ledger = Self::new_with_generic_hc(
+                config,
+                retained_weight_bytes,
+                capacity,
+                prefill_rows,
+                generic_hc,
+                price,
+            )?;
             Ok(ledger.peak_bytes() <= budget_bytes)
         };
         let smallest = prefill_rows.max(1);

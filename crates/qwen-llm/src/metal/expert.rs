@@ -39,6 +39,53 @@ const GATE_UP_KERNELS: &[(GgmlType, &str)] = &[
     ),
 ];
 
+fn all_slots_gate_up_kernel(dtype: GgmlType) -> Option<&'static str> {
+    GATE_UP_KERNELS
+        .iter()
+        .find(|(t, _)| *t == dtype)
+        .map(|(_, kernel)| *kernel)
+}
+
+fn all_slots_down_kernel(dtype: GgmlType) -> Option<(&'static str, usize, usize, usize)> {
+    Some(match dtype {
+        GgmlType::IQ3_S => (
+            "kernel_deepseek_v4_all_slots_down_iq3_s_f32_fast",
+            8,
+            64,
+            256,
+        ),
+        GgmlType::IQ3_XXS => (
+            "kernel_deepseek_v4_all_slots_down_iq3_xxs_f32_fast",
+            8,
+            64,
+            256,
+        ),
+        GgmlType::MXFP4 => ("kernel_deepseek_v4_all_slots_down_mxfp4_f32", 4, 128, 32),
+        GgmlType::Q4_K => ("kernel_deepseek_v4_all_slots_down_q4_K_f32", 4, 64, 256),
+        _ => return None,
+    })
+}
+
+/// All-slot clamped gate/up requires equal storage types. Mixed pairs need a
+/// separate composition and must not be inferred from individual capabilities.
+pub fn all_slots_gate_up_supported(gate: GgmlType, up: GgmlType) -> bool {
+    gate == up && all_slots_gate_up_kernel(gate).is_some()
+}
+
+pub fn all_slots_down_supported(dtype: GgmlType) -> bool {
+    dtype == GgmlType::IQ4_XS || all_slots_down_kernel(dtype).is_some()
+}
+
+/// Capability of the packed clamped path used by `encode_grouped_routed_experts`.
+/// The unclamped generic two-pass path does not implement this contract.
+pub fn grouped_clamped_gate_up_supported(gate: GgmlType, up: GgmlType) -> bool {
+    gate == up && clamped_swiglu_pipeline_name(gate).is_some()
+}
+
+pub fn grouped_expert_down_supported(dtype: GgmlType) -> bool {
+    dtype == GgmlType::IQ4_XS || moe_grouped_generic_supported(dtype)
+}
+
 /// Buckets of at least this many slots take the 32-token gate/up tile in
 /// the half-staged grouped path (`None`: every bucket on the 16-token
 /// tile). Bitwise equal per slot to the 16-token tile (unit and GLM model
@@ -175,10 +222,7 @@ pub fn encode_all_slots_gate_up_swiglu(
     if gate_bank.dtype != up_bank.dtype {
         return Err(bad_shape(K, "gate and up banks must share a dtype"));
     }
-    let kernel = GATE_UP_KERNELS
-        .iter()
-        .find(|(dtype, _)| *dtype == gate_bank.dtype)
-        .map(|(_, kernel)| *kernel)
+    let kernel = all_slots_gate_up_kernel(gate_bank.dtype)
         .ok_or_else(|| bad_shape(K, format!("no all-slot kernel for {:?}", gate_bank.dtype)))?;
     if !n_in.is_multiple_of(256) {
         return Err(bad_shape(
@@ -308,23 +352,8 @@ pub fn encode_all_slots_down(
         );
         return Ok(());
     }
-    let (kernel, rows_per_group, threads, block) = match bank.dtype {
-        GgmlType::IQ3_S => (
-            "kernel_deepseek_v4_all_slots_down_iq3_s_f32_fast",
-            8,
-            64,
-            256,
-        ),
-        GgmlType::IQ3_XXS => (
-            "kernel_deepseek_v4_all_slots_down_iq3_xxs_f32_fast",
-            8,
-            64,
-            256,
-        ),
-        GgmlType::MXFP4 => ("kernel_deepseek_v4_all_slots_down_mxfp4_f32", 4, 128, 32),
-        GgmlType::Q4_K => ("kernel_deepseek_v4_all_slots_down_q4_K_f32", 4, 64, 256),
-        dtype => return Err(bad_shape(K, format!("no all-slot kernel for {dtype:?}"))),
-    };
+    let (kernel, rows_per_group, threads, block) = all_slots_down_kernel(bank.dtype)
+        .ok_or_else(|| bad_shape(K, format!("no all-slot kernel for {:?}", bank.dtype)))?;
     if !n_in.is_multiple_of(block) {
         return Err(bad_shape(
             K,
@@ -512,6 +541,17 @@ pub(crate) fn encode_grouped_routed_experts_with_down_policy(
 ) -> Result<(), MetalError> {
     const K: &str = "grouped_routed_experts";
     check_grouped_routed_experts(K, enc, b, hidden, ffn, experts, top_k, rows)?;
+    if !grouped_clamped_gate_up_supported(b.gate_bank.dtype, b.up_bank.dtype)
+        || !grouped_expert_down_supported(b.down_bank.dtype)
+    {
+        return Err(bad_shape(
+            K,
+            format!(
+                "no clamped grouped path for gate/up/down {:?}/{:?}/{:?}",
+                b.gate_bank.dtype, b.up_bank.dtype, b.down_bank.dtype,
+            ),
+        ));
+    }
     let flat = |t: &MetalTensor| MetalTensor {
         shape: vec![t.n_elements()],
         ..t.clone()
@@ -1346,3 +1386,39 @@ mod f32x_tests;
 
 #[cfg(test)]
 mod wide_tests;
+
+#[test]
+fn expert_capability_names_have_shader_implementations() {
+    let decode = include_str!("../../../../kernels/mat_vec.metal");
+    let packed = include_str!("../../../../kernels/moe.metal");
+    for raw in 0..=255 {
+        let dtype = GgmlType::from_raw(raw);
+        if let Some(name) = all_slots_gate_up_kernel(dtype) {
+            assert!(decode.contains(name), "{dtype:?}: {name}");
+        }
+        if let Some((name, _, _, _)) = all_slots_down_kernel(dtype) {
+            assert!(decode.contains(name), "{dtype:?}: {name}");
+        }
+        if grouped_clamped_gate_up_supported(dtype, dtype) {
+            let name = clamped_swiglu_pipeline_name(dtype).unwrap();
+            assert!(packed.contains(&name), "{dtype:?}: {name}");
+        }
+        if grouped_expert_down_supported(dtype) && dtype != GgmlType::IQ4_XS {
+            let name =
+                moe_grouped_generic_pipeline_name(MoeGroupedGenericRole::Down, dtype).unwrap();
+            assert!(packed.contains(&name), "{dtype:?}: {name}");
+        }
+    }
+    assert!(all_slots_down_supported(GgmlType::IQ3_XXS));
+    assert!(grouped_expert_down_supported(GgmlType::IQ3_XXS));
+    assert!(all_slots_down_supported(GgmlType::MXFP4));
+    assert!(!grouped_expert_down_supported(GgmlType::MXFP4));
+    assert!(!all_slots_gate_up_supported(
+        GgmlType::IQ2_S,
+        GgmlType::IQ3_S
+    ));
+    assert!(!grouped_clamped_gate_up_supported(
+        GgmlType::IQ2_S,
+        GgmlType::IQ3_S
+    ));
+}

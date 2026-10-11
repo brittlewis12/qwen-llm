@@ -1,0 +1,18 @@
+
+running 12 tests
+test metal::expert::expert_capability_names_have_shader_implementations ... ok
+test metal::expert::f32x_tests::down_f32x_refuses_oversized_geometry ... 2026-10-11 12:00:58.588 qwen_llm-de358c0a63485fd8[80500:18339159] Metal API Validation Enabled
+ok
+test metal::expert::f32x_tests::down_f32x_tile_buckets_edges_and_invalid_slots ... ok
+test metal::expert::f32x_tests::f32x_expert_encoders_refuse_bad_bindings ... ok
+test metal::expert::f32x_tests::grouped_f32x_experts_refuse_types_without_a_tile ... ok
+test metal::expert::f32x_tests::grouped_f32x_experts_token_outputs_do_not_depend_on_the_dispatch ... ok
+test metal::expert::f32x_tests::grouped_f32x_experts_track_decode_and_f64_beyond_half ... ok
+test metal::expert::tests::all_slots_down_matches_dequantized_reference_at_glm_widths ... ok
+test metal::expert::tests::all_slots_gate_up_matches_dequantized_reference_at_glm_widths ... ok
+test metal::expert::tests::grouped_routed_experts_match_per_row_decode_composition ... ok
+test metal::expert::tests::routed_expert_block_dispatch_costs ... ignored, timing screen; run without MTL_DEBUG_LAYER
+test metal::expert::wide_tests::wide_gate_up_tile_matches_the_16_token_tile_bitwise ... ok
+
+test result: ok. 11 passed; 0 failed; 1 ignored; 0 measured; 1875 filtered out; finished in 4.56s
+

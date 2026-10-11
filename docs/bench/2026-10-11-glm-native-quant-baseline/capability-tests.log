@@ -1,0 +1,17 @@
+
+running 12 tests
+test checkpoint_codec::tests::checkpoint_codec_round_trips_state_families_and_capabilities ... ok
+test glm5_next::tests::expert_admission_uses_all_slot_capability_with_optional_grouped_prefill ... ok
+test glm5_next::tests::role_admission_corresponds_to_dispatch_capabilities ... ok
+test metal::elementwise::gather_capability_names_have_shader_implementations ... ok
+test metal::expert::expert_capability_names_have_shader_implementations ... ok
+test metal::iq1::tests::iq1_auto_preflights_capability_and_alignment_fallback ... ok
+test metal::iq1::tests::iq1_m_gather_rejects_invalid_bindings_devices_and_capabilities_before_dispatch ... ok
+test metal::iq2_xxs::tests::iq2_xxs_auto_preflights_capability_and_alignment_fallback ... ok
+test metal_forward::dispatch::dense_capabilities_keep_partial_and_unimplemented_codecs_honest ... ok
+test metal_forward::role_tests::dense_iq_role_storage_prefill_capability_matches_dense_roles ... ok
+test metal_forward::tests::gguf_parallel_pread_capability_table_is_exact ... ok
+test prefix_cache::tests::insert_keeps_first_equal_capability_snapshot ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 1875 filtered out; finished in 0.12s
+

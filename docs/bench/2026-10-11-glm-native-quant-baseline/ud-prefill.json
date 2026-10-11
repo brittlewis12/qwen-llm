@@ -1,0 +1,57 @@
+{
+  "schema": "glm53.packed_prefill_stage_attribution.v1",
+  "method": "one 512-row chunk as one command, one timestamp-sampled encoder per stage per block; spans scaled to the command's GPU time and summed per stage",
+  "prompt": "long_qualification_text (teacher-forced)",
+  "cases": [
+    {
+      "depth": 0,
+      "precision": "half",
+      "chunk_tokens": 512,
+      "unprofiled_wall_ms": [
+        2168.9835,
+        2311.2406659999997
+      ],
+      "profiled_command_gpu_ms": 2246.466250013327,
+      "profiled_span_sum_ms": 2244.811206013319,
+      "stages_ms": {
+        "attention_post": 20.900045000123992,
+        "attention_pre": 15.847710000094017,
+        "dense_ffn": 36.81245900021839,
+        "embed": 0.5947910000035287,
+        "ffn_post": 21.157377000125514,
+        "ffn_pre": 15.588376000092477,
+        "head": 1.060750000006293,
+        "kda": 495.99629100294254,
+        "mla_projection": 157.60758600093504,
+        "routed_experts": 1356.989040008051,
+        "router": 24.788162000147057,
+        "shared_expert": 97.46861900057822
+      }
+    },
+    {
+      "depth": 0,
+      "precision": "f32",
+      "chunk_tokens": 512,
+      "unprofiled_wall_ms": [
+        2930.06425,
+        3005.938125
+      ],
+      "profiled_command_gpu_ms": 3102.866750006797,
+      "profiled_span_sum_ms": 3061.8934140067076,
+      "stages_ms": {
+        "attention_post": 21.4137070000469,
+        "attention_pre": 17.711252000038797,
+        "dense_ffn": 44.036124000096464,
+        "embed": 0.5933750000012998,
+        "ffn_post": 21.790544000047735,
+        "ffn_pre": 17.577417000038505,
+        "head": 1.0539160000023087,
+        "kda": 627.2403780013739,
+        "mla_projection": 199.85512700043782,
+        "routed_experts": 1958.6381180042904,
+        "router": 26.707332000058514,
+        "shared_expert": 125.27612400027442
+      }
+    }
+  ]
+}

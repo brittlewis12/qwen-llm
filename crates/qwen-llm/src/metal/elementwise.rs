@@ -2213,6 +2213,24 @@ pub fn encode_scatter_offset_f32_to_q8_0_kv(
     Ok(())
 }
 
+/// Native row-gather dispatch capability, shared with model admission.
+/// The IQ1_M primitive owns its own physical validation; other formats use
+/// the common gather binding below.
+pub fn get_rows_pipeline_name(dtype: GgmlType) -> Option<&'static str> {
+    Some(match dtype {
+        GgmlType::F32 => "kernel_get_rows_f32",
+        GgmlType::F16 => "kernel_get_rows_f16",
+        GgmlType::BF16 => "kernel_get_rows_bf16",
+        GgmlType::Q4_K => "kernel_get_rows_q4_K_f32",
+        GgmlType::Q6_K => "kernel_get_rows_q6_K_f32",
+        GgmlType::Q8_0 => "kernel_get_rows_q8_0_f32",
+        GgmlType::IQ4_NL => "kernel_get_rows_iq4_nl_f32",
+        GgmlType::IQ4_XS => "kernel_get_rows_iq4_xs_f32",
+        GgmlType::IQ1_M => "kernel_get_rows_iq1_m_f32",
+        _ => return None,
+    })
+}
+
 /// Row lookup: `y[r * n_cols + i] = source[ids[r] * n_cols + i]`.
 /// The source may be flat or multidimensional; its logical element count
 /// defines the row count. GGUF embeddings are normally `[n_cols, vocab]`.
@@ -2225,6 +2243,10 @@ pub fn encode_get_rows_f32(
     n_rows: usize,
     n_cols: usize,
 ) -> Result<(), MetalError> {
+    let kernel_name = get_rows_pipeline_name(embed.dtype).ok_or_else(|| MetalError::BadShape {
+        kernel: "get_rows",
+        detail: format!("unsupported embedding dtype {:?}", embed.dtype),
+    })?;
     if embed.dtype == GgmlType::IQ1_M {
         // Same gather contract: IDs contain n_rows I32 elements; output has
         // exactly n_rows*n_cols F32 elements, flat or shaped. The IQ1 primitive
@@ -2350,33 +2372,12 @@ pub fn encode_get_rows_f32(
         });
     }
     let source_rows = source_elements / n_cols;
-    let block_layout = match embed.dtype {
-        GgmlType::F32 => (1usize, 4usize),
-        GgmlType::F16 | GgmlType::BF16 => (1, 2),
-        GgmlType::Q4_K => (256, 144),
-        GgmlType::Q6_K => (256, 210),
-        GgmlType::Q8_0 => (32, 34),
-        GgmlType::IQ4_NL => (32, 18),
-        GgmlType::IQ4_XS => (256, 136),
-        other => {
-            return Err(MetalError::BadShape {
-                kernel: "get_rows",
-                detail: format!("unsupported embedding dtype {other:?}"),
-            });
-        }
-    };
-    let (block_elements, block_bytes) = block_layout;
-    let source_alignment = match embed.dtype {
-        GgmlType::F32 => std::mem::align_of::<f32>(),
-        GgmlType::F16
-        | GgmlType::BF16
-        | GgmlType::Q4_K
-        | GgmlType::Q6_K
-        | GgmlType::Q8_0
-        | GgmlType::IQ4_NL
-        | GgmlType::IQ4_XS => std::mem::align_of::<u16>(),
-        _ => unreachable!(),
-    } as u64;
+    let (block_elements, block_bytes) = embed
+        .dtype
+        .storage_layout()
+        .expect("row dispatch types have a storage layout");
+    let (block_elements, block_bytes) = (block_elements as usize, block_bytes as usize);
+    let source_alignment = if embed.dtype == GgmlType::F32 { 4 } else { 2 };
     if !embed.offset.is_multiple_of(source_alignment) {
         return Err(MetalError::BadShape {
             kernel: "get_rows",
@@ -2437,17 +2438,7 @@ pub fn encode_get_rows_f32(
             ),
         });
     }
-    let kernel_name = match embed.dtype {
-        GgmlType::F32 => "kernel_get_rows_f32",
-        GgmlType::F16 => "kernel_get_rows_f16",
-        GgmlType::BF16 => "kernel_get_rows_bf16",
-        GgmlType::Q4_K => "kernel_get_rows_q4_K_f32",
-        GgmlType::Q6_K => "kernel_get_rows_q6_K_f32",
-        GgmlType::Q8_0 => "kernel_get_rows_q8_0_f32",
-        GgmlType::IQ4_NL => "kernel_get_rows_iq4_nl_f32",
-        GgmlType::IQ4_XS => "kernel_get_rows_iq4_xs_f32",
-        _ => unreachable!(),
-    };
+
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct GetRowsArgs {
@@ -3999,5 +3990,32 @@ mod tests {
                 assert_eq!(gap, vec![0.0], "boundary width {width} gap");
             }
         }
+    }
+}
+
+#[test]
+fn gather_capability_names_have_shader_implementations() {
+    let common = include_str!("../../../../kernels/elementwise.metal");
+    let iq1 = include_str!("../../../../kernels/iq1.metal");
+    for raw in 0..=255 {
+        let dtype = GgmlType::from_raw(raw);
+        if let Some(name) = get_rows_pipeline_name(dtype) {
+            assert!(
+                common.contains(name) || iq1.contains(name),
+                "{dtype:?}: {name}"
+            );
+            assert!(dtype.storage_layout().is_some());
+        }
+    }
+    for dtype in [GgmlType::IQ1_M, GgmlType::IQ4_NL, GgmlType::IQ4_XS] {
+        assert!(get_rows_pipeline_name(dtype).is_some());
+    }
+    for dtype in [
+        GgmlType::Q5_K,
+        GgmlType::IQ1_S,
+        GgmlType::NVFP4,
+        GgmlType::Unknown,
+    ] {
+        assert!(get_rows_pipeline_name(dtype).is_none());
     }
 }

@@ -180,11 +180,13 @@ pub fn preflight_session(
     let (page, max_buffer) = retained_geometry(ctx)?;
     let (_, retained) = model.plan_retained(gguf, page, max_buffer)?;
     let price = device_price(ctx);
-    let ledger = Glm5NextMemoryLedger::new(
+    let generic_hc = needs_generic_hc(&model.blocks, |t| t.dtype);
+    let ledger = Glm5NextMemoryLedger::new_with_generic_hc(
         &model.config,
         retained,
         capacity as u64,
         prefill_rows as u64,
+        generic_hc,
         &price,
     )?;
     let admission =
@@ -195,11 +197,12 @@ pub fn preflight_session(
     let budget = admission_budget(&admission);
     // A smaller capacity is advice only when memory, not telemetry, refused.
     let advice = if denied.reason.is_pressure() {
-        match Glm5NextMemoryLedger::max_capacity(
+        match Glm5NextMemoryLedger::max_capacity_with_generic_hc(
             &model.config,
             retained,
             prefill_rows as u64,
             budget,
+            generic_hc,
             &price,
         ) {
             Ok(Some(n)) => CapacityAdvice::Fits(n),
@@ -438,6 +441,7 @@ struct Scratch {
     residual: [MetalTensor; 2],
     quarter: MetalTensor,
     no_sink: MetalTensor,
+    generic_hc: Option<GenericHcScratch>,
     hc_partial_dots: MetalTensor,
     hc_partial_sumsq: MetalTensor,
     mixes: MetalTensor,
@@ -549,8 +553,90 @@ impl SpecBuffers {
     }
 }
 
-impl Scratch {
+/// Scan only executed blocks: an unused NextN HC never needs scratch.
+fn needs_generic_hc<T>(blocks: &[Glm5NextBlock<T>], dtype: impl Fn(&T) -> GgmlType) -> bool {
+    blocks.iter().any(|b| {
+        dtype(&b.attention_hc.mix) != GgmlType::Q8_0 || dtype(&b.ffn_hc.mix) != GgmlType::Q8_0
+    })
+}
+
+struct GenericHcScratch {
+    normalized: MetalTensor,
+    ones: MetalTensor,
+}
+
+impl GenericHcScratch {
     fn new(ctx: &MetalContext, c: &Glm5NextConfig) -> Result<Self> {
+        let mut b = SpecBuffers::allocate(ctx, "generic_hc", &memory::generic_hc_scratch_specs(c))?;
+        let scratch = Self {
+            normalized: b.take("normalized")?,
+            ones: b.take("ones")?,
+        };
+        b.finish()?;
+        Ok(scratch)
+    }
+}
+
+/// Keep fused Q8 and single-row generic GEMV unchanged. Packed generic HC
+/// runs once over all active rows: the API uses grouped F32 projection when
+/// available and row GEMV otherwise, with batched normalization/controls.
+/// Exact and Fast both retain F32 operands; reduction order may differ from
+/// decode. Scratch contains activations only, never expanded weights.
+#[allow(clippy::too_many_arguments)]
+fn encode_hc_pre_dispatch(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    hidden: usize,
+    rows: usize,
+    eps: crate::metal::Mhc4PreEps,
+    inputs: &crate::metal::Mhc4PreInputs<'_>,
+    partials: &crate::metal::Mhc4PrePartials<'_>,
+    scratch: Option<&crate::metal::Mhc4PreGenericScratch<'_>>,
+    outputs: &crate::metal::Mhc4PreOutputs<'_>,
+) -> Result<()> {
+    if inputs.mix.dtype == GgmlType::Q8_0 {
+        crate::metal::encode_mhc4_pre_q8_0(ctx, enc, hidden, rows, eps, inputs, partials, outputs)?;
+        return Ok(());
+    }
+    let scratch = scratch.ok_or_else(|| {
+        Glm5NextMetalError::Invalid("generic HC mix without admitted activation scratch".into())
+    })?;
+    crate::metal::encode_mhc4_pre_generic(ctx, enc, hidden, rows, eps, inputs, scratch, outputs)?;
+    Ok(())
+}
+
+/// Q8 keeps its original decode kernel; native grouped dispatch consumes
+/// flattened views of the runtime's `[width, heads, 1]` latent tensors.
+#[allow(clippy::too_many_arguments)]
+fn grouped_matvec(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    groups: usize,
+) -> Result<()> {
+    if weight.dtype == GgmlType::Q8_0 {
+        encode_mat_vec_q8_0_grouped_f32(ctx, enc, weight, input, output, n_in, n_out, groups)?;
+    } else {
+        crate::metal::encode_mat_vec_grouped_f32(
+            ctx,
+            enc,
+            weight,
+            &input.view_subrange(0, vec![(n_in * groups) as u64]),
+            &output.view_subrange(0, vec![(n_out * groups) as u64]),
+            n_in,
+            n_out,
+            groups,
+        )?;
+    }
+    Ok(())
+}
+
+impl Scratch {
+    fn new(ctx: &MetalContext, c: &Glm5NextConfig, generic_hc: bool) -> Result<Self> {
         let mut b = SpecBuffers::allocate(ctx, "decode_scratch", &memory::decode_scratch_specs(c))?;
         let s = Self {
             token: b.take("token")?,
@@ -558,6 +644,9 @@ impl Scratch {
             residual: [b.take("residual_a")?, b.take("residual_b")?],
             quarter: b.take("quarter")?,
             no_sink: b.take("no_sink")?,
+            generic_hc: generic_hc
+                .then(|| GenericHcScratch::new(ctx, c))
+                .transpose()?,
             hc_partial_dots: b.take("hc_partial_dots")?,
             hc_partial_sumsq: b.take("hc_partial_sumsq")?,
             mixes: b.take("mixes")?,
@@ -979,11 +1068,13 @@ impl<'w> Glm5NextSession<'w> {
             return invalid("capacity must be positive");
         }
         let sparse_capacity = capacity >= c.sparse_frontier() as usize;
-        let ledger = Glm5NextMemoryLedger::new(
+        let generic_hc = needs_generic_hc(&weights.blocks, |t| t.dtype);
+        let ledger = Glm5NextMemoryLedger::new_with_generic_hc(
             c,
             weights.retained_bytes,
             capacity as u64,
             prefill_rows as u64,
+            generic_hc,
             &device_price(ctx),
         )?;
         let session_bytes = ledger.peak_bytes() - weights.retained_bytes;
@@ -1011,12 +1102,12 @@ impl<'w> Glm5NextSession<'w> {
             .map(|block| LayerState::new(ctx, c, block.mixer, capacity as u64))
             .collect::<Result<Vec<_>>>()?;
         let routes = RouteRecord::for_blocks(ctx, c, None)?;
-        let s = Scratch::new(ctx, c)?;
+        let s = Scratch::new(ctx, c, generic_hc)?;
         let sparse = sparse_capacity
             .then(|| SparseScratch::new(ctx, c, capacity as u64))
             .transpose()?;
         let packed = (prefill_rows > 0)
-            .then(|| packed::PackedScratch::new(ctx, c, prefill_rows, capacity))
+            .then(|| packed::PackedScratch::new(ctx, c, prefill_rows, capacity, generic_hc))
             .transpose()?;
         // Diagnostic only: the device counter also moves with unrelated
         // allocations and frees elsewhere in the process.
@@ -1665,11 +1756,8 @@ impl<'w> Glm5NextSession<'w> {
         Ok(())
     }
 
-    /// The fused mHC pre ([`crate::metal::encode_mhc4_pre_q8_0`]) of one
-    /// sub-block: mixes, controls and collapse into `collapsed`, then the
-    /// block norm into `normed`; `post`/`comb` stay set for the matching
-    /// post. GLM admits only Q8_0 mixes (coverage), and packed rows run the
-    /// same kernels, so packed prefill keeps decode's mHC lineage.
+    /// mHC pre for one sub-block. Q8 keeps the fused path; other native
+    /// dtypes use F32 normalized activations and generic dense GEMV.
     fn encode_hc_pre(
         &self,
         ctx: &MetalContext,
@@ -1682,7 +1770,7 @@ impl<'w> Glm5NextSession<'w> {
         let s = &self.s;
         let one = |t: &MetalTensor, shape: Vec<u64>| t.view_subrange(0, shape);
         let (h, mixes) = (c.hidden_size as u64, c.hc_mix_count() as u64);
-        crate::metal::encode_mhc4_pre_q8_0(
+        encode_hc_pre_dispatch(
             ctx,
             enc,
             c.hidden_size as usize,
@@ -1699,6 +1787,13 @@ impl<'w> Glm5NextSession<'w> {
                 dots: &s.hc_partial_dots,
                 sumsq: &s.hc_partial_sumsq,
             },
+            s.generic_hc
+                .as_ref()
+                .map(|scratch| crate::metal::Mhc4PreGenericScratch {
+                    normalized: &scratch.normalized,
+                    ones: &scratch.ones,
+                })
+                .as_ref(),
             &crate::metal::Mhc4PreOutputs {
                 mixes: &one(&s.mixes, vec![mixes, 1]),
                 pre: &one(&s.pre, vec![4, 1]),
@@ -1851,7 +1946,7 @@ impl<'w> Glm5NextSession<'w> {
             c.rms_epsilon,
         )?;
         encode_scatter_offset_f32_to_f16(ctx, enc, &s.latent, latent, self.position * kv, kv)?;
-        encode_mat_vec_q8_0_grouped_f32(
+        grouped_matvec(
             ctx,
             enc,
             &mla.key_absorb,
@@ -1918,7 +2013,7 @@ impl<'w> Glm5NextSession<'w> {
             )?;
         }
         self.stage(enc, Glm5NextStage::MlaOutput, Some(block))?;
-        encode_mat_vec_q8_0_grouped_f32(
+        grouped_matvec(
             ctx,
             enc,
             &mla.value_expand,

@@ -2,6 +2,90 @@
 
 use super::*;
 
+type MatVecKernel = fn(
+    &MetalContext,
+    &KernelEncoder,
+    &MetalTensor,
+    &MetalTensor,
+    &MetalTensor,
+    usize,
+    usize,
+) -> Result<(), MetalError>;
+
+fn mat_vec_kernel(dtype: GgmlType) -> Option<MatVecKernel> {
+    Some(match dtype {
+        GgmlType::IQ1_S | GgmlType::IQ1_M => crate::metal::encode_mat_vec_iq1_f32,
+        GgmlType::IQ2_XXS => crate::metal::encode_mat_vec_iq2_xxs_f32,
+        GgmlType::F32 => encode_mat_vec_f32,
+        GgmlType::F16 => crate::metal::encode_mat_vec_f16_f32,
+        GgmlType::BF16 => crate::metal::encode_mat_vec_bf16_f32,
+        GgmlType::Q2_K => crate::metal::encode_mat_vec_q2_k_f32,
+        GgmlType::Q3_K => crate::metal::encode_mat_vec_q3_k_f32,
+        GgmlType::IQ2_XS => crate::metal::encode_mat_vec_iq2_xs_f32,
+        GgmlType::IQ2_S => crate::metal::encode_mat_vec_iq2_s_f32,
+        GgmlType::IQ3_XXS => crate::metal::encode_mat_vec_iq3_xxs_f32,
+        GgmlType::IQ3_S => crate::metal::encode_mat_vec_iq3_s_f32,
+        GgmlType::Q4_0 => crate::metal::encode_mat_vec_q4_0_f32,
+        GgmlType::Q4_1 => crate::metal::encode_mat_vec_q4_1_f32,
+        GgmlType::Q4_K => encode_mat_vec_q4_k_f32,
+        GgmlType::Q5_K => encode_mat_vec_q5_k_f32,
+        GgmlType::Q6_K => encode_mat_vec_q6_k_f32,
+        GgmlType::MXFP4 => crate::metal::encode_mat_vec_mxfp4_f32,
+        GgmlType::Q8_0 => crate::metal::encode_mat_vec_q8_0_f32,
+        GgmlType::IQ4_NL => crate::metal::encode_mat_vec_iq4_nl_f32,
+        GgmlType::IQ4_XS => crate::metal::encode_mat_vec_iq4_xs_f32,
+        _ => return None,
+    })
+}
+
+/// Whether generic GEMV dispatch has a native weight path.
+/// Geometry and buffer validation remain the encoder's responsibility.
+pub fn mat_vec_dispatch_supported(dtype: GgmlType) -> bool {
+    mat_vec_kernel(dtype).is_some()
+}
+
+type MatMatKernel = fn(
+    &MetalContext,
+    &KernelEncoder,
+    &MetalTensor,
+    &MetalTensor,
+    &MetalTensor,
+    usize,
+    usize,
+    usize,
+) -> Result<(), MetalError>;
+
+fn mat_mat_kernel(dtype: GgmlType) -> Option<MatMatKernel> {
+    Some(match dtype {
+        GgmlType::IQ1_S | GgmlType::IQ1_M => crate::metal::encode_mat_mat_iq1_f32,
+        GgmlType::IQ2_XXS => crate::metal::encode_mat_mat_iq2_xxs_f32,
+        GgmlType::Q4_K => crate::metal::encode_mat_mat_q4_k_f32,
+        GgmlType::F32 => crate::metal::encode_mat_mat_f32,
+        GgmlType::F16 => crate::metal::encode_mat_mat_f16_f32,
+        GgmlType::BF16 => crate::metal::encode_mat_mat_bf16_f32,
+        GgmlType::Q2_K => crate::metal::encode_mat_mat_q2_k_f32,
+        GgmlType::Q3_K => crate::metal::encode_mat_mat_q3_k_f32,
+        GgmlType::IQ2_XS => crate::metal::encode_mat_mat_iq2_xs_f32,
+        GgmlType::IQ2_S => crate::metal::encode_mat_mat_iq2_s_f32,
+        GgmlType::IQ3_XXS => crate::metal::encode_mat_mat_iq3_xxs_f32,
+        GgmlType::IQ3_S => crate::metal::encode_mat_mat_iq3_s_f32,
+        GgmlType::Q4_0 => crate::metal::encode_mat_mat_q4_0_f32,
+        GgmlType::Q4_1 => crate::metal::encode_mat_mat_q4_1_f32,
+        GgmlType::Q5_K => crate::metal::encode_mat_mat_q5_k_f32,
+        GgmlType::Q6_K => crate::metal::encode_mat_mat_q6_k_f32,
+        GgmlType::Q8_0 => crate::metal::encode_mat_mat_q8_0_f32,
+        GgmlType::IQ4_NL => crate::metal::encode_mat_mat_iq4_nl_f32,
+        GgmlType::IQ4_XS => crate::metal::encode_mat_mat_iq4_xs_f32,
+        _ => return None,
+    })
+}
+
+/// Whether generic multi-row GEMM dispatch has a native weight path.
+/// Geometry and buffer validation remain the encoder's responsibility.
+pub fn mat_mat_dispatch_supported(dtype: GgmlType) -> bool {
+    mat_mat_kernel(dtype).is_some()
+}
+
 pub fn with_matmat_bf16_bfloat_act_override<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
     struct Restore(Option<bool>);
     impl Drop for Restore {
@@ -141,14 +225,8 @@ pub fn encode_mat_vec_dispatch(
         // The native IQ primitive records the normalized ranges itself. Do not also
         // run generic notes: duplicate writes would trigger concurrent hazards.
         let (x, y) = native_iq_dispatch_views(x, y, n_in, n_out, 1, false)?;
-        if matches!(weight.dtype, GgmlType::IQ1_S | GgmlType::IQ1_M) {
-            return Ok(crate::metal::encode_mat_vec_iq1_f32(
-                ctx, enc, weight, &x, &y, n_in, n_out,
-            )?);
-        }
-        return Ok(crate::metal::encode_mat_vec_iq2_xxs_f32(
-            ctx, enc, weight, &x, &y, n_in, n_out,
-        )?);
+        let kernel = mat_vec_kernel(weight.dtype).expect("native IQ GEMV selector");
+        return Ok(kernel(ctx, enc, weight, &x, &y, n_in, n_out)?);
     }
     // Debug-only concurrent-pass hazard tracking (no-op on serial encoders
     // and in release builds). This is the chokepoint for the concurrent
@@ -158,64 +236,11 @@ pub fn encode_mat_vec_dispatch(
     enc.note_read(weight);
     enc.note_read(x);
     enc.note_write(y);
-    match weight.dtype {
-        GgmlType::F32 => Ok(encode_mat_vec_f32(ctx, enc, weight, x, y, n_in, n_out)?),
-        GgmlType::F16 => Ok(crate::metal::encode_mat_vec_f16_f32(
-            ctx, enc, weight, x, y, n_in, n_out,
-        )?),
-        GgmlType::BF16 => Ok(crate::metal::encode_mat_vec_bf16_f32(
-            ctx, enc, weight, x, y, n_in, n_out,
-        )?),
-        GgmlType::Q2_K => Ok(crate::metal::encode_mat_vec_q2_k_f32(
-            ctx, enc, weight, x, y, n_in, n_out,
-        )?),
-        GgmlType::Q3_K => Ok(crate::metal::encode_mat_vec_q3_k_f32(
-            ctx, enc, weight, x, y, n_in, n_out,
-        )?),
-        GgmlType::IQ2_XS => Ok(crate::metal::encode_mat_vec_iq2_xs_f32(
-            ctx, enc, weight, x, y, n_in, n_out,
-        )?),
-        GgmlType::IQ2_S => Ok(crate::metal::encode_mat_vec_iq2_s_f32(
-            ctx, enc, weight, x, y, n_in, n_out,
-        )?),
-        GgmlType::IQ3_XXS => Ok(crate::metal::encode_mat_vec_iq3_xxs_f32(
-            ctx, enc, weight, x, y, n_in, n_out,
-        )?),
-        GgmlType::IQ3_S => Ok(crate::metal::encode_mat_vec_iq3_s_f32(
-            ctx, enc, weight, x, y, n_in, n_out,
-        )?),
-        GgmlType::Q4_0 => Ok(crate::metal::encode_mat_vec_q4_0_f32(
-            ctx, enc, weight, x, y, n_in, n_out,
-        )?),
-        GgmlType::Q4_1 => Ok(crate::metal::encode_mat_vec_q4_1_f32(
-            ctx, enc, weight, x, y, n_in, n_out,
-        )?),
-        GgmlType::Q4_K => Ok(encode_mat_vec_q4_k_f32(
-            ctx, enc, weight, x, y, n_in, n_out,
-        )?),
-        GgmlType::Q5_K => Ok(encode_mat_vec_q5_k_f32(
-            ctx, enc, weight, x, y, n_in, n_out,
-        )?),
-        GgmlType::Q6_K => Ok(encode_mat_vec_q6_k_f32(
-            ctx, enc, weight, x, y, n_in, n_out,
-        )?),
-        GgmlType::MXFP4 => Ok(crate::metal::encode_mat_vec_mxfp4_f32(
-            ctx, enc, weight, x, y, n_in, n_out,
-        )?),
-        GgmlType::Q8_0 => Ok(crate::metal::encode_mat_vec_q8_0_f32(
-            ctx, enc, weight, x, y, n_in, n_out,
-        )?),
-        GgmlType::IQ4_NL => Ok(crate::metal::encode_mat_vec_iq4_nl_f32(
-            ctx, enc, weight, x, y, n_in, n_out,
-        )?),
-        GgmlType::IQ4_XS => Ok(crate::metal::encode_mat_vec_iq4_xs_f32(
-            ctx, enc, weight, x, y, n_in, n_out,
-        )?),
-        other => Err(MfError::UnsupportedDtype {
-            name: "(weight at mat_vec dispatch)".to_string(),
-            dtype: other,
-        }),
-    }
+    let kernel = mat_vec_kernel(weight.dtype).ok_or_else(|| MfError::UnsupportedDtype {
+        name: "(weight at mat_vec dispatch)".to_string(),
+        dtype: weight.dtype,
+    })?;
+    Ok(kernel(ctx, enc, weight, x, y, n_in, n_out)?)
 }
 
 #[cfg(test)]
@@ -559,80 +584,45 @@ fn encode_mat_mat_dispatch_routed(
             _ => {}
         }
     }
-    match weight.dtype {
-        GgmlType::Q4_K => Ok(crate::metal::encode_mat_mat_q4_k_f32(
+    if weight.dtype == GgmlType::BF16
+        && matmat_bf16_bfloat_act_enabled()
+        && n_in.is_multiple_of(32)
+        && n_query >= 16
+    {
+        return Ok(crate::metal::encode_mat_mat_bf16_bfloat_act_f32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
-        )?),
-        GgmlType::F32 => Ok(crate::metal::encode_mat_mat_f32(
-            ctx, enc, weight, x, y, n_in, n_out, n_query,
-        )?),
-        GgmlType::F16 => Ok(crate::metal::encode_mat_mat_f16_f32(
-            ctx, enc, weight, x, y, n_in, n_out, n_query,
-        )?),
-        GgmlType::BF16
-            if matmat_bf16_bfloat_act_enabled() && n_in.is_multiple_of(32) && n_query >= 16 =>
-        {
-            Ok(crate::metal::encode_mat_mat_bf16_bfloat_act_f32(
-                ctx, enc, weight, x, y, n_in, n_out, n_query,
-            )?)
-        }
-        GgmlType::BF16 => Ok(crate::metal::encode_mat_mat_bf16_f32(
-            ctx, enc, weight, x, y, n_in, n_out, n_query,
-        )?),
-        GgmlType::Q2_K => Ok(crate::metal::encode_mat_mat_q2_k_f32(
-            ctx, enc, weight, x, y, n_in, n_out, n_query,
-        )?),
-        GgmlType::Q3_K => Ok(crate::metal::encode_mat_mat_q3_k_f32(
-            ctx, enc, weight, x, y, n_in, n_out, n_query,
-        )?),
-        GgmlType::IQ2_XS => Ok(crate::metal::encode_mat_mat_iq2_xs_f32(
-            ctx, enc, weight, x, y, n_in, n_out, n_query,
-        )?),
-        GgmlType::IQ1_S | GgmlType::IQ1_M => {
-            let (x, y) = native_iq_dispatch_views(x, y, n_in, n_out, n_query, true)?;
-            Ok(crate::metal::encode_mat_mat_iq1_f32(
-                ctx, enc, weight, &x, &y, n_in, n_out, n_query,
-            )?)
-        }
-        GgmlType::IQ2_XXS => {
-            let (x, y) = native_iq_dispatch_views(x, y, n_in, n_out, n_query, true)?;
-            Ok(crate::metal::encode_mat_mat_iq2_xxs_f32(
-                ctx, enc, weight, &x, &y, n_in, n_out, n_query,
-            )?)
-        }
-        GgmlType::IQ2_S => Ok(crate::metal::encode_mat_mat_iq2_s_f32(
-            ctx, enc, weight, x, y, n_in, n_out, n_query,
-        )?),
-        GgmlType::IQ3_XXS => Ok(crate::metal::encode_mat_mat_iq3_xxs_f32(
-            ctx, enc, weight, x, y, n_in, n_out, n_query,
-        )?),
-        GgmlType::IQ3_S => Ok(crate::metal::encode_mat_mat_iq3_s_f32(
-            ctx, enc, weight, x, y, n_in, n_out, n_query,
-        )?),
-        GgmlType::Q4_0 => Ok(crate::metal::encode_mat_mat_q4_0_f32(
-            ctx, enc, weight, x, y, n_in, n_out, n_query,
-        )?),
-        GgmlType::Q4_1 => Ok(crate::metal::encode_mat_mat_q4_1_f32(
-            ctx, enc, weight, x, y, n_in, n_out, n_query,
-        )?),
-        GgmlType::Q5_K => Ok(crate::metal::encode_mat_mat_q5_k_f32(
-            ctx, enc, weight, x, y, n_in, n_out, n_query,
-        )?),
-        GgmlType::Q6_K => Ok(crate::metal::encode_mat_mat_q6_k_f32(
-            ctx, enc, weight, x, y, n_in, n_out, n_query,
-        )?),
-        GgmlType::Q8_0 => Ok(crate::metal::encode_mat_mat_q8_0_f32(
-            ctx, enc, weight, x, y, n_in, n_out, n_query,
-        )?),
-        GgmlType::IQ4_NL => Ok(crate::metal::encode_mat_mat_iq4_nl_f32(
-            ctx, enc, weight, x, y, n_in, n_out, n_query,
-        )?),
-        GgmlType::IQ4_XS => Ok(crate::metal::encode_mat_mat_iq4_xs_f32(
-            ctx, enc, weight, x, y, n_in, n_out, n_query,
-        )?),
-        other => Err(MfError::UnsupportedDtype {
-            name: "(weight at mat_mat dispatch)".to_string(),
-            dtype: other,
-        }),
+        )?);
+    }
+    let kernel = mat_mat_kernel(weight.dtype).ok_or_else(|| MfError::UnsupportedDtype {
+        name: "(weight at mat_mat dispatch)".to_string(),
+        dtype: weight.dtype,
+    })?;
+    if matches!(
+        weight.dtype,
+        GgmlType::IQ1_S | GgmlType::IQ1_M | GgmlType::IQ2_XXS
+    ) {
+        let (x, y) = native_iq_dispatch_views(x, y, n_in, n_out, n_query, true)?;
+        return Ok(kernel(ctx, enc, weight, &x, &y, n_in, n_out, n_query)?);
+    }
+    Ok(kernel(ctx, enc, weight, x, y, n_in, n_out, n_query)?)
+}
+
+#[test]
+fn dense_capabilities_keep_partial_and_unimplemented_codecs_honest() {
+    use GgmlType::*;
+    for dtype in [
+        F32, F16, BF16, IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, Q2_K,
+        Q3_K, Q4_0, Q4_1, Q4_K, Q5_K, Q6_K, Q8_0,
+    ] {
+        assert!(mat_vec_dispatch_supported(dtype), "{dtype:?}");
+        assert!(mat_mat_dispatch_supported(dtype), "{dtype:?}");
+    }
+    assert!(mat_vec_dispatch_supported(MXFP4));
+    assert!(!mat_mat_dispatch_supported(MXFP4));
+    for dtype in [
+        NVFP4, TQ1_0, TQ2_0, Q1_0, Q2_0, Q5_0, Q5_1, Q8_1, Q8_K, I32, Unknown,
+    ] {
+        assert!(!mat_vec_dispatch_supported(dtype), "{dtype:?}");
+        assert!(!mat_mat_dispatch_supported(dtype), "{dtype:?}");
     }
 }

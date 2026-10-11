@@ -198,11 +198,12 @@ fn allocate<'w>(
     out: &mut File,
     c: Case,
 ) -> Option<Glm5NextSession<'w>> {
-    let ledger = Glm5NextMemoryLedger::new(
+    let ledger = Glm5NextMemoryLedger::new_with_generic_hc(
         &weights.config,
         weights.retained_bytes,
         capacity as u64,
         chunk as u64,
+        needs_generic_hc(&weights.blocks, |t| t.dtype),
         &device_price(ctx),
     )
     .unwrap();

@@ -1,0 +1,32 @@
+
+running 1 test
+test glm5_next_metal::tests::packed_prefill_stage_attribution ... depth 0 half: unprofiled wall 4272.5 ms (119.8 tok/s); profiled command 4184.1 ms, span sum 4182.5 ms
+  routed_experts      1358.67 ms   32.5%   2653.6 us/token
+  attention_pre        908.33 ms   21.7%   1774.1 us/token
+  ffn_pre              896.27 ms   21.4%   1750.5 us/token
+  kda                  479.94 ms   11.5%    937.4 us/token
+  mla_projection       339.68 ms    8.1%    663.4 us/token
+  shared_expert         94.81 ms    2.3%    185.2 us/token
+  dense_ffn             36.83 ms    0.9%     71.9 us/token
+  router                23.35 ms    0.6%     45.6 us/token
+  ffn_post              21.00 ms    0.5%     41.0 us/token
+  attention_post        20.75 ms    0.5%     40.5 us/token
+  embed                  1.81 ms    0.0%      3.5 us/token
+  head                   1.09 ms    0.0%      2.1 us/token
+depth 0 f32: unprofiled wall 8099.0 ms (63.2 tok/s); profiled command 7863.9 ms, span sum 7857.4 ms
+  routed_experts      4760.52 ms   60.6%   9297.9 us/token
+  attention_pre        978.98 ms   12.5%   1912.1 us/token
+  ffn_pre              943.92 ms   12.0%   1843.6 us/token
+  kda                  566.10 ms    7.2%   1105.7 us/token
+  mla_projection       379.04 ms    4.8%    740.3 us/token
+  shared_expert        120.28 ms    1.5%    234.9 us/token
+  dense_ffn             40.21 ms    0.5%     78.5 us/token
+  router                22.82 ms    0.3%     44.6 us/token
+  ffn_post              21.46 ms    0.3%     41.9 us/token
+  attention_post        21.22 ms    0.3%     41.5 us/token
+  embed                  1.80 ms    0.0%      3.5 us/token
+  head                   1.09 ms    0.0%      2.1 us/token
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1886 filtered out; finished in 50.85s
+

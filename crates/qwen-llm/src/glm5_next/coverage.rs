@@ -1,10 +1,10 @@
 //! Executable coverage by tensor role and storage type.
 //!
 //! "Kept native" (`metal_forward::weight_dtype_kept_native`) is a storage
-//! property. This table instead records which existing kernel family can
+//! property. These queries instead record which existing kernel family can
 //! execute a role at a dtype, for single-token decode and for packed prefill.
-//! A role/dtype pair absent from the table has no path, and binding refuses it
-//! before residency rather than falling back to an F32 expansion. `Pending`
+//! A role/dtype pair absent from the dispatch capabilities has no path; binding
+//! refuses it before residency rather than falling back to an F32 expansion. `Pending`
 //! names a known adaptation inside an existing path, and
 //! [`Glm5NextModel::validate_execution`] refuses a mode while any of its cells
 //! is pending. Weight coverage is not graph capability: routing, KDA, latent
@@ -32,7 +32,8 @@ pub enum TensorRole {
     HyperMix,
     /// Quantized dense projection.
     Projection,
-    /// F32 dense projection (router logits, indexer head weights).
+    /// Router logits and indexer head weights. Historical storage-named role;
+    /// native dense dispatch determines supported types, including non-F32.
     F32Projection,
     /// Per-head MLA absorption/expansion (`attn_k_b`, `attn_v_b`).
     LatentAbsorb,
@@ -98,49 +99,46 @@ const fn split(decode: Support, prefill: Support) -> RoleCoverage {
     RoleCoverage { decode, prefill }
 }
 
-const DENSE: &str = "dense mat_vec / mat_mat";
+const DENSE: &str = "dense mat_vec / optional mat_mat with per-row mat_vec fallback";
 
 /// Coverage of `role` stored as `dtype`, or `None` when no path exists.
 pub fn coverage(role: TensorRole, dtype: GgmlType) -> Option<RoleCoverage> {
+    use crate::metal::{
+        all_slots_down_supported, all_slots_gate_up_supported, get_rows_pipeline_name,
+        grouped_projection_supported,
+    };
+    use crate::metal_forward::{mat_mat_dispatch_supported, mat_vec_dispatch_supported};
     use GgmlType as T;
     use TensorRole as R;
-    Some(match (role, dtype) {
-        (R::Embedding, T::Q6_K | T::Q8_0 | T::Q4_K | T::F16 | T::BF16 | T::F32) => {
-            both("kernel_get_rows_*")
+    Some(match role {
+        R::Embedding => both(get_rows_pipeline_name(dtype)?),
+        // The head consumes the last position only, even during packed prefill.
+        R::Head if mat_vec_dispatch_supported(dtype) => both("dense mat_vec (last position)"),
+        R::Vector | R::Conv if dtype == T::F32 => both("elementwise / kernel_ssm_conv_silu_f32"),
+        // Packed execution can use per-row GEMV when GEMM is unavailable.
+        // An optional optimization must not narrow admission.
+        R::Projection | R::F32Projection if mat_vec_dispatch_supported(dtype) => both(DENSE),
+        // Generic HC delegates to dense dispatch, with an explicit per-row
+        // GEMV composition for MXFP4. Q8_0 may use the fused pre fast path.
+        R::HyperMix
+            if mat_vec_dispatch_supported(dtype)
+                && (mat_mat_dispatch_supported(dtype) || dtype == T::MXFP4) =>
+        {
+            both("encode_mhc4_pre_generic / fused Q8_0 pre")
         }
-        (R::Head, T::Q6_K | T::Q8_0 | T::Q4_K | T::Q5_K | T::F16 | T::BF16) => both(DENSE),
-        (R::Vector | R::Conv, T::F32) => both("elementwise / kernel_ssm_conv_silu_f32"),
-        // Fused pre: split-K Q8_0 mix dots and sums of squares over
-        // [hidden * streams], then one threadgroup per row for the RMS scale,
-        // controls, collapse and block norm; decode and packed rows share it.
-        (R::HyperMix, T::Q8_0) => both("kernel_mhc4_pre_mix_partial_q8_0 + kernel_mhc4_pre_finish"),
-        (
-            R::Projection,
-            T::Q8_0 | T::Q6_K | T::Q5_K | T::Q4_K | T::IQ4_XS | T::F16 | T::BF16 | T::F32,
-        ) => both(DENSE),
-        // Logits only: sigmoid top-8 routing is a separate graph capability.
-        (R::F32Projection, T::F32) => split(
-            Support::Kernel("kernel_mat_vec_f32_f32"),
-            Support::Kernel("kernel_mat_mat_f32_f32_router_e8p32"),
-        ),
-        (R::LatentAbsorb, T::Q8_0) => split(
-            Support::Kernel("kernel_mat_vec_q8_0_f32_lcpp_grouped"),
-            Support::Kernel("encode_mat_mat_q8_0_grouped_f32 (128-row blocks) + grouped GEMV tail"),
-        ),
-        // Expert entries list only dtypes verified on both paths (decode via
-        // metal::expert's all-slot encoders, GPU-tested at GLM widths); other
-        // artifacts add theirs with evidence.
-        (R::ExpertGateUp, T::IQ2_S | T::IQ3_S) => split(
+        R::LatentAbsorb if grouped_projection_supported(dtype) => {
+            both("encode_mat_vec_grouped_f32 / encode_mat_mat_grouped_f32")
+        }
+        // Packed execution falls back to all-slot row decode when the grouped
+        // clamped gate/up pair or grouped down kernel is unavailable. Binding
+        // additionally checks the actual gate/up pair for equal types.
+        R::ExpertGateUp if all_slots_gate_up_supported(dtype, dtype) => split(
             Support::Kernel("encode_all_slots_gate_up_swiglu"),
-            Support::Kernel("encode_grouped_routed_experts (clamped grouped SwiGLU)"),
+            Support::Kernel("optional grouped clamped SwiGLU / all-slot row decode"),
         ),
-        (R::ExpertDown, T::IQ3_S) => split(
-            Support::Kernel("encode_all_slots_down (all_slots_down_iq3_s)"),
-            Support::Kernel("encode_grouped_routed_experts (grouped generic down)"),
-        ),
-        (R::ExpertDown, T::IQ4_XS) => split(
-            Support::Kernel("encode_all_slots_down (moe_down_iq4_xs_fast)"),
-            Support::Kernel("encode_grouped_routed_experts (moe_down_iq4_xs grouped)"),
+        R::ExpertDown if all_slots_down_supported(dtype) => split(
+            Support::Kernel("encode_all_slots_down"),
+            Support::Kernel("optional grouped down / all-slot row decode"),
         ),
         _ => return None,
     })

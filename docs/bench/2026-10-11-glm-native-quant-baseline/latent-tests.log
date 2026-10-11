@@ -1,0 +1,11 @@
+
+running 5 tests
+test metal::latent::grouped_native_tests::grouped_native_all_shared_formats_and_q8_dispatch_preservation ... 2026-10-11 12:00:57.548 qwen_llm-de358c0a63485fd8[80492:18338744] Metal API Validation Enabled
+ok
+test metal::latent::grouped_native_tests::grouped_native_decoder_and_storage_mapping_matches_shared_tiles ... ok
+test metal::latent::grouped_native_tests::grouped_native_exact_preserves_f32_operands_and_dense_range_with_channel_tails ... ok
+test metal::latent::grouped_native_tests::grouped_native_rejects_invalid_bindings_without_dispatch ... ok
+test metal::latent::grouped_native_tests::grouped_native_required_shapes_offsets_and_head_isolation ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1882 filtered out; finished in 0.89s
+

@@ -4,10 +4,10 @@
 //! Allocation-free: callers own every buffer. Layouts: residuals are
 //! stream-major `[hidden, 4]` (stream `s` occupies `[s * hidden, (s + 1) *
 //! hidden)`); the 24 mixes are `pre[4] | post[4] | comb[16]`; the combination
-//! matrix is source-major, `comb[src * 4 + dst]`. The mix RMSNorm and
-//! projection stay with the caller; [`encode_mhc4_controls`] consumes projected
-//! F32 mixes. Single-token forms only; packed forms land with their first
-//! shared caller.
+//! matrix is source-major, `comb[src * 4 + dst]`. [`encode_mhc4_pre_generic`]
+//! composes the complete pre sequence for native dense weight formats;
+//! [`encode_mhc4_pre_q8_0`] retains the fused Q8 path. Both accept decode or
+//! packed rows, as do the individual primitives' `_rows` forms.
 //!
 //! CPU contract: `crate::deepseek_v4_oracle::{hyper_connection_pre,
 //! hyper_connection_post}`.
@@ -478,8 +478,8 @@ pub struct Mhc4PrePartials<'a> {
     pub sumsq: &'a MetalTensor,
 }
 
-/// Outputs of [`encode_mhc4_pre_q8_0`], all F32 per row: mixes `[24]`, pre
-/// and post `[4]`, combination `[4, 4]`, collapsed and normed `[hidden]`.
+/// Outputs of both pre encoders, all F32: mixes `[24, rows]`, pre and post
+/// `[4, rows]`, combination `[4, 4, rows]`, collapsed and normed `[hidden, rows]`.
 pub struct Mhc4PreOutputs<'a> {
     pub mixes: &'a MetalTensor,
     pub pre: &'a MetalTensor,
@@ -489,15 +489,220 @@ pub struct Mhc4PreOutputs<'a> {
     pub normed: &'a MetalTensor,
 }
 
-/// Inputs of [`encode_mhc4_pre_q8_0`]: residual `[hidden, 4, rows]`, Q8_0
-/// mix `[4 * hidden, 24]`, F32 scale `[3]` and base `[24]`, and the block's
-/// F32 norm weight `[hidden]`.
+/// Inputs of both pre encoders: F32 residual `[hidden, 4, rows]`, mix
+/// `[4 * hidden, 24]`, F32 scale `[3]` and base `[24]`, and the block's F32
+/// norm weight `[hidden]`. The fused encoder requires a Q8_0 mix; the generic
+/// encoder keeps the mix in its native dense-dispatch dtype.
 pub struct Mhc4PreInputs<'a> {
     pub residual: &'a MetalTensor,
     pub mix: &'a MetalTensor,
     pub scale: &'a MetalTensor,
     pub base: &'a MetalTensor,
     pub norm_weight: &'a MetalTensor,
+}
+
+/// Activation-sized scratch for [`encode_mhc4_pre_generic`]. Both tensors
+/// are writable F32, need no initialization, and may be reused across layers.
+/// Total additional storage is `4 * (4 * hidden) * (rows + 1)` bytes; no
+/// decoded or expanded projection weights are allocated.
+pub struct Mhc4PreGenericScratch<'a> {
+    /// `[4 * hidden, rows]`, with a 16-byte-aligned offset.
+    pub normalized: &'a MetalTensor,
+    /// `[4 * hidden]`, filled with ones by the encoder for unweighted RMS.
+    pub ones: &'a MetalTensor,
+}
+
+/// Generic mHC pre: RMS-normalize each flattened four-stream residual,
+/// project to 24 mixes using native F32-operand dispatch, compute controls (20
+/// Sinkhorn rounds), collapse the original residual, and apply block RMSNorm.
+///
+/// Uses [`Mhc4PreInputs`] and [`Mhc4PreOutputs`] with explicit row axes even
+/// for decode (`rows = 1`). Decode uses generic GEMV. For packed rows, types
+/// accepted by [`grouped_projection_supported`] use
+/// [`encode_mat_mat_grouped_f32`] with one group and all rows in one call;
+/// remaining native types use individual row GEMVs. Projection operands and
+/// accumulators stay F32, with no half/bfloat activation staging or narrowing
+/// of decoded weights. The projection encoders own dtype support and any
+/// additional kernel geometry constraints (grouped projection requires
+/// `4 * hidden` divisible by 32). Allocate scratch for all rows and call once.
+/// No host readback, buffer allocation, or projection-weight expansion occurs.
+/// The unit RMS weights are filled on-device before normalization.
+///
+/// Requires a serial encoder, positive finite epsilons, positive geometry
+/// with residual/mix element counts fitting i32, block-aligned mix width,
+/// and 16-byte-aligned mix and normalized scratch offsets. All scratch and
+/// output ranges must be mutually disjoint and disjoint from every input.
+/// Other bindings require 4-byte alignment. Errors from dense dispatch are
+/// preserved; discard the command buffer on failure (earlier stages may
+/// already have been encoded). F32 operands preserve their range and precision;
+/// different reduction orders and Metal fast math mean packed results are
+/// numerically equivalent to decode, not necessarily bitwise identical.
+/// The fused Q8 encoder remains a separate caller choice.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mhc4_pre_generic(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    hidden: usize,
+    rows: usize,
+    eps: Mhc4PreEps,
+    inputs: &Mhc4PreInputs<'_>,
+    scratch: &Mhc4PreGenericScratch<'_>,
+    outputs: &Mhc4PreOutputs<'_>,
+) -> Result<(), crate::metal_forward::MfError> {
+    use crate::metal_forward::encode_mat_vec_dispatch;
+
+    const K: &str = "mhc4_pre_generic";
+    require_serial(K, enc)?;
+    let (_, width) = residual_geometry(K, hidden)?;
+    rows_u32(K, rows)?;
+    for (value, name) in [
+        (eps.hc_rms, "hyper-connection RMS epsilon"),
+        (eps.hc, "hyper-connection epsilon"),
+        (eps.norm, "norm epsilon"),
+    ] {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(bad(
+                K,
+                format!("{name} must be finite and positive, got {value}"),
+            )
+            .into());
+        }
+    }
+    for (a, b) in [(width, rows), (width, MHC_MIXES), (MHC_MIXES, rows)] {
+        if a.checked_mul(b).is_none_or(|n| i32::try_from(n).is_err()) {
+            return Err(bad(K, "geometry exceeds signed 32-bit dense shader offsets").into());
+        }
+    }
+    let (block, _) = inputs
+        .mix
+        .dtype
+        .storage_layout()
+        .ok_or_else(|| bad(K, "mix has unknown storage layout"))?;
+    if !(width as u64).is_multiple_of(block) {
+        return Err(bad(
+            K,
+            format!("mix width {width} is not a multiple of block {block}"),
+        )
+        .into());
+    }
+    let h = hidden as u64;
+    let r = rows as u64;
+    check_tensor(
+        K,
+        inputs.mix,
+        inputs.mix.dtype,
+        &[width as u64, 24],
+        false,
+        "mix",
+    )?;
+    check_alignment(K, inputs.mix, 16, "mix")?;
+    check_f32(K, inputs.residual, &[h, 4, r], false, "residual")?;
+    check_f32(K, inputs.scale, &[3], false, "scale")?;
+    check_f32(K, inputs.base, &[24], false, "base")?;
+    check_f32(K, inputs.norm_weight, &[h], false, "norm weight")?;
+    check_f32(
+        K,
+        scratch.normalized,
+        &[width as u64, r],
+        true,
+        "normalized",
+    )?;
+    check_alignment(K, scratch.normalized, 16, "normalized")?;
+    check_f32(K, scratch.ones, &[width as u64], true, "ones")?;
+    check_f32(K, outputs.mixes, &[24, r], true, "mixes")?;
+    check_f32(K, outputs.pre, &[4, r], true, "pre")?;
+    check_f32(K, outputs.post, &[4, r], true, "post")?;
+    check_f32(K, outputs.comb, &[4, 4, r], true, "combination")?;
+    check_f32(K, outputs.collapsed, &[h, r], true, "collapsed")?;
+    check_f32(K, outputs.normed, &[h, r], true, "normed")?;
+    let written = [
+        (scratch.normalized, "normalized"),
+        (scratch.ones, "ones"),
+        (outputs.mixes, "mixes"),
+        (outputs.pre, "pre"),
+        (outputs.post, "post"),
+        (outputs.comb, "combination"),
+        (outputs.collapsed, "collapsed"),
+        (outputs.normed, "normed"),
+    ];
+    let read = [
+        (inputs.residual, "residual"),
+        (inputs.mix, "mix"),
+        (inputs.scale, "scale"),
+        (inputs.base, "base"),
+        (inputs.norm_weight, "norm weight"),
+    ];
+    for (i, &(tensor, name)) in written.iter().enumerate() {
+        check_disjoint(K, tensor, &read).map_err(|e| bad(K, format!("{name}: {e}")))?;
+        check_disjoint(K, tensor, &written[i + 1..]).map_err(|e| bad(K, format!("{name}: {e}")))?;
+    }
+
+    encode_fill_f32(ctx, enc, scratch.ones, 1.0)?;
+    encode_rms_norm_mul_rows_f32(
+        ctx,
+        enc,
+        inputs.residual,
+        scratch.ones,
+        scratch.normalized,
+        rows,
+        width,
+        eps.hc_rms,
+    )?;
+    if rows > 1 && grouped_projection_supported(inputs.mix.dtype) {
+        encode_mat_mat_grouped_f32(
+            ctx,
+            enc,
+            inputs.mix,
+            scratch.normalized,
+            outputs.mixes,
+            width,
+            MHC_MIXES,
+            1,
+            rows,
+        )?;
+    } else {
+        for row in 0..rows {
+            let x = scratch
+                .normalized
+                .view_subrange((row * width) as u64, vec![width as u64]);
+            let y = outputs
+                .mixes
+                .view_subrange((row * MHC_MIXES) as u64, vec![MHC_MIXES as u64]);
+            encode_mat_vec_dispatch(ctx, enc, inputs.mix, &x, &y, width, MHC_MIXES)?;
+        }
+    }
+    encode_mhc4_controls_rows(
+        ctx,
+        enc,
+        rows,
+        eps.hc,
+        outputs.mixes,
+        inputs.scale,
+        inputs.base,
+        outputs.pre,
+        outputs.post,
+        outputs.comb,
+    )?;
+    encode_mhc4_collapse_rows(
+        ctx,
+        enc,
+        hidden,
+        rows,
+        inputs.residual,
+        outputs.pre,
+        outputs.collapsed,
+    )?;
+    encode_rms_norm_mul_rows_f32(
+        ctx,
+        enc,
+        outputs.collapsed,
+        inputs.norm_weight,
+        outputs.normed,
+        rows,
+        hidden,
+        eps.norm,
+    )?;
+    Ok(())
 }
 
 /// Fused single-token-or-rows mHC pre with a Q8_0 mix projection: per row,
@@ -696,7 +901,7 @@ pub fn encode_mhc4_pre_q8_0(
     Ok(())
 }
 
-/// Epsilons of [`encode_mhc4_pre_q8_0`]: the flattened residual's RMS, the
+/// Epsilons of both pre encoders: the flattened residual's RMS, the
 /// controls (Sinkhorn) and the block RMSNorm.
 #[derive(Clone, Copy, Debug)]
 pub struct Mhc4PreEps {
@@ -704,6 +909,10 @@ pub struct Mhc4PreEps {
     pub hc: f32,
     pub norm: f32,
 }
+
+#[cfg(test)]
+#[path = "mhc/generic_tests.rs"]
+mod generic_tests;
 
 #[cfg(test)]
 mod tests {

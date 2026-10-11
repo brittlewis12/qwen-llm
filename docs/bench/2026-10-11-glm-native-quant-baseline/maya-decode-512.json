@@ -1,0 +1,150 @@
+{
+  "schema": "glm53.decode_stage_attribution.v1",
+  "method": "one command per step, one timestamp-sampled encoder per stage; spans scaled to the command's GPU time",
+  "prompt": "[gMASK]<sop> + long_qualification_text (teacher-forced)",
+  "weight_bytes_per_step": {
+    "attention_pre": 71521020.0,
+    "dense_ffn": 371589120.0,
+    "embed": 3360.0,
+    "ffn_pre": 71521020.0,
+    "head": 520413184.0,
+    "kda": 3881035264.0,
+    "mla_indexer": 12289024.0,
+    "mla_output": 681246720.0,
+    "mla_projection": 378560512.0,
+    "routed_experts": 2909798400.0,
+    "router": 198229248.0,
+    "shared_expert": 867041280.0,
+    "sparse_query": 75063296.0
+  },
+  "depths": [
+    {
+      "depth": 512,
+      "steps": 12,
+      "unprofiled_wall_ms_per_token": 34.56079858333334,
+      "unprofiled_wall_ms": [
+        34.387875,
+        34.435874999999996,
+        34.612792000000006,
+        34.774625,
+        34.680291000000004,
+        34.375625,
+        34.475,
+        34.417125,
+        34.725709,
+        34.834291,
+        34.588417,
+        34.421958000000004
+      ],
+      "profiled_command_gpu_ms": 35.67046874377411,
+      "profiled_span_sum_ms": 34.605646880025446,
+      "stages": {
+        "attention_post": {
+          "ms": 0.14497990252094348,
+          "share_of_spans": 0.00418948684946059,
+          "spans_per_step": 45,
+          "weight_bytes": 0.0,
+          "effective_gb_s": 0.0
+        },
+        "attention_pre": {
+          "ms": 2.4011419327654653,
+          "share_of_spans": 0.06938584159660419,
+          "spans_per_step": 45,
+          "weight_bytes": 71521020.0,
+          "effective_gb_s": 29.786252542608818
+        },
+        "dense_attention": {
+          "ms": 2.124781294494417,
+          "share_of_spans": 0.061399843264333,
+          "spans_per_step": 11,
+          "weight_bytes": 0.0,
+          "effective_gb_s": 0.0
+        },
+        "dense_ffn": {
+          "ms": 0.8054651709787799,
+          "share_of_spans": 0.023275541525672173,
+          "spans_per_step": 3,
+          "weight_bytes": 371589120.0,
+          "effective_gb_s": 461.3348079948072
+        },
+        "embed": {
+          "ms": 0.005461832790067846,
+          "share_of_spans": 0.00015783068032230438,
+          "spans_per_step": 1,
+          "weight_bytes": 3360.0,
+          "effective_gb_s": 0.6151781149562182
+        },
+        "ffn_post": {
+          "ms": 0.1401100696198842,
+          "share_of_spans": 0.004048763200573385,
+          "spans_per_step": 45,
+          "weight_bytes": 0.0,
+          "effective_gb_s": 0.0
+        },
+        "ffn_pre": {
+          "ms": 2.4042821826951006,
+          "share_of_spans": 0.06947658545527333,
+          "spans_per_step": 45,
+          "weight_bytes": 71521020.0,
+          "effective_gb_s": 29.747348507914285
+        },
+        "head": {
+          "ms": 1.0533608940499322,
+          "share_of_spans": 0.030438988691696364,
+          "spans_per_step": 1,
+          "weight_bytes": 520413184.0,
+          "effective_gb_s": 494.05022242579196
+        },
+        "kda": {
+          "ms": 9.673466807062427,
+          "share_of_spans": 0.27953434422420814,
+          "spans_per_step": 34,
+          "weight_bytes": 3881035264.0,
+          "effective_gb_s": 401.20417440896415
+        },
+        "mla_indexer": {
+          "ms": 0.15775331856719454,
+          "share_of_spans": 0.004558600482577615,
+          "spans_per_step": 11,
+          "weight_bytes": 12289024.0,
+          "effective_gb_s": 77.90025662607869
+        },
+        "mla_output": {
+          "ms": 1.5990415104043794,
+          "share_of_spans": 0.04620753127222581,
+          "spans_per_step": 11,
+          "weight_bytes": 681246720.0,
+          "effective_gb_s": 426.03441847342685
+        },
+        "mla_projection": {
+          "ms": 1.2180352147264226,
+          "share_of_spans": 0.035197585496645596,
+          "spans_per_step": 11,
+          "weight_bytes": 378560512.0,
+          "effective_gb_s": 310.79603235036745
+        },
+        "routed_experts": {
+          "ms": 9.687929392291768,
+          "share_of_spans": 0.27995226980957516,
+          "spans_per_step": 42,
+          "weight_bytes": 2909798400.0,
+          "effective_gb_s": 300.352973496606
+        },
+        "router": {
+          "ms": 0.8038848381539875,
+          "share_of_spans": 0.0232298746196244,
+          "spans_per_step": 42,
+          "weight_bytes": 198229248.0,
+          "effective_gb_s": 246.5891115140405
+        },
+        "shared_expert": {
+          "ms": 2.3859525189046824,
+          "share_of_spans": 0.06894691283120809,
+          "spans_per_step": 42,
+          "weight_bytes": 867041280.0,
+          "effective_gb_s": 363.3941887485808
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,244 @@
+
+running 111 tests
+test glm5_next::oracle::tests::kda_contract_matches_fla_naive_recurrence ... ok
+test glm5_next::tests::binder_classifies_every_tensor_exactly_once ... ok
+test glm5_next::tests::binder_refuses_structural_drift ... ok
+test glm5_next::tests::binding_accepts_alternate_native_quant_mixtures ... ok
+test glm5_next::tests::binding_rejects_unimplemented_codecs_and_uncomposed_expert_pairs ... ok
+test glm5_next::tests::buffer_specs_are_unique_nonempty_and_granule_priced ... ok
+test glm5_next::tests::coverage_matrix_names_remaining_adaptations ... ok
+test glm5_next::tests::execution_gate_is_phase_specific ... ok
+test glm5_next::tests::expert_admission_uses_all_slot_capability_with_optional_grouped_prefill ... ok
+test glm5_next::tests::ledger_terms_match_release_geometry ... ok
+test glm5_next::tests::max_capacity_is_the_largest_fitting_context ... ok
+test glm5_next::tests::metadata_fails_closed ... ok
+test glm5_next::tests::mxfp4_dense_is_admitted_in_both_modes_via_row_fallback ... ok
+test glm5_next::tests::packed_activation_rows_back_padded_reads ... ok
+test glm5_next::tests::release_artifact_census_and_allocation_plan ... ignored, CPU/header-only; requires GLM53_GGUF (GLM-5.3-Flash shard 1)
+test glm5_next::tests::release_metadata_binds_in_both_namespaces ... ok
+test glm5_next::tests::role_admission_corresponds_to_dispatch_capabilities ... ok
+test glm5_next::tests::snapshot_bytes_at_the_agent_prefix ... ok
+test glm5_next_chat::tests::a_reply_extends_its_prompt_when_rendered_back_as_history ... ok
+test glm5_next_chat::tests::assistant_strip_is_pythons_str_strip_at_every_code_point ... ok
+test glm5_next_chat::tests::boundaries_are_recorded_while_rendering_not_found_by_scanning ... ok
+test glm5_next_chat::tests::documents_refuse_anything_the_renderer_would_drop ... ok
+test glm5_next_chat::tests::effort_levels_are_explicit_and_default_to_max ... ok
+test glm5_next_chat::tests::fixture_pins_the_upstream_release_and_the_gguf_conversion ... ok
+test glm5_next_chat::tests::gguf_profile_verifies_and_native_tokens_match_hf ... ignored, CPU/header-only; requires GLM53_GGUF (GLM-5.3-Flash shard 1), no inference or GPU
+test glm5_next_chat::tests::only_null_content_separates_the_gguf_template_from_upstream ... ok
+test glm5_next_chat::tests::renders_every_supported_case_byte_for_byte_and_refuses_the_rest ... ok
+test glm5_next_chat::tool_output::tests::ambiguous_lossy_or_unrenderable_arguments_are_refused ... ok
+test glm5_next_chat::tool_output::tests::an_open_block_is_incomplete_at_the_token_limit_and_an_error_at_a_stop ... ok
+test glm5_next_chat::tool_output::tests::arguments_follow_the_declared_schema ... ok
+test glm5_next_chat::tool_output::tests::block_projection_matches_every_push_and_capacity_follows_reservations ... ok
+test glm5_next_chat::tool_output::tests::every_byte_split_streams_the_same_text_and_calls ... ok
+test glm5_next_chat::tool_output::tests::every_prefix_of_valid_output_finishes_cleanly_at_the_token_limit ... ok
+test glm5_next_chat::tool_output::tests::rendered_calls_parse_back_to_the_same_bytes ... ok
+test glm5_next_chat::tool_output::tests::root_reference_siblings_type_generated_arguments ... ok
+test glm5_next_chat::tool_output::tests::text_without_calls_and_marker_prefixes_are_released ... ok
+test glm5_next_chat::tool_output::tests::the_byte_budget_bounds_the_buffered_block ... ok
+test glm5_next_metal::lens::tests::output_norm_statistic_refuses_unrepresentable_sums_of_squares ... ok
+test glm5_next_metal::lens::tests::sites_are_bounded_without_overflow ... ok
+test glm5_next_metal::packed::absorb_tail_policy_tests::absorb_tail_dispatch_split_and_counter_preserve_prefix_and_residual ... 2026-10-11 12:00:40.841 qwen_llm-de358c0a63485fd8[80473:18334033] Metal API Validation Enabled
+ok
+test glm5_next_metal::packed::absorb_tail_policy_tests::absorb_tail_scope_restores_nested_unwound_and_thread_state ... 
+thread 'glm5_next_metal::packed::absorb_tail_policy_tests::absorb_tail_scope_restores_nested_unwound_and_thread_state' (18334121) panicked at crates/qwen-llm/src/glm5_next_metal/packed.rs:2554:51:
+scope restore probe
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok
+test glm5_next_metal::packed::absorb_tail_policy_tests::absorb_tail_selection_is_off_by_default_and_exact_and_keeps_full_prefix ... ok
+test glm5_next_metal::packed::down_policy_tests::iq3_s_down_policy_preserves_other_geometries_and_dtypes ... ok
+test glm5_next_metal::packed::down_policy_tests::iq3_s_down_policy_uses_actual_command_width_and_fast_lineage ... ok
+test glm5_next_metal::packed::expert_down::expert_down_domain_arm_selection_keeps_incumbent_explicit ... ok
+test glm5_next_metal::packed::expert_down::expert_down_domain_screen_requires_valid_paired_evidence ... ok
+test glm5_next_metal::packed::expert_down::expert_down_observer_is_scoped_and_independent ... 
+thread 'glm5_next_metal::packed::expert_down::expert_down_observer_is_scoped_and_independent' (18334128) panicked at crates/qwen-llm/src/glm5_next_metal/tests/expert_down.rs:1205:62:
+observer unwind
+ok
+test glm5_next_metal::packed::expert_down::expert_down_packet ... ignored, diagnostic: released GLM fixture, production lease, new GLM53_EXPERT_DOWN_OUT; DOMAIN=1 bypasses capture/leaf; optional PRODUCTION=1 and DOMAIN_LONG=1
+test glm5_next_metal::packed::mla_tail::mla_tail_packet ... ignored, released GLM fixture; production lease; new GLM53_MLA_TAIL_OUT; optional GLM53_MLA_TAIL_FULL=1
+test glm5_next_metal::packed::mla_tail::mla_tail_timestamp_scope_and_expected_counts ... 
+thread 'glm5_next_metal::packed::mla_tail::mla_tail_timestamp_scope_and_expected_counts' (18334129) panicked at crates/qwen-llm/src/glm5_next_metal/tests/mla_tail.rs:615:56:
+restore nested scope
+ok
+test glm5_next_metal::packed::native_dispatch::disabling_f32_tiles_preserves_requested_operand_precision ... ok
+test glm5_next_metal::packed::native_dispatch::expert_half_and_f32_requests_dispatch_grouped_or_all_slot_paths ... ok
+test glm5_next_metal::packed::native_dispatch::f32_precision_fallback_policy_checks_dtype_geometry_and_expert_combination ... ok
+test glm5_next_metal::packed::native_dispatch::generic_hc_ledger_prices_two_shared_rows_and_capacity_advice ... ok
+test glm5_next_metal::packed::native_dispatch::hc_scratch_selection_checks_both_sites_and_only_mix_weights ... ok
+test glm5_next_metal::packed::native_dispatch::native_hc_runtime_dispatch_matches_oracle_and_serial_rows ... ok
+test glm5_next_metal::packed::native_dispatch::native_latent_exact_does_not_narrow_large_f32_operands ... ok
+test glm5_next_metal::packed::native_dispatch::native_latent_runtime_decode_and_packed_keep_f32_operands ... ok
+test glm5_next_metal::packed::native_dispatch::packed_expert_baseline_reuses_decode_scratch_and_matches_oracle ... ok
+test glm5_next_metal::packed::native_dispatch::packed_fallback_policy_preserves_available_fast_paths ... ok
+test glm5_next_metal::packed::native_dispatch::packed_mxfp4_dense_baseline_matches_exact_rows ... ok
+test glm5_next_metal::packed::native_dispatch::q2_k_dense_half_and_f32_requests_dispatch_different_operand_paths ... ok
+test glm5_next_metal::packed::native_dispatch::router_native_dtypes_use_indexer_projection_policy ... ok
+test glm5_next_metal::packed::router_prefill::router_cpu_capture_rejects_invalid_timestamps_in_both_arms ... ok
+test glm5_next_metal::packed::router_prefill::router_cpu_inactive_capture_does_not_read_gpu_timestamps ... ok
+test glm5_next_metal::packed::router_prefill::router_cpu_override_restores_nested_error_and_unwind ... 
+thread 'glm5_next_metal::packed::router_prefill::router_cpu_override_restores_nested_error_and_unwind' (18334222) panicked at crates/qwen-llm/src/glm5_next_metal/tests/router_prefill.rs:241:21:
+diagnostic unwind
+
+thread 'glm5_next_metal::packed::router_prefill::router_cpu_override_restores_nested_error_and_unwind' (18334222) panicked at crates/qwen-llm/src/glm5_next_metal/tests/router_prefill.rs:257:36:
+outer diagnostic unwind
+ok
+test glm5_next_metal::packed::router_prefill::router_cpu_pipeline_capacity_matches_dispatch ... ok
+test glm5_next_metal::packed::router_prefill::router_cpu_production_selection_is_narrow ... ok
+test glm5_next_metal::packed::router_prefill::router_cpu_scoped_arms_override_widths_but_not_guards ... ok
+test glm5_next_metal::packed::router_prefill::router_prefill_abba ... ignored, diagnostic timing: GLM53_GGUF, GLM53_ROUTER_OUT (new JSONL), no MTL_DEBUG_LAYER; loads 109.5 GiB under production lease
+test glm5_next_metal::tests::capture_release_sampling_logits ... ignored, acquisition: loads the GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_LOGITS_OUT and an idle GPU
+test glm5_next_metal::tests::checkpoint_v1_matches_llama_cpp_oracle ... ignored, loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, the ckpt-v1 oracle and an idle GPU
+test glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs ... 
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+relative error (actual): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+relative error (expected): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+KL (actual): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+KL (expected): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+max |diff| (actual): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+choice regret (actual): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+relative error (actual): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+relative error (expected): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+KL (actual): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+KL (expected): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+max |diff| (actual): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+choice regret (actual): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+relative error (actual): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+relative error (expected): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+KL (actual): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+KL (expected): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+max |diff| (actual): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+choice regret (actual): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:192:5:
+assertion `left == right` failed: relative error: length mismatch
+  left: 2
+ right: 3
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:193:5:
+relative error: empty comparison
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:192:5:
+assertion `left == right` failed: KL: length mismatch
+  left: 2
+ right: 3
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+relative error (actual): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:283:5:
+relative error (expected): non-finite values
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:1074:21:
+pending: one side empty
+
+thread 'glm5_next_metal::tests::comparison_helpers_refuse_nonfinite_and_mismatched_inputs' (18334226) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:1070:13:
+assertion `left == right` failed: kda_state: layer count mismatch
+  left: 2
+ right: 1
+ok
+test glm5_next_metal::tests::decode_stage_attribution ... ignored, timing: loads the GLM-5.3 trunk; requires GLM53_GGUF, GLM53_STAGE_OUT, no MTL_DEBUG_LAYER and an idle GPU
+test glm5_next_metal::tests::fast_reuse_schedule_sensitivity_across_reuse_boundaries ... ignored, map #12 schedule-sensitivity report; loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU
+test glm5_next_metal::tests::intervention_gates::module_interventions_are_inert_when_empty_and_exact_where_applied ... ignored, GLM intervention gates: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU
+test glm5_next_metal::tests::lens_captures_read_out_without_moving_state ... ignored, loads the GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU
+test glm5_next_metal::tests::natural::fast_f32_narrow_rows_match_the_wide_tiles ... ignored, map #12 narrow F32 kernels in the model: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU
+test glm5_next_metal::tests::natural::fast_f32_operand_prefill_cost ... ignored, diagnostic timing: GLM53_GGUF, GLM53_PROBE_OUT, release build, no MTL_DEBUG_LAYER; loads 109.5 GiB under production lease
+test glm5_next_metal::tests::natural::fast_f32_operands_keep_chunk_identities ... ignored, map #12 F32-operand chunk identities: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU
+test glm5_next_metal::tests::natural::packed_lineage_prefill_cost ... ignored, timing (map #12): loads the 109.5 GiB GLM-5.3 trunk; requires GLM53_GGUF, GLM53_LINEAGE_COST_OUT, no MTL_DEBUG_LAYER and an idle GPU
+test glm5_next_metal::tests::natural::reuse_natural_activation_rounding_probe ... ignored, map #12 precision probe: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_PROBE_OUT and an idle GPU
+test glm5_next_metal::tests::natural::reuse_natural_evaluate ... ignored, map #12 natural-trajectory qualification: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_REUSE_NATURAL_REPORT, GLM53_EVALUATOR_COMMIT, the committed fixture and an idle GPU
+test glm5_next_metal::tests::natural::reuse_natural_f32_operand_probe ... ignored, map #12 F32-operand accuracy probe: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_PROBE_OUT and an idle GPU
+test glm5_next_metal::tests::natural::reuse_natural_f32_route_divergence ... ignored, map #12 route divergence: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_PROBE_OUT and an idle GPU
+test glm5_next_metal::tests::natural::reuse_natural_generate ... ignored, generator (map #12 natural trajectories): loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_REUSE_NATURAL_OUT, GLM53_PRODUCER_COMMIT and an idle GPU
+test glm5_next_metal::tests::natural::reuse_natural_stage_attribution ... ignored, map #12 attribution: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_ATTRIBUTION_OUT and an idle GPU
+test glm5_next_metal::tests::oracle_evidence_refuses_manifest_mismatches ... 
+thread 'glm5_next_metal::tests::oracle_evidence_refuses_manifest_mismatches' (18334227) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:61:5:
+assertion `left == right` failed: a.captures: size differs from the manifest
+  left: 76
+ right: 77
+
+thread 'glm5_next_metal::tests::oracle_evidence_refuses_manifest_mismatches' (18334227) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:77:5:
+assertion `left == right` failed: a.captures: SHA-256 differs from the manifest
+  left: "561f11c52c68b70d82287844f90ab44448235f1ddf077ff70007c13ec578c2f1"
+ right: "0000000000000000000000000000000000000000000000000000000000000000"
+
+thread 'glm5_next_metal::tests::oracle_evidence_refuses_manifest_mismatches' (18334227) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:79:9:
+assertion `left == right` failed: a.captures: record count differs from the manifest
+  left: 1
+ right: 2
+
+thread 'glm5_next_metal::tests::oracle_evidence_refuses_manifest_mismatches' (18334227) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:61:5:
+assertion `left == right` failed: a.captures: size differs from the manifest
+  left: 76
+ right: 77
+
+thread 'glm5_next_metal::tests::oracle_evidence_refuses_manifest_mismatches' (18334227) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:77:5:
+assertion `left == right` failed: a.captures: SHA-256 differs from the manifest
+  left: "561f11c52c68b70d82287844f90ab44448235f1ddf077ff70007c13ec578c2f1"
+ right: "0000000000000000000000000000000000000000000000000000000000000000"
+
+thread 'glm5_next_metal::tests::oracle_evidence_refuses_manifest_mismatches' (18334227) panicked at crates/qwen-llm/src/glm5_next_metal/tests.rs:79:9:
+assertion `left == right` failed: a.captures: record count differs from the manifest
+  left: 1
+ right: 2
+ok
+test glm5_next_metal::tests::packed_fast_chunkings_keep_bit_identities_with_drift_alarms ... ignored, loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, the qual-v1 oracle and an idle GPU
+test glm5_next_metal::tests::packed_fast_matches_exact_over_a_grouped_block_and_tail ... ignored, loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU
+test glm5_next_metal::tests::packed_prefill_matches_serial_and_oracle_on_checkpoint_v1 ... ignored, loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, the ckpt-v1 oracle and an idle GPU
+test glm5_next_metal::tests::packed_prefill_rows_cost ... ignored, timing: loads the GLM-5.3 trunk; requires GLM53_GGUF, GLM53_STAGE_OUT, release, no MTL_DEBUG_LAYER and an idle GPU
+test glm5_next_metal::tests::packed_prefill_stage_attribution ... ignored, timing: loads the GLM-5.3 trunk; requires GLM53_GGUF, GLM53_STAGE_OUT, release, no MTL_DEBUG_LAYER and an idle GPU
+test glm5_next_metal::tests::packed_sparse_prefill_matches_llama_cpp_at_the_prompt_end ... ignored, loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, the sparse-v1 oracle and an idle GPU
+test glm5_next_metal::tests::packed_sparse_prefill_matches_serial_across_the_frontier ... ignored, loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, the sparse-v1 oracle and an idle GPU
+test glm5_next_metal::tests::preflight_admits_fitting_sessions_and_reports_the_largest ... ignored, requires GLM53_GGUF (header and retained-window plan only) and Metal
+test glm5_next_metal::tests::print_long_qualification_tokens ... ignored, CPU-only helper; requires GLM53_GGUF
+test glm5_next_metal::tests::print_sparse_qualification_tokens ... ignored, CPU-only helper; requires GLM53_GGUF
+test glm5_next_metal::tests::quality::quality_cohort_evaluate ... ignored, map #12 quality comparison: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_QUALITY_REPORT, GLM53_EVALUATOR_COMMIT and an idle GPU
+test glm5_next_metal::tests::quality::quality_cohort_generate ... ignored, generator (map #12 quality cohort): CPU only; requires GLM53_GGUF (tokenizer), GLM53_QUALITY_OUT and GLM53_PRODUCER_COMMIT
+test glm5_next_metal::tests::quality_split::grid_cuts_keep_the_in_chunk_offset_below_the_prefix ... ok
+test glm5_next_metal::tests::quality_split::quality_split_evaluate ... ignored, map #12/#15 split qualification: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, GLM53_SPLIT_REPORT, GLM53_EVALUATOR_COMMIT and an idle GPU
+test glm5_next_metal::tests::quality_split::quality_split_generate ... ignored, generator (map #12/#15 split qualification): CPU only; requires GLM53_GGUF (tokenizer), GLM53_SPLIT_OUT and GLM53_PRODUCER_COMMIT
+test glm5_next_metal::tests::snapshot_gates::f32_operand_snapshot_restore_and_frontier_chunkings ... ignored, map #12 F32-operand snapshot gates: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU
+test glm5_next_metal::tests::snapshot_gates::snapshot_restore_equals_the_uninterrupted_run ... ignored, map #15 snapshot gates: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU
+test glm5_next_metal::tests::sparse_decode_cost_across_the_frontier ... ignored, timing; loads the 109.5 GiB GLM-5.3 trunk; requires GLM53_GGUF, no MTL_DEBUG_LAYER, an idle GPU
+test glm5_next_metal::tests::sparse_decode_crosses_the_frontier_against_llama_cpp ... ignored, loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, the sparse-v1 oracle and an idle GPU
+test glm5_next_metal::tests::sparse_long_context_matches_llama_cpp_near_4096 ... ignored, loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF, the sparse-v2 oracle and an idle GPU
+test glm5_next_metal::tests::sparse_selection_replays_llama_cpp_captures_near_4096 ... ignored, requires the sparse-v2 llama.cpp captures and Metal
+test glm5_next_metal::tests::sparse_selection_replays_llama_cpp_indexer_captures ... ignored, requires the sparse-v1 llama.cpp captures and Metal
+test glm5_next_metal::tests::wide_gate_up_prefill_ab ... ignored, timing: loads the GLM-5.3 trunk; requires GLM53_GGUF, GLM53_STAGE_OUT, release, no MTL_DEBUG_LAYER and an idle GPU
+
+test result: ok. 68 passed; 0 failed; 43 ignored; 0 measured; 1776 filtered out; finished in 0.63s
+

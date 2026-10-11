@@ -4,13 +4,22 @@
 //! Same graph as single-token decode, with batched encoders: mHC rows,
 //! row-wise norms, mat-mat projections, packed KDA, causal packed latent
 //! attention, row-wise indexer appends, and expert-major routed experts.
-//! Latent absorption runs per row through the decode grouped GEMV (exact
-//! decode lineage). In [`PackedLineage::Fast`] (default) projections and
+//! Q8 latent absorption preserves its decode GEMV lineage in Exact; other
+//! native latent dtypes use grouped F32 operands in both lineages.
+//! In [`PackedLineage::Fast`] (default) projections and
 //! grouped experts stage activations in half, as llama.cpp's batched prefill
 //! does, so packed logits match serial decode closely but not bitwise.
-//! [`PackedLineage::Exact`] runs every projection and expert per row through
-//! the decode kernels and reproduces serial decode; it exists as the
-//! equivalence reference, not as a fast path.
+//! [`PackedLineage::Exact`] preserves F32 projection operands and runs
+//! experts through decode kernels. It is the serial equivalence reference;
+//! native grouped HC and latent kernels may use a different reduction order.
+//! Packed generic HC batches every active row in either lineage, reusing one
+//! chunk-sized F32 normalized-activation buffer across layers.
+//! Fast uses the same per-row decode composition when a dense dtype has no
+//! GEMM or an expert combination has no grouped clamped path at the requested
+//! operand precision. These are
+//! availability baselines, not optimized batched implementations: encoding
+//! work and kernel launches grow with rows. They reuse admitted decode
+//! scratch; packed buffers remain allocated and fully priced.
 
 use super::*;
 use crate::metal::{
@@ -20,6 +29,10 @@ use crate::metal::{
     encode_route_learned_rows,
 };
 use objc2_metal::MTLComputePipelineState;
+
+#[cfg(test)]
+#[path = "tests/native_dispatch.rs"]
+mod native_dispatch;
 
 // Diagnostic overrides and timing are absent from product builds.
 #[cfg(test)]
@@ -124,8 +137,8 @@ pub(super) enum StageMode {
     /// Batched mat-mat tiles with half-staged operands.
     Fast,
     /// Batched mat-mat with F32 operands where an F32-operand tile exists
-    /// for the weight type and geometry (Q8_0, Q6_K); otherwise as
-    /// [`StageMode::Fast`] ([`F32Census`] counts both outcomes in tests).
+    /// for the weight type and geometry (Q8_0, Q6_K); otherwise use native
+    /// F32 GEMM or the Exact row baseline, never half-staged GEMM.
     FastF32,
 }
 
@@ -148,6 +161,8 @@ pub(super) enum CensusPath {
     F32Native,
     /// A half-staged batched kernel.
     Half,
+    /// Fast requested, but only per-row decode meets capability/precision.
+    RowBaseline,
 }
 
 /// Calls per (stage family, weight kind, path); the kind is the weight's
@@ -168,8 +183,8 @@ fn record_census(stage: Stage, kind: String, path: CensusPath) {
 /// Test-only census of every Fast-lineage matrix call of the stage families
 /// on this thread (Fast and [`StageMode::FastF32`] alike): per stage family
 /// and weight kind, how many ran on an F32-operand tile, on an F32 weight's
-/// own kernel, or half-staged. Comparing a half-staged run's census with a
-/// selection's shows both coverage (the same calls) and the path each took.
+/// own kernel, half-staged, or through the F32 row baseline. Comparing
+/// selections shows both coverage (the same calls) and the path each took.
 /// Recording stops on drop.
 #[cfg(test)]
 pub(super) struct F32Census(());
@@ -311,14 +326,15 @@ fn f32_tile_enabled(_: F32Tile) -> bool {
 }
 
 /// Test-only scope in which `stages` of Fast sessions on this thread use
-/// F32-operand tiles where one exists; the previous selection is restored on
-/// drop.
+/// F32 operands via eligible tiles or decode rows; the previous selection is
+/// restored on drop.
 #[cfg(test)]
 pub(super) struct F32Stages(u16, u8);
 
 #[cfg(test)]
 impl F32Stages {
-    /// `stages` may take only `tiles`; other calls stay half-staged.
+    /// Selected `stages` may take only `tiles`; a disabled/missing tile uses
+    /// F32 decode rows. Unselected stages keep half-staged execution.
     pub(super) fn with_tiles(stages: &[Stage], tiles: &[F32Tile]) -> Self {
         let bits = stages.iter().fold(0, |bits, stage| bits | stage.bit());
         let tile_bits = tiles.iter().fold(0, |bits, tile| bits | tile.bit());
@@ -427,11 +443,12 @@ pub enum FastPrecision {
     /// Half-staged mat-mat tiles (the original Fast).
     #[default]
     Half,
-    /// Every dense projection (KDA, MLA, indexer, shared expert, dense FFN)
-    /// on F32-operand tiles; routed experts half-staged.
+    /// All dense projections (including routers) keep F32 operands, using
+    /// native F32 kernels or row GEMV when no eligible F32 tile exists.
+    /// Routed experts retain Half's policy.
     DenseF32,
-    /// Every quantized matrix operand in F32: dense projections and routed
-    /// experts.
+    /// Dense projections and routed experts keep F32 operands. Missing
+    /// F32 tiles use the slower decode composition per row.
     F32,
 }
 
@@ -453,7 +470,7 @@ impl FastPrecision {
         Self::ALL.into_iter().find(|p| p.name() == name)
     }
 
-    /// Whether `stage` runs on F32-operand tiles in a Fast session.
+    /// Whether `stage` requires F32 operands in a Fast session.
     fn f32_stage(self, stage: Stage) -> bool {
         let dense = matches!(
             stage,
@@ -461,6 +478,7 @@ impl FastPrecision {
                 | Stage::KdaProjection
                 | Stage::MlaProjection
                 | Stage::IndexerProjection
+                | Stage::Router
                 | Stage::SharedExpert
                 | Stage::DenseFfn
         );
@@ -482,10 +500,12 @@ pub(super) struct Arith {
 /// Arithmetic lineage of packed prefill.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PackedLineage {
-    /// Batched mat-mat projections and expert-major grouped experts.
+    /// Batched projections and grouped experts where supported; otherwise
+    /// the slower per-row decode baseline, with the same admitted buffers.
     #[default]
     Fast,
-    /// Decode kernels per row: identical to serial decode, slower.
+    /// F32 operands and decode lineage; grouped HC and latent reductions
+    /// need not be bitwise identical to single-row execution.
     Exact,
 }
 
@@ -571,6 +591,9 @@ pub(super) struct PackedScratch {
     token: MetalTensor,
     embedding: MetalTensor,
     residual: [MetalTensor; 2],
+    /// F32 normalized residuals for the admitted chunk, shared by layers.
+    /// Present only for non-Q8 HC; unit RMS weights stay in decode scratch.
+    hc_normalized: Option<MetalTensor>,
     hc_partial_dots: MetalTensor,
     hc_partial_sumsq: MetalTensor,
     mixes: MetalTensor,
@@ -704,9 +727,13 @@ impl PackedScratch {
         c: &Glm5NextConfig,
         rows: usize,
         capacity: usize,
+        generic_hc: bool,
     ) -> Result<Self> {
         let r = rows as u64;
-        let specs = memory::packed_scratch_specs(c, r);
+        let mut specs = memory::packed_scratch_specs(c, r);
+        if generic_hc {
+            specs.extend(memory::packed_generic_hc_scratch_specs(c, r));
+        }
         let mut b = SpecBuffers::allocate(ctx, "packed_scratch", &specs)?;
         let scratch = Self {
             rows,
@@ -718,6 +745,7 @@ impl PackedScratch {
                 take_rows(&mut b, "residual_a", rows)?,
                 take_rows(&mut b, "residual_b", rows)?,
             ],
+            hc_normalized: generic_hc.then(|| b.take("hc_normalized")).transpose()?,
             hc_partial_dots: take_rows(&mut b, "hc_partial_dots", rows)?,
             hc_partial_sumsq: take_rows(&mut b, "hc_partial_sumsq", rows)?,
             mixes: take_rows(&mut b, "mixes", rows)?,
@@ -780,6 +808,195 @@ fn flat(t: &MetalTensor, n: usize) -> MetalTensor {
     t.view_subrange(0, vec![n as u64])
 }
 
+/// Resolve execution without changing the session's requested lineage.
+/// A missing GEMM, or a missing F32 tile when F32 operands are requested,
+/// uses the existing Exact row loop. Native F32 GEMM already keeps F32.
+fn projection_mode(
+    arith: Arith,
+    stage: Stage,
+    dtype: GgmlType,
+    n_in: usize,
+    n_out: usize,
+) -> StageMode {
+    let requested = stage_mode(arith, stage);
+    let f32_tile = match dtype {
+        GgmlType::Q8_0 => {
+            f32_tile_enabled(F32Tile::Q8_0) && n_in.is_multiple_of(64) && n_out.is_multiple_of(16)
+        }
+        GgmlType::Q6_K => f32_tile_enabled(F32Tile::Q6K) && n_in.is_multiple_of(256),
+        _ => false,
+    };
+    if !crate::metal_forward::mat_mat_dispatch_supported(dtype)
+        || (requested == StageMode::FastF32 && dtype != GgmlType::F32 && !f32_tile)
+    {
+        StageMode::Exact
+    } else {
+        requested
+    }
+}
+
+/// The grouped clamped contract is a gate/up pair plus a down capability.
+/// Test the actual combination before choosing Fast; decode validation still
+/// rejects unsupported all-slot combinations (admission owns eligibility).
+fn expert_row_fallback(
+    lineage: PackedLineage,
+    gate: GgmlType,
+    up: GgmlType,
+    down: GgmlType,
+) -> bool {
+    lineage == PackedLineage::Exact
+        || !crate::metal::grouped_clamped_gate_up_supported(gate, up)
+        || !crate::metal::grouped_expert_down_supported(down)
+}
+
+/// Precision is part of capability: ordinary grouped kernels stage half,
+/// so F32 requests may only use an eligible F32 tile or all-slot decode.
+fn expert_mode(arith: Arith, gate: GgmlType, up: GgmlType, down: GgmlType) -> StageMode {
+    let requested = stage_mode(arith, Stage::RoutedExperts);
+    let f32_tile = f32_tile_enabled(F32Tile::RoutedExperts)
+        && gate == up
+        && matches!(gate, GgmlType::IQ2_S | GgmlType::IQ3_S)
+        && matches!(down, GgmlType::IQ3_S | GgmlType::IQ4_XS);
+    if expert_row_fallback(
+        stage_lineage(arith.lineage, Stage::RoutedExperts),
+        gate,
+        up,
+        down,
+    ) || (requested == StageMode::FastF32 && !f32_tile)
+    {
+        StageMode::Exact
+    } else {
+        requested
+    }
+}
+
+/// Shared by the session and synthetic dispatch tests. Returns the actual
+/// path so the existing grouped-only diagnostic hook stays on that path.
+#[allow(clippy::too_many_arguments)]
+fn encode_experts(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    arith: Arith,
+    b: &GroupedExperts<'_>,
+    status: &MetalTensor,
+    row_inner: &MetalTensor,
+    row_out: &MetalTensor,
+    h: usize,
+    f: usize,
+    e: usize,
+    k: usize,
+    rows: usize,
+    clamp: f32,
+) -> Result<StageMode> {
+    let mode = expert_mode(arith, b.gate_bank.dtype, b.up_bank.dtype, b.down_bank.dtype);
+    #[cfg(test)]
+    if stage_lineage(arith.lineage, Stage::RoutedExperts) == PackedLineage::Fast {
+        record_census(
+            Stage::RoutedExperts,
+            "experts".into(),
+            match mode {
+                StageMode::Exact => CensusPath::RowBaseline,
+                StageMode::FastF32 => CensusPath::F32Tile,
+                StageMode::Fast => CensusPath::Half,
+            },
+        );
+    }
+    match mode {
+        StageMode::Exact => encode_expert_rows(
+            ctx,
+            enc,
+            &ExpertRowBuffers {
+                gate: b.gate_bank,
+                up: b.up_bank,
+                down: b.down_bank,
+                input: b.input,
+                ids: b.ids,
+                weights: b.weights,
+                status,
+                inner: row_inner,
+                slot_out: row_out,
+                output: b.output,
+            },
+            h,
+            f,
+            e,
+            k,
+            rows,
+            clamp,
+        )?,
+        StageMode::FastF32 => {
+            encode_grouped_routed_experts_f32x(ctx, enc, b, h, f, e, k, rows, clamp)?
+        }
+        StageMode::Fast => encode_grouped_routed_experts_with_down_policy(
+            ctx,
+            enc,
+            b,
+            h,
+            f,
+            e,
+            k,
+            rows,
+            clamp,
+            grouped_down_policy(arith.lineage, b.down_bank.dtype, f, h, e, rows),
+        )?,
+    }
+    Ok(mode)
+}
+
+/// Reuses one token's existing decode scratch for every packed row. No new
+/// buffers, expert repacking, host readback, or half activation staging.
+struct ExpertRowBuffers<'a> {
+    gate: &'a MetalTensor,
+    up: &'a MetalTensor,
+    down: &'a MetalTensor,
+    input: &'a MetalTensor,
+    ids: &'a MetalTensor,
+    weights: &'a MetalTensor,
+    status: &'a MetalTensor,
+    inner: &'a MetalTensor,
+    slot_out: &'a MetalTensor,
+    output: &'a MetalTensor,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_expert_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    b: &ExpertRowBuffers<'_>,
+    h: usize,
+    f: usize,
+    e: usize,
+    k: usize,
+    rows: usize,
+    clamp: f32,
+) -> Result<()> {
+    #[cfg(test)]
+    let rounded = rounded_input(ctx, enc, b.input, rows * h)?;
+    #[cfg(test)]
+    let normed = rounded.as_ref().unwrap_or(b.input);
+    #[cfg(not(test))]
+    let normed = b.input;
+    for row in 0..rows {
+        let x = normed.view_subrange((row * h) as u64, vec![h as u64]);
+        let ids = b.ids.view_subrange((row * k) as u64, vec![k as u64]);
+        let weights = b.weights.view_subrange((row * k) as u64, vec![k as u64]);
+        let status = b.status.view_subrange(row as u64, vec![1]);
+        let out = b.output.view_subrange((row * h) as u64, vec![h as u64]);
+        crate::metal::encode_all_slots_gate_up_swiglu(
+            ctx, enc, b.gate, b.up, &x, &ids, &status, b.inner, h, f, e, k, clamp,
+        )?;
+        #[cfg(test)]
+        if ROUND_EXACT_ACTIVATIONS.with(std::cell::Cell::get) {
+            crate::metal::encode_round_trip_f16_f32(ctx, enc, b.inner, f * k)?;
+        }
+        crate::metal::encode_all_slots_down(
+            ctx, enc, b.down, b.inner, &ids, &status, b.slot_out, f, h, e, k,
+        )?;
+        encode_moe_weighted_sum_f32(ctx, enc, b.slot_out, &weights, &out, h, k)?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn matmat(
     ctx: &MetalContext,
@@ -793,7 +1010,15 @@ fn matmat(
     n_out: usize,
     rows: usize,
 ) -> Result<()> {
-    let mode = stage_mode(arith, stage);
+    let mode = projection_mode(arith, stage, weight.dtype, n_in, n_out);
+    #[cfg(test)]
+    if mode == StageMode::Exact && stage_lineage(arith.lineage, stage) == PackedLineage::Fast {
+        record_census(
+            stage,
+            format!("{:?}", weight.dtype),
+            CensusPath::RowBaseline,
+        );
+    }
     if mode == StageMode::FastF32 {
         // F32-operand tiles at every row count (one row included), so a
         // token's outputs do not depend on its chunking.
@@ -911,9 +1136,9 @@ fn expand_rows(
 }
 
 /// Per-head latent absorption or expansion over `rows` token-major rows:
-/// grouped Q8_0 mat-mat (F32 accumulation) over whole 128-row blocks in fast
-/// lineage, and the decode grouped GEMV per remaining row (every row in exact
-/// lineage).
+/// Q8 retains its existing tiles in Fast and per-row GEMV in Exact. Other
+/// native dtypes use grouped F32-operand dispatch in both lineages, with no
+/// activation rounding, repacking, or expanded weight bank.
 #[allow(clippy::too_many_arguments)]
 fn absorb_rows(
     ctx: &MetalContext,
@@ -928,6 +1153,20 @@ fn absorb_rows(
     rows: usize,
 ) -> Result<()> {
     let (in_width, out_width) = (n_in * groups, n_out * groups);
+    if weight.dtype != GgmlType::Q8_0 {
+        crate::metal::encode_mat_mat_grouped_f32(
+            ctx,
+            enc,
+            weight,
+            &input.view_subrange(0, vec![in_width as u64, rows as u64]),
+            &output.view_subrange(0, vec![out_width as u64, rows as u64]),
+            n_in,
+            n_out,
+            groups,
+            rows,
+        )?;
+        return Ok(());
+    }
     let blocked = match lineage {
         PackedLineage::Fast => rows / 128 * 128,
         PackedLineage::Exact => 0,
@@ -1318,144 +1557,46 @@ impl Glm5NextSession<'_> {
                         &v(&route.status),
                     )?;
                     self.stage(&mut enc, Glm5NextStage::RoutedExperts, Some(index))?;
-                    if stage_lineage(p.lineage, Stage::RoutedExperts) == PackedLineage::Exact {
-                        let s = &self.s;
-                        #[cfg(test)]
-                        let rounded = rounded_input(ctx, &enc, &v(&p.normed), rows * h)?;
-                        #[cfg(test)]
-                        let normed = rounded.as_ref().unwrap_or(&p.normed);
-                        #[cfg(not(test))]
-                        let normed = &p.normed;
-                        for row in 0..rows {
-                            let x = normed.view_subrange((row * h) as u64, vec![h as u64]);
-                            let ids_r = route.ids.view_subrange((row * k) as u64, vec![k as u64]);
-                            let w_r = route
-                                .weights
-                                .view_subrange((row * k) as u64, vec![k as u64]);
-                            let st = route.status.view_subrange(row as u64, vec![1]);
-                            let out = p.routed.view_subrange((row * h) as u64, vec![h as u64]);
-                            crate::metal::encode_all_slots_gate_up_swiglu(
-                                ctx,
-                                &enc,
-                                &moe.gate_experts,
-                                &moe.up_experts,
-                                &x,
-                                &ids_r,
-                                &st,
-                                &s.expert_inner,
-                                h,
-                                f,
-                                e,
-                                k,
-                                c.swiglu_clamp,
-                            )?;
-                            #[cfg(test)]
-                            if ROUND_EXACT_ACTIVATIONS.with(std::cell::Cell::get) {
-                                crate::metal::encode_round_trip_f16_f32(
-                                    ctx,
-                                    &enc,
-                                    &s.expert_inner,
-                                    f * k,
-                                )?;
-                            }
-                            crate::metal::encode_all_slots_down(
-                                ctx,
-                                &enc,
-                                &moe.down_experts,
-                                &s.expert_inner,
-                                &ids_r,
-                                &st,
-                                &s.expert_out,
-                                f,
-                                h,
-                                e,
-                                k,
-                            )?;
-                            encode_moe_weighted_sum_f32(
-                                ctx,
-                                &enc,
-                                &s.expert_out,
-                                &w_r,
-                                &out,
-                                h,
-                                k,
-                            )?;
-                        }
-                    } else {
-                        let grouped = GroupedExperts {
-                            gate_bank: &moe.gate_experts,
-                            up_bank: &moe.up_experts,
-                            down_bank: &moe.down_experts,
-                            input: &v(&p.normed),
-                            ids: &route_ids,
-                            weights: &route_weights,
-                            counts: &p.counts,
-                            slots: &flat(&p.slots, e * rows),
-                            inner: &p.inner.view_subrange(0, vec![f as u64, (k * rows) as u64]),
-                            slot_out: &p
-                                .slot_out
-                                .view_subrange(0, vec![h as u64, (k * rows) as u64]),
-                            output: &v(&p.routed),
-                        };
-                        let f32_mode =
-                            stage_mode(p.arith(), Stage::RoutedExperts) == StageMode::FastF32;
-                        let f32_taken = f32_mode
-                            && f32_tile_enabled(F32Tile::RoutedExperts)
-                            && moe.gate_experts.dtype == moe.up_experts.dtype
-                            && matches!(moe.gate_experts.dtype, GgmlType::IQ2_S | GgmlType::IQ3_S)
-                            && matches!(moe.down_experts.dtype, GgmlType::IQ3_S | GgmlType::IQ4_XS);
-                        #[cfg(test)]
-                        record_census(
-                            Stage::RoutedExperts,
-                            "experts".into(),
-                            if f32_taken {
-                                CensusPath::F32Tile
-                            } else {
-                                CensusPath::Half
-                            },
-                        );
-                        if f32_taken {
-                            encode_grouped_routed_experts_f32x(
-                                ctx,
-                                &enc,
-                                &grouped,
-                                h,
-                                f,
-                                e,
-                                k,
-                                rows,
-                                c.swiglu_clamp,
-                            )?;
-                        } else {
-                            encode_grouped_routed_experts_with_down_policy(
-                                ctx,
-                                &enc,
-                                &grouped,
-                                h,
-                                f,
-                                e,
-                                k,
-                                rows,
-                                c.swiglu_clamp,
-                                grouped_down_policy(
-                                    p.lineage,
-                                    moe.down_experts.dtype,
-                                    f,
-                                    h,
-                                    e,
-                                    rows,
-                                ),
-                            )?;
-                            #[cfg(test)]
-                            expert_down::after_grouped(
-                                ctx,
-                                &enc,
-                                index,
-                                rows,
-                                moe.down_experts.dtype,
-                                p,
-                            )?;
-                        }
+                    let grouped = GroupedExperts {
+                        gate_bank: &moe.gate_experts,
+                        up_bank: &moe.up_experts,
+                        down_bank: &moe.down_experts,
+                        input: &v(&p.normed),
+                        ids: &route_ids,
+                        weights: &route_weights,
+                        counts: &p.counts,
+                        slots: &flat(&p.slots, e * rows),
+                        inner: &p.inner.view_subrange(0, vec![f as u64, (k * rows) as u64]),
+                        slot_out: &p
+                            .slot_out
+                            .view_subrange(0, vec![h as u64, (k * rows) as u64]),
+                        output: &v(&p.routed),
+                    };
+                    let _expert_mode = encode_experts(
+                        ctx,
+                        &enc,
+                        p.arith(),
+                        &grouped,
+                        &v(&route.status),
+                        &self.s.expert_inner,
+                        &self.s.expert_out,
+                        h,
+                        f,
+                        e,
+                        k,
+                        rows,
+                        c.swiglu_clamp,
+                    )?;
+                    #[cfg(test)]
+                    if _expert_mode == StageMode::Fast {
+                        expert_down::after_grouped(
+                            ctx,
+                            &enc,
+                            index,
+                            rows,
+                            moe.down_experts.dtype,
+                            p,
+                        )?;
                     }
                     self.stage(&mut enc, Glm5NextStage::SharedExpert, Some(index))?;
                     let sf = c.shared_expert_ffn_size as usize;
@@ -1563,9 +1704,10 @@ impl Glm5NextSession<'_> {
         Ok(())
     }
 
-    /// [`Glm5NextSession::encode_hc_pre`] for `rows` packed tokens: the same
-    /// fused kernels with a rows axis (each row independent), so packed
-    /// prefill keeps decode's mHC lineage in both lineages.
+    /// Fused Q8 or one generic call over the active chunk prefix. Generic HC
+    /// batches F32 projection where supported, in both Exact and Fast, and
+    /// shares decode's unit RMS weights. F32 precision does not promise
+    /// bitwise agreement with decode's projection reduction order.
     fn encode_hc_pre_rows(
         &self,
         ctx: &MetalContext,
@@ -1578,7 +1720,16 @@ impl Glm5NextSession<'_> {
         let c = &self.weights.config;
         let p = self.packed.as_ref().expect("packed scratch");
         let v = |t: &MetalTensor| rows_view(t, rows);
-        crate::metal::encode_mhc4_pre_q8_0(
+        let normalized = p.hc_normalized.as_ref().map(v);
+        let scratch =
+            normalized
+                .as_ref()
+                .zip(self.s.generic_hc.as_ref())
+                .map(|(normalized, decode)| crate::metal::Mhc4PreGenericScratch {
+                    normalized,
+                    ones: &decode.ones,
+                });
+        super::encode_hc_pre_dispatch(
             ctx,
             enc,
             c.hidden_size as usize,
@@ -1595,6 +1746,7 @@ impl Glm5NextSession<'_> {
                 dots: &v(&p.hc_partial_dots),
                 sumsq: &v(&p.hc_partial_sumsq),
             },
+            scratch.as_ref(),
             &crate::metal::Mhc4PreOutputs {
                 mixes: &v(&p.mixes),
                 pre: &v(&p.pre),

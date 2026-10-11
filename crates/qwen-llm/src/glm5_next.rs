@@ -943,15 +943,31 @@ fn bind_moe<'a>(
     let f = u64::from(c.expert_ffn_size);
     let gate_up = TensorRole::ExpertGateUp;
     let n = |suffix: &str| format!("blk.{i}.{suffix}");
+    let router = b.take(
+        &n("ffn_gate_inp.weight"),
+        &[h, e],
+        TensorRole::F32Projection,
+    )?;
+    let selection_bias = b.take(&n("exp_probs_b.bias"), &[e], TensorRole::Vector)?;
+    let gate_experts = b.take(&n("ffn_gate_exps.weight"), &[h, f, e], gate_up)?;
+    let up_experts = b.take(&n("ffn_up_exps.weight"), &[h, f, e], gate_up)?;
+    // NextN is census-only. Executed banks must satisfy the composed pair
+    // contract; individual role coverage cannot establish mixed-pair support.
+    if !b.nextn && !crate::metal::all_slots_gate_up_supported(gate_experts.dtype, up_experts.dtype)
+    {
+        return Err(tensor_error(
+            &n("ffn_up_exps.weight"),
+            format!(
+                "gate and up banks must share a dtype supported by all-slot dispatch; got {:?}/{:?}",
+                gate_experts.dtype, up_experts.dtype,
+            ),
+        ));
+    }
     Ok(MoeTensors {
-        router: b.take(
-            &n("ffn_gate_inp.weight"),
-            &[h, e],
-            TensorRole::F32Projection,
-        )?,
-        selection_bias: b.take(&n("exp_probs_b.bias"), &[e], TensorRole::Vector)?,
-        gate_experts: b.take(&n("ffn_gate_exps.weight"), &[h, f, e], gate_up)?,
-        up_experts: b.take(&n("ffn_up_exps.weight"), &[h, f, e], gate_up)?,
+        router,
+        selection_bias,
+        gate_experts,
+        up_experts,
         down_experts: b.take(
             &n("ffn_down_exps.weight"),
             &[f, h, e],

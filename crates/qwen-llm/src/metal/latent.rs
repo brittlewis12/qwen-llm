@@ -893,6 +893,323 @@ pub fn encode_mat_mat_q8_0_grouped_tail_f32(
     Ok(())
 }
 
+/// Native grouped projection formats with canonical decoders in `quant_tiles.h`.
+/// This is a storage-format capability list, independent of model family.
+pub const GROUPED_PROJECTION_DTYPES: &[GgmlType] = &[
+    GgmlType::Q2_0,
+    GgmlType::Q2_K,
+    GgmlType::Q3_K,
+    GgmlType::Q4_K,
+    GgmlType::Q5_K,
+    GgmlType::Q6_K,
+    GgmlType::Q8_0,
+    GgmlType::Q4_0,
+    GgmlType::Q4_1,
+    GgmlType::IQ2_S,
+    GgmlType::IQ3_XXS,
+    GgmlType::IQ3_S,
+    GgmlType::IQ4_NL,
+    GgmlType::IQ4_XS,
+    GgmlType::F32,
+    GgmlType::F16,
+    GgmlType::BF16,
+];
+
+/// Whether the native grouped F32-operand projection supports this storage type.
+pub fn grouped_projection_supported(dtype: GgmlType) -> bool {
+    GROUPED_PROJECTION_DTYPES.contains(&dtype)
+}
+
+/// Generic pipeline name, independent of the specialized Q8 dispatch choice.
+pub fn grouped_projection_pipeline_name(dtype: GgmlType) -> Option<String> {
+    let suffix = match dtype {
+        GgmlType::Q2_0 => "q2_0",
+        GgmlType::Q2_K => "q2_K",
+        GgmlType::Q3_K => "q3_K",
+        GgmlType::Q4_K => "q4_K",
+        GgmlType::Q5_K => "q5_K",
+        GgmlType::Q6_K => "q6_K",
+        GgmlType::Q8_0 => "q8_0",
+        GgmlType::Q4_0 => "q4_0",
+        GgmlType::Q4_1 => "q4_1",
+        GgmlType::IQ2_S => "iq2_s",
+        GgmlType::IQ3_XXS => "iq3_xxs",
+        GgmlType::IQ3_S => "iq3_s",
+        GgmlType::IQ4_NL => "iq4_nl",
+        GgmlType::IQ4_XS => "iq4_xs",
+        GgmlType::F32 => "f32",
+        GgmlType::F16 => "f16",
+        GgmlType::BF16 => "bf16",
+        _ => return None,
+    };
+    Some(format!("kernel_latent_grouped_{suffix}_f32"))
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GroupedProjectionArgs {
+    k: u32,
+    m: u32,
+    groups: u32,
+    rows: u32,
+    row_bytes: u32,
+    input_stride: u32,
+    output_stride: u32,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_grouped_projection(
+    weight: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    groups: usize,
+    rows: usize,
+) -> Result<GroupedProjectionArgs, MetalError> {
+    const K: &str = "grouped_projection";
+    if !grouped_projection_supported(weight.dtype) {
+        return Err(bad_shape(
+            K,
+            format!("unsupported native type {:?}", weight.dtype),
+        ));
+    }
+    let (block, bytes) = weight
+        .dtype
+        .storage_layout()
+        .ok_or_else(|| bad_shape(K, "unknown layout"))?;
+    if n_in == 0
+        || n_out == 0
+        || groups == 0
+        || rows == 0
+        || !n_in.is_multiple_of(32)
+        || !(n_in as u64).is_multiple_of(block)
+    {
+        return Err(bad_shape(
+            K,
+            "positive K/M/groups/rows required; K must align to 32 and the storage block",
+        ));
+    }
+    let product = |a: usize, b: usize| {
+        a.checked_mul(b)
+            .ok_or_else(|| bad_shape(K, "dimension product overflows"))
+    };
+    let input_stride = product(n_in, groups)?;
+    let output_stride = product(n_out, groups)?;
+    if weight.shape != [n_in as u64, n_out as u64, groups as u64]
+        && weight.shape != [n_in as u64, output_stride as u64]
+    {
+        return Err(bad_shape(
+            K,
+            "weight must be contiguous [K, M, groups] or [K, M * groups]",
+        ));
+    }
+    if input.shape != [input_stride as u64, rows as u64]
+        || output.shape != [output_stride as u64, rows as u64]
+    {
+        return Err(bad_shape(
+            K,
+            "input/output must be token-major [K * groups, rows] / [M * groups, rows]",
+        ));
+    }
+    for (name, tensor, elements, dtype, writable, alignment) in [
+        (
+            "weight",
+            weight,
+            product(n_in, output_stride)?,
+            weight.dtype,
+            false,
+            if weight.dtype == GgmlType::F32 { 4 } else { 2 },
+        ),
+        (
+            "input",
+            input,
+            product(input_stride, rows)?,
+            GgmlType::F32,
+            false,
+            4,
+        ),
+        (
+            "output",
+            output,
+            product(output_stride, rows)?,
+            GgmlType::F32,
+            true,
+            4,
+        ),
+    ] {
+        super::moe::validate_moe_decode_tensor(
+            K,
+            name,
+            tensor,
+            elements,
+            &[dtype],
+            writable,
+            alignment,
+        )?;
+    }
+    check_disjoint(K, output, &[(input, "input"), (weight, "weight")])?;
+    let u = |v, name| super::checks::to_u32(K, v, name);
+    Ok(GroupedProjectionArgs {
+        k: u(n_in, "K")?,
+        m: u(n_out, "M")?,
+        groups: u(groups, "groups")?,
+        rows: u(rows, "rows")?,
+        row_bytes: u(
+            product(n_in / block as usize, bytes as usize)?,
+            "weight row bytes",
+        )?,
+        input_stride: u(input_stride, "input stride")?,
+        output_stride: u(output_stride, "output stride")?,
+    })
+}
+
+/// Compressed grouped projection for decode or packed callers (Exact operands).
+/// Computes `Y[token, g, m] = sum_k W[g, m, k] * X[token, g, k]`.
+///
+/// * Weights: native contiguous `[K, M, groups]` (or identical bytes viewed as
+///   `[K, M * groups]`), K fastest, no group padding or transposition.
+/// * Input/output: contiguous token-major F32 `[K * groups, rows]` and
+///   `[M * groups, rows]`; group slices within each token have strides K/M.
+/// * K is positive and divisible by 32 and the native storage block size;
+///   M, groups and rows are positive, with no tile divisibility requirement.
+/// * Dimensions, token strides and weight row bytes must fit u32; total
+///   extents must fit usize and their buffers. Address arithmetic is 64-bit.
+/// * Nonzero buffer offsets are supported: weight alignment is two bytes
+///   (four for F32), activation/output alignment is four bytes. Output must
+///   be writable and disjoint from input and weights. All bindings and the
+///   serial encoder must belong to the context's device.
+///
+/// No caller scratch, repacking or expanded weight bank. Generic kernels
+/// decode 16 weights per lane into F32 registers and reuse them for up to four
+/// tokens. F32/BF16 weights and F32 activations are never narrowed to half;
+/// accumulation is F32. "Exact" means operand precision, not bitwise agreement
+/// with another reduction order or strict IEEE behavior under Metal fast math.
+/// Q8 decode, full 128-token tiles and eligible 8-token tails retain the
+/// existing Q8 kernels unchanged (internal threadgroup scratch only).
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_mat_grouped_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    groups: usize,
+    rows: usize,
+) -> Result<(), MetalError> {
+    const K: &str = "grouped_projection";
+    require_serial(K, enc)?;
+    let args = validate_grouped_projection(weight, input, output, n_in, n_out, groups, rows)?;
+    let device = ctx.device.registryID();
+    if enc.parent_command_buffer().device().registryID() != device
+        || [weight, input, output]
+            .iter()
+            .any(|t| t.buffer.device().registryID() != device)
+    {
+        return Err(bad_shape(
+            K,
+            "encoder and bindings must belong to the context device",
+        ));
+    }
+    if weight.dtype == GgmlType::Q8_0 {
+        if rows == 1 {
+            return encode_mat_vec_q8_0_grouped_f32(
+                ctx, enc, weight, input, output, n_in, n_out, groups,
+            );
+        }
+        if n_in.is_multiple_of(64) && n_out.is_multiple_of(16) {
+            if rows.is_multiple_of(128) {
+                return encode_mat_mat_q8_0_grouped_f32(
+                    ctx, enc, weight, input, output, n_in, n_out, groups, rows,
+                );
+            }
+            if rows <= 128 && rows.is_multiple_of(8) {
+                return encode_mat_mat_q8_0_grouped_tail_f32(
+                    ctx, enc, weight, input, output, n_in, n_out, groups, rows,
+                );
+            }
+        }
+    }
+    let kernel = grouped_projection_pipeline_name(weight.dtype).expect("validated native dtype");
+    let pso = ctx.pipeline(&kernel)?;
+    if pso.threadExecutionWidth() != 32
+        || pso.maxTotalThreadsPerThreadgroup() < 128
+        || pso.staticThreadgroupMemoryLength() > ctx.device.maxThreadgroupMemoryLength()
+    {
+        return Err(bad_shape(K, "needs four 32-lane simdgroups"));
+    }
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, input);
+    enc.set_tensor(3, output);
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(4),
+            height: rows.div_ceil(4),
+            depth: groups,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Single-token wrapper for [`encode_mat_mat_grouped_f32`]. Input/output may
+/// be `[K * groups, 1]` / `[M * groups, 1]`, flat vectors, or `[K, groups]` /
+/// `[M, groups]` views of the same contiguous bytes. No copying or scratch.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_vec_grouped_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    groups: usize,
+) -> Result<(), MetalError> {
+    let view = |tensor: &MetalTensor, width: usize| -> Result<MetalTensor, MetalError> {
+        let total = width
+            .checked_mul(groups)
+            .ok_or_else(|| bad_shape("grouped_projection", "dimension product overflows"))?
+            as u64;
+        if tensor.shape != [total, 1]
+            && tensor.shape != [total]
+            && tensor.shape != [width as u64, groups as u64]
+        {
+            return Err(bad_shape(
+                "grouped_projection",
+                "decode activation must be [width * groups, 1], [width * groups] or [width, groups]",
+            ));
+        }
+        Ok(MetalTensor {
+            shape: vec![total, 1],
+            ..tensor.clone()
+        })
+    };
+    encode_mat_mat_grouped_f32(
+        ctx,
+        enc,
+        weight,
+        &view(input, n_in)?,
+        &view(output, n_out)?,
+        n_in,
+        n_out,
+        groups,
+        1,
+    )
+}
+
+#[cfg(test)]
+#[path = "latent/grouped_native_tests.rs"]
+mod grouped_native_tests;
+
 #[cfg(test)]
 #[path = "latent/grouped_tail_tests.rs"]
 mod grouped_tail_tests;

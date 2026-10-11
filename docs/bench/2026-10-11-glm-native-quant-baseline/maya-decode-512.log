@@ -1,0 +1,22 @@
+
+running 1 test
+test glm5_next_metal::tests::decode_stage_attribution ... depth 512: unprofiled 34.56 ms/token; profiled command 35.67 ms, span sum 34.61 ms
+  routed_experts       9.688 ms   28.0%    2909.8 MB   300.4 GB/s
+  kda                  9.673 ms   28.0%    3881.0 MB   401.2 GB/s
+  ffn_pre              2.404 ms    6.9%      71.5 MB    29.7 GB/s
+  attention_pre        2.401 ms    6.9%      71.5 MB    29.8 GB/s
+  shared_expert        2.386 ms    6.9%     867.0 MB   363.4 GB/s
+  dense_attention      2.125 ms    6.1%       0.0 MB     0.0 GB/s
+  mla_output           1.599 ms    4.6%     681.2 MB   426.0 GB/s
+  mla_projection       1.218 ms    3.5%     378.6 MB   310.8 GB/s
+  head                 1.053 ms    3.0%     520.4 MB   494.1 GB/s
+  dense_ffn            0.805 ms    2.3%     371.6 MB   461.3 GB/s
+  router               0.804 ms    2.3%     198.2 MB   246.6 GB/s
+  mla_indexer          0.158 ms    0.5%      12.3 MB    77.9 GB/s
+  attention_post       0.145 ms    0.4%       0.0 MB     0.0 GB/s
+  ffn_post             0.140 ms    0.4%       0.0 MB     0.0 GB/s
+  embed                0.005 ms    0.0%       0.0 MB     0.6 GB/s
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1886 filtered out; finished in 81.14s
+

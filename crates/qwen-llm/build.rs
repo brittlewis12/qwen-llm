@@ -2,7 +2,7 @@
 //! `.metallib` archive and embeds the bytes into the library via
 //! `OUT_DIR/kernels.metallib`.
 //!
-//! Invoked at `cargo build` time. Recompiles only when `kernels/` changes.
+//! Invoked at `cargo build` time. Recompiles when inputs or the worktree change.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,9 +20,17 @@ fn main() -> anyhow::Result<()> {
     let kernels_dir = workspace_root.join("kernels");
     let watched_kernels_dir = PathBuf::from("../../kernels");
 
-    // Keep the fingerprint portable when worktrees share CARGO_TARGET_DIR.
+    // Keep kernel watches relative, but bind cached output to this worktree.
+    // Cargo strips the current package root from rerun paths when fingerprinting:
+    // this absolute path becomes `build.rs` here, but stays absolute when another
+    // worktree reads the cached output, forcing a rerun even with older mtimes.
+    // Keep the manifest lookup at runtime: Cargo filters CARGO_MANIFEST_DIR out
+    // of env! dep-info, so a reused build-script executable must use its new root.
     println!("cargo:rerun-if-changed={}", watched_kernels_dir.display());
-    println!("cargo:rerun-if-changed=build.rs");
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("build.rs").display()
+    );
     println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
 
     // Pin the language and deployment target: without them the compiler

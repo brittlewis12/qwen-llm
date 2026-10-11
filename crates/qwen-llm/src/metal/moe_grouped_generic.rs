@@ -313,6 +313,377 @@ fn dispatch_generic_mm(
     Ok(())
 }
 
+/// Parked test-only M64/N64/K32 half-operand DOWN from the research metallib.
+/// `MetalContext::pipeline` loads it lazily via the existing research fallback.
+#[cfg(test)]
+pub fn moe_down_n64_pipeline_name(dtype: GgmlType) -> Option<String> {
+    let layout = moe_grouped_generic_layout(dtype)?;
+    Some(format!(
+        "kernel_moe_down_{}_f32_grouped_slots_n64",
+        layout.suffix
+    ))
+}
+
+#[cfg(test)]
+thread_local! {
+    static GROUPED_DOWN_WIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // Exercise second-pipeline preflight failures without mutating the context.
+    static DOWN_WIDE_PREFLIGHT_FAULT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Thread-local, nestable, unwind-safe experiment. `false` retains the caller's
+/// actual production policy (including IQ3_S SmallCounts); `true` substitutes
+/// the N32/N64 split in the Half expert orchestrator. F32 paths are unaffected.
+#[cfg(test)]
+pub fn with_grouped_down_wide_override<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            GROUPED_DOWN_WIDE.with(|v| v.set(self.0));
+        }
+    }
+    let _restore = Restore(GROUPED_DOWN_WIDE.with(|v| v.replace(enabled)));
+    f()
+}
+
+#[cfg(test)]
+pub(crate) fn grouped_down_wide_enabled() -> bool {
+    GROUPED_DOWN_WIDE.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+struct GroupedDownPanel {
+    name: String,
+    pso: Pipeline,
+    min_count: u32,
+    max_count: u32,
+    grid_width: usize,
+    threadgroup_bytes: usize,
+}
+
+/// Prepared ahead of routing/gate-up by the test-only orchestrator selector.
+/// Retained pipelines make encoding infallible after all preflight checks.
+#[cfg(test)]
+pub(crate) struct PreparedGroupedDown<'a> {
+    enc: &'a KernelEncoder,
+    bindings: [&'a MetalTensor; 5],
+    args: GenericMmArgs,
+    experts: usize,
+    panels: Vec<GroupedDownPanel>,
+}
+
+#[cfg(test)]
+impl PreparedGroupedDown<'_> {
+    pub(crate) fn encode(self) {
+        for panel in self.panels {
+            let args = GenericMmArgs {
+                min_count: panel.min_count,
+                max_count: panel.max_count,
+                ..self.args
+            };
+            // Pipeline lookup happened before routing/gate-up; restore attribution.
+            census_record_pso(&panel.name);
+            self.enc.set_pipeline(&panel.pso);
+            self.enc.set_bytes(0, &args);
+            for (index, tensor) in self.bindings.into_iter().enumerate() {
+                self.enc.set_tensor(index + 1, tensor);
+            }
+            self.enc.set_threadgroup_memory(0, panel.threadgroup_bytes);
+            self.enc.dispatch(
+                MTLSize {
+                    width: panel.grid_width,
+                    height: (args.m as usize).div_ceil(64),
+                    depth: self.experts,
+                },
+                MTLSize {
+                    width: 128,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+const DOWN_N64_KERNEL: &str = "moe_down_grouped_slots_n64_split";
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn checked_grouped_down<'a>(
+    ctx: &MetalContext,
+    enc: &'a KernelEncoder,
+    weight: &'a MetalTensor,
+    inner: &'a MetalTensor,
+    counts: &'a MetalTensor,
+    ids: &'a MetalTensor,
+    out: &'a MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    n_tokens: usize,
+) -> Result<PreparedGroupedDown<'a>, MetalError> {
+    use super::checks::{bad_shape, check_disjoint, require_serial};
+    use super::moe::{checked_moe_product, validate_moe_decode_tensor};
+    const K: &str = DOWN_N64_KERNEL;
+    require_serial(K, enc)?;
+    for (label, value) in [
+        ("K", n_in),
+        ("M", n_out),
+        ("experts", n_expert),
+        ("N", n_tokens),
+    ] {
+        if value == 0 || value > i32::MAX as usize {
+            return Err(bad_shape(K, format!("{label} must fit positive i32")));
+        }
+    }
+    let layout = moe_grouped_generic_layout(weight.dtype)
+        .ok_or_else(|| bad_shape(K, format!("no grouped DOWN for {:?}", weight.dtype)))?;
+    if !n_in.is_multiple_of(layout.block_elems.max(32)) {
+        return Err(bad_shape(
+            K,
+            "K must align to max(32, storage block elements)",
+        ));
+    }
+    let bank_elements = checked_moe_product(K, "bank", &[n_in, n_out, n_expert])?;
+    let bucket_elements = checked_moe_product(K, "ids", &[n_expert, n_tokens])?;
+    if bucket_elements > i32::MAX as usize {
+        return Err(bad_shape(K, "ids element count exceeds i32"));
+    }
+    let (out_elements, _) = checked_ggml_shape_bytes(&out.shape, out.dtype)?;
+    let slots = out_elements / n_out;
+    if slots == 0 || slots > i32::MAX as usize || !out_elements.is_multiple_of(n_out) {
+        return Err(bad_shape(
+            K,
+            "output must have whole rows and a positive i32 slot count",
+        ));
+    }
+    let input_elements = checked_moe_product(K, "input", &[slots, n_in])?;
+    let weight_alignment = if weight.dtype == GgmlType::F32 { 4 } else { 2 };
+    for (label, tensor, elements, dtype, writable, alignment) in [
+        (
+            "weight",
+            weight,
+            bank_elements,
+            weight.dtype,
+            false,
+            weight_alignment,
+        ),
+        ("inner", inner, input_elements, GgmlType::F32, false, 16),
+        ("counts", counts, n_expert, GgmlType::I32, false, 4),
+        ("ids", ids, bucket_elements, GgmlType::I32, false, 4),
+        ("out", out, out_elements, GgmlType::F32, true, 4),
+    ] {
+        validate_moe_decode_tensor(K, label, tensor, elements, &[dtype], writable, alignment)?;
+    }
+    check_disjoint(
+        K,
+        out,
+        &[
+            (weight, "weight"),
+            (inner, "inner"),
+            (counts, "counts"),
+            (ids, "ids"),
+        ],
+    )?;
+    let bindings = [weight, inner, counts, ids, out];
+    let device = ctx.device.registryID();
+    if enc.parent_command_buffer().device().registryID() != device
+        || bindings
+            .iter()
+            .any(|t| t.buffer.device().registryID() != device)
+    {
+        return Err(bad_shape(
+            K,
+            "encoder and bindings must belong to the context device",
+        ));
+    }
+    let row_bytes = (n_in / layout.block_elems)
+        .checked_mul(layout.block_bytes)
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| bad_shape(K, "weight row byte stride exceeds u32"))?;
+    Ok(PreparedGroupedDown {
+        enc,
+        bindings,
+        experts: n_expert,
+        panels: Vec::with_capacity(2),
+        args: GenericMmArgs {
+            m: n_out as u32,
+            n: n_tokens as u32,
+            k: n_in as u32,
+            nb01: row_bytes,
+            stride_b: n_in as u32,
+            min_count: 1,
+            max_count: n_tokens as u32,
+            b_div: 1,
+            slot_limit: slots as u32,
+        },
+    })
+}
+
+#[cfg(test)]
+fn grouped_down_panel(
+    ctx: &MetalContext,
+    name: String,
+    min_count: u32,
+    max_count: u32,
+    grid_width: usize,
+    threadgroup_bytes: usize,
+) -> Result<GroupedDownPanel, MetalError> {
+    let lookup = name.as_str();
+    let limit = ctx.device.maxThreadgroupMemoryLength();
+    #[cfg(test)]
+    let (lookup, limit) = match DOWN_WIDE_PREFLIGHT_FAULT.with(std::cell::Cell::get) {
+        Some(missing) if name.ends_with("_n64") => {
+            if missing {
+                ("__missing_down_n64_pipeline", limit)
+            } else {
+                (lookup, 0)
+            }
+        }
+        _ => (lookup, limit),
+    };
+    let pso = ctx.pipeline(lookup)?;
+    if pso.threadExecutionWidth() != 32
+        || pso.maxTotalThreadsPerThreadgroup() < 128
+        || pso
+            .staticThreadgroupMemoryLength()
+            .checked_add(threadgroup_bytes)
+            .is_none_or(|n| n > limit)
+    {
+        return Err(super::checks::bad_shape(
+            DOWN_N64_KERNEL,
+            format!("{name} requires SIMD32, TG128 and {threadgroup_bytes} dynamic TGM bytes"),
+        ));
+    }
+    Ok(GroupedDownPanel {
+        name,
+        pso,
+        min_count,
+        max_count,
+        grid_width,
+        threadgroup_bytes,
+    })
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_moe_down_f32_grouped_slots_n64_split<'a>(
+    ctx: &MetalContext,
+    enc: &'a KernelEncoder,
+    weight: &'a MetalTensor,
+    inner: &'a MetalTensor,
+    counts: &'a MetalTensor,
+    ids: &'a MetalTensor,
+    out: &'a MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    n_tokens: usize,
+) -> Result<PreparedGroupedDown<'a>, MetalError> {
+    let mut prepared = checked_grouped_down(
+        ctx, enc, weight, inner, counts, ids, out, n_in, n_out, n_expert, n_tokens,
+    )?;
+    let narrow =
+        moe_grouped_generic_pipeline_name(MoeGroupedGenericRole::Down, weight.dtype).unwrap();
+    prepared.panels.push(grouped_down_panel(
+        ctx,
+        narrow,
+        1,
+        (n_tokens as u32).min(32),
+        1,
+        8192,
+    )?);
+    if n_tokens >= 33 {
+        let wide = moe_down_n64_pipeline_name(weight.dtype).unwrap();
+        prepared.panels.push(grouped_down_panel(
+            ctx,
+            wide,
+            33,
+            n_tokens as u32,
+            n_tokens.div_ceil(64),
+            8192,
+        )?);
+    }
+    Ok(prepared)
+}
+
+/// Experimental Half DOWN split: counts 1..=32 use one incumbent N32 panel;
+/// counts 33..=N use M64/N64/K32. No production promotion or count readback.
+/// Every binding and required pipeline is checked before either dispatch.
+/// Operands must fit half; this is not the F32-operand accuracy path.
+/// K aligns to max(32, storage block elements), M may have a tail, and valid
+/// slot ids must be unique across buckets. Invalid ids/counts are skipped.
+/// Uses 128 threads and 8 KiB dynamic TGM for either tile. N64 drains its
+/// two N32 result panels sequentially through that overlay, with no persistent scratch.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub fn encode_moe_down_f32_grouped_slots_n64_split(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    prepare_moe_down_f32_grouped_slots_n64_split(
+        ctx, enc, weight, inner, counts, ids, out, n_in, n_out, n_expert, n_tokens,
+    )?
+    .encode();
+    Ok(())
+}
+
+/// Diagnostic incumbent with ceil(max_count/32) panels and unchanged args.N
+/// (the actual ids stride). Counts above the cap are skipped; the caller must
+/// supply an upper bound on bucket counts to compare a complete DOWN call.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub fn encode_moe_down_f32_grouped_slots_generic_capped(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    n_tokens: usize,
+    max_count: usize,
+) -> Result<(), MetalError> {
+    let mut prepared = checked_grouped_down(
+        ctx, enc, weight, inner, counts, ids, out, n_in, n_out, n_expert, n_tokens,
+    )?;
+    if max_count == 0 || max_count > n_tokens {
+        return Err(super::checks::bad_shape(
+            DOWN_N64_KERNEL,
+            "max_count must be in 1..=N",
+        ));
+    }
+    let name =
+        moe_grouped_generic_pipeline_name(MoeGroupedGenericRole::Down, weight.dtype).unwrap();
+    prepared.panels.push(grouped_down_panel(
+        ctx,
+        name,
+        1,
+        max_count as u32,
+        max_count.div_ceil(32),
+        8192,
+    )?);
+    prepared.encode();
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "moe_grouped_generic/down_n64_tests.rs"]
+mod down_n64_tests;
+
 /// Generic grouped down projection. Same contract as
 /// [`encode_moe_down_q5_K_f32_grouped_slots_range`]: `inner` holds one
 /// `n_in` row per routed slot, `out` one `n_out` row per slot, `ids` is the

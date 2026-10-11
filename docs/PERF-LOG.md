@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-11 - Wide Down Falsifier and Maya Deep Decode
+
+- Tested compressed native M64/N64 expert down on real N2048/N512 routes,
+  preserving the actual production SmallCounts baseline. Whole UD/Maya ratios
+  0.991-1.011x do not establish a useful gain. The 8 KiB result-overlay follow-up
+  is also neutral. Candidate remains test-only in the research metallib;
+  production dispatch/admission/memory are unchanged.
+- All recorded leaf/weighted and join/three-step continuation outputs are
+  bit-identical. A cancellation-sensitive scalar-relative oracle was replaced
+  by a derived accumulation bound plus the retained absolute and aggregate RMS
+  checks; candidate/incumbent bit equality is checked independently first.
+- Maya 8K/32K attribution: ordinary decode 34.44/32.85 ms, selected attention
+  1.076/1.042 ms, score+selection growth about 0.35 ms. Different subsequent
+  teacher-forced positions, not a paired speedup claim. KDA and routed experts
+  each remain about 30% of profiled spans.
+- Re-ranked next work to lower-state gate/up prefill, then register-resident KDA
+  convolution preparation. No threshold sweep or low-budget attention rewrite.
+- Final 55 grouped-MoE and 86 GLM tests pass under Metal validation; all-target
+  workspace check passes. Three ignored model ABBA packets and the deep packet
+  ran separately. Evidence and original-16-KiB reproducer:
+  `docs/bench/2026-10-11-glm-down-wide/`.
+
 ## 2026-10-11 - GLM Leverage Refresh and Precision-Scoped Latent MMA
 
 - Re-ranked against main `27b49476`: serving workspace selection, wide gate/up,

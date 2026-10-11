@@ -14,7 +14,7 @@ For append-only checkpoint history and exact current handoff state, see
 
 ## Current Leverage - 2026-10-11
 
-Reoriented on main `27b49476` with cx, retaining the requested family/phase
+Reoriented through main `fcb0c7c0` with cx, retaining the requested family/phase
 priority: GLM prefill and long-context decode first, then Flash-Next and Qwen.
 This section supersedes stale next-step claims in the dated maps below.
 
@@ -37,26 +37,41 @@ The arithmetic-preserving scalar8 alternative was bit-identical but neutral
 (0.996-1.006x), so stays test-only. UD's unchanged Q8 control was bit-identical.
 Evidence: `docs/bench/2026-10-11-glm-latent-mma/`.
 
-1. **High-count expert down reuse.** Experts remain the largest prefill stage
-   (about 1.71 s and 57-61% of profiled N512 spans in the retained Maya/UD runs).
-   The wider gate/up tile is already done. At N2048, average expert bucket
-   occupancy is roughly 57 slots versus 14 at N512; a wider down token tile is
-   a plausible next reuse opportunity. Separate gate/up, down, bucket and
-   reduction costs on representative real routes, then test a bounded wider
-   tile with the current tile retained for small counts. Do not multiply a leaf
-   microbenchmark across the model without measuring whole-prefill conversion.
-2. **Depth-dependent GLM attention.** Use one admitted deep cell plus a shallower
-   control to separate scoring, selection and selected attention. Historical UD
-   decode only rose from about 32.3 to 32.8 ms between 4K and 32K; current Maya
-   deep costs are unmeasured. Shared latent-row loads across heads are a concrete
-   hypothesis, not an established bottleneck. If scoring dominates, target it
-   instead. Keep Flash selected-QSA work coordinated with its existing lane.
+**High-count down experiment parked:** M64/N64 reduces decoded panels but adds
+padding and accumulator state. UD/Maya whole-prefill ratios are only
+0.991-1.011x; an 8 KiB overlay follow-up is also neutral. All recorded outputs
+are bit-identical. No production promotion; helpers/shader stay in test/research.
+Maya deep attribution is now measured: ordinary decode 34.44/32.85 ms at
+8K/32K, selected attention about 1.05 ms, score/select growth only 0.35 ms.
+These are different teacher-forced positions, not a paired depth speedup.
+Evidence: `docs/bench/2026-10-11-glm-down-wide/`.
+
+1. **Routed gate/up prefill with less per-threadgroup state.** Experts remain
+   the largest historical N512 prefill stage. Capture normalized block input
+   for actual N2048 gate/up replay (post-SwiGLU down input is insufficient).
+   Test M32/N32/K32 against the existing M64/N32 tile: reduced accumulator
+   state and an 8 KiB overlay, at the cost of more groups/activation loads.
+   Preserve N16 for small buckets and per-output arithmetic. Use N512 control
+   and whole-prefill conversion only if the real-input leaf is promising.
+   One down-bank duration times 42 is not measured aggregate attribution.
+2. **KDA packed preparation history in registers.** The per-head preparation
+   loop repeatedly reads/shifts convolution history in device memory. Keep
+   nine history values in registers and write final history once, retaining
+   convolution FMA/normalization order. First isolate preparation from the
+   much larger KDA parent, restore mutable inputs/state outside leaf timing,
+   and check final history as well as outputs. No recurrence redesign or new
+   persistent scratch. Current deep experts and KDA each occupy about 30% of
+   profiled spans; this does not prove preparation is a large fraction.
 3. **Half-mode latent numerics, when it beats the opportunities above.** Keep
    the measured MMA candidate available to diagnostics. A useful follow-up
    evaluates task consequences or localizes amplification on real inputs,
    rather than optimizing for agreement with old Fast alone. The diagnostic
    1e-3 bound and historical Exact/Fast 0.33 trigger answer different questions;
    neither is an artifact-admission rule or a task-quality result.
+
+GLM selected-attention work is deferred behind those concrete prefill bets;
+the measured leaf is only about 1 ms. Keep Flash selected-QSA work coordinated
+with its existing lane: GLM's small depth cost does not establish Flash's cost.
 
 Serving width, precision, placement and snapshot reuse are separate variables.
 Use the current workspace policy, not the superseded fixed-512 assumption, when

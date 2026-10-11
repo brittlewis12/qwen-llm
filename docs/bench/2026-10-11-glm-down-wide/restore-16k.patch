@@ -1,0 +1,103 @@
+Restore the original 16 KiB N64 output-overlay experiment from the parked
+8 KiB research version. Arithmetic, cfg(test) isolation, names and diagnostic
+invocations stay unchanged. Includes the resource expectation in the leaf test.
+
+From the repository root:
+  git apply --check docs/bench/2026-10-11-glm-down-wide/restore-16k.patch
+  git apply docs/bench/2026-10-11-glm-down-wide/restore-16k.patch
+Revert with the same command plus -R after recording the 16 KiB run.
+
+--- a/kernels/research/moe_down_n64.metal
++++ b/kernels/research/moe_down_n64.metal
+@@ -1,9 +1,8 @@
+ // Experimental half-operand grouped DOWN: M64/N64/K32, 128 threads.
+ // Two incumbent N32 panels reuse one decoded weight tile. Each output keeps
+ // moe_grouped_slots_mm_generic_body<EPI=0>'s half conversion and K/MMA order.
+-// Staging: 4096 B weights + 4096 B activations. Drain each N32 F32 result
+-// panel through the same 8192 B overlay before storing the next panel.
+-// No persistent scratch or repacked weights.
++// Staging: 4096 B weights + 4096 B activations. The F32 result overlays this
++// storage and needs 16384 B. No persistent scratch or repacked weights.
+ #include <metal_stdlib>
+ using namespace metal;
+ #include "../quant_tiles.h"
+@@ -113,31 +112,26 @@
+             lsmb += 4 * 64;
+         }
+     }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
+     threadgroup float * temp_str = (threadgroup float *)shmem
+         + 32 * (sgitg & 1) + (16 * (sgitg >> 1)) * 64;
+     for (short p = 0; p < 2; ++p) {
+-        // All threads finish input reads (p=0), or the previous panel's
+-        // scatter (p=1), before any SIMD group overwrites the shared overlay.
+-        threadgroup_barrier(mem_flags::mem_threadgroup);
+         for (short i = 0; i < 8; ++i) {
+-            simdgroup_store(mc[8 * p + i], temp_str + 8 * (i % 4) + 8 * 64 * (i / 4),
++            simdgroup_store(mc[8 * p + i], temp_str + 32 * 64 * p + 8 * (i % 4) + 8 * 64 * (i / 4),
+                             64, 0, false);
+         }
+-        threadgroup_barrier(mem_flags::mem_threadgroup);
+-        if (sgitg == 0) {
+-            for (int j = tiitg; j < 32 && 32 * p + j < nr1; j += 32) {
+-                const int slot = ids[(ulong)im * args.N + r1 + 32 * p + j];
+-                if (slot < 0 || slot >= slot_limit) continue;
+-                device float * D = dst + (ulong)slot * args.M + r0;
+-                threadgroup float * C = temp_str + j * 64;
+-                for (int i = 0; i < nr0; ++i) {
+-                    D[i] = C[i];
+-                }
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    if (sgitg == 0) {
++        for (int j = tiitg; j < nr1; j += 32) {
++            const int slot = ids[(ulong)im * args.N + r1 + j];
++            if (slot < 0 || slot >= slot_limit) continue;
++            device float * D = dst + (ulong)slot * args.M + r0;
++            threadgroup float * C = temp_str + j * 64;
++            for (int i = 0; i < nr0; ++i) {
++                D[i] = C[i];
+             }
+         }
+-        // No barrier is conditional on a slot, row tail, or SIMD group. The
+-        // next iteration's leading barrier protects reuse even for an empty
+-        // second panel; after the last scatter the overlay is no longer used.
+     }
+ }
+ 
+--- a/crates/qwen-llm/src/metal/moe_grouped_generic.rs
++++ b/crates/qwen-llm/src/metal/moe_grouped_generic.rs
+@@ -602,7 +602,7 @@
+             33,
+             n_tokens as u32,
+             n_tokens.div_ceil(64),
+-            8192,
++            16384,
+         )?);
+     }
+     Ok(prepared)
+@@ -614,8 +614,7 @@
+ /// Operands must fit half; this is not the F32-operand accuracy path.
+ /// K aligns to max(32, storage block elements), M may have a tail, and valid
+ /// slot ids must be unique across buckets. Invalid ids/counts are skipped.
+-/// Uses 128 threads and 8 KiB dynamic TGM for either tile. N64 drains its
+-/// two N32 result panels sequentially through that overlay, with no persistent scratch.
++/// Uses 128 threads and 8/16 KiB dynamic TGM, with no persistent scratch.
+ #[cfg(test)]
+ #[allow(clippy::too_many_arguments)]
+ pub fn encode_moe_down_f32_grouped_slots_n64_split(
+--- a/crates/qwen-llm/src/metal/moe_grouped_generic/down_n64_tests.rs
++++ b/crates/qwen-llm/src/metal/moe_grouped_generic/down_n64_tests.rs
+@@ -385,9 +385,9 @@
+                 let prepared = f.prepare(&ctx, enc, &candidate)?;
+                 assert_eq!(prepared.args.n as usize, n);
+                 assert_eq!(prepared.panels.len(), 2);
+-                // Both input staging and each sequential N32 output panel fit
+-                // the same 8 KiB overlay, including the N64 dispatch.
+-                assert!(prepared.panels.iter().all(|p| p.threadgroup_bytes == 8192));
++                // Original experiment stages the whole N64 result in 16 KiB.
++                assert_eq!(prepared.panels[0].threadgroup_bytes, 8192);
++                assert_eq!(prepared.panels[1].threadgroup_bytes, 16384);
+                 assert_eq!(
+                     (
+                         prepared.panels[0].min_count,

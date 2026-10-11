@@ -39,6 +39,9 @@ use std::io::Write;
 use std::rc::Rc;
 use std::time::Instant;
 
+#[path = "expert_down_wide.rs"]
+mod wide;
+
 const H: usize = 4096;
 const K: usize = 2048;
 const E: usize = 288;
@@ -52,6 +55,7 @@ struct Observation {
     gpu_ms: f64,
     iq3_layers: usize,
     iq4_layers: usize,
+    iq3_xxs_layers: usize,
     captures: usize,
 }
 
@@ -122,6 +126,7 @@ pub(super) fn after_grouped(
         match dtype {
             GgmlType::IQ3_S => s.observation.iq3_layers += 1,
             GgmlType::IQ4_XS => s.observation.iq4_layers += 1,
+            GgmlType::IQ3_XXS => s.observation.iq3_xxs_layers += 1,
             _ => panic!("unexpected GLM down dtype {dtype:?}"),
         }
         let capture = s.capture.as_ref().filter(|c| c.block == block).cloned();
@@ -131,7 +136,7 @@ pub(super) fn after_grouped(
         capture
     });
     if let Some(c) = capture {
-        assert_eq!((rows, dtype), (c.rows, GgmlType::IQ3_S));
+        assert_eq!((rows, dtype), (c.rows, c.dtype));
         crate::metal::encode_copy_offset_f32(
             ctx,
             enc,
@@ -154,6 +159,7 @@ pub(super) fn after_grouped(
 }
 
 struct Capture {
+    dtype: GgmlType,
     block: usize,
     rows: usize,
     inner: MetalTensor,
@@ -169,6 +175,18 @@ fn cpu_reserve(rows: usize) -> u64 {
 
 impl Capture {
     fn allocate(ctx: &MetalContext, block: usize, rows: usize, out: &mut File) -> Rc<Self> {
+        Self::allocate_for(ctx, block, rows, GgmlType::IQ3_S, cpu_reserve(rows), out)
+    }
+
+    fn allocate_for(
+        ctx: &MetalContext,
+        block: usize,
+        rows: usize,
+        dtype: GgmlType,
+        cpu_bytes: u64,
+        out: &mut File,
+    ) -> Rc<Self> {
+        assert!(matches!(dtype, GgmlType::IQ3_S | GgmlType::IQ3_XXS));
         let lengths = [K * TOP * rows * 4, E * 4, E * rows * 4];
         let priced: Vec<u64> = lengths
             .iter()
@@ -181,7 +199,7 @@ impl Capture {
         let _allocation = ctx.begin_allocation_transaction();
         let admission = evaluate_metal_memory_admission_with_cpu_bytes(
             priced.iter().sum(),
-            cpu_reserve(rows),
+            cpu_bytes,
             0,
             ctx.memory_signals(),
             true,
@@ -189,13 +207,14 @@ impl Capture {
         emit(
             out,
             json!({"event":"capture_admission", "block":block, "rows":rows,
-            "logical_bytes":lengths, "priced_gpu_bytes":priced, "cpu_reserve_bytes":cpu_reserve(rows),
+            "logical_bytes":lengths, "priced_gpu_bytes":priced, "cpu_reserve_bytes":cpu_bytes,
             "admitted":admission.admitted, "reason":admission.reason.as_str(),
             "current_gpu_bytes":admission.signals.current_allocated_bytes,
             "working_set_headroom_bytes":admission.working_set_headroom_bytes}),
         );
         assert!(admission.admitted, "capture memory admission refused");
         Rc::new(Self {
+            dtype,
             block,
             rows,
             inner: MetalTensor::zeros_f32(ctx, vec![(K * TOP * rows) as u64]).unwrap(),
@@ -642,8 +661,13 @@ fn prefill_attempt(
         "nonfinite_logits":nonfinite,"top1":(nonfinite==0).then(|| argmax(&logits))}),
     );
     assert_eq!(
-        (obs.iq3_layers, obs.iq4_layers, obs.captures),
-        (39, 3, usize::from(capture_on))
+        (
+            obs.iq3_layers,
+            obs.iq4_layers,
+            obs.iq3_xxs_layers,
+            obs.captures
+        ),
+        (39, 3, 0, usize::from(capture_on))
     );
     assert_eq!(
         substitutions,
@@ -977,6 +1001,7 @@ fn domain_cell(
         });
         let topology_valid = obs.iq3_layers == 39 * chunks
             && obs.iq4_layers == 3 * chunks
+            && obs.iq3_xxs_layers == 0
             && obs.captures == 0
             && substitutions == if b { 39 * chunks } else { 0 };
         let gpu_ms = (result.is_ok()

@@ -585,6 +585,35 @@ pub(crate) fn encode_grouped_routed_experts_with_down_policy(
     };
     let down_inner = flat(b.inner);
     let down_out = flat(b.slot_out);
+    // Test-only experiment: false leaves the caller's production policy intact.
+    #[cfg(test)]
+    let experimental_down = super::moe_grouped_generic::grouped_down_wide_enabled();
+    #[cfg(test)]
+    let prepared_wide_down = if experimental_down {
+        Some(
+            super::moe_grouped_generic::prepare_moe_down_f32_grouped_slots_n64_split(
+                ctx,
+                enc,
+                b.down_bank,
+                &down_inner,
+                b.counts,
+                b.slots,
+                &down_out,
+                ffn,
+                hidden,
+                experts,
+                rows,
+            )?,
+        )
+    } else {
+        None
+    };
+    #[cfg(test)]
+    let down_policy = if experimental_down {
+        GroupedDownPolicy::Incumbent
+    } else {
+        down_policy
+    };
     let prepared_down = match down_policy {
         GroupedDownPolicy::Incumbent => None,
         GroupedDownPolicy::Iq3SSmallCounts => super::iq3_s_down_retile::prepare_small_counts(
@@ -647,6 +676,20 @@ pub(crate) fn encode_grouped_routed_experts_with_down_policy(
             rows,
             clamp,
         )?,
+    }
+    #[cfg(test)]
+    if let Some(down) = prepared_wide_down {
+        down.encode();
+        return encode_moe_weighted_sum_packed_f32(
+            ctx,
+            enc,
+            &flat(b.slot_out),
+            &flat(b.weights),
+            &flat(b.output),
+            hidden,
+            top_k,
+            rows,
+        );
     }
     if let Some(down) = prepared_down {
         down.encode()?;

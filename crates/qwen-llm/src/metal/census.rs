@@ -20,16 +20,20 @@ pub struct DispatchCensusRow {
 }
 
 pub(crate) static DISPATCH_CENSUS_ACTIVE_THREADS: AtomicUsize = AtomicUsize::new(0);
+static CENSUS_NEXT_SESSION: AtomicUsize = AtomicUsize::new(1);
 
 thread_local! {
     static DISPATCH_CENSUS: std::cell::RefCell<Option<Vec<DispatchCensusRow>>> =
         const { std::cell::RefCell::new(None) };
-    static CENSUS_LAST_PSO: std::cell::RefCell<String> =
-        const { std::cell::RefCell::new(String::new()) };
+    #[cfg(test)]
+    static CENSUS_PSO_ANNOTATION: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+    static CENSUS_SESSION: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CENSUS_FAMILY: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
     static CENSUS_TAG: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
     static CENSUS_NEXT_ENCODER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    static CENSUS_ENCODER: std::cell::Cell<(u64, bool)> = const { std::cell::Cell::new((u64::MAX, false)) };
+    // Constructor handoff only; dispatch attribution lives on each encoder.
+    static CENSUS_ENCODER: std::cell::Cell<(usize, u64)> = const { std::cell::Cell::new((0, u64::MAX)) };
 }
 
 #[must_use]
@@ -55,7 +59,12 @@ pub fn dispatch_census_begin() {
     }
     CENSUS_TAG.with(|tag| *tag.borrow_mut() = None);
     CENSUS_NEXT_ENCODER.with(|next| next.set(0));
-    CENSUS_ENCODER.with(|encoder| encoder.set((u64::MAX, false)));
+    CENSUS_SESSION.with(|session| {
+        session.set(CENSUS_NEXT_SESSION.fetch_add(1, Ordering::Relaxed));
+    });
+    CENSUS_ENCODER.with(|encoder| encoder.set((0, u64::MAX)));
+    #[cfg(test)]
+    CENSUS_PSO_ANNOTATION.with(|annotation| *annotation.borrow_mut() = None);
 }
 
 /// Stop recording and take the census rows.
@@ -165,52 +174,82 @@ pub fn dispatch_census_tag_scope(tag: impl FnOnce() -> String) -> Option<Dispatc
     Some(DispatchCensusTagGuard { previous })
 }
 
+/// Compatibility for explicit annotations at existing call sites. Pipeline lookups
+/// never determine dispatch identity. Production calls are inert; tests may add
+/// a one-dispatch suffix to the *actual* bound name (the IQ1 format annotation).
 #[inline]
-pub(crate) fn census_record_pso(name: &str) {
-    if DISPATCH_CENSUS_ACTIVE_THREADS.load(Ordering::Relaxed) == 0 {
-        return;
+pub(crate) fn census_record_pso(_name: &str) {
+    #[cfg(test)]
+    if dispatch_census_is_active() {
+        CENSUS_PSO_ANNOTATION.with(|annotation| {
+            *annotation.borrow_mut() = Some(_name.to_owned());
+        });
     }
-    DISPATCH_CENSUS.with(|c| {
-        if c.borrow().is_some() {
-            CENSUS_LAST_PSO.with(|p| {
-                let mut p = p.borrow_mut();
-                p.clear();
-                p.push_str(name);
-            });
-        }
-    });
+}
+
+fn census_next_encoder() -> u64 {
+    CENSUS_NEXT_ENCODER.with(|next| {
+        let ordinal = next.get();
+        next.set(ordinal + 1);
+        ordinal
+    })
 }
 
 #[inline]
-pub(crate) fn census_record_encoder(concurrent: bool) {
-    if DISPATCH_CENSUS_ACTIVE_THREADS.load(Ordering::Relaxed) == 0 {
-        return;
+pub(crate) fn census_record_encoder(_concurrent: bool) {
+    if dispatch_census_is_active() {
+        let session = CENSUS_SESSION.with(|session| session.get());
+        CENSUS_ENCODER.with(|encoder| encoder.set((session, census_next_encoder())));
     }
-    DISPATCH_CENSUS.with(|census| {
-        if census.borrow().is_some() {
-            let ordinal = CENSUS_NEXT_ENCODER.with(|next| {
-                let ordinal = next.get();
-                next.set(ordinal + 1);
-                ordinal
-            });
-            CENSUS_ENCODER.with(|encoder| encoder.set((ordinal, concurrent)));
-        }
-    });
 }
 
 #[inline]
-pub(crate) fn census_record_dispatch(grid: MTLSize, threads: MTLSize) {
+pub(crate) fn census_encoder_identity() -> (usize, u64) {
+    if dispatch_census_is_active() {
+        CENSUS_ENCODER.with(|encoder| encoder.get())
+    } else {
+        (0, u64::MAX)
+    }
+}
+
+#[inline]
+pub(crate) fn census_record_dispatch(enc: &KernelEncoder, grid: MTLSize, threads: MTLSize) {
     if DISPATCH_CENSUS_ACTIVE_THREADS.load(Ordering::Relaxed) == 0 {
         return;
     }
     DISPATCH_CENSUS.with(|c| {
         if let Some(rows) = c.borrow_mut().as_mut() {
+            let session = CENSUS_SESSION.with(|session| session.get());
+            let (encoder_session, mut ordinal) = enc.census_identity.get();
+            if encoder_session != session {
+                // An encoder can predate this capture, or survive take/begin.
+                ordinal = census_next_encoder();
+                enc.census_identity.set((session, ordinal));
+            }
+            let bound_name = enc.bound_pipeline_name.borrow();
+            let kernel = bound_name.as_deref().unwrap_or("");
+            let tag = CENSUS_TAG.with(|tag| tag.borrow().clone());
+            #[cfg(test)]
+            let annotation =
+                CENSUS_PSO_ANNOTATION.with(|annotation| annotation.borrow_mut().take());
+            #[cfg(test)]
+            let kernel = annotation
+                .as_deref()
+                .filter(|annotation| {
+                    // Preserve test-only format suffixes, never another PSO's name.
+                    annotation
+                        .strip_prefix(kernel)
+                        .and_then(|suffix| suffix.strip_prefix(" ["))
+                        .and_then(|suffix| suffix.strip_suffix(']'))
+                        .is_some_and(|format| Some(format) == tag.as_deref())
+                })
+                .unwrap_or(kernel);
             rows.push(DispatchCensusRow {
                 family: CENSUS_FAMILY.with(|f| f.get()),
-                tag: CENSUS_TAG.with(|tag| tag.borrow().clone()),
-                encoder_ordinal: CENSUS_ENCODER.with(|encoder| encoder.get().0),
-                encoder_concurrent: CENSUS_ENCODER.with(|encoder| encoder.get().1),
-                kernel: CENSUS_LAST_PSO.with(|p| p.borrow().clone()),
+                tag,
+                encoder_ordinal: ordinal,
+                encoder_concurrent: enc.concurrent,
+                kernel: kernel.to_owned(),
                 grid_width: grid.width as u64,
                 grid_height: grid.height as u64,
                 grid_depth: grid.depth as u64,
@@ -294,7 +333,24 @@ pub(crate) type Queue = Retained<ProtocolObject<dyn MTLCommandQueue>>;
 
 pub(crate) type Library = Retained<ProtocolObject<dyn MTLLibrary>>;
 
-pub(crate) type Pipeline = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
+/// Compiled PSO and its immutable entry name. Metal's PSO label is optional and
+/// read-only; retaining the name here avoids changing compilation descriptors or
+/// querying Objective-C solely for census attribution. The name is allocated once
+/// on a cache miss and shared by the cache key and encoders, including while
+/// census is inactive.
+#[derive(Clone)]
+pub struct Pipeline {
+    pub(crate) raw: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    pub(crate) name: Arc<str>,
+}
+
+impl std::ops::Deref for Pipeline {
+    type Target = ProtocolObject<dyn MTLComputePipelineState>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.raw
+    }
+}
 
 /// Owned Metal buffer wrapper, the public type for buffer-style values.
 pub type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
@@ -346,11 +402,42 @@ impl MetalPipelineCacheMetrics {
 
 #[derive(Default)]
 pub(crate) struct MetalPipelineCache {
-    pub(crate) pipelines: HashMap<String, Pipeline>,
+    // Key contents and hashing remain the kernel name; share its allocation
+    // with the PSO metadata instead of allocating a separate diagnostics name.
+    pub(crate) pipelines: HashMap<Arc<str>, Pipeline>,
     pub(crate) metrics_enabled: bool,
     pub(crate) metrics: MetalPipelineCacheMetrics,
 }
 
 pub(crate) fn duration_ns_saturating(duration: std::time::Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn census_observer_is_inert_when_only_another_thread_is_capturing() {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let other = std::thread::spawn(move || {
+            dispatch_census_begin();
+            ready_tx.send(()).unwrap();
+            let _ = done_rx.recv();
+            dispatch_census_take()
+        });
+        ready_rx.recv().unwrap();
+        assert!(!dispatch_census_is_active());
+        assert!(dispatch_census_tag_scope(|| panic!("inactive tag evaluated")).is_none());
+        let next = CENSUS_NEXT_ENCODER.with(|next| next.get());
+        census_record_encoder(false);
+        census_record_pso("must_not_be_recorded");
+        assert_eq!(census_encoder_identity(), (0, u64::MAX));
+        assert_eq!(CENSUS_NEXT_ENCODER.with(|next| next.get()), next);
+        CENSUS_PSO_ANNOTATION.with(|annotation| assert!(annotation.borrow().is_none()));
+        assert!(dispatch_census_take().is_empty());
+        done_tx.send(()).unwrap();
+        assert!(other.join().unwrap().is_empty());
+    }
 }

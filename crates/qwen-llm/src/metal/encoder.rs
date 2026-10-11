@@ -15,6 +15,10 @@ pub struct KernelEncoder {
     pub(crate) raw: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
     pub(crate) parent: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     pub(crate) ended: bool,
+    pub(crate) census_identity: Cell<(usize, u64)>,
+    // Always track the binding: census can start after this encoder was bound.
+    // Arc cloning costs no allocation or Objective-C message send.
+    pub(crate) bound_pipeline_name: std::cell::RefCell<Option<Arc<str>>>,
     /// True when created via [`KernelEncoder::begin_concurrent`]. Concurrent
     /// passes provide NO ordering between dispatches, so every dispatch pair
     /// must be independent (disjoint writes; no dispatch reads another's
@@ -43,6 +47,8 @@ impl KernelEncoder {
             raw,
             parent: parent.clone(),
             ended: false,
+            census_identity: Cell::new(census_encoder_identity()),
+            bound_pipeline_name: std::cell::RefCell::new(None),
             concurrent,
             #[cfg(debug_assertions)]
             hazard_writes: std::cell::RefCell::new(Vec::new()),
@@ -276,12 +282,13 @@ impl KernelEncoder {
     }
 
     pub fn set_pipeline(&self, pso: &Pipeline) {
-        self.raw.setComputePipelineState(pso);
+        self.raw.setComputePipelineState(&pso.raw);
+        *self.bound_pipeline_name.borrow_mut() = Some(Arc::clone(&pso.name));
     }
 
     pub fn dispatch(&self, grid: MTLSize, threads: MTLSize) {
         kernel_trace_record_dispatch();
-        census_record_dispatch(grid, threads);
+        census_record_dispatch(self, grid, threads);
         self.raw
             .dispatchThreadgroups_threadsPerThreadgroup(grid, threads);
     }
@@ -437,6 +444,199 @@ impl Drop for BlitEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // These are real Metal dispatches, deliberately bypassing encode_* helpers
+    // so pipeline lookup order and binding order can differ.
+    const CENSUS_ADD: &str = "kernel_add_f32";
+    const CENSUS_MUL: &str = "kernel_mul_f32";
+    const CENSUS_SIZE: MTLSize = MTLSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+
+    struct CensusCapture;
+
+    impl CensusCapture {
+        fn begin() -> Self {
+            dispatch_census_begin();
+            Self
+        }
+    }
+
+    impl Drop for CensusCapture {
+        fn drop(&mut self) {
+            dispatch_census_take();
+        }
+    }
+
+    fn census_buffers(ctx: &MetalContext) -> [Buffer; 4] {
+        [2.0f32, 3.0, 0.0, 0.0].map(|v| ctx.buffer_from(bytemuck::bytes_of(&v)).unwrap())
+    }
+
+    fn census_bind_buffers(enc: &KernelEncoder, buffers: &[Buffer; 4], output: usize) {
+        enc.set_bytes(0, &1u32);
+        enc.set_buffer(1, &buffers[0], 0);
+        enc.set_buffer(2, &buffers[1], 0);
+        enc.set_buffer(3, &buffers[output], 0);
+    }
+
+    fn census_check_outputs(buffers: &[Buffer; 4]) {
+        // Called only after successful command-buffer completion.
+        let values = [2, 3].map(|i| unsafe { *buffers[i].contents().as_ptr().cast::<f32>() });
+        assert_eq!(values, [5.0, 6.0]);
+    }
+
+    #[test]
+    fn census_follows_bound_pso_after_preflight_and_cache_hits() {
+        for prewarm in [false, true] {
+            let Some(ctx) = crate::metal::test_support::metal_test_context() else {
+                return;
+            };
+            if prewarm {
+                ctx.pipeline(CENSUS_ADD).unwrap();
+                ctx.pipeline(CENSUS_MUL).unwrap();
+            }
+            ctx.set_pipeline_cache_metrics_enabled(true);
+            let buffers = census_buffers(&ctx);
+            let _capture = CensusCapture::begin();
+            let cmd = ctx.queue.commandBuffer().unwrap();
+            let enc = KernelEncoder::begin(&cmd);
+            // A/B preflight must not label the first (A) dispatch as B.
+            let add = ctx.pipeline(CENSUS_ADD).unwrap();
+            let mul = ctx.pipeline(CENSUS_MUL).unwrap();
+            enc.set_pipeline(&add);
+            // Legacy explicit tracing calls must not override the actual PSO either.
+            census_record_pso(CENSUS_MUL);
+            // Even a failed lookup after binding cannot change attribution.
+            assert!(matches!(
+                ctx.pipeline("census_missing_kernel"),
+                Err(MetalError::NoFunction(_))
+            ));
+            census_bind_buffers(&enc, &buffers, 2);
+            enc.dispatch(CENSUS_SIZE, CENSUS_SIZE);
+            enc.set_pipeline(&mul);
+            census_bind_buffers(&enc, &buffers, 3);
+            enc.dispatch(CENSUS_SIZE, CENSUS_SIZE);
+            // An unbound cache hit also cannot relabel the current binding.
+            let cached_add = ctx.pipeline(CENSUS_ADD).unwrap();
+            assert!(Arc::ptr_eq(&add.name, &cached_add.name));
+            enc.dispatch(CENSUS_SIZE, CENSUS_SIZE);
+            enc.end();
+            let rows = dispatch_census_take();
+            cmd.commit();
+            wait_completed(&cmd).unwrap();
+            census_check_outputs(&buffers);
+            assert_eq!(
+                rows.iter().map(|r| r.kernel.as_str()).collect::<Vec<_>>(),
+                [CENSUS_ADD, CENSUS_MUL, CENSUS_MUL]
+            );
+            assert!(
+                rows.iter()
+                    .all(|r| r.encoder_ordinal == 0 && !r.encoder_concurrent)
+            );
+            assert!(rows.iter().all(|r| r.grid_tgs == 1 && r.tg_threads == 1));
+            // One additional miss is the deliberately missing function.
+            assert_eq!(
+                ctx.pipeline_cache_metrics().misses,
+                if prewarm { 1 } else { 3 }
+            );
+        }
+    }
+
+    #[test]
+    fn census_interleaved_encoders_keep_their_bindings_and_ordinals() {
+        let Some(ctx) = crate::metal::test_support::metal_test_context() else {
+            return;
+        };
+        let buffers = census_buffers(&ctx);
+        let add = ctx.pipeline(CENSUS_ADD).unwrap();
+        let mul = ctx.pipeline(CENSUS_MUL).unwrap();
+        let _capture = CensusCapture::begin();
+        // Separate command buffers permit both encoders to remain open.
+        let cmd_a = ctx.queue.commandBuffer().unwrap();
+        let cmd_b = ctx.queue.commandBuffer().unwrap();
+        let a = KernelEncoder::begin(&cmd_a);
+        a.set_pipeline(&add);
+        census_bind_buffers(&a, &buffers, 2);
+        let b = KernelEncoder::begin_concurrent(&cmd_b);
+        b.set_pipeline(&mul);
+        census_bind_buffers(&b, &buffers, 3);
+        a.dispatch(CENSUS_SIZE, CENSUS_SIZE);
+        b.dispatch(CENSUS_SIZE, CENSUS_SIZE);
+        a.dispatch(CENSUS_SIZE, CENSUS_SIZE);
+        a.end();
+        b.end();
+        let rows = dispatch_census_take();
+        cmd_a.commit();
+        cmd_b.commit();
+        wait_completed(&cmd_a).unwrap();
+        wait_completed(&cmd_b).unwrap();
+        census_check_outputs(&buffers);
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.kernel.as_str(), r.encoder_ordinal, r.encoder_concurrent))
+                .collect::<Vec<_>>(),
+            [
+                (CENSUS_ADD, 0, false),
+                (CENSUS_MUL, 1, true),
+                (CENSUS_ADD, 0, false)
+            ]
+        );
+    }
+
+    #[test]
+    fn census_tracks_bindings_before_capture_and_across_restart() {
+        let Some(ctx) = crate::metal::test_support::metal_test_context() else {
+            return;
+        };
+        let buffers = census_buffers(&ctx);
+        let add = ctx.pipeline(CENSUS_ADD).unwrap();
+        let mul = ctx.pipeline(CENSUS_MUL).unwrap();
+        let cmd = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&cmd);
+        enc.set_pipeline(&add);
+        census_bind_buffers(&enc, &buffers, 2);
+        enc.dispatch(CENSUS_SIZE, CENSUS_SIZE);
+        assert!(!dispatch_census_is_active());
+        assert!(dispatch_census_tag_scope(|| panic!("inactive tag evaluated")).is_none());
+        assert!(dispatch_census_take().is_empty());
+        let _capture = CensusCapture::begin();
+        enc.dispatch(CENSUS_SIZE, CENSUS_SIZE);
+        let rows = dispatch_census_take();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (rows[0].kernel.as_str(), rows[0].encoder_ordinal),
+            (CENSUS_ADD, 0)
+        );
+
+        // Change the binding while the observer is off, then resume capture.
+        enc.set_pipeline(&mul);
+        census_bind_buffers(&enc, &buffers, 3);
+        enc.dispatch(CENSUS_SIZE, CENSUS_SIZE);
+        assert!(dispatch_census_take().is_empty());
+        dispatch_census_begin();
+        let other_cmd = ctx.queue.commandBuffer().unwrap();
+        let other = KernelEncoder::begin(&other_cmd);
+        other.set_pipeline(&add);
+        census_bind_buffers(&other, &buffers, 2);
+        other.dispatch(CENSUS_SIZE, CENSUS_SIZE);
+        enc.dispatch(CENSUS_SIZE, CENSUS_SIZE);
+        let rows = dispatch_census_take();
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.kernel.as_str(), r.encoder_ordinal))
+                .collect::<Vec<_>>(),
+            [(CENSUS_ADD, 0), (CENSUS_MUL, 1)]
+        );
+        enc.end();
+        other.end();
+        cmd.commit();
+        other_cmd.commit();
+        wait_completed(&cmd).unwrap();
+        wait_completed(&other_cmd).unwrap();
+        census_check_outputs(&buffers);
+    }
 
     #[test]
     fn kernel_encoder_drop_closes_validation_error_pass() {

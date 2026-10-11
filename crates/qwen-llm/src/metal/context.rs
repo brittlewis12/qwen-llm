@@ -756,7 +756,6 @@ impl MetalContext {
     /// come from the embedded product metallib; bench/research probes fall
     /// back to the research metallib.
     pub fn pipeline(&self, name: &str) -> Result<Pipeline, MetalError> {
-        census_record_pso(name);
         let metrics_enabled = {
             let mut cache = self.pso_cache.lock();
             if let Some(p) = cache.pipelines.get(name) {
@@ -794,10 +793,14 @@ impl MetalContext {
         let pso = pso_result.map_err(|e: Retained<NSError>| {
             MetalError::Pipeline(name.to_string(), e.localizedDescription().to_string())
         })?;
+        let pso = Pipeline {
+            raw: pso,
+            name: Arc::from(name),
+        };
         self.pso_cache
             .lock()
             .pipelines
-            .insert(name.to_string(), pso.clone());
+            .insert(Arc::clone(&pso.name), pso.clone());
         Ok(pso)
     }
 

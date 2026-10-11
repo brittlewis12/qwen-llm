@@ -29,12 +29,13 @@ execution. Coverage includes independent decoded CPU oracles, mixed types,
 clamp boundaries, token/channel tails, nonzero offsets, canaries, invalid IDs and
 statuses, binding admission, and actual precision-path selection.
 
-The first GPU pass found two test-fixture errors: dispatch census was assumed to
-be an ordered trace, and changing a status tensor to shape `[1]` was incorrectly
-expected to make it invalid. The fixtures were corrected without loosening
-numerical comparisons or runtime validation. Census also labels preflighted
-pipelines by the last lookup, so the native two-pass test checks launch totals;
-independent numerical oracles verify that the two distinct banks are consumed.
+The first GPU pass found a dispatch-labeling defect and a fixture error: the
+ordered census mislabeled preflighted pipelines by the last lookup, and changing
+a status tensor to shape `[1]` was incorrectly expected to make it invalid.
+The initial census workaround checked launch totals while independent numerical
+oracles verified the two banks. The root attribution defect is now fixed and the
+ordered-name assertion restored; see `DIAGNOSTICS.md`. Numerical comparisons and
+runtime validation were not loosened.
 
 Final results: 5 native-expert, 48 generic-grouped, 73 GLM, 11 optimized-expert,
 and 5 grouped-latent tests passed. The 44 existing opt-in tests in those suites

@@ -198,19 +198,17 @@ fn gate_up_case(
     })
     .unwrap();
     let census = dispatch_census_take();
-    let mut counts = std::collections::BTreeMap::new();
-    for row in census {
-        *counts.entry(row.kernel).or_insert(0usize) += 1;
-    }
-    assert_eq!(counts.values().sum::<usize>(), 2);
-    // Census currently labels dispatches by the last ctx.pipeline lookup,
-    // not enc.set_pipeline. Both pipelines are prepared before dispatch, so
-    // both launches carry the up label, including for mixed storage types.
-    // Check aggregate launch counts; the independent oracle below verifies
-    // that the actual gate and up projections use their respective banks.
+    // Census preserves dispatch order, including mixed gate/up storage types.
+    // Preflighting both PSOs must not change attribution of the gate binding.
     assert_eq!(
-        counts,
-        std::collections::BTreeMap::from([(native_pipeline_name(up_type).unwrap(), 2)])
+        census
+            .iter()
+            .map(|row| row.kernel.as_str())
+            .collect::<Vec<_>>(),
+        [
+            native_pipeline_name(gate_type).unwrap(),
+            native_pipeline_name(up_type).unwrap(),
+        ]
     );
     let mut expected = vec![0.0; m * IDS.len()];
     for (slot, &id) in IDS.iter().enumerate() {

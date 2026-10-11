@@ -274,8 +274,11 @@ impl KernelEncoder {
         }
     }
 
-    /// Bind threadgroup memory of `n_bytes` at slot `index`.
+    /// Bind at least `n_bytes`, rounded to Metal's 16-byte allocation alignment.
     pub fn set_threadgroup_memory(&self, index: usize, n_bytes: usize) {
+        let n_bytes = n_bytes
+            .checked_next_multiple_of(16)
+            .expect("threadgroup memory size overflow");
         unsafe {
             self.raw.setThreadgroupMemoryLength_atIndex(n_bytes, index);
         }

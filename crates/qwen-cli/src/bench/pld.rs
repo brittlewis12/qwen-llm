@@ -358,6 +358,31 @@ pub(crate) fn run_pld(args: PldArgs) -> Result<()> {
     stats.decode_ms = decode_start.elapsed().as_secs_f64() * 1e3;
     let candidate_total_ms = candidate_total_start.elapsed().as_secs_f64() * 1e3;
 
+    let decode_speedup = ref_decode_ms / stats.decode_ms;
+    let total_speedup = ref_total_ms / candidate_total_ms;
+    eprintln!(
+        "[pld] ref prefill={ref_prefill_ms:.1} decode={ref_decode_ms:.1} total={ref_total_ms:.1} ms"
+    );
+    eprintln!(
+        "[pld] pld index={:.3} prefill={candidate_prefill_ms:.1} decode={:.1} \
+         total={candidate_total_ms:.1} ms",
+        stats.index_build_ms, stats.decode_ms,
+    );
+    eprintln!(
+        "[pld] speedup decode={decode_speedup:.3}x total={total_speedup:.3}x \
+         attempts={} abstentions={} verifies={} restores={} accepted={}/{}",
+        stats.attempts,
+        stats.abstentions,
+        stats.verify_calls,
+        stats.restore_calls,
+        stats.accepted,
+        stats.drafts_scored,
+    );
+    eprintln!(
+        "[pld] phases lookup={:.3} update={:.3} serial={:.1} verify={:.1} restore={:.1} ms",
+        stats.lookup_ms, stats.index_update_ms, stats.serial_ms, stats.verify_ms, stats.restore_ms,
+    );
+
     let identical = ref_generated == candidate_generated;
     anyhow::ensure!(identical, "PLD generated tokens differ from serial target");
     let pending_terminal_token = *ref_generated.last().context("PLD emitted no tokens")?;
@@ -389,31 +414,6 @@ pub(crate) fn run_pld(args: PldArgs) -> Result<()> {
         stats.accepted,
         stats.drafts_scored,
         stats.restore_calls,
-    );
-
-    let decode_speedup = ref_decode_ms / stats.decode_ms;
-    let total_speedup = ref_total_ms / candidate_total_ms;
-    eprintln!(
-        "[pld] ref prefill={ref_prefill_ms:.1} decode={ref_decode_ms:.1} total={ref_total_ms:.1} ms"
-    );
-    eprintln!(
-        "[pld] pld index={:.3} prefill={candidate_prefill_ms:.1} decode={:.1} \
-         total={candidate_total_ms:.1} ms",
-        stats.index_build_ms, stats.decode_ms,
-    );
-    eprintln!(
-        "[pld] speedup decode={decode_speedup:.3}x total={total_speedup:.3}x \
-         attempts={} abstentions={} verifies={} restores={} accepted={}/{}",
-        stats.attempts,
-        stats.abstentions,
-        stats.verify_calls,
-        stats.restore_calls,
-        stats.accepted,
-        stats.drafts_scored,
-    );
-    eprintln!(
-        "[pld] phases lookup={:.3} update={:.3} serial={:.1} verify={:.1} restore={:.1} ms",
-        stats.lookup_ms, stats.index_update_ms, stats.serial_ms, stats.verify_ms, stats.restore_ms,
     );
 
     if let Some(output_path) = output {

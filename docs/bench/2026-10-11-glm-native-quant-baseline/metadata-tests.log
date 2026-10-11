@@ -1,0 +1,31 @@
+
+running 26 tests
+test glm5_next::tests::architectural_defaults_preserve_the_executed_graph ... ok
+test glm5_next::tests::binder_classifies_every_tensor_exactly_once ... ok
+test glm5_next::tests::binder_refuses_structural_drift ... ok
+test glm5_next::tests::binding_accepts_alternate_native_quant_mixtures ... ok
+test glm5_next::tests::binding_rejects_unimplemented_codecs_not_independently_typed_experts ... ok
+test glm5_next::tests::bool_and_integer_indexer_types_are_equivalent_but_shared_selection_is_not ... ok
+test glm5_next::tests::buffer_specs_are_unique_nonempty_and_granule_priced ... ok
+test glm5_next::tests::coverage_matrix_names_remaining_adaptations ... ok
+test glm5_next::tests::defaults_do_not_override_explicit_incompatible_or_malformed_values ... ok
+test glm5_next::tests::execution_gate_is_phase_specific ... ok
+test glm5_next::tests::expert_admission_uses_all_slot_capability_with_optional_grouped_prefill ... ok
+test glm5_next::tests::gsq3_saved_header_descriptor_binding ... ignored, CPU/header-only; requires GLM53_GSQ3_HEADER (saved .gguf.header.bin)
+test glm5_next::tests::ledger_terms_match_release_geometry ... ok
+test glm5_next::tests::max_capacity_is_the_largest_fitting_context ... ok
+test glm5_next::tests::metadata_fails_closed ... ok
+test glm5_next::tests::mxfp4_dense_is_admitted_in_both_modes_via_row_fallback ... ok
+test glm5_next::tests::native_expert_binding_covers_independent_gate_up_and_down_types ... ok
+test glm5_next::tests::nextn_omissions_preserve_binding_and_retained_bytes ... ok
+test glm5_next::tests::optional_storage_never_changes_the_45_block_trunk ... ok
+test glm5_next::tests::packed_activation_rows_back_padded_reads ... ok
+test glm5_next::tests::present_nextn_tensors_are_bounded_census_only ... ok
+test glm5_next::tests::release_artifact_census_and_allocation_plan ... ignored, CPU/header-only; requires GLM53_GGUF (GLM-5.3-Flash shard 1)
+test glm5_next::tests::release_metadata_binds_in_both_namespaces ... ok
+test glm5_next::tests::role_admission_corresponds_to_dispatch_capabilities ... ok
+test glm5_next::tests::singleton_conv_binding_preserves_bytes_and_supplies_canonical_execution_view ... ok
+test glm5_next::tests::snapshot_bytes_at_the_agent_prefix ... ok
+
+test result: ok. 24 passed; 0 failed; 2 ignored; 0 measured; 1884 filtered out; finished in 0.52s
+

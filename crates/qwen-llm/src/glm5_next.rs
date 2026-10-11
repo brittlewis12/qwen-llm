@@ -5,8 +5,9 @@
 //! family dispatch, chat capability or Metal execution. Reference semantics are
 //! llama.cpp `src/models/glm5-next.cpp`; see `docs/GLM53-FLASH-PLAN.md`.
 //!
-//! The release stores 46 blocks: 45 executed trunk blocks plus the NextN (MTP)
-//! block. NextN tensors are recognized and counted, but are never retained.
+//! The release executes 45 trunk blocks. Storage may additionally declare one
+//! unused NextN (MTP) block; its tensors are optional, counted when present,
+//! and never retained. Storage conventions do not establish artifact identity.
 
 use crate::gguf::{GgufError, GgufFile};
 use crate::metal::{RetainedStorageDisposition, RetainedStoragePlan, plan_retained_storage};
@@ -27,6 +28,7 @@ pub use memory::{Glm5NextMemoryLedger, Glm5NextPhasePeaks};
 pub const ARCHITECTURE_NAME: &str = "glm5-next";
 /// Spelling in the original unsloth shard; tensor bytes are identical.
 pub const LEGACY_ARCHITECTURE_NAME: &str = "glm5next";
+/// Original UD census including 29 NextN tensors; not a binding requirement.
 pub const RELEASE_TENSOR_COUNT: usize = 1412;
 /// GPT-2 byte-BPE vocabulary entries, including unused padding rows.
 pub const RELEASE_VOCAB_SIZE: u32 = 154_880;
@@ -75,7 +77,9 @@ pub struct BlockKind {
 pub struct Glm5NextConfig {
     /// `general.architecture` as stored; selects the metadata namespace.
     pub architecture: String,
+    /// Declared blocks: 45 trunk blocks plus zero or one unused NextN block.
     pub stored_block_count: u32,
+    /// Optional storage declaration, not a requirement that its tensors exist.
     pub nextn_layer_count: u32,
     pub context_length: u32,
     pub hidden_size: u32,
@@ -144,7 +148,10 @@ impl Glm5NextConfig {
                 format!("{} entries, metadata vocab_size {vocab_size}", tokens.len()),
             ));
         }
-        if ns.u32(metadata, "expert_gating_func")? != 2 {
+        // glm5-next.cpp::load_arch_hparams maps NONE (0, also the absent-key
+        // initializer in llama-hparams.h) to SIGMOID (2). Explicit alternative
+        // routing functions still fail; this is not a blanket fallback.
+        if !matches!(ns.u32_or(metadata, "expert_gating_func", 0)?, 0 | 2) {
             return Err(unsupported(
                 &ns.key("expert_gating_func"),
                 "only sigmoid routing (2) is implemented",
@@ -180,7 +187,11 @@ impl Glm5NextConfig {
         }
 
         let stored_block_count = ns.u32(metadata, "block_count")?;
-        let nextn_layer_count = ns.u32(metadata, "nextn_predict_layers")?;
+        // llama-hparams.h initializes n_layer_nextn=0; llama-model.cpp reads
+        // NEXTN_PREDICT_LAYERS optionally. Never infer an omitted layer from
+        // block_count: 46 without the declaration is a different trunk.
+        let nextn_layer_count = ns.u32_or(metadata, "nextn_predict_layers", 0)?;
+        validate_block_counts(ns, stored_block_count, nextn_layer_count)?;
         let leading_dense_block_count = ns.u32(metadata, "leading_dense_block_count")?;
         let executed = stored_block_count
             .checked_sub(nextn_layer_count)
@@ -217,11 +228,16 @@ impl Glm5NextConfig {
             &ns.key("swiglu_clamp_exp"),
             stored_block_count as usize,
         )?;
-        let shared_clamp = uniform_f32_array(
-            metadata,
-            &ns.key("swiglu_clamp_shexp"),
-            stored_block_count as usize,
-        )?;
+        // glm5-next.cpp copies swiglu_clamp_exp when SHEXP is absent.
+        let shared_clamp = if metadata.contains_key(&ns.key("swiglu_clamp_shexp")) {
+            uniform_f32_array(
+                metadata,
+                &ns.key("swiglu_clamp_shexp"),
+                stored_block_count as usize,
+            )?
+        } else {
+            swiglu_clamp
+        };
         if swiglu_clamp.to_bits() != shared_clamp.to_bits() {
             return Err(unsupported(
                 &ns.key("swiglu_clamp_shexp"),
@@ -230,6 +246,14 @@ impl Glm5NextConfig {
         }
         validate_indexer_selection(metadata, ns, stored_block_count, executed)?;
 
+        // glm5-next.cpp::load_arch_tensors defines shared FFN width as
+        // n_ff_exp(i) * n_expert_shared (it does not require a separate key).
+        // Preserve validation of an explicit key instead of overriding it.
+        let expert_ffn_size = ns.u32(metadata, "expert_feed_forward_length")?;
+        let shared_expert_count = ns.u32(metadata, "expert_shared_count")?;
+        let shared_width = expert_ffn_size
+            .checked_mul(shared_expert_count)
+            .ok_or(Glm5NextError::Overflow("shared expert width"))?;
         let config = Self {
             architecture: architecture.to_string(),
             stored_block_count,
@@ -243,9 +267,13 @@ impl Glm5NextConfig {
             layer_norm_epsilon: ns.f32(metadata, "attention.layer_norm_epsilon")?,
             expert_count: ns.u32(metadata, "expert_count")?,
             expert_used_count: ns.u32(metadata, "expert_used_count")?,
-            expert_ffn_size: ns.u32(metadata, "expert_feed_forward_length")?,
-            shared_expert_count: ns.u32(metadata, "expert_shared_count")?,
-            shared_expert_ffn_size: ns.u32(metadata, "expert_shared_feed_forward_length")?,
+            expert_ffn_size,
+            shared_expert_count,
+            shared_expert_ffn_size: ns.u32_or(
+                metadata,
+                "expert_shared_feed_forward_length",
+                shared_width,
+            )?,
             leading_dense_block_count,
             expert_weights_scale: ns.f32(metadata, "expert_weights_scale")?,
             swiglu_clamp,
@@ -273,9 +301,8 @@ impl Glm5NextConfig {
     /// reference evidence before they are admitted.
     pub fn validate_release(&self) -> Result<()> {
         let ns = Namespace(&self.architecture);
+        validate_block_counts(ns, self.stored_block_count, self.nextn_layer_count)?;
         for (suffix, actual, expected) in [
-            ("block_count", self.stored_block_count, 46),
-            ("nextn_predict_layers", self.nextn_layer_count, 1),
             ("embedding_length", self.hidden_size, 4096),
             ("feed_forward_length", self.dense_ffn_size, 12288),
             ("attention.head_count", self.head_count, 64),
@@ -662,6 +689,23 @@ pub struct BoundTensor<'a> {
     pub role: TensorRole,
 }
 
+impl BoundTensor<'_> {
+    /// Logical execution view; the stored descriptor and byte range remain
+    /// unchanged. llama.cpp's GLM convolution loader accepts [4,1,d,1] and
+    /// [4,1,d]. Our KDA encoders check exactly [4,1,d], so residency must use
+    /// this view (not assume that a kernel ignores trailing dimensions).
+    pub(crate) fn execution_shape(&self) -> &[u64] {
+        if self.role == TensorRole::Conv
+            && self.tensor.shape.len() == 4
+            && self.tensor.shape[3] == 1
+        {
+            &self.tensor.shape[..3]
+        } else {
+            &self.tensor.shape
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Glm5NextModel<'a> {
     pub config: Glm5NextConfig,
@@ -951,10 +995,9 @@ fn bind_moe<'a>(
     let selection_bias = b.take(&n("exp_probs_b.bias"), &[e], TensorRole::Vector)?;
     let gate_experts = b.take(&n("ffn_gate_exps.weight"), &[h, f, e], gate_up)?;
     let up_experts = b.take(&n("ffn_up_exps.weight"), &[h, f, e], gate_up)?;
-    // NextN is census-only. Executed banks must satisfy the composed pair
-    // contract; individual role coverage cannot establish mixed-pair support.
-    if !b.nextn && !crate::metal::all_slots_gate_up_supported(gate_experts.dtype, up_experts.dtype)
-    {
+    // Executed banks must satisfy the composed pair contract; individual
+    // role coverage cannot establish mixed-pair support.
+    if !crate::metal::all_slots_gate_up_supported(gate_experts.dtype, up_experts.dtype) {
         return Err(tensor_error(
             &n("ffn_up_exps.weight"),
             format!(
@@ -977,31 +1020,62 @@ fn bind_moe<'a>(
     })
 }
 
-/// NextN: an MLA block without hyper-connections, a MoE FFN and the four
-/// `nextn.*` tensors. Bound for census completeness only; the binder records
-/// every tensor from here on as [`TensorRole::NextN`].
+/// Census only: glm5-next.cpp::load_arch_tensors and llama-model.cpp::nextn_flags
+/// allow trunk-only storage. Accept any subset of the known unused NextN
+/// tensors, but still check every present name, shape, dtype layout and byte
+/// range. A declared NextN block is never an executed block or identity proof.
 fn bind_nextn_block(b: &mut Binder<'_>, c: &Glm5NextConfig, i: usize) -> Result<()> {
-    b.nextn = true;
     let h = u64::from(c.hidden_size);
-    b.take(
-        &format!("blk.{i}.attn_norm.weight"),
-        &[h],
-        TensorRole::NextN,
-    )?;
-    b.take(&format!("blk.{i}.ffn_norm.weight"), &[h], TensorRole::NextN)?;
-    bind_mla(b, c, i)?;
-    bind_moe(b, c, i)?;
-    b.take(
-        &format!("blk.{i}.nextn.eh_proj.weight"),
-        &[2 * h, h],
-        TensorRole::NextN,
-    )?;
-    for norm in ["enorm", "hnorm", "shared_head_norm"] {
-        b.take(
-            &format!("blk.{i}.nextn.{norm}.weight"),
-            &[h],
-            TensorRole::NextN,
-        )?;
+    let q = u64::from(c.q_lora_rank);
+    let kv = u64::from(c.kv_lora_rank);
+    let heads = u64::from(c.head_count);
+    let kd = u64::from(c.mla_key_head_dim);
+    let vd = u64::from(c.mla_value_head_dim);
+    let ih = u64::from(c.indexer_head_count);
+    let id = u64::from(c.indexer_head_dim);
+    let pool = u64::from(c.indexer_pool);
+    let e = u64::from(c.expert_count);
+    let f = u64::from(c.expert_ffn_size);
+    let sf = u64::from(c.shared_expert_ffn_size);
+    let vocab = u64::from(c.vocab_size);
+    let specs: &[(&str, &[u64])] = &[
+        ("attn_norm.weight", &[h]),
+        ("ffn_norm.weight", &[h]),
+        ("attn_q_a.weight", &[h, q]),
+        ("attn_q_a_norm.weight", &[q]),
+        ("attn_q_b.weight", &[q, heads * kd]),
+        ("attn_kv_a_mqa.weight", &[h, kv]),
+        ("attn_kv_a_norm.weight", &[kv]),
+        ("attn_k_b.weight", &[kd, kv, heads]),
+        ("attn_v_b.weight", &[kv, vd, heads]),
+        ("attn_output.weight", &[heads * vd, h]),
+        ("indexer.attn_q_b.weight", &[q, ih * id]),
+        ("indexer.attn_k.weight", &[h, id]),
+        ("indexer.k_norm.weight", &[id]),
+        ("indexer.k_norm.bias", &[id]),
+        ("indexer.proj.weight", &[h, ih]),
+        ("indexer_compressor_gate.weight", &[h, id]),
+        ("indexer_compressor_ape.weight", &[id, pool]),
+        ("ffn_gate_inp.weight", &[h, e]),
+        ("exp_probs_b.bias", &[e]),
+        ("ffn_gate_exps.weight", &[h, f, e]),
+        ("ffn_up_exps.weight", &[h, f, e]),
+        ("ffn_down_exps.weight", &[f, h, e]),
+        ("ffn_gate_shexp.weight", &[h, sf]),
+        ("ffn_up_shexp.weight", &[h, sf]),
+        ("ffn_down_shexp.weight", &[sf, h]),
+        ("nextn.eh_proj.weight", &[2 * h, h]),
+        ("nextn.enorm.weight", &[h]),
+        ("nextn.hnorm.weight", &[h]),
+        ("nextn.shared_head_norm.weight", &[h]),
+        ("nextn.embed_tokens.weight", &[h, vocab]),
+        ("nextn.shared_head_head.weight", &[h, vocab]),
+    ];
+    for (suffix, shape) in specs {
+        let name = format!("blk.{i}.{suffix}");
+        if b.inventory.contains_key(name.as_str()) {
+            b.take(&name, shape, TensorRole::NextN)?;
+        }
     }
     Ok(())
 }
@@ -1010,8 +1084,6 @@ struct Binder<'a> {
     inventory: BTreeMap<&'a str, &'a TensorDesc>,
     used: HashSet<&'a str>,
     trunk: Vec<BoundTensor<'a>>,
-    /// Once set, every subsequent tensor is NextN regardless of its role.
-    nextn: bool,
 }
 
 impl<'a> Binder<'a> {
@@ -1026,7 +1098,6 @@ impl<'a> Binder<'a> {
             inventory,
             used: HashSet::new(),
             trunk: Vec::with_capacity(tensors.len()),
-            nextn: false,
         })
     }
 
@@ -1035,13 +1106,19 @@ impl<'a> Binder<'a> {
             .inventory
             .get_key_value(name)
             .ok_or_else(|| tensor_error(name, "missing required tensor"))?;
-        if tensor.shape != shape {
+        // Only the exact extra dimension accepted by glm5-next.cpp's conv
+        // loader is equivalent; no squeezing, transposition or general reshape.
+        let singleton_conv = role == TensorRole::Conv
+            && shape.len() == 3
+            && tensor.shape.len() == 4
+            && tensor.shape[..3] == *shape
+            && tensor.shape[3] == 1;
+        if tensor.shape != shape && !singleton_conv {
             return Err(tensor_error(
                 name,
                 format!("expected shape {shape:?}, got {:?}", tensor.shape),
             ));
         }
-        let role = if self.nextn { TensorRole::NextN } else { role };
         validate_storage(tensor)?;
         if role != TensorRole::NextN && coverage::coverage(role, tensor.dtype).is_none() {
             return Err(tensor_error(
@@ -1119,9 +1196,32 @@ impl Namespace<'_> {
         required_u32(metadata, &self.key(suffix))
     }
 
+    fn u32_or(self, metadata: &BTreeMap<String, Value>, suffix: &str, default: u32) -> Result<u32> {
+        if metadata.contains_key(&self.key(suffix)) {
+            self.u32(metadata, suffix)
+        } else {
+            Ok(default)
+        }
+    }
+
     fn f32(self, metadata: &BTreeMap<String, Value>, suffix: &str) -> Result<f32> {
         required_f32(metadata, &self.key(suffix))
     }
+}
+
+fn validate_block_counts(ns: Namespace<'_>, stored: u32, nextn: u32) -> Result<()> {
+    // Bound the optional storage independently of the executed graph. This
+    // also protects callers constructing a config directly from subtraction
+    // underflow and prevents unbounded metadata-driven allocation.
+    if nextn > 1 || stored.checked_sub(nextn) != Some(45) {
+        return Err(unsupported(
+            &ns.key("block_count"),
+            format!(
+                "release expects 45 executed blocks and 0 or 1 unused NextN blocks; got stored={stored}, nextn={nextn}"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Every key in the architecture namespace must be understood. MTP-only keys
@@ -1195,7 +1295,7 @@ fn validate_metadata_features(metadata: &BTreeMap<String, Value>, ns: Namespace<
 /// Sparse selection as implemented: the incomplete pool's tail is selected
 /// (`kpool_select_tail`, llama.cpp default true when absent) and every MLA
 /// layer runs its own indexer (`indexer.types`, default all full when absent;
-/// a scalar or one entry per stored or executed block, 1 = full). Explicit
+/// a scalar or one entry per stored or executed block, 1/true = full). Explicit
 /// alternatives are refused rather than silently executed with the defaults.
 fn validate_indexer_selection(
     metadata: &BTreeMap<String, Value>,
@@ -1234,7 +1334,9 @@ fn validate_indexer_selection(
             None => vec![value],
         };
         for entry in entries {
-            match entry.as_u64() {
+            // llama-model-loader.cpp::get_arr<uint32_t> accepts BOOL as well
+            // as INT32/UINT32. Restrict equivalence to true/1, never truthiness.
+            match entry.as_bool().map(u64::from).or_else(|| entry.as_u64()) {
                 Some(1) => {}
                 Some(_) => {
                     return Err(unsupported(
@@ -1242,7 +1344,7 @@ fn validate_indexer_selection(
                         "shared indexer layers (reusing a previous selection) are not implemented",
                     ));
                 }
-                None => return Err(invalid(&types, "expected unsigned integers")),
+                None => return Err(invalid(&types, "expected booleans or unsigned integers")),
             }
         }
     }
@@ -1250,9 +1352,11 @@ fn validate_indexer_selection(
 }
 
 fn uniform_f32_array(metadata: &BTreeMap<String, Value>, key: &str, len: usize) -> Result<f32> {
-    let values = required(metadata, key)?
-        .as_array()
-        .ok_or_else(|| invalid(key, "expected number array"))?;
+    // glm5-next.cpp reads clamps with get_key_or_arr: a scalar broadcasts.
+    let value = required(metadata, key)?;
+    let Some(values) = value.as_array() else {
+        return required_f32(metadata, key);
+    };
     if values.len() != len {
         return Err(invalid(
             key,

@@ -70,6 +70,377 @@ fn config() -> Glm5NextConfig {
     Glm5NextConfig::from_metadata(&release_metadata(ARCHITECTURE_NAME)).unwrap()
 }
 
+fn trunk_only_metadata(arch: &str) -> BTreeMap<String, Value> {
+    let mut m = release_metadata(arch);
+    m.insert(format!("{arch}.block_count"), json!(45));
+    m.remove(&format!("{arch}.nextn_predict_layers"));
+    for suffix in [
+        "attention.head_count_kv",
+        "swiglu_clamp_exp",
+        "swiglu_clamp_shexp",
+    ] {
+        m.get_mut(&format!("{arch}.{suffix}"))
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .truncate(45);
+    }
+    m
+}
+
+#[test]
+fn architectural_defaults_preserve_the_executed_graph() {
+    // References: llama-hparams.h n_layer_nextn=0; glm5-next.cpp
+    // load_arch_hparams (sigmoid, shared clamp fallback, full indexers),
+    // load_arch_tensors (shared width = expert width * shared count).
+    for arch in [ARCHITECTURE_NAME, LEGACY_ARCHITECTURE_NAME] {
+        let explicit = Glm5NextConfig::from_metadata(&release_metadata(arch)).unwrap();
+        let mut m = release_metadata(arch);
+        for suffix in [
+            "expert_gating_func",
+            "expert_shared_feed_forward_length",
+            "swiglu_clamp_shexp",
+        ] {
+            m.remove(&format!("{arch}.{suffix}"));
+            assert_eq!(Glm5NextConfig::from_metadata(&m).unwrap(), explicit);
+        }
+        m.insert(format!("{arch}.swiglu_clamp_exp"), json!(10.0));
+        assert_eq!(Glm5NextConfig::from_metadata(&m).unwrap(), explicit);
+        m.insert(format!("{arch}.expert_gating_func"), json!(0)); // reference NONE -> sigmoid
+        assert_eq!(Glm5NextConfig::from_metadata(&m).unwrap(), explicit);
+
+        let mut gsq = trunk_only_metadata(arch);
+        gsq.remove(&format!("{arch}.expert_shared_feed_forward_length"));
+        gsq.insert(
+            format!("{arch}.attention.indexer.types"),
+            json!(vec![true; 45]),
+        );
+        let normalized = Glm5NextConfig::from_metadata(&gsq).unwrap();
+        let mut expected = explicit;
+        expected.stored_block_count = 45;
+        expected.nextn_layer_count = 0;
+        assert_eq!(normalized, expected);
+        gsq.insert(format!("{arch}.nextn_predict_layers"), json!(0));
+        assert_eq!(Glm5NextConfig::from_metadata(&gsq).unwrap(), expected);
+    }
+}
+
+#[test]
+fn defaults_do_not_override_explicit_incompatible_or_malformed_values() {
+    for (suffix, value) in [
+        ("expert_gating_func", json!(1)),
+        ("expert_gating_func", json!(3)),
+        ("expert_shared_feed_forward_length", json!(4096)),
+        ("swiglu_clamp_shexp", json!(9.0)),
+        ("swiglu_clamp_exp", json!(0.0)),
+        ("attention.indexer.types", json!(false)),
+        ("attention.indexer.types", json!(2)),
+        ("attention.indexer.types", json!(-1)),
+        ("attention.indexer.types", json!(1.0)),
+        ("attention.indexer.types", json!("true")),
+        ("attention.indexer.types", json!(vec![true; 44])),
+    ] {
+        let mut m = release_metadata(ARCHITECTURE_NAME);
+        m.insert(format!("glm5-next.{suffix}"), value.clone());
+        assert!(
+            Glm5NextConfig::from_metadata(&m).is_err(),
+            "{suffix}={value}"
+        );
+    }
+    for suffix in [
+        "nextn_predict_layers",
+        "expert_gating_func",
+        "expert_shared_feed_forward_length",
+        "swiglu_clamp_shexp",
+    ] {
+        let mut m = release_metadata(ARCHITECTURE_NAME);
+        m.insert(format!("glm5-next.{suffix}"), Value::Null);
+        assert!(Glm5NextConfig::from_metadata(&m).is_err(), "{suffix}");
+    }
+    // No reference-equivalent default was established for these omissions.
+    for suffix in [
+        "attention.layer_norm_epsilon",
+        "expert_weights_norm",
+        "expert_weights_scale",
+        "kda.gate_lower_bound",
+        "swiglu_clamp_exp",
+        "rope.dimension_count",
+    ] {
+        let mut m = release_metadata(ARCHITECTURE_NAME);
+        m.remove(&format!("glm5-next.{suffix}"));
+        assert!(
+            matches!(
+                Glm5NextConfig::from_metadata(&m),
+                Err(Glm5NextError::MissingMetadata(_))
+            ),
+            "{suffix}"
+        );
+    }
+}
+
+#[test]
+fn optional_storage_never_changes_the_45_block_trunk() {
+    for (stored, nextn) in [(44, 0), (45, 1), (46, 0), (47, 2), (0, 1), (u32::MAX, 0)] {
+        let mut c = config();
+        c.stored_block_count = stored;
+        c.nextn_layer_count = nextn;
+        assert!(c.validate_release().is_err(), "{stored}/{nextn}");
+        let mut m = release_metadata(ARCHITECTURE_NAME);
+        m.insert("glm5-next.block_count".into(), json!(stored));
+        m.insert("glm5-next.nextn_predict_layers".into(), json!(nextn));
+        assert!(Glm5NextConfig::from_metadata(&m).is_err());
+    }
+    let mut m = release_metadata(ARCHITECTURE_NAME);
+    m.remove("glm5-next.nextn_predict_layers");
+    assert!(
+        Glm5NextConfig::from_metadata(&m).is_err(),
+        "46 cannot imply NextN"
+    );
+}
+
+#[test]
+fn bool_and_integer_indexer_types_are_equivalent_but_shared_selection_is_not() {
+    let expected = config();
+    for value in [
+        json!(true),
+        json!(1),
+        json!(vec![true; 45]),
+        json!(vec![true; 46]),
+        json!(vec![1; 45]),
+        json!(vec![1; 46]),
+    ] {
+        let mut m = release_metadata(ARCHITECTURE_NAME);
+        m.insert("glm5-next.attention.indexer.types".into(), value);
+        assert_eq!(Glm5NextConfig::from_metadata(&m).unwrap(), expected);
+    }
+    for value in [json!(false), json!(0), json!(2)] {
+        let mut types = vec![json!(true); 45];
+        types[7] = value;
+        let mut m = release_metadata(ARCHITECTURE_NAME);
+        m.insert("glm5-next.attention.indexer.types".into(), json!(types));
+        assert!(Glm5NextConfig::from_metadata(&m).is_err());
+    }
+}
+
+#[test]
+fn nextn_omissions_preserve_binding_and_retained_bytes() {
+    let tensors = release_tensors();
+    let full = Glm5NextModel::bind(config(), &tensors).unwrap();
+    let trunk: Vec<_> = tensors
+        .iter()
+        .filter(|t| !t.name.starts_with("blk.45."))
+        .cloned()
+        .collect();
+    for c in [
+        config(),
+        Glm5NextConfig::from_metadata(&trunk_only_metadata(ARCHITECTURE_NAME)).unwrap(),
+    ] {
+        let model = Glm5NextModel::bind(c, &trunk).unwrap();
+        assert!(model.nextn.is_empty());
+        assert_eq!(model.nextn_bytes, 0);
+        assert_eq!(model.blocks.len(), 45);
+        assert_eq!(model.trunk_bytes, full.trunk_bytes);
+        assert_eq!(
+            model.retained_tensors().len(),
+            full.retained_tensors().len()
+        );
+        assert_eq!(model.config.blocks, full.config.blocks);
+    }
+    // Every known tensor is independently optional. Each present descriptor
+    // is still counted, checked, and excluded from execution/retention.
+    for nextn in &full.nextn {
+        let mut partial = trunk.clone();
+        partial.push((*nextn).clone());
+        let model = Glm5NextModel::bind(config(), &partial).unwrap();
+        assert_eq!(model.nextn.len(), 1);
+        assert_eq!(model.nextn_bytes, nextn.n_bytes);
+        assert_eq!(model.trunk_bytes, full.trunk_bytes);
+        assert!(
+            model
+                .retained_tensors()
+                .iter()
+                .all(|t| !t.name.starts_with("blk.45."))
+        );
+    }
+    let no_nextn = Glm5NextConfig::from_metadata(&trunk_only_metadata(ARCHITECTURE_NAME)).unwrap();
+    assert!(
+        Glm5NextModel::bind(no_nextn, &tensors).is_err(),
+        "undeclared block"
+    );
+}
+
+#[test]
+fn present_nextn_tensors_are_bounded_census_only() {
+    let mut tensors = release_tensors();
+    // Optional separate MTP embedding/head from glm5-next.cpp; no new roles
+    // or executable tensors are introduced by recognizing these names.
+    for name in ["nextn.embed_tokens.weight", "nextn.shared_head_head.weight"] {
+        let mut t = tensors[0].clone();
+        t.name = format!("blk.45.{name}");
+        tensors.push(t);
+    }
+    let model = Glm5NextModel::bind(config(), &tensors).unwrap();
+    assert_eq!(model.nextn.len(), 31);
+    assert_eq!(model.trunk.len(), 1383);
+    for mutation in 0..6 {
+        let mut bad = tensors.clone();
+        let t = bad.last_mut().unwrap();
+        match mutation {
+            0 => t.shape[0] += 1,
+            1 => t.n_bytes -= 1,
+            2 => t.data_offset = u64::MAX,
+            3 => t.name = "blk.45.unknown.weight".into(),
+            4 => t.dtype = GgmlType::Unknown,
+            _ => t.name = "blk.46.nextn.embed_tokens.weight".into(),
+        }
+        assert!(
+            Glm5NextModel::bind(config(), &bad).is_err(),
+            "mutation {mutation}"
+        );
+    }
+}
+
+#[test]
+fn singleton_conv_binding_preserves_bytes_and_supplies_canonical_execution_view() {
+    let baseline = release_tensors();
+    let expected = Glm5NextModel::bind(config(), &baseline).unwrap();
+    let mut padded = baseline.clone();
+    for t in &mut padded {
+        if t.name.contains(".ssm_conv1d_") {
+            t.shape.push(1);
+        }
+    }
+    let model = Glm5NextModel::bind(config(), &padded).unwrap();
+    assert_eq!(model.trunk_bytes, expected.trunk_bytes);
+    for (bound, original) in model.trunk.iter().zip(&expected.trunk) {
+        assert_eq!(bound.execution_shape(), original.tensor.shape);
+        assert_eq!(bound.tensor.n_bytes, original.tensor.n_bytes);
+        assert_eq!(bound.tensor.data_offset, original.tensor.data_offset);
+        assert_eq!(bound.tensor.dtype, original.tensor.dtype);
+        if bound.role == TensorRole::Conv {
+            assert_eq!(bound.tensor.shape, [4, 1, 8192, 1]);
+            assert_eq!(bound.execution_shape(), [4, 1, 8192]);
+            assert_eq!(bound.tensor.n_bytes, 4 * 8192 * 4);
+        }
+    }
+    // Combined GSQ conventions: no NextN declaration/tensors, no redundant
+    // shared width, boolean indexer array, and original rank-four convs.
+    let mut gsq_metadata = trunk_only_metadata(ARCHITECTURE_NAME);
+    gsq_metadata.remove("glm5-next.expert_shared_feed_forward_length");
+    gsq_metadata.insert(
+        "glm5-next.attention.indexer.types".into(),
+        json!(vec![true; 45]),
+    );
+    let gsq_tensors: Vec<_> = padded
+        .iter()
+        .filter(|t| !t.name.starts_with("blk.45."))
+        .cloned()
+        .collect();
+    let gsq = Glm5NextModel::bind(
+        Glm5NextConfig::from_metadata(&gsq_metadata).unwrap(),
+        &gsq_tensors,
+    )
+    .unwrap();
+    assert_eq!(gsq.trunk_bytes, expected.trunk_bytes);
+    assert_eq!(gsq.config.blocks, expected.config.blocks);
+    assert!(gsq.nextn.is_empty());
+    for (bound, original) in gsq.trunk.iter().zip(&expected.trunk) {
+        assert_eq!(bound.tensor.name, original.tensor.name);
+        assert_eq!(bound.role, original.role);
+        assert_eq!(bound.execution_shape(), original.execution_shape());
+    }
+    for shape in [
+        vec![4, 1, 8192, 2],
+        vec![4, 8192],
+        vec![1, 4, 8192],
+        vec![4, 1, 8192, 1, 1],
+    ] {
+        let mut bad = baseline.clone();
+        bad.iter_mut()
+            .find(|t| t.name == "blk.0.ssm_conv1d_q.weight")
+            .unwrap()
+            .shape = shape;
+        assert!(Glm5NextModel::bind(config(), &bad).is_err());
+    }
+    let t = padded
+        .iter_mut()
+        .find(|t| t.name == "blk.0.ssm_conv1d_q.weight")
+        .unwrap();
+    t.n_bytes -= 4;
+    assert!(Glm5NextModel::bind(config(), &padded).is_err());
+    let mut bad = baseline;
+    bad[0].shape.push(1); // No generic singleton relaxation for other roles.
+    assert!(Glm5NextModel::bind(config(), &bad).is_err());
+}
+
+/// Replay the saved results-v2/gsq3 raw header, never a weight file. This is
+/// descriptor binding only: it does not call GgufFile::open/from_gguf, verify
+/// payload identity, admit execution, or touch Metal. The pinned remote length
+/// is used solely to check the descriptor ranges against the audit receipt.
+#[test]
+#[ignore = "CPU/header-only; requires GLM53_GSQ3_HEADER (saved .gguf.header.bin)"]
+fn gsq3_saved_header_descriptor_binding() {
+    use sha2::{Digest, Sha256};
+    let path = std::env::var_os("GLM53_GSQ3_HEADER").expect("GLM53_GSQ3_HEADER required");
+    let header = std::fs::read(path).unwrap();
+    assert_eq!(header.len(), 9_517_272);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&header)),
+        "856fb2662ccea169fd6c2d6fde1bd908a11c12cb54999f9badc12b32b053dadd"
+    );
+    let data_start = (header.len() as u64).div_ceil(32) * 32;
+    let mut container =
+        gguf_rs::GGUFContainer::new(Box::new(std::io::Cursor::new(header)), u64::MAX)
+            .unwrap()
+            .with_input_len(117_481_680_096);
+    let decoded = container.decode().unwrap();
+    let c = Glm5NextConfig::from_metadata(decoded.metadata()).unwrap();
+    assert_eq!((c.stored_block_count, c.nextn_layer_count), (45, 0));
+    assert_eq!(c.shared_expert_ffn_size, 2048);
+    let tensors: Vec<_> = decoded
+        .tensors()
+        .iter()
+        .map(|t| {
+            // gguf-rs pads shapes to rank four. Match GgufFile's ordinary shape
+            // decoding except preserve conv's fourth 1 to exercise binding too.
+            let mut shape = t.shape.clone();
+            if !t.name.contains(".ssm_conv1d_") {
+                while shape.len() > 1 && shape.last() == Some(&1) {
+                    shape.pop();
+                }
+            }
+            TensorDesc {
+                name: t.name.clone(),
+                shape,
+                dtype: GgmlType::from_raw(t.kind),
+                shard_idx: 0,
+                data_offset: data_start + t.offset,
+                n_bytes: t.size,
+            }
+        })
+        .collect();
+    let model = Glm5NextModel::bind(c, &tensors).unwrap();
+    assert_eq!(model.trunk.len(), 1383);
+    assert!(model.nextn.is_empty());
+    assert_eq!(model.nextn_bytes, 0);
+    assert_eq!(model.blocks.len(), 45);
+    assert_eq!(
+        model
+            .trunk
+            .iter()
+            .filter(|t| t.role == TensorRole::Conv)
+            .count(),
+        102
+    );
+    assert!(
+        model
+            .trunk
+            .iter()
+            .filter(|t| t.role == TensorRole::Conv)
+            .all(|t| t.execution_shape() == [4, 1, 8192] && t.tensor.shape == [4, 1, 8192, 1])
+    );
+}
+
 /// Release-shaped descriptors with the census dtypes; offsets are synthetic.
 fn release_tensors() -> Vec<TensorDesc> {
     use GgmlType::*;

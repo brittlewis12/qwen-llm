@@ -358,13 +358,13 @@ impl Glm5NextWeights {
                 32,
             )?);
         }
-        let requests = model.retained_tensors();
-        let mut views = HashMap::with_capacity(requests.len());
-        for (entry, desc) in plan.entries.iter().zip(&requests) {
+        let mut views = HashMap::with_capacity(model.trunk.len());
+        for (entry, bound) in plan.entries.iter().zip(&model.trunk) {
+            let desc = bound.tensor;
             if entry.name != desc.name {
                 return invalid("retained entry order drift");
             }
-            let tensor = match entry.disposition {
+            let mut tensor = match entry.disposition {
                 RetainedStorageDisposition::View { window_index, .. } => {
                     let (eligibility, tensor) = backings[window_index].tensor(desc)?;
                     tensor.ok_or_else(|| {
@@ -381,6 +381,9 @@ impl Glm5NextWeights {
                 )?,
                 _ => return invalid(format!("{}: alias dispositions are not used", desc.name)),
             };
+            // Binding checked byte equivalence; KDA checks the canonical 3D
+            // conv shape even when the stored descriptor carries a fourth 1.
+            tensor.shape = bound.execution_shape().to_vec();
             views.insert(desc.name.clone(), tensor);
         }
         let mut take = |desc: &&TensorDesc| -> Result<MetalTensor> {

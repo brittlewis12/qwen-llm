@@ -1,0 +1,15 @@
+
+running 1 test
+test glm5_next_metal::tests::packed_fast_matches_exact_over_a_grouped_block_and_tail ... 2026-10-11 13:14:15.863 qwen_llm-de358c0a63485fd8[364:19779164] Metal API Validation Enabled
+session buffers: observed 789397504 of 792576000 priced (99.6%)
+Exact: 200 tokens in 18468.0 ms
+session buffers: observed 789397504 of 792576000 priced (99.6%)
+Fast: 200 tokens in 1436.6 ms
+fast vs exact after 200 tokens: kl 5.962e-6
+decode step 0: kl 3.698e-6
+decode step 1: kl 2.893e-6
+decode step 2: kl 2.563e-6
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1909 filtered out; finished in 20.55s
+

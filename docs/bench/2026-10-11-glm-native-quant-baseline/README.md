@@ -77,8 +77,9 @@ Artifacts used locally:
 
 ## Remaining Boundaries
 
-The following describes the initial checkpoint; mixed expert support is now
-implemented in the follow-up documented in `MIXED-EXPERTS.md`.
+The following describes the initial checkpoint; mixed expert support and
+equivalent metadata normalization are now implemented in the follow-ups
+documented in `MIXED-EXPERTS.md` and `METADATA.md`.
 
 Mixed gate/up expert dtypes and formats without an all-slot clamped expert
 implementation remain unsupported. This checkpoint does not normalize alternate

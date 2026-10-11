@@ -87,7 +87,7 @@ pub(super) fn phase_moe_route_deep_split_enabled() -> bool {
     })
 }
 
-pub(super) fn moe_routed_gate_up_decode_supported(gate: GgmlType, up: GgmlType) -> bool {
+pub(crate) fn moe_routed_gate_up_decode_supported(gate: GgmlType, up: GgmlType) -> bool {
     matches!(
         (gate, up),
         (GgmlType::Q4_K, GgmlType::Q4_K)
@@ -99,6 +99,20 @@ pub(super) fn moe_routed_gate_up_decode_supported(gate: GgmlType, up: GgmlType) 
             | (GgmlType::IQ4_XS, GgmlType::IQ4_XS)
             | (GgmlType::BF16, GgmlType::BF16)
             | (GgmlType::F32, GgmlType::F32)
+    )
+}
+
+pub(crate) fn moe_routed_down_decode_supported(down: GgmlType) -> bool {
+    matches!(
+        down,
+        GgmlType::Q4_K
+            | GgmlType::Q5_K
+            | GgmlType::Q6_K
+            | GgmlType::Q8_0
+            | GgmlType::IQ4_NL
+            | GgmlType::IQ4_XS
+            | GgmlType::BF16
+            | GgmlType::F32
     )
 }
 
@@ -402,17 +416,7 @@ impl<'a> MetalForward<'a> {
                 dtype: moe.gate_exps.dtype,
             });
         }
-        if !matches!(
-            moe.down_exps.dtype,
-            GgmlType::Q4_K
-                | GgmlType::Q5_K
-                | GgmlType::Q6_K
-                | GgmlType::Q8_0
-                | GgmlType::IQ4_NL
-                | GgmlType::IQ4_XS
-                | GgmlType::BF16
-                | GgmlType::F32
-        ) {
+        if !moe_routed_down_decode_supported(moe.down_exps.dtype) {
             return Err(MfError::UnsupportedDtype {
                 name: "MoE routed down expert bank".into(),
                 dtype: moe.down_exps.dtype,

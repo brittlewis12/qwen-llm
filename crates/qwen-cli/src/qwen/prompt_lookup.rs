@@ -2,6 +2,10 @@
 
 use super::*;
 
+#[cfg(test)]
+#[path = "prompt_lookup_tests.rs"]
+mod tests;
+
 pub(crate) struct PromptLookupGeneration {
     pub(crate) generation: GenerationResult,
     pub(crate) stats: PromptLookupDecodeStats,

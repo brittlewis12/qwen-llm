@@ -1190,7 +1190,11 @@ fn project_info(model: &Path, gguf: &GgufFile) -> Result<serde_json::Value> {
                 Ok(model) => {
                     match qwen_llm::metal_dflash::ensure_prompt_lookup_n8_supported_for_gguf(&model)
                     {
-                        Ok(()) => serde_json::json!({ "status": "permitted" }),
+                        Ok(()) => serde_json::json!({
+                            "status": "permitted",
+                            "experimental": true,
+                            "message": "packed arithmetic may change tokens relative to ordinary decoding",
+                        }),
                         Err(message) => serde_json::json!({
                             "status": "unsupported",
                             "code": "layout_not_qualified",

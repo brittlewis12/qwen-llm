@@ -14693,7 +14693,7 @@ mod prompt_lookup_layout_gate {
             gate: GgmlType::Q4_K,
             up: GgmlType::Q4_K,
             down: GgmlType::Q6_K,
-            moe: false,
+            routed: None,
         }
     }
 
@@ -14763,23 +14763,78 @@ mod prompt_lookup_layout_gate {
         blocks[17].gate = GgmlType::I32;
         let err = check_prompt_lookup_n8_layout(&QWEN3_27B, GgmlType::Q6_K, blocks).unwrap_err();
         assert!(
-            err.contains("block 17 has gate/up/down=I32/Q4_K/Q6_K, moe=false"),
+            err.contains("block 17 has gate/up/down=I32/Q4_K/Q6_K"),
             "{err}"
         );
     }
 
     #[test]
-    fn routed_experts_are_refused() {
-        let mut blocks = vec![q4km_block(); 64];
-        blocks[0].moe = true;
-        let err = check_prompt_lookup_n8_layout(&QWEN3_27B, GgmlType::Q6_K, blocks).unwrap_err();
-        assert!(err.contains("moe=true"), "{err}");
+    fn routed_experts_use_executable_dispatch_not_artifact_quant_mixtures() {
         let arch = crate::model::Arch {
             kind: crate::model::ArchKind::Moe,
             ..QWEN3_27B
         };
-        let err =
-            check_prompt_lookup_n8_layout(&arch, GgmlType::Q6_K, std::iter::empty()).unwrap_err();
-        assert!(err.contains("unresolved numerical differences"), "{err}");
+        for gate in [
+            GgmlType::Q4_K,
+            GgmlType::Q5_K,
+            GgmlType::Q6_K,
+            GgmlType::Q8_0,
+            GgmlType::IQ3_XXS,
+            GgmlType::IQ3_S,
+            GgmlType::IQ4_XS,
+            GgmlType::BF16,
+            GgmlType::F32,
+        ] {
+            for down in [
+                GgmlType::Q4_K,
+                GgmlType::Q5_K,
+                GgmlType::Q6_K,
+                GgmlType::Q8_0,
+                GgmlType::IQ4_NL,
+                GgmlType::IQ4_XS,
+                GgmlType::BF16,
+                GgmlType::F32,
+            ] {
+                let block = PromptLookupBlockLayout {
+                    routed: Some([gate, gate, down]),
+                    ..q4km_block()
+                };
+                assert_eq!(
+                    check_prompt_lookup_n8_layout(&arch, GgmlType::Q8_0, [block]),
+                    Ok(())
+                );
+            }
+        }
+        for routed in [
+            [GgmlType::Q4_K, GgmlType::Q6_K, GgmlType::Q6_K],
+            [GgmlType::Q4_K, GgmlType::Q4_K, GgmlType::IQ3_XXS],
+            [GgmlType::I32; 3],
+        ] {
+            let block = PromptLookupBlockLayout {
+                routed: Some(routed),
+                ..q4km_block()
+            };
+            let err = check_prompt_lookup_n8_layout(&arch, GgmlType::Q8_0, [block]).unwrap_err();
+            assert!(
+                err.contains("no routed expert dispatch for block 0"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn routed_presence_must_match_architecture() {
+        let arch = crate::model::Arch {
+            kind: crate::model::ArchKind::Moe,
+            ..QWEN3_27B
+        };
+        let err = check_prompt_lookup_n8_layout(&arch, GgmlType::Q8_0, [q4km_block()]).unwrap_err();
+        assert!(err.contains("routed expert presence"), "{err}");
+        let block = PromptLookupBlockLayout {
+            routed: Some([GgmlType::Q4_K; 3]),
+            ..q4km_block()
+        };
+        let err = check_prompt_lookup_n8_layout(&QWEN3_27B, GgmlType::Q8_0, [block]).unwrap_err();
+        assert!(err.contains("routed expert presence"), "{err}");
     }
 }

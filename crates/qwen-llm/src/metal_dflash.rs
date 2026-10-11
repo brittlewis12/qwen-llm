@@ -280,10 +280,11 @@ pub struct PromptLookupBlockLayout {
     pub gate: GgmlType,
     pub up: GgmlType,
     pub down: GgmlType,
-    pub moe: bool,
+    /// Routed expert gate/up/down banks, in addition to the shared FFN above.
+    pub routed: Option<[GgmlType; 3]>,
 }
 
-/// Prompt lookup needs no MTP head and imposes no additional dense model-size
+/// Prompt lookup needs no MTP head and imposes no additional model-size
 /// or quant-mixture restriction. The verifier batches supported operations and
 /// otherwise uses the ordinary GEMV dispatch. Model loading and the encoders
 /// still validate geometry. Packed arithmetic is not scalar-bit-identical.
@@ -292,28 +293,41 @@ pub fn check_prompt_lookup_n8_layout(
     lm_head: GgmlType,
     blocks: impl IntoIterator<Item = PromptLookupBlockLayout>,
 ) -> Result<(), String> {
-    use crate::metal_forward::mat_vec_dispatch_supported;
-    if arch.kind == crate::model::ArchKind::Moe {
-        return Err(
-            "packed prompt lookup on MoE targets has unresolved numerical differences in resumed state; ordinary decoding remains available".into(),
-        );
-    }
+    use crate::metal_forward::{
+        mat_vec_dispatch_supported, moe_routed_down_decode_supported,
+        moe_routed_gate_up_decode_supported,
+    };
     if !mat_vec_dispatch_supported(lm_head) {
         return Err(format!(
             "prompt lookup has no target lm_head dispatch for {lm_head:?}"
         ));
     }
     for (index, block) in blocks.into_iter().enumerate() {
-        if block.moe
-            || !mat_vec_dispatch_supported(block.gate)
+        if !mat_vec_dispatch_supported(block.gate)
             || !mat_vec_dispatch_supported(block.up)
             || !mat_vec_dispatch_supported(block.down)
         {
             return Err(format!(
-                "prompt lookup requires executable dense FFN operations; block \
-                 {index} has gate/up/down={:?}/{:?}/{:?}, moe={}",
-                block.gate, block.up, block.down, block.moe
+                "prompt lookup requires executable dense/shared FFN operations; block \
+                 {index} has gate/up/down={:?}/{:?}/{:?}",
+                block.gate, block.up, block.down
             ));
+        }
+        if block.routed.is_some() != (arch.kind == crate::model::ArchKind::Moe) {
+            return Err(format!(
+                "prompt lookup block {index} routed expert presence does not match {:?} architecture",
+                arch.kind
+            ));
+        }
+        if let Some([gate, up, down]) = block.routed {
+            if !moe_routed_gate_up_decode_supported(gate, up)
+                || !moe_routed_down_decode_supported(down)
+            {
+                return Err(format!(
+                    "prompt lookup has no routed expert dispatch for block {index} \
+                     gate/up/down={gate:?}/{up:?}/{down:?}"
+                ));
+            }
         }
     }
     Ok(())
@@ -333,13 +347,19 @@ pub fn ensure_prompt_lookup_n8_supported_for_gguf(
                 gate: block.ffn_gate.dtype,
                 up: block.ffn_up.dtype,
                 down: block.ffn_down.dtype,
-                moe: block.ffn_moe.is_some(),
+                routed: block
+                    .ffn_moe
+                    .as_ref()
+                    .map(|moe| [moe.gate_exps.dtype, moe.up_exps.dtype, moe.down_exps.dtype]),
             },
             Block::Attn(block) => PromptLookupBlockLayout {
                 gate: block.ffn_gate.dtype,
                 up: block.ffn_up.dtype,
                 down: block.ffn_down.dtype,
-                moe: block.ffn_moe.is_some(),
+                routed: block
+                    .ffn_moe
+                    .as_ref()
+                    .map(|moe| [moe.gate_exps.dtype, moe.up_exps.dtype, moe.down_exps.dtype]),
             },
         }),
     )
@@ -354,13 +374,19 @@ pub fn ensure_prompt_lookup_n8_supported(model: &MetalModel) -> Result<(), Strin
                 gate: block.ffn_gate.dtype,
                 up: block.ffn_up.dtype,
                 down: block.ffn_down.dtype,
-                moe: block.ffn_moe.is_some(),
+                routed: block
+                    .ffn_moe
+                    .as_ref()
+                    .map(|moe| [moe.gate_exps.dtype, moe.up_exps.dtype, moe.down_exps.dtype]),
             },
             MetalBlock::Attn(block) => PromptLookupBlockLayout {
                 gate: block.ffn_gate.dtype,
                 up: block.ffn_up.dtype,
                 down: block.ffn_down.dtype,
-                moe: block.ffn_moe.is_some(),
+                routed: block
+                    .ffn_moe
+                    .as_ref()
+                    .map(|moe| [moe.gate_exps.dtype, moe.up_exps.dtype, moe.down_exps.dtype]),
             },
         }),
     )

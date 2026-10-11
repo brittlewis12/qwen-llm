@@ -1,0 +1,57 @@
+
+running 23 tests
+test metal::iq2_xs::tests::iq2_xs_dense_all_coefficients_match_codec_basis ... 2026-10-11 14:27:24.443 qwen_llm-de358c0a63485fd8[43973:21107716] Metal API Validation Enabled
+ok
+test metal::iq2_xs::tests::iq2_xs_dense_capacity_devices_and_address_boundaries ... ok
+test metal::iq2_xs::tests::iq2_xs_dense_concurrent_shared_inputs_distinct_outputs_and_counts ... ok
+test metal::iq2_xs::tests::iq2_xs_dense_f64_tails_offsets_flat_views_and_real_k ... ok
+test metal::iq2_xs::tests::iq2_xs_dense_forced_scalar_and_production_fallback_match_incumbent ... ok
+test metal::iq2_xs::tests::iq2_xs_dense_foreign_device_bindings_and_encoder_rejected_when_available ... ok
+test metal::iq2_xs::tests::iq2_xs_dense_invalid_bindings_reject_without_dispatch_or_hazard_notes ... ok
+test metal::iq2_xs::tests::iq2_xs_dense_layout_grid_sign_scale_coverage ... ok
+test metal::iq2_xs::tests::iq2_xs_dense_n1_controls_unchanged ... 
+running 1 test
+test metal::iq2_xs::tests::iq2_xs_dense_n1_controls_unchanged ... 2026-10-11 14:27:24.646 qwen_llm-de358c0a63485fd8[43976:21107819] Metal API Validation Enabled
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1926 filtered out; finished in 0.04s
+
+
+running 1 test
+test metal::iq2_xs::tests::iq2_xs_dense_n1_controls_unchanged ... 2026-10-11 14:27:24.692 qwen_llm-de358c0a63485fd8[43977:21107825] Metal API Validation Enabled
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1926 filtered out; finished in 0.03s
+
+
+running 1 test
+test metal::iq2_xs::tests::iq2_xs_dense_n1_controls_unchanged ... 2026-10-11 14:27:24.730 qwen_llm-de358c0a63485fd8[43978:21107830] Metal API Validation Enabled
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1926 filtered out; finished in 0.03s
+
+
+running 1 test
+test metal::iq2_xs::tests::iq2_xs_dense_n1_controls_unchanged ... 2026-10-11 14:27:24.766 qwen_llm-de358c0a63485fd8[43979:21107837] Metal API Validation Enabled
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1926 filtered out; finished in 0.03s
+
+ok
+test metal::iq2_xs::tests::iq2_xs_dense_production_auto_preflight_fallback_and_strict_mma ... ok
+test metal::iq2_xs::tests::iq2_xs_dense_scale_extremes_keep_f32_per_row ... ok
+test metal::iq2_xs::tests::iq2_xs_dense_scope_restores_production_counts_unwind_and_threads ... ok
+test metal::iq2_xxs::tests::iq2_xxs_all_grid_sign_scale_positions_match_codec_basis ... ok
+test metal::iq2_xxs::tests::iq2_xxs_apple7_support_contract_and_scoped_injection ... ok
+test metal::iq2_xxs::tests::iq2_xxs_auto_preflights_capability_and_alignment_fallback ... ok
+test metal::iq2_xxs::tests::iq2_xxs_capacity_device_ids_and_dimensions ... ok
+test metal::iq2_xxs::tests::iq2_xxs_concurrent_shared_inputs_distinct_outputs_match_serial ... ok
+test metal::iq2_xxs::tests::iq2_xxs_f32_paths_match_f64_tails_offsets_and_real_k ... ok
+test metal::iq2_xxs::tests::iq2_xxs_f32_scale_extremes_do_not_stage_half ... ok
+test metal::iq2_xxs::tests::iq2_xxs_foreign_device_bindings_and_encoder_are_rejected_when_available ... ok
+test metal::iq2_xxs::tests::iq2_xxs_invalid_bindings_do_not_dispatch_on_serial_or_concurrent ... ok
+test metal::iq2_xxs::tests::iq2_xxs_layout_table_and_payload_coverage ... ok
+test metal::iq2_xxs::tests::iq2_xxs_unsupported_apple7_falls_back_before_pipeline_lookup ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 1904 filtered out; finished in 0.58s
+

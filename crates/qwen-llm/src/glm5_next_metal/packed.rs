@@ -52,6 +52,10 @@ mod mla_tail;
 mod f32_down_ab;
 
 #[cfg(test)]
+#[path = "tests/hc_decode_ab.rs"]
+mod hc_decode_ab;
+
+#[cfg(test)]
 thread_local! {
     static ABSORB_TAIL: std::cell::Cell<(Option<bool>, usize)> = const { std::cell::Cell::new((None, 0)) };
 }

@@ -508,8 +508,153 @@ pub struct Mhc4PreInputs<'a> {
 pub struct Mhc4PreGenericScratch<'a> {
     /// `[4 * hidden, rows]`, with a 16-byte-aligned offset.
     pub normalized: &'a MetalTensor,
-    /// `[4 * hidden]`, filled with ones by the encoder for unweighted RMS.
+    /// `[4 * hidden]`, filled with ones for RMS, then reused by eligible decode
+    /// as `[24, ceil(4 * hidden / 256)]` partial dots. Contents are unspecified
+    /// after encoding; each call initializes the RMS weights again.
     pub ones: &'a MetalTensor,
+}
+
+#[cfg(test)]
+thread_local! {
+    static MHC4_PRE_GENERIC_BASELINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test-only same-binary A/B control. `true` forces the original generic
+/// composition; `false` allows the decode candidate. Thread-local, restores
+/// nested scopes and unwinding, and has no production environment toggle.
+#[cfg(test)]
+pub fn with_mhc4_pre_generic_baseline_override<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            MHC4_PRE_GENERIC_BASELINE.with(|slot| slot.set(self.0));
+        }
+    }
+    let _restore = Restore(MHC4_PRE_GENERIC_BASELINE.with(|slot| slot.replace(enabled)));
+    f()
+}
+
+fn mhc4_pre_native_pipeline_name(dtype: GgmlType, width: usize, rows: usize) -> Option<String> {
+    #[cfg(test)]
+    if MHC4_PRE_GENERIC_BASELINE.with(|slot| slot.get()) {
+        return None;
+    }
+    let chunks = width.div_ceil(MHC4_PRE_CHUNK);
+    if rows != 1
+        || width == 0
+        || !width.is_multiple_of(32)
+        || chunks.checked_mul(MHC_MIXES)? > width
+    {
+        return None;
+    }
+    // The 17 shared F32 decoders have the same instantiations as grouped
+    // projection. Native storage block alignment is checked by the caller.
+    grouped_projection_pipeline_name(dtype).map(|name| {
+        name.replacen(
+            "kernel_latent_grouped_",
+            "kernel_mhc4_pre_native_partial_",
+            1,
+        )
+    })
+}
+
+/// Called after RMS has consumed `ones`. Never projects the raw residual:
+/// moving RMS after the dot can overflow even when normalized dots are finite.
+#[allow(clippy::too_many_arguments)]
+fn encode_mhc4_pre_native_finish(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    hidden: usize,
+    rows: usize,
+    eps: Mhc4PreEps,
+    inputs: &Mhc4PreInputs<'_>,
+    scratch: &Mhc4PreGenericScratch<'_>,
+    outputs: &Mhc4PreOutputs<'_>,
+) -> Result<bool, MetalError> {
+    let width = hidden * MHC_STREAMS;
+    let Some(name) = mhc4_pre_native_pipeline_name(inputs.mix.dtype, width, rows) else {
+        return Ok(false);
+    };
+    let partial = ctx.pipeline(&name)?;
+    let finish = ctx.pipeline("kernel_mhc4_pre_native_finish")?;
+    if partial.threadExecutionWidth() != 32
+        || partial.maxTotalThreadsPerThreadgroup() < 128
+        || finish.threadExecutionWidth() != 32
+        || finish.maxTotalThreadsPerThreadgroup() < 1024
+    {
+        return Ok(false);
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        hidden: u32,
+        chunks: u32,
+        row_bytes: u32,
+        hc_eps: f32,
+        norm_eps: f32,
+    }
+    let (block, bytes) = inputs.mix.dtype.storage_layout().expect("validated layout");
+    let row_bytes = width as u64 / block * bytes;
+    let Ok(row_bytes) = u32::try_from(row_bytes) else {
+        return Ok(false);
+    };
+    let chunks = width.div_ceil(MHC4_PRE_CHUNK);
+    let args = Args {
+        hidden: hidden as u32,
+        chunks: chunks as u32,
+        row_bytes,
+        hc_eps: eps.hc,
+        norm_eps: eps.norm,
+    };
+    // The prefix fits the existing ones buffer by selection above. All bytes
+    // are disjoint from normalized/input/output bindings by generic validation.
+    let dots = scratch
+        .ones
+        .view_subrange(0, vec![MHC_MIXES as u64, chunks as u64]);
+    enc.set_pipeline(&partial);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, scratch.normalized);
+    enc.set_tensor(2, inputs.mix);
+    enc.set_tensor(3, &dots);
+    enc.dispatch(
+        MTLSize {
+            width: chunks,
+            height: MHC_MIXES / 4,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    enc.set_pipeline(&finish);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, inputs.residual);
+    enc.set_tensor(2, &dots);
+    enc.set_tensor(3, inputs.scale);
+    enc.set_tensor(4, inputs.base);
+    enc.set_tensor(5, inputs.norm_weight);
+    enc.set_tensor(6, outputs.mixes);
+    enc.set_tensor(7, outputs.pre);
+    enc.set_tensor(8, outputs.post);
+    enc.set_tensor(9, outputs.comb);
+    enc.set_tensor(10, outputs.collapsed);
+    enc.set_tensor(11, outputs.normed);
+    enc.set_threadgroup_memory(0, 96 * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 1024,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(true)
 }
 
 /// Generic mHC pre: RMS-normalize each flattened four-stream residual,
@@ -517,7 +662,13 @@ pub struct Mhc4PreGenericScratch<'a> {
 /// Sinkhorn rounds), collapse the original residual, and apply block RMSNorm.
 ///
 /// Uses [`Mhc4PreInputs`] and [`Mhc4PreOutputs`] with explicit row axes even
-/// for decode (`rows = 1`). Decode uses generic GEMV. For packed rows, types
+/// for decode (`rows = 1`). Eligible decode uses four dispatches: fill ones,
+/// flattened RMS, native split-K projection of normalized F32 activations,
+/// then fused controls/collapse/block RMS. It reuses `ones` for partial dots;
+/// requires a shared native decoder, width divisible by 32 and its storage
+/// block, `24 * ceil(width / 256) <= width`, and 128/1024-thread pipelines.
+/// Otherwise decode retains the original six-dispatch generic GEMV baseline.
+/// For packed rows, types
 /// accepted by [`grouped_projection_supported`] use
 /// [`encode_mat_mat_grouped_f32`] with one group and all rows in one call;
 /// remaining native types use individual row GEMVs. Projection operands and
@@ -648,6 +799,9 @@ pub fn encode_mhc4_pre_generic(
         width,
         eps.hc_rms,
     )?;
+    if encode_mhc4_pre_native_finish(ctx, enc, hidden, rows, eps, inputs, scratch, outputs)? {
+        return Ok(());
+    }
     if rows > 1 && grouped_projection_supported(inputs.mix.dtype) {
         encode_mat_mat_grouped_f32(
             ctx,
@@ -913,6 +1067,10 @@ pub struct Mhc4PreEps {
 #[cfg(test)]
 #[path = "mhc/generic_tests.rs"]
 mod generic_tests;
+
+#[cfg(test)]
+#[path = "mhc/native_decode_tests.rs"]
+mod native_decode_tests;
 
 #[cfg(test)]
 mod tests {

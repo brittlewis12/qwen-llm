@@ -1,0 +1,22 @@
+
+running 16 tests
+test metal::mhc::generic_tests::mhc4_pre_generic_native_weights_match_oracle_decode_and_packed ... 2026-10-11 14:27:26.980 qwen_llm-de358c0a63485fd8[44057:21109062] Metal API Validation Enabled
+ok
+test metal::mhc::generic_tests::mhc4_pre_generic_packed_preserves_large_f32_activations_and_weights ... ok
+test metal::mhc::generic_tests::mhc4_pre_generic_q8_matches_existing_reference_sequence ... ok
+test metal::mhc::generic_tests::mhc4_pre_generic_rejects_aliases_and_invalid_geometry ... ok
+test metal::mhc::native_decode_tests::native_pre_all_decoders_tiny_and_full_glm_oracles ... ok
+test metal::mhc::native_decode_tests::native_pre_baseline_override_restores_nested_unwind_and_thread ... ok
+test metal::mhc::native_decode_tests::native_pre_decoder_selection_and_preserved_finish_expressions ... ok
+test metal::mhc::native_decode_tests::native_pre_normalization_first_preserves_pathological_finite_range ... ok
+test metal::mhc::tests::clamped_swiglu_matches_contract_at_boundaries_and_in_place ... ok
+test metal::mhc::tests::mhc4_controls_single_and_rows_agree_bitwise ... ok
+test metal::mhc::tests::mhc4_pre_dispatch_costs ... ignored, timing screen; run without MTL_DEBUG_LAYER
+test metal::mhc::tests::mhc4_pre_q8_0_directed_numerics_and_widths ... ok
+test metal::mhc::tests::mhc4_pre_q8_0_matches_the_unfused_path_and_is_row_independent ... ok
+test metal::mhc::tests::mhc4_primitives_match_cpu_contract_at_glm_width ... ok
+test metal::mhc::tests::mhc4_rows_match_single_row_encoders ... ok
+test metal::mhc::tests::mhc_and_swiglu_refuse_unsafe_aliasing ... ok
+
+test result: ok. 15 passed; 0 failed; 1 ignored; 0 measured; 1911 filtered out; finished in 0.20s
+

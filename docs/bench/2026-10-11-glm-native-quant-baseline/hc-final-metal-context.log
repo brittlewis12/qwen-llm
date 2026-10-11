@@ -1,0 +1,22 @@
+
+running 16 tests
+test metal::context::admission_refusal_tests::refusals_are_typed_and_only_shortfalls_are_pressure ... ok
+test metal::context::tests::cpu_only_admission_bytes_do_not_consume_metal_headroom ... ok
+test metal::context::tests::metal_context_initializes ... 2026-10-11 14:27:23.882 qwen_llm-de358c0a63485fd8[43964:21107480] Metal API Validation Enabled
+ok
+test metal::context::tests::metal_memory_admission_fails_closed_on_required_overflow ... ok
+test metal::context::tests::metal_memory_admission_omits_zero_process_budget_only_when_allowed ... ok
+test metal::context::tests::metal_memory_admission_rejects_zero_required_with_zero_headroom ... ok
+test metal::context::tests::metal_memory_admission_requires_both_advisory_budgets ... ok
+test metal::context::tests::metal_memory_probes_are_available_on_product_host ... ok
+test metal::context::tests::metal_memory_probes_match_local_m4_max ... ignored
+test metal::context::tests::process_lease_owner_display_cannot_inject_lines ... ok
+test metal::context::tests::process_lease_owner_fields_are_single_line_and_bounded ... ok
+test metal::context::tests::process_lease_rejects_overlap_and_recovers_after_release ... ok
+test metal::context::tests::shared_buffer_pricing_errors_render_without_a_name_so_callers_prefix_theirs ... ok
+test metal::context::tests::shared_buffer_pricing_fails_closed_at_every_boundary ... ok
+test metal::context::tests::shared_buffer_pricing_rounds_to_the_larger_of_device_and_host_alignment ... ok
+test metal::context::tests::wired_memory_guard_rejects_half_of_physical_memory ... ok
+
+test result: ok. 15 passed; 0 failed; 1 ignored; 0 measured; 1911 filtered out; finished in 0.03s
+

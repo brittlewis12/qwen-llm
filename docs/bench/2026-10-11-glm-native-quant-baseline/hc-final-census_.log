@@ -1,0 +1,15 @@
+
+running 9 tests
+test glm5_next::tests::present_nextn_tensors_are_bounded_census_only ... ok
+test glm5_next::tests::release_artifact_census_and_allocation_plan ... ignored, CPU/header-only; requires GLM53_GGUF (GLM-5.3-Flash shard 1)
+test metal::census::tests::census_observer_is_inert_when_only_another_thread_is_capturing ... ok
+test metal::encoder::tests::census_follows_bound_pso_after_preflight_and_cache_hits ... 2026-10-11 14:27:23.819 qwen_llm-de358c0a63485fd8[43962:21107464] Metal API Validation Enabled
+ok
+test metal::encoder::tests::census_interleaved_encoders_keep_their_bindings_and_ordinals ... ok
+test metal::encoder::tests::census_tracks_bindings_before_capture_and_across_restart ... ok
+test metal::tensor::tests::allocation_census_records_realized_storage ... ok
+test qwen4exp_residency::tests::native_census_keeps_source_types_and_requires_matching_experts ... ok
+test qwen4exp_runtime::tests::prefill_map::frontier_schedule::frontier_layer0::frontier_layer0_census_checks_kernel_geometry_and_order_metadata ... ok
+
+test result: ok. 8 passed; 0 failed; 1 ignored; 0 measured; 1918 filtered out; finished in 0.08s
+

@@ -202,7 +202,14 @@ fn mhc4_pre_generic_native_weights_match_oracle_decode_and_packed() {
             command.commit();
             wait_completed(&command).expect("command buffer failed");
 
-            if rows > 1 && grouped_projection_supported(dtype) {
+            if rows == 1 && mhc4_pre_native_pipeline_name(dtype, WIDTH, rows).is_some() {
+                assert_eq!(census.len(), 4, "{dtype:?}: native decode launches");
+                assert_eq!(
+                    census[2].kernel,
+                    mhc4_pre_native_pipeline_name(dtype, WIDTH, rows).unwrap()
+                );
+                assert_eq!(census[3].kernel, "kernel_mhc4_pre_native_finish");
+            } else if rows > 1 && grouped_projection_supported(dtype) {
                 // At M=24 even Q8 uses the generic grouped kernel. A single
                 // projection covers every row, including the 129th-row tail.
                 assert_eq!(census.len(), 6, "{dtype:?}/{rows}: packed launches");
@@ -254,7 +261,17 @@ fn mhc4_pre_generic_native_weights_match_oracle_decode_and_packed() {
                     );
                 }
             }
-            assert!(tensor_f32_at_offset(&ones).iter().all(|&v| v == 1.0));
+            let reused = if rows == 1 && mhc4_pre_native_pipeline_name(dtype, WIDTH, rows).is_some()
+            {
+                MHC_MIXES * WIDTH.div_ceil(MHC4_PRE_CHUNK)
+            } else {
+                0
+            };
+            assert!(
+                tensor_f32_at_offset(&ones)[reused..]
+                    .iter()
+                    .all(|&v| v == 1.0)
+            );
         }
     }
 }
@@ -423,6 +440,8 @@ fn mhc4_pre_generic_q8_matches_existing_reference_sequence() {
         &out.bindings(),
     )
     .unwrap();
+    // Candidate decode consumed the unit-weight prefix for partial dots.
+    encode_fill_f32(&ctx, &enc, &ones, 1.0).unwrap();
     encode_rms_norm_mul_f32(
         &ctx,
         &enc,

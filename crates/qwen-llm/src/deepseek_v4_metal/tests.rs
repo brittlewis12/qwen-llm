@@ -4159,14 +4159,16 @@ fn current_asset_packed_post_route_stage_attribution_packet() {
         })
         .reduce(f64::max)
         .unwrap();
-    let coverage_uncertainty = accepted_indices
+    let coverage_deltas = accepted_indices
         .iter()
         .map(|&index| {
             let summary = &summaries[index];
-            (summary.raw_span_ms / summary.command_gpu_ms - 1.0).abs()
+            summary.raw_span_ms / summary.command_gpu_ms - 1.0
         })
-        .reduce(f64::max)
-        .unwrap();
+        .collect::<Vec<_>>();
+    let reference_coverage = vec![0.0; coverage_deltas.len()];
+    let coverage_uncertainty =
+        crate::compare::report_max_abs_diff_f64(coverage_deltas.iter(), reference_coverage.iter());
 
     eprintln!(
         "deepseek_v4 packed_post_route_stage_profile n={PREFIX_TOKENS} control_gpu_ms={control_gpu_ms:?} interpolated_control_gpu_ms={interpolated_control_gpu_ms:?} sampled_gpu_ms={sampled_gpu_ms:?} accepted_sample_indices={accepted_indices:?} accepted_gpu_ms={accepted_gpu_ms:?} sample_is_valid={sample_is_valid:?} control_wall_ms={control_wall_ms:?} sampled_wall_ms={sampled_wall_ms:?} control_drift={:.6} accepted_sampled_drift={:.6} sampled_perturbation={perturbation:?} stage_shares={stage_shares:?} stage_repeat_delta={stage_repeat_delta:?} cohort_stage_shares={cohort_stage_shares:?} cohort_stage_repeat_delta={cohort_stage_repeat_delta:?} transition_uncertainty={transition_uncertainty:.6} coverage_uncertainty={coverage_uncertainty:.6} dispatches={} ordinary_encoders={ORDINARY_ENCODERS} sampled_encoders={SAMPLED_ENCODERS} dispatch_sha256={} model_content_id={} logits_sha256={} hidden_sha256={} causal_digest={} prefix_digest={} compatibility_digest={} continuation_logits_sha256={} continuation_causal_digest={} committed_tokens_sha256={}",

@@ -189,11 +189,11 @@ fn exercise_down(ctx: &MetalContext, dtype: GgmlType, k: usize, m: usize, n: usi
             let actual = &got[slot * m..(slot + 1) * m];
             let rms = relative_rms(actual, &exact);
             let peak = exact.iter().map(|x| x.abs()).fold(0.0, f64::max);
-            let max_error = actual
-                .iter()
-                .zip(&exact)
-                .map(|(&a, &e)| (f64::from(a) - e).abs())
-                .fold(0.0, f64::max);
+            let max_error = crate::compare::assert_max_abs_diff_f64(
+                concat!(file!(), ":", line!()),
+                actual.iter().map(|&value| f64::from(value)),
+                exact.iter(),
+            );
             assert!(
                 rms <= 1e-5 && max_error <= peak * 2e-5,
                 "{dtype:?} K={k} M={m} n={n} expert={expert} slot={slot}: RMS {rms:e}, peak error {max_error:e}/{peak:e}"

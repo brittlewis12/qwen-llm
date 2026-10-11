@@ -1104,11 +1104,11 @@ fn packed_expert_baseline_reuses_decode_scratch_and_matches_oracle() {
             .map(f32::abs)
             .fold(0.0f32, f32::max);
         assert!(scale > 1e-7, "synthetic experts must have a nonzero result");
-        let worst = got
-            .iter()
-            .zip(&expected)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
+        let worst = crate::compare::assert_max_abs_diff_f32(
+            concat!(file!(), ":", line!()),
+            got.iter(),
+            &expected,
+        );
         assert!(
             got.iter().all(|v| v.is_finite()) && worst <= 1e-3 * scale,
             "expert baseline {gate_dtype:?}/{down_dtype:?}: max error {worst}, scale {scale}"
@@ -1548,12 +1548,12 @@ fn expert_half_and_f32_requests_dispatch_grouped_or_all_slot_paths() {
                 .copied()
                 .map(f32::abs)
                 .fold(0.0f32, f32::max);
-            let worst = got
-                .iter()
-                .zip(&expected)
-                .map(|(a, b)| (a - b).abs())
-                .fold(0.0f32, f32::max);
             assert!(scale > 1e-7 && expected.iter().chain(&got).all(|v| v.is_finite()));
+            let worst = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                got.iter(),
+                &expected,
+            );
             assert!(
                 worst
                     <= (if expected_mode == StageMode::Fast {
@@ -1768,12 +1768,12 @@ fn mixed_native_experts_dispatch_by_capability_and_match_oracle() {
                 .copied()
                 .map(f32::abs)
                 .fold(0.0f32, f32::max);
-            let worst = got
-                .iter()
-                .zip(&expected)
-                .map(|(a, b)| (a - b).abs())
-                .fold(0.0f32, f32::max);
             assert!(scale > 1e-7 && expected.iter().chain(&got).all(|v| v.is_finite()));
+            let worst = crate::compare::assert_max_abs_diff_f32(
+                concat!(file!(), ":", line!()),
+                got.iter(),
+                &expected,
+            );
             assert!(
                 worst <= (if grouped { 5e-3 } else { 2e-4 }) * scale,
                 "{gate_type:?}/{up_type:?}/{down_type:?} {lineage:?}/{precision:?}: error {worst}, scale {scale}"

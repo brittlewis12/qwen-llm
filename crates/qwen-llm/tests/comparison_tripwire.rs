@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -16,129 +16,25 @@ const TEMPORARY_GLM5_METAL_FILES: &[&str] = &[
 struct Exception {
     path: &'static str,
     function: &'static str,
+    expression: &'static str,
     reason: &'static str,
 }
 
-// These reductions compute magnitudes for quantization scales or activation
-// envelopes; they do not compare two independently produced values.
-const MAGNITUDE_EXCEPTIONS: &[Exception] = &[
-    Exception {
-        path: "crates/qwen-llm/src/deepseek_v4_oracle.rs",
-        function: "attention_fp8_nope_bf16_rope_roundtrip_in_place",
-        reason: "quantization scale magnitude",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/deepseek_v4_oracle.rs",
-        function: "attention_fp8_nope_roundtrip_in_place",
-        reason: "quantization scale magnitude",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/deepseek_v4_oracle.rs",
-        function: "fp4_activation_roundtrip_in_place",
-        reason: "quantization scale magnitude",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/deepseek_v4_oracle.rs",
-        function: "pack_indexer_fp4_row",
-        reason: "quantization scale magnitude",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/k2_horizon_metal/compact/tests.rs",
-        function: "quantize",
-        reason: "quantization scale magnitude",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/k2_horizon_metal/compact/tests.rs",
-        function: "quantizer_contract_has_exact_ties_canonical_zero_and_visible_failures",
-        reason: "quantization error bound scale",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/k2_horizon_metal/compact/tests.rs",
-        function: "gpu_q8_store_bytes_and_inline_attention_match_independent_controls",
-        reason: "quantization scale magnitude",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/muse_glimmer_lens_fit/tests.rs",
-        function: "real_q8_block_51_replay_and_vjp_smoke",
-        reason: "expected-gradient magnitude scale",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/metal/moe_grouped_generic/tests.rs",
-        function: "assert_close",
-        reason: "reference magnitude scale",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/metal/moe_grouped_generic/tests.rs",
-        function: "generic_grouped_moe_down_q5_k_matches_specialized",
-        reason: "reference magnitude scale",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/metal/moe_grouped_generic/tests.rs",
-        function: "generic_grouped_moe_gate_up_q4_k_q5_k_match_specialized",
-        reason: "reference magnitude scale",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/metal/mhc.rs",
-        function: "mhc4_pre_q8_0_directed_numerics_and_widths",
-        reason: "summed absolute activation envelope",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/metal/elementwise.rs",
-        function: "scatter_kv_q8_matches_ref_quant",
-        reason: "Q8 block quantization scale magnitude",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/metal/kda.rs",
-        function: "assert_close",
-        reason: "reference magnitude for relative tolerance",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/metal/latent.rs",
-        function: "grouped_q8_mat_mat_matches_per_row_gemv_at_glm_shapes",
-        reason: "reference row magnitude for relative tolerance",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/metal/latent.rs",
-        function: "split_selected_attention_directed_cases_match_an_independent_softmax",
-        reason: "reference magnitude for relative tolerance",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/metal/expert.rs",
-        function: "assert_moe_oracle_close_loose",
-        reason: "reference magnitude for relative tolerance",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/metal/test_support.rs",
-        function: "assert_moe_oracle_close",
-        reason: "reference magnitude in checked shared assertion helper",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/metal/mat_mat.rs",
-        function: "q8_0_fewrow_matches_cpu_reference_at_tile_edges",
-        reason: "reference output magnitude for relative tolerance",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/metal/mat_vec.rs",
-        function: "mat_vec_trellis3_matches_cpu",
-        reason: "reference output magnitude for relative tolerance",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/glm5_next/oracle.rs",
-        function: "kda_contract_matches_fla_naive_recurrence",
-        reason: "reference output magnitude for relative tolerance",
-    },
-    Exception {
-        path: "crates/qwen-llm/src/muse_tiled_numerical_diagnostic.rs",
-        function: "tiled_prefill_numerical_diagnostic",
-        reason: "worst-row index selected after checked comparison metrics",
-    },
-];
+// This diagnostic selects the greatest differing row after `compare_logits`
+// has already validated and measured the whole compared slice.
+const COMPARISON_EXCEPTIONS: &[Exception] = &[Exception {
+    path: "crates/qwen-llm/src/muse_tiled_numerical_diagnostic.rs",
+    function: "tiled_prefill_numerical_diagnostic",
+    expression: "online.iter().zip(candidate).enumerate().max_by(|(_,(a,b)),(_,(c,d))|(*a-*b).abs().total_cmp(&(*c-*d).abs()))",
+    reason: "worst-row index selected after checked comparison metrics",
+}];
 
 #[derive(Debug, PartialEq, Eq)]
 struct Finding {
     path: String,
     line: usize,
     function: String,
+    expression: String,
 }
 
 fn mask_range(bytes: &mut [u8], start: usize, end: usize) {
@@ -318,24 +214,179 @@ fn contains_abs(source: &str) -> bool {
     source.contains(".abs(") || source.contains("map(f32::abs)") || source.contains("map(f64::abs)")
 }
 
-fn precomputed_difference_names(source: &str) -> HashSet<String> {
-    let mut names = HashSet::new();
-    for statement in source.split(';') {
-        if !contains_abs(statement) || !statement.contains('-') {
+fn is_operand_end(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b')' | b']' | b'}')
+}
+
+fn is_operand_start(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'(' | b'[' | b'&' | b'*')
+}
+
+fn has_binary_subtraction(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    for index in 0..bytes.len() {
+        if bytes[index] != b'-'
+            || bytes.get(index + 1) == Some(&b'>')
+            || bytes.get(index + 1) == Some(&b'=')
+        {
+            continue;
+        }
+        let mut before = index;
+        while before > 0 && bytes[before - 1].is_ascii_whitespace() {
+            before -= 1;
+        }
+        let mut after = index + 1;
+        while after < bytes.len() && bytes[after].is_ascii_whitespace() {
+            after += 1;
+        }
+        if before == 0 || after == bytes.len() || !is_operand_end(bytes[before - 1]) {
+            continue;
+        }
+        if !is_operand_start(bytes[after]) {
+            continue;
+        }
+        let previous = bytes[before - 1];
+        if matches!(previous, b'e' | b'E')
+            && before >= 2
+            && (bytes[before - 2].is_ascii_digit() || bytes[before - 2] == b'.')
+        {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+fn precomputed_difference_names(
+    source: &str,
+) -> (
+    HashMap<String, HashSet<String>>,
+    HashMap<String, HashSet<String>>,
+) {
+    let mut names = HashMap::<String, HashSet<String>>::new();
+    let mut absolute_names = HashMap::<String, HashSet<String>>::new();
+    let mut statement_start = 0;
+    for (separator, _) in source.match_indices(';') {
+        let statement = &source[statement_start..separator];
+        if !has_binary_subtraction(statement) {
+            statement_start = separator + 1;
             continue;
         }
         let Some(let_offset) = statement.rfind("let ") else {
+            statement_start = separator + 1;
             continue;
         };
-        let name_start = let_offset + 4;
+        let mut name_start = let_offset + 4;
+        while statement
+            .as_bytes()
+            .get(name_start)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            name_start += 1;
+        }
+        if statement[name_start..].starts_with("mut ") {
+            name_start += 4;
+        }
+        while statement
+            .as_bytes()
+            .get(name_start)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            name_start += 1;
+        }
         let Some((start, end)) = identifier_at(statement, name_start) else {
+            statement_start = separator + 1;
             continue;
         };
         if start == name_start {
-            names.insert(statement[start..end].to_string());
+            let function = function_at(source, statement_start + start);
+            names
+                .entry(function.clone())
+                .or_default()
+                .insert(statement[start..end].to_string());
+            if contains_abs(&statement[end..]) {
+                absolute_names
+                    .entry(function)
+                    .or_default()
+                    .insert(statement[start..end].to_string());
+            }
+        }
+        statement_start = separator + 1;
+    }
+    (names, absolute_names)
+}
+
+fn name_is_referenced(context: &str, name: &str) -> bool {
+    context.match_indices(name).any(|(at, _)| {
+        let before = context.as_bytes().get(at.wrapping_sub(1)).copied();
+        let after = context.as_bytes().get(at + name.len()).copied();
+        let suffix = context[at + name.len()..].trim_start();
+        !before.is_some_and(is_ident)
+            && before != Some(b'.')
+            && before != Some(b':')
+            && !after.is_some_and(is_ident)
+            && (suffix.starts_with(".iter(")
+                || suffix.starts_with(".into_iter(")
+                || suffix.starts_with(".as_slice("))
+    })
+}
+
+fn normalize_expression(source: &str) -> String {
+    source
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
+
+fn expression_start(source: &str, target: usize) -> usize {
+    let bytes = source.as_bytes();
+    let mut delimiters = Vec::new();
+    for &byte in &bytes[..target] {
+        match byte {
+            b'(' | b'[' | b'{' => delimiters.push(byte),
+            b')' | b']' | b'}' => {
+                delimiters.pop();
+            }
+            _ => {}
         }
     }
-    names
+    let target_depth = delimiters.len();
+
+    delimiters.clear();
+    let mut boundary = 0;
+    for (index, &byte) in bytes.iter().enumerate().take(target) {
+        let depth = delimiters.len();
+        if depth == target_depth {
+            if matches!(byte, b';' | b',') {
+                boundary = index + 1;
+            } else if byte == b'=' {
+                let previous = index.checked_sub(1).and_then(|i| bytes.get(i));
+                let next = bytes.get(index + 1);
+                if previous != Some(&b'=')
+                    && previous != Some(&b'!')
+                    && previous != Some(&b'<')
+                    && previous != Some(&b'>')
+                    && next != Some(&b'=')
+                    && next != Some(&b'>')
+                {
+                    boundary = index + 1;
+                }
+            }
+        }
+        match byte {
+            b'(' | b'[' | b'{' => {
+                delimiters.push(byte);
+                if depth + 1 == target_depth {
+                    boundary = index + 1;
+                }
+            }
+            b')' | b']' | b'}' => {
+                delimiters.pop();
+            }
+            _ => {}
+        }
+    }
+    boundary
 }
 
 fn is_reduction(name: &str) -> bool {
@@ -351,7 +402,7 @@ fn has_maximum_operator(source: &str) -> bool {
 
 fn scan_unfiltered(path: &str, source: &str) -> Result<Vec<Finding>, String> {
     let source = strip_comments_and_strings(source)?;
-    let names = precomputed_difference_names(&source);
+    let (names, absolute_names) = precomputed_difference_names(&source);
     let bytes = source.as_bytes();
     let mut findings = Vec::new();
     let mut i = 0;
@@ -370,21 +421,20 @@ fn scan_unfiltered(path: &str, source: &str) -> Result<Vec<Finding>, String> {
             continue;
         }
         let call_close = call_end(&source, end)?;
-        let statement_start = source[..start]
-            .rfind([';', '{', '}'])
-            .map_or(0, |boundary| boundary + 1);
+        let statement_start = expression_start(&source, start);
         let context = &source[statement_start..call_close];
         let call = &source[start..call_close];
-        let has_precomputed = names.iter().any(|name| {
-            context.match_indices(name).any(|(at, _)| {
-                let before = context.as_bytes().get(at.wrapping_sub(1)).copied();
-                let after = context.as_bytes().get(at + name.len()).copied();
-                !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
-            })
-        });
-        let is_abs_comparison =
-            has_maximum_operator(call) && (contains_abs(context) || contains_abs(call));
-        if is_abs_comparison || (has_precomputed && has_maximum_operator(call)) {
+        let function = function_at(&source, start);
+        let has_precomputed = names
+            .get(&function)
+            .is_some_and(|names| names.iter().any(|name| name_is_referenced(context, name)));
+        let has_precomputed_absolute = absolute_names
+            .get(&function)
+            .is_some_and(|names| names.iter().any(|name| name_is_referenced(context, name)));
+        let has_abs = contains_abs(context) || contains_abs(call);
+        let has_comparison_abs = has_precomputed_absolute
+            || (has_abs && (has_binary_subtraction(context) || has_precomputed));
+        if has_comparison_abs && has_maximum_operator(call) {
             let line = source[..start]
                 .bytes()
                 .filter(|byte| *byte == b'\n')
@@ -393,7 +443,8 @@ fn scan_unfiltered(path: &str, source: &str) -> Result<Vec<Finding>, String> {
             findings.push(Finding {
                 path: path.to_string(),
                 line,
-                function: function_at(&source, start),
+                function,
+                expression: normalize_expression(context),
             });
         }
         i = call_close;
@@ -409,16 +460,22 @@ fn scan_source(path: &str, source: &str) -> Result<Vec<Finding>, String> {
     Ok(findings
         .into_iter()
         .filter(|finding| {
-            !MAGNITUDE_EXCEPTIONS.iter().any(|exception| {
+            !COMPARISON_EXCEPTIONS.iter().any(|exception| {
                 exception.path == path
                     && exception.function == finding.function
+                    && exception.expression == finding.expression
                     && !exception.reason.is_empty()
             })
         })
         .collect())
 }
 
-fn scan_tree(root: &Path, directory: &Path, findings: &mut Vec<Finding>) -> Result<(), String> {
+fn scan_tree(
+    root: &Path,
+    directory: &Path,
+    findings: &mut Vec<Finding>,
+    apply_exceptions: bool,
+) -> Result<(), String> {
     let entries = fs::read_dir(directory)
         .map_err(|error| format!("read {}: {error}", directory.display()))?;
     for entry in entries {
@@ -426,7 +483,7 @@ fn scan_tree(root: &Path, directory: &Path, findings: &mut Vec<Finding>) -> Resu
             entry.map_err(|error| format!("read entry in {}: {error}", directory.display()))?;
         let path = entry.path();
         if path.is_dir() {
-            scan_tree(root, &path, findings)?;
+            scan_tree(root, &path, findings, apply_exceptions)?;
         } else if path.extension().is_some_and(|extension| extension == "rs") {
             let source = fs::read_to_string(&path)
                 .map_err(|error| format!("read {}: {error}", path.display()))?;
@@ -442,7 +499,11 @@ fn scan_tree(root: &Path, directory: &Path, findings: &mut Vec<Finding>) -> Resu
                 .to_str()
                 .ok_or_else(|| format!("non-UTF-8 source path: {}", path.display()))?
                 .replace('\\', "/");
-            findings.extend(scan_source(&relative, &source)?);
+            if apply_exceptions {
+                findings.extend(scan_source(&relative, &source)?);
+            } else if relative != COMPARISON_MODULE {
+                findings.extend(scan_unfiltered(&relative, &source)?);
+            }
         }
     }
     Ok(())
@@ -457,17 +518,39 @@ fn workspace_has_no_unchecked_absolute_difference_max_reductions() {
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let workspace = workspace.canonicalize().expect("workspace root");
     let mut findings = Vec::new();
-    scan_tree(&workspace, &workspace.join("crates"), &mut findings)
+    scan_tree(&workspace, &workspace.join("crates"), &mut findings, true)
         .unwrap_or_else(|error| panic!("comparison tripwire scan failed closed: {error}"));
     assert!(
         findings.is_empty(),
-        "unchecked absolute-difference max reductions remain; use crate::compare::assert_max_abs_diff_f32/f64 for tests or qwen_llm::compare::report_max_abs_diff_f32/f64 for reporters:\n{}",
+        "unchecked max reductions over two-sided absolute differences remain; use crate::compare::assert_max_abs_diff_f32/f64 for tests or qwen_llm::compare::report_max_abs_diff_f32/f64 for reporters:\n{}",
         findings
             .iter()
-            .map(|finding| format!("{}:{}", finding.path, finding.line))
+            .map(|finding| format!("{}:{} ({})", finding.path, finding.line, finding.expression))
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+#[test]
+fn every_expression_exception_matches_a_current_finding() {
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let workspace = workspace.canonicalize().expect("workspace root");
+    let mut findings = Vec::new();
+    scan_tree(&workspace, &workspace.join("crates"), &mut findings, false)
+        .unwrap_or_else(|error| panic!("comparison tripwire scan failed closed: {error}"));
+    for exception in COMPARISON_EXCEPTIONS {
+        assert!(
+            findings.iter().any(|finding| {
+                finding.path == exception.path
+                    && finding.function == exception.function
+                    && finding.expression == exception.expression
+            }),
+            "stale comparison exception {}::{} ({})",
+            exception.path,
+            exception.function,
+            exception.reason
+        );
+    }
 }
 
 #[test]
@@ -479,8 +562,6 @@ fn tripwire_detects_pairwise_and_precomputed_difference_variants() {
         "fn sample() { let delta = a.iter().zip(b).max_by(|(x,y),(u,v)| (x-y).abs().total_cmp(&(u-v).abs())); }",
         "fn sample() { let delta = a.iter().zip(b).map(|(x,y)| (x-y).abs()).fold(0.0, |m,d| m.max(d)); }",
         "fn sample() { let delta = a.iter().zip(b).map(|(x,y)| (x-y).abs()).reduce(|m,d| m.max(d)); }",
-        "fn sample() { let delta = a.iter().zip(b).map(f32::abs).fold(0.0, f32::max); }",
-        "fn sample() { let delta = a.iter().zip(b).map(f64::abs).reduce(f64::max); }",
         "fn sample() { let differences = a.iter().zip(b).map(|(x,y)| (x-y).abs()).collect::<Vec<_>>(); let delta = differences.iter().fold(0.0, f32::max); }",
     ];
     for sample in variants {
@@ -507,22 +588,45 @@ fn tripwire_ignores_commented_and_quoted_examples() {
 fn magnitude_fixture_is_detected_and_only_its_named_exception_is_allowed() {
     let magnitude =
         "fn quantize() { let scale = values.iter().map(f32::abs).fold(0.0, f32::max); }";
-    let raw = scan_unfiltered(
-        "crates/qwen-llm/src/k2_horizon_metal/compact/tests.rs",
-        magnitude,
-    )
-    .unwrap();
-    assert_eq!(raw.len(), 1, "magnitude fixture must exercise the scanner");
     assert!(
-        scan_text(
-            "crates/qwen-llm/src/k2_horizon_metal/compact/tests.rs",
-            magnitude
-        )
-        .is_empty()
+        scan_unfiltered("crates/example.rs", magnitude)
+            .unwrap()
+            .is_empty()
     );
-    assert_eq!(scan_text("crates/example.rs", magnitude).len(), 1);
+    let deviation =
+        "fn sample() { let peak = values.iter().map(|x| (*x - mean).abs()).fold(0.0, f32::max); }";
+    assert_eq!(scan_text("crates/example.rs", deviation).len(), 1);
+    let return_type_only = "fn sample() { let peak = values.iter().map(|value| -> f32 { value.abs() }).fold(0.0, f32::max); }";
+    assert!(scan_text("crates/example.rs", return_type_only).is_empty());
     let deferred = "fn old() { a.iter().zip(b).map(|(x,y)| (x-y).abs()).fold(0.0, f32::max); }";
     assert!(scan_text("crates/qwen-llm/src/glm5_next_metal/tests.rs", deferred).is_empty());
+}
+
+#[test]
+fn block_closures_and_mutable_precomputed_differences_are_detected() {
+    let block_closure = "fn sample() { let peak = actual.iter().zip(expected).map(|(x, y)| { (x - y).abs() }).fold(0.0, f32::max); }";
+    assert_eq!(scan_text("crates/example.rs", block_closure).len(), 1);
+
+    let mutable_precomputed = "fn sample() { let mut differences = actual.iter().zip(expected).map(|(a, b)| (a - b).abs()).collect::<Vec<_>>(); let peak = differences.iter().fold(0.0, f32::max); }";
+    assert_eq!(scan_text("crates/example.rs", mutable_precomputed).len(), 1);
+
+    let mapped_precomputed = "fn sample() { let mut differences = actual.iter().zip(expected).map(|(a, b)| a - b).collect::<Vec<_>>(); let peak = differences.iter().map(f32::abs).fold(0.0, f32::max); }";
+    assert_eq!(scan_text("crates/example.rs", mapped_precomputed).len(), 1);
+}
+
+#[test]
+fn an_additional_comparison_in_an_exempt_function_is_not_exempted() {
+    let source = "fn tiled_prefill_numerical_diagnostic() { let index = online.iter().zip(candidate).enumerate().max_by(|(_, (a, b)), (_, (c, d))| (*a - *b).abs().total_cmp(&(*c - *d).abs())); let peak = actual.iter().zip(expected).map(|(a,b)| (a-b).abs()).fold(0.0, f32::max); }";
+    let findings = scan_text(
+        "crates/qwen-llm/src/muse_tiled_numerical_diagnostic.rs",
+        source,
+    );
+    assert_eq!(findings.len(), 1);
+    assert!(
+        findings[0]
+            .expression
+            .contains("actual.iter().zip(expected)")
+    );
 }
 
 #[test]

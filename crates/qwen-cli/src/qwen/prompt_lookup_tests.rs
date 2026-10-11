@@ -130,11 +130,8 @@ fn prompt_lookup_edit_then_next_turn() -> Result<()> {
     let ref_logits = finite_logits(loaded.prefill(&mut reference, &mut prefill, &suffix_ids)?);
     let candidate_logits =
         finite_logits(loaded.prefill(&mut candidate, &mut prefill, &suffix_ids)?);
-    let delta = ref_logits
-        .iter()
-        .zip(&candidate_logits)
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0_f32, f32::max);
+    let delta =
+        qwen_llm::compare::report_max_abs_diff_f32(ref_logits.iter(), candidate_logits.iter());
     eprintln!("next-turn prompt logit max_abs={delta:e}");
     let next_position = terminal_position + 1 + suffix_ids.len();
     assert_position(&reference, next_position);

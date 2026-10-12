@@ -5,6 +5,7 @@ use crate::serve::partition::PartitionEvent;
 use serde_json::{Value, json};
 
 mod chunk_checkpoint_ab;
+mod chunk_checkpoint_cancel;
 
 #[test]
 #[ignore = "GLM53_GGUF leased session-recreation cost screen; MTL_DEBUG_LAYER=1"]
@@ -262,6 +263,9 @@ fn gpu_adaptive_prefill_cold_hit_and_continuation() {
         cache,
     );
     backend.prefix_reuse = true;
+    // Historical shared-cut planning/cancellation oracle. The production deep
+    // policy has its own unforced gpu_chunk_checkpoint_cancel_resume test.
+    backend.chunk_checkpoint_override = Some(false);
     backend.fast_snapshots = true;
     backend.lineage = PackedLineage::Fast;
     backend.warm_up().unwrap();
@@ -1380,6 +1384,8 @@ fn gpu_snapshots_continue_the_captured_trajectory() {
         plan(8192),
     );
     // These existing trajectory gates explicitly exercise the 512-row contract.
+    // Keep their shared-only cache cardinality/restore oracle unchanged.
+    backend.chunk_checkpoint_override = Some(false);
     backend.frozen_rows = Some(512);
     backend.warm_up().unwrap();
     // ~1.3K tokens of instructions plus a tool: the shared cut is not a

@@ -1,5 +1,9 @@
 # Maya conversation reuse screen - 2026-10-12
 
+Historical screen: the later [document-checkpoint promotion](../2026-10-12-glm-document-checkpoint/README.md)
+adds deeper Fast snapshot reuse. The shared-only behavior and measurements below
+describe this run and are retained unchanged.
+
 Current Maya serving reuses live continuations and a shared instruction/tool
 prefix across branches and conversations. A, B and the return to A produced
 useful, fixture-correct answers. C remained unfinished; completed HTTP responses

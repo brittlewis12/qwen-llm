@@ -14,7 +14,8 @@ For append-only checkpoint history and exact current handoff state, see
 
 ## Current Leverage - 2026-10-12
 
-Reoriented through main `f36f52b1` with cx, retaining the requested family/phase
+Reoriented through `42b3cdad` and the reviewed default-checkpoint promotion,
+retaining the requested family/phase
 priority: GLM prefill and long-context decode first, then Flash-Next and Qwen.
 This section supersedes stale next-step claims in the dated maps below.
 
@@ -96,9 +97,9 @@ Cold load 50.711 s is separate from A1's 50.016 s first delta. A2 live is 1.473 
 B/C snapshot hits are 0.622/0.538 s; A return is 2.051 s. A/B/A return are useful
 and fixture-correct. C remains unfinished after three continuations and fixture
 errors, despite completed HTTP responses. All 11 argument objects parse. One
-11,104-token shared entry uses 272.36 MiB against a 6.66 GiB budget; Fast return
-restores the shared prefix, not the full conversation. No historical UD paired
-speedup claim. [Recipe and evidence](bench/2026-10-12-glm-maya-agent-reuse/README.md).
+11,104-token shared entry uses 272.36 MiB against a 6.66 GiB budget; that run's
+Fast return restored the shared prefix, not the full conversation. No historical
+UD paired speedup claim. [Recipe and evidence](bench/2026-10-12-glm-maya-agent-reuse/README.md).
 
 **Real repository task and follow-up completed:** CLI `ec96cc45`, driver
 `9cd2915e`, default Half, 64K capacity, 2048 workspace rows. Initial input 41,420
@@ -111,14 +112,24 @@ no task-quality pass. Only a 51-token shared snapshot was captured
 load/warm-up 68.265/36.573 s are separate, with no cause inferred.
 [Evidence and corrections](bench/2026-10-12-glm-maya-repository-context/README.md).
 
-1. **Research the next concrete long-document branch lever.** The repository
-   task is finished; no new experiment is underway. Fast's shared-only 51-token
-   cut may leave useful branch reuse on the table, but this run measured only
-   cold input and live continuation, not a branch cliff. A candidate needs a
-   concrete branch workload, measured cost and a compatible mechanism before
-   implementation. Retain the flawed answers; no favorable rerun or kernel
-   search is queued. Coordinate with the serving owner's busy-response and
-   Lens work; do not duplicate it.
+**Document-branch reuse completed and promoted:** experiment archived at
+`42b3cdad`, followed by reviewed default promotion. Initial private A/B
+restores 41,011 instead of 51 tokens: prefill 217.66 -> 2.52 s, backend wall
+240.29 -> 22.67 s, with identical seed/branch logits and greedy bytes. This is
+one ordered backend comparison, not a universal throughput or task-quality
+claim; the seed is truncated. Capture costs 76.221 ms and 643,637,452 extra
+cache-accounted bytes, with unchanged session allocation and precision.
+Default unforced cancellation/resume and restore pass under Metal validation;
+injected denial preserves width/output but is not actual pressure evidence.
+CLI 807 passed / 45 ignored, primitive state oracles and all-target check pass.
+All Fast precisions use existing cache controls, with shared-split execution
+unchanged; Exact/serial unchanged. [Evidence](bench/2026-10-12-glm-document-checkpoint/README.md).
+
+1. **Use the completed GLM serving improvements on actual work.** Prefill and
+   long-context decode remain the priority, but no further kernel, cache or
+   quality experiment is queued without a concrete workload problem. Preserve
+   the earlier flawed answers and parked experiments. Coordinate with the
+   serving owner's busy-response and Lens work; do not duplicate it.
 2. **Coordinate Flash work; the retained integer selector is now falsified.**
    Existing Flash work now retains packed prefill under workspace pressure
    (`e7b48483`). The quant-compatibility worktree has been retired; its parallel
@@ -132,7 +143,7 @@ load/warm-up 68.265/36.573 s are separate, with no cause inferred.
    observer or encoder-splitting campaign, duplicate another owner, or force
    another GLM tweak merely because it is locally available.
 
-GLM selected-attention work is deferred behind those prefill opportunities;
+GLM selected-attention work remains deferred;
 the measured leaf is only about 1 ms. Keep Flash selected-QSA work coordinated
 with its existing lane: GLM's small depth cost does not establish Flash's cost.
 

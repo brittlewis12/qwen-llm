@@ -151,6 +151,7 @@ fn gpu_repository_chunk_checkpoint_ab() {
         "inherited_overrides":overrides,"capacity":65536,"precision":"half","max_output_tokens":1024,
         "timing_mode":if ["MTL_DEBUG_LAYER","MTL_SHADER_VALIDATION"].iter().any(|key|std::env::var(key).is_ok_and(|v|v!="0" && !v.is_empty())) { "validation-on" } else { "validation-not-requested" },
         "temperature":0,"effort":"low","order":"A seed/branch, B seed/branch",
+        "checkpoint_policy":{"A":"forced incumbent (Some(false))","B":"production default (None)"},
         "timing":"ordinary backend wall and first decoded piece; not HTTP first-answer latency; load, warmup, request rendering, sink allocation and comparisons excluded",
         "limits":"single AB, no speed threshold or task-quality verdict; seed timings may include first-use work"}),
     );
@@ -200,7 +201,7 @@ fn gpu_repository_chunk_checkpoint_ab() {
             std::time::Duration::ZERO,
             cache_plan,
         );
-        backend.chunk_checkpoints = candidate;
+        backend.chunk_checkpoint_override = if candidate { None } else { Some(false) };
         assert!(
             backend.prefix_reuse
                 && backend.fast_snapshots

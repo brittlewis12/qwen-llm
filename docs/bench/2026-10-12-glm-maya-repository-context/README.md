@@ -7,6 +7,11 @@ found material factual errors in their operator guidance. This is measured live
 reuse and completed generation, not a task-quality pass or evidence of restoring
 a 41K-document snapshot. Raw answers are retained unchanged; there was no rerun.
 
+Follow-up: [document checkpoints](../2026-10-12-glm-document-checkpoint/README.md)
+now reuse a deep prefix on an edited final question. That separate comparison
+and default promotion supersede the shared-only cache behavior described here,
+not this run's measurements or answer review.
+
 ## Configuration and source packet
 
 CLI build `ec96cc45`, driver/launch checkout `9cd2915e`; [report.json](report.json)
@@ -125,11 +130,10 @@ This is one freshly sampled source-understanding example, not broader quality
 evidence. HTTP completion, plausible citations and long-context retention do not
 make incorrect operator advice correct. Keep the raw answers and these limits.
 
-## State and possible next leverage
+## Follow-up
 
-The bounded repository task and follow-up are complete. No new experiment is
-underway from this packet. Research is considering whether Fast's shared-only
-51-token cut is a useful next long-document branch target. A candidate needs a
-concrete branch workload, measured branch cost and a compatible mechanism before
-implementation; this run measured no branch cliff and supports no branch-speedup
-claim. No rerun to obtain a better answer is planned.
+The bounded repository task and follow-up are complete. The separate
+[document-checkpoint A/B and promotion](../2026-10-12-glm-document-checkpoint/README.md)
+addressed branch reuse using this frozen packet. This original run measured no
+branch and supports no branch-speedup claim. Its raw answers and factual errors
+remain unchanged; no rerun to obtain a better answer is planned.

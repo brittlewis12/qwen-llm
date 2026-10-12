@@ -1,4 +1,5 @@
-//! Test-private experiment. No public knob, new execution cut or workspace reserve.
+//! Last-full-chunk snapshots of the existing Fast shared-split schedule.
+//! No new execution cut, workspace reserve or independent policy lever.
 use super::super::snapshot_cache::PrefixHit;
 use super::*;
 
@@ -176,9 +177,134 @@ pub(super) fn with_pins<V, T>(
     f(&mut *guard.cache)
 }
 
+/// Optional capture at one already-existing chunk boundary. All storage
+/// allocation/admission remains in capture_into; this only tracks provenance
+/// and accounts for the copy independently of compute time.
+pub(super) struct Capture<'a> {
+    pub shared: CacheNamespace,
+    pub namespace: CacheNamespace,
+    pub tokens: &'a [u32],
+    pub target: Option<usize>,
+    pub estimate: Option<u64>,
+    pub restored: Option<EntryId>,
+    pub reserve: u64,
+    pub denied: bool,
+    pub origin: Option<ChunkOrigin>,
+    pub elapsed_ms: f64,
+    pub outcome: Option<CaptureOutcome>,
+}
+
+impl Capture<'_> {
+    pub(super) fn prefill_segment(
+        &mut self,
+        session: &mut Glm5NextSession<'_>,
+        ctx: &MetalContext,
+        cache: &mut SnapshotCache<Glm5NextSnapshot, CacheNamespace>,
+        range: std::ops::Range<usize>,
+        before: &mut dyn FnMut() -> std::result::Result<(), String>,
+    ) -> Result<Vec<f32>, Glm5NextMetalError> {
+        let mut start = range.start;
+        let tokens = self.tokens;
+        session.prefill_packed_with_observer(ctx, &tokens[range], before, &mut |session, len| {
+            let committed = session.position();
+            if committed.checked_sub(start) != Some(len) {
+                self.origin = None;
+            }
+            ChunkOrigin::advance(&mut self.origin, start, committed);
+            start = committed;
+            if Some(committed) != self.target || self.origin.is_none() {
+                return;
+            }
+            let started = Instant::now();
+            let Schedule::FastChunkCheckpointV1 { shared_cut, .. } = self.namespace.schedule else {
+                unreachable!("capture namespace is an existing chunk origin")
+            };
+            let shared = cache.entry_for_in(&self.shared, &tokens[..shared_cut]);
+            self.outcome = Some(with_pins(cache, [shared, self.restored], |cache| {
+                if self.denied {
+                    CaptureOutcome::Denied
+                } else {
+                    capture_into(
+                        cache,
+                        session,
+                        ctx,
+                        self.namespace,
+                        &tokens[..committed],
+                        self.estimate,
+                        self.reserve,
+                    )
+                }
+            }));
+            self.elapsed_ms += started.elapsed().as_secs_f64() * 1e3;
+        })
+    }
+
+    pub(super) fn reached_segment_end(&mut self, position: usize, canonical: bool) {
+        self.origin = self.origin.filter(|origin| origin.at(position));
+        let Schedule::FastChunkCheckpointV1 {
+            shared_cut,
+            precision,
+        } = self.namespace.schedule
+        else {
+            unreachable!("capture namespace is an existing chunk origin")
+        };
+        // Seed only from the proven zero-to-shared execution, not from
+        // alignment or success/failure of the optional snapshot copy.
+        if position == shared_cut && canonical {
+            self.origin = ChunkOrigin::from_shared(shared_cut, self.namespace.rows, precision);
+        }
+    }
+
+    pub(super) fn description(&self) -> String {
+        self.outcome.map_or_else(String::new, |outcome| {
+            format!(
+                "{}:{}",
+                self.target.expect("capture target"),
+                outcome.name()
+            )
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_fast_precisions_use_existing_rollbacks_and_geometry() {
+        for precision in FastPrecision::ALL {
+            let shared = CacheNamespace {
+                lineage: PackedLineage::Fast,
+                schedule: Schedule::FastSharedSplitV1,
+                rows: 2048,
+            };
+            assert!(namespace(shared, 51, precision).is_some());
+            assert!(namespace(CacheNamespace { rows: 0, ..shared }, 51, precision).is_none());
+            assert!(namespace(shared, 0, precision).is_none());
+            assert!(
+                namespace(
+                    CacheNamespace {
+                        lineage: PackedLineage::Exact,
+                        schedule: Schedule::ExactV1,
+                        ..shared
+                    },
+                    51,
+                    precision
+                )
+                .is_none()
+            );
+        }
+        assert_eq!(snapshot_schedule(0, true, PackedLineage::Fast), None);
+        assert_eq!(snapshot_schedule(8192, false, PackedLineage::Fast), None);
+        assert_eq!(
+            snapshot_schedule(8192, true, PackedLineage::Fast),
+            Some(Schedule::FastSharedSplitV1)
+        );
+        assert_eq!(
+            snapshot_schedule(8192, true, PackedLineage::Exact),
+            Some(Schedule::ExactV1)
+        );
+    }
 
     #[test]
     fn boundary_formula_checked_and_strict() {

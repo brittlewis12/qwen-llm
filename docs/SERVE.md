@@ -784,8 +784,9 @@ Keep default Fast Half and automatic workspace/RAM cache selection; replay
 reasoning, assistant messages and tool results with stable shared instructions.
 The [Maya reuse screen](bench/2026-10-12-glm-maya-agent-reuse/README.md) records
 live and shared-prefix snapshot reuse, startup/request timings and the unfinished
-C task. Fast return restores the shared prefix, then prefills the conversation
-suffix. Snapshots remain in RAM only while the server is running.
+C task. Fast return can now restore a compatible document checkpoint as well as
+the shared prefix, then prefill the remaining suffix. Snapshots remain in RAM
+only while the server is running.
 
 The [64K-capacity repository run](bench/2026-10-12-glm-maya-repository-context/README.md)
 used `--max-context-tokens 65536 --max-tokens 4096` with the same defaults and
@@ -794,7 +795,10 @@ reused 43,032 tokens live and prefilled 106. Only a 51-token shared snapshot was
 captured, so this does not demonstrate document-snapshot restoration. Both
 answers completed but contained material factual errors; the packet records
 corrections, not a quality pass. Startup and first-delta/first-answer timings are
-reported separately.
+reported separately. The subsequent
+[document-checkpoint comparison](bench/2026-10-12-glm-document-checkpoint/README.md)
+reused 41,011 tokens on an edited final question with identical logits and output.
+That mechanism is now default under the existing cache controls.
 
 For UD:
 
@@ -950,8 +954,8 @@ after a pause pays ~1 s to re-wire GLM's 109.5 GiB: a 27-token prefill takes
 
 **Live session.** The one resident session is reused when a request's
 prompt strictly extends exactly the tokens it consumed; otherwise a snapshot
-may restore a shared prefix (below), or the healthy, compatible session resets
-and prefills from the start. Reset retains workspace and cache allocations,
+may restore a shared prefix or document checkpoint (below), or the healthy,
+compatible session resets and prefills from the start. Reset retains workspace and cache allocations,
 clears recurrent state and pending pooling rings, and publishes position zero;
 it is not secure erasure of invisible cache tails. Incompatible arithmetic or
 geometry still requires a new session. A replayed conversation extends: the
@@ -975,29 +979,43 @@ at a committed position: about 0.14 GiB fixed plus ~11.7 KiB per token
 records two boundaries while it renders: the end of the shared prefix (the
 effort line, the tools block and leading system messages) and the start of
 the generation header; serve verifies each against the prompt's tokens. A
-request whose schedule uses snapshots splits its prefill at those positions
+request splits at the boundaries selected by its execution schedule
 whether its lookup hits or misses, the cache is full or capture is denied,
 and captures the state at each cut when it is new and admitted. A later
 request restores the longest compatible snapshot when it reaches past the
 live session's extension (`usage.cached_tokens` reports it); entries are
-compatible only within one prefill lineage and schedule.
+compatible only within one prefill lineage and cache origin. Live reuse wins
+ties. Fast document checkpoints observe existing full-chunk boundaries; they do
+not introduce another execution split.
 
 - Exact (`x_qwen.prefill_lineage: "exact"`) cuts at both boundaries. Packed
   Exact equals token-by-token decoding, so a restored request equals a cold
   run bit for bit. On by default whenever the cache has a budget.
-- Fast (the default lineage) is on by default (`QWEN_GLM_FAST_SNAPSHOTS=0`
-  turns it off): one cut at the shared prefix. Fast's prefill depends on
+- Fast snapshots are on by default (`QWEN_GLM_FAST_SNAPSHOTS=0`
+  turns them off): the execution schedule `fast_shared_split_v1` keeps one
+  explicit cut at the shared prefix. Fast's prefill depends on
   where chunks start, so a split request equals a miss on the same split,
   not an unsplit cold run. Against the unsplit Fast it replaces, the split
   showed no detectable quality change on the #12 cohort; the preregistered
   comparison against Exact was inconclusive on one arm
   (`docs/bench/2026-10-08-glm53-fast-split-quality/`; decision in PERF-LOG
-  2026-10-08). A Fast request restores
-  only a snapshot ending exactly at its own verified cut and publishes one
-  only from a state on that schedule (packed chunks from 0; a live session
-  with an earlier cut, an off-grid cancellation or decoded tokens is
-  continued but not captured, outcome `noncanonical`); without a verified
-  cut it neither restores nor captures.
+  2026-10-08). Shared snapshots still end at the request's verified cut and
+  require canonical execution from zero. Without a verified cut, Fast neither
+  restores nor captures snapshots.
+- Fast also retains an optional **document checkpoint** at the last existing
+  full chunk strictly before the prompt endpoint, after the shared cut.
+  `fast_chunk_checkpoint_v1` is a cache origin, not an execution schedule.
+  Lookup requires the same verified shared cut, rows, precision and matching
+  token prefix. Proven full chunks after that cut preserve same-cold-schedule
+  equality; partial chunks or decoded history cannot regain publication
+  provenance merely by ending aligned. Prefill cancellation can retain valid
+  committed provenance; decode invalidates live publication, not older cached
+  snapshots. A read-only postcommit hook captures state without an extra head
+  calculation or changes to chunks, precision or workspace allocation.
+  Capture denial skips the optional checkpoint and preserves the request.
+  All Fast precision settings use the existing `QWEN_GLM_PREFIX_REUSE`,
+  `QWEN_GLM_FAST_SNAPSHOTS` and cache-budget controls; no new knob. Exact and
+  serial execution are unchanged. [Evidence](bench/2026-10-12-glm-document-checkpoint/README.md).
 - Fast operand precision (`QWEN_GLM_FAST_PRECISION`, read at startup and
   shown as `fast_precision=` in the startup limits line): `half` (default)
   stages quantized matrix operands in half precision; `dense_f32` runs the
@@ -1014,7 +1032,19 @@ releases cached snapshots (except one being restored) and retries once.
 The `serve phases:` line reports `reuse_source=live|snapshot|none`,
 `restore_ms`, `boundary_ms` (CPU time verifying the cuts), `snapshot_schedule`, `cuts`, each cut's capture outcome
 (`captured`, `present`, `ineligible`, `denied`, `failed`, `noncanonical`),
-`snapshot_capture_ms` and the cache's bytes and entries.
+`snapshot_capture_ms` and the cache's bytes and entries. `restore_origin`
+distinguishes `fast_chunk_checkpoint_v1`, `fast_shared_split_v1`, `exact_v1`
+and `none`. Document capture adds `checkpoint_target` (0 if ineligible),
+`checkpoint_captures` and `checkpoint_capture_ms`; that time is already included
+in `snapshot_capture_ms`. Private test JSON uses `chunk_*` for these three fields.
+
+Default, unforced `gpu_chunk_checkpoint_cancel_resume` passes under Metal
+validation: shared cut 13, committed 2061, target 4109, prompt 4112; resume
+publishes the checkpoint and restore reads the last three tokens with identical
+logits, greedy bytes and termination, leaving no pins held. Injected denial at
+test workspace cap 8 also preserves output and width; this is not an actual
+memory-pressure experiment. The initial private real-document A/B and primitive
+state oracles are recorded in the evidence linked above.
 
 Checked under `MTL_DEBUG_LAYER=1` on UD-IQ3_XXS with a 1,173-token shared
 prefix (`serve::backend_glm5_next::tests::gpu_snapshots_continue_the_captured_trajectory`):
@@ -1024,7 +1054,7 @@ both equal to cold runs bit for bit (logits and bytes); Fast hits equal
 a miss on the same split, as does a full cache; Fast entries never serve an
 Exact request; a split prefill cancelled after its first chunk resumes onto
 the same schedule with the uninterrupted run's logits, in both lineages; a
-Fast request ignores another request's shorter cut and equals its own miss;
+Fast request ignores another request's shorter shared cut and equals its own miss;
 a live session cancelled just after a cut continues into a longer prefix
 without publishing a Fast snapshot; a Fast request without boundaries
 neither restores nor captures; denied captures keep the splits; and a

@@ -13,14 +13,16 @@
 //! or is denied capture, so a restore continues exactly the trajectory a
 //! miss would have run. Exact (`x_qwen.prefill_lineage: "exact"`) is
 //! segmentation-invariant, so its snapshots also equal a cold run. Fast
-//! snapshots split at the shared prefix only; they are on by default
+//! snapshots split at the shared prefix only. The last existing full chunk
+//! after that cut can also be cached, with its shared-cut/rows/precision
+//! provenance, without adding an execution split. They are on by default
 //! (decision of 2026-10-08, PERF-LOG: the split against the unsplit Fast it
 //! replaces showed no detectable quality change, while the preregistered
 //! comparison against Exact was inconclusive) and `QWEN_GLM_FAST_SNAPSHOTS=0`
-//! turns them off. A Fast request restores only a snapshot ending exactly
-//! at its own verified cut, and publishes one only from a state on the
-//! canonical schedule (packed chunks from 0, no other cut, no decoded
-//! tokens); without a verified cut it neither restores nor captures.
+//! turns them off. Shared snapshots must end at the request's verified cut;
+//! deeper snapshots must belong to that same cut's uninterrupted full-chunk
+//! schedule. Live ties win. Decoded or partially chunked states cannot publish
+//! deeper snapshots; without a verified shared cut neither path is used.
 //! Memory-pressure refusals of the transport or a new session release the
 //! cache (except a snapshot being restored) and retry once.
 use super::decode_loop;
@@ -48,7 +50,6 @@ use std::io;
 use std::sync::Arc;
 use std::time::Instant;
 
-#[cfg(test)]
 mod chunk_checkpoint;
 mod prefill_plan;
 
@@ -87,8 +88,7 @@ enum Schedule {
     ExactV1,
     /// Fast lineage: one cut at the shared prefix end.
     FastSharedSplitV1,
-    /// Test-only cache provenance, NEVER an execution schedule or extra cut.
-    #[cfg(test)]
+    /// Cache provenance, NEVER an execution schedule or extra cut.
     FastChunkCheckpointV1 {
         shared_cut: usize,
         precision: FastPrecision,
@@ -100,7 +100,6 @@ impl Schedule {
         match self {
             Self::ExactV1 => "exact_v1",
             Self::FastSharedSplitV1 => "fast_shared_split_v1",
-            #[cfg(test)]
             Self::FastChunkCheckpointV1 { .. } => "fast_chunk_checkpoint_v1",
         }
     }
@@ -298,8 +297,9 @@ pub(super) struct Glm5NextBackend<'w, 'g> {
     #[cfg(test)]
     force_cold_reallocation: bool,
     #[cfg(test)]
-    chunk_checkpoints: bool,
-    #[cfg(test)]
+    chunk_checkpoint_override: Option<bool>,
+    /// Valid only for the current committed position; never inferred from
+    /// alignment, and cleared before decode/reset/error can mutate the state.
     chunk_origin: Option<chunk_checkpoint::ChunkOrigin>,
     #[cfg(test)]
     last_chunk_checkpoint: Option<serde_json::Value>,
@@ -373,7 +373,6 @@ fn cut_positions(
             ("shared_prefix", boundaries.shared_prefix_end),
             ("generation_header", None),
         ],
-        #[cfg(test)]
         Schedule::FastChunkCheckpointV1 { .. } => {
             panic!("checkpoint provenance must never select execution cuts")
         }
@@ -634,8 +633,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             #[cfg(test)]
             force_cold_reallocation: false,
             #[cfg(test)]
-            chunk_checkpoints: false,
-            #[cfg(test)]
+            chunk_checkpoint_override: None,
             chunk_origin: None,
             #[cfg(test)]
             last_chunk_checkpoint: None,
@@ -651,6 +649,14 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         {
             false
         }
+    }
+
+    fn chunk_checkpoints_allowed(&self) -> bool {
+        #[cfg(test)]
+        if let Some(enabled) = self.chunk_checkpoint_override {
+            return enabled;
+        }
+        true
     }
 
     fn can_reset_session(&self, lineage: PackedLineage, rows: usize) -> bool {
@@ -775,7 +781,6 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
 
         // Taken before the session is used and republished only for a state
         // the session is known to hold, so a failure leaves no stale history.
-        #[cfg(test)]
         let saved_chunk_origin = self.chunk_origin.take();
         #[cfg(test)]
         {
@@ -856,9 +861,9 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 rows,
             })
         });
-        // Exact restores any compatible prefix (segmentation-invariant);
-        // Fast only a snapshot ending exactly at this request's cut. Used
-        // only when it reaches past the live extension (ties keep live).
+        // Incumbent lookup: Exact accepts any compatible prefix; Fast shared
+        // snapshots must end exactly at this request's cut. Compare compatible
+        // full-chunk checkpoints below; live wins ties across both origins.
         let hit = namespace
             .filter(|_| self.prefix_reuse)
             .and_then(|namespace| match namespace.schedule {
@@ -866,16 +871,13 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 Schedule::FastSharedSplitV1 => {
                     self.cache.peek_exact_in(&namespace, &tokens[..cuts[0]])
                 }
-                #[cfg(test)]
                 Schedule::FastChunkCheckpointV1 { .. } => unreachable!("not an execution schedule"),
             })
             .filter(|hit| hit.prefix_len > live);
-        #[cfg(test)]
-        let chunk_enabled = self.chunk_checkpoints
+        let chunk_enabled = self.chunk_checkpoints_allowed()
             && self.prefix_reuse
             && schedule == Some(Schedule::FastSharedSplitV1)
             && selected_rows > 0;
-        #[cfg(test)]
         let (hit, deep_hit) = {
             let deep = namespace
                 .filter(|_| chunk_enabled)
@@ -908,28 +910,27 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             Some(hit) => {
                 if live_lineage != Some(lineage) {
                     self.session = None;
-                    #[cfg(test)]
-                    let shared_pin = if chunk_enabled {
-                        namespace
-                            .and_then(|ns| self.cache.entry_for_in(&ns, &tokens[..cuts[0]]))
-                            .filter(|&id| id != hit.id && self.cache.pin(id))
+                    let shared = if chunk_enabled {
+                        namespace.and_then(|ns| self.cache.entry_for_in(&ns, &tokens[..cuts[0]]))
                     } else {
                         None
                     };
-                    let created = with_snapshot_release(&mut self.cache, Some(hit.id), || {
-                        new_session(
-                            self.ctx,
-                            self.weights,
-                            &self.prepared,
-                            reserve,
-                            lineage,
-                            selected_rows,
-                        )
-                    });
-                    #[cfg(test)]
-                    if let Some(id) = shared_pin {
-                        self.cache.unpin(id);
-                    }
+                    let created = chunk_checkpoint::with_pins(
+                        &mut self.cache,
+                        [shared, Some(hit.id)],
+                        |cache| {
+                            with_snapshot_release(cache, Some(hit.id), || {
+                                new_session(
+                                    self.ctx,
+                                    self.weights,
+                                    &self.prepared,
+                                    reserve,
+                                    lineage,
+                                    selected_rows,
+                                )
+                            })
+                        },
+                    );
                     self.session = Some(created.map_err(session_error)?);
                 }
                 let session = self.session.as_mut().expect("session present");
@@ -937,10 +938,9 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                     Ok(()) => {
                         self.cache.touch(hit.id);
                         restored = Some(hit.id);
-                        // Fast entries are captured only from canonical
-                        // states (below).
+                        // A shared Fast entry is canonical from zero; a deep
+                        // entry instead carries the shared-relative origin.
                         canonical = lineage == PackedLineage::Fast;
-                        #[cfg(test)]
                         if deep_hit {
                             canonical = false;
                         }
@@ -1060,15 +1060,12 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             schedule,
             rows: selected_rows,
         });
-        #[cfg(test)]
         let chunk_namespace = namespace
             .filter(|_| chunk_enabled && selected_rows > 0)
             .and_then(|ns| chunk_checkpoint::namespace(ns, cuts[0], self.prepared.fast_precision));
-        #[cfg(test)]
         let chunk_target = chunk_namespace
             .and_then(|_| chunk_checkpoint::target(tokens.len(), cuts[0], selected_rows));
-        #[cfg(test)]
-        let mut chunk_origin = chunk_namespace.and_then(|_| {
+        let chunk_origin = chunk_namespace.and_then(|_| {
             let source = restored.and_then(|_| {
                 if deep_hit {
                     chunk_namespace.map(|ns| ns.schedule)
@@ -1085,7 +1082,6 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 source,
             )
         });
-        #[cfg(test)]
         let restore_origin = if restored.is_some() {
             if deep_hit {
                 "fast_chunk_checkpoint_v1"
@@ -1112,10 +1108,19 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         let prefill_t0 = Instant::now();
         let mut capture_ms = 0.0;
         let mut captures = Vec::new();
-        #[cfg(test)]
-        let mut chunk_capture_ms = 0.0;
-        #[cfg(test)]
-        let mut chunk_captures = Vec::new();
+        let mut chunk_capture = chunk_namespace.map(|deep_namespace| chunk_checkpoint::Capture {
+            shared: namespace.expect("chunk capture requires shared schedule"),
+            namespace: deep_namespace,
+            tokens: &tokens,
+            target: chunk_target,
+            estimate: chunk_target.and_then(|cut| snapshot_bytes(&self.weights.config, cut as u64)),
+            restored,
+            reserve,
+            denied: self.deny_captures(),
+            origin: chunk_origin,
+            elapsed_ms: 0.0,
+            outcome: None,
+        });
         // The entry this request restored, reused through the live session
         // or captured last stays pinned while a later cut is captured, so
         // that capture's admission cannot evict it.
@@ -1137,8 +1142,6 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             // Chunks of this segment start at `position`: they stay on the
             // from-0 grid only if it is a multiple of the chunk rows.
             canonical &= position % rows == 0;
-            #[cfg(test)]
-            let deny_chunk_capture = self.deny_captures();
             let session = self.session.as_mut().expect("session present");
             let mut checkpoint_abort: Option<io::Error> = None;
             let mut before = || {
@@ -1147,56 +1150,8 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                     "transport aborted during GLM-5.3 prefill".into()
                 })
             };
-            #[cfg(not(test))]
-            let result =
-                session.prefill_packed_with_checkpoint(ctx, &tokens[position..end], &mut before);
-            #[cfg(test)]
-            let result = if let Some(deep_namespace) = chunk_namespace {
-                let cache = &mut self.cache;
-                let mut chunk_start = position;
-                session.prefill_packed_with_observer(
-                    ctx,
-                    &tokens[position..end],
-                    &mut before,
-                    &mut |session, committed_len| {
-                        // Use the authoritative absolute session position; the callback
-                        // is after commit and only runs for a successful packed chunk.
-                        let committed = session.position();
-                        if committed.checked_sub(chunk_start) != Some(committed_len) {
-                            chunk_origin = None;
-                        }
-                        chunk_checkpoint::ChunkOrigin::advance(
-                            &mut chunk_origin,
-                            chunk_start,
-                            committed,
-                        );
-                        chunk_start = committed;
-                        if Some(committed) != chunk_target || chunk_origin.is_none() {
-                            return;
-                        }
-                        let started = Instant::now();
-                        let shared =
-                            namespace.and_then(|ns| cache.entry_for_in(&ns, &tokens[..cuts[0]]));
-                        let outcome =
-                            chunk_checkpoint::with_pins(cache, [shared, restored], |cache| {
-                                if deny_chunk_capture {
-                                    CaptureOutcome::Denied
-                                } else {
-                                    capture_into(
-                                        cache,
-                                        session,
-                                        ctx,
-                                        deep_namespace,
-                                        &tokens[..committed],
-                                        snapshot_bytes(&self.weights.config, committed as u64),
-                                        reserve,
-                                    )
-                                }
-                            });
-                        chunk_capture_ms += started.elapsed().as_secs_f64() * 1e3;
-                        chunk_captures.push(format!("{committed}:{}", outcome.name()));
-                    },
-                )
+            let result = if let Some(capture) = &mut chunk_capture {
+                capture.prefill_segment(session, ctx, &mut self.cache, position..end, &mut before)
             } else {
                 session.prefill_packed_with_checkpoint(ctx, &tokens[position..end], &mut before)
             };
@@ -1212,10 +1167,10 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                         let position = session.position();
                         self.history = tokens[..position].to_vec();
                         self.live_canonical = canonical && lineage == PackedLineage::Fast;
-                        #[cfg(test)]
-                        {
-                            self.chunk_origin = chunk_origin.filter(|origin| origin.at(position));
-                        }
+                        self.chunk_origin = chunk_capture
+                            .as_ref()
+                            .and_then(|capture| capture.origin)
+                            .filter(|origin| origin.at(position));
                         return Err(BackendFailure::Aborted(abort));
                     }
                     self.session = None;
@@ -1225,18 +1180,8 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 }
             };
             position = end;
-            #[cfg(test)]
-            if chunk_namespace.is_some() {
-                chunk_origin = chunk_origin.filter(|origin| origin.at(position));
-                // This segment reached the shared cut on the proven from-zero
-                // schedule. Capture admission is optional and does not seed us.
-                if position == cuts[0] && canonical {
-                    chunk_origin = chunk_checkpoint::ChunkOrigin::from_shared(
-                        cuts[0],
-                        selected_rows,
-                        self.prepared.fast_precision,
-                    );
-                }
+            if let Some(capture) = &mut chunk_capture {
+                capture.reached_segment_end(position, canonical);
             }
             if end == tokens.len() {
                 break;
@@ -1275,8 +1220,11 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         #[cfg(test)]
         {
             self.last_prefill_logits = logits.iter().map(|v| v.to_bits()).collect();
-            capture_ms += chunk_capture_ms;
         }
+        let chunk_capture_ms = chunk_capture
+            .as_ref()
+            .map_or(0.0, |capture| capture.elapsed_ms);
+        capture_ms += chunk_capture_ms;
         let session = self.session.as_mut().expect("session present");
         if let Err(abort) = sink.tick() {
             // The prompt is consumed but no retry can extend it (an equal
@@ -1327,8 +1275,10 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         {
             self.last_chunk_checkpoint = Some(serde_json::json!({
                 "execution_schedule": schedule.map_or("none", Schedule::name),
-                "restore_origin": restore_origin, "chunk_checkpoint_enabled": self.chunk_checkpoints,
-                "chunk_target": chunk_target, "chunk_captures": chunk_captures,
+                "restore_origin": restore_origin, "chunk_checkpoint_enabled": chunk_enabled,
+                "chunk_target": chunk_target, "chunk_captures": chunk_capture.as_ref().map_or_else(Vec::new, |capture| {
+                    capture.outcome.map_or_else(Vec::new, |_| vec![capture.description()])
+                }),
                 "chunk_capture_ms": chunk_capture_ms, "snapshot_capture_ms": capture_ms,
                 "shared_captures": captures, "cuts": cuts, "restore_ms": restore_ms,
                 "reuse_source": reuse_source, "reused_tokens": matched,
@@ -1336,13 +1286,10 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 "cache_bytes": self.cache.indexed_bytes(), "cache_entries": self.cache.len(),
                 "rows": selected_rows,
             }));
-            if self.chunk_checkpoints {
-                tracing::info!(target: "qwen_diag", "serve chunk checkpoint: {}", self.last_chunk_checkpoint.as_ref().unwrap());
-            }
         }
         tracing::info!(
             target: "qwen_diag",
-            "serve phases: family=glm5_next prefill_ms={prefill_ms:.1} reused_tokens={matched} reuse_source={reuse_source} restore_ms={restore_ms:.1} boundary_ms={boundary_ms:.1} prefill_tokens={} decode_ms={:.1} required_forwards={required} capacity={} transitions={} lineage={} snapshot_schedule={} cuts={cuts:?} captures=[{}] snapshot_capture_ms={capture_ms:.1} snapshot_cache_bytes={} snapshot_cache_entries={}",
+            "serve phases: family=glm5_next prefill_ms={prefill_ms:.1} reused_tokens={matched} reuse_source={reuse_source} restore_origin={restore_origin} restore_ms={restore_ms:.1} boundary_ms={boundary_ms:.1} prefill_tokens={} decode_ms={:.1} required_forwards={required} capacity={} transitions={} lineage={} snapshot_schedule={} cuts={cuts:?} captures=[{}] snapshot_capture_ms={capture_ms:.1} snapshot_cache_bytes={} snapshot_cache_entries={} checkpoint_target={} checkpoint_captures=[{}] checkpoint_capture_ms={chunk_capture_ms:.1}",
             tokens.len() - matched,
             generation.wall_ms,
             self.prepared.capacity,
@@ -1352,6 +1299,8 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             captures.join(","),
             self.cache.indexed_bytes(),
             self.cache.len(),
+            chunk_target.unwrap_or(0), // Zero means no eligible checkpoint.
+            chunk_capture.as_ref().map_or_else(String::new, |capture| capture.description()),
         );
         Ok(super::outcome::finish_generation(
             tokens.len(),
@@ -1422,10 +1371,7 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
         self.idle_residency.shutdown();
         self.session = None;
         self.history.clear();
-        #[cfg(test)]
-        {
-            self.chunk_origin = None;
-        }
+        self.chunk_origin = None;
     }
 }
 

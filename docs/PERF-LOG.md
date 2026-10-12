@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-12 - Document Checkpoints Promoted After Default Validation
+
+- Experiment archived at `42b3cdad`; production now enables the existing-chunk
+  checkpoint for all Fast precision settings
+  under existing prefix-reuse, Fast-snapshot and cache-budget controls. No new
+  knob; Exact/serial unchanged. Cache origin is distinct from shared-split
+  execution. Same shared cut/rows/precision/token prefix and proven full chunks
+  preserve same-cold-schedule equality; partial alignment cannot restore origin.
+- Initial private real-source A/B: branch reuse 51 -> 41,011 tokens; prefill
+  217,658.66 -> 2,522.78 ms, first decoded piece 217,727.52 -> 2,555.85 ms,
+  backend wall 240,292.96 -> 22,665.94 ms. Seed and branch logits/greedy bytes
+  match exactly. Seed truncates equally at 1024 tokens; branch ends normally
+  after 576. One ordered backend A/B, not HTTP latency or universal throughput.
+- Seed capture 76.221 ms, extra 643,637,452 cache-accounted bytes, not RSS.
+  Session allocation/precision unchanged; optional denial skips capture without
+  reshaping workspace or chunks. Live wins ties; shared/restored entries protected.
+- Default override `None`: `gpu_chunk_checkpoint_cancel_resume` passes under
+  Metal validation in 53.60 s. Shared 13, committed 2061, target 4109, prompt
+  4112; live resume publishes, deep restore reads suffix 3, full logits/greedy
+  bytes/end match, pins return to zero. Separate injected denial at cap 8/suffix
+  65 preserves width/output; not an actual pressure experiment.
+- CLI 807 passed / 45 ignored in 29.32 s; primitive state oracles passed in
+  139 s; all-target check passed. [Evidence and telemetry](bench/2026-10-12-glm-document-checkpoint/README.md)
+  distinguish the initial private timing packet from default validation.
+  The branch lever is complete; no further arbitrary experiment or quality
+  rerun is queued. Earlier answer errors and parked kernels remain recorded.
+
 ## 2026-10-12 - Maya 41K Repository Context And Live Follow-Up Complete
 
 - CLI `ec96cc45`, driver `9cd2915e`; one real-source packet, two requests,

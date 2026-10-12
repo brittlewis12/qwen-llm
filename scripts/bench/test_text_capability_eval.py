@@ -139,6 +139,43 @@ def merge_spans(spans):
         self.assertFalse(missing["protocol_complete"])
         self.assertFalse(missing["stop_complete"])
 
+    def test_window_max_grader_runs_ordinary_and_large_special_cases(self) -> None:
+        source = """\
+def window_max(values, k):
+    if k <= 0 or k > len(values):
+        return []
+    queue = []
+    head = 0
+    output = []
+    for index, value in enumerate(values):
+        while head < len(queue) and queue[head] <= index - k:
+            head += 1
+        while len(queue) > head and values[queue[-1]] <= value:
+            queue.pop()
+        queue.append(index)
+        if index >= k - 1:
+            output.append(values[queue[head]])
+    return output
+"""
+        report = capability.grade_code("c5", source)
+        self.assertTrue(report["semantic_correct"], report)
+        self.assertEqual(report["tests_run"], len(capability.code_cases("c5")) + 1)
+
+    def test_patch_alias_special_case_executes_and_reports_real_failure(self) -> None:
+        # Isolate the real alias check from the ordinary path-validation cases.
+        with mock.patch.object(capability, "code_cases", return_value=[]):
+            copied = capability.grade_code(
+                "c6", "def apply_patch(doc, ops):\n    return {'x': list(ops[0][2])}"
+            )
+            aliased = capability.grade_code(
+                "c6", "def apply_patch(doc, ops):\n    return {'x': ops[0][2]}"
+            )
+        self.assertTrue(copied["semantic_correct"], copied)
+        self.assertEqual(copied["tests_run"], 1)
+        self.assertTrue(aliased["format_compliant"], aliased)
+        self.assertFalse(aliased["semantic_correct"], aliased)
+        self.assertIn("result aliases operation value", aliased["error"])
+
     def test_exact_and_json_graders_preserve_visible_whitespace(self) -> None:
         tasks = {task.task_id: task for task in capability.build_tasks()}
         self.assertFalse(

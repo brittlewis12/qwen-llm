@@ -20,6 +20,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 from collections import Counter, deque
 from contextlib import contextmanager, nullcontext
@@ -1886,7 +1887,7 @@ def grade_code(task_id: str, response: str) -> dict[str, Any]:
             "tests_run": 0,
         }
     cases = code_cases(task_id)
-    special = code_special_test(task_id)
+    special = textwrap.indent(code_special_test(task_id), "    ")
     child = f"""\
 import builtins
 import copy

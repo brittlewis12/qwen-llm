@@ -256,6 +256,16 @@ fn session_error(error: qwen_llm::deepseek_v4_metal::DeepSeekV4MetalError) -> Se
     }
 }
 
+fn session_refusal_is_process_releasable(
+    reason: qwen_llm::metal::MetalMemoryAdmissionReason,
+) -> bool {
+    matches!(
+        reason,
+        qwen_llm::metal::MetalMemoryAdmissionReason::ProcessInsufficient
+            | qwen_llm::metal::MetalMemoryAdmissionReason::BothInsufficient
+    )
+}
+
 /// Write-behind eligibility for one captured boundary.
 fn persistable(
     prefix_len: usize,
@@ -846,13 +856,26 @@ impl DeepSeekV4Backend {
         let preflight = {
             let ctx = &self.ctx;
             let cache = &mut self.cache;
+            let memory_reason = Cell::new(None);
             super::transport_memory::with_pressure_release_retry(
-                || {
-                    residency
-                        .admit_session_memory(ctx.memory_signals(), cpu_reserved)
-                        .map_err(session_error)
+                || match residency.admit_session_memory(ctx.memory_signals(), cpu_reserved) {
+                    Ok(()) => Ok(()),
+                    Err(
+                        error @ qwen_llm::deepseek_v4_metal::DeepSeekV4MetalError::MemoryAdmission(
+                            denied,
+                        ),
+                    ) => {
+                        memory_reason.set(Some(denied.reason));
+                        Err(session_error(error))
+                    }
+                    Err(error) => Err(session_error(error)),
                 },
-                || !cache.evict_for(u64::MAX).is_empty(),
+                || {
+                    memory_reason
+                        .get()
+                        .is_some_and(session_refusal_is_process_releasable)
+                        && !cache.evict_for(u64::MAX).is_empty()
+                },
             )
         };
         if let Err(error) = preflight {
@@ -1225,6 +1248,24 @@ impl DeepSeekV4Backend {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn session_relief_only_targets_process_pressure() {
+        use qwen_llm::metal::MetalMemoryAdmissionReason as Reason;
+
+        assert!(super::session_refusal_is_process_releasable(
+            Reason::ProcessInsufficient
+        ));
+        assert!(super::session_refusal_is_process_releasable(
+            Reason::BothInsufficient
+        ));
+        assert!(!super::session_refusal_is_process_releasable(
+            Reason::WorkingSetInsufficient
+        ));
+        assert!(!super::session_refusal_is_process_releasable(
+            Reason::ProcessSignalUnavailable
+        ));
+    }
+
     #[test]
     fn durable_writer_reserves_only_extra_decode_storage_until_ack() {
         let payload_bytes = 256;

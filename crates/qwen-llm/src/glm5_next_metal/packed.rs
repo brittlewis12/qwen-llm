@@ -31,6 +31,10 @@ use crate::metal::{
 use objc2_metal::MTLComputePipelineState;
 
 #[cfg(test)]
+#[path = "tests/prefill_observer.rs"]
+mod prefill_observer;
+
+#[cfg(test)]
 #[path = "tests/native_dispatch.rs"]
 mod native_dispatch;
 
@@ -1297,8 +1301,33 @@ impl Glm5NextSession<'_> {
         tokens: &[u32],
         checkpoint: &mut dyn FnMut() -> std::result::Result<(), String>,
     ) -> Result<Vec<f32>> {
+        self.prefill_packed_with_observer(ctx, tokens, checkpoint, &mut |_, _| {})
+    }
+
+    /// Packed prefill with cancellation before each chunk and observation of
+    /// each successfully committed packed chunk, including a ragged last chunk.
+    /// `after_chunk` receives the immutable session and that chunk's token count
+    /// after GPU completion, status validation, position publication and poison
+    /// clearing. It is not called for a failed or cancelled chunk. `before_chunk`
+    /// has the same validation and cancellation semantics as
+    /// [`Self::prefill_packed_with_checkpoint`].
+    ///
+    /// This synchronous, nonfallible observer is only a hook: it imposes no
+    /// snapshot/cache policy and adds no synchronization, buffers, head execution
+    /// or chunk boundaries. A caller may capture a snapshot at an existing full
+    /// chunk boundary using `session.position()`; any capture cost belongs to
+    /// the callback. The final token's logits are still computed only for the
+    /// last chunk. Without packed scratch, the unchanged serial fallback calls
+    /// `before_chunk` before each token and never calls `after_chunk`.
+    pub fn prefill_packed_with_observer(
+        &mut self,
+        ctx: &MetalContext,
+        tokens: &[u32],
+        before_chunk: &mut dyn FnMut() -> std::result::Result<(), String>,
+        after_chunk: &mut dyn FnMut(&Glm5NextSession, usize),
+    ) -> Result<Vec<f32>> {
         self.validate_request(tokens)?;
-        let mut check = || checkpoint().map_err(Glm5NextMetalError::Cancelled);
+        let mut check = || before_chunk().map_err(Glm5NextMetalError::Cancelled);
         let Some(rows) = self.packed.as_ref().map(|p| p.rows) else {
             let (&last, head) = tokens.split_last().expect("validated nonempty");
             for &token in head {
@@ -1314,6 +1343,7 @@ impl Glm5NextSession<'_> {
         for (index, chunk) in chunks.into_iter().enumerate() {
             check()?;
             logits = self.step_packed(ctx, chunk, index == last)?;
+            after_chunk(self, chunk.len());
         }
         logits.ok_or_else(|| Glm5NextMetalError::Invalid("missing prefill logits".into()))
     }

@@ -4,6 +4,8 @@ use crate::serve::output_partition::{GenerationEnd, OutputPartition, OutputProto
 use crate::serve::partition::PartitionEvent;
 use serde_json::{Value, json};
 
+mod chunk_checkpoint_ab;
+
 #[test]
 #[ignore = "GLM53_GGUF leased session-recreation cost screen; MTL_DEBUG_LAYER=1"]
 fn gpu_cold_session_recreation_cost() {

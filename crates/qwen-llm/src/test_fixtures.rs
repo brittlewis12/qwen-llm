@@ -9,12 +9,13 @@
 //! skip?" and "is Metal available or should I skip?"
 //!
 //! Distinctions kept deliberately:
-//! - *Unavailable* (no alias set, default path absent) is a skip. *Explicitly
+//! - *Unavailable* (no alias set, filename not found) is a skip. *Explicitly
 //!   requested but unreadable* (an alias set to a missing file) is a failure —
 //!   a caller asked for something specific and did not get it.
 //! - Aliases are consulted in the order listed; setting two aliases to
 //!   different values is a conflict and fails rather than silently picking one.
-//! - Metal being required (`QWEN_REQUIRE_METAL_TESTS` truthy) turns a
+//! - `QWEN_REQUIRE_FIXTURES` turns unavailable fixtures into failures. Metal
+//!   being required (`QWEN_REQUIRE_METAL_TESTS` truthy) turns a
 //!   would-be skip into a failure. It never changes what a fixture resolves to.
 //!
 //! This module is compiled into the library so the crate's integration tests
@@ -26,70 +27,75 @@ use std::path::{Path, PathBuf};
 use crate::env_flag::env_value_truthy;
 use crate::metal::{MetalContext, MetalError};
 
+crate::env_flag!(
+    /// Fail a test when a model fixture is unavailable instead of skipping it.
+    default_off require_fixtures, "QWEN_REQUIRE_FIXTURES"
+);
+
 /// One local model fixture: a stable id, the environment aliases that may
-/// override its location, and the path it lives at on the reference machine.
+/// override its location, and its published filename.
 #[derive(Clone, Copy, Debug)]
 pub struct Fixture {
     pub id: &'static str,
     /// Aliases in precedence order. All historical names are kept.
     pub env: &'static [&'static str],
-    pub default_path: &'static str,
+    pub filename: &'static str,
 }
 
 /// Qwen3.6-35B-A3B UD-Q4_K_M (MoE hybrid; the most-referenced fixture).
 pub const A3B_Q4_K_M: Fixture = Fixture {
     id: "qwen3.6-35b-a3b-ud-q4_k_m",
     env: &["QWEN_A3B_MOE_MODEL"],
-    default_path: "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+    filename: "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
 };
 
 /// Qwen3.6-27B Q4_K_M (dense).
 pub const QWEN36_27B_Q4_K_M: Fixture = Fixture {
     id: "qwen3.6-27b-q4_k_m",
     env: &[],
-    default_path: "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+    filename: "Qwen3.6-27B-Q4_K_M.gguf",
 };
 
 /// Qwen3.5-0.8B F32 (smallest dense; CPU-oracle comparisons).
 pub const QWEN35_0_8B_F32: Fixture = Fixture {
     id: "qwen3.5-0.8b-f32",
     env: &[],
-    default_path: "/Users/tito/models/Qwen3.5-0.8B.F32.gguf",
+    filename: "Qwen3.5-0.8B.F32.gguf",
 };
 
 /// Qwen3.5-122B-A10B UD-Q4_K_XL (large MoE; residency and prefetch tests).
 pub const A10B_Q4_K_XL: Fixture = Fixture {
     id: "qwen3.5-122b-a10b-ud-q4_k_xl",
     env: &[],
-    default_path: "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+    filename: "Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
 };
 
 /// Qwen3.5-35B-A3B Q3_K_M (older A3B quant used by MoE kernel tests).
 pub const A3B_Q3_K_M: Fixture = Fixture {
     id: "qwen3.5-35b-a3b-q3_k_m",
     env: &["QWEN_A3B_Q3_MODEL"],
-    default_path: "/Users/tito/models/Qwen3.5-35B-A3B-Q3_K_M.gguf",
+    filename: "Qwen3.5-35B-A3B-Q3_K_M.gguf",
 };
 
 /// Qwen3.5-35B-A3B UD-IQ4_XS.
 pub const A3B_IQ4_XS: Fixture = Fixture {
     id: "qwen3.5-35b-a3b-ud-iq4_xs",
     env: &["QWEN_A3B_UDIQ4XS_MODEL"],
-    default_path: "/Users/tito/models/Qwen3.5-35B-A3B-UD-IQ4_XS.gguf",
+    filename: "Qwen3.5-35B-A3B-UD-IQ4_XS.gguf",
 };
 
 /// Muse Glimmer 30B Q8_0.
 pub const MUSE_GLIMMER_Q8_0: Fixture = Fixture {
     id: "muse-glimmer-30b-q8_0",
     env: &["MUSE_GLIMMER_Q8_GGUF"],
-    default_path: "/Users/tito/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf",
+    filename: "Muse-Glimmer-30B-Q8_0.gguf",
 };
 
 /// DeepSeek V4 Flash 0731 UD-IQ3_XXS (first shard).
 pub const DEEPSEEK_V4_IQ3_XXS: Fixture = Fixture {
     id: "deepseek-v4-flash-0731-ud-iq3_xxs",
     env: &[],
-    default_path: "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+    filename: "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
 };
 
 /// Qwen3.8-Flash-Next UD-Q3_K_XL (first shard). One file, historically
@@ -111,21 +117,21 @@ pub const QWEN4EXP_Q3_K_XL: Fixture = Fixture {
         "QWEN4EXP_TOKENIZER_GGUF",
         "QWEN4EXP_METADATA_GGUF",
     ],
-    default_path: "/Users/tito/models/Qwen3.8-Flash-Next-UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf",
+    filename: "Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf",
 };
 
 /// GLM-5.3-Flash UD-IQ3_XXS (first, metadata-only shard of four).
 pub const GLM53_FLASH_UD_IQ3_XXS: Fixture = Fixture {
     id: "glm-5.3-flash-ud-iq3_xxs",
     env: &["GLM53_GGUF"],
-    default_path: "/Volumes/wdblack/weights-archive/glm-5.3-flash-ud-iq3_xxs/glm5-next/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+    filename: "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
 };
 
 /// Spiritbuun DFlash drafter for Qwen3.6 (v1 drafter convention).
 pub const DFLASH_DRAFT_36_Q8_0: Fixture = Fixture {
     id: "dflash-draft-3.6-q8_0",
     env: &[],
-    default_path: "/Users/tito/models/spiritbuun-dflash/dflash-draft-3.6-q8_0.gguf",
+    filename: "dflash-draft-3.6-q8_0.gguf",
 };
 
 /// Where a fixture came from, for messages and for tests that care.
@@ -133,8 +139,8 @@ pub const DFLASH_DRAFT_36_Q8_0: Fixture = Fixture {
 pub enum FixtureSource {
     /// An environment alias named it.
     Env(&'static str),
-    /// The reference-machine default.
-    Default,
+    /// A directory from `QWEN_MODEL_SEARCH_PATH`.
+    SearchPath,
 }
 
 #[derive(Clone, Debug)]
@@ -144,10 +150,14 @@ pub struct ResolvedFixture {
 }
 
 impl Fixture {
-    /// The reference-machine path as a literal. Type-preserving replacement
-    /// for the string literals tests used to carry; consults no environment.
-    pub const fn path(&self) -> &'static str {
-        self.default_path
+    /// Published filename used to discover this fixture.
+    pub const fn filename(&self) -> &'static str {
+        self.filename
+    }
+
+    /// Return the published filename for constructing fixture-related test data.
+    pub fn path(&self) -> &'static str {
+        self.filename
     }
 
     /// Consult aliases in order. Returns `Err` on a conflict between two set
@@ -178,8 +188,8 @@ impl Fixture {
         }))
     }
 
-    /// Resolve to a readable path, or `None` when the fixture is simply not
-    /// present on this machine. Panics when an alias names an unreadable
+    /// Resolve to a readable path, or skip when the fixture is not present.
+    /// Panics when an alias names an unreadable
     /// file (requested-but-invalid) or two aliases disagree.
     pub fn path_or_skip(&self) -> Option<PathBuf> {
         match self.env_override() {
@@ -191,17 +201,26 @@ impl Fixture {
                         self.id,
                         match resolved.source {
                             FixtureSource::Env(name) => name,
-                            FixtureSource::Default => "default",
+                            FixtureSource::SearchPath => "QWEN_MODEL_SEARCH_PATH",
                         },
                         resolved.path.display()
                     );
                 }
                 Some(resolved.path)
             }
-            Ok(None) => {
-                let default = Path::new(self.default_path);
-                readable_file(default).ok().map(|()| default.to_path_buf())
-            }
+            Ok(None) => self.search_path().or_else(|| {
+                let message = format!(
+                    "fixture {} ({}) unavailable; set QWEN_MODEL_SEARCH_PATH or one of [{}]",
+                    self.id,
+                    self.filename,
+                    self.env.join(", ")
+                );
+                if require_fixtures() {
+                    panic!("{message}");
+                }
+                eprintln!("skipping: {message}");
+                None
+            }),
         }
     }
 
@@ -210,13 +229,47 @@ impl Fixture {
     pub fn required(&self) -> PathBuf {
         self.path_or_skip().unwrap_or_else(|| {
             panic!(
-                "fixture {} is required: set one of [{}] or place it at {}",
+                "fixture {} ({}) is required: set one of [{}] or include it in QWEN_MODEL_SEARCH_PATH",
                 self.id,
-                self.env.join(", "),
-                self.default_path
+                self.filename,
+                self.env.join(", ")
             )
         })
     }
+
+    fn search_path(&self) -> Option<PathBuf> {
+        // QWEN_MODEL_SEARCH_PATH is a colon-separated list of directories. For example:
+        // `QWEN_MODEL_SEARCH_PATH="$MODELS/primary:$MODELS/archive"`.
+        let search = std::env::var_os("QWEN_MODEL_SEARCH_PATH")?;
+        for root in std::env::split_paths(&search) {
+            if let Some(path) = find_filename(&root, self.filename, 3) {
+                return Some(path);
+            }
+        }
+        None
+    }
+}
+
+/// Search a directory and at most three directory levels below it.
+fn find_filename(root: &Path, filename: &str, depth: usize) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(root).ok()?;
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    paths.sort();
+    for path in &paths {
+        if path.file_name().is_some_and(|name| name == filename) && readable_file(path).is_ok() {
+            return Some(path.clone());
+        }
+    }
+    if depth == 0 {
+        return None;
+    }
+    paths
+        .into_iter()
+        .filter(|path| path.is_dir())
+        .find_map(|path| find_filename(&path, filename, depth - 1))
 }
 
 /// "Readable" means what the loaders need: a regular file that opens.
@@ -270,7 +323,7 @@ mod tests {
     const PROBE: Fixture = Fixture {
         id: "probe",
         env: &["QWEN_TEST_FIXTURE_PROBE_A", "QWEN_TEST_FIXTURE_PROBE_B"],
-        default_path: "/definitely/not/present.gguf",
+        filename: "not-present.gguf",
     };
 
     // Environment mutation is process-global; serialize the tests that touch it.
@@ -396,6 +449,26 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), all.len());
-        assert!(all.iter().all(|f| f.default_path.ends_with(".gguf")));
+        assert!(all.iter().all(|f| f.filename.ends_with(".gguf")));
+    }
+
+    #[test]
+    fn searches_filename_to_bounded_depth_in_directory_order() {
+        let root = std::env::temp_dir().join(format!("qwen-fixture-search-{}", std::process::id()));
+        let file = root.join("one/two/three/probe.gguf");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"fixture").unwrap();
+        let fixture = Fixture {
+            id: "search-probe",
+            env: &[],
+            filename: "probe.gguf",
+        };
+        with_env(
+            &[("QWEN_MODEL_SEARCH_PATH", Some(root.to_str().unwrap()))],
+            || {
+                assert_eq!(fixture.path_or_skip().as_deref(), Some(file.as_path()));
+            },
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

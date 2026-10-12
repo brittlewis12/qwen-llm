@@ -341,8 +341,8 @@ pub static DEEPSEEK_V4_PACKED_QA_RAW_KV_MATRIX: Qualification = Qualification {
     required_headroom_bytes: None,
     required_headroom_scope: None,
     evidence: "6ea94010",
-    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_q8_qa_kv_matrix_policy_is_scoped_and_fail_closed -- --exact",
-    correctness_kind: QualificationWitnessKind::Replay,
+    correctness: "scope-only: cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_q8_qa_kv_matrix_policy_is_scoped_and_fail_closed -- --exact",
+    correctness_kind: QualificationWitnessKind::ScopeOnly,
     performance: "none: the 2026-08-08 PERF-LOG entry gives Q-A/raw-KV A/B results but no exact command or packet runner for that measurement",
     performance_kind: QualificationWitnessKind::None,
 };
@@ -355,8 +355,8 @@ pub static DEEPSEEK_V4_PACKED_INDEXER_Q_MATRIX: Qualification = Qualification {
     required_headroom_bytes: None,
     required_headroom_scope: None,
     evidence: "30c8ef59, 85a0ca34",
-    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_indexer_q_matrix_scope_is_4096_only -- --exact",
-    correctness_kind: QualificationWitnessKind::Replay,
+    correctness: "scope-only: cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_indexer_q_matrix_scope_is_4096_only -- --exact",
+    correctness_kind: QualificationWitnessKind::ScopeOnly,
     performance: "none: the cited PERF-LOG sections record the indexed-Q measurements and rollback but contain no replay command or packet path for that schedule",
     performance_kind: QualificationWitnessKind::None,
 };
@@ -453,8 +453,8 @@ pub static PARALLEL_COPY_EXACT_UNIFIED: Qualification = Qualification {
     required_headroom_bytes: Some(A10B_PARALLEL_PREAD_REQUIRED_HEADROOM_BYTES),
     required_headroom_scope: Some(HeadroomRequirementScope::A10bQ4xlForcedPread),
     evidence: "8c223624, fba3b97a",
-    correctness: "cargo test --release -p qwen-llm --lib metal_forward::tests::gguf_parallel_pread_a10b_profile_is_exact_and_force_only -- --exact",
-    correctness_kind: QualificationWitnessKind::M4CharacterizationSkip,
+    correctness: "scope-only: cargo test --release -p qwen-llm --lib metal_forward::tests::gguf_parallel_pread_a10b_profile_is_exact_and_force_only -- --exact",
+    correctness_kind: QualificationWitnessKind::ScopeOnly,
     performance: "none: commits 8c223624 and fba3b97a plus their PERF-LOG entries report measurements but record no executable A/B replay command",
     performance_kind: QualificationWitnessKind::None,
 };

@@ -313,9 +313,9 @@ mod tests {
             exact["correctness"]
                 .as_str()
                 .unwrap()
-                .starts_with("cargo test")
+                .starts_with("scope-only: cargo test")
         );
-        assert_eq!(exact["correctness_kind"], "m4_characterization_skip");
+        assert_eq!(exact["correctness_kind"], "scope_only");
         assert!(exact["performance"].as_str().unwrap().starts_with("none:"));
         assert_eq!(exact["performance_kind"], "none");
         assert_eq!(exact["decline_reason"]["facet"], "device_model");

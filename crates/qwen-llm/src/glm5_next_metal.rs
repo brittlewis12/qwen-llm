@@ -930,12 +930,17 @@ pub enum Glm5NextProbe {
     BlockResidual,
 }
 
-/// Decode stages timed by [`Glm5NextSession::forward_stage_profiled`].
+/// Decode and packed-prefill stages timed by the session stage recorder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Glm5NextStage {
     Embed,
     AttentionPre,
     Kda,
+    PackedKdaInputProjections,
+    PackedKdaPrepare,
+    PackedKdaRecurrence,
+    PackedKdaOutputNorm,
+    PackedKdaOutputProjection,
     MlaProjection,
     MlaIndexer,
     DenseAttention,
@@ -960,6 +965,11 @@ impl Glm5NextStage {
             Self::Embed => "embed",
             Self::AttentionPre => "attention_pre",
             Self::Kda => "kda",
+            Self::PackedKdaInputProjections => "packed_kda_input_projections",
+            Self::PackedKdaPrepare => "packed_kda_prepare",
+            Self::PackedKdaRecurrence => "packed_kda_recurrence",
+            Self::PackedKdaOutputNorm => "packed_kda_output_norm",
+            Self::PackedKdaOutputProjection => "packed_kda_output_projection",
             Self::MlaProjection => "mla_projection",
             Self::MlaIndexer => "mla_indexer",
             Self::DenseAttention => "dense_attention",
@@ -980,7 +990,7 @@ impl Glm5NextStage {
     }
 }
 
-/// One timed encoder of a profiled decode step.
+/// One timed encoder of a profiled decode step or packed-prefill chunk.
 #[derive(Clone, Copy, Debug)]
 pub struct Glm5NextStageSpan {
     pub stage: Glm5NextStage,
@@ -990,9 +1000,10 @@ pub struct Glm5NextStageSpan {
     pub gpu_ms: f64,
 }
 
-/// Attribution of one decode step: the step is encoded as one command with
-/// one sampled encoder per stage (diagnostic; encoder boundaries add their
-/// own cost, reported as the gap between the span sum and the command).
+/// Attribution of one decode step or packed chunk, encoded as one command with
+/// one sampled encoder per stage. Boundaries can perturb execution; compare
+/// profiled and ordinary wall time. The command-minus-span gap is unassigned
+/// profiled time, not an independent measurement of boundary overhead.
 #[derive(Clone, Debug)]
 pub struct Glm5NextStageReport {
     pub spans: Vec<Glm5NextStageSpan>,
@@ -1286,8 +1297,9 @@ impl<'w> Glm5NextSession<'w> {
 
     /// Like [`Self::forward`] (same kernels, same state), encoding the step
     /// as one command with a timestamp-sampled encoder per stage. The
-    /// encoder boundaries cost GPU time of their own, so the spans attribute
-    /// a slightly slower step; compare shares, not the sum, with `forward`.
+    /// encoder boundaries can perturb both total cost and relative shares.
+    /// Compare ordinary wall time separately; spans are diagnostic attribution,
+    /// not fractions of ordinary execution time.
     pub fn forward_stage_profiled(
         &mut self,
         ctx: &MetalContext,
@@ -1299,9 +1311,9 @@ impl<'w> Glm5NextSession<'w> {
     /// Like [`Self::prefill_packed`] for one chunk (at most the session's
     /// prefill rows; same kernels, same state and logits), encoding it as one
     /// command with a timestamp-sampled encoder per stage of every block
-    /// (mHC pre/post, the KDA or MLA mixer, dense FFN, router, routed
-    /// experts, shared expert, head). As with decode, compare shares, not
-    /// the sum, with an unprofiled prefill.
+    /// (mHC pre/post, five KDA components or the MLA mixer, dense FFN, router,
+    /// routed experts, shared expert, head). Measure observer overhead against
+    /// ordinary prefill; substantial overhead can distort component shares.
     pub fn prefill_chunk_stage_profiled(
         &mut self,
         ctx: &MetalContext,

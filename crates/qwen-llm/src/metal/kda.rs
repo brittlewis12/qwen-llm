@@ -198,6 +198,41 @@ pub fn encode_kda_prefill(
     lower_bound: f32,
     norm_eps: f32,
 ) -> Result<(), MetalError> {
+    let prepared = prepare_kda_prefill(ctx, enc, heads, rows, b, lower_bound, norm_eps)?;
+    prepared.encode_prepare(enc)?;
+    prepared.encode_recurrence(enc)?;
+    prepared.encode_output_norm(enc)
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct KdaPrefillArgs {
+    n_heads: u32,
+    n_rows: u32,
+    lower_bound: f32,
+    norm_eps: f32,
+}
+
+/// Validated borrowed bindings and pipeline handles, with no activation allocation.
+/// Only profiling callers split encoders between these three ordered dispatches;
+/// the public ordinary encoder above keeps them in the caller's single encoder.
+pub(crate) struct PreparedKdaPrefill<'a, 'b> {
+    b: &'a KdaDecode<'b>,
+    args: KdaPrefillArgs,
+    prepare: Pipeline,
+    recurrence: Pipeline,
+    output: Pipeline,
+}
+
+pub(crate) fn prepare_kda_prefill<'a, 'b>(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    heads: usize,
+    rows: usize,
+    b: &'a KdaDecode<'b>,
+    lower_bound: f32,
+    norm_eps: f32,
+) -> Result<PreparedKdaPrefill<'a, 'b>, MetalError> {
     const K: &str = "kda_prefill";
     require_serial(K, enc)?;
     if heads == 0 || rows == 0 {
@@ -267,24 +302,11 @@ pub fn encode_kda_prefill(
             }
         }
     }
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Args {
-        n_heads: u32,
-        n_rows: u32,
-        lower_bound: f32,
-        norm_eps: f32,
-    }
-    let args = Args {
+    let args = KdaPrefillArgs {
         n_heads: to_u32(K, heads, "heads")?,
         n_rows: to_u32(K, rows, "rows")?,
         lower_bound,
         norm_eps,
-    };
-    let threads = MTLSize {
-        width: THREADS,
-        height: 1,
-        depth: 1,
     };
     let pipeline = |name: &str| -> Result<Pipeline, MetalError> {
         let pso = ctx.pipeline(name)?;
@@ -297,70 +319,105 @@ pub fn encode_kda_prefill(
         Ok(pso)
     };
 
-    let prepare = pipeline("kernel_glm53_kda_prefill_prepare")?;
-    enc.set_pipeline(&prepare);
-    enc.set_bytes(0, &args);
-    for (index, tensor) in [
-        b.q,
-        b.k,
-        b.v,
-        b.raw_gate,
-        b.q_conv,
-        b.k_conv,
-        b.v_conv,
-        b.neg_exp_a_log,
-        b.dt_bias,
-        b.conv_state,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        enc.set_tensor(index + 1, tensor);
-    }
-    enc.set_threadgroup_memory(0, (2 * KDA_HEAD_DIM + 8) * std::mem::size_of::<f32>());
-    enc.dispatch(
-        MTLSize {
-            width: heads,
-            height: 1,
-            depth: 1,
-        },
-        threads,
-    );
+    Ok(PreparedKdaPrefill {
+        b,
+        args,
+        prepare: pipeline("kernel_glm53_kda_prefill_prepare")?,
+        recurrence: pipeline("kernel_glm53_kda_prefill_recurrence")?,
+        output: pipeline("kernel_glm53_kda_prefill_output")?,
+    })
+}
 
-    let recurrence = pipeline("kernel_glm53_kda_prefill_recurrence")?;
-    enc.set_pipeline(&recurrence);
-    enc.set_bytes(0, &args);
-    for (index, tensor) in [b.q, b.k, b.v, b.raw_gate, b.raw_beta, b.state, b.out]
+impl PreparedKdaPrefill<'_, '_> {
+    pub(crate) fn encode_prepare(&self, enc: &KernelEncoder) -> Result<(), MetalError> {
+        require_serial("kda_prefill", enc)?;
+        let b = self.b;
+        enc.set_pipeline(&self.prepare);
+        enc.set_bytes(0, &self.args);
+        for (index, tensor) in [
+            b.q,
+            b.k,
+            b.v,
+            b.raw_gate,
+            b.q_conv,
+            b.k_conv,
+            b.v_conv,
+            b.neg_exp_a_log,
+            b.dt_bias,
+            b.conv_state,
+        ]
         .into_iter()
         .enumerate()
-    {
-        enc.set_tensor(index + 1, tensor);
-    }
-    enc.dispatch(
-        MTLSize {
-            width: heads,
-            height: KDA_HEAD_DIM / 4,
-            depth: 1,
-        },
-        threads,
-    );
+        {
+            enc.set_tensor(index + 1, tensor);
+        }
+        enc.set_threadgroup_memory(0, (2 * KDA_HEAD_DIM + 8) * std::mem::size_of::<f32>());
+        enc.dispatch(
+            MTLSize {
+                width: self.args.n_heads as usize,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: THREADS,
+                height: 1,
+                depth: 1,
+            },
+        );
 
-    let output = pipeline("kernel_glm53_kda_prefill_output")?;
-    enc.set_pipeline(&output);
-    enc.set_bytes(0, &args);
-    enc.set_tensor(1, b.out);
-    enc.set_tensor(2, b.output_gate);
-    enc.set_tensor(3, b.output_norm);
-    enc.set_threadgroup_memory(0, 4 * std::mem::size_of::<f32>());
-    enc.dispatch(
-        MTLSize {
-            width: rows,
-            height: heads,
-            depth: 1,
-        },
-        threads,
-    );
-    Ok(())
+        Ok(())
+    }
+
+    pub(crate) fn encode_recurrence(&self, enc: &KernelEncoder) -> Result<(), MetalError> {
+        require_serial("kda_prefill", enc)?;
+        let b = self.b;
+        enc.set_pipeline(&self.recurrence);
+        enc.set_bytes(0, &self.args);
+        for (index, tensor) in [b.q, b.k, b.v, b.raw_gate, b.raw_beta, b.state, b.out]
+            .into_iter()
+            .enumerate()
+        {
+            enc.set_tensor(index + 1, tensor);
+        }
+        enc.dispatch(
+            MTLSize {
+                width: self.args.n_heads as usize,
+                height: KDA_HEAD_DIM / 4,
+                depth: 1,
+            },
+            MTLSize {
+                width: THREADS,
+                height: 1,
+                depth: 1,
+            },
+        );
+
+        Ok(())
+    }
+
+    pub(crate) fn encode_output_norm(&self, enc: &KernelEncoder) -> Result<(), MetalError> {
+        require_serial("kda_prefill", enc)?;
+        let b = self.b;
+        enc.set_pipeline(&self.output);
+        enc.set_bytes(0, &self.args);
+        enc.set_tensor(1, b.out);
+        enc.set_tensor(2, b.output_gate);
+        enc.set_tensor(3, b.output_norm);
+        enc.set_threadgroup_memory(0, 4 * std::mem::size_of::<f32>());
+        enc.dispatch(
+            MTLSize {
+                width: self.args.n_rows as usize,
+                height: self.args.n_heads as usize,
+                depth: 1,
+            },
+            MTLSize {
+                width: THREADS,
+                height: 1,
+                depth: 1,
+            },
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -702,6 +759,98 @@ mod tests {
                 "rows {rows} conv state"
             );
             position += rows;
+        }
+    }
+
+    /// Same nonzero-history fixture construction as the chunk oracle, reduced
+    /// to two heads. Encoder boundaries must preserve every written buffer.
+    #[test]
+    fn kda_prefill_sampled_components_match_ordinary_bits() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        const HEADS: usize = 2;
+        let width = HEADS * KDA_HEAD_DIM;
+        let (w, d, h) = (width as u64, KDA_HEAD_DIM as u64, HEADS as u64);
+        let q_conv = tensor(&ctx, &series(width * 4, 7, 1.0), vec![4, 1, w]);
+        let k_conv = tensor(&ctx, &series(width * 4, 8, 1.0), vec![4, 1, w]);
+        let v_conv = tensor(&ctx, &series(width * 4, 9, 1.0), vec![4, 1, w]);
+        let a = tensor(&ctx, &[-0.5, -1.0], vec![h]);
+        let dt = tensor(&ctx, &series(width, 11, 2.0), vec![w]);
+        let norm = tensor(
+            &ctx,
+            &(0..KDA_HEAD_DIM)
+                .map(|i| 1.0 + val(i, 12, 0.5))
+                .collect::<Vec<_>>(),
+            vec![d],
+        );
+        for rows in [1usize, 37] {
+            let run = |sampled: bool| {
+                let shape = vec![w, rows as u64];
+                let q = tensor(&ctx, &series(width * rows, 1, 2.0), shape.clone());
+                let k = tensor(&ctx, &series(width * rows, 2, 2.0), shape.clone());
+                let v = tensor(&ctx, &series(width * rows, 3, 2.0), shape.clone());
+                let g = tensor(&ctx, &series(width * rows, 4, 6.0), shape.clone());
+                let beta = tensor(&ctx, &series(HEADS * rows, 5, 4.0), vec![h, rows as u64]);
+                let og = tensor(&ctx, &series(width * rows, 6, 4.0), shape.clone());
+                let out = tensor(&ctx, &vec![0.0; width * rows], shape);
+                let conv = tensor(&ctx, &series(9 * width, 13, 1.0), vec![w, 3, 3]);
+                let state = tensor(
+                    &ctx,
+                    &series(HEADS * KDA_HEAD_DIM * KDA_HEAD_DIM, 14, 0.2),
+                    vec![d, d, h],
+                );
+                let b = KdaDecode {
+                    q: &q,
+                    k: &k,
+                    v: &v,
+                    raw_gate: &g,
+                    raw_beta: &beta,
+                    output_gate: &og,
+                    q_conv: &q_conv,
+                    k_conv: &k_conv,
+                    v_conv: &v_conv,
+                    neg_exp_a_log: &a,
+                    dt_bias: &dt,
+                    output_norm: &norm,
+                    conv_state: &conv,
+                    state: &state,
+                    out: &out,
+                };
+                let samples = sampled.then(|| ctx.timestamp_sample_buffer(6).unwrap());
+                let command = ctx.queue.commandBuffer().expect("command buffer");
+                let mut enc = if let Some(samples) = &samples {
+                    KernelEncoder::try_begin_sampled(&command, samples, 0, 1, false).unwrap()
+                } else {
+                    KernelEncoder::begin(&command)
+                };
+                if let Some(samples) = &samples {
+                    let prepared =
+                        prepare_kda_prefill(&ctx, &enc, HEADS, rows, &b, -5.0, 1e-5).unwrap();
+                    prepared.encode_prepare(&enc).unwrap();
+                    enc.finish();
+                    enc = KernelEncoder::try_begin_sampled(&command, samples, 2, 3, false).unwrap();
+                    prepared.encode_recurrence(&enc).unwrap();
+                    enc.finish();
+                    enc = KernelEncoder::try_begin_sampled(&command, samples, 4, 5, false).unwrap();
+                    prepared.encode_output_norm(&enc).unwrap();
+                } else {
+                    encode_kda_prefill(&ctx, &enc, HEADS, rows, &b, -5.0, 1e-5).unwrap();
+                }
+                enc.end();
+                command.commit();
+                wait_completed(&command).unwrap();
+                [&q, &k, &v, &g, &out, &conv, &state].map(|t| {
+                    let data = tensor_f32_at_offset(t);
+                    assert!(data.iter().all(|x| x.is_finite()));
+                    data.into_iter().map(f32::to_bits).collect::<Vec<_>>()
+                })
+            };
+            assert_eq!(
+                run(false),
+                run(true),
+                "rows {rows}: prepared arrays, output and final states"
+            );
         }
     }
 

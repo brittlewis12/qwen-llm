@@ -1474,8 +1474,7 @@ impl Glm5NextSession<'_> {
             )?;
             match (&block.mixer, &self.layers[index]) {
                 (MixerTensors::Kda(kda), LayerState::Kda { conv, state }) => {
-                    self.stage(&mut enc, Glm5NextStage::Kda, Some(index))?;
-                    self.encode_kda_rows(ctx, &enc, rows, kda, conv, state)?
+                    self.encode_kda_rows(ctx, &mut enc, rows, index, kda, conv, state)?
                 }
                 (
                     MixerTensors::Mla(mla),
@@ -1815,11 +1814,13 @@ impl Glm5NextSession<'_> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn encode_kda_rows(
         &self,
         ctx: &MetalContext,
-        enc: &KernelEncoder,
+        enc: &mut KernelEncoder,
         rows: usize,
+        block: usize,
         kda: &crate::glm5_next::KdaTensors<MetalTensor>,
         conv: &MetalTensor,
         state: &MetalTensor,
@@ -1832,6 +1833,7 @@ impl Glm5NextSession<'_> {
             c.kda_width() as usize,
             c.kda_head_dim as usize,
         );
+        self.stage(enc, Glm5NextStage::PackedKdaInputProjections, Some(block))?;
         let x = v(&p.normed);
         matmat(
             ctx,
@@ -1929,31 +1931,52 @@ impl Glm5NextSession<'_> {
             width,
             rows,
         )?;
-        encode_kda_prefill(
-            ctx,
-            enc,
-            c.head_count as usize,
-            rows,
-            &KdaDecode {
-                q: &v(&p.q),
-                k: &v(&p.k),
-                v: &v(&p.v),
-                raw_gate: &v(&p.raw_gate),
-                raw_beta: &v(&p.raw_beta),
-                output_gate: &v(&p.output_gate),
-                q_conv: &kda.query_conv,
-                k_conv: &kda.key_conv,
-                v_conv: &kda.value_conv,
-                neg_exp_a_log: &kda.neg_exp_a_log,
-                dt_bias: &kda.decay_bias,
-                output_norm: &kda.output_norm,
-                conv_state: conv,
-                state,
-                out: &v(&p.kda_out),
-            },
-            c.kda_gate_lower_bound,
-            c.rms_epsilon,
-        )?;
+        let bindings = KdaDecode {
+            q: &v(&p.q),
+            k: &v(&p.k),
+            v: &v(&p.v),
+            raw_gate: &v(&p.raw_gate),
+            raw_beta: &v(&p.raw_beta),
+            output_gate: &v(&p.output_gate),
+            q_conv: &kda.query_conv,
+            k_conv: &kda.key_conv,
+            v_conv: &kda.value_conv,
+            neg_exp_a_log: &kda.neg_exp_a_log,
+            dt_bias: &kda.decay_bias,
+            output_norm: &kda.output_norm,
+            conv_state: conv,
+            state,
+            out: &v(&p.kda_out),
+        };
+        let profiling = self.stage_recorder.borrow().is_some();
+        if profiling {
+            let prepared = crate::metal::prepare_kda_prefill(
+                ctx,
+                enc,
+                c.head_count as usize,
+                rows,
+                &bindings,
+                c.kda_gate_lower_bound,
+                c.rms_epsilon,
+            )?;
+            self.stage(enc, Glm5NextStage::PackedKdaPrepare, Some(block))?;
+            prepared.encode_prepare(enc)?;
+            self.stage(enc, Glm5NextStage::PackedKdaRecurrence, Some(block))?;
+            prepared.encode_recurrence(enc)?;
+            self.stage(enc, Glm5NextStage::PackedKdaOutputNorm, Some(block))?;
+            prepared.encode_output_norm(enc)?;
+        } else {
+            encode_kda_prefill(
+                ctx,
+                enc,
+                c.head_count as usize,
+                rows,
+                &bindings,
+                c.kda_gate_lower_bound,
+                c.rms_epsilon,
+            )?;
+        }
+        self.stage(enc, Glm5NextStage::PackedKdaOutputProjection, Some(block))?;
         matmat(
             ctx,
             enc,

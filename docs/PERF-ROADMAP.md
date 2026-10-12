@@ -78,16 +78,22 @@ or extrapolate the entire router parent as recoverable projection time.
 Evidence: `docs/bench/2026-10-12-glm-prefill-cost/` and
 `docs/bench/2026-10-12-glm-router-large/`.
 
-1. **Resolve KDA's actual internal budget.** Use five boundaries in the existing
-   recorder: input projections, preparation, recurrence, output normalization,
-   output projection. Ordinary execution must keep its encoder and kernels.
-   One identical-input N2048 ordinary/profiled comparison, with overhead
-   reported, decides whether the serial-time recurrence is large enough to
-   justify a chunkwise matrix prototype. Per-key-channel decay is not scalar
-   GDN decay; preserve incoming/final state and avoid unstable inverse-decay
-   formulations. If projections dominate or observation is unstable, stop the
-   recurrence redesign rather than expanding an attribution campaign. Generic
-   HC is second: its entire pre-stage parent budget is only about292 ms.
+**KDA internal split completed:** input projections 1245 ms, preparation 105,
+recurrence 340, output normalization 13, output projection 393. Ordinary wall
+7.68/8.03s, profiled 8.63s (9.8% overhead); exact logits and state checks pass.
+Projections dominate this diagnostic. Do not use the old 2345 ms parent to
+justify a large chunkwise per-key-decay recurrence redesign; park it.
+
+1. **Bounded normalized F32 mHC matrix reuse.** Reuse the existing grouped
+   MMA template for F32 weights and complete eight-channel fragments (M24
+   needs guarded invalid loads/stores), K64 alignment. Preserve normalization
+   before projection and existing scratch. Scope only Fast initially; Exact
+   shares the generic HC caller and must not change accidentally. A dedicated
+   HC override must leave shipped Q6 MMA enabled in both arms. Check all 24
+   channels with independent dots, boundary rows and ragged tokens. One actual
+   N2048 leaf then whole ABBA if promising; no tile sweep. The entire pre-stage
+   budget is only 263 ms and M24/N2048 yields 32 MMA groups, so insufficient
+   parallelism is a concrete falsifier. Stop if it does not convert.
 2. **Coordinate Flash work; the retained integer selector is now falsified.**
    Existing Flash work now retains packed prefill under workspace pressure
    (`e7b48483`). The quant-compatibility worktree has been retired; its parallel

@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-12 - KDA Component Budget Does Not Justify Recurrence Redesign
+
+- Split packed KDA into five existing-recorder spans; ordinary execution keeps
+  one encoder and the same three kernels/arguments/order. Shared validation
+  preflights all PSOs before dispatch. No new activation memory or GPU arithmetic.
+- Maya Half N2048 across 34 blocks: input projections 1244.76 ms, prepare 105.13,
+  recurrence 340.05, output norm 12.71, output projection 392.54. Ordinary wall
+  7684.56/8031.44 ms; profiled 8631.17 ms (9.8% overhead), 984 timestamps used.
+  This is diagnostic attribution with perturbation, not ordinary-wall fractions.
+- Full model profiled/ordinary logits match bits. Four leased KDA tests pass,
+  including independent CPU chunk/decode and seven-buffer output/state equality
+  across sampled encoder boundaries at rows 1/37 with nonzero incoming state.
+- Projections dominate; park a large chunkwise recurrence algorithm rather than
+  claim its budget is the whole KDA parent. Next is one small F32 normalized-HC
+  MMA primitive-reuse bet, with explicit lineage permission and M24 tail guards.
+  Evidence: `docs/bench/2026-10-12-glm-prefill-cost/maya-2048-kda-components.jsonl`.
+
 ## 2026-10-12 - Strict Router Follows Geometry, Not Sampled Widths
 
 - Current Maya Half N2048 profile (`5d934f4a`) finds42 generic F32 routers,

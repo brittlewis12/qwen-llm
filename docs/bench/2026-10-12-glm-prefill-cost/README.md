@@ -35,3 +35,41 @@ not a projection-only opportunity.
 
 The packet uses the existing profiler and records the full dispatched names,
 geometry and weight descriptors. It adds no production observer or allocation.
+
+## KDA Component Decision
+
+After router promotion, schema v2 splits packed KDA into five components using
+the existing recorder. Decode keeps its original parent stage. Ordinary packed
+execution retains the same encoder, three KDA kernels, arguments and order;
+shared validated helpers preflight all three pipelines before dispatch. Profiling
+alone adds four encoder boundaries per KDA block, with no activation buffers.
+
+`maya-2048-kda-components.jsonl` records 34 KDA blocks, 170 component spans and
+984 timestamp samples within the existing 2048-sample capacity. Ordinary wall
+7684.56 / 8031.44 ms; profiled 8631.17 ms, 1.098x ordinary mean. Ordinary repeats
+vary 4.5%. Do not infer an optimization from timing differences versus v1: these
+are separate runs and the router policy also changed.
+
+| KDA component, across 34 blocks | Scaled GPU ms |
+| --- | ---: |
+| Input projections | 1244.76 |
+| Preparation | 105.13 |
+| Recurrence | 340.05 |
+| Output normalization/gating | 12.71 |
+| Output projection | 392.54 |
+
+Projections dominate this diagnostic; recurrence is only about 340 ms of an
+approximately 7.9-second ordinary chunk. The observer adds roughly 9.8% wall
+overhead and can distort component shares, so these are not ordinary-runtime
+fractions. A new chunkwise per-key-decay recurrence is not justified by the
+2345 ms parent budget. Park that redesign rather than start a larger campaign.
+
+All model endpoint logits remain bit-identical. Four KDA tests pass under leased
+Metal validation, including the independent CPU chunk/decode oracle and an
+ordinary-versus-sampled test checking all seven written buffers, incoming
+nonzero state, and rows 1/37. No GPU kernel arithmetic changes are made.
+
+The next bounded primitive-reuse candidate is normalized F32 mHC projection
+through the existing grouped MMA template, with explicit Fast-only permission
+and output-channel-tail guards. Its entire pre-stage budget is only about 263 ms,
+so keep the experiment small and stop if reduced parallelism defeats reuse.

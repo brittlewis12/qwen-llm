@@ -1,5 +1,5 @@
-//! Current production Fast Half, one N2048 chunk at prefix zero. Parent costs,
-//! not leaf attribution or a qualification gate. GLM53_GGUF=Maya;
+//! Current production Fast Half, one N2048 chunk at prefix zero. Parent costs
+//! and five packed KDA components; not a qualification gate. GLM53_GGUF=Maya;
 //! GLM53_STAGE_OUT=new.jsonl (relative paths are workspace-relative).
 use super::*;
 use crate::glm5_next_metal::tests::{long_qualification_text, perf_lease};
@@ -49,16 +49,19 @@ fn current_half_2048_cost() {
     }
     emit(
         &mut out,
-        json!({"event":"header","schema":"glm53.current_half_2048_cost.v1",
+        json!({"event":"header","schema":"glm53.current_half_2048_cost.v2",
         "artifact":path,"binary":binary,"binary_sha256":format!("{hash:x}",hash=hash.finalize()),
         "rows":ROWS,"prefix":0,"precision":"Half","lineage":"Fast","production_overrides":false,
         "msl_language":include_str!("../../../build.rs").lines().find(|l|l.starts_with("const METAL_LANGUAGE:")).unwrap().split('"').nth(1).unwrap(),
         "product_deployment_target":crate::PRODUCT_METALLIB_TARGET,"research_deployment_target":crate::RESEARCH_METALLIB_TARGET,
         "source_sha256":{"packet":sha(include_bytes!("prefill_cost.rs")),"packed":sha(include_bytes!("../packed.rs")),
-            "runtime":sha(include_bytes!("../../glm5_next_metal.rs")),"build":sha(include_bytes!("../../../build.rs")),
+            "runtime":sha(include_bytes!("../../glm5_next_metal.rs")),"kda":sha(include_bytes!("../../metal/kda.rs")),"build":sha(include_bytes!("../../../build.rs")),
             "metallib":sha(crate::KERNELS_METALLIB)},
         "method":"warm ordinary with census, two ordinary plain calls, one stage-profiled call; fresh zero-prefix session each; ordinary call includes GPU wait and logits readback; session allocation, checks, hashes and JSON excluded; profiled API wall includes sample allocation/resolution",
-        "limits":"existing packed boundaries combine bucket/gate-up/down/reduction in routed_experts, KDA projections/prepare/recurrence in kda, and MLA dense/indexer/latent/attention in mla_projection; dispatch counts are NOT leaf times; scaled timestamps do not supply independent raw coverage"}),
+        "packed_kda_components":["input_projections (q/k/v, decay, beta, output gate)","prepare (convolution, normalization, per-key decay)","recurrence","output_norm (including output gate)","output_projection"],
+        "profile_extra_encoders_per_kda_block":4,"profile_sample_capacity":STAGE_SAMPLE_CAPACITY,
+        "profile_extra_activation_bytes":0,"precision_stage_map_changed":false,
+        "limits":"existing packed boundaries still combine bucket/gate-up/down/reduction in routed_experts and MLA dense/indexer/latent/attention in mla_projection; KDA components split only profiled encoders; dispatch counts are NOT leaf times; scaled timestamps do not supply independent raw coverage"}),
     );
     let ctx = MetalContext::new().unwrap();
     let gguf = GgufFile::open(std::path::PathBuf::from(path)).unwrap();
@@ -178,6 +181,27 @@ fn current_half_2048_cost() {
             plain.push(wall);
         }
         if let Some(report) = report {
+            let kda_stages = [
+                Glm5NextStage::PackedKdaInputProjections,
+                Glm5NextStage::PackedKdaPrepare,
+                Glm5NextStage::PackedKdaRecurrence,
+                Glm5NextStage::PackedKdaOutputNorm,
+                Glm5NextStage::PackedKdaOutputProjection,
+            ];
+            let mut kda_blocks = 0;
+            for (block, weights) in weights.blocks.iter().enumerate() {
+                if matches!(&weights.mixer, MixerTensors::Kda(_)) {
+                    kda_blocks += 1;
+                    let actual: Vec<_> = report
+                        .spans
+                        .iter()
+                        .filter(|s| s.block == Some(block as u32) && kda_stages.contains(&s.stage))
+                        .map(|s| s.stage)
+                        .collect();
+                    assert_eq!(actual, kda_stages, "block {block} KDA component order");
+                }
+            }
+            assert!(!report.spans.iter().any(|s| s.stage == Glm5NextStage::Kda));
             let mut stages = BTreeMap::<&str, f64>::new();
             for s in &report.spans {
                 *stages.entry(s.stage.as_str()).or_default() += s.gpu_ms;
@@ -187,7 +211,8 @@ fn current_half_2048_cost() {
                 &mut out,
                 json!({"event":"profile","plain_wall_ms":plain,"profiled_wall_ms":wall,
                 "profiled_over_plain_mean":wall/mean,"plain2_over_plain1":plain[1]/plain[0],
-                "command_gpu_ms":report.command_gpu_ms,"scaled_span_sum_ms":report.span_sum_ms,
+                "kda_blocks":kda_blocks,"kda_component_spans":5*kda_blocks,
+                "timestamp_samples_used":2*report.spans.len(),"command_gpu_ms":report.command_gpu_ms,"scaled_span_sum_ms":report.span_sum_ms,
                 "command_minus_scaled_spans_ms":report.command_gpu_ms-report.span_sum_ms,"stages_ms":stages,
                 "spans":report.spans.iter().map(|s|json!({"block":s.block,"stage":s.stage.as_str(),"gpu_ms":s.gpu_ms})).collect::<Vec<_>>(),
                 "warning":"profile splits encoders and scales timestamps; inspect overhead and plain drift before trusting attribution. No ordinary-wall fractions, raw-coverage claim, leaf extrapolation or numeric acceptance bound."}),

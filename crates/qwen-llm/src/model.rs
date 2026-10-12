@@ -187,13 +187,20 @@ mod tests {
 
     #[test]
     fn arch_matches_gguf_0_8b() {
-        // Sanity-check: numbers in QWEN3_0_8B match the live GGUF metadata.
-        // Skipped if the file isn't present on this box.
-        let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
-        if !std::path::Path::new(path).exists() {
+        if crate::test_fixtures::QWEN35_0_8B_F32
+            .path_or_skip()
+            .is_none()
+        {
             return;
         }
-        let g = crate::gguf::GgufFile::open(path).expect("open");
+
+        // Sanity-check: numbers in QWEN3_0_8B match the live GGUF metadata.
+        // Skipped if the file isn't present on this box.
+        let path = crate::test_fixtures::QWEN35_0_8B_F32.required();
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let g = crate::gguf::GgufFile::open(&path).expect("open");
         let a = QWEN3_0_8B;
         assert_eq!(g.get_u64("qwen35.block_count"), Some(a.n_layer as u64));
         assert_eq!(

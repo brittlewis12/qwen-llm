@@ -22,8 +22,8 @@
 //!
 //! Both tests skip silently if the required GGUFs aren't present
 //! locally:
-//! * `~/models/Qwen3.6-27B-Q4_K_M.gguf`
-//! * `~/models/spiritbuun-dflash/dflash-draft-3.6-q8_0.gguf`
+//! * `$MODELS/Qwen3.6-27B-Q4_K_M.gguf`
+//! * `$MODELS/spiritbuun-dflash/dflash-draft-3.6-q8_0.gguf`
 
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 use qwen_llm::forward::{Forward, GdnState, KvCache};
@@ -48,8 +48,8 @@ use qwen_llm::metal_forward::{
 use qwen_llm::tensor::GgmlType;
 use qwen_llm::tokenizer::Tokenizer;
 
-const TARGET_GGUF: &str = qwen_llm::test_fixtures::QWEN36_27B_Q4_K_M.path();
-const DRAFTER_GGUF: &str = qwen_llm::test_fixtures::DFLASH_DRAFT_36_Q8_0.path();
+const TARGET_GGUF: &str = "Qwen3.6-27B-Q4_K_M.gguf";
+const DRAFTER_GGUF: &str = "dflash-draft-3.6-q8_0.gguf";
 
 fn fixtures_present() -> bool {
     std::path::Path::new(TARGET_GGUF).exists() && std::path::Path::new(DRAFTER_GGUF).exists()
@@ -3572,10 +3572,10 @@ fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
 #[test]
 fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke() {
     let model_path = concat!(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/",
+        "models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/",
         "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"
     );
-    if !std::path::Path::new(model_path).exists() {
+    if !std::path::Path::new(&model_path).exists() {
         eprintln!("[prefill-vs-single-a10b] skipped — target GGUF missing");
         return;
     }
@@ -3586,7 +3586,7 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke() {
     };
 
     eprintln!("[prefill-vs-single-a10b] loading 122B A10B…");
-    let g = GgufFile::open(model_path).expect("open target");
+    let g = GgufFile::open(&model_path).expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     assert_eq!(m.arch.kind, qwen_llm::model::ArchKind::Moe);
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
@@ -3692,10 +3692,10 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke() {
 #[ignore]
 fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_chunk128_boundary() {
     let model_path = concat!(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/",
+        "models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/",
         "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"
     );
-    if !std::path::Path::new(model_path).exists() {
+    if !std::path::Path::new(&model_path).exists() {
         eprintln!("[prefill-vs-single-a10b-boundary] skipped — target GGUF missing");
         return;
     }
@@ -3706,7 +3706,7 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_chunk128_boundary() {
     };
 
     eprintln!("[prefill-vs-single-a10b-boundary] loading 122B A10B…");
-    let g = GgufFile::open(model_path).expect("open target");
+    let g = GgufFile::open(&model_path).expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     assert_eq!(m.arch.kind, qwen_llm::model::ArchKind::Moe);
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
@@ -3832,10 +3832,10 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_chunk128_boundary() {
 #[ignore]
 fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_packed_attn_active_shapes() {
     let model_path = concat!(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/",
+        "models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/",
         "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"
     );
-    if !std::path::Path::new(model_path).exists() {
+    if !std::path::Path::new(&model_path).exists() {
         eprintln!("[prefill-vs-single-a10b-packed] skipped — target GGUF missing");
         return;
     }
@@ -3846,7 +3846,7 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_packed_attn_active_sha
     };
 
     eprintln!("[prefill-vs-single-a10b-packed] loading 122B A10B…");
-    let g = GgufFile::open(model_path).expect("open target");
+    let g = GgufFile::open(&model_path).expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     assert_eq!(m.arch.kind, qwen_llm::model::ArchKind::Moe);
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
@@ -3967,8 +3967,12 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_packed_attn_active_sha
 
 #[test]
 fn prefill_tokens_moe_hidden_capture_matches_p1_oracle_35b_a3b() {
-    let model_path = qwen_llm::test_fixtures::A3B_Q4_K_M.path();
-    if !std::path::Path::new(model_path).exists() {
+    if qwen_llm::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
+        return;
+    }
+
+    let model_path = qwen_llm::test_fixtures::A3B_Q4_K_M.required();
+    if !std::path::Path::new(&model_path).exists() {
         eprintln!("[prefill-hidden-a3b] skipped — target GGUF missing");
         return;
     }
@@ -3978,7 +3982,7 @@ fn prefill_tokens_moe_hidden_capture_matches_p1_oracle_35b_a3b() {
         Err(e) => panic!("metal init: {e}"),
     };
 
-    let g = GgufFile::open(model_path).expect("open target");
+    let g = GgufFile::open(&model_path).expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     assert_eq!(m.arch.kind, qwen_llm::model::ArchKind::Moe);
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");

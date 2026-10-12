@@ -740,13 +740,20 @@ mod tests {
     #[test]
     #[ignore = "serial Metal, production lease, Muse default/explicit and reference/rollback delivery"]
     fn muse_math_default_delivery() {
+        if crate::test_fixtures::MUSE_GLIMMER_Q8_0
+            .path_or_skip()
+            .is_none()
+        {
+            return;
+        }
+
         use crate::tokenizer::LlamaCppTokenizer;
         let _lease = crate::metal::acquire_metal_benchmark_lease()
             .expect("production GPU lease and wired-memory gate required");
-        let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
-        let gguf = GgufFile::open(path).unwrap();
+        let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
+        let gguf = GgufFile::open(&path).unwrap();
         let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
-        let tokenizer = LlamaCppTokenizer::open(path).unwrap();
+        let tokenizer = LlamaCppTokenizer::open(&path).unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../docs/bench/tokenizer-messages/current-reva-short-qwen36.json"
         ))
@@ -869,9 +876,16 @@ mod tests {
     #[test]
     #[ignore = "serial Metal, delivered optimized Muse prefill option short-shape composition"]
     fn optimized_prefill_runner_short_composition() {
+        if crate::test_fixtures::MUSE_GLIMMER_Q8_0
+            .path_or_skip()
+            .is_none()
+        {
+            return;
+        }
+
         use crate::tokenizer::LlamaCppTokenizer;
-        let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
-        let gguf = GgufFile::open(path).unwrap();
+        let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
+        let gguf = GgufFile::open(&path).unwrap();
         let ctx = MetalContext::new().unwrap();
         let options = MuseGlimmerRuntimeOptions {
             split_decode: true,
@@ -883,7 +897,7 @@ mod tests {
         let mut model =
             MuseGlimmerLoadedModel::load_with_options(&ctx, &gguf, 144, options).unwrap();
         let mut reference = MuseGlimmerTextSession::new(&ctx, model.config(), 144).unwrap();
-        let tokenizer = LlamaCppTokenizer::open(path).unwrap();
+        let tokenizer = LlamaCppTokenizer::open(&path).unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../docs/bench/tokenizer-messages/current-reva-short-qwen36.json"
         ))
@@ -990,8 +1004,19 @@ mod tests {
     #[test]
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn deployed_output_tail_matches_forward_from_captured_final_residual_bitwise() {
-        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
-            .unwrap_or_else(|_| crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into());
+        if crate::test_fixtures::MUSE_GLIMMER_Q8_0
+            .path_or_skip()
+            .is_none()
+        {
+            return;
+        }
+
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
+            crate::test_fixtures::MUSE_GLIMMER_Q8_0
+                .required()
+                .to_string_lossy()
+                .into_owned()
+        });
         let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
         let ctx = MetalContext::new().expect("open Metal context");
         let mut model = MuseGlimmerLoadedModel::load(&ctx, &gguf, 1).expect("load Muse Q8 target");
@@ -1049,8 +1074,19 @@ mod tests {
     #[test]
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn batched_full_readout_matches_scalar_oracle_exactly() {
-        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
-            .unwrap_or_else(|_| crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into());
+        if crate::test_fixtures::MUSE_GLIMMER_Q8_0
+            .path_or_skip()
+            .is_none()
+        {
+            return;
+        }
+
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
+            crate::test_fixtures::MUSE_GLIMMER_Q8_0
+                .required()
+                .to_string_lossy()
+                .into_owned()
+        });
         let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
         let ctx = MetalContext::new().expect("open Metal context");
         let mut model = MuseGlimmerLoadedModel::load(&ctx, &gguf, 2).expect("load Muse Q8 target");

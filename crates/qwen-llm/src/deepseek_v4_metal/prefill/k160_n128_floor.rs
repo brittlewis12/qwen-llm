@@ -5,7 +5,7 @@ use std::collections::BinaryHeap;
 use std::path::Path;
 use std::time::Instant;
 
-const FIXTURE: &str = "/Users/tito/models/deepseek-v4-flash-0731-reap-k160/DeepSeek-V4-Flash-0731-REAP-K160-Q3_K_Q4_K-00001-of-00004.gguf";
+const FIXTURE: &str = "models/deepseek-v4-flash-0731-reap-k160/DeepSeek-V4-Flash-0731-REAP-K160-Q3_K_Q4_K-00001-of-00004.gguf";
 const N_TOKENS: usize = 128;
 const EXPERTS: usize = 160;
 const ROUTES: usize = N_TOKENS * MOE_TOP_K;

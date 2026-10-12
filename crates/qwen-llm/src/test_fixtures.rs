@@ -23,6 +23,7 @@
 //! the Metal context constructor.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use crate::env_flag::env_value_truthy;
 use crate::metal::{MetalContext, MetalError};
@@ -155,11 +156,6 @@ impl Fixture {
         self.filename
     }
 
-    /// Return the published filename for constructing fixture-related test data.
-    pub fn path(&self) -> &'static str {
-        self.filename
-    }
-
     /// Consult aliases in order. Returns `Err` on a conflict between two set
     /// aliases; `Ok(None)` when no alias is set.
     fn env_override(&self) -> Result<Option<ResolvedFixture>, String> {
@@ -226,15 +222,25 @@ impl Fixture {
 
     /// Resolve or fail with a message naming the fixture and every alias
     /// that could have supplied it.
-    pub fn required(&self) -> PathBuf {
-        self.path_or_skip().unwrap_or_else(|| {
+    pub fn required(&self) -> &'static PathBuf {
+        let path = self.path_or_skip().unwrap_or_else(|| {
             panic!(
                 "fixture {} ({}) is required: set one of [{}] or include it in QWEN_MODEL_SEARCH_PATH",
                 self.id,
                 self.filename,
                 self.env.join(", ")
             )
-        })
+        });
+        static REQUIRED_PATHS: OnceLock<
+            Mutex<std::collections::HashMap<(&'static str, PathBuf), &'static PathBuf>>,
+        > = OnceLock::new();
+        let paths = REQUIRED_PATHS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+        let mut paths = paths
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *paths
+            .entry((self.id, path.clone()))
+            .or_insert_with(|| Box::leak(Box::new(path)))
     }
 
     fn search_path(&self) -> Option<PathBuf> {
@@ -248,6 +254,13 @@ impl Fixture {
         }
         None
     }
+}
+
+/// Configured roots in `QWEN_MODEL_SEARCH_PATH` order.
+pub fn model_search_roots() -> Vec<PathBuf> {
+    std::env::var_os("QWEN_MODEL_SEARCH_PATH")
+        .map(|value| std::env::split_paths(&value).collect())
+        .unwrap_or_default()
 }
 
 /// Search a directory and at most three directory levels below it.
@@ -450,6 +463,30 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), all.len());
         assert!(all.iter().all(|f| f.filename.ends_with(".gguf")));
+    }
+
+    #[test]
+    #[ignore = "prints fixture search results without opening model files"]
+    fn list_fixture_resolutions_without_loading_models() {
+        let all = [
+            A3B_Q4_K_M,
+            QWEN36_27B_Q4_K_M,
+            QWEN35_0_8B_F32,
+            A10B_Q4_K_XL,
+            A3B_Q3_K_M,
+            A3B_IQ4_XS,
+            MUSE_GLIMMER_Q8_0,
+            DEEPSEEK_V4_IQ3_XXS,
+            QWEN4EXP_Q3_K_XL,
+            GLM53_FLASH_UD_IQ3_XXS,
+            DFLASH_DRAFT_36_Q8_0,
+        ];
+        for fixture in all {
+            match fixture.path_or_skip() {
+                Some(path) => eprintln!("fixture {}: {}", fixture.id, path.display()),
+                None => eprintln!("fixture {}: unavailable", fixture.id),
+            }
+        }
     }
 
     #[test]

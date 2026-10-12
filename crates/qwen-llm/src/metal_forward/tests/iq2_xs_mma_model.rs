@@ -32,8 +32,7 @@ use crate::tokenizer::Tokenizer;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs::File, time::Instant};
 
-const ARTIFACT: &str =
-    "/Volumes/wdblack/weights-archive/underdog-saluki-27b/Underdog-Saluki-27B-1.0-IQ2-mix.gguf";
+const ARTIFACT: &str = "models/underdog-saluki-27b/Underdog-Saluki-27B-1.0-IQ2-mix.gguf";
 const WIDTHS: [usize; 2] = [128, 4096];
 const NEXT: usize = 4;
 const PROSE: &str = include_str!("../../../../../docs/GLM53-FLASH-PLAN.md");

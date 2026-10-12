@@ -3469,8 +3469,7 @@ mod tests {
     #[test]
     #[ignore = "requires local A3B Q4_K_M MTP fixture and 2 GiB peak Metal/host memory"]
     fn mtp_direct_f32_banks_match_staged_bytes() {
-        let path =
-            "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+        let path = "models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
         assert!(
             std::path::Path::new(path).is_file(),
             "required MTP direct-F32 fixture is missing: {path}"
@@ -3577,8 +3576,7 @@ mod tests {
     #[test]
     #[ignore = "requires local A3B Q4_K_M MTP fixture and several GiB of Metal memory"]
     fn mtp_moe_native_bank_fixture_ledger() {
-        let path =
-            "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+        let path = "models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
         if !std::path::Path::new(path).exists() {
             eprintln!("[mtp-moe-bank-ledger] skipped - fixture missing");
             return;
@@ -3635,8 +3633,7 @@ mod tests {
     #[test]
     #[ignore = "requires local A3B Q4_K_M MTP fixture"]
     fn mtp_moe_native_banks_match_f32_draft_logits() {
-        let path =
-            "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+        let path = "models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
         if !std::path::Path::new(path).exists() {
             eprintln!("[mtp-moe-native-oracle] skipped - fixture missing");
             return;
@@ -3757,7 +3754,7 @@ mod tests {
     /// * step 2: 2-entry KV (KV reads + RoPE position increment)
     #[test]
     fn metal_mtp_draft_matches_cpu() {
-        let path = "/Users/tito/models/h4-smoke-test/Qwen3.5-0.8B/qwen3.5-0.8b.Q4_K_M.gguf";
+        let path = "models/h4-smoke-test/Qwen3.5-0.8B/qwen3.5-0.8b.Q4_K_M.gguf";
         if !std::path::Path::new(path).exists() {
             eprintln!("[mtp-metal-cosine] skipped — fixture missing");
             return;
@@ -3899,7 +3896,7 @@ mod tests {
     /// produces SOMETHING reasonable.
     #[test]
     fn greedy_equivalence_0_8b_mtp() {
-        let path = "/Users/tito/models/h4-smoke-test/Qwen3.5-0.8B/qwen3.5-0.8b.Q4_K_M.gguf";
+        let path = "models/h4-smoke-test/Qwen3.5-0.8B/qwen3.5-0.8b.Q4_K_M.gguf";
         if !std::path::Path::new(path).exists() {
             eprintln!("[mtp-equiv] skipped — fixture missing");
             return;

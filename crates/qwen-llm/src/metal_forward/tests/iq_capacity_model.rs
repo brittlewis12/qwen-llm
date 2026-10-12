@@ -28,8 +28,7 @@ use objc2_metal::MTLBuffer;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs::File, io::Write, time::Instant};
 
-const ARTIFACT: &str =
-    "/Volumes/wdblack/weights-archive/underdog-saluki-27b/Underdog-Saluki-27B-1.0-IQ2-mix.gguf";
+const ARTIFACT: &str = "models/underdog-saluki-27b/Underdog-Saluki-27B-1.0-IQ2-mix.gguf";
 const CHUNK: u32 = 128;
 const CAPACITY: usize = 135;
 const CONTINUATIONS: usize = 4;

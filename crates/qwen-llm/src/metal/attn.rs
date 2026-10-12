@@ -5878,7 +5878,7 @@ mod tests {
     #[ignore = "slow real-model GPU audit; run explicitly"]
     fn attn_decode_v4_bandwidth_audit_130k() {
         let model_path = std::env::var("QWEN_ATTN_AUDIT_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.8-27B-Q8_0.gguf".into());
+            .unwrap_or_else(|_| "models/Qwen3.8-27B-Q8_0.gguf".into());
         if !std::path::Path::new(&model_path).exists() {
             eprintln!("[attn-audit] skipped — model missing");
             return;

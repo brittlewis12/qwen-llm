@@ -23,7 +23,7 @@
 //!                   read from GGUF metadata.
 //!
 //! The numerical oracle is `~/code/llama.cpp/build/bin/llama-cli` running
-//! against `~/models/Qwen3.5-0.8B.F32.gguf`. Logits-byte-equivalence on this
+//! against `$MODELS/Qwen3.5-0.8B.F32.gguf`. Logits-byte-equivalence on this
 //! pair is the v1 correctness bar.
 
 pub mod cache_probe;

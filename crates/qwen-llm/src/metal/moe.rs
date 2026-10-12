@@ -6507,7 +6507,7 @@ mod tests {
         let Some(path) = crate::test_fixtures::A3B_Q3_K_M.path_or_skip() else {
             eprintln!(
                 "[moe-iq3-oracle] skipped missing fixture {}",
-                crate::test_fixtures::A3B_Q3_K_M.path()
+                crate::test_fixtures::A3B_Q3_K_M.required().display()
             );
             return;
         };
@@ -6583,7 +6583,7 @@ mod tests {
         let Some(path) = crate::test_fixtures::A3B_Q3_K_M.path_or_skip() else {
             eprintln!(
                 "[moe-iq3-direct-swiglu-oracle] skipped missing fixture {}",
-                crate::test_fixtures::A3B_Q3_K_M.path()
+                crate::test_fixtures::A3B_Q3_K_M.required().display()
             );
             return;
         };
@@ -6722,7 +6722,7 @@ mod tests {
         let Some(path) = crate::test_fixtures::A3B_Q3_K_M.path_or_skip() else {
             eprintln!(
                 "[moe-iq3-swiglu-oracle] skipped missing fixture {}",
-                crate::test_fixtures::A3B_Q3_K_M.path()
+                crate::test_fixtures::A3B_Q3_K_M.required().display()
             );
             return;
         };
@@ -6855,7 +6855,7 @@ mod tests {
         let Some(path) = crate::test_fixtures::A3B_IQ4_XS.path_or_skip() else {
             eprintln!(
                 "[moe-iq3s-oracle] skipped missing fixture {}",
-                crate::test_fixtures::A3B_IQ4_XS.path()
+                crate::test_fixtures::A3B_IQ4_XS.required().display()
             );
             return;
         };
@@ -6931,7 +6931,7 @@ mod tests {
         let Some(path) = crate::test_fixtures::A3B_IQ4_XS.path_or_skip() else {
             eprintln!(
                 "[moe-iq3s-direct-swiglu-oracle] skipped missing fixture {}",
-                crate::test_fixtures::A3B_IQ4_XS.path()
+                crate::test_fixtures::A3B_IQ4_XS.required().display()
             );
             return;
         };
@@ -7070,7 +7070,7 @@ mod tests {
         let Some(path) = crate::test_fixtures::A3B_IQ4_XS.path_or_skip() else {
             eprintln!(
                 "[moe-iq3s-swiglu-oracle] skipped missing fixture {}",
-                crate::test_fixtures::A3B_IQ4_XS.path()
+                crate::test_fixtures::A3B_IQ4_XS.required().display()
             );
             return;
         };
@@ -7203,7 +7203,7 @@ mod tests {
         let Some(path) = crate::test_fixtures::A3B_IQ4_XS.path_or_skip() else {
             eprintln!(
                 "[moe-iq4xs-down-oracle] skipped missing fixture {}",
-                crate::test_fixtures::A3B_IQ4_XS.path()
+                crate::test_fixtures::A3B_IQ4_XS.required().display()
             );
             return;
         };
@@ -7360,7 +7360,7 @@ mod tests {
     #[ignore]
     fn moe_swiglu_q6_k_matches_f32_dequant_fixture() {
         let path = std::env::var("QWEN_A3B_Q6_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q6_K.gguf".into());
+            .unwrap_or_else(|_| "models/Qwen3.5-35B-A3B-Q6_K.gguf".into());
         if !std::path::Path::new(&path).exists() {
             eprintln!("[moe-q6-direct-swiglu-oracle] skipped missing fixture {path}");
             return;
@@ -7468,7 +7468,7 @@ mod tests {
     #[ignore]
     fn moe_grouped_swiglu_q6_k_matches_f32_dequant_fixture() {
         let path = std::env::var("QWEN_A3B_Q6_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q6_K.gguf".into());
+            .unwrap_or_else(|_| "models/Qwen3.5-35B-A3B-Q6_K.gguf".into());
         if !std::path::Path::new(&path).exists() {
             eprintln!("[moe-q6-swiglu-oracle] skipped missing fixture {path}");
             return;
@@ -7600,7 +7600,7 @@ mod tests {
     #[ignore]
     fn moe_q8_0_swiglu_down_weighted_matches_f32_dequant_fixture() {
         let path = std::env::var("QWEN_A3B_Q8_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q8_0.gguf".into());
+            .unwrap_or_else(|_| "models/Qwen3.5-35B-A3B-Q8_0.gguf".into());
         if !std::path::Path::new(&path).exists() {
             eprintln!("[moe-q8-direct-oracle] skipped missing fixture {path}");
             return;
@@ -7784,7 +7784,7 @@ mod tests {
     #[ignore]
     fn moe_grouped_q8_0_swiglu_down_matches_f32_dequant_fixture() {
         let path = std::env::var("QWEN_A3B_Q8_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q8_0.gguf".into());
+            .unwrap_or_else(|_| "models/Qwen3.5-35B-A3B-Q8_0.gguf".into());
         if !std::path::Path::new(&path).exists() {
             eprintln!("[moe-q8-oracle] skipped missing fixture {path}");
             return;

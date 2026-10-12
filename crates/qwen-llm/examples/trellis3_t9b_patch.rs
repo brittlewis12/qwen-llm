@@ -124,7 +124,7 @@ fn trellis_roundtrip(
 
 fn main() {
     let src = std::env::var("T9B_SRC")
-        .unwrap_or_else(|_| qwen_llm::test_fixtures::QWEN35_0_8B_F32.path().into());
+        .unwrap_or_else(|_| qwen_llm::test_fixtures::QWEN35_0_8B_F32.required().into());
     let dst = std::env::var("T9B_DST").expect("T9B_DST");
     let recipe = std::env::var("T9B_RECIPE").expect("T9B_RECIPE (f32|q3k|q4k|a0|a3)");
     let n_threads = env_or("T9B_THREADS", 12);

@@ -21,8 +21,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{fs::File, io::Write, mem::MaybeUninit, time::Instant};
 
-const ARTIFACT: &str =
-    "/Volumes/wdblack/weights-archive/underdog-saluki-27b/Underdog-Saluki-27B-1.0-IQ2-mix.gguf";
+const ARTIFACT: &str = "models/underdog-saluki-27b/Underdog-Saluki-27B-1.0-IQ2-mix.gguf";
 const READ: usize = 256 * 1024; // F32 readback chunk, one MiB.
 const DECODE_ROWS: usize = 16;
 const META_CPU: u64 = 16 << 20; // Future diagnostic/codec/census bookkeeping.

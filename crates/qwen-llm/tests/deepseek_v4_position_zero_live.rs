@@ -28,9 +28,9 @@ use std::time::Instant;
 #[cfg(feature = "dsv4-diagnostics")]
 use objc2_metal::MTLDevice;
 
-const DEFAULT_MODEL: &str = "/Users/tito/models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
+const DEFAULT_MODEL: &str = "models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
 #[cfg(feature = "dsv4-diagnostics")]
-const DEFAULT_CURRENT_MODEL: &str = qwen_llm::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path();
+const DEFAULT_CURRENT_MODEL: &str = "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
 const DEFAULT_DURABLE_SNAPSHOT: &str = "target/dsv4-position1024.ds4c";
 const DEFAULT_DURABLE_POSITION_2048_SNAPSHOT: &str = "target/dsv4-position2048.ds4c";
 const DEFAULT_DURABLE_POSITION_2052_SNAPSHOT: &str = "target/dsv4-position2052.ds4c";
@@ -241,7 +241,7 @@ fn frozen_model_content_id() -> DeepSeekV4ModelContentId {
 }
 
 fn open_pinned_legacy_gguf(model_path: &Path) -> GgufFile {
-    let gguf = GgufFile::open(model_path).expect("open legacy DS4 GGUF shards");
+    let gguf = GgufFile::open(&model_path).expect("open legacy DS4 GGUF shards");
     PinnedDeepSeekV4AssetV1::parse(LEGACY_CENSUS_MANIFEST)
         .expect("parse legacy DS4 census")
         .validate_observed(&gguf)
@@ -265,7 +265,7 @@ fn open_pinned_legacy_gguf(model_path: &Path) -> GgufFile {
 
 #[cfg(feature = "dsv4-diagnostics")]
 fn open_pinned_current_gguf(model_path: &Path) -> (GgufFile, DeepSeekV4ModelContentId) {
-    let gguf = GgufFile::open(model_path).expect("open current DS4 GGUF shards");
+    let gguf = GgufFile::open(&model_path).expect("open current DS4 GGUF shards");
     PinnedDeepSeekV4AssetV1::parse(CURRENT_CENSUS_MANIFEST)
         .expect("parse current DS4 census")
         .validate_observed(&gguf)

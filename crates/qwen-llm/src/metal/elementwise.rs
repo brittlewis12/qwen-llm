@@ -2886,6 +2886,13 @@ mod tests {
 
     #[test]
     fn post_block_interventions_match_f32_cpu_oracles_at_realistic_hidden_size() {
+        if crate::test_fixtures::QWEN36_27B_Q4_K_M
+            .path_or_skip()
+            .is_none()
+        {
+            return;
+        }
+
         let Some(ctx) = metal_test_context() else {
             return;
         };
@@ -3497,8 +3504,18 @@ mod tests {
     #[test]
     #[ignore = "requires local 27B Q4_K fixture"]
     fn get_rows_q4_k_matches_selected_cpu_rows() {
+        if crate::test_fixtures::QWEN36_27B_Q4_K_M
+            .path_or_skip()
+            .is_none()
+        {
+            return;
+        }
+
         quantized_get_rows_fixture(
-            crate::test_fixtures::QWEN36_27B_Q4_K_M.path(),
+            crate::test_fixtures::QWEN36_27B_Q4_K_M
+                .required()
+                .to_str()
+                .expect("model fixture path must be UTF-8"),
             GgmlType::Q4_K,
             true,
         );
@@ -3508,7 +3525,7 @@ mod tests {
     #[ignore = "requires local A3B Q8_0 embedding fixture"]
     fn get_rows_q8_0_matches_selected_cpu_rows() {
         quantized_get_rows_fixture(
-            "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            "models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
             GgmlType::Q8_0,
             true,
         );
@@ -3518,7 +3535,7 @@ mod tests {
     #[ignore = "requires local Ridge 27B Q6_K embedding fixture"]
     fn get_rows_q6_k_matches_selected_cpu_rows() {
         quantized_get_rows_fixture(
-            "/Users/tito/models/qwen38-27b-ridge/Qwen3.8-27B-Ridge-3.7bpw.gguf",
+            "models/qwen38-27b-ridge/Qwen3.8-27B-Ridge-3.7bpw.gguf",
             GgmlType::Q6_K,
             true,
         );

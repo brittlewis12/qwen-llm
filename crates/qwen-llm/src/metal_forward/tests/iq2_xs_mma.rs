@@ -20,8 +20,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{fs::File, io::Write, time::Instant};
 
-const ARTIFACT: &str =
-    "/Volumes/wdblack/weights-archive/underdog-saluki-27b/Underdog-Saluki-27B-1.0-IQ2-mix.gguf";
+const ARTIFACT: &str = "models/underdog-saluki-27b/Underdog-Saluki-27B-1.0-IQ2-mix.gguf";
 const WIDTHS: [usize; 11] = [1, 2, 8, 31, 32, 33, 127, 128, 129, 512, 1024];
 const MAX_N: usize = 1024;
 const READ_BYTES: usize = 1 << 20;

@@ -592,7 +592,7 @@ fn packed_q2_attention_matches_per_row_at_high_nwg() {
 #[ignore = "slow real-model GPU audit; run explicitly"]
 fn packed_q2_attention_perf_audit_130k() {
     let model_path = std::env::var("QWEN_ATTN_AUDIT_MODEL")
-        .unwrap_or_else(|_| "/Users/tito/models/Qwen3.8-27B-Q8_0.gguf".into());
+        .unwrap_or_else(|_| "models/Qwen3.8-27B-Q8_0.gguf".into());
     if !std::path::Path::new(&model_path).exists() {
         eprintln!("[packed-audit] skipped — model missing");
         return;

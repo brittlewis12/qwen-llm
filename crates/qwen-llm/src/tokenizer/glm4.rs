@@ -23,8 +23,9 @@ mod tests {
     const EOS: i32 = 154_820;
     const EOT: i32 = 154_827;
     const EOM: i32 = 154_829;
-    const ALTERNATE_GGUF: &str = "/Volumes/wdblack/weights-archive/glm-5.3-flash-ud-iq3_xxs/UD-IQ3_XXS/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf";
-    const LLAMA_TOKENIZE: &str = "/Users/tito/code/llama.cpp/build-glm5/bin/llama-tokenize";
+    const ALTERNATE_GGUF: &str =
+        "models/glm-5.3-flash-ud-iq3_xxs/UD-IQ3_XXS/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf";
+    const LLAMA_TOKENIZE: &str = "$LLAMA_TOKENIZE";
 
     fn fixtures() -> Value {
         serde_json::from_str(include_str!("../../tests/fixtures/glm4_tokenizer_hf.json")).unwrap()
@@ -194,7 +195,9 @@ mod tests {
     }
 
     fn gguf_paths() -> Vec<PathBuf> {
-        let mut paths = vec![crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required()];
+        let mut paths = vec![PathBuf::from(
+            crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required(),
+        )];
         if std::path::Path::new(ALTERNATE_GGUF).exists() {
             paths.push(ALTERNATE_GGUF.into());
         }
@@ -259,6 +262,13 @@ mod tests {
     #[test]
     #[ignore = "CPU/vocab-only; requires GLM53_GGUF and a glm4 ignore_merges llama-tokenize (GLM_LLAMA_TOKENIZE)"]
     fn gguf_tokenizer_matches_llama_tokenize_cli() {
+        if crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS
+            .path_or_skip()
+            .is_none()
+        {
+            return;
+        }
+
         let binary = std::env::var("GLM_LLAMA_TOKENIZE").unwrap_or_else(|_| LLAMA_TOKENIZE.into());
         assert!(
             std::path::Path::new(&binary).exists(),

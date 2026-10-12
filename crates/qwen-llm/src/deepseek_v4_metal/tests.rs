@@ -610,7 +610,7 @@ fn metal_context() -> Option<MetalContext> {
 }
 
 fn open_pinned_legacy_gguf(model_path: &Path) -> GgufFile {
-    let gguf = GgufFile::open(model_path).expect("open legacy DS4 GGUF shards");
+    let gguf = GgufFile::open(&model_path).expect("open legacy DS4 GGUF shards");
     PinnedDeepSeekV4AssetV1::parse(LEGACY_CENSUS_MANIFEST)
         .expect("parse legacy DS4 census")
         .validate_observed(&gguf)
@@ -630,7 +630,7 @@ fn open_pinned_legacy_gguf(model_path: &Path) -> GgufFile {
 
 #[cfg(feature = "dsv4-diagnostics")]
 fn open_pinned_current_gguf(model_path: &Path) -> (GgufFile, DeepSeekV4ModelContentId) {
-    let gguf = GgufFile::open(model_path).expect("open current DS4 GGUF shards");
+    let gguf = GgufFile::open(&model_path).expect("open current DS4 GGUF shards");
     PinnedDeepSeekV4AssetV1::parse(CURRENT_CENSUS_MANIFEST)
         .expect("parse current DS4 census")
         .validate_observed(&gguf)
@@ -2543,6 +2543,13 @@ fn session_phase_encodes_observation_and_poison_transitions() {
 #[test]
 #[ignore = "requires the current 97.05 GiB DS4 asset"]
 fn current_asset_packed_gpu_route_kill_packet() {
+    if crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS
+        .path_or_skip()
+        .is_none()
+    {
+        return;
+    }
+
     const CHUNK_TOKENS: usize = 128;
     const PREFIX_TOKENS: usize = 140;
     const CONTINUATION_TOKEN: u32 = 35;
@@ -2690,7 +2697,7 @@ fn current_asset_packed_gpu_route_kill_packet() {
 
     let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path()));
+        .unwrap_or_else(|| PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required()));
     assert!(model_path.exists(), "missing current DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
     if let Some(reason) =
@@ -2881,6 +2888,13 @@ fn current_asset_packed_gpu_route_kill_packet() {
 #[test]
 #[ignore = "requires the current 97.05 GiB DS4 asset"]
 fn current_asset_packed_grouped_expert_integration_packet() {
+    if crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS
+        .path_or_skip()
+        .is_none()
+    {
+        return;
+    }
+
     const CONTINUATION_TOKEN: u32 = 35;
     const IQ2_ELIGIBLE_LAYERS: u32 = 25;
     const IQ3_ELIGIBLE_LAYERS: u32 = 16;
@@ -3083,7 +3097,7 @@ fn current_asset_packed_grouped_expert_integration_packet() {
 
     let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path()));
+        .unwrap_or_else(|| PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required()));
     assert!(model_path.exists(), "missing current DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
     if let Some(reason) =
@@ -3346,6 +3360,13 @@ fn current_asset_packed_grouped_expert_integration_packet() {
 #[test]
 #[ignore = "requires the current 97.05 GiB DS4 asset"]
 fn current_asset_packed_attention_split_attribution_packet() {
+    if crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS
+        .path_or_skip()
+        .is_none()
+    {
+        return;
+    }
+
     const PREFIX_TOKENS: usize = 128;
     const CONTINUATION_TOKEN: u32 = 35;
     const ACCEPTED_COMBINED_LOG_SHA256: &str =
@@ -3713,7 +3734,7 @@ fn current_asset_packed_attention_split_attribution_packet() {
 
     let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path()));
+        .unwrap_or_else(|| PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required()));
     assert!(model_path.exists(), "missing current DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
     let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
@@ -4010,6 +4031,13 @@ fn current_asset_packed_attention_split_attribution_packet() {
 #[test]
 #[ignore = "requires the current 97.05 GiB DS4 asset"]
 fn current_asset_packed_post_route_stage_attribution_packet() {
+    if crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS
+        .path_or_skip()
+        .is_none()
+    {
+        return;
+    }
+
     const PREFIX_TOKENS: usize = 128;
     const CONTINUATION_TOKEN: u32 = 35;
     const STAGE_COUNT: usize = 4;
@@ -4343,7 +4371,7 @@ fn current_asset_packed_post_route_stage_attribution_packet() {
 
     let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path()));
+        .unwrap_or_else(|| PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required()));
     assert!(model_path.exists(), "missing current DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
     let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
@@ -4614,6 +4642,13 @@ fn current_asset_packed_post_route_stage_attribution_packet() {
 #[test]
 #[ignore = "requires the current 97.05 GiB DS4 asset"]
 fn current_asset_packed_all_iq3_sealed_promotion_gate() {
+    if crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS
+        .path_or_skip()
+        .is_none()
+    {
+        return;
+    }
+
     const PREFIX_TOKENS: usize = 128;
     const CONTINUATION_TOKEN: u32 = 35;
     const ENDPOINT_COUNT: usize = 3;
@@ -4975,7 +5010,7 @@ fn current_asset_packed_all_iq3_sealed_promotion_gate() {
 
     let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path()));
+        .unwrap_or_else(|| PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required()));
     assert!(model_path.exists(), "missing current DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
     assert!(
@@ -5423,7 +5458,7 @@ fn native_synthetic_state_crosses_the_first_tiled_hca_boundary_repeatably() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             std::path::PathBuf::from(
-                "/Users/tito/models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                "models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
             )
         });
     assert!(model_path.exists(), "missing DS4 model");
@@ -5493,6 +5528,13 @@ fn native_synthetic_state_crosses_the_first_tiled_hca_boundary_repeatably() {
 #[test]
 #[ignore = "requires the current DS4 asset and a full-context session allocation"]
 fn splitk_hca_profiles_current_synthetic_terminal_tokens() {
+    if crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS
+        .path_or_skip()
+        .is_none()
+    {
+        return;
+    }
+
     const START_POSITION: u32 = DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32 - 2;
     const TERMINAL_POSITION: u32 = START_POSITION + 1;
     const FORWARD_LIMIT: usize = DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY;
@@ -5588,7 +5630,7 @@ fn splitk_hca_profiles_current_synthetic_terminal_tokens() {
     let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
-            std::path::PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path())
+            std::path::PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required())
         });
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
@@ -5928,7 +5970,7 @@ fn online_hca_preserves_terminal_decisions_repeatably() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             std::path::PathBuf::from(
-                "/Users/tito/models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                "models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
             )
         });
     assert!(model_path.exists(), "missing DS4 model");
@@ -6113,7 +6155,7 @@ fn sparse_csa_optimizations_preserve_far_context_token_and_causal_state() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             std::path::PathBuf::from(
-                "/Users/tito/models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                "models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
             )
         });
     assert!(model_path.exists(), "missing DS4 model");
@@ -6285,6 +6327,13 @@ fn sparse_csa_optimizations_preserve_far_context_token_and_causal_state() {
 #[test]
 #[ignore = "requires the current DS4 asset and executes focused far-context differentials"]
 fn current_weight_boundary_optimization_differentials() {
+    if crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS
+        .path_or_skip()
+        .is_none()
+    {
+        return;
+    }
+
     const POSITION: u32 = 65_663;
     const FORWARD_LIMIT: usize = POSITION as usize + 1;
     const TOKEN_ID: u32 = 35;
@@ -6458,7 +6507,7 @@ fn current_weight_boundary_optimization_differentials() {
     let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
-            std::path::PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path())
+            std::path::PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required())
         });
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
@@ -12502,6 +12551,13 @@ fn profile_sparse_csa_multigroup_integrated_gate() {
 #[test]
 #[ignore = "requires the current 97.05 GiB DS4 asset and a full-context session"]
 fn current_asset_multigroup_selector_whole_token_gate() {
+    if crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS
+        .path_or_skip()
+        .is_none()
+    {
+        return;
+    }
+
     const POSITION: u32 = 786_431;
     const FORWARD_LIMIT: usize = DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY;
     const TOKEN_ID: u32 = 35;
@@ -12714,7 +12770,7 @@ fn current_asset_multigroup_selector_whole_token_gate() {
 
     let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path()));
+        .unwrap_or_else(|| PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required()));
     assert!(model_path.exists(), "missing current DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
     if let Some(reason) =

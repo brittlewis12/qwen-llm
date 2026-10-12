@@ -81,8 +81,9 @@ fn read_src(rel: &str) -> Option<String> {
 }
 
 fn models_dir() -> Option<PathBuf> {
-    let p = PathBuf::from("/Users/tito/models");
-    if p.is_dir() { Some(p) } else { None }
+    qwen_llm::test_fixtures::model_search_roots()
+        .into_iter()
+        .find(|path| path.is_dir())
 }
 
 fn family_ggufs(dir: &Path) -> Vec<PathBuf> {
@@ -252,7 +253,7 @@ fn gguf_file_exposes_stop_token_ids_method() {
 /// remain unchanged.
 #[test]
 fn gguf_file_exposes_stop_token_ids_contract() {
-    let path = Path::new("/Users/tito/models/Qwen3.5-0.8B-BF16.gguf");
+    let path = Path::new("models/Qwen3.5-0.8B-BF16.gguf");
     if !path.exists() {
         eprintln!("[eos-gap] skipped — Qwen3.5-0.8B-BF16.gguf not present");
         return;
@@ -273,7 +274,7 @@ fn gguf_file_exposes_stop_token_ids_contract() {
 //    provably wrong rather than just-conventionally-suspect.
 // =========================================================================
 
-/// Walks every Qwen 3.5/3.6 GGUF in `~/models` and asserts the set of
+/// Walks every Qwen 3.5/3.6 GGUF in the first configured model search root and asserts the set of
 /// declared `tokenizer.ggml.eos_token_id` values contains more than
 /// one distinct value.
 ///
@@ -291,13 +292,17 @@ fn family_declared_eos_is_heterogeneous() {
     let dir = match models_dir() {
         Some(d) => d,
         None => {
-            eprintln!("[eos-gap] skipped — ~/models not present");
+            eprintln!(
+                "[eos-gap] skipped — model directory unavailable; set QWEN_MODEL_SEARCH_PATH"
+            );
             return;
         }
     };
     let files = family_ggufs(&dir);
     if files.is_empty() {
-        eprintln!("[eos-gap] skipped — no Qwen3.5/3.6 GGUFs in ~/models");
+        eprintln!(
+            "[eos-gap] skipped — no Qwen3.5/3.6 GGUFs in the first QWEN_MODEL_SEARCH_PATH directory"
+        );
         return;
     }
 
@@ -334,7 +339,7 @@ fn family_declared_eos_is_heterogeneous() {
         "expected at least one base GGUF declaring {FAMILY_BASE_EOS} \
          alongside instruct GGUFs declaring {HARDCODED_EOS_INSTRUCT}, \
          but found a single value {distinct:?} across {} files. \
-         If this is intentional (e.g. base models removed from ~/models), \
+         If this is intentional (e.g. base models are absent from the model search root), \
          either re-add a base GGUF or relax this test — but do NOT \
          delete the assertion as a side effect of cleanup.",
         per_file.len(),
@@ -357,13 +362,17 @@ fn every_family_file_declares_eos() {
     let dir = match models_dir() {
         Some(d) => d,
         None => {
-            eprintln!("[eos-gap] skipped — ~/models not present");
+            eprintln!(
+                "[eos-gap] skipped — model directory unavailable; set QWEN_MODEL_SEARCH_PATH"
+            );
             return;
         }
     };
     let files = family_ggufs(&dir);
     if files.is_empty() {
-        eprintln!("[eos-gap] skipped — no Qwen3.5/3.6 GGUFs in ~/models");
+        eprintln!(
+            "[eos-gap] skipped — no Qwen3.5/3.6 GGUFs in the first QWEN_MODEL_SEARCH_PATH directory"
+        );
         return;
     }
 

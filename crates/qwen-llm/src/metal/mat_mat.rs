@@ -4139,14 +4139,14 @@ mod tests {
             Err(e) => panic!("init failed: {e}"),
         };
         for &(path, dtype) in &[
-            ("/Users/tito/models/Qwen3.5-0.8B.f16.gguf", GgmlType::F16),
-            ("/Users/tito/models/Qwen3.5-0.8B-BF16.gguf", GgmlType::BF16),
+            ("models/Qwen3.5-0.8B.f16.gguf", GgmlType::F16),
+            ("models/Qwen3.5-0.8B-BF16.gguf", GgmlType::BF16),
         ] {
-            if !std::path::Path::new(path).exists() {
+            if !std::path::Path::new(&path).exists() {
                 eprintln!("[half-weight] skipped missing fixture {path}");
                 continue;
             }
-            let g = crate::gguf::GgufFile::open(path).expect("open");
+            let g = crate::gguf::GgufFile::open(&path).expect("open");
             let w = g
                 .tensors
                 .iter()
@@ -4244,12 +4244,12 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/Qwen3.5-0.8B-BF16.gguf";
-        if !std::path::Path::new(path).exists() {
+        let path = "models/Qwen3.5-0.8B-BF16.gguf";
+        if !std::path::Path::new(&path).exists() {
             eprintln!("[bf16-bfloat-act] skipped missing fixture {path}");
             return;
         }
-        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let g = crate::gguf::GgufFile::open(&path).expect("open");
         let w = g
             .tensors
             .iter()
@@ -4328,14 +4328,14 @@ mod tests {
             Err(e) => panic!("init failed: {e}"),
         };
         for &(path, dtype) in &[
-            ("/Users/tito/models/Qwen3.5-0.8B-Q4_0.gguf", GgmlType::Q4_0),
-            ("/Users/tito/models/Qwen3.5-0.8B-Q4_1.gguf", GgmlType::Q4_1),
+            ("models/Qwen3.5-0.8B-Q4_0.gguf", GgmlType::Q4_0),
+            ("models/Qwen3.5-0.8B-Q4_1.gguf", GgmlType::Q4_1),
         ] {
-            if !std::path::Path::new(path).exists() {
+            if !std::path::Path::new(&path).exists() {
                 eprintln!("[q4-legacy] skipped missing fixture {path}");
                 continue;
             }
-            let g = crate::gguf::GgufFile::open(path).expect("open");
+            let g = crate::gguf::GgufFile::open(&path).expect("open");
             let w = g
                 .tensors
                 .iter()
@@ -4430,12 +4430,12 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/Qwen3.5-0.8B-Q3_K_M.gguf";
-        if !std::path::Path::new(path).exists() {
+        let path = "models/Qwen3.5-0.8B-Q3_K_M.gguf";
+        if !std::path::Path::new(&path).exists() {
             eprintln!("[q3_k] skipped missing fixture {path}");
             return;
         }
-        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let g = crate::gguf::GgufFile::open(&path).expect("open");
         let w = g
             .tensors
             .iter()
@@ -4523,12 +4523,12 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/Qwen3.5-4B-UD-IQ2_M.gguf";
-        if !std::path::Path::new(path).exists() {
+        let path = "models/Qwen3.5-4B-UD-IQ2_M.gguf";
+        if !std::path::Path::new(&path).exists() {
             eprintln!("[dense-iq2_s] skipped missing fixture {path}");
             return;
         }
-        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let g = crate::gguf::GgufFile::open(&path).expect("open");
         let w = match g.tensors.iter().find(|t| {
             t.name.starts_with("blk.")
                 && t.name.ends_with(".weight")
@@ -4622,21 +4622,15 @@ mod tests {
             Err(e) => panic!("init failed: {e}"),
         };
         let fixtures = [
-            (
-                "/Users/tito/models/Qwen3.5-4B-UD-Q2_K_XL.gguf",
-                GgmlType::IQ3_XXS,
-            ),
-            (
-                "/Users/tito/models/Qwen3.5-4B-UD-Q2_K_XL.gguf",
-                GgmlType::IQ3_S,
-            ),
+            ("models/Qwen3.5-4B-UD-Q2_K_XL.gguf", GgmlType::IQ3_XXS),
+            ("models/Qwen3.5-4B-UD-Q2_K_XL.gguf", GgmlType::IQ3_S),
         ];
         for &(path, dtype) in &fixtures {
-            if !std::path::Path::new(path).exists() {
+            if !std::path::Path::new(&path).exists() {
                 eprintln!("[dense-iq3 {dtype:?}] skipped missing fixture {path}");
                 continue;
             }
-            let g = crate::gguf::GgufFile::open(path).expect("open");
+            let g = crate::gguf::GgufFile::open(&path).expect("open");
             let w = match g.tensors.iter().find(|t| {
                 t.name.starts_with("blk.")
                     && t.name.ends_with(".weight")
@@ -4738,12 +4732,12 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/Qwen3.5-0.8B.Q2_K.gguf";
-        if !std::path::Path::new(path).exists() {
+        let path = "models/Qwen3.5-0.8B.Q2_K.gguf";
+        if !std::path::Path::new(&path).exists() {
             eprintln!("[q2_k] skipped missing fixture {path}");
             return;
         }
-        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let g = crate::gguf::GgufFile::open(&path).expect("open");
         let w = g
             .tensors
             .iter()
@@ -4832,20 +4826,14 @@ mod tests {
             Err(e) => panic!("init failed: {e}"),
         };
         for &(path, dtype) in &[
-            (
-                "/Users/tito/models/Qwen3.5-0.8B-IQ4_NL.gguf",
-                GgmlType::IQ4_NL,
-            ),
-            (
-                "/Users/tito/models/Qwen3.5-0.8B-IQ4_XS.gguf",
-                GgmlType::IQ4_XS,
-            ),
+            ("models/Qwen3.5-0.8B-IQ4_NL.gguf", GgmlType::IQ4_NL),
+            ("models/Qwen3.5-0.8B-IQ4_XS.gguf", GgmlType::IQ4_XS),
         ] {
-            if !std::path::Path::new(path).exists() {
+            if !std::path::Path::new(&path).exists() {
                 eprintln!("[iq4] skipped missing fixture {path}");
                 continue;
             }
-            let g = crate::gguf::GgufFile::open(path).expect("open");
+            let g = crate::gguf::GgufFile::open(&path).expect("open");
             let align = if dtype == GgmlType::IQ4_NL { 32 } else { 256 };
             let w = g
                 .tensors
@@ -4954,17 +4942,27 @@ mod tests {
     /// path (N=32).
     #[test]
     fn mat_mat_q4_k_matches_cpu_and_mat_vec() {
+        if crate::test_fixtures::QWEN36_27B_Q4_K_M
+            .path_or_skip()
+            .is_none()
+        {
+            return;
+        }
+
         let ctx = match MetalContext::new() {
             Ok(c) => c,
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-        if !std::path::Path::new(path).exists() {
+        let path = crate::test_fixtures::QWEN36_27B_Q4_K_M
+            .required()
+            .to_str()
+            .expect("model fixture path must be UTF-8");
+        if !std::path::Path::new(&path).exists() {
             eprintln!("[mat_mat_q4_k] skipped — fixture missing");
             return;
         }
-        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let g = crate::gguf::GgufFile::open(&path).expect("open");
         // Pick a Q4_K tensor with shape compatible with mat-mat tiling
         // (n_in % 32 == 0, n_out % 64 == 0 for the lifted tile).
         let q4k = g
@@ -5120,12 +5118,12 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf";
-        if !std::path::Path::new(path).exists() {
+        let path = "models/Qwen3.5-0.8B-Q4_K_M.gguf";
+        if !std::path::Path::new(&path).exists() {
             eprintln!("[mat_mat_q6_k] skipped — fixture missing");
             return;
         }
-        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let g = crate::gguf::GgufFile::open(&path).expect("open");
         let q6k = g
             .tensors
             .iter()
@@ -5241,12 +5239,12 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf";
-        if !std::path::Path::new(path).exists() {
+        let path = "models/Qwen3.5-0.8B-Q4_K_M.gguf";
+        if !std::path::Path::new(&path).exists() {
             eprintln!("[mat_mat_q5_k] skipped — fixture missing");
             return;
         }
-        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let g = crate::gguf::GgufFile::open(&path).expect("open");
         let q5k = g
             .tensors
             .iter()
@@ -5386,17 +5384,27 @@ mod tests {
     /// close to 1.000000.
     #[test]
     fn mat_mat_q8_0_matches_cpu_and_mat_vec() {
+        if crate::test_fixtures::DFLASH_DRAFT_36_Q8_0
+            .path_or_skip()
+            .is_none()
+        {
+            return;
+        }
+
         let ctx = match MetalContext::new() {
             Ok(c) => c,
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = crate::test_fixtures::DFLASH_DRAFT_36_Q8_0.path();
-        if !std::path::Path::new(path).exists() {
+        let path = crate::test_fixtures::DFLASH_DRAFT_36_Q8_0
+            .required()
+            .to_str()
+            .expect("model fixture path must be UTF-8");
+        if !std::path::Path::new(&path).exists() {
             eprintln!("[mat_mat_q8_0] skipped — drafter GGUF missing");
             return;
         }
-        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let g = crate::gguf::GgufFile::open(&path).expect("open");
         let q8 = g
             .tensors
             .iter()
@@ -5517,6 +5525,13 @@ mod tests {
     #[test]
     #[ignore]
     fn prompt_mat_mat_production_shapes() {
+        if crate::test_fixtures::QWEN36_27B_Q4_K_M
+            .path_or_skip()
+            .is_none()
+        {
+            return;
+        }
+
         use std::time::Instant;
 
         let ctx = match MetalContext::new() {
@@ -5524,12 +5539,15 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-        if !std::path::Path::new(path).exists() {
+        let path = crate::test_fixtures::QWEN36_27B_Q4_K_M
+            .required()
+            .to_str()
+            .expect("model fixture path must be UTF-8");
+        if !std::path::Path::new(&path).exists() {
             eprintln!("[prompt-matmat] skipped — fixture missing");
             return;
         }
-        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let g = crate::gguf::GgufFile::open(&path).expect("open");
         const N_QUERY: usize = 321;
         let cases = [
             "blk.0.ffn_gate.weight",
@@ -5653,6 +5671,13 @@ mod tests {
     #[test]
     #[ignore]
     fn prompt_mat_mat_production_shapes_chained64() {
+        if crate::test_fixtures::QWEN36_27B_Q4_K_M
+            .path_or_skip()
+            .is_none()
+        {
+            return;
+        }
+
         use std::time::Instant;
 
         let ctx = match MetalContext::new() {
@@ -5660,12 +5685,15 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-        if !std::path::Path::new(path).exists() {
+        let path = crate::test_fixtures::QWEN36_27B_Q4_K_M
+            .required()
+            .to_str()
+            .expect("model fixture path must be UTF-8");
+        if !std::path::Path::new(&path).exists() {
             eprintln!("[prompt-matmat-chained] skipped — fixture missing");
             return;
         }
-        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let g = crate::gguf::GgufFile::open(&path).expect("open");
         let n_query: usize = std::env::var("QWEN_PROMPT_MATMAT_N")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -5824,6 +5852,13 @@ mod tests {
     #[test]
     #[ignore]
     fn q8_0_mat_mat_amortization_vs_n_mat_vec() {
+        if crate::test_fixtures::DFLASH_DRAFT_36_Q8_0
+            .path_or_skip()
+            .is_none()
+        {
+            return;
+        }
+
         use std::time::Instant;
 
         fn env_usize(name: &str, default: usize) -> usize {
@@ -5848,8 +5883,13 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = std::env::var("QWEN_Q8_AMORT_MODEL")
-            .unwrap_or_else(|_| crate::test_fixtures::DFLASH_DRAFT_36_Q8_0.path().into());
+        let path = std::env::var("QWEN_Q8_AMORT_MODEL").unwrap_or_else(|_| {
+            crate::test_fixtures::DFLASH_DRAFT_36_Q8_0
+                .required()
+                .to_str()
+                .expect("model fixture path must be UTF-8")
+                .into()
+        });
         if !std::path::Path::new(&path).exists() {
             eprintln!("[q8-amort] skipped - GGUF missing: {path}");
             return;
@@ -6091,18 +6131,28 @@ mod tests {
     #[test]
     #[ignore]
     fn q5_k_mat_mat_amortization_vs_n_mat_vec() {
+        if crate::test_fixtures::QWEN36_27B_Q4_K_M
+            .path_or_skip()
+            .is_none()
+        {
+            return;
+        }
+
         use std::time::Instant;
         let ctx = match MetalContext::new() {
             Ok(c) => c,
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-        if !std::path::Path::new(path).exists() {
+        let path = crate::test_fixtures::QWEN36_27B_Q4_K_M
+            .required()
+            .to_str()
+            .expect("model fixture path must be UTF-8");
+        if !std::path::Path::new(&path).exists() {
             eprintln!("[v0.73a.0-gate] skipped — fixture missing");
             return;
         }
-        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let g = crate::gguf::GgufFile::open(&path).expect("open");
         let q5k = g
             .tensors
             .iter()
@@ -6231,11 +6281,11 @@ mod tests {
         let Some(ctx) = metal_test_context() else {
             return;
         };
-        let path = "/Users/tito/models/Qwen3.8-27B-Q4_K_M.gguf";
-        if !std::path::Path::new(path).exists() {
+        let path = "models/Qwen3.8-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(&path).exists() {
             return;
         }
-        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let g = crate::gguf::GgufFile::open(&path).expect("open");
         let gate = g
             .tensors
             .iter()

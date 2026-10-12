@@ -19,8 +19,18 @@ fn replay_tail(session: &MuseGlimmerTextSession, base: usize, rows: usize) -> Ve
 #[test]
 #[ignore = "serial Metal, delivered N128 plus N16 plus scalar composition"]
 fn tiled_prefill_short_delivery() {
-    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
-    let gguf = GgufFile::open(path).unwrap();
+    if crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .path_or_skip()
+        .is_none()
+    {
+        return;
+    }
+
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    let gguf = GgufFile::open(&path).unwrap();
     let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
     let tokens = long_context_tokens(path, &config);
     let ctx = MetalContext::new().unwrap();
@@ -137,7 +147,10 @@ fn tiled_prefill_32k_transfer(delivery: bool, profile: bool) {
     }
     let seed: serde_json::Value =
         serde_json::from_reader(std::fs::File::open(root.join("prefix.json")).unwrap()).unwrap();
-    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
     let metadata = std::fs::metadata(path).unwrap();
     assert_eq!(seed["identity"]["model"], path);
     assert_eq!(seed["identity"]["model_bytes"], metadata.len());
@@ -151,7 +164,7 @@ fn tiled_prefill_32k_transfer(delivery: bool, profile: bool) {
             .as_nanos()
             .to_string()
     );
-    let gguf = GgufFile::open(path).unwrap();
+    let gguf = GgufFile::open(&path).unwrap();
     let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
     let tokens = long_context_tokens(path, &config);
     assert_eq!(

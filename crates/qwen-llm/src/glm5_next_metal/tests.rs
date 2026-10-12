@@ -9,8 +9,7 @@ mod quality_split;
 mod reset;
 mod snapshot_gates;
 
-const ORACLE_DEFAULT: &str =
-    "/Volumes/wdblack/weights-archive/.fetch/analysis/runs/glm53-oracle/ckpt-v1";
+const ORACLE_DEFAULT: &str = "models/.fetch/analysis/runs/glm53-oracle/ckpt-v1";
 
 fn oracle_dir() -> PathBuf {
     std::env::var_os("GLM53_ORACLE_DIR")
@@ -1136,8 +1135,7 @@ impl ReferenceStream {
     }
 }
 
-const QUAL_ORACLE_DEFAULT: &str =
-    "/Volumes/wdblack/weights-archive/.fetch/analysis/runs/glm53-oracle/qual-v1";
+const QUAL_ORACLE_DEFAULT: &str = "models/.fetch/analysis/runs/glm53-oracle/qual-v1";
 
 fn qual_oracle_dir() -> PathBuf {
     std::env::var_os("GLM53_QUAL_ORACLE_DIR")
@@ -1463,8 +1461,7 @@ fn comparison_helpers_refuse_nonfinite_and_mismatched_inputs() {
     assert!(errors.iter().all(|(_, e, _)| *e == 0.0));
 }
 
-const SPARSE_ORACLE_DEFAULT: &str =
-    "/Volumes/wdblack/weights-archive/.fetch/analysis/runs/glm53-oracle/sparse-v1";
+const SPARSE_ORACLE_DEFAULT: &str = "models/.fetch/analysis/runs/glm53-oracle/sparse-v1";
 
 fn sparse_oracle_dir() -> PathBuf {
     std::env::var_os("GLM53_SPARSE_ORACLE_DIR")
@@ -1714,8 +1711,7 @@ fn sparse_selection_replays_llama_cpp_indexer_captures() {
     assert_eq!(sparse, 10 * MLA_BLOCKS.len());
 }
 
-const SPARSE_V2_DEFAULT: &str =
-    "/Volumes/wdblack/weights-archive/.fetch/analysis/runs/glm53-oracle/sparse-v2";
+const SPARSE_V2_DEFAULT: &str = "models/.fetch/analysis/runs/glm53-oracle/sparse-v2";
 
 fn sparse_v2_dir() -> PathBuf {
     std::env::var_os("GLM53_SPARSE_V2_DIR")

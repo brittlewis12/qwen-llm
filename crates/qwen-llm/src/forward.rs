@@ -1421,11 +1421,18 @@ mod tests {
 
     #[test]
     fn forward_runs_one_token_0_8b() {
-        let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
-        if !std::path::Path::new(path).exists() {
+        if crate::test_fixtures::QWEN35_0_8B_F32
+            .path_or_skip()
+            .is_none()
+        {
             return;
         }
-        let g = GgufFile::open(path).expect("open");
+
+        let path = crate::test_fixtures::QWEN35_0_8B_F32.required();
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let g = GgufFile::open(&path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
         let f = Forward::new(&g, &m);
         let mut state = GdnState::fresh(&m);
@@ -1451,18 +1458,22 @@ mod tests {
 
     #[test]
     fn forward_runs_one_token_35b_a3b_moe() {
-        let path = crate::test_fixtures::A3B_Q4_K_M.path();
-        if !std::path::Path::new(path).exists() {
+        if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
             return;
         }
-        let g = GgufFile::open(path).expect("open");
+
+        let path = crate::test_fixtures::A3B_Q4_K_M.required();
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let g = GgufFile::open(&path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
         assert_eq!(m.arch.kind, crate::model::ArchKind::Moe);
         let f = Forward::new(&g, &m);
         let mut state = GdnState::fresh(&m);
         let mut kv = KvCache::with_capacity(&m, 8);
 
-        let tok = crate::tokenizer::Tokenizer::open(path).expect("tok");
+        let tok = crate::tokenizer::Tokenizer::open(&path).expect("tok");
         let ids = tok.encode("Hello", false).expect("tokenize");
         let logits = f
             .single_token(ids[0], 0, &mut state, &mut kv)
@@ -1489,11 +1500,18 @@ mod tests {
     /// RMSNorm, and mat_vec orientations are coherent.
     #[test]
     fn forward_bypass_blocks_smoke() {
-        let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
-        if !std::path::Path::new(path).exists() {
+        if crate::test_fixtures::QWEN35_0_8B_F32
+            .path_or_skip()
+            .is_none()
+        {
             return;
         }
-        let g = GgufFile::open(path).expect("open");
+
+        let path = crate::test_fixtures::QWEN35_0_8B_F32.required();
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let g = GgufFile::open(&path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
         let f = Forward::new(&g, &m);
 
@@ -1544,15 +1562,23 @@ mod tests {
     ///
     /// To regenerate the oracle:
     /// ```sh
-    /// ~/code/llm/target/release/llm --model /Users/tito/models/Qwen3.5-0.8B.F32.gguf \
+    /// external reference tool/target/release/llm --model models/Qwen3.5-0.8B.F32.gguf \
     ///   --snapshot /tmp/qwen-oracle --snapshot-id hello_t0 --raw "Hello"
     /// ```
     /// Produces /tmp/qwen-oracle/hello_t0.{f32,json}.
     #[test]
     fn oracle_match_hello_0_8b_f32() {
-        let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
+        if crate::test_fixtures::QWEN35_0_8B_F32
+            .path_or_skip()
+            .is_none()
+        {
+            return;
+        }
+
+        let model_path = crate::test_fixtures::QWEN35_0_8B_F32.required();
         let oracle_path = "/tmp/qwen-oracle/hello_t0.f32";
-        if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists()
+        if !std::path::Path::new(&model_path).exists()
+            || !std::path::Path::new(oracle_path).exists()
         {
             eprintln!("[oracle] skipped — fixtures missing");
             return;
@@ -1566,12 +1592,12 @@ mod tests {
             .collect();
 
         // Load + forward.
-        let g = GgufFile::open(model_path).expect("open");
+        let g = GgufFile::open(&model_path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
         assert_eq!(oracle.len(), m.arch.vocab_size as usize);
 
         // Tokenize "Hello" (raw, no chat template, no specials).
-        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let tok = crate::tokenizer::Tokenizer::open(&model_path).expect("tok");
         let ids = tok.encode("Hello", false).expect("tokenize");
         eprintln!("[oracle] 'Hello' -> {ids:?} ({} tokens)", ids.len());
 
@@ -1650,9 +1676,17 @@ mod tests {
     #[test]
     #[ignore]
     fn oracle_match_27b_q4_k_m() {
-        let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
+        if crate::test_fixtures::QWEN36_27B_Q4_K_M
+            .path_or_skip()
+            .is_none()
+        {
+            return;
+        }
+
+        let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
         let oracle_path = "/tmp/qwen-oracle/hello_27b_q4km.f32";
-        if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists()
+        if !std::path::Path::new(&model_path).exists()
+            || !std::path::Path::new(oracle_path).exists()
         {
             eprintln!("[oracle-27b] skipped — fixtures missing");
             return;
@@ -1664,12 +1698,12 @@ mod tests {
             .map(|i| f32::from_le_bytes(oracle_bytes[i * 4..i * 4 + 4].try_into().unwrap()))
             .collect();
 
-        let g = GgufFile::open(model_path).expect("open");
+        let g = GgufFile::open(&model_path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
         assert_eq!(oracle.len(), m.arch.vocab_size as usize);
         assert!(!m.tied_embeddings);
 
-        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let tok = crate::tokenizer::Tokenizer::open(&model_path).expect("tok");
         let ids = tok.encode("Hello", false).expect("tokenize");
         eprintln!("[oracle-27b] {ids:?}");
 
@@ -1725,7 +1759,7 @@ mod tests {
     ///
     /// Codex review (fc6f43e) flagged the test gap. Oracle generated via:
     /// ```sh
-    /// ~/code/llm/target/release/llm --model /Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf \
+    /// external reference tool/target/release/llm --model models/Qwen3.6-27B-Q4_K_M.gguf \
     ///   --snapshot /tmp/qwen-oracle --snapshot-id longprompt_27b \
     ///   --raw "The quick brown fox jumps over the lazy dog"
     /// ```
@@ -1736,9 +1770,17 @@ mod tests {
     #[test]
     #[ignore]
     fn oracle_match_longprompt_27b_q4_k_m() {
-        let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
+        if crate::test_fixtures::QWEN36_27B_Q4_K_M
+            .path_or_skip()
+            .is_none()
+        {
+            return;
+        }
+
+        let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
         let oracle_path = "/tmp/qwen-oracle/longprompt_27b.f32";
-        if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists()
+        if !std::path::Path::new(&model_path).exists()
+            || !std::path::Path::new(oracle_path).exists()
         {
             eprintln!("[oracle-27b-long] skipped — fixtures missing");
             return;
@@ -1750,14 +1792,14 @@ mod tests {
             .map(|i| f32::from_le_bytes(oracle_bytes[i * 4..i * 4 + 4].try_into().unwrap()))
             .collect();
 
-        let g = GgufFile::open(model_path).expect("open");
+        let g = GgufFile::open(&model_path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
         assert_eq!(oracle.len(), m.arch.vocab_size as usize);
         // Sanity: this must be the n_v != n_k path.
         assert_eq!(m.arch.gdn_n_v_heads, 48);
         assert_eq!(m.arch.gdn_n_k_heads, 16);
 
-        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let tok = crate::tokenizer::Tokenizer::open(&model_path).expect("tok");
         let ids = tok
             .encode("The quick brown fox jumps over the lazy dog", false)
             .expect("tokenize");
@@ -1823,16 +1865,24 @@ mod tests {
     ///
     /// Oracle generated via:
     /// ```sh
-    /// ~/code/llm/target/release/llm --model /Users/tito/models/Qwen3.5-0.8B.F32.gguf \
+    /// external reference tool/target/release/llm --model models/Qwen3.5-0.8B.F32.gguf \
     ///   --snapshot /tmp/qwen-oracle --snapshot-id longprompt_t0 \
     ///   --raw "The quick brown fox jumps over the lazy dog"
     /// ```
     /// Expected argmax: "." (token 13).
     #[test]
     fn oracle_match_longprompt_0_8b_f32() {
-        let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
+        if crate::test_fixtures::QWEN35_0_8B_F32
+            .path_or_skip()
+            .is_none()
+        {
+            return;
+        }
+
+        let model_path = crate::test_fixtures::QWEN35_0_8B_F32.required();
         let oracle_path = "/tmp/qwen-oracle/longprompt_t0.f32";
-        if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists()
+        if !std::path::Path::new(&model_path).exists()
+            || !std::path::Path::new(oracle_path).exists()
         {
             eprintln!("[oracle-long] skipped — fixtures missing");
             return;
@@ -1844,11 +1894,11 @@ mod tests {
             .map(|i| f32::from_le_bytes(oracle_bytes[i * 4..i * 4 + 4].try_into().unwrap()))
             .collect();
 
-        let g = GgufFile::open(model_path).expect("open");
+        let g = GgufFile::open(&model_path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
         assert_eq!(oracle.len(), m.arch.vocab_size as usize);
 
-        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let tok = crate::tokenizer::Tokenizer::open(&model_path).expect("tok");
         let ids = tok
             .encode("The quick brown fox jumps over the lazy dog", false)
             .expect("tokenize");
@@ -1911,12 +1961,12 @@ mod tests {
     /// boundary slot.
     #[test]
     fn mtp_step_runs_0_8b() {
-        let path = "/Users/tito/models/h4-smoke-test/Qwen3.5-0.8B/qwen3.5-0.8b.Q4_K_M.gguf";
-        if !std::path::Path::new(path).exists() {
+        let path = "models/h4-smoke-test/Qwen3.5-0.8B/qwen3.5-0.8b.Q4_K_M.gguf";
+        if !std::path::Path::new(&path).exists() {
             eprintln!("[mtp-smoke] skipped — fixture missing");
             return;
         }
-        let g = GgufFile::open(path).expect("open");
+        let g = GgufFile::open(&path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
         assert!(m.mtp.is_some(), "MTP head should be bound on 0.8B-MTP");
 
@@ -1926,7 +1976,7 @@ mod tests {
         let mut mtp_kv = f.fresh_mtp_kv(64);
 
         // Tokenize a short prompt.
-        let tok = crate::tokenizer::Tokenizer::open(path).expect("tok");
+        let tok = crate::tokenizer::Tokenizer::open(&path).expect("tok");
         let ids = tok.encode("Hello world", false).expect("tokenize");
         eprintln!("[mtp-smoke] prompt tokens: {ids:?}");
         assert!(ids.len() >= 2, "need at least 2 tokens for the test");

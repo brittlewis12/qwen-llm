@@ -35,7 +35,7 @@ fn long_context_tokens(path: &str, config: &MuseGlimmerConfig) -> Vec<u32> {
     )
     .unwrap()
     .text;
-    let tokenizer = LlamaCppTokenizer::open(path).unwrap();
+    let tokenizer = LlamaCppTokenizer::open(&path).unwrap();
     let ids = tokenizer.encode(&rendered, false).unwrap();
     assert!(ids.len() >= 32784);
     eprintln!(
@@ -50,20 +50,40 @@ fn long_context_tokens(path: &str, config: &MuseGlimmerConfig) -> Vec<u32> {
 #[test]
 #[ignore = "CPU-only authenticated Muse long fixture identity"]
 fn muse_long_fixture_identity() {
-    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
-    let gguf = GgufFile::open(path).unwrap();
+    if crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .path_or_skip()
+        .is_none()
+    {
+        return;
+    }
+
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    let gguf = GgufFile::open(&path).unwrap();
     long_context_tokens(path, &MuseGlimmerConfig::from_gguf(&gguf).unwrap());
 }
 
 #[test]
 #[ignore = "CPU-only export of an authenticated native long CLI request"]
 fn export_muse_long_cli_fixture() {
+    if crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .path_or_skip()
+        .is_none()
+    {
+        return;
+    }
+
     use crate::muse_glimmer_prompt::MuseGlimmerMessageRole;
     use std::io::Write;
-    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
-    let gguf = GgufFile::open(path).unwrap();
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    let gguf = GgufFile::open(&path).unwrap();
     let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
-    let tokenizer = LlamaCppTokenizer::open(path).unwrap();
+    let tokenizer = LlamaCppTokenizer::open(&path).unwrap();
     let messages = long_context_messages();
     for end in (1..=messages.len()).rev() {
         if messages[end - 1].role != MuseGlimmerMessageRole::User {
@@ -199,8 +219,18 @@ fn check_local_generated_math(
 #[test]
 #[ignore = "serial Metal, one optimized traversal for horizon checks and current phase attribution"]
 fn optimized_horizon_and_current_profile() {
-    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
-    let gguf = GgufFile::open(path).unwrap();
+    if crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .path_or_skip()
+        .is_none()
+    {
+        return;
+    }
+
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    let gguf = GgufFile::open(&path).unwrap();
     let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
     let tokens = long_context_tokens(path, &config);
     let ctx = MetalContext::new().unwrap();
@@ -272,8 +302,18 @@ fn optimized_horizon_and_current_profile() {
 #[test]
 #[ignore = "serial Metal, Muse capacity reservation and 7168 prefill/decode boundary"]
 fn optimized_prefill_large_reservation_boundary() {
-    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
-    let gguf = GgufFile::open(path).unwrap();
+    if crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .path_or_skip()
+        .is_none()
+    {
+        return;
+    }
+
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    let gguf = GgufFile::open(&path).unwrap();
     let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
     let tokens = long_context_tokens(path, &config);
     let ctx = MetalContext::new().unwrap();
@@ -351,8 +391,18 @@ fn optimized_prefill_large_reservation_boundary() {
 #[test]
 #[ignore = "serial Metal, live 8K Muse chunk extended-attention qualification"]
 fn long_attention_live_8k_chunk() {
-    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
-    let gguf = GgufFile::open(path).unwrap();
+    if crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .path_or_skip()
+        .is_none()
+    {
+        return;
+    }
+
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    let gguf = GgufFile::open(&path).unwrap();
     let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
     let tokens = long_context_tokens(path, &config);
     let ctx = MetalContext::new().unwrap();
@@ -542,8 +592,18 @@ fn live_long_attention_chunk_with_tiling(
 #[test]
 #[ignore = "serial Metal, one tiled traversal with current-online live chunk comparisons"]
 fn tiled_prefill_live_chunk_transfer() {
-    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
-    let gguf = GgufFile::open(path).unwrap();
+    if crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .path_or_skip()
+        .is_none()
+    {
+        return;
+    }
+
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    let gguf = GgufFile::open(&path).unwrap();
     let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
     let tokens = long_context_tokens(path, &config);
     let ctx = MetalContext::new().unwrap();
@@ -641,8 +701,18 @@ fn long_prefill_fresh_32k() {
 #[test]
 #[ignore = "serial Metal, delivered 32K prefill constructor and incremental fallback boundaries"]
 fn long_prefill_32k_delivery_boundaries() {
-    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
-    let gguf = GgufFile::open(path).unwrap();
+    if crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .path_or_skip()
+        .is_none()
+    {
+        return;
+    }
+
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    let gguf = GgufFile::open(&path).unwrap();
     let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
     let tokens = long_context_tokens(path, &config);
     let ctx = MetalContext::new().unwrap();
@@ -701,8 +771,11 @@ fn long_prefill_32k_delivery_boundaries() {
 }
 
 fn long_prefill_fresh_qualification(count: usize) {
-    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
-    let gguf = GgufFile::open(path).unwrap();
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    let gguf = GgufFile::open(&path).unwrap();
     let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
     let tokens = long_context_tokens(path, &config);
     let ctx = MetalContext::new().unwrap();

@@ -626,9 +626,20 @@ mod tests {
     #[test]
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn real_q8_capture_and_selected_covector_smoke() {
-        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
-            .unwrap_or_else(|_| crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into());
-        let gguf = GgufFile::open(path).expect("open Muse Q8 target");
+        if crate::test_fixtures::MUSE_GLIMMER_Q8_0
+            .path_or_skip()
+            .is_none()
+        {
+            return;
+        }
+
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
+            crate::test_fixtures::MUSE_GLIMMER_Q8_0
+                .required()
+                .to_string_lossy()
+                .into_owned()
+        });
+        let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
         let ctx = MetalContext::new().expect("open Metal context");
         let plan =
             MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).expect("qualify Muse Q8 target");

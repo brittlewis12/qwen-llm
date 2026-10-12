@@ -1546,9 +1546,9 @@ mod tests {
         // Use the smallest local Qwen3.5 GGUF as a real-world fixture.
         // Falls back to the gguf-rs test fixture if the model isn't present.
         let candidates = [
-            "/Users/tito/models/Qwen3.5-0.8B-Q4_0.gguf",
-            "/Users/tito/models/Qwen3.5-0.8B-BF16.gguf",
-            "/Users/tito/code/gguf/tests/test-le-v3.gguf",
+            "models/Qwen3.5-0.8B-Q4_0.gguf",
+            "models/Qwen3.5-0.8B-BF16.gguf",
+            "tests/test-le-v3.gguf",
         ];
         for c in candidates {
             if std::path::Path::new(c).exists() {

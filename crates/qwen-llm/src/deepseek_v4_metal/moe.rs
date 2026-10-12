@@ -1081,22 +1081,21 @@ impl DeepSeekV4MoeScratch {
                 );
             });
         }
-        let gate_kernel = routed_all_slots_gate_up_selector(gate_bank.dtype);
-        if gate_bank.dtype != up_bank.dtype || gate_kernel.is_none() {
+        let gate_kernel = routed_all_slots_gate_up_selector(gate_bank.dtype)
+            .filter(|_| gate_bank.dtype == up_bank.dtype);
+        let Some(gate_kernel) = gate_kernel else {
             return invalid(format!(
                 "all-slot routed gate/up require matching executable dtypes, got {:?}/{:?}",
                 gate_bank.dtype, up_bank.dtype
             ));
-        }
-        let down_kernel = routed_all_slots_down_selector(down_bank.dtype);
-        if down_kernel.is_none() {
+        };
+        let Some((down_kernel, down_threads)) = routed_all_slots_down_selector(down_bank.dtype)
+        else {
             return invalid(format!(
                 "all-slot routed down requires an executable dtype, got {:?}",
                 down_bank.dtype
             ));
-        }
-        let gate_kernel = gate_kernel.expect("selector checked above");
-        let (down_kernel, down_threads) = down_kernel.expect("selector checked above");
+        };
         validate_deepseek_v4_all_slot_pipeline(ctx, gate_kernel, 64, 64)?;
         validate_deepseek_v4_all_slot_pipeline(ctx, down_kernel, down_threads, 0)?;
         encode_ds4_all_slots_gate_up_swiglu(

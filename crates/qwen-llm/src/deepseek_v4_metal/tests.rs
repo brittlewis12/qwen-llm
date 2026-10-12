@@ -21309,11 +21309,19 @@ fn all_slot_routed_experts_match_serial_indexed_path_and_zero_failures() {
     let mixed_error = scratch
         .encode_routed_experts_all_slots(&ctx, &encoder, &gate_bank, &mixed_up, &down_bank, CLAMP)
         .unwrap_err();
-    assert!(mixed_error.to_string().contains("require matching IQ2_XS"));
+    assert!(
+        mixed_error
+            .to_string()
+            .contains("gate/up require matching executable dtypes, got IQ2_S/IQ3_S")
+    );
     let down_error = scratch
         .encode_routed_experts_all_slots(&ctx, &encoder, &gate_bank, &up_bank, &gate_bank, CLAMP)
         .unwrap_err();
-    assert!(down_error.to_string().contains("IQ3_XXS, MXFP4, or Q4_K"));
+    assert!(
+        down_error
+            .to_string()
+            .contains("down requires an executable dtype, got IQ2_S")
+    );
     encoder.end();
 
     let short_scratch =

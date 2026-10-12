@@ -324,6 +324,12 @@ fn k160_n128_grouped_q3q4_representative_layer_floor() {
         return;
     }
     let gguf = crate::gguf::GgufFile::open(FIXTURE).expect("open K160 GGUF");
+    if let Some(reason) =
+        crate::metal::DEEPSEEK_V4_PACKED_GROUPED_Q3Q4.decline_reason(ctx.device_facts())
+    {
+        eprintln!("[k160-n128-floor] skipped: M4 Max qualification does not hold: {reason:?}");
+        return;
+    }
     assert_eq!(ctx.device.name().to_string(), "Apple M4 Max");
     assert_eq!(gguf.tensors.len(), 1_328);
     assert_eq!(gguf.shard_count(), 4);

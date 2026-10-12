@@ -1572,7 +1572,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "M4 Max host memory-probe characterization; measured values are host-specific"]
     fn metal_memory_probes_match_local_m4_max() {
         let ctx = MetalContext::new().expect("Metal context");
         let signals = ctx.memory_signals();

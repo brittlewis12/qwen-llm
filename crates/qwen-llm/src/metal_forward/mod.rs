@@ -32,19 +32,19 @@ use crate::gguf::GgufFile;
 use crate::loader::{Block, Model, MoeFfn};
 pub use crate::metal::PostBlockIntervention;
 use crate::metal::{
-    Buffer, GgufBackingEligibility, KernelEncoder, MetalContext, MetalError, MetalGgufBacking,
-    MetalTensor, MetalTensorProvenance, MetalTimestampSampleBuffer, RetainedStorageDisposition,
-    RetainedStorageFallback, RetainedStoragePlan, attn_v4_choose_nwg, attn_v4_choose_tile_c,
-    encode_add_inplace_f32, encode_argmax_f32, encode_argmax_f32_greedy,
-    encode_attn_decode_f16kv_f32, encode_attn_decode_v4_f32, encode_axpy_scalar_f32,
-    encode_dot_sigmoid_f32, encode_ffn_swiglu_q4_K_f32, encode_fill_f32,
-    encode_gdn_decay_chain_f32, encode_gdn_step_decay_f32, encode_get_rows_f32,
-    encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32, encode_mat_vec_f32,
-    encode_mat_vec_f32_sigmoid, encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32,
-    encode_mat_vec_q6_k_f32, encode_moe_down_bf16_f32, encode_moe_down_f32_f32,
-    encode_moe_down_iq4_nl_f32, encode_moe_down_iq4_xs_f32, encode_moe_down_iq4_xs_f32_fast,
-    encode_moe_down_q4_K_f32, encode_moe_down_q5_K_f32,
-    encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
+    A10B_PARALLEL_PREAD_REQUIRED_HEADROOM_BYTES, Buffer, GgufBackingEligibility, KernelEncoder,
+    MetalContext, MetalError, MetalGgufBacking, MetalTensor, MetalTensorProvenance,
+    MetalTimestampSampleBuffer, RetainedStorageDisposition, RetainedStorageFallback,
+    RetainedStoragePlan, attn_v4_choose_nwg, attn_v4_choose_tile_c, encode_add_inplace_f32,
+    encode_argmax_f32, encode_argmax_f32_greedy, encode_attn_decode_f16kv_f32,
+    encode_attn_decode_v4_f32, encode_axpy_scalar_f32, encode_dot_sigmoid_f32,
+    encode_ffn_swiglu_q4_K_f32, encode_fill_f32, encode_gdn_decay_chain_f32,
+    encode_gdn_step_decay_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
+    encode_l2_norm_pair_batched_f32, encode_mat_vec_f32, encode_mat_vec_f32_sigmoid,
+    encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32,
+    encode_moe_down_bf16_f32, encode_moe_down_f32_f32, encode_moe_down_iq4_nl_f32,
+    encode_moe_down_iq4_xs_f32, encode_moe_down_iq4_xs_f32_fast, encode_moe_down_q4_K_f32,
+    encode_moe_down_q5_K_f32, encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
     encode_moe_down_weighted_sum_q6_K_f32, encode_moe_down_weighted_sum_q8_0_f32,
     encode_moe_grouped_finalizer_f32, encode_moe_mat_vec_bf16_f32, encode_moe_mat_vec_f32,
@@ -181,7 +181,6 @@ const GGUF_PAGE_ROUNDED_A3B_ALLOCATED_BYTES: u64 = 22_126_297_088;
 const GGUF_PAGE_ROUNDED_A3B_PADDING_BYTES: u64 = 2_758_144;
 const GGUF_PAGE_ROUNDED_A3B_PADDED_RESOURCES: usize = 232;
 const GGUF_OWNED_WORKERS: usize = 4;
-const A10B_PARALLEL_PREAD_REQUIRED_HEADROOM_BYTES: u64 = 85_608_931_328;
 const A3B_PARALLEL_COPY_AUTO_OVERRIDE_ENVS: [&str; 8] = [
     "QWEN_GGUF_NO_COPY",
     "QWEN_GGUF_OWNED_ARENA",

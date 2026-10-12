@@ -71,10 +71,10 @@ fn qualification_facts(
             metal4: false,
         },
         max_threadgroup_memory_bytes: 0,
-        max_buffer_length_bytes: 0,
+        max_buffer_length_bytes: 77_309_411_328,
         recommended_max_working_set_bytes: 0,
         unified_memory,
-        host_page_size_bytes: None,
+        host_page_size_bytes: Some(16_384),
         physical_memory_bytes,
         os_version: None,
         product_metallib_deployment_target: "",
@@ -2122,6 +2122,14 @@ fn assert_gguf_parallel_dense27b_q4_is_bit_exact(
     let gguf = GgufFile::open(model_path).expect("open parallel-copy dense fixture");
     let model = Model::from_gguf(&gguf).expect("bind parallel-copy dense fixture");
     let profile = &DENSE27B_PARALLEL_COPY_PROFILE;
+    if let Some(reason) =
+        crate::metal::PARALLEL_COPY_EXACT_UNIFIED.decline_reason(ctx.device_facts())
+    {
+        eprintln!(
+            "[metal-parallel-copy-dense27b] skipped: M4 Max qualification does not hold: {reason:?}"
+        );
+        return;
+    }
     assert_eq!(gguf.architecture().as_deref(), profile.architecture_label);
     assert_eq!(gguf.shard_mapped_lengths(), profile.shard_mapped_lengths);
     assert_eq!(

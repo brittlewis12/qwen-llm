@@ -986,6 +986,13 @@ pub(super) fn parallel_copy_profile_matches(
     if let ParallelCopyDeviceConstraint::ExactUnified(qualification) = profile.device_constraint
         && !qualification.holds_for(ctx.device_facts())
     {
+        if let Some(reason) = crate::metal::declined_reason_once(qualification, ctx.device_facts())
+        {
+            emit_metal_load_line(format_args!(
+                "[metal-gguf-parallel-qualification] path={} declined reason={reason:?}",
+                qualification.path
+            ));
+        }
         return Ok(false);
     }
     let architecture = gguf.architecture();
@@ -1018,8 +1025,6 @@ pub(super) fn parallel_copy_profile_matches(
         || model.token_embd.dtype != profile.embedding_dtype
         || model.token_embd.shape.as_slice() != profile.embedding_shape
         || !embedding_qualified
-        || host_page_size_bytes()? != 16_384
-        || ctx.max_buffer_length() != 77_309_411_328
         || expected.len() != profile.request_count
         || model_weight_storage_inventory_digest(expected) != profile.inventory_digest
     {
@@ -1064,7 +1069,15 @@ pub(super) fn select_parallel_copy_profile(
 }
 
 pub(super) fn a3b_parallel_copy_auto_host_supported(facts: &crate::metal::DeviceFacts) -> bool {
-    facts.unified_memory && crate::metal::A3B_PARALLEL_COPY_AUTO.holds_for(facts)
+    let qualification = &crate::metal::A3B_PARALLEL_COPY_AUTO;
+    let holds = qualification.holds_for(facts);
+    if let Some(reason) = crate::metal::declined_reason_once(qualification, facts) {
+        emit_metal_load_line(format_args!(
+            "[metal-gguf-parallel-qualification] path={} declined reason={reason:?}",
+            qualification.path
+        ));
+    }
+    facts.unified_memory && holds
 }
 
 pub(super) fn select_auto_parallel_copy_profile(

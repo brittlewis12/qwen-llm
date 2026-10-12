@@ -13,7 +13,8 @@ use qwen_llm::{
     gguf::{GgufFile, GgufShardStamp},
     loader::Model,
     metal::{
-        BlitEncoder, Buffer, DiagnosticGgufBlitReleaseProbe, MetalContext, MetalMemoryAdmission,
+        A10B_PARALLEL_PREAD_REQUIRED_HEADROOM_BYTES as A10B_REQUIRED_HEADROOM_BYTES, BlitEncoder,
+        Buffer, DiagnosticGgufBlitReleaseProbe, MetalContext, MetalMemoryAdmission,
         MetalMemorySignals, RetainedStorageDisposition, RetainedStorageFallback,
         RetainedStoragePlan, evaluate_metal_memory_admission, host_page_size_bytes,
         plan_retained_storage,
@@ -38,7 +39,6 @@ const EXPECTED_PAGE_SIZE: usize = 16_384;
 const EXPECTED_MAX_BUFFER_LENGTH: usize = 77_309_411_328;
 const FROZEN_PARALLEL_COPY_WORKERS: usize = 4;
 const PARALLEL_COPY_ALGORITHM: &str = "minimax-contiguous-v1";
-const A10B_REQUIRED_HEADROOM_BYTES: u64 = 85_608_931_328;
 const HOST_POPULATION_ENDPOINT: &str = "host-population/no-GPU-command";
 const HOST_POPULATION_NO_GPU_SEAL: &str = "gguf-arena-floor-copied-pread-v1";
 const ALLOWED_DIAGNOSTIC_WORKERS: [usize; 6] = [1, 2, 4, 6, 8, 12];

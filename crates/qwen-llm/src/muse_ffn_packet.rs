@@ -209,7 +209,7 @@ fn muse_ffn_packet_cpu_contracts() {
 }
 
 #[test]
-#[ignore = "coordinated GPU only, production lease, all-layer Muse FFN capture and frozen fusion screen"]
+#[ignore = "M4 Max characterization; coordinated GPU only, production lease, all-layer Muse FFN capture and frozen fusion screen"]
 fn muse_ffn_capture_and_fusion_screen() {
     let _lease = crate::metal::acquire_metal_benchmark_lease()
         .expect("production lease and wired gate required");

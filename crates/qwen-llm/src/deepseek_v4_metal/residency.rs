@@ -724,6 +724,17 @@ fn log_deepseek_v4_artifact_qualification(
         _ => "none",
     };
     let qualified = profile != "none" && crate::metal::DEEPSEEK_V4_RESIDENCY_SET.holds_for(facts);
+    if profile != "none" && !qualified {
+        if let Some(reason) =
+            crate::metal::declined_reason_once(&crate::metal::DEEPSEEK_V4_RESIDENCY_SET, facts)
+        {
+            eprintln!(
+                "deepseek_v4: residency qualification declined path={} reason={reason:?}",
+                crate::metal::DEEPSEEK_V4_RESIDENCY_SET.path
+            );
+        }
+        return;
+    }
     eprintln!(
         "deepseek_v4: artifact profile={profile} tensor_count={} experts={} source_bytes={} device={:?} identity_gated_fast_paths={}",
         report.tensor_count,

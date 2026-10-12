@@ -805,6 +805,19 @@ pub(super) fn authenticated_a3b_storage_plan(
     expected: &[ModelWeightStorageRequest<'_>],
     embedding_selection: NativeQuantEmbeddingSelection,
 ) -> Result<RetainedStoragePlan, MfError> {
+    let qualification = &crate::metal::A3B_PARALLEL_COPY_AUTO;
+    if let Some(reason) = qualification.decline_reason(ctx.device_facts()) {
+        if let Some(reason) = crate::metal::declined_reason_once(qualification, ctx.device_facts())
+        {
+            emit_metal_load_line(format_args!(
+                "[metal-gguf-parallel-qualification] path={} declined reason={reason:?}",
+                qualification.path
+            ));
+        }
+        return Err(MfError::LoadPolicy(format!(
+            "forced A3B storage host qualification declined: {reason:?}"
+        )));
+    }
     if !ctx.device.hasUnifiedMemory() {
         return Err(MfError::LoadPolicy(
             "forced A3B storage requires unified memory".to_string(),
@@ -871,9 +884,7 @@ pub(super) fn authenticated_a3b_storage_plan(
             )
         })
         .collect::<Vec<_>>();
-    if page_size != 16_384
-        || ctx.max_buffer_length() != 77_309_411_328
-        || retained_storage_plan_digest(&plan) != GGUF_OWNED_A3B_PLAN_DIGEST
+    if retained_storage_plan_digest(&plan) != GGUF_OWNED_A3B_PLAN_DIGEST
         || plan.windows.len() != 1
         || window_bytes != GGUF_OWNED_A3B_WINDOW_BYTES
         || view_count != GGUF_OWNED_A3B_VIEWS

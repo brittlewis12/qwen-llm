@@ -4521,10 +4521,9 @@ mod tests {
                 && t.shape[0] % 256 == 0
         }) {
             Some(t) => t,
-            None => {
-                eprintln!("[dense-iq2_s] skipped missing IQ2_S tensor in {path}");
-                return;
-            }
+            None => panic!(
+                "{path} has no qualifying IQ2_S blk.*.weight tensor for the dense IQ2_S comparison"
+            ),
         };
         let n_in = w.shape[0] as usize;
         let n_out = w.shape[1] as usize;

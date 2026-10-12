@@ -13215,10 +13215,10 @@ fn dflash_restore_after_partial_accept_replay_equivalence() {
 fn dflash_layer_major_packed_gdn_checkpoint_replay_equivalence() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
-    if !dflash_verify_packed_gdn_enabled() {
-        eprintln!("[packed-gdn-restore] skipped — packed GDN disabled");
-        return;
-    }
+    assert!(
+        dflash_verify_packed_gdn_enabled(),
+        "packed GDN comparison requires QWEN_DFLASH_VERIFY_PACKED_GDN=1"
+    );
     let path = crate::test_fixtures::QWEN35_0_8B_F32
         .required()
         .to_str()

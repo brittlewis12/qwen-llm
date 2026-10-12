@@ -2,12 +2,13 @@
 
 import argparse
 import json
-from pathlib import Path
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from model_search import models_matching, resolve_model
 import statistics
 import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import models_matching, resolve_model
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -17,6 +18,12 @@ EXTRA_MODEL_FILENAMES = (
     "Qwen3.5-35B-A3B-BF16-00001-of-00002.gguf",
     "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
 )
+def is_first_shard(filename: str) -> bool:
+    if "-of-" not in filename:
+        return True
+    before_count, _ = filename.rsplit("-of-", 1)
+    shard = before_count.rsplit("-", 1)
+    return len(shard) == 2 and shard[1] == "00001"
 
 
 def command_text(command: list[str]) -> str:
@@ -52,7 +59,11 @@ def source_and_build_identity() -> tuple[str, dict[str, object]]:
 
 
 def discover_models(mtp_model: Path) -> list[Path]:
-    candidates = list(models_matching("Qwen3.[56]-*.gguf"))
+    candidates = [
+        path
+        for path in models_matching("Qwen3.[56]-*.gguf")
+        if is_first_shard(path.name)
+    ]
     candidates.extend(resolve_model(filename) for filename in EXTRA_MODEL_FILENAMES)
     candidates.append(mtp_model.resolve())
     models = list(dict.fromkeys(path.resolve() for path in candidates))
@@ -128,6 +139,8 @@ def main() -> None:
         raise SystemExit(f"missing release binary {BINARY}")
     commit, build = source_and_build_identity()
     mtp_model = args.mtp_model.expanduser().resolve()
+    if not is_first_shard(mtp_model.name):
+        raise SystemExit(f"MTP model must be an unsplit artifact or its first shard: {mtp_model}")
     models = discover_models(mtp_model)
     if ARTIFACT.exists():
         raise SystemExit(f"refusing to reuse artifact directory {ARTIFACT}")

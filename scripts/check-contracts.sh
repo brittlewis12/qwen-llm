@@ -78,7 +78,12 @@ for segment in Users Volumes home; do
 done
 check_tree_has_no_match "home model path found outside docs" "${tilde}/${model_name}"
 home_variable='$HOME'
-check_tree_has_no_match "HOME model path found outside docs" "${home_variable}/${model_name}"
+home_model_sample="${home_variable}/${model_name}/sample.gguf"
+dollar='\$'
+home_name='HOME'
+home_models_path_pattern="${dollar}${home_name}/${model_name}"
+check_sample_matches "$home_models_path_pattern" "$home_model_sample"
+check_tree_has_no_match "HOME model path found outside docs" "$home_models_path_pattern"
 check_tree_has_no_match "home checkout path found outside docs" "${tilde}/${code_name}/"
 check_tree_has_no_match "home-directory model path expression found outside docs" "$home_models_pattern"
 check_tree_has_no_match "home-directory checkout path expression found outside docs" "$home_code_pattern"
@@ -86,8 +91,24 @@ check_tree_has_no_match "relative model-directory literal found in Rust or scrip
 
 cargo fmt --all --check
 uv run scripts/reference/env_knobs.py --check
+uv run scripts/model-witnesses.py --self-test
 if [ "$full" -eq 1 ]; then
   cargo test --release --workspace --no-run
+fi
+
+cargo test --release -p qwen-llm --test comparison_tripwire
+if [ "$full" -eq 1 ]; then
+  readme_test=family_profile::tests::readme_family_table_matches_profiles
+  status=0
+  output=$(cargo test --release -p qwen-cli --bin qwen -- --exact "$readme_test" 2>&1) ||
+    status=$?
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ] || exit "$status"
+  pass_count=$(grep -Ec '^test result: ok\. 1 passed; 0 failed([;[:space:]]|$)' <<<"$output" || true)
+  if [ "$pass_count" -ne 1 ]; then
+    echo "check-contracts: $readme_test did not run exactly once" >&2
+    exit 1
+  fi
 fi
 
 if [ "$(git rev-parse HEAD)" != "$commit" ] || [ "$(git rev-parse 'HEAD^{tree}')" != "$tree" ] || ! worktree_clean; then

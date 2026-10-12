@@ -16,7 +16,8 @@ import subprocess
 import sys
 
 WITNESS_REASON = re.compile(
-    r'^\s*#\[ignore\s*=\s*"(?P<reason>model witness: [^"]+|needs reference logits from the external llm tool)"\]\s*$'
+    r'ignore\s*=\s*"(?P<reason>model witness: [^"]+|needs reference logits from the external llm tool)"',
+    re.DOTALL,
 )
 FUNCTION = re.compile(r"(?:pub(?:\([^)]*\))?\s+)?fn\s+(?P<name>\w+)")
 
@@ -127,47 +128,78 @@ def source_base_path(path: pathlib.Path, source_root: pathlib.Path) -> list[str]
     return parts
 
 
+def inline_module_path(ranges: list[tuple[int, int, str]], offset: int) -> list[str]:
+    return [
+        name
+        for _, name in sorted(
+            (start, name)
+            for start, end, name in ranges
+            if start < offset < end
+        )
+    ]
+
+
 def witness_annotations(source: str, path: pathlib.Path, package: str):
-    lines = source.splitlines(keepends=True)
+    code = rust_code_only(source)
     offsets = []
-    for line_index, line in enumerate(lines):
-        annotation = WITNESS_REASON.match(line.rstrip("\r\n"))
+    position = 0
+    while True:
+        start = code.find("#[", position)
+        if start < 0:
+            break
+        depth = 0
+        end = None
+        for index in range(start + 1, len(code)):
+            if code[index] == "[":
+                depth += 1
+            elif code[index] == "]":
+                depth -= 1
+                if depth == 0:
+                    end = index + 1
+                    break
+        if end is None:
+            print(f"{package}: unterminated attribute in {path}:{source.count(chr(10), 0, start) + 1}", file=sys.stderr)
+            return None
+        position = end
+        annotation = WITNESS_REASON.search(source[start:end])
         if not annotation:
             continue
-        index = line_index + 1
-        in_block_comment = False
-        function = None
-        while index < len(lines):
-            candidate = lines[index].strip()
-            if in_block_comment:
-                if "*/" in candidate:
-                    in_block_comment = False
-                index += 1
-                continue
-            if not candidate:
-                index += 1
-                continue
-            if candidate.startswith("//"):
-                index += 1
-                continue
-            if candidate.startswith("/*"):
-                in_block_comment = "*/" not in candidate[2:]
-                index += 1
-                continue
-            if candidate.startswith("#["):
-                index += 1
-                continue
-            function = FUNCTION.search(candidate)
-            break
+        function = FUNCTION.search(code, end)
         if function is None:
+            line = source.count("\n", 0, start) + 1
             print(
-                f"{package}: witness annotation in {path}:{line_index + 1} is not followed by a function",
+                f"{package}: witness annotation in {path}:{line} is not followed by a function",
                 file=sys.stderr,
             )
             return None
-        offset = sum(map(len, lines[:index])) + function.start()
-        offsets.append((annotation.group("reason"), function.group("name"), offset))
+        offsets.append((annotation.group("reason"), function.group("name"), function.start()))
     return offsets
+
+
+def self_test() -> None:
+    source = '''
+mod outer {
+    mod inner {
+        #[test]
+        #[ignore =
+            "model witness: sample-fixture"
+        ] // reason annotation may have a trailing comment
+        fn nested_witness() {}
+    }
+}
+'''
+    path = pathlib.Path("fixture.rs")
+    annotations = witness_annotations(source, path, "fixture")
+    assert annotations == [("model witness: sample-fixture", "nested_witness", source.index("fn nested_witness"))]
+    code = rust_code_only(source)
+    start = annotations[0][2]
+    modules = inline_module_path(module_ranges(code), start)
+    assert modules == ["outer", "inner"], modules
+    trailing = '#[ignore = "needs reference logits from the external llm tool"] // comment\nfn oracle() {}'
+    assert witness_annotations(trailing, path, "fixture")[0][:2] == (
+        "needs reference logits from the external llm tool",
+        "oracle",
+    )
 
 
 def cargo_metadata() -> dict:
@@ -210,7 +242,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("filter", nargs="?", default="", help="function-name substring")
     parser.add_argument("--list-only", action="store_true", help="validate and print target-qualified selections")
+    parser.add_argument("--self-test", action="store_true", help="exercise source annotation parsing")
     args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        print("model-witnesses: self-test passed")
+        return 0
     repo_result = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"], check=True, capture_output=True, text=True
     )
@@ -254,11 +291,7 @@ def main() -> int:
                 for _, name, offset in annotations:
                     if args.filter and args.filter not in name:
                         continue
-                    module = base + [
-                        module_name
-                        for start, end, module_name in ranges
-                        if start < offset < end
-                    ]
+                    module = base + inline_module_path(ranges, offset)
                     full_name = "::".join([*module, name])
                     witnesses.append((package_name, full_name, path, name, path.is_relative_to(manifest.parent / "tests")))
 

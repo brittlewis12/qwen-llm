@@ -29,6 +29,10 @@ const COMPARISON_EXCEPTIONS: &[Exception] = &[Exception {
     reason: "worst-row index selected after checked comparison metrics",
 }];
 
+// This lexical scan is intentionally conservative. It does not recognize bare
+// `a.max(b) - a.min(b)`, `abs_diff`, squared differences, loop accumulators, or
+// differences computed inside helper functions.
+
 #[derive(Debug, PartialEq, Eq)]
 struct Finding {
     path: String,
@@ -245,16 +249,25 @@ fn has_binary_subtraction(source: &str) -> bool {
         if !is_operand_start(bytes[after]) {
             continue;
         }
-        let previous = bytes[before - 1];
-        if matches!(previous, b'e' | b'E')
-            && before >= 2
-            && (bytes[before - 2].is_ascii_digit() || bytes[before - 2] == b'.')
-        {
+        if is_exponent_sign(bytes, before - 1) {
             continue;
         }
         return true;
     }
     false
+}
+
+fn is_exponent_sign(bytes: &[u8], exponent: usize) -> bool {
+    if !matches!(bytes.get(exponent), Some(b'e' | b'E')) || exponent == 0 {
+        return false;
+    }
+    let mut start = exponent;
+    while start > 0 && (bytes[start - 1].is_ascii_digit() || bytes[start - 1] == b'.') {
+        start -= 1;
+    }
+    start < exponent
+        && bytes[start..exponent].iter().any(u8::is_ascii_digit)
+        && (start == 0 || !is_ident(bytes[start - 1]))
 }
 
 fn precomputed_difference_names(
@@ -321,13 +334,21 @@ fn name_is_referenced(context: &str, name: &str) -> bool {
         let before = context.as_bytes().get(at.wrapping_sub(1)).copied();
         let after = context.as_bytes().get(at + name.len()).copied();
         let suffix = context[at + name.len()..].trim_start();
+        let indexed = suffix.starts_with('[')
+            && suffix
+                .find(']')
+                .is_some_and(|close| suffix[close + 1..].trim_start().starts_with(".iter("));
         !before.is_some_and(is_ident)
             && before != Some(b'.')
             && before != Some(b':')
             && !after.is_some_and(is_ident)
-            && (suffix.starts_with(".iter(")
+            && (suffix.starts_with(".fold(")
+                || suffix.starts_with(".reduce(")
+                || suffix.starts_with(".max_by(")
+                || suffix.starts_with(".iter(")
                 || suffix.starts_with(".into_iter(")
-                || suffix.starts_with(".as_slice("))
+                || suffix.starts_with(".as_slice(")
+                || indexed)
     })
 }
 
@@ -400,6 +421,10 @@ fn has_maximum_operator(source: &str) -> bool {
         || source.contains("max_by")
 }
 
+fn has_zipped_pair_abs(source: &str) -> bool {
+    source.contains(".zip(") && source.contains(".map(") && contains_abs(source)
+}
+
 fn scan_unfiltered(path: &str, source: &str) -> Result<Vec<Finding>, String> {
     let source = strip_comments_and_strings(source)?;
     let (names, absolute_names) = precomputed_difference_names(&source);
@@ -433,7 +458,10 @@ fn scan_unfiltered(path: &str, source: &str) -> Result<Vec<Finding>, String> {
             .is_some_and(|names| names.iter().any(|name| name_is_referenced(context, name)));
         let has_abs = contains_abs(context) || contains_abs(call);
         let has_comparison_abs = has_precomputed_absolute
-            || (has_abs && (has_binary_subtraction(context) || has_precomputed));
+            || (has_abs
+                && (has_binary_subtraction(context)
+                    || has_precomputed
+                    || has_zipped_pair_abs(context)));
         if has_comparison_abs && has_maximum_operator(call) {
             let line = source[..start]
                 .bytes()
@@ -468,6 +496,26 @@ fn scan_source(path: &str, source: &str) -> Result<Vec<Finding>, String> {
             })
         })
         .collect())
+}
+
+fn validate_exceptions(findings: &[Finding]) -> Result<(), String> {
+    for exception in COMPARISON_EXCEPTIONS {
+        let matches = findings
+            .iter()
+            .filter(|finding| {
+                finding.path == exception.path
+                    && finding.function == exception.function
+                    && finding.expression == exception.expression
+            })
+            .count();
+        if matches != 1 {
+            return Err(format!(
+                "comparison exception {}::{} ({}) matched {matches} findings; expected exactly one",
+                exception.path, exception.function, exception.reason
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn scan_tree(
@@ -538,19 +586,7 @@ fn every_expression_exception_matches_a_current_finding() {
     let mut findings = Vec::new();
     scan_tree(&workspace, &workspace.join("crates"), &mut findings, false)
         .unwrap_or_else(|error| panic!("comparison tripwire scan failed closed: {error}"));
-    for exception in COMPARISON_EXCEPTIONS {
-        assert!(
-            findings.iter().any(|finding| {
-                finding.path == exception.path
-                    && finding.function == exception.function
-                    && finding.expression == exception.expression
-            }),
-            "stale comparison exception {}::{} ({})",
-            exception.path,
-            exception.function,
-            exception.reason
-        );
-    }
+    validate_exceptions(&findings).expect("each comparison exception must match exactly once");
 }
 
 #[test]
@@ -563,6 +599,9 @@ fn tripwire_detects_pairwise_and_precomputed_difference_variants() {
         "fn sample() { let delta = a.iter().zip(b).map(|(x,y)| (x-y).abs()).fold(0.0, |m,d| m.max(d)); }",
         "fn sample() { let delta = a.iter().zip(b).map(|(x,y)| (x-y).abs()).reduce(|m,d| m.max(d)); }",
         "fn sample() { let differences = a.iter().zip(b).map(|(x,y)| (x-y).abs()).collect::<Vec<_>>(); let delta = differences.iter().fold(0.0, f32::max); }",
+        "fn sample() { let differences = a.iter().zip(b).map(|(a, b)| (a - b).abs()); differences.fold(0.0, f32::max); }",
+        "fn sample() { let differences = a.iter().zip(b).map(|(a, b)| (a - b).abs()).collect::<Vec<_>>(); differences[..].iter().copied().fold(0.0, f32::max); }",
+        "fn sample() { let delta = a.iter().zip(b).map(|(a, b)| delta(a, b).abs()).fold(0.0, f32::max); }",
     ];
     for sample in variants {
         assert_eq!(
@@ -598,8 +637,28 @@ fn magnitude_fixture_is_detected_and_only_its_named_exception_is_allowed() {
     assert_eq!(scan_text("crates/example.rs", deviation).len(), 1);
     let return_type_only = "fn sample() { let peak = values.iter().map(|value| -> f32 { value.abs() }).fold(0.0, f32::max); }";
     assert!(scan_text("crates/example.rs", return_type_only).is_empty());
+    let zipped_magnitude = "fn sample() { let peak = values.iter().zip(other).map(|(value, _)| value.abs()).fold(0.0, f32::max); }";
+    assert_eq!(scan_text("crates/example.rs", zipped_magnitude).len(), 1);
     let deferred = "fn old() { a.iter().zip(b).map(|(x,y)| (x-y).abs()).fold(0.0, f32::max); }";
     assert!(scan_text("crates/qwen-llm/src/glm5_next_metal/tests.rs", deferred).is_empty());
+}
+
+#[test]
+fn subtraction_recognizes_scientific_notation_only_at_numeric_boundaries() {
+    assert!(!has_binary_subtraction("let ratio = 1.2e-3;"));
+    let source = "fn sample() { let peak = values.iter().map(|value2e| (value2e - b).abs()).fold(0.0, f32::max); }";
+    assert_eq!(scan_text("crates/example.rs", source).len(), 1);
+}
+
+#[test]
+fn duplicate_exception_expression_is_rejected() {
+    let one = "fn tiled_prefill_numerical_diagnostic() { online.iter().zip(candidate).enumerate().max_by(|(_, (a, b)), (_, (c, d))| (*a - *b).abs().total_cmp(&(*c - *d).abs())); }";
+    let findings = scan_unfiltered(
+        "crates/qwen-llm/src/muse_tiled_numerical_diagnostic.rs",
+        &format!("{one} {one}"),
+    )
+    .unwrap();
+    assert!(validate_exceptions(&findings).is_err());
 }
 
 #[test]

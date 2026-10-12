@@ -18,18 +18,24 @@ fn assert_position(sequence: &Sequence, expected: usize) {
     for bytes in [&snapshot.gdn_state_arena, &snapshot.gdn_conv_arena] {
         assert!(
             bytes
-                .chunks_exact(4)
-                .all(|b| f32::from_le_bytes(b.try_into().unwrap()).is_finite())
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|b| f32::from_le_bytes(*b).is_finite())
         );
     }
     for bytes in [&snapshot.kv_k_arena, &snapshot.kv_v_arena] {
         let finite = match state.kv_k[0].dtype {
-            GgmlType::F16 => bytes.chunks_exact(2).all(|b| {
-                half::f16::from_bits(u16::from_le_bytes(b.try_into().unwrap())).is_finite()
-            }),
+            GgmlType::F16 => bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .all(|b| half::f16::from_bits(u16::from_le_bytes(*b)).is_finite()),
             GgmlType::F32 => bytes
-                .chunks_exact(4)
-                .all(|b| f32::from_le_bytes(b.try_into().unwrap()).is_finite()),
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|b| f32::from_le_bytes(*b).is_finite()),
             dtype => panic!("unexpected KV dtype: {dtype:?}"),
         };
         assert!(finite);
@@ -131,7 +137,7 @@ fn prompt_lookup_edit_then_next_turn() -> Result<()> {
     let candidate_logits =
         finite_logits(loaded.prefill(&mut candidate, &mut prefill, &suffix_ids)?);
     let delta =
-        qwen_llm::compare::report_max_abs_diff_f32(ref_logits.iter(), candidate_logits.iter());
+        qwen_llm::compare::report_max_abs_diff_f32(candidate_logits.iter(), ref_logits.iter());
     eprintln!("next-turn prompt logit max_abs={delta:e}");
     let next_position = terminal_position + 1 + suffix_ids.len();
     assert_position(&reference, next_position);

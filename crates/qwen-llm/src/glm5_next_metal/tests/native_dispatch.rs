@@ -1104,8 +1104,12 @@ fn packed_expert_baseline_reuses_decode_scratch_and_matches_oracle() {
             .map(f32::abs)
             .fold(0.0f32, f32::max);
         assert!(scale > 1e-7, "synthetic experts must have a nonzero result");
+        assert!(
+            got.iter().all(|value| value.is_finite()),
+            "expert baseline {gate_dtype:?}/{down_dtype:?}: GPU output contains non-finite values"
+        );
         let worst = crate::compare::assert_max_abs_diff_f32(
-            concat!(file!(), ":", line!()),
+            &format!("expert baseline {gate_dtype:?}/{down_dtype:?}"),
             got.iter(),
             &expected,
         );
@@ -1550,7 +1554,7 @@ fn expert_half_and_f32_requests_dispatch_grouped_or_all_slot_paths() {
                 .fold(0.0f32, f32::max);
             assert!(scale > 1e-7 && expected.iter().chain(&got).all(|v| v.is_finite()));
             let worst = crate::compare::assert_max_abs_diff_f32(
-                concat!(file!(), ":", line!()),
+                &format!("expert dispatch {down_dtype:?}/{precision:?}/{expected_mode:?}"),
                 got.iter(),
                 &expected,
             );
@@ -1770,7 +1774,9 @@ fn mixed_native_experts_dispatch_by_capability_and_match_oracle() {
                 .fold(0.0f32, f32::max);
             assert!(scale > 1e-7 && expected.iter().chain(&got).all(|v| v.is_finite()));
             let worst = crate::compare::assert_max_abs_diff_f32(
-                concat!(file!(), ":", line!()),
+                &format!(
+                    "expert dispatch {gate_type:?}/{up_type:?}/{down_type:?}/{lineage:?}/{precision:?}/{grouped}"
+                ),
                 got.iter(),
                 &expected,
             );

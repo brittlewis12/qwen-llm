@@ -69,7 +69,12 @@ raw evidence includes local paths. The
 record timing, replay, partial failures and bounded owned-process teardown.
 
 The normalized F32 HC candidate was parked and removed from active builds at
-`ec96cc45`; source is archived at `08ec6267`. Next is the already-underway single
-64K-capacity real repository task (about 41K input tokens) plus a follow-up, with
-a separate owner implementing the driver. Its outcomes are pending; no further
-kernel search follows from this screen.
+`ec96cc45`; source is archived at `08ec6267`. The
+[64K-capacity real repository task and follow-up](../2026-10-12-glm-maya-repository-context/README.md)
+are now complete: 41,420 initial prompt tokens, then 43,032 live-reused tokens
+and 106 prefilled tokens. Both responses completed without truncation, but
+review found material factual errors; this is not a task-quality pass. The new
+run captured only a 51-token shared snapshot, so it demonstrates long live reuse,
+not restoration of the document. No further kernel search follows from these
+screens; a possible long-document branch lever still needs a concrete mechanism
+and measured branch cost.

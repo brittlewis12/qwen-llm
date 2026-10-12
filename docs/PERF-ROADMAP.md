@@ -100,13 +100,25 @@ errors, despite completed HTTP responses. All 11 argument objects parse. One
 restores the shared prefix, not the full conversation. No historical UD paired
 speedup claim. [Recipe and evidence](bench/2026-10-12-glm-maya-agent-reuse/README.md).
 
-1. **Use Maya on one larger real repository task and follow-up.** Already
-   underway: 64K capacity with about 41K input tokens; a separate owner implements
-   the driver. Check the actual answer and follow-up reuse, retaining failures
-   rather than treating HTTP completion as task success. Fix a concrete workflow
-   defect if exposed. No fixture rerun or further kernel search is queued.
-   Coordinate with the serving owner's busy-response and Lens work; do not
-   duplicate it.
+**Real repository task and follow-up completed:** CLI `ec96cc45`, driver
+`9cd2915e`, default Half, 64K capacity, 2048 workspace rows. Initial input 41,420
+tokens: first delta/answer 187.2918/188.5597 s, wall 245.4655 s. Follow-up reuses
+43,032 tokens live and prefills 106: first delta/answer 1.2314/6.3004 s,
+wall 43.0456 s. Both complete without truncation, but review found material
+errors about cancellation, Fast canonicality and Exact transcript restoration;
+no task-quality pass. Only a 51-token shared snapshot was captured
+(153,264,332 bytes), so this is not 41K-document snapshot restoration. Startup
+load/warm-up 68.265/36.573 s are separate, with no cause inferred.
+[Evidence and corrections](bench/2026-10-12-glm-maya-repository-context/README.md).
+
+1. **Research the next concrete long-document branch lever.** The repository
+   task is finished; no new experiment is underway. Fast's shared-only 51-token
+   cut may leave useful branch reuse on the table, but this run measured only
+   cold input and live continuation, not a branch cliff. A candidate needs a
+   concrete branch workload, measured cost and a compatible mechanism before
+   implementation. Retain the flawed answers; no favorable rerun or kernel
+   search is queued. Coordinate with the serving owner's busy-response and
+   Lens work; do not duplicate it.
 2. **Coordinate Flash work; the retained integer selector is now falsified.**
    Existing Flash work now retains packed prefill under workspace pressure
    (`e7b48483`). The quant-compatibility worktree has been retired; its parallel

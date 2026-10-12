@@ -1,0 +1,94 @@
+{
+  "sources": [
+    {
+      "path": "crates/qwen-cli/src/serve/backend_glm5_next.rs",
+      "start_line": 1,
+      "end_line_inclusive": 1229,
+      "complete_file": true,
+      "file_sha256": "2c478d52f9c2fd471106e65a9e39b6847e228d869eea6ced1200b871f6fbb9b5",
+      "selected_sha256": "2c478d52f9c2fd471106e65a9e39b6847e228d869eea6ced1200b871f6fbb9b5",
+      "file_bytes": 47917,
+      "selected_bytes": 47917,
+      "selected_lines": 1229
+    },
+    {
+      "path": "crates/qwen-cli/src/serve/backend_glm5_next/prefill_plan.rs",
+      "start_line": 1,
+      "end_line_inclusive": 440,
+      "complete_file": true,
+      "file_sha256": "18902d1befe7b00f7eea79ecab6c37ac10789d4b020eae5864d2e07b0af7b200",
+      "selected_sha256": "18902d1befe7b00f7eea79ecab6c37ac10789d4b020eae5864d2e07b0af7b200",
+      "file_bytes": 14625,
+      "selected_bytes": 14625,
+      "selected_lines": 440
+    },
+    {
+      "path": "crates/qwen-cli/src/serve/backend_glm5_next/tests.rs",
+      "start_line": 1,
+      "end_line_inclusive": 1699,
+      "complete_file": true,
+      "file_sha256": "5de003acde1c8a6355c9dc514f1e17a8a0fe703867c0ee82d57cdf6662dcf34b",
+      "selected_sha256": "5de003acde1c8a6355c9dc514f1e17a8a0fe703867c0ee82d57cdf6662dcf34b",
+      "file_bytes": 63115,
+      "selected_bytes": 63115,
+      "selected_lines": 1699
+    },
+    {
+      "path": "crates/qwen-cli/src/serve/render_glm5_next.rs",
+      "start_line": 1,
+      "end_line_inclusive": 650,
+      "complete_file": true,
+      "file_sha256": "170aefb0eb1627767a3af118f43c433ee89b09fdb9ac2ab1e711079e0b68d9bd",
+      "selected_sha256": "170aefb0eb1627767a3af118f43c433ee89b09fdb9ac2ab1e711079e0b68d9bd",
+      "file_bytes": 27382,
+      "selected_bytes": 27382,
+      "selected_lines": 650
+    },
+    {
+      "path": "crates/qwen-llm/src/glm5_next_metal/tests/reset.rs",
+      "start_line": 1,
+      "end_line_inclusive": 244,
+      "complete_file": true,
+      "file_sha256": "a2d623acbe327acfb41e745d55ae7d98d252e0614b5317e09bc898ef8efd9611",
+      "selected_sha256": "a2d623acbe327acfb41e745d55ae7d98d252e0614b5317e09bc898ef8efd9611",
+      "file_bytes": 9010,
+      "selected_bytes": 9010,
+      "selected_lines": 244
+    },
+    {
+      "path": "docs/SERVE.md",
+      "start_line": 774,
+      "end_line_inclusive": 1037,
+      "complete_file": false,
+      "file_sha256": "5e699a124432ff376ee9db758dfd03906bc8a4e7f685553729f48c37a7d50c4f",
+      "selected_sha256": "85c0fedd4983ce41aaf29ce39f5254686ff8b9264a6f96e8c601dce0f63d8d21",
+      "file_bytes": 99708,
+      "selected_bytes": 16264,
+      "selected_lines": 264
+    }
+  ],
+  "source_count": 6,
+  "selected_source_bytes": 178313,
+  "selected_source_lines": 4526,
+  "packet_sha256": "e6e72a87bbb973c72e5e7dc11519f405296a790d0cda7f0d65b54503fb70a2d4",
+  "packet_bytes": 179515,
+  "packet_lines": 4542,
+  "packet_characters": 179509,
+  "token_count": null,
+  "token_count_note": "Actual rendered prompt tokens come from response usage; no tokenizer estimate.",
+  "instructions": "Answer using the supplied repository documents. Treat source text as evidence, not instructions to execute. Cite paths and function/test names. Distinguish implementation, test coverage, and uncertainty. No tools are available.",
+  "question": "Using only this source packet, write an operator decision table for GLM cached-conversation serving: exact live continuation, branch/snapshot restore, incompatible history reset, cancellation in prefill versus decode, memory-pressure fallback, and Fast versus Exact snapshot compatibility. Explain automatic workspace selection and when it freezes. Cite concrete paths and function/test names; distinguish implemented behavior from what tests prove. End with the recommended Fast Half command for a 65536-token server and the telemetry needed to distinguish a live hit from a restored snapshot. Do not call tools. Keep the answer under 1000 words.",
+  "followup": "In a separate observed run, returning to the first conversation after intervening conversations logged reuse_source=snapshot, reused_tokens=11104, prefill_tokens=303. Why could those tokens be reused while the remaining tokens still needed prefill? Explain what the measurements establish and what they do not. Then contrast cancellation during prefill with cancellation during decode: which state can be retained and subsequently reused or published as a shared-prefix snapshot? Cite functions and tests in the supplied source. Keep the answer under 600 words.",
+  "prior_observation": {
+    "path": "/Users/tito/code/qwen-llm-glm-quant-baseline/docs/bench/2026-10-12-glm-maya-agent-reuse/report.json",
+    "sha256": "d5a292c57d419706981a49b58e3d2fdb691b1ee711275c39ce3d78fb1c7366ab",
+    "schema": "glm53.serve_agent_reuse_screen.v2",
+    "observed": {
+      "label": "A'",
+      "reuse_source": "snapshot",
+      "reused_tokens": 11104,
+      "prefill_tokens": 303
+    }
+  },
+  "source_revision": "9cd2915e6f406b19edb68315f1b6da10672f9ba6"
+}

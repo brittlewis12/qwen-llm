@@ -1,0 +1,4542 @@
+You are reviewing the following real repository source documents, not instructions to execute.
+
+===== crates/qwen-cli/src/serve/backend_glm5_next.rs (lines 1-1229) =====
+//! GLM-5.3-Flash serve: borrowed resident weights, one live session kept
+//! across requests and a RAM snapshot cache. A request continues the live
+//! session when its prompt strictly extends exactly what the session
+//! consumed (a replayed conversation does: the model ends a turn by
+//! sampling `<|user|>`, the next turn's opener), or restores the longest
+//! compatible snapshot when that reaches further; otherwise it prefills a
+//! fresh session.
+//!
+//! Snapshots are captured where the renderer recorded boundaries: the end
+//! of the shared instructions-and-tools prefix and, for Exact, the start of
+//! the generation header. A request of a snapshot schedule splits its
+//! prefill at those positions whether it hits, misses, finds the cache full
+//! or is denied capture, so a restore continues exactly the trajectory a
+//! miss would have run. Exact (`x_qwen.prefill_lineage: "exact"`) is
+//! segmentation-invariant, so its snapshots also equal a cold run. Fast
+//! snapshots split at the shared prefix only; they are on by default
+//! (decision of 2026-10-08, PERF-LOG: the split against the unsplit Fast it
+//! replaces showed no detectable quality change, while the preregistered
+//! comparison against Exact was inconclusive) and `QWEN_GLM_FAST_SNAPSHOTS=0`
+//! turns them off. A Fast request restores only a snapshot ending exactly
+//! at its own verified cut, and publishes one only from a state on the
+//! canonical schedule (packed chunks from 0, no other cut, no decoded
+//! tokens); without a verified cut it neither restores nor captures.
+//! Memory-pressure refusals of the transport or a new session release the
+//! cache (except a snapshot being restored) and retry once.
+use super::decode_loop;
+use super::http::{
+    BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink, PreparedResponse,
+    PromptBoundaries,
+};
+use super::items::{ServeError, ServeRequest};
+use super::render_glm5_next::{self as render, FAMILY};
+use super::snapshot_cache::SnapshotCache;
+use anyhow::{Context, Result};
+use qwen_llm::gguf::GgufFile;
+use qwen_llm::glm5_next::Glm5NextPreparedArtifact;
+use qwen_llm::glm5_next_chat::{CHAT_STOPS, VerifiedChatProfile};
+use qwen_llm::glm5_next_metal::{
+    CapacityAdvice, FastPrecision, Glm5NextMetalError, Glm5NextSession, Glm5NextSnapshot,
+    Glm5NextWeights, PackedLineage, prefetch_retained_with_cancel, preflight_session,
+    snapshot_bytes,
+};
+use qwen_llm::metal::MetalContext;
+use qwen_llm::model_family::ModelFamily;
+use qwen_llm::sampling::Sampler;
+use qwen_llm::snapshot_policy::EntryId;
+use std::io;
+use std::sync::Arc;
+use std::time::Instant;
+
+mod prefill_plan;
+
+/// Default-on rollback lever for live-session and snapshot reuse.
+const PREFIX_REUSE_ENV: &str = "QWEN_GLM_PREFIX_REUSE";
+/// Default-on lever for Fast-lineage snapshots (shared-prefix split); `0`
+/// restores unsplit Fast prefill with live-session reuse only.
+const FAST_SNAPSHOTS_ENV: &str = "QWEN_GLM_FAST_SNAPSHOTS";
+/// Operand precision of Fast packed prefill: `half` (default), `dense_f32`
+/// (dense projections on F32-operand tiles) or `f32` (every quantized matrix
+/// operand); closer to Exact at some prefill cost
+/// (`docs/bench/2026-10-09-glm53-fast-f32-operands/`). Read at startup.
+const FAST_PRECISION_ENV: &str = "QWEN_GLM_FAST_PRECISION";
+
+/// The Fast precision `value` names (unset: `half`); any other value is a
+/// startup error naming the accepted ones.
+fn parse_fast_precision(value: Option<&str>) -> Result<FastPrecision> {
+    let Some(value) = value else {
+        return Ok(FastPrecision::Half);
+    };
+    FastPrecision::from_name(value.trim()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{FAST_PRECISION_ENV}={value:?} is not one of {}",
+            FastPrecision::ALL.map(FastPrecision::name).join(", ")
+        )
+    })
+}
+
+/// The prefill schedule a snapshot belongs to. A restore is valid only into
+/// a request that splits its prefill the same way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Schedule {
+    /// Exact lineage: cuts at the shared prefix end and the generation
+    /// header start. Packed Exact equals serial decode, so any cuts give the
+    /// same state.
+    ExactV1,
+    /// Fast lineage: one cut at the shared prefix end.
+    FastSharedSplitV1,
+}
+
+impl Schedule {
+    fn name(self) -> &'static str {
+        match self {
+            Self::ExactV1 => "exact_v1",
+            Self::FastSharedSplitV1 => "fast_shared_split_v1",
+        }
+    }
+}
+
+/// What must match, beyond the token prefix, for a cached snapshot to be
+/// restored (weights instance and policy version are fixed per process and
+/// checked again by the engine).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CacheNamespace {
+    lineage: PackedLineage,
+    schedule: Schedule,
+    rows: usize,
+}
+
+/// CPU startup facts: the admitted artifact, its verified chat profile and
+/// the fixed context capacity and maximum prefill workspace width.
+pub(super) struct Prepared<'g> {
+    artifact: Glm5NextPreparedArtifact<'g>,
+    pub(super) capacity: usize,
+    default_max: usize,
+    prefill_rows: usize,
+    profile: VerifiedChatProfile,
+    /// Longest decoded token, for the tool block's byte budget.
+    max_piece_bytes: usize,
+    /// Operand precision of every Fast session ([`FAST_PRECISION_ENV`]).
+    fast_precision: FastPrecision,
+}
+
+impl<'g> Prepared<'g> {
+    /// Inspects the GLM artifact and session limits using CPU metadata only.
+    pub(super) fn new(
+        gguf: &'g GgufFile,
+        invocation: &crate::cli::ServeInvocation,
+    ) -> Result<Self> {
+        let artifact = Glm5NextPreparedArtifact::inspect(gguf)
+            .with_context(|| format!("admit {FAMILY} artifact"))?;
+        let limits = super::resolve_serve_limits(
+            super::profile(ModelFamily::Glm5Next),
+            Some(artifact.config().context_length as usize),
+            invocation.max_context_tokens,
+            invocation.max_tokens,
+        )?
+        .context("GLM-5.3-Flash profile has no fixed serve capacity")?;
+        let (capacity, default_max) = (limits.context_tokens, limits.max_tokens);
+        // There is no raw serve lane: without a verified profile nothing renders.
+        let profile = artifact.chat_profile().map_err(|error| {
+            anyhow::anyhow!("{FAMILY} serve renders verified text chat: {error}")
+        })?;
+        let prefill_rows = if artifact.packed_prefill() {
+            2048.min(capacity)
+        } else {
+            0
+        };
+        let max_piece_bytes = artifact.tokenizer().max_decoded_piece_bytes();
+        let fast_precision =
+            parse_fast_precision(std::env::var(FAST_PRECISION_ENV).ok().as_deref())?;
+        crate::shutdown::checkpoint()?;
+        Ok(Self {
+            artifact,
+            capacity,
+            default_max,
+            prefill_rows,
+            profile,
+            max_piece_bytes,
+            fast_precision,
+        })
+    }
+
+    pub(super) fn describe(&self) -> String {
+        format!(
+            "family=glm5_next input=verified_chat_and_tools renderer={} capacity={} default_max_tokens={} prefill_rows_max={} fast_precision={}",
+            self.profile.renderer,
+            self.capacity,
+            self.default_max,
+            self.prefill_rows,
+            self.fast_precision.name()
+        )
+    }
+}
+
+/// Device admission, prefetch and load, before the listener accepts: a
+/// session that cannot fit is refused with the capacity that would.
+pub(super) fn load(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    prepared: &Prepared<'_>,
+) -> Result<Glm5NextWeights> {
+    for rows in prefill_plan::candidates(prepared.capacity, prepared.artifact.packed_prefill()) {
+        match preflight_session(
+            ctx,
+            gguf,
+            prepared.artifact.model(),
+            prepared.capacity,
+            rows,
+        ) {
+            Ok(_) => break,
+            Err(Glm5NextMetalError::MemoryAdmission { denied, .. })
+                if rows != 0 && denied.reason.is_pressure() =>
+            {
+                continue;
+            }
+            Err(error @ Glm5NextMetalError::MemoryAdmission { advice, .. }) => {
+                let advice = match advice {
+                    CapacityAdvice::Fits(n) => format!("pass --max-context-tokens {n} or less"),
+                    CapacityAdvice::NoneFits => {
+                        "free device memory or use a smaller artifact".to_string()
+                    }
+                    CapacityAdvice::NotEvaluated => {
+                        "no smaller capacity was evaluated; see the refusal reason".to_string()
+                    }
+                };
+                return Err(error).context(format!("admit GLM-5.3 serve session: {advice}"));
+            }
+            Err(error) => return Err(error).context("admit GLM-5.3 serve session"),
+        }
+    }
+    let prefetch =
+        prefetch_retained_with_cancel(ctx, gguf, 0.98, &|| crate::shutdown::checkpoint().is_err())
+            .context("prefetch GLM-5.3 retained windows")?;
+    tracing::info!(
+        target: "qwen_diag",
+        "serve prefetch: family=glm5_next windows={} cold_windows={} bytes_read={} wall_ms={:.1}",
+        prefetch.windows,
+        prefetch.cold_windows,
+        prefetch.bytes_read,
+        prefetch.wall.as_secs_f64() * 1e3
+    );
+    crate::shutdown::checkpoint()?;
+    Glm5NextWeights::load(ctx, gguf).context("load GLM-5.3 weights")
+}
+
+/// Performs device admission and model load after listener bind, then serves.
+pub(super) fn start(
+    prepared: Prepared<'_>,
+    gguf: &GgufFile,
+    invocation: &crate::cli::ServeInvocation,
+    listening: super::Listening,
+    idle_window: std::time::Duration,
+) -> Result<()> {
+    crate::shutdown::checkpoint()?;
+    let ctx = MetalContext::new()?;
+    let started = std::time::Instant::now();
+    let weights = load(&ctx, gguf, &prepared)?;
+    let load_ms = started.elapsed().as_secs_f64() * 1e3;
+    let snapshot_cache_plan = super::SnapshotCachePlan::resolve(
+        invocation.snapshot_cache_mib,
+        invocation.snapshot_policy,
+        ctx.memory_signals(),
+    )?;
+    let limits = prepared.describe();
+    let mut backend = Glm5NextBackend::new(
+        &ctx,
+        &weights,
+        prepared,
+        listening.model_id.clone(),
+        idle_window,
+        snapshot_cache_plan,
+    );
+    tracing::info!(target: "qwen_diag", "serve limits: {limits} {}", backend.describe_snapshots());
+    let warm_up_ms = backend.warm_up()?;
+    tracing::info!(target: "qwen_diag", "serve startup: family=glm5_next load_ms={load_ms:.1} warm_up_ms={warm_up_ms:.1}");
+    listening.serve(load_ms, &mut backend)
+}
+
+pub(super) struct Glm5NextBackend<'w, 'g> {
+    ctx: &'w MetalContext,
+    weights: &'w Glm5NextWeights,
+    prepared: Prepared<'g>,
+    model_id: String,
+    session: Option<Glm5NextSession<'w>>,
+    /// Exactly the tokens `session` has consumed, or empty when unknown.
+    history: Vec<u32>,
+    prefix_reuse: bool,
+    idle_residency: super::idle_residency::IdleResidency,
+    /// Packed-prefill arithmetic for new sessions (tests compare warm and
+    /// cold paths under `Exact`, which matches serial decode bitwise).
+    lineage: PackedLineage,
+    cache: SnapshotCache<Glm5NextSnapshot, CacheNamespace>,
+    pub(super) snapshot_cache_plan: super::SnapshotCachePlan,
+    fast_snapshots: bool,
+    /// The live session's whole state is a Fast packed prefill of its
+    /// history in chunks from 0 (no other cuts, no decoded tokens), so a
+    /// Fast capture continuing it would equal a miss's.
+    live_canonical: bool,
+    frozen_rows: Option<usize>,
+    /// Bits of the last request's prefill logits (tests compare paths).
+    #[cfg(test)]
+    last_prefill_logits: Vec<u32>,
+    /// Treat every capture admission as denied (tests).
+    #[cfg(test)]
+    deny_captures: bool,
+    #[cfg(test)]
+    last_cold_session_ms: Option<(f64, f64, f64)>,
+    #[cfg(test)]
+    force_cold_reallocation: bool,
+}
+
+/// Why a cut's snapshot was or was not cached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CaptureOutcome {
+    Captured,
+    Present,
+    Ineligible,
+    Denied,
+    Failed,
+    /// A Fast state not produced on the canonical schedule; not published.
+    NonCanonical,
+}
+
+impl CaptureOutcome {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Captured => "captured",
+            Self::Present => "present",
+            Self::Ineligible => "ineligible",
+            Self::Denied => "denied",
+            Self::Failed => "failed",
+            Self::NonCanonical => "noncanonical",
+        }
+    }
+}
+
+/// The snapshot schedule of a request of `lineage`, or `None` when its
+/// prefill neither splits nor captures: no cache budget, or Fast with the
+/// lever off.
+fn snapshot_schedule(
+    cache_bytes: u64,
+    fast_snapshots: bool,
+    lineage: PackedLineage,
+) -> Option<Schedule> {
+    if cache_bytes == 0 {
+        return None;
+    }
+    match lineage {
+        PackedLineage::Exact => Some(Schedule::ExactV1),
+        PackedLineage::Fast if fast_snapshots => Some(Schedule::FastSharedSplitV1),
+        PackedLineage::Fast => None,
+    }
+}
+
+/// Token positions where a request of `schedule` splits its prefill: each
+/// renderer boundary the schedule uses, mapped to a token position by
+/// encoding the prompt up to it and requiring that to be a prefix of the
+/// prompt's tokens. Sorted, unique and strictly inside the prompt; a
+/// boundary that fails is dropped with a diagnostic (it depends only on the
+/// prompt, so hits and misses still split alike).
+fn cut_positions(
+    encode: impl Fn(&str) -> Result<Vec<u32>, ServeError>,
+    prompt: &str,
+    tokens: &[u32],
+    boundaries: Option<PromptBoundaries>,
+    schedule: Schedule,
+) -> Vec<usize> {
+    let Some(boundaries) = boundaries else {
+        return Vec::new();
+    };
+    let wanted = match schedule {
+        Schedule::ExactV1 => [
+            ("shared_prefix", boundaries.shared_prefix_end),
+            ("generation_header", boundaries.generation_header_start),
+        ],
+        Schedule::FastSharedSplitV1 => [
+            ("shared_prefix", boundaries.shared_prefix_end),
+            ("generation_header", None),
+        ],
+    };
+    let mut cuts = Vec::new();
+    for (name, offset) in wanted {
+        let Some(offset) = offset else { continue };
+        let prefix = match prompt.get(..offset) {
+            Some(prefix) => encode(prefix).ok(),
+            None => None,
+        };
+        match prefix {
+            Some(ids)
+                if !ids.is_empty() && ids.len() < tokens.len() && tokens.starts_with(&ids) =>
+            {
+                cuts.push(ids.len());
+            }
+            _ => tracing::warn!(
+                target: "qwen_diag",
+                "serve: glm5_next {name} boundary at byte {offset} is not a token prefix of the prompt; not split there"
+            ),
+        }
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    cuts
+}
+
+/// Capture the session's state (committed exactly `prefix`) into the cache
+/// if it is new, fits and is admitted. Optional: every failure leaves the
+/// request running on the same schedule.
+fn capture_into(
+    cache: &mut SnapshotCache<Glm5NextSnapshot, CacheNamespace>,
+    session: &Glm5NextSession<'_>,
+    ctx: &MetalContext,
+    namespace: CacheNamespace,
+    prefix: &[u32],
+    estimate: Option<u64>,
+    reserve: u64,
+) -> CaptureOutcome {
+    if cache.entry_for_in(&namespace, prefix).is_some() {
+        return CaptureOutcome::Present;
+    }
+    let Some(entry_bytes) =
+        estimate.and_then(|payload| cache.strict_eligibility_in(&namespace, prefix, payload))
+    else {
+        return CaptureOutcome::Ineligible;
+    };
+    let Some(required) = entry_bytes.checked_add(reserve) else {
+        return CaptureOutcome::Ineligible;
+    };
+    if let Err((reason, signals)) = super::admit_snapshot_capture_for(
+        FAMILY,
+        required,
+        || ctx.memory_signals(),
+        |bytes| cache.evict_for(bytes),
+    ) {
+        tracing::warn!(
+            target: "qwen_diag",
+            "serve: glm5_next snapshot not captured at {}: {reason:?} (required {required} bytes, signals {signals:?})",
+            prefix.len()
+        );
+        return CaptureOutcome::Denied;
+    }
+    let snapshot = match session.capture_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::warn!(
+                target: "qwen_diag",
+                "serve: glm5_next snapshot capture at {} failed: {error}",
+                prefix.len()
+            );
+            return CaptureOutcome::Failed;
+        }
+    };
+    let Some(bytes) = SnapshotCache::<Glm5NextSnapshot, CacheNamespace>::entry_bytes(
+        prefix.len(),
+        snapshot.bytes() as u64,
+    ) else {
+        return CaptureOutcome::Ineligible;
+    };
+    if cache.insert_strict_in(namespace, prefix.to_vec(), snapshot, bytes) {
+        CaptureOutcome::Captured
+    } else {
+        CaptureOutcome::Ineligible
+    }
+}
+
+/// A session-creation failure: a typed memory refusal takes the shared
+/// status table (pressure 503, telemetry and size 500); anything else
+/// (geometry, invalid weights, GPU) is a 500 server error.
+fn session_error(error: Glm5NextMetalError) -> ServeError {
+    match &error {
+        Glm5NextMetalError::MemoryAdmission { denied, .. } => {
+            super::transport_memory::memory_refusal(&format!("{FAMILY} session"), denied)
+        }
+        _ => ServeError::server_error(format!("{FAMILY} session: {error}")),
+    }
+}
+
+/// A typed memory-pressure refusal (503 `memory_admission_denied`), which
+/// releasing cached snapshots may relieve; telemetry, size and overflow
+/// refusals are not retried.
+fn is_pressure_refusal(error: &ServeError) -> bool {
+    error.status == 503 && error.code == Some("memory_admission_denied")
+}
+
+/// Release every unpinned cached snapshot except `keep` (memory pressure:
+/// the cache is optional, a refused request is not).
+/// `attempt`, retried once after releasing cached snapshots (except
+/// `keep`) when it is refused for memory pressure and something was
+/// released.
+fn with_snapshot_release<T, V>(
+    cache: &mut SnapshotCache<V, CacheNamespace>,
+    keep: Option<EntryId>,
+    mut attempt: impl FnMut() -> Result<T, Glm5NextMetalError>,
+) -> Result<T, Glm5NextMetalError> {
+    let first = attempt();
+    super::memory_relief::retry(
+        FAMILY,
+        first,
+        |result| match result.as_ref().err()? {
+            Glm5NextMetalError::MemoryAdmission { denied, .. } => Some((denied.reason, u64::MAX)),
+            _ => None,
+        },
+        |bytes| cache.evict_for_except(bytes, keep),
+        attempt,
+    )
+}
+
+/// Transport admission prices process CPU only; a transport refusal is
+/// therefore process-only and may use the same cached-snapshot relief.
+fn with_transport_snapshot_release<T, V>(
+    cache: &mut SnapshotCache<V, CacheNamespace>,
+    keep: Option<EntryId>,
+    mut attempt: impl FnMut() -> Result<T, ServeError>,
+) -> Result<T, ServeError> {
+    let first = attempt();
+    super::memory_relief::retry(
+        FAMILY,
+        first,
+        |result| {
+            result.as_ref().err().and_then(|error| {
+                is_pressure_refusal(error).then_some((
+                    qwen_llm::metal::MetalMemoryAdmissionReason::ProcessInsufficient,
+                    u64::MAX,
+                ))
+            })
+        },
+        |bytes| cache.evict_for_except(bytes, keep),
+        attempt,
+    )
+}
+
+/// A session of the serve geometry reading prompts with `lineage`.
+fn new_session<'w>(
+    ctx: &'w MetalContext,
+    weights: &'w Glm5NextWeights,
+    prepared: &Prepared<'_>,
+    cpu_reserve: u64,
+    lineage: PackedLineage,
+    rows: usize,
+) -> Result<Glm5NextSession<'w>, Glm5NextMetalError> {
+    let mut session = Glm5NextSession::with_prefill_rows_and_cpu_reserve(
+        ctx,
+        weights,
+        prepared.capacity,
+        rows,
+        cpu_reserve,
+    )?;
+    session.set_packed_lineage(lineage)?;
+    session.set_fast_precision(prepared.fast_precision)?;
+    Ok(session)
+}
+
+fn plan_session(
+    ctx: &MetalContext,
+    weights: &Glm5NextWeights,
+    prepared: &Prepared<'_>,
+    maximum_rows: usize,
+    reserve: u64,
+    prefix: Option<u64>,
+) -> Result<prefill_plan::Plan, ServeError> {
+    prefill_plan::select(
+        &prefill_plan::candidates(
+            maximum_rows.min(prepared.capacity),
+            prepared.artifact.packed_prefill(),
+        ),
+        ctx.memory_signals(),
+        reserve,
+        prefix,
+        |rows| {
+            let ledger = Glm5NextSession::plan_memory(ctx, weights, prepared.capacity, rows)
+                .map_err(session_error)?;
+            Ok(prefill_plan::Price::from_ledger(&ledger))
+        },
+    )
+}
+
+/// The lineage this request reads its prompt with: `x_qwen.prefill_lineage`
+/// if sent, else the backend default.
+fn request_lineage(request: &ServeRequest, default: PackedLineage) -> PackedLineage {
+    match request.prefill_lineage {
+        Some(super::items::PrefillLineage::Exact) => PackedLineage::Exact,
+        Some(super::items::PrefillLineage::Fast) => PackedLineage::Fast,
+        None => default,
+    }
+}
+
+/// Tokens reused from the live session: its extending prefix, but only when
+/// the session reads prompts with the requested lineage (a live session
+/// never mixes lineages; a mismatch starts a fresh session).
+fn reuse_len(extending: usize, live: Option<PackedLineage>, requested: PackedLineage) -> usize {
+    match live {
+        Some(live) if live == requested => extending,
+        None => extending,
+        Some(_) => 0,
+    }
+}
+
+fn lineage_name(lineage: PackedLineage) -> &'static str {
+    match lineage {
+        PackedLineage::Fast => "fast",
+        PackedLineage::Exact => "exact",
+    }
+}
+
+impl<'w, 'g> Glm5NextBackend<'w, 'g> {
+    pub(super) fn new(
+        ctx: &'w MetalContext,
+        weights: &'w Glm5NextWeights,
+        prepared: Prepared<'g>,
+        model_id: String,
+        idle_residency: std::time::Duration,
+        snapshot_cache_plan: super::SnapshotCachePlan,
+    ) -> Self {
+        Self {
+            ctx,
+            weights,
+            prepared,
+            model_id,
+            session: None,
+            history: Vec::new(),
+            prefix_reuse: qwen_llm::env_flag::read_default_on(PREFIX_REUSE_ENV),
+            idle_residency: super::idle_residency::IdleResidency::new("glm5_next", idle_residency),
+            lineage: PackedLineage::default(),
+            cache: SnapshotCache::new(snapshot_cache_plan.bytes, snapshot_cache_plan.policy),
+            snapshot_cache_plan,
+            fast_snapshots: qwen_llm::env_flag::read_default_on(FAST_SNAPSHOTS_ENV),
+            live_canonical: false,
+            frozen_rows: None,
+            #[cfg(test)]
+            last_prefill_logits: Vec::new(),
+            #[cfg(test)]
+            deny_captures: false,
+            #[cfg(test)]
+            last_cold_session_ms: None,
+            #[cfg(test)]
+            force_cold_reallocation: false,
+        }
+    }
+
+    fn deny_captures(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.deny_captures
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
+
+    fn can_reset_session(&self, lineage: PackedLineage, rows: usize) -> bool {
+        #[cfg(test)]
+        if self.force_cold_reallocation {
+            return false;
+        }
+        self.session.as_ref().is_some_and(|session| {
+            !session.is_poisoned()
+                && session.ledger().capacity() == self.prepared.capacity as u64
+                && session.ledger().prefill_rows() == rows as u64
+                && session.packed_lineage().is_none_or(|live| live == lineage)
+                && (lineage != PackedLineage::Fast
+                    || session
+                        .fast_precision()
+                        .is_none_or(|live| live == self.prepared.fast_precision))
+        })
+    }
+
+    /// The `serve limits` fragment for snapshots: the schedules that run
+    /// (none without a cache budget).
+    pub(super) fn describe_snapshots(&self) -> String {
+        let schedules = match (self.cache.max_bytes() > 0, self.fast_snapshots) {
+            (false, _) => "none",
+            (true, true) => "exact,fast_shared_split",
+            (true, false) => "exact",
+        };
+        format!(
+            "{} snapshot_schedules={schedules}",
+            self.snapshot_cache_plan
+        )
+    }
+
+    #[cfg(test)]
+    fn fresh_session(
+        &self,
+        cpu_reserve: u64,
+        lineage: PackedLineage,
+    ) -> Result<Glm5NextSession<'w>, ServeError> {
+        new_session(
+            self.ctx,
+            self.weights,
+            &self.prepared,
+            cpu_reserve,
+            lineage,
+            self.frozen_rows.unwrap_or(self.prepared.prefill_rows),
+        )
+        .map_err(session_error)
+    }
+
+    /// One short prefill on a throwaway session before the listener accepts,
+    /// so the first request is not charged the weights' first GPU use.
+    pub(super) fn warm_up(&mut self) -> Result<f64> {
+        let started = Instant::now();
+        let tokens = self
+            .prepared
+            .artifact
+            .tokenizer()
+            .encode("[gMASK]<sop>", false)?
+            .into_iter()
+            .map(|id| u32::try_from(id).context("warm-up token id"))
+            .collect::<Result<Vec<_>>>()?;
+        let plan = |maximum| plan_session(self.ctx, self.weights, &self.prepared, maximum, 0, None);
+        let initial = plan(tokens.len()).map_err(|e| anyhow::anyhow!(e.message))?;
+        let (mut session, _) = prefill_plan::create_with_pressure_retry(initial, plan, |rows| {
+            new_session(
+                self.ctx,
+                self.weights,
+                &self.prepared,
+                0,
+                self.lineage,
+                rows,
+            )
+            .map_err(session_error)
+        })
+        .map_err(|e| anyhow::anyhow!(e.message))?;
+        session
+            .prefill_packed_with_checkpoint(self.ctx, &tokens, &mut || {
+                crate::shutdown::checkpoint().map_err(|e| e.to_string())
+            })
+            .context("GLM-5.3 serve warm-up")?;
+        drop(session);
+        // The server is about to accept: open the idle-residency window.
+        self.idle_residency.note_activity();
+        Ok(started.elapsed().as_secs_f64() * 1e3)
+    }
+
+    /// One request: reuse (live session or snapshot), prefill split at the
+    /// schedule's cuts with optional captures, decode.
+    fn generate_with(
+        &mut self,
+        request: &ServeRequest,
+        prompt: &str,
+        boundaries: Option<PromptBoundaries>,
+        sink: &mut dyn GenerationSink,
+    ) -> Result<GenerationOutcome, BackendFailure> {
+        self.idle_residency.before_request();
+        // Everything a client can get wrong is refused before the live
+        // session is touched, so a 400 keeps the cached conversation.
+        let maximum = request
+            .max_output_tokens
+            .unwrap_or(self.prepared.default_max);
+        let mut sampler = Sampler::new(render::sampling(request))
+            .map_err(|e| ServeError::invalid_request(None, format!("{FAMILY} sampler: {e}")))?;
+        let vocab_size = self.prepared.artifact.config().vocab_size;
+        let tokenizer = self.prepared.artifact.tokenizer();
+        // The renderer writes [gMASK]<sop>; the glm4 tokenizer adds nothing.
+        let tokens = decode_loop::encode_checked(tokenizer, prompt, false, vocab_size, FAMILY)?;
+        let required =
+            decode_loop::required_forwards(FAMILY, tokens.len(), maximum, self.prepared.capacity)?;
+        // A tool block's memory is admitted as it grows (the tools partition),
+        // not reserved here at its rarely approached worst case.
+        let reserve = sink.transport_reserve_bytes();
+        // Cached snapshots are optional: released before a pressure refusal.
+        with_transport_snapshot_release(&mut self.cache, None, || {
+            super::transport_memory::admit_resident_transport(
+                reserve,
+                MetalContext::process_limit_bytes_remaining(),
+            )
+        })?;
+        sink.tick().map_err(BackendFailure::Aborted)?;
+
+        // Taken before the session is used and republished only for a state
+        // the session is known to hold, so a failure leaves no stale history.
+        let history = std::mem::take(&mut self.history);
+        let committed = self.session.as_ref().map_or(0, Glm5NextSession::position);
+        // A request may ask for the Exact lineage (`x_qwen.prefill_lineage`);
+        // a live session is reused only by requests of its own lineage.
+        let lineage = request_lineage(request, self.lineage);
+        let live_lineage = self
+            .session
+            .as_ref()
+            .and_then(Glm5NextSession::packed_lineage);
+        let live = reuse_len(
+            decode_loop::extending_prefix(&history, &tokens, committed, self.prefix_reuse),
+            live_lineage,
+            lineage,
+        );
+        let mut schedule = snapshot_schedule(self.cache.max_bytes(), self.fast_snapshots, lineage);
+        let boundary_t0 = Instant::now();
+        let cuts = schedule.map_or_else(Vec::new, |schedule| {
+            cut_positions(
+                |text| decode_loop::encode_checked(tokenizer, text, false, vocab_size, FAMILY),
+                prompt,
+                &tokens,
+                boundaries,
+                schedule,
+            )
+        });
+        // CPU cost of verifying boundaries (one prefix encode per cut).
+        let boundary_ms = boundary_t0.elapsed().as_secs_f64() * 1e3;
+        // Fast snapshots exist only at a verified shared-prefix cut: without
+        // one this request neither restores nor captures.
+        if schedule == Some(Schedule::FastSharedSplitV1) && cuts.is_empty() {
+            schedule = None;
+        }
+        let mut plan = if self.frozen_rows.is_none() {
+            // The earliest verified cut is the shared prefix when present,
+            // otherwise Exact's transcript prefix. Reserve just this entry.
+            let prefix = prefill_plan::eligible_prefix(
+                self.prefix_reuse,
+                schedule.is_some(),
+                cuts.first().copied(),
+                self.cache.max_bytes(),
+                |cut| {
+                    let payload =
+                        snapshot_bytes(&self.weights.config, cut as u64).ok_or_else(|| {
+                            ServeError::server_error("GLM prefix snapshot size overflow")
+                        })?;
+                    let bytes = SnapshotCache::<Glm5NextSnapshot, CacheNamespace>::entry_bytes(
+                        cut, payload,
+                    )
+                    .ok_or_else(|| ServeError::server_error("GLM prefix entry size overflow"))?;
+                    Ok(bytes)
+                },
+            )?;
+            Some(plan_session(
+                self.ctx,
+                self.weights,
+                &self.prepared,
+                self.prepared.prefill_rows,
+                reserve,
+                prefix,
+            )?)
+        } else {
+            None
+        };
+        let mut selected_rows = self
+            .frozen_rows
+            .unwrap_or_else(|| plan.expect("unfrozen plan").rows);
+        // Before the first successful allocation there are no compatible
+        // snapshots; its tentative width may still shrink under pressure.
+        let namespace = self.frozen_rows.and_then(|rows| {
+            schedule.map(|schedule| CacheNamespace {
+                lineage,
+                schedule,
+                rows,
+            })
+        });
+        // Exact restores any compatible prefix (segmentation-invariant);
+        // Fast only a snapshot ending exactly at this request's cut. Used
+        // only when it reaches past the live extension (ties keep live).
+        let hit = namespace
+            .filter(|_| self.prefix_reuse)
+            .and_then(|namespace| match namespace.schedule {
+                Schedule::ExactV1 => self.cache.peek_best_prefix_in(&namespace, &tokens),
+                Schedule::FastSharedSplitV1 => {
+                    self.cache.peek_exact_in(&namespace, &tokens[..cuts[0]])
+                }
+            })
+            .filter(|hit| hit.prefix_len > live);
+        let restore_t0 = Instant::now();
+        let mut restored: Option<EntryId> = None;
+        // Whether the session's state at the current position equals a
+        // packed prefill of the same tokens in chunks from 0 (Fast captures
+        // publish only such states; Exact does not depend on it).
+        let mut canonical;
+        #[cfg(test)]
+        {
+            self.last_cold_session_ms = None;
+        }
+        let matched = match hit {
+            Some(hit) => {
+                if live_lineage != Some(lineage) {
+                    self.session = None;
+                    self.session = Some(
+                        with_snapshot_release(&mut self.cache, Some(hit.id), || {
+                            new_session(
+                                self.ctx,
+                                self.weights,
+                                &self.prepared,
+                                reserve,
+                                lineage,
+                                selected_rows,
+                            )
+                        })
+                        .map_err(session_error)?,
+                    );
+                }
+                let session = self.session.as_mut().expect("session present");
+                match session.restore_snapshot(&hit.value) {
+                    Ok(()) => {
+                        self.cache.touch(hit.id);
+                        restored = Some(hit.id);
+                        // Fast entries are captured only from canonical
+                        // states (below).
+                        canonical = lineage == PackedLineage::Fast;
+                        hit.prefix_len
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "qwen_diag",
+                            "serve: glm5_next snapshot restore at {} failed: {error}; prefilling a fresh session",
+                            hit.prefix_len
+                        );
+                        // Release the failed snapshot before allocating, so
+                        // a pressure retry can reclaim it if evicted.
+                        drop(hit);
+                        self.session = None;
+                        self.session = Some(
+                            with_snapshot_release(&mut self.cache, None, || {
+                                new_session(
+                                    self.ctx,
+                                    self.weights,
+                                    &self.prepared,
+                                    reserve,
+                                    lineage,
+                                    selected_rows,
+                                )
+                            })
+                            .map_err(session_error)?,
+                        );
+                        canonical = true;
+                        0
+                    }
+                }
+                // The restored value's Arc drops here, before any capture
+                // admission could need its memory released.
+            }
+            None if live > 0 => {
+                canonical = self.live_canonical;
+                live
+            }
+            None if self.can_reset_session(lineage, selected_rows) => {
+                #[cfg(test)]
+                let reset_started = Instant::now();
+                if let Err(error) = self.session.as_mut().expect("compatible session").reset() {
+                    self.session = None;
+                    return Err(session_error(error).into());
+                }
+                #[cfg(test)]
+                {
+                    self.last_cold_session_ms =
+                        Some((0.0, 0.0, reset_started.elapsed().as_secs_f64() * 1e3));
+                }
+                canonical = true;
+                0
+            }
+            None => {
+                // Release the old session's memory before allocating its
+                // successor; its buffers and this request's transport
+                // allowance are admitted as one requirement.
+                #[cfg(test)]
+                let drop_started = Instant::now();
+                self.session = None;
+                #[cfg(test)]
+                let drop_ms = drop_started.elapsed().as_secs_f64() * 1e3;
+                #[cfg(test)]
+                let alloc_started = Instant::now();
+                let ctx = self.ctx;
+                let weights = self.weights;
+                let prepared = &self.prepared;
+                let mut create = |rows| {
+                    with_snapshot_release(&mut self.cache, None, || {
+                        new_session(ctx, weights, prepared, reserve, lineage, rows)
+                    })
+                    .map_err(session_error)
+                };
+                let created = if let Some(initial) = plan {
+                    let (session, actual) = prefill_plan::create_with_pressure_retry(
+                        initial,
+                        |maximum| {
+                            plan_session(
+                                ctx,
+                                weights,
+                                prepared,
+                                maximum,
+                                reserve,
+                                initial.prefix_bytes,
+                            )
+                        },
+                        &mut create,
+                    )?;
+                    selected_rows = actual.rows;
+                    plan = Some(actual);
+                    Ok(session)
+                } else {
+                    create(selected_rows)
+                };
+                self.session = Some(prefill_plan::freeze_after_creation(
+                    &mut self.frozen_rows,
+                    selected_rows,
+                    created,
+                )?);
+                #[cfg(test)]
+                {
+                    self.last_cold_session_ms =
+                        Some((drop_ms, alloc_started.elapsed().as_secs_f64() * 1e3, 0.0));
+                }
+                canonical = true;
+                0
+            }
+        };
+        if let Some(plan) = plan {
+            tracing::info!(target: "qwen_diag",
+                "serve: glm5_next prefill plan rows={} session_bytes={} prefix_budget={} prefix_preference_held={}",
+                plan.rows, plan.price.buffers, plan.prefix_bytes.unwrap_or(0), plan.preserved);
+        }
+        let namespace = schedule.map(|schedule| CacheNamespace {
+            lineage,
+            schedule,
+            rows: selected_rows,
+        });
+        let restore_ms = if restored.is_some() {
+            restore_t0.elapsed().as_secs_f64() * 1e3
+        } else {
+            0.0
+        };
+        let reuse_source = match (restored.is_some(), matched) {
+            (true, _) => "snapshot",
+            (false, 0) => "none",
+            (false, _) => "live",
+        };
+        // Whatever happens next, the live state's provenance is recomputed.
+        self.live_canonical = false;
+
+        let ctx = self.ctx;
+        let prefill_t0 = Instant::now();
+        let mut capture_ms = 0.0;
+        let mut captures = Vec::new();
+        // The entry this request restored, reused through the live session
+        // or captured last stays pinned while a later cut is captured, so
+        // that capture's admission cannot evict it.
+        let mut protect = restored.or_else(|| {
+            let namespace = namespace?;
+            let cut = cuts.iter().copied().filter(|&cut| cut <= matched).max()?;
+            self.cache.entry_for_in(&namespace, &tokens[..cut])
+        });
+        let rows = selected_rows.max(1);
+        let mut position = matched;
+        let mut logits = Vec::new();
+        let ends: Vec<usize> = cuts
+            .iter()
+            .copied()
+            .filter(|&cut| cut > matched)
+            .chain([tokens.len()])
+            .collect();
+        for end in ends {
+            // Chunks of this segment start at `position`: they stay on the
+            // from-0 grid only if it is a multiple of the chunk rows.
+            canonical &= position % rows == 0;
+            let session = self.session.as_mut().expect("session present");
+            let mut checkpoint_abort: Option<io::Error> = None;
+            let result =
+                session.prefill_packed_with_checkpoint(ctx, &tokens[position..end], &mut || {
+                    sink.tick().map_err(|error| {
+                        checkpoint_abort = Some(error);
+                        "transport aborted during GLM-5.3 prefill".into()
+                    })
+                });
+            logits = match result {
+                Ok(logits) => logits,
+                Err(error) => {
+                    if let (Glm5NextMetalError::Cancelled(_), Some(abort)) =
+                        (&error, checkpoint_abort)
+                    {
+                        // Cancelled at a chunk boundary: the committed prefix
+                        // is consistent, so a retry of this prompt resumes
+                        // from it.
+                        let position = session.position();
+                        self.history = tokens[..position].to_vec();
+                        self.live_canonical = canonical && lineage == PackedLineage::Fast;
+                        return Err(BackendFailure::Aborted(abort));
+                    }
+                    self.session = None;
+                    return Err(
+                        ServeError::server_error(format!("{FAMILY} prefill: {error}")).into(),
+                    );
+                }
+            };
+            position = end;
+            if end == tokens.len() {
+                break;
+            }
+            let namespace = namespace.expect("cuts come from a snapshot schedule");
+            let capture_t0 = Instant::now();
+            let pinned = protect.filter(|&id| self.cache.pin(id));
+            let outcome = if namespace.schedule == Schedule::FastSharedSplitV1 && !canonical {
+                // Live history segmented differently (an earlier cut, a
+                // cancellation off the chunk grid, decoded tokens): this
+                // state is not the one a miss would publish.
+                CaptureOutcome::NonCanonical
+            } else if self.deny_captures() {
+                CaptureOutcome::Denied
+            } else {
+                capture_into(
+                    &mut self.cache,
+                    self.session.as_ref().expect("session present"),
+                    ctx,
+                    namespace,
+                    &tokens[..end],
+                    snapshot_bytes(&self.weights.config, end as u64),
+                    reserve,
+                )
+            };
+            if let Some(id) = pinned {
+                self.cache.unpin(id);
+            }
+            capture_ms += capture_t0.elapsed().as_secs_f64() * 1e3;
+            protect = self
+                .cache
+                .entry_for_in(&namespace, &tokens[..end])
+                .or(protect);
+            captures.push(format!("{end}:{}", outcome.name()));
+        }
+        #[cfg(test)]
+        {
+            self.last_prefill_logits = logits.iter().map(|v| v.to_bits()).collect();
+        }
+        let session = self.session.as_mut().expect("session present");
+        if let Err(abort) = sink.tick() {
+            // The prompt is consumed but no retry can extend it (an equal
+            // prompt has no fresh row): release the session now.
+            self.session = None;
+            return Err(BackendFailure::Aborted(abort));
+        }
+        let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3 - capture_ms;
+        let generation = decode_loop::decode_serial(
+            decode_loop::DecodeRequest {
+                family: FAMILY,
+                logits,
+                max_tokens: maximum,
+                stop_tokens: &CHAT_STOPS,
+                vocab_size,
+            },
+            &mut sampler,
+            tokenizer,
+            sink,
+            |token| Ok(session.forward(ctx, token)?),
+        );
+        let generation = match generation {
+            Ok(generation) => generation,
+            Err(failure) => {
+                // A decode abort or failure clears the live session: a
+                // retry's prompt never extends a partially generated history.
+                self.session = None;
+                return Err(failure);
+            }
+        };
+        if session.position() != tokens.len() + generation.transitions {
+            self.session = None;
+            return Err(ServeError::server_error(format!(
+                "{FAMILY} consumed-prefix accounting mismatch"
+            ))
+            .into());
+        }
+        let mut history = history;
+        history.clear();
+        history.extend_from_slice(&tokens);
+        history.extend(
+            generation.tokens[..generation.transitions]
+                .iter()
+                .map(|&token| token as u32),
+        );
+        self.history = history;
+        tracing::info!(
+            target: "qwen_diag",
+            "serve phases: family=glm5_next prefill_ms={prefill_ms:.1} reused_tokens={matched} reuse_source={reuse_source} restore_ms={restore_ms:.1} boundary_ms={boundary_ms:.1} prefill_tokens={} decode_ms={:.1} required_forwards={required} capacity={} transitions={} lineage={} snapshot_schedule={} cuts={cuts:?} captures=[{}] snapshot_capture_ms={capture_ms:.1} snapshot_cache_bytes={} snapshot_cache_entries={}",
+            tokens.len() - matched,
+            generation.wall_ms,
+            self.prepared.capacity,
+            generation.transitions,
+            lineage_name(lineage),
+            schedule.map_or("none", Schedule::name),
+            captures.join(","),
+            self.cache.indexed_bytes(),
+            self.cache.len(),
+        );
+        Ok(super::outcome::finish_generation(
+            tokens.len(),
+            &generation,
+            matched,
+            restore_ms,
+        ))
+    }
+}
+
+impl GenerationBackend for Glm5NextBackend<'_, '_> {
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn request_profile(&self) -> super::request_profile::RequestProfile {
+        super::request_profile::RequestProfile::Glm5Next {
+            default_max_tokens: self.prepared.default_max,
+            capacity: self.prepared.capacity,
+            max_piece_bytes: self.prepared.max_piece_bytes,
+        }
+    }
+
+    fn render_prepared(
+        &self,
+        request: &ServeRequest,
+    ) -> Result<(String, Option<PromptBoundaries>), ServeError> {
+        self.request_profile().render_prepared(request)
+    }
+
+    fn generate(
+        &mut self,
+        request: &ServeRequest,
+        prompt: &str,
+        sink: &mut dyn GenerationSink,
+    ) -> Result<GenerationOutcome, BackendFailure> {
+        self.generate_with(request, prompt, None, sink)
+    }
+
+    fn generate_prepared(
+        &mut self,
+        prepared: Arc<PreparedResponse>,
+        sink: &mut dyn GenerationSink,
+    ) -> Result<GenerationOutcome, BackendFailure> {
+        self.generate_with(
+            &prepared.request,
+            &prepared.prompt,
+            prepared.boundaries,
+            sink,
+        )
+    }
+
+    fn idle(&mut self) {
+        super::log_expired_snapshots("glm5_next", &self.cache.sweep());
+        let weights = self.weights;
+        self.idle_residency
+            .on_idle(self.ctx, || weights.retained_buffers());
+    }
+
+    fn request_finished(&mut self) {
+        self.idle_residency.request_finished();
+    }
+    fn request_failed_on_server(&mut self) {
+        self.idle_residency.request_failed_on_server();
+    }
+
+    fn shutdown(&mut self) {
+        self.idle_residency.shutdown();
+        self.session = None;
+        self.history.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests;
+
+===== crates/qwen-cli/src/serve/backend_glm5_next/prefill_plan.rs (lines 1-440) =====
+use super::super::SnapshotCaptureDenial;
+use super::{ServeError, is_pressure_refusal};
+use qwen_llm::glm5_next_metal::DEFAULT_PREFILL_ROWS;
+use qwen_llm::metal::{MetalMemorySignals, evaluate_metal_memory_admission_with_cpu_bytes};
+
+pub(super) fn candidates(capacity: usize, packed: bool) -> Vec<usize> {
+    let mut rows: Vec<_> = [2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1, 0]
+        .into_iter()
+        .map(|n| if packed { n.min(capacity) } else { 0 })
+        .collect();
+    rows.dedup();
+    rows
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Price {
+    pub buffers: u64,
+    pub admission: u64,
+}
+
+impl Price {
+    pub(super) fn from_ledger(ledger: &qwen_llm::glm5_next::Glm5NextMemoryLedger) -> Self {
+        Self {
+            buffers: ledger.session_buffer_bytes(),
+            admission: ledger.peak_bytes() - ledger.phase_peaks().resident,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Plan {
+    pub rows: usize,
+    pub price: Price,
+    pub prefix_bytes: Option<u64>,
+    pub preserved: bool,
+}
+
+pub(super) fn freeze_after_creation<T, E>(
+    frozen: &mut Option<usize>,
+    rows: usize,
+    created: Result<T, E>,
+) -> Result<T, E> {
+    let session = created?;
+    assert!(frozen.is_none_or(|old| old == rows));
+    *frozen = Some(rows);
+    Ok(session)
+}
+
+pub(super) fn create_with_pressure_retry<T>(
+    mut plan: Plan,
+    mut replan: impl FnMut(usize) -> Result<Plan, ServeError>,
+    mut create: impl FnMut(usize) -> Result<T, ServeError>,
+) -> Result<(T, Plan), ServeError> {
+    loop {
+        match create(plan.rows) {
+            Ok(session) => return Ok((session, plan)),
+            Err(error) if plan.rows > 0 && is_pressure_refusal(&error) => {
+                let maximum = candidates(plan.rows, true)
+                    .into_iter()
+                    .find(|&rows| rows < plan.rows)
+                    .expect("serial is the final candidate");
+                plan = replan(maximum)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+pub(super) fn eligible_prefix(
+    reuse: bool,
+    scheduled: bool,
+    cut: Option<usize>,
+    cache_bytes: u64,
+    entry: impl FnOnce(usize) -> Result<u64, ServeError>,
+) -> Result<Option<u64>, ServeError> {
+    if !reuse || !scheduled || cache_bytes == 0 {
+        return Ok(None);
+    }
+    cut.filter(|&cut| cut >= DEFAULT_PREFILL_ROWS)
+        .map(|cut| entry(cut).map(|bytes| (bytes <= cache_bytes).then_some(bytes)))
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn invalid(message: impl Into<String>) -> ServeError {
+    ServeError::server_error(message.into())
+}
+
+fn capture(
+    mut signals: MetalMemorySignals,
+    buffers: u64,
+    required: u64,
+) -> Result<(), SnapshotCaptureDenial> {
+    signals.current_allocated_bytes = signals
+        .current_allocated_bytes
+        .checked_add(buffers)
+        .ok_or(SnapshotCaptureDenial::EstimateOverflow)?;
+    signals.process_limit_remaining_bytes = match signals.process_limit_remaining_bytes {
+        Some(0) => Some(0),
+        // A finite budget consumed by the session must not turn into Darwin's
+        // zero-means-omitted sentinel in the capture guard.
+        Some(n) if n <= buffers => {
+            return Err(SnapshotCaptureDenial::ProcessHeadroom {
+                deficit_bytes: buffers - n + 1,
+            });
+        }
+        Some(n) => Some(n - buffers),
+        None => None,
+    };
+    super::super::snapshot_capture_admission(required, signals)
+}
+
+/// Prefer reusable prefixes within the measured 512..=2048 throughput range.
+/// Smaller widths remain execution fallbacks, not speculative cache sacrifices.
+pub(super) fn select(
+    rows: &[usize],
+    signals: MetalMemorySignals,
+    transport: u64,
+    prefix_bytes: Option<u64>,
+    mut price: impl FnMut(usize) -> Result<Price, ServeError>,
+) -> Result<Plan, ServeError> {
+    let required = prefix_bytes
+        .map(|n| {
+            n.checked_add(transport)
+                .ok_or_else(|| invalid("GLM prefill prefix reserve overflow"))
+        })
+        .transpose()?;
+    let mut executable = None;
+    let mut refusal = None;
+    for &rows in rows {
+        if rows < DEFAULT_PREFILL_ROWS
+            && let Some(plan) = executable
+        {
+            return Ok(plan);
+        }
+        let price = price(rows)?;
+        let decision = evaluate_metal_memory_admission_with_cpu_bytes(
+            price.admission,
+            transport,
+            0,
+            signals,
+            true,
+        );
+        if let Some(denied) = decision.refusal() {
+            let error = super::super::transport_memory::memory_refusal("GLM prefill plan", &denied);
+            if !is_pressure_refusal(&error) {
+                return Err(error);
+            }
+            refusal = Some(error);
+            continue;
+        }
+        let plan = Plan {
+            rows,
+            price,
+            prefix_bytes,
+            preserved: false,
+        };
+        executable.get_or_insert(plan);
+        if rows < DEFAULT_PREFILL_ROWS {
+            return Ok(plan);
+        }
+        let Some(required) = required else {
+            return Ok(plan);
+        };
+        match capture(signals, price.buffers, required) {
+            Ok(()) => {
+                return Ok(Plan {
+                    preserved: true,
+                    ..plan
+                });
+            }
+            Err(
+                SnapshotCaptureDenial::MetalHeadroom
+                | SnapshotCaptureDenial::ProcessHeadroom { .. },
+            ) => {}
+            Err(reason) => return Err(invalid(format!("GLM prefill capture plan: {reason:?}"))),
+        }
+    }
+    executable.ok_or_else(|| refusal.unwrap_or_else(|| invalid("empty GLM prefill candidates")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn signals(n: u64) -> MetalMemorySignals {
+        MetalMemorySignals {
+            recommended_max_bytes: n,
+            current_allocated_bytes: 0,
+            process_limit_remaining_bytes: Some(n),
+        }
+    }
+    fn price(rows: usize) -> Result<Price, ServeError> {
+        Ok(Price {
+            buffers: rows as u64 * 1_000_000,
+            admission: rows as u64 * 1_000_000,
+        })
+    }
+    #[test]
+    fn capped_unique_and_serial() {
+        assert_eq!(candidates(3, true), [3, 2, 1, 0]);
+        assert_eq!(candidates(3000, false), [0]);
+    }
+    #[test]
+    fn abundant_and_pressure_keep_context() {
+        let rows = candidates(4096, true);
+        assert_eq!(
+            select(&rows, signals(10_000_000_000), 0, None, price)
+                .unwrap()
+                .rows,
+            2048
+        );
+        assert_eq!(
+            select(&rows, signals(600_000_000), 0, None, price)
+                .unwrap()
+                .rows,
+            512
+        );
+        assert_eq!(rows, candidates(4096, true));
+    }
+    #[test]
+    fn prefix_preference_and_execution_fallback() {
+        let rows = candidates(4096, true);
+        let plan = select(&rows, signals(3_000_000_000), 0, Some(1_000_000_000), price).unwrap();
+        assert!(plan.preserved);
+        assert!(plan.rows < 2048);
+        let plan = select(&rows, signals(3_000_000_000), 0, Some(4_000_000_000), price).unwrap();
+        assert!(!plan.preserved);
+        assert_eq!(plan.rows, 2048);
+        let plan = select(
+            &[2048, 0],
+            signals(3_000_000_000),
+            0,
+            Some(2_000_000_000),
+            price,
+        )
+        .unwrap();
+        assert_eq!(plan.rows, 2048);
+        assert!(!plan.preserved, "speculative reuse must not force serial");
+        let plan = select(&rows, signals(400_000_000), 0, Some(100_000_000), price).unwrap();
+        assert_eq!(plan.rows, 256, "execution pressure may go below 512");
+        assert!(!plan.preserved);
+    }
+    #[test]
+    fn telemetry_and_overflow_fail_closed() {
+        let mut s = signals(10_000_000_000);
+        s.process_limit_remaining_bytes = None;
+        assert!(select(&[2048, 0], s, 0, None, price).is_err());
+        assert!(select(&[2048, 0], signals(u64::MAX), 1, Some(u64::MAX), price).is_err());
+        assert!(select(&[2048, 0], signals(u64::MAX), 0, Some(u64::MAX), price).is_err());
+        assert!(select(&[2048, 0], signals(u64::MAX), u64::MAX, None, price).is_err());
+        assert!(
+            select(&[2048, 0], signals(u64::MAX), 0, None, |_| Err(invalid(
+                "geometry"
+            )))
+            .is_err()
+        );
+    }
+    #[test]
+    fn omitted_is_not_exhausted() {
+        let mut s = signals(10_000_000_000);
+        s.process_limit_remaining_bytes = Some(0);
+        assert!(capture(s, 100, 100).is_ok());
+        s.process_limit_remaining_bytes = Some(100);
+        assert!(matches!(
+            capture(s, 100, 100),
+            Err(SnapshotCaptureDenial::ProcessHeadroom { .. })
+        ));
+    }
+
+    #[test]
+    fn transport_and_dynamic_reserve_remain_charged() {
+        let rows = [2, 1, 0];
+        let price = |rows| {
+            Ok(Price {
+                buffers: rows as u64 * 100,
+                admission: rows as u64 * 100 + 50,
+            })
+        };
+        assert_eq!(select(&rows, signals(250), 1, None, price).unwrap().rows, 1);
+        let mut s = signals(1_000_000_000);
+        s.process_limit_remaining_bytes = Some(600_000_000);
+        assert!(capture(s, 100_000_000, 100_000_000).is_err());
+        s.process_limit_remaining_bytes = Some(0);
+        assert!(capture(s, 100_000_000, 100_000_000).is_ok());
+    }
+
+    #[test]
+    fn failed_creation_does_not_freeze() {
+        let mut frozen = None;
+        assert!(freeze_after_creation(&mut frozen, 2048, Err::<(), _>("allocation")).is_err());
+        assert_eq!(frozen, None);
+        freeze_after_creation(&mut frozen, 1024, Ok::<_, ()>(())).unwrap();
+        assert_eq!(frozen, Some(1024));
+        assert!(freeze_after_creation(&mut frozen, 1024, Err::<(), _>("pressure")).is_err());
+        assert_eq!(frozen, Some(1024));
+    }
+
+    #[test]
+    fn creation_pressure_replans_downward_without_freezing_failures() {
+        let initial = select(
+            &candidates(4096, true),
+            signals(10_000_000_000),
+            0,
+            None,
+            price,
+        )
+        .unwrap();
+        let mut attempts = Vec::new();
+        let mut frozen = None;
+        let (session, plan) = create_with_pressure_retry(
+            initial,
+            |maximum| {
+                select(
+                    &candidates(maximum, true),
+                    signals(10_000_000_000),
+                    0,
+                    None,
+                    price,
+                )
+            },
+            |rows| {
+                attempts.push(rows);
+                if rows > 512 {
+                    let refusal =
+                        evaluate_metal_memory_admission_with_cpu_bytes(2, 0, 0, signals(1), true)
+                            .refusal()
+                            .unwrap();
+                    Err(super::super::super::transport_memory::memory_refusal(
+                        "test", &refusal,
+                    ))
+                } else {
+                    Ok(rows)
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(attempts, [2048, 1024, 512]);
+        assert_eq!(frozen, None);
+        assert_eq!(
+            freeze_after_creation(&mut frozen, plan.rows, Ok::<_, ServeError>(session)).unwrap(),
+            512
+        );
+        assert_eq!(frozen, Some(512));
+
+        let error = create_with_pressure_retry(
+            initial,
+            |_| panic!("not pressure"),
+            |_| Err::<(), _>(invalid("geometry")),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("geometry"));
+    }
+
+    #[test]
+    fn creation_retry_uses_new_budget_and_stops_after_serial_pressure() {
+        let initial = select(
+            &candidates(4096, true),
+            signals(10_000_000_000),
+            0,
+            None,
+            price,
+        )
+        .unwrap();
+        let pressure = || {
+            let denied = evaluate_metal_memory_admission_with_cpu_bytes(2, 0, 0, signals(1), true)
+                .refusal()
+                .unwrap();
+            super::super::super::transport_memory::memory_refusal("test", &denied)
+        };
+        let mut attempts = Vec::new();
+        let mut maxima = Vec::new();
+        let result = create_with_pressure_retry(
+            initial,
+            |maximum| {
+                maxima.push(maximum);
+                // Fresh pressure can skip candidates, not just choose the next width.
+                let available = if maximum == 1024 { 300_000_000 } else { 1 };
+                select(
+                    &candidates(maximum, true),
+                    signals(available),
+                    0,
+                    None,
+                    price,
+                )
+            },
+            |rows| {
+                attempts.push(rows);
+                Err::<(), _>(pressure())
+            },
+        );
+        assert!(is_pressure_refusal(&result.unwrap_err()));
+        assert_eq!(attempts, [2048, 256, 0]);
+        assert_eq!(maxima, [1024, 128]);
+
+        let mut attempts = 0;
+        let error = create_with_pressure_retry(
+            initial,
+            |maximum| {
+                let mut unavailable = signals(10_000_000_000);
+                unavailable.process_limit_remaining_bytes = None;
+                select(&candidates(maximum, true), unavailable, 0, None, price)
+            },
+            |_| {
+                attempts += 1;
+                Err::<(), _>(pressure())
+            },
+        )
+        .unwrap_err();
+        assert!(!is_pressure_refusal(&error));
+        assert_eq!(
+            attempts, 1,
+            "unknown fresh signals cannot trigger another allocation"
+        );
+    }
+
+    #[test]
+    fn ineligible_prefix_is_not_reserved() {
+        for (reuse, scheduled, cut, budget) in [
+            (false, true, Some(1024), 100),
+            (true, false, Some(1024), 100),
+            (true, true, None, 100),
+            (true, true, Some(1024), 0),
+            (true, true, Some(511), 100),
+        ] {
+            assert_eq!(
+                eligible_prefix(reuse, scheduled, cut, budget, |_| panic!("not eligible")).unwrap(),
+                None
+            );
+        }
+        assert_eq!(
+            eligible_prefix(true, true, Some(512), 99, |_| Ok(100)).unwrap(),
+            None
+        );
+        assert_eq!(
+            eligible_prefix(true, true, Some(512), 100, |_| Ok(100)).unwrap(),
+            Some(100)
+        );
+        assert!(eligible_prefix(true, true, Some(512), 100, |_| Err(invalid("overflow"))).is_err());
+    }
+}
+
+===== crates/qwen-cli/src/serve/backend_glm5_next/tests.rs (lines 1-1699) =====
+use super::*;
+use crate::serve::items::TemplateStyle;
+use crate::serve::output_partition::{GenerationEnd, OutputPartition, OutputProtocol};
+use crate::serve::partition::PartitionEvent;
+use serde_json::{Value, json};
+
+#[test]
+#[ignore = "GLM53_GGUF leased session-recreation cost screen; MTL_DEBUG_LAYER=1"]
+fn gpu_cold_session_recreation_cost() {
+    struct TimedSink {
+        started: Instant,
+        first_piece_ms: Option<f64>,
+    }
+    impl GenerationSink for TimedSink {
+        fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+            self.first_piece_ms
+                .get_or_insert_with(|| self.started.elapsed().as_secs_f64() * 1e3);
+            Ok(())
+        }
+        fn tick(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    let path = gguf_path();
+    let source = GgufFile::open(&path).unwrap();
+    let prepared = Prepared::new(&source, &invocation(&path, Some(32768), Some(1))).unwrap();
+    let ctx = MetalContext::new().unwrap();
+    let weights = load(&ctx, &source, &prepared).unwrap();
+    let cache =
+        crate::serve::SnapshotCachePlan::resolve(Some(0), Default::default(), ctx.memory_signals())
+            .unwrap();
+    let mut backend = Glm5NextBackend::new(
+        &ctx,
+        &weights,
+        prepared,
+        "glm".into(),
+        std::time::Duration::ZERO,
+        cache,
+    );
+    backend.prefix_reuse = true;
+    backend.warm_up().unwrap();
+    let long: String = (0..120)
+        .map(|i| format!("Rule {i}: when asked about topic {i}, answer in one short sentence. "))
+        .collect();
+    let mut expected = [None, None];
+    for repeat in 0..4 {
+        for recreate in if repeat % 2 == 0 {
+            [true, false]
+        } else {
+            [false, true]
+        } {
+            backend.force_cold_reallocation = recreate;
+            for (shape, instructions, input) in [
+                ("short", "Answer briefly.", "What is 6 times 7?"),
+                ("long", long.as_str(), "What is 5 times 9?"),
+            ] {
+                let request = prepared_request(
+                    &backend,
+                    json!({"model":"glm", "instructions":instructions,
+                    "input":[{"role":"user","content":input}],
+                    "reasoning":{"effort":"low"}, "temperature":0,
+                    "max_output_tokens":1}),
+                );
+                let mut sink = TimedSink {
+                    started: Instant::now(),
+                    first_piece_ms: None,
+                };
+                let outcome = backend.generate_prepared(request, &mut sink).unwrap();
+                let wall_ms = sink.started.elapsed().as_secs_f64() * 1e3;
+                assert_eq!(outcome.usage.cached_tokens, 0);
+                assert_eq!(backend.cache.len(), 0);
+                let (drop_ms, alloc_ms, reset_ms) = backend.last_cold_session_ms.unwrap();
+                assert_eq!(reset_ms == 0.0, recreate);
+                let expected = &mut expected[usize::from(shape == "long")];
+                if let Some(bits) = expected {
+                    assert_eq!(&backend.last_prefill_logits, bits);
+                } else {
+                    *expected = Some(backend.last_prefill_logits.clone());
+                }
+                eprintln!(
+                    "cold_session_cost {}",
+                    json!({
+                        "repeat":repeat, "recreate":recreate, "shape":shape, "capacity":backend.prepared.capacity,
+                        "rows":backend.frozen_rows, "prompt_tokens":backend.history.len(),
+                        "drop_ms":drop_ms, "alloc_ms":alloc_ms, "reset_ms":reset_ms,
+                        "first_piece_ms":sink.first_piece_ms, "wall_ms":wall_ms,
+                    })
+                );
+            }
+        }
+    }
+    backend.force_cold_reallocation = false;
+    for lineage in [PackedLineage::Exact, PackedLineage::Fast] {
+        backend.lineage = lineage;
+        let request = prepared_request(
+            &backend,
+            json!({"model":"glm",
+            "input":"Reply with the number 7.", "temperature":0,
+            "reasoning":{"effort":"low"}, "max_output_tokens":1}),
+        );
+        backend
+            .generate_prepared(request, &mut Sink::default())
+            .unwrap();
+        assert_eq!(
+            backend.last_cold_session_ms.unwrap().2,
+            0.0,
+            "incompatible arithmetic must recreate, not reset"
+        );
+        assert_eq!(
+            backend.session.as_ref().unwrap().packed_lineage(),
+            Some(lineage)
+        );
+    }
+    struct CancelledTransport;
+    impl GenerationSink for CancelledTransport {
+        fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+            unreachable!()
+        }
+        fn tick(&mut self) -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "cancel before reset",
+            ))
+        }
+    }
+    let old_history = backend.history.clone();
+    let old_position = backend.session.as_ref().unwrap().position();
+    let request = prepared_request(
+        &backend,
+        json!({"model":"glm",
+        "input":"An unrelated request", "temperature":0, "max_output_tokens":1}),
+    );
+    assert!(
+        backend
+            .generate_prepared(request, &mut CancelledTransport)
+            .is_err()
+    );
+    assert_eq!(backend.history, old_history);
+    assert_eq!(backend.session.as_ref().unwrap().position(), old_position);
+    assert!(!backend.session.as_ref().unwrap().is_poisoned());
+}
+
+fn invocation(
+    path: &str,
+    capacity: Option<usize>,
+    maximum: Option<usize>,
+) -> crate::cli::ServeInvocation {
+    crate::cli::ServeInvocation {
+        lens_data_dir: None,
+        lens_config: None,
+        web_root: None,
+        lens_allowed_origin: Vec::new(),
+        model: path.into(),
+        addr: "invalid-listen-address".into(),
+        max_tokens: maximum,
+        max_context_tokens: capacity,
+        snapshot_cache_mib: None,
+        snapshot_policy: Default::default(),
+        durable: crate::serve::durable::DurableSnapshotConfig::off(),
+        drafter: None,
+        trace_sse: None,
+        template_style: Default::default(),
+        idle_residency_secs: None,
+    }
+}
+
+fn gguf_path() -> String {
+    std::env::var("GLM53_GGUF").expect("GLM53_GGUF (GLM-5.3-Flash shard 1)")
+}
+
+#[test]
+fn snapshot_namespaces_isolate_prefill_rows() {
+    let ns = CacheNamespace {
+        lineage: PackedLineage::Fast,
+        schedule: Schedule::FastSharedSplitV1,
+        rows: 512,
+    };
+    let mut cache = SnapshotCache::new(1024, Default::default());
+    assert!(cache.insert_strict_in(ns, vec![1, 2], "snapshot", 10));
+    assert!(cache.peek_exact_in(&ns, &[1, 2]).is_some());
+    assert!(
+        cache
+            .peek_exact_in(&CacheNamespace { rows: 2048, ..ns }, &[1, 2])
+            .is_none()
+    );
+}
+
+#[test]
+#[ignore = "GLM53_GGUF CPU metadata-only real ledger planning; no Metal context"]
+fn cpu_prefill_plan_generic_hc_and_sparse_ledger() {
+    use qwen_llm::glm5_next::memory::{Glm5NextMemoryLedger, apple_16k_price};
+    use qwen_llm::metal::MetalMemorySignals;
+    let path = gguf_path();
+    let source = GgufFile::open(&path).unwrap();
+    let prepared = Prepared::new(&source, &invocation(&path, Some(4096), Some(1))).unwrap();
+    let ledger = |rows, generic| {
+        Glm5NextMemoryLedger::new_with_generic_hc(
+            prepared.artifact.config(),
+            0,
+            4096,
+            rows as u64,
+            generic,
+            &apple_16k_price,
+        )
+        .unwrap()
+    };
+    let generic = ledger(2048, true);
+    assert!(generic.session_buffer_bytes() > ledger(2048, false).session_buffer_bytes());
+    assert!(
+        generic
+            .terms()
+            .iter()
+            .any(|&(name, bytes)| name == "packed_sparse" && bytes > 0)
+    );
+    let price = prefill_plan::Price::from_ledger(&generic);
+    assert!(
+        price.admission > price.buffers,
+        "dynamic reserve stays in admission"
+    );
+    let signals = MetalMemorySignals {
+        recommended_max_bytes: price.admission - 1,
+        current_allocated_bytes: 0,
+        process_limit_remaining_bytes: Some(0),
+    };
+    let plan = prefill_plan::select(
+        &prefill_plan::candidates(4096, true),
+        signals,
+        0,
+        None,
+        |rows| Ok(prefill_plan::Price::from_ledger(&ledger(rows, true))),
+    )
+    .unwrap();
+    assert!(plan.rows < 2048);
+    assert_eq!(ledger(plan.rows, true).capacity(), 4096);
+}
+
+#[test]
+#[ignore = "GLM53_GGUF adaptive 2048-row serve cold/hit/cancel/continuation; MTL_DEBUG_LAYER=1; requires snapshot headroom"]
+fn gpu_adaptive_prefill_cold_hit_and_continuation() {
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    let path = gguf_path();
+    let source = GgufFile::open(&path).unwrap();
+    let prepared = Prepared::new(&source, &invocation(&path, Some(4096), Some(1))).unwrap();
+    let ctx = MetalContext::new().unwrap();
+    let weights = load(&ctx, &source, &prepared).unwrap();
+    let cache = crate::serve::SnapshotCachePlan::resolve(
+        Some(8192),
+        Default::default(),
+        ctx.memory_signals(),
+    )
+    .unwrap();
+    let mut backend = Glm5NextBackend::new(
+        &ctx,
+        &weights,
+        prepared,
+        "glm".into(),
+        std::time::Duration::ZERO,
+        cache,
+    );
+    backend.prefix_reuse = true;
+    backend.fast_snapshots = true;
+    backend.lineage = PackedLineage::Fast;
+    backend.warm_up().unwrap();
+    assert_eq!(backend.frozen_rows, None);
+    let instructions: String = (0..120)
+        .map(|i| format!("Rule {i}: when asked about topic {i}, answer in one short sentence. "))
+        .collect();
+    let prompt = prepared_request(
+        &backend,
+        json!({
+            "model":"glm", "instructions":instructions,
+            "input":[{"role":"user","content":QUESTION}],
+            "reasoning":{"effort":"low"}, "temperature":0, "max_output_tokens":1
+        }),
+    );
+    let encode = |text: &str| {
+        decode_loop::encode_checked(
+            backend.prepared.artifact.tokenizer(),
+            text,
+            false,
+            backend.prepared.artifact.config().vocab_size,
+            FAMILY,
+        )
+    };
+    let tokens = encode(&prompt.prompt).unwrap();
+    let cuts = cut_positions(
+        encode,
+        &prompt.prompt,
+        &tokens,
+        prompt.boundaries,
+        Schedule::FastSharedSplitV1,
+    );
+    assert_eq!(cuts.len(), 1);
+    let shared = cuts[0];
+    assert!(
+        shared > 2048 && shared < tokens.len(),
+        "fixture must exercise a full 2048-row chunk plus tail: shared={shared}, prompt={}",
+        tokens.len()
+    );
+    assert!(tokens.len() + 32 < backend.prepared.capacity);
+    let prefix_bytes = SnapshotCache::<Glm5NextSnapshot, CacheNamespace>::entry_bytes(
+        shared,
+        snapshot_bytes(&weights.config, shared as u64).unwrap(),
+    )
+    .unwrap();
+    assert!(prefix_bytes <= backend.cache.max_bytes());
+    let scenario = plan_session(
+        &ctx,
+        &weights,
+        &backend.prepared,
+        2048,
+        Sink::default().transport_reserve_bytes(),
+        Some(prefix_bytes),
+    )
+    .unwrap();
+    assert_eq!(
+        scenario.rows, 2048,
+        "this opt-in gate requires 2048-row session plus useful-prefix headroom: {scenario:?}"
+    );
+    assert!(scenario.preserved);
+    let run = |label: &str, backend: &mut Glm5NextBackend<'_, '_>| {
+        let started = Instant::now();
+        let mut sink = Sink::default();
+        let outcome = backend
+            .generate_prepared(prompt.clone(), &mut sink)
+            .unwrap();
+        eprintln!(
+            "adaptive {label}: rows={:?} shared_rows={shared} prompt_rows={} cached_rows={} elapsed_ms={:.1}",
+            backend.frozen_rows,
+            tokens.len(),
+            outcome.usage.cached_tokens,
+            started.elapsed().as_secs_f64() * 1e3
+        );
+        (
+            outcome.usage.cached_tokens,
+            backend.last_prefill_logits.clone(),
+            sink.bytes,
+        )
+    };
+    let cold = run("cold", &mut backend);
+    assert_eq!(cold.0, 0);
+    assert_eq!(
+        backend.frozen_rows,
+        Some(2048),
+        "actual allocation must exercise the admitted 2048-row scenario"
+    );
+    assert_eq!(backend.prepared.capacity, 4096);
+    assert_eq!(
+        backend.session.as_ref().unwrap().ledger().prefill_rows(),
+        2048
+    );
+    let namespace = CacheNamespace {
+        lineage: PackedLineage::Fast,
+        schedule: Schedule::FastSharedSplitV1,
+        rows: 2048,
+    };
+    assert!(
+        backend
+            .cache
+            .peek_exact_in(&namespace, &tokens[..shared])
+            .is_some()
+    );
+    assert!(
+        backend
+            .cache
+            .peek_exact_in(
+                &CacheNamespace {
+                    rows: 512,
+                    ..namespace
+                },
+                &tokens[..shared]
+            )
+            .is_none()
+    );
+    backend.session = None;
+    backend.history.clear();
+    let hit = run("snapshot_hit", &mut backend);
+    assert_eq!(hit.0, shared);
+    assert_eq!(hit.1, cold.1, "hit and miss use the same frozen schedule");
+    assert_eq!(hit.2, cold.2);
+
+    backend.session = None;
+    backend.history.clear();
+    backend.cache = SnapshotCache::new(
+        backend.cache.max_bytes(),
+        backend.snapshot_cache_plan.policy,
+    );
+    // Admission tick, first chunk tick, then cancellation before chunk two.
+    let mut cancelled = Sink {
+        abort_tick: Some(3),
+        ..Sink::default()
+    };
+    let started = Instant::now();
+    assert!(matches!(
+        backend.generate_prepared(prompt.clone(), &mut cancelled),
+        Err(BackendFailure::Aborted(_))
+    ));
+    eprintln!(
+        "adaptive cancelled: rows={:?} committed_rows={} elapsed_ms={:.1}",
+        backend.frozen_rows,
+        backend.history.len(),
+        started.elapsed().as_secs_f64() * 1e3
+    );
+    assert_eq!(backend.frozen_rows, Some(2048));
+    assert_eq!(backend.history, tokens[..2048]);
+    assert_eq!(backend.session.as_ref().unwrap().position(), 2048);
+    assert!(backend.live_canonical);
+    assert_eq!(
+        backend.cache.len(),
+        0,
+        "cancel occurs before the shared cut"
+    );
+    let retry = run("cancel_retry", &mut backend);
+    assert_eq!(retry.0, 2048);
+    assert_eq!(
+        retry.1, cold.1,
+        "chunk-boundary retry keeps the uninterrupted schedule"
+    );
+    assert_eq!(retry.2, cold.2);
+    assert!(
+        backend
+            .cache
+            .peek_exact_in(&namespace, &tokens[..shared])
+            .is_some()
+    );
+
+    // With one output token no sampled token is forwarded. Append a special
+    // token to keep the original generation header's tokenization intact.
+    let continuation = format!("{}<|user|>Continue.", prompt.prompt);
+    let previous = backend.history.len();
+    assert_eq!(backend.history, tokens);
+    let continued_tokens = decode_loop::encode_checked(
+        backend.prepared.artifact.tokenizer(),
+        &continuation,
+        false,
+        backend.prepared.artifact.config().vocab_size,
+        FAMILY,
+    )
+    .unwrap();
+    assert!(continued_tokens.starts_with(&backend.history));
+    assert!((1..=32).contains(&(continued_tokens.len() - previous)));
+    let started = Instant::now();
+    let continued = backend
+        .generate(&prompt.request, &continuation, &mut Sink::default())
+        .unwrap();
+    eprintln!(
+        "adaptive short_suffix: rows={:?} suffix_rows={} cached_rows={} elapsed_ms={:.1}",
+        backend.frozen_rows,
+        continued_tokens.len() - previous,
+        continued.usage.cached_tokens,
+        started.elapsed().as_secs_f64() * 1e3
+    );
+    assert_eq!(continued.usage.cached_tokens, previous);
+    assert_eq!(backend.history, continued_tokens);
+    assert_eq!(backend.frozen_rows, Some(2048));
+
+    // Test-only pinned schedules isolate the throughput tradeoff using the
+    // same resident weights, request, snapshot policy, and transport reserve.
+    // Reverse the order on the second pair; compare identity within a plan,
+    // not between different floating-point execution schedules.
+    for rows in [512, 2048, 2048, 512] {
+        backend.session = None;
+        backend.history.clear();
+        backend.cache = SnapshotCache::new(
+            backend.cache.max_bytes(),
+            backend.snapshot_cache_plan.policy,
+        );
+        backend.frozen_rows = Some(rows);
+        let cold = run("comparison_cold", &mut backend);
+        assert_eq!(cold.0, 0);
+        eprintln!(
+            "adaptive comparison_memory: rows={rows} session_buffer_bytes={}",
+            backend
+                .session
+                .as_ref()
+                .unwrap()
+                .ledger()
+                .session_buffer_bytes()
+        );
+        backend.session = None;
+        backend.history.clear();
+        let hit = run("comparison_hit", &mut backend);
+        assert_eq!(hit.0, shared);
+        assert_eq!(hit.1, cold.1);
+        assert_eq!(hit.2, cold.2);
+    }
+}
+
+/// `QWEN_GLM_FAST_PRECISION`: unset is `half`; each named precision parses
+/// (surrounding space ignored); anything else is a startup error that names
+/// the accepted values.
+#[test]
+fn fast_precision_setting_parses_or_refuses() {
+    assert_eq!(parse_fast_precision(None).unwrap(), FastPrecision::Half);
+    for precision in FastPrecision::ALL {
+        assert_eq!(
+            parse_fast_precision(Some(precision.name())).unwrap(),
+            precision
+        );
+    }
+    assert_eq!(
+        parse_fast_precision(Some(" dense_f32\n")).unwrap(),
+        FastPrecision::DenseF32
+    );
+    for bad in ["", "F32", "fp32", "full"] {
+        let error = parse_fast_precision(Some(bad)).unwrap_err().to_string();
+        assert!(error.contains("half, dense_f32, f32"), "{bad:?}: {error}");
+    }
+}
+
+#[test]
+#[ignore = "CPU/header-only GLM53_GGUF startup refusals; never binds a socket or initializes Metal"]
+fn cpu_startup_refuses_bad_limits_before_listener_or_metal() {
+    let path = gguf_path();
+    for (capacity, maximum, change, expected) in [
+        (None, Some(8), None, "requires --max-context-tokens"),
+        (Some(64), None, None, "requires explicit --max-tokens"),
+        (Some(64), Some(65), None, "exceeds --max-context-tokens"),
+        (Some(4 << 20), Some(8), None, "exceeds model context"),
+        (Some(0), Some(0), None, "must be greater than 0"),
+        (
+            Some(64),
+            Some(8),
+            Some("drafter"),
+            "--drafter is not supported for",
+        ),
+        (
+            Some(64),
+            Some(8),
+            Some("upstream"),
+            "--template-style upstream",
+        ),
+    ] {
+        let mut invocation = invocation(&path, capacity, maximum);
+        match change {
+            Some("drafter") => invocation.drafter = Some("nonexistent-drafter.gguf".into()),
+            Some("upstream") => invocation.template_style = TemplateStyle::Upstream,
+            _ => {}
+        }
+        let error = crate::serve::run_serve(invocation).unwrap_err();
+        assert!(format!("{error:#}").contains(expected), "{error:#}");
+    }
+}
+
+#[derive(Default)]
+struct Sink {
+    bytes: Vec<u8>,
+    ticks: usize,
+    pieces: usize,
+    abort_tick: Option<usize>,
+    /// Disconnect on this (1-based) piece.
+    abort_piece: Option<usize>,
+}
+
+impl GenerationSink for Sink {
+    fn piece(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.pieces += 1;
+        if self.abort_piece == Some(self.pieces) {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "test disconnect"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+    fn tick(&mut self) -> io::Result<()> {
+        self.ticks += 1;
+        if self.abort_tick == Some(self.ticks) {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "test disconnect"));
+        }
+        Ok(())
+    }
+}
+
+fn request(backend: &Glm5NextBackend<'_, '_>, body: Value) -> (ServeRequest, String) {
+    let mut request = backend.parse_request(&body).unwrap();
+    backend.normalize_request(&mut request).unwrap();
+    let prompt = backend.render_prompt(&request).unwrap();
+    (request, prompt)
+}
+
+/// (reasoning, answer) through the serve output grammar.
+fn split(bytes: &[u8], end: GenerationEnd) -> (String, String) {
+    let mut partition = OutputPartition::new(OutputProtocol::Glm5NextChat);
+    let mut events = Vec::new();
+    partition.push(bytes, &mut events);
+    partition.finish(end, &mut events).unwrap();
+    let (mut reasoning, mut answer) = (String::new(), String::new());
+    for event in events {
+        match event {
+            PartitionEvent::Reasoning(text) => reasoning.push_str(&text),
+            PartitionEvent::Visible(text) => answer.push_str(&text),
+            PartitionEvent::ReasoningClosed => {}
+            PartitionEvent::FunctionCall(_) => panic!("no-tools grammar parsed a call"),
+        }
+    }
+    (reasoning, answer)
+}
+
+fn wire(backend: &mut Glm5NextBackend<'_, '_>, body: Value) -> String {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let client = std::thread::spawn(move || {
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(600)))
+            .unwrap();
+        let body = body.to_string();
+        write!(stream, "POST /v1/responses HTTP/1.1\r\nhost: localhost\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}", body.len()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    });
+    let (stream, _) = listener.accept().unwrap();
+    // The Metal backend stays on this thread; only the socket client is spawned.
+    crate::serve::http::handle_connection(&stream, backend, None).unwrap();
+    drop(stream);
+    client.join().unwrap()
+}
+
+/// The run lane's cold path for the same prompt: a fresh session, packed
+/// prefill, the shared serial loop.
+fn reference_bytes(
+    backend: &Glm5NextBackend<'_, '_>,
+    request: &ServeRequest,
+    prompt: &str,
+) -> Vec<u8> {
+    let tokenizer = backend.prepared.artifact.tokenizer();
+    let tokens: Vec<u32> = tokenizer
+        .encode(prompt, false)
+        .unwrap()
+        .into_iter()
+        .map(|id| id as u32)
+        .collect();
+    let mut session = backend.fresh_session(0, backend.lineage).unwrap();
+    let logits = session.prefill_packed(backend.ctx, &tokens).unwrap();
+    let mut sampler = Sampler::new(render::sampling(request)).unwrap();
+    let mut bytes = Vec::new();
+    crate::generate_serial(
+        logits,
+        request.max_output_tokens.unwrap(),
+        &CHAT_STOPS,
+        &mut sampler,
+        |token| {
+            bytes.extend_from_slice(tokenizer.try_decode_piece_bytes_exact(token)?);
+            Ok(())
+        },
+        |token| Ok(session.forward(backend.ctx, token as u32)?),
+    )
+    .unwrap();
+    bytes
+}
+
+const QUESTION: &str = "What is 6 times 7? Reply with the number only.";
+
+#[test]
+#[ignore = "GLM53_GGUF GPU serve correctness under MTL_DEBUG_LAYER=1; production CLI lease, no server process"]
+fn gpu_live_session_extends_resumes_and_resets() {
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    let path = gguf_path();
+    let source = GgufFile::open(&path).unwrap();
+    let prepared = Prepared::new(&source, &invocation(&path, Some(1024), Some(64))).unwrap();
+    assert_eq!(prepared.prefill_rows, 1024);
+    // A CLI test links the production library: this takes the real lease.
+    let ctx = MetalContext::new().unwrap();
+    let weights = load(&ctx, &source, &prepared).unwrap();
+    // No snapshot cache: this test pins live-session behaviour alone.
+    let no_snapshots =
+        crate::serve::SnapshotCachePlan::resolve(Some(0), Default::default(), ctx.memory_signals())
+            .unwrap();
+    let mut backend = Glm5NextBackend::new(
+        &ctx,
+        &weights,
+        prepared,
+        "glm".into(),
+        std::time::Duration::ZERO,
+        no_snapshots,
+    );
+    backend.frozen_rows = Some(512);
+    eprintln!("warm_up_ms={:.1}", backend.warm_up().unwrap());
+    let greedy = |input: Value, effort: &str| {
+        json!({"model":"glm","input":input,"reasoning":{"effort":effort},
+            "temperature":0,"max_output_tokens":64})
+    };
+
+    // Cold request: the run lane's bytes, history = prompt + forwarded.
+    let (first_req, first_prompt) = request(&backend, greedy(json!(QUESTION), "low"));
+    assert_eq!(
+        backend.output_protocol(&first_req),
+        OutputProtocol::Glm5NextChat
+    );
+    let mut first = Sink::default();
+    let started = Instant::now();
+    let outcome = backend
+        .generate(&first_req, &first_prompt, &mut first)
+        .unwrap();
+    eprintln!(
+        "first request ms={:.1} usage={:?}",
+        started.elapsed().as_secs_f64() * 1e3,
+        outcome.usage
+    );
+    assert_eq!(outcome.usage.cached_tokens, 0);
+    assert_eq!(
+        first.bytes,
+        reference_bytes(&backend, &first_req, &first_prompt)
+    );
+    assert_eq!(
+        backend.history.len(),
+        outcome.usage.input_tokens + outcome.usage.output_tokens - 1
+    );
+    let (reasoning, answer) = split(&first.bytes, outcome.end);
+    assert!(answer.contains("42"), "{reasoning:?} / {answer:?}");
+
+    // Replaying the exchange plus a new turn extends the live session.
+    let replay = |next: &str| {
+        json!([
+            {"role":"user","content":QUESTION},
+            {"type":"reasoning","content":reasoning},
+            {"role":"assistant","content":answer},
+            {"role":"user","content":next}])
+    };
+    let (second_req, second_prompt) = request(&backend, greedy(replay("And 6 times 8?"), "low"));
+    assert!(second_prompt.starts_with(&first_prompt));
+    let history = backend.history.len();
+    let mut second = Sink::default();
+    let outcome = backend
+        .generate(&second_req, &second_prompt, &mut second)
+        .unwrap();
+    assert_eq!(
+        outcome.usage.cached_tokens, history,
+        "replayed history must re-tokenize to the consumed tokens"
+    );
+    let (_, second_answer) = split(&second.bytes, outcome.end);
+    assert!(second_answer.contains("48"), "{second_answer:?}");
+
+    // A cold run of the same prompt: semantically the same under Fast...
+    backend.prefix_reuse = false;
+    let mut cold = Sink::default();
+    let outcome = backend
+        .generate(&second_req, &second_prompt, &mut cold)
+        .unwrap();
+    assert_eq!(outcome.usage.cached_tokens, 0);
+    assert!(split(&cold.bytes, outcome.end).1.contains("48"));
+    eprintln!("fast warm==cold bytes: {}", cold.bytes == second.bytes);
+    backend.prefix_reuse = true;
+    // ...and bitwise under Exact, whose prefill matches serial decode.
+    backend.lineage = PackedLineage::Exact;
+    backend.session = None;
+    backend.history.clear();
+    let mut exact_first = Sink::default();
+    let outcome = backend
+        .generate(&first_req, &first_prompt, &mut exact_first)
+        .unwrap();
+    let exact_history = backend.history.clone();
+    let first_len = outcome.usage.input_tokens;
+    let (r, a) = split(&exact_first.bytes, outcome.end);
+    let exact_replay = json!([
+        {"role":"user","content":QUESTION},
+        {"type":"reasoning","content":r},
+        {"role":"assistant","content":a},
+        {"role":"user","content":"And 6 times 8?"}]);
+    let (exact_req, exact_prompt) = request(&backend, greedy(exact_replay, "low"));
+    let history = backend.history.len();
+    let mut warm = Sink::default();
+    let outcome = backend
+        .generate(&exact_req, &exact_prompt, &mut warm)
+        .unwrap();
+    assert_eq!(outcome.usage.cached_tokens, history);
+    backend.prefix_reuse = false;
+    let mut cold = Sink::default();
+    backend
+        .generate(&exact_req, &exact_prompt, &mut cold)
+        .unwrap();
+    assert_eq!(warm.bytes, cold.bytes, "Exact: warm continuation == cold");
+    // The join itself: the logits after (prefill, decode forwards, suffix
+    // prefill) equal one cold prefill's, bit for bit.
+    let exact_tokens: Vec<u32> = backend
+        .prepared
+        .artifact
+        .tokenizer()
+        .encode(&exact_prompt, false)
+        .unwrap()
+        .into_iter()
+        .map(|id| id as u32)
+        .collect();
+    assert!(exact_tokens.starts_with(&exact_history));
+    let mut cold_session = backend.fresh_session(0, backend.lineage).unwrap();
+    let cold_logits = cold_session.prefill_packed(&ctx, &exact_tokens).unwrap();
+    drop(cold_session);
+    let mut warm_session = backend.fresh_session(0, backend.lineage).unwrap();
+    warm_session
+        .prefill_packed(&ctx, &exact_history[..first_len])
+        .unwrap();
+    for &token in &exact_history[first_len..] {
+        warm_session.forward(&ctx, token).unwrap();
+    }
+    let warm_logits = warm_session
+        .prefill_packed(&ctx, &exact_tokens[exact_history.len()..])
+        .unwrap();
+    drop(warm_session);
+    assert!(
+        warm_logits
+            .iter()
+            .zip(&cold_logits)
+            .all(|(a, b)| a.to_bits() == b.to_bits()),
+        "Exact warm and cold logits differ"
+    );
+    backend.prefix_reuse = true;
+    backend.lineage = PackedLineage::Fast;
+    backend.session = None;
+    backend.history.clear();
+
+    // A different effort rewrites the prefix: a fresh session.
+    backend
+        .generate(&first_req, &first_prompt, &mut Sink::default())
+        .unwrap();
+    let (high_req, high_prompt) = request(&backend, greedy(replay("And 6 times 8?"), "high"));
+    let outcome = backend
+        .generate(&high_req, &high_prompt, &mut Sink::default())
+        .unwrap();
+    assert_eq!(outcome.usage.cached_tokens, 0);
+
+    // A two-chunk prompt cancelled between chunks keeps the committed chunk;
+    // the retry resumes from it with the cold run's bytes.
+    let long = format!(
+        "{} Summarize the text above in five words.",
+        "The quick brown fox jumps over the lazy dog. ".repeat(70)
+    );
+    let (long_req, long_prompt) = request(&backend, greedy(json!(long), "low"));
+    backend.prefix_reuse = false;
+    let mut long_cold = Sink::default();
+    let cold_outcome = backend
+        .generate(&long_req, &long_prompt, &mut long_cold)
+        .unwrap();
+    assert!(
+        cold_outcome.usage.input_tokens > 512,
+        "{:?}",
+        cold_outcome.usage
+    );
+    backend.prefix_reuse = true;
+    backend.session = None;
+    backend.history.clear();
+    // Ticks: admission, chunk 1, chunk 2.
+    let mut cancelled = Sink {
+        abort_tick: Some(3),
+        ..Sink::default()
+    };
+    assert!(matches!(
+        backend.generate(&long_req, &long_prompt, &mut cancelled),
+        Err(BackendFailure::Aborted(_))
+    ));
+    assert_eq!(backend.history.len(), 512);
+    let mut resumed = Sink::default();
+    let outcome = backend
+        .generate(&long_req, &long_prompt, &mut resumed)
+        .unwrap();
+    assert_eq!(outcome.usage.cached_tokens, 512);
+    assert_eq!(resumed.bytes, long_cold.bytes);
+
+    // An abort right after prefill (tick 3 of a one-chunk prompt), on the
+    // first decoded piece, or after several forwards clears the session; each
+    // retry is cold and equal to an uninterrupted run.
+    let (count_req, count_prompt) = request(
+        &backend,
+        greedy(json!("Count from 1 to 20, separated by spaces."), "low"),
+    );
+    let mut counted = Sink::default();
+    backend
+        .generate(&count_req, &count_prompt, &mut counted)
+        .unwrap();
+    assert!(counted.pieces > 8, "{}", counted.pieces);
+    for sink in [
+        Sink {
+            abort_tick: Some(3),
+            ..Sink::default()
+        },
+        Sink {
+            abort_piece: Some(1),
+            ..Sink::default()
+        },
+        Sink {
+            abort_piece: Some(6),
+            ..Sink::default()
+        },
+    ] {
+        let mut sink = sink;
+        assert!(matches!(
+            backend.generate(&count_req, &count_prompt, &mut sink),
+            Err(BackendFailure::Aborted(_))
+        ));
+        assert!(backend.history.is_empty() && backend.session.is_none());
+        let mut retry = Sink::default();
+        let outcome = backend
+            .generate(&count_req, &count_prompt, &mut retry)
+            .unwrap();
+        assert_eq!(outcome.usage.cached_tokens, 0);
+        assert_eq!(retry.bytes, counted.bytes);
+    }
+
+    // Over capacity is refused before the session: no ticks, history kept.
+    let history = backend.history.clone();
+    let (mut oversized, prompt) = request(&backend, greedy(replay("Next?"), "low"));
+    oversized.max_output_tokens = Some(1024);
+    let mut sink = Sink::default();
+    assert!(matches!(
+        backend.generate(&oversized, &prompt, &mut sink),
+        Err(BackendFailure::Serve(_))
+    ));
+    assert_eq!(sink.ticks, 0);
+    assert_eq!(backend.history, history);
+
+    // JSON and SSE carry the reasoning item and the answer.
+    for stream in [false, true] {
+        let mut body = greedy(json!(QUESTION), "low");
+        body["stream"] = stream.into();
+        let response = wire(&mut backend, body);
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let body = response.split_once("\r\n\r\n").unwrap().1;
+        let envelope = if stream {
+            let block = body
+                .split("\n\n")
+                .find(|block| block.starts_with("event: response.completed\n"))
+                .unwrap_or_else(|| panic!("{body}"));
+            let data = block
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .unwrap();
+            serde_json::from_str::<Value>(data).unwrap()["response"].clone()
+        } else {
+            serde_json::from_str::<Value>(body).unwrap()
+        };
+        let output = envelope["output"].as_array().unwrap();
+        assert_eq!(output[0]["type"], "reasoning");
+        assert_eq!(output[0]["content"][0]["text"], reasoning);
+        assert_eq!(output[1]["content"][0]["text"], answer);
+        assert_eq!(envelope["reasoning"], json!({"effort":"low"}));
+    }
+}
+
+fn refusal(
+    reason: qwen_llm::metal::MetalMemoryAdmissionReason,
+) -> qwen_llm::metal::MemoryAdmissionDenied {
+    qwen_llm::metal::MemoryAdmissionDenied {
+        reason,
+        required_bytes: Some(3 << 30),
+        signals: qwen_llm::metal::MetalMemorySignals {
+            recommended_max_bytes: 112 << 30,
+            current_allocated_bytes: 111 << 30,
+            process_limit_remaining_bytes: Some(8 << 30),
+        },
+        working_set_headroom_bytes: Some(1 << 30),
+    }
+}
+
+/// Lane audit B3: only a typed pressure refusal of the session is a 503;
+/// telemetry refusals, geometry and kernel validation failures stay 500.
+#[test]
+fn session_errors_map_typed_pressure_to_503_and_the_rest_to_500() {
+    use qwen_llm::metal::MetalMemoryAdmissionReason as R;
+    let admission = |reason| Glm5NextMetalError::MemoryAdmission {
+        denied: refusal(reason),
+        budget_bytes: 1 << 30,
+        advice: qwen_llm::glm5_next_metal::CapacityAdvice::NotEvaluated,
+    };
+    let pressure = admission(R::BothInsufficient);
+    assert!(pressure.is_memory_pressure());
+    let error = session_error(pressure);
+    assert_eq!(
+        (error.status, error.error_type, error.code),
+        (503, "server_busy", Some("memory_admission_denied"))
+    );
+    assert!(
+        error.message.contains("both_insufficient"),
+        "{}",
+        error.message
+    );
+
+    let telemetry = admission(R::InvalidWorkingSetSignal);
+    assert!(!telemetry.is_memory_pressure());
+    let error = session_error(telemetry);
+    assert_eq!(
+        (error.status, error.code),
+        (500, Some("memory_signal_invalid"))
+    );
+
+    for other in [
+        Glm5NextMetalError::Invalid("capacity must be positive".into()),
+        Glm5NextMetalError::Poisoned,
+        Glm5NextMetalError::KernelValidation {
+            stage: "route",
+            block: 7,
+            row: None,
+            status: -1,
+        },
+    ] {
+        assert!(!other.is_memory_pressure());
+        let error = session_error(other);
+        assert_eq!((error.status, error.code), (500, None), "{}", error.message);
+    }
+}
+
+/// A request reads its prompt with its own lineage, and a live session is
+/// reused only by requests of the lineage it was built with.
+#[test]
+fn live_session_reuse_requires_the_same_prefill_lineage() {
+    use crate::serve::items::PrefillLineage;
+    let mut request = ServeRequest::default();
+    assert_eq!(
+        request_lineage(&request, PackedLineage::Fast),
+        PackedLineage::Fast
+    );
+    request.prefill_lineage = Some(PrefillLineage::Exact);
+    assert_eq!(
+        request_lineage(&request, PackedLineage::Fast),
+        PackedLineage::Exact
+    );
+    request.prefill_lineage = Some(PrefillLineage::Fast);
+    assert_eq!(
+        request_lineage(&request, PackedLineage::Exact),
+        PackedLineage::Fast
+    );
+
+    assert_eq!(
+        reuse_len(218, Some(PackedLineage::Fast), PackedLineage::Fast),
+        218
+    );
+    assert_eq!(
+        reuse_len(218, Some(PackedLineage::Fast), PackedLineage::Exact),
+        0
+    );
+    assert_eq!(
+        reuse_len(218, Some(PackedLineage::Exact), PackedLineage::Fast),
+        0
+    );
+    assert_eq!(reuse_len(0, None, PackedLineage::Exact), 0);
+    assert_eq!(lineage_name(PackedLineage::Exact), "exact");
+}
+
+/// Exact always has a snapshot schedule when the cache has a budget; Fast
+/// only with its lever on (the default); no budget means no splits and no
+/// captures.
+#[test]
+fn snapshot_schedules_follow_lineage_budget_and_lever() {
+    use PackedLineage::{Exact, Fast};
+    assert_eq!(snapshot_schedule(1, false, Exact), Some(Schedule::ExactV1));
+    assert_eq!(snapshot_schedule(1, true, Exact), Some(Schedule::ExactV1));
+    assert_eq!(snapshot_schedule(1, false, Fast), None);
+    assert_eq!(
+        snapshot_schedule(1, true, Fast),
+        Some(Schedule::FastSharedSplitV1)
+    );
+    for lineage in [Exact, Fast] {
+        assert_eq!(snapshot_schedule(0, true, lineage), None);
+    }
+}
+
+/// Cuts are renderer boundaries mapped through the tokenizer and kept only
+/// when the boundary's tokens are a strict prefix of the prompt's.
+#[test]
+fn cuts_are_verified_renderer_boundaries() {
+    // A toy tokenizer: one id per char, except "XY", which merges.
+    let encode = |text: &str| -> Result<Vec<u32>, ServeError> {
+        let mut ids = Vec::new();
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == 'X' && chars.peek() == Some(&'Y') {
+                chars.next();
+                ids.push(1000);
+            } else {
+                ids.push(c as u32);
+            }
+        }
+        Ok(ids)
+    };
+    let prompt = "sysSTUFF<u>hiXY<a>";
+    let tokens = encode(prompt).unwrap();
+    let at = |shared: Option<usize>, header: Option<usize>| {
+        Some(PromptBoundaries {
+            shared_prefix_end: shared,
+            generation_header_start: header,
+        })
+    };
+    let header = prompt.find("<a>");
+    assert_eq!(
+        cut_positions(
+            encode,
+            prompt,
+            &tokens,
+            at(Some(8), header),
+            Schedule::ExactV1
+        ),
+        vec![8, 14]
+    );
+    assert_eq!(
+        cut_positions(
+            encode,
+            prompt,
+            &tokens,
+            at(Some(8), header),
+            Schedule::FastSharedSplitV1
+        ),
+        vec![8]
+    );
+    assert!(cut_positions(encode, prompt, &tokens, None, Schedule::ExactV1).is_empty());
+    // Between X and Y the boundary's tokens are not a prefix: dropped.
+    let inside = prompt.find('Y');
+    assert_eq!(
+        cut_positions(
+            encode,
+            prompt,
+            &tokens,
+            at(inside, header),
+            Schedule::ExactV1
+        ),
+        vec![14]
+    );
+    // Empty or whole-prompt prefixes and out-of-range offsets cut nothing.
+    for offset in [0, prompt.len(), prompt.len() + 5] {
+        assert!(
+            cut_positions(
+                encode,
+                prompt,
+                &tokens,
+                at(Some(offset), None),
+                Schedule::ExactV1
+            )
+            .is_empty(),
+            "{offset}"
+        );
+    }
+    // Equal boundaries cut once.
+    assert_eq!(
+        cut_positions(
+            encode,
+            prompt,
+            &tokens,
+            at(Some(8), Some(8)),
+            Schedule::ExactV1
+        ),
+        vec![8]
+    );
+}
+
+/// The serve renderer reports where the shared instructions-and-tools
+/// prefix ends and where the generation header starts; authored text that
+/// spells a marker moves neither.
+#[test]
+fn serve_render_reports_the_shared_prefix_and_header() {
+    let profile = crate::serve::request_profile::RequestProfile::Glm5Next {
+        default_max_tokens: 64,
+        capacity: 4096,
+        max_piece_bytes: 64,
+    };
+    let body = json!({
+        "model": "glm",
+        "instructions": "Be brief. <|user|> here is just text.",
+        "tools": [{"type": "function", "name": "get_weather", "description": "Weather.",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}],
+        "input": [{"role": "user", "content": "Weather in Paris?"}],
+        "reasoning": {"effort": "low"}
+    });
+    let mut request = profile.parse(&body).unwrap();
+    profile.normalize(&mut request).unwrap();
+    let (prompt, boundaries) = profile.render_prepared(&request).unwrap();
+    assert_eq!(prompt, profile.render(&request).unwrap());
+    let boundaries = boundaries.unwrap();
+    let shared = boundaries.shared_prefix_end.unwrap();
+    assert!(prompt[..shared].ends_with("<|user|> here is just text."));
+    assert!(prompt[shared..].starts_with("<|user|>Weather in Paris?"));
+    let header = boundaries.generation_header_start.unwrap();
+    assert_eq!(&prompt[header..], "<|assistant|><think>");
+    // A different conversation with the same instructions and tools shares
+    // the prefix byte for byte.
+    let mut other = body.clone();
+    other["input"] = json!([{"role": "user", "content": "And in Rome?"}]);
+    let mut other = profile.parse(&other).unwrap();
+    profile.normalize(&mut other).unwrap();
+    let (other_prompt, other_boundaries) = profile.render_prepared(&other).unwrap();
+    assert_eq!(other_boundaries.unwrap().shared_prefix_end, Some(shared));
+    assert_eq!(other_prompt[..shared], prompt[..shared]);
+}
+
+/// Session snapshot relief is reserved for process-only memory refusals.
+#[test]
+fn process_only_session_refusals_release_snapshots_and_keep_the_hit() {
+    use qwen_llm::metal::MetalMemoryAdmissionReason as R;
+    use qwen_llm::snapshot_policy::SnapshotPolicyConfig;
+    let ns = CacheNamespace {
+        lineage: PackedLineage::Exact,
+        schedule: Schedule::ExactV1,
+        rows: 512,
+    };
+    let filled = || {
+        let mut cache: SnapshotCache<&'static str, CacheNamespace> =
+            SnapshotCache::new(1 << 20, SnapshotPolicyConfig::LRU);
+        assert!(cache.insert_strict_in(ns, vec![1], "keep", 10));
+        assert!(cache.insert_strict_in(ns, vec![2], "drop", 10));
+        cache
+    };
+    let admission = |reason| Glm5NextMetalError::MemoryAdmission {
+        denied: refusal(reason),
+        budget_bytes: 1 << 30,
+        advice: qwen_llm::glm5_next_metal::CapacityAdvice::NotEvaluated,
+    };
+
+    // Working-set-only and mixed denials are not relieved by dropping CPU
+    // snapshots, and their typed reasons and denial details are preserved.
+    for reason in [R::WorkingSetInsufficient, R::BothInsufficient] {
+        let mut cache = filled();
+        let mut attempts = 0;
+        let result: Result<(), Glm5NextMetalError> =
+            with_snapshot_release(&mut cache, None, || {
+                attempts += 1;
+                Err(admission(reason))
+            });
+        assert_eq!(attempts, 1);
+        assert!(cache.entry_for_in(&ns, &[1]).is_some());
+        assert!(cache.entry_for_in(&ns, &[2]).is_some());
+        match result.unwrap_err() {
+            Glm5NextMetalError::MemoryAdmission { denied, .. } => {
+                assert_eq!(denied, refusal(reason));
+            }
+            error => panic!("unexpected refusal: {error}"),
+        }
+    }
+
+    // A process-only refusal releases unpinned snapshots except `keep` and
+    // retries exactly once.
+    let mut cache = filled();
+    let keep = cache.entry_for_in(&ns, &[1]);
+    let mut attempts = 0;
+    let result = with_snapshot_release(&mut cache, keep, || {
+        attempts += 1;
+        if attempts == 1 {
+            Err(admission(R::ProcessInsufficient))
+        } else {
+            Ok(attempts)
+        }
+    });
+    assert_eq!(result.unwrap(), 2);
+    assert_eq!(attempts, 2);
+    assert!(cache.entry_for_in(&ns, &[1]).is_some());
+    assert!(cache.entry_for_in(&ns, &[2]).is_none());
+
+    // Persistent process pressure retries once and returns the second typed
+    // refusal.
+    let mut cache = filled();
+    let mut attempts = 0;
+    let result: Result<(), Glm5NextMetalError> = with_snapshot_release(&mut cache, None, || {
+        attempts += 1;
+        Err(admission(R::ProcessInsufficient))
+    });
+    assert!(matches!(
+        result.unwrap_err(),
+        Glm5NextMetalError::MemoryAdmission { denied, .. }
+            if denied.reason == R::ProcessInsufficient
+    ));
+    assert_eq!(attempts, 2);
+    assert_eq!(cache.len(), 0);
+
+    // An empty cache returns the original process refusal without retry.
+    let mut attempts = 0;
+    let result: Result<(), Glm5NextMetalError> = with_snapshot_release(&mut cache, None, || {
+        attempts += 1;
+        Err(admission(R::ProcessInsufficient))
+    });
+    assert!(matches!(
+        result.unwrap_err(),
+        Glm5NextMetalError::MemoryAdmission { denied, .. }
+            if denied.reason == R::ProcessInsufficient
+    ));
+    assert_eq!(attempts, 1);
+
+    // Invalid memory telemetry also preserves every cache entry.
+    let mut cache = filled();
+    let result: Result<(), Glm5NextMetalError> = with_snapshot_release(&mut cache, None, || {
+        Err(admission(R::InvalidWorkingSetSignal))
+    });
+    assert!(matches!(
+        result.unwrap_err(),
+        Glm5NextMetalError::MemoryAdmission { denied, .. }
+            if denied.reason == R::InvalidWorkingSetSignal
+    ));
+    assert_eq!(cache.len(), 2);
+}
+
+#[test]
+fn release_keep_pin_is_cleared_when_eviction_panics() {
+    use qwen_llm::snapshot_policy::{Clock, SnapshotPolicyConfig};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    struct PanicClock(Arc<AtomicBool>);
+
+    impl Clock for PanicClock {
+        fn now(&self) -> Duration {
+            assert!(
+                !self.0.load(Ordering::Relaxed),
+                "injected eviction clock panic"
+            );
+            Duration::ZERO
+        }
+    }
+
+    let panic_clock = Arc::new(AtomicBool::new(false));
+    let namespace = CacheNamespace {
+        lineage: PackedLineage::Exact,
+        schedule: Schedule::ExactV1,
+        rows: 512,
+    };
+    let mut cache: SnapshotCache<&'static str, CacheNamespace> = SnapshotCache::with_clock(
+        1_000,
+        SnapshotPolicyConfig::default(),
+        Arc::new(PanicClock(Arc::clone(&panic_clock))),
+    );
+    for token in [1, 2, 3] {
+        assert!(cache.insert_strict_in(namespace, vec![token], "snapshot", 10));
+    }
+    let keep = cache.entry_for_in(&namespace, &[1]);
+
+    panic_clock.store(true, Ordering::Relaxed);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cache.evict_for_except(u64::MAX, keep);
+    }));
+    assert!(result.is_err());
+    panic_clock.store(false, Ordering::Relaxed);
+
+    assert_eq!(cache.pinned_bytes(), 0);
+    assert_eq!(cache.len(), 3);
+}
+
+/// A request rendered as serve renders it, with its boundaries.
+fn prepared_request(backend: &Glm5NextBackend<'_, '_>, body: Value) -> Arc<PreparedResponse> {
+    let mut request = backend.parse_request(&body).unwrap();
+    backend.normalize_request(&mut request).unwrap();
+    let (prompt, boundaries) = backend.render_prepared(&request).unwrap();
+    Arc::new(PreparedResponse {
+        request,
+        prompt,
+        boundaries,
+    })
+}
+
+/// Map #15 serve gates. A snapshot restore continues exactly the trajectory
+/// a miss runs on the same schedule: Exact hits equal a cold single prefill
+/// bitwise (Exact is segmentation-invariant); Fast hits equal a miss
+/// that splits at the same shared-prefix cut, as does a full cache; Fast and
+/// Exact entries never serve each other; a cancelled split prefill resumes
+/// onto the same schedule.
+#[test]
+#[ignore = "GLM53_GGUF GPU serve snapshot gates under MTL_DEBUG_LAYER=1; production CLI lease, no server process"]
+fn gpu_snapshots_continue_the_captured_trajectory() {
+    use qwen_llm::snapshot_policy::SnapshotPolicyConfig;
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    let path = gguf_path();
+    let source = GgufFile::open(&path).unwrap();
+    let prepared = Prepared::new(&source, &invocation(&path, Some(4096), Some(64))).unwrap();
+    let ctx = MetalContext::new().unwrap();
+    let weights = load(&ctx, &source, &prepared).unwrap();
+    let plan = |mib| {
+        crate::serve::SnapshotCachePlan::resolve(
+            Some(mib),
+            Default::default(),
+            ctx.memory_signals(),
+        )
+        .unwrap()
+    };
+    let mut backend = Glm5NextBackend::new(
+        &ctx,
+        &weights,
+        prepared,
+        "glm".into(),
+        std::time::Duration::ZERO,
+        plan(8192),
+    );
+    // These existing trajectory gates explicitly exercise the 512-row contract.
+    backend.frozen_rows = Some(512);
+    backend.warm_up().unwrap();
+    // ~1.3K tokens of instructions plus a tool: the shared cut is not a
+    // multiple of the 512-row chunk, so a split moves chunk alignment.
+    let instructions: String = (0..60)
+        .map(|i| format!("Rule {i}: when asked about topic {i}, answer in one short sentence. "))
+        .collect();
+    let body_with = |instructions: &str, input: Value| {
+        json!({"model":"glm","instructions":instructions,
+            "tools":[{"type":"function","name":"get_weather","description":"Current weather for a city.",
+                "parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}],
+            "input":input,
+            "reasoning":{"effort":"low"},"temperature":0,"max_output_tokens":8})
+    };
+    let body =
+        |question: &str| body_with(&instructions, json!([{"role":"user","content":question}]));
+    let a = prepared_request(
+        &backend,
+        body("What is 6 times 7? Reply with the number only."),
+    );
+    let b = prepared_request(
+        &backend,
+        body("What is 5 times 9? Reply with the number only."),
+    );
+    let tokenizer = backend.prepared.artifact.tokenizer();
+    let shared = tokenizer
+        .encode(
+            &a.prompt[..a.boundaries.unwrap().shared_prefix_end.unwrap()],
+            false,
+        )
+        .unwrap()
+        .len();
+    let a_len = tokenizer.encode(&a.prompt, false).unwrap().len();
+    assert!(shared > 1024 && shared % 512 != 0, "shared prefix {shared}");
+    eprintln!("shared prefix {shared} tokens, request A {a_len} tokens");
+
+    // Runs one request; returns (cached tokens, prefill logit bits, bytes).
+    let run = |backend: &mut Glm5NextBackend<'_, '_>, prepared: &Arc<PreparedResponse>| {
+        let mut sink = Sink::default();
+        let outcome = backend
+            .generate_prepared(Arc::clone(prepared), &mut sink)
+            .unwrap();
+        (
+            outcome.usage.cached_tokens,
+            backend.last_prefill_logits.clone(),
+            sink.bytes,
+        )
+    };
+    let reset = |backend: &mut Glm5NextBackend<'_, '_>, mib: u64, fast: bool, lineage| {
+        backend.session = None;
+        backend.history.clear();
+        backend.deny_captures = false;
+        backend.cache = SnapshotCache::new(mib << 20, SnapshotPolicyConfig::default());
+        backend.fast_snapshots = fast;
+        backend.lineage = lineage;
+    };
+    let mut failures = Vec::new();
+    let mut check = |label: &str, ok: bool| {
+        eprintln!("{label}: {ok}");
+        if !ok {
+            failures.push(label.to_string());
+        }
+    };
+
+    // Exact references: one cold prefill each (no cache, so no cuts).
+    reset(&mut backend, 0, false, PackedLineage::Exact);
+    let (_, exact_a, exact_a_bytes) = run(&mut backend, &a);
+    reset(&mut backend, 0, false, PackedLineage::Exact);
+    let (_, exact_b, exact_b_bytes) = run(&mut backend, &b);
+    // Exact with snapshots: A misses and captures at both cuts; B restores
+    // the shared prefix; an identical retry of A restores its transcript.
+    reset(&mut backend, 8192, false, PackedLineage::Exact);
+    let (cached, logits, bytes) = run(&mut backend, &a);
+    check("exact miss: no reuse", cached == 0);
+    check(
+        "exact miss == cold",
+        logits == exact_a && bytes == exact_a_bytes,
+    );
+    check("exact miss captured both cuts", backend.cache.len() == 2);
+    let (cached, logits, bytes) = run(&mut backend, &b);
+    check("exact B restores the shared prefix", cached == shared);
+    check(
+        "exact B hit == cold",
+        logits == exact_b && bytes == exact_b_bytes,
+    );
+    let (cached, logits, bytes) = run(&mut backend, &a);
+    check("exact A retry restores its transcript", cached == a_len - 2);
+    check(
+        "exact A retry == cold",
+        logits == exact_a && bytes == exact_a_bytes,
+    );
+
+    // Fast snapshots: the reference is a miss on the same schedule.
+    reset(&mut backend, 8192, true, PackedLineage::Fast);
+    let (cached, _, _) = run(&mut backend, &a);
+    check("fast A miss: no reuse", cached == 0);
+    reset(&mut backend, 8192, true, PackedLineage::Fast);
+    let (_, fast_b_miss, fast_b_bytes) = run(&mut backend, &b);
+    check(
+        "fast B miss captured the shared cut",
+        backend.cache.len() == 1,
+    );
+    backend.session = None;
+    backend.history.clear();
+    let (cached, logits, bytes) = run(&mut backend, &b);
+    check("fast B restores the shared prefix", cached == shared);
+    check(
+        "fast B hit == fast B miss",
+        logits == fast_b_miss && bytes == fast_b_bytes,
+    );
+    let (cached, logits, _) = run(&mut backend, &a);
+    check("fast A hit (from B's capture)", cached == shared);
+    let fast_a_hit = logits;
+    // A full cache (1 MiB) captures nothing but splits the same way.
+    reset(&mut backend, 1, true, PackedLineage::Fast);
+    let (cached, logits, bytes) = run(&mut backend, &b);
+    check(
+        "fast full: no reuse, nothing cached",
+        cached == 0 && backend.cache.len() == 0,
+    );
+    check(
+        "fast full == fast miss",
+        logits == fast_b_miss && bytes == fast_b_bytes,
+    );
+    // Fast with the lever off is a single cold prefill.
+    reset(&mut backend, 8192, false, PackedLineage::Fast);
+    let (_, unsplit, _) = run(&mut backend, &a);
+    check(
+        "fast with the lever off captures nothing",
+        backend.cache.len() == 0,
+    );
+    eprintln!(
+        "fast split vs unsplit A logits equal: {}",
+        unsplit == fast_a_hit
+    );
+
+    // Lineages never share entries: Fast entries serve no Exact request.
+    reset(&mut backend, 8192, true, PackedLineage::Fast);
+    run(&mut backend, &a);
+    backend.lineage = PackedLineage::Exact;
+    let (cached, logits, _) = run(&mut backend, &b);
+    check("exact B ignores fast entries", cached == 0);
+    check("exact B after fast entries == cold", logits == exact_b);
+
+    // A cancelled split prefill (tick 3: admission, chunk 1, chunk 2 of
+    // the shared segment) resumes on the same schedule.
+    for (lineage, fast) in [(PackedLineage::Exact, false), (PackedLineage::Fast, true)] {
+        reset(&mut backend, 8192, fast, lineage);
+        let reference = run(&mut backend, &b);
+        reset(&mut backend, 8192, fast, lineage);
+        let mut cancelled = Sink {
+            abort_tick: Some(3),
+            ..Sink::default()
+        };
+        let aborted = backend.generate_prepared(Arc::clone(&b), &mut cancelled);
+        check(
+            &format!("{lineage:?} cancel keeps 512 committed"),
+            matches!(aborted, Err(BackendFailure::Aborted(_))) && backend.history.len() == 512,
+        );
+        let (cached, logits, bytes) = run(&mut backend, &b);
+        check(
+            &format!("{lineage:?} resume == uninterrupted"),
+            cached == 512 && logits == reference.1 && bytes == reference.2,
+        );
+    }
+
+    // Fast snapshots are taken and used only at this request's own
+    // verified cut. Two instruction sets where the first's shared prefix is
+    // a strict token prefix of the second's.
+    let short = format!("{}\n", instructions.trim_end());
+    let long = format!("{short}Extra rule: answer politely.\n");
+    let question =
+        json!([{"role":"user","content":"What is 6 times 7? Reply with the number only."}]);
+    let first = prepared_request(&backend, body_with(&short, question.clone()));
+    let second = prepared_request(&backend, body_with(&long, question));
+    // The GGUF tokenizer, independent of the backend's borrow.
+    let gguf_tokenizer = qwen_llm::tokenizer::Tokenizer::from_gguf(&source).unwrap();
+    let encode = |text: &str| -> Vec<u32> {
+        gguf_tokenizer
+            .encode(text, false)
+            .unwrap()
+            .into_iter()
+            .map(|id| id as u32)
+            .collect()
+    };
+    assert_eq!(encode(&a.prompt).len(), a_len);
+    let first_tokens = encode(&first.prompt);
+    let second_tokens = encode(&second.prompt);
+    let s1 = encode(&first.prompt[..first.boundaries.unwrap().shared_prefix_end.unwrap()]).len();
+    let s2 = encode(&second.prompt[..second.boundaries.unwrap().shared_prefix_end.unwrap()]).len();
+    assert!(
+        s1 < s2 && second_tokens.starts_with(&first_tokens[..s1]),
+        "fixture: the first shared prefix ({s1}) must be a token prefix of the second ({s2})"
+    );
+    let fast_ns = CacheNamespace {
+        lineage: PackedLineage::Fast,
+        schedule: Schedule::FastSharedSplitV1,
+        rows: 512,
+    };
+    reset(&mut backend, 8192, true, PackedLineage::Fast);
+    let (_, second_miss, second_bytes) = run(&mut backend, &second);
+    // A cached shorter shared prefix is not this request's cut: a miss.
+    reset(&mut backend, 8192, true, PackedLineage::Fast);
+    run(&mut backend, &first);
+    backend.session = None;
+    backend.history.clear();
+    let (cached, logits, bytes) = run(&mut backend, &second);
+    check("fast ignores another request's shorter cut", cached == 0);
+    check(
+        "fast after a shorter cut == miss",
+        logits == second_miss && bytes == second_bytes,
+    );
+    // A live session cancelled right after the first request's cut (tick 5:
+    // admission, three chunks, then the next segment) continues into the
+    // second request, but its state is off the chunk grid: no Fast capture.
+    reset(&mut backend, 8192, true, PackedLineage::Fast);
+    let mut cancelled = Sink {
+        abort_tick: Some(5),
+        ..Sink::default()
+    };
+    let aborted = backend.generate_prepared(Arc::clone(&first), &mut cancelled);
+    check(
+        "fast cancel right after the cut",
+        matches!(aborted, Err(BackendFailure::Aborted(_))) && backend.history.len() == s1,
+    );
+    let (cached, _, _) = run(&mut backend, &second);
+    check(
+        "off-grid live state is continued but not published",
+        cached == s1
+            && backend
+                .cache
+                .entry_for_in(&fast_ns, &second_tokens[..s2])
+                .is_none(),
+    );
+    // Without renderer boundaries a Fast request neither restores nor
+    // captures.
+    reset(&mut backend, 8192, true, PackedLineage::Fast);
+    run(&mut backend, &a);
+    backend.session = None;
+    backend.history.clear();
+    let entries = backend.cache.len();
+    let mut sink = Sink::default();
+    let outcome = backend.generate(&a.request, &a.prompt, &mut sink).unwrap();
+    check(
+        "fast without boundaries: no restore, no capture",
+        outcome.usage.cached_tokens == 0 && backend.cache.len() == entries,
+    );
+
+    // Denied captures keep the same splits.
+    for (lineage, fast, reference) in [
+        (PackedLineage::Fast, true, &fast_b_miss),
+        (PackedLineage::Exact, false, &exact_b),
+    ] {
+        reset(&mut backend, 8192, fast, lineage);
+        backend.deny_captures = true;
+        let (cached, logits, _) = run(&mut backend, &b);
+        check(
+            &format!("{lineage:?} denied: same splits, nothing cached"),
+            cached == 0 && backend.cache.len() == 0 && logits == *reference,
+        );
+    }
+
+    // A continued live request keeps the shared entry it passed: with room
+    // for one entry beside a pinned one, its transcript capture is refused
+    // rather than evicting the shared snapshot.
+    reset(&mut backend, 8192, false, PackedLineage::Exact);
+    let mut sink = Sink::default();
+    let outcome = backend
+        .generate_prepared(Arc::clone(&a), &mut sink)
+        .unwrap();
+    let (reasoning, answer) = split(&sink.bytes, outcome.end);
+    let continued = prepared_request(
+        &backend,
+        body_with(
+            &instructions,
+            json!([
+                {"role":"user","content":"What is 6 times 7? Reply with the number only."},
+                {"type":"reasoning","content":reasoning},
+                {"role":"assistant","content":answer},
+                {"role":"user","content":"And 5 times 9?"}]),
+        ),
+    );
+    let entry = |n: usize| {
+        qwen_llm::glm5_next_metal::snapshot_bytes(&weights.config, n as u64).unwrap() + 4 * n as u64
+    };
+    let continued_len = encode(&continued.prompt).len();
+    let budget = entry(continued_len - 2) + entry(shared) / 2;
+    backend.session = None;
+    backend.history.clear();
+    backend.cache = SnapshotCache::new(budget, SnapshotPolicyConfig::default());
+    run(&mut backend, &a);
+    let exact_ns = CacheNamespace {
+        lineage: PackedLineage::Exact,
+        schedule: Schedule::ExactV1,
+        rows: 512,
+    };
+    let a_tokens = encode(&a.prompt);
+    check(
+        "tight budget keeps the shared entry, refuses the transcript",
+        backend.cache.len() == 1
+            && backend
+                .cache
+                .entry_for_in(&exact_ns, &a_tokens[..shared])
+                .is_some(),
+    );
+    let (cached, _, _) = run(&mut backend, &continued);
+    check(
+        "continued request reuses the live session past both cuts",
+        cached > a_len,
+    );
+    check(
+        "the passed shared entry survives the continued capture",
+        backend
+            .cache
+            .entry_for_in(&exact_ns, &a_tokens[..shared])
+            .is_some(),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+===== crates/qwen-cli/src/serve/render_glm5_next.rs (lines 1-650) =====
+//! GLM-5.3-Flash chat and tools over the serve and run lanes: Open Responses
+//! items to the pinned renderer, the release sampling defaults, and the
+//! output grammar (reasoning pre-opened by `<|assistant|><think>`, closed by
+//! the first `</think>`; with declared tools, `<tool_call>` blocks after it).
+//!
+//! Tools: function definitions render in their declared order; a replayed
+//! `function_call` becomes the assistant turn's call (arguments are a JSON
+//! object), and `function_call_output` items become tool results, rendered
+//! in call order under one `<|observation|>`.
+//!
+//! Serve renders past turns as they were generated: an assistant turn that
+//! arrives without a reasoning item renders as empty reasoning (serve's rule
+//! for every family), never through the template's inline `</think>` split.
+//! The template keeps history reasoning by default; `x_qwen.history_thinking:
+//! "strip"` is its own `clear_thinking`.
+use super::items::{ServeError, ServeRequest};
+use super::partition_preopened::{PreopenedGrammar, PreopenedPartition};
+use crate::model_request::Turn;
+use qwen_llm::glm5_next_chat::{
+    self as chat, CHAT_STOPS, Effort, Message, RenderOptions, THINK_CLOSE, THINK_OPEN, ToolCall,
+    ToolDefinition,
+};
+use qwen_llm::sampling::SamplingConfig;
+use serde_json::json;
+
+pub(crate) const FAMILY: &str = "GLM-5.3-Flash";
+
+fn invalid(param: &'static str, message: impl Into<String>) -> ServeError {
+    ServeError::invalid_request(Some(param), message)
+}
+
+pub(crate) fn partition() -> PreopenedPartition {
+    PreopenedPartition::new(PreopenedGrammar {
+        family: FAMILY,
+        open: THINK_OPEN.into(),
+        closes: &[THINK_CLOSE],
+        stops: &CHAT_STOPS,
+    })
+}
+
+pub(crate) fn effort(request: &ServeRequest) -> Result<Effort, ServeError> {
+    Effort::parse(request.reasoning_effort.as_deref())
+        .map_err(|error| invalid("reasoning.effort", error.to_string()))
+}
+
+/// GLM-5.3-Flash's release defaults (`release_sampling`); seeds are drawn
+/// per request.
+fn glm_release() -> SamplingConfig {
+    crate::release_sampling::release_sampling(
+        crate::release_identity::ReleaseIdentity::Glm53Flash,
+        0,
+    )
+}
+
+pub(crate) fn sampling(request: &ServeRequest) -> SamplingConfig {
+    super::request_profile::sampling_with_defaults(request, glm_release())
+}
+
+/// Release sampling defaults, the output budget, and the normalized effort
+/// echo; the rendering checks run here too, so a refusal precedes any
+/// response bytes.
+pub(crate) fn normalize_request(
+    request: &mut ServeRequest,
+    default_max_tokens: usize,
+    capacity: usize,
+    max_piece_bytes: usize,
+) -> Result<(), ServeError> {
+    super::request_profile::fill_sampling_defaults(request, glm_release());
+    let maximum = *request.max_output_tokens.get_or_insert(default_max_tokens);
+    if maximum == 0 || maximum > capacity {
+        return Err(invalid(
+            "max_output_tokens",
+            format!("{FAMILY} max_output_tokens must be in 1..={capacity}"),
+        ));
+    }
+    sampling(request)
+        .validate()
+        .map_err(|error| invalid("temperature", format!("{FAMILY} sampling: {error}")))?;
+    let effort = effort(request)?;
+    request.reasoning_effort = Some(effort.as_str().into());
+    request.reasoning = Some(json!({"effort": effort.as_str()}));
+    if !request.model_request.tools.is_empty() {
+        tool_byte_budget(maximum, max_piece_bytes)?;
+    }
+    render(request).map(drop)
+}
+
+/// The buffered tool block's bound: every output token at its longest
+/// decoded piece, times 3 for UTF-8 replacement expansion.
+pub(crate) fn tool_byte_budget(
+    max_tokens: usize,
+    max_piece_bytes: usize,
+) -> Result<usize, ServeError> {
+    max_tokens
+        .checked_mul(max_piece_bytes)
+        .and_then(|n| n.checked_mul(3))
+        .filter(|&n| n > 0)
+        .ok_or_else(|| {
+            invalid(
+                "max_output_tokens",
+                format!("{FAMILY} decoded output byte bound overflow or zero"),
+            )
+        })
+}
+
+/// Text chat, or the tools grammar when the request declares functions.
+pub(crate) fn output_protocol(
+    request: &ServeRequest,
+    max_piece_bytes: usize,
+) -> crate::serve::output_partition::OutputProtocol {
+    use crate::serve::output_partition::OutputProtocol;
+    match definitions(request) {
+        Ok(definitions) if !definitions.is_empty() => OutputProtocol::Glm5NextTools {
+            definitions,
+            // Normalization admitted this bound before any response bytes.
+            max_bytes: tool_byte_budget(request.max_output_tokens.unwrap_or(1), max_piece_bytes)
+                .unwrap_or(usize::MAX),
+        },
+        _ => OutputProtocol::Glm5NextChat,
+    }
+}
+
+/// GLM's template prints every key of a function object except `strict`
+/// and `defer_loading`, and hides deferred functions. The shared parser keeps
+/// only name, description, parameters and strict, so refuse anything it
+/// would drop before parsing: `defer_loading: true`, and any other key.
+pub(crate) fn check_raw_tool_definitions(body: &serde_json::Value) -> Result<(), ServeError> {
+    let Some(tools) = body.get("tools").and_then(serde_json::Value::as_array) else {
+        return Ok(());
+    };
+    for (index, tool) in tools.iter().enumerate() {
+        let Some(map) = tool.as_object() else {
+            continue;
+        };
+        for (key, value) in map {
+            match key.as_str() {
+                "type" | "name" | "description" | "parameters" | "strict" => {}
+                "defer_loading"
+                    if matches!(
+                        value,
+                        serde_json::Value::Null | serde_json::Value::Bool(false)
+                    ) => {}
+                "defer_loading" => {
+                    return Err(invalid(
+                        "tools",
+                        format!(
+                            "tool {index}: {FAMILY} cannot honor defer_loading (deferred functions are hidden from the model but callable)"
+                        ),
+                    ));
+                }
+                other => {
+                    return Err(invalid(
+                        "tools",
+                        format!(
+                            "tool {index}: {FAMILY} renders function objects verbatim and does not support key {other:?}"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The declared functions, in request order.
+fn definitions(request: &ServeRequest) -> Result<Vec<ToolDefinition>, ServeError> {
+    request
+        .model_request
+        .tools
+        .iter()
+        .map(|tool| {
+            if tool.strict == Some(true) {
+                return Err(invalid(
+                    "tools",
+                    format!("{FAMILY} cannot honor strict tool schemas"),
+                ));
+            }
+            ToolDefinition::from_parts(
+                &tool.name,
+                tool.description.as_deref(),
+                Some(&tool.parameters),
+            )
+            .map_err(|error| invalid("tools", error.to_string()))
+        })
+        .collect()
+}
+
+/// The conversation the renderer sees: the system message, then each turn.
+fn messages(request: &ServeRequest) -> Result<Vec<Message>, ServeError> {
+    let model = &request.model_request;
+    let mut messages = Vec::with_capacity(model.turns.len() + 1);
+    if let Some(system) = &model.system {
+        messages.push(Message::System(system.clone()));
+    }
+    for turn in &model.turns {
+        match turn {
+            Turn::User(text) => messages.push(Message::User(text.clone())),
+            Turn::Assistant {
+                reasoning,
+                visible,
+                calls,
+            } => {
+                let calls = calls
+                    .iter()
+                    .map(|call| {
+                        // Lossless: containers kept, duplicate keys refused.
+                        let arguments = qwen_llm::tool_schema::decode_json(&call.arguments)
+                            .ok()
+                            .and_then(|value| value.as_object().cloned())
+                            .ok_or_else(|| {
+                                invalid(
+                                    "input",
+                                    format!(
+                                        "{FAMILY} function_call {:?} arguments must be a JSON object without duplicate keys",
+                                        call.call_id
+                                    ),
+                                )
+                            })?;
+                        Ok(ToolCall {
+                            id: call.call_id.clone(),
+                            name: call.name.clone(),
+                            arguments,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ServeError>>()?;
+                messages.push(Message::Assistant {
+                    content: visible.clone(),
+                    reasoning: Some(reasoning.clone().unwrap_or_default()),
+                    calls,
+                });
+            }
+            Turn::ToolResults(results) => {
+                for result in results {
+                    messages.push(Message::Tool {
+                        call_id: result.call_id.clone(),
+                        content: result.output.clone(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(messages)
+}
+
+pub(crate) fn render(request: &ServeRequest) -> Result<String, ServeError> {
+    render_with_boundaries(request).map(|(prompt, _)| prompt)
+}
+
+/// [`render`] plus the shared-prefix and generation-header byte offsets the
+/// engine renderer recorded while appending.
+pub(crate) fn render_with_boundaries(
+    request: &ServeRequest,
+) -> Result<(String, super::http::PromptBoundaries), ServeError> {
+    if request.no_thinking {
+        return Err(invalid(
+            "x_qwen.no_thinking",
+            format!(
+                "{FAMILY} always reasons (its template opens <think>); use reasoning.effort low"
+            ),
+        ));
+    }
+    let definitions = definitions(request)?;
+    let options = RenderOptions::generate(effort(request)?, request.strip_history_thinking);
+    let rendered = chat::render_with_boundaries(&messages(request)?, &definitions, options)
+        .map_err(|error| {
+            let param = if error.code() == "glm5_next_chat_tools" {
+                "tools"
+            } else {
+                "input"
+            };
+            invalid(param, error.to_string())
+        })?;
+    let boundaries = super::http::PromptBoundaries {
+        shared_prefix_end: Some(rendered.shared_prefix_end),
+        generation_header_start: rendered.generation_header_start,
+    };
+    Ok((rendered.text, boundaries))
+}
+
+#[cfg(test)]
+mod natural_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::serve::output_partition::GenerationEnd;
+    use crate::serve::partition::PartitionEvent;
+
+    fn collect(events: &[PartitionEvent]) -> (String, String, usize) {
+        let (mut r, mut v, mut close) = (String::new(), String::new(), 0);
+        for event in events {
+            match event {
+                PartitionEvent::Reasoning(t) => r.push_str(t),
+                PartitionEvent::Visible(t) => v.push_str(t),
+                PartitionEvent::ReasoningClosed => close += 1,
+                PartitionEvent::FunctionCall(_) => panic!("no-tools grammar parsed a call"),
+            }
+        }
+        (r, v, close)
+    }
+
+    use crate::serve::request_profile::RequestProfile;
+    use serde_json::{Value, json};
+
+    const PROFILE: RequestProfile = RequestProfile::Glm5Next {
+        default_max_tokens: 8,
+        capacity: 64,
+        max_piece_bytes: 64,
+    };
+
+    fn bound(body: Value) -> Result<(ServeRequest, String), ServeError> {
+        let mut request = PROFILE.parse(&body)?;
+        PROFILE.normalize(&mut request)?;
+        let prompt = PROFILE.render(&request)?;
+        Ok((request, prompt))
+    }
+
+    const HEAD: &str = "[gMASK]<sop><|system|>Reasoning Effort: ";
+
+    /// Open Responses tools and tool history render exactly as the native
+    /// document does (the pinned `tool-call-content-and-reasoning` fixture
+    /// case): definitions in order, the replayed call with its JSON-object
+    /// arguments, and the output under `<|observation|>`. The output grammar
+    /// switches to tools.
+    #[test]
+    fn tools_and_tool_history_render_as_the_pinned_fixture() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../qwen-llm/tests/fixtures/glm53_chat_hf.json"
+        ))
+        .unwrap();
+        let case = fixture["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "tool-call-content-and-reasoning")
+            .unwrap();
+        let function = &case["tools"][0]["function"];
+        let body = json!({"model":"m","tools":[{"type":"function","name":function["name"],
+            "description":function["description"],"parameters":function["parameters"]}],
+            "input":[
+                {"role":"user","content":"What's the weather in Paris?"},
+                {"type":"reasoning","content":"need the weather"},
+                {"type":"message","role":"assistant","content":" Let me check. \n"},
+                {"type":"function_call","call_id":"c1","name":"get_weather","arguments":"{\"city\":\"Paris\"}"},
+                {"type":"function_call_output","call_id":"c1","output":"18C, clear"}]});
+        let (request, prompt) = bound(body).unwrap();
+        assert_eq!(prompt, case["rendered"].as_str().unwrap());
+        let crate::serve::output_partition::OutputProtocol::Glm5NextTools {
+            definitions,
+            max_bytes,
+        } = PROFILE.output(&request)
+        else {
+            panic!("declared tools select the tools grammar");
+        };
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(max_bytes, 8 * 64 * 3);
+        // Duplicate keys are refused, not collapsed.
+        let error = bound(json!({"model":"m","tools":[{"type":"function","name":"get_weather"}],
+            "input":[{"role":"user","content":"q"},
+                {"type":"function_call","call_id":"c1","name":"get_weather","arguments":"{\"a\":1,\"a\":2}"},
+                {"type":"function_call_output","call_id":"c1","output":"r"}]}))
+        .unwrap_err();
+        assert_eq!(error.status, 400, "{error:?}");
+        // Arguments that are not a JSON object are refused before execution.
+        let error = bound(
+            json!({"model":"m","tools":[{"type":"function","name":"get_weather"}],
+            "input":[{"role":"user","content":"q"},
+                {"type":"function_call","call_id":"c1","name":"get_weather","arguments":"[1]"},
+                {"type":"function_call_output","call_id":"c1","output":"r"}]}),
+        )
+        .unwrap_err();
+        assert_eq!(error.status, 400, "{error:?}");
+    }
+
+    /// Live-session reuse after a tool call is an exact prefix property: a
+    /// call the model wrote in `tojson`'s canonical form re-renders as the
+    /// same bytes, so the next prompt extends prompt + generated text; a
+    /// noncanonical but valid call (`["a","b"]`) is accepted, re-renders
+    /// canonically, and the next prompt does not extend it, so serve's exact
+    /// prefix check declines reuse and prefills fresh rather than diverge.
+    #[test]
+    fn tool_history_extends_only_canonical_generated_calls() {
+        use crate::serve::output_partition::{GenerationEnd, OutputPartition};
+        let tools = json!([{"type":"function","name":"tag",
+            "parameters":{"type":"object","properties":{"tags":{"type":"array"}}}}]);
+        let (request, prompt) =
+            bound(json!({"model":"m","input":"q","tools":tools,"reasoning":{"effort":"low"}}))
+                .unwrap();
+        for (generated_value, extends) in [(r#"["a", "b"]"#, true), (r#"["a","b"]"#, false)] {
+            let generated = format!(
+                "</think><tool_call>tag<arg_key>tags</arg_key><arg_value>{generated_value}</arg_value></tool_call>"
+            );
+            let mut partition = OutputPartition::new(PROFILE.output(&request));
+            let mut events = Vec::new();
+            partition.push(generated.as_bytes(), &mut events);
+            partition
+                .finish(GenerationEnd::StopToken(154_829), &mut events)
+                .unwrap();
+            let call = events
+                .iter()
+                .find_map(|e| match e {
+                    PartitionEvent::FunctionCall(call) => Some(call.clone()),
+                    _ => None,
+                })
+                .expect("a parsed call");
+            assert_eq!(
+                serde_json::Value::Object(call.arguments.clone()),
+                json!({"tags":["a","b"]})
+            );
+            let arguments = serde_json::to_string(&call.arguments).unwrap();
+            let (_, next) = bound(
+                json!({"model":"m","tools":tools,"reasoning":{"effort":"low"},
+                "input":[{"role":"user","content":"q"},
+                    {"type":"reasoning","content":""},
+                    {"type":"function_call","call_id":"c1","name":"tag","arguments":arguments},
+                    {"type":"function_call_output","call_id":"c1","output":"ok"}]}),
+            )
+            .unwrap();
+            assert_eq!(
+                next.starts_with(&format!("{prompt}{generated}")),
+                extends,
+                "{generated_value}: next prompt {next:?}"
+            );
+        }
+    }
+
+    /// Generated output with a call: reasoning, visible text, then the call
+    /// as a FunctionCall event with schema-typed arguments; a tool marker
+    /// inside reasoning stays reasoning.
+    #[test]
+    fn generated_tool_calls_become_function_call_events() {
+        use crate::serve::output_partition::{GenerationEnd, OutputPartition};
+        let (request, _) = bound(json!({"model":"m","input":"q","tools":[{"type":"function",
+            "name":"get_weather","parameters":{"type":"object","properties":{
+                "city":{"type":"string"},"days":{"type":"integer"}}}}]}))
+        .unwrap();
+        let output = "plan <tool_call>not yet</think>Checking.<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value><arg_key>days</arg_key><arg_value>3</arg_value></tool_call>";
+        let mut partition = OutputPartition::new(PROFILE.output(&request));
+        let mut events = Vec::new();
+        for byte in output.as_bytes().chunks(3) {
+            partition.push(byte, &mut events);
+        }
+        partition
+            .finish(GenerationEnd::StopToken(154_829), &mut events)
+            .unwrap();
+        let mut reasoning = String::new();
+        let mut visible = String::new();
+        let mut calls = Vec::new();
+        for event in events {
+            match event {
+                PartitionEvent::Reasoning(text) => reasoning.push_str(&text),
+                PartitionEvent::Visible(text) => visible.push_str(&text),
+                PartitionEvent::FunctionCall(call) => calls.push(call),
+                PartitionEvent::ReasoningClosed => {}
+            }
+        }
+        assert_eq!(reasoning, "plan <tool_call>not yet");
+        assert_eq!(visible, "Checking.");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(
+            serde_json::Value::Object(calls[0].arguments.clone()),
+            json!({"city":"Paris","days":3})
+        );
+    }
+
+    #[test]
+    fn requests_render_through_the_pinned_template_with_release_defaults() {
+        let (request, prompt) = bound(json!({"model":"m","input":"Hello"})).unwrap();
+        assert_eq!(
+            prompt,
+            format!("{HEAD}Max<|user|>Hello<|assistant|><think>")
+        );
+        assert_eq!(request.reasoning, Some(json!({"effort":"max"})));
+        assert_eq!(
+            sampling(&request),
+            SamplingConfig::glm5_next(request.seed.expect("a fresh seed is drawn")),
+            "release defaults"
+        );
+        assert_eq!(request.max_output_tokens, Some(8));
+        for (effort, label) in [("low", "Low"), ("high", "High"), ("max", "Max")] {
+            let (request, prompt) = bound(
+                json!({"model":"m","input":"q","instructions":"S","reasoning":{"effort":effort}}),
+            )
+            .unwrap();
+            assert_eq!(
+                prompt,
+                format!("{HEAD}{label}<|system|>S<|user|>q<|assistant|><think>")
+            );
+            assert_eq!(request.reasoning_effort.as_deref(), Some(effort));
+        }
+        let history = |extra: Value| {
+            let mut body = json!({"model":"m","input":[
+                {"role":"user","content":"one"},
+                {"type":"reasoning","content":"r1"},
+                {"role":"assistant","content":"a1"},
+                {"role":"user","content":"two"},
+                {"role":"assistant","content":"tag </think> stays visible"},
+                {"role":"user","content":"three"}]});
+            body["x_qwen"] = extra;
+            bound(body).unwrap()
+        };
+        // Missing reasoning renders as empty, never through the inline split.
+        let (request, prompt) = history(json!({}));
+        assert_eq!(
+            prompt,
+            format!(
+                "{HEAD}Max<|user|>one<|assistant|><think>r1</think>a1<|user|>two<|assistant|><think></think>tag </think> stays visible<|user|>three<|assistant|><think>"
+            )
+        );
+        assert_eq!(request.history_reasoning_missing, 1);
+        assert_eq!(history(json!({"history_thinking":"preserve"})).1, prompt);
+        // strip is the template's clear_thinking.
+        assert_eq!(
+            history(json!({"history_thinking":"strip"})).1,
+            format!(
+                "{HEAD}Max<|user|>one<|assistant|><think></think>a1<|user|>two<|assistant|><think></think>tag </think> stays visible<|user|>three<|assistant|><think>"
+            )
+        );
+        // Explicit sampling overrides and a no-op thinking flag.
+        let (request, _) = bound(json!({"model":"m","input":"q","temperature":0,"top_p":1,
+            "max_output_tokens":64,"x_qwen":{"top_k":5,"seed":7,"thinking":true,"no_thinking":false}}))
+        .unwrap();
+        assert_eq!(
+            sampling(&request),
+            SamplingConfig {
+                temperature: 0.0,
+                top_k: 5,
+                top_p: 1.0,
+                min_p: 0.0,
+                seed: 7
+            }
+        );
+    }
+
+    #[test]
+    fn unsupported_controls_are_refused_before_execution_with_their_parameter() {
+        for (body, param) in [
+            (
+                json!({"model":"m","input":"q","reasoning":{"effort":"medium"}}),
+                "reasoning.effort",
+            ),
+            (
+                json!({"model":"m","input":"q","reasoning":{"effort":"none"}}),
+                "reasoning.effort",
+            ),
+            (
+                json!({"model":"m","input":"q","x_qwen":{"no_thinking":true}}),
+                "x_qwen.no_thinking",
+            ),
+            (
+                json!({"model":"m","input":"q","max_output_tokens":65}),
+                "max_output_tokens",
+            ),
+            (
+                json!({"model":"m","input":"q","tools":[{"type":"function","name":"f","strict":true,"parameters":{}}]}),
+                "tools",
+            ),
+            (
+                json!({"model":"m","input":"q","tools":[{"type":"function","name":"f","defer_loading":true}]}),
+                "tools",
+            ),
+            (
+                json!({"model":"m","input":"q","tools":[{"type":"function","name":"f","examples":[]}]}),
+                "tools",
+            ),
+            // A schema that could not type generated arguments.
+            (
+                json!({"model":"m","input":"q","tools":[{"type":"function","name":"f",
+                    "parameters":{"$ref":"#/$defs/A","$defs":{"A":{"$ref":"#/$defs/Gone"}}}}]}),
+                "tools",
+            ),
+            (
+                json!({"model":"m","input":[{"role":"user","content":"q"},
+                    {"type":"function_call","call_id":"c","name":"f","arguments":"{}"},
+                    {"type":"function_call_output","call_id":"c","output":"r"}]}),
+                "tools",
+            ),
+        ] {
+            let error = bound(body.clone()).unwrap_err();
+            assert_eq!(error.param.as_deref(), Some(param), "{body}: {error:?}");
+            assert_eq!(error.status, 400);
+        }
+        // A conversation must end in a user turn.
+        let error = bound(json!({"model":"m","input":[{"role":"user","content":"q"},
+            {"role":"assistant","content":"a"}]}))
+        .unwrap_err();
+        assert_eq!(error.status, 400, "{error:?}");
+        assert_eq!(PROFILE.template_style_default(), None);
+        assert_eq!(
+            PROFILE.output(&bound(json!({"model":"m","input":"q"})).unwrap().0),
+            crate::serve::output_partition::OutputProtocol::Glm5NextChat
+        );
+    }
+
+    #[test]
+    fn every_byte_split_closes_once_and_keeps_later_tags_visible() {
+        for opener in ["", "<think>"] {
+            for reason in ["", "plan \u{1f389} <|user|> <think>nested"] {
+                let visible = "answer \u{2192}</think><think>x</think><tool_call>t</tool_call>";
+                let all = format!("{opener}{reason}</think>{visible}");
+                for split in 0..=all.len() {
+                    for stop in CHAT_STOPS {
+                        let mut p = partition();
+                        let mut events = Vec::new();
+                        p.push(&all.as_bytes()[..split], &mut events);
+                        p.push(&all.as_bytes()[split..], &mut events);
+                        assert!(p.closed());
+                        p.finish(GenerationEnd::StopToken(stop), &mut events)
+                            .unwrap();
+                        assert_eq!(collect(&events), (reason.into(), visible.into(), 1));
+                        assert!(matches!(events.first(), Some(PartitionEvent::Reasoning(_))));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn truncated_reasoning_is_incomplete_and_bad_stops_fail() {
+        for text in ["", "p</thi", "<thi", "p</think_x>", "<think>"] {
+            for end in [
+                GenerationEnd::TokenLimit,
+                GenerationEnd::StopToken(154_820),
+                GenerationEnd::StopToken(154_827),
+            ] {
+                let mut p = partition();
+                let mut events = Vec::new();
+                for byte in text.as_bytes() {
+                    p.push(&[*byte], &mut events);
+                }
+                let result = p.finish(end, &mut events);
+                assert_eq!(result.is_ok(), end.is_token_limit(), "{text:?} {end:?}");
+                if let Err(error) = result {
+                    assert!(error.message.contains("GLM-5.3-Flash"), "{}", error.message);
+                }
+                assert!(collect(&events).1.is_empty());
+                assert_eq!(collect(&events).2, 0);
+            }
+        }
+        let mut p = partition();
+        let mut events = Vec::new();
+        p.push(b"a</think>x", &mut events);
+        // <|assistant|> is not a released stop.
+        assert!(
+            p.finish(GenerationEnd::StopToken(154_828), &mut events)
+                .is_err()
+        );
+    }
+}
+
+===== crates/qwen-llm/src/glm5_next_metal/tests/reset.rs (lines 1-244) =====
+//! Reset reuses storage but must behave like an independently fresh session.
+
+use super::*;
+
+fn fresh<'w>(
+    ctx: &MetalContext,
+    weights: &'w Glm5NextWeights,
+    capacity: usize,
+    rows: usize,
+) -> Glm5NextSession<'w> {
+    let mut session = Glm5NextSession::with_prefill_rows(ctx, weights, capacity, rows).unwrap();
+    session.set_packed_lineage(PackedLineage::Fast).unwrap();
+    session.set_fast_precision(FastPrecision::Half).unwrap();
+    session
+}
+
+fn retained_pointers(session: &Glm5NextSession<'_>) -> Vec<(usize, u64, u64)> {
+    let mut pointers = Vec::new();
+    let mut record = |t: &MetalTensor| {
+        pointers.push((t.buffer.contents().as_ptr() as usize, t.offset, t.n_bytes()));
+    };
+    for layer in &session.layers {
+        match layer {
+            LayerState::Kda { conv, state } => {
+                record(conv);
+                record(state);
+            }
+            LayerState::Mla {
+                latent,
+                pending,
+                pooled,
+            } => {
+                record(latent);
+                record(pending);
+                record(pooled);
+            }
+        }
+    }
+    for route in session.routes.iter().flatten() {
+        record(&route.ids);
+        record(&route.weights);
+        record(&route.status);
+    }
+    macro_rules! record_fields {
+        ($s:expr; $($field:ident),+ $(,)?) => {
+            $(record(&$s.$field);)+
+        };
+    }
+    let s = &session.s;
+    record_fields!(s; token, embedding, quarter, no_sink, hc_partial_dots,
+        hc_partial_sumsq, mixes, pre, post, comb, collapsed, normed, block_out,
+        q, k, v, rank_a, raw_gate, raw_beta, rank_b, output_gate, kda_out,
+        query_a, query_r, query, latent_raw, latent, query_latent, output_latent,
+        heads_out, index_key, index_gate, dense_gate, dense_up, router,
+        expert_inner, expert_out, routed, shared_swiglu, shared, final_hidden,
+        final_normed, logits);
+    for residual in &s.residual {
+        record(residual);
+    }
+    if let Some(hc) = &s.generic_hc {
+        record_fields!(hc; normalized, ones);
+    }
+    if let Some(sparse) = &session.sparse {
+        record_fields!(sparse; index_query, index_query_f16, index_weights,
+            scores, pool_ids, pool_counts, visible_pools, visible_rows,
+            row_ids, row_counts, select_status, attention_partials,
+            attention_partial_stats);
+    }
+    // Packed internals are private to their sibling module. Its exposed
+    // route buffers are sentinels; the device counter also covers its scratch.
+    if let Some(packed) = &session.packed {
+        for (_, ids) in packed.route_ids() {
+            record(ids);
+        }
+    }
+    pointers
+}
+
+fn reset_retaining_storage(ctx: &MetalContext, session: &mut Glm5NextSession<'_>) {
+    let pointers = retained_pointers(session);
+    let ledger = *session.ledger();
+    let capacity = session.capacity;
+    let rows = session.packed.as_ref().map(|p| p.rows());
+    let lineage = session.packed_lineage();
+    let precision = session.fast_precision();
+    let observed = session.observed_allocation_delta();
+    let allocated = ctx.current_allocated_size();
+    session.reset().unwrap();
+    assert_eq!(
+        ctx.current_allocated_size(),
+        allocated,
+        "reset allocated/freed Metal storage"
+    );
+    assert_eq!(retained_pointers(session), pointers);
+    assert_eq!(*session.ledger(), ledger);
+    assert_eq!(session.capacity, capacity);
+    assert_eq!(session.packed.as_ref().map(|p| p.rows()), rows);
+    assert_eq!(session.packed_lineage(), lineage);
+    assert_eq!(session.fast_precision(), precision);
+    assert_eq!(session.observed_allocation_delta(), observed);
+    assert_eq!(session.position(), 0);
+    assert!(!session.is_poisoned());
+}
+
+fn assert_same_state(actual: &Glm5NextSession<'_>, expected: &Glm5NextSession<'_>) {
+    assert_eq!(actual.position(), expected.position());
+    let snapshot = actual.capture_snapshot().unwrap();
+    assert!(
+        snapshot.same_state(&expected.capture_snapshot().unwrap()),
+        "snapshot differs at position {}",
+        actual.position()
+    );
+    assert!(
+        snapshot.same_state(&actual.capture_snapshot().unwrap()),
+        "repeated capture changed at position {}",
+        actual.position()
+    );
+}
+
+fn compare_schedule(
+    ctx: &MetalContext,
+    actual: &mut Glm5NextSession<'_>,
+    expected: &mut Glm5NextSession<'_>,
+    tokens: &[u32],
+) {
+    let a = actual.prefill_packed(ctx, tokens).unwrap();
+    let b = expected.prefill_packed(ctx, tokens).unwrap();
+    assert_comparable("reset prefill", &a, &b);
+    assert_eq!(
+        logit_bits(&[a]),
+        logit_bits(&[b]),
+        "prefill length {}",
+        tokens.len()
+    );
+    assert_same_state(actual, expected);
+    // Exercise the partial pending ring through a full pool boundary.
+    for &token in tokens.iter().cycle().take(4) {
+        let a = actual.forward(ctx, token).unwrap();
+        let b = expected.forward(ctx, token).unwrap();
+        assert_comparable("reset decode", &a, &b);
+        assert_eq!(
+            logit_bits(&[a]),
+            logit_bits(&[b]),
+            "decode position {}",
+            actual.position()
+        );
+        assert_same_state(actual, expected);
+    }
+}
+
+#[test]
+#[ignore = "reset gates: loads the 109.5 GiB GLM-5.3 trunk; requires MTL_DEBUG_LAYER=1, GLM53_GGUF and an idle GPU"]
+fn reset_equals_fresh_and_retains_storage() {
+    let _lease = production_lease();
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let ctx = MetalContext::new().expect("Metal context");
+    let gguf = GgufFile::open(&path).unwrap();
+    let weights = Glm5NextWeights::load(&ctx, &gguf).expect("load weights");
+    let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
+    let tokens: Vec<u32> = tokenizer
+        .encode(&long_qualification_text(), false)
+        .unwrap()
+        .into_iter()
+        .map(|t| t as u32)
+        .collect();
+    let frontier = weights.config.sparse_frontier() as usize;
+    assert_eq!(
+        weights.config.indexer_pool, 4,
+        "these cases target pool residues 1/3/0"
+    );
+    let old_len = frontier + 7;
+    let capacity = old_len + 8;
+    let new_start = 61;
+    assert!(tokens.len() >= new_start + frontier + 2);
+    let mut recycled = fresh(&ctx, &weights, capacity, 2048);
+    recycled.prefill_packed(&ctx, &tokens[..old_len]).unwrap();
+    let old = recycled.capture_snapshot().unwrap();
+    assert_eq!(old.position(), old_len);
+
+    // One expensive old prefill, replayed only as CPU snapshot copies. The
+    // independent oracle never restores a snapshot or calls reset.
+    for n in [1, 3, 4, frontier + 2] {
+        recycled.restore_snapshot(&old).unwrap();
+        let mut oracle = fresh(&ctx, &weights, capacity, 2048);
+        reset_retaining_storage(&ctx, &mut recycled);
+        assert_same_state(&recycled, &oracle);
+        reset_retaining_storage(&ctx, &mut recycled);
+        assert_same_state(&recycled, &oracle);
+        compare_schedule(
+            &ctx,
+            &mut recycled,
+            &mut oracle,
+            &tokens[new_start..new_start + n],
+        );
+    }
+
+    // Poison refusal must preserve even stale capacity beyond the live prefix.
+    let before = recycled.capture_snapshot().unwrap();
+    let bits = state_bits(&recycled);
+    let pointers = retained_pointers(&recycled);
+    let ledger = *recycled.ledger();
+    let allocated = ctx.current_allocated_size();
+    let position = recycled.position();
+    recycled.poisoned = true;
+    assert!(matches!(
+        recycled.reset(),
+        Err(Glm5NextMetalError::Poisoned)
+    ));
+    assert!(recycled.is_poisoned());
+    assert_eq!(recycled.position(), position);
+    assert_eq!(ctx.current_allocated_size(), allocated);
+    assert_eq!(retained_pointers(&recycled), pointers);
+    assert_eq!(*recycled.ledger(), ledger);
+    assert_eq!(recycled.capacity, capacity);
+    assert_eq!(recycled.packed.as_ref().unwrap().rows(), 2048);
+    assert_eq!(recycled.packed_lineage(), Some(PackedLineage::Fast));
+    assert_eq!(recycled.fast_precision(), Some(FastPrecision::Half));
+    assert_eq!(
+        state_bits(&recycled),
+        bits,
+        "poison refusal wrote persistent storage"
+    );
+    recycled.poisoned = false; // Only to inspect the deliberately poisoned state.
+    assert!(before.same_state(&recycled.capture_snapshot().unwrap()));
+    drop(bits);
+    drop(before);
+    drop(old);
+    drop(recycled);
+
+    // No packed/sparse scratch: prefill_packed takes the serial fallback.
+    let mut serial = fresh(&ctx, &weights, 16, 0);
+    serial.prefill(&ctx, &tokens[..7]).unwrap();
+    let mut oracle = fresh(&ctx, &weights, 16, 0);
+    reset_retaining_storage(&ctx, &mut serial);
+    assert_same_state(&serial, &oracle);
+    reset_retaining_storage(&ctx, &mut serial);
+    assert_same_state(&serial, &oracle);
+    compare_schedule(
+        &ctx,
+        &mut serial,
+        &mut oracle,
+        &tokens[new_start..new_start + 3],
+    );
+}
+
+===== docs/SERVE.md (lines 774-1037) =====
+## GLM-5.3-Flash Verified Chat And Tools
+
+For Maya conversation reuse, the current practical recipe is:
+
+```sh
+qwen serve -m /path/to/GLM-5.3-Flash-Maya-M-IQ2_S-00001-of-00003.gguf \
+  --addr 127.0.0.1:8797 --max-context-tokens 32768 --max-tokens 2048
+```
+
+Keep default Fast Half and automatic workspace/RAM cache selection; replay
+reasoning, assistant messages and tool results with stable shared instructions.
+The [Maya reuse screen](bench/2026-10-12-glm-maya-agent-reuse/README.md) records
+live and shared-prefix snapshot reuse, startup/request timings and the unfinished
+C task. Fast return restores the shared prefix, then prefills the conversation
+suffix. Snapshots remain in RAM only while the server is running.
+
+For UD:
+
+```sh
+qwen serve -m GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf \
+  --max-context-tokens 16384 --max-tokens 2048
+```
+
+Startup admits the artifact, requires its chat profile (embedded template
+digest pinned to the upstream or unsloth GGUF template, every marker a single
+released token, the released stops), and refuses to serve otherwise: there is
+no raw serve lane. Before listening it admits the session against device
+memory (a refusal names the `--max-context-tokens` that fits), prefetches the
+retained windows, loads, and runs a two-token warm-up prefill so the first
+request is not charged the weights' first GPU use (`serve startup:` logs
+`load_ms` and `warm_up_ms`).
+
+Requests use the shared Open Responses parser; the pinned
+`glm53_flash_chat_v2` renderer (`crates/qwen-llm/src/glm5_next_chat.rs`)
+renders them. The body is decoded once, losslessly
+(`qwen_llm::tool_schema::decode_json`, as for K2): a literal
+`"$serde_json::private::Number"` key in a tool schema or replayed arguments
+stays an ordinary key (serde's arbitrary-precision `Value` would read it as a
+number), and a duplicate key anywhere is a 400 rather than silently
+collapsed. `qwen run --messages` documents decode the same way.
+
+- `input` string is one user message; items are system/developer (or
+  `instructions`), user and assistant messages with `reasoning` items,
+  `function_call` and `function_call_output` items, ending in a user turn or
+  tool results. Tools are below.
+- `reasoning.effort` is `low`, `high` or `max` (default `max`, the
+  template's); anything else is a 400 on `reasoning.effort`, where the
+  template would silently use Max. The template always opens reasoning:
+  `x_qwen.no_thinking: true` is refused, `x_qwen.thinking: true` is a no-op.
+- History renders as generated. The template keeps past reasoning by
+  default; an assistant without a reasoning item renders with empty
+  reasoning, never through the template's inline `</think>` split.
+  `x_qwen.history_thinking: "strip"` is the template's own `clear_thinking`
+  (reasoning at or before the last user turn dropped). `template_style` is
+  refused at startup and per request, as for K2 and Muse.
+- Sampling defaults are the release `generation_config.json`: temperature
+  1.0, top-p 0.95, top-k and min-p off, a fresh seed; `max_output_tokens` defaults
+  to `--max-tokens` and must be within capacity.
+- `x_qwen.prefill_lineage` chooses how the prompt is read: `"fast"` (the
+  default: batched, ~190 tok/s, with small numerical drift from
+  token-by-token decoding) or `"exact"` (the decode kernels per row, ~40
+  tok/s, matching token-by-token decoding; for evaluations and reproducible
+  comparisons; `docs/bench/2026-10-07-glm53-natural-reuse/`). The live
+  session is reused only by requests of its own lineage; a change starts a
+  fresh session. The `serve phases:` line reports `lineage=`. Every other
+  family refuses the field.
+
+Output partitions on the pre-opened reasoning: bytes are a `reasoning` item
+until the first `</think>`, then the `message`. Stops are `<|endoftext|>`,
+`<|user|>` and `<|observation|>`. Budget exhaustion inside reasoning is
+incomplete; a stop before `</think>` is a protocol failure.
+
+**Tools.** Function tools follow the template's own format; serve renders
+and parses it, and never runs a tool.
+
+- **Definitions.** They render in request order as one `<|system|>` tools
+  block of `{"name", "description", "parameters"}` objects (Python `tojson`).
+  `strict: true` is refused (no constrained decoding). So are
+  `defer_loading: true` and any key other than `type`, `name`,
+  `description`, `parameters` and `strict`: upstream would hide deferred
+  functions and print other keys, which the shared parser does not keep.
+  `tool_choice` is `auto` or `allowed_tools` (shared rules below).
+  Generated calls to functions outside `allowed_tools`, and extra calls when
+  `parallel_tool_calls` is false, are suppressed from the response, not
+  prevented by decoding.
+- **History.**
+  - A replayed `function_call` becomes its assistant turn's
+    `<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value>…</tool_call>`:
+    string values are written verbatim, others through `tojson`, and
+    `arguments` must be a JSON object without duplicate keys (decoded
+    losslessly).
+  - `function_call_output` items render under one `<|observation|>` as
+    `<tool_response>…</tool_response>`, in call order.
+  - Each call needs exactly one output before the next turn.
+  - Renders are byte-exact against the template oracle's tool cases
+    (`crates/qwen-llm/tests/fixtures/glm53_chat_hf.json`).
+- **Output.** After `</think>`, visible text is released until the first
+  `<tool_call>`. The block is buffered within `max_output_tokens` × the
+  longest decoded token × 3 bytes, and calls are published together as
+  `function_call` items when the turn stops (`<|observation|>`).
+  - Each argument's outer type comes from the declared schema (`type`,
+    `enum`, `const`, `anyOf`/`oneOf`/`allOf`, local `$ref`). This is not
+    full JSON Schema validation.
+    - Every object schema that applies to the arguments constrains each
+      argument, and they intersect: `parameters` itself, each target along
+      its `$ref` chain (the root's own `properties` still apply), and each
+      `allOf` member. Root `anyOf`/`oneOf` members unite.
+    - A definition whose schema could not type some argument is refused
+      with a 400 when the request arrives. That covers a non-string,
+      unresolvable or remote `$ref` anywhere in that walk or in a declared
+      property, and malformed `properties` or combinators. So is a schema
+      that needs more than 65,536 visits (shared references fanned out
+      along many paths).
+    - A schema that admits no string: the value must decode losslessly as
+      JSON of an admitted, renderable type.
+    - A schema that admits a string: the text is the string, unless it also
+      decodes as another admitted type (`3` under `{}` or `["string",
+      "integer"]`). The template writes both identically, so such a call is
+      refused as ambiguous; declare a narrower schema.
+  - Memory: the block is capped at its byte bound and admitted before it
+    grows. Its capacity grows in 64 KiB steps, and each step must find
+    process headroom for the block's whole outstanding peak at the new
+    capacity, less what it already holds. That peak is 256 bytes per block
+    byte. It covers the text, the parsed values with their container
+    overhead, the serialized arguments kept and embedded in events and the
+    response, and, when not streaming, the collected output pieces (one
+    allocation each).
+    - Counting allocators measure it over container-heavy shapes (arrays
+      nested to the decoder's 128-level limit are the worst).
+    - Through serve's real handler, the peak above a run without a block
+      is about 149 bytes per block byte when streaming (with or without an
+      SSE trace) and 205 when not streaming with one-byte pieces. The
+      theoretical worst is about 225.
+    - Sources: `crates/qwen-cli/src/serve/http/tests/tool_block_memory_tests.rs`
+      and `crates/qwen-llm/tests/glm53_tool_block_peak.rs`.
+    - Headroom is read afresh at every step and once more before the
+      parse, so an earlier step reserves nothing. A failed check ends the
+      turn: `503` `memory_admission_denied` under memory pressure, or `500`
+      `memory_signal_unavailable` when the process budget signal is
+      unavailable (a reported zero means no limit and admits).
+    - When not streaming, the partition runs after generation, so the
+      check prices the block's parse and publication but cannot stop the
+      collection itself. Collecting other output is not priced (map #14).
+    - Nothing is reserved upfront at the worst case (the longest piece is
+      512 bytes; the 99.9th percentile is 52).
+    - A partition failure found after generation (this refusal, or an
+      ill-typed call) reaches the model owner as a server-side failure.
+  - Text after a call, an undeclared function, a repeated key or an
+    ill-typed value is a server error, never text.
+  - A block still open at the token limit is incomplete with no call.
+  - A tool marker inside reasoning stays reasoning.
+- **Live session.** A tool loop extends the live session: the model ends
+  the call turn by sampling `<|observation|>`, which opens the results.
+  Live, UD-IQ3_XXS, effort low
+  (`docs/bench/2026-10-05-glm53-tools/serve-tool-loop.json`):
+  - the first turn returned `get_weather {"city":"Paris","days":2}`;
+  - the replayed call and output reused 218 of 236 tokens (401 ms
+    prefill vs 1.5 s cold), and the answer used the output;
+  - JSON and SSE behaved alike.
+- **`qwen run --messages`.** A document with a nonempty `tools` list prints
+  one Responses JSON object, `function_call` items included, instead of
+  streaming text.
+
+**Idle residency.** On by default (60 s; see
+[Idle residency](#idle-residency-no-copy-families)). Without it, a request
+after a pause pays ~1 s to re-wire GLM's 109.5 GiB: a 27-token prefill takes
+1.6-1.7 s instead of 0.6 s. The window opens after the warm-up.
+
+**Live session.** The one resident session is reused when a request's
+prompt strictly extends exactly the tokens it consumed; otherwise a snapshot
+may restore a shared prefix (below), or the healthy, compatible session resets
+and prefills from the start. Reset retains workspace and cache allocations,
+clears recurrent state and pending pooling rings, and publishes position zero;
+it is not secure erasure of invisible cache tails. Incompatible arithmetic or
+geometry still requires a new session. A replayed conversation extends: the
+model ends a turn by sampling `<|user|>`, the next turn's opener, and the
+renderer writes history back byte-for-byte when the client replays the
+reasoning and answer items. Re-tokenization that differs from the sampled tokens, a changed
+effort or system message, `strip`, or whitespace the template strips from an
+answer all fall back to fresh logical state. Every client-caused refusal
+(budget, capacity, input) precedes the session, so the cache survives it. A
+cancellation during prefill keeps the committed chunks (a retry of the same
+prompt resumes from them); an abort during decode or any engine failure
+clears the session. `QWEN_GLM_PREFIX_REUSE=0` disables token-prefix reuse (live
+session and snapshots), not reuse of reset storage. Reset reports zero cached
+tokens and does not change the request's arithmetic policy.
+
+**Snapshots.** GLM keeps a RAM snapshot cache under `--snapshot-cache-mib`
+(default `auto`) and the shared expiry and eviction flags; there is no
+durable tier. A snapshot holds the session's recurrent and attention state
+at a committed position: about 0.14 GiB fixed plus ~11.7 KiB per token
+(0.27 GiB at an 11K-token instructions-and-tools prefix). The renderer
+records two boundaries while it renders: the end of the shared prefix (the
+effort line, the tools block and leading system messages) and the start of
+the generation header; serve verifies each against the prompt's tokens. A
+request whose schedule uses snapshots splits its prefill at those positions
+whether its lookup hits or misses, the cache is full or capture is denied,
+and captures the state at each cut when it is new and admitted. A later
+request restores the longest compatible snapshot when it reaches past the
+live session's extension (`usage.cached_tokens` reports it); entries are
+compatible only within one prefill lineage and schedule.
+
+- Exact (`x_qwen.prefill_lineage: "exact"`) cuts at both boundaries. Packed
+  Exact equals token-by-token decoding, so a restored request equals a cold
+  run bit for bit. On by default whenever the cache has a budget.
+- Fast (the default lineage) is on by default (`QWEN_GLM_FAST_SNAPSHOTS=0`
+  turns it off): one cut at the shared prefix. Fast's prefill depends on
+  where chunks start, so a split request equals a miss on the same split,
+  not an unsplit cold run. Against the unsplit Fast it replaces, the split
+  showed no detectable quality change on the #12 cohort; the preregistered
+  comparison against Exact was inconclusive on one arm
+  (`docs/bench/2026-10-08-glm53-fast-split-quality/`; decision in PERF-LOG
+  2026-10-08). A Fast request restores
+  only a snapshot ending exactly at its own verified cut and publishes one
+  only from a state on that schedule (packed chunks from 0; a live session
+  with an earlier cut, an off-grid cancellation or decoded tokens is
+  continued but not captured, outcome `noncanonical`); without a verified
+  cut it neither restores nor captures.
+- Fast operand precision (`QWEN_GLM_FAST_PRECISION`, read at startup and
+  shown as `fast_precision=` in the startup limits line): `half` (default)
+  stages quantized matrix operands in half precision; `dense_f32` runs the
+  dense projections on F32-operand tiles; `f32` also the routed experts.
+  On the six frozen natural cases these cut the mean KL against Exact by
+  30% and 50%, at about +5% and +13-17% on a fresh 2,048-token prompt
+  (`docs/bench/2026-10-09-glm53-fast-f32-operands/`). Every setting keeps
+  the bitwise properties above; one server uses one precision, and the
+  engine refuses to restore a snapshot of another.
+
+A memory-pressure refusal of the transport allowance or of a new session
+releases cached snapshots (except one being restored) and retries once.
+
+The `serve phases:` line reports `reuse_source=live|snapshot|none`,
+`restore_ms`, `boundary_ms` (CPU time verifying the cuts), `snapshot_schedule`, `cuts`, each cut's capture outcome
+(`captured`, `present`, `ineligible`, `denied`, `failed`, `noncanonical`),
+`snapshot_capture_ms` and the cache's bytes and entries.
+
+Checked under `MTL_DEBUG_LAYER=1` on UD-IQ3_XXS with a 1,173-token shared
+prefix (`serve::backend_glm5_next::tests::gpu_snapshots_continue_the_captured_trajectory`):
+Exact misses capture both cuts and equal a cold run; a second conversation
+restores the shared prefix and an identical retry restores its transcript,
+both equal to cold runs bit for bit (logits and bytes); Fast hits equal
+a miss on the same split, as does a full cache; Fast entries never serve an
+Exact request; a split prefill cancelled after its first chunk resumes onto
+the same schedule with the uninterrupted run's logits, in both lineages; a
+Fast request ignores another request's shorter cut and equals its own miss;
+a live session cancelled just after a cut continues into a longer prefix
+without publishing a Fast snapshot; a Fast request without boundaries
+neither restores nor captures; denied captures keep the splits; and a
+continued live request's transcript capture cannot evict the shared entry it
+passed.
+
+Checked under `MTL_DEBUG_LAYER=1` on UD-IQ3_XXS
+(`serve::backend_glm5_next::tests::gpu_live_session_extends_resumes_and_resets`):
+cold bytes equal the run lane's; a replayed turn reuses the whole history;
+under the Exact packed lineage a warm continuation's output bytes, and the
+logits at the join, equal a cold run's bit for bit; a two-chunk prompt
+cancelled between chunks resumes with the cold run's bytes; aborts after
+prefill, on the first piece and after several forwards clear the session and
+their retries equal an uninterrupted run; over-capacity is refused with no
+ticks and the history kept; JSON and SSE carry the reasoning item and the
+answer. A new session is admitted together with the request's transport
+allowance. These are wiring and cache-correctness checks, not
+reasoning-quality or sustained-service qualification.
+
+
+===== QUESTION =====
+Using only this source packet, write an operator decision table for GLM cached-conversation serving: exact live continuation, branch/snapshot restore, incompatible history reset, cancellation in prefill versus decode, memory-pressure fallback, and Fast versus Exact snapshot compatibility. Explain automatic workspace selection and when it freezes. Cite concrete paths and function/test names; distinguish implemented behavior from what tests prove. End with the recommended Fast Half command for a 65536-token server and the telemetry needed to distinguish a live hit from a restored snapshot. Do not call tools. Keep the answer under 1000 words.

@@ -1,0 +1,12 @@
+serve durable: family=GLM-5.3-Flash tier unsupported; prefixes do not survive a restart
+serve prefetch: family=glm5_next windows=3 cold_windows=3 bytes_read=112394829824 wall_ms=68252.6
+serve idle residency: family=glm5_next window_s=60 pulse_ms=500
+serve limits: family=glm5_next input=verified_chat_and_tools renderer=glm53_flash_chat_v2 capacity=65536 default_max_tokens=4096 prefill_rows_max=2048 fast_precision=half snapshot_cache_bytes=7149666304 snapshot_cache_source=auto physical_bytes=137438953472 metal_recommended_bytes=126701535232 metal_resident_bytes=112402202624 snapshot_half_life_secs=600 snapshot_idle_ttl_secs=3600 snapshot_max_age_secs=86400 snapshot_schedules=exact,fast_shared_split
+serve startup: family=glm5_next load_ms=68265.1 warm_up_ms=36572.5
+serve: listening on http://127.0.0.1:8797 model=GLM-5.3-Flash-Maya-M-IQ2_S-00001-of-00003 load_ms=68265.1 lens_history=false (serial; POST /v1/responses, GET /v1/models)
+serve: glm5_next prefill plan rows=2048 session_bytes=3548266496 prefix_budget=0 prefix_preference_held=false
+serve phases: family=glm5_next prefill_ms=186981.2 reused_tokens=0 reuse_source=none restore_ms=0.0 boundary_ms=0.0 prefill_tokens=41420 decode_ms=58175.0 required_forwards=45515 capacity=65536 transitions=1612 lineage=fast snapshot_schedule=fast_shared_split_v1 cuts=[51] captures=[51:captured] snapshot_capture_ms=15.8 snapshot_cache_bytes=153264332 snapshot_cache_entries=1
+serve stats: version=serve_stats_v1 prompt_tokens=41420 generated_tokens=1613 stop_reason=eos matched_tokens=0 restore_ms=0.0 decode_tps=27.73
+serve phases: family=glm5_next prefill_ms=1211.4 reused_tokens=43032 reuse_source=live restore_ms=0.0 boundary_ms=0.0 prefill_tokens=106 decode_ms=41815.5 required_forwards=47233 capacity=65536 transitions=1163 lineage=fast snapshot_schedule=fast_shared_split_v1 cuts=[51] captures=[] snapshot_capture_ms=0.0 snapshot_cache_bytes=153264332 snapshot_cache_entries=1
+serve stats: version=serve_stats_v1 prompt_tokens=43138 generated_tokens=1164 stop_reason=eos matched_tokens=43032 restore_ms=0.0 decode_tps=27.84
+Error: termination signal 2 received; unwinding for Metal teardown

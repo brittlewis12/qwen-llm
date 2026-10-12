@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-12 - Maya 41K Repository Context And Live Follow-Up Complete
+
+- CLI `ec96cc45`, driver `9cd2915e`; one real-source packet, two requests,
+  65536 capacity, default Fast Half, automatic cache/workspace, low effort,
+  fresh sampling at temperature 1.0 / top_p 0.95 without overrides. Both
+  responses completed at EOS, not truncated; no request/teardown errors.
+- Initial input 41,420 tokens: first delta 187.2918 s, first answer 188.5597 s,
+  wall 245.4655 s, output 1,613 tokens. Follow-up input 43,138, live cached
+  43,032, prefilled 106: first delta 1.2314 s, first answer 6.3004 s,
+  wall 43.0456 s, output 1,164. Decode 27.73/27.84 tokens/s. Cold load
+  68.265 s and warm-up 36.573 s precede requests; cause not inferred.
+- Admitted rows 2048, session ledger 3,548,266,496 bytes. Cache budget
+  7,149,666,304 bytes; actual shared cut 51, one 153,264,332-byte entry.
+  This demonstrates long live reuse, not restoration of a 41K document.
+- Independent review found material answer errors: decode cancellation drops
+  live state but leaves snapshots; Fast canonicality checks segment starts,
+  not cut endpoints; tick-5 cancellation is at the cut; Exact can restore
+  the transcript suffix (`a_len - 2`). The 2048-row cancellation citation is
+  `gpu_adaptive_prefill_cold_hit_and_continuation`. No task-quality pass.
+- [Evidence and corrected guidance](bench/2026-10-12-glm-maya-repository-context/README.md)
+  retain raw answers, hashes and timings unchanged. One example is not broader
+  quality evidence; no rerun to paint it green. No new task is underway.
+  Research is considering the Fast shared-only cut as a long-document branch
+  lever, but a candidate needs concrete branch cost and a compatible mechanism;
+  there is no measured branch cliff yet.
+
 ## 2026-10-12 - Maya Practical Reuse And Harness Refresh
 
 - CLI `ec96cc45`, harness `f36f52b1`; 10 mock tests passed for the refreshed
@@ -23,9 +49,9 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   preserve those fixture failures. No paired speedup claim against historical
   UD on a different, pre-snapshot binary. HC remains parked at `ec96cc45`,
   source archived at `08ec6267`.
-- Next already underway: one 64K-capacity real repository task (about 41K input
-  tokens) plus follow-up; a separate owner implements the driver. No new kernel
-  search or duplicate serving work.
+- The subsequent 64K-capacity real repository task and follow-up are now
+  complete; see the checkpoint above for live reuse and factual answer errors.
+  No new kernel search or duplicate serving work.
 
 ## 2026-10-12 - F32 HC MMA Leaf Win Does Not Convert To Whole Prefill
 

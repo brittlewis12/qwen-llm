@@ -787,6 +787,15 @@ live and shared-prefix snapshot reuse, startup/request timings and the unfinishe
 C task. Fast return restores the shared prefix, then prefills the conversation
 suffix. Snapshots remain in RAM only while the server is running.
 
+The [64K-capacity repository run](bench/2026-10-12-glm-maya-repository-context/README.md)
+used `--max-context-tokens 65536 --max-tokens 4096` with the same defaults and
+admitted 2048 workspace rows. A 41,420-token prompt completed; its follow-up
+reused 43,032 tokens live and prefilled 106. Only a 51-token shared snapshot was
+captured, so this does not demonstrate document-snapshot restoration. Both
+answers completed but contained material factual errors; the packet records
+corrections, not a quality pass. Startup and first-delta/first-answer timings are
+reported separately.
+
 For UD:
 
 ```sh

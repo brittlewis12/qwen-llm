@@ -1149,6 +1149,52 @@ fn process_only_session_refusals_release_snapshots_and_keep_the_hit() {
     assert_eq!(cache.len(), 2);
 }
 
+#[test]
+fn release_keep_pin_is_cleared_when_eviction_panics() {
+    use qwen_llm::snapshot_policy::{Clock, SnapshotPolicyConfig};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    struct PanicClock(Arc<AtomicBool>);
+
+    impl Clock for PanicClock {
+        fn now(&self) -> Duration {
+            assert!(
+                !self.0.load(Ordering::Relaxed),
+                "injected eviction clock panic"
+            );
+            Duration::ZERO
+        }
+    }
+
+    let panic_clock = Arc::new(AtomicBool::new(false));
+    let namespace = CacheNamespace {
+        lineage: PackedLineage::Exact,
+        schedule: Schedule::ExactV1,
+        rows: 512,
+    };
+    let mut cache: SnapshotCache<&'static str, CacheNamespace> = SnapshotCache::with_clock(
+        1_000,
+        SnapshotPolicyConfig::default(),
+        Arc::new(PanicClock(Arc::clone(&panic_clock))),
+    );
+    for token in [1, 2, 3] {
+        assert!(cache.insert_strict_in(namespace, vec![token], "snapshot", 10));
+    }
+    let keep = cache.entry_for_in(&namespace, &[1]);
+
+    panic_clock.store(true, Ordering::Relaxed);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        release_snapshots(&mut cache, keep);
+    }));
+    assert!(result.is_err());
+    panic_clock.store(false, Ordering::Relaxed);
+
+    assert_eq!(cache.pinned_bytes(), 0);
+    assert_eq!(cache.len(), 3);
+}
+
 /// A request rendered as serve renders it, with its boundaries.
 fn prepared_request(backend: &Glm5NextBackend<'_, '_>, body: Value) -> Arc<PreparedResponse> {
     let mut request = backend.parse_request(&body).unwrap();

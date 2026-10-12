@@ -1,6 +1,7 @@
 use crate::metal_forward::{SessionSnapshot, SnapshotIdentity};
 use crate::snapshot_policy::{
     Clock, EntryId, Evicted, MonotonicClock, SnapshotPolicy, SnapshotPolicyConfig,
+    SnapshotPolicyPinGuard,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -244,13 +245,10 @@ impl PrefixCache {
             .filter(|entry| Arc::strong_count(&entry.snapshot) > 1)
             .map(|entry| entry.id)
             .collect();
-        for &id in &held {
-            self.policy.pin(id);
-        }
-        let evicted = self.policy.evict_for(bytes);
-        for &id in &held {
-            self.policy.unpin(id);
-        }
+        let evicted = {
+            let mut pins = SnapshotPolicyPinGuard::new(&mut self.policy, held);
+            pins.evict_for(bytes)
+        };
         self.release(&evicted, false);
         evicted
     }
@@ -561,9 +559,22 @@ mod tests {
     use crate::metal_forward::{
         SNAPSHOT_LAYOUT_VERSION, SessionSnapshot, SnapshotIdentity, SnapshotKvStorageKind,
     };
-    use crate::snapshot_policy::{FakeClock, SnapshotPolicyConfig};
+    use crate::snapshot_policy::{Clock, FakeClock, SnapshotPolicyConfig};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+
+    struct PanicClock(Arc<AtomicBool>);
+
+    impl Clock for PanicClock {
+        fn now(&self) -> Duration {
+            assert!(
+                !self.0.load(Ordering::Relaxed),
+                "injected eviction clock panic"
+            );
+            Duration::ZERO
+        }
+    }
 
     fn ident(model_id: u64) -> SnapshotIdentity {
         SnapshotIdentity {
@@ -1215,5 +1226,31 @@ mod tests {
         assert_eq!(evicted.bytes, 2 * one);
         assert_eq!(cache.len(), 1);
         assert!(cache.lookup_longest(&id, &[1]).is_some());
+    }
+
+    #[test]
+    fn eviction_panic_releases_held_entry_pin() {
+        let panic_clock = Arc::new(AtomicBool::new(false));
+        let id = ident(1);
+        let mut cache = PrefixCache::with_policy(
+            10_000,
+            SnapshotPolicyConfig::default(),
+            Arc::new(PanicClock(Arc::clone(&panic_clock))),
+        );
+        cache.insert(snap(id.clone(), &[1], 64));
+        let held = cache.lookup_longest(&id, &[1]).unwrap();
+        cache.insert(snap(id.clone(), &[2], 64));
+
+        panic_clock.store(true, Ordering::Relaxed);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cache.evict_for(u64::MAX);
+        }));
+        assert!(result.is_err());
+        panic_clock.store(false, Ordering::Relaxed);
+
+        assert_eq!(cache.pinned_bytes(), 0);
+        assert_eq!(cache.len(), 2);
+        assert!(cache.lookup_longest(&id, &[1]).is_some());
+        drop(held);
     }
 }

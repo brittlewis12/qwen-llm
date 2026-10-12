@@ -6,6 +6,7 @@
 
 use qwen_llm::snapshot_policy::{
     Clock, EntryId, Evicted, MonotonicClock, SnapshotPolicy, SnapshotPolicyConfig,
+    SnapshotPolicyPinGuard,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -201,21 +202,32 @@ impl<V, N: PartialEq> SnapshotCache<V, N> {
 
     /// Evict unpinned entries by rank until `bytes` are released.
     pub(crate) fn evict_for(&mut self, bytes: u64) -> Evicted {
+        self.evict_for_except(bytes, None)
+    }
+
+    /// Evict unpinned entries while protecting one additional entry for the
+    /// duration of this call.
+    pub(crate) fn evict_for_except(&mut self, bytes: u64, keep: Option<EntryId>) -> Evicted {
         let held: Vec<EntryId> = self
             .entries
             .iter()
             .filter(|(_, entry)| Arc::strong_count(&entry.value) > 1)
             .map(|(&id, _)| id)
             .collect();
-        for &id in &held {
-            self.policy.pin(id);
-        }
-        let evicted = self.policy.evict_for(bytes);
-        for &id in &held {
-            self.policy.unpin(id);
-        }
+        let evicted = {
+            let mut pins = SnapshotPolicyPinGuard::new(&mut self.policy, held);
+            if let Some(keep) = keep {
+                pins.pin(keep);
+            }
+            pins.evict_for(bytes)
+        };
         self.drop_entries(&evicted);
         evicted
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pinned_bytes(&self) -> u64 {
+        self.policy.pinned_bytes()
     }
 
     /// Remove a specific cached value when the caller proves it is unusable.
@@ -271,10 +283,55 @@ impl<V> SnapshotCache<V> {
 mod tests {
     use super::*;
     use qwen_llm::snapshot_policy::FakeClock;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+
+    struct PanicClock(Arc<AtomicBool>);
+
+    impl Clock for PanicClock {
+        fn now(&self) -> Duration {
+            assert!(
+                !self.0.load(Ordering::Relaxed),
+                "injected eviction clock panic"
+            );
+            Duration::ZERO
+        }
+    }
 
     fn lru(max_bytes: u64) -> SnapshotCache<&'static str> {
         SnapshotCache::new(max_bytes, SnapshotPolicyConfig::LRU)
+    }
+
+    #[test]
+    fn eviction_panic_releases_held_and_keep_pins() {
+        let panic_clock = Arc::new(AtomicBool::new(false));
+        let mut cache = SnapshotCache::with_clock(
+            100,
+            SnapshotPolicyConfig::default(),
+            Arc::new(PanicClock(Arc::clone(&panic_clock))),
+        );
+        assert!(cache.insert_strict(vec![1], "held", 10));
+        let held_id = cache.entry_for(&[1]).unwrap();
+        let held = cache.peek_exact_in(&(), &[1]).unwrap();
+        assert!(cache.insert_strict(vec![2], "keep", 10));
+        let keep_id = cache.entry_for(&[2]).unwrap();
+        assert!(cache.insert_strict(vec![3], "victim", 10));
+        let victim_id = cache.entry_for(&[3]).unwrap();
+
+        panic_clock.store(true, Ordering::Relaxed);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cache.evict_for_except(u64::MAX, Some(keep_id));
+        }));
+        assert!(result.is_err());
+        panic_clock.store(false, Ordering::Relaxed);
+
+        assert_eq!(cache.pinned_bytes(), 0);
+        assert!(cache.entry_for(&[1]).is_some());
+        assert!(cache.entry_for(&[2]).is_some());
+        assert!(cache.entry_for(&[3]).is_some());
+        drop(held);
+        assert_eq!(cache.entry_for(&[1]), Some(held_id));
+        assert_eq!(cache.entry_for(&[3]), Some(victim_id));
     }
 
     #[test]

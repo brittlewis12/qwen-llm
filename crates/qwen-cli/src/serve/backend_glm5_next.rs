@@ -462,11 +462,7 @@ fn release_snapshots<V>(
     cache: &mut SnapshotCache<V, CacheNamespace>,
     keep: Option<EntryId>,
 ) -> qwen_llm::snapshot_policy::Evicted {
-    let pinned = keep.filter(|&id| cache.pin(id));
-    let released = cache.evict_for(u64::MAX);
-    if let Some(id) = pinned {
-        cache.unpin(id);
-    }
+    let released = cache.evict_for_except(u64::MAX, keep);
     if !released.is_empty() {
         tracing::info!(
             target: "qwen_diag",

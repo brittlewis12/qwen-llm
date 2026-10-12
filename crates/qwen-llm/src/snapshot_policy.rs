@@ -128,6 +128,51 @@ pub struct SnapshotPolicy {
     entries: HashMap<EntryId, Meta>,
 }
 
+/// Pins policy entries for a scope and releases exactly those pin counts on
+/// drop, including while unwinding from an eviction clock or ranking failure.
+pub struct SnapshotPolicyPinGuard<'a> {
+    policy: &'a mut SnapshotPolicy,
+    pinned: Vec<EntryId>,
+}
+
+impl<'a> SnapshotPolicyPinGuard<'a> {
+    pub fn new(policy: &'a mut SnapshotPolicy, ids: impl IntoIterator<Item = EntryId>) -> Self {
+        let mut guard = Self {
+            policy,
+            pinned: Vec::new(),
+        };
+        for id in ids {
+            guard.pin(id);
+        }
+        guard
+    }
+
+    pub fn pin(&mut self, id: EntryId) -> bool {
+        if self.pinned.contains(&id) {
+            return self.policy.contains(id);
+        }
+        self.pinned.reserve(1);
+        if self.policy.pin(id) {
+            self.pinned.push(id);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn evict_for(&mut self, bytes: u64) -> Evicted {
+        self.policy.evict_for(bytes)
+    }
+}
+
+impl Drop for SnapshotPolicyPinGuard<'_> {
+    fn drop(&mut self) {
+        for id in self.pinned.drain(..) {
+            self.policy.unpin(id);
+        }
+    }
+}
+
 impl SnapshotPolicy {
     pub fn new(max_bytes: u64, config: SnapshotPolicyConfig) -> Self {
         Self::with_clock(max_bytes, config, Arc::new(MonotonicClock::new()))

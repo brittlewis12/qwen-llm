@@ -624,10 +624,28 @@ impl DeepSeekV4AdmittedLoadPlan {
 pub struct DeepSeekV4MetalResidency {
     pub(super) config: DeepSeekV4Config,
     pub(super) session_capacity: DeepSeekV4SessionCapacity,
+    session_priced_upper_bytes: u64,
     pub(super) _residency_set: Option<DeepSeekV4ResidencySetGuard>,
     pub(super) tensors: BTreeMap<String, MetalTensor>,
     pub(super) report: DeepSeekV4ResidencyReport,
     pub(super) device_registry_id: u64,
+}
+
+pub(super) fn check_session_memory_admission(
+    session_priced_upper_bytes: u64,
+    cpu_reserved_bytes: u64,
+    signals: MetalMemorySignals,
+) -> Result<(), DeepSeekV4MetalError> {
+    let admission = crate::metal::evaluate_metal_memory_admission_with_cpu_bytes(
+        session_priced_upper_bytes,
+        cpu_reserved_bytes,
+        0,
+        signals,
+        true,
+    );
+    admission.refusal().map_or(Ok(()), |denied| {
+        Err(DeepSeekV4MetalError::MemoryAdmission(denied))
+    })
 }
 
 unsafe impl Send for DeepSeekV4MetalResidency {}
@@ -917,6 +935,7 @@ impl DeepSeekV4MetalResidency {
             residency: Self {
                 config: plan.config,
                 session_capacity: plan.session_capacity,
+                session_priced_upper_bytes: plan.memory.session_priced_upper_bytes,
                 _residency_set: residency_set,
                 tensors,
                 report: plan.report,
@@ -933,6 +952,21 @@ impl DeepSeekV4MetalResidency {
 
     pub fn session_capacity(&self) -> DeepSeekV4SessionCapacity {
         self.session_capacity
+    }
+
+    /// Upper-bound price for the fresh per-request session scratch allocations.
+    pub fn session_priced_upper_bytes(&self) -> u64 {
+        self.session_priced_upper_bytes
+    }
+
+    /// Check a fresh per-request session against the load plan's existing
+    /// per-session price and the caller's CPU-only reservations.
+    pub fn admit_session_memory(
+        &self,
+        signals: MetalMemorySignals,
+        cpu_reserved_bytes: u64,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        check_session_memory_admission(self.session_priced_upper_bytes, cpu_reserved_bytes, signals)
     }
 
     pub fn tensor(&self, name: &str) -> Option<&MetalTensor> {

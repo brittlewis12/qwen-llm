@@ -211,6 +211,15 @@ fn session_content_id(
     strong.unwrap_or(ephemeral)
 }
 
+fn session_error(error: qwen_llm::deepseek_v4_metal::DeepSeekV4MetalError) -> ServeError {
+    match error {
+        qwen_llm::deepseek_v4_metal::DeepSeekV4MetalError::MemoryAdmission(denied) => {
+            super::transport_memory::memory_refusal("DeepSeek V4 session", &denied)
+        }
+        error => ServeError::server_error(format!("DeepSeek V4 session: {error}")),
+    }
+}
+
 /// Write-behind eligibility for one captured boundary.
 fn persistable(
     prefix_len: usize,
@@ -772,6 +781,32 @@ impl DeepSeekV4Backend {
         let session_id = session_content_id(self.strong_content_id(), self.ephemeral_content_id);
         let warm_start = self.select_warm_start(prompt_ids, session_id);
         let select_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
+        let cpu_reserved = match super::transport_memory::combined_reserve(
+            self.control_cpu_reserve,
+            sink.transport_reserve_bytes(),
+        ) {
+            Ok(reserved) => reserved,
+            Err(error) => {
+                self.residency = Some(residency);
+                return Err(error.into());
+            }
+        };
+        let preflight = {
+            let ctx = &self.ctx;
+            let cache = &mut self.cache;
+            super::transport_memory::with_pressure_release_retry(
+                || {
+                    residency
+                        .admit_session_memory(ctx.memory_signals(), cpu_reserved)
+                        .map_err(session_error)
+                },
+                || !cache.evict_for(u64::MAX).is_empty(),
+            )
+        };
+        if let Err(error) = preflight {
+            self.residency = Some(residency);
+            return Err(error.into());
+        }
         // Session per request over the long-lived residency; the slot is
         // restored on every exit path below.
         let session_t0 = Instant::now();
@@ -795,9 +830,8 @@ impl DeepSeekV4Backend {
             self,
             session,
             |owner, session| {
-                // Session construction allocates fresh scratch. Recheck the CPU
-                // allowance afterwards, before any model work, without losing
-                // residency on rejection. This does not price the construction peak.
+                // Recheck transport headroom against fresh telemetry before
+                // model work; session scratch was admitted before construction.
                 super::transport_memory::admit_resident_transport(
                     sink.transport_reserve_bytes(),
                     owner.ctx.memory_signals().process_limit_remaining_bytes,
@@ -1045,6 +1079,43 @@ impl DeepSeekV4Backend {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn session_memory_refusals_use_the_shared_transport_mapping() {
+        use qwen_llm::metal::{
+            MemoryAdmissionDenied, MetalMemoryAdmissionReason as Reason, MetalMemorySignals,
+        };
+
+        let signals = MetalMemorySignals {
+            recommended_max_bytes: 1_000,
+            current_allocated_bytes: 0,
+            process_limit_remaining_bytes: Some(0),
+        };
+        let denied = |reason| {
+            qwen_llm::deepseek_v4_metal::DeepSeekV4MetalError::MemoryAdmission(
+                MemoryAdmissionDenied {
+                    reason,
+                    required_bytes: Some(100),
+                    signals,
+                    working_set_headroom_bytes: Some(1_000),
+                },
+            )
+        };
+
+        let pressure = super::session_error(denied(Reason::ProcessInsufficient));
+        assert_eq!(pressure.status, 503);
+        assert_eq!(pressure.code, Some("memory_admission_denied"));
+
+        let telemetry = super::session_error(denied(Reason::ProcessSignalUnavailable));
+        assert_eq!(telemetry.status, 500);
+        assert_eq!(telemetry.code, Some("memory_signal_unavailable"));
+
+        let invalid = super::session_error(
+            qwen_llm::deepseek_v4_metal::DeepSeekV4MetalError::Invalid("geometry".into()),
+        );
+        assert_eq!(invalid.status, 500);
+        assert_eq!(invalid.code, None);
+    }
+
     #[test]
     fn post_construction_transport_rejection_restores_session_without_execution() {
         let mut residency = None;

@@ -278,6 +278,40 @@ fn operation_preflight_accepts_current_qualified_artifact_storage() {
     validate_operation_dtypes(&descriptors).unwrap();
 }
 
+#[test]
+fn session_memory_admission_uses_the_priced_session_and_cpu_reserve() {
+    use crate::metal::{MetalMemoryAdmissionReason as Reason, MetalMemorySignals};
+
+    let signals = MetalMemorySignals {
+        recommended_max_bytes: 1_000,
+        current_allocated_bytes: 200,
+        process_limit_remaining_bytes: Some(149),
+    };
+    let error = check_session_memory_admission(100, 50, signals).unwrap_err();
+    assert!(matches!(
+        error,
+        DeepSeekV4MetalError::MemoryAdmission(denied)
+            if denied.reason == Reason::ProcessInsufficient
+                && denied.required_bytes == Some(150)
+    ));
+
+    let accepted = MetalMemorySignals {
+        process_limit_remaining_bytes: Some(150),
+        ..signals
+    };
+    check_session_memory_admission(100, 50, accepted).unwrap();
+
+    let telemetry = MetalMemorySignals {
+        process_limit_remaining_bytes: None,
+        ..accepted
+    };
+    assert!(matches!(
+        check_session_memory_admission(100, 50, telemetry),
+        Err(DeepSeekV4MetalError::MemoryAdmission(denied))
+            if denied.reason == Reason::ProcessSignalUnavailable
+    ));
+}
+
 fn max_finite_metric(values: impl IntoIterator<Item = f64>) -> f64 {
     let mut maximum = 0.0f64;
     let mut count = 0usize;

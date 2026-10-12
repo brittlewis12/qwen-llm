@@ -99,6 +99,7 @@ fn family_ggufs() -> Vec<PathBuf> {
                 };
                 if (name.starts_with("Qwen3.5-") || name.starts_with("Qwen3.6-"))
                     && name.ends_with(".gguf")
+                    && is_first_shard(name)
                 {
                     out.push(path);
                 }
@@ -107,6 +108,15 @@ fn family_ggufs() -> Vec<PathBuf> {
     }
     out.sort();
     out
+}
+
+fn is_first_shard(filename: &str) -> bool {
+    let Some((before_count, _)) = filename.rsplit_once("-of-") else {
+        return true;
+    };
+    before_count
+        .rsplit_once('-')
+        .is_some_and(|(_, index)| index == "00001")
 }
 
 // =========================================================================
@@ -271,9 +281,9 @@ fn gguf_file_exposes_stop_token_ids_contract() {
 //    provably wrong rather than just-conventionally-suspect.
 // =========================================================================
 
-/// Walks every Qwen 3.5/3.6 GGUF under all configured model search roots and asserts the set of
-/// declared `tokenizer.ggml.eos_token_id` values contains more than
-/// one distinct value.
+/// Walks every unsplit Qwen 3.5/3.6 GGUF and each split model's first
+/// shard under all configured model search roots, then compares the
+/// declared `tokenizer.ggml.eos_token_id` values.
 ///
 /// As of 2026-05-16 the observed split is:
 ///   * `Qwen3.5-4B-Base-BF16.gguf` → 248044  (`<|endoftext|>`)
@@ -291,14 +301,14 @@ fn family_declared_eos_is_heterogeneous() {
     let files = family_ggufs();
     assert!(
         !files.is_empty(),
-        "model witness qwen-model-family-eos requires Qwen3.5/3.6 GGUFs under QWEN_MODEL_SEARCH_PATH"
+        "model witness qwen3.5-4b-base-bf16 requires Qwen3.5/3.6 GGUFs under QWEN_MODEL_SEARCH_PATH"
     );
 
     let mut per_file: BTreeMap<String, i32> = BTreeMap::new();
     for path in &files {
         let name = path.file_name().unwrap().to_str().unwrap().to_string();
         let g = GgufFile::open(path).unwrap_or_else(|error| {
-            panic!("model witness qwen-model-family-eos cannot open {name}: {error}")
+            panic!("model witness qwen3.5-4b-base-bf16 cannot open {name}: {error}")
         });
         let eos = g
             .get_u64("tokenizer.ggml.eos_token_id")
@@ -348,14 +358,14 @@ fn every_family_file_declares_eos() {
     let files = family_ggufs();
     assert!(
         !files.is_empty(),
-        "model witness qwen-model-family-eos requires Qwen3.5/3.6 GGUFs under QWEN_MODEL_SEARCH_PATH"
+        "model witness qwen3.5-4b-base-bf16 requires Qwen3.5/3.6 GGUFs under QWEN_MODEL_SEARCH_PATH"
     );
 
     let mut missing: Vec<String> = Vec::new();
     for path in &files {
         let name = path.file_name().unwrap().to_str().unwrap().to_string();
         let g = GgufFile::open(path).unwrap_or_else(|error| {
-            panic!("model witness qwen-model-family-eos cannot open {name}: {error}")
+            panic!("model witness qwen3.5-4b-base-bf16 cannot open {name}: {error}")
         });
         if g.get_u64("tokenizer.ggml.eos_token_id").is_none() {
             missing.push(name);

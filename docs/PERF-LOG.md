@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-12 - Maya Practical Reuse And Harness Refresh
+
+- CLI `ec96cc45`, harness `f36f52b1`; 10 mock tests passed for the refreshed
+  screen's outcomes, replay, failure evidence and owned teardown. Default Half,
+  automatic cache, 32768 context capacity and 2048 workspace rows.
+- Cold load 50.711 s plus warm-up 1.129 s precede requests. First deltas:
+  A1 50.016 s, A2 live 1.473 s, B snapshot 0.622 s, C snapshot 0.538 s,
+  A return 2.051 s. One 11,104-token entry uses 272.36 MiB; the 6.66 GiB
+  cache budget is not allocated usage. Return restores the shared prefix.
+- A/B/A return are useful and correct for the canned fixture. C is unfinished
+  after three continuations: unsupported task/rg/main.rs read, then pending
+  cat main.rs. All 11 argument objects parse; nine completed HTTP responses
+  do not make C a task-quality pass. No request/teardown errors; SIGINT exit 130.
+- [Recipe and original evidence](bench/2026-10-12-glm-maya-agent-reuse/README.md)
+  preserve those fixture failures. No paired speedup claim against historical
+  UD on a different, pre-snapshot binary. HC remains parked at `ec96cc45`,
+  source archived at `08ec6267`.
+- Next already underway: one 64K-capacity real repository task (about 41K input
+  tokens) plus follow-up; a separate owner implements the driver. No new kernel
+  search or duplicate serving work.
+
 ## 2026-10-12 - F32 HC MMA Leaf Win Does Not Convert To Whole Prefill
 
 - Reused the existing F32-operand MMA template with guarded M24 fragments,

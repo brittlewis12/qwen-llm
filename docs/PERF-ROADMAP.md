@@ -14,7 +14,7 @@ For append-only checkpoint history and exact current handoff state, see
 
 ## Current Leverage - 2026-10-12
 
-Reoriented through main `29e623e2` with cx, retaining the requested family/phase
+Reoriented through main `f36f52b1` with cx, retaining the requested family/phase
 priority: GLM prefill and long-context decode first, then Flash-Next and Qwen.
 This section supersedes stale next-step claims in the dated maps below.
 
@@ -87,19 +87,26 @@ justify a large chunkwise per-key-decay recurrence redesign; park it.
 **Normalized F32 mHC MMA reuse also parked:** actual-input leaf favors MMA,
 but ordinary whole N2048 A/B is 0.981103x, with no useful conversion in either
 pair. Numerical oracles and guards pass; no old-Fast KL veto. Complete source
-at `08ec6267`, removed from active builds. Evidence:
+at `08ec6267`, removed from active builds at `ec96cc45`. Evidence:
 `docs/bench/2026-10-12-glm-hc-f32-mma/`. No tile sweep or favorable-repeat hunt.
 
-1. **Make current Maya conversation reuse usable.** One current Fast Half,
-   automatic-workspace/cache, 32K-capacity owned loopback server: cold request,
-   continued tools, edited branch, independent conversation sharing instructions,
-   then return to the first conversation. Reuse the existing scripted screen,
-   clearly label canned tools, retain useful-answer/truncation outcomes and
-   current first-delta/reused/prefilled/capture/restore/workspace telemetry.
-   Publish a short usable recipe. If reuse misses, fix the first concrete cause;
-   historical pre-snapshot replay costs are not an outstanding measured defect.
+**Maya practical reuse screen completed:** CLI `ec96cc45`, harness `f36f52b1`
+(10 mock tests), default Half, automatic cache, 32K capacity, 2048 workspace rows.
+Cold load 50.711 s is separate from A1's 50.016 s first delta. A2 live is 1.473 s;
+B/C snapshot hits are 0.622/0.538 s; A return is 2.051 s. A/B/A return are useful
+and fixture-correct. C remains unfinished after three continuations and fixture
+errors, despite completed HTTP responses. All 11 argument objects parse. One
+11,104-token shared entry uses 272.36 MiB against a 6.66 GiB budget; Fast return
+restores the shared prefix, not the full conversation. No historical UD paired
+speedup claim. [Recipe and evidence](bench/2026-10-12-glm-maya-agent-reuse/README.md).
+
+1. **Use Maya on one larger real repository task and follow-up.** Already
+   underway: 64K capacity with about 41K input tokens; a separate owner implements
+   the driver. Check the actual answer and follow-up reuse, retaining failures
+   rather than treating HTTP completion as task success. Fix a concrete workflow
+   defect if exposed. No fixture rerun or further kernel search is queued.
    Coordinate with the serving owner's busy-response and Lens work; do not
-   duplicate it. Larger-context task evidence follows only if this is useful.
+   duplicate it.
 2. **Coordinate Flash work; the retained integer selector is now falsified.**
    Existing Flash work now retains packed prefill under workspace pressure
    (`e7b48483`). The quant-compatibility worktree has been retired; its parallel

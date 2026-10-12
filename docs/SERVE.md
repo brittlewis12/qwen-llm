@@ -773,6 +773,22 @@ Reproduction: `scripts/reference/k2/README.md`.
 
 ## GLM-5.3-Flash Verified Chat And Tools
 
+For Maya conversation reuse, the current practical recipe is:
+
+```sh
+qwen serve -m /path/to/GLM-5.3-Flash-Maya-M-IQ2_S-00001-of-00003.gguf \
+  --addr 127.0.0.1:8797 --max-context-tokens 32768 --max-tokens 2048
+```
+
+Keep default Fast Half and automatic workspace/RAM cache selection; replay
+reasoning, assistant messages and tool results with stable shared instructions.
+The [Maya reuse screen](bench/2026-10-12-glm-maya-agent-reuse/README.md) records
+live and shared-prefix snapshot reuse, startup/request timings and the unfinished
+C task. Fast return restores the shared prefix, then prefills the conversation
+suffix. Snapshots remain in RAM only while the server is running.
+
+For UD:
+
 ```sh
 qwen serve -m GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf \
   --max-context-tokens 16384 --max-tokens 2048

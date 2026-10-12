@@ -445,14 +445,18 @@ impl GenerationBackend for FlashNextBackend {
         };
         let outcome = run();
         let workspace = runner.into_workspace();
-        if let Err(error) = self.loaded.restore_workspace(workspace) {
-            tracing::error!(
-                target: "qwen_diag",
-                "serve: qwen4exp workspace could not be returned ({error}); aborting"
-            );
-            std::process::abort();
-        }
-        outcome
+        with_request_workspace(
+            outcome,
+            workspace,
+            |workspace| self.loaded.restore_workspace(workspace),
+            |error| {
+                tracing::error!(
+                    target: "qwen_diag",
+                    "serve: qwen4exp workspace could not be returned ({error}); aborting"
+                );
+                std::process::abort();
+            },
+        )
     }
 }
 
@@ -489,6 +493,19 @@ fn map_prefill_result<T>(
 
 fn transcript_split(transcript_at: Option<usize>, matched_tokens: usize) -> Option<usize> {
     transcript_at.filter(|&boundary| boundary > matched_tokens)
+}
+
+/// Return Flash-Next's single workspace after request work, including aborts.
+fn with_request_workspace<T, E, W, R>(
+    outcome: Result<T, E>,
+    workspace: W,
+    restore: impl FnOnce(W) -> Result<(), R>,
+    on_restore_failure: impl FnOnce(R),
+) -> Result<T, E> {
+    if let Err(error) = restore(workspace) {
+        on_restore_failure(error);
+    }
+    outcome
 }
 
 fn restore_best_prefix<V, R, E: std::fmt::Debug>(

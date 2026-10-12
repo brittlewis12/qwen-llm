@@ -217,24 +217,37 @@ fn failed_snapshot_restore_evicts_the_entry_and_resets_the_runner() {
 }
 
 #[test]
-fn request_session_is_handed_back_after_success_and_failure() {
-    for fail in [false, true] {
-        let mut resident = None;
-        let result = crate::serve::with_request_session(
-            &mut resident,
-            "workspace",
-            |_, _| {
-                if fail {
-                    Err("request failed")
-                } else {
-                    Ok("request succeeded")
-                }
-            },
-            |slot, workspace| *slot = Some(workspace),
-        );
-        assert_eq!(resident, Some("workspace"));
-        assert_eq!(result.is_err(), fail);
-    }
+fn flash_next_workspace_cleanup_runs_after_transport_abort() {
+    let mut reset = false;
+    let outcome: Result<(), BackendFailure> = Err(BackendFailure::Aborted(io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        "client disconnected",
+    )));
+    let result = with_request_workspace(
+        outcome,
+        "workspace",
+        |workspace| {
+            assert_eq!(workspace, "workspace");
+            reset = true;
+            Ok::<(), &str>(())
+        },
+        |error| panic!("unexpected workspace reset failure: {error}"),
+    );
+    assert!(reset);
+    assert!(matches!(result, Err(BackendFailure::Aborted(_))));
+}
+
+#[test]
+fn flash_next_workspace_reset_failure_reaches_fail_stop_handler() {
+    let mut failure = None;
+    let result = with_request_workspace(
+        Ok::<_, &str>("streamed success"),
+        "workspace",
+        |_| Err("reset failed"),
+        |error| failure = Some(error),
+    );
+    assert_eq!(result, Ok("streamed success"));
+    assert_eq!(failure, Some("reset failed"));
 }
 
 #[test]

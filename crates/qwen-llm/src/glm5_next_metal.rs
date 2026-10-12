@@ -1217,6 +1217,55 @@ impl<'w> Glm5NextSession<'w> {
         self.poisoned
     }
 
+    /// Starts an unrelated sequence without reallocating a healthy session.
+    /// Preserves capacity, workspace and arithmetic policy. This is a logical
+    /// reset, not secure erasure: invisible cache tails remain allocated.
+    /// Failed execution still requires replacement or snapshot restoration.
+    pub fn reset(&mut self) -> Result<()> {
+        if self.poisoned {
+            return Err(Glm5NextMetalError::Poisoned);
+        }
+        fn regions(layer: &LayerState) -> impl Iterator<Item = &MetalTensor> {
+            match layer {
+                LayerState::Kda { conv, state } => [Some(conv), Some(state)],
+                // Snapshots include the full pending ring, even at position 0.
+                LayerState::Mla { pending, .. } => [Some(pending), None],
+            }
+            .into_iter()
+            .flatten()
+        }
+        for tensor in self.layers.iter().flat_map(regions) {
+            if !tensor.is_writable()
+                || tensor
+                    .offset
+                    .checked_add(tensor.n_bytes())
+                    .is_none_or(|end| end > tensor.buffer.length() as u64)
+            {
+                return invalid("reset state exceeds writable storage");
+            }
+        }
+        self.poisoned = true;
+        // Healthy execution is synchronous. Cache rows and disposable scratch
+        // are overwritten before becoming visible, just as after a restore.
+        for tensor in self.layers.iter().flat_map(regions) {
+            unsafe {
+                std::ptr::write_bytes(
+                    tensor
+                        .buffer
+                        .contents()
+                        .as_ptr()
+                        .cast::<u8>()
+                        .add(tensor.offset as usize),
+                    0,
+                    tensor.n_bytes() as usize,
+                );
+            }
+        }
+        self.position = 0;
+        self.poisoned = false;
+        Ok(())
+    }
+
     pub fn ledger(&self) -> &Glm5NextMemoryLedger {
         &self.ledger
     }

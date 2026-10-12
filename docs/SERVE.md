@@ -925,18 +925,22 @@ after a pause pays ~1 s to re-wire GLM's 109.5 GiB: a 27-token prefill takes
 
 **Live session.** The one resident session is reused when a request's
 prompt strictly extends exactly the tokens it consumed; otherwise a snapshot
-may restore a shared prefix (below), or a fresh session (about 8 ms to
-allocate) prefills from the start. A replayed conversation extends: the
+may restore a shared prefix (below), or the healthy, compatible session resets
+and prefills from the start. Reset retains workspace and cache allocations,
+clears recurrent state and pending pooling rings, and publishes position zero;
+it is not secure erasure of invisible cache tails. Incompatible arithmetic or
+geometry still requires a new session. A replayed conversation extends: the
 model ends a turn by sampling `<|user|>`, the next turn's opener, and the
 renderer writes history back byte-for-byte when the client replays the
 reasoning and answer items. Re-tokenization that differs from the sampled tokens, a changed
 effort or system message, `strip`, or whitespace the template strips from an
-answer all fall back to a fresh session. Every client-caused refusal
+answer all fall back to fresh logical state. Every client-caused refusal
 (budget, capacity, input) precedes the session, so the cache survives it. A
 cancellation during prefill keeps the committed chunks (a retry of the same
 prompt resumes from them); an abort during decode or any engine failure
-clears the session. `QWEN_GLM_PREFIX_REUSE=0` disables reuse (live session
-and snapshots).
+clears the session. `QWEN_GLM_PREFIX_REUSE=0` disables token-prefix reuse (live
+session and snapshots), not reuse of reset storage. Reset reports zero cached
+tokens and does not change the request's arithmetic policy.
 
 **Snapshots.** GLM keeps a RAM snapshot cache under `--snapshot-cache-mib`
 (default `auto`) and the shared expiry and eviction flags; there is no

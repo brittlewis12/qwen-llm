@@ -4,6 +4,144 @@ use crate::serve::output_partition::{GenerationEnd, OutputPartition, OutputProto
 use crate::serve::partition::PartitionEvent;
 use serde_json::{Value, json};
 
+#[test]
+#[ignore = "GLM53_GGUF leased session-recreation cost screen; MTL_DEBUG_LAYER=1"]
+fn gpu_cold_session_recreation_cost() {
+    struct TimedSink {
+        started: Instant,
+        first_piece_ms: Option<f64>,
+    }
+    impl GenerationSink for TimedSink {
+        fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+            self.first_piece_ms
+                .get_or_insert_with(|| self.started.elapsed().as_secs_f64() * 1e3);
+            Ok(())
+        }
+        fn tick(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    let path = gguf_path();
+    let source = GgufFile::open(&path).unwrap();
+    let prepared = Prepared::new(&source, &invocation(&path, Some(32768), Some(1))).unwrap();
+    let ctx = MetalContext::new().unwrap();
+    let weights = load(&ctx, &source, &prepared).unwrap();
+    let cache =
+        crate::serve::SnapshotCachePlan::resolve(Some(0), Default::default(), ctx.memory_signals())
+            .unwrap();
+    let mut backend = Glm5NextBackend::new(
+        &ctx,
+        &weights,
+        prepared,
+        "glm".into(),
+        std::time::Duration::ZERO,
+        cache,
+    );
+    backend.prefix_reuse = true;
+    backend.warm_up().unwrap();
+    let long: String = (0..120)
+        .map(|i| format!("Rule {i}: when asked about topic {i}, answer in one short sentence. "))
+        .collect();
+    let mut expected = [None, None];
+    for repeat in 0..4 {
+        for recreate in if repeat % 2 == 0 {
+            [true, false]
+        } else {
+            [false, true]
+        } {
+            backend.force_cold_reallocation = recreate;
+            for (shape, instructions, input) in [
+                ("short", "Answer briefly.", "What is 6 times 7?"),
+                ("long", long.as_str(), "What is 5 times 9?"),
+            ] {
+                let request = prepared_request(
+                    &backend,
+                    json!({"model":"glm", "instructions":instructions,
+                    "input":[{"role":"user","content":input}],
+                    "reasoning":{"effort":"low"}, "temperature":0,
+                    "max_output_tokens":1}),
+                );
+                let mut sink = TimedSink {
+                    started: Instant::now(),
+                    first_piece_ms: None,
+                };
+                let outcome = backend.generate_prepared(request, &mut sink).unwrap();
+                let wall_ms = sink.started.elapsed().as_secs_f64() * 1e3;
+                assert_eq!(outcome.usage.cached_tokens, 0);
+                assert_eq!(backend.cache.len(), 0);
+                let (drop_ms, alloc_ms, reset_ms) = backend.last_cold_session_ms.unwrap();
+                assert_eq!(reset_ms == 0.0, recreate);
+                let expected = &mut expected[usize::from(shape == "long")];
+                if let Some(bits) = expected {
+                    assert_eq!(&backend.last_prefill_logits, bits);
+                } else {
+                    *expected = Some(backend.last_prefill_logits.clone());
+                }
+                eprintln!(
+                    "cold_session_cost {}",
+                    json!({
+                        "repeat":repeat, "recreate":recreate, "shape":shape, "capacity":backend.prepared.capacity,
+                        "rows":backend.frozen_rows, "prompt_tokens":backend.history.len(),
+                        "drop_ms":drop_ms, "alloc_ms":alloc_ms, "reset_ms":reset_ms,
+                        "first_piece_ms":sink.first_piece_ms, "wall_ms":wall_ms,
+                    })
+                );
+            }
+        }
+    }
+    backend.force_cold_reallocation = false;
+    for lineage in [PackedLineage::Exact, PackedLineage::Fast] {
+        backend.lineage = lineage;
+        let request = prepared_request(
+            &backend,
+            json!({"model":"glm",
+            "input":"Reply with the number 7.", "temperature":0,
+            "reasoning":{"effort":"low"}, "max_output_tokens":1}),
+        );
+        backend
+            .generate_prepared(request, &mut Sink::default())
+            .unwrap();
+        assert_eq!(
+            backend.last_cold_session_ms.unwrap().2,
+            0.0,
+            "incompatible arithmetic must recreate, not reset"
+        );
+        assert_eq!(
+            backend.session.as_ref().unwrap().packed_lineage(),
+            Some(lineage)
+        );
+    }
+    struct CancelledTransport;
+    impl GenerationSink for CancelledTransport {
+        fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+            unreachable!()
+        }
+        fn tick(&mut self) -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "cancel before reset",
+            ))
+        }
+    }
+    let old_history = backend.history.clone();
+    let old_position = backend.session.as_ref().unwrap().position();
+    let request = prepared_request(
+        &backend,
+        json!({"model":"glm",
+        "input":"An unrelated request", "temperature":0, "max_output_tokens":1}),
+    );
+    assert!(
+        backend
+            .generate_prepared(request, &mut CancelledTransport)
+            .is_err()
+    );
+    assert_eq!(backend.history, old_history);
+    assert_eq!(backend.session.as_ref().unwrap().position(), old_position);
+    assert!(!backend.session.as_ref().unwrap().is_poisoned());
+}
+
 fn invocation(
     path: &str,
     capacity: Option<usize>,

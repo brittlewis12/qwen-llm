@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-12 - Retain Healthy GLM Session Storage On Cold Misses
+
+- Actual served cold misses paid roughly 170-280 ms for session destruction and
+  allocation before the existing prefill timer. Avoid this work by resetting
+  compatible healthy state, not by changing arithmetic or adding a session pool.
+  Clear KDA convolution/recurrent state and complete MLA pending rings; retain
+  invisible cache tails and scratch. Poison still refuses reset, errors still
+  discard sessions, and lineage changes still recreate. Prefix/snapshot hits
+  retain precedence; a reset is zero cached tokens, with transport admission
+  before mutation and no double charge for resident storage.
+- M4 Max, UD-IQ3_XXS, context32768/workspace2048, current Fast/Half defaults,
+  Metal validation, loaded weights, no snapshots. Alternating unrelated
+  24/2062-token requests; recreate/reset order reverses each round. Final
+  first-backend-piece milliseconds (round0 then three warm paired rounds):
+
+  | Prompt | Recreate | Reset |
+  | --- | --- | --- |
+  | 24 tokens | 701.9, 922.0, 727.7, 771.9 | 548.6, 528.2, 526.4, 528.7 |
+  | 2062 tokens | 9597.9, 9380.1, 9910.4, 9895.3 | 9533.8, 9810.8, 9436.5, 9532.3 |
+
+- Warm short pairs save 27.7-42.7% to first backend piece; not HTTP TTFT or
+  loading-inclusive latency. Direct reset costs 0.7-11.6 ms versus 179-296 ms
+  destruction/allocation in these warm rounds. Whole-request savings exceed
+  that isolated interval; do not attribute all the difference to memset alone.
+  Long-request timing is mixed: no general prefill-throughput claim.
+- Full prefill logit bits match across every recreate/reset arm. Independent
+  fresh-session test checks snapshots, full logits and continuation at zero,
+  partial pool and sparse-frontier positions after a longer old prompt;
+  storage/ledger remain unchanged, repeated reset works and poison refuses.
+  Serial fallback also passes. Library reset test and all four GLM serving GPU
+  tests pass under Metal validation, including live/snapshot/cancel/retry paths.
+  The combined run timed out during snapshots; the isolated rerun passes.
+- 798 default CLI tests pass (43 ignored); cx finds no production blocker.
+  Strict all-target Clippy remains blocked by existing warnings outside this
+  change. Reproduce the paired backend check with ignored
+  `gpu_cold_session_recreation_cost` and `GLM53_GGUF`; no production knob added.
+
 ## 2026-10-12 - Flash Integer Selector: Ordinary Execution Does Not Convert
 
 - Reused retained `3b21b899` without old parent observers or encoder splitting.

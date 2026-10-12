@@ -283,6 +283,10 @@ pub(super) struct Glm5NextBackend<'w, 'g> {
     /// Treat every capture admission as denied (tests).
     #[cfg(test)]
     deny_captures: bool,
+    #[cfg(test)]
+    last_cold_session_ms: Option<(f64, f64, f64)>,
+    #[cfg(test)]
+    force_cold_reallocation: bool,
 }
 
 /// Why a cut's snapshot was or was not cached.
@@ -605,6 +609,10 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             last_prefill_logits: Vec::new(),
             #[cfg(test)]
             deny_captures: false,
+            #[cfg(test)]
+            last_cold_session_ms: None,
+            #[cfg(test)]
+            force_cold_reallocation: false,
         }
     }
 
@@ -617,6 +625,23 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         {
             false
         }
+    }
+
+    fn can_reset_session(&self, lineage: PackedLineage, rows: usize) -> bool {
+        #[cfg(test)]
+        if self.force_cold_reallocation {
+            return false;
+        }
+        self.session.as_ref().is_some_and(|session| {
+            !session.is_poisoned()
+                && session.ledger().capacity() == self.prepared.capacity as u64
+                && session.ledger().prefill_rows() == rows as u64
+                && session.packed_lineage().is_none_or(|live| live == lineage)
+                && (lineage != PackedLineage::Fast
+                    || session
+                        .fast_precision()
+                        .is_none_or(|live| live == self.prepared.fast_precision))
+        })
     }
 
     /// The `serve limits` fragment for snapshots: the schedules that run
@@ -817,6 +842,10 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         // packed prefill of the same tokens in chunks from 0 (Fast captures
         // publish only such states; Exact does not depend on it).
         let mut canonical;
+        #[cfg(test)]
+        {
+            self.last_cold_session_ms = None;
+        }
         let matched = match hit {
             Some(hit) => {
                 if live_lineage != Some(lineage) {
@@ -879,11 +908,32 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 canonical = self.live_canonical;
                 live
             }
+            None if self.can_reset_session(lineage, selected_rows) => {
+                #[cfg(test)]
+                let reset_started = Instant::now();
+                if let Err(error) = self.session.as_mut().expect("compatible session").reset() {
+                    self.session = None;
+                    return Err(session_error(error).into());
+                }
+                #[cfg(test)]
+                {
+                    self.last_cold_session_ms =
+                        Some((0.0, 0.0, reset_started.elapsed().as_secs_f64() * 1e3));
+                }
+                canonical = true;
+                0
+            }
             None => {
                 // Release the old session's memory before allocating its
                 // successor; its buffers and this request's transport
                 // allowance are admitted as one requirement.
+                #[cfg(test)]
+                let drop_started = Instant::now();
                 self.session = None;
+                #[cfg(test)]
+                let drop_ms = drop_started.elapsed().as_secs_f64() * 1e3;
+                #[cfg(test)]
+                let alloc_started = Instant::now();
                 let ctx = self.ctx;
                 let weights = self.weights;
                 let prepared = &self.prepared;
@@ -919,6 +969,11 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                     selected_rows,
                     created,
                 )?);
+                #[cfg(test)]
+                {
+                    self.last_cold_session_ms =
+                        Some((drop_ms, alloc_started.elapsed().as_secs_f64() * 1e3, 0.0));
+                }
                 canonical = true;
                 0
             }

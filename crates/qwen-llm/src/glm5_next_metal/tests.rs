@@ -6,6 +6,7 @@ mod intervention_gates;
 mod natural;
 mod quality;
 mod quality_split;
+mod reset;
 mod snapshot_gates;
 
 const ORACLE_DEFAULT: &str =

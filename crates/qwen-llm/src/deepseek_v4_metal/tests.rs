@@ -279,31 +279,45 @@ fn operation_preflight_accepts_current_qualified_artifact_storage() {
 }
 
 #[test]
-fn session_memory_admission_uses_the_priced_session_and_cpu_reserve() {
+fn session_memory_admission_reserves_dynamic_headroom_at_the_boundary() {
     use crate::metal::{MetalMemoryAdmissionReason as Reason, MetalMemorySignals};
 
-    let signals = MetalMemorySignals {
-        recommended_max_bytes: 1_000,
+    let dynamic_reserve = DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES;
+    let process_required = 100 + 50 + dynamic_reserve;
+    let metal_required = 100 + dynamic_reserve;
+    let at_boundary = MetalMemorySignals {
+        recommended_max_bytes: 200 + metal_required,
         current_allocated_bytes: 200,
-        process_limit_remaining_bytes: Some(149),
+        process_limit_remaining_bytes: Some(process_required),
     };
-    let error = check_session_memory_admission(100, 50, signals).unwrap_err();
+    check_session_memory_admission(100, 50, at_boundary).unwrap();
+
+    let process_below = MetalMemorySignals {
+        process_limit_remaining_bytes: Some(process_required - 1),
+        ..at_boundary
+    };
+    let error = check_session_memory_admission(100, 50, process_below).unwrap_err();
     assert!(matches!(
         error,
         DeepSeekV4MetalError::MemoryAdmission(denied)
             if denied.reason == Reason::ProcessInsufficient
-                && denied.required_bytes == Some(150)
+                && denied.required_bytes == Some(process_required)
     ));
 
-    let accepted = MetalMemorySignals {
-        process_limit_remaining_bytes: Some(150),
-        ..signals
+    let working_set_below = MetalMemorySignals {
+        recommended_max_bytes: 200 + metal_required - 1,
+        ..at_boundary
     };
-    check_session_memory_admission(100, 50, accepted).unwrap();
+    assert!(matches!(
+        check_session_memory_admission(100, 50, working_set_below),
+        Err(DeepSeekV4MetalError::MemoryAdmission(denied))
+            if denied.reason == Reason::WorkingSetInsufficient
+                && denied.working_set_headroom_bytes == Some(metal_required - 1)
+    ));
 
     let telemetry = MetalMemorySignals {
         process_limit_remaining_bytes: None,
-        ..accepted
+        ..at_boundary
     };
     assert!(matches!(
         check_session_memory_admission(100, 50, telemetry),

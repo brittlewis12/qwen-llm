@@ -639,7 +639,7 @@ pub(super) fn check_session_memory_admission(
     let admission = crate::metal::evaluate_metal_memory_admission_with_cpu_bytes(
         session_priced_upper_bytes,
         cpu_reserved_bytes,
-        0,
+        DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES,
         signals,
         true,
     );

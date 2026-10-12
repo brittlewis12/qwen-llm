@@ -700,6 +700,27 @@ pub fn encode_mhc4_pre_generic(
     scratch: &Mhc4PreGenericScratch<'_>,
     outputs: &Mhc4PreOutputs<'_>,
 ) -> Result<(), crate::metal_forward::MfError> {
+    encode_mhc4_pre_generic_with_f32_mma_policy(
+        ctx, enc, hidden, rows, eps, inputs, scratch, outputs, false,
+    )
+}
+
+/// Internal experiment permission for the normalized F32 projection only.
+/// The ordinary wrapper declines F32 MMA. Normalization still precedes the
+/// projection in the same scratch; Q8 fusion, native decode and Q6 policy are
+/// unchanged. Eligibility and device fallback remain with grouped projection.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_mhc4_pre_generic_with_f32_mma_policy(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    hidden: usize,
+    rows: usize,
+    eps: Mhc4PreEps,
+    inputs: &Mhc4PreInputs<'_>,
+    scratch: &Mhc4PreGenericScratch<'_>,
+    outputs: &Mhc4PreOutputs<'_>,
+    allow_f32_mma: bool,
+) -> Result<(), crate::metal_forward::MfError> {
     use crate::metal_forward::encode_mat_vec_dispatch;
 
     const K: &str = "mhc4_pre_generic";
@@ -803,7 +824,7 @@ pub fn encode_mhc4_pre_generic(
         return Ok(());
     }
     if rows > 1 && grouped_projection_supported(inputs.mix.dtype) {
-        encode_mat_mat_grouped_f32(
+        encode_mat_mat_grouped_f32_with_f32_mma_policy(
             ctx,
             enc,
             inputs.mix,
@@ -813,6 +834,8 @@ pub fn encode_mhc4_pre_generic(
             MHC_MIXES,
             1,
             rows,
+            true,
+            allow_f32_mma,
         )?;
     } else {
         for row in 0..rows {

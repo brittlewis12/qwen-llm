@@ -52,6 +52,10 @@ mod mla_tail;
 mod f32_down_ab;
 
 #[cfg(test)]
+#[path = "tests/hc_f32_mma.rs"]
+mod hc_f32_mma;
+
+#[cfg(test)]
 #[path = "tests/hc_decode_ab.rs"]
 mod hc_decode_ab;
 
@@ -1784,32 +1788,53 @@ impl Glm5NextSession<'_> {
                     normalized,
                     ones: &decode.ones,
                 });
+        let inputs = crate::metal::Mhc4PreInputs {
+            residual,
+            mix: &hc.mix,
+            scale: &hc.scale,
+            base: &hc.base,
+            norm_weight,
+        };
+        let outputs = crate::metal::Mhc4PreOutputs {
+            mixes: &v(&p.mixes),
+            pre: &v(&p.pre),
+            post: &v(&p.post),
+            comb: &v(&p.comb),
+            collapsed: &v(&p.collapsed),
+            normed: &v(&p.normed),
+        };
+        #[cfg(test)]
+        if hc_f32_mma::enabled(p.arith(), hc.mix.dtype) {
+            crate::metal::encode_mhc4_pre_generic_with_f32_mma_policy(
+                ctx,
+                enc,
+                c.hidden_size as usize,
+                rows,
+                super::hc_pre_eps(c),
+                &inputs,
+                scratch.as_ref().ok_or_else(|| {
+                    Glm5NextMetalError::Invalid(
+                        "generic HC mix without admitted activation scratch".into(),
+                    )
+                })?,
+                &outputs,
+                true,
+            )?;
+            return Ok(());
+        }
         super::encode_hc_pre_dispatch(
             ctx,
             enc,
             c.hidden_size as usize,
             rows,
             super::hc_pre_eps(c),
-            &crate::metal::Mhc4PreInputs {
-                residual,
-                mix: &hc.mix,
-                scale: &hc.scale,
-                base: &hc.base,
-                norm_weight,
-            },
+            &inputs,
             &crate::metal::Mhc4PrePartials {
                 dots: &v(&p.hc_partial_dots),
                 sumsq: &v(&p.hc_partial_sumsq),
             },
             scratch.as_ref(),
-            &crate::metal::Mhc4PreOutputs {
-                mixes: &v(&p.mixes),
-                pre: &v(&p.pre),
-                post: &v(&p.post),
-                comb: &v(&p.comb),
-                collapsed: &v(&p.collapsed),
-                normed: &v(&p.normed),
-            },
+            &outputs,
         )?;
         Ok(())
     }

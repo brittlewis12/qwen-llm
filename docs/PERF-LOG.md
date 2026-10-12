@@ -6,6 +6,45 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-12 - Quant-Compatibility Worktree Disposition
+
+- Reviewed the completed October 10 Flash and GLM experiments against current
+  main. Do not merge the old worktree wholesale: its large observer/benchmark
+  scaffolding is not a production feature. No new archive format or preservation
+  framework; this log carries the conclusions and ordinary Git history carries
+  useful source checkpoints.
+- Flash encoder splitting: counter-free restored suffixes at 8K/32K improved
+  wall time about 4.75%, with exact checked outputs/state. Whole 32K prefill
+  averaged 77.254/75.871 seconds, but all four paired changes were -3.115%,
+  +0.682%, -4.398%, -0.173%, with unstable ordinary repeats. The isolated wait
+  saving did not repeat across sustained chunks; stop expanding this execution
+  plumbing. These are not loading-inclusive TTFT measurements.
+- Sustained parent observation: numerical/state and local timestamp checks pass;
+  whole/decode controls exceed the frozen perturbation bounds. Do not use its
+  parent fractions to rank kernels. Retire the attribution campaign, not the
+  valid observations it produced.
+- Parallel integer scans: exact independent selector checks pass. At N2048 and
+  capacity 8192, all six GPU pairs save 6.65-22.25%, with unstable ordinary
+  repeats. At capacity 16384 one pair is effectively neutral; a small-query
+  control retains a regression. This remains a promising batched candidate,
+  not a universal replacement or a demonstrated whole-model win. Its next
+  useful test is an ordinary selected-prefill A/B with only the selector changed,
+  not another parent-observer prerequisite or a threshold-relaxation exercise.
+- GLM quant screen: pinned llama.cpp, eight paired tasks, greedy/low reasoning,
+  16K context. At 2048 generated tokens UD/Maya both pass 6/8; at 8192 UD passes
+  7/8 and Maya 6/8. UD's deep-get completion becomes correct with more budget;
+  Maya finishes but mishandles the dot after a list index. Tools are constrained
+  and token-identical. Maya's logged buffers are about 4.80 GiB smaller. This
+  supports no general quality winner and says nothing about native Half/MMA.
+- Reuse task meanings and existing graders for native quality work, not the
+  machine-bound operator, duplicated metadata or bytecode-dependent freezes.
+  Its local indentation repair exposed a real C5/C6 bug in the existing mainline
+  grader: special tests were inserted outside the generated try block. Repair
+  that utility directly; preserve task/prompt hashes and historical scores.
+- Read-only verification of the old quality packet passed its 52 adapter and
+  25 operator CPU tests. This is historical evidence review, not renewed GPU
+  qualification or a claim that the entire dirty tree is ready to land.
+
 ## 2026-10-11 - Gate/Up and KDA Falsifiers; Retire Live Experiment Debt
 
 - M32/N32 lower-state gate/up: Maya whole ratios 0.9877x at N2048 and

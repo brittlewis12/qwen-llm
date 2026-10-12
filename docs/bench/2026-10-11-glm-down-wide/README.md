@@ -1,5 +1,11 @@
 # High-count grouped expert down
 
+Archive update: the complete validated experiment remains at `950a2db3`
+(also present in `d7a46ba7`). Its live helpers, capture hooks, tests and research
+shader were subsequently removed to avoid permanent build/maintenance cost.
+Use a separate worktree at `950a2db3` for reproduction; `restore-16k.patch`
+applies there. All evidence in this directory remains retained.
+
 Experimental M64/N64/K32 Half-operand down tile, compared with the current
 production path (including IQ3_S SmallCounts at N512). No production selection
 change yet. Native storage remains compressed; no persistent GPU scratch.
@@ -42,8 +48,8 @@ The retained 8 KiB shader sequentially drains two N32 result panels through one
 shared-memory overlay. This tests avoidable threadgroup reservation, not
 register pressure: the doubled accumulator state remains. `restore-16k.patch`
 recreates the original shader/host reservation from the retained version.
-Experimental Rust helpers are test-only and the shader lives in the research
-metallib, lazily resolved by existing pipeline lookup. Production dispatch,
+At the experimental revision Rust helpers are test-only and the shader lives
+in the research metallib, lazily resolved by existing pipeline lookup. Production dispatch,
 admission, persistent memory and arithmetic remain unchanged.
 
 All recorded slot-output, weighted-output and endpoint/three-step continuation

@@ -176,8 +176,7 @@ kernel void kernel_glm53_kda_decode(
 // Stage 1, one threadgroup per head, serial over rows: causal conv + SiLU
 // (advancing the conv tails), L2-normalized and scaled q/k, and the
 // per-channel decay, all in place (raw_gate becomes the decay).
-template <bool REGISTER_HISTORY>
-kernel void kernel_glm53_kda_prefill_prepare_impl(
+kernel void kernel_glm53_kda_prefill_prepare(
         constant glm53_kda_args & args [[buffer(0)]],
         device float * q [[buffer(1)]],
         device float * k [[buffer(2)]],
@@ -207,36 +206,15 @@ kernel void kernel_glm53_kda_prefill_prepare_impl(
     device float * k_state = q_state + HISTORY * projection;
     device float * v_state = k_state + HISTORY * projection;
 
-    // Candidate only: nine F32 history values per channel, retained across
-    // tokens. Coefficients stay in the token loop; arithmetic/barriers below
-    // are shared with the production device-history specialization.
-    float q_h0 = 0.0f, q_h1 = 0.0f, q_h2 = 0.0f;
-    float k_h0 = 0.0f, k_h1 = 0.0f, k_h2 = 0.0f;
-    float v_h0 = 0.0f, v_h1 = 0.0f, v_h2 = 0.0f;
-    if (REGISTER_HISTORY) {
-        q_h0 = q_state[channel];
-        q_h1 = q_state[projection + channel];
-        q_h2 = q_state[2ul * projection + channel];
-        k_h0 = k_state[channel];
-        k_h1 = k_state[projection + channel];
-        k_h2 = k_state[2ul * projection + channel];
-        v_h0 = v_state[channel];
-        v_h1 = v_state[projection + channel];
-        v_h2 = v_state[2ul * projection + channel];
-    }
-
     for (uint token = 0; token < args.n_rows; token++) {
         const ulong index = (ulong)token * projection + channel;
         float q_acc = 0.0f;
         float k_acc = 0.0f;
         float v_acc = 0.0f;
         for (uint w = 0; w < HISTORY; w++) {
-            q_acc = fma(REGISTER_HISTORY ? (w == 0u ? q_h0 : (w == 1u ? q_h1 : q_h2))
-                                         : q_state[(ulong)w * projection + channel], q_conv[(ulong)channel * 4u + w], q_acc);
-            k_acc = fma(REGISTER_HISTORY ? (w == 0u ? k_h0 : (w == 1u ? k_h1 : k_h2))
-                                         : k_state[(ulong)w * projection + channel], k_conv[(ulong)channel * 4u + w], k_acc);
-            v_acc = fma(REGISTER_HISTORY ? (w == 0u ? v_h0 : (w == 1u ? v_h1 : v_h2))
-                                         : v_state[(ulong)w * projection + channel], v_conv[(ulong)channel * 4u + w], v_acc);
+            q_acc = fma(q_state[(ulong)w * projection + channel], q_conv[(ulong)channel * 4u + w], q_acc);
+            k_acc = fma(k_state[(ulong)w * projection + channel], k_conv[(ulong)channel * 4u + w], k_acc);
+            v_acc = fma(v_state[(ulong)w * projection + channel], v_conv[(ulong)channel * 4u + w], v_acc);
         }
         const float q_new = q[index];
         const float k_new = k[index];
@@ -244,22 +222,15 @@ kernel void kernel_glm53_kda_prefill_prepare_impl(
         q_acc = fma(q_new, q_conv[(ulong)channel * 4u + 3u], q_acc);
         k_acc = fma(k_new, k_conv[(ulong)channel * 4u + 3u], k_acc);
         v_acc = fma(v_new, v_conv[(ulong)channel * 4u + 3u], v_acc);
-        if (REGISTER_HISTORY) {
-            // Shift raw inputs before q/k/v become prepared activations.
-            q_h0 = q_h1; q_h1 = q_h2; q_h2 = q_new;
-            k_h0 = k_h1; k_h1 = k_h2; k_h2 = k_new;
-            v_h0 = v_h1; v_h1 = v_h2; v_h2 = v_new;
-        } else {
-            q_state[channel] = q_state[projection + channel];
-            q_state[projection + channel] = q_state[2ul * projection + channel];
-            q_state[2ul * projection + channel] = q_new;
-            k_state[channel] = k_state[projection + channel];
-            k_state[projection + channel] = k_state[2ul * projection + channel];
-            k_state[2ul * projection + channel] = k_new;
-            v_state[channel] = v_state[projection + channel];
-            v_state[projection + channel] = v_state[2ul * projection + channel];
-            v_state[2ul * projection + channel] = v_new;
-        }
+        q_state[channel] = q_state[projection + channel];
+        q_state[projection + channel] = q_state[2ul * projection + channel];
+        q_state[2ul * projection + channel] = q_new;
+        k_state[channel] = k_state[projection + channel];
+        k_state[projection + channel] = k_state[2ul * projection + channel];
+        k_state[2ul * projection + channel] = k_new;
+        v_state[channel] = v_state[projection + channel];
+        v_state[projection + channel] = v_state[2ul * projection + channel];
+        v_state[2ul * projection + channel] = v_new;
 
         sq[tid] = q_acc / (1.0f + exp(-q_acc));
         sk[tid] = k_acc / (1.0f + exp(-k_acc));
@@ -285,23 +256,7 @@ kernel void kernel_glm53_kda_prefill_prepare_impl(
         k[index] = sk[tid] * k_scale;
         threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
     }
-    if (REGISTER_HISTORY) {
-        // Final history only, oldest first, including chunks shorter than 3.
-        q_state[channel] = q_h0;
-        q_state[projection + channel] = q_h1;
-        q_state[2ul * projection + channel] = q_h2;
-        k_state[channel] = k_h0;
-        k_state[projection + channel] = k_h1;
-        k_state[2ul * projection + channel] = k_h2;
-        v_state[channel] = v_h0;
-        v_state[projection + channel] = v_h1;
-        v_state[2ul * projection + channel] = v_h2;
-    }
 }
-
-typedef decltype(kernel_glm53_kda_prefill_prepare_impl<false>) glm53_kda_prepare_t;
-template [[host_name("kernel_glm53_kda_prefill_prepare")]] kernel glm53_kda_prepare_t kernel_glm53_kda_prefill_prepare_impl<false>;
-template [[host_name("kernel_glm53_kda_prefill_prepare_register_history")]] kernel glm53_kda_prepare_t kernel_glm53_kda_prefill_prepare_impl<true>;
 
 // Stage 2, grid (heads, 32) x 128: each simdgroup owns one value row of the
 // state in registers across all rows; lanes own four keys.

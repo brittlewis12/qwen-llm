@@ -14,7 +14,7 @@ For append-only checkpoint history and exact current handoff state, see
 
 ## Current Leverage - 2026-10-11
 
-Reoriented through main `fcb0c7c0` with cx, retaining the requested family/phase
+Reoriented through main `e7b48483` with cx, retaining the requested family/phase
 priority: GLM prefill and long-context decode first, then Flash-Next and Qwen.
 This section supersedes stale next-step claims in the dated maps below.
 
@@ -40,36 +40,44 @@ Evidence: `docs/bench/2026-10-11-glm-latent-mma/`.
 **High-count down experiment parked:** M64/N64 reduces decoded panels but adds
 padding and accumulator state. UD/Maya whole-prefill ratios are only
 0.991-1.011x; an 8 KiB overlay follow-up is also neutral. All recorded outputs
-are bit-identical. No production promotion; helpers/shader stay in test/research.
+are bit-identical. No production promotion; source is archived at `950a2db3`,
+not retained in the active shader/test build.
 Maya deep attribution is now measured: ordinary decode 34.44/32.85 ms at
 8K/32K, selected attention about 1.05 ms, score/select growth only 0.35 ms.
 These are different teacher-forced positions, not a paired depth speedup.
 Evidence: `docs/bench/2026-10-11-glm-down-wide/`.
 
-1. **Routed gate/up prefill with less per-threadgroup state.** Experts remain
-   the largest historical N512 prefill stage. Capture normalized block input
-   for actual N2048 gate/up replay (post-SwiGLU down input is insufficient).
-   Test M32/N32/K32 against the existing M64/N32 tile: reduced accumulator
-   state and an 8 KiB overlay, at the cost of more groups/activation loads.
-   Preserve N16 for small buckets and per-output arithmetic. Use N512 control
-   and whole-prefill conversion only if the real-input leaf is promising.
-   One down-bank duration times 42 is not measured aggregate attribution.
-2. **KDA packed preparation history in registers.** The per-head preparation
-   loop repeatedly reads/shifts convolution history in device memory. Keep
-   nine history values in registers and write final history once, retaining
-   convolution FMA/normalization order. First isolate preparation from the
-   much larger KDA parent, restore mutable inputs/state outside leaf timing,
-   and check final history as well as outputs. No recurrence redesign or new
-   persistent scratch. Current deep experts and KDA each occupy about 30% of
-   profiled spans; this does not prove preparation is a large fraction.
-3. **Half-mode latent numerics, when it beats the opportunities above.** Keep
-   the measured MMA candidate available to diagnostics. A useful follow-up
-   evaluates task consequences or localizes amplification on real inputs,
-   rather than optimizing for agreement with old Fast alone. The diagnostic
-   1e-3 bound and historical Exact/Fast 0.33 trigger answer different questions;
-   neither is an artifact-admission rule or a task-quality result.
+**Lower-state gate/up and register-history KDA also parked:** Maya N2048
+gate/up leaf 67.95 -> 70.00 ms; whole 10553 -> 10685 ms. KDA preparation is only
+about 3.2 ms per sampled block at N2048; its small improvement does not establish
+useful whole-model conversion. Recorded outputs/state are bit-identical.
+The incomplete KDA attempt remains separate from the successful whole-only
+retry; no cause was established for its stall. Complete source is archived at
+`d7a46ba7`; raw packets remain in `docs/bench/2026-10-11-glm-gate-up-state/` and
+`docs/bench/2026-10-11-glm-kda-history/`. No further tile/threshold sweeps.
 
-GLM selected-attention work is deferred behind those concrete prefill bets;
+1. **Reconcile actual N2048 costs before another implementation.** Reuse the
+   existing packed stage profiler and bound-dispatch census for one Maya Half
+   chunk with identical ordinary/profiled inputs. Separate expert gate/up from
+   down/reduction, KDA dense projections from preparation/recurrence, and MLA
+   dense projections from latent absorption/expansion. Collect census outside
+   ordinary timing. A representative leaf times the layer count is not actual
+   aggregate attribution. No new general tracing framework or depth grid.
+2. **Resolve the existing Half latent MMA task-quality question.** Its retained
+   roughly 9% gain is stronger evidence than the failed bit-preserving tile
+   bets. Q6_K dense projections already have batched execution; the remaining
+   scalar4 latent recipe is a concrete structural cost. Use existing task
+   evaluation machinery to assess consequences, not agreement with old Fast as
+   ground truth. Keep declared operand contracts and weights intact. A single
+   task probe can inform direction, not manufacture non-inferiority. The old
+   diagnostic 1e-3 KL bound and Exact/Fast 0.33 trigger answer different
+   questions; neither is an artifact-admission rule or task-quality result.
+3. **Coordinate the next Flash selected-QSA step if GLM lacks a useful lever.**
+   Existing Flash work now retains packed prefill under workspace pressure
+   (`e7b48483`). Do not duplicate that lane or force another GLM tweak merely
+   because it is locally available.
+
+GLM selected-attention work is deferred behind those prefill opportunities;
 the measured leaf is only about 1 ms. Keep Flash selected-QSA work coordinated
 with its existing lane: GLM's small depth cost does not establish Flash's cost.
 
@@ -85,6 +93,12 @@ Use small independent GPU oracles and paired whole-model witnesses for the
 actual mechanism. Integrate validated checkpoints continuously. Do not reopen
 completed work, add artifact-certification gates, or weaken numerical checks to
 turn an inconclusive experiment into a win.
+
+**Retire unsuccessful experiments:** raw evidence and complete source revisions
+remain in Git history, including failed/incomplete attempts. Remove candidate
+shaders, overrides and one-off capture hooks from the active build when no
+specific near-term follow-up remains. Research-only code still costs compile
+time and maintenance. Keep shared profilers and established independent oracles.
 
 ## Active Phase Priorities - 2026-10-10
 

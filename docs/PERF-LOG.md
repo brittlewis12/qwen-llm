@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-11 - Gate/Up and KDA Falsifiers; Retire Live Experiment Debt
+
+- M32/N32 lower-state gate/up: Maya whole ratios 0.9877x at N2048 and
+  0.9961x at N512. Recorded leaf and whole join/three-step outputs match bits;
+  no performance justification for promotion or a UD sweep.
+- Register-history KDA: prepared arrays and final history match bits, including
+  short chunks and CPU chunk/decode oracle. Sampled preparation is only 3.2 ms
+  per N2048 block; small leaf savings do not explain a noisy 0.9% whole mean.
+  Production remains unchanged. No coefficient/barrier/recurrence tuning.
+- First KDA packet is incomplete after a slow baseline A1; process later
+  disappeared without manual termination/environment changes, cause unknown.
+  Whole-only retry completes all 12 sessions with matching output hashes and
+  no accumulating per-session GPU allocations. Preserve both raw packets.
+- Validated experimental source checkpoint: `d7a46ba7` (154 targeted tests,
+  all-target release check). Wide-down source is also retained at `950a2db3`.
+  Retire their live shaders, switches, tests and capture machinery; history is
+  the reproducibility archive, not an ever-growing active research build.
+- After archive cleanup and main refresh through `e7b48483`: 48 grouped-MoE,
+  3 KDA and 86 GLM tests pass (137 total), plus all-target release checks.
+  Existing unrelated `prompt_prefix_len` unused warning remains.
+- Re-ranked next: one actual N2048 cost/dispatch reconciliation, then the
+  already-measured Half latent MMA task-quality question. Do not treat old
+  Fast output equality as quality. Coordinate Flash work instead of inventing
+  further low-budget GLM knobs. Raw evidence: gate-up-state/kda-history packets
+  under `docs/bench/2026-10-11-*`.
+
 ## 2026-10-11 - Wide Down Falsifier and Maya Deep Decode
 
 - Tested compressed native M64/N64 expert down on real N2048/N512 routes,

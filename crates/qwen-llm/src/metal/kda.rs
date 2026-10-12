@@ -182,58 +182,6 @@ pub fn encode_kda_decode(
     Ok(())
 }
 
-#[cfg(test)]
-thread_local! {
-    static KDA_PREPARE_REGISTER_HISTORY: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-}
-
-/// Thread-local, nestable and unwind-safe history-storage experiment. False
-/// selects the actual production prepare; true retains nine history floats
-/// per channel in registers. Decode and recurrence/output are unchanged.
-#[cfg(test)]
-pub fn with_kda_prepare_register_history_override<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
-    struct Restore(Option<bool>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            KDA_PREPARE_REGISTER_HISTORY.with(|v| v.set(self.0));
-        }
-    }
-    let _restore = Restore(KDA_PREPARE_REGISTER_HISTORY.with(|v| v.replace(Some(enabled))));
-    f()
-}
-
-fn kda_prepare_pipeline_name() -> &'static str {
-    #[cfg(test)]
-    if let Some(enabled) = KDA_PREPARE_REGISTER_HISTORY.with(std::cell::Cell::get) {
-        return if enabled {
-            "kernel_glm53_kda_prefill_prepare_register_history"
-        } else {
-            "kernel_glm53_kda_prefill_prepare"
-        };
-    }
-    // Keep the forced baseline above if a future result justifies changing
-    // this production default; both sides of the diagnostic remain usable.
-    "kernel_glm53_kda_prefill_prepare"
-}
-
-/// Encode only packed prefill's prepare stage for diagnostics, honoring
-/// [`with_kda_prepare_register_history_override`]. Uses the existing full
-/// [`KdaDecode`] packed bindings and validation: even unused recurrence/output
-/// bindings must be valid. Mutates only q/k/v, raw_gate and conv_state; no
-/// scratch allocations, recurrence or output dispatches.
-#[cfg(test)]
-pub fn encode_kda_prefill_prepare(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    heads: usize,
-    rows: usize,
-    b: &KdaDecode<'_>,
-    lower_bound: f32,
-    norm_eps: f32,
-) -> Result<(), MetalError> {
-    encode_kda_prefill_impl(ctx, enc, heads, rows, b, lower_bound, norm_eps, true)
-}
-
 /// Packed prefill of `rows` consecutive tokens. Same bindings as
 /// [`encode_kda_decode`] with per-row activations: `q`, `k`, `v`, `raw_gate`,
 /// `output_gate` and `out` are `[width, rows]` and `raw_beta` `[heads, rows]`.
@@ -249,20 +197,6 @@ pub fn encode_kda_prefill(
     b: &KdaDecode<'_>,
     lower_bound: f32,
     norm_eps: f32,
-) -> Result<(), MetalError> {
-    encode_kda_prefill_impl(ctx, enc, heads, rows, b, lower_bound, norm_eps, false)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn encode_kda_prefill_impl(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    heads: usize,
-    rows: usize,
-    b: &KdaDecode<'_>,
-    lower_bound: f32,
-    norm_eps: f32,
-    prepare_only: bool,
 ) -> Result<(), MetalError> {
     const K: &str = "kda_prefill";
     require_serial(K, enc)?;
@@ -363,7 +297,7 @@ fn encode_kda_prefill_impl(
         Ok(pso)
     };
 
-    let prepare = pipeline(kda_prepare_pipeline_name())?;
+    let prepare = pipeline("kernel_glm53_kda_prefill_prepare")?;
     enc.set_pipeline(&prepare);
     enc.set_bytes(0, &args);
     for (index, tensor) in [
@@ -392,10 +326,6 @@ fn encode_kda_prefill_impl(
         },
         threads,
     );
-
-    if prepare_only {
-        return Ok(());
-    }
 
     let recurrence = pipeline("kernel_glm53_kda_prefill_recurrence")?;
     enc.set_pipeline(&recurrence);
@@ -630,15 +560,6 @@ mod tests {
     /// contract iterated token by token: outputs, state and conv tails.
     #[test]
     fn kda_prefill_matches_stepwise_contract_across_chunks_and_decode() {
-        with_kda_prepare_register_history_override(false, kda_prefill_stepwise_contract);
-    }
-
-    #[test]
-    fn kda_prepare_register_history_matches_stepwise_contract_across_chunks_and_decode() {
-        with_kda_prepare_register_history_override(true, kda_prefill_stepwise_contract);
-    }
-
-    fn kda_prefill_stepwise_contract() {
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
@@ -781,220 +702,6 @@ mod tests {
                 "rows {rows} conv state"
             );
             position += rows;
-        }
-    }
-
-    #[test]
-    fn kda_prepare_register_history_override_restores_scope() {
-        const BASE: &str = "kernel_glm53_kda_prefill_prepare";
-        const CANDIDATE: &str = "kernel_glm53_kda_prefill_prepare_register_history";
-        assert_eq!(kda_prepare_pipeline_name(), BASE);
-        with_kda_prepare_register_history_override(true, || {
-            assert_eq!(kda_prepare_pipeline_name(), CANDIDATE);
-            with_kda_prepare_register_history_override(false, || {
-                assert_eq!(kda_prepare_pipeline_name(), BASE);
-            });
-            let _ = std::panic::catch_unwind(|| {
-                with_kda_prepare_register_history_override(false, || panic!("restore"));
-            });
-            assert_eq!(kda_prepare_pipeline_name(), CANDIDATE);
-            std::thread::spawn(|| assert_eq!(kda_prepare_pipeline_name(), BASE))
-                .join()
-                .unwrap();
-        });
-        assert_eq!(kda_prepare_pipeline_name(), BASE);
-    }
-
-    /// Only the history storage differs: exact prepared q/k/v/decay and final
-    /// tails for short and long chunks, irregular heads, and nonzero offsets.
-    #[test]
-    fn kda_prepare_register_history_matches_bits_and_raw_history() {
-        use super::super::test_support::{assert_offset_guards, tensor_backing_bytes};
-        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
-            return;
-        };
-        for (heads, rows) in [(1, 1), (3, 2), (5, 3), (3, 512)] {
-            let width = heads * KDA_HEAD_DIM;
-            let (w, r, h, d) = (width as u64, rows as u64, heads as u64, KDA_HEAD_DIM as u64);
-            let raw: [Vec<f32>; 4] =
-                std::array::from_fn(|i| series(width * rows, i + 1, 2.0 + i as f64));
-            let initial_history = series(9 * width, 13, 1.0);
-            let mut expected_history = initial_history.clone();
-            for token in 0..rows {
-                for bank in 0..3 {
-                    for c in 0..width {
-                        let i = bank * 3 * width + c;
-                        expected_history[i] = expected_history[i + width];
-                        expected_history[i + width] = expected_history[i + 2 * width];
-                        expected_history[i + 2 * width] = raw[bank][token * width + c];
-                    }
-                }
-            }
-            let q_conv = tensor(&ctx, &series(width * 4, 7, 1.0), vec![4, 1, w]);
-            let k_conv = tensor(&ctx, &series(width * 4, 8, 1.0), vec![4, 1, w]);
-            let v_conv = tensor(&ctx, &series(width * 4, 9, 1.0), vec![4, 1, w]);
-            let a = tensor(
-                &ctx,
-                &(0..heads)
-                    .map(|i| -(0.75 + val(i, 10, 1.0)))
-                    .collect::<Vec<_>>(),
-                vec![h],
-            );
-            let dt = tensor(&ctx, &series(width, 11, 2.0), vec![w]);
-            // Full packed bindings are reused, but prepare must leave these
-            // recurrence/output inputs and destinations untouched.
-            let beta = tensor(&ctx, &series(heads * rows, 5, 4.0), vec![h, r]);
-            let output_gate = tensor(&ctx, &series(width * rows, 6, 4.0), vec![w, r]);
-            let norm = tensor(&ctx, &vec![1.0; KDA_HEAD_DIM], vec![d]);
-            let state = tensor(
-                &ctx,
-                &series(heads * KDA_HEAD_DIM * KDA_HEAD_DIM, 14, 0.2),
-                vec![d, d, h],
-            );
-            let out = tensor(&ctx, &vec![-777.0; width * rows], vec![w, r]);
-            let unchanged = [
-                &q_conv,
-                &k_conv,
-                &v_conv,
-                &a,
-                &dt,
-                &beta,
-                &output_gate,
-                &norm,
-                &state,
-                &out,
-            ];
-            let before: Vec<_> = unchanged.iter().map(|t| tensor_backing_bytes(t)).collect();
-            let mut baseline: Vec<Vec<f32>> = Vec::new();
-            for enabled in [false, true] {
-                let acts: Vec<_> = raw
-                    .iter()
-                    .enumerate()
-                    .map(|(i, values)| {
-                        offset_tensor(
-                            &ctx,
-                            16 * (i + 1),
-                            bytemuck::cast_slice(values),
-                            20,
-                            vec![w, r],
-                            GgmlType::F32,
-                        )
-                    })
-                    .collect();
-                let history = offset_tensor(
-                    &ctx,
-                    20,
-                    bytemuck::cast_slice(&initial_history),
-                    20,
-                    vec![w, 3, 3],
-                    GgmlType::F32,
-                );
-                let b = KdaDecode {
-                    q: &acts[0],
-                    k: &acts[1],
-                    v: &acts[2],
-                    raw_gate: &acts[3],
-                    raw_beta: &beta,
-                    output_gate: &output_gate,
-                    q_conv: &q_conv,
-                    k_conv: &k_conv,
-                    v_conv: &v_conv,
-                    neg_exp_a_log: &a,
-                    dt_bias: &dt,
-                    output_norm: &norm,
-                    conv_state: &history,
-                    state: &state,
-                    out: &out,
-                };
-                if rows == 1 {
-                    // The diagnostic leaf uses the same validation as full
-                    // prefill, before encoding even its single dispatch.
-                    let cmd = ctx.queue.commandBuffer().unwrap();
-                    let enc = KernelEncoder::begin(&cmd);
-                    let mut bad_q = acts[0].clone();
-                    bad_q.offset += 4;
-                    let bad = KdaDecode { q: &bad_q, ..b };
-                    dispatch_census_begin();
-                    assert!(
-                        with_kda_prepare_register_history_override(enabled, || {
-                            encode_kda_prefill_prepare(&ctx, &enc, heads, rows, &bad, -5.0, 1e-5)
-                        })
-                        .is_err()
-                    );
-                    assert!(dispatch_census_take().is_empty());
-                    // Wrong shape and aliased writable input.
-                    let bad = KdaDecode {
-                        conv_state: &acts[0],
-                        ..b
-                    };
-                    dispatch_census_begin();
-                    assert!(
-                        encode_kda_prefill_prepare(&ctx, &enc, heads, rows, &bad, -5.0, 1e-5)
-                            .is_err()
-                    );
-                    assert!(dispatch_census_take().is_empty());
-                    enc.end();
-                }
-                dispatch_census_begin();
-                one_shot(&ctx, |enc| {
-                    with_kda_prepare_register_history_override(enabled, || {
-                        encode_kda_prefill_prepare(&ctx, enc, heads, rows, &b, -5.0, 1e-5)
-                    })
-                })
-                .unwrap();
-                let census = dispatch_census_take();
-                assert_eq!(
-                    census.len(),
-                    1,
-                    "prepare leaf must encode no recurrence/output"
-                );
-                assert_eq!(
-                    census[0].kernel,
-                    with_kda_prepare_register_history_override(enabled, kda_prepare_pipeline_name)
-                );
-                assert_eq!(census[0].grid_width, heads as u64);
-                assert_eq!(census[0].tg_threads, THREADS as u64);
-                let snapshots: Vec<Vec<f32>> = acts
-                    .iter()
-                    .chain(std::iter::once(&history))
-                    .map(tensor_f32_at_offset)
-                    .collect();
-                if enabled {
-                    for ((label, actual), expected) in ["q", "k", "v", "gate", "history"]
-                        .into_iter()
-                        .zip(&snapshots)
-                        .zip(&baseline)
-                    {
-                        for (i, (a, b)) in actual.iter().zip(expected).enumerate() {
-                            assert_eq!(
-                                a.to_bits(),
-                                b.to_bits(),
-                                "heads={heads} rows={rows} {label}[{i}]: candidate={a:e} baseline={b:e}"
-                            );
-                        }
-                    }
-                } else {
-                    baseline = snapshots;
-                }
-                assert_eq!(
-                    tensor_f32_at_offset(&history)
-                        .iter()
-                        .map(|v| v.to_bits())
-                        .collect::<Vec<_>>(),
-                    expected_history
-                        .iter()
-                        .map(|v| v.to_bits())
-                        .collect::<Vec<_>>(),
-                    "heads={heads} rows={rows}: final raw history, oldest first"
-                );
-                for (i, t) in acts.iter().enumerate() {
-                    assert_offset_guards(t, 16 * (i + 1), 20);
-                }
-                assert_offset_guards(&history, 20, 20);
-                for (t, bytes) in unchanged.iter().zip(&before) {
-                    assert_eq!(&tensor_backing_bytes(t), bytes);
-                }
-            }
         }
     }
 

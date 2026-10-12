@@ -38,8 +38,9 @@ representative leaf times are not aggregate attribution for all routed blocks.
 
 ## Reproduction
 
-The validated experimental source is retained in the Git checkpoint preceding
-the archive cleanup. Use that revision in a separate worktree to reproduce:
+The validated experimental source is retained at Git commit `d7a46ba7`.
+It is removed from the active build after measurement. Use that revision in a
+separate worktree to reproduce:
 
 ```sh
 env -u MTL_DEBUG_LAYER QWEN_METAL_LEASE_WAIT=1 \

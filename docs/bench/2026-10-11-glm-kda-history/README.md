@@ -52,7 +52,7 @@ totals are 112402464768 bytes, so no accumulating session allocation is evident.
 
 ## Reproduction And Scope
 
-The experiment is retained in the Git checkpoint preceding archive cleanup;
+The experiment is retained at Git commit `d7a46ba7`, not in the active build;
 use that revision in a separate worktree. The whole-only retry is:
 
 ```sh

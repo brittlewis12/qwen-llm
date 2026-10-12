@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Structural contracts that need no GPU or model. `--full` also compiles every
-# workspace test, example, benchmark and integration target in release mode.
+# Structural contracts that need no GPU or model, checked on the committed
+# tree: no machine-specific paths in code, scripts or maintained docs,
+# formatting, the generated knob reference, the model-witness and path
+# normalizer self-tests, and the numeric comparison tripwire. `--full` also
+# compiles every workspace target in release mode and runs the README family
+# table test.
 set -euo pipefail
 
 full=0
@@ -29,7 +33,9 @@ check_tree_has_no_match() {
   local pattern="$2"
   local output
   local result
-  if output=$(git grep -n -E -e "$pattern" "$tree" -- . ':!docs/**' 2>&1); then
+  # The normalizer names the paths it replaces; docs are checked by it.
+  if output=$(git grep -n -E -e "$pattern" "$tree" -- . ':!docs/**' \
+    ':!scripts/reference/normalize_paths.py' 2>&1); then
     printf '%s\n' "$output" >&2
     echo "check-contracts: $description" >&2
     exit 1
@@ -92,6 +98,8 @@ check_tree_has_no_match "relative model-directory literal found in Rust or scrip
 cargo fmt --all --check
 uv run scripts/reference/env_knobs.py --check
 uv run scripts/model-witnesses.py --self-test
+uv run scripts/reference/normalize_paths.py --self-test
+uv run scripts/reference/normalize_paths.py --check
 if [ "$full" -eq 1 ]; then
   cargo test --release --workspace --no-run
 fi

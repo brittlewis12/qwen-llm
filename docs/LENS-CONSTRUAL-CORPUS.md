@@ -206,7 +206,7 @@ stability or movement of an interpretation.
 The new artifacts are locally present at:
 
 ```
-/Users/tito/models/qwen38-27b-lenses/qwen3.8-27b/pile10k25-t128-skip4-target62-v1/
+$MODELS/qwen38-27b-lenses/qwen3.8-27b/pile10k25-t128-skip4-target62-v1/
   j/qwen3.8-27b-j-lens.pt
   r/qwen3.8-27b-r-lens.pt
 ```

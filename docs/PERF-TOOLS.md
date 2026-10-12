@@ -519,7 +519,7 @@ GO=target/profiles/a3b-stage.go
 rm -f "$READY" "$GO"
 (while [ ! -f "$READY" ]; do sleep 0.1; done; touch "$GO") &
 target/release/qwen-bench decode-window \
-  -m /Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf \
+  -m $MODELS/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf \
   --target-ctx 16384 --window 4 --stage-timestamps \
   --ready-file "$READY" --go-file "$GO" \
   > target/profiles/a3b-stage.tsv \
@@ -577,7 +577,7 @@ Example scenario packet:
 
 ```sh
 uv run scripts/profile/request_trace_from_game.py \
-  --input '/Users/tito/code/llm/game/*.json' \
+  --input '$HOME/code/llm/game/*.json' \
   --arrival-model fixed-gap --fixed-gap-ms 500 \
   --output target/profiles/game-scenario-fixed500.tsv
 

@@ -15968,7 +15968,7 @@ MoE verifier FFN attempt gated off as a negative result.
 
 THE CHANGE:
 - Downloaded and measured the intended Unsloth A3B MTP target:
-  `/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`.
+  `$MODELS/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`.
 - Fixed recorded MTP probe alignment: `RecordedDraftStep::start_position` now
   records the base packed-verify start position, not the drafter KV start. This
   unblocks `--mtp-probe replay-current` for committed-history MTP.
@@ -16083,7 +16083,7 @@ qwen35moe packed-N verify support; without it, MoE MTP is capped at lazy MTP-1.
 ## 2026-07-07 - v0.512 A3B MoE MTP Asset Exposes Unsupported Head
 
 Status: model-asset + comparator smoke. Downloaded
-`/Users/tito/models/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf` from
+`$MODELS/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf` from
 `unsloth/Qwen3.6-35B-A3B-MTP-GGUF` with `hugtug` to add native-MTP MoE coverage.
 
 THE CHANGE:
@@ -17212,8 +17212,8 @@ or online-attention design.
 Validation:
 
 - `QWEN_ATTN_V4_G8_TILE=1 cargo test --release -p qwen-llm attn_v4_group8_subgroup_matches_naive_f16kv -- --ignored --nocapture`
-- `QWEN_ATTN_V4_G8_TILE=4 target/release/qwen-bench attn-intra -m /Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --ctx 16384 --runs 5 > target/profiles/v0488-a3b-attn-intra-ctx16384-t4.out`
-- `QWEN_ATTN_V4_G8_TILE=1 target/release/qwen-bench attn-intra -m /Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --ctx 16384 --runs 5 > target/profiles/v0488-a3b-attn-intra-ctx16384-t1.out`
+- `QWEN_ATTN_V4_G8_TILE=4 target/release/qwen-bench attn-intra -m $MODELS/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --ctx 16384 --runs 5 > target/profiles/v0488-a3b-attn-intra-ctx16384-t4.out`
+- `QWEN_ATTN_V4_G8_TILE=1 target/release/qwen-bench attn-intra -m $MODELS/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --ctx 16384 --runs 5 > target/profiles/v0488-a3b-attn-intra-ctx16384-t1.out`
 
 ## 2026-07-05 - v0.487 MoE Down All-SG Scatter Falsifier
 
@@ -17237,8 +17237,8 @@ body, is the limiting term.
 Validation:
 
 - `QWEN_A3B_MOE_TEST_TOTAL=16 QWEN_A3B_MOE_TEST_CHUNK=16 QWEN_A3B_MOE_TEST_CONT_TOKENS=0 cargo test --release -p qwen-llm --test dflash_correctness prefill_tokens_matches_single_token_loop_35b_a3b_moe -- --nocapture`
-- `target/release/qwen-bench suite -m /Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --pp 512,1024 --runs 2 -o json > target/profiles/v0487-a3b-pp512-1024-allsg-base.json`
-- `target/release/qwen-bench suite -m /Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --pp 512,1024 --runs 2 -o json > target/profiles/v0487-a3b-pp512-1024-allsg-modified.json`
+- `target/release/qwen-bench suite -m $MODELS/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --pp 512,1024 --runs 2 -o json > target/profiles/v0487-a3b-pp512-1024-allsg-base.json`
+- `target/release/qwen-bench suite -m $MODELS/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --pp 512,1024 --runs 2 -o json > target/profiles/v0487-a3b-pp512-1024-allsg-modified.json`
 
 ## 2026-07-05 - v0.486 Q4_K Compressed Prepack Falsifier
 
@@ -17291,8 +17291,8 @@ Validation:
 
 - `cargo test -p qwen-llm mat_mat_q4_k_matches_cpu_and_mat_vec -- --nocapture`
 - `cargo test -p qwen-llm mat_mat_q6_k_matches_cpu_and_mat_vec -- --nocapture`
-- `target/release/qwen-bench suite -m /Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf --pp 1024,4096 --runs 3 -o json > target/profiles/v0485-27b-suite-q4q6-sgbarrier-pruned.json`
-- `target/release/qwen-bench suite -m /Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf --pp 1024,4096 --runs 3 -o json > target/profiles/v0485-27b-suite-q4q6-sgbarrier-base-repeat.json`
+- `target/release/qwen-bench suite -m $MODELS/Qwen3.6-27B-Q4_K_M.gguf --pp 1024,4096 --runs 3 -o json > target/profiles/v0485-27b-suite-q4q6-sgbarrier-pruned.json`
+- `target/release/qwen-bench suite -m $MODELS/Qwen3.6-27B-Q4_K_M.gguf --pp 1024,4096 --runs 3 -o json > target/profiles/v0485-27b-suite-q4q6-sgbarrier-base-repeat.json`
 
 ## 2026-07-05 - v0.484 GDN Update-Dot Loop Falsifier
 
@@ -17319,8 +17319,8 @@ Validation:
 
 - `cargo test -p qwen-llm gdn_step_matches_cpu -- --nocapture`
 - `QWEN_TEST_27B_PREFILL_T=24 QWEN_TEST_27B_PREFILL_P=16 cargo test --release -p qwen-llm --test dflash_correctness prefill_tokens_matches_single_token_loop_27b -- --nocapture`
-- `target/release/qwen-bench suite -m /Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf --pp 1024 --tg 128 --runs 3 -o json > target/profiles/v0484-27b-suite-gdn-dot-base.json`
-- `target/release/qwen-bench suite -m /Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf --pp 1024 --tg 128 --runs 3 -o json > target/profiles/v0484-27b-suite-gdn-dot-combined.json`
+- `target/release/qwen-bench suite -m $MODELS/Qwen3.6-27B-Q4_K_M.gguf --pp 1024 --tg 128 --runs 3 -o json > target/profiles/v0484-27b-suite-gdn-dot-base.json`
+- `target/release/qwen-bench suite -m $MODELS/Qwen3.6-27B-Q4_K_M.gguf --pp 1024 --tg 128 --runs 3 -o json > target/profiles/v0484-27b-suite-gdn-dot-combined.json`
 
 ## 2026-07-05 - v0.483 GDN Chunk16 Delta-Rule Falsifier
 
@@ -17357,7 +17357,7 @@ Validation:
 - `cargo test -p qwen-llm gdn_chunked_delta_matches_serial_cpu -- --nocapture`
 - `cargo test -p qwen-llm gdn_chunk16_matches_packed_gpu_production_shape -- --nocapture`
 - `QWEN_GDN_PACKED_CHUNK16=1 QWEN_TEST_27B_PREFILL_T=24 QWEN_TEST_27B_PREFILL_P=16 cargo test --release -p qwen-llm --test dflash_correctness prefill_tokens_matches_single_token_loop_27b -- --nocapture`
-- `uv run scripts/profile/prefill_sweep.py --model /Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf --n-prompt 1024 --runs 2 --no-warmup --cooldown-seconds 10 --repeat-blocks 1 --shuffle-seed 482 --variant base --variant chunk16:QWEN_GDN_PACKED_CHUNK16=1 --output target/profiles/v0483-27b-pp1024-gdn-chunk16-sweep.json`
+- `uv run scripts/profile/prefill_sweep.py --model $MODELS/Qwen3.6-27B-Q4_K_M.gguf --n-prompt 1024 --runs 2 --no-warmup --cooldown-seconds 10 --repeat-blocks 1 --shuffle-seed 482 --variant base --variant chunk16:QWEN_GDN_PACKED_CHUNK16=1 --output target/profiles/v0483-27b-pp1024-gdn-chunk16-sweep.json`
 - `cargo fmt --check`
 - `cargo check -p qwen-llm`
 
@@ -17709,8 +17709,8 @@ remain scenario evidence only.
 Validation:
 
 - `uv run python -m py_compile scripts/profile/request_trace_from_game.py`
-- Exact-count smoke on `/Users/tito/code/llm/game/chaos.json` with
-  `/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf`
+- Exact-count smoke on `$HOME/code/llm/game/chaos.json` with
+  `$MODELS/Qwen3.5-0.8B-Q4_K_M.gguf`
 
 ## 2026-07-04 - v0.470 Prefix-Cache Stats Summarizer
 
@@ -17788,7 +17788,7 @@ S8 replay economics model without calling modeled arrivals real workload data.
   arrival models, char-estimated token counts, and optional exact counts via
   `qwen-bench tok`.
 - Smoke: exact-token `chaos.json` first-four assistant trace works with
-  `/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf`.
+  `$MODELS/Qwen3.5-0.8B-Q4_K_M.gguf`.
 - Scenario packet: 34 game JSONs, 163 assistant completions, about `218k`
   char-estimated completion tokens.
 - Fixed-gap 500 ms scenario through v0.466 A3B rows: ctx8192 saves `8.13%`, p95
@@ -20048,7 +20048,7 @@ Validation:
 - `cargo fmt`
 - `cargo check -p qwen-cli --bin qwen-bench`
 - `cargo build --release -p qwen-cli --bin qwen-bench`
-- A3B/A10B `moe-batch-sweep --file /Users/tito/code/llm/game/the_current.md`
+- A3B/A10B `moe-batch-sweep --file $HOME/code/llm/game/the_current.md`
 - `cx ask` adversarial review, session `019f1b61-4fee-7e33-b5ae-79a087a838fe`
 
 Results:
@@ -21372,8 +21372,8 @@ Artifact:
 
 Validation:
 
-- `uv run scripts/bench/family.py --shapes pp512,pp4096,tg128 --runs 1 --cooldown-seconds 10 --run-tag v0345-fresh-lcpp-c818 --llama-bench /Users/tito/code/llama.cpp/build/bin/llama-bench --allow-unpinned-lcpp`
-- `uv run scripts/bench/ensure_llama_cpp.py --smoke-model /Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf --print-bin llama-bench`
+- `uv run scripts/bench/family.py --shapes pp512,pp4096,tg128 --runs 1 --cooldown-seconds 10 --run-tag v0345-fresh-lcpp-c818 --llama-bench $HOME/code/llama.cpp/build/bin/llama-bench --allow-unpinned-lcpp`
+- `uv run scripts/bench/ensure_llama_cpp.py --smoke-model $MODELS/Qwen3.5-0.8B-Q4_K_M.gguf --print-bin llama-bench`
 - direct pinned probe reports `build_commit=c818263f2a`, `build_number=9833`,
   `backends=MTL,BLAS`, and `has tensor=false`
 
@@ -30501,7 +30501,7 @@ long-context attention path.
 
 ### 9B Long-Context Canary Result
 
-Model: `/Users/tito/models/Qwen3.5-9B-Q4_K_M.gguf`
+Model: `$MODELS/Qwen3.5-9B-Q4_K_M.gguf`
 
 `qwen-bench ctx-sweep --checkpoints 1,4096,8192,16384,32768 --window 2`:
 

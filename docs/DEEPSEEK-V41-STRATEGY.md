@@ -69,7 +69,7 @@ Evaluate a pinned version against fixtures before adding a dependency.
 ## DwarfStar release: 2026-09-12
 
 Supersedes the earlier "not yet public" DwarfStar status below. Local
-`/Users/tito/code/ds4` fast-forwarded from `6289c51` to
+`$HOME/code/ds4` fast-forwarded from `6289c51` to
 `bd66c402070042bf0a79ad6ece8242de4c93680c`:
 https://github.com/antirez/ds4/commit/bd66c402070042bf0a79ad6ece8242de4c93680c
 (`DeepSeek v4.1 Flash support for Metal`). Untracked local logs were preserved;
@@ -149,7 +149,7 @@ was rerun locally. The official HF revision remains
 
 ### Local checkout updates
 
-All paths are under `/Users/tito/code`. Nine existing checkouts fast-forwarded
+All paths are under `$HOME/code`. Nine existing checkouts fast-forwarded
 without merges, rebases, stashes, or local-edit loss:
 
 | Checkout | Updated HEAD | V4.1 status at inspection |

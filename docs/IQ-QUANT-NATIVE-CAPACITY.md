@@ -123,7 +123,7 @@ their "current" storage totals describe the pre-change baseline.
 ## Historical investigation: verified scope versus reported measurements
 
 Artifact:
-`/Volumes/wdblack/weights-archive/underdog-saluki-27b/Underdog-Saluki-27B-1.0-IQ2-mix.gguf`.
+`$MODELS/underdog-saluki-27b/Underdog-Saluki-27B-1.0-IQ2-mix.gguf`.
 Metadata-only inspection finds architecture `qwen35`, 851 tensors and
 7,898,369,152 file bytes (7.356 GiB). No weight payload was decoded or model
 loaded for this investigation. Header length: 10,994,812 bytes; header-only

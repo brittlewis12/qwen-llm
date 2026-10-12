@@ -63,7 +63,7 @@ Primary sources:
 The current product, quality, and optimization target is the 2026-08-04
 converter refresh at:
 
-`/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf`
+`$MODELS/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf`
 
 Observed facts from its complete four-shard mapping:
 
@@ -99,7 +99,7 @@ The 2026-07-31 four-shard asset used for bring-up is historical lineage, not a
 required local dependency. Its b10222 logits, decision transcripts, census,
 and shard hashes remain immutable in the repository. Historical live tests use
 `DSV4_LEGACY_MODEL` and may be reprovisioned under
-`/Users/tito/models/deepseek-v4-flash-0731-old/`; ordinary development does not
+`$MODELS/deepseek-v4-flash-0731-old/`; ordinary development does not
 keep its 95.93 GiB GGUF resident. The exact mixed-revision URLs, commits, Xet
 objects, hashes, and engine ordered-content root are retained in
 `crates/qwen-llm/tests/fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_legacy_2026_07_31_provisioning_v1.json`.

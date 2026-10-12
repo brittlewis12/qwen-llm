@@ -122,7 +122,7 @@ no further `glm5-next` changes). Earlier research (2026-08-28 gap analysis,
 
 Local weights: unsloth `GLM-5.3-Flash-GGUF` revision `621d456e93e926e4b52f85cff5f634358c1828f9`,
 `UD-IQ3_XXS` (4 shards, 112.092 GiB, 1,412 tensors), in
-`/Volumes/wdblack/weights-archive/glm-5.3-flash-ud-iq3_xxs/`. The original shard 1 says
+`$MODELS/glm-5.3-flash-ud-iq3_xxs/`. The original shard 1 says
 architecture `glm5next`; `glm5-next/` links unsloth's `Shard_Rewrite` shard 1 (`glm5-next`
 keys) with the original shards 2-4. Tensor bytes are identical; accept both names and
 both metadata namespaces. Shard 1 holds metadata only.
@@ -442,7 +442,7 @@ context qualification beyond measured lengths.
 
 ## Integration Discipline
 
-Work proceeds on `feat/glm53-flash` in `/Users/tito/code/qwen-llm-directions`, kept
+Work proceeds on `feat/glm53-flash` in `$HOME/code/qwen-llm-directions`, kept
 current with main. Commits are conventional with Why/What/Evidence/Risks bodies.
 `cx` design and adversarial review at each packet. Shared-kernel changes must keep
 DS4 and Qwen4Exp behavior and tests unchanged.

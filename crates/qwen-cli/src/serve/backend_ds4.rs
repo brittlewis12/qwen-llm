@@ -94,8 +94,16 @@ fn pending_writer_bytes(pending: &[(u64, u64)]) -> u64 {
         .fold(0_u64, |total, (_, bytes)| total.saturating_add(*bytes))
 }
 
-fn settle_writer_reservations(pending: &mut Vec<(u64, u64)>, completed: &[u64]) {
-    pending.retain(|(ticket, _)| !completed.contains(ticket));
+fn settle_writer_reservations(
+    pending: &mut Vec<(u64, u64)>,
+    completed: &[u64],
+    writer_failed: bool,
+) {
+    if writer_failed {
+        pending.clear();
+    } else {
+        pending.retain(|(ticket, _)| !completed.contains(ticket));
+    }
 }
 
 /// A chosen warm start: matched prefix length, the snapshot (bound to the
@@ -946,12 +954,9 @@ impl DeepSeekV4Backend {
         let Some(durable) = self.durable.as_ref() else {
             return;
         };
-        if durable.worker.failed() {
-            durable.pending.borrow_mut().clear();
-            return;
-        }
+        let writer_failed = durable.worker.failed();
         let completed = durable.acknowledgements.try_iter().collect::<Vec<_>>();
-        settle_writer_reservations(&mut durable.pending.borrow_mut(), &completed);
+        settle_writer_reservations(&mut durable.pending.borrow_mut(), &completed, writer_failed);
     }
 
     fn durable_reserved_bytes(&self) -> u64 {
@@ -1306,13 +1311,23 @@ mod tests {
         let mut pending = vec![(11, writer_copy), (12, writer_copy)];
         assert_eq!(super::pending_writer_bytes(&pending), 4 * payload_bytes);
 
-        super::settle_writer_reservations(&mut pending, &[11]);
+        super::settle_writer_reservations(&mut pending, &[11], false);
         assert_eq!(super::pending_writer_bytes(&pending), 2 * payload_bytes);
         assert_eq!(pending, [(12, writer_copy)]);
 
-        super::settle_writer_reservations(&mut pending, &[12]);
+        super::settle_writer_reservations(&mut pending, &[12], false);
         assert_eq!(super::pending_writer_bytes(&pending), 0);
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn failed_durable_writer_settles_all_queued_reservations() {
+        let mut pending = vec![(11, 256), (12, 512)];
+
+        super::settle_writer_reservations(&mut pending, &[11], true);
+
+        assert!(pending.is_empty());
+        assert_eq!(super::pending_writer_bytes(&pending), 0);
     }
 
     #[test]

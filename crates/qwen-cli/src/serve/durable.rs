@@ -21,6 +21,7 @@ use anyhow::{Context as _, Result, bail};
 use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
 use qwen_llm::gguf::GgufFile;
 use std::collections::VecDeque;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
@@ -292,9 +293,22 @@ impl<J: Send + 'static> DurableWorker<J> {
         let identity = Arc::new(OnceLock::new());
         let worker_shared = Arc::clone(&shared);
         let worker_identity = Arc::clone(&identity);
+        let panic_shared = Arc::clone(&shared);
         std::thread::Builder::new()
             .name(format!("qwen-durable-{label}"))
-            .spawn(move || run_worker(label, worker_shared, worker_identity, resolve))
+            .spawn(move || {
+                if catch_unwind(AssertUnwindSafe(|| {
+                    run_worker(label, worker_shared, worker_identity, resolve)
+                }))
+                .is_err()
+                {
+                    fail_worker(&panic_shared);
+                    tracing::error!(
+                        target: "qwen_diag",
+                        "serve durable: family={label} worker panicked; tier disabled and queued snapshots dropped",
+                    );
+                }
+            })
             .context("spawn durable snapshot worker")?;
         Ok(Self {
             shared,
@@ -433,6 +447,18 @@ fn push<J>(state: &mut State<J>, job: J, bytes: u64) {
     state.jobs.push_back((job, bytes));
     state.queued_bytes += bytes;
     state.stats.enqueued += 1;
+}
+
+fn fail_worker<J>(shared: &Shared<J>) {
+    let mut state = shared.lock();
+    state.failed = true;
+    state.writing = false;
+    state.queued_bytes = 0;
+    state.stats.failed += 1;
+    let abandoned = std::mem::take(&mut state.jobs);
+    drop(state);
+    shared.changed.notify_all();
+    drop(abandoned);
 }
 
 fn run_worker<J, W>(
@@ -699,6 +725,37 @@ mod tests {
         assert!(worker.content_id().is_none());
         assert!(!worker.try_enqueue(1, 1));
         assert_eq!(worker.stats().enqueued, 0);
+    }
+
+    #[test]
+    fn writer_panic_disables_worker_and_drains_queued_jobs() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (panic_tx, panic_rx) = mpsc::channel();
+        let worker = DurableWorker::spawn("test", 10, move || {
+            Ok(Resolved {
+                content_id: [1; 32],
+                detail: String::new(),
+                writer: move |_job: u32| {
+                    let _ = started_tx.send(());
+                    panic_rx.recv().unwrap();
+                    panic!("injected durable writer panic");
+                },
+            })
+        })
+        .unwrap();
+        assert!(worker.try_enqueue(1, 3));
+        started_rx.recv_timeout(LONG).unwrap();
+        assert!(worker.try_enqueue(2, 4));
+        panic_tx.send(()).unwrap();
+
+        let started = Instant::now();
+        while !worker.failed() {
+            assert!(started.elapsed() < LONG);
+            std::thread::yield_now();
+        }
+        assert!(worker.is_idle());
+        assert_eq!(worker.stats().failed, 1);
+        assert!(!worker.try_enqueue(3, 1));
     }
 
     #[test]

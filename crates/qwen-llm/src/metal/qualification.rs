@@ -38,7 +38,8 @@ pub enum HeadroomRequirementScope {
 pub enum QualifiedDevices {
     Model(&'static str),
     AppleFamily7 {
-        measured_on: &'static [&'static str],
+        oldest_measured: &'static str,
+        newest_measured: &'static str,
     },
 }
 
@@ -244,7 +245,8 @@ pub static DEEPSEEK_V4_F16_MATRIX_SCORER: Qualification = Qualification {
 pub static DEEPSEEK_V4_GROUPED_LONG_HCA: Qualification = Qualification {
     path: "deepseek_v4.grouped_long_hca",
     qualified_devices: QualifiedDevices::AppleFamily7 {
-        measured_on: &["Apple M4 Max", "Apple M1 Pro"],
+        oldest_measured: "Apple M1 Pro",
+        newest_measured: "Apple M4 Max",
     },
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
@@ -252,7 +254,7 @@ pub static DEEPSEEK_V4_GROUPED_LONG_HCA: Qualification = Qualification {
     required_headroom_bytes: None,
     required_headroom_scope: None,
     evidence: "PERF-LOG 2026-08-07: Grouped Long-HCA Default GO; Apple M1 Pro (Apple7), 2026-10-12: 8192 rows 4.31 ms grouped / 1.28 ms split4 / 1.30 ms split8 / 1.14 ms split16 vs 5.17 ms online; 513 rows 0.341 ms grouped / 0.136 ms split8 vs 0.413 ms online",
-    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::tiled_hca_matches_cpu_through_the_full_model_context -- --exact",
+    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::online_hca_matches_legacy_envelope_at_structural_boundaries -- --exact",
     correctness_kind: QualificationWitnessKind::Replay,
     performance: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_tiled_hca_at_far_context -- --ignored --exact --nocapture",
     performance_kind: QualificationWitnessKind::Replay,
@@ -260,18 +262,19 @@ pub static DEEPSEEK_V4_GROUPED_LONG_HCA: Qualification = Qualification {
 pub static DEEPSEEK_V4_SPLITK_HCA: Qualification = Qualification {
     path: "deepseek_v4.splitk_hca",
     qualified_devices: QualifiedDevices::AppleFamily7 {
-        measured_on: &["Apple M4 Max", "Apple M1 Pro"],
+        oldest_measured: "Apple M1 Pro",
+        newest_measured: "Apple M4 Max",
     },
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     required_headroom_scope: None,
-    evidence: "PERF-LOG 2026-08-07: Eight-Way Split-K HCA Default GO; Apple M1 Pro (Apple7), 2026-10-12: 8192 rows split8 1.30 ms vs 5.17 ms online; 513 rows split8 0.136 ms vs 0.413 ms online",
+    evidence: "PERF-LOG 2026-08-07: Eight-Way Split-K HCA Default GO; M4-only characterization uses splitk_hca_profiles_current_synthetic_terminal_tokens and skips off-M4; Apple M1 Pro (Apple7), 2026-10-12: 8192 rows split8 1.30 ms vs 5.17 ms online; 513 rows split8 0.136 ms vs 0.413 ms online",
     correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::online_hca_matches_legacy_envelope_at_structural_boundaries -- --exact",
     correctness_kind: QualificationWitnessKind::Replay,
-    performance: "cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::splitk_hca_profiles_current_synthetic_terminal_tokens -- --ignored --exact --nocapture (M4 characterization; skips off-M4); Apple7 replay: cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_tiled_hca_at_far_context -- --ignored --exact --nocapture (compares online, grouped, and split-K HCA at 513 and 8192 rows)",
-    performance_kind: QualificationWitnessKind::M4CharacterizationSkip,
+    performance: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_tiled_hca_at_far_context -- --ignored --exact --nocapture",
+    performance_kind: QualificationWitnessKind::Replay,
 };
 pub static DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY: Qualification = Qualification {
     path: "deepseek_v4.packed_q8_matrix_family",
@@ -282,7 +285,7 @@ pub static DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY: Qualification = Qualification {
     required_headroom_bytes: None,
     required_headroom_scope: None,
     evidence: "4d3ed878, c9e6b729, c74d791d, 673830e4, 85a0ca34",
-    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_scope_helpers_use_their_named_device_qualifications -- --exact; cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::q8_f32_mma_r2c4k64_reduces_operand_rounding_and_preserves_guards -- --exact",
+    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::q8_f32_mma_r2c4k64_reduces_operand_rounding_and_preserves_guards -- --exact",
     correctness_kind: QualificationWitnessKind::Replay,
     performance: "cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::prefill::tests::profile_q8_f32_mma_r2c4k64_attention_output_packet -- --ignored --exact --nocapture",
     performance_kind: QualificationWitnessKind::M4CharacterizationSkip,
@@ -310,9 +313,9 @@ pub static DEEPSEEK_V4_PACKED_MXFP4_MATRIX: Qualification = Qualification {
     required_headroom_bytes: None,
     required_headroom_scope: None,
     evidence: "56a10b85, b1a534e8, f75f1eb1",
-    correctness: "cargo test --release -p qwen-llm --lib metal::tests::mxfp4_f32_matrix_tile_matches_scalar_envelope_and_guards -- --exact; cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_mxfp4_matrix_scope_covers_both_fresh_and_k216_full_widths -- --exact",
+    correctness: "cargo test --release -p qwen-llm --lib metal::tests::mxfp4_f32_matrix_tile_matches_scalar_envelope_and_guards -- --exact",
     correctness_kind: QualificationWitnessKind::Replay,
-    performance: "cargo test --release -p qwen-llm --lib metal::tests::mxfp4_f32_matrix_tile_k216_n2048_bucket_floor -- --ignored --exact --nocapture; cargo test --release -p qwen-llm --lib metal::moe::tests::mxfp4_f32_matrix_tile_k216_n4096_all_expert_floor -- --ignored --exact --nocapture",
+    performance: "cargo test --release -p qwen-llm --lib metal::tests::mxfp4_f32_matrix_tile_k216_n2048_bucket_floor -- --ignored --exact --nocapture",
     performance_kind: QualificationWitnessKind::Replay,
 };
 pub static DEEPSEEK_V4_PACKED_E8P32_ROUTER: Qualification = Qualification {
@@ -324,7 +327,7 @@ pub static DEEPSEEK_V4_PACKED_E8P32_ROUTER: Qualification = Qualification {
     required_headroom_bytes: None,
     required_headroom_scope: None,
     evidence: "6ea94010",
-    correctness: "cargo test --release -p qwen-llm --lib metal::moe::tests::mat_mat_f32_router_e8p32_strict_matches_generic_bits -- --exact; cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_router_e8p32_scope_is_exactly_k160_m4 -- --exact",
+    correctness: "cargo test --release -p qwen-llm --lib metal::moe::tests::mat_mat_f32_router_e8p32_strict_matches_generic_bits -- --exact",
     correctness_kind: QualificationWitnessKind::Replay,
     performance: "none: the cited PERF-LOG entry records sampled E8 router intervals and a noisy bracket but no executable replay command; the available post-route packet does not isolate this router",
     performance_kind: QualificationWitnessKind::None,
@@ -338,7 +341,7 @@ pub static DEEPSEEK_V4_PACKED_QA_RAW_KV_MATRIX: Qualification = Qualification {
     required_headroom_bytes: None,
     required_headroom_scope: None,
     evidence: "6ea94010",
-    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_q8_qa_kv_matrix_policy_is_scoped_and_fail_closed -- --exact; cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::q8_f32_mma_r2c4k64_reduces_operand_rounding_and_preserves_guards -- --exact",
+    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_q8_qa_kv_matrix_policy_is_scoped_and_fail_closed -- --exact",
     correctness_kind: QualificationWitnessKind::Replay,
     performance: "none: the 2026-08-08 PERF-LOG entry gives Q-A/raw-KV A/B results but no exact command or packet runner for that measurement",
     performance_kind: QualificationWitnessKind::None,
@@ -352,7 +355,7 @@ pub static DEEPSEEK_V4_PACKED_INDEXER_Q_MATRIX: Qualification = Qualification {
     required_headroom_bytes: None,
     required_headroom_scope: None,
     evidence: "30c8ef59, 85a0ca34",
-    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_indexer_q_matrix_scope_is_4096_only -- --exact; cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::q8_f32_mma_r2c4k64_reduces_operand_rounding_and_preserves_guards -- --exact",
+    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_indexer_q_matrix_scope_is_4096_only -- --exact",
     correctness_kind: QualificationWitnessKind::Replay,
     performance: "none: the cited PERF-LOG sections record the indexed-Q measurements and rollback but contain no replay command or packet path for that schedule",
     performance_kind: QualificationWitnessKind::None,
@@ -396,7 +399,7 @@ pub static DEEPSEEK_V4_PACKED_GROUPED_EXPERT: Qualification = Qualification {
     evidence: "da9e5d02",
     correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_grouped_iq2_xs_iq3_xxs_matches_bucket_path -- --exact",
     correctness_kind: QualificationWitnessKind::Replay,
-    performance: "QWEN_DSV4_PACKED_GROUPED_EXPERTS=auto QWEN_MATMAT_IQ3_XXS_MM=1 cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::current_asset_packed_grouped_expert_integration_packet -- --ignored --exact --nocapture; QWEN_DSV4_PACKED_GROUPED_EXPERTS=1 QWEN_DSV4_PACKED_GROUPED_SAMPLES=5 QWEN_DSV4_PACKED_GROUPED_ONLY_N=128 QWEN_MATMAT_IQ3_XXS_MM=1 cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::current_asset_packed_grouped_expert_integration_packet -- --ignored --exact --nocapture",
+    performance: "QWEN_DSV4_PACKED_GROUPED_EXPERTS=1 QWEN_DSV4_PACKED_GROUPED_SAMPLES=5 QWEN_DSV4_PACKED_GROUPED_ONLY_N=128 QWEN_MATMAT_IQ3_XXS_MM=1 cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::current_asset_packed_grouped_expert_integration_packet -- --ignored --exact --nocapture",
     performance_kind: QualificationWitnessKind::M4CharacterizationSkip,
 };
 pub static DEEPSEEK_V4_ALL_SLOTS_Q3Q4: Qualification = Qualification {
@@ -450,7 +453,7 @@ pub static PARALLEL_COPY_EXACT_UNIFIED: Qualification = Qualification {
     required_headroom_bytes: Some(A10B_PARALLEL_PREAD_REQUIRED_HEADROOM_BYTES),
     required_headroom_scope: Some(HeadroomRequirementScope::A10bQ4xlForcedPread),
     evidence: "8c223624, fba3b97a",
-    correctness: "cargo test --release -p qwen-llm --lib metal_forward::tests::gguf_parallel_pread_dense27b_q4_is_bit_exact -- --ignored --exact; cargo test --release -p qwen-llm --lib metal_forward::tests::gguf_parallel_pread_a10b_profile_is_exact_and_force_only -- --exact",
+    correctness: "cargo test --release -p qwen-llm --lib metal_forward::tests::gguf_parallel_pread_a10b_profile_is_exact_and_force_only -- --exact",
     correctness_kind: QualificationWitnessKind::M4CharacterizationSkip,
     performance: "none: commits 8c223624 and fba3b97a plus their PERF-LOG entries report measurements but record no executable A/B replay command",
     performance_kind: QualificationWitnessKind::None,
@@ -556,6 +559,33 @@ mod tests {
         }
     }
 
+    fn is_single_cargo_test_command(value: &str) -> bool {
+        if value.contains(';') || value.contains('\n') || value.matches("cargo test").count() != 1 {
+            return false;
+        }
+        let Some((environment, arguments)) = value.split_once("cargo test") else {
+            return false;
+        };
+        let environment_is_valid = environment.is_empty()
+            || environment
+                .split_whitespace()
+                .all(|assignment| assignment.contains('='));
+        let arguments_are_command_tokens = arguments.split_whitespace().all(|token| {
+            token
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "_./:=+-".contains(character))
+        });
+        environment_is_valid && arguments.starts_with(' ') && arguments_are_command_tokens
+    }
+
+    fn has_valid_witness_shape(value: &str) -> bool {
+        if let Some(explanation) = value.strip_prefix("none: ") {
+            return !explanation.trim().is_empty();
+        }
+        let command = value.strip_prefix("scope-only: ").unwrap_or(value);
+        is_single_cargo_test_command(command)
+    }
+
     #[test]
     fn qualification_matches_model_and_memory() {
         assert!(DEEPSEEK_V4_GROUPED_LONG_HCA.holds_for(&facts(DEVICE, None)));
@@ -630,6 +660,44 @@ mod tests {
             if matches!(qualification.qualified_devices, QualifiedDevices::Model(_)) {
                 assert!(!qualification.holds_for(&facts("Apple M4 Pro", Some(192 * GIB))));
             }
+        }
+    }
+
+    #[test]
+    fn family_scopes_name_distinct_measurements_at_both_supported_ends() {
+        let family_records = QUALIFICATIONS
+            .iter()
+            .filter_map(|record| match record.qualified_devices {
+                QualifiedDevices::AppleFamily7 {
+                    oldest_measured,
+                    newest_measured,
+                } => Some((record.path, oldest_measured, newest_measured)),
+                QualifiedDevices::Model(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!family_records.is_empty());
+        for (path, oldest, newest) in family_records {
+            assert!(!oldest.trim().is_empty(), "{path}");
+            assert!(!newest.trim().is_empty(), "{path}");
+            assert_ne!(oldest, newest, "{path}");
+        }
+    }
+
+    #[test]
+    fn every_qualification_witness_is_one_command_or_an_explicit_non_replay() {
+        for record in QUALIFICATIONS {
+            assert!(
+                has_valid_witness_shape(record.correctness),
+                "{} correctness witness: {}",
+                record.path,
+                record.correctness
+            );
+            assert!(
+                has_valid_witness_shape(record.performance),
+                "{} performance witness: {}",
+                record.path,
+                record.performance
+            );
         }
     }
 

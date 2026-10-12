@@ -292,7 +292,8 @@ mod tests {
         assert!(report.contains("performance_kind=M4CharacterizationSkip"));
         assert!(report.contains("performance=cargo test"));
         assert!(report.contains("decline_reason=Some(DeviceModel"));
-        assert!(report.contains("measured_on: [\"Apple M4 Max\", \"Apple M1 Pro\"]"));
+        assert!(report.contains("oldest_measured: \"Apple M1 Pro\""));
+        assert!(report.contains("newest_measured: \"Apple M4 Max\""));
     }
 
     #[test]
@@ -324,8 +325,12 @@ mod tests {
             .unwrap();
         assert_eq!(hca["qualified_devices"]["scope"], "apple_family7");
         assert_eq!(
-            hca["qualified_devices"]["details"]["measured_on"][1],
+            hca["qualified_devices"]["details"]["oldest_measured"],
             "Apple M1 Pro"
+        );
+        assert_eq!(
+            hca["qualified_devices"]["details"]["newest_measured"],
+            "Apple M4 Max"
         );
     }
 

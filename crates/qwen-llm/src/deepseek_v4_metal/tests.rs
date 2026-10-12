@@ -372,12 +372,12 @@ fn synthetic_device_facts(
     unified: bool,
 ) -> crate::metal::DeviceFacts {
     crate::metal::DeviceFacts {
-        version: "qwen_device_info_v2",
+        version: "qwen_device_info_v3",
         name: name.into(),
         architecture: "test".into(),
         registry_id: 0,
         gpu_families: crate::metal::GpuFamilySupport {
-            apple7: false,
+            apple7: true,
             apple8: false,
             apple9: false,
             apple10: false,
@@ -513,8 +513,8 @@ fn singleton_indexer_and_hca_device_decisions_use_their_named_records() {
     assert!(!super::indexer::deepseek_v4_f16_matrix_scorer_qualified(
         &variant
     ));
-    assert!(!super::attention::deepseek_v4_singleton_splitk_hca_qualified(&variant));
-    assert!(!super::attention::deepseek_v4_singleton_grouped_long_hca_qualified(&variant));
+    assert!(super::attention::deepseek_v4_singleton_splitk_hca_qualified(&variant));
+    assert!(super::attention::deepseek_v4_singleton_grouped_long_hca_qualified(&variant));
 }
 
 #[derive(serde::Deserialize)]

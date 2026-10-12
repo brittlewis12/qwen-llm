@@ -10,7 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 
 fn selector_device_facts(name: &str) -> qwen_llm::metal::DeviceFacts {
     qwen_llm::metal::DeviceFacts {
-        version: "qwen_device_info_v2",
+        version: "qwen_device_info_v3",
         name: name.into(),
         architecture: "test".into(),
         registry_id: 0,

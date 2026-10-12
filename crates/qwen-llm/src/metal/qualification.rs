@@ -33,10 +33,19 @@ pub enum HeadroomRequirementScope {
     A10bQ4xlForcedPread,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "scope", content = "details", rename_all = "snake_case")]
+pub enum QualifiedDevices {
+    Model(&'static str),
+    AppleFamily7 {
+        measured_on: &'static [&'static str],
+    },
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Qualification {
     pub path: &'static str,
-    pub device_model: &'static str,
+    pub qualified_devices: QualifiedDevices,
     pub memory: QualifiedMemory,
     pub host_page_size_bytes: Option<usize>,
     pub max_buffer_length_bytes: Option<usize>,
@@ -56,6 +65,10 @@ pub enum QualificationDeclineReason {
         expected: &'static str,
         actual: String,
     },
+    GpuFamily {
+        family: &'static str,
+        supported: bool,
+    },
     Memory {
         minimum_gib: u16,
         actual_bytes: Option<u64>,
@@ -73,7 +86,7 @@ pub enum QualificationDeclineReason {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct QualificationStatus {
     pub path: &'static str,
-    pub device_model: &'static str,
+    pub qualified_devices: QualifiedDevices,
     pub memory: QualifiedMemory,
     pub host_page_size_bytes: Option<usize>,
     pub max_buffer_length_bytes: Option<usize>,
@@ -102,9 +115,18 @@ impl Qualification {
 
     pub fn decline_reason(&self, facts: &DeviceFacts) -> Option<QualificationDeclineReason> {
         match self.first_failing_facet(facts)? {
-            QualificationFacet::DeviceModel => Some(QualificationDeclineReason::DeviceModel {
-                expected: self.device_model,
-                actual: facts.name.clone(),
+            QualificationFacet::DeviceModel => {
+                let QualifiedDevices::Model(expected) = self.qualified_devices else {
+                    unreachable!("model facet only applies to model-scoped record")
+                };
+                Some(QualificationDeclineReason::DeviceModel {
+                    expected,
+                    actual: facts.name.clone(),
+                })
+            }
+            QualificationFacet::GpuFamily => Some(QualificationDeclineReason::GpuFamily {
+                family: "Apple7",
+                supported: facts.gpu_families.apple7,
             }),
             QualificationFacet::Memory => {
                 let QualifiedMemory::AtLeastGiB(minimum_gib) = self.memory else {
@@ -131,8 +153,14 @@ impl Qualification {
     fn first_failing_facet(&self, facts: &DeviceFacts) -> Option<QualificationFacet> {
         // Runtime gates use this allocation-free check; owned detail is built
         // only when a caller requests a diagnostic or report.
-        if facts.name != self.device_model {
-            return Some(QualificationFacet::DeviceModel);
+        match self.qualified_devices {
+            QualifiedDevices::Model(model) if facts.name != model => {
+                return Some(QualificationFacet::DeviceModel);
+            }
+            QualifiedDevices::AppleFamily7 { .. } if !facts.gpu_families.apple7 => {
+                return Some(QualificationFacet::GpuFamily);
+            }
+            _ => {}
         }
         if let QualifiedMemory::AtLeastGiB(gib) = self.memory
             && !facts
@@ -160,6 +188,7 @@ impl Qualification {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum QualificationFacet {
     DeviceModel,
+    GpuFamily,
     Memory,
     HostPageSize,
     MaxBufferLength,
@@ -186,7 +215,7 @@ const DEVICE: &str = "Apple M4 Max";
 
 pub static DEEPSEEK_V4_MULTIGROUP_SELECTOR: Qualification = Qualification {
     path: "deepseek_v4.multigroup_selector",
-    device_model: DEVICE,
+    qualified_devices: QualifiedDevices::Model(DEVICE),
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -200,7 +229,7 @@ pub static DEEPSEEK_V4_MULTIGROUP_SELECTOR: Qualification = Qualification {
 };
 pub static DEEPSEEK_V4_F16_MATRIX_SCORER: Qualification = Qualification {
     path: "deepseek_v4.singleton_f16_matrix_scorer",
-    device_model: DEVICE,
+    qualified_devices: QualifiedDevices::Model(DEVICE),
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -214,13 +243,15 @@ pub static DEEPSEEK_V4_F16_MATRIX_SCORER: Qualification = Qualification {
 };
 pub static DEEPSEEK_V4_GROUPED_LONG_HCA: Qualification = Qualification {
     path: "deepseek_v4.grouped_long_hca",
-    device_model: DEVICE,
+    qualified_devices: QualifiedDevices::AppleFamily7 {
+        measured_on: &["Apple M4 Max", "Apple M1 Pro"],
+    },
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     required_headroom_scope: None,
-    evidence: "PERF-LOG 2026-08-07: Grouped Long-HCA Default GO",
+    evidence: "PERF-LOG 2026-08-07: Grouped Long-HCA Default GO; Apple M1 Pro (Apple7), 2026-10-12: 8192 rows 4.31 ms grouped / 1.28 ms split4 / 1.30 ms split8 / 1.14 ms split16 vs 5.17 ms online; 513 rows 0.341 ms grouped / 0.136 ms split8 vs 0.413 ms online",
     correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::tiled_hca_matches_cpu_through_the_full_model_context -- --exact",
     correctness_kind: QualificationWitnessKind::Replay,
     performance: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_tiled_hca_at_far_context -- --ignored --exact --nocapture",
@@ -228,21 +259,23 @@ pub static DEEPSEEK_V4_GROUPED_LONG_HCA: Qualification = Qualification {
 };
 pub static DEEPSEEK_V4_SPLITK_HCA: Qualification = Qualification {
     path: "deepseek_v4.splitk_hca",
-    device_model: DEVICE,
+    qualified_devices: QualifiedDevices::AppleFamily7 {
+        measured_on: &["Apple M4 Max", "Apple M1 Pro"],
+    },
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     required_headroom_scope: None,
-    evidence: "PERF-LOG 2026-08-07: Eight-Way Split-K HCA Default GO",
+    evidence: "PERF-LOG 2026-08-07: Eight-Way Split-K HCA Default GO; Apple M1 Pro (Apple7), 2026-10-12: 8192 rows split8 1.30 ms vs 5.17 ms online; 513 rows split8 0.136 ms vs 0.413 ms online",
     correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::online_hca_matches_legacy_envelope_at_structural_boundaries -- --exact",
     correctness_kind: QualificationWitnessKind::Replay,
-    performance: "cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::splitk_hca_profiles_current_synthetic_terminal_tokens -- --ignored --exact --nocapture",
+    performance: "cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::splitk_hca_profiles_current_synthetic_terminal_tokens -- --ignored --exact --nocapture (M4 characterization; skips off-M4); Apple7 replay: cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_tiled_hca_at_far_context -- --ignored --exact --nocapture (compares online, grouped, and split-K HCA at 513 and 8192 rows)",
     performance_kind: QualificationWitnessKind::M4CharacterizationSkip,
 };
 pub static DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY: Qualification = Qualification {
     path: "deepseek_v4.packed_q8_matrix_family",
-    device_model: DEVICE,
+    qualified_devices: QualifiedDevices::Model(DEVICE),
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -256,7 +289,7 @@ pub static DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY: Qualification = Qualification {
 };
 pub static DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION: Qualification = Qualification {
     path: "deepseek_v4.packed_gpu_route_compaction",
-    device_model: DEVICE,
+    qualified_devices: QualifiedDevices::Model(DEVICE),
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -270,7 +303,7 @@ pub static DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION: Qualification = Qualificatio
 };
 pub static DEEPSEEK_V4_PACKED_MXFP4_MATRIX: Qualification = Qualification {
     path: "deepseek_v4.packed_mxfp4_matrix",
-    device_model: DEVICE,
+    qualified_devices: QualifiedDevices::Model(DEVICE),
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -284,7 +317,7 @@ pub static DEEPSEEK_V4_PACKED_MXFP4_MATRIX: Qualification = Qualification {
 };
 pub static DEEPSEEK_V4_PACKED_E8P32_ROUTER: Qualification = Qualification {
     path: "deepseek_v4.packed_e8p32_router",
-    device_model: DEVICE,
+    qualified_devices: QualifiedDevices::Model(DEVICE),
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -298,7 +331,7 @@ pub static DEEPSEEK_V4_PACKED_E8P32_ROUTER: Qualification = Qualification {
 };
 pub static DEEPSEEK_V4_PACKED_QA_RAW_KV_MATRIX: Qualification = Qualification {
     path: "deepseek_v4.packed_q_a_raw_kv_matrix",
-    device_model: DEVICE,
+    qualified_devices: QualifiedDevices::Model(DEVICE),
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -312,7 +345,7 @@ pub static DEEPSEEK_V4_PACKED_QA_RAW_KV_MATRIX: Qualification = Qualification {
 };
 pub static DEEPSEEK_V4_PACKED_INDEXER_Q_MATRIX: Qualification = Qualification {
     path: "deepseek_v4.packed_indexer_q_matrix",
-    device_model: DEVICE,
+    qualified_devices: QualifiedDevices::Model(DEVICE),
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -326,7 +359,7 @@ pub static DEEPSEEK_V4_PACKED_INDEXER_Q_MATRIX: Qualification = Qualification {
 };
 pub static DEEPSEEK_V4_PACKED_GROUPED_Q3Q4: Qualification = Qualification {
     path: "deepseek_v4.packed_grouped_q3q4",
-    device_model: DEVICE,
+    qualified_devices: QualifiedDevices::Model(DEVICE),
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -340,7 +373,7 @@ pub static DEEPSEEK_V4_PACKED_GROUPED_Q3Q4: Qualification = Qualification {
 };
 pub static DEEPSEEK_V4_PACKED_SHARED_ROUTE_OVERLAP: Qualification = Qualification {
     path: "deepseek_v4.packed_shared_route_overlap",
-    device_model: DEVICE,
+    qualified_devices: QualifiedDevices::Model(DEVICE),
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -354,7 +387,7 @@ pub static DEEPSEEK_V4_PACKED_SHARED_ROUTE_OVERLAP: Qualification = Qualificatio
 };
 pub static DEEPSEEK_V4_PACKED_GROUPED_EXPERT: Qualification = Qualification {
     path: "deepseek_v4.packed_grouped_expert",
-    device_model: DEVICE,
+    qualified_devices: QualifiedDevices::Model(DEVICE),
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -368,7 +401,7 @@ pub static DEEPSEEK_V4_PACKED_GROUPED_EXPERT: Qualification = Qualification {
 };
 pub static DEEPSEEK_V4_ALL_SLOTS_Q3Q4: Qualification = Qualification {
     path: "deepseek_v4.all_slots_q3q4_decode",
-    device_model: DEVICE,
+    qualified_devices: QualifiedDevices::Model(DEVICE),
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -382,7 +415,7 @@ pub static DEEPSEEK_V4_ALL_SLOTS_Q3Q4: Qualification = Qualification {
 };
 pub static DEEPSEEK_V4_RESIDENCY_SET: Qualification = Qualification {
     path: "deepseek_v4.residency_set",
-    device_model: DEVICE,
+    qualified_devices: QualifiedDevices::Model(DEVICE),
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -396,7 +429,7 @@ pub static DEEPSEEK_V4_RESIDENCY_SET: Qualification = Qualification {
 };
 pub static A3B_PARALLEL_COPY_AUTO: Qualification = Qualification {
     path: "metal_forward.a3b_parallel_copy_auto",
-    device_model: DEVICE,
+    qualified_devices: QualifiedDevices::Model(DEVICE),
     memory: QualifiedMemory::AtLeastGiB(128),
     host_page_size_bytes: Some(16_384),
     max_buffer_length_bytes: Some(77_309_411_328),
@@ -410,7 +443,7 @@ pub static A3B_PARALLEL_COPY_AUTO: Qualification = Qualification {
 };
 pub static PARALLEL_COPY_EXACT_UNIFIED: Qualification = Qualification {
     path: "metal_forward.exact_unified_parallel_copy_profiles",
-    device_model: DEVICE,
+    qualified_devices: QualifiedDevices::Model(DEVICE),
     memory: QualifiedMemory::Any,
     host_page_size_bytes: Some(16_384),
     max_buffer_length_bytes: Some(77_309_411_328),
@@ -466,7 +499,7 @@ pub fn qualification_statuses(facts: &DeviceFacts) -> Vec<QualificationStatus> {
         .iter()
         .map(|qualification| QualificationStatus {
             path: qualification.path,
-            device_model: qualification.device_model,
+            qualified_devices: qualification.qualified_devices,
             memory: qualification.memory,
             host_page_size_bytes: qualification.host_page_size_bytes,
             max_buffer_length_bytes: qualification.max_buffer_length_bytes,
@@ -504,7 +537,7 @@ mod tests {
             architecture: "test".into(),
             registry_id: 0,
             gpu_families: GpuFamilySupport {
-                apple7: false,
+                apple7: true,
                 apple8: false,
                 apple9: false,
                 apple10: false,
@@ -527,8 +560,8 @@ mod tests {
     fn qualification_matches_model_and_memory() {
         assert!(DEEPSEEK_V4_GROUPED_LONG_HCA.holds_for(&facts(DEVICE, None)));
         assert!(DEEPSEEK_V4_SPLITK_HCA.holds_for(&facts(DEVICE, None)));
-        assert!(!DEEPSEEK_V4_GROUPED_LONG_HCA.holds_for(&facts("Apple M5 Ultra", None)));
-        assert!(!DEEPSEEK_V4_SPLITK_HCA.holds_for(&facts("Apple M5 Ultra", None)));
+        assert!(DEEPSEEK_V4_GROUPED_LONG_HCA.holds_for(&facts("Apple M5 Ultra", None)));
+        assert!(DEEPSEEK_V4_SPLITK_HCA.holds_for(&facts("Apple M5 Ultra", None)));
         let large = 128_u64 * 1024 * 1024 * 1024;
         assert!(A3B_PARALLEL_COPY_AUTO.holds_for(&facts(DEVICE, Some(large))));
         assert!(!A3B_PARALLEL_COPY_AUTO.holds_for(&facts(DEVICE, Some(large - 1))));
@@ -536,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn every_record_preserves_the_original_model_gate() {
+    fn every_record_keeps_its_scope_and_memory_gate() {
         const GIB: u64 = 1024 * 1024 * 1024;
         let expected = [
             ("deepseek_v4.multigroup_selector", QualifiedMemory::Any),
@@ -575,7 +608,12 @@ mod tests {
         assert_eq!(QUALIFICATIONS.len(), expected.len());
         for (qualification, (path, memory_requirement)) in QUALIFICATIONS.iter().zip(expected) {
             assert_eq!(qualification.path, path);
-            assert_eq!(qualification.device_model, "Apple M4 Max");
+            if matches!(qualification.qualified_devices, QualifiedDevices::Model(_)) {
+                assert_eq!(
+                    qualification.qualified_devices,
+                    QualifiedDevices::Model("Apple M4 Max")
+                );
+            }
             assert_eq!(qualification.memory, memory_requirement);
             for (memory, expected_hold) in [
                 (None, memory_requirement == QualifiedMemory::Any),
@@ -589,23 +627,65 @@ mod tests {
                 let matching = facts("Apple M4 Max", memory);
                 assert_eq!(qualification.holds_for(&matching), expected_hold, "{path}");
             }
-            assert!(!qualification.holds_for(&facts("Apple M4 Pro", Some(192 * GIB))));
+            if matches!(qualification.qualified_devices, QualifiedDevices::Model(_)) {
+                assert!(!qualification.holds_for(&facts("Apple M4 Pro", Some(192 * GIB))));
+            }
         }
     }
 
     #[test]
-    fn synthetic_m4_facts_hold_and_m5_declines_on_model_first() {
+    fn synthetic_m4_holds_all_and_m5_holds_family_scoped_hca() {
         const GIB: u64 = 1024 * 1024 * 1024;
         let m4 = facts(DEVICE, Some(128 * GIB));
         assert!(QUALIFICATIONS.iter().all(|record| record.holds_for(&m4)));
 
         let m5 = facts("Apple M5 Ultra", Some(128 * GIB));
         for status in qualification_statuses(&m5) {
-            assert!(!status.holds_for_device, "{}", status.path);
-            assert!(matches!(
-                status.decline_reason,
-                Some(QualificationDeclineReason::DeviceModel { .. })
-            ));
+            let hca = status.path == DEEPSEEK_V4_GROUPED_LONG_HCA.path
+                || status.path == DEEPSEEK_V4_SPLITK_HCA.path;
+            assert_eq!(status.holds_for_device, hca, "{}", status.path);
+            if !hca {
+                assert!(matches!(
+                    status.decline_reason,
+                    Some(QualificationDeclineReason::DeviceModel { .. })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn apple7_hca_scope_holds_only_for_the_two_measured_paths() {
+        let m1 = facts("Apple M1 Pro", None);
+        assert!(DEEPSEEK_V4_GROUPED_LONG_HCA.holds_for(&m1));
+        assert!(DEEPSEEK_V4_SPLITK_HCA.holds_for(&m1));
+        for status in qualification_statuses(&m1) {
+            if status.path == DEEPSEEK_V4_GROUPED_LONG_HCA.path
+                || status.path == DEEPSEEK_V4_SPLITK_HCA.path
+            {
+                assert!(status.holds_for_device, "{}", status.path);
+            } else {
+                assert!(!status.holds_for_device, "{}", status.path);
+                assert!(
+                    matches!(
+                        status.decline_reason,
+                        Some(QualificationDeclineReason::DeviceModel { .. })
+                    ),
+                    "{}",
+                    status.path
+                );
+            }
+        }
+
+        let mut no_apple7 = facts("Apple GPU without Apple7", None);
+        no_apple7.gpu_families.apple7 = false;
+        for qualification in [&DEEPSEEK_V4_GROUPED_LONG_HCA, &DEEPSEEK_V4_SPLITK_HCA] {
+            assert_eq!(
+                qualification.decline_reason(&no_apple7),
+                Some(QualificationDeclineReason::GpuFamily {
+                    family: "Apple7",
+                    supported: false,
+                })
+            );
         }
     }
 

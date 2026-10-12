@@ -58,7 +58,7 @@ fn qualification_facts(
     unified_memory: bool,
 ) -> crate::metal::DeviceFacts {
     crate::metal::DeviceFacts {
-        version: "qwen_device_info_v2",
+        version: "qwen_device_info_v3",
         name: name.into(),
         architecture: "test".into(),
         registry_id: 0,

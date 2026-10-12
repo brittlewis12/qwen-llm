@@ -23,7 +23,7 @@ pub struct GpuFamilySupport {
 
 /// Stable identifier of the serialized report; bump it when a field's
 /// name or meaning changes.
-pub const DEVICE_FACTS_VERSION: &str = "qwen_device_info_v2";
+pub const DEVICE_FACTS_VERSION: &str = "qwen_device_info_v3";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DeviceFacts {
@@ -131,9 +131,9 @@ impl DeviceFacts {
                 }
             };
             report.push_str(&format!(
-                "\n  {}: device={} memory={} host_page_size_bytes={:?} max_buffer_length_bytes={:?} required_headroom_bytes={:?} required_headroom_scope={:?} holds_for_device={} decline_reason={:?} evidence={} correctness_kind={:?} correctness={} performance_kind={:?} performance={}",
+                "\n  {}: qualified_devices={:?} memory={} host_page_size_bytes={:?} max_buffer_length_bytes={:?} required_headroom_bytes={:?} required_headroom_scope={:?} holds_for_device={} decline_reason={:?} evidence={} correctness_kind={:?} correctness={} performance_kind={:?} performance={}",
                 status.path,
-                status.device_model,
+                status.qualified_devices,
                 memory,
                 status.host_page_size_bytes,
                 status.max_buffer_length_bytes,
@@ -262,7 +262,7 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&sample()).unwrap(),
             concat!(
-                r#"{"version":"qwen_device_info_v2","name":"Test GPU","architecture":"test-arch","#,
+                r#"{"version":"qwen_device_info_v3","name":"Test GPU","architecture":"test-arch","#,
                 r#""registry_id":42,"gpu_families":{"apple7":true,"apple8":false,"apple9":false,"#,
                 r#""apple10":false,"metal3":true,"metal4":false},"max_threadgroup_memory_bytes":32,"#,
                 r#""max_buffer_length_bytes":4096,"recommended_max_working_set_bytes":8192,"#,
@@ -282,7 +282,9 @@ mod tests {
         assert!(report.contains("physical_memory: unavailable"));
         assert!(report.contains("product_metallib_deployment_target: 15.0"));
         assert!(report.contains("os_supports_metallib: yes"));
-        assert!(report.contains("deepseek_v4.multigroup_selector: device=Apple M4 Max"));
+        assert!(report.contains(
+            "deepseek_v4.multigroup_selector: qualified_devices=Model(\"Apple M4 Max\")"
+        ));
         assert!(report.contains("holds_for_device=false"));
         assert!(
             report.contains("evidence=d52815a3 correctness_kind=Replay correctness=cargo test")
@@ -290,6 +292,7 @@ mod tests {
         assert!(report.contains("performance_kind=M4CharacterizationSkip"));
         assert!(report.contains("performance=cargo test"));
         assert!(report.contains("decline_reason=Some(DeviceModel"));
+        assert!(report.contains("measured_on: [\"Apple M4 Max\", \"Apple M1 Pro\"]"));
     }
 
     #[test]
@@ -315,6 +318,15 @@ mod tests {
         assert!(exact["performance"].as_str().unwrap().starts_with("none:"));
         assert_eq!(exact["performance_kind"], "none");
         assert_eq!(exact["decline_reason"]["facet"], "device_model");
+        let hca = qualifications
+            .iter()
+            .find(|record| record["path"] == "deepseek_v4.grouped_long_hca")
+            .unwrap();
+        assert_eq!(hca["qualified_devices"]["scope"], "apple_family7");
+        assert_eq!(
+            hca["qualified_devices"]["details"]["measured_on"][1],
+            "Apple M1 Pro"
+        );
     }
 
     #[test]

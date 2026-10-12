@@ -346,10 +346,15 @@ impl DeepSeekV4MultigroupSelectorPlan {
         let geometry = match requested {
             DeepSeekV4MultigroupSelectorArg::Auto | DeepSeekV4MultigroupSelectorArg::Off => None,
             DeepSeekV4MultigroupSelectorArg::QualifiedExperimental => {
+                let qwen_llm::metal::QualifiedDevices::Model(required_model) =
+                    qwen_llm::metal::DEEPSEEK_V4_MULTIGROUP_SELECTOR.qualified_devices
+                else {
+                    unreachable!("multi-group selector qualification is model-scoped")
+                };
                 ensure!(
                     device_qualified,
                     "--deepseek-v4-multigroup-selector=qualified-experimental requires {}, got {}",
-                    qwen_llm::metal::DEEPSEEK_V4_MULTIGROUP_SELECTOR.device_model,
+                    required_model,
                     device_name,
                 );
                 Some(

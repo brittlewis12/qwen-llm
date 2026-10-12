@@ -363,7 +363,8 @@ pub use qualification::{
     DEEPSEEK_V4_PACKED_QA_RAW_KV_MATRIX, DEEPSEEK_V4_PACKED_SHARED_ROUTE_OVERLAP,
     DEEPSEEK_V4_QUALIFICATIONS, DEEPSEEK_V4_RESIDENCY_SET, DEEPSEEK_V4_SPLITK_HCA,
     HeadroomRequirementScope, PARALLEL_COPY_EXACT_UNIFIED, QUALIFICATIONS, Qualification,
-    QualificationDeclineReason, QualificationWitnessKind, QualifiedMemory, declined_reason_once,
+    QualificationDeclineReason, QualificationWitnessKind, QualifiedDevices, QualifiedMemory,
+    declined_reason_once,
 };
 pub use research::*;
 pub use rope::*;

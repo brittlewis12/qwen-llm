@@ -328,8 +328,8 @@ impl DeepSeekV4PositionZeroAttentionScratch {
     pub(super) fn use_splitk_hca(&self, ctx: &MetalContext) -> bool {
         #[cfg(test)]
         {
-            let _ = ctx;
             self.hca_test_policy == DeepSeekV4HcaTestPolicy::Production
+                && deepseek_v4_singleton_splitk_hca_qualified(ctx.device_facts())
         }
         #[cfg(not(test))]
         {
@@ -340,8 +340,8 @@ impl DeepSeekV4PositionZeroAttentionScratch {
     pub(super) fn use_grouped_long_hca(&self, ctx: &MetalContext) -> bool {
         #[cfg(test)]
         {
-            let _ = ctx;
-            true
+            self.hca_test_policy != DeepSeekV4HcaTestPolicy::LegacyTiled
+                && deepseek_v4_singleton_grouped_long_hca_qualified(ctx.device_facts())
         }
         #[cfg(not(test))]
         {

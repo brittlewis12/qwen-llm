@@ -9,7 +9,7 @@ fn scope_facts(
     unified_memory: bool,
 ) -> crate::metal::DeviceFacts {
     crate::metal::DeviceFacts {
-        version: "qwen_device_info_v2",
+        version: "qwen_device_info_v3",
         name: model.into(),
         architecture: "test".into(),
         registry_id: 0,
@@ -5814,10 +5814,12 @@ fn profile_packed_grouped_fused_all_iq3_production_shape() {
     let Ok(ctx) = MetalContext::new() else {
         return;
     };
-    assert_eq!(
-        ctx.device.name().to_string(),
-        crate::metal::DEEPSEEK_V4_PACKED_GROUPED_EXPERT.device_model
-    );
+    let crate::metal::QualifiedDevices::Model(qualified_model) =
+        crate::metal::DEEPSEEK_V4_PACKED_GROUPED_EXPERT.qualified_devices
+    else {
+        panic!("packed grouped expert is model-scoped");
+    };
+    assert_eq!(ctx.device.name().to_string(), qualified_model);
     assert!(
         packed_grouped_iq3_fused_candidate_supported(&ctx),
         "fused all-IQ3 pipeline is not qualified"

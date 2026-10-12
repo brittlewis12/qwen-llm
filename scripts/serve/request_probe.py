@@ -28,7 +28,12 @@ p.add_argument("--drafter")
 p.add_argument("--off-ctx")
 p.add_argument("--requests", type=Path, required=True)
 p.add_argument("--out", type=Path, required=True)
+p.add_argument(
+    "--settle-ms", type=int, default=0, help="Untimed pause between requests"
+)
 a = p.parse_args()
+if a.settle_ms < 0:
+    p.error("--settle-ms must be nonnegative")
 requests = json.loads(a.requests.read_text())
 a.out.mkdir(mode=0o700, parents=True, exist_ok=False)
 env = os.environ.copy()
@@ -68,6 +73,7 @@ manifest = {
     "command": command,
     "qwen_env": {k: v for k, v in env.items() if k.startswith("QWEN_")},
     "requests": requests,
+    "settle_ms": a.settle_ms,
     "host_before": host(),
 }
 (a.out / "manifest.json").write_text(json.dumps(manifest, indent=2))
@@ -181,6 +187,7 @@ with (a.out / "server.log").open("x") as log:
                     flush=True,
                 )
                 previous_input, previous_response = body["input"], completed
+                time.sleep(a.settle_ms / 1000)
     finally:
         if child.poll() is None:
             child.send_signal(signal.SIGINT)

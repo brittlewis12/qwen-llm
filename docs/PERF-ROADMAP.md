@@ -1401,17 +1401,16 @@ model state rather than generation policy.
 
 ## Serve Follow-ups — 2026-08-20
 
-2026-09-07 fresh-serving Q8 now has a retained explicit opt-in:
-`QWEN_SERVE_FRESH_PACKED=1`, greedy fresh cache misses of 19-48 tokens, no drafter.
-Balanced endpoint gates pass: fresh19 wall saves 66.646%, code32/128 saves 16.940%,
-prose48/128 saves 23.115%; guards pass and all 64 Q4/Q8 paired responses agree. Q4 fails its
-512-token guard (+8.482%) and remains unsupported. Automatic Q8 rollout is held
-after a post-narrowing first-request outlier coinciding with large global VM
-compression; neither an intrinsic first-use bug nor a PSO cause is established.
-Keep the measured opt-in, preserve the PASS, and do not repeat qualification or
-rewrite gates. Future attribution requires phase-local host/PSO observations under
-a declared host contract, not generic kernel/PSO/residency work. Evidence:
-`docs/bench/2026-09-07-fresh-serving-http/RESULT.md`.
+2026-10-12: bounded fresh 19-48-token single-chunk prefill is default-on for
+the covered dense-27 geometry, greedy cache misses without a drafter. Template
+and LM-head dtype restrictions are removed; `QWEN_SERVE_FRESH_PACKED=0` remains
+the rollback. Current Qwen3.8 Q8 and Qwen3.6 Q4 endpoint comparisons identify
+serial transcript/header segments as the remaining cost, not an entirely serial
+baseline. Admission and allocation-failure fallback price their actual scratch.
+See PERF-LOG for current measurements, control drift and limits. The September
+packet and its original guard failure/outlier remain historical evidence at
+`docs/bench/2026-09-07-fresh-serving-http/RESULT.md`, not runtime incompatibility
+criteria or a permanent prohibition on evaluating today's different baseline.
 
 2026-09-06 cost re-ranking finds fresh 19/3 prefill still occupies 85-88% of Q4/Q8
 request wall, while landed Q8 compact-128 prefill is only 3.0-3.25%. A test-only

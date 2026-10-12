@@ -229,32 +229,11 @@ fn optional_tail_fallback_propagates_admission_error_without_allocating() {
 
 #[test]
 fn fresh_packed_policy_preserves_cached_sampled_and_unqualified_requests() {
-    use qwen_llm::tensor::GgmlType;
     let arch = qwen_llm::model::QWEN3_27B;
-    assert!(!fresh_packed_arch(
-        &arch,
-        QwenTemplate::Qwen36,
-        GgmlType::Q6_K
-    ));
-    assert!(fresh_packed_arch(
-        &arch,
-        QwenTemplate::Qwen38,
-        GgmlType::Q8_0
-    ));
-    for (template, dtype) in [
-        (QwenTemplate::Qwen36, GgmlType::Q8_0),
-        (QwenTemplate::Qwen38, GgmlType::Q6_K),
-        (QwenTemplate::Qwen35, GgmlType::Q6_K),
-    ] {
-        assert!(!fresh_packed_arch(&arch, template, dtype));
-    }
+    assert!(bounded_packed_dense_arch(&arch));
     let mut wrong = arch;
     wrong.n_layer -= 1;
-    assert!(!fresh_packed_arch(
-        &wrong,
-        QwenTemplate::Qwen36,
-        GgmlType::Q6_K
-    ));
+    assert!(!bounded_packed_dense_arch(&wrong));
     for prompt in [0, 1, 18, 19, 20, 31, 32, 47, 48, 49, 8192] {
         assert_eq!(
             fresh_packed_width(true, true, false, true, false, prompt),
@@ -284,9 +263,9 @@ fn fresh_packed_policy_preserves_cached_sampled_and_unqualified_requests() {
 }
 
 #[test]
-fn fresh_packed_opt_in_and_rollback_are_fail_closed() {
+fn fresh_packed_defaults_on_with_explicit_rollback() {
     use std::ffi::OsStr;
-    assert!(!fresh_packed_enabled(None));
+    assert!(fresh_packed_enabled(None));
     assert!(fresh_packed_enabled(Some(OsStr::new("1"))));
     for value in ["0", "", "true", "yes", "1 ", "01", "invalid"] {
         assert!(!fresh_packed_enabled(Some(OsStr::new(value))));

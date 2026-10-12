@@ -603,18 +603,8 @@ fn bounded_packed_dense_arch(arch: &qwen_llm::model::Arch) -> bool {
         && arch.attn_head_dim == 256
 }
 
-fn fresh_packed_arch(
-    arch: &qwen_llm::model::Arch,
-    template: QwenTemplate,
-    lm_head_dtype: qwen_llm::tensor::GgmlType,
-) -> bool {
-    bounded_packed_dense_arch(arch)
-        && template == QwenTemplate::Qwen38
-        && lm_head_dtype == qwen_llm::tensor::GgmlType::Q8_0
-}
-
 fn fresh_packed_enabled(value: Option<&std::ffi::OsStr>) -> bool {
-    value.is_some_and(|value| value == "1")
+    value.is_none_or(|value| value == "1")
 }
 
 fn fresh_packed_width(
@@ -1134,11 +1124,7 @@ impl EngineBackend {
         };
         let packed_width = fresh_packed_width(
             fresh_packed_enabled(std::env::var_os("QWEN_SERVE_FRESH_PACKED").as_deref()),
-            fresh_packed_arch(
-                &self.loaded.arch(),
-                self.template,
-                self.loaded.metal_model().lm_head.dtype,
-            ),
+            bounded_packed_dense_arch(&self.loaded.arch()),
             self.dflash_head.is_some(),
             greedy,
             cached_lookup.is_some(),

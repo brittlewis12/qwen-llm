@@ -6,6 +6,53 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-12 - Avoid Serial Transcript Segments In Short Qwen Prefill
+
+- Default-enable the existing bounded single-chunk route for fresh greedy
+  19-48-token requests on the covered dense-27 geometry without a drafter.
+  Remove template/LM-head dtype filters: these are not operation requirements.
+  Retain the 128 MiB priced scratch cap, admitted fallback and explicit
+  `QWEN_SERVE_FRESH_PACKED=0` rollback (invalid values also disable).
+- Actual current serving, not the old forced-serial pilot: ordinary dense
+  prefill switches above 12 tokens but reevaluates each transcript segment.
+  Fresh19 splits into 12+7 serial steps; fresh32/48 pack 25/41 then serialize
+  the seven-token header. Single-chunk scratch batches both segments. Request
+  `prefill_path=chunked` alone did not describe the executed segment schedule.
+- M4 Max, Metal validation, isolated loopback, durable tier off, RAM cache4GiB,
+  ABBA fresh server processes, eight identical cases per process. Q8 A=0/B=1;
+  Q4 A=0/B=unset verifies the new default. First SSE delta milliseconds:
+
+  | Model / prompt | A1, A2 | B1, B2 |
+  | --- | --- | --- |
+  | Qwen3.8 Q8 / 19 | 1493.4, 1361.6 | 488.8, 476.9 |
+  | Qwen3.8 Q8 / 32 | 684.9, 653.5 | 312.2, 312.9 |
+  | Qwen3.8 Q8 / 48 | 761.0, 833.0 | 392.8, 394.0 |
+  | Qwen3.6 Q4 / 19 | 896.4, 897.4 | 561.7, 546.2 |
+  | Qwen3.6 Q4 / 32 | 578.8, 534.7 | 507.9, 472.2 |
+  | Qwen3.6 Q4 / 48 | 668.8, 628.1 | 590.8, 583.0 |
+
+- All 64 responses match within model on output hash, full usage, status and
+  incomplete reason/error. Code/prose128 and guard49 are token-limit truncated,
+  not completed-task quality evidence. The fixture named `exact-19` restores
+  12 transcript tokens and runs seven header tokens, not an exact-logits hit.
+  Q8/Q4 full-state/logit numerical and 3/64/64 greedy continuation checks pass.
+- Controls retain their routes but drift: guard512 paired TTFT changes are
+  -7.5%/-14.0% Q8 and +11.5%/-5.9% Q4. Host VM activity also changes, without
+  a localized cause. Do not attribute every saved millisecond to the route or
+  claim universal throughput. In particular, Q4 output-heavy wall is near flat.
+  This does not rescore the September guard failure or erase its VM outlier.
+- Initial tight-loop probe stops on a transient server-busy503 after DONE;
+  retained separately. Completed comparisons use an equal, recorded, untimed
+  200 ms inter-request pause, not a back-to-back throughput/reliability claim.
+  The probe now exposes `--settle-ms`; every owned server exits cooperatively130.
+- Reproduction: existing `fresh_packed_endpoint_fixture`, `request_probe.py`,
+  and `fresh_short_packed_matches_serial`. Raw local runs:
+  `target/profiles/audit-fresh-settled-{A1,B1,B2,A2}` and
+  `target/profiles/audit-fresh-q4-{A1,B1,B2,A2}`. cx reviewed the current baseline,
+  mechanism, resource repair and bounded rollout; no new qualification framework.
+- Final checks: 800 CLI tests pass (43 ignored), formatting and environment
+  inventory checks pass; probe rejects a negative pause before file access.
+
 ## 2026-10-12 - Strict Router Follows Geometry, Not Sampled Widths
 
 - Current Maya Half N2048 profile (`5d934f4a`) finds42 generic F32 routers,

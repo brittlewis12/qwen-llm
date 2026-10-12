@@ -28,6 +28,9 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import resolve_directory, resolve_model, search_roots
 from typing import Any, BinaryIO, Iterable
 
 
@@ -46,13 +49,9 @@ INVENTORY_VERSION = 2
 INVENTORY_AUTHORITY = (
     "development_k0s_inventory_only_no_model_forward_or_semantic_authority"
 )
-BOOTSTRAP_TARGET_PATH = "/Users/tito/models/Qwen3.8-27B-Q4_K_M.gguf"
 BOOTSTRAP_TARGET_BYTES = 17106773984
 BOOTSTRAP_TARGET_SHA256 = (
     "7b2aec3b9ababdfd75aa17552ee95607d866e44decf547f6f12fcef85cc89f1b"
-)
-BOOTSTRAP_DRAFTER_PATH = (
-    "/Users/tito/models/incoai-dflash2/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
 )
 BOOTSTRAP_DRAFTER_MAX_BYTES = 2147483648
 BOOTSTRAP_DRAFTER_SHA256 = (
@@ -62,6 +61,14 @@ INVENTORY_SPEC_SCHEMA = "qwen.dflash_k0s_inventory_spec"
 PREPARATION_SPEC_SCHEMA = "qwen.dflash_k0s_preparation_spec"
 PREPARATION_SPEC_VERSION = 2
 PREPARATION_CHOICES_SCHEMA = "qwen.dflash_k0s_preparation_choices"
+
+
+def bootstrap_target_path() -> str:
+    return str(resolve_model("Qwen3.8-27B-Q4_K_M.gguf"))
+
+
+def bootstrap_drafter_path() -> str:
+    return str(resolve_model("Qwen3.8-27B-DFlash2-Q4_K_M.gguf"))
 PREPARATION_CHOICES_VERSION = 1
 SEAL_SCHEMA = "qwen.dflash_k0s_preparation_seal"
 INVENTORY_KEYS = (
@@ -5533,14 +5540,14 @@ def validate_bootstrap_asset_expectations(value: Any) -> list[dict[str, Any]]:
         == [
             {
                 "role": "target",
-                "path": BOOTSTRAP_TARGET_PATH,
+                "path": bootstrap_target_path(),
                 "expected_bytes": BOOTSTRAP_TARGET_BYTES,
                 "max_bytes": BOOTSTRAP_TARGET_BYTES,
                 "sha256": BOOTSTRAP_TARGET_SHA256,
             },
             {
                 "role": "drafter",
-                "path": BOOTSTRAP_DRAFTER_PATH,
+                "path": bootstrap_drafter_path(),
                 "expected_bytes": None,
                 "max_bytes": BOOTSTRAP_DRAFTER_MAX_BYTES,
                 "sha256": BOOTSTRAP_DRAFTER_SHA256,
@@ -12660,14 +12667,14 @@ def self_test() -> None:
     frozen_assets = [
         {
             "role": "target",
-            "path": BOOTSTRAP_TARGET_PATH,
+            "path": bootstrap_target_path(),
             "expected_bytes": BOOTSTRAP_TARGET_BYTES,
             "max_bytes": BOOTSTRAP_TARGET_BYTES,
             "sha256": BOOTSTRAP_TARGET_SHA256,
         },
         {
             "role": "drafter",
-            "path": BOOTSTRAP_DRAFTER_PATH,
+            "path": bootstrap_drafter_path(),
             "expected_bytes": None,
             "max_bytes": BOOTSTRAP_DRAFTER_MAX_BYTES,
             "sha256": BOOTSTRAP_DRAFTER_SHA256,

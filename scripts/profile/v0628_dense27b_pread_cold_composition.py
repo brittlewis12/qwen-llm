@@ -7,6 +7,9 @@ import json
 import math
 import os
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import resolve_directory, resolve_model, search_roots
 import re
 import signal
 import subprocess
@@ -21,7 +24,7 @@ PREREG = ROOT / "docs/bench/v0628-dense27b-pread-cold-composition.md"
 RUNNER = Path(__file__).resolve()
 EXAMPLE_SOURCE = ROOT / "crates/qwen-llm/examples/first_byte_spike.rs"
 EXAMPLE_BINARY = ROOT / "target/release/examples/first_byte_spike"
-MODEL = Path("/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf")
+MODEL = resolve_model("Qwen3.6-27B-Q4_K_M.gguf")
 QWEN = ROOT / "target/release/qwen"
 QWEN_BENCH = ROOT / "target/release/qwen-bench"
 V0627_ROOT = ROOT / "target/profiles/v0627-dense27b-parallel-pread-fresh-repair-p1"

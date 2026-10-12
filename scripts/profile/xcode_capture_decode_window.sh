@@ -12,15 +12,16 @@ set -euo pipefail
 MODEL_KEY="${1:-a3b}"
 CTX="${2:-16384}"
 WINDOW="${3:-256}"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 case "$MODEL_KEY" in
-  a3b)  MODEL="$HOME/models/Qwen3.5-35B-A3B-Q4_K_M.gguf" ;;
-  27b)  MODEL="$HOME/models/Qwen3.5-27B-Q4_K_M.gguf" ;;
-  a10b) MODEL="$HOME/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf" ;;
+  a3b)  MODEL_FILE="Qwen3.5-35B-A3B-Q4_K_M.gguf" ;;
+  27b)  MODEL_FILE="Qwen3.5-27B-Q4_K_M.gguf" ;;
+  a10b) MODEL_FILE="Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf" ;;
   *) echo "unknown model key: $MODEL_KEY (want a3b|27b|a10b)"; exit 1 ;;
 esac
 
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+MODEL="$(python3 "$ROOT/scripts/model_search.py" "$MODEL_FILE")"
 BENCH="$ROOT/target/release/qwen-bench"
 [ -x "$BENCH" ] || { echo "build first: cargo build --release -p qwen-cli --bin qwen-bench"; exit 1; }
 

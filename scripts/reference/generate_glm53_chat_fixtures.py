@@ -21,18 +21,19 @@ import argparse
 import hashlib
 import json
 import struct
+import sys
 from pathlib import Path
 
 from jinja2 import TemplateError, sandbox
 from tokenizers import Tokenizer
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+from model_search import resolve_directory, resolve_model
+
 OUTPUT = ROOT / "crates/qwen-llm/tests/fixtures/glm53_chat_hf.json"
-HF_DIR = Path("/Volumes/wdblack/weights-archive/glm-5.3-flash-fp8")
-GGUF = Path(
-    "/Volumes/wdblack/weights-archive/glm-5.3-flash-ud-iq3_xxs/glm5-next/"
-    "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf"
-)
+HF_DIR = resolve_directory("glm-5.3-flash-fp8")
+GGUF = resolve_model("GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf")
 REVISION = "eb9eb208eb0d988989d07a6a12d0fdeb5f52574a"
 HASHES = {
     "chat_template.jinja": "0c4099f3382d6c92700dfb99725025360966fd73032f0ecf32377c0d9e6309c5",

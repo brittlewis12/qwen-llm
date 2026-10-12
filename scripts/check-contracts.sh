@@ -27,6 +27,16 @@ if ! worktree_clean; then
   echo "check-contracts: worktree has uncommitted changes; commit or stash them first" >&2
   exit 1
 fi
+
+machine_path_patterns=(' /''Users/' ' /''Volumes/' ' /''home/' '~''/models' '$HOME''/models')
+for pattern in "${machine_path_patterns[@]}"; do
+  pattern=${pattern# }
+  if git grep -n -F "$pattern" HEAD -- . ':!docs/**'; then
+    echo "check-contracts: machine-specific path found outside docs" >&2
+    exit 1
+  fi
+done
+
 commit=$(git rev-parse HEAD)
 tree=$(git rev-parse 'HEAD^{tree}')
 

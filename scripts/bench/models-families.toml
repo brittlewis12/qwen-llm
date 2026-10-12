@@ -14,7 +14,7 @@ display = "Qwen3.8-27B"
 family = "qwen"
 kind = "dense"
 quant = "Q4_K_M"
-path = "~/models/Qwen3.8-27B-Q4_K_M.gguf"
+path = "Qwen3.8-27B-Q4_K_M.gguf"
 tg_depths = [0, 8192, 32768]
 
 [[models]]
@@ -23,7 +23,7 @@ display = "Qwen3.6-35B-A3B"
 family = "qwen"
 kind = "moe"
 quant = "UD-Q4_K_M"
-path = "~/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+path = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
 tg_depths = [0, 8192, 32768]
 
 [[models]]
@@ -32,7 +32,7 @@ display = "Qwen3.5-122B-A10B"
 family = "qwen"
 kind = "moe"
 quant = "UD-Q4_K_XL"
-path = "~/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"
+path = "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"
 tg_depths = [0, 8192]
 
 [[models]]
@@ -41,7 +41,7 @@ display = "Qwen3.8-Flash-Next"
 family = "qwen4exp"
 kind = "moe"
 quant = "UD-Q3_K_XL"
-path = "~/models/Qwen3.8-Flash-Next-UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf"
+path = "Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf"
 tg_depths = [0, 8192]
 
 [[models]]
@@ -50,7 +50,7 @@ display = "DeepSeek-V4-Flash-0731"
 family = "deepseek_v4"
 kind = "moe"
 quant = "UD-IQ3_XXS"
-path = "~/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf"
+path = "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf"
 tg_depths = [0, 8192]
 
 [[models]]
@@ -59,7 +59,7 @@ display = "Muse-Glimmer-30B"
 family = "muse_glimmer"
 kind = "dense"
 quant = "Q8_0"
-path = "~/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf"
+path = "Muse-Glimmer-30B-Q8_0.gguf"
 tg_depths = [0, 8192]
 
 [[models]]
@@ -68,7 +68,7 @@ display = "K2-Horizon-7B"
 family = "k2_horizon"
 kind = "dense"
 quant = "Q4_K_M"
-path = "~/models/K2-Horizon-7B-Q4_K_M.gguf"
+path = "K2-Horizon-7B-Q4_K_M.gguf"
 lcpp = false
 tg_depths = [0, 8192]
 
@@ -83,6 +83,6 @@ display = "GLM-5.3-Flash"
 family = "glm5_next"
 kind = "moe"
 quant = "UD-IQ3_XXS"
-path = "/Volumes/wdblack/weights-archive/glm-5.3-flash-ud-iq3_xxs/glm5-next/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf"
+path = "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf"
 lcpp = false
 tg_depths = [0, 4096]

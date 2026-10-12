@@ -15,12 +15,16 @@ import json
 import random
 import sys
 from pathlib import Path
+import sys
 
 from tokenizers import Regex, Tokenizer, pre_tokenizers
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+from model_search import resolve_directory
+
 OUTPUT = ROOT / "crates/qwen-llm/tests/fixtures/glm4_tokenizer_hf.json"
-DEFAULT_DIR = Path("/Volumes/wdblack/weights-archive/glm-5.3-flash-fp8")
+DEFAULT_DIR = resolve_directory("glm-5.3-flash-fp8")
 HASHES = {
     "tokenizer.json": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
     "tokenizer_config.json": "98b1271574f41abf89427ae2dda030d94dc9478f0edc5a8bd240db213c6fd5fc",

@@ -17,7 +17,7 @@
     "device": "Apple M4 Max 128 GB, Metal, all layers offloaded",
     "context": {"n_ctx": 256, "n_batch": 1, "n_ubatch": 1, "type_k": "f16", "type_v": "f16", "flash_attn": false, "fused_ops": "library defaults"}
   },
-  "location": "/Volumes/wdblack/weights-archive/.fetch/analysis/runs/glm53-oracle/ckpt-v1",
+  "location": "target/profiles/glm53-oracle/ckpt-v1",
   "files": {
     "logits.bin": {"bytes": 9292936, "sha256": "70defd4d93ac761f4b21936ea18c78fed175f240631ed746aaa7f4a2907737b5", "run": "logits only"},
     "default.bin": {"bytes": 9292936, "sha256": "70defd4d93ac761f4b21936ea18c78fed175f240631ed746aaa7f4a2907737b5", "run": "--capture-default, all 15 steps"},

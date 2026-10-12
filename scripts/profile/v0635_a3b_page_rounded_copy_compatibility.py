@@ -8,6 +8,9 @@ import json
 import math
 import os
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import resolve_directory, resolve_model, search_roots
 import re
 import signal
 import statistics
@@ -22,7 +25,7 @@ ARTIFACT = ROOT / "target/profiles/v0635-a3b-page-rounded-copy-compatibility-p1"
 PREREG = ROOT / "docs/bench/v0635-a3b-page-rounded-copy-compatibility.md"
 RUNNER = Path(__file__).resolve()
 METAL_SOURCE = ROOT / "crates/qwen-llm/src/metal_forward.rs"
-MODEL = Path("/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
+MODEL = resolve_model("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
 PROMPT = ROOT / "docs/bench/tokenizer-prompts/current-reva-n8-interactive-qwen36.txt"
 BENCH = ROOT / "target/release/qwen-bench"
 CLI = ROOT / "target/release/qwen"

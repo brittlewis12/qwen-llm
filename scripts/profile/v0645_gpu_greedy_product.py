@@ -16,6 +16,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import resolve_directory, resolve_model, search_roots
 from typing import Any
 
 
@@ -42,14 +45,14 @@ PAIR_ORDERS = ("AB", "BA") * 8
 MODELS = (
     {
         "name": "a3b",
-        "path": Path("/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"),
+        "path": resolve_model("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"),
         "sha256": "ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61",
         "runtime_model_id": "e6024ce53109fdf7",
         "runtime_tokenizer_id": "a4b0b26f8a8c9917",
     },
     {
         "name": "dense27b",
-        "path": Path("/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf"),
+        "path": resolve_model("Qwen3.6-27B-Q4_K_M.gguf"),
         "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
         "runtime_model_id": "6247cb71b536c975",
         "runtime_tokenizer_id": "a4b0b26f8a8c9917",

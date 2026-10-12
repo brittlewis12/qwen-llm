@@ -16,6 +16,9 @@ import time
 from decimal import Decimal, InvalidOperation
 from itertools import pairwise
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import resolve_directory, resolve_model, search_roots
 
 import v0593_demand_paged_no_copy as common
 
@@ -24,7 +27,7 @@ ARTIFACT = ROOT / "target/profiles/v0630-dense27b-pread-loaded-stability-p1"
 PREREG = ROOT / "docs/bench/v0630-dense27b-pread-loaded-stability.md"
 RUNNER = Path(__file__).resolve()
 BENCH_SOURCE = ROOT / "crates/qwen-cli/src/bench.rs"
-MODEL = Path("/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf")
+MODEL = resolve_model("Qwen3.6-27B-Q4_K_M.gguf")
 PROMPT = ROOT / "docs/bench/tokenizer-prompts/current-reva-n8-interactive-qwen36.txt"
 BENCH_BINARY = ROOT / "target/release/qwen-bench"
 V0629_ROOT = ROOT / "target/profiles/v0629-dense27b-pread-cold-composition-repair-p1"

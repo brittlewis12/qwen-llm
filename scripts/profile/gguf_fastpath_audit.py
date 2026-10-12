@@ -102,8 +102,7 @@ def gguf_bin_default() -> str:
     env = os.environ.get("GGUF_BIN")
     if env:
         return env
-    local = Path("/Users/tito/code/gguf/target/release/gguf")
-    return str(local) if local.exists() else "gguf"
+    return "gguf"
 
 
 def load_tensors(gguf_bin: str, model: Path) -> dict[str, dict[str, object]]:

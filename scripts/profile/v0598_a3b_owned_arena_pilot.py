@@ -5,6 +5,9 @@ import json
 import math
 import os
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import resolve_directory, resolve_model, search_roots
 import re
 import statistics
 import subprocess
@@ -20,7 +23,7 @@ P1_ROOT = ROOT / "target/profiles/v0598-a3b-owned-arena-pilot-p1"
 P1_MANIFEST = P1_ROOT / "manifest.json"
 P1_CORRECTNESS = P1_ROOT / "correctness.out"
 PREREG = ROOT / "docs/bench/v0598-a3b-owned-arena-pilot.md"
-MODEL = Path("/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
+MODEL = resolve_model("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
 PROMPT = ROOT / "docs/bench/tokenizer-prompts/current-reva-n8-interactive-qwen36.txt"
 CLI_BINARY = ROOT / "target/release/qwen"
 BENCH_BINARY = ROOT / "target/release/qwen-bench"

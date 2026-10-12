@@ -2,20 +2,20 @@
 
 import json
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import models_matching, resolve_model
 import statistics
 import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MODELS = Path("/Users/tito/models")
 BINARY = ROOT / "target/release/qwen-bench"
 ARTIFACT = ROOT / "target/profiles/v0594-retained-storage-coverage"
 EXTRA_MODELS = (
-    MODELS / "BF16" / "Qwen3.5-35B-A3B-BF16-00001-of-00002.gguf",
-    MODELS
-    / "unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL"
-    / "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
-    MODELS / "unsloth-Qwen3.6-35B-A3B-MTP-GGUF" / "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+    resolve_model("Qwen3.5-35B-A3B-BF16-00001-of-00002.gguf"),
+    resolve_model("Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"),
+    resolve_model("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"),
 )
 
 
@@ -52,7 +52,7 @@ def source_and_build_identity() -> tuple[str, dict[str, object]]:
 
 
 def discover_models() -> list[Path]:
-    models = sorted(MODELS.glob("Qwen3.[56]-*.gguf"))
+    models = list(models_matching("Qwen3.[56]-*.gguf"))
     models.extend(EXTRA_MODELS)
     missing = [path for path in models if not path.is_file()]
     if missing:

@@ -8,6 +8,9 @@ import json
 import math
 import os
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import resolve_directory, resolve_model, search_roots
 import re
 import shutil
 import signal
@@ -25,7 +28,7 @@ WORK_ROOT = ROOT / "target/profiles/v0622-checkpoint-staged-validation-work"
 PREREG = ROOT / "docs/bench/v0622-checkpoint-staged-validation.md"
 BASE_PROTOCOL = ROOT / "scripts/profile/v0602_a3b_parallel_copied_loader.py"
 COMMON_RUNNER = ROOT / "scripts/profile/v0593_demand_paged_no_copy.py"
-MODEL = Path("/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf")
+MODEL = resolve_model("Qwen3.6-27B-Q4_K_M.gguf")
 MESSAGES = ROOT / "target/profiles/v0615-long-history/ring0-turn-2.json"
 IDENTITY_SEED = (
     ROOT / "target/profiles/v0615-long-history/cache-ring0/v1/identity/"

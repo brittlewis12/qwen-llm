@@ -10,6 +10,9 @@ import json
 import math
 import os
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import resolve_directory, resolve_model, search_roots
 import re
 import resource
 import shutil
@@ -43,7 +46,7 @@ V0639_WORK_ROOT = (
 )
 PERF_LOG = ROOT / "docs/PERF-LOG.md"
 PERF_ROADMAP = ROOT / "docs/PERF-ROADMAP.md"
-MODEL = Path("/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf")
+MODEL = resolve_model("Qwen3.6-27B-Q4_K_M.gguf")
 MESSAGES = ROOT / "target/profiles/v0615-long-history/ring0-turn-2.json"
 IDENTITY_SEED = (
     ROOT / "target/profiles/v0615-long-history/cache-ring0/v1/identity/"
@@ -526,9 +529,9 @@ def authenticate_v0639() -> dict[str, object]:
             decision.get("successor_authorization") != "none",
             decision.get("execution_commit") != V0639_COMMIT,
             decision.get("implementation_commit") != IMPLEMENTATION,
-            decision.get("error")
-            != "ContractDefect: binary is not private executable regular data: "
-            "/Users/tito/code/qwen-llm/target/release/qwen",
+            not str(decision.get("error", "")).startswith(
+                "ContractDefect: binary is not private executable regular data: "
+            ),
             decision.get("stopped_after") != "gates",
             decision.get("decision_cutoff") != cutoff,
             decision.get("build_identity") is not None,

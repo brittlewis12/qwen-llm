@@ -46,7 +46,7 @@ fn bounded_restored_tail_plan_preserves_unqualified_lanes() {
 }
 
 #[test]
-fn optional_tail_faults_preserve_serial_admission_and_allocation() {
+fn optional_tail_faults_preserve_baseline_admission_and_allocation() {
     use qwen_llm::metal::MetalMemorySignals;
     use std::cell::Cell;
     let signals = MetalMemorySignals {
@@ -100,6 +100,7 @@ fn optional_tail_faults_preserve_serial_admission_and_allocation() {
             attempts.set(attempts.get() + 1);
             Err::<Vec<u8>, _>("injected allocation failure")
         },
+        || Ok(()),
         || {
             attempts.set(attempts.get() + 1);
             Ok(baseline.clone())
@@ -111,6 +112,7 @@ fn optional_tail_faults_preserve_serial_admission_and_allocation() {
     let retained = allocate_optional_tail(
         None::<()>,
         |_| -> Result<Vec<u8>, &str> { panic!("unselected candidate") },
+        || panic!("baseline already admitted"),
         || Ok(baseline.clone()),
     )
     .unwrap();
@@ -119,14 +121,110 @@ fn optional_tail_faults_preserve_serial_admission_and_allocation() {
         allocate_optional_tail(
             Some(()),
             |_| Ok::<_, &str>(7),
+            || panic!("successful candidate re-admitted"),
             || panic!("successful candidate retried")
         ),
         Ok(7)
     );
     assert_eq!(
-        allocate_optional_tail(Some(()), |_| Err::<(), _>("candidate"), || Err("serial")),
-        Err("serial")
+        allocate_optional_tail(
+            Some(()),
+            |_| Err::<(), _>("candidate"),
+            || Ok(()),
+            || Err("baseline")
+        ),
+        Err("baseline")
     );
+}
+
+#[test]
+fn optional_tail_failed_allocation_readmits_full_baseline() {
+    use qwen_llm::metal::{MetalMemorySignals, evaluate_metal_memory_admission_with_cpu_bytes};
+    use std::cell::{Cell, RefCell};
+
+    for (remaining, expected_error) in [
+        (Some(80), Some((503, "memory_admission_denied"))),
+        (Some(128), None),
+        (None, Some((500, "memory_signal_unavailable"))),
+    ] {
+        let capacity = 8;
+        let cpu_reserved = super::super::transport_memory::combined_reserve(17, 23).unwrap();
+        let prices = RefCell::new(Vec::new());
+        let live_candidate = Cell::new(false);
+        struct CandidateBuffer<'a>(&'a Cell<bool>);
+        impl Drop for CandidateBuffer<'_> {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+        let admit = |price, remaining| {
+            assert!(!live_candidate.get());
+            prices.borrow_mut().push((capacity, price, cpu_reserved));
+            evaluate_metal_memory_admission_with_cpu_bytes(
+                capacity + price,
+                cpu_reserved,
+                0,
+                MetalMemorySignals {
+                    recommended_max_bytes: 1024,
+                    current_allocated_bytes: 0,
+                    process_limit_remaining_bytes: remaining,
+                },
+                false,
+            )
+        };
+        let (plan, admission) = admit_optional_tail(Some(((), 16)), 64, |price| {
+            Ok::<_, ServeError>(admit(price, Some(80)))
+        })
+        .unwrap();
+        assert!(plan.is_some() && admission.admitted);
+        let baseline_allocations = Cell::new(0);
+        let result = allocate_optional_tail(
+            plan,
+            |_| {
+                live_candidate.set(true);
+                let _buffer = CandidateBuffer(&live_candidate);
+                Err(ServeError::server_error("injected allocation failure"))
+            },
+            || {
+                let admission = admit(64, remaining);
+                if let Some(denied) = admission.refusal() {
+                    return Err(super::super::transport_memory::memory_refusal(
+                        "request memory",
+                        &denied,
+                    ));
+                }
+                Ok(())
+            },
+            || {
+                baseline_allocations.set(baseline_allocations.get() + 1);
+                Ok(())
+            },
+        );
+        assert_eq!(*prices.borrow(), [(8, 16, 40), (8, 64, 40)]);
+        assert_eq!(
+            baseline_allocations.get(),
+            usize::from(expected_error.is_none())
+        );
+        match expected_error {
+            Some((status, code)) => {
+                let error = result.unwrap_err();
+                assert_eq!((error.status, error.code), (status, Some(code)));
+            }
+            None => result.unwrap(),
+        }
+    }
+}
+
+#[test]
+fn optional_tail_fallback_propagates_admission_error_without_allocating() {
+    let error = allocate_optional_tail(
+        Some(()),
+        |_| Err::<(), _>("candidate allocation"),
+        || Err("telemetry query failed"),
+        || panic!("unadmitted baseline allocated"),
+    )
+    .unwrap_err();
+    assert_eq!(error, "telemetry query failed");
 }
 
 #[test]

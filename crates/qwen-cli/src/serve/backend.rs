@@ -700,10 +700,19 @@ fn admit_optional_tail<P, E>(
 fn allocate_optional_tail<P, T, E>(
     candidate: Option<P>,
     allocate: impl FnOnce(P) -> Result<T, E>,
+    readmit_baseline: impl FnOnce() -> Result<(), E>,
     fallback: impl FnOnce() -> Result<T, E>,
 ) -> Result<T, E> {
     match candidate {
-        Some(plan) => allocate(plan).or_else(|_| fallback()),
+        Some(plan) => match allocate(plan) {
+            Ok(state) => Ok(state),
+            Err(error) => {
+                // Release failed candidate resources before sampling memory again.
+                drop(error);
+                readmit_baseline()?;
+                fallback()
+            }
+        },
         None => fallback(),
     }
 }
@@ -1097,7 +1106,8 @@ impl EngineBackend {
             exact_cached,
         );
         // The retained lookup pins the restore boundary through allocation.
-        // Packed execution still admits its complete fallback topology.
+        // Price the general baseline too: a failed optional allocation must
+        // re-admit that topology before falling back to it.
         let prefill_scratch_upper_bytes = if !needs_scratch {
             0
         } else {
@@ -1209,8 +1219,30 @@ impl EngineBackend {
             |plan| {
                 allocate_single_chunk_request_state(&self.loaded, capacity, plan)
                 .inspect_err(|error| {
-                    tracing::warn!("serve: single-chunk tail allocation failed; retaining serial prefill: {error:#}");
+                    tracing::warn!("serve: single-chunk tail allocation failed; attempting general baseline prefill: {error:#}");
                 })
+                .map_err(|error| ServeError::server_error(format!("allocate request state: {error:#}")))
+            },
+            || {
+                let admission = self
+                    .loaded
+                    .qwen_execution_memory_admission_with_additional_bytes(
+                        1,
+                        capacity,
+                        prefill_scratch_upper_bytes,
+                        0,
+                        cpu_reserved,
+                    )
+                    .map_err(|error| {
+                        ServeError::server_error(format!("price request memory: {error:#}"))
+                    })?;
+                if let Some(denied) = admission.refusal() {
+                    return Err(super::transport_memory::memory_refusal(
+                        "request memory",
+                        &denied,
+                    ));
+                }
+                Ok(())
             },
             || {
                 allocate_serve_request_state(
@@ -1219,11 +1251,12 @@ impl EngineBackend {
                     capacity,
                     needs_scratch,
                 )
+                .map_err(|error| {
+                    ServeError::server_error(format!("allocate request state: {error:#}"))
+                })
             },
         );
-        let (chunk, scratch, mut sequence) = allocation.map_err(|error| {
-            ServeError::server_error(format!("allocate request state: {error:#}"))
-        })?;
+        let (chunk, scratch, mut sequence) = allocation?;
         // Which prefill path the remainder takes, for the phases line: a slow
         // path is never silent.
         let prefill_path = if exact_cached {

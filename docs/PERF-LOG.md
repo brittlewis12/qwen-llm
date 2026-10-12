@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-12 - Re-Admit Qwen's Actual Packed Allocation Fallback
+
+- Short-request investigation found a stale resource assumption: optional
+  single-chunk scratch can be smaller than the general packed fallback. The
+  fallback is no longer necessarily serial after the dense serial-tail limit
+  moved to 12. Following candidate allocation failure, re-admit the full
+  baseline sequence/scratch footprint and unchanged durable/transport CPU
+  reservation before allocating it. Preserve typed pressure/telemetry errors.
+- Successful candidates and already-admitted ordinary paths do not repeat
+  admission. Failed candidate resources drop before fresh memory signals are
+  sampled. No policy widening or execution change; fallback may still refuse
+  conservatively rather than initiate another snapshot-eviction round.
+- Three CPU fault tests and six transport-memory tests pass; release server
+  build passes; cx review finds no blocker. Mocked allocation failures are not
+  real Metal OOM tests.
+- Re-ranking: Qwen's recorded allocation costs are about 1-2 ms, not GLM's
+  hundreds. Defer sequence retention. The old short-packed pilot still passes
+  numerical/state/greedy checks, but forces a serial reference: its historical
+  speedup is not today's serving opportunity, since current ordinary serving
+  already batches prompts above 12 tokens. Compare actual routes before rollout.
+
 ## 2026-10-12 - Retain Healthy GLM Session Storage On Cold Misses
 
 - Actual served cold misses paid roughly 170-280 ms for session destruction and

@@ -392,11 +392,53 @@ fn dense_iq_role_storage_retained_plan_keeps_compressed_spans() {
 
 #[test]
 fn dense_iq_role_storage_prefill_capability_matches_dense_roles() {
-    for raw in 0..=43 {
-        let dtype = GgmlType::from_raw(raw);
+    let dtypes = [
+        GgmlType::F32,
+        GgmlType::F16,
+        GgmlType::Q4_0,
+        GgmlType::Q4_1,
+        GgmlType::Q5_0,
+        GgmlType::Q5_1,
+        GgmlType::Q8_0,
+        GgmlType::Q8_1,
+        GgmlType::Q2_K,
+        GgmlType::Q3_K,
+        GgmlType::Q4_K,
+        GgmlType::Q5_K,
+        GgmlType::Q6_K,
+        GgmlType::Q8_K,
+        GgmlType::IQ2_XXS,
+        GgmlType::IQ2_XS,
+        GgmlType::IQ3_XXS,
+        GgmlType::IQ1_S,
+        GgmlType::IQ4_NL,
+        GgmlType::IQ3_S,
+        GgmlType::IQ2_S,
+        GgmlType::IQ4_XS,
+        GgmlType::I8,
+        GgmlType::I16,
+        GgmlType::I32,
+        GgmlType::I64,
+        GgmlType::F64,
+        GgmlType::IQ1_M,
+        GgmlType::BF16,
+        GgmlType::TQ1_0,
+        GgmlType::TQ2_0,
+        GgmlType::MXFP4,
+        GgmlType::NVFP4,
+        GgmlType::Q1_0,
+        GgmlType::Q2_0,
+        GgmlType::Unknown,
+    ];
+    for dtype in dtypes {
         assert_eq!(
             crate::metal_dflash::prefill_mat_mat_dispatch_eligible(dtype),
-            weight_role_dtype_supported(WeightRole::DenseProjection, dtype)
+            crate::metal_forward::mat_mat_dispatch_supported(dtype)
+        );
+        assert_eq!(
+            crate::metal_dflash::prefill_mat_mat_dispatch_eligible(dtype),
+            weight_role_dtype_supported(WeightRole::DenseProjection, dtype),
+            "{dtype:?}"
         );
     }
     assert!(crate::metal_dflash::prefill_mat_mat_dispatch_eligible(

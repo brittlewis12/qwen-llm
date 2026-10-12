@@ -742,12 +742,11 @@ fn prefill_dense_ffn_fused_swiglu_q4_enabled(hidden: usize) -> bool {
 }
 
 pub(crate) fn prefill_mat_mat_dispatch_eligible(dtype: GgmlType) -> bool {
-    // Capability is independent of the test-only storage rollback: existing
-    // native tensors must keep the same execution path in either scope.
-    crate::metal_forward::weight_role_dtype_supported(
-        crate::metal_forward::WeightRole::DenseProjection,
-        dtype,
-    )
+    crate::metal_forward::mat_mat_dispatch_supported(dtype)
+}
+
+fn router_mat_mat_eligible(dtype: GgmlType) -> bool {
+    crate::metal_forward::mat_mat_dispatch_supported(dtype)
 }
 
 crate::env_flag!(
@@ -8801,19 +8800,6 @@ fn encode_packed_verify_moe_grouped_ffn_after_mixer(
         return Ok(false);
     };
 
-    let router_mat_mat_eligible = |dtype: GgmlType| {
-        matches!(
-            dtype,
-            GgmlType::F32
-                | GgmlType::F16
-                | GgmlType::BF16
-                | GgmlType::Q4_K
-                | GgmlType::Q5_K
-                | GgmlType::Q6_K
-                | GgmlType::Q8_0
-        )
-    };
-
     let topk = arch.expert_used_count.min(arch.expert_count) as usize;
     let n_expert = arch.expert_count as usize;
     let f_exp = arch.expert_feed_forward_length as usize;
@@ -10425,16 +10411,7 @@ pub fn encode_packed_verify_layer_major_inner(
                 && moe.up_exps.dtype == GgmlType::Q4_K;
             let topk = arch.expert_used_count.min(arch.expert_count) as usize;
             let n_expert = arch.expert_count as usize;
-            let router_mat_mat_eligible = matches!(
-                moe.gate_inp.dtype,
-                GgmlType::F32
-                    | GgmlType::F16
-                    | GgmlType::BF16
-                    | GgmlType::Q4_K
-                    | GgmlType::Q5_K
-                    | GgmlType::Q6_K
-                    | GgmlType::Q8_0
-            );
+            let router_mat_mat_eligible = router_mat_mat_eligible(moe.gate_inp.dtype);
             let use_batched_route = mtp_moe_verify_batched_route_enabled()
                 && mtp_moe_verify_row_views_enabled()
                 && topk > 0
@@ -13819,18 +13796,6 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                     "post_norm",
                 )?;
 
-                let router_mat_mat_eligible = |dtype: GgmlType| {
-                    matches!(
-                        dtype,
-                        GgmlType::F32
-                            | GgmlType::F16
-                            | GgmlType::BF16
-                            | GgmlType::Q4_K
-                            | GgmlType::Q5_K
-                            | GgmlType::Q6_K
-                            | GgmlType::Q8_0
-                    )
-                };
                 let packed_routed_path = prefill_moe_packed_routed_enabled()
                     && moe.gate_exps.dtype == GgmlType::Q4_K
                     && moe.up_exps.dtype == GgmlType::Q4_K

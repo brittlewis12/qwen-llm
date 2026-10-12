@@ -206,7 +206,7 @@ fn packed_grouped_schedule_from_route_ids(
             i32::from(expert)
         })
         .collect::<Vec<_>>();
-    for token_ids in route_ids.chunks_exact(MOE_TOP_K) {
+    for token_ids in route_ids.as_chunks::<MOE_TOP_K>().0 {
         let mut seen = [false; MOE_EXPERT_COUNT];
         for &expert in token_ids {
             assert!(!std::mem::replace(&mut seen[usize::from(expert)], true));
@@ -6627,7 +6627,7 @@ impl PackedRouteFixture {
                 (0..MOE_TOP_K).map(move |slot| ((token * 17 + slot * 37) % 256) as i32)
             })
             .collect::<Vec<_>>();
-        for row in hash_map.chunks_exact(MOE_TOP_K) {
+        for row in hash_map.as_chunks::<MOE_TOP_K>().0 {
             let mut sorted = row.to_vec();
             sorted.sort_unstable();
             sorted.dedup();

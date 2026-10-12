@@ -1799,7 +1799,7 @@ fn decode_compressor_q8_pair_replaces_three_dispatches_with_one() {
     const N_IN: usize = 512;
     const N_OUT: usize = 67;
     let mut bytes = vec![0u8; N_OUT * (N_IN / 32) * 34];
-    for block in bytes.chunks_exact_mut(34) {
+    for block in bytes.as_chunks_mut::<34>().0 {
         block[..2].copy_from_slice(&half::f16::from_f32(0.01).to_bits().to_le_bytes());
         block[2..].fill(1);
     }
@@ -8229,7 +8229,9 @@ fn ratio4_indexer_publication_matches_the_integrated_oracle() {
     #[cfg(feature = "dsv4-diagnostics")]
     {
         let expected_packed = expected_rows
-            .chunks_exact(HEAD_DIM)
+            .as_chunks::<HEAD_DIM>()
+            .0
+            .iter()
             .map(|row| pack_indexer_fp4_row(row).unwrap())
             .collect::<Vec<_>>();
         let sidecar = frontier.fp4_sidecar.as_ref().unwrap();
@@ -13564,7 +13566,7 @@ fn batched_hadamard_and_stable_top512_match_cpu_contracts() {
         })
         .collect::<Vec<_>>();
     let mut expected = values.clone();
-    for row in expected.chunks_exact_mut(128) {
+    for row in expected.as_chunks_mut::<128>().0 {
         hadamard_128_in_place(row).unwrap();
     }
     let transformed = offset_f32(&ctx, &values, vec![128, ROWS as u64]);
@@ -16853,11 +16855,15 @@ fn fp4_shadow_runs_pack_unpack_and_score_without_host_reconstruction() {
     assert_eq!(read_i32(&key_status), vec![0; ROWS]);
 
     let query_rows = query_inputs
-        .chunks_exact(INDEXER_FP4_VALUES_PER_ROW)
+        .as_chunks::<INDEXER_FP4_VALUES_PER_ROW>()
+        .0
+        .iter()
         .map(|row| pack_indexer_fp4_row(row).unwrap())
         .collect::<Vec<_>>();
     let key_rows = key_inputs
-        .chunks_exact(INDEXER_FP4_VALUES_PER_ROW)
+        .as_chunks::<INDEXER_FP4_VALUES_PER_ROW>()
+        .0
+        .iter()
         .map(|row| pack_indexer_fp4_row(row).unwrap())
         .collect::<Vec<_>>();
     let expected = packed_indexer_scores(&query_rows, &weights, &key_rows).unwrap();
@@ -17116,7 +17122,9 @@ fn fp4_matrix_shadow_covers_batched_queries_tails_offsets_and_envelope() {
         })
         .collect::<Vec<_>>();
     let query_rows = query_inputs
-        .chunks_exact(INDEXER_FP4_VALUES_PER_ROW)
+        .as_chunks::<INDEXER_FP4_VALUES_PER_ROW>()
+        .0
+        .iter()
         .map(|row| pack_indexer_fp4_row(row).unwrap())
         .collect::<Vec<_>>();
     let key_inputs = (0..ROWS * INDEXER_FP4_VALUES_PER_ROW)
@@ -17128,7 +17136,9 @@ fn fp4_matrix_shadow_covers_batched_queries_tails_offsets_and_envelope() {
         })
         .collect::<Vec<_>>();
     let key_rows = key_inputs
-        .chunks_exact(INDEXER_FP4_VALUES_PER_ROW)
+        .as_chunks::<INDEXER_FP4_VALUES_PER_ROW>()
+        .0
+        .iter()
         .map(|row| pack_indexer_fp4_row(row).unwrap())
         .collect::<Vec<_>>();
     let weights = (0..QUERIES * HEADS)
@@ -19396,7 +19406,9 @@ fn dense_compressed_attention_includes_the_newest_published_row() {
     )
     .unwrap();
     let raw_sources = raw_rows
-        .chunks_exact(HEAD_DIM)
+        .as_chunks::<HEAD_DIM>()
+        .0
+        .iter()
         .map(|row| offset_f32(&ctx, row, vec![HEAD_DIM as u64]))
         .collect::<Vec<_>>();
     let compressed_source = offset_f32(&ctx, &compressed_rows, vec![HEAD_DIM as u64, 4]);
@@ -22127,7 +22139,9 @@ fn native_hyper_connections_match_oracle_with_offsets_and_asymmetric_streams() {
         "fixture must detect transposed combination axes"
     );
     let per_stream_norm = residual_values
-        .chunks_exact(H)
+        .as_chunks::<H>()
+        .0
+        .iter()
         .flat_map(|stream| rms_norm(stream, None, rms_eps).unwrap())
         .collect::<Vec<_>>();
     let wrong_mixes = mat_vec(

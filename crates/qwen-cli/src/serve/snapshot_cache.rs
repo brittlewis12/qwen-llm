@@ -201,7 +201,19 @@ impl<V, N: PartialEq> SnapshotCache<V, N> {
 
     /// Evict unpinned entries by rank until `bytes` are released.
     pub(crate) fn evict_for(&mut self, bytes: u64) -> Evicted {
+        let held: Vec<EntryId> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| Arc::strong_count(&entry.value) > 1)
+            .map(|(&id, _)| id)
+            .collect();
+        for &id in &held {
+            self.policy.pin(id);
+        }
         let evicted = self.policy.evict_for(bytes);
+        for &id in &held {
+            self.policy.unpin(id);
+        }
         self.drop_entries(&evicted);
         evicted
     }
@@ -421,5 +433,54 @@ mod tests {
         assert_eq!(cache.evict_for(1).bytes, 10);
         assert_eq!(cache.len(), 0);
         assert_eq!(cache.indexed_bytes(), 0);
+    }
+
+    #[test]
+    fn pressure_eviction_skips_held_values_and_releases_unheld_values() {
+        let mut cache = lru(30);
+        let held = Arc::new("held");
+        assert!(cache.insert_shared_strict(vec![1], Arc::clone(&held), 10));
+        assert!(cache.insert_strict(vec![2], "unheld", 10));
+        let held_id = cache.entry_for(&[1]).unwrap();
+
+        let evicted = cache.evict_for(10);
+        assert_eq!(evicted.bytes, 10);
+        assert_eq!(evicted.ids.len(), 1);
+        assert_eq!(cache.entry_for(&[1]), Some(held_id));
+        assert!(cache.entry_for(&[2]).is_none());
+        assert_eq!(cache.indexed_bytes(), 10);
+        assert_eq!(*held, "held");
+    }
+
+    #[test]
+    fn pressure_eviction_preserves_existing_pins_while_skipping_held_values() {
+        let mut cache = lru(30);
+        let held = Arc::new("held and pinned");
+        assert!(cache.insert_shared_strict(vec![1], Arc::clone(&held), 10));
+        assert!(cache.insert_strict(vec![2], "unheld", 10));
+        let held_id = cache.entry_for(&[1]).unwrap();
+        assert!(cache.pin(held_id));
+
+        assert_eq!(cache.evict_for(10).bytes, 10);
+        drop(held);
+        assert!(cache.evict_for(u64::MAX).is_empty());
+        assert_eq!(cache.entry_for(&[1]), Some(held_id));
+
+        cache.unpin(held_id);
+        assert_eq!(cache.evict_for(10).bytes, 10);
+        assert!(cache.entry_for(&[1]).is_none());
+    }
+
+    #[test]
+    fn pressure_eviction_returns_empty_when_all_payloads_are_held() {
+        let mut cache = lru(30);
+        let first = Arc::new("first");
+        let second = Arc::new("second");
+        assert!(cache.insert_shared_strict(vec![1], Arc::clone(&first), 10));
+        assert!(cache.insert_shared_strict(vec![2], Arc::clone(&second), 10));
+
+        assert!(cache.evict_for(u64::MAX).is_empty());
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.indexed_bytes(), 20);
     }
 }

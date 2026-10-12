@@ -1523,4 +1523,36 @@ mod tests {
         );
         assert_eq!(result.unwrap_err().0, SnapshotCaptureDenial::MetalHeadroom);
     }
+
+    #[test]
+    fn capture_admission_does_not_retry_when_snapshot_payload_is_held() {
+        use super::snapshot_cache::SnapshotCache;
+
+        let mut cache = SnapshotCache::new(u64::MAX, SnapshotPolicyConfig::default());
+        assert!(cache.insert_strict(vec![1], "held", 10));
+        let held = cache.peek_exact_in(&(), &[1]).unwrap();
+        let signal_reads = std::cell::Cell::new(0);
+        let bytes = 1;
+        let process_remaining = bytes + SNAPSHOT_CAPTURE_HEADROOM_BYTES - 1;
+        let result = admit_snapshot_capture(
+            bytes,
+            || {
+                signal_reads.set(signal_reads.get() + 1);
+                MetalMemorySignals {
+                    recommended_max_bytes: u64::MAX,
+                    current_allocated_bytes: 0,
+                    process_limit_remaining_bytes: Some(process_remaining),
+                }
+            },
+            |deficit| cache.evict_for(deficit),
+        );
+        assert_eq!(
+            result.unwrap_err().0,
+            SnapshotCaptureDenial::ProcessHeadroom { deficit_bytes: 1 }
+        );
+        assert_eq!(signal_reads.get(), 1);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.indexed_bytes(), 10);
+        assert_eq!(cache.entry_for(&[1]), Some(held.id));
+    }
 }

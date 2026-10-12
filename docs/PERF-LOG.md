@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-12 - Enable Half Q6 Latent MMA On Task Evidence
+
+- Refreshed lane from `8d50ec11` through `73d13835`, then `f9abbf19` before
+  integration. GLM arithmetic was unchanged; rebuilt for the new MSL3.1 target.
+- Fixed quality-v1 subset before outputs: three 64-token real continuations and
+  four tools, greedy plus seed11, same Maya weights/workspace2048. All eight
+  tool runs per arm strictly correct with identical text/tokens. Mean NLL
+  improves 0.009980 nats/token; top-1 hits fall 111 to 109/192. Bounded evidence,
+  not a general non-inferiority or quality-upgrade claim.
+- Production B without override: throughput ratios 1.068x full512, 1.112x
+  full2048, 1.037x ragged129 suffix and 1.118x512 suffix after4096. Independent
+  primitive tolerances unchanged; no new GPU buffers or model gates.
+- Enable only Fast Half alongside existing Fast F32. Keep DenseF32, Exact,
+  Q8, decode and capability/geometry fallbacks unchanged. Test-only scalar8 is
+  isolated so promotion cannot silently change its diagnostic arm.
+- Historical forced-MMA KL assertion still fails at 0.012874 and is retained.
+  Old Fast agreement is not task ground truth. New production AB records KL
+  without that gate. UD control timed out after two bit-identical cells amid
+  unstable timings/host pressure; retain it and make no UD speed claim.
+- Ten grouped-latent and 87 GLM tests, six analyzer tests, all-target checks
+  and Maya adaptive serve cold/hit/cancel/retry/continuation validation pass.
+  Snapshots are RAM-only and bound to a weights instance; there is no
+  demonstrated cross-binary collision requiring a new lineage.
+- Evidence: `docs/bench/2026-10-12-glm-latent-quality/`. Task comparison answered
+  the open question more directly than another parent-stage profile; actual
+  N2048 attribution remains a way to choose the next mechanism, not a
+  prerequisite to exploiting the demonstrated one.
+
 ## 2026-10-12 - Quant-Compatibility Worktree Disposition
 
 - Reviewed the completed October 10 Flash and GLM experiments against current

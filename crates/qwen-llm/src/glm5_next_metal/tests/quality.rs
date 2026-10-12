@@ -15,6 +15,8 @@
 //!    Exact. Tool tasks run greedy and seeded release sampling after an Exact
 //!    or a Fast prefill and record whether the call is right.
 
+mod latent_mma;
+
 use super::natural::{
     Generation, OBSERVATION, artifact_layout, currency_tool, ids, parse_ids, parse_turn, render,
     session, sha256_hex, weather_tool,

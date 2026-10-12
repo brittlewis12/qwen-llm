@@ -1,0 +1,1081 @@
+{
+  "schema": "glm53.latent_quality_analysis.v1",
+  "scope": "Descriptive fixed subset; no margins, quality gate, or noninferiority claim. Deltas are half_mma minus half_scalar.",
+  "report_sha256": "0213eecb741126963e307983331787f53432acd50d562a790465ca8f5a487f62",
+  "fixture_sha256": "7f9ac936b08ee0f4e47fbbb42dbfd46c3055f058b4f36fa5d832fbefcad43057",
+  "packet_header": {
+    "event": "header",
+    "schema": "glm53.latent_quality.v1",
+    "fixture_sha256": "7f9ac936b08ee0f4e47fbbb42dbfd46c3055f058b4f36fa5d832fbefcad43057",
+    "model": "/Volumes/wdblack/weights-archive/glm-5.3-flash-maya-m/Maya-M/GLM-5.3-Flash-Maya-M-IQ2_S-00001-of-00003.gguf",
+    "artifact_layout": {
+      "shards": [
+        {
+          "file": "GLM-5.3-Flash-Maya-M-IQ2_S-00001-of-00003.gguf",
+          "bytes": 47678327584
+        },
+        {
+          "file": "GLM-5.3-Flash-Maya-M-IQ2_S-00002-of-00003.gguf",
+          "bytes": 47820244896
+        },
+        {
+          "file": "GLM-5.3-Flash-Maya-M-IQ2_S-00003-of-00003.gguf",
+          "bytes": 20504990688
+        }
+      ],
+      "tensors": 1412,
+      "tensor_table_sha256": "8cdf8eb7a56d7cde4d3bf2b24db38d546e0a116cb7269edc934e8dabfd9aa898"
+    },
+    "shards": [
+      {
+        "path": "/Volumes/wdblack/weights-archive/glm-5.3-flash-maya-m/Maya-M/GLM-5.3-Flash-Maya-M-IQ2_S-00001-of-00003.gguf",
+        "shard": 0,
+        "device": 16777244,
+        "inode": 11057,
+        "bytes": 47678327584,
+        "mtime_sec": 1791687008,
+        "mtime_nsec": 348485755,
+        "ctime_sec": 1791687008,
+        "ctime_nsec": 354781194
+      },
+      {
+        "path": "/Volumes/wdblack/weights-archive/glm-5.3-flash-maya-m/Maya-M/GLM-5.3-Flash-Maya-M-IQ2_S-00002-of-00003.gguf",
+        "shard": 1,
+        "device": 16777244,
+        "inode": 11065,
+        "bytes": 47820244896,
+        "mtime_sec": 1791689925,
+        "mtime_nsec": 794612742,
+        "ctime_sec": 1791689925,
+        "ctime_nsec": 800868906
+      },
+      {
+        "path": "/Volumes/wdblack/weights-archive/glm-5.3-flash-maya-m/Maya-M/GLM-5.3-Flash-Maya-M-IQ2_S-00003-of-00003.gguf",
+        "shard": 2,
+        "device": 16777244,
+        "inode": 11083,
+        "bytes": 20504990688,
+        "mtime_sec": 1791689791,
+        "mtime_nsec": 667470230,
+        "ctime_sec": 1791689791,
+        "ctime_nsec": 673280389
+      }
+    ],
+    "binary": "/Users/tito/code/qwen-llm/target/release/deps/qwen_llm-de358c0a63485fd8",
+    "binary_sha256": "c9c148f3d2f0d0d09c055e51ed1f294e285f6937ea1eab6d098dbda1796d95d9",
+    "tokenizer_compatibility": {
+      "verified": true,
+      "ud_header": "/Volumes/wdblack/weights-archive/glm-5.3-flash-ud-iq3_xxs/glm5-next/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+      "ud_header_sha256": "632f4fabe03ea73d20c299c8ef00c4a16e47dd9ab3f1750a8585b92eb70dfa74",
+      "method": "all tokenizer.* raw typed GGUF values, complete arrays",
+      "fields": {
+        "tokenizer.chat_template": "672fb9985ba847e09eccb3087f6c9c7ac0d7a713ad7da45db0bfb5044c82badb",
+        "tokenizer.ggml.bos_token_id": "28718ae9654b72340a24e6619cd98c1865dd6767821de2401ce6cb5bb99907a3",
+        "tokenizer.ggml.eom_token_id": "dbf1b2992df931ec7876e5d9dea22e795b52659f2e770e685a11aa0e207f5eba",
+        "tokenizer.ggml.eos_token_id": "b88b532f05878c26e528aaf9a3061846276e20b9919d634c9abb1b3ad6d3cf46",
+        "tokenizer.ggml.eot_token_id": "4e166bc0599efd2c4fd635a51ec413700f194a08bae409677d9a70ea45a6fda9",
+        "tokenizer.ggml.merges": "423072afc0faee4aacbabc4618772665d5f06dd1ef51d8612f0bb2e3548ffe47",
+        "tokenizer.ggml.model": "35b5fa96b5f7fc8c0addda0366ee9029c0e3f4c0fb1b604032bc88054dc127a6",
+        "tokenizer.ggml.padding_token_id": "b88b532f05878c26e528aaf9a3061846276e20b9919d634c9abb1b3ad6d3cf46",
+        "tokenizer.ggml.pre": "272106076e12d8f96b6af54d54e1c094b71fbb72651c27d41924eed20f7e7ead",
+        "tokenizer.ggml.token_type": "ac6e5090bdacc52b3283639c3902b92fd719754e26df2ea1114ebc118c27d19e",
+        "tokenizer.ggml.tokens": "60ff2c90f06eb35c2ce4768ab5262514403c2ad624ac211f0212123e498aa931",
+        "tokenizer.ggml.unknown_token_id": "b88b532f05878c26e528aaf9a3061846276e20b9919d634c9abb1b3ad6d3cf46"
+      }
+    },
+    "documents": [
+      {
+        "path": "docs/GLM53-FLASH-PLAN.md",
+        "stratum": "prose",
+        "prefix": 2048
+      },
+      {
+        "path": "crates/qwen-llm/src/sampling.rs",
+        "stratum": "code",
+        "prefix": 2048
+      },
+      {
+        "path": "docs/SERVE.md",
+        "stratum": "long",
+        "prefix": 4352
+      }
+    ],
+    "tasks": [
+      "T03",
+      "T10",
+      "T11",
+      "T12"
+    ],
+    "continuation": 64,
+    "tool_cap": 256,
+    "seeds": [
+      11
+    ],
+    "arms": [
+      "half_scalar",
+      "half_mma"
+    ],
+    "lineage": "Fast",
+    "precision": "Half",
+    "workspace_rows": 2048,
+    "policy": "override around entire prefill in both arms; fresh sessions; decode unchanged; no promotion, verdict, or timing claim",
+    "source_binding": {
+      "packet": "68de0ec4bd98df98e509ec65daa3a3037011a8ec11abbfe99fc36c76b0b2da7d",
+      "quality": "f7e4728a08488dd804457c618412d0c97b95c904b7ce316c306f214fb48cc8a4",
+      "natural": "f1a02147b064aa80728ee7cd3df5e02f3b4c3163b5675270ed0291df3042d45b",
+      "packed": "7490cc82b7410029069de06691107bd40e93d881bd459b238caa09ae6084f2e5",
+      "session": "93a41cff62977329a764a03a13a730c2a8848dc3d2837b65fa9a0e3c3cd4e035",
+      "latent": "9dc990b7e5d4c9dfe3e2f4b132a686c677370db8dcf40bddf98908cec6fe9362",
+      "sampling": "52824de1810336b027c71c4bc8ac54311114dca02298c7770eb3195f7fbcf7fc",
+      "tokenizer": "e44989e4161e0427fc9f98f6e01889afeb9d28aa131eed651af9d5d9686b19d1",
+      "mma_shader": "158aebcd83b9645206e95b965e4d62cfb519e707649db88b5178d8da6c1526c8",
+      "metallib": "ac1759670cbadfcf0ae405a30a0b091578ed7d5b2d7bae78cbe3a27c5c1f64c1"
+    }
+  },
+  "analysis_sha256": "02ee5e6a1c94c2553b9baaac77f878669d0ecb32bafa7cedc951b785342742cd",
+  "scorer_sha256": "44ee0c82e3fdbb212be30ac88b0663d3a3e929b77b7c2b6251cd9f5942bb946f",
+  "documents": [
+    {
+      "path": "docs/GLM53-FLASH-PLAN.md",
+      "prefix": 2048,
+      "stratum": "prose",
+      "arms": {
+        "half_scalar": {
+          "mean_nll": 1.7385345232504819,
+          "hits": 39
+        },
+        "half_mma": {
+          "mean_nll": 1.7205105544566341,
+          "hits": 39
+        }
+      },
+      "mean_nll_delta": -0.01802396879384765,
+      "per_token_nll_delta": [
+        0.040769116539692396,
+        2.6080545850016006e-05,
+        -0.00011503362576920518,
+        -0.032867144527529035,
+        -0.03387329242193027,
+        0.09691695278519907,
+        -0.0010807947465351986,
+        -0.010057590844285091,
+        0.01180620438228544,
+        0.005204076932420559,
+        -0.4523013951784769,
+        -0.01576018221753417,
+        -0.027727585728220205,
+        0.1833960387709208,
+        -0.014420544338915903,
+        -0.19074393196986605,
+        0.17502184368513696,
+        0.01165983385405589,
+        -0.01284726328117225,
+        0.00010133648536658768,
+        0.0020835001318015856,
+        -0.0033846463910665037,
+        0.010565263790657031,
+        0.004330719079493894,
+        0.059745782794792035,
+        0.4318926589462224,
+        -0.014554306778571169,
+        0.03312664705148194,
+        -0.0003412896563942209,
+        -0.1199185744326341,
+        -0.05952303491277977,
+        -0.8299110832925072,
+        0.004140064140016372,
+        -0.014726987404860559,
+        -0.4132521419997075,
+        -0.000594441110320993,
+        0.0022953042361503473,
+        0.002948653105502231,
+        0.08033396133416248,
+        -0.0620043629641403,
+        9.332814519183441e-05,
+        0.053722982558882915,
+        -6.507562015611304e-05,
+        0.013663347035441475,
+        0.0011091549102663096,
+        0.0009027982560095077,
+        0.0001989255624985642,
+        -1.3091933055735011e-05,
+        -0.00700715335012525,
+        0.11102821390867129,
+        2.367454760673611e-05,
+        0.10528036389125184,
+        -0.10359171861421079,
+        0.007707915092747569,
+        0.00025513865723318164,
+        -0.09544468869036049,
+        -3.3117589427743174e-06,
+        0.00041408145549497535,
+        -0.001357447763832044,
+        -6.197415040068281e-05,
+        -0.0021274048909888654,
+        2.542801682957964e-06,
+        -0.08409777726282375,
+        -0.0005252363623235667
+      ],
+      "hit_delta": 0
+    },
+    {
+      "path": "crates/qwen-llm/src/sampling.rs",
+      "prefix": 2048,
+      "stratum": "code",
+      "arms": {
+        "half_scalar": {
+          "mean_nll": 1.1948676264482148,
+          "hits": 46
+        },
+        "half_mma": {
+          "mean_nll": 1.1889646395834867,
+          "hits": 45
+        }
+      },
+      "mean_nll_delta": -0.005902986864728099,
+      "per_token_nll_delta": [
+        0.0003797182775374632,
+        0.05692326729568357,
+        0.00020046083775348503,
+        0.0005858517319608345,
+        0.0017143562348809899,
+        0.07535708565224514,
+        5.8256174485227285e-05,
+        0.0011976927859241571,
+        0.00124081886665235,
+        -0.001506848030478923,
+        0.026632736646401478,
+        -0.7053966945429444,
+        -0.001391827942168489,
+        0.11551385962702199,
+        -0.055686593560955955,
+        0.0002695586872184122,
+        -0.6335276116867092,
+        0.08386104972121466,
+        -1.650002962262035e-05,
+        0.00028750470628937513,
+        -0.01701381105738603,
+        -0.17902413456453914,
+        -0.6075085490405452,
+        0.8030289419025181,
+        0.2418578290253901,
+        -0.04220546450334428,
+        -0.021502916246006323,
+        0.5304417681712232,
+        0.014999912600786633,
+        0.06481061427356571,
+        -0.010082544310294761,
+        -0.00906344691818009,
+        2.6330997950773905e-08,
+        3.879420647233519e-05,
+        4.772995516217856e-06,
+        4.479436959861477e-07,
+        -0.006814697086158894,
+        -0.3849312622088581,
+        -8.076971757693602e-06,
+        0.0022418088492414806,
+        0.12891610135841525,
+        0.10501171900690487,
+        -0.05804673596068488,
+        -0.001751880539739896,
+        0.07261887570523484,
+        0.1109097918881432,
+        0.006572081795214776,
+        1.1077665544439116e-06,
+        -0.008680939709113045,
+        1.0274487030346828e-05,
+        5.085932943684434e-07,
+        -0.006943017705895949,
+        -0.004029824158590923,
+        -0.07407534528914095,
+        -0.0015823150492509201,
+        -1.0201303775931973e-05,
+        -0.006430598137615692,
+        -1.823873295315435e-07,
+        0.027780842603604916,
+        5.632695659773787e-06,
+        -0.00029144390606749616,
+        -0.0009062762667462242,
+        -0.012830154456782691,
+        -5.335216647727582e-06
+      ],
+      "hit_delta": -1
+    },
+    {
+      "path": "docs/SERVE.md",
+      "prefix": 4352,
+      "stratum": "long",
+      "arms": {
+        "half_scalar": {
+          "mean_nll": 2.8793489262396523,
+          "hits": 26
+        },
+        "half_mma": {
+          "mean_nll": 2.8733360768927847,
+          "hits": 25
+        }
+      },
+      "mean_nll_delta": -0.006012849346867411,
+      "per_token_nll_delta": [
+        -0.04352070357937787,
+        0.028903975957825456,
+        -0.002252226937277335,
+        -0.11872262748530993,
+        0.043183953259549046,
+        0.14163509484929548,
+        0.01718835709374744,
+        0.2708426597182627,
+        4.076736977543107e-05,
+        -0.09588044807864637,
+        -0.06184558848327759,
+        -3.2142785237625334e-05,
+        0.08682623296726577,
+        0.03399364986531761,
+        9.985490981296459e-06,
+        -0.22676545428494066,
+        -0.2814723515411153,
+        -0.26637125219273194,
+        -0.14942510174034496,
+        0.06374449037395591,
+        -0.03631548325273792,
+        -0.24604427486800873,
+        -0.04841593718314963,
+        0.2824291549169624,
+        0.2889088903101904,
+        -0.27160689226347845,
+        0.02647779974130149,
+        0.21593823485912367,
+        0.012290807717566077,
+        9.21818860887243e-05,
+        4.0250960750444346e-07,
+        0.026179837142423112,
+        0.30190250437663324,
+        -0.047922189817908745,
+        0.05417376448852895,
+        0.043651617389701136,
+        -0.0750687713800735,
+        -0.01877018459221219,
+        0.0778132942946893,
+        0.08033951456931687,
+        -0.1451071353937845,
+        0.055445064848944625,
+        0.004407866637081703,
+        -0.010062721356538074,
+        0.040020813181513015,
+        0.0006730940367809524,
+        -0.018045917630760133,
+        -4.1838744614420024e-07,
+        0.1297415217968787,
+        -0.1140047950568901,
+        0.013993003041574248,
+        -0.2867799373804898,
+        -0.06224761941105106,
+        -6.183456916818386e-05,
+        -0.006425214642653776,
+        -0.10955538685216837,
+        -0.20204000301160363,
+        0.05899592215022281,
+        0.3418230953429111,
+        0.04530359708925191,
+        -0.1609344321211461,
+        0.025579194151664764,
+        -0.050472477989088715,
+        -0.0412031773558299
+      ],
+      "hit_delta": -1
+    }
+  ],
+  "overall": {
+    "mean_nll_delta": -0.009979935001814386,
+    "hit_delta": -2,
+    "hit_rate_delta": -0.010416666666666666
+  },
+  "tools": [
+    {
+      "id": "T03",
+      "mode": "greedy",
+      "arms": {
+        "half_scalar": {
+          "text": "</think><tool_call>get_weather<arg_key>city</arg_key><arg_value>Lisbon</arg_value><arg_key>days</arg_key><arg_value>3</arg_value></tool_call>",
+          "emitted_ids": [
+            154842,
+            154843,
+            455,
+            68852,
+            154847,
+            8923,
+            154848,
+            154849,
+            43,
+            285,
+            5970,
+            154850,
+            154847,
+            13769,
+            154848,
+            154849,
+            18,
+            154850,
+            154844
+          ],
+          "calls": [
+            {
+              "name": "get_weather",
+              "arguments": {
+                "city": "Lisbon",
+                "days": 3
+              }
+            }
+          ],
+          "stop": 154829,
+          "parse_error": null,
+          "correct": true,
+          "truncated": false
+        },
+        "half_mma": {
+          "text": "</think><tool_call>get_weather<arg_key>city</arg_key><arg_value>Lisbon</arg_value><arg_key>days</arg_key><arg_value>3</arg_value></tool_call>",
+          "emitted_ids": [
+            154842,
+            154843,
+            455,
+            68852,
+            154847,
+            8923,
+            154848,
+            154849,
+            43,
+            285,
+            5970,
+            154850,
+            154847,
+            13769,
+            154848,
+            154849,
+            18,
+            154850,
+            154844
+          ],
+          "calls": [
+            {
+              "name": "get_weather",
+              "arguments": {
+                "city": "Lisbon",
+                "days": 3
+              }
+            }
+          ],
+          "stop": 154829,
+          "parse_error": null,
+          "correct": true,
+          "truncated": false
+        }
+      },
+      "text_differs": false,
+      "tokens_differ": false,
+      "correct_delta": 0
+    },
+    {
+      "id": "T03",
+      "mode": "sampled",
+      "arms": {
+        "half_scalar": {
+          "text": "</think><tool_call>get_weather<arg_key>city</arg_key><arg_value>Lisbon</arg_value><arg_key>days</arg_key><arg_value>3</arg_value></tool_call>",
+          "emitted_ids": [
+            154842,
+            154843,
+            455,
+            68852,
+            154847,
+            8923,
+            154848,
+            154849,
+            43,
+            285,
+            5970,
+            154850,
+            154847,
+            13769,
+            154848,
+            154849,
+            18,
+            154850,
+            154844
+          ],
+          "calls": [
+            {
+              "name": "get_weather",
+              "arguments": {
+                "city": "Lisbon",
+                "days": 3
+              }
+            }
+          ],
+          "stop": 154829,
+          "parse_error": null,
+          "correct": true,
+          "truncated": false
+        },
+        "half_mma": {
+          "text": "</think><tool_call>get_weather<arg_key>city</arg_key><arg_value>Lisbon</arg_value><arg_key>days</arg_key><arg_value>3</arg_value></tool_call>",
+          "emitted_ids": [
+            154842,
+            154843,
+            455,
+            68852,
+            154847,
+            8923,
+            154848,
+            154849,
+            43,
+            285,
+            5970,
+            154850,
+            154847,
+            13769,
+            154848,
+            154849,
+            18,
+            154850,
+            154844
+          ],
+          "calls": [
+            {
+              "name": "get_weather",
+              "arguments": {
+                "city": "Lisbon",
+                "days": 3
+              }
+            }
+          ],
+          "stop": 154829,
+          "parse_error": null,
+          "correct": true,
+          "truncated": false
+        }
+      },
+      "text_differs": false,
+      "tokens_differ": false,
+      "correct_delta": 0
+    },
+    {
+      "id": "T10",
+      "mode": "greedy",
+      "arms": {
+        "half_scalar": {
+          "text": "</think><tool_call>convert_currency<arg_key>amount</arg_key><arg_value>75</arg_value><arg_key>from</arg_key><arg_value>EUR</arg_value><arg_key>to</arg_key><arg_value>CAD</arg_value></tool_call>",
+          "emitted_ids": [
+            154842,
+            154843,
+            14157,
+            34539,
+            154847,
+            6045,
+            154848,
+            154849,
+            100899,
+            154850,
+            154847,
+            1499,
+            154848,
+            154849,
+            54372,
+            154850,
+            154847,
+            983,
+            154848,
+            154849,
+            48266,
+            154850,
+            154844
+          ],
+          "calls": [
+            {
+              "name": "convert_currency",
+              "arguments": {
+                "amount": 75,
+                "from": "EUR",
+                "to": "CAD"
+              }
+            }
+          ],
+          "stop": 154829,
+          "parse_error": null,
+          "correct": true,
+          "truncated": false
+        },
+        "half_mma": {
+          "text": "</think><tool_call>convert_currency<arg_key>amount</arg_key><arg_value>75</arg_value><arg_key>from</arg_key><arg_value>EUR</arg_value><arg_key>to</arg_key><arg_value>CAD</arg_value></tool_call>",
+          "emitted_ids": [
+            154842,
+            154843,
+            14157,
+            34539,
+            154847,
+            6045,
+            154848,
+            154849,
+            100899,
+            154850,
+            154847,
+            1499,
+            154848,
+            154849,
+            54372,
+            154850,
+            154847,
+            983,
+            154848,
+            154849,
+            48266,
+            154850,
+            154844
+          ],
+          "calls": [
+            {
+              "name": "convert_currency",
+              "arguments": {
+                "amount": 75,
+                "from": "EUR",
+                "to": "CAD"
+              }
+            }
+          ],
+          "stop": 154829,
+          "parse_error": null,
+          "correct": true,
+          "truncated": false
+        }
+      },
+      "text_differs": false,
+      "tokens_differ": false,
+      "correct_delta": 0
+    },
+    {
+      "id": "T10",
+      "mode": "sampled",
+      "arms": {
+        "half_scalar": {
+          "text": "</think><tool_call>convert_currency<arg_key>amount</arg_key><arg_value>75</arg_value><arg_key>from</arg_key><arg_value>EUR</arg_value><arg_key>to</arg_key><arg_value>CAD</arg_value></tool_call>",
+          "emitted_ids": [
+            154842,
+            154843,
+            14157,
+            34539,
+            154847,
+            6045,
+            154848,
+            154849,
+            100899,
+            154850,
+            154847,
+            1499,
+            154848,
+            154849,
+            54372,
+            154850,
+            154847,
+            983,
+            154848,
+            154849,
+            48266,
+            154850,
+            154844
+          ],
+          "calls": [
+            {
+              "name": "convert_currency",
+              "arguments": {
+                "amount": 75,
+                "from": "EUR",
+                "to": "CAD"
+              }
+            }
+          ],
+          "stop": 154829,
+          "parse_error": null,
+          "correct": true,
+          "truncated": false
+        },
+        "half_mma": {
+          "text": "</think><tool_call>convert_currency<arg_key>amount</arg_key><arg_value>75</arg_value><arg_key>from</arg_key><arg_value>EUR</arg_value><arg_key>to</arg_key><arg_value>CAD</arg_value></tool_call>",
+          "emitted_ids": [
+            154842,
+            154843,
+            14157,
+            34539,
+            154847,
+            6045,
+            154848,
+            154849,
+            100899,
+            154850,
+            154847,
+            1499,
+            154848,
+            154849,
+            54372,
+            154850,
+            154847,
+            983,
+            154848,
+            154849,
+            48266,
+            154850,
+            154844
+          ],
+          "calls": [
+            {
+              "name": "convert_currency",
+              "arguments": {
+                "amount": 75,
+                "from": "EUR",
+                "to": "CAD"
+              }
+            }
+          ],
+          "stop": 154829,
+          "parse_error": null,
+          "correct": true,
+          "truncated": false
+        }
+      },
+      "text_differs": false,
+      "tokens_differ": false,
+      "correct_delta": 0
+    },
+    {
+      "id": "T11",
+      "mode": "greedy",
+      "arms": {
+        "half_scalar": {
+          "text": "</think><tool_call>get_weather<arg_key>city</arg_key><arg_value>Santiago</arg_value></tool_call>",
+          "emitted_ids": [
+            154842,
+            154843,
+            455,
+            68852,
+            154847,
+            8923,
+            154848,
+            154849,
+            50,
+            42729,
+            154850,
+            154844
+          ],
+          "calls": [
+            {
+              "name": "get_weather",
+              "arguments": {
+                "city": "Santiago"
+              }
+            }
+          ],
+          "stop": 154829,
+          "parse_error": null,
+          "correct": true,
+          "truncated": false
+        },
+        "half_mma": {
+          "text": "</think><tool_call>get_weather<arg_key>city</arg_key><arg_value>Santiago</arg_value></tool_call>",
+          "emitted_ids": [
+            154842,
+            154843,
+            455,
+            68852,
+            154847,
+            8923,
+            154848,
+            154849,
+            50,
+            42729,
+            154850,
+            154844
+          ],
+          "calls": [
+            {
+              "name": "get_weather",
+              "arguments": {
+                "city": "Santiago"
+              }
+            }
+          ],
+          "stop": 154829,
+          "parse_error": null,
+          "correct": true,
+          "truncated": false
+        }
+      },
+      "text_differs": false,
+      "tokens_differ": false,
+      "correct_delta": 0
+    },
+    {
+      "id": "T11",
+      "mode": "sampled",
+      "arms": {
+        "half_scalar": {
+          "text": "</think><tool_call>get_weather<arg_key>city</arg_key><arg_value>Santiago</arg_value></tool_call>",
+          "emitted_ids": [
+            154842,
+            154843,
+            455,
+            68852,
+            154847,
+            8923,
+            154848,
+            154849,
+            50,
+            42729,
+            154850,
+            154844
+          ],
+          "calls": [
+            {
+              "name": "get_weather",
+              "arguments": {
+                "city": "Santiago"
+              }
+            }
+          ],
+          "stop": 154829,
+          "parse_error": null,
+          "correct": true,
+          "truncated": false
+        },
+        "half_mma": {
+          "text": "</think><tool_call>get_weather<arg_key>city</arg_key><arg_value>Santiago</arg_value></tool_call>",
+          "emitted_ids": [
+            154842,
+            154843,
+            455,
+            68852,
+            154847,
+            8923,
+            154848,
+            154849,
+            50,
+            42729,
+            154850,
+            154844
+          ],
+          "calls": [
+            {
+              "name": "get_weather",
+              "arguments": {
+                "city": "Santiago"
+              }
+            }
+          ],
+          "stop": 154829,
+          "parse_error": null,
+          "correct": true,
+          "truncated": false
+        }
+      },
+      "text_differs": false,
+      "tokens_differ": false,
+      "correct_delta": 0
+    },
+    {
+      "id": "T12",
+      "mode": "greedy",
+      "arms": {
+        "half_scalar": {
+          "text": "</think><tool_call>convert_currency<arg_key>amount</arg_key><arg_value>500</arg_value><arg_key>from</arg_key><arg_value>AUD</arg_value><arg_key>to</arg_key><arg_value>JPY</arg_value></tool_call>",
+          "emitted_ids": [
+            154842,
+            154843,
+            14157,
+            34539,
+            154847,
+            6045,
+            154848,
+            154849,
+            100840,
+            154850,
+            154847,
+            1499,
+            154848,
+            154849,
+            60847,
+            154850,
+            154847,
+            983,
+            154848,
+            154849,
+            27099,
+            56,
+            154850,
+            154844
+          ],
+          "calls": [
+            {
+              "name": "convert_currency",
+              "arguments": {
+                "amount": 500,
+                "from": "AUD",
+                "to": "JPY"
+              }
+            }
+          ],
+          "stop": 154829,
+          "parse_error": null,
+          "correct": true,
+          "truncated": false
+        },
+        "half_mma": {
+          "text": "</think><tool_call>convert_currency<arg_key>amount</arg_key><arg_value>500</arg_value><arg_key>from</arg_key><arg_value>AUD</arg_value><arg_key>to</arg_key><arg_value>JPY</arg_value></tool_call>",
+          "emitted_ids": [
+            154842,
+            154843,
+            14157,
+            34539,
+            154847,
+            6045,
+            154848,
+            154849,
+            100840,
+            154850,
+            154847,
+            1499,
+            154848,
+            154849,
+            60847,
+            154850,
+            154847,
+            983,
+            154848,
+            154849,
+            27099,
+            56,
+            154850,
+            154844
+          ],
+          "calls": [
+            {
+              "name": "convert_currency",
+              "arguments": {
+                "amount": 500,
+                "from": "AUD",
+                "to": "JPY"
+              }
+            }
+          ],
+          "stop": 154829,
+          "parse_error": null,
+          "correct": true,
+          "truncated": false
+        }
+      },
+      "text_differs": false,
+      "tokens_differ": false,
+      "correct_delta": 0
+    },
+    {
+      "id": "T12",
+      "mode": "sampled",
+      "arms": {
+        "half_scalar": {
+          "text": "</think><tool_call>convert_currency<arg_key>amount</arg_key><arg_value>500</arg_value><arg_key>from</arg_key><arg_value>AUD</arg_value><arg_key>to</arg_key><arg_value>JPY</arg_value></tool_call>",
+          "emitted_ids": [
+            154842,
+            154843,
+            14157,
+            34539,
+            154847,
+            6045,
+            154848,
+            154849,
+            100840,
+            154850,
+            154847,
+            1499,
+            154848,
+            154849,
+            60847,
+            154850,
+            154847,
+            983,
+            154848,
+            154849,
+            27099,
+            56,
+            154850,
+            154844
+          ],
+          "calls": [
+            {
+              "name": "convert_currency",
+              "arguments": {
+                "amount": 500,
+                "from": "AUD",
+                "to": "JPY"
+              }
+            }
+          ],
+          "stop": 154829,
+          "parse_error": null,
+          "correct": true,
+          "truncated": false
+        },
+        "half_mma": {
+          "text": "</think><tool_call>convert_currency<arg_key>amount</arg_key><arg_value>500</arg_value><arg_key>from</arg_key><arg_value>AUD</arg_value><arg_key>to</arg_key><arg_value>JPY</arg_value></tool_call>",
+          "emitted_ids": [
+            154842,
+            154843,
+            14157,
+            34539,
+            154847,
+            6045,
+            154848,
+            154849,
+            100840,
+            154850,
+            154847,
+            1499,
+            154848,
+            154849,
+            60847,
+            154850,
+            154847,
+            983,
+            154848,
+            154849,
+            27099,
+            56,
+            154850,
+            154844
+          ],
+          "calls": [
+            {
+              "name": "convert_currency",
+              "arguments": {
+                "amount": 500,
+                "from": "AUD",
+                "to": "JPY"
+              }
+            }
+          ],
+          "stop": 154829,
+          "parse_error": null,
+          "correct": true,
+          "truncated": false
+        }
+      },
+      "text_differs": false,
+      "tokens_differ": false,
+      "correct_delta": 0
+    }
+  ],
+  "tool_counts": {
+    "greedy": {
+      "half_scalar": 4,
+      "half_mma": 4
+    },
+    "sampled": {
+      "half_scalar": 4,
+      "half_mma": 4
+    }
+  }
+}

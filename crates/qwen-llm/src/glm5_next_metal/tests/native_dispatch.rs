@@ -1797,28 +1797,31 @@ fn mixed_native_experts_dispatch_by_capability_and_match_oracle() {
 }
 
 #[test]
-fn latent_mma_policy_is_only_fast_full_f32() {
+fn latent_mma_policy_is_fast_half_or_f32() {
     for lineage in [PackedLineage::Exact, PackedLineage::Fast] {
         for precision in FastPrecision::ALL {
             assert_eq!(
                 latent_mma_allowed(Arith { lineage, precision }),
-                lineage == PackedLineage::Fast && precision == FastPrecision::F32
+                lineage == PackedLineage::Fast
+                    && matches!(precision, FastPrecision::Half | FastPrecision::F32)
             );
         }
     }
-    let f32 = Arith {
-        lineage: PackedLineage::Fast,
-        precision: FastPrecision::F32,
-    };
-    {
-        let _exact = ExactStages::set(&[Stage::MlaAbsorb]);
-        assert!(!latent_mma_allowed(f32));
+    for precision in [FastPrecision::Half, FastPrecision::F32] {
+        let arith = Arith {
+            lineage: PackedLineage::Fast,
+            precision,
+        };
+        {
+            let _exact = ExactStages::set(&[Stage::MlaAbsorb]);
+            assert!(!latent_mma_allowed(arith));
+        }
+        assert!(latent_mma_allowed(arith));
     }
-    assert!(latent_mma_allowed(f32));
 }
 
 #[test]
-fn q6_latent_production_dispatch_preserves_scalar_bits_outside_fast_f32() {
+fn q6_latent_production_dispatch_modes_ragged_and_geometry_fallback() {
     use crate::metal::{
         dispatch_census_begin, dispatch_census_take,
         with_grouped_projection_scalar_baseline_override,
@@ -1826,22 +1829,23 @@ fn q6_latent_production_dispatch_preserves_scalar_bits_outside_fast_f32() {
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
-    let (k, m, groups) = (256usize, 32usize, 2usize);
-    let scalar4 = "kernel_latent_grouped_q6_K_f32";
-    let mma = "kernel_latent_grouped_q6_K_f32_r2c16k64";
-    let (weight, decoded) = bank(
-        &ctx,
-        GgmlType::Q6_K,
-        vec![k as u64, m as u64, groups as u64],
-    );
-    for rows in [1usize, 7, 8, 128, 129, 136] {
-        let values: Vec<f32> = (0..k * groups * rows)
-            .map(|i| ((i * 13 + i / k) % 89) as f32 * 0.01719 - 0.7)
-            .collect();
-        let input = tensor(&ctx, &values, vec![(k * groups) as u64, rows as u64]);
-        let baseline = empty(&ctx, vec![(m * groups) as u64, rows as u64]);
-        run(&ctx, |enc| {
-            with_grouped_projection_scalar_baseline_override(true, || {
+    let (k, groups) = (256usize, 2usize);
+    for m in [32usize, 17] {
+        // m=17 cannot use the MMA output tile.
+        let scalar4 = "kernel_latent_grouped_q6_K_f32";
+        let mma = "kernel_latent_grouped_q6_K_f32_r2c16k64";
+        let (weight, decoded) = bank(
+            &ctx,
+            GgmlType::Q6_K,
+            vec![k as u64, m as u64, groups as u64],
+        );
+        for rows in [1usize, 7, 8, 127, 128, 129, 136] {
+            let values: Vec<f32> = (0..k * groups * rows)
+                .map(|i| ((i * 13 + i / k) % 89) as f32 * 0.01719 - 0.7)
+                .collect();
+            let input = tensor(&ctx, &values, vec![(k * groups) as u64, rows as u64]);
+            let baseline = empty(&ctx, vec![(m * groups) as u64, rows as u64]);
+            run(&ctx, |enc| {
                 dispatch_census_begin();
                 absorb_rows(
                     &ctx,
@@ -1862,104 +1866,104 @@ fn q6_latent_production_dispatch_preserves_scalar_bits_outside_fast_f32() {
                 let kernels = dispatch_census_take();
                 assert_eq!(kernels.len(), 1);
                 assert_eq!(kernels[0].kernel, scalar4);
-            })
-        });
-        let baseline = read_f32(&baseline).unwrap();
-        let mut oracle = Vec::new();
-        for row in 0..rows {
-            for g in 0..groups {
-                for out in 0..m {
-                    oracle.push(
-                        (0..k)
-                            .map(|i| {
-                                decoded[(g * m + out) * k + i] as f64
-                                    * values[(row * groups + g) * k + i] as f64
-                            })
-                            .sum::<f64>() as f32,
-                    );
-                }
-            }
-        }
-        for lineage in [PackedLineage::Exact, PackedLineage::Fast] {
-            for precision in FastPrecision::ALL {
-                let arith = Arith { lineage, precision };
-                let output = empty(&ctx, vec![(m * groups) as u64, rows as u64]);
-                let mut kernels = Vec::new();
-                run(&ctx, |enc| {
-                    dispatch_census_begin();
-                    absorb_rows(
-                        &ctx, enc, arith, &weight, &input, &output, k, m, groups, rows,
-                    )
-                    .unwrap();
-                    kernels = dispatch_census_take();
-                });
-                let takes_mma = lineage == PackedLineage::Fast
-                    && precision == FastPrecision::F32
-                    && rows >= 128;
-                if takes_mma {
-                    assert_eq!(
-                        kernels.iter().filter(|r| r.kernel == mma).count(),
-                        1,
-                        "{kernels:?}"
-                    );
-                    let tail: Vec<_> = kernels.iter().filter(|r| r.kernel == scalar4).collect();
-                    assert_eq!(tail.len(), usize::from(rows % 128 != 0));
-                    assert!(
-                        tail.iter()
-                            .all(|r| r.grid_height == (rows % 128).div_ceil(4) as u64)
-                    );
-                    assert_eq!(kernels.len(), 1 + tail.len());
-                } else {
-                    assert_eq!(kernels.len(), 1, "{kernels:?}");
-                    let r = &kernels[0];
-                    assert_eq!(
-                        r.kernel, scalar4,
-                        "production scalar4 dispatch: {kernels:?}"
-                    );
-                    assert_eq!(r.grid_height, rows.div_ceil(4) as u64);
-                }
-                let got = read_f32(&output).unwrap();
-                close(
-                    &format!("Q6 latent {lineage:?}/{precision:?}/{rows}"),
-                    &got,
-                    &oracle,
-                    4e-5,
-                );
-                if !takes_mma {
-                    assert_eq!(
-                        got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-                        baseline.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-                        "production/scoped scalar4 arithmetic {lineage:?}/{precision:?}/{rows}"
-                    );
-                }
-            }
-        }
-        if rows >= 128 {
-            // Historical diagnostics must still force MMA even though Half's
-            // actual caller policy is false. No numerical gate is changed.
-            let output = empty(&ctx, vec![(m * groups) as u64, rows as u64]);
-            run(&ctx, |enc| {
-                with_grouped_projection_scalar_baseline_override(false, || {
-                    dispatch_census_begin();
-                    absorb_rows(
-                        &ctx,
-                        enc,
-                        Arith {
-                            lineage: PackedLineage::Fast,
-                            precision: FastPrecision::Half,
-                        },
-                        &weight,
-                        &input,
-                        &output,
-                        k,
-                        m,
-                        groups,
-                        rows,
-                    )
-                    .unwrap();
-                    assert!(dispatch_census_take().iter().any(|r| r.kernel == mma));
-                })
             });
+            let baseline = read_f32(&baseline).unwrap();
+            let mut oracle = Vec::new();
+            for row in 0..rows {
+                for g in 0..groups {
+                    for out in 0..m {
+                        oracle.push(
+                            (0..k)
+                                .map(|i| {
+                                    decoded[(g * m + out) * k + i] as f64
+                                        * values[(row * groups + g) * k + i] as f64
+                                })
+                                .sum::<f64>() as f32,
+                        );
+                    }
+                }
+            }
+            for lineage in [PackedLineage::Exact, PackedLineage::Fast] {
+                for precision in FastPrecision::ALL {
+                    let arith = Arith { lineage, precision };
+                    let output = empty(&ctx, vec![(m * groups) as u64, rows as u64]);
+                    let mut kernels = Vec::new();
+                    run(&ctx, |enc| {
+                        dispatch_census_begin();
+                        absorb_rows(
+                            &ctx, enc, arith, &weight, &input, &output, k, m, groups, rows,
+                        )
+                        .unwrap();
+                        kernels = dispatch_census_take();
+                    });
+                    let takes_mma = lineage == PackedLineage::Fast
+                        && matches!(precision, FastPrecision::Half | FastPrecision::F32)
+                        && rows >= 128
+                        && m.is_multiple_of(16);
+                    if takes_mma {
+                        assert_eq!(
+                            kernels.iter().filter(|r| r.kernel == mma).count(),
+                            1,
+                            "{kernels:?}"
+                        );
+                        let tail: Vec<_> = kernels.iter().filter(|r| r.kernel == scalar4).collect();
+                        assert_eq!(tail.len(), usize::from(rows % 128 != 0));
+                        assert!(
+                            tail.iter()
+                                .all(|r| r.grid_height == (rows % 128).div_ceil(4) as u64)
+                        );
+                        assert_eq!(kernels.len(), 1 + tail.len());
+                    } else {
+                        assert_eq!(kernels.len(), 1, "{kernels:?}");
+                        let r = &kernels[0];
+                        assert_eq!(
+                            r.kernel, scalar4,
+                            "production scalar4 dispatch: {kernels:?}"
+                        );
+                        assert_eq!(r.grid_height, rows.div_ceil(4) as u64);
+                    }
+                    let got = read_f32(&output).unwrap();
+                    close(
+                        &format!("Q6 latent {lineage:?}/{precision:?}/{rows}"),
+                        &got,
+                        &oracle,
+                        4e-5,
+                    );
+                    if !takes_mma {
+                        assert_eq!(
+                            got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            baseline.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            "production/Exact scalar4 arithmetic {lineage:?}/{precision:?}/{rows}"
+                        );
+                    }
+                }
+            }
+            if rows >= 128 && m.is_multiple_of(16) {
+                // Forced diagnostics still bypass DenseF32 caller policy.
+                let output = empty(&ctx, vec![(m * groups) as u64, rows as u64]);
+                run(&ctx, |enc| {
+                    with_grouped_projection_scalar_baseline_override(false, || {
+                        dispatch_census_begin();
+                        absorb_rows(
+                            &ctx,
+                            enc,
+                            Arith {
+                                lineage: PackedLineage::Fast,
+                                precision: FastPrecision::DenseF32,
+                            },
+                            &weight,
+                            &input,
+                            &output,
+                            k,
+                            m,
+                            groups,
+                            rows,
+                        )
+                        .unwrap();
+                        assert!(dispatch_census_take().iter().any(|r| r.kernel == mma));
+                    })
+                });
+            }
         }
     }
 }

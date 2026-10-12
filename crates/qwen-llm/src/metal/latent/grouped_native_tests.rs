@@ -781,6 +781,14 @@ fn grouped_scalar8_override_is_nested_unwind_safe_and_thread_local() {
     assert!(!grouped_projection_scalar8_enabled());
     let result = with_grouped_projection_scalar8_override(true, || {
         assert!(grouped_projection_scalar8_enabled());
+        for allow in [false, true] {
+            assert_eq!(grouped_projection_policy(allow, None), (false, false));
+            assert_eq!(
+                grouped_projection_policy(allow, Some(false)),
+                (false, false)
+            );
+            assert_eq!(grouped_projection_policy(allow, Some(true)), (false, true));
+        }
         with_grouped_projection_scalar8_override(false, || {
             assert!(!grouped_projection_scalar8_enabled());
         });
@@ -859,10 +867,10 @@ fn grouped_q6_scalar8_policy_is_bitwise_scalar4_at_real_shapes() {
                 rows,
                 suffix,
             );
-            let encode = |output: &MetalTensor| {
+            let encode = |output: &MetalTensor, allow_mma: bool| {
                 one_shot(&ctx, |enc| {
                     encode_mat_mat_grouped_f32_with_policy(
-                        &ctx, enc, &weight, &input, output, k, m, GROUPS, rows, false,
+                        &ctx, enc, &weight, &input, output, k, m, GROUPS, rows, allow_mma,
                     )
                 })
             };
@@ -871,7 +879,7 @@ fn grouped_q6_scalar8_policy_is_bitwise_scalar4_at_real_shapes() {
             // full tiles and rows >=8 when the caller disallows MMA.
             assert_eq!(grouped_projection_scalar_baseline(), None);
             assert!(!grouped_projection_scalar8_enabled());
-            encode(&baseline_output).unwrap();
+            encode(&baseline_output, false).unwrap();
             let census = dispatch_census_take();
             assert_eq!(census.len(), 1);
             assert_eq!(census[0].kernel, "kernel_latent_grouped_q6_K_f32");
@@ -882,7 +890,7 @@ fn grouped_q6_scalar8_policy_is_bitwise_scalar4_at_real_shapes() {
                 dispatch_census_begin();
                 with_grouped_projection_scalar8_override(true, || {
                     with_grouped_projection_scalar_baseline_override(true, || {
-                        encode(&candidate_output)
+                        encode(&candidate_output, true)
                     })
                 })
                 .unwrap();
@@ -891,7 +899,9 @@ fn grouped_q6_scalar8_policy_is_bitwise_scalar4_at_real_shapes() {
                 assert_eq!(census[0].kernel, "kernel_latent_grouped_q6_K_f32");
             }
             dispatch_census_begin();
-            with_grouped_projection_scalar8_override(true, || encode(&candidate_output)).unwrap();
+            // Scalar8 suppresses the now-enabled Half caller MMA policy.
+            with_grouped_projection_scalar8_override(true, || encode(&candidate_output, true))
+                .unwrap();
             assert!(!grouped_projection_scalar8_enabled());
             let census = dispatch_census_take();
             assert_eq!(census.len(), 1);
@@ -943,13 +953,13 @@ fn grouped_q6_scalar8_policy_is_bitwise_scalar4_at_real_shapes() {
             }
             assert_offset_guards(&baseline_output, 20, suffix);
             assert_offset_guards(&candidate_output, 20, suffix);
-            // Some(false) must override the caller's false policy for paired
-            // diagnostics, including a scalar4 remainder at rows129.
+            // Explicitly disabling scalar8 restores forced-MMA diagnostics,
+            // including a scalar4 remainder at rows129.
             if matches!(rows, 128 | 129) {
                 dispatch_census_begin();
-                with_grouped_projection_scalar8_override(true, || {
+                with_grouped_projection_scalar8_override(false, || {
                     with_grouped_projection_scalar_baseline_override(false, || {
-                        encode(&candidate_output)
+                        encode(&candidate_output, true)
                     })
                 })
                 .unwrap();

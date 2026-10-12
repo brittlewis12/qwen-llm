@@ -982,7 +982,8 @@ thread_local! {
 /// Select the pre-MMA scalar native baseline during a synchronous diagnostic.
 /// `true` installs `Some(true)`, forcing old scalar4 (disables MMA and scalar8).
 /// `false` installs `Some(false)`, permitting MMA regardless of caller policy,
-/// subject to unchanged geometry/capacity checks. Outside an override (`None`),
+/// subject to unchanged geometry/capacity checks and the scalar8 test scope.
+/// Outside an override (`None`),
 /// caller policy applies and non-MMA work uses scalar4 unless the separate
 /// test-only scalar8 experiment is explicitly enabled.
 /// Q8 specialization and decode behavior are unaffected. State belongs
@@ -1006,7 +1007,8 @@ pub(crate) fn with_grouped_projection_scalar_baseline_override<R>(
 }
 
 /// Test-only scalar8 experiment for whole-call Q6_K scalar work with >=8 rows.
-/// This does not disable MMA; use `allow_mma = false` to compare scalar8/4.
+/// Enabling this scope suppresses MMA, including a forced-MMA baseline scope,
+/// so the scalar8/4 experiment stays isolated when caller policy permits MMA.
 /// The scalar-baseline override `Some(true)` always wins and forces scalar4;
 /// MMA remainders also remain scalar4. `false` disables the experiment within
 /// a nested scope. Thread-local, restores nesting/unwinding, no environment
@@ -1043,12 +1045,12 @@ fn grouped_projection_scalar_baseline() -> Option<bool> {
 }
 
 // Some(false) preserves same-binary MMA diagnostics even for callers which
-// deliberately disallow MMA in production (for example Half lineage).
+// deliberately disallow MMA in production (for example DenseF32 or Exact).
 fn grouped_projection_policy(allow_mma: bool, baseline: Option<bool>) -> (bool, bool) {
-    (
-        baseline.map_or(allow_mma, |scalar4| !scalar4),
-        baseline == Some(true),
-    )
+    let allow_mma = baseline.map_or(allow_mma, |scalar4| !scalar4);
+    #[cfg(test)]
+    let allow_mma = allow_mma && !grouped_projection_scalar8_enabled();
+    (allow_mma, baseline == Some(true))
 }
 
 fn grouped_projection_scalar_preflight(

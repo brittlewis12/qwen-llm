@@ -10,9 +10,12 @@
 //! Optional GLM53_LATENT_MMA_AB_DEPTH=4096 adds a 512-row suffix after that
 //! prefix. No grid search. Half remains the default. Each cell warms A/B,
 //! verifies warmup-only dispatch census, then times A1/B1/B2/A2 without tracing.
-//! Common prefixes use scalar baseline outside timing to isolate the suffix.
+//! Historical/scalar8 common prefixes use scalar baseline outside timing.
+//! Production mode uses each arm's policy for its prefix as well as its suffix.
 //! The historical MMA diagnostic explicitly forces MMA in Half and retains its
-//! original KL bound; it does not represent Half's current production policy.
+//! original KL bound and its failed evidence. `grouped_latent_production_ab`
+//! uses the same output environment with a distinct schema: B has no override,
+//! and finite KL is recorded without a numeric promotion gate.
 //! For scalar4 versus test-only Half scalar8, select `grouped_latent_scalar8_ab`
 //! and use GLM53_LATENT_SCALAR8_AB_OUT for a separate new JSON file. That test
 //! requires bit-identical final logits and three common continuation steps;
@@ -168,19 +171,47 @@ fn verify_q6_scalar8_census(
 #[test]
 #[ignore = "model timing: explicit GLM53_GGUF (Maya or UD), release binary, no MTL_DEBUG_LAYER, production lease; optional new GLM53_LATENT_MMA_AB_OUT and DEPTH=4096"]
 fn grouped_latent_mma_ab() {
-    grouped_latent_ab_packet(false);
+    grouped_latent_ab_packet(PacketMode::HistoricalMma);
 }
 
-/// Half's production policy disallows MMA. A forces historical scalar4;
-/// B explicitly enables test-only scalar8. Production Half retains scalar4.
+/// A forces historical scalar4; B's test-only scalar8 scope suppresses MMA,
+/// independently of the promoted production Half policy.
 /// Same cells/depth control as grouped_latent_mma_ab, separate evidence file.
 #[test]
 #[ignore = "Half scalar4/test-only scalar8 timing: GLM53_GGUF, release binary, no MTL_DEBUG_LAYER; optional new GLM53_LATENT_SCALAR8_AB_OUT and GLM53_LATENT_MMA_AB_DEPTH=4096"]
 fn grouped_latent_scalar8_ab() {
-    grouped_latent_ab_packet(true);
+    grouped_latent_ab_packet(PacketMode::Scalar8);
 }
 
-fn grouped_latent_ab_packet(scalar8: bool) {
+#[test]
+#[ignore = "production Half ABBA: GLM53_GGUF (Maya or UD), release, no MTL_DEBUG_LAYER; optional new GLM53_LATENT_MMA_AB_OUT and DEPTH=4096; finite KL observations, no numeric gate"]
+fn grouped_latent_production_ab() {
+    grouped_latent_ab_packet(PacketMode::Production);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PacketMode {
+    HistoricalMma,
+    Production,
+    Scalar8,
+}
+
+impl PacketMode {
+    fn run<T>(self, baseline: bool, body: impl FnOnce() -> T) -> T {
+        if baseline {
+            return with_grouped_projection_scalar_baseline_override(true, body);
+        }
+        match self {
+            Self::HistoricalMma => with_grouped_projection_scalar_baseline_override(false, body),
+            Self::Production => body(), // Actual caller policy; no test override in B.
+            Self::Scalar8 => with_grouped_projection_scalar8_override(true, body),
+        }
+    }
+}
+
+fn grouped_latent_ab_packet(mode: PacketMode) {
+    let scalar8 = mode == PacketMode::Scalar8;
+    let kl_limit = (mode == PacketMode::HistoricalMma).then_some(KL_LIMIT);
     assert!(
         !cfg!(debug_assertions),
         "timing requires a release test binary"
@@ -195,8 +226,10 @@ fn grouped_latent_ab_packet(scalar8: bool) {
     };
     let experiment = if scalar8 {
         "Half test-only scalar8"
+    } else if mode == PacketMode::Production {
+        "production Half MMA"
     } else {
-        "forced MMA"
+        "historical forced MMA"
     };
     let mut output = std::env::var_os(output_env).map(|path| {
         std::fs::OpenOptions::new()
@@ -307,17 +340,18 @@ fn grouped_latent_ab_packet(scalar8: bool) {
     );
     let vocab = u64::from(weights.config.vocab_size);
     let cpu_reserve = (2 * (STEPS + 1) + 1) as u64 * vocab * 4 + 2 * vocab * 8 + (4 << 20);
-    let mut report = json!({"schema":if scalar8 { "glm53.grouped_latent_scalar8_ab.v1" } else { "glm53.grouped_latent_mma_ab.v1" },"model":path,
+    let mut report = json!({"schema":match mode { PacketMode::Scalar8 => "glm53.grouped_latent_scalar8_ab.v1", PacketMode::HistoricalMma => "glm53.grouped_latent_mma_ab.v1", PacketMode::Production => "glm53.grouped_latent_production_ab.v1" },"model":path,
         "test_binary":std::env::current_exe().unwrap(),"precision":"default Half","lineage":"default Fast",
         "order":"each cell: warmup A B with census; then untraced A1 B1 B2 A2; fresh sessions, one weight load",
         "arms":{"A":"Some(true): forced historical Q6 scalar4",
-            "B":if scalar8 { "explicit test-only scalar8 override; Half caller allow_mma=false; baseline override None" }
-                else { "Some(false): forced Q6 MMA prefix plus scalar4 remainder, including in Half" }},
-        "prefix_policy":"identical scalar-baseline prefix, chunks of workspace rows, outside timing",
+            "B":match mode { PacketMode::Scalar8 => "explicit test-only scalar8 override suppresses MMA; baseline override None",
+                PacketMode::HistoricalMma => "Some(false): forced Q6 MMA prefix plus scalar4 remainder, including in Half",
+                PacketMode::Production => "no override: production Fast Half policy, Q6 MMA when eligible, scalar4 fallback/tail" }},
+        "prefix_policy":if mode == PacketMode::Production { "A scalar baseline; B production without override; chunks of workspace rows, outside timing" } else { "identical scalar-baseline prefix, chunks of workspace rows, outside timing" },
         "timing":"ordinary full prefill or suffix wall, including GPU wait and final logits readback; load, allocation, prefix, continuation, warmup and diagnostics excluded",
         "prompt":"[gMASK]<sop> + existing long_qualification_text repeated twice","tokens":tokens,
         "latent_banks":banks,"q6_calls_per_chunk":q6_calls,"q8_calls_per_chunk":q8_calls,
-        "cpu_reserve_bytes":cpu_reserve,"kl_limit":if scalar8 { None } else { Some(KL_LIMIT) },
+        "cpu_reserve_bytes":cpu_reserve,"kl_limit":kl_limit,
         "bit_identity_required":scalar8,"cells":[],"performance_assertion":false});
     save(&mut output, &report);
     let mut failures = Vec::new();
@@ -336,16 +370,24 @@ fn grouped_latent_ab_packet(scalar8: bool) {
             assert_eq!(session.packed_lineage(), Some(PackedLineage::Fast));
             assert_eq!(session.fast_precision(), Some(FastPrecision::Half));
             if cell.prefix > 0 {
-                let prefix = with_grouped_projection_scalar_baseline_override(true, || {
-                    session
-                        .prefill_packed(&ctx, &tokens[..cell.prefix])
-                        .unwrap()
-                });
+                let prefix = if mode == PacketMode::Production {
+                    mode.run(baseline, || {
+                        session
+                            .prefill_packed(&ctx, &tokens[..cell.prefix])
+                            .unwrap()
+                    })
+                } else {
+                    with_grouped_projection_scalar_baseline_override(true, || {
+                        session
+                            .prefill_packed(&ctx, &tokens[..cell.prefix])
+                            .unwrap()
+                    })
+                };
                 assert_eq!(prefix.len(), vocab as usize);
                 assert!(prefix.iter().all(|v| v.is_finite()));
             }
             assert_eq!(session.position(), cell.prefix);
-            assert!(!latent_mma_allowed(Arith {
+            assert!(latent_mma_allowed(Arith {
                 lineage: PackedLineage::Fast,
                 precision: FastPrecision::Half
             }));
@@ -372,14 +414,7 @@ fn grouped_latent_ab_packet(scalar8: bool) {
                 }
                 (wall_ms, logits, census)
             };
-            if scalar8 && !baseline {
-                // Baseline override is restored to None. Half disallows MMA;
-                // only this test scope enables the scalar8 candidate.
-                with_grouped_projection_scalar8_override(true, encode)
-            } else {
-                // Preserve the historical Half scalar4/forced-MMA experiment.
-                with_grouped_projection_scalar_baseline_override(baseline, encode)
-            }
+            mode.run(baseline, encode)
         };
         let mut warmups = Vec::new();
         let mut q8_control = None;
@@ -438,7 +473,7 @@ fn grouped_latent_ab_packet(scalar8: bool) {
                 ));
             }
             for (step, &kl) in kls.iter().enumerate() {
-                if !scalar8 && kl > KL_LIMIT {
+                if kl_limit.is_some_and(|limit| kl > limit) {
                     cell_failures.push(format!(
                         "{} {label} position {}: KL(A1||run)={kl:.6e} > {KL_LIMIT}",
                         cell.name,
@@ -476,6 +511,16 @@ fn grouped_latent_ab_packet(scalar8: bool) {
             let last = report["cells"].as_array_mut().unwrap().last_mut().unwrap();
             last["bit_identity_failures"] = json!(cell_failures);
             last.as_object_mut().unwrap().remove("kl_failures");
+        }
+        if mode == PacketMode::Production {
+            report["cells"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove("kl_failures");
         }
         failures.extend(cell_failures);
         save(&mut output, &report);

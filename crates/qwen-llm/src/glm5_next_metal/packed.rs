@@ -1175,18 +1175,18 @@ fn expand_rows(
     }
 }
 
-/// Only the full F32 Fast lane opts into the changed grouped reduction.
-/// Half, DenseF32, and Exact keep scalar per-output arithmetic.
+/// Fast Half and F32 permit the grouped MMA reduction. DenseF32 and Exact
+/// retain scalar per-output arithmetic; primitive geometry/capacity checks apply.
 fn latent_mma_allowed(arith: Arith) -> bool {
     stage_lineage(arith.lineage, Stage::MlaAbsorb) == PackedLineage::Fast
-        && arith.precision == FastPrecision::F32
+        && matches!(arith.precision, FastPrecision::Half | FastPrecision::F32)
 }
 
 /// Per-head latent absorption or expansion over `rows` token-major rows:
 /// Q8 retains its existing tiles in Fast and per-row GEMV in Exact. Other
 /// native dtypes use grouped F32-operand dispatch in both lineages, with no
 /// activation rounding, repacking, or expanded weight bank. Q6 MMA is allowed
-/// only in Fast + F32; other modes retain scalar arithmetic.
+/// in Fast Half/F32; DenseF32 and Exact retain scalar arithmetic.
 #[allow(clippy::too_many_arguments)]
 fn absorb_rows(
     ctx: &MetalContext,

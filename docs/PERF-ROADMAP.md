@@ -12,9 +12,9 @@ confirm a concrete engine hypothesis.
 For append-only checkpoint history and exact current handoff state, see
 `docs/PERF-LOG.md`.
 
-## Current Leverage - 2026-10-11
+## Current Leverage - 2026-10-12
 
-Reoriented through main `e7b48483` with cx, retaining the requested family/phase
+Reoriented through main `f9abbf19` with cx, retaining the requested family/phase
 priority: GLM prefill and long-context decode first, then Flash-Next and Qwen.
 This section supersedes stale next-step claims in the dated maps below.
 
@@ -26,16 +26,26 @@ improved 1.955x and its paired decode improved 8.8%. These are different phase
 and precision measurements, not a combined speedup or a quality verdict.
 Evidence: `docs/bench/2026-10-11-glm-native-quant-baseline/`.
 
-**Grouped Q6_K latent matrix execution completed for explicit F32:** same-binary
+**Grouped Q6_K latent matrix execution completed for Fast Half and F32:** prior
 Maya ABBA gains are 5.8% at 512 tokens and 8.5% at 2048, without extra persistent
 scratch. F32 scalar/matrix KL is at most 3e-10 and 4.8e-5 respectively through
-three common decode steps; no top-token changes in these probes. Default Half,
-DenseF32, Exact and decode retain scalar4. Forced Half/MMA showed about 9% gains
+three common decode steps; no top-token changes in these probes. DenseF32,
+Exact and decode retain scalar4. Forced Half/MMA showed about 9% gains
 but KL up to 0.013; comparison with scalar Exact found neither Half arm uniformly
 closer. That is precision-dependent amplification, not a task-quality verdict.
 The arithmetic-preserving scalar8 alternative was bit-identical but neutral
 (0.996-1.006x), so stays test-only. UD's unchanged Q8 control was bit-identical.
 Evidence: `docs/bench/2026-10-11-glm-latent-mma/`.
+
+Half is now enabled after a frozen task subset and current-binary timing:
+production gains 6.8% at 512 and 11.2% at 2048, without new memory/knobs. All
+eight tool runs per arm are strictly correct with identical tokens; mean
+continuation NLL improves 0.00998 nats/token but top-1 hits fall 111 to 109/192.
+This is bounded evidence, not universal quality equivalence. Serving snapshot,
+cancel and continuation checks pass. Historical KL failures remain recorded,
+not converted into a task veto. The incomplete UD control is unusable for
+timing; completed outputs and Q8 dispatch remain identical. Evidence:
+`docs/bench/2026-10-12-glm-latent-quality/`.
 
 **High-count down experiment parked:** M64/N64 reduces decoded panels but adds
 padding and accumulator state. UD/Maya whole-prefill ratios are only
@@ -63,19 +73,14 @@ retry; no cause was established for its stall. Complete source is archived at
    dense projections from latent absorption/expansion. Collect census outside
    ordinary timing. A representative leaf times the layer count is not actual
    aggregate attribution. No new general tracing framework or depth grid.
-2. **Resolve the existing Half latent MMA task-quality question.** Its retained
-   roughly 9% gain is stronger evidence than the failed bit-preserving tile
-   bets. Q6_K dense projections already have batched execution; the remaining
-   scalar4 latent recipe is a concrete structural cost. Use existing task
-   evaluation machinery to assess consequences, not agreement with old Fast as
-   ground truth. Keep declared operand contracts and weights intact. A single
-   task probe can inform direction, not manufacture non-inferiority. The old
-   diagnostic 1e-3 KL bound and Exact/Fast 0.33 trigger answer different
-   questions; neither is an artifact-admission rule or task-quality result.
-3. **Coordinate the next Flash selected-QSA step if GLM lacks a useful lever.**
+2. **Coordinate the next Flash selected-QSA step if GLM lacks a useful lever.**
    Existing Flash work now retains packed prefill under workspace pressure
-   (`e7b48483`). Do not duplicate that lane or force another GLM tweak merely
-   because it is locally available.
+   (`e7b48483`). The quant-compatibility worktree has been retired; its parallel
+   integer selector and correctness tests remain at `3b21b899`. A bounded
+   ordinary selected-prefill A/B, changing only that selector, is the next useful
+   test. Do not resurrect its perturbing parent observer or encoder-splitting
+   campaign, duplicate another owner, or force another GLM tweak merely because
+   it is locally available.
 
 GLM selected-attention work is deferred behind those prefill opportunities;
 the measured leaf is only about 1 ms. Keep Flash selected-QSA work coordinated

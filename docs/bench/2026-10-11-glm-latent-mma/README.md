@@ -81,11 +81,13 @@ not isolated routing causality or a task-quality claim. The original 1e-3
 old/new diagnostic bound is not the historical Exact/Fast investigation trigger
 and is not a model-admission criterion.
 
-GLM production therefore permits this matrix path only for Fast lineage with
-explicit full-F32 precision. Half, DenseF32, Exact and decode retain scalar4;
+The Oct 11 interim policy permitted this matrix path only for Fast lineage
+with explicit full-F32 precision. It kept Half, DenseF32, Exact and decode on scalar4;
 Q8 remains unchanged. The shared primitive exposes an explicit caller policy
 and retains its full native baseline coverage. Test-only overrides reproduce
 the original forced experiment without adding production environment switches.
+The [Oct 12 task/timing follow-up](../2026-10-12-glm-latent-quality/README.md)
+supersedes the Half restriction; this packet and its failed KL bounds are retained.
 
 ## Arithmetic-Preserving Alternative
 

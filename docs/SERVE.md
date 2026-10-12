@@ -1221,15 +1221,16 @@ because client model-pickers probe it).
   chunks for prompts over 1,024 tokens (4096 for the pinned 122B-A10B profile)
   when memory admission passes; dense models use 1024. A declined larger chunk
   is logged with its reason (PERF-LOG 2026-09-24 auto prefill chunk entry).
-  `QWEN_SERVE_FRESH_PACKED=1` additionally opts validated Qwen3.8/Q8 dense-27
-  **fresh cache misses** of 19-48 prompt tokens into bounded packed prefill,
-  greedy requests without a drafter only. Unset, `0` and invalid values disable
-  this fresh path; Q4 is unsupported even with `1`. The same 128 MiB scratch cap
-  and chunked fallback apply (the chunked path already removes most of the
-  serial cost this opt-in was measured against). Q8 passes balanced endpoint gates, but automatic
-  enablement remains held after an unpaired first-request outlier under substantial
-  global compression. No first-request guarantee or sampled-distribution claim.
-  Evidence: `docs/bench/2026-09-07-fresh-serving-http/RESULT.md`.
+  **Fresh cache misses** of 19-48 prompt tokens on the same 27B dense geometry
+  use bounded single-chunk prefill by default, for greedy requests without a
+  drafter. Template and LM-head dtype do not gate this operation. The same
+  128 MiB scratch cap and admitted general fallback apply. This avoids serial
+  transcript/header segments even when the overall request already plans packed
+  scratch. `QWEN_SERVE_FRESH_PACKED=0` rolls back; `1` or unset enables it;
+  invalid values disable it. Packed versus serial state is numerical, not
+  universally bitwise. Current Q8/Q4 paired serving and continuation checks
+  support the bounded default; no universal first-request timing or sampled
+  distribution guarantee. See PERF-LOG's 2026-10-12 short-prefill entry.
   Muse defaults to fresh packed prefill in superchunks of up to128 tokens
   with a16-token packing quantum, followed by a scalar remainder. By default
   it reuses the exact consumed-token prefix of the last

@@ -450,6 +450,31 @@ impl Fixture {
     /// Panics when an alias names an unreadable
     /// file (requested-but-invalid) or two aliases disagree.
     pub fn path_or_skip(&self) -> Option<PathBuf> {
+        let resolved = self.resolve();
+        if resolved.is_none() {
+            eprintln!(
+                "skipping: fixture {} ({}) unavailable; {}",
+                self.id,
+                self.filename,
+                self.supply_hint()
+            );
+        }
+        resolved
+    }
+
+    /// How a missing fixture can be supplied.
+    fn supply_hint(&self) -> String {
+        if self.env.is_empty() {
+            "put it in a directory listed in QWEN_MODEL_SEARCH_PATH".to_string()
+        } else {
+            format!(
+                "put it in a directory listed in QWEN_MODEL_SEARCH_PATH or set one of {}",
+                self.env.join(", ")
+            )
+        }
+    }
+
+    fn resolve(&self) -> Option<PathBuf> {
         match self.env_override() {
             Err(conflict) => panic!("{conflict}"),
             Ok(Some(resolved)) => {
@@ -466,28 +491,19 @@ impl Fixture {
                 }
                 Some(resolved.path)
             }
-            Ok(None) => self.search_path().or_else(|| {
-                let message = format!(
-                    "fixture {} ({}) unavailable; set QWEN_MODEL_SEARCH_PATH or one of [{}]",
-                    self.id,
-                    self.filename,
-                    self.env.join(", ")
-                );
-                eprintln!("skipping: {message}");
-                None
-            }),
+            Ok(None) => self.search_path(),
         }
     }
 
     /// Resolve or fail with a message naming the fixture and every alias
     /// that could have supplied it.
     pub fn required(&self) -> &'static PathBuf {
-        let path = self.path_or_skip().unwrap_or_else(|| {
+        let path = self.resolve().unwrap_or_else(|| {
             panic!(
-                "fixture {} ({}) is required: set one of [{}] or include it in QWEN_MODEL_SEARCH_PATH",
+                "fixture {} ({}) is required; {}",
                 self.id,
                 self.filename,
-                self.env.join(", ")
+                self.supply_hint()
             )
         });
         static REQUIRED_PATHS: OnceLock<

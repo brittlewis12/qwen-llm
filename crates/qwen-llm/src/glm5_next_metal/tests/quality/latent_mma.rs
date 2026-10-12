@@ -188,8 +188,8 @@ fn half_latent_mma_quality() {
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS
-                .default_path
-                .into()
+                .required()
+                .clone()
         });
     let ud_file = File::open(&ud_path).unwrap();
     assert_eq!(

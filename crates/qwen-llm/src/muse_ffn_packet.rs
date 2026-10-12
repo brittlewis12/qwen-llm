@@ -1,3 +1,6 @@
+#[cfg(not(target_endian = "little"))]
+compile_error!("Muse FFN packet artifacts require little-endian targets");
+
 const FFN_BASE: usize = 32768;
 const FFN_SAVED_BASE: usize = 32640;
 const FFN_SAMPLES: usize = 8;
@@ -150,7 +153,6 @@ fn ffn_write_stream(
     width: usize,
 ) -> serde_json::Value {
     use std::io::Write;
-    assert!(cfg!(target_endian = "little"));
     let bytes = bytemuck::cast_slice::<f32, u8>(ffn_f32_slice(tensor));
     let mut file = std::fs::OpenOptions::new()
         .write(true)

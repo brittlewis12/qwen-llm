@@ -713,16 +713,27 @@ fn admit_with_pressure_relief<P, E>(
     baseline_price: u64,
     cpu_reserved: u64,
     mut admit: impl FnMut(u64, u64) -> Result<qwen_llm::metal::MetalMemoryAdmission, E>,
-    mut release: impl FnMut(u64) -> bool,
+    release: impl FnMut(u64) -> qwen_llm::snapshot_policy::Evicted,
 ) -> Result<(Option<P>, qwen_llm::metal::MetalMemoryAdmission), E> {
-    let (plan, mut admission) = admit_optional_tail(candidate, baseline_price, |price| {
+    let (plan, admission) = admit_optional_tail(candidate, baseline_price, |price| {
         admit(price, cpu_reserved)
     })?;
-    if let Some(deficit) = process_deficit(&admission)
-        && release(deficit)
-    {
-        admission = admit(baseline_price, cpu_reserved)?;
-    }
+    let admission = super::memory_relief::retry(
+        "qwen",
+        Ok::<_, E>(admission),
+        |result| {
+            result.as_ref().ok().and_then(|admission| {
+                process_deficit(admission).map(|bytes| {
+                    (
+                        qwen_llm::metal::MetalMemoryAdmissionReason::ProcessInsufficient,
+                        bytes,
+                    )
+                })
+            })
+        },
+        release,
+        || admit(baseline_price, cpu_reserved),
+    )?;
     Ok((plan, admission))
 }
 
@@ -731,7 +742,7 @@ fn with_native_admission<T>(
     readout_gpu: u64,
     readout_cpu: u64,
     admit: impl FnMut(u64, u64) -> anyhow::Result<qwen_llm::metal::MetalMemoryAdmission>,
-    release: impl FnMut(u64) -> bool,
+    release: impl FnMut(u64) -> qwen_llm::snapshot_policy::Evicted,
     execute: impl FnOnce(u64) -> T,
 ) -> anyhow::Result<T> {
     let cpu = durable
@@ -1169,39 +1180,23 @@ impl EngineBackend {
             |price, reserved| {
                 self.loaded
                     .qwen_execution_memory_admission_with_additional_bytes(
-                        1,
-                        capacity,
-                        price,
-                        0,
-                        reserved,
+                        1, capacity, price, 0, reserved,
                     )
             },
-            |deficit| {
+            |bytes| {
                 // Keep the restore entry pinned while releasing disposable
                 // snapshots, then retry with the same complete CPU reservation.
                 let keep = cached_lookup
                     .as_ref()
                     .and_then(|lookup| self.loaded.pin_prepared_lookup(lookup));
-                let evicted = self.loaded.evict_prefix_cache_for(deficit);
+                let evicted = self.loaded.evict_prefix_cache_for(bytes);
                 if let Some(entry) = keep {
                     self.loaded.unpin_prefix_cache_entry(entry);
                 }
-                if evicted.is_empty() {
-                    false
-                } else {
-                    tracing::info!(
-                        target: "qwen_diag",
-                        "serve: snapshot cache evicted for request admission; entries={} released_bytes={} (indexed; payload memory returns when the last holder drops) deficit_bytes={deficit}",
-                        evicted.ids.len(),
-                        evicted.bytes,
-                    );
-                    true
-                }
+                evicted
             },
         )
-        .map_err(|error| {
-            ServeError::server_error(format!("price request memory: {error:#}"))
-        })?;
+        .map_err(|error| ServeError::server_error(format!("price request memory: {error:#}")))?;
         // Pressure is 503; telemetry and size refusals are 500 with their
         // own codes (one table across lanes, `transport_memory`).
         if let Some(denied) = admission.refusal() {
@@ -1367,7 +1362,7 @@ impl GenerationBackend for EngineBackend {
                             1, capacity, 0, gpu, reserved,
                         )?)
                 },
-                |deficit| !self.loaded.evict_prefix_cache_for(deficit).is_empty(),
+                |bytes| self.loaded.evict_prefix_cache_for(bytes),
                 |reserve| {
                     super::native::with_staged(prepared, sink, reserve, |staged| {
                         super::native::run_loaded(
@@ -2255,7 +2250,8 @@ impl EngineBackend {
         }
         // Plus the durable writer's in-flight decode copy, which the memory
         // signals may not show yet.
-        if let Err((reason, signals)) = super::admit_snapshot_capture(
+        if let Err((reason, signals)) = super::admit_snapshot_capture_for(
+            "qwen",
             estimate
                 .saturating_add(self.durable_reserved_bytes())
                 .saturating_add(self.control_cpu_reserve),
@@ -2520,7 +2516,11 @@ mod tests {
                 |deficit| {
                     assert_eq!(deficit, 17);
                     remaining.set(reserved + 17);
-                    release_succeeds
+                    if release_succeeds {
+                        super::super::memory_relief::test_evicted(deficit)
+                    } else {
+                        qwen_llm::snapshot_policy::Evicted::default()
+                    }
                 },
                 |authorized| {
                     assert_eq!(authorized, reserved + 17);
@@ -2589,9 +2589,10 @@ mod tests {
                 ))
             },
             |deficit| {
+                assert_eq!(deficit, 132);
                 evicted.push(deficit);
                 remaining.set(182);
-                true
+                crate::serve::memory_relief::test_evicted(deficit)
             },
         )
         .unwrap();
@@ -2787,6 +2788,22 @@ mod tests {
         let admitted = evaluate_metal_memory_admission(60, 0, signals(Some(500), 1000), false);
         assert!(admitted.admitted);
         assert_eq!(process_deficit(&admitted), None);
+
+        let missing_budget = qwen_llm::metal::MetalMemoryAdmission {
+            admitted: false,
+            reason: Reason::ProcessInsufficient,
+            scratch_upper_bytes: 60,
+            reserve_bytes: 0,
+            required_bytes: Some(60),
+            signals: signals(None, 1000),
+            working_set_headroom_bytes: Some(1000),
+        };
+        assert_eq!(process_deficit(&missing_budget), None);
+        let non_positive_deficit = qwen_llm::metal::MetalMemoryAdmission {
+            signals: signals(Some(60), 1000),
+            ..missing_budget
+        };
+        assert_eq!(process_deficit(&non_positive_deficit), None);
     }
 
     #[test]

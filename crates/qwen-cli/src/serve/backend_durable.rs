@@ -571,7 +571,8 @@ impl EngineBackend {
                     denied = Some("cache_budget");
                     return false;
                 }
-                if super::super::admit_snapshot_capture(
+                if super::super::admit_snapshot_capture_for(
+                    "qwen",
                     blob_bytes
                         .saturating_add(self.durable_reserved_bytes())
                         .saturating_add(self.control_cpu_reserve),

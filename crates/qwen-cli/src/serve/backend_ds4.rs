@@ -264,13 +264,22 @@ fn session_error(error: qwen_llm::deepseek_v4_metal::DeepSeekV4MetalError) -> Se
     }
 }
 
+#[cfg(test)]
 fn session_refusal_is_process_releasable(
     reason: qwen_llm::metal::MetalMemoryAdmissionReason,
 ) -> bool {
-    matches!(
-        reason,
-        qwen_llm::metal::MetalMemoryAdmissionReason::ProcessInsufficient
-    )
+    let released = Cell::new(false);
+    let _: Result<(), _> = super::memory_relief::retry(
+        "test",
+        Err(reason),
+        |result| result.as_ref().err().map(|reason| (*reason, 1)),
+        |_| {
+            released.set(true);
+            qwen_llm::snapshot_policy::Evicted::default()
+        },
+        || Ok(()),
+    );
+    released.get()
 }
 
 /// Write-behind eligibility for one captured boundary.
@@ -525,7 +534,8 @@ impl DeepSeekV4Backend {
                 snapshot.prefix_tokens().len(),
                 snapshot.payload_bytes(),
             )?;
-            if super::admit_snapshot_capture(
+            if super::admit_snapshot_capture_for(
+                "deepseek_v4",
                 bytes.saturating_add(cpu_reserved),
                 || self.ctx.memory_signals(),
                 |bytes| self.cache.evict_for(bytes),
@@ -593,7 +603,8 @@ impl DeepSeekV4Backend {
                     denied = Some("cache_budget");
                     return false;
                 };
-                if super::admit_snapshot_capture(
+                if super::admit_snapshot_capture_for(
+                    "deepseek_v4",
                     entry_bytes.saturating_add(reserve),
                     || ctx.memory_signals(),
                     |bytes| cache.evict_for(bytes),
@@ -863,27 +874,21 @@ impl DeepSeekV4Backend {
         let preflight = {
             let ctx = &self.ctx;
             let cache = &mut self.cache;
-            let memory_reason = Cell::new(None);
-            super::transport_memory::with_pressure_release_retry(
-                || match residency.admit_session_memory(ctx.memory_signals(), cpu_reserved) {
-                    Ok(()) => Ok(()),
-                    Err(
-                        error @ qwen_llm::deepseek_v4_metal::DeepSeekV4MetalError::MemoryAdmission(
-                            denied,
-                        ),
-                    ) => {
-                        memory_reason.set(Some(denied.reason));
-                        Err(session_error(error))
+            let attempt = || residency.admit_session_memory(ctx.memory_signals(), cpu_reserved);
+            let first = attempt();
+            let preflight = super::memory_relief::retry(
+                "deepseek_v4",
+                first,
+                |result| match result.as_ref().err()? {
+                    qwen_llm::deepseek_v4_metal::DeepSeekV4MetalError::MemoryAdmission(denied) => {
+                        Some((denied.reason, u64::MAX))
                     }
-                    Err(error) => Err(session_error(error)),
+                    _ => None,
                 },
-                || {
-                    memory_reason
-                        .get()
-                        .is_some_and(session_refusal_is_process_releasable)
-                        && !cache.evict_for(u64::MAX).is_empty()
-                },
-            )
+                |bytes| cache.evict_for(bytes),
+                attempt,
+            );
+            preflight.map_err(session_error)
         };
         if let Err(error) = preflight {
             self.residency = Some(residency);
@@ -1214,7 +1219,8 @@ impl DeepSeekV4Backend {
         };
         let ctx = &self.ctx;
         let cache = &mut self.cache;
-        if let Err((reason, signals)) = super::admit_snapshot_capture(
+        if let Err((reason, signals)) = super::admit_snapshot_capture_for(
+            "deepseek_v4",
             required_bytes,
             || ctx.memory_signals(),
             |bytes| cache.evict_for(bytes),
@@ -1276,26 +1282,24 @@ mod tests {
 
         let mut cache = super::SnapshotCache::new(1024, Default::default());
         assert!(cache.insert_strict_in((), vec![1, 2], 7_u8, 32));
-        let result: Result<(), super::ServeError> =
-            crate::serve::transport_memory::with_pressure_release_retry(
-                || {
-                    Err(super::ServeError {
-                        status: 503,
-                        error_type: "server_busy",
-                        code: Some("memory_admission_denied"),
-                        param: None,
-                        message: "both working set and process budget are insufficient".into(),
-                    })
-                },
-                || {
-                    if super::session_refusal_is_process_releasable(Reason::BothInsufficient) {
-                        cache.evict_for(u64::MAX);
-                        true
-                    } else {
-                        false
-                    }
-                },
-            );
+        let result: Result<(), super::ServeError> = crate::serve::memory_relief::retry(
+            "deepseek_v4",
+            Err(super::ServeError {
+                status: 503,
+                error_type: "server_busy",
+                code: Some("memory_admission_denied"),
+                param: None,
+                message: "both working set and process budget are insufficient".into(),
+            }),
+            |result| {
+                result
+                    .as_ref()
+                    .err()
+                    .map(|_| (Reason::BothInsufficient, u64::MAX))
+            },
+            |bytes| cache.evict_for(bytes),
+            || panic!("mixed refusal must not retry"),
+        );
 
         assert!(result.is_err());
         assert_eq!(cache.len(), 1);

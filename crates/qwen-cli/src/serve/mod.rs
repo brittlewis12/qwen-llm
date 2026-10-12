@@ -28,6 +28,7 @@ pub(crate) mod http;
 mod idle_residency;
 mod jobs;
 pub(crate) mod lens_http;
+mod memory_relief;
 mod native;
 pub(crate) mod outcome;
 mod output_memory;
@@ -257,32 +258,32 @@ pub(super) enum SnapshotCaptureDenial {
 /// deficit by evicting cached snapshots and re-checking once. A Metal
 /// headroom denial is not retried: snapshots live in CPU arenas, so evicting
 /// them does not change the Metal allocation signal.
-pub(super) fn admit_snapshot_capture(
+pub(super) fn admit_snapshot_capture_for(
+    family: &str,
     bytes: u64,
     signals: impl Fn() -> MetalMemorySignals,
     evict_for: impl FnOnce(u64) -> Evicted,
 ) -> std::result::Result<(), (SnapshotCaptureDenial, MetalMemorySignals)> {
-    let observed = signals();
-    let deficit_bytes = match snapshot_capture_admission(bytes, observed) {
-        Ok(()) => return Ok(()),
-        Err(SnapshotCaptureDenial::ProcessHeadroom { deficit_bytes }) => deficit_bytes,
-        Err(reason) => return Err((reason, observed)),
+    let admit = || {
+        let observed = signals();
+        snapshot_capture_admission(bytes, observed).map_err(|reason| (reason, observed))
     };
-    let evicted = evict_for(deficit_bytes);
-    if evicted.is_empty() {
-        return Err((
-            SnapshotCaptureDenial::ProcessHeadroom { deficit_bytes },
-            observed,
-        ));
-    }
-    tracing::info!(
-        target: "qwen_diag",
-        "serve: snapshot cache evicted for process headroom; entries={} released_bytes={} (indexed; payload memory returns when the last holder drops) deficit_bytes={deficit_bytes}",
-        evicted.ids.len(),
-        evicted.bytes,
-    );
-    let observed = signals();
-    snapshot_capture_admission(bytes, observed).map_err(|reason| (reason, observed))
+    let first = admit();
+    memory_relief::retry(
+        family,
+        first,
+        |result| {
+            result.as_ref().err().and_then(|(reason, _)| match reason {
+                SnapshotCaptureDenial::ProcessHeadroom { deficit_bytes } => Some((
+                    qwen_llm::metal::MetalMemoryAdmissionReason::ProcessInsufficient,
+                    *deficit_bytes,
+                )),
+                _ => None,
+            })
+        },
+        evict_for,
+        admit,
+    )
 }
 
 pub(super) fn snapshot_capture_admission(
@@ -1494,7 +1495,8 @@ mod tests {
         cache.insert(64, 1);
         // Eviction is asked for exactly the deficit; the re-check sees relief.
         let observed = std::cell::Cell::new(required - 40);
-        let result = admit_snapshot_capture(
+        let result = admit_snapshot_capture_for(
+            "test",
             100,
             || signals(observed.get()),
             |deficit| {
@@ -1506,7 +1508,8 @@ mod tests {
         assert!(result.is_ok());
         assert!(cache.is_empty());
         // Nothing evictable: the original denial stands.
-        let result = admit_snapshot_capture(
+        let result = admit_snapshot_capture_for(
+            "test",
             100,
             || signals(required - 40),
             |deficit| cache.evict_for(deficit),
@@ -1516,7 +1519,8 @@ mod tests {
             SnapshotCaptureDenial::ProcessHeadroom { deficit_bytes: 40 }
         );
         // Metal headroom is never retried by evicting CPU snapshots.
-        let result = admit_snapshot_capture(
+        let result = admit_snapshot_capture_for(
+            "test",
             20 * GIB,
             || signals(0),
             |_| panic!("metal denial must not evict"),
@@ -1534,7 +1538,8 @@ mod tests {
         let signal_reads = std::cell::Cell::new(0);
         let bytes = 1;
         let process_remaining = bytes + SNAPSHOT_CAPTURE_HEADROOM_BYTES - 1;
-        let result = admit_snapshot_capture(
+        let result = admit_snapshot_capture_for(
+            "test",
             bytes,
             || {
                 signal_reads.set(signal_reads.get() + 1);

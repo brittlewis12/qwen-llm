@@ -1186,7 +1186,7 @@ fn release_keep_pin_is_cleared_when_eviction_panics() {
 
     panic_clock.store(true, Ordering::Relaxed);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        release_snapshots(&mut cache, keep);
+        cache.evict_for_except(u64::MAX, keep);
     }));
     assert!(result.is_err());
     panic_clock.store(false, Ordering::Relaxed);

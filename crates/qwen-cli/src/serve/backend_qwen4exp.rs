@@ -519,7 +519,7 @@ fn admit_flash_next_snapshot_capture(
         qwen_llm::metal::MetalMemorySignals,
     ),
 > {
-    super::admit_snapshot_capture(bytes, signals, evict_for)
+    super::admit_snapshot_capture_for(FAMILY, bytes, signals, evict_for)
 }
 
 fn restore_best_prefix<V, R, E: std::fmt::Debug>(

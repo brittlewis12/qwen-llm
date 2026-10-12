@@ -43,24 +43,6 @@ pub(crate) fn memory_refusal(what: &str, denied: &MemoryAdmissionDenied) -> Serv
     }
 }
 
-/// Retry a memory-pressure refusal once after releasing optional cached
-/// state. Telemetry, size and unrelated errors pass through unchanged.
-pub(super) fn with_pressure_release_retry<T>(
-    mut attempt: impl FnMut() -> Result<T, ServeError>,
-    mut release: impl FnMut() -> bool,
-) -> Result<T, ServeError> {
-    match attempt() {
-        Err(error) if error.status == 503 && error.code == Some("memory_admission_denied") => {
-            if release() {
-                attempt()
-            } else {
-                Err(error)
-            }
-        }
-        other => other,
-    }
-}
-
 pub(super) fn combined_reserve(durable: u64, transport: u64) -> Result<u64, ServeError> {
     durable
         .checked_add(transport)
@@ -209,23 +191,32 @@ mod tests {
 
         let attempts = std::cell::Cell::new(0);
         let releases = std::cell::Cell::new(0);
-        let result = with_pressure_release_retry(
-            || {
-                let attempt = attempts.get() + 1;
-                attempts.set(attempt);
-                if attempt == 1 {
-                    Err(memory_refusal(
-                        "DS4 session",
-                        &denied(Reason::ProcessInsufficient),
-                    ))
-                } else {
-                    Ok("admitted")
-                }
+        let attempt = || {
+            let attempt = attempts.get() + 1;
+            attempts.set(attempt);
+            if attempt == 1 {
+                Err(memory_refusal(
+                    "DS4 session",
+                    &denied(Reason::ProcessInsufficient),
+                ))
+            } else {
+                Ok("admitted")
+            }
+        };
+        let result = crate::serve::memory_relief::retry(
+            "test",
+            attempt(),
+            |result| {
+                result.as_ref().err().and_then(|error| {
+                    (error.status == 503 && error.code == Some("memory_admission_denied"))
+                        .then_some((Reason::ProcessInsufficient, u64::MAX))
+                })
             },
-            || {
+            |bytes| {
                 releases.set(releases.get() + 1);
-                true
+                crate::serve::memory_relief::test_evicted(bytes)
             },
+            attempt,
         );
         assert_eq!(result.unwrap(), "admitted");
         assert_eq!(attempts.get(), 2);
@@ -234,15 +225,24 @@ mod tests {
         let attempts = std::cell::Cell::new(0);
         let releases = std::cell::Cell::new(0);
         let expected = memory_refusal("DS4 session", &denied(Reason::ProcessSignalUnavailable));
-        let result: Result<(), ServeError> = with_pressure_release_retry(
-            || {
-                attempts.set(attempts.get() + 1);
-                Err(expected.clone())
+        let attempt = || {
+            attempts.set(attempts.get() + 1);
+            Err(expected.clone())
+        };
+        let result: Result<(), ServeError> = crate::serve::memory_relief::retry(
+            "test",
+            attempt(),
+            |result| {
+                result.as_ref().err().and_then(|error| {
+                    (error.status == 503 && error.code == Some("memory_admission_denied"))
+                        .then_some((Reason::ProcessInsufficient, u64::MAX))
+                })
             },
-            || {
+            |bytes| {
                 releases.set(releases.get() + 1);
-                true
+                crate::serve::memory_relief::test_evicted(bytes)
             },
+            attempt,
         );
         let error = result.unwrap_err();
         assert_eq!(error, expected);

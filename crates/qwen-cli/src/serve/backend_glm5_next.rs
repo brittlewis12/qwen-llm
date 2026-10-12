@@ -401,7 +401,8 @@ fn capture_into(
     let Some(required) = entry_bytes.checked_add(reserve) else {
         return CaptureOutcome::Ineligible;
     };
-    if let Err((reason, signals)) = super::admit_snapshot_capture(
+    if let Err((reason, signals)) = super::admit_snapshot_capture_for(
+        FAMILY,
         required,
         || ctx.memory_signals(),
         |bytes| cache.evict_for(bytes),
@@ -458,31 +459,25 @@ fn is_pressure_refusal(error: &ServeError) -> bool {
 
 /// Release every unpinned cached snapshot except `keep` (memory pressure:
 /// the cache is optional, a refused request is not).
-fn release_snapshots<V>(
-    cache: &mut SnapshotCache<V, CacheNamespace>,
-    keep: Option<EntryId>,
-) -> qwen_llm::snapshot_policy::Evicted {
-    let released = cache.evict_for_except(u64::MAX, keep);
-    if !released.is_empty() {
-        tracing::info!(
-            target: "qwen_diag",
-            "serve: glm5_next snapshot cache released for memory pressure; entries={} released_bytes={} (indexed; payload memory returns when the last holder drops)",
-            released.ids.len(),
-            released.bytes,
-        );
-    }
-    released
-}
-
 /// `attempt`, retried once after releasing cached snapshots (except
 /// `keep`) when it is refused for memory pressure and something was
 /// released.
 fn with_snapshot_release<T, V>(
     cache: &mut SnapshotCache<V, CacheNamespace>,
     keep: Option<EntryId>,
-    attempt: impl FnMut() -> Result<T, Glm5NextMetalError>,
+    mut attempt: impl FnMut() -> Result<T, Glm5NextMetalError>,
 ) -> Result<T, Glm5NextMetalError> {
-    with_snapshot_release_when(cache, keep, attempt, is_process_only_session_refusal)
+    let first = attempt();
+    super::memory_relief::retry(
+        FAMILY,
+        first,
+        |result| match result.as_ref().err()? {
+            Glm5NextMetalError::MemoryAdmission { denied, .. } => Some((denied.reason, u64::MAX)),
+            _ => None,
+        },
+        |bytes| cache.evict_for_except(bytes, keep),
+        attempt,
+    )
 }
 
 /// Transport admission prices process CPU only; a transport refusal is
@@ -490,33 +485,22 @@ fn with_snapshot_release<T, V>(
 fn with_transport_snapshot_release<T, V>(
     cache: &mut SnapshotCache<V, CacheNamespace>,
     keep: Option<EntryId>,
-    attempt: impl FnMut() -> Result<T, ServeError>,
+    mut attempt: impl FnMut() -> Result<T, ServeError>,
 ) -> Result<T, ServeError> {
-    with_snapshot_release_when(cache, keep, attempt, is_pressure_refusal)
-}
-
-fn with_snapshot_release_when<T, V, E>(
-    cache: &mut SnapshotCache<V, CacheNamespace>,
-    keep: Option<EntryId>,
-    mut attempt: impl FnMut() -> Result<T, E>,
-    release_for: impl Fn(&E) -> bool,
-) -> Result<T, E> {
-    match attempt() {
-        Err(error) if release_for(&error) => {
-            if release_snapshots(cache, keep).is_empty() {
-                return Err(error);
-            }
-            attempt()
-        }
-        other => other,
-    }
-}
-
-fn is_process_only_session_refusal(error: &Glm5NextMetalError) -> bool {
-    matches!(
-        error,
-        Glm5NextMetalError::MemoryAdmission { denied, .. }
-            if denied.reason == qwen_llm::metal::MetalMemoryAdmissionReason::ProcessInsufficient
+    let first = attempt();
+    super::memory_relief::retry(
+        FAMILY,
+        first,
+        |result| {
+            result.as_ref().err().and_then(|error| {
+                is_pressure_refusal(error).then_some((
+                    qwen_llm::metal::MetalMemoryAdmissionReason::ProcessInsufficient,
+                    u64::MAX,
+                ))
+            })
+        },
+        |bytes| cache.evict_for_except(bytes, keep),
+        attempt,
     )
 }
 

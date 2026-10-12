@@ -4,7 +4,7 @@ use qwen_llm::qwen4exp::Qwen4ExpConfig;
 use serde_json::json;
 use std::io;
 
-fn gpu_backend(snapshot_cache_mib: u64) -> FlashNextBackend {
+fn gpu_backend(snapshot_cache_mib: Option<u64>) -> FlashNextBackend {
     let path = qwen_llm::test_fixtures::QWEN4EXP_Q3_K_XL.required();
     let gguf = Box::leak(Box::new(GgufFile::open(&path).unwrap()));
     let invocation = crate::cli::ServeInvocation {
@@ -16,7 +16,7 @@ fn gpu_backend(snapshot_cache_mib: u64) -> FlashNextBackend {
         addr: "127.0.0.1:0".into(),
         max_tokens: Some(8),
         max_context_tokens: Some(256),
-        snapshot_cache_mib: Some(snapshot_cache_mib),
+        snapshot_cache_mib,
         snapshot_policy: Default::default(),
         durable: crate::serve::durable::DurableSnapshotConfig::off(),
         drafter: None,
@@ -25,6 +25,8 @@ fn gpu_backend(snapshot_cache_mib: u64) -> FlashNextBackend {
         idle_residency_secs: None,
     };
     let prepared = Prepared::new(gguf, &invocation).unwrap();
+    let snapshot_cache_mib =
+        snapshot_cache_mib.unwrap_or_else(|| snapshot_cache_mib_for_test(gguf, &prepared));
     FlashNextBackend::new(
         MetalContext::new().unwrap(),
         gguf,
@@ -34,6 +36,23 @@ fn gpu_backend(snapshot_cache_mib: u64) -> FlashNextBackend {
         Default::default(),
     )
     .unwrap()
+}
+
+fn snapshot_cache_mib_for_test(gguf: &GgufFile, prepared: &Prepared) -> u64 {
+    const MIB: u64 = 1 << 20;
+    let config = Qwen4ExpConfig::from_gguf(gguf).unwrap();
+    let geometry = qwen_llm::qwen4exp_text_session::Qwen4ExpTextSessionMetalGeometry::from_config(
+        &config,
+        prepared.capacity.qsa_physical_capacity(),
+    )
+    .unwrap();
+    let max_prefix = prepared.capacity.forward_limit().saturating_sub(1);
+    let payload_bytes = geometry.snapshot_bytes(max_prefix).unwrap();
+    let entry_bytes = SnapshotCache::<()>::entry_bytes(max_prefix, payload_bytes).unwrap();
+    entry_bytes
+        .checked_mul(2)
+        .expect("snapshot cache margin overflow")
+        .div_ceil(MIB)
 }
 
 #[derive(Default)]
@@ -221,7 +240,7 @@ fn request_session_is_handed_back_after_success_and_failure() {
 #[test]
 #[ignore = "GPU-only QWEN4EXP_Q3_K_XL resident/cold parity and abort retry coverage"]
 fn gpu_qwen4exp_resident_abort_retry_and_transcript_cache_parity() {
-    let mut cold_backend = gpu_backend(0);
+    let mut cold_backend = gpu_backend(Some(0));
     let (cold_request, cold_prompt) =
         build_request(&cold_backend, "What is 2 + 2? Answer briefly.");
     let mut cold_sink = Sink::default();
@@ -236,18 +255,25 @@ fn gpu_qwen4exp_resident_abort_retry_and_transcript_cache_parity() {
     let cold_bytes = cold_sink.bytes;
     drop(cold_backend);
 
-    let mut backend = gpu_backend(64);
+    let mut backend = gpu_backend(None);
     let (request, prompt) = build_request(&backend, "What is 2 + 2? Answer briefly.");
     let mut warm = Sink::default();
     execute(&mut backend, &request, &prompt, &mut warm).unwrap();
     assert_eq!(warm.bytes, cold_bytes);
 
-    let token_ids = backend.tokenizer.encode(&prompt, false).unwrap();
+    let token_ids = decode_loop::encode_checked(
+        &backend.tokenizer,
+        &prompt,
+        false,
+        backend.vocab_size,
+        FAMILY,
+    )
+    .unwrap();
     let boundary = backend
         .im_start
-        .and_then(|im_start| i32::try_from(im_start).ok())
         .and_then(|im_start| transcript_boundary(&token_ids, im_start))
         .expect("rendered Flash-Next prompt has a transcript boundary");
+    assert!(backend.cache.entry_for(&token_ids[..boundary]).is_some());
     let mut resent = Sink::default();
     let resent_outcome = execute(&mut backend, &request, &prompt, &mut resent).unwrap();
     assert_eq!(resent_outcome.usage.cached_tokens, boundary);
@@ -288,21 +314,28 @@ fn gpu_qwen4exp_resident_abort_retry_and_transcript_cache_parity() {
 #[ignore = "GPU-only QWEN4EXP_Q3_K_XL transcript snapshot restore parity"]
 fn gpu_qwen4exp_transcript_restore_matches_cold_run() {
     let question = "Summarize why cached prefixes are safe. Keep it short.";
-    let mut resident = gpu_backend(64);
+    let mut resident = gpu_backend(None);
     let (request, prompt) = build_request(&resident, question);
-    let token_ids = resident.tokenizer.encode(&prompt, false).unwrap();
+    let token_ids = decode_loop::encode_checked(
+        &resident.tokenizer,
+        &prompt,
+        false,
+        resident.vocab_size,
+        FAMILY,
+    )
+    .unwrap();
     let boundary = resident
         .im_start
-        .and_then(|im_start| i32::try_from(im_start).ok())
         .and_then(|im_start| transcript_boundary(&token_ids, im_start))
         .expect("rendered Flash-Next prompt has a transcript boundary");
     let mut first = Sink::default();
     execute(&mut resident, &request, &prompt, &mut first).unwrap();
+    assert!(resident.cache.entry_for(&token_ids[..boundary]).is_some());
     let mut restored = Sink::default();
     let outcome = execute(&mut resident, &request, &prompt, &mut restored).unwrap();
     assert_eq!(outcome.usage.cached_tokens, boundary);
 
-    let mut cold = gpu_backend(0);
+    let mut cold = gpu_backend(Some(0));
     let (cold_request, cold_prompt) = build_request(&cold, question);
     let mut cold_sink = Sink::default();
     execute(&mut cold, &cold_request, &cold_prompt, &mut cold_sink).unwrap();

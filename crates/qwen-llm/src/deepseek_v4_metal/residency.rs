@@ -119,9 +119,17 @@ pub(super) fn validate_operation_dtypes(
         if name.ends_with(".ffn_gate_tid2eid.weight") {
             continue;
         }
+        // APE is F32 schema data consumed by compressor frontier kernels, not a projection.
+        if name.ends_with("_compressor_ape.weight") {
+            continue;
+        }
         if tensor.shape.len() == 2 && name.ends_with(".weight") {
             if !crate::metal_forward::mat_vec_dispatch_supported(tensor.dtype) {
                 return Err(unsupported_operation_dtype(tensor, "dense GEMV"));
+            }
+            // The final head uses encode_head for one row in both decode and packed prefill.
+            if name == "output_hc_fn.weight" {
+                continue;
             }
             if super::prefill::batch_projection_selector(tensor.dtype).is_none() {
                 return Err(unsupported_operation_dtype(

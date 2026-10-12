@@ -229,6 +229,16 @@ fn operation_preflight_preserves_mxfp4_routed_down_and_output_logits() {
 }
 
 #[test]
+fn operation_preflight_admits_mxfp4_output_hyper_connection_head() {
+    let descriptors = [operation_descriptor(
+        "output_hc_fn.weight",
+        GgmlType::MXFP4,
+        &[16_384, 4],
+    )];
+    validate_operation_dtypes(&descriptors).unwrap();
+}
+
+#[test]
 fn operation_preflight_accepts_current_qualified_artifact_storage() {
     const CURRENT_CENSUS: &str = include_str!(
         "../../tests/fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_current_2026_08_04_census_v1.json"

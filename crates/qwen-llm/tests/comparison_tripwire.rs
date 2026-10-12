@@ -262,12 +262,10 @@ fn is_exponent_sign(bytes: &[u8], exponent: usize) -> bool {
         return false;
     }
     let mut start = exponent;
-    while start > 0 && (bytes[start - 1].is_ascii_digit() || bytes[start - 1] == b'.') {
+    while start > 0 && matches!(bytes[start - 1], b'0'..=b'9' | b'.' | b'_') {
         start -= 1;
     }
-    start < exponent
-        && bytes[start..exponent].iter().any(u8::is_ascii_digit)
-        && (start == 0 || !is_ident(bytes[start - 1]))
+    start < exponent && bytes[start].is_ascii_digit() && (start == 0 || !is_ident(bytes[start - 1]))
 }
 
 fn precomputed_difference_names(
@@ -646,8 +644,15 @@ fn magnitude_fixture_is_detected_and_only_its_named_exception_is_allowed() {
 #[test]
 fn subtraction_recognizes_scientific_notation_only_at_numeric_boundaries() {
     assert!(!has_binary_subtraction("let ratio = 1.2e-3;"));
+    assert!(!has_binary_subtraction("let ratio = 1_000e-3;"));
+    let underscored =
+        "fn sample() { let peak = values.iter().map(|v| v.abs() * 1_000e-3).fold(0.0, f32::max); }";
+    assert!(scan_text("crates/example.rs", underscored).is_empty());
     let source = "fn sample() { let peak = values.iter().map(|value2e| (value2e - b).abs()).fold(0.0, f32::max); }";
     assert_eq!(scan_text("crates/example.rs", source).len(), 1);
+    let identifier =
+        "fn sample() { let peak = values.iter().map(|_1e| (_1e - b).abs()).fold(0.0, f32::max); }";
+    assert_eq!(scan_text("crates/example.rs", identifier).len(), 1);
 }
 
 #[test]

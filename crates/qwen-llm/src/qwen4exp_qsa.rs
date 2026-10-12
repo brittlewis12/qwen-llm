@@ -53,6 +53,53 @@ pub(crate) mod split_decode;
 #[cfg(test)]
 pub(crate) mod split_decode_probe;
 
+#[cfg(test)]
+mod parallel_scan_tests;
+
+const SELECTOR_KERNEL: &str = "kernel_deepseek_v4_select_top_k_radix4_ids_f32";
+#[cfg(test)]
+const PARALLEL_SCAN_SELECTOR_KERNEL: &str =
+    "kernel_qwen4exp_qsa_select_top_k_radix4_ids_parallel_scan_f32";
+
+#[cfg(test)]
+#[derive(Clone, Copy, Default)]
+struct PackedSelectorOverride {
+    enabled: bool,
+    substitutions: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static PACKED_SELECTOR_OVERRIDE: std::cell::Cell<PackedSelectorOverride> =
+        std::cell::Cell::new(PackedSelectorOverride::default());
+}
+
+/// Select only packed QSA's integer-scan candidate, with a scoped dispatch count.
+/// Nested scopes have independent counts; errors and unwinding restore the caller.
+#[cfg(test)]
+pub(crate) fn with_packed_qsa_parallel_scan<R>(enabled: bool, f: impl FnOnce() -> R) -> (R, usize) {
+    struct Restore(PackedSelectorOverride);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PACKED_SELECTOR_OVERRIDE.set(self.0);
+        }
+    }
+    let _restore = Restore(PACKED_SELECTOR_OVERRIDE.replace(PackedSelectorOverride {
+        enabled,
+        substitutions: 0,
+    }));
+    let result = f();
+    (result, PACKED_SELECTOR_OVERRIDE.get().substitutions)
+}
+
+fn packed_selector_kernel() -> &'static str {
+    #[cfg(test)]
+    if PACKED_SELECTOR_OVERRIDE.get().enabled {
+        return PARALLEL_SCAN_SELECTOR_KERNEL;
+    }
+    SELECTOR_KERNEL
+}
+
 crate::env_flag!(
     default_on configured_qwen4exp_qsa_gqa4_logits_enabled,
     "QWEN4EXP_QSA_GQA4_LOGITS"
@@ -2906,10 +2953,7 @@ fn preflight_selected_index_primitives(ctx: &MetalContext) -> Result<(), Qwen4Ex
     }
     for (kernel, dynamic_memory) in [
         ("kernel_qwen4exp_qsa_index_scores_packed_4x128_f16", 0),
-        (
-            "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
-            SELECTOR_SCRATCH_BYTES,
-        ),
+        (packed_selector_kernel(), SELECTOR_SCRATCH_BYTES),
     ] {
         let pipeline = ctx.pipeline(kernel)?;
         validate_cooperative_pipeline(
@@ -3286,7 +3330,7 @@ fn encode_selected_index_primitives(
         g.ratio,
         g.block_capacity(),
     )?;
-    encode_select_blocks_tensors(
+    encode_select_blocks_packed_tensors(
         ctx,
         enc,
         &views.scores,
@@ -5190,6 +5234,73 @@ fn encode_select_blocks_tensors(
     block_budget: usize,
     query_count: usize,
 ) -> Result<(), MetalError> {
+    encode_select_blocks_tensors_kernel(
+        ctx,
+        enc,
+        scores,
+        visible_blocks,
+        selected_blocks,
+        selected_count,
+        selector_status,
+        block_capacity,
+        block_budget,
+        query_count,
+        SELECTOR_KERNEL,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_select_blocks_packed_tensors(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    scores: &MetalTensor,
+    visible_blocks: &MetalTensor,
+    selected_blocks: &MetalTensor,
+    selected_count: &MetalTensor,
+    selector_status: &MetalTensor,
+    block_capacity: usize,
+    block_budget: usize,
+    query_count: usize,
+) -> Result<(), MetalError> {
+    let kernel = packed_selector_kernel();
+    encode_select_blocks_tensors_kernel(
+        ctx,
+        enc,
+        scores,
+        visible_blocks,
+        selected_blocks,
+        selected_count,
+        selector_status,
+        block_capacity,
+        block_budget,
+        query_count,
+        kernel,
+    )?;
+    #[cfg(test)]
+    if kernel == PARALLEL_SCAN_SELECTOR_KERNEL {
+        PACKED_SELECTOR_OVERRIDE.with(|state| {
+            let mut current = state.get();
+            current.substitutions += 1;
+            state.set(current);
+        });
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_select_blocks_tensors_kernel(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    scores: &MetalTensor,
+    visible_blocks: &MetalTensor,
+    selected_blocks: &MetalTensor,
+    selected_count: &MetalTensor,
+    selector_status: &MetalTensor,
+    block_capacity: usize,
+    block_budget: usize,
+    query_count: usize,
+    kernel: &'static str,
+) -> Result<(), MetalError> {
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
@@ -5198,7 +5309,27 @@ fn encode_select_blocks_tensors(
         query_count: u32,
         emit_ranked: u32,
     }
-    let pso = ctx.pipeline("kernel_deepseek_v4_select_top_k_radix4_ids_f32")?;
+    let pso = ctx.pipeline(kernel)?;
+    #[cfg(test)]
+    if kernel == PARALLEL_SCAN_SELECTOR_KERNEL {
+        validate_parallel_scan_selector(
+            ctx,
+            enc,
+            scores,
+            visible_blocks,
+            selected_blocks,
+            selected_count,
+            selector_status,
+            block_capacity,
+            block_budget,
+            query_count,
+            &pso,
+        )
+        .map_err(|error| MetalError::BadShape {
+            kernel,
+            detail: error.to_string(),
+        })?;
+    }
     enc.set_pipeline(&pso);
     enc.set_bytes(
         0,
@@ -5229,6 +5360,76 @@ fn encode_select_blocks_tensors(
         },
     );
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn validate_parallel_scan_selector(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    scores: &MetalTensor,
+    visible: &MetalTensor,
+    ids: &MetalTensor,
+    counts: &MetalTensor,
+    status: &MetalTensor,
+    capacity: usize,
+    budget: usize,
+    queries: usize,
+    pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
+) -> Result<(), Qwen4ExpQsaError> {
+    validate_encoder(ctx, enc)?;
+    if capacity == 0
+        || capacity > i32::MAX as usize
+        || budget == 0
+        || budget > capacity
+        || queries == 0
+        || capacity
+            .checked_mul(queries)
+            .is_none_or(|n| n > u32::MAX as usize)
+        || budget
+            .checked_mul(queries)
+            .is_none_or(|n| n > u32::MAX as usize)
+    {
+        return invalid("parallel-scan QSA selector geometry exceeds checked integer addressing");
+    }
+    require_tensor(
+        "selector scores",
+        scores,
+        GgmlType::F32,
+        &[capacity as u64, queries as u64],
+        false,
+    )?;
+    require_tensor(
+        "selector IDs",
+        ids,
+        GgmlType::I32,
+        &[budget as u64, queries as u64],
+        true,
+    )?;
+    for (name, tensor, writable) in [
+        ("selector visibility", visible, false),
+        ("selector counts", counts, true),
+        ("selector status", status, true),
+    ] {
+        require_tensor(name, tensor, GgmlType::I32, &[queries as u64], writable)?;
+    }
+    let tensors = [
+        ("scores", scores),
+        ("visibility", visible),
+        ("IDs", ids),
+        ("counts", counts),
+        ("status", status),
+    ];
+    require_same_device(ctx, &tensors)?;
+    require_disjoint(&tensors)?;
+    validate_cooperative_pipeline(
+        PARALLEL_SCAN_SELECTOR_KERNEL,
+        pipeline.threadExecutionWidth(),
+        pipeline.maxTotalThreadsPerThreadgroup(),
+        pipeline.staticThreadgroupMemoryLength(),
+        SELECTOR_SCRATCH_BYTES,
+        ctx.device.maxThreadgroupMemoryLength(),
+    )
 }
 
 fn encode_expand_ids(

@@ -66,15 +66,6 @@ pub(crate) enum DurableCapturePolicy {
     AutomaticCompleted,
 }
 
-impl DurableCapturePolicy {
-    pub(crate) fn prompt_prefix_len(self) -> Option<usize> {
-        match self {
-            Self::ExplicitPrompt(len) | Self::AutomaticPrompt(len) => Some(len),
-            Self::Disabled | Self::AutomaticCompleted => None,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CompletedCheckpointBoundary {
     pub(crate) consumed_generated_tokens: usize,

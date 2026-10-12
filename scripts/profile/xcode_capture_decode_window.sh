@@ -17,7 +17,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 case "$MODEL_KEY" in
   a3b)  MODEL_FILE="Qwen3.5-35B-A3B-Q4_K_M.gguf" ;;
   27b)  MODEL_FILE="Qwen3.5-27B-Q4_K_M.gguf" ;;
-  a10b) MODEL_FILE="Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf" ;;
+  a10b) MODEL_FILE="Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf" ;;
   *) echo "unknown model key: $MODEL_KEY (want a3b|27b|a10b)"; exit 1 ;;
 esac
 

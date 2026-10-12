@@ -68,7 +68,7 @@ pub const QWEN35_0_8B_F32: Fixture = Fixture {
 pub const A10B_Q4_K_XL: Fixture = Fixture {
     id: "qwen3.5-122b-a10b-ud-q4_k_xl",
     env: &[],
-    filename: "Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+    filename: "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
 };
 
 /// Qwen3.5-35B-A3B Q3_K_M (older A3B quant used by MoE kernel tests).

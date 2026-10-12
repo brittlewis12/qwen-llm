@@ -28,14 +28,19 @@ if ! worktree_clean; then
   exit 1
 fi
 
-machine_path_patterns=(' /''Users/' ' /''Volumes/' ' /''home/' '~''/models' '$HOME''/models')
-for pattern in "${machine_path_patterns[@]}"; do
-  pattern=${pattern# }
+check_machine_path_fragment() {
+  local pattern="$1$2"
   if git grep -n -F "$pattern" HEAD -- . ':!docs/**'; then
     echo "check-contracts: machine-specific path found outside docs" >&2
     exit 1
   fi
-done
+}
+
+check_machine_path_fragment '/' 'Users/'
+check_machine_path_fragment '/' 'Volumes/'
+check_machine_path_fragment '/' 'home/'
+check_machine_path_fragment '~' '/models'
+check_machine_path_fragment '$HOME' '/models'
 
 commit=$(git rev-parse HEAD)
 tree=$(git rev-parse 'HEAD^{tree}')

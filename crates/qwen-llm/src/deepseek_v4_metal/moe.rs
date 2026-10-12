@@ -2,6 +2,75 @@
 
 use super::*;
 
+pub(super) fn routed_all_slots_gate_up_selector(dtype: GgmlType) -> Option<&'static str> {
+    Some(match dtype {
+        GgmlType::IQ2_XS => "kernel_deepseek_v4_all_slots_swiglu_iq2_xs_f32_fast",
+        GgmlType::IQ2_S => "kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast",
+        GgmlType::IQ3_XXS => "kernel_deepseek_v4_all_slots_swiglu_iq3_xxs_f32_fast",
+        GgmlType::IQ3_S => "kernel_deepseek_v4_all_slots_swiglu_iq3_s_f32_fast",
+        GgmlType::Q3_K => "kernel_deepseek_v4_all_slots_swiglu_q3_K_f32",
+        _ => return None,
+    })
+}
+
+pub(super) fn routed_all_slots_down_selector(dtype: GgmlType) -> Option<(&'static str, usize)> {
+    Some(match dtype {
+        GgmlType::IQ3_XXS => ("kernel_deepseek_v4_all_slots_down_iq3_xxs_f32_fast", 64),
+        GgmlType::MXFP4 => ("kernel_deepseek_v4_all_slots_down_mxfp4_f32", 128),
+        GgmlType::Q4_K => ("kernel_deepseek_v4_all_slots_down_q4_K_f32", 64),
+        _ => return None,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum SharedSwiGluKernel {
+    Q6K,
+    Q8_0,
+}
+
+fn shared_swiglu_selector(dtype: GgmlType) -> Option<SharedSwiGluKernel> {
+    match dtype {
+        GgmlType::Q6_K => Some(SharedSwiGluKernel::Q6K),
+        GgmlType::Q8_0 => Some(SharedSwiGluKernel::Q8_0),
+        _ => None,
+    }
+}
+
+pub(super) fn indexed_expert_selector(
+    dtype: GgmlType,
+) -> Option<(&'static str, usize, usize, usize)> {
+    Some(match dtype {
+        GgmlType::IQ2_XS => (
+            "kernel_deepseek_v4_indexed_mat_vec_iq2_xs_f32_fast",
+            8,
+            64,
+            256,
+        ),
+        GgmlType::IQ2_S => (
+            "kernel_deepseek_v4_indexed_mat_vec_iq2_s_f32_fast",
+            8,
+            64,
+            256,
+        ),
+        GgmlType::IQ3_XXS => (
+            "kernel_deepseek_v4_indexed_mat_vec_iq3_xxs_f32_fast",
+            8,
+            64,
+            256,
+        ),
+        GgmlType::IQ3_S => (
+            "kernel_deepseek_v4_indexed_mat_vec_iq3_s_f32_fast",
+            8,
+            64,
+            256,
+        ),
+        GgmlType::Q3_K => ("kernel_deepseek_v4_indexed_mat_vec_q3_K_f32", 8, 64, 256),
+        GgmlType::Q4_K => ("kernel_deepseek_v4_indexed_mat_vec_q4_K_f32", 4, 64, 256),
+        GgmlType::MXFP4 => ("kernel_deepseek_v4_indexed_mat_vec_mxfp4_f32", 4, 128, 32),
+        _ => return None,
+    })
+}
+
 pub(super) const DEEPSEEK_V4_ROUTE_STATUS_READY: i32 = 1;
 
 pub(super) const DEEPSEEK_V4_ROUTE_STATUS_NONFINITE_LOGIT: i32 = -1;
@@ -1012,44 +1081,22 @@ impl DeepSeekV4MoeScratch {
                 );
             });
         }
-        if gate_bank.dtype != up_bank.dtype
-            || !matches!(
-                gate_bank.dtype,
-                GgmlType::IQ2_XS
-                    | GgmlType::IQ2_S
-                    | GgmlType::IQ3_XXS
-                    | GgmlType::IQ3_S
-                    | GgmlType::Q3_K
-            )
-        {
+        let gate_kernel = routed_all_slots_gate_up_selector(gate_bank.dtype);
+        if gate_bank.dtype != up_bank.dtype || gate_kernel.is_none() {
             return invalid(format!(
-                "all-slot routed gate/up require matching IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, or Q3_K storage, got {:?}/{:?}",
+                "all-slot routed gate/up require matching executable dtypes, got {:?}/{:?}",
                 gate_bank.dtype, up_bank.dtype
             ));
         }
-        if !matches!(
-            down_bank.dtype,
-            GgmlType::IQ3_XXS | GgmlType::MXFP4 | GgmlType::Q4_K
-        ) {
+        let down_kernel = routed_all_slots_down_selector(down_bank.dtype);
+        if down_kernel.is_none() {
             return invalid(format!(
-                "all-slot routed down requires IQ3_XXS, MXFP4, or Q4_K storage, got {:?}",
+                "all-slot routed down requires an executable dtype, got {:?}",
                 down_bank.dtype
             ));
         }
-        let gate_kernel = match gate_bank.dtype {
-            GgmlType::IQ2_XS => "kernel_deepseek_v4_all_slots_swiglu_iq2_xs_f32_fast",
-            GgmlType::IQ2_S => "kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast",
-            GgmlType::IQ3_XXS => "kernel_deepseek_v4_all_slots_swiglu_iq3_xxs_f32_fast",
-            GgmlType::IQ3_S => "kernel_deepseek_v4_all_slots_swiglu_iq3_s_f32_fast",
-            GgmlType::Q3_K => "kernel_deepseek_v4_all_slots_swiglu_q3_K_f32",
-            _ => unreachable!("gate/up dtype was validated above"),
-        };
-        let (down_kernel, down_threads) = match down_bank.dtype {
-            GgmlType::IQ3_XXS => ("kernel_deepseek_v4_all_slots_down_iq3_xxs_f32_fast", 64),
-            GgmlType::MXFP4 => ("kernel_deepseek_v4_all_slots_down_mxfp4_f32", 128),
-            GgmlType::Q4_K => ("kernel_deepseek_v4_all_slots_down_q4_K_f32", 64),
-            _ => unreachable!("down dtype was validated above"),
-        };
+        let gate_kernel = gate_kernel.expect("selector checked above");
+        let (down_kernel, down_threads) = down_kernel.expect("selector checked above");
         validate_deepseek_v4_all_slot_pipeline(ctx, gate_kernel, 64, 64)?;
         validate_deepseek_v4_all_slot_pipeline(ctx, down_kernel, down_threads, 0)?;
         encode_ds4_all_slots_gate_up_swiglu(
@@ -1162,9 +1209,10 @@ impl DeepSeekV4MoeScratch {
         require_serial(enc, "deepseek_v4_moe_shared_expert")?;
         let c = self.config;
         let fused_q6_scratch = checked_mul(c.ffn_size, 3, "MoE gate and fused Q6 scratch")?;
+        let fused_kernel = shared_swiglu_selector(shared_gate.dtype);
         let fused = deepseek_v4_decode_shared_swiglu_enabled()
             && shared_gate.dtype == shared_up.dtype
-            && matches!(shared_gate.dtype, GgmlType::Q6_K | GgmlType::Q8_0);
+            && fused_kernel.is_some();
         let shared_inner = if fused && shared_gate.dtype == GgmlType::Q6_K {
             self.gate.view_subrange(0, vec![c.ffn_size as u64])
         } else {
@@ -1177,8 +1225,8 @@ impl DeepSeekV4MoeScratch {
                     "deepseek_v4: decode shared gate/up/clamped-SwiGLU runs one fused dispatch; rollback=QWEN_DSV4_DECODE_SHARED_SWIGLU=0"
                 );
             });
-            match shared_gate.dtype {
-                GgmlType::Q6_K => {
+            match fused_kernel.expect("selector checked above") {
+                SharedSwiGluKernel::Q6K => {
                     let scratch = self.gate.view_subrange(0, vec![fused_q6_scratch as u64]);
                     crate::metal::encode_ds4_shared_swiglu_q6_k_f32(
                         ctx,
@@ -1192,7 +1240,7 @@ impl DeepSeekV4MoeScratch {
                         shared_clamp,
                     )
                 }
-                GgmlType::Q8_0 => crate::metal::encode_ds4_shared_swiglu_q8_0_f32(
+                SharedSwiGluKernel::Q8_0 => crate::metal::encode_ds4_shared_swiglu_q8_0_f32(
                     ctx,
                     enc,
                     shared_gate,
@@ -1203,7 +1251,6 @@ impl DeepSeekV4MoeScratch {
                     c.ffn_size,
                     shared_clamp,
                 ),
-                _ => unreachable!("fused shared-expert dtype was qualified"),
             }
             .map_err(DeepSeekV4MetalError::Metal)?;
         } else {
@@ -1508,40 +1555,13 @@ pub(super) fn encode_ds4_indexed_expert_projection(
     validate_f32(input, &[n_in as u64], false, &format!("{name} input"))?;
     validate_f32(output, &[n_out as u64], true, &format!("{name} output"))?;
 
-    let (kernel, rows_per_group, threads_per_group, block_size) = match bank.dtype {
-        GgmlType::IQ2_XS => (
-            "kernel_deepseek_v4_indexed_mat_vec_iq2_xs_f32_fast",
-            8,
-            64,
-            256,
-        ),
-        GgmlType::IQ2_S => (
-            "kernel_deepseek_v4_indexed_mat_vec_iq2_s_f32_fast",
-            8,
-            64,
-            256,
-        ),
-        GgmlType::IQ3_XXS => (
-            "kernel_deepseek_v4_indexed_mat_vec_iq3_xxs_f32_fast",
-            8,
-            64,
-            256,
-        ),
-        GgmlType::IQ3_S => (
-            "kernel_deepseek_v4_indexed_mat_vec_iq3_s_f32_fast",
-            8,
-            64,
-            256,
-        ),
-        GgmlType::Q3_K => ("kernel_deepseek_v4_indexed_mat_vec_q3_K_f32", 8, 64, 256),
-        GgmlType::Q4_K => ("kernel_deepseek_v4_indexed_mat_vec_q4_K_f32", 4, 64, 256),
-        GgmlType::MXFP4 => ("kernel_deepseek_v4_indexed_mat_vec_mxfp4_f32", 4, 128, 32),
-        dtype => {
-            return invalid(format!(
-                "{name} has unsupported indexed expert dtype {dtype:?}"
-            ));
-        }
-    };
+    let (kernel, rows_per_group, threads_per_group, block_size) =
+        indexed_expert_selector(bank.dtype).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(format!(
+                "{name} has unsupported indexed expert dtype {:?}",
+                bank.dtype
+            ))
+        })?;
     if !n_in.is_multiple_of(block_size) {
         return invalid(format!(
             "{name} input width {n_in} is not divisible by block size {block_size}"

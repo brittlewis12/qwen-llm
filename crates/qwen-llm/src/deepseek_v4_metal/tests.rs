@@ -63,6 +63,81 @@ fn dense_matvec_admission_matches_metal_forward_dispatch() {
     }
 }
 
+#[test]
+fn routed_selector_predicates_match_their_operation_tables() {
+    let dtypes = [
+        GgmlType::F32,
+        GgmlType::F16,
+        GgmlType::Q4_0,
+        GgmlType::Q4_1,
+        GgmlType::Q5_0,
+        GgmlType::Q5_1,
+        GgmlType::Q8_0,
+        GgmlType::Q8_1,
+        GgmlType::Q2_K,
+        GgmlType::Q3_K,
+        GgmlType::Q4_K,
+        GgmlType::Q5_K,
+        GgmlType::Q6_K,
+        GgmlType::Q8_K,
+        GgmlType::IQ2_XXS,
+        GgmlType::IQ2_XS,
+        GgmlType::IQ3_XXS,
+        GgmlType::IQ1_S,
+        GgmlType::IQ4_NL,
+        GgmlType::IQ3_S,
+        GgmlType::IQ2_S,
+        GgmlType::IQ4_XS,
+        GgmlType::I8,
+        GgmlType::I16,
+        GgmlType::I32,
+        GgmlType::I64,
+        GgmlType::F64,
+        GgmlType::IQ1_M,
+        GgmlType::BF16,
+        GgmlType::TQ1_0,
+        GgmlType::TQ2_0,
+        GgmlType::MXFP4,
+        GgmlType::NVFP4,
+        GgmlType::Q1_0,
+        GgmlType::Q2_0,
+        GgmlType::Unknown,
+    ];
+    for dtype in dtypes {
+        assert_eq!(
+            super::moe::routed_all_slots_gate_up_selector(dtype).is_some(),
+            matches!(
+                dtype,
+                GgmlType::IQ2_XS
+                    | GgmlType::IQ2_S
+                    | GgmlType::IQ3_XXS
+                    | GgmlType::IQ3_S
+                    | GgmlType::Q3_K
+            ),
+            "gate/up {dtype:?}"
+        );
+        assert_eq!(
+            super::moe::routed_all_slots_down_selector(dtype).is_some(),
+            matches!(dtype, GgmlType::IQ3_XXS | GgmlType::MXFP4 | GgmlType::Q4_K),
+            "down {dtype:?}"
+        );
+        assert_eq!(
+            super::moe::indexed_expert_selector(dtype).is_some(),
+            matches!(
+                dtype,
+                GgmlType::IQ2_XS
+                    | GgmlType::IQ2_S
+                    | GgmlType::IQ3_XXS
+                    | GgmlType::IQ3_S
+                    | GgmlType::Q3_K
+                    | GgmlType::Q4_K
+                    | GgmlType::MXFP4
+            ),
+            "indexed {dtype:?}"
+        );
+    }
+}
+
 fn max_finite_metric(values: impl IntoIterator<Item = f64>) -> f64 {
     let mut maximum = 0.0f64;
     let mut count = 0usize;

@@ -1769,7 +1769,7 @@ mod tests {
 
     #[test]
     fn causal_snapshot_roundtrip_preserves_bits_and_revokes_observation() {
-        let Ok(ctx) = MetalContext::new() else {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
         let config = crate::deepseek_v4::flash_0731_config_fixture();
@@ -1870,7 +1870,7 @@ mod tests {
 
     #[test]
     fn snapshot_v1_restores_canonically_across_physical_capacities() {
-        let Ok(ctx) = MetalContext::new() else {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
         let mut config = crate::deepseek_v4::flash_0731_config_fixture();
@@ -1973,7 +1973,7 @@ mod tests {
 
     #[test]
     fn larger_capacity_snapshot_rejects_smaller_destination_atomically() {
-        let Ok(ctx) = MetalContext::new() else {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
         let mut config = crate::deepseek_v4::flash_0731_config_fixture();
@@ -2034,7 +2034,7 @@ mod tests {
 
     #[test]
     fn snapshot_rejection_is_preflight_atomic_and_poison_is_ineligible() {
-        let Ok(ctx) = MetalContext::new() else {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
         let config = crate::deepseek_v4::flash_0731_config_fixture();

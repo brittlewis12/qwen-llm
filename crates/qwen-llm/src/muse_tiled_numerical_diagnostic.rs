@@ -179,12 +179,7 @@ fn diagnostic_f64(
 #[test]
 #[ignore = "serial Metal, reusable 8K prefix and same-input/per-layer numerical diagnosis; no timing verdict"]
 fn tiled_prefill_numerical_diagnostic() {
-    if crate::test_fixtures::MUSE_GLIMMER_Q8_0
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
 
     use std::io::Write;
     let root = std::path::Path::new("target/profiles/muse-tiled-diagnostic");
@@ -217,7 +212,7 @@ fn tiled_prefill_numerical_diagnostic() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    let gguf = GgufFile::open(&path).unwrap();
+    let gguf = GgufFile::open(path).unwrap();
     let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
     let tokens = long_context_tokens(path, &config);
     let model_metadata = std::fs::metadata(path).unwrap();

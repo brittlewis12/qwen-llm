@@ -12,8 +12,6 @@ const CURRENT_FIXTURE_JSON: &str =
 const LEGACY_PROVISIONING_JSON: &str = include_str!(
     "fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_legacy_2026_07_31_provisioning_v1.json"
 );
-const DEFAULT_CURRENT_MODEL: &str = "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
-const DEFAULT_LEGACY_MODEL: &str = "models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
 
 fn legacy_fixture() -> PinnedDeepSeekV4AssetV1 {
     PinnedDeepSeekV4AssetV1::parse(LEGACY_FIXTURE_JSON).expect("valid legacy pinned DS4 census")
@@ -308,7 +306,11 @@ fn fixture_rejects_rehashed_dtype_identity_and_cross_table_drift() {
 fn live_current_asset_matches_pinned_schema_and_quant_census() {
     let model_path = std::env::var_os("DSV4_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_CURRENT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(
         model_path.exists(),
         "missing DS4 fixture at {}",
@@ -325,7 +327,11 @@ fn live_current_asset_matches_pinned_schema_and_quant_census() {
 fn live_legacy_asset_matches_pinned_schema_and_content_identity() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_LEGACY_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(
         model_path.exists(),
         "missing legacy DS4 fixture at {}",

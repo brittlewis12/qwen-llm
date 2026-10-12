@@ -815,10 +815,10 @@ mod tests {
     }
 
     fn test_model_and_dir(label: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        let model = std::path::PathBuf::from(
-            std::env::var("QWEN_DURABLE_TEST_MODEL")
-                .unwrap_or_else(|_| "models/Qwen3.5-0.8B-Q4_K_M.gguf".into()),
-        );
+        let model =
+            std::path::PathBuf::from(std::env::var("QWEN_DURABLE_TEST_MODEL").unwrap_or_else(
+                |_| qwen_llm::test_fixtures::required_filename("Qwen3.5-0.8B-Q4_K_M.gguf").into(),
+            ));
         let dir = std::env::temp_dir().join(format!(
             "qwen-serve-durable-{label}-{}-{}",
             std::process::id(),
@@ -925,10 +925,10 @@ mod tests {
     #[test]
     #[ignore = "serial Metal; loads QWEN_DURABLE_TEST_MODEL (default 0.8B) twice"]
     fn restart_restores_prompt_boundary_from_disk_with_identical_continuation() {
-        let model = std::path::PathBuf::from(
-            std::env::var("QWEN_DURABLE_TEST_MODEL")
-                .unwrap_or_else(|_| "models/Qwen3.5-0.8B-Q4_K_M.gguf".into()),
-        );
+        let model =
+            std::path::PathBuf::from(std::env::var("QWEN_DURABLE_TEST_MODEL").unwrap_or_else(
+                |_| qwen_llm::test_fixtures::required_filename("Qwen3.5-0.8B-Q4_K_M.gguf").into(),
+            ));
         let dir = std::env::temp_dir().join(format!(
             "qwen-serve-durable-restart-{}-{}",
             std::process::id(),

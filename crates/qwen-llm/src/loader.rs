@@ -1693,19 +1693,15 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
     fn loads_0_8b_f32() {
-        if crate::test_fixtures::QWEN35_0_8B_F32
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
         let path = crate::test_fixtures::QWEN35_0_8B_F32.required();
         if !std::path::Path::new(&path).exists() {
             return;
         }
-        let g = GgufFile::open(&path).expect("open");
+        let g = GgufFile::open(path).expect("open");
         let m = Model::from_gguf(&g).expect("load model");
         eprintln!("[loader] {}", summary(&m));
         assert_eq!(m.arch.n_layer, 24);
@@ -1734,12 +1730,13 @@ mod tests {
     /// the NEXTN/MTP head). The main forward path sees only the 24
     /// base layers; the MTP head is bound separately under `m.mtp`.
     #[test]
+    #[ignore = "model witness: qwen3-5-0-8b-q4-k-m"]
     fn loads_0_8b_with_mtp() {
-        let path = "models/h4-smoke-test/Qwen3.5-0.8B/qwen3.5-0.8b.Q4_K_M.gguf";
+        let path = crate::test_fixtures::required_filename("qwen3.5-0.8b.Q4_K_M.gguf");
         if !std::path::Path::new(&path).exists() {
             return;
         }
-        let g = GgufFile::open(&path).expect("open");
+        let g = GgufFile::open(path).expect("open");
         let m = Model::from_gguf(&g).expect("load model");
         eprintln!("[loader] {}", summary(&m));
         // block_count=25 in metadata, MTP=1, so main forward sees 24.
@@ -1775,19 +1772,15 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen36-27b-q4-k-m"]
     fn loads_27b_q4_k_m() {
-        if crate::test_fixtures::QWEN36_27B_Q4_K_M
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
 
         let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
         if !std::path::Path::new(&path).exists() {
             return;
         }
-        let g = GgufFile::open(&path).expect("open");
+        let g = GgufFile::open(path).expect("open");
         let m = Model::from_gguf(&g).expect("load model");
         eprintln!("[loader] {}", summary(&m));
         assert_eq!(m.arch.n_layer, 64);
@@ -1811,16 +1804,15 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: a3b-q4-k-m"]
     fn loads_35b_a3b_q4_k_m() {
-        if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-            return;
-        }
+        let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
         let path = crate::test_fixtures::A3B_Q4_K_M.required();
         if !std::path::Path::new(&path).exists() {
             return;
         }
-        let g = GgufFile::open(&path).expect("open");
+        let g = GgufFile::open(path).expect("open");
         let m = Model::from_gguf(&g).expect("load model");
         eprintln!("[loader-moe] {}", summary(&m));
         assert_eq!(m.arch.kind, ArchKind::Moe);
@@ -1857,19 +1849,10 @@ mod tests {
     /// match the GGUF metadata exactly. Skipped if either file is
     /// missing locally.
     #[test]
+    #[ignore = "model witness: dflash-draft-36-q8-0"]
     fn loads_dflash_drafter_3_6_27b() {
-        if crate::test_fixtures::DFLASH_DRAFT_36_Q8_0
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
-        if crate::test_fixtures::QWEN36_27B_Q4_K_M
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::DFLASH_DRAFT_36_Q8_0.required();
+        let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
 
         let target_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
         let drafter_path = crate::test_fixtures::DFLASH_DRAFT_36_Q8_0.required();
@@ -1879,9 +1862,9 @@ mod tests {
             eprintln!("[dflash-load] skipped — fixtures missing");
             return;
         }
-        let target_g = GgufFile::open(&target_path).expect("open target");
+        let target_g = GgufFile::open(target_path).expect("open target");
         let target_m = Model::from_gguf(&target_g).expect("load target");
-        let drafter_g = GgufFile::open(&drafter_path).expect("open drafter");
+        let drafter_g = GgufFile::open(drafter_path).expect("open drafter");
 
         let head = open_dflash_drafter(&drafter_g, &target_m).expect("bind drafter");
 
@@ -1924,8 +1907,9 @@ mod tests {
     #[test]
     #[ignore = "requires local Qwen3.8 target and Q4 DFlash2 GGUF fixtures"]
     fn loads_dflash2_q4_selector_codebooks() {
-        let target_path = "models/Qwen3.8-27B-Q4_K_M.gguf";
-        let drafter_path = "models/incoai-dflash2/Qwen3.8-27B-DFlash2-Q4_K_M.gguf";
+        let target_path = crate::test_fixtures::required_filename("Qwen3.8-27B-Q4_K_M.gguf");
+        let drafter_path =
+            crate::test_fixtures::required_filename("Qwen3.8-27B-DFlash2-Q4_K_M.gguf");
         assert!(
             std::path::Path::new(&target_path).exists(),
             "missing target fixture"
@@ -1935,9 +1919,9 @@ mod tests {
             "missing drafter fixture"
         );
 
-        let target_g = GgufFile::open(&target_path).expect("open target");
+        let target_g = GgufFile::open(target_path).expect("open target");
         let target_m = Model::from_gguf(&target_g).expect("load target");
-        let drafter_g = GgufFile::open(&drafter_path).expect("open drafter");
+        let drafter_g = GgufFile::open(drafter_path).expect("open drafter");
         let head = open_dflash_drafter(&drafter_g, &target_m).expect("bind drafter");
         let selector = head.selector.as_ref().expect("DFlash2 selector");
 
@@ -1956,12 +1940,13 @@ mod tests {
     /// MTP-aware Q4_K_M GGUF at brittlewis12/Qwen3.6-27B-MTP-GGUF.
     /// Skipped if the file isn't present locally.
     #[test]
+    #[ignore = "model witness: qwen3-6-27b-mtp-q4-k-m"]
     fn loads_27b_mtp_q4_k_m() {
-        let path = "models/Qwen3.6-27B-MTP-Q4_K_M.gguf";
+        let path = crate::test_fixtures::required_filename("Qwen3.6-27B-MTP-Q4_K_M.gguf");
         if !std::path::Path::new(&path).exists() {
             return;
         }
-        let g = GgufFile::open(&path).expect("open");
+        let g = GgufFile::open(path).expect("open");
         let m = Model::from_gguf(&g).expect("load model");
         eprintln!("[loader] {}", summary(&m));
         // 64 base layers + 1 MTP block at index 64.

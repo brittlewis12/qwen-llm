@@ -404,7 +404,7 @@ fn boundaries_are_recorded_while_rendering_not_found_by_scanning() {
 #[ignore = "CPU/header-only; requires GLM53_GGUF (GLM-5.3-Flash shard 1), no inference or GPU"]
 fn gguf_profile_verifies_and_native_tokens_match_hf() {
     let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
-    let gguf = GgufFile::open(&path).unwrap();
+    let gguf = GgufFile::open(path).unwrap();
     let artifact = crate::glm5_next::admission::Glm5NextPreparedArtifact::inspect(&gguf).unwrap();
     let stops = artifact.generation_stops().unwrap();
     let profile = verify_profile(&gguf, artifact.tokenizer(), &stops).unwrap();

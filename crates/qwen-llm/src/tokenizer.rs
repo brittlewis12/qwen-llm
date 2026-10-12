@@ -2132,8 +2132,6 @@ mod tests {
     use fancy_regex::Regex;
     use proptest::prelude::*;
 
-    const DS4_0731_CURRENT: &str = "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
-
     #[test]
     fn raw_i32le_token_digest_matches_frozen_vectors() {
         assert_eq!(
@@ -2179,8 +2177,8 @@ mod tests {
                 let path = fixture()?;
                 Some(OraclePair {
                     path,
-                    ffi: LlamaCppTokenizer::open(&path).expect("open ffi tokenizer"),
-                    native: NativeTokenizer::open(&path).expect("open native tokenizer"),
+                    ffi: LlamaCppTokenizer::open(path).expect("open ffi tokenizer"),
+                    native: NativeTokenizer::open(path).expect("open native tokenizer"),
                 })
             })
             .as_ref()
@@ -2192,14 +2190,14 @@ mod tests {
                 .required()
                 .to_str()
                 .unwrap(),
-            "models/Qwen3.5-0.8B-BF16.gguf",
-            "models/Qwen3.5-4B-BF16.gguf",
-            "models/Qwen3.5-27B-Q4_K_M.gguf",
+            crate::test_fixtures::required_filename("Qwen3.5-0.8B-BF16.gguf"),
+            crate::test_fixtures::required_filename("Qwen3.5-4B-BF16.gguf"),
+            crate::test_fixtures::required_filename("Qwen3.5-27B-Q4_K_M.gguf"),
             crate::test_fixtures::QWEN36_27B_Q4_K_M
                 .required()
                 .to_str()
                 .unwrap(),
-            "models/Qwen3.6-27B-MTP-Q4_K_M.gguf",
+            crate::test_fixtures::required_filename("Qwen3.6-27B-MTP-Q4_K_M.gguf"),
             crate::test_fixtures::A3B_Q4_K_M
                 .required()
                 .to_str()
@@ -2219,15 +2217,10 @@ mod tests {
     #[test]
     #[ignore = "set QWEN4EXP_TOKENIZER_GGUF to the pinned Flash-Next release"]
     fn released_qwen4exp_tokenizer_preserves_specials_and_exact_bytes() {
-        if crate::test_fixtures::QWEN4EXP_Q3_K_XL
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
 
         let path = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
-        let gguf = GgufFile::open(&path).expect("open released Flash-Next GGUF");
+        let gguf = GgufFile::open(path).expect("open released Flash-Next GGUF");
         assert_eq!(gguf.architecture().as_deref(), Some("qwen4exp"));
         let identity = qwen4exp_tokenizer_identity_sha256(&gguf).unwrap();
         let identity_hex = identity
@@ -2473,9 +2466,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
     fn opens_and_encodes() {
         let Some(path) = fixture() else { return };
-        let tok = Tokenizer::open(&path).expect("open tokenizer");
+        let tok = Tokenizer::open(path).expect("open tokenizer");
         assert!(tok.n_vocab() >= 248_000, "n_vocab={}", tok.n_vocab());
 
         // A canonical short prompt that should produce a well-known short
@@ -2506,9 +2500,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
     fn special_tokens_round_trip() {
         let Some(path) = fixture() else { return };
-        let tok = Tokenizer::open(&path).expect("open");
+        let tok = Tokenizer::open(path).expect("open");
         // <|im_start|> is one of the chat template specials.
         let ids = tok.encode("<|im_start|>user\nhi<|im_end|>", false).unwrap();
         let s = tok.decode(&ids);
@@ -2558,9 +2553,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
     fn rejects_invalid_decode_token() {
         let Some(path) = fixture() else { return };
-        let tok = Tokenizer::open(&path).expect("open tokenizer");
+        let tok = Tokenizer::open(path).expect("open tokenizer");
         let err = tok
             .try_decode_piece(-1)
             .expect_err("negative token should fail");
@@ -2572,10 +2568,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
     fn native_matches_llama_cpp_oracle_on_edge_prompts() {
         let Some(path) = fixture() else { return };
-        let ffi = LlamaCppTokenizer::open(&path).expect("open ffi tokenizer");
-        let native = NativeTokenizer::open(&path).expect("open native tokenizer");
+        let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
+        let native = NativeTokenizer::open(path).expect("open native tokenizer");
         for prompt in adversarial_prompts() {
             for add_special in [false, true] {
                 assert_tokenizers_match(&ffi, &native, path, prompt, add_special);
@@ -2584,10 +2581,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
     fn native_matches_llama_cpp_on_generated_unicode_prompts() {
         let Some(path) = fixture() else { return };
-        let ffi = LlamaCppTokenizer::open(&path).expect("open ffi tokenizer");
-        let native = NativeTokenizer::open(&path).expect("open native tokenizer");
+        let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
+        let native = NativeTokenizer::open(path).expect("open native tokenizer");
         for prompt in generated_unicode_prompts() {
             for add_special in [false, true] {
                 assert_tokenizers_match(&ffi, &native, path, &prompt, add_special);
@@ -2603,6 +2601,7 @@ mod tests {
         })]
 
         #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
         fn native_matches_llama_cpp_property_fuzz(
             prompt in fuzz_prompt_strategy(),
             add_special in any::<bool>(),
@@ -2644,8 +2643,8 @@ mod tests {
             "<|fim_prefix|>code<|fim_middle|>body<|fim_suffix|>",
         ];
         for path in fixtures {
-            let ffi = LlamaCppTokenizer::open(&path).expect("open ffi tokenizer");
-            let native = NativeTokenizer::open(&path).expect("open native tokenizer");
+            let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
+            let native = NativeTokenizer::open(path).expect("open native tokenizer");
             for prompt in prompts {
                 for add_special in [false, true] {
                     assert_tokenizers_match(&ffi, &native, path, prompt, add_special);
@@ -2655,9 +2654,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
     fn native_rejects_invalid_decode_token() {
         let Some(path) = fixture() else { return };
-        let native = match NativeTokenizer::open(&path) {
+        let native = match NativeTokenizer::open(path) {
             Ok(native) => native,
             Err(TokError::UnsupportedNativeTokenizer { .. }) => return,
             Err(err) => panic!("open native tokenizer: {err}"),
@@ -2681,9 +2681,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
     fn native_exact_piece_bytes_preserve_utf8_boundaries() {
         let Some(path) = fixture() else { return };
-        let native = NativeTokenizer::open(&path).expect("open native tokenizer");
+        let native = NativeTokenizer::open(path).expect("open native tokenizer");
         let text = "JSON: {\"emoji\":\"🙂\",\"city\":\"上海\"}";
         let ids = native
             .encode(text, false)
@@ -2705,9 +2706,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
     fn native_exact_piece_bytes_do_not_replace_invalid_utf8() {
         let Some(path) = fixture() else { return };
-        let native = NativeTokenizer::open(&path).expect("open native tokenizer");
+        let native = NativeTokenizer::open(path).expect("open native tokenizer");
         let token = native.byte_token_ids[0xff];
         assert_eq!(
             native
@@ -2724,9 +2726,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
     fn native_content_policy_excludes_chat_control_tokens() {
         let Some(path) = fixture() else { return };
-        let native = NativeTokenizer::open(&path).expect("open native tokenizer");
+        let native = NativeTokenizer::open(path).expect("open native tokenizer");
         let control = native
             .encode("<|im_start|>", false)
             .expect("encode control token");
@@ -2747,10 +2750,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
     fn native_decode_piece_matches_llama_cpp_for_full_vocab() {
         let Some(path) = fixture() else { return };
-        let ffi = LlamaCppTokenizer::open(&path).expect("open ffi tokenizer");
-        let native = match NativeTokenizer::open(&path) {
+        let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
+        let native = match NativeTokenizer::open(path) {
             Ok(native) => native,
             Err(TokError::UnsupportedNativeTokenizer { .. }) => return,
             Err(err) => panic!("open native tokenizer: {err}"),
@@ -2774,10 +2778,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
     fn native_random_token_sequences_match_llama_cpp() {
         let Some(path) = fixture() else { return };
-        let ffi = LlamaCppTokenizer::open(&path).expect("open ffi tokenizer");
-        let native = NativeTokenizer::open(&path).expect("open native tokenizer");
+        let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
+        let native = NativeTokenizer::open(path).expect("open native tokenizer");
         let mut rng = Lcg::new(0x5eed_fade_dead_beef);
         for len in [0usize, 1, 2, 3, 4, 7, 16, 31, 64] {
             for _ in 0..32 {
@@ -2794,6 +2799,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
     fn native_lazy_decode_cache_is_thread_safe() {
         let Some(pair) = oracle_pair() else { return };
         let native = &pair.native;
@@ -2811,10 +2817,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
     fn native_special_token_literals_match_llama_cpp() {
         let Some(path) = fixture() else { return };
-        let ffi = LlamaCppTokenizer::open(&path).expect("open ffi tokenizer");
-        let native = NativeTokenizer::open(&path).expect("open native tokenizer");
+        let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
+        let native = NativeTokenizer::open(path).expect("open native tokenizer");
         let specials = special_token_texts(&native);
         for text in &specials {
             assert_tokenizers_match(&ffi, &native, path, text, false);
@@ -2830,8 +2837,8 @@ mod tests {
     #[ignore = "exhaustive cross-model special-token oracle sweep"]
     fn native_special_token_literals_match_llama_cpp_across_model_matrix() {
         for path in fixtures() {
-            let ffi = LlamaCppTokenizer::open(&path).expect("open ffi tokenizer");
-            let native = NativeTokenizer::open(&path).expect("open native tokenizer");
+            let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
+            let native = NativeTokenizer::open(path).expect("open native tokenizer");
             let specials = special_token_texts(&native);
             for text in &specials {
                 assert_tokenizers_match(&ffi, &native, path, text, false);
@@ -2889,8 +2896,17 @@ mod tests {
     #[test]
     #[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
     fn deepseek_v4_0731_native_tokenizer_smoke() {
-        assert!(Path::new(DS4_0731_CURRENT).exists(), "missing DS4 fixture");
-        let tokenizer = NativeTokenizer::open(DS4_0731_CURRENT).expect("open DS4 tokenizer");
+        assert!(
+            Path::new(crate::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf"
+            ))
+            .exists(),
+            "missing DS4 fixture"
+        );
+        let tokenizer = NativeTokenizer::open(crate::test_fixtures::required_filename(
+            "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+        ))
+        .expect("open DS4 tokenizer");
         assert_eq!(tokenizer.pretokenizer, PretokenizerKind::JoyAi);
         assert_eq!(tokenizer.n_vocab(), 129_280);
         assert_eq!(tokenizer.bos(), Some(0));
@@ -3020,12 +3036,21 @@ mod tests {
     #[ignore = "requires local DeepSeek V4 fixture and current llama.cpp tokenizer binary"]
     fn deepseek_v4_native_matches_current_llama_cpp_cli() {
         const LLAMA_TOKENIZE: &str = "$LLAMA_TOKENIZE";
-        assert!(Path::new(DS4_0731_CURRENT).exists(), "missing DS4 fixture");
+        assert!(
+            Path::new(crate::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf"
+            ))
+            .exists(),
+            "missing DS4 fixture"
+        );
         assert!(
             Path::new(LLAMA_TOKENIZE).exists(),
             "missing llama-tokenize oracle"
         );
-        let tokenizer = NativeTokenizer::open(DS4_0731_CURRENT).expect("open DS4 tokenizer");
+        let tokenizer = NativeTokenizer::open(crate::test_fixtures::required_filename(
+            "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+        ))
+        .expect("open DS4 tokenizer");
         let prompts = [
             "Hello, world!",
             "digits 1 12 123 1234 １２３４ ①Ⅻ",
@@ -3039,7 +3064,9 @@ mod tests {
             let output = std::process::Command::new(LLAMA_TOKENIZE)
                 .args([
                     "-m",
-                    DS4_0731_CURRENT,
+                    crate::test_fixtures::required_filename(
+                        "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                    ),
                     "--ids",
                     "--no-bos",
                     "--no-escape",

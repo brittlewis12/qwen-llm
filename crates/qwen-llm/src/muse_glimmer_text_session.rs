@@ -4001,12 +4001,7 @@ mod tests {
     #[test]
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn packed_q8_prefill_endpoint_and_scalar_continuation_match_scalar_bitwise() {
-        if crate::test_fixtures::MUSE_GLIMMER_Q8_0
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
 
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
             crate::test_fixtures::MUSE_GLIMMER_Q8_0
@@ -4062,12 +4057,7 @@ mod tests {
     #[test]
     #[ignore = "serial Metal, Muse live-prefix rewind and branch exactness"]
     fn live_prefix_rewind_matches_fresh_logits_and_all_active_kv() {
-        if crate::test_fixtures::MUSE_GLIMMER_Q8_0
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
 
         let gguf = GgufFile::open(crate::test_fixtures::MUSE_GLIMMER_Q8_0.required()).unwrap();
         let ctx = MetalContext::new().unwrap();
@@ -4148,12 +4138,7 @@ mod tests {
     #[test]
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn packed_q8_prefill_n144_superchunk_state_matches_scalar_bitwise() {
-        if crate::test_fixtures::MUSE_GLIMMER_Q8_0
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
 
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
             crate::test_fixtures::MUSE_GLIMMER_Q8_0
@@ -4210,12 +4195,7 @@ mod tests {
     #[test]
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn packed_q8_prefill_n128_wall_screen() {
-        if crate::test_fixtures::MUSE_GLIMMER_Q8_0
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
 
         use std::time::Instant;
 
@@ -4300,12 +4280,7 @@ mod tests {
     #[test]
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn packed_q8_mat_mat_n128_numerical_and_wall_screen() {
-        if crate::test_fixtures::MUSE_GLIMMER_Q8_0
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
 
         use std::time::Instant;
 
@@ -4701,16 +4676,11 @@ mod tests {
     #[test]
     #[ignore = "serial Metal, Muse longer native-prompt matrix numerical transfer and decode attribution"]
     fn packed_q8_matrix_current_prompt_transfer() {
-        if crate::test_fixtures::MUSE_GLIMMER_Q8_0
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
 
         let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
-        let tokenizer = LlamaCppTokenizer::open(&path).unwrap();
-        let gguf = GgufFile::open(&path).unwrap();
+        let tokenizer = LlamaCppTokenizer::open(path).unwrap();
+        let gguf = GgufFile::open(path).unwrap();
         let ctx = MetalContext::new().unwrap();
         let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).unwrap();
         let admitted = plan.admit(ctx.memory_signals()).unwrap();
@@ -4904,16 +4874,11 @@ mod tests {
     #[test]
     #[ignore = "serial Metal, Muse matrix-prefill/split-decode composition and actual packed attribution"]
     fn matrix_prefill_split_decode_composition() {
-        if crate::test_fixtures::MUSE_GLIMMER_Q8_0
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
 
         let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
-        let tokenizer = LlamaCppTokenizer::open(&path).unwrap();
-        let gguf = GgufFile::open(&path).unwrap();
+        let tokenizer = LlamaCppTokenizer::open(path).unwrap();
+        let gguf = GgufFile::open(path).unwrap();
         let ctx = MetalContext::new().unwrap();
         let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).unwrap();
         let weights = MuseGlimmerMetalWeights::realize(
@@ -5015,17 +4980,12 @@ mod tests {
     #[test]
     #[ignore = "serial Metal, whole fresh-prefill online attention numerical and ABBA packet"]
     fn packed_online_whole_prefill_packet() {
-        if crate::test_fixtures::MUSE_GLIMMER_Q8_0
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
 
         use crate::muse_glimmer_metal::with_packed_online;
         let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
-        let tokenizer = LlamaCppTokenizer::open(&path).unwrap();
-        let gguf = GgufFile::open(&path).unwrap();
+        let tokenizer = LlamaCppTokenizer::open(path).unwrap();
+        let gguf = GgufFile::open(path).unwrap();
         let ctx = MetalContext::new().unwrap();
         let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).unwrap();
         let weights = MuseGlimmerMetalWeights::realize(
@@ -5245,16 +5205,11 @@ mod tests {
     #[test]
     #[ignore = "serial Metal, Muse split decode admission and prefill isolation"]
     fn split_decode_preserves_prefill_and_matches_pilot() {
-        if crate::test_fixtures::MUSE_GLIMMER_Q8_0
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
 
         use crate::muse_glimmer_metal::split_attention_pilot;
         let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
-        let gguf = GgufFile::open(&path).unwrap();
+        let gguf = GgufFile::open(path).unwrap();
         let ctx = MetalContext::new().unwrap();
         let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).unwrap();
         let weights = MuseGlimmerMetalWeights::realize(
@@ -5289,7 +5244,7 @@ mod tests {
             split.observed_allocation_delta() - exact.observed_allocation_delta(),
             partial.buffer.length() as u64
         );
-        let tokenizer = LlamaCppTokenizer::open(&path).unwrap();
+        let tokenizer = LlamaCppTokenizer::open(path).unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../docs/bench/tokenizer-messages/current-reva-short-qwen36.json"
         ))
@@ -5392,7 +5347,7 @@ mod tests {
     fn split_attention_decode_packet(long: bool, delivery: bool) {
         use crate::muse_glimmer_metal::split_attention_pilot;
         let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
-        let gguf = GgufFile::open(&path).unwrap();
+        let gguf = GgufFile::open(path).unwrap();
         let ctx = MetalContext::new().unwrap();
         let plan = MuseGlimmerMetalWeightPlan::for_release(&ctx, &gguf).unwrap();
         let admitted = plan.admit(ctx.memory_signals()).unwrap();
@@ -5406,7 +5361,7 @@ mod tests {
             tokens.truncate(32768);
             tokens
         } else {
-            let tokenizer = LlamaCppTokenizer::open(&path).unwrap();
+            let tokenizer = LlamaCppTokenizer::open(path).unwrap();
             let fixture: serde_json::Value = serde_json::from_str(include_str!(
                 "../../../docs/bench/tokenizer-messages/current-reva-short-qwen36.json"
             ))
@@ -5707,12 +5662,7 @@ mod tests {
     #[test]
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn capture_enabled_prefill_and_decode_logits_match_ordinary_forward_bitwise() {
-        if crate::test_fixtures::MUSE_GLIMMER_Q8_0
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
 
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
             crate::test_fixtures::MUSE_GLIMMER_Q8_0
@@ -5869,12 +5819,7 @@ mod tests {
     #[test]
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn runs_pinned_q8_first_token_after_dropping_gguf_owner() {
-        if crate::test_fixtures::MUSE_GLIMMER_Q8_0
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
 
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
             crate::test_fixtures::MUSE_GLIMMER_Q8_0
@@ -5953,9 +5898,8 @@ mod tests {
         );
         assert_eq!(piece, b",");
 
-        let oracle_path = std::env::var("MUSE_GLIMMER_Q8_HELLO_ORACLE")
-            .unwrap_or_else(|_| "/tmp/muse-glimmer-oracle/hello-q8.f32".into());
-        let oracle_bytes = std::fs::read(&oracle_path).expect("read llama.cpp-rs Hello logits");
+        let oracle_path = crate::test_fixtures::required_filename("hello-q8.f32");
+        let oracle_bytes = std::fs::read(oracle_path).expect("read llama.cpp-rs Hello logits");
         assert_eq!(
             oracle_bytes.len(),
             logits.len() * std::mem::size_of::<f32>()

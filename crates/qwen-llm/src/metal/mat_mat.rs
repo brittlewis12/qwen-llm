@@ -3590,10 +3590,8 @@ mod tests {
         use std::io::Write;
         use std::sync::atomic::AtomicUsize;
 
-        let ctx = match MetalContext::new() {
-            Ok(ctx) => ctx,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("init failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let page_size = host_page_size().expect("host page size");
         let mut bytes = vec![0u8; page_size * 2];
@@ -3759,10 +3757,8 @@ mod tests {
     fn diagnostic_blit_sources_release_after_completed_command() {
         use std::io::Write;
 
-        let ctx = match MetalContext::new() {
-            Ok(ctx) => ctx,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("init failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let page_size = host_page_size().expect("host page size");
         let bytes = (0..page_size * 2)
@@ -3871,10 +3867,8 @@ mod tests {
         use std::io::Write;
         use std::sync::atomic::AtomicUsize;
 
-        let ctx = match MetalContext::new() {
-            Ok(ctx) => ctx,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("init failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let page_size = host_page_size().expect("host page size");
 
@@ -4132,21 +4126,26 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen3-5-0-8b-f16"]
     fn mat_vec_and_mat_mat_half_weights_match_cpu() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         for &(path, dtype) in &[
-            ("models/Qwen3.5-0.8B.f16.gguf", GgmlType::F16),
-            ("models/Qwen3.5-0.8B-BF16.gguf", GgmlType::BF16),
+            (
+                crate::test_fixtures::required_filename("Qwen3.5-0.8B.f16.gguf"),
+                GgmlType::F16,
+            ),
+            (
+                crate::test_fixtures::required_filename("Qwen3.5-0.8B-BF16.gguf"),
+                GgmlType::BF16,
+            ),
         ] {
             if !std::path::Path::new(&path).exists() {
                 eprintln!("[half-weight] skipped missing fixture {path}");
                 continue;
             }
-            let g = crate::gguf::GgufFile::open(&path).expect("open");
+            let g = crate::gguf::GgufFile::open(path).expect("open");
             let w = g
                 .tensors
                 .iter()
@@ -4232,24 +4231,24 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
     fn mat_mat_bf16_bfloat_act_matches_rounded_cpu() {
+        #[ignore = "model witness: qwen3-5-0-8b-bf16"]
         fn round_to_bf16_f32(x: f32) -> f32 {
             let bits = x.to_bits();
             let lsb = (bits >> 16) & 1;
             f32::from_bits(bits.wrapping_add(0x7fff + lsb) & 0xffff_0000)
         }
 
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
-        let path = "models/Qwen3.5-0.8B-BF16.gguf";
+        let path = crate::test_fixtures::required_filename("Qwen3.5-0.8B-BF16.gguf");
         if !std::path::Path::new(&path).exists() {
             eprintln!("[bf16-bfloat-act] skipped missing fixture {path}");
             return;
         }
-        let g = crate::gguf::GgufFile::open(&path).expect("open");
+        let g = crate::gguf::GgufFile::open(path).expect("open");
         let w = g
             .tensors
             .iter()
@@ -4321,21 +4320,26 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen3-5-0-8b-q4-0"]
     fn mat_vec_and_mat_mat_q4_legacy_match_cpu() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         for &(path, dtype) in &[
-            ("models/Qwen3.5-0.8B-Q4_0.gguf", GgmlType::Q4_0),
-            ("models/Qwen3.5-0.8B-Q4_1.gguf", GgmlType::Q4_1),
+            (
+                crate::test_fixtures::required_filename("Qwen3.5-0.8B-Q4_0.gguf"),
+                GgmlType::Q4_0,
+            ),
+            (
+                crate::test_fixtures::required_filename("Qwen3.5-0.8B-Q4_1.gguf"),
+                GgmlType::Q4_1,
+            ),
         ] {
             if !std::path::Path::new(&path).exists() {
                 eprintln!("[q4-legacy] skipped missing fixture {path}");
                 continue;
             }
-            let g = crate::gguf::GgufFile::open(&path).expect("open");
+            let g = crate::gguf::GgufFile::open(path).expect("open");
             let w = g
                 .tensors
                 .iter()
@@ -4424,18 +4428,17 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen3-5-0-8b-q3-k-m"]
     fn mat_vec_and_mat_mat_q3_k_match_cpu() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
-        let path = "models/Qwen3.5-0.8B-Q3_K_M.gguf";
+        let path = crate::test_fixtures::required_filename("Qwen3.5-0.8B-Q3_K_M.gguf");
         if !std::path::Path::new(&path).exists() {
             eprintln!("[q3_k] skipped missing fixture {path}");
             return;
         }
-        let g = crate::gguf::GgufFile::open(&path).expect("open");
+        let g = crate::gguf::GgufFile::open(path).expect("open");
         let w = g
             .tensors
             .iter()
@@ -4517,18 +4520,17 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen3-5-4b-ud-iq2-m"]
     fn mat_vec_and_mat_mat_dense_iq2_s_match_cpu() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
-        let path = "models/Qwen3.5-4B-UD-IQ2_M.gguf";
+        let path = crate::test_fixtures::required_filename("Qwen3.5-4B-UD-IQ2_M.gguf");
         if !std::path::Path::new(&path).exists() {
             eprintln!("[dense-iq2_s] skipped missing fixture {path}");
             return;
         }
-        let g = crate::gguf::GgufFile::open(&path).expect("open");
+        let g = crate::gguf::GgufFile::open(path).expect("open");
         let w = match g.tensors.iter().find(|t| {
             t.name.starts_with("blk.")
                 && t.name.ends_with(".weight")
@@ -4615,22 +4617,27 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen3-5-4b-ud-q2-k-xl"]
     fn mat_vec_and_mat_mat_dense_iq3_match_cpu() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let fixtures = [
-            ("models/Qwen3.5-4B-UD-Q2_K_XL.gguf", GgmlType::IQ3_XXS),
-            ("models/Qwen3.5-4B-UD-Q2_K_XL.gguf", GgmlType::IQ3_S),
+            (
+                crate::test_fixtures::required_filename("Qwen3.5-4B-UD-Q2_K_XL.gguf"),
+                GgmlType::IQ3_XXS,
+            ),
+            (
+                crate::test_fixtures::required_filename("Qwen3.5-4B-UD-Q2_K_XL.gguf"),
+                GgmlType::IQ3_S,
+            ),
         ];
         for &(path, dtype) in &fixtures {
             if !std::path::Path::new(&path).exists() {
                 eprintln!("[dense-iq3 {dtype:?}] skipped missing fixture {path}");
                 continue;
             }
-            let g = crate::gguf::GgufFile::open(&path).expect("open");
+            let g = crate::gguf::GgufFile::open(path).expect("open");
             let w = match g.tensors.iter().find(|t| {
                 t.name.starts_with("blk.")
                     && t.name.ends_with(".weight")
@@ -4726,18 +4733,17 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen3-5-0-8b-q2-k"]
     fn mat_vec_and_mat_mat_q2_k_match_cpu() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
-        let path = "models/Qwen3.5-0.8B.Q2_K.gguf";
+        let path = crate::test_fixtures::required_filename("Qwen3.5-0.8B.Q2_K.gguf");
         if !std::path::Path::new(&path).exists() {
             eprintln!("[q2_k] skipped missing fixture {path}");
             return;
         }
-        let g = crate::gguf::GgufFile::open(&path).expect("open");
+        let g = crate::gguf::GgufFile::open(path).expect("open");
         let w = g
             .tensors
             .iter()
@@ -4819,21 +4825,26 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen3-5-0-8b-iq4-nl"]
     fn mat_vec_and_mat_mat_iq4_match_cpu() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         for &(path, dtype) in &[
-            ("models/Qwen3.5-0.8B-IQ4_NL.gguf", GgmlType::IQ4_NL),
-            ("models/Qwen3.5-0.8B-IQ4_XS.gguf", GgmlType::IQ4_XS),
+            (
+                crate::test_fixtures::required_filename("Qwen3.5-0.8B-IQ4_NL.gguf"),
+                GgmlType::IQ4_NL,
+            ),
+            (
+                crate::test_fixtures::required_filename("Qwen3.5-0.8B-IQ4_XS.gguf"),
+                GgmlType::IQ4_XS,
+            ),
         ] {
             if !std::path::Path::new(&path).exists() {
                 eprintln!("[iq4] skipped missing fixture {path}");
                 continue;
             }
-            let g = crate::gguf::GgufFile::open(&path).expect("open");
+            let g = crate::gguf::GgufFile::open(path).expect("open");
             let align = if dtype == GgmlType::IQ4_NL { 32 } else { 256 };
             let w = g
                 .tensors
@@ -4941,18 +4952,12 @@ mod tests {
     /// to exercise both partial-tile path (N=1, N=16) and full-tile
     /// path (N=32).
     #[test]
+    #[ignore = "model witness: qwen36-27b-q4-k-m"]
     fn mat_mat_q4_k_matches_cpu_and_mat_vec() {
-        if crate::test_fixtures::QWEN36_27B_Q4_K_M
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
 
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let path = crate::test_fixtures::QWEN36_27B_Q4_K_M
             .required()
@@ -4962,7 +4967,7 @@ mod tests {
             eprintln!("[mat_mat_q4_k] skipped — fixture missing");
             return;
         }
-        let g = crate::gguf::GgufFile::open(&path).expect("open");
+        let g = crate::gguf::GgufFile::open(path).expect("open");
         // Pick a Q4_K tensor with shape compatible with mat-mat tiling
         // (n_in % 32 == 0, n_out % 64 == 0 for the lifted tile).
         let q4k = g
@@ -5112,18 +5117,17 @@ mod tests {
     /// H5.3b.6 gate: Q6_K mat-mat parity vs N successive mat-vec.
     /// Includes N_QUERY=64/128 so the large-N N64 prompt tile is exercised.
     #[test]
+    #[ignore = "model witness: qwen3-5-0-8b-q4-k-m"]
     fn mat_mat_q6_k_matches_cpu_and_mat_vec() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
-        let path = "models/Qwen3.5-0.8B-Q4_K_M.gguf";
+        let path = crate::test_fixtures::required_filename("Qwen3.5-0.8B-Q4_K_M.gguf");
         if !std::path::Path::new(&path).exists() {
             eprintln!("[mat_mat_q6_k] skipped — fixture missing");
             return;
         }
-        let g = crate::gguf::GgufFile::open(&path).expect("open");
+        let g = crate::gguf::GgufFile::open(path).expect("open");
         let q6k = g
             .tensors
             .iter()
@@ -5233,18 +5237,17 @@ mod tests {
     /// v0.73a.0 gate: Q5_K mat-mat parity vs N successive Q5_K mat-vec.
     /// Includes N_QUERY=64/128 so the large-N N64 prompt tile is exercised.
     #[test]
+    #[ignore = "model witness: qwen3-5-0-8b-q4-k-m"]
     fn mat_mat_q5_k_matches_cpu_and_mat_vec() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
-        let path = "models/Qwen3.5-0.8B-Q4_K_M.gguf";
+        let path = crate::test_fixtures::required_filename("Qwen3.5-0.8B-Q4_K_M.gguf");
         if !std::path::Path::new(&path).exists() {
             eprintln!("[mat_mat_q5_k] skipped — fixture missing");
             return;
         }
-        let g = crate::gguf::GgufFile::open(&path).expect("open");
+        let g = crate::gguf::GgufFile::open(path).expect("open");
         let q5k = g
             .tensors
             .iter()
@@ -5383,18 +5386,12 @@ mod tests {
     /// precision in nibble packing + scale folding). Expect cos very
     /// close to 1.000000.
     #[test]
+    #[ignore = "model witness: dflash-draft-36-q8-0"]
     fn mat_mat_q8_0_matches_cpu_and_mat_vec() {
-        if crate::test_fixtures::DFLASH_DRAFT_36_Q8_0
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::DFLASH_DRAFT_36_Q8_0.required();
 
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let path = crate::test_fixtures::DFLASH_DRAFT_36_Q8_0
             .required()
@@ -5404,7 +5401,7 @@ mod tests {
             eprintln!("[mat_mat_q8_0] skipped — drafter GGUF missing");
             return;
         }
-        let g = crate::gguf::GgufFile::open(&path).expect("open");
+        let g = crate::gguf::GgufFile::open(path).expect("open");
         let q8 = g
             .tensors
             .iter()
@@ -5525,19 +5522,12 @@ mod tests {
     #[test]
     #[ignore]
     fn prompt_mat_mat_production_shapes() {
-        if crate::test_fixtures::QWEN36_27B_Q4_K_M
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
 
         use std::time::Instant;
 
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let path = crate::test_fixtures::QWEN36_27B_Q4_K_M
             .required()
@@ -5547,7 +5537,7 @@ mod tests {
             eprintln!("[prompt-matmat] skipped — fixture missing");
             return;
         }
-        let g = crate::gguf::GgufFile::open(&path).expect("open");
+        let g = crate::gguf::GgufFile::open(path).expect("open");
         const N_QUERY: usize = 321;
         let cases = [
             "blk.0.ffn_gate.weight",
@@ -5671,19 +5661,12 @@ mod tests {
     #[test]
     #[ignore]
     fn prompt_mat_mat_production_shapes_chained64() {
-        if crate::test_fixtures::QWEN36_27B_Q4_K_M
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
 
         use std::time::Instant;
 
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let path = crate::test_fixtures::QWEN36_27B_Q4_K_M
             .required()
@@ -5693,7 +5676,7 @@ mod tests {
             eprintln!("[prompt-matmat-chained] skipped — fixture missing");
             return;
         }
-        let g = crate::gguf::GgufFile::open(&path).expect("open");
+        let g = crate::gguf::GgufFile::open(path).expect("open");
         let n_query: usize = std::env::var("QWEN_PROMPT_MATMAT_N")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -5852,12 +5835,7 @@ mod tests {
     #[test]
     #[ignore]
     fn q8_0_mat_mat_amortization_vs_n_mat_vec() {
-        if crate::test_fixtures::DFLASH_DRAFT_36_Q8_0
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::DFLASH_DRAFT_36_Q8_0.required();
 
         use std::time::Instant;
 
@@ -5878,10 +5856,8 @@ mod tests {
             }
         }
 
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let path = std::env::var("QWEN_Q8_AMORT_MODEL").unwrap_or_else(|_| {
             crate::test_fixtures::DFLASH_DRAFT_36_Q8_0
@@ -6131,18 +6107,11 @@ mod tests {
     #[test]
     #[ignore]
     fn q5_k_mat_mat_amortization_vs_n_mat_vec() {
-        if crate::test_fixtures::QWEN36_27B_Q4_K_M
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
 
         use std::time::Instant;
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let path = crate::test_fixtures::QWEN36_27B_Q4_K_M
             .required()
@@ -6152,7 +6121,7 @@ mod tests {
             eprintln!("[v0.73a.0-gate] skipped — fixture missing");
             return;
         }
-        let g = crate::gguf::GgufFile::open(&path).expect("open");
+        let g = crate::gguf::GgufFile::open(path).expect("open");
         let q5k = g
             .tensors
             .iter()
@@ -6277,15 +6246,16 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen3-8-27b-q4-k-m"]
     fn ffn_fused_swiglu_q4_k_mma8_matches_unfused_n8() {
         let Some(ctx) = metal_test_context() else {
             return;
         };
-        let path = "models/Qwen3.8-27B-Q4_K_M.gguf";
+        let path = crate::test_fixtures::required_filename("Qwen3.8-27B-Q4_K_M.gguf");
         if !std::path::Path::new(&path).exists() {
             return;
         }
-        let g = crate::gguf::GgufFile::open(&path).expect("open");
+        let g = crate::gguf::GgufFile::open(path).expect("open");
         let gate = g
             .tensors
             .iter()
@@ -6418,10 +6388,8 @@ mod tests {
     /// the destination back. If the blit didn't fire, we'd read zeros.
     #[test]
     fn blit_encoder_copies_buffer_within_one_command_buffer() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
 
         const N: usize = 1024;

@@ -9,12 +9,10 @@ mod quality_split;
 mod reset;
 mod snapshot_gates;
 
-const ORACLE_DEFAULT: &str = "models/.fetch/analysis/runs/glm53-oracle/ckpt-v1";
-
 fn oracle_dir() -> PathBuf {
     std::env::var_os("GLM53_ORACLE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(ORACLE_DEFAULT))
+        .unwrap_or_else(|| panic!("set GLM53_ORACLE_DIR to the oracle capture directory"))
 }
 
 const CKPT_V1_MANIFEST: &str = include_str!("../../../../scripts/reference/glm53/ckpt-v1.json");
@@ -1135,12 +1133,10 @@ impl ReferenceStream {
     }
 }
 
-const QUAL_ORACLE_DEFAULT: &str = "models/.fetch/analysis/runs/glm53-oracle/qual-v1";
-
 fn qual_oracle_dir() -> PathBuf {
     std::env::var_os("GLM53_QUAL_ORACLE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(QUAL_ORACLE_DEFAULT))
+        .unwrap_or_else(|| panic!("set GLM53_QUAL_ORACLE_DIR to the oracle capture directory"))
 }
 
 /// Fast-lineage chunking checks over a long prompt (qual-v1): a 559-token
@@ -1461,12 +1457,10 @@ fn comparison_helpers_refuse_nonfinite_and_mismatched_inputs() {
     assert!(errors.iter().all(|(_, e, _)| *e == 0.0));
 }
 
-const SPARSE_ORACLE_DEFAULT: &str = "models/.fetch/analysis/runs/glm53-oracle/sparse-v1";
-
 fn sparse_oracle_dir() -> PathBuf {
     std::env::var_os("GLM53_SPARSE_ORACLE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(SPARSE_ORACLE_DEFAULT))
+        .unwrap_or_else(|| panic!("set GLM53_SPARSE_ORACLE_DIR to the oracle capture directory"))
 }
 
 /// Executed MLA block indices of the release (every fourth block from 3).
@@ -1711,12 +1705,10 @@ fn sparse_selection_replays_llama_cpp_indexer_captures() {
     assert_eq!(sparse, 10 * MLA_BLOCKS.len());
 }
 
-const SPARSE_V2_DEFAULT: &str = "models/.fetch/analysis/runs/glm53-oracle/sparse-v2";
-
 fn sparse_v2_dir() -> PathBuf {
     std::env::var_os("GLM53_SPARSE_V2_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(SPARSE_V2_DEFAULT))
+        .unwrap_or_else(|| panic!("set GLM53_SPARSE_V2_DIR to the oracle capture directory"))
 }
 
 /// [`replay_indexer_captures`] deep in the sparse range (sparse-v2,

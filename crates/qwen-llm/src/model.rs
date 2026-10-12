@@ -186,13 +186,9 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
     fn arch_matches_gguf_0_8b() {
-        if crate::test_fixtures::QWEN35_0_8B_F32
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
         // Sanity-check: numbers in QWEN3_0_8B match the live GGUF metadata.
         // Skipped if the file isn't present on this box.
@@ -200,7 +196,7 @@ mod tests {
         if !std::path::Path::new(&path).exists() {
             return;
         }
-        let g = crate::gguf::GgufFile::open(&path).expect("open");
+        let g = crate::gguf::GgufFile::open(path).expect("open");
         let a = QWEN3_0_8B;
         assert_eq!(g.get_u64("qwen35.block_count"), Some(a.n_layer as u64));
         assert_eq!(

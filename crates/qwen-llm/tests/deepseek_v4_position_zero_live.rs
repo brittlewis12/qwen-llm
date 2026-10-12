@@ -27,10 +27,6 @@ use std::time::Instant;
 
 #[cfg(feature = "dsv4-diagnostics")]
 use objc2_metal::MTLDevice;
-
-const DEFAULT_MODEL: &str = "models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
-#[cfg(feature = "dsv4-diagnostics")]
-const DEFAULT_CURRENT_MODEL: &str = "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
 const DEFAULT_DURABLE_SNAPSHOT: &str = "target/dsv4-position1024.ds4c";
 const DEFAULT_DURABLE_POSITION_2048_SNAPSHOT: &str = "target/dsv4-position2048.ds4c";
 const DEFAULT_DURABLE_POSITION_2052_SNAPSHOT: &str = "target/dsv4-position2052.ds4c";
@@ -241,7 +237,7 @@ fn frozen_model_content_id() -> DeepSeekV4ModelContentId {
 }
 
 fn open_pinned_legacy_gguf(model_path: &Path) -> GgufFile {
-    let gguf = GgufFile::open(&model_path).expect("open legacy DS4 GGUF shards");
+    let gguf = GgufFile::open(model_path).expect("open legacy DS4 GGUF shards");
     PinnedDeepSeekV4AssetV1::parse(LEGACY_CENSUS_MANIFEST)
         .expect("parse legacy DS4 census")
         .validate_observed(&gguf)
@@ -562,7 +558,11 @@ fn pinned_position_zero_oracle_has_exact_identity() {
 fn native_deepseek_v4_full_context_session_plan_is_exact_and_admitted() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
     let gguf = open_pinned_legacy_gguf(&model_path);
@@ -1252,7 +1252,11 @@ fn pinned_hca_boundary_oracles_have_exact_identity() {
 fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(
         model_path.exists(),
         "missing DS4 model at {}",
@@ -1946,7 +1950,11 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
 
     let model_path = std::env::var_os("DSV4_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_CURRENT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(
         model_path.exists(),
         "missing current DS4 model at {}",
@@ -2997,7 +3005,11 @@ fn current_deepseek_v4_fp4_collapsed_position_3070_packet() {
 
     let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_CURRENT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(model_path.exists(), "missing current DS4 model");
     let ctx = MetalContext::new().expect("create collapsed FP4 Metal context");
     let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
@@ -3487,7 +3499,11 @@ fn current_deepseek_v4_fp4_collapsed_position_3070_packet() {
 fn native_deepseek_v4_token_35_position_zero() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(
         model_path.exists(),
         "missing DS4 model at {}",
@@ -3592,7 +3608,11 @@ fn native_deepseek_v4_token_35_position_zero() {
 fn native_deepseek_v4_packed_n1_matches_position_zero_oracle() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(
         model_path.exists(),
         "missing DS4 model at {}",
@@ -3616,7 +3636,11 @@ fn native_deepseek_v4_packed_n1_matches_position_zero_oracle() {
 fn native_deepseek_v4_packed_n2_matches_local_continuation() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     let ctx = MetalContext::new().expect("create Metal context");
     let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency(&ctx, &gguf);
@@ -3646,7 +3670,11 @@ fn native_deepseek_v4_packed_n2_matches_local_continuation() {
 fn native_deepseek_v4_packed_n4_preserves_csa_and_decode_continuation() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(
         model_path.exists(),
         "missing DS4 model at {}",
@@ -3691,7 +3719,11 @@ fn native_deepseek_v4_packed_n4_preserves_csa_and_decode_continuation() {
 fn native_deepseek_v4_snapshot_restores_exact_csa_continuation() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(
         model_path.exists(),
         "missing DS4 model at {}",
@@ -3815,7 +3847,11 @@ fn native_deepseek_v4_snapshot_restores_exact_csa_continuation() {
 fn native_deepseek_v4_packed_callback_unwind_poison_is_fail_stop() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     let ctx = MetalContext::new().expect("create Metal context");
     let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency(&ctx, &gguf);
@@ -3864,7 +3900,11 @@ fn native_deepseek_v4_packed_callback_unwind_poison_is_fail_stop() {
 fn native_deepseek_v4_whole_command_callback_reports_only_verified_prefix() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     let ctx = MetalContext::new().expect("create Metal context");
     let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency_for(&ctx, &gguf, 1);
@@ -3899,7 +3939,11 @@ fn native_deepseek_v4_whole_command_callback_reports_only_verified_prefix() {
 fn native_deepseek_v4_packed_n128_preserves_hca_and_wrapped_decode() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(
         model_path.exists(),
         "missing DS4 model at {}",
@@ -3980,7 +4024,11 @@ fn native_deepseek_v4_packed_n128_preserves_hca_and_wrapped_decode() {
 fn native_deepseek_v4_two_packed_chunks_match_second_hca_and_decode() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     let ctx = MetalContext::new().expect("create Metal context");
     let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency(&ctx, &gguf);
@@ -4037,7 +4085,11 @@ fn profile_native_deepseek_v4_singleton_decode_at_128_and_512() {
     const SAMPLES: usize = 5;
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
     let gguf = open_pinned_legacy_gguf(&model_path);
@@ -4240,7 +4292,11 @@ fn profile_native_deepseek_v4_whole_token_breakdown_at_128_and_512() {
 
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
     let gguf = open_pinned_legacy_gguf(&model_path);
@@ -4473,7 +4529,11 @@ fn profile_native_deepseek_v4_single_command_at_128_and_512() {
 
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
     let gguf = open_pinned_legacy_gguf(&model_path);
@@ -4847,7 +4907,11 @@ fn profile_native_deepseek_v4_stage_families_at_128_and_512() {
 
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
     let gguf = open_pinned_legacy_gguf(&model_path);
@@ -4892,7 +4956,11 @@ fn profile_native_deepseek_v4_exact_packed_prefix_decode_at_129_and_513() {
     const WARM_SAMPLES: usize = 5;
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
     let gguf = open_pinned_legacy_gguf(&model_path);
@@ -5062,7 +5130,11 @@ fn profile_native_deepseek_v4_exact_packed_prefix_decode_at_129_and_513() {
 fn native_deepseek_v4_retained_chunks_reach_position_1024() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(
         model_path.exists(),
         "missing DS4 model at {}",
@@ -5116,7 +5188,11 @@ fn native_deepseek_v4_retained_chunks_reach_position_1024() {
 fn native_deepseek_v4_durable_position_1024_snapshot_matches_oracle() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     let snapshot_path = std::env::var_os("DSV4_SNAPSHOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -5200,7 +5276,11 @@ fn native_deepseek_v4_durable_position_1024_snapshot_matches_oracle() {
 fn native_deepseek_v4_position_1024_snapshot_reaches_position_2048() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     let source_snapshot_path = std::env::var_os("DSV4_SNAPSHOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -5353,7 +5433,11 @@ fn native_deepseek_v4_position_1024_snapshot_reaches_position_2048() {
 fn native_deepseek_v4_durable_position_2048_snapshot_matches_oracle() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     let snapshot_path = std::env::var_os("DSV4_POSITION_2048_SNAPSHOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -5449,7 +5533,11 @@ fn native_deepseek_v4_durable_position_2048_snapshot_matches_oracle() {
 fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     let source_snapshot_path = std::env::var_os("DSV4_POSITION_2048_SNAPSHOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -5702,7 +5790,11 @@ fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
 fn native_deepseek_v4_durable_position_2052_snapshot_matches_oracle() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     let snapshot_path = std::env::var_os("DSV4_POSITION_2052_SNAPSHOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -5799,7 +5891,11 @@ fn native_deepseek_v4_position_2052_snapshot_reaches_hca_row_16() {
     const FORWARD_LIMIT: usize = 2_177;
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     let source_snapshot_path = std::env::var_os("DSV4_POSITION_2052_SNAPSHOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -6071,7 +6167,11 @@ fn native_deepseek_v4_position_2052_snapshot_reaches_hca_row_16() {
 fn native_deepseek_v4_durable_position_2176_snapshot_matches_oracle() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     let snapshot_path = std::env::var_os("DSV4_POSITION_2176_SNAPSHOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -6170,7 +6270,11 @@ fn native_deepseek_v4_durable_position_2176_snapshot_matches_oracle() {
 fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     let source_snapshot_path = std::env::var_os("DSV4_POSITION_2176_SNAPSHOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -6560,7 +6664,11 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
 fn native_deepseek_v4_durable_position_3072_snapshot_matches_schedule_envelope() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     let snapshot_path = std::env::var_os("DSV4_POSITION_3072_SNAPSHOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -6677,7 +6785,11 @@ fn native_deepseek_v4_position_3072_snapshot_crosses_dynamic_csa_capacity() {
     const FORWARD_LIMIT: usize = 3_077;
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     let snapshot_path = std::env::var_os("DSV4_POSITION_3072_SNAPSHOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -6864,7 +6976,11 @@ fn native_deepseek_v4_position_3072_snapshot_crosses_dynamic_csa_capacity() {
 fn native_deepseek_v4_tokens_35_201_200_local_prefix() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(
         model_path.exists(),
         "missing DS4 model at {}",
@@ -7030,7 +7146,11 @@ fn native_deepseek_v4_tokens_35_201_200_local_prefix() {
 fn native_deepseek_v4_csa_boundary_and_continuation_branch() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(
         model_path.exists(),
         "missing DS4 model at {}",
@@ -7102,7 +7222,11 @@ fn native_deepseek_v4_csa_boundary_and_continuation_branch() {
 fn native_deepseek_v4_second_csa_boundary_and_continuation() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(
         model_path.exists(),
         "missing DS4 model at {}",
@@ -7174,7 +7298,11 @@ fn native_deepseek_v4_second_csa_boundary_and_continuation() {
 fn native_deepseek_v4_through_fourth_hca_continuation() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| {
+            PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
+        });
     assert!(
         model_path.exists(),
         "missing DS4 model at {}",

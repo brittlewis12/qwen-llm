@@ -1097,12 +1097,7 @@ mod tests {
     #[test]
     #[ignore = "requires the pinned local Unsloth Muse Glimmer Q8_0 GGUF and Metal"]
     fn plans_pinned_q8_target_without_realizing_weights() {
-        if crate::test_fixtures::MUSE_GLIMMER_Q8_0
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
 
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
             crate::test_fixtures::MUSE_GLIMMER_Q8_0
@@ -1127,7 +1122,8 @@ mod tests {
     #[ignore = "requires the pinned local two-shard Unsloth Muse Glimmer BF16 GGUF and Metal"]
     fn plans_pinned_bf16_target_without_realizing_weights() {
         let path = std::env::var("MUSE_GLIMMER_BF16_GGUF").unwrap_or_else(|_| {
-            "models/muse-glimmer/BF16/Muse-Glimmer-30B-BF16-00001-of-00002.gguf".into()
+            crate::test_fixtures::required_filename("Muse-Glimmer-30B-BF16-00001-of-00002.gguf")
+                .into()
         });
         let gguf = GgufFile::open(&path).expect("open Muse BF16 target");
         let ctx = MetalContext::new().expect("open Metal context");

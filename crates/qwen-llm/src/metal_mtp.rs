@@ -3469,7 +3469,7 @@ mod tests {
     #[test]
     #[ignore = "requires local A3B Q4_K_M MTP fixture and 2 GiB peak Metal/host memory"]
     fn mtp_direct_f32_banks_match_staged_bytes() {
-        let path = "models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+        let path = crate::test_fixtures::required_filename("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf");
         assert!(
             std::path::Path::new(path).is_file(),
             "required MTP direct-F32 fixture is missing: {path}"
@@ -3576,7 +3576,7 @@ mod tests {
     #[test]
     #[ignore = "requires local A3B Q4_K_M MTP fixture and several GiB of Metal memory"]
     fn mtp_moe_native_bank_fixture_ledger() {
-        let path = "models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+        let path = crate::test_fixtures::required_filename("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf");
         if !std::path::Path::new(path).exists() {
             eprintln!("[mtp-moe-bank-ledger] skipped - fixture missing");
             return;
@@ -3633,7 +3633,7 @@ mod tests {
     #[test]
     #[ignore = "requires local A3B Q4_K_M MTP fixture"]
     fn mtp_moe_native_banks_match_f32_draft_logits() {
-        let path = "models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+        let path = crate::test_fixtures::required_filename("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf");
         if !std::path::Path::new(path).exists() {
             eprintln!("[mtp-moe-native-oracle] skipped - fixture missing");
             return;
@@ -3753,16 +3753,15 @@ mod tests {
     /// * step 1: 1-entry KV (first-position drift through encode_mtp_attn)
     /// * step 2: 2-entry KV (KV reads + RoPE position increment)
     #[test]
+    #[ignore = "model witness: qwen3-5-0-8b-q4-k-m"]
     fn metal_mtp_draft_matches_cpu() {
-        let path = "models/h4-smoke-test/Qwen3.5-0.8B/qwen3.5-0.8b.Q4_K_M.gguf";
+        let path = crate::test_fixtures::required_filename("qwen3.5-0.8b.Q4_K_M.gguf");
         if !std::path::Path::new(path).exists() {
             eprintln!("[mtp-metal-cosine] skipped — fixture missing");
             return;
         }
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
 
         let g = GgufFile::open(path).expect("open");
@@ -3895,16 +3894,15 @@ mod tests {
     /// smoke test we just assert α > 0 to confirm the MTP forward
     /// produces SOMETHING reasonable.
     #[test]
+    #[ignore = "model witness: qwen3-5-0-8b-q4-k-m"]
     fn greedy_equivalence_0_8b_mtp() {
-        let path = "models/h4-smoke-test/Qwen3.5-0.8B/qwen3.5-0.8b.Q4_K_M.gguf";
+        let path = crate::test_fixtures::required_filename("qwen3.5-0.8b.Q4_K_M.gguf");
         if !std::path::Path::new(path).exists() {
             eprintln!("[mtp-equiv] skipped — fixture missing");
             return;
         }
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
 
         let g = GgufFile::open(path).expect("open");

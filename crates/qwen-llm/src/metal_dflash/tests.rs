@@ -2747,12 +2747,8 @@ fn matrix_vt_prefix_rebuild_span_is_exact() {
 
 #[test]
 fn prefill_command_completion_check_fails_closed() {
-    let ctx = match MetalContext::new() {
-        Ok(ctx) => ctx,
-        Err(crate::metal::MetalError::EmptyLibrary | crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(error) => panic!("Metal context: {error}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let cmd = ctx.queue.commandBuffer().expect("command buffer");
     assert!(require_prefill_command_completed(&cmd).is_err());
@@ -3053,10 +3049,8 @@ fn fresh_single_chunk_scratch_architecture_screen() {
 
 #[test]
 fn prefill_overlay_backing_plan_allocates_with_matching_type() {
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let arch = product_moe_plan_arch(false);
     let plan = product_moe_plan(&arch, 1, true);
@@ -3188,14 +3182,10 @@ fn run_packed_moe_tail_profile(model_path: &str, label: &str, chunk_p: usize, n_
         eprintln!("[packed-moe-tail-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -3373,9 +3363,7 @@ fn run_packed_moe_tail_profile(model_path: &str, label: &str, chunk_p: usize, n_
 #[test]
 #[ignore]
 fn metal_35b_a3b_packed_moe_tail_profile() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_packed_moe_tail_profile(
         crate::test_fixtures::A3B_Q4_K_M
@@ -3391,9 +3379,7 @@ fn metal_35b_a3b_packed_moe_tail_profile() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_packed_moe_tail_profile() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_packed_moe_tail_profile(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -3416,14 +3402,10 @@ fn run_packed_moe_tail_ab_profile(
         eprintln!("[moe-tail-ab-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -3843,9 +3825,7 @@ fn run_packed_moe_tail_ab_profile(
 #[test]
 #[ignore]
 fn metal_35b_a3b_packed_moe_tail_ab_profile() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_packed_moe_tail_ab_profile(
         crate::test_fixtures::A3B_Q4_K_M
@@ -3861,9 +3841,7 @@ fn metal_35b_a3b_packed_moe_tail_ab_profile() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_packed_moe_tail_ab_profile() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_packed_moe_tail_ab_profile(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -3886,14 +3864,10 @@ fn run_live_packed_moe_tail_phase_profile(
         eprintln!("[live-packed-moe-tail-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -4491,9 +4465,7 @@ fn run_live_packed_moe_tail_phase_profile(
 #[test]
 #[ignore]
 fn metal_35b_a3b_live_packed_moe_tail_phase_profile() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_live_packed_moe_tail_phase_profile(
         crate::test_fixtures::A3B_Q4_K_M
@@ -4509,9 +4481,7 @@ fn metal_35b_a3b_live_packed_moe_tail_phase_profile() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_live_packed_moe_tail_phase_profile() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_live_packed_moe_tail_phase_profile(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -4534,14 +4504,10 @@ fn run_live_grouped_moe_tail_phase_profile(
         eprintln!("[live-grouped-moe-tail-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -4904,9 +4870,7 @@ fn run_live_grouped_moe_tail_phase_profile(
 #[test]
 #[ignore]
 fn metal_35b_a3b_live_grouped_moe_tail_phase_profile_320() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_live_grouped_moe_tail_phase_profile(
         crate::test_fixtures::A3B_Q4_K_M
@@ -4922,9 +4886,7 @@ fn metal_35b_a3b_live_grouped_moe_tail_phase_profile_320() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_live_grouped_moe_tail_phase_profile_320() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_live_grouped_moe_tail_phase_profile(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -4940,9 +4902,7 @@ fn metal_122b_a10b_live_grouped_moe_tail_phase_profile_320() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_live_grouped_moe_tail_phase_profile_512() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_live_grouped_moe_tail_phase_profile(
         crate::test_fixtures::A3B_Q4_K_M
@@ -4958,9 +4918,7 @@ fn metal_35b_a3b_live_grouped_moe_tail_phase_profile_512() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_live_grouped_moe_tail_phase_profile_512() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_live_grouped_moe_tail_phase_profile(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -4976,9 +4934,7 @@ fn metal_122b_a10b_live_grouped_moe_tail_phase_profile_512() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_live_grouped_moe_tail_phase_profile_1024() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_live_grouped_moe_tail_phase_profile(
         crate::test_fixtures::A3B_Q4_K_M
@@ -4994,9 +4950,7 @@ fn metal_35b_a3b_live_grouped_moe_tail_phase_profile_1024() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_live_grouped_moe_tail_phase_profile_1024() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_live_grouped_moe_tail_phase_profile(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -5014,14 +4968,10 @@ fn run_moe_route_bucket_fused_oracle(model_path: &str, label: &str, chunk_p: usi
         eprintln!("[moe-route-bucket-fused-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -5327,14 +5277,10 @@ fn run_moe_route_logits_e8p32_oracle(model_path: &str, label: &str, chunk_p: usi
         eprintln!("[moe-route-e8p32-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -5494,9 +5440,7 @@ fn run_moe_route_logits_e8p32_oracle(model_path: &str, label: &str, chunk_p: usi
 #[test]
 #[ignore]
 fn metal_35b_a3b_moe_route_bucket_fused_oracle_128() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_moe_route_bucket_fused_oracle(
         crate::test_fixtures::A3B_Q4_K_M
@@ -5511,9 +5455,7 @@ fn metal_35b_a3b_moe_route_bucket_fused_oracle_128() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_moe_route_bucket_fused_oracle_320() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_moe_route_bucket_fused_oracle(
         crate::test_fixtures::A3B_Q4_K_M
@@ -5528,9 +5470,7 @@ fn metal_35b_a3b_moe_route_bucket_fused_oracle_320() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_moe_route_bucket_fused_oracle_512() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_moe_route_bucket_fused_oracle(
         crate::test_fixtures::A3B_Q4_K_M
@@ -5545,9 +5485,7 @@ fn metal_35b_a3b_moe_route_bucket_fused_oracle_512() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_moe_route_bucket_fused_oracle_512() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_moe_route_bucket_fused_oracle(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -5562,9 +5500,7 @@ fn metal_122b_a10b_moe_route_bucket_fused_oracle_512() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_moe_route_logits_e8p32_oracle_128() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_moe_route_logits_e8p32_oracle(
         crate::test_fixtures::A3B_Q4_K_M
@@ -5579,9 +5515,7 @@ fn metal_35b_a3b_moe_route_logits_e8p32_oracle_128() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_moe_route_logits_e8p32_oracle_320() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_moe_route_logits_e8p32_oracle(
         crate::test_fixtures::A3B_Q4_K_M
@@ -5596,9 +5530,7 @@ fn metal_35b_a3b_moe_route_logits_e8p32_oracle_320() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_moe_route_logits_e8p32_oracle_512() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_moe_route_logits_e8p32_oracle(
         crate::test_fixtures::A3B_Q4_K_M
@@ -5613,9 +5545,7 @@ fn metal_35b_a3b_moe_route_logits_e8p32_oracle_512() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_moe_route_logits_e8p32_oracle_1024() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_moe_route_logits_e8p32_oracle(
         crate::test_fixtures::A3B_Q4_K_M
@@ -5630,9 +5560,7 @@ fn metal_35b_a3b_moe_route_logits_e8p32_oracle_1024() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_moe_route_logits_e8p32_oracle_320() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_moe_route_logits_e8p32_oracle(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -5647,9 +5575,7 @@ fn metal_122b_a10b_moe_route_logits_e8p32_oracle_320() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_moe_route_logits_e8p32_oracle_512() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_moe_route_logits_e8p32_oracle(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -5664,9 +5590,7 @@ fn metal_122b_a10b_moe_route_logits_e8p32_oracle_512() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_moe_route_logits_e8p32_oracle_1024() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_moe_route_logits_e8p32_oracle(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -5688,14 +5612,10 @@ fn run_gpu_compacted_grouped_down_profile(
         eprintln!("[gpu-grouped-down-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -6019,9 +5939,7 @@ fn run_gpu_compacted_grouped_down_profile(
 #[test]
 #[ignore]
 fn metal_122b_a10b_gpu_compacted_grouped_down_profile() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_gpu_compacted_grouped_down_profile(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -6037,9 +5955,7 @@ fn metal_122b_a10b_gpu_compacted_grouped_down_profile() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_gpu_compacted_grouped_down_profile() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_gpu_compacted_grouped_down_profile(
         crate::test_fixtures::A3B_Q4_K_M
@@ -6062,14 +5978,10 @@ fn run_grouped_q5_down_vs_matmat_oracle(
         eprintln!("[grouped-q5-oracle-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -6390,14 +6302,10 @@ fn run_grouped_q5_swiglu_vs_matmat_oracle(
         eprintln!("[grouped-q5-swiglu-oracle-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -6545,9 +6453,7 @@ fn run_grouped_q5_swiglu_vs_matmat_oracle(
 #[test]
 #[ignore]
 fn metal_122b_a10b_grouped_q5_down_vs_matmat_oracle() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_grouped_q5_down_vs_matmat_oracle(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -6563,9 +6469,7 @@ fn metal_122b_a10b_grouped_q5_down_vs_matmat_oracle() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_grouped_q5_swiglu_vs_matmat_oracle_layer46() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_grouped_q5_swiglu_vs_matmat_oracle(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -6588,14 +6492,10 @@ fn run_grouped_q4_swiglu_vs_packed_oracle(
         eprintln!("[grouped-q4-oracle-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -6861,9 +6761,7 @@ fn run_grouped_q4_swiglu_vs_packed_oracle(
 #[test]
 #[ignore]
 fn metal_122b_a10b_grouped_q4_swiglu_vs_packed_oracle() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_grouped_q4_swiglu_vs_packed_oracle(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -6886,14 +6784,10 @@ fn run_grouped_swiglu_down_backend_profile(
         eprintln!("[grouped-swiglu-down-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -7711,9 +7605,7 @@ fn run_grouped_swiglu_down_backend_profile(
 #[test]
 #[ignore]
 fn metal_122b_a10b_grouped_swiglu_down_backend_profile() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_grouped_swiglu_down_backend_profile(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -7729,9 +7621,7 @@ fn metal_122b_a10b_grouped_swiglu_down_backend_profile() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_swiglu_down_backend_profile() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_grouped_swiglu_down_backend_profile(
         crate::test_fixtures::A3B_Q4_K_M
@@ -7747,9 +7637,7 @@ fn metal_35b_a3b_grouped_swiglu_down_backend_profile() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_swiglu_down_backend_profile_512() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_grouped_swiglu_down_backend_profile(
         crate::test_fixtures::A3B_Q4_K_M
@@ -7765,9 +7653,7 @@ fn metal_35b_a3b_grouped_swiglu_down_backend_profile_512() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_grouped_swiglu_down_backend_profile_512() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_grouped_swiglu_down_backend_profile(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -7783,9 +7669,7 @@ fn metal_122b_a10b_grouped_swiglu_down_backend_profile_512() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_swiglu_down_backend_profile_1024() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_grouped_swiglu_down_backend_profile(
         crate::test_fixtures::A3B_Q4_K_M
@@ -7801,9 +7685,7 @@ fn metal_35b_a3b_grouped_swiglu_down_backend_profile_1024() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_grouped_swiglu_down_backend_profile_1024() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_grouped_swiglu_down_backend_profile(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -7826,14 +7708,10 @@ fn run_grouped_swiglu_fused_bank_profile(
         eprintln!("[grouped-swiglu-fused-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -8070,9 +7948,7 @@ fn run_grouped_swiglu_fused_bank_profile(
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_swiglu_fused_bank_profile_320() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_grouped_swiglu_fused_bank_profile(
         crate::test_fixtures::A3B_Q4_K_M
@@ -8088,9 +7964,7 @@ fn metal_35b_a3b_grouped_swiglu_fused_bank_profile_320() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_grouped_swiglu_fused_bank_profile_320() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_grouped_swiglu_fused_bank_profile(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -8106,9 +7980,7 @@ fn metal_122b_a10b_grouped_swiglu_fused_bank_profile_320() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_swiglu_fused_bank_profile_512() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_grouped_swiglu_fused_bank_profile(
         crate::test_fixtures::A3B_Q4_K_M
@@ -8124,9 +7996,7 @@ fn metal_35b_a3b_grouped_swiglu_fused_bank_profile_512() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_grouped_swiglu_fused_bank_profile_512() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_grouped_swiglu_fused_bank_profile(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -8142,9 +8012,7 @@ fn metal_122b_a10b_grouped_swiglu_fused_bank_profile_512() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_swiglu_fused_bank_profile_1024() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_grouped_swiglu_fused_bank_profile(
         crate::test_fixtures::A3B_Q4_K_M
@@ -8160,9 +8028,7 @@ fn metal_35b_a3b_grouped_swiglu_fused_bank_profile_1024() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_grouped_swiglu_fused_bank_profile_1024() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_grouped_swiglu_fused_bank_profile(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -8242,14 +8108,10 @@ fn run_grouped_zero_fill_coverage_oracle(model_path: &str, label: &str, chunk_p:
         eprintln!("[grouped-zero-fill-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -8505,14 +8367,10 @@ fn run_grouped_moe_overlap_falsifier(model_path: &str, label: &str, chunk_p: usi
         eprintln!("[grouped-overlap-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -8875,9 +8733,7 @@ fn run_grouped_moe_overlap_falsifier(model_path: &str, label: &str, chunk_p: usi
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_overlap_falsifier_512() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_grouped_moe_overlap_falsifier(
         crate::test_fixtures::A3B_Q4_K_M
@@ -8893,9 +8749,7 @@ fn metal_35b_a3b_grouped_overlap_falsifier_512() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_grouped_overlap_falsifier_512() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_grouped_moe_overlap_falsifier(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -8911,9 +8765,7 @@ fn metal_122b_a10b_grouped_overlap_falsifier_512() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_zero_fill_coverage_oracle_512() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_grouped_zero_fill_coverage_oracle(
         crate::test_fixtures::A3B_Q4_K_M
@@ -8928,9 +8780,7 @@ fn metal_35b_a3b_grouped_zero_fill_coverage_oracle_512() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_grouped_zero_fill_coverage_oracle_512() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_grouped_zero_fill_coverage_oracle(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -8947,14 +8797,10 @@ fn run_grouped_q4_n32_proof(model_path: &str, label: &str, chunk_p: usize, n_run
         eprintln!("[grouped-q4-n32-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -9192,9 +9038,7 @@ fn run_grouped_q4_n32_proof(model_path: &str, label: &str, chunk_p: usize, n_run
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_q4_n32_proof_512() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_grouped_q4_n32_proof(
         crate::test_fixtures::A3B_Q4_K_M
@@ -9210,9 +9054,7 @@ fn metal_35b_a3b_grouped_q4_n32_proof_512() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_grouped_q4_n32_proof_512() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_grouped_q4_n32_proof(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -9228,9 +9070,7 @@ fn metal_122b_a10b_grouped_q4_n32_proof_512() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_q4_n32_proof_1024() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_grouped_q4_n32_proof(
         crate::test_fixtures::A3B_Q4_K_M
@@ -9246,9 +9086,7 @@ fn metal_35b_a3b_grouped_q4_n32_proof_1024() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_grouped_q4_n32_proof_1024() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_grouped_q4_n32_proof(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -9272,14 +9110,10 @@ fn run_grouped_q4_hot_n32_proof(
         eprintln!("[grouped-q4-hot-n32-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -9563,9 +9397,7 @@ fn run_grouped_q4_hot_n32_proof(
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_q4_hot_n32_proof_512() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_grouped_q4_hot_n32_proof(
         crate::test_fixtures::A3B_Q4_K_M
@@ -9582,9 +9414,7 @@ fn metal_35b_a3b_grouped_q4_hot_n32_proof_512() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_grouped_q4_hot_n32_proof_512() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_grouped_q4_hot_n32_proof(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -9601,9 +9431,7 @@ fn metal_122b_a10b_grouped_q4_hot_n32_proof_512() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_q4_hot_n32_threshold_scan_512() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     for &threshold in &[48usize, 64, 96, 128] {
         run_grouped_q4_hot_n32_proof(
@@ -9622,9 +9450,7 @@ fn metal_35b_a3b_grouped_q4_hot_n32_threshold_scan_512() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_grouped_q4_hot_n32_threshold_scan_512() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     for &threshold in &[48usize, 64, 96, 128] {
         run_grouped_q4_hot_n32_proof(
@@ -9650,14 +9476,10 @@ fn run_gpu_owned_grouped_routed_backend_profile(
         eprintln!("[gpu-owned-grouped-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -9880,9 +9702,7 @@ fn run_gpu_owned_grouped_routed_backend_profile(
 #[test]
 #[ignore]
 fn metal_122b_a10b_gpu_owned_grouped_routed_backend_profile() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_gpu_owned_grouped_routed_backend_profile(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -9898,9 +9718,7 @@ fn metal_122b_a10b_gpu_owned_grouped_routed_backend_profile() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_gpu_owned_grouped_routed_backend_profile() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_gpu_owned_grouped_routed_backend_profile(
         crate::test_fixtures::A3B_Q4_K_M
@@ -9923,14 +9741,10 @@ fn run_grouped_routed_down_accum_proof(
         eprintln!("[grouped-down-accum-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -10182,9 +9996,7 @@ fn run_grouped_routed_down_accum_proof(
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_routed_down_accum_proof_512() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_grouped_routed_down_accum_proof(
         crate::test_fixtures::A3B_Q4_K_M
@@ -10200,9 +10012,7 @@ fn metal_35b_a3b_grouped_routed_down_accum_proof_512() {
 #[test]
 #[ignore]
 fn metal_122b_a10b_grouped_routed_down_accum_proof_512() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_grouped_routed_down_accum_proof(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -10220,14 +10030,10 @@ fn run_fused_routed_tail_profile(model_path: &str, label: &str, chunk_p: usize, 
         eprintln!("[fused-routed-tail-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -10489,9 +10295,7 @@ fn run_fused_routed_tail_profile(model_path: &str, label: &str, chunk_p: usize, 
 #[test]
 #[ignore]
 fn metal_122b_a10b_fused_routed_tail_profile() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_fused_routed_tail_profile(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -10507,9 +10311,7 @@ fn metal_122b_a10b_fused_routed_tail_profile() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_fused_routed_tail_profile() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_fused_routed_tail_profile(
         crate::test_fixtures::A3B_Q4_K_M
@@ -10532,14 +10334,10 @@ fn run_grouped_routed_down_experiment_profile(
         eprintln!("[grouped-down-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -10766,9 +10564,7 @@ fn run_grouped_routed_down_experiment_profile(
 #[test]
 #[ignore]
 fn metal_122b_a10b_grouped_routed_down_experiment_profile() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     run_grouped_routed_down_experiment_profile(
         crate::test_fixtures::A10B_Q4_K_XL
@@ -10784,9 +10580,7 @@ fn metal_122b_a10b_grouped_routed_down_experiment_profile() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_grouped_routed_down_experiment_profile() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_grouped_routed_down_experiment_profile(
         crate::test_fixtures::A3B_Q4_K_M
@@ -10810,14 +10604,10 @@ fn run_hot_expert_routed_down_hybrid_profile(
         eprintln!("[hot-hybrid-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -11064,9 +10854,7 @@ fn run_hot_expert_routed_down_hybrid_profile(
 #[test]
 #[ignore]
 fn metal_122b_a10b_hot_expert_routed_down_hybrid_profile() {
-    if crate::test_fixtures::A10B_Q4_K_XL.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
 
     for threshold in [64usize, 96, 128] {
         run_hot_expert_routed_down_hybrid_profile(
@@ -11085,9 +10873,7 @@ fn metal_122b_a10b_hot_expert_routed_down_hybrid_profile() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_hot_expert_routed_down_hybrid_profile() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     run_hot_expert_routed_down_hybrid_profile(
         crate::test_fixtures::A3B_Q4_K_M
@@ -11106,19 +10892,15 @@ fn run_packed_dense_prefill_phase_profile(model_path: &str, prompt: &str, chunk_
         eprintln!("[packed-prefill-phase] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     assert_eq!(m.arch.kind, crate::model::ArchKind::Dense);
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
-    let tok = crate::tokenizer::Tokenizer::open(&model_path).expect("tok");
+    let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
     let ids = tok.encode(prompt, false).expect("tokenize");
     let total_n = ids.len();
     let arch = &mm.arch;
@@ -11889,12 +11671,7 @@ fn run_packed_dense_prefill_phase_profile(model_path: &str, prompt: &str, chunk_
 #[test]
 #[ignore]
 fn metal_27b_packed_prefill_phase_profile() {
-    if crate::test_fixtures::QWEN36_27B_Q4_K_M
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
 
     let prompt = "The quick brown fox jumps over the lazy dog. ".repeat(32);
     run_packed_dense_prefill_phase_profile(
@@ -11910,12 +11687,7 @@ fn metal_27b_packed_prefill_phase_profile() {
 #[test]
 #[ignore]
 fn metal_27b_packed_gdn_tail_profile() {
-    if crate::test_fixtures::QWEN36_27B_Q4_K_M
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
 
     let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M
         .required()
@@ -11925,18 +11697,14 @@ fn metal_27b_packed_gdn_tail_profile() {
         eprintln!("[packed-gdn-tail] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&model_path).expect("open");
+    let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
-    let tok = crate::tokenizer::Tokenizer::open(&model_path).expect("tok");
+    let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
     let ids = tok
         .encode(
             &"The quick brown fox jumps over the lazy dog. ".repeat(32),
@@ -12217,13 +11985,9 @@ fn metal_27b_packed_gdn_tail_profile() {
 /// (24 layers, all GDN — so n_gdn = n_layer = 24, smaller than
 /// 27B's 48). Loads in <1 s.
 #[test]
+#[ignore = "model witness: qwen35-0-8b-f32"]
 fn dflash_verify_scratch_slots_and_offsets() {
-    if crate::test_fixtures::QWEN35_0_8B_F32
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
     let path = crate::test_fixtures::QWEN35_0_8B_F32
         .required()
@@ -12233,14 +11997,10 @@ fn dflash_verify_scratch_slots_and_offsets() {
         eprintln!("[dflash-scratch] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&path).expect("open");
+    let g = GgufFile::open(path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
 
@@ -12425,13 +12185,9 @@ fn dflash_verify_scratch_slots_and_offsets() {
 ///
 /// 0.8B-F32, N=4. Loads in ~500 ms; total runtime ≤ 2 s on M4 Max.
 #[test]
+#[ignore = "model witness: qwen35-0-8b-f32"]
 fn dflash_packed_verify_argmax_matches_n_single_tokens() {
-    if crate::test_fixtures::QWEN35_0_8B_F32
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
     let path = crate::test_fixtures::QWEN35_0_8B_F32
         .required()
@@ -12441,14 +12197,10 @@ fn dflash_packed_verify_argmax_matches_n_single_tokens() {
         eprintln!("[dflash-packed-verify] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&path).expect("open");
+    let g = GgufFile::open(path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -12607,13 +12359,9 @@ fn dflash_packed_verify_argmax_matches_n_single_tokens() {
 ///
 /// 0.8B-F32, M=2 prime + N=4 verify. ≤ 2 s.
 #[test]
+#[ignore = "model witness: qwen35-0-8b-f32"]
 fn dflash_packed_verify_layer_major_matches_token_major() {
-    if crate::test_fixtures::QWEN35_0_8B_F32
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
     let path = crate::test_fixtures::QWEN35_0_8B_F32
         .required()
@@ -12622,14 +12370,10 @@ fn dflash_packed_verify_layer_major_matches_token_major() {
     if !std::path::Path::new(&path).exists() {
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&path).expect("open");
+    let g = GgufFile::open(path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -12832,13 +12576,9 @@ fn dflash_packed_verify_layer_major_matches_token_major() {
 /// Uses 0.8B-F32 (lib loop, fast). 27B integration test follows in
 /// dflash_correctness.rs.
 #[test]
+#[ignore = "model witness: qwen35-0-8b-f32"]
 fn dflash_packed_verify_n_eff_override_equiv() {
-    if crate::test_fixtures::QWEN35_0_8B_F32
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
     let path = crate::test_fixtures::QWEN35_0_8B_F32
         .required()
@@ -12848,14 +12588,10 @@ fn dflash_packed_verify_n_eff_override_equiv() {
         eprintln!("[n_eff-equiv] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&path).expect("open");
+    let g = GgufFile::open(path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -13015,13 +12751,9 @@ fn dflash_packed_verify_n_eff_override_equiv() {
 /// Catches the scratch/model/session dimensional drift class
 /// codex flagged.
 #[test]
+#[ignore = "model witness: qwen35-0-8b-f32"]
 fn dflash_packed_verify_dim_guard_wall() {
-    if crate::test_fixtures::QWEN35_0_8B_F32
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
     let path = crate::test_fixtures::QWEN35_0_8B_F32
         .required()
@@ -13030,14 +12762,10 @@ fn dflash_packed_verify_dim_guard_wall() {
     if !std::path::Path::new(&path).exists() {
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&path).expect("open");
+    let g = GgufFile::open(path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -13141,13 +12869,9 @@ fn dflash_packed_verify_dim_guard_wall() {
 ///   (b) Stale session (kv_n_pos=K from prior decode) called with
 ///       start_position != K — should fail.
 #[test]
+#[ignore = "model witness: qwen35-0-8b-f32"]
 fn dflash_packed_verify_kv_n_pos_guard() {
-    if crate::test_fixtures::QWEN35_0_8B_F32
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
     let path = crate::test_fixtures::QWEN35_0_8B_F32
         .required()
@@ -13156,14 +12880,10 @@ fn dflash_packed_verify_kv_n_pos_guard() {
     if !std::path::Path::new(&path).exists() {
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&path).expect("open");
+    let g = GgufFile::open(path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -13219,13 +12939,9 @@ fn dflash_packed_verify_kv_n_pos_guard() {
 /// This is the test codex specifically called out as more
 /// important than the cosine gate before writing restore.
 #[test]
+#[ignore = "model witness: qwen35-0-8b-f32"]
 fn dflash_packed_verify_with_primed_session() {
-    if crate::test_fixtures::QWEN35_0_8B_F32
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
     let path = crate::test_fixtures::QWEN35_0_8B_F32
         .required()
@@ -13234,14 +12950,10 @@ fn dflash_packed_verify_with_primed_session() {
     if !std::path::Path::new(&path).exists() {
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&path).expect("open");
+    let g = GgufFile::open(path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -13352,13 +13064,9 @@ fn dflash_packed_verify_with_primed_session() {
 ///
 /// 0.8B-F32, M=2 prime + N=4 verify. ≤ 5 s on M4 Max.
 #[test]
+#[ignore = "model witness: qwen35-0-8b-f32"]
 fn dflash_restore_after_partial_accept_replay_equivalence() {
-    if crate::test_fixtures::QWEN35_0_8B_F32
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
     let path = crate::test_fixtures::QWEN35_0_8B_F32
         .required()
@@ -13367,14 +13075,10 @@ fn dflash_restore_after_partial_accept_replay_equivalence() {
     if !std::path::Path::new(&path).exists() {
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&path).expect("open");
+    let g = GgufFile::open(path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -13526,13 +13230,9 @@ fn dflash_restore_after_partial_accept_replay_equivalence() {
 }
 
 #[test]
+#[ignore = "model witness: qwen35-0-8b-f32"]
 fn dflash_layer_major_packed_gdn_checkpoint_replay_equivalence() {
-    if crate::test_fixtures::QWEN35_0_8B_F32
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
     if !dflash_verify_packed_gdn_enabled() {
         eprintln!("[packed-gdn-restore] skipped — packed GDN disabled");
@@ -13545,14 +13245,10 @@ fn dflash_layer_major_packed_gdn_checkpoint_replay_equivalence() {
     if !std::path::Path::new(&path).exists() {
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&path).expect("open");
+    let g = GgufFile::open(path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -13715,13 +13411,9 @@ fn dflash_layer_major_packed_gdn_checkpoint_replay_equivalence() {
 /// MetalDFlashDebugScratch (allocates the [N, V] buffer; debug-
 /// only path).
 #[test]
+#[ignore = "model witness: qwen35-0-8b-f32"]
 fn dflash_packed_verify_with_logits_cosine_match() {
-    if crate::test_fixtures::QWEN35_0_8B_F32
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
     let path = crate::test_fixtures::QWEN35_0_8B_F32
         .required()
@@ -13730,14 +13422,10 @@ fn dflash_packed_verify_with_logits_cosine_match() {
     if !std::path::Path::new(&path).exists() {
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&path).expect("open");
+    let g = GgufFile::open(path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -13863,13 +13551,9 @@ fn dflash_packed_verify_with_logits_cosine_match() {
 // for `reference[n][...]`, `(n * K + k) * H + i` stride math, and
 // failure-message position. Iterator rewrite would lose all three.
 #[allow(clippy::needless_range_loop)]
+#[ignore = "model witness: qwen35-0-8b-f32"]
 fn dflash_packed_verify_hidden_capture_layout() {
-    if crate::test_fixtures::QWEN35_0_8B_F32
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
     let path = crate::test_fixtures::QWEN35_0_8B_F32
         .required()
@@ -13878,14 +13562,10 @@ fn dflash_packed_verify_hidden_capture_layout() {
     if !std::path::Path::new(&path).exists() {
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&path).expect("open");
+    let g = GgufFile::open(path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -14014,13 +13694,9 @@ fn dflash_packed_verify_hidden_capture_layout() {
 /// mitigation): n_keep=0 must fail loudly; n_keep > N must fail;
 /// stale kv_n_pos must fail.
 #[test]
+#[ignore = "model witness: qwen35-0-8b-f32"]
 fn dflash_restore_after_partial_accept_guard_wall() {
-    if crate::test_fixtures::QWEN35_0_8B_F32
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
     let path = crate::test_fixtures::QWEN35_0_8B_F32
         .required()
@@ -14029,14 +13705,10 @@ fn dflash_restore_after_partial_accept_guard_wall() {
     if !std::path::Path::new(&path).exists() {
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&path).expect("open");
+    let g = GgufFile::open(path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -14103,13 +13775,9 @@ fn dflash_restore_after_partial_accept_guard_wall() {
 /// Verify `MetalDFlashDebugScratch` builds correctly and `logits_slot`
 /// returns properly-aligned views into the [N, V] buffer.
 #[test]
+#[ignore = "model witness: qwen35-0-8b-f32"]
 fn dflash_debug_scratch_logits_slots() {
-    if crate::test_fixtures::QWEN35_0_8B_F32
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
     let path = crate::test_fixtures::QWEN35_0_8B_F32
         .required()
@@ -14119,14 +13787,10 @@ fn dflash_debug_scratch_logits_slots() {
         eprintln!("[dflash-debug-scratch] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&path).expect("open");
+    let g = GgufFile::open(path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
 
@@ -14164,13 +13828,9 @@ fn dflash_debug_scratch_logits_slots() {
 ///
 /// Edge cases tested via subroutine: T<P, T==P, T==P+r, T==2P.
 #[test]
+#[ignore = "model witness: qwen35-0-8b-f32"]
 fn prefill_tokens_matches_single_token_loop_0_8b() {
-    if crate::test_fixtures::QWEN35_0_8B_F32
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
     let path = crate::test_fixtures::QWEN35_0_8B_F32
         .required()
@@ -14180,14 +13840,10 @@ fn prefill_tokens_matches_single_token_loop_0_8b() {
         eprintln!("[prefill-tokens-vs-single-token] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&path).expect("open");
+    let g = GgufFile::open(path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -14409,19 +14065,15 @@ fn prefill_tokens_matches_single_token_loop_0_8b() {
 #[test]
 #[ignore]
 fn prefill_bf16_bfloat_act_matches_exact_0_8b() {
-    let path = "models/Qwen3.5-0.8B-BF16.gguf";
+    let path = crate::test_fixtures::required_filename("Qwen3.5-0.8B-BF16.gguf");
     if !std::path::Path::new(&path).exists() {
         eprintln!("[bf16-bfloat-act-model] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&path).expect("open");
+    let g = GgufFile::open(path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -14486,19 +14138,15 @@ fn prefill_bf16_bfloat_act_matches_exact_0_8b() {
 #[test]
 #[ignore]
 fn prefill_f16_half_act_matches_exact_0_8b() {
-    let path = "models/Qwen3.5-0.8B.f16.gguf";
+    let path = crate::test_fixtures::required_filename("Qwen3.5-0.8B.f16.gguf");
     if !std::path::Path::new(&path).exists() {
         eprintln!("[f16-half-act-model] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&path).expect("open");
+    let g = GgufFile::open(path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -14564,20 +14212,17 @@ fn prefill_f16_half_act_matches_exact_0_8b() {
 #[ignore]
 fn prefill_q4_legacy_mm_matches_exact_0_8b() {
     for path in [
-        "models/Qwen3.5-0.8B-Q4_0.gguf",
-        "models/Qwen3.5-0.8B-Q4_1.gguf",
+        crate::test_fixtures::required_filename("Qwen3.5-0.8B-Q4_0.gguf"),
+        crate::test_fixtures::required_filename("Qwen3.5-0.8B-Q4_1.gguf"),
     ] {
         if !std::path::Path::new(&path).exists() {
             eprintln!("[q4-legacy-mm-model] skipped missing fixture {path}");
             continue;
         }
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(crate::metal::MetalError::EmptyLibrary)
-            | Err(crate::metal::MetalError::NoDevice) => return,
-            Err(e) => panic!("metal init: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
-        let g = GgufFile::open(&path).expect("open");
+        let g = GgufFile::open(path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
         let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
         let mf = MetalForward::new(&ctx, &mm);
@@ -14647,19 +14292,15 @@ fn prefill_q4_legacy_mm_matches_exact_0_8b() {
 #[test]
 #[ignore]
 fn prefill_bf16_bfloat_act_a3b_moe_drift_smoke() {
-    let path = "models/BF16/Qwen3.5-35B-A3B-BF16-00001-of-00002.gguf";
+    let path = crate::test_fixtures::required_filename("Qwen3.5-35B-A3B-BF16-00001-of-00002.gguf");
     if !std::path::Path::new(&path).exists() {
         eprintln!("[bf16-bfloat-act-a3b] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&path).expect("open");
+    let g = GgufFile::open(path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -14754,9 +14395,7 @@ fn prefill_bf16_bfloat_act_a3b_moe_drift_smoke() {
 #[test]
 #[ignore]
 fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
-    if crate::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
     let path = crate::test_fixtures::A3B_Q4_K_M
         .required()
@@ -14766,14 +14405,10 @@ fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
         eprintln!("[moe-prefill-vs-single] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(crate::metal::MetalError::EmptyLibrary) | Err(crate::metal::MetalError::NoDevice) => {
-            return;
-        }
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(&path).expect("open");
+    let g = GgufFile::open(path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
     assert_eq!(
         m.arch.kind,
@@ -15085,33 +14720,42 @@ fn fuse_q4k_gate_up_expert_banks(
 #[ignore = "slow real-model GPU gate; run explicitly"]
 fn windowed_dflash_bit_identity_3076() {
     use crate::loader::open_dflash_drafter;
-    use crate::metal::MetalError;
     use crate::tokenizer::Tokenizer;
 
     const PROMPT_TOKENS: usize = 3076;
     const WINDOW: usize = 2048;
     const SLACK: usize = 64;
-    const TARGET_GGUF: &str = "models/Qwen3.8-27B-Q8_0.gguf";
-    const DRAFTER_GGUF: &str = "models/incoai-dflash2/Qwen3.8-27B-DFlash2-Q8_0.gguf";
     const FIXTURE_TEXT: &str = "The quick brown fox jumps over the lazy dog while the \
         server quietly processes a long agentic conversation about software \
         engineering, performance analysis, and the correct way to serve large \
         language models on Apple silicon without disturbing the production queue. ";
 
-    if !std::path::Path::new(TARGET_GGUF).exists() || !std::path::Path::new(DRAFTER_GGUF).exists() {
+    if !std::path::Path::new(crate::test_fixtures::required_filename(
+        "Qwen3.8-27B-Q8_0.gguf",
+    ))
+    .exists()
+        || !std::path::Path::new(crate::test_fixtures::required_filename(
+            "Qwen3.8-27B-DFlash2-Q8_0.gguf",
+        ))
+        .exists()
+    {
         eprintln!("[f1] skipped — fixtures missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("[f1] metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
     eprintln!("[f1] loading target + drafter…");
-    let target_g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let target_g = GgufFile::open(crate::test_fixtures::required_filename(
+        "Qwen3.8-27B-Q8_0.gguf",
+    ))
+    .expect("open target");
     let target_m = Model::from_gguf(&target_g).expect("load target");
-    let drafter_g = GgufFile::open(DRAFTER_GGUF).expect("open drafter");
+    let drafter_g = GgufFile::open(crate::test_fixtures::required_filename(
+        "Qwen3.8-27B-DFlash2-Q8_0.gguf",
+    ))
+    .expect("open drafter");
     let head = open_dflash_drafter(&drafter_g, &target_m).expect("bind drafter");
 
     eprintln!(
@@ -15130,7 +14774,10 @@ fn windowed_dflash_bit_identity_3076() {
     let v = target_m.arch.vocab_size as usize;
     let n_features = head.target_layer_ids.len() * h;
 
-    let tok = Tokenizer::open(TARGET_GGUF).expect("tokenizer");
+    let tok = Tokenizer::open(crate::test_fixtures::required_filename(
+        "Qwen3.8-27B-Q8_0.gguf",
+    ))
+    .expect("tokenizer");
     let mut text = String::new();
     while tok.encode(&text, false).map(|ids| ids.len()).unwrap_or(0) < PROMPT_TOKENS {
         text.push_str(FIXTURE_TEXT);
@@ -15254,33 +14901,42 @@ fn windowed_dflash_bit_identity_3076() {
 #[ignore = "slow real-model GPU gate; run explicitly"]
 fn windowed_split_capture_equals_full_capture() {
     use crate::loader::open_dflash_drafter;
-    use crate::metal::MetalError;
     use crate::tokenizer::Tokenizer;
 
     const PROMPT_TOKENS: usize = 3076;
     const WINDOW: usize = DFLASH_CAPTURE_WINDOW;
     const SLACK: usize = 64;
-    const TARGET_GGUF: &str = "models/Qwen3.8-27B-Q8_0.gguf";
-    const DRAFTER_GGUF: &str = "models/incoai-dflash2/Qwen3.8-27B-DFlash2-Q8_0.gguf";
     const FIXTURE_TEXT: &str = "The quick brown fox jumps over the lazy dog while the \
         server quietly processes a long agentic conversation about software \
         engineering, performance analysis, and the correct way to serve large \
         language models on Apple silicon without disturbing the production queue. ";
 
-    if !std::path::Path::new(TARGET_GGUF).exists() || !std::path::Path::new(DRAFTER_GGUF).exists() {
+    if !std::path::Path::new(crate::test_fixtures::required_filename(
+        "Qwen3.8-27B-Q8_0.gguf",
+    ))
+    .exists()
+        || !std::path::Path::new(crate::test_fixtures::required_filename(
+            "Qwen3.8-27B-DFlash2-Q8_0.gguf",
+        ))
+        .exists()
+    {
         eprintln!("[f2-split] skipped — fixtures missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("[f2-split] metal init: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
     eprintln!("[f2-split] loading target + drafter…");
-    let target_g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let target_g = GgufFile::open(crate::test_fixtures::required_filename(
+        "Qwen3.8-27B-Q8_0.gguf",
+    ))
+    .expect("open target");
     let target_m = Model::from_gguf(&target_g).expect("load target");
-    let drafter_g = GgufFile::open(DRAFTER_GGUF).expect("open drafter");
+    let drafter_g = GgufFile::open(crate::test_fixtures::required_filename(
+        "Qwen3.8-27B-DFlash2-Q8_0.gguf",
+    ))
+    .expect("open drafter");
     let head = open_dflash_drafter(&drafter_g, &target_m).expect("bind drafter");
     assert_eq!(
         dflash_capture_window_limit(
@@ -15294,7 +14950,10 @@ fn windowed_split_capture_equals_full_capture() {
     let v = target_m.arch.vocab_size as usize;
     let n_features = head.target_layer_ids.len() * h;
 
-    let tok = Tokenizer::open(TARGET_GGUF).expect("tokenizer");
+    let tok = Tokenizer::open(crate::test_fixtures::required_filename(
+        "Qwen3.8-27B-Q8_0.gguf",
+    ))
+    .expect("tokenizer");
     let mut text = String::new();
     while tok.encode(&text, false).map(|ids| ids.len()).unwrap_or(0) < PROMPT_TOKENS {
         text.push_str(FIXTURE_TEXT);

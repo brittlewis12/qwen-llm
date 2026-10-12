@@ -32,7 +32,6 @@ use std::time::Instant;
 use crate::host_validity::HostSnapshot;
 
 const SCHEMA: &str = "qwen-lm-head-screening-oracle/v0664";
-const MODEL_FILENAME: &str = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
 const MODEL_BYTES: u64 = 22_134_528_992;
 const MODEL_SHA256: &str = "ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61";
 const PROMPT_PATH: &str = "docs/bench/tokenizer-prompts/current-reva-n8-interactive-qwen36.txt";
@@ -769,7 +768,8 @@ fn validate_readiness_constants(readiness: &ReadinessArtifact) -> Result<()> {
     ensure!(
         readiness.command_arguments
             == ReadinessCommandArguments {
-                model: MODEL_FILENAME.to_string(),
+                model: qwen_llm::test_fixtures::required_filename("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
+                    .to_string(),
                 prompt_file: PROMPT_PATH.to_string(),
                 tokens: TOKENS,
                 capture_calls: CALLS.to_vec(),
@@ -1275,7 +1275,9 @@ fn validate_capture_manifest_constants(manifest: &CaptureManifestArtifact) -> Re
         Path::new(&model.path)
             .file_name()
             .and_then(|name| name.to_str())
-            == Some(MODEL_FILENAME)
+            == Some(qwen_llm::test_fixtures::required_filename(
+                "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+            ))
             && model.bytes == MODEL_BYTES
             && model.sha256 == MODEL_SHA256
             && model.architecture == "qwen35moe"
@@ -2134,7 +2136,8 @@ fn validate_raw_gguf(
     let output = gguf.try_slice(desc)?;
     ensure!(sha256(output) == OUTPUT_SHA256);
     Ok(ModelIdentityRecord {
-        path: MODEL_FILENAME.to_string(),
+        path: qwen_llm::test_fixtures::required_filename("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
+            .to_string(),
         bytes: MODEL_BYTES,
         sha256: MODEL_SHA256.to_string(),
         architecture: "qwen35moe".to_string(),
@@ -5386,6 +5389,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen3-6-35b-a3b-ud-q4-k-m"]
     fn invalid_terminalization_is_exclusive_and_atomic_visible() {
         let root = std::env::temp_dir().join(format!(
             "qwen-v0664-terminal-{}-{}",
@@ -5439,7 +5443,8 @@ mod tests {
             executable_identity,
             operator_attestation: true,
             command_arguments: ReadinessCommandArguments {
-                model: MODEL_FILENAME.to_string(),
+                model: qwen_llm::test_fixtures::required_filename("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
+                    .to_string(),
                 prompt_file: PROMPT_PATH.to_string(),
                 tokens: TOKENS,
                 capture_calls: CALLS.to_vec(),

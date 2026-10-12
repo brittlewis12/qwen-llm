@@ -84,6 +84,7 @@ fn client_shape(item: &Value) -> Value {
 }
 
 #[test]
+#[ignore = "model witness: glm53-flash-ud-iq3-xxs"]
 fn natural_fixture_replays_through_serve() {
     let fixture_path = std::env::var_os("GLM53_REUSE_NATURAL")
         .map(std::path::PathBuf::from)
@@ -97,9 +98,9 @@ fn natural_fixture_replays_through_serve() {
         eprintln!("skipped: no fixture at {}", fixture_path.display());
         return;
     };
-    let Some(path) = qwen_llm::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.path_or_skip() else {
-        return;
-    };
+    let path = qwen_llm::test_fixtures::GLM53_FLASH_UD_IQ3_XXS
+        .required()
+        .clone();
     let fixture: Value = serde_json::from_slice(&bytes).unwrap();
     let gguf = qwen_llm::gguf::GgufFile::open(&path).unwrap();
     let tokenizer = qwen_llm::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();

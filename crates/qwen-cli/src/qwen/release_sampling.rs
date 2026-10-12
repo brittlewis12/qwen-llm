@@ -222,6 +222,7 @@ mod tests {
     /// but where a local release GGUF restates its generation_config in
     /// `general.sampling.*`, the two must agree (absent keys mean "off").
     #[test]
+    #[ignore = "model witness: qwen3-5-27b-q4-k-m"]
     fn decisions_agree_with_release_ggufs_that_restate_their_generation_config() {
         use qwen_llm::test_fixtures as fx;
         let mut paths: Vec<std::path::PathBuf> = [
@@ -238,9 +239,11 @@ mod tests {
         .collect();
         paths.extend(
             [
-                "models/Qwen3.5-27B-Q4_K_M.gguf",
-                "models/Qwen3.8-27B-Q4_K_M.gguf",
-                "models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
+                qwen_llm::test_fixtures::required_filename("Qwen3.5-27B-Q4_K_M.gguf"),
+                qwen_llm::test_fixtures::required_filename("Qwen3.8-27B-Q4_K_M.gguf"),
+                qwen_llm::test_fixtures::required_filename(
+                    "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
+                ),
             ]
             .map(std::path::PathBuf::from)
             .into_iter()

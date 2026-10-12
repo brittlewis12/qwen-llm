@@ -80,32 +80,30 @@ fn read_src(rel: &str) -> Option<String> {
     std::fs::read_to_string(&p).ok()
 }
 
-fn models_dir() -> Option<PathBuf> {
-    qwen_llm::test_fixtures::model_search_roots()
-        .into_iter()
-        .find(|path| path.is_dir())
-}
-
-fn family_ggufs(dir: &Path) -> Vec<PathBuf> {
+fn family_ggufs() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let read = match std::fs::read_dir(dir) {
-        Ok(r) => r,
-        Err(_) => return out,
-    };
-    for entry in read.flatten() {
-        let path = entry.path();
-        let name = match path.file_name().and_then(|s| s.to_str()) {
-            Some(n) => n,
-            None => continue,
-        };
-        // Only the family we actually support: Qwen 3.5 / 3.6 (top-level files only).
-        if !(name.starts_with("Qwen3.5-") || name.starts_with("Qwen3.6-")) {
-            continue;
+    for root in qwen_llm::test_fixtures::model_search_roots() {
+        let mut pending = vec![(root, 0usize)];
+        while let Some((dir, depth)) = pending.pop() {
+            let Ok(read) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            for entry in read.flatten() {
+                let path = entry.path();
+                if path.is_dir() && depth < 3 {
+                    pending.push((path, depth + 1));
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                if (name.starts_with("Qwen3.5-") || name.starts_with("Qwen3.6-"))
+                    && name.ends_with(".gguf")
+                {
+                    out.push(path);
+                }
+            }
         }
-        if !name.ends_with(".gguf") {
-            continue;
-        }
-        out.push(path);
     }
     out.sort();
     out
@@ -252,12 +250,11 @@ fn gguf_file_exposes_stop_token_ids_method() {
 /// call below with the real method invocation; the assertion should
 /// remain unchanged.
 #[test]
+#[ignore = "model witness: qwen3-5-0-8b-bf16"]
 fn gguf_file_exposes_stop_token_ids_contract() {
-    let path = Path::new("models/Qwen3.5-0.8B-BF16.gguf");
-    if !path.exists() {
-        eprintln!("[eos-gap] skipped — Qwen3.5-0.8B-BF16.gguf not present");
-        return;
-    }
+    let path = Path::new(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.5-0.8B-BF16.gguf",
+    ));
     let g = GgufFile::open(path).expect("open 0.8B BF16");
 
     let stops = g
@@ -288,21 +285,11 @@ fn gguf_file_exposes_stop_token_ids_contract() {
 /// pulling a fresh base GGUF) and confirm the engine still respects
 /// what the producer declared.
 #[test]
+#[ignore = "model witness: qwen-model-family-eos"]
 fn family_declared_eos_is_heterogeneous() {
-    let dir = match models_dir() {
-        Some(d) => d,
-        None => {
-            eprintln!(
-                "[eos-gap] skipped — model directory unavailable; set QWEN_MODEL_SEARCH_PATH"
-            );
-            return;
-        }
-    };
-    let files = family_ggufs(&dir);
+    let files = family_ggufs();
     if files.is_empty() {
-        eprintln!(
-            "[eos-gap] skipped — no Qwen3.5/3.6 GGUFs in the first QWEN_MODEL_SEARCH_PATH directory"
-        );
+        eprintln!("[eos-gap] no Qwen3.5/3.6 GGUFs found under QWEN_MODEL_SEARCH_PATH");
         return;
     }
 
@@ -358,17 +345,9 @@ fn family_declared_eos_is_heterogeneous() {
 /// safe fallback — silently picking 248046 (as today) hides corrupt
 /// or partially-converted GGUFs.
 #[test]
+#[ignore = "model witness: qwen-model-family-eos"]
 fn every_family_file_declares_eos() {
-    let dir = match models_dir() {
-        Some(d) => d,
-        None => {
-            eprintln!(
-                "[eos-gap] skipped — model directory unavailable; set QWEN_MODEL_SEARCH_PATH"
-            );
-            return;
-        }
-    };
-    let files = family_ggufs(&dir);
+    let files = family_ggufs();
     if files.is_empty() {
         eprintln!(
             "[eos-gap] skipped — no Qwen3.5/3.6 GGUFs in the first QWEN_MODEL_SEARCH_PATH directory"

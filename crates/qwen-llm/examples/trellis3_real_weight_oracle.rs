@@ -124,8 +124,9 @@ fn trellis_sq_err(rot_rows: &[f32], code: &TrellisCode) -> f64 {
 }
 
 fn main() {
-    let model = std::env::var("QWEN_T7_MODEL")
-        .unwrap_or_else(|_| "models/Qwen3.5-9B-BF16.gguf".to_string());
+    let model = std::env::var("QWEN_T7_MODEL").unwrap_or_else(|_| {
+        crate::test_fixtures::required_filename("Qwen3.5-9B-BF16.gguf").to_string()
+    });
     let g = GgufFile::open(&model).expect("open model");
     println!("model: {model}");
 

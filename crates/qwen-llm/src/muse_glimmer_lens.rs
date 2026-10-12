@@ -626,12 +626,7 @@ mod tests {
     #[test]
     #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
     fn real_q8_capture_and_selected_covector_smoke() {
-        if crate::test_fixtures::MUSE_GLIMMER_Q8_0
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
 
         let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
             crate::test_fixtures::MUSE_GLIMMER_Q8_0

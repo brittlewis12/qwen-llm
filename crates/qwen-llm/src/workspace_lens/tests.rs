@@ -1037,10 +1037,8 @@ fn causal_gated_attention_and_rope_vjps_match_finite_differences() {
 
 #[test]
 fn hybrid_attention_mixer_vjp_matches_directional_finite_differences() {
-    let context = match MetalContext::new() {
-        Ok(context) => context,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(error) => panic!("init failed: {error}"),
+    let Some(context) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     const TOKENS: usize = 3;
     const HIDDEN: usize = 16;
@@ -1256,10 +1254,8 @@ fn hybrid_attention_mixer_vjp_matches_directional_finite_differences() {
 
 #[test]
 fn gdn_mixer_replay_vjp_matches_directional_finite_differences() {
-    let context = match MetalContext::new() {
-        Ok(context) => context,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(error) => panic!("init failed: {error}"),
+    let Some(context) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     const N_TOKENS: usize = 3;
     const HIDDEN: usize = 32;
@@ -1569,10 +1565,8 @@ fn gdn_mixer_replay_vjp_matches_directional_finite_differences() {
 
 #[test]
 fn dense_ffn_query_rows_match_serial_batches_and_do_not_cross_talk() {
-    let context = match MetalContext::new() {
-        Ok(context) => context,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(error) => panic!("init failed: {error}"),
+    let Some(context) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     const ROWS: usize = 3;
     const HIDDEN: usize = 11;
@@ -1726,10 +1720,8 @@ fn dense_ffn_query_rows_match_serial_batches_and_do_not_cross_talk() {
 
 #[test]
 fn gdn_block_composition_matches_distinct_row_and_temporal_oracles() {
-    let context = match MetalContext::new() {
-        Ok(context) => context,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(error) => panic!("init failed: {error}"),
+    let Some(context) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     const ROWS: usize = 3;
     const HIDDEN: usize = 11;
@@ -1937,10 +1929,8 @@ fn gdn_block_composition_matches_distinct_row_and_temporal_oracles() {
 
 #[test]
 fn dense_ffn_vjp_composes_jacobian_and_relp_rules() {
-    let context = match MetalContext::new() {
-        Ok(context) => context,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(error) => panic!("init failed: {error}"),
+    let Some(context) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     const HIDDEN: usize = 11;
     const INTERMEDIATE: usize = 17;
@@ -2044,10 +2034,8 @@ fn dense_ffn_vjp_composes_jacobian_and_relp_rules() {
 
 #[test]
 fn dense_ffn_vjp_preserves_the_identity_residual() {
-    let context = match MetalContext::new() {
-        Ok(context) => context,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(error) => panic!("init failed: {error}"),
+    let Some(context) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     const HIDDEN: usize = 7;
     const INTERMEDIATE: usize = 9;

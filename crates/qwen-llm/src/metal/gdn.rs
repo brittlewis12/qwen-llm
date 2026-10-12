@@ -2172,10 +2172,8 @@ mod tests {
     /// softplus + mul). Must match within fp32 rounding noise.
     #[test]
     fn gdn_alpha_chain_matches_unfused() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let n = 48usize; // n_v_heads for 27B
         let a: Vec<f32> = (0..n).map(|i| ((i % 23) as f32 - 11.0) * 0.5).collect();
@@ -2261,10 +2259,8 @@ mod tests {
     /// (broadcasting `dt_bias` and `a_log` across rows).
     #[test]
     fn gdn_alpha_chain_batched_matches_per_row() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let n_rows = 16usize; // N for DFlash block_size
         let n_cols = 48usize; // n_v_heads for 27B
@@ -2330,10 +2326,8 @@ mod tests {
 
     #[test]
     fn ssm_conv_silu_matches_cpu() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         // Real shapes: 0.8B has conv_dim = 2*16*128 + 16*128 = 6144;
         // 27B has conv_dim = 2*16*128 + 48*128 = 10240.

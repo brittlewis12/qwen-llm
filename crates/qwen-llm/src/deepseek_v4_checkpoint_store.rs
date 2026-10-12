@@ -518,7 +518,7 @@ mod tests {
 
     #[test]
     fn shared_staging_cleanup_is_wired_into_deepseek_publication() {
-        let Ok(ctx) = MetalContext::new() else {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
         let temp = TestDir::new("staging-cleanup");
@@ -570,7 +570,7 @@ mod tests {
 
     #[test]
     fn store_publishes_and_restores_longest_strict_prefix() {
-        let Ok(ctx) = MetalContext::new() else {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
         let temp = TestDir::new("basic");
@@ -675,7 +675,7 @@ mod tests {
 
     #[test]
     fn budget_eviction_is_lru_and_respects_touch_freshness() {
-        let Ok(ctx) = MetalContext::new() else {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
         let temp = TestDir::new("evict");
@@ -717,7 +717,7 @@ mod tests {
 
     #[test]
     fn oversized_publication_is_rejected_without_namespace_mutation() {
-        let Ok(ctx) = MetalContext::new() else {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
         let temp = TestDir::new("oversized");
@@ -738,7 +738,7 @@ mod tests {
 
     #[test]
     fn caller_record_budget_failure_preserves_the_valid_blob() {
-        let Ok(ctx) = MetalContext::new() else {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
         let temp = TestDir::new("caller-budget");
@@ -768,7 +768,7 @@ mod tests {
 
     #[test]
     fn corrupt_blob_is_self_healed_and_lookup_falls_back() {
-        let Ok(ctx) = MetalContext::new() else {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
         let temp = TestDir::new("heal");
@@ -801,7 +801,7 @@ mod tests {
 
     #[test]
     fn foreign_entry_at_managed_key_is_rejected() {
-        let Ok(ctx) = MetalContext::new() else {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
         let temp = TestDir::new("foreign");
@@ -824,7 +824,7 @@ mod tests {
 
     #[test]
     fn republishing_different_causal_state_for_same_prefix_is_a_collision() {
-        let Ok(ctx) = MetalContext::new() else {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
         let temp = TestDir::new("collision");
@@ -862,7 +862,7 @@ mod tests {
 
     #[test]
     fn prepared_checkpoints_publish_after_their_session_is_gone() {
-        let Ok(ctx) = MetalContext::new() else {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
         let temp = TestDir::new("prepared");
@@ -896,7 +896,7 @@ mod tests {
 
     #[test]
     fn concurrent_publishers_converge_on_one_immutable_blob() {
-        let Ok(ctx) = MetalContext::new() else {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
         let temp = TestDir::new("concurrent");

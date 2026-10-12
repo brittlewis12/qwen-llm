@@ -27,8 +27,6 @@ use crate::tokenizer::Tokenizer;
 use objc2_metal::MTLBuffer;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs::File, io::Write, time::Instant};
-
-const ARTIFACT: &str = "models/underdog-saluki-27b/Underdog-Saluki-27B-1.0-IQ2-mix.gguf";
 const CHUNK: u32 = 128;
 const CAPACITY: usize = 135;
 const CONTINUATIONS: usize = 4;
@@ -932,7 +930,9 @@ fn iq_capacity_model_packet() {
         .create_new(true)
         .open(std::env::var_os("IQ_CAPACITY_MODEL_OUT").expect("IQ_CAPACITY_MODEL_OUT required"))
         .expect("new output file required");
-    let path = std::env::var_os("IQ_CAPACITY_GGUF").unwrap_or_else(|| ARTIFACT.into());
+    let path = std::env::var_os("IQ_CAPACITY_GGUF").unwrap_or_else(|| {
+        crate::test_fixtures::required_filename("Underdog-Saluki-27B-1.0-IQ2-mix.gguf").into()
+    });
     let gguf = GgufFile::open(&path).unwrap();
     let bound = Model::from_gguf(&gguf).unwrap();
     assert_eq!(bound.arch.kind, ArchKind::Dense);

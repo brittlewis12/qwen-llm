@@ -5068,10 +5068,8 @@ mod tests {
     #[test]
     #[ignore]
     fn attn_matrix_online_vs_sidecar_microbench() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let hd = 256usize;
 
@@ -5242,10 +5240,8 @@ mod tests {
     #[test]
     #[ignore]
     fn attn_v4_group8_subgroup_matches_naive_f16kv() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let n_q = 16usize;
         let n_kv = 2usize;
@@ -5459,10 +5455,8 @@ mod tests {
     #[ignore]
     fn attn_v4_prefill_g8_t2_q2_c64_vs_decode_loop() {
         use std::time::Instant;
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         const N_Q: usize = 16;
         const N_KV: usize = 2;
@@ -5626,10 +5620,8 @@ mod tests {
     #[ignore]
     fn attn_v4_nwg_sweep() {
         use std::time::Instant;
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         eprintln!("[v4-bench] {}", ctx.describe());
 
@@ -5767,10 +5759,8 @@ mod tests {
     #[ignore]
     fn attn_v4_tile_c_sweep() {
         use std::time::Instant;
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         eprintln!("[v4-c-sweep] {}", ctx.describe());
 
@@ -5877,8 +5867,9 @@ mod tests {
     #[test]
     #[ignore = "slow real-model GPU audit; run explicitly"]
     fn attn_decode_v4_bandwidth_audit_130k() {
-        let model_path = std::env::var("QWEN_ATTN_AUDIT_MODEL")
-            .unwrap_or_else(|_| "models/Qwen3.8-27B-Q8_0.gguf".into());
+        let model_path = std::env::var("QWEN_ATTN_AUDIT_MODEL").unwrap_or_else(|_| {
+            crate::test_fixtures::required_filename("Qwen3.8-27B-Q8_0.gguf").into()
+        });
         if !std::path::Path::new(&model_path).exists() {
             eprintln!("[attn-audit] skipped — model missing");
             return;
@@ -5887,10 +5878,8 @@ mod tests {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(131_072);
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let g = crate::gguf::GgufFile::open(&model_path).expect("open model");
         let m = crate::loader::Model::from_gguf(&g).expect("load model");

@@ -649,7 +649,9 @@ pub(super) fn run_mxfp4_f32_matrix_tile_k216_bucket_floor(
         Some(ctx) => ctx,
         None => return,
     };
-    let path = "models/deepseek-v4-flash-0731-reap-k216/DeepSeek-V4-Flash-0731-REAP-K216-UD-IQ3_XXS-00001-of-00003.gguf";
+    let path = crate::test_fixtures::required_filename(
+        "DeepSeek-V4-Flash-0731-REAP-K216-UD-IQ3_XXS-00001-of-00003.gguf",
+    );
     if !std::path::Path::new(&path).exists() {
         eprintln!("[mxfp4-mm-floor] skipped: K216 fixture missing");
         return;
@@ -657,7 +659,7 @@ pub(super) fn run_mxfp4_f32_matrix_tile_k216_bucket_floor(
     const N_IN: usize = 2_048;
     const N_OUT: usize = 4_096;
     const EXPERTS: usize = 216;
-    let gguf = crate::gguf::GgufFile::open(&path).expect("open K216 GGUF");
+    let gguf = crate::gguf::GgufFile::open(path).expect("open K216 GGUF");
     let load_bank = |layer: usize| {
         let name = format!("blk.{layer}.ffn_down_exps.weight");
         let tensor = gguf
@@ -933,16 +935,14 @@ where
 
 #[allow(non_snake_case)]
 pub(super) fn ffn_swiglu_q4_K_matches_unfused() {
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
     if !std::path::Path::new(&path).exists() {
         return;
     }
-    let g = crate::gguf::GgufFile::open(&path).expect("open");
+    let g = crate::gguf::GgufFile::open(path).expect("open");
 
     // Find ffn_gate and ffn_up Q4_K tensors from layer 0.
     let gate = g
@@ -1051,10 +1051,8 @@ pub(super) fn run_attn_v4_q8_kv_compare(
     tile_c: usize,
     group_tile: Option<usize>,
 ) {
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let hd = 256usize;
     let kv_dim = n_kv * hd;
@@ -1219,7 +1217,7 @@ pub(super) fn quantized_get_rows_fixture(path: &str, expected_dtype: GgmlType, b
         "required fixture missing: {path}"
     );
     let ctx = MetalContext::new().expect("metal context");
-    let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
+    let g = crate::gguf::GgufFile::open(path).expect("open fixture");
     let model = crate::loader::Model::from_gguf(&g).expect("load model");
     let desc = model.token_embd;
     assert_eq!(desc.dtype, expected_dtype);

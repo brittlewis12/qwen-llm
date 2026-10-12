@@ -1410,10 +1410,8 @@ mod tests {
 
     #[test]
     fn rms_norm_matches_cpu() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         for &n in &[1024usize, 5120, 17408] {
             let x: Vec<f32> = (0..n).map(|i| ((i % 17) as f32 - 8.0) * 0.1).collect();
@@ -1436,10 +1434,8 @@ mod tests {
 
     #[test]
     fn rms_norm_vjp_matches_jacobian_and_relp_rules() {
-        let ctx = match MetalContext::new() {
-            Ok(context) => context,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("init failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         const N_DIM: usize = 67;
         const EPS: f32 = 1e-6;
@@ -1552,10 +1548,8 @@ mod tests {
 
     #[test]
     fn residual_rms_norm_matches_separate_cpu_path() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         for &n in &[1024usize, 5120, 17408] {
             let x: Vec<f32> = (0..n).map(|i| ((i % 23) as f32 - 11.0) * 0.07).collect();
@@ -1586,10 +1580,8 @@ mod tests {
 
     #[test]
     fn l2_norm_matches_cpu() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         for &n in &[128usize, 256, 1024] {
             // include a few that hit the eps clamp (very small magnitudes)
@@ -1620,10 +1612,8 @@ mod tests {
 
     #[test]
     fn l2_norm_batched_matches_cpu() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         for &(n_heads, head_dim) in &[(16usize, 128usize), (48, 128), (8, 256)] {
             let total = n_heads * head_dim;
@@ -1671,10 +1661,8 @@ mod tests {
 
     #[test]
     fn l2_norm_pair_batched_matches_cpu() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         for &(n_heads, head_dim) in &[(16usize, 128usize), (48, 128), (8, 256)] {
             let total = n_heads * head_dim;
@@ -2040,10 +2028,8 @@ mod tests {
     /// batched q-norm (pure addressing change, same per-row arithmetic).
     #[test]
     fn rms_norm_batched_src_strided_matches_split_path_bitwise() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         for &(n_heads, head_dim) in &[(24usize, 256usize), (16, 256), (8, 64)] {
             let full: Vec<f32> = (0..n_heads * 2 * head_dim)

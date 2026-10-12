@@ -1265,9 +1265,9 @@ fn max_capacity_is_the_largest_fitting_context() {
 #[test]
 #[ignore = "CPU/header-only; requires GLM53_GGUF (GLM-5.3-Flash shard 1)"]
 fn release_artifact_census_and_allocation_plan() {
-    let Some(path) = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.path_or_skip() else {
-        return;
-    };
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS
+        .required()
+        .clone();
     let gguf = GgufFile::open(&path).unwrap();
     let model = Glm5NextModel::from_gguf(&gguf).unwrap();
     assert_eq!(gguf.tensors.len(), RELEASE_TENSOR_COUNT);

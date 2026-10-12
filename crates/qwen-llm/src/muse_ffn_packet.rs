@@ -213,12 +213,7 @@ fn muse_ffn_packet_cpu_contracts() {
 #[test]
 #[ignore = "M4 Max characterization; coordinated GPU only, production lease, all-layer Muse FFN capture and frozen fusion screen"]
 fn muse_ffn_capture_and_fusion_screen() {
-    if crate::test_fixtures::MUSE_GLIMMER_Q8_0
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
 
     let _lease = crate::metal::acquire_metal_benchmark_lease()
         .expect("production lease and wired gate required");
@@ -291,7 +286,7 @@ fn muse_ffn_capture_and_fusion_screen() {
         seed["math"],
         serde_json::json!({"matrix":true,"tiled_f32":true,"chunk":128})
     );
-    let gguf = GgufFile::open(&path).unwrap();
+    let gguf = GgufFile::open(path).unwrap();
     let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
     let tokens = long_context_tokens(path, &config);
     assert_eq!(

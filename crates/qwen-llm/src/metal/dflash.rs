@@ -1029,10 +1029,8 @@ mod tests {
     ///     under SWA)
     #[test]
     fn dflash_attn_matches_cpu_oracle_under_mask_regimes() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("metal init: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
 
         // Drafter shape: n_q=32, n_kv=8 (group=4), head_dim=128, N=16.
@@ -1411,10 +1409,8 @@ mod tests {
 
     #[test]
     fn dflash_attn_swa_split4_matches_cpu_oracle_n8() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("metal init: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let n = 8;
         let n_q = 32;
@@ -1550,10 +1546,8 @@ mod tests {
 
     #[test]
     fn dflash_attn_swa_split4_rejects_unsafe_contracts() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("metal init: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let n = 8usize;
         let ctx_len = 16usize;
@@ -1654,10 +1648,8 @@ mod tests {
     /// stack-OOB without this guard.
     #[test]
     fn dflash_attn_rejects_head_dim_over_256() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("metal init: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         // Make tiny placeholder buffers; we only care about the host
         // wrapper validation.

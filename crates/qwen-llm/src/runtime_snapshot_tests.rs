@@ -32,12 +32,7 @@ fn replace_first_word(ctx: &MetalContext, destination: &MetalTensor, bytes: [u8;
 #[test]
 #[ignore = "serial Metal, real 0.8B runtime snapshot alias witness"]
 fn runtime_snapshot_observes_alias_retained_across_restore() {
-    if crate::test_fixtures::QWEN35_0_8B_F32
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
     let runtime = Runtime::metal().unwrap();
     let model = runtime
@@ -93,12 +88,7 @@ fn assert_same_payload(a: &PreparedCheckpoint, b: &PreparedCheckpoint) {
 #[test]
 #[ignore = "serial Metal, real 0.8B packed capture destination guards"]
 fn runtime_packed_capture_rejects_session_and_scratch_aliases() {
-    if crate::test_fixtures::QWEN35_0_8B_F32
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
     let runtime = Runtime::metal().unwrap();
     let model = runtime
@@ -176,12 +166,7 @@ fn runtime_packed_capture_rejects_session_and_scratch_aliases() {
 #[test]
 #[ignore = "serial Metal, real 0.8B owned serial prompt append equivalence"]
 fn runtime_owned_prompt_token_matches_raw_append_and_fails_closed() {
-    if crate::test_fixtures::QWEN35_0_8B_F32
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
     let runtime = Runtime::metal().unwrap();
     let model = runtime

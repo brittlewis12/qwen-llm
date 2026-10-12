@@ -831,10 +831,8 @@ mod tests {
 
     #[test]
     fn swiglu_vjp_matches_jacobian_and_relp_rules() {
-        let ctx = match MetalContext::new() {
-            Ok(context) => context,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("init failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         const N_DIM: usize = 79;
         for row_count in [1usize, 2, 8] {
@@ -912,10 +910,8 @@ mod tests {
 
     #[test]
     fn periodic_vjps_match_per_row_controls_bits() {
-        let ctx = match MetalContext::new() {
-            Ok(context) => context,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("init failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         const PRIMAL_ROWS: usize = 3;
         const ROWS: usize = 9;
@@ -1077,10 +1073,8 @@ mod tests {
 
     #[test]
     fn frozen_linear_dense_vjp_matches_stored_precision() {
-        let ctx = match MetalContext::new() {
-            Ok(context) => context,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("init failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         const N_IN: usize = 73;
         const N_OUT: usize = 37;
@@ -1126,10 +1120,8 @@ mod tests {
 
     #[test]
     fn frozen_linear_q8_0_vjp_matches_dequantized_adjoint() {
-        let ctx = match MetalContext::new() {
-            Ok(context) => context,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("init failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         const N_IN: usize = 96;
         const N_OUT: usize = 37;
@@ -1223,10 +1215,8 @@ mod tests {
 
     #[test]
     fn frozen_linear_q8_0_vjp_supports_offset_tensor_views() {
-        let ctx = match MetalContext::new() {
-            Ok(context) => context,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("init failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         const N_IN: usize = 64;
         const N_OUT: usize = 5;
@@ -1291,10 +1281,8 @@ mod tests {
 
     #[test]
     fn frozen_linear_q8_0_vjp_rejects_invalid_contracts() {
-        let ctx = match MetalContext::new() {
-            Ok(context) => context,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("init failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         const N: usize = 32;
         const N_QUERY: usize = 2;
@@ -1380,10 +1368,8 @@ mod tests {
 
     #[test]
     fn frozen_linear_q8_0_vjp_r2c16k64_matches_adjoint_and_tails() {
-        let ctx = match MetalContext::new() {
-            Ok(context) => context,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("init failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
 
         for (n_in, n_out, n_query) in [(32usize, 64usize, 128usize), (96, 128, 257), (96, 65, 129)]
@@ -1590,10 +1576,8 @@ mod tests {
     #[test]
     #[ignore = "bounded model-free Muse Q8 VJP qualification packet"]
     fn profile_frozen_linear_q8_0_vjp_r2c16k64_muse_shapes() {
-        let ctx = match MetalContext::new() {
-            Ok(context) => context,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("init failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         const FIXED_KILL_MS: f64 = 23.579;
         let cases = [

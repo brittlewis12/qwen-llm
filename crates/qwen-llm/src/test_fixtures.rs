@@ -14,9 +14,9 @@
 //!   a caller asked for something specific and did not get it.
 //! - Aliases are consulted in the order listed; setting two aliases to
 //!   different values is a conflict and fails rather than silently picking one.
-//! - `QWEN_REQUIRE_FIXTURES` turns unavailable fixtures into failures. Metal
-//!   being required (`QWEN_REQUIRE_METAL_TESTS` truthy) turns a
-//!   would-be skip into a failure. It never changes what a fixture resolves to.
+//! - Explicitly selected model witnesses use `required()` and fail when their
+//!   fixture is missing. Metal being required (`QWEN_REQUIRE_METAL_TESTS`
+//!   truthy) turns a would-be hardware skip into a failure.
 //!
 //! This module is compiled into the library so the crate's integration tests
 //! (a separate crate) can reach it; it has no dependencies beyond `std` and
@@ -27,11 +27,6 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::env_flag::env_value_truthy;
 use crate::metal::{MetalContext, MetalError};
-
-crate::env_flag!(
-    /// Fail a test when a model fixture is unavailable instead of skipping it.
-    default_off require_fixtures, "QWEN_REQUIRE_FIXTURES"
-);
 
 /// One local model fixture: a stable id, the environment aliases that may
 /// override its location, and its published filename.
@@ -135,6 +130,252 @@ pub const DFLASH_DRAFT_36_Q8_0: Fixture = Fixture {
     filename: "dflash-draft-3.6-q8_0.gguf",
 };
 
+/// Additional published GGUF fixtures used by model witnesses.
+pub mod catalog {
+    use super::Fixture;
+
+    /// Published artifact fixture `DeepSeek-V4-Flash-0731-REAP-K160-Q3_K_Q4_K-00001-of-00004.gguf`.
+    pub const DEEPSEEK_V4_FLASH_0731_REAP_K160_Q3_K_Q4_K_00001_OF_00004: Fixture = Fixture {
+        id: "deepseek-v4-flash-0731-reap-k160-q3-k-q4-k-00001-of-00004",
+        env: &[],
+        filename: "DeepSeek-V4-Flash-0731-REAP-K160-Q3_K_Q4_K-00001-of-00004.gguf",
+    };
+
+    /// Published artifact fixture `DeepSeek-V4-Flash-0731-REAP-K216-UD-IQ3_XXS-00001-of-00003.gguf`.
+    pub const DEEPSEEK_V4_FLASH_0731_REAP_K216_UD_IQ3_XXS_00001_OF_00003: Fixture = Fixture {
+        id: "deepseek-v4-flash-0731-reap-k216-ud-iq3-xxs-00001-of-00003",
+        env: &[],
+        filename: "DeepSeek-V4-Flash-0731-REAP-K216-UD-IQ3_XXS-00001-of-00003.gguf",
+    };
+
+    /// Published artifact fixture `Muse-Glimmer-30B-BF16-00001-of-00002.gguf`.
+    pub const MUSE_GLIMMER_30B_BF16_00001_OF_00002: Fixture = Fixture {
+        id: "muse-glimmer-30b-bf16-00001-of-00002",
+        env: &[],
+        filename: "Muse-Glimmer-30B-BF16-00001-of-00002.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.5-0.8B-BF16.gguf`.
+    pub const QWEN3_5_0_8B_BF16: Fixture = Fixture {
+        id: "qwen3.5-0.8b-bf16",
+        env: &[],
+        filename: "Qwen3.5-0.8B-BF16.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.5-0.8B-IQ4_NL.gguf`.
+    pub const QWEN3_5_0_8B_IQ4_NL: Fixture = Fixture {
+        id: "qwen3.5-0.8b-iq4-nl",
+        env: &[],
+        filename: "Qwen3.5-0.8B-IQ4_NL.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.5-0.8B-IQ4_XS.gguf`.
+    pub const QWEN3_5_0_8B_IQ4_XS: Fixture = Fixture {
+        id: "qwen3.5-0.8b-iq4-xs",
+        env: &[],
+        filename: "Qwen3.5-0.8B-IQ4_XS.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.5-0.8B-Q3_K_M.gguf`.
+    pub const QWEN3_5_0_8B_Q3_K_M: Fixture = Fixture {
+        id: "qwen3.5-0.8b-q3-k-m",
+        env: &[],
+        filename: "Qwen3.5-0.8B-Q3_K_M.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.5-0.8B-Q4_0.gguf`.
+    pub const QWEN3_5_0_8B_Q4_0: Fixture = Fixture {
+        id: "qwen3.5-0.8b-q4-0",
+        env: &[],
+        filename: "Qwen3.5-0.8B-Q4_0.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.5-0.8B-Q4_1.gguf`.
+    pub const QWEN3_5_0_8B_Q4_1: Fixture = Fixture {
+        id: "qwen3.5-0.8b-q4-1",
+        env: &[],
+        filename: "Qwen3.5-0.8B-Q4_1.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.5-0.8B-Q4_K_M.gguf`.
+    pub const QWEN3_5_0_8B_Q4_K_M: Fixture = Fixture {
+        id: "qwen3.5-0.8b-q4-k-m",
+        env: &[],
+        filename: "Qwen3.5-0.8B-Q4_K_M.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.5-0.8B-Q8_0.gguf`.
+    pub const QWEN3_5_0_8B_Q8_0: Fixture = Fixture {
+        id: "qwen3.5-0.8b-q8-0",
+        env: &[],
+        filename: "Qwen3.5-0.8B-Q8_0.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.5-0.8B.Q2_K.gguf`.
+    pub const QWEN3_5_0_8B_Q2_K: Fixture = Fixture {
+        id: "qwen3.5-0.8b.q2-k",
+        env: &[],
+        filename: "Qwen3.5-0.8B.Q2_K.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.5-0.8B.f16.gguf`.
+    pub const QWEN3_5_0_8B_F16: Fixture = Fixture {
+        id: "qwen3.5-0.8b.f16",
+        env: &[],
+        filename: "Qwen3.5-0.8B.f16.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.5-27B-Q4_K_M.gguf`.
+    pub const QWEN3_5_27B_Q4_K_M: Fixture = Fixture {
+        id: "qwen3.5-27b-q4-k-m",
+        env: &[],
+        filename: "Qwen3.5-27B-Q4_K_M.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.5-35B-A3B-BF16-00001-of-00002.gguf`.
+    pub const QWEN3_5_35B_A3B_BF16_00001_OF_00002: Fixture = Fixture {
+        id: "qwen3.5-35b-a3b-bf16-00001-of-00002",
+        env: &[],
+        filename: "Qwen3.5-35B-A3B-BF16-00001-of-00002.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.5-35B-A3B-Q6_K.gguf`.
+    pub const QWEN3_5_35B_A3B_Q6_K: Fixture = Fixture {
+        id: "qwen3.5-35b-a3b-q6-k",
+        env: &[],
+        filename: "Qwen3.5-35B-A3B-Q6_K.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.5-35B-A3B-Q8_0.gguf`.
+    pub const QWEN3_5_35B_A3B_Q8_0: Fixture = Fixture {
+        id: "qwen3.5-35b-a3b-q8-0",
+        env: &[],
+        filename: "Qwen3.5-35B-A3B-Q8_0.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.5-4B-BF16.gguf`.
+    pub const QWEN3_5_4B_BF16: Fixture = Fixture {
+        id: "qwen3.5-4b-bf16",
+        env: &[],
+        filename: "Qwen3.5-4B-BF16.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.5-4B-UD-IQ2_M.gguf`.
+    pub const QWEN3_5_4B_UD_IQ2_M: Fixture = Fixture {
+        id: "qwen3.5-4b-ud-iq2-m",
+        env: &[],
+        filename: "Qwen3.5-4B-UD-IQ2_M.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.5-4B-UD-Q2_K_XL.gguf`.
+    pub const QWEN3_5_4B_UD_Q2_K_XL: Fixture = Fixture {
+        id: "qwen3.5-4b-ud-q2-k-xl",
+        env: &[],
+        filename: "Qwen3.5-4B-UD-Q2_K_XL.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.5-9B-BF16.gguf`.
+    pub const QWEN3_5_9B_BF16: Fixture = Fixture {
+        id: "qwen3.5-9b-bf16",
+        env: &[],
+        filename: "Qwen3.5-9B-BF16.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.6-27B-BF16.gguf`.
+    pub const QWEN3_6_27B_BF16: Fixture = Fixture {
+        id: "qwen3.6-27b-bf16",
+        env: &[],
+        filename: "Qwen3.6-27B-BF16.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.6-27B-MTP-Q4_K_M.gguf`.
+    pub const QWEN3_6_27B_MTP_Q4_K_M: Fixture = Fixture {
+        id: "qwen3.6-27b-mtp-q4-k-m",
+        env: &[],
+        filename: "Qwen3.6-27B-MTP-Q4_K_M.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.8-27B-DFlash2-Q4_K_M.gguf`.
+    pub const QWEN3_8_27B_DFLASH2_Q4_K_M: Fixture = Fixture {
+        id: "qwen3.8-27b-dflash2-q4-k-m",
+        env: &[],
+        filename: "Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.8-27B-DFlash2-Q8_0.gguf`.
+    pub const QWEN3_8_27B_DFLASH2_Q8_0: Fixture = Fixture {
+        id: "qwen3.8-27b-dflash2-q8-0",
+        env: &[],
+        filename: "Qwen3.8-27B-DFlash2-Q8_0.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.8-27B-Q4_K_M.gguf`.
+    pub const QWEN3_8_27B_Q4_K_M: Fixture = Fixture {
+        id: "qwen3.8-27b-q4-k-m",
+        env: &[],
+        filename: "Qwen3.8-27B-Q4_K_M.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.8-27B-Q8_0.gguf`.
+    pub const QWEN3_8_27B_Q8_0: Fixture = Fixture {
+        id: "qwen3.8-27b-q8-0",
+        env: &[],
+        filename: "Qwen3.8-27B-Q8_0.gguf",
+    };
+
+    /// Published artifact fixture `Qwen3.8-27B-Ridge-3.7bpw.gguf`.
+    pub const QWEN3_8_27B_RIDGE_3_7BPW: Fixture = Fixture {
+        id: "qwen3.8-27b-ridge-3.7bpw",
+        env: &[],
+        filename: "Qwen3.8-27B-Ridge-3.7bpw.gguf",
+    };
+
+    /// Published artifact fixture `Underdog-Saluki-27B-1.0-IQ2-mix.gguf`.
+    pub const UNDERDOG_SALUKI_27B_1_0_IQ2_MIX: Fixture = Fixture {
+        id: "underdog-saluki-27b-1.0-iq2-mix",
+        env: &[],
+        filename: "Underdog-Saluki-27B-1.0-IQ2-mix.gguf",
+    };
+
+    /// Published lowercase release filename used by legacy 0.8B witnesses.
+    pub const QWEN3_5_0_8B_LOWER_Q4_K_M: Fixture = Fixture {
+        id: "qwen3.5-0.8b-lower-q4-k-m",
+        env: &[],
+        filename: "qwen3.5-0.8b.Q4_K_M.gguf",
+    };
+
+    /// Generated by `llm --model "$MODELS/Qwen3.5-0.8B.F32.gguf" --snapshot "$ORACLE_DIR" --snapshot-id hello_t0 --raw "Hello"`.
+    pub const ORACLE_HELLO_T0: Fixture = Fixture {
+        id: "oracle-hello-t0",
+        env: &[],
+        filename: "hello_t0.f32",
+    };
+    /// Generated by `llm --model "$MODELS/Qwen3.6-27B-Q4_K_M.gguf" --snapshot "$ORACLE_DIR" --snapshot-id hello_27b_q4km --raw "Hello"`.
+    pub const ORACLE_HELLO_27B_Q4KM: Fixture = Fixture {
+        id: "oracle-hello-27b-q4km",
+        env: &[],
+        filename: "hello_27b_q4km.f32",
+    };
+    /// Generated by `llm --model "$MODELS/Qwen3.6-27B-Q4_K_M.gguf" --snapshot "$ORACLE_DIR" --snapshot-id longprompt_27b --raw "$PROMPT"`.
+    pub const ORACLE_LONGPROMPT_27B: Fixture = Fixture {
+        id: "oracle-longprompt-27b",
+        env: &[],
+        filename: "longprompt_27b.f32",
+    };
+    /// Generated by `llm --model "$MODELS/Qwen3.5-0.8B.F32.gguf" --snapshot "$ORACLE_DIR" --snapshot-id longprompt_t0 --raw "$PROMPT"`.
+    pub const ORACLE_LONGPROMPT_T0: Fixture = Fixture {
+        id: "oracle-longprompt-t0",
+        env: &[],
+        filename: "longprompt_t0.f32",
+    };
+    /// Generated by `llm --model "$MODELS/Muse-Glimmer-30B-Q8_0.gguf" --snapshot "$ORACLE_DIR" --snapshot-id hello-q8 --raw "Hello"`.
+    pub const ORACLE_HELLO_Q8: Fixture = Fixture {
+        id: "oracle-hello-q8",
+        env: &[],
+        filename: "hello-q8.f32",
+    };
+}
+
 /// Where a fixture came from, for messages and for tests that care.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FixtureSource {
@@ -211,9 +452,6 @@ impl Fixture {
                     self.filename,
                     self.env.join(", ")
                 );
-                if require_fixtures() {
-                    panic!("{message}");
-                }
                 eprintln!("skipping: {message}");
                 None
             }),
@@ -238,7 +476,7 @@ impl Fixture {
         let mut paths = paths
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *paths
+        paths
             .entry((self.id, path.clone()))
             .or_insert_with(|| Box::leak(Box::new(path)))
     }
@@ -255,6 +493,74 @@ impl Fixture {
         None
     }
 }
+
+/// Resolve an artifact by the filename it is distributed under.
+pub fn required_filename(filename: &str) -> &'static str {
+    let fixture = ALL_FIXTURES
+        .iter()
+        .find(|fixture| fixture.filename == filename)
+        .unwrap_or_else(|| panic!("unregistered model fixture filename: {filename}"));
+    type FilenameCache = std::collections::HashMap<(&'static str, PathBuf), &'static str>;
+    static REQUIRED_FILENAMES: OnceLock<Mutex<FilenameCache>> = OnceLock::new();
+    let path = fixture.required();
+    let key = (fixture.id, path.clone());
+    let paths = REQUIRED_FILENAMES.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut paths = paths
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    paths
+        .entry(key)
+        .or_insert_with(|| Box::leak(path.display().to_string().into_boxed_str()))
+}
+
+static ALL_FIXTURES: &[Fixture] = &[
+    A3B_Q4_K_M,
+    QWEN36_27B_Q4_K_M,
+    QWEN35_0_8B_F32,
+    A10B_Q4_K_XL,
+    A3B_Q3_K_M,
+    A3B_IQ4_XS,
+    MUSE_GLIMMER_Q8_0,
+    DEEPSEEK_V4_IQ3_XXS,
+    QWEN4EXP_Q3_K_XL,
+    GLM53_FLASH_UD_IQ3_XXS,
+    DFLASH_DRAFT_36_Q8_0,
+    catalog::DEEPSEEK_V4_FLASH_0731_REAP_K160_Q3_K_Q4_K_00001_OF_00004,
+    catalog::DEEPSEEK_V4_FLASH_0731_REAP_K216_UD_IQ3_XXS_00001_OF_00003,
+    catalog::MUSE_GLIMMER_30B_BF16_00001_OF_00002,
+    catalog::QWEN3_5_0_8B_BF16,
+    catalog::QWEN3_5_0_8B_IQ4_NL,
+    catalog::QWEN3_5_0_8B_IQ4_XS,
+    catalog::QWEN3_5_0_8B_Q3_K_M,
+    catalog::QWEN3_5_0_8B_Q4_0,
+    catalog::QWEN3_5_0_8B_Q4_1,
+    catalog::QWEN3_5_0_8B_Q4_K_M,
+    catalog::QWEN3_5_0_8B_Q8_0,
+    catalog::QWEN3_5_0_8B_Q2_K,
+    catalog::QWEN3_5_0_8B_F16,
+    catalog::QWEN3_5_27B_Q4_K_M,
+    catalog::QWEN3_5_35B_A3B_BF16_00001_OF_00002,
+    catalog::QWEN3_5_35B_A3B_Q6_K,
+    catalog::QWEN3_5_35B_A3B_Q8_0,
+    catalog::QWEN3_5_4B_BF16,
+    catalog::QWEN3_5_4B_UD_IQ2_M,
+    catalog::QWEN3_5_4B_UD_Q2_K_XL,
+    catalog::QWEN3_5_9B_BF16,
+    catalog::QWEN3_6_27B_BF16,
+    catalog::QWEN3_6_27B_MTP_Q4_K_M,
+    catalog::QWEN3_8_27B_DFLASH2_Q4_K_M,
+    catalog::QWEN3_8_27B_DFLASH2_Q8_0,
+    catalog::QWEN3_8_27B_Q4_K_M,
+    catalog::QWEN3_8_27B_Q8_0,
+    catalog::QWEN3_8_27B_RIDGE_3_7BPW,
+    catalog::UNDERDOG_SALUKI_27B_1_0_IQ2_MIX,
+    catalog::QWEN3_5_0_8B_LOWER_Q4_K_M,
+    catalog::ORACLE_HELLO_T0,
+    catalog::ORACLE_HELLO_27B_Q4KM,
+    catalog::ORACLE_LONGPROMPT_27B,
+    catalog::ORACLE_LONGPROMPT_T0,
+    catalog::ORACLE_HELLO_Q8,
+];
 
 /// Configured roots in `QWEN_MODEL_SEARCH_PATH` order.
 pub fn model_search_roots() -> Vec<PathBuf> {
@@ -313,14 +619,6 @@ pub fn metal_context_or_skip() -> Option<MetalContext> {
             assert!(
                 !metal_tests_required(),
                 "Metal is required but unavailable: {error}"
-            );
-            eprintln!("skipping: {error}");
-            None
-        }
-        Err(error @ MetalError::ProcessLease(_)) => {
-            assert!(
-                !metal_tests_required(),
-                "Metal is required but leased: {error}"
             );
             eprintln!("skipping: {error}");
             None

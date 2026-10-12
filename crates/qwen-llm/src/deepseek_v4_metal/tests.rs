@@ -1332,7 +1332,7 @@ fn decode_prepare_paired_matches_composed_path_bitwise() {
 
 #[test]
 fn decode_grouped_output_gemv_matches_singleton_loop_bitwise() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     if !crate::metal::mat_vec_q8_0_lcpp_enabled() {
@@ -2543,12 +2543,7 @@ fn session_phase_encodes_observation_and_poison_transitions() {
 #[test]
 #[ignore = "requires the current 97.05 GiB DS4 asset"]
 fn current_asset_packed_gpu_route_kill_packet() {
-    if crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required();
 
     const CHUNK_TOKENS: usize = 128;
     const PREFIX_TOKENS: usize = 140;
@@ -2888,12 +2883,7 @@ fn current_asset_packed_gpu_route_kill_packet() {
 #[test]
 #[ignore = "requires the current 97.05 GiB DS4 asset"]
 fn current_asset_packed_grouped_expert_integration_packet() {
-    if crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required();
 
     const CONTINUATION_TOKEN: u32 = 35;
     const IQ2_ELIGIBLE_LAYERS: u32 = 25;
@@ -3360,12 +3350,7 @@ fn current_asset_packed_grouped_expert_integration_packet() {
 #[test]
 #[ignore = "requires the current 97.05 GiB DS4 asset"]
 fn current_asset_packed_attention_split_attribution_packet() {
-    if crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required();
 
     const PREFIX_TOKENS: usize = 128;
     const CONTINUATION_TOKEN: u32 = 35;
@@ -4031,12 +4016,7 @@ fn current_asset_packed_attention_split_attribution_packet() {
 #[test]
 #[ignore = "requires the current 97.05 GiB DS4 asset"]
 fn current_asset_packed_post_route_stage_attribution_packet() {
-    if crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required();
 
     const PREFIX_TOKENS: usize = 128;
     const CONTINUATION_TOKEN: u32 = 35;
@@ -4642,12 +4622,7 @@ fn current_asset_packed_post_route_stage_attribution_packet() {
 #[test]
 #[ignore = "requires the current 97.05 GiB DS4 asset"]
 fn current_asset_packed_all_iq3_sealed_promotion_gate() {
-    if crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required();
 
     const PREFIX_TOKENS: usize = 128;
     const CONTINUATION_TOKEN: u32 = 35;
@@ -5457,9 +5432,9 @@ fn native_synthetic_state_crosses_the_first_tiled_hca_boundary_repeatably() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
-            std::path::PathBuf::from(
-                "models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
-            )
+            std::path::PathBuf::from(crate::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
         });
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
@@ -5528,12 +5503,7 @@ fn native_synthetic_state_crosses_the_first_tiled_hca_boundary_repeatably() {
 #[test]
 #[ignore = "requires the current DS4 asset and a full-context session allocation"]
 fn splitk_hca_profiles_current_synthetic_terminal_tokens() {
-    if crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required();
 
     const START_POSITION: u32 = DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32 - 2;
     const TERMINAL_POSITION: u32 = START_POSITION + 1;
@@ -5969,9 +5939,9 @@ fn online_hca_preserves_terminal_decisions_repeatably() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
-            std::path::PathBuf::from(
-                "models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
-            )
+            std::path::PathBuf::from(crate::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
         });
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
@@ -6154,9 +6124,9 @@ fn sparse_csa_optimizations_preserve_far_context_token_and_causal_state() {
     let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
-            std::path::PathBuf::from(
-                "models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
-            )
+            std::path::PathBuf::from(crate::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            ))
         });
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
@@ -6327,12 +6297,7 @@ fn sparse_csa_optimizations_preserve_far_context_token_and_causal_state() {
 #[test]
 #[ignore = "requires the current DS4 asset and executes focused far-context differentials"]
 fn current_weight_boundary_optimization_differentials() {
-    if crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required();
 
     const POSITION: u32 = 65_663;
     const FORWARD_LIMIT: usize = POSITION as usize + 1;
@@ -12551,12 +12516,7 @@ fn profile_sparse_csa_multigroup_integrated_gate() {
 #[test]
 #[ignore = "requires the current 97.05 GiB DS4 asset and a full-context session"]
 fn current_asset_multigroup_selector_whole_token_gate() {
-    if crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required();
 
     const POSITION: u32 = 786_431;
     const FORWARD_LIMIT: usize = DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY;

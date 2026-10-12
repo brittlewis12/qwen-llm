@@ -2689,7 +2689,7 @@ fn packed_all_iq3_route_census_fixture_is_canonical() {
 
 #[test]
 fn packed_grouped_mapped_iq3_consumes_explicit_source_rows() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     const H: usize = 256;
@@ -2836,7 +2836,7 @@ fn packed_grouped_mapped_iq3_consumes_explicit_source_rows() {
 
 #[test]
 fn packed_grouped_mapped_q3_q4_match_static_expert_views() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     const H: usize = 512;
@@ -3017,9 +3017,8 @@ fn packed_grouped_mapped_q3_q4_match_static_expert_views() {
 
 #[test]
 fn q8_f32_mma_r2c4k64_reduces_operand_rounding_and_preserves_guards() {
-    let Ok(ctx) = MetalContext::new() else {
-        return;
-    };
+    let ctx =
+        MetalContext::new().expect("Metal context required for qualification correctness witness");
 
     fn submit(
         ctx: &MetalContext,
@@ -3112,7 +3111,7 @@ fn q8_f32_mma_r2c4k64_reduces_operand_rounding_and_preserves_guards() {
 /// on it); the shared encoder refuses input without padded backing.
 #[test]
 fn q8_f32_r2c4k64_token_outputs_do_not_depend_on_the_dispatch() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     let run = |weight: &MetalTensor, input: &MetalTensor, n_in, n_out, n_tokens| {
@@ -3190,7 +3189,7 @@ fn q8_f32_r2c4k64_token_outputs_do_not_depend_on_the_dispatch() {
 
 #[test]
 fn q8_f32_mma_r2c16k64_matches_r2c4k64_bits() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     const M: usize = 32;
@@ -3260,7 +3259,7 @@ fn q8_f32_mma_r2c16k64_matches_r2c4k64_bits() {
 
 #[test]
 fn q8_f32_grouped_r2c16k64_matches_per_group_controls_bits() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     const GROUPS: usize = 2;
@@ -3356,7 +3355,7 @@ fn q8_f32_grouped_r2c16k64_matches_per_group_controls_bits() {
 
 #[test]
 fn q8_f32_mma_r2c4k64_rejects_unqualified_storage_before_dispatch() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     const K: usize = 64;
@@ -3439,7 +3438,7 @@ fn q8_f32_mma_r2c4k64_rejects_unqualified_storage_before_dispatch() {
 #[test]
 #[ignore = "sealed GO; do not rerun without material implementation or device drift"]
 fn profile_q8_f32_mma_r2c4k64_attention_output_packet() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     if let Some(reason) =
@@ -3783,7 +3782,7 @@ fn packed_iq2_xs_batch_projection_pins_scalar_under_dense_overrides() {
         Iq2XsMatMatVariant, dispatch_census_begin, dispatch_census_take, with_iq2_xs_matmat_variant,
     };
 
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     let bank = grouped_test_bank(&ctx, GgmlType::IQ2_XS, 256, 17, 2, 1);
@@ -3826,7 +3825,7 @@ fn packed_iq2_xs_batch_projection_pins_scalar_under_dense_overrides() {
 
 #[test]
 fn packed_grouped_iq2_xs_iq3_xxs_matches_bucket_path() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     const H: usize = 256;
@@ -4103,7 +4102,7 @@ fn packed_grouped_iq2_xs_iq3_xxs_matches_bucket_path() {
 
 #[test]
 fn packed_grouped_iq2_xs_f32_matrix_schedules_match_reduced_k_scalar() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     const H: usize = 256;
@@ -4467,7 +4466,7 @@ fn packed_grouped_iq2_xs_f32_matrix_schedules_match_reduced_k_scalar() {
 
 #[test]
 fn packed_grouped_iq2_xs_f32_matrix_schedules_traverse_production_k() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     const H: usize = 4_096;
@@ -4831,7 +4830,7 @@ fn packed_grouped_iq2_xs_f32_matrix_schedules_traverse_production_k() {
 
 #[test]
 fn packed_gpu_route_compaction_feeds_all_iq3_at_n2048() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     assert!(packed_grouped_iq3_candidate_supported(&ctx));
@@ -5008,7 +5007,7 @@ fn packed_gpu_route_compaction_feeds_all_iq3_at_n2048() {
 
 #[test]
 fn packed_grouped_all_iq3_matches_bucket_path_and_arena_contract() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     assert!(
@@ -5634,7 +5633,7 @@ fn packed_grouped_all_iq3_matches_bucket_path_and_arena_contract() {
 
 #[test]
 fn packed_grouped_fused_all_iq3_rejects_invalid_contracts_before_dispatch() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     const H: usize = 512;
@@ -5811,7 +5810,7 @@ fn packed_grouped_fused_all_iq3_rejects_invalid_contracts_before_dispatch() {
 #[test]
 #[ignore = "sealed KILL; do not rerun without material implementation or device drift"]
 fn profile_packed_grouped_fused_all_iq3_production_shape() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     let crate::metal::QualifiedDevices::Model(qualified_model) =
@@ -7072,7 +7071,7 @@ fn assert_packed_route_failure(
 
 #[test]
 fn packed_gpu_routes_and_schedules_match_cpu_at_representative_widths() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     let fixture = PackedRouteFixture::new(&ctx);
@@ -7093,7 +7092,7 @@ fn packed_gpu_routes_and_schedules_match_cpu_at_representative_widths() {
 
 #[test]
 fn packed_gpu_route_compaction_matches_cpu_at_capacity_boundaries() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     let fixture = PackedRouteFixture::new(&ctx);
@@ -7110,7 +7109,7 @@ fn packed_gpu_route_compaction_matches_cpu_at_capacity_boundaries() {
 
 #[test]
 fn packed_duplicate_hash_routes_flow_through_grouped_experts_and_sum() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     const H: usize = 256;
@@ -7328,7 +7327,7 @@ fn packed_duplicate_hash_routes_flow_through_grouped_experts_and_sum() {
 
 #[test]
 fn packed_gpu_route_compaction_handles_maximum_concentrated_count() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     const EXPERT: usize = 7;
@@ -7401,7 +7400,7 @@ fn packed_gpu_route_compaction_handles_maximum_concentrated_count() {
 
 #[test]
 fn packed_gpu_route_compaction_rejects_invalid_late_tokens() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     let fixture = PackedRouteFixture::new(&ctx);
@@ -7521,7 +7520,7 @@ fn packed_gpu_route_policy_rejects_unqualified_widths() {
 #[cfg(feature = "dsv4-diagnostics")]
 #[test]
 fn packed_diagnostic_hash_route_detects_duplicate_slots_before_mutation() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     let unique = MetalTensor::from_bytes(
@@ -7561,7 +7560,7 @@ fn packed_diagnostic_hash_route_detects_duplicate_slots_before_mutation() {
 
 #[test]
 fn packed_gpu_routes_are_bitwise_singleton_equivalent_on_adversarial_scores() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     let packed = PackedRouteMicroproofScratch::new(&ctx).unwrap();
@@ -7698,7 +7697,7 @@ fn packed_gpu_routes_are_bitwise_singleton_equivalent_on_adversarial_scores() {
 
 #[test]
 fn packed_route_signature_binds_each_payload_class() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     let fixture = PackedRouteFixture::new(&ctx);
@@ -7783,7 +7782,7 @@ fn packed_route_signature_binds_each_payload_class() {
 #[cfg(feature = "dsv4-diagnostics")]
 #[test]
 fn production_packed_gpu_route_owns_and_compacts_the_qualified_schedule() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     let fixture = PackedRouteFixture::new(&ctx);
@@ -8065,7 +8064,7 @@ fn production_packed_gpu_route_owns_and_compacts_the_qualified_schedule() {
 
 #[test]
 fn packed_gpu_route_records_repeat_and_reject_missing_producers() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     let fixture = PackedRouteFixture::new(&ctx);
@@ -8261,7 +8260,7 @@ fn packed_gpu_route_records_repeat_and_reject_missing_producers() {
 
 #[test]
 fn packed_route_authority_rejects_invalid_producers_and_private_state() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     let fixture = PackedRouteFixture::new(&ctx);
@@ -8597,7 +8596,7 @@ fn relative_drift(left: f64, right: f64) -> f64 {
 #[test]
 #[ignore = "focused exact packed-route profiler; run release with --nocapture"]
 fn profile_exact_packed_gpu_route_and_schedule_packet() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     let fixture = PackedRouteFixture::new(&ctx);
@@ -8783,7 +8782,7 @@ fn tiled_hca_offset_starts_at_the_513th_visible_row() {
 
 #[test]
 fn packed_raw_chunk_publication_matches_ordered_ring_updates() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     const HEAD_DIM: usize = 16;
@@ -8865,7 +8864,7 @@ fn packed_raw_chunk_publication_matches_ordered_ring_updates() {
 
 #[test]
 fn packed_dense_attention_matches_ordered_singleton_rows_within_roundoff() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     let n_tokens = 8;
@@ -9107,7 +9106,7 @@ fn packed_dense_attention_matches_ordered_singleton_rows_within_roundoff() {
 
 #[test]
 fn packed_hca_splits_the_first_tiled_query_without_future_raw_leakage() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     const START_POSITION: usize = 65_662;
@@ -9307,7 +9306,7 @@ fn packed_hca_splits_the_first_tiled_query_without_future_raw_leakage() {
 
 #[test]
 fn packed_sparse_suffix_matches_cpu_with_original_chunk_ring_visibility() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     let config = deepseek_v4_session_attention_config();
@@ -9586,7 +9585,7 @@ fn packed_sparse_suffix_matches_cpu_with_original_chunk_ring_visibility() {
 
 #[test]
 fn retained_packed_attention_preserves_ring_and_absolute_visibility() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
 
@@ -9819,7 +9818,7 @@ fn retained_packed_attention_preserves_ring_and_absolute_visibility() {
 
 #[test]
 fn q8_token_axis_gemv_is_bitwise_singleton_equivalent() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
     const N_IN: usize = 64;

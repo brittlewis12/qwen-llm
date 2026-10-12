@@ -1546,8 +1546,8 @@ mod tests {
         // Use the smallest local Qwen3.5 GGUF as a real-world fixture.
         // Falls back to the gguf-rs test fixture if the model isn't present.
         let candidates = [
-            "models/Qwen3.5-0.8B-Q4_0.gguf",
-            "models/Qwen3.5-0.8B-BF16.gguf",
+            crate::test_fixtures::required_filename("Qwen3.5-0.8B-Q4_0.gguf"),
+            crate::test_fixtures::required_filename("Qwen3.5-0.8B-BF16.gguf"),
             "tests/test-le-v3.gguf",
         ];
         for c in candidates {
@@ -1559,6 +1559,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
     fn parses_real_gguf() {
         let path = fixture();
         let g = GgufFile::open(&path).expect("open");
@@ -2679,6 +2680,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
     fn finds_token_embedding() {
         let path = fixture();
         let g = GgufFile::open(&path).expect("open");
@@ -2695,6 +2697,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen35-0-8b-f32"]
     fn stop_token_ids_on_real_gguf() {
         let path = fixture();
         let g = GgufFile::open(&path).expect("open");

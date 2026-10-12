@@ -23,8 +23,6 @@ mod tests {
     const EOS: i32 = 154_820;
     const EOT: i32 = 154_827;
     const EOM: i32 = 154_829;
-    const ALTERNATE_GGUF: &str =
-        "models/glm-5.3-flash-ud-iq3_xxs/UD-IQ3_XXS/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf";
     const LLAMA_TOKENIZE: &str = "$LLAMA_TOKENIZE";
 
     fn fixtures() -> Value {
@@ -198,8 +196,17 @@ mod tests {
         let mut paths = vec![PathBuf::from(
             crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required(),
         )];
-        if std::path::Path::new(ALTERNATE_GGUF).exists() {
-            paths.push(ALTERNATE_GGUF.into());
+        if std::path::Path::new(crate::test_fixtures::required_filename(
+            "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+        ))
+        .exists()
+        {
+            paths.push(
+                crate::test_fixtures::required_filename(
+                    "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+                )
+                .into(),
+            );
         }
         paths
     }
@@ -262,12 +269,7 @@ mod tests {
     #[test]
     #[ignore = "CPU/vocab-only; requires GLM53_GGUF and a glm4 ignore_merges llama-tokenize (GLM_LLAMA_TOKENIZE)"]
     fn gguf_tokenizer_matches_llama_tokenize_cli() {
-        if crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS
-            .path_or_skip()
-            .is_none()
-        {
-            return;
-        }
+        let _ = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
 
         let binary = std::env::var("GLM_LLAMA_TOKENIZE").unwrap_or_else(|_| LLAMA_TOKENIZE.into());
         assert!(
@@ -275,7 +277,7 @@ mod tests {
             "missing llama-tokenize oracle {binary}"
         );
         let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
-        let tokenizer = NativeTokenizer::open(&path).unwrap();
+        let tokenizer = NativeTokenizer::open(path).unwrap();
         let prompt_file =
             std::env::temp_dir().join(format!("glm4-llama-tokenize-{}.txt", std::process::id()));
         let data = fixtures();
@@ -285,7 +287,7 @@ mod tests {
             std::fs::write(&prompt_file, text).unwrap();
             let output = std::process::Command::new(&binary)
                 .arg("-m")
-                .arg(&path)
+                .arg(path)
                 .arg("-f")
                 .arg(&prompt_file)
                 .args(["--ids", "--no-escape", "--log-disable"])

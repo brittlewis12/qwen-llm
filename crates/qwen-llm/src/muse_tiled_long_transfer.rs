@@ -19,18 +19,13 @@ fn replay_tail(session: &MuseGlimmerTextSession, base: usize, rows: usize) -> Ve
 #[test]
 #[ignore = "serial Metal, delivered N128 plus N16 plus scalar composition"]
 fn tiled_prefill_short_delivery() {
-    if crate::test_fixtures::MUSE_GLIMMER_Q8_0
-        .path_or_skip()
-        .is_none()
-    {
-        return;
-    }
+    let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
 
     let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    let gguf = GgufFile::open(&path).unwrap();
+    let gguf = GgufFile::open(path).unwrap();
     let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
     let tokens = long_context_tokens(path, &config);
     let ctx = MetalContext::new().unwrap();
@@ -164,7 +159,7 @@ fn tiled_prefill_32k_transfer(delivery: bool, profile: bool) {
             .as_nanos()
             .to_string()
     );
-    let gguf = GgufFile::open(&path).unwrap();
+    let gguf = GgufFile::open(path).unwrap();
     let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
     let tokens = long_context_tokens(path, &config);
     assert_eq!(

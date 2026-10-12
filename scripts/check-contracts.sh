@@ -42,6 +42,11 @@ check_machine_path_fragment '/' 'home/'
 check_machine_path_fragment '~' '/models'
 check_machine_path_fragment '$HOME' '/models'
 
+if git grep -n -E '"(\./)?models/' HEAD -- crates scripts ':!scripts/check-contracts.sh'; then
+  echo "check-contracts: relative model-directory literal found in Rust or scripts" >&2
+  exit 1
+fi
+
 commit=$(git rev-parse HEAD)
 tree=$(git rev-parse 'HEAD^{tree}')
 

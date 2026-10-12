@@ -30,8 +30,8 @@ use qwen_llm::forward::{Forward, GdnState, KvCache};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::loader::{Model, open_dflash_drafter};
 use qwen_llm::metal::{
-    BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
-    encode_argmax_f32, encode_copy_offset_f32, encode_gdn_alpha_chain_f32, encode_get_rows_f32,
+    BlitEncoder, KernelEncoder, MetalTensor, encode_add_inplace_f32, encode_argmax_f32,
+    encode_copy_offset_f32, encode_gdn_alpha_chain_f32, encode_get_rows_f32,
     encode_mat_mat_mma8_dispatch, encode_mat_mat_mma8_variant, encode_mat_vec_nc_dispatch,
     encode_mat_vec_q4_k_nc2_rp4_f32, encode_mul_f32, encode_rms_norm_batched_f32,
     encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
@@ -48,11 +48,15 @@ use qwen_llm::metal_forward::{
 use qwen_llm::tensor::GgmlType;
 use qwen_llm::tokenizer::Tokenizer;
 
-const TARGET_GGUF: &str = "Qwen3.6-27B-Q4_K_M.gguf";
-const DRAFTER_GGUF: &str = "dflash-draft-3.6-q8_0.gguf";
-
 fn fixtures_present() -> bool {
-    std::path::Path::new(TARGET_GGUF).exists() && std::path::Path::new(DRAFTER_GGUF).exists()
+    std::path::Path::new(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .exists()
+        && std::path::Path::new(qwen_llm::test_fixtures::required_filename(
+            "dflash-draft-3.6-q8_0.gguf",
+        ))
+        .exists()
 }
 
 /// **H5.1** smoke test: bind drafter, run dflash_draft with real target
@@ -62,14 +66,21 @@ fn fixtures_present() -> bool {
 /// Catches the cross-GGUF dequant bug class and any layer-output layout
 /// regression (target hiddens stacked in the wrong K order, etc.).
 #[test]
+#[ignore = "model witness: qwen3-6-27b-q4-k-m"]
 fn dflash_draft_cpu_smoke() {
     if !fixtures_present() {
         eprintln!("[dflash-cpu-smoke] skipped — fixtures missing");
         return;
     }
-    let target_g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let target_g = GgufFile::open(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .expect("open target");
     let target_m = Model::from_gguf(&target_g).expect("load target");
-    let drafter_g = GgufFile::open(DRAFTER_GGUF).expect("open drafter");
+    let drafter_g = GgufFile::open(qwen_llm::test_fixtures::required_filename(
+        "dflash-draft-3.6-q8_0.gguf",
+    ))
+    .expect("open drafter");
     let head = open_dflash_drafter(&drafter_g, &target_m).expect("bind drafter");
 
     let f = Forward::new(&target_g, &target_m);
@@ -82,7 +93,10 @@ fn dflash_draft_cpu_smoke() {
     // per token. Mirrors what H5.2's Metal multi-hidden capture does;
     // the integration test runs CPU here for fixture-independence.
     let prompt = "The quick brown fox";
-    let tok = Tokenizer::open(TARGET_GGUF).expect("tok");
+    let tok = Tokenizer::open(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .expect("tok");
     let prompt_ids = tok.encode(prompt, false).expect("tok");
     let ctx_len = prompt_ids.len();
     let n_target_features = k_layers * h_target;
@@ -162,25 +176,33 @@ fn dflash_draft_cpu_smoke() {
 /// It does NOT validate the SWA mask algorithm or the actual drafter
 /// distribution — H5.2.5 (measured α) is that gate.
 #[test]
+#[ignore = "model witness: qwen3-6-27b-q4-k-m"]
 fn metal_drafter_cosine_vs_cpu() {
     if !fixtures_present() {
         eprintln!("[h5.1.5] skipped — fixtures missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
-    let target_g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let target_g = GgufFile::open(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .expect("open target");
     let target_m = Model::from_gguf(&target_g).expect("load target");
-    let drafter_g = GgufFile::open(DRAFTER_GGUF).expect("open drafter");
+    let drafter_g = GgufFile::open(qwen_llm::test_fixtures::required_filename(
+        "dflash-draft-3.6-q8_0.gguf",
+    ))
+    .expect("open drafter");
     let head = open_dflash_drafter(&drafter_g, &target_m).expect("bind drafter");
 
     // Real prompt prefill on CPU to capture multi-layer hiddens.
     let cpu_fwd = Forward::new(&target_g, &target_m);
-    let tok = Tokenizer::open(TARGET_GGUF).expect("tok");
+    let tok = Tokenizer::open(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .expect("tok");
     let prompt_ids = tok.encode("The quick brown fox", false).expect("tok");
     let ctx_len = prompt_ids.len();
     let h_target = target_m.arch.hidden_size as usize;
@@ -335,19 +357,25 @@ fn metal_drafter_cosine_vs_cpu() {
 ///
 /// ~3-5 min runtime: 27B-Q4_K_M load + prime + two N=16 forwards.
 #[test]
+#[ignore = "model witness: qwen3-6-27b-q4-k-m"]
 fn dflash_packed_verify_layer_major_vs_token_major_27b() {
-    if !std::path::Path::new(TARGET_GGUF).exists() {
+    if !std::path::Path::new(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .exists()
+    {
         eprintln!("[h5.3b-27b] skipped — target GGUF missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
     eprintln!("[h5.3b-27b] loading 27B-Q4_K_M (~10s on cold cache)…");
-    let g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let g = GgufFile::open(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -543,18 +571,23 @@ fn dflash_packed_verify_layer_major_vs_token_major_27b() {
             run explicitly with `cargo test --test dflash_correctness \
             --release packed_verify_phase_profile_27b -- --ignored --nocapture`"]
 fn packed_verify_phase_profile_27b() {
-    if !std::path::Path::new(TARGET_GGUF).exists() {
+    if !std::path::Path::new(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .exists()
+    {
         eprintln!("[v0.70-profile] skipped — target GGUF missing");
         return;
     }
-    let ctx_metal = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx_metal) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
     eprintln!("[v0.70-profile] loading 27B-Q4_K_M…");
-    let g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let g = GgufFile::open(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     let mm = MetalModel::load(&ctx_metal, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx_metal, &mm);
@@ -1076,18 +1109,23 @@ fn packed_verify_phase_profile_27b() {
             run explicitly with `cargo test --test dflash_correctness \
             --release packed_verify_phase_profile_v073a2_27b -- --ignored --nocapture`"]
 fn packed_verify_phase_profile_v073a2_27b() {
-    if !std::path::Path::new(TARGET_GGUF).exists() {
+    if !std::path::Path::new(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .exists()
+    {
         eprintln!("[v0.73a.2-profile] skipped — target GGUF missing");
         return;
     }
-    let ctx_metal = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx_metal) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
     eprintln!("[v0.73a.2-profile] loading 27B-Q4_K_M…");
-    let g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let g = GgufFile::open(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     let mm = MetalModel::load(&ctx_metal, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx_metal, &mm);
@@ -1848,7 +1886,11 @@ fn packed_verify_phase_profile_v073a2_27b() {
 fn packed_verify_pipelined_cost_27b() {
     let target_path = std::env::var_os("QWEN_DFLASH_VERIFY_AUDIT_MODEL")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(TARGET_GGUF));
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(qwen_llm::test_fixtures::required_filename(
+                "Qwen3.6-27B-Q4_K_M.gguf",
+            ))
+        });
     if !target_path.exists() {
         eprintln!(
             "[h5.6-m1b] skipped — target GGUF missing: {}",
@@ -1856,10 +1898,8 @@ fn packed_verify_pipelined_cost_27b() {
         );
         return;
     }
-    let ctx_metal = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx_metal) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
     eprintln!("[h5.6-m1b] loading {}", target_path.display());
@@ -1984,18 +2024,23 @@ fn packed_verify_pipelined_cost_27b() {
 #[test]
 #[ignore = "slow: loads 27B; run explicitly (see doc comment)"]
 fn packed_verify_skinny_gemm_micro_27b() {
-    if !std::path::Path::new(TARGET_GGUF).exists() {
+    if !std::path::Path::new(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .exists()
+    {
         eprintln!("[h5.6-m1a] skipped — target GGUF missing");
         return;
     }
-    let ctx_metal = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx_metal) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
     eprintln!("[h5.6-m1a] loading 27B-Q4_K_M…");
-    let g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let g = GgufFile::open(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     let mm = MetalModel::load(&ctx_metal, &g, &m).expect("metal load");
 
@@ -2117,18 +2162,23 @@ fn packed_verify_skinny_gemm_micro_27b() {
 #[test]
 #[ignore = "slow: loads 27B; run explicitly (see doc comment)"]
 fn multicol_gemv_micro_27b() {
-    if !std::path::Path::new(TARGET_GGUF).exists() {
+    if !std::path::Path::new(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .exists()
+    {
         eprintln!("[h5.6-m2nc] skipped — target GGUF missing");
         return;
     }
-    let ctx_metal = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx_metal) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
     eprintln!("[h5.6-m2nc] loading 27B-Q4_K_M…");
-    let g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let g = GgufFile::open(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     let mm = MetalModel::load(&ctx_metal, &g, &m).expect("metal load");
 
@@ -2364,18 +2414,23 @@ fn multicol_gemv_micro_27b() {
 #[test]
 #[ignore = "slow: loads 27B; run explicitly (see doc comment)"]
 fn smalln_mma_micro_27b() {
-    if !std::path::Path::new(TARGET_GGUF).exists() {
+    if !std::path::Path::new(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .exists()
+    {
         eprintln!("[h5.6-mma8] skipped — target GGUF missing");
         return;
     }
-    let ctx_metal = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx_metal) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
     eprintln!("[h5.6-mma8] loading 27B-Q4_K_M…");
-    let g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let g = GgufFile::open(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     let mm = MetalModel::load(&ctx_metal, &g, &m).expect("metal load");
 
@@ -2580,18 +2635,23 @@ fn smalln_mma_micro_27b() {
 #[test]
 #[ignore = "slow: loads 27B; run explicitly (see doc comment)"]
 fn smalln_selection_sweep_27b() {
-    if !std::path::Path::new(TARGET_GGUF).exists() {
+    if !std::path::Path::new(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .exists()
+    {
         eprintln!("[sweep] skipped — target GGUF missing");
         return;
     }
-    let ctx_metal = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx_metal) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
     eprintln!("[sweep] loading 27B-Q4_K_M…");
-    let g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let g = GgufFile::open(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     let mm = MetalModel::load(&ctx_metal, &g, &m).expect("metal load");
 
@@ -2967,19 +3027,25 @@ fn smalln_selection_sweep_27b() {
 /// Wall: ~3-5 min on M4 Max (oracle is 24 single_token forwards =
 /// ~24 * 50 ms = 1.2 s GPU + load ~10 s; experimental is ~0.4 s).
 #[test]
+#[ignore = "model witness: qwen3-6-27b-q4-k-m"]
 fn prefill_tokens_matches_single_token_loop_27b() {
-    if !std::path::Path::new(TARGET_GGUF).exists() {
+    if !std::path::Path::new(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .exists()
+    {
         eprintln!("[prefill-vs-single-27b] skipped — target GGUF missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
     eprintln!("[prefill-vs-single-27b] loading 27B-Q4_K_M (~10s on cold cache)…");
-    let g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let g = GgufFile::open(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -3157,7 +3223,11 @@ fn prefill_tokens_matches_single_token_loop_27b() {
 #[test]
 #[ignore]
 fn prefill_tokens_matches_single_token_loop_27b_matrix_g6_prefix_gate() {
-    if !std::path::Path::new(TARGET_GGUF).exists() {
+    if !std::path::Path::new(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .exists()
+    {
         eprintln!("[prefill-vs-single-27b-g6-prefix] skipped — target GGUF missing");
         return;
     }
@@ -3170,14 +3240,15 @@ fn prefill_tokens_matches_single_token_loop_27b_matrix_g6_prefix_gate() {
         return;
     }
 
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
     eprintln!("[prefill-vs-single-27b-g6-prefix] loading 27B-Q4_K_M…");
-    let g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let g = GgufFile::open(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
@@ -3291,19 +3362,18 @@ fn prefill_tokens_matches_single_token_loop_27b_matrix_g6_prefix_gate() {
 }
 
 #[test]
+#[ignore = "model witness: a3b-q4-k-m"]
 fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
     let Some(model_path) = qwen_llm::test_fixtures::A3B_Q4_K_M.path_or_skip() else {
         eprintln!("[prefill-vs-single-a3b] skipped — target GGUF missing");
         return;
     };
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
     eprintln!("[prefill-vs-single-a3b] loading 35B A3B…");
-    let g = GgufFile::open(&model_path).expect("open target");
+    let g = GgufFile::open(model_path).expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     assert_eq!(m.arch.kind, qwen_llm::model::ArchKind::Moe);
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
@@ -3570,23 +3640,22 @@ fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
 }
 
 #[test]
+#[ignore = "model witness: qwen3-5-122b-a10b-ud-q4-k-xl"]
 fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke() {
-    let model_path = concat!(
-        "models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/",
-        "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"
-    );
+    let model_path = qwen_llm::test_fixtures::A10B_Q4_K_XL
+        .required()
+        .to_str()
+        .expect("UTF-8 fixture path");
     if !std::path::Path::new(&model_path).exists() {
         eprintln!("[prefill-vs-single-a10b] skipped — target GGUF missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
     eprintln!("[prefill-vs-single-a10b] loading 122B A10B…");
-    let g = GgufFile::open(&model_path).expect("open target");
+    let g = GgufFile::open(model_path).expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     assert_eq!(m.arch.kind, qwen_llm::model::ArchKind::Moe);
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
@@ -3691,22 +3760,20 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke() {
 #[test]
 #[ignore]
 fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_chunk128_boundary() {
-    let model_path = concat!(
-        "models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/",
-        "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"
-    );
+    let model_path = qwen_llm::test_fixtures::A10B_Q4_K_XL
+        .required()
+        .to_str()
+        .expect("UTF-8 fixture path");
     if !std::path::Path::new(&model_path).exists() {
         eprintln!("[prefill-vs-single-a10b-boundary] skipped — target GGUF missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
     eprintln!("[prefill-vs-single-a10b-boundary] loading 122B A10B…");
-    let g = GgufFile::open(&model_path).expect("open target");
+    let g = GgufFile::open(model_path).expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     assert_eq!(m.arch.kind, qwen_llm::model::ArchKind::Moe);
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
@@ -3831,22 +3898,20 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_chunk128_boundary() {
 #[test]
 #[ignore]
 fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_packed_attn_active_shapes() {
-    let model_path = concat!(
-        "models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/",
-        "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"
-    );
+    let model_path = qwen_llm::test_fixtures::A10B_Q4_K_XL
+        .required()
+        .to_str()
+        .expect("UTF-8 fixture path");
     if !std::path::Path::new(&model_path).exists() {
         eprintln!("[prefill-vs-single-a10b-packed] skipped — target GGUF missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
     eprintln!("[prefill-vs-single-a10b-packed] loading 122B A10B…");
-    let g = GgufFile::open(&model_path).expect("open target");
+    let g = GgufFile::open(model_path).expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     assert_eq!(m.arch.kind, qwen_llm::model::ArchKind::Moe);
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
@@ -3966,23 +4031,20 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_packed_attn_active_sha
 }
 
 #[test]
+#[ignore = "model witness: a3b-q4-k-m"]
 fn prefill_tokens_moe_hidden_capture_matches_p1_oracle_35b_a3b() {
-    if qwen_llm::test_fixtures::A3B_Q4_K_M.path_or_skip().is_none() {
-        return;
-    }
+    let _ = qwen_llm::test_fixtures::A3B_Q4_K_M.required();
 
     let model_path = qwen_llm::test_fixtures::A3B_Q4_K_M.required();
     if !std::path::Path::new(&model_path).exists() {
         eprintln!("[prefill-hidden-a3b] skipped — target GGUF missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("metal init: {e}"),
+    let Some(ctx) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
-    let g = GgufFile::open(&model_path).expect("open target");
+    let g = GgufFile::open(model_path).expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     assert_eq!(m.arch.kind, qwen_llm::model::ArchKind::Moe);
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");

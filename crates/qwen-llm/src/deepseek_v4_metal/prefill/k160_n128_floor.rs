@@ -4,8 +4,6 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::path::Path;
 use std::time::Instant;
-
-const FIXTURE: &str = "models/deepseek-v4-flash-0731-reap-k160/DeepSeek-V4-Flash-0731-REAP-K160-Q3_K_Q4_K-00001-of-00004.gguf";
 const N_TOKENS: usize = 128;
 const EXPERTS: usize = 160;
 const ROUTES: usize = N_TOKENS * MOE_TOP_K;
@@ -316,14 +314,21 @@ fn encode_grouped_candidate(
 #[test]
 #[ignore = "requires the local K160 fixture and about 4 GiB transient residency"]
 fn k160_n128_grouped_q3q4_representative_layer_floor() {
-    let Ok(ctx) = MetalContext::new() else {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
-    if !Path::new(FIXTURE).exists() {
+    if !Path::new(crate::test_fixtures::required_filename(
+        "DeepSeek-V4-Flash-0731-REAP-K160-Q3_K_Q4_K-00001-of-00004.gguf",
+    ))
+    .exists()
+    {
         eprintln!("[k160-n128-floor] skipped: K160 fixture missing");
         return;
     }
-    let gguf = crate::gguf::GgufFile::open(FIXTURE).expect("open K160 GGUF");
+    let gguf = crate::gguf::GgufFile::open(crate::test_fixtures::required_filename(
+        "DeepSeek-V4-Flash-0731-REAP-K160-Q3_K_Q4_K-00001-of-00004.gguf",
+    ))
+    .expect("open K160 GGUF");
     if let Some(reason) =
         crate::metal::DEEPSEEK_V4_PACKED_GROUPED_Q3Q4.decline_reason(ctx.device_facts())
     {

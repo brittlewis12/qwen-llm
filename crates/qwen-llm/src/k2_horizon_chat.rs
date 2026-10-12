@@ -375,9 +375,10 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "CPU only: K2_GGUF metadata/content identity and native token-ID oracle, never Metal"]
+    #[ignore = "model witness: k2-horizon-7b-q8-0"]
     fn cpu_k2_chat_artifact_identity_and_native_tokens() {
-        let source = GgufFile::open(std::env::var("K2_GGUF").unwrap()).unwrap();
+        let source =
+            GgufFile::open(crate::test_fixtures::catalog::K2_HORIZON_7B_Q8_0.required()).unwrap();
         let mut checkpoints = 0;
         let cancelled = verify_profile_with_cancel(&source, || {
             checkpoints += 1;

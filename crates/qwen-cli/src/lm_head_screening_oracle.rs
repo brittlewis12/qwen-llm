@@ -32,7 +32,7 @@ use std::time::Instant;
 use crate::host_validity::HostSnapshot;
 
 const SCHEMA: &str = "qwen-lm-head-screening-oracle/v0664";
-const MODEL_PATH: &str = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+const MODEL_FILENAME: &str = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
 const MODEL_BYTES: u64 = 22_134_528_992;
 const MODEL_SHA256: &str = "ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61";
 const PROMPT_PATH: &str = "docs/bench/tokenizer-prompts/current-reva-n8-interactive-qwen36.txt";
@@ -530,7 +530,7 @@ fn hidden_norms_profiled(
     let mut whole_from_elements = Dyadic::zero();
     let mut whole_from_blocks = Dyadic::zero();
     let mut norms = [0.0f32; BLOCKS];
-    for (block_index, chunk) in hidden.chunks_exact(BLOCK).enumerate() {
+    for (block_index, chunk) in hidden.as_chunks::<BLOCK>().0.iter().enumerate() {
         let mut exact = Dyadic::zero();
         let mut terms = [0.0f64; BLOCK];
         for (index, &h) in chunk.iter().enumerate() {
@@ -643,10 +643,6 @@ fn tensor_copy(tensor: &MetalTensor, expected: usize) -> Result<Vec<f32>> {
 }
 
 fn validate_args(args: &LmHeadScreeningOracleArgs) -> Result<()> {
-    ensure!(
-        args.model == Path::new(MODEL_PATH),
-        "model argument differs from preregistration"
-    );
     ensure!(
         args.prompt_file == Path::new(PROMPT_PATH),
         "prompt argument differs from preregistration"
@@ -770,10 +766,18 @@ fn validate_readiness_constants(readiness: &ReadinessArtifact) -> Result<()> {
     )?;
     ensure!(!readiness.executable_identity.debug_assertions);
     ensure!(readiness.operator_attestation);
+    let model_input = &readiness.command_arguments.model;
+    ensure!(
+        Path::new(model_input)
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some(MODEL_FILENAME),
+        "readiness model input has the wrong published filename"
+    );
     ensure!(
         readiness.command_arguments
             == ReadinessCommandArguments {
-                model: MODEL_PATH.to_string(),
+                model: model_input.clone(),
                 prompt_file: PROMPT_PATH.to_string(),
                 tokens: TOKENS,
                 capture_calls: CALLS.to_vec(),
@@ -1276,7 +1280,10 @@ fn validate_capture_manifest_constants(manifest: &CaptureManifestArtifact) -> Re
     validate_sha256(&model.sha256, "model SHA-256")?;
     validate_sha256(&model.output_weight.sha256, "output head SHA-256")?;
     ensure!(
-        model.path == MODEL_PATH
+        Path::new(&model.path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some(MODEL_FILENAME)
             && model.bytes == MODEL_BYTES
             && model.sha256 == MODEL_SHA256
             && model.architecture == "qwen35moe"
@@ -1581,14 +1588,14 @@ fn self_tests() -> Result<SelfTestArtifact> {
     let cancelled = Dyadic::new(BigInt::one(), -10).add(&Dyadic::new(BigInt::from(-1), -10));
     ensure!(cancelled == Dyadic::zero());
     let mut dot_row = vec![0u8; 2 * BLOCK_BYTES];
-    for raw in dot_row.chunks_exact_mut(BLOCK_BYTES) {
+    for raw in dot_row.as_chunks_mut::<BLOCK_BYTES>().0.iter_mut() {
         raw[192..208].fill(1);
         raw[208..210].copy_from_slice(&0x3c00u16.to_le_bytes());
     }
     let dot = exact_dot(&dot_row, &vec![1.0; 512])?;
     ensure!(dot.cmp(&Dyadic::new(BigInt::from(-16_384), 0)) == Ordering::Equal);
     let mut extreme_row = vec![0xffu8; ROW_BYTES];
-    for raw in extreme_row.chunks_exact_mut(BLOCK_BYTES) {
+    for raw in extreme_row.as_chunks_mut::<BLOCK_BYTES>().0.iter_mut() {
         raw[192..208].fill(0x80);
         raw[208..210].copy_from_slice(&0x7bffu16.to_le_bytes());
     }
@@ -1891,9 +1898,11 @@ fn runtime_artifact_self_test() -> Result<()> {
 fn decode_f32_raw(bytes: &[u8], expected: usize) -> Result<Vec<f32>> {
     ensure!(bytes.len() == expected.checked_mul(4).context("raw F32 size overflow")?);
     bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|chunk| {
-            let value = f32::from_bits(u32::from_le_bytes(chunk.try_into().unwrap()));
+            let value = f32::from_bits(u32::from_le_bytes(*chunk));
             ensure!(value.is_finite(), "raw F32 contains a nonfinite value");
             Ok(value)
         })
@@ -2105,6 +2114,7 @@ fn extract_model_name_identity(gguf: &qwen_llm::gguf::GgufFile) -> Result<ModelN
 fn validate_raw_gguf(
     gguf: &qwen_llm::gguf::GgufFile,
     expected_stamp: &FileStamp,
+    input_path: &Path,
 ) -> Result<ModelIdentityRecord> {
     ensure!(gguf.shard_count() == 1 && gguf.total_mapped_len() as u64 == MODEL_BYTES);
     ensure!(stamp_retained_gguf(gguf)? == *expected_stamp);
@@ -2135,7 +2145,7 @@ fn validate_raw_gguf(
     let output = gguf.try_slice(desc)?;
     ensure!(sha256(output) == OUTPUT_SHA256);
     Ok(ModelIdentityRecord {
-        path: MODEL_PATH.to_string(),
+        path: input_path.to_string_lossy().into_owned(),
         bytes: MODEL_BYTES,
         sha256: MODEL_SHA256.to_string(),
         architecture: "qwen35moe".to_string(),
@@ -2382,8 +2392,8 @@ fn capture_request(
 fn populate_block_norms(output: &[u8]) -> Result<Vec<f32>> {
     ensure!(output.len() == OUTPUT_BYTES);
     let mut norms = Vec::with_capacity(VOCAB * BLOCKS);
-    for row in output.chunks_exact(ROW_BYTES) {
-        for block in row.chunks_exact(BLOCK_BYTES) {
+    for row in output.as_chunks::<ROW_BYTES>().0.iter() {
+        for block in row.as_chunks::<BLOCK_BYTES>().0.iter() {
             let block = Q6Block::parse(block)?;
             norms.push(block.outward_norm_f32()?);
         }
@@ -2395,10 +2405,10 @@ fn populate_block_norms(output: &[u8]) -> Result<Vec<f32>> {
 fn validate_block_norms_exact(output: &[u8], norms: &[f32]) -> Result<u64> {
     ensure!(output.len() == OUTPUT_BYTES && norms.len() == VOCAB * BLOCKS);
     let mut tracker = BigIntPayloadTracker::default();
-    for (row_index, row) in output.chunks_exact(ROW_BYTES).enumerate() {
+    for (row_index, row) in output.as_chunks::<ROW_BYTES>().0.iter().enumerate() {
         let mut row_square = Dyadic::zero();
         tracker.observe_dyadic(&row_square);
-        for (block_index, raw) in row.chunks_exact(BLOCK_BYTES).enumerate() {
+        for (block_index, raw) in row.as_chunks::<BLOCK_BYTES>().0.iter().enumerate() {
             let block_square = Q6Block::parse(raw)?.exact_square_profiled(&mut tracker)?;
             row_square = tracked_dyadic_add(&row_square, &block_square, &mut tracker);
             let norm = norms[row_index * BLOCKS + block_index];
@@ -3909,7 +3919,6 @@ fn sha256_file_handle(file: &File) -> Result<String> {
 
 fn authenticate_raw_model(path: &Path) -> Result<AuthenticatedModel> {
     let total_start = Instant::now();
-    ensure!(path == Path::new(MODEL_PATH));
     check_absolute_nofollow_parents(path)?;
     let path_metadata = std::fs::symlink_metadata(path)?;
     ensure!(path_metadata.file_type().is_file() && !path_metadata.file_type().is_symlink());
@@ -3930,12 +3939,12 @@ fn authenticate_raw_model(path: &Path) -> Result<AuthenticatedModel> {
     );
     let runtime_gguf_start = Instant::now();
     let gguf = qwen_llm::gguf::GgufFile::from_opened_file(file.try_clone()?, path)?;
-    let identity = validate_raw_gguf(&gguf, &stamp)?;
+    let identity = validate_raw_gguf(&gguf, &stamp, path)?;
     let runtime_gguf_open_profile_and_output_hash_wall_nanoseconds =
         u64::try_from(runtime_gguf_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
     let analysis_gguf_start = Instant::now();
     let analysis_gguf = qwen_llm::gguf::GgufFile::from_opened_file(file.try_clone()?, path)?;
-    ensure!(validate_raw_gguf(&analysis_gguf, &stamp)? == identity);
+    ensure!(validate_raw_gguf(&analysis_gguf, &stamp, path)? == identity);
     let analysis_gguf_open_profile_and_output_hash_wall_nanoseconds =
         u64::try_from(analysis_gguf_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
     ensure!(
@@ -4735,7 +4744,10 @@ fn run_reserved(
     let loaded = runtime.load_opened_gguf(authenticated_gguf, args.model.clone())?;
     let runtime_stamp = stamp_retained_gguf(loaded.gguf())?;
     ensure!(runtime_stamp == authenticated_stamp);
-    ensure!(validate_raw_gguf(loaded.gguf(), &authenticated_stamp)? == authenticated_identity);
+    ensure!(
+        validate_raw_gguf(loaded.gguf(), &authenticated_stamp, &args.model)?
+            == authenticated_identity
+    );
     let post_runtime_load_stamp = FileStamp::from_metadata(&authenticated_file.metadata()?);
     ensure!(post_runtime_load_stamp == authenticated_stamp);
     let tokenizer = loaded.tokenizer()?;
@@ -4959,7 +4971,7 @@ mod tests {
         assert_eq!(resource_max.signed_bits(), 511);
         assert!(resource_max.signed_bits() <= 512);
         let mut row = vec![0u8; 2 * BLOCK_BYTES];
-        for block in row.chunks_exact_mut(BLOCK_BYTES) {
+        for block in row.as_chunks_mut::<BLOCK_BYTES>().0.iter_mut() {
             block[192..208].fill(1);
             block[208..210].copy_from_slice(&0x3c00u16.to_le_bytes());
         }
@@ -5441,7 +5453,7 @@ mod tests {
             executable_identity,
             operator_attestation: true,
             command_arguments: ReadinessCommandArguments {
-                model: MODEL_PATH.to_string(),
+                model: MODEL_FILENAME.to_string(),
                 prompt_file: PROMPT_PATH.to_string(),
                 tokens: TOKENS,
                 capture_calls: CALLS.to_vec(),

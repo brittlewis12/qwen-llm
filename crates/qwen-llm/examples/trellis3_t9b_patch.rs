@@ -50,8 +50,10 @@ fn read_f64_file(path: &str, n: usize) -> Vec<f64> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     assert_eq!(bytes.len(), n * 8, "{path} size");
     bytes
-        .chunks_exact(8)
-        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| f64::from_le_bytes(*c))
         .collect()
 }
 
@@ -123,8 +125,9 @@ fn trellis_roundtrip(
 }
 
 fn main() {
-    let src = std::env::var("T9B_SRC")
-        .unwrap_or_else(|_| qwen_llm::test_fixtures::QWEN35_0_8B_F32.path().into());
+    let src = std::env::var_os("T9B_SRC")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| qwen_llm::test_fixtures::QWEN35_0_8B_F32.required().clone());
     let dst = std::env::var("T9B_DST").expect("T9B_DST");
     let recipe = std::env::var("T9B_RECIPE").expect("T9B_RECIPE (f32|q3k|q4k|a0|a3)");
     let n_threads = env_or("T9B_THREADS", 12);

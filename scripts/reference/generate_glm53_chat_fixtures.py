@@ -20,19 +20,20 @@ renderer does with the case: render it byte-for-byte, or refuse it.
 import argparse
 import hashlib
 import json
+import os
 import struct
+import sys
 from pathlib import Path
 
 from jinja2 import TemplateError, sandbox
 from tokenizers import Tokenizer
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+from model_search import resolve_model
+
 OUTPUT = ROOT / "crates/qwen-llm/tests/fixtures/glm53_chat_hf.json"
-HF_DIR = Path("/Volumes/wdblack/weights-archive/glm-5.3-flash-fp8")
-GGUF = Path(
-    "/Volumes/wdblack/weights-archive/glm-5.3-flash-ud-iq3_xxs/glm5-next/"
-    "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf"
-)
+HF_DIR: Path | None = None
 REVISION = "eb9eb208eb0d988989d07a6a12d0fdeb5f52574a"
 HASHES = {
     "chat_template.jinja": "0c4099f3382d6c92700dfb99725025360966fd73032f0ecf32377c0d9e6309c5",
@@ -597,8 +598,16 @@ def cases():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--gguf", type=Path, default=GGUF)
+    parser.add_argument("--hf-dir", type=Path, default=os.environ.get("GLM53_HF_DIR"))
+    parser.add_argument("--gguf", type=Path)
     args = parser.parse_args()
+    if args.hf_dir is None:
+        parser.error("provide --hf-dir or set GLM53_HF_DIR")
+    global HF_DIR
+    HF_DIR = Path(args.hf_dir).expanduser()
+    gguf = args.gguf.expanduser() if args.gguf else resolve_model(
+        "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf"
+    )
 
     template_bytes, template_sha = read_pinned("chat_template.jinja")
     generation_bytes, generation_sha = read_pinned("generation_config.json")
@@ -608,7 +617,7 @@ def main():
     tokenizer_bytes, tokenizer_sha = read_pinned("tokenizer.json")
     tokenizer = Tokenizer.from_str(tokenizer_bytes.decode())
 
-    gguf_bytes = gguf_chat_template(args.gguf)
+    gguf_bytes = gguf_chat_template(gguf)
     gguf_sha = hashlib.sha256(gguf_bytes).hexdigest()
     if gguf_sha != GGUF_TEMPLATE_SHA256:
         raise RuntimeError(f"GGUF chat template drift: {gguf_sha}")

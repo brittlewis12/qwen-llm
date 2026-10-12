@@ -10,6 +10,9 @@ import json
 import math
 import os
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import resolve_model, search_roots
 import re
 import resource
 import shutil
@@ -40,7 +43,7 @@ V0638_WORK_ROOT = (
     ROOT / "target/profiles/v0638-checkpoint-deferred-restore-product-work"
 )
 SEALED_V0637 = ROOT / "target/profiles/v0637-checkpoint-deferred-restore-floor-p1"
-MODEL = Path("/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf")
+MODEL = resolve_model("Qwen3.6-27B-Q4_K_M.gguf")
 MESSAGES = ROOT / "target/profiles/v0615-long-history/ring0-turn-2.json"
 IDENTITY_SEED = (
     ROOT / "target/profiles/v0615-long-history/cache-ring0/v1/identity/"

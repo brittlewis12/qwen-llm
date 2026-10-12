@@ -8,7 +8,7 @@
 //! Performance is **explicitly not a concern here**. Naive triple-loop
 //! matmul, allocate-on-every-step. The point is correctness.
 //!
-//! Reference: `~/code/llama.cpp/src/models/qwen35.cpp`. The structure of
+//! Reference: `$LLAMA_CPP/src/models/qwen35.cpp`. The structure of
 //! [`Forward::single_token`] mirrors `llm_build_qwen35::llm_build_qwen35`
 //! exactly.
 
@@ -1420,11 +1420,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn forward_runs_one_token_0_8b() {
-        let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
-        if !std::path::Path::new(path).exists() {
-            return;
-        }
+        let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
+        let path = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
         let g = GgufFile::open(path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
         let f = Forward::new(&g, &m);
@@ -1450,11 +1451,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m"]
     fn forward_runs_one_token_35b_a3b_moe() {
-        let path = crate::test_fixtures::A3B_Q4_K_M.path();
-        if !std::path::Path::new(path).exists() {
-            return;
-        }
+        let _ = crate::test_fixtures::A3B_Q4_K_M.required();
+
+        let path = crate::test_fixtures::A3B_Q4_K_M.required();
+
         let g = GgufFile::open(path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
         assert_eq!(m.arch.kind, crate::model::ArchKind::Moe);
@@ -1488,11 +1490,12 @@ mod tests {
     /// even without a real model — just confirms our embedding lookup,
     /// RMSNorm, and mat_vec orientations are coherent.
     #[test]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn forward_bypass_blocks_smoke() {
-        let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
-        if !std::path::Path::new(path).exists() {
-            return;
-        }
+        let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
+        let path = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
         let g = GgufFile::open(path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
         let f = Forward::new(&g, &m);
@@ -1544,19 +1547,17 @@ mod tests {
     ///
     /// To regenerate the oracle:
     /// ```sh
-    /// ~/code/llm/target/release/llm --model /Users/tito/models/Qwen3.5-0.8B.F32.gguf \
-    ///   --snapshot /tmp/qwen-oracle --snapshot-id hello_t0 --raw "Hello"
+    /// "$LLM" --model "$MODELS/Qwen3.5-0.8B.F32.gguf" \
+    ///   --snapshot $ORACLE_DIR --snapshot-id hello_t0 --raw "Hello"
     /// ```
-    /// Produces /tmp/qwen-oracle/hello_t0.{f32,json}.
+    /// Produces $ORACLE_DIR/hello_t0.{f32,json}.
     #[test]
+    #[ignore = "needs reference logits from the external llm tool"]
     fn oracle_match_hello_0_8b_f32() {
-        let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
-        let oracle_path = "/tmp/qwen-oracle/hello_t0.f32";
-        if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists()
-        {
-            eprintln!("[oracle] skipped — fixtures missing");
-            return;
-        }
+        let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
+        let model_path = crate::test_fixtures::QWEN35_0_8B_F32.required();
+        let oracle_path = crate::test_fixtures::required_filename("hello_t0.f32");
 
         // Load oracle logits (binary f32 vector).
         let oracle_bytes = std::fs::read(oracle_path).expect("read oracle");
@@ -1648,15 +1649,12 @@ mod tests {
     /// Marked `#[ignore]` so default `cargo test` doesn't run it; invoke
     /// explicitly with `cargo test --release -p qwen-llm 27b -- --ignored`.
     #[test]
-    #[ignore]
+    #[ignore = "needs reference logits from the external llm tool"]
     fn oracle_match_27b_q4_k_m() {
-        let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-        let oracle_path = "/tmp/qwen-oracle/hello_27b_q4km.f32";
-        if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists()
-        {
-            eprintln!("[oracle-27b] skipped — fixtures missing");
-            return;
-        }
+        let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+
+        let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+        let oracle_path = crate::test_fixtures::required_filename("hello_27b_q4km.f32");
 
         let oracle_bytes = std::fs::read(oracle_path).expect("read oracle");
         let n = oracle_bytes.len() / 4;
@@ -1725,8 +1723,8 @@ mod tests {
     ///
     /// Codex review (fc6f43e) flagged the test gap. Oracle generated via:
     /// ```sh
-    /// ~/code/llm/target/release/llm --model /Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf \
-    ///   --snapshot /tmp/qwen-oracle --snapshot-id longprompt_27b \
+    /// "$LLM" --model "$MODELS/Qwen3.6-27B-Q4_K_M.gguf" \
+    ///   --snapshot $ORACLE_DIR --snapshot-id longprompt_27b \
     ///   --raw "The quick brown fox jumps over the lazy dog"
     /// ```
     /// Expected argmax: "." (token 13).
@@ -1734,15 +1732,12 @@ mod tests {
     /// Slow (~minutes per token via CPU triple-loop matmul through 27B).
     /// Marked `#[ignore]` so default `cargo test` doesn't run it.
     #[test]
-    #[ignore]
+    #[ignore = "needs reference logits from the external llm tool"]
     fn oracle_match_longprompt_27b_q4_k_m() {
-        let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-        let oracle_path = "/tmp/qwen-oracle/longprompt_27b.f32";
-        if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists()
-        {
-            eprintln!("[oracle-27b-long] skipped — fixtures missing");
-            return;
-        }
+        let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+
+        let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+        let oracle_path = crate::test_fixtures::required_filename("longprompt_27b.f32");
 
         let oracle_bytes = std::fs::read(oracle_path).expect("read oracle");
         let n = oracle_bytes.len() / 4;
@@ -1823,20 +1818,18 @@ mod tests {
     ///
     /// Oracle generated via:
     /// ```sh
-    /// ~/code/llm/target/release/llm --model /Users/tito/models/Qwen3.5-0.8B.F32.gguf \
-    ///   --snapshot /tmp/qwen-oracle --snapshot-id longprompt_t0 \
+    /// "$LLM" --model "$MODELS/Qwen3.5-0.8B.F32.gguf" \
+    ///   --snapshot $ORACLE_DIR --snapshot-id longprompt_t0 \
     ///   --raw "The quick brown fox jumps over the lazy dog"
     /// ```
     /// Expected argmax: "." (token 13).
     #[test]
+    #[ignore = "needs reference logits from the external llm tool"]
     fn oracle_match_longprompt_0_8b_f32() {
-        let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
-        let oracle_path = "/tmp/qwen-oracle/longprompt_t0.f32";
-        if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists()
-        {
-            eprintln!("[oracle-long] skipped — fixtures missing");
-            return;
-        }
+        let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
+        let model_path = crate::test_fixtures::QWEN35_0_8B_F32.required();
+        let oracle_path = crate::test_fixtures::required_filename("longprompt_t0.f32");
 
         let oracle_bytes = std::fs::read(oracle_path).expect("read oracle");
         let n = oracle_bytes.len() / 4;
@@ -1910,12 +1903,10 @@ mod tests {
     /// through the eh_proj concat path, RoPE position bugs at the
     /// boundary slot.
     #[test]
+    #[ignore = "model witness: qwen3.5-0.8b-q4-k-m"]
     fn mtp_step_runs_0_8b() {
-        let path = "/Users/tito/models/h4-smoke-test/Qwen3.5-0.8B/qwen3.5-0.8b.Q4_K_M.gguf";
-        if !std::path::Path::new(path).exists() {
-            eprintln!("[mtp-smoke] skipped — fixture missing");
-            return;
-        }
+        let path = crate::test_fixtures::required_filename("qwen3.5-0.8b.Q4_K_M.gguf");
+
         let g = GgufFile::open(path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
         assert!(m.mtp.is_some(), "MTP head should be bound on 0.8B-MTP");

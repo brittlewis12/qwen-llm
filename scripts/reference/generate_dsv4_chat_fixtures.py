@@ -67,8 +67,11 @@ STRUCTURALLY_PINNED = {
 }
 
 
-def checkout(env_name: str, default: str) -> Path:
-    path = Path(os.environ.get(env_name, os.path.expanduser(default))).resolve()
+def checkout(env_name: str) -> Path:
+    value = os.environ.get(env_name)
+    if not value:
+        raise SystemExit(f"set {env_name} to the external checkout directory")
+    path = Path(value).expanduser().resolve()
     if not path.is_dir():
         raise SystemExit(f"{env_name} checkout missing: {path}")
     return path
@@ -312,8 +315,8 @@ CASES = [
 
 def main() -> None:
     check = "--check" in sys.argv[1:]
-    vllm_dir = checkout("DSV4_VLLM_DIR", "~/code/vllm")
-    sglang_dir = checkout("DSV4_SGLANG_DIR", "~/code/sglang")
+    vllm_dir = checkout("DSV4_VLLM_DIR")
+    sglang_dir = checkout("DSV4_SGLANG_DIR")
 
     with tempfile.TemporaryDirectory() as scratch_dir:
         scratch = Path(scratch_dir)

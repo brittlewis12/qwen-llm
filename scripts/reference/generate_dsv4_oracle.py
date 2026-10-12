@@ -1153,9 +1153,10 @@ def validate_llama_cpp_vectors(value: object) -> dict[str, object]:
 
 
 def llama_cpp_cpu_fixture() -> dict[str, object]:
-    llama_cpp = Path(
-        os.environ.get("DSV4_LLAMA_CPP_DIR", Path.home() / "code" / "llama.cpp")
-    ).resolve()
+    llama_cpp_value = os.environ.get("DSV4_LLAMA_CPP_DIR")
+    if not llama_cpp_value:
+        raise RuntimeError("set DSV4_LLAMA_CPP_DIR to the external llama.cpp checkout")
+    llama_cpp = Path(llama_cpp_value).expanduser().resolve()
     if not (llama_cpp / "ggml" / "CMakeLists.txt").is_file():
         raise RuntimeError(
             f"llama.cpp checkout not found at {llama_cpp}; set DSV4_LLAMA_CPP_DIR"
@@ -1511,9 +1512,10 @@ def validate_dwarfstar_vectors(value: object) -> dict[str, object]:
 
 
 def dwarfstar_direct_fixture() -> dict[str, object]:
-    dwarfstar = Path(
-        os.environ.get("DSV4_DWARFSTAR_DIR", Path.home() / "code" / "ds4")
-    ).resolve()
+    dwarfstar_value = os.environ.get("DSV4_DWARFSTAR_DIR")
+    if not dwarfstar_value:
+        raise RuntimeError("set DSV4_DWARFSTAR_DIR to the external DwarfStar checkout")
+    dwarfstar = Path(dwarfstar_value).expanduser().resolve()
     source = dwarfstar / "ds4.c"
     if not source.is_file():
         raise RuntimeError(

@@ -18,6 +18,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import resolve_model, search_roots
 from typing import Any
 
 
@@ -34,7 +37,7 @@ IMPLEMENTATION_COMMIT = "43af9d0f2effd0f86062391a6fddac97bbf46d4a"
 
 MODEL = {
     "name": "a3b",
-    "path": Path("/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"),
+    "path": resolve_model("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"),
     "sha256": "ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61",
     "runtime_identity_kind": "metadata_compatibility_v1",
     "runtime_model_id": "e6024ce53109fdf7",

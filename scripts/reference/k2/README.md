@@ -18,12 +18,12 @@ The new test compares this artifact against itself in the pinned independent
 oracle, not against Q8 weights. It does not change frozen Q8 qualification.
 
 ```sh
-K2_GGUF="$HOME/models/K2-Horizon-7B-Q4_K_M.gguf" \
+K2_GGUF="$MODELS/K2-Horizon-7B-Q4_K_M.gguf" \
 cargo --config 'profile.test.package.blake3.opt-level=3' \
   --config 'profile.test.package.sha2.opt-level=3' test -p qwen-llm --lib \
   k2_horizon_runtime::oracle_tests::quantized::cpu_final_q4_artifact_preflight \
   -- --ignored --exact --nocapture --test-threads=1
-MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q4_K_M.gguf" \
+MTL_DEBUG_LAYER=1 K2_GGUF="$MODELS/K2-Horizon-7B-Q4_K_M.gguf" \
 K2_LLAMA_ORACLE="$PWD/target/profiles/k2-oracle-build/bin/k2_checkpoint_oracle" \
 cargo --config 'profile.test.package.blake3.opt-level=3' \
   --config 'profile.test.package.sha2.opt-level=3' test -p qwen-llm --lib \
@@ -71,11 +71,11 @@ HTTP retains singleton cancellation points; CLI/bench/lens retain packed chunk
 boundaries. Packed scratch remains per-append, not a retained session workspace.
 
 ```sh
-K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" MTL_DEBUG_LAYER=1 \
+K2_GGUF="$MODELS/K2-Horizon-7B-Q8_0.gguf" MTL_DEBUG_LAYER=1 \
 cargo test -p qwen-llm --lib \
   k2_horizon_runtime::readout_tests::gpu_k2_advance_skips_readouts_preserves_state_and_poisoning \
   -- --ignored --exact --nocapture --test-threads=1
-K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" MTL_DEBUG_LAYER=1 \
+K2_GGUF="$MODELS/K2-Horizon-7B-Q8_0.gguf" MTL_DEBUG_LAYER=1 \
 K2_READOUT_EVIDENCE="$PWD/target/profiles/k2-readout-pairs-new.json" \
 cargo test -p qwen-llm --lib \
   k2_horizon_runtime::readout_tests::gpu_k2_readout_schedule_paired_wall_probe \
@@ -112,7 +112,7 @@ is ignored by the upstream template and must not be advertised as a native contr
 Native tokenizer parity on those successful tool prompts is CPU-only:
 
 ```sh
-K2_GGUF="$HOME/models/K2-Horizon-7B-Q4_K_M.gguf" cargo test -p qwen-llm --lib \
+K2_GGUF="$MODELS/K2-Horizon-7B-Q4_K_M.gguf" cargo test -p qwen-llm --lib \
   k2_horizon_chat::tools::presentation::tests::cpu_native_tool_template_token_ids \
   -- --ignored --exact --nocapture --test-threads=1
 ```
@@ -147,9 +147,9 @@ gain a partial-publication path.
 cargo --config 'profile.dev.package.blake3.opt-level=3' \
   --config 'profile.dev.package.sha2.opt-level=3' build -p qwen-cli --bin qwen
 uv run scripts/reference/k2/check_tools_cli.py --binary target/debug/qwen \
-  --model "$HOME/models/K2-Horizon-7B-Q4_K_M.gguf" \
+  --model "$MODELS/K2-Horizon-7B-Q4_K_M.gguf" \
   --call-format json --output target/profiles/k2-tools-cli-new
-K2_GGUF="$HOME/models/K2-Horizon-7B-Q4_K_M.gguf" MTL_DEBUG_LAYER=1 \
+K2_GGUF="$MODELS/K2-Horizon-7B-Q4_K_M.gguf" MTL_DEBUG_LAYER=1 \
 K2_TOOLS_HTTP_EVIDENCE="$PWD/target/profiles/k2-tools-http-new.json" \
 cargo test -p qwen-cli --bin qwen \
   serve::backend_k2::tests::gpu_k2_tools_roundtrip_all_formats_json_sse \
@@ -175,7 +175,7 @@ include authored marker tokens, Unicode and assistant thinking aliases.
 
 ```sh
 uv run scripts/reference/generate_k2_chat_fixtures.py
-K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+K2_GGUF="$MODELS/K2-Horizon-7B-Q8_0.gguf" \
 cargo --config 'profile.test.package.qwen-llm.opt-level=1' \
   --config 'profile.test.package.blake3.opt-level=3' test -p qwen-llm --lib \
   k2_horizon_chat::tests::cpu_k2_chat_artifact_identity_and_native_tokens \
@@ -183,7 +183,7 @@ cargo --config 'profile.test.package.qwen-llm.opt-level=1' \
 cargo --config 'profile.dev.package.blake3.opt-level=3' \
   --config 'profile.dev.package.sha2.opt-level=3' build -p qwen-cli --bin qwen
 uv run scripts/reference/k2/check_chat_cli.py --binary target/debug/qwen \
-  --model "$HOME/models/K2-Horizon-7B-Q8_0.gguf" --output target/profiles/k2-chat-new-run
+  --model "$MODELS/K2-Horizon-7B-Q8_0.gguf" --output target/profiles/k2-chat-new-run
 ```
 
 The final script is opt-in GPU execution: serial CLI children take their own
@@ -199,7 +199,7 @@ loopback sockets, never a shared server. Pass an absolute evidence path because
 Cargo tests run from the crate directory:
 
 ```sh
-K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" MTL_DEBUG_LAYER=1 \
+K2_GGUF="$MODELS/K2-Horizon-7B-Q8_0.gguf" MTL_DEBUG_LAYER=1 \
 K2_CHAT_HTTP_EVIDENCE="$PWD/target/profiles/k2-chat-http-new.json" \
 cargo --config 'profile.test.package.blake3.opt-level=3' \
   --config 'profile.test.package.sha2.opt-level=3' test -p qwen-cli --bin qwen \
@@ -238,7 +238,7 @@ standalone executable does not acquire the repository lease on its own.
 
 ```sh
 MTL_DEBUG_LAYER=1 \
-K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+K2_GGUF="$MODELS/K2-Horizon-7B-Q8_0.gguf" \
 K2_LLAMA_ORACLE="$PWD/target/profiles/k2-oracle-build/bin/k2_checkpoint_oracle" \
 cargo test -p qwen-llm --lib \
   k2_horizon_runtime::oracle_tests::gpu_checkpoint_logits_match_independent_ifm_fork \
@@ -354,7 +354,7 @@ the four previously seen v2 corpora at their selected bases, not a new holdout, 
 applies the unchanged v2 gates prospectively to online versus materialized results:
 
 ```sh
-MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+MTL_DEBUG_LAYER=1 K2_GGUF="$MODELS/K2-Horizon-7B-Q8_0.gguf" \
 K2_HOST_BUILD_NOTE="temporary qwen-llm test-package opt-level=1; Metal unchanged" \
 cargo --config 'profile.test.package.qwen-llm.opt-level=1' test -p qwen-llm --lib \
   k2_horizon_runtime::oracle_tests::holdout::online::gpu_online_runtime_matches_materialized_256_controls \
@@ -378,7 +378,7 @@ and full coordinate/token/finite-row protocol, and rechecks trace noninterferenc
 Original logs have exact mode/device marker checks, not digest authentication.
 
 ```sh
-MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+MTL_DEBUG_LAYER=1 K2_GGUF="$MODELS/K2-Horizon-7B-Q8_0.gguf" \
 K2_LLAMA_ORACLE="$PWD/target/profiles/k2-oracle-build/bin/k2_checkpoint_oracle" \
 K2_RETAINED_V2="$PWD/target/profiles/k2-holdout-v2-12878-1789830419367474000" \
 K2_HOST_BUILD_NOTE="temporary qwen-llm test-package opt-level=1; Metal unchanged" \
@@ -417,7 +417,7 @@ MTL_DEBUG_LAYER=1 cargo --config 'profile.test.package.qwen-llm.opt-level=1' \
   test -p qwen-llm --lib \
   k2_horizon_metal::tests::gpu_q8_batch_projection_matches_singleton_bits_and_guards \
   -- --ignored --exact --nocapture --test-threads=1
-MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+MTL_DEBUG_LAYER=1 K2_GGUF="$MODELS/K2-Horizon-7B-Q8_0.gguf" \
   cargo --config 'profile.test.package.qwen-llm.opt-level=1' \
   --config 'profile.test.package.sha2.opt-level=3' test -p qwen-llm --lib \
   k2_horizon_runtime::oracle_tests::holdout::packed::gpu_packed_q8_matches_serial_captures_cache_partitions_and_interventions \
@@ -464,7 +464,7 @@ MTL_DEBUG_LAYER=1 cargo --config 'profile.test.package.qwen-llm.opt-level=1' \
   test -p qwen-llm --lib \
   k2_horizon_metal::compact::tests::gpu_q8_store_bytes_and_inline_attention_match_independent_controls \
   -- --ignored --exact --nocapture --test-threads=1
-MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+MTL_DEBUG_LAYER=1 K2_GGUF="$MODELS/K2-Horizon-7B-Q8_0.gguf" \
   cargo --config 'profile.test.package.qwen-llm.opt-level=1' test -p qwen-llm --lib \
   k2_horizon_runtime::compact_tests::gpu_compact_cache_preserves_transactions_causality_and_lens \
   -- --ignored --exact --nocapture --test-threads=1
@@ -489,7 +489,7 @@ runtime markers must agree on actual cache precision; F32 reference logs must sh
 cache dtype may also change backend kernels/reduction topology.
 
 ```sh
-MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+MTL_DEBUG_LAYER=1 K2_GGUF="$MODELS/K2-Horizon-7B-Q8_0.gguf" \
 K2_LLAMA_ORACLE="$PWD/target/profiles/k2-oracle-build/bin/k2_checkpoint_oracle" \
 cargo test -p qwen-llm --lib \
   k2_horizon_runtime::oracle_tests::cache_precision::gpu_f16_native_and_ifm_against_f32_cache_control \
@@ -516,7 +516,7 @@ capture sites, append boundaries, and reference argmax trajectories. The fixed
 exceeds 256 rows. Its EOS-inclusive trajectory is not a serving stop-policy test.
 
 ```sh
-MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+MTL_DEBUG_LAYER=1 K2_GGUF="$MODELS/K2-Horizon-7B-Q8_0.gguf" \
 K2_LLAMA_ORACLE="$PWD/target/profiles/k2-oracle-build/bin/k2_checkpoint_oracle" \
 cargo test -p qwen-llm --lib \
   k2_horizon_runtime::oracle_tests::holdout::runner::gpu_frozen_guarded_256_holdout \
@@ -539,7 +539,7 @@ rows and 16 sites without using any indeterminate-ranking allowance. Scope is
 the pinned Q8-weight checkpoint with F16 KV, not F16-weight qualification.
 
 ```sh
-MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+MTL_DEBUG_LAYER=1 K2_GGUF="$MODELS/K2-Horizon-7B-Q8_0.gguf" \
 K2_HOST_BUILD_NOTE="temporary qwen-llm test-package opt-level=1; Metal unchanged" \
 K2_LLAMA_ORACLE="$PWD/target/profiles/k2-oracle-build/bin/k2_checkpoint_oracle" \
 cargo --config 'profile.test.package.qwen-llm.opt-level=1' test -p qwen-llm --lib \
@@ -564,9 +564,9 @@ cargo --config 'profile.dev.package.blake3.opt-level=3' \
   --bin qwen --bin qwen-bench --bin qwen-lens
 uv run scripts/reference/k2/check_guarded_capacity.py \
   --qwen target/debug/qwen --bench target/debug/qwen-bench \
-  --lens target/debug/qwen-lens --model "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+  --lens target/debug/qwen-lens --model "$MODELS/K2-Horizon-7B-Q8_0.gguf" \
   --capacity 1024 --output target/profiles/k2-context-1024-new-run
-MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+MTL_DEBUG_LAYER=1 K2_GGUF="$MODELS/K2-Horizon-7B-Q8_0.gguf" \
   K2_BOUNDARY_EVIDENCE="$PWD/target/profiles/k2-context-1024-new-run" \
   cargo test -p qwen-cli --bin qwen \
   serve::backend_k2::tests::gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one \
@@ -590,7 +590,7 @@ registers; the shorter kernel stays unchanged. No history is dropped or expanded
 Runtime self-controls at 257/1024 rows and high absolute positions are separate:
 
 ```sh
-MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+MTL_DEBUG_LAYER=1 K2_GGUF="$MODELS/K2-Horizon-7B-Q8_0.gguf" \
 cargo --config 'profile.test.package.qwen-llm.opt-level=1' \
   --config 'profile.test.package.sha2.opt-level=3' test -p qwen-llm --lib \
   k2_horizon_runtime::context_tests::gpu_checkpoint_context_boundaries_and_memory_admission \
@@ -614,10 +614,10 @@ directories. A busy lease is a failure, never permission to stop another owner.
 cargo --config 'profile.dev.package.blake3.opt-level=3' \
   --config 'profile.dev.package.sha2.opt-level=3' build -p qwen-cli --bin qwen-lens
 uv run scripts/reference/k2/check_plain_lens_cli.py \
-  --binary target/debug/qwen-lens --model "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+  --binary target/debug/qwen-lens --model "$MODELS/K2-Horizon-7B-Q8_0.gguf" \
   --output target/profiles/k2-plain-lens-new-run
 uv run scripts/reference/k2/check_imported_lens_cli.py \
-  --binary target/debug/qwen-lens --model "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+  --binary target/debug/qwen-lens --model "$MODELS/K2-Horizon-7B-Q8_0.gguf" \
   --output target/profiles/k2-imported-lens-new-run
 ```
 
@@ -639,7 +639,7 @@ The private Q8 cache experiment uses the frozen storage contract in
 independent implementation) on four previously seen v2 cases:
 
 ```sh
-MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+MTL_DEBUG_LAYER=1 K2_GGUF="$MODELS/K2-Horizon-7B-Q8_0.gguf" \
 K2_HOST_BUILD_NOTE="temporary qwen-llm opt-level=1 and sha2 opt-level=3; Metal unchanged" \
 cargo --config 'profile.test.package.qwen-llm.opt-level=1' \
   --config 'profile.test.package.sha2.opt-level=3' test -p qwen-llm --lib \
@@ -669,7 +669,7 @@ reports recorded metrics; it does not reconstruct absent candidate logits.
 ```sh
 cargo build -p qwen-cli --bin qwen-bench
 uv run scripts/reference/k2/check_request_bench.py \
-  --binary target/debug/qwen-bench --model "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+  --binary target/debug/qwen-bench --model "$MODELS/K2-Horizon-7B-Q8_0.gguf" \
   --output target/profiles/k2-request-bench-new-run
 ```
 
@@ -688,7 +688,7 @@ separate serving manual. This opt-in probe uses direct borrowed-backend calls an
 ephemeral loopback JSON/SSE connections, without starting a long-running server:
 
 ```sh
-MTL_DEBUG_LAYER=1 K2_GGUF="$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+MTL_DEBUG_LAYER=1 K2_GGUF="$MODELS/K2-Horizon-7B-Q8_0.gguf" \
   cargo test -p qwen-cli --bin qwen \
   serve::backend_k2::tests::gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests \
   -- --ignored --exact --nocapture --test-threads=1

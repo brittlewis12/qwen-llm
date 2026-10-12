@@ -12,15 +12,15 @@ tokenizer_config.json; nothing is downloaded and no model is executed.
 
 import hashlib
 import json
+import argparse
+import os
 import random
-import sys
 from pathlib import Path
 
 from tokenizers import Regex, Tokenizer, pre_tokenizers
 
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / "crates/qwen-llm/tests/fixtures/glm4_tokenizer_hf.json"
-DEFAULT_DIR = Path("/Volumes/wdblack/weights-archive/glm-5.3-flash-fp8")
 HASHES = {
     "tokenizer.json": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
     "tokenizer_config.json": "98b1271574f41abf89427ae2dda030d94dc9478f0edc5a8bd240db213c6fd5fc",
@@ -154,7 +154,12 @@ def load(directory, name):
 
 
 def main():
-    directory = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_DIR
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("hf_dir", nargs="?", type=Path, default=os.environ.get("GLM53_HF_DIR"))
+    args = parser.parse_args()
+    if args.hf_dir is None:
+        parser.error("provide HF_DIR or set GLM53_HF_DIR")
+    directory = Path(args.hf_dir).expanduser()
     raw = load(directory, "tokenizer.json")
     config = json.loads(load(directory, "tokenizer_config.json"))
     document = json.loads(raw)

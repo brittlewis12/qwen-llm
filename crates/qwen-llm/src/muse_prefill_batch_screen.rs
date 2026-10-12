@@ -1,7 +1,9 @@
 #[test]
 #[ignore = "serial Metal, equal512-row Q8 FFN batch-size falsifier; not model throughput"]
 fn muse_prefill_equal_work_batch_screen() {
-    let gguf = GgufFile::open(crate::test_fixtures::MUSE_GLIMMER_Q8_0.path()).unwrap();
+    let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
+
+    let gguf = GgufFile::open(crate::test_fixtures::MUSE_GLIMMER_Q8_0.required()).unwrap();
     MuseGlimmerConfig::from_gguf(&gguf).unwrap();
     let ctx = MetalContext::new().unwrap();
     for (name, expected_shape) in [

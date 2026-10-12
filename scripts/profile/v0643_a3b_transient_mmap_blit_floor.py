@@ -17,6 +17,9 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import resolve_model, search_roots
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKET = ROOT / "target/profiles/v0643-a3b-transient-mmap-blit-floor-p1"
@@ -24,7 +27,7 @@ WORK = ROOT / "target/profiles/v0643-a3b-transient-mmap-blit-floor-work"
 PREREG = ROOT / "docs/bench/v0643-a3b-transient-mmap-blit-floor.md"
 RUNNER = Path(__file__).resolve()
 BINARY = ROOT / "target/release/qwen-bench"
-MODEL = Path("/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
+MODEL = resolve_model("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
 IMPLEMENTATION_PARENT = "d859345118774b934218a7eb55460ef0870da882"
 MODEL_SIZE = 22_134_528_992
 MODEL_PAGES = 1_350_985

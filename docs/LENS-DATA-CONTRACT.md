@@ -132,7 +132,7 @@ explicitly not authenticated weight-content roots.
 - Both new Qwen3.8 n25/T128/skip4/target62 J/R archives converted using only the
   restricted decoder, in 77.89s and 84.83s respectively. Output directories are
   `j/data-v1` and `r/data-v1` alongside the original files under
-  `/Users/tito/models/qwen38-27b-lenses/qwen3.8-27b/pile10k25-t128-skip4-target62-v1/`.
+  `$MODELS/qwen38-27b-lenses/qwen3.8-27b/pile10k25-t128-skip4-target62-v1/`.
 - Each payload is 3,303,014,400 bytes, shape `[63,5120,5120]`, with exact declared
   identity at layer62. Both pass the native CPU verifier. Neither has an exact
   deployment binding; the original BF16-to-GGUF transfer caveat remains.

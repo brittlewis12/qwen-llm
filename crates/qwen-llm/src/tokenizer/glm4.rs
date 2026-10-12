@@ -23,8 +23,6 @@ mod tests {
     const EOS: i32 = 154_820;
     const EOT: i32 = 154_827;
     const EOM: i32 = 154_829;
-    const ALTERNATE_GGUF: &str = "/Volumes/wdblack/weights-archive/glm-5.3-flash-ud-iq3_xxs/UD-IQ3_XXS/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf";
-    const LLAMA_TOKENIZE: &str = "/Users/tito/code/llama.cpp/build-glm5/bin/llama-tokenize";
 
     fn fixtures() -> Value {
         serde_json::from_str(include_str!("../../tests/fixtures/glm4_tokenizer_hf.json")).unwrap()
@@ -194,15 +192,15 @@ mod tests {
     }
 
     fn gguf_paths() -> Vec<PathBuf> {
-        let mut paths = vec![crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required()];
-        if std::path::Path::new(ALTERNATE_GGUF).exists() {
-            paths.push(ALTERNATE_GGUF.into());
-        }
-        paths
+        vec![
+            crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS
+                .required()
+                .clone(),
+        ]
     }
 
     #[test]
-    #[ignore = "CPU/header-only; requires GLM53_GGUF (GLM-5.3-Flash shard 1), no inference or GPU"]
+    #[ignore = "model witness: glm-5.3-flash-ud-iq3_xxs"]
     fn gguf_tokenizer_matches_hf_ids() {
         let data = fixtures();
         for path in gguf_paths() {
@@ -257,15 +255,20 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "CPU/vocab-only; requires GLM53_GGUF and a glm4 ignore_merges llama-tokenize (GLM_LLAMA_TOKENIZE)"]
+    #[ignore = "separate external-tool correctness check: requires GLM_LLAMA_TOKENIZE or LLAMA_TOKENIZE; not a routine model witness"]
     fn gguf_tokenizer_matches_llama_tokenize_cli() {
-        let binary = std::env::var("GLM_LLAMA_TOKENIZE").unwrap_or_else(|_| LLAMA_TOKENIZE.into());
+        let _ = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+
+        let binary = std::env::var_os("GLM_LLAMA_TOKENIZE")
+            .or_else(|| std::env::var_os("LLAMA_TOKENIZE"))
+            .expect("set GLM_LLAMA_TOKENIZE or LLAMA_TOKENIZE to a compatible llama-tokenize");
         assert!(
-            std::path::Path::new(&binary).exists(),
-            "missing llama-tokenize oracle {binary}"
+            std::path::Path::new(&binary).is_file(),
+            "missing llama-tokenize oracle {}",
+            std::path::Path::new(&binary).display()
         );
         let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
-        let tokenizer = NativeTokenizer::open(&path).unwrap();
+        let tokenizer = NativeTokenizer::open(path).unwrap();
         let prompt_file =
             std::env::temp_dir().join(format!("glm4-llama-tokenize-{}.txt", std::process::id()));
         let data = fixtures();
@@ -275,7 +278,7 @@ mod tests {
             std::fs::write(&prompt_file, text).unwrap();
             let output = std::process::Command::new(&binary)
                 .arg("-m")
-                .arg(&path)
+                .arg(path)
                 .arg("-f")
                 .arg(&prompt_file)
                 .args(["--ids", "--no-escape", "--log-disable"])

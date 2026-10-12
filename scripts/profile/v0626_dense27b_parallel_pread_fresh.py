@@ -8,6 +8,9 @@ import json
 import mmap
 import os
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import resolve_model, search_roots
 import re
 import signal
 import subprocess
@@ -21,7 +24,7 @@ ARTIFACT = ROOT / "target/profiles/v0626-dense27b-parallel-pread-fresh-p1"
 PREREG = ROOT / "docs/bench/v0626-dense27b-parallel-pread-fresh.md"
 MECHANICS = ROOT / "scripts/profile/v0605_dense27b_parallel_copied_loader.py"
 COMMON_RUNNER = ROOT / "scripts/profile/v0593_demand_paged_no_copy.py"
-MODEL = Path("/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf")
+MODEL = resolve_model("Qwen3.6-27B-Q4_K_M.gguf")
 PROMPT = ROOT / "docs/bench/tokenizer-prompts/current-reva-n8-interactive-qwen36.txt"
 CLI_BINARY = ROOT / "target/release/qwen"
 BENCH_BINARY = ROOT / "target/release/qwen-bench"

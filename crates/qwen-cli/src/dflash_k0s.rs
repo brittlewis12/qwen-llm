@@ -5460,11 +5460,11 @@ fn authorize_inventory_asset_argv(
     ensure!(
         target.expected_bytes == Some(17_106_773_984)
             && target.max_bytes == 17_106_773_984
-            && target.path == "/Users/tito/models/Qwen3.8-27B-Q4_K_M.gguf"
+            && target.path == "Qwen3.8-27B-Q4_K_M.gguf"
             && target.sha256 == "7b2aec3b9ababdfd75aa17552ee95607d866e44decf547f6f12fcef85cc89f1b"
             && drafter.expected_bytes.is_none()
             && drafter.max_bytes == 2_147_483_648
-            && drafter.path == "/Users/tito/models/incoai-dflash2/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+            && drafter.path == "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
             && drafter.sha256 == "18a380efc9b7ed8d88677fc895f5c11ae170653434ee378f7348f715c14d0594",
         "asset expected-byte/cap predicates differ from authorization"
     );
@@ -9224,8 +9224,8 @@ mod tests {
 
     #[test]
     fn inventory_asset_argv_gate_rejects_substitution_before_open_sentinel() {
-        let target_path = "/Users/tito/models/Qwen3.8-27B-Q4_K_M.gguf";
-        let drafter_path = "/Users/tito/models/incoai-dflash2/Qwen3.8-27B-DFlash2-Q4_K_M.gguf";
+        let target_path = "Qwen3.8-27B-Q4_K_M.gguf";
+        let drafter_path = "Qwen3.8-27B-DFlash2-Q4_K_M.gguf";
         let assets = vec![
             AssetExpectation {
                 role: "target".into(),

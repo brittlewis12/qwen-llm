@@ -161,9 +161,10 @@ fn frozen_holdout_policy_is_bounded_and_unchanged() {
 }
 
 #[test]
-#[ignore = "CPU artifact-hash/tokenizer only; requires K2_GGUF, no model forward or Metal"]
+#[ignore = "model witness: k2-horizon-7b-q8-0"]
 fn cpu_frozen_holdout_prefixes_fit_native_tokenizer() {
-    let source = GgufFile::open(std::env::var("K2_GGUF").expect("K2_GGUF")).unwrap();
+    let source =
+        GgufFile::open(crate::test_fixtures::catalog::K2_HORIZON_7B_Q8_0.required()).unwrap();
     let cases = inputs(&source);
     assert_eq!(cases.len(), 12);
     assert_eq!(cases.iter().filter(|case| case.3).count(), 4);

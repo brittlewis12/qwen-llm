@@ -31,9 +31,6 @@ use crate::qwen_queue2::{QWEN_QUEUE2_DYNAMIC_RESERVE_BYTES, qwen_queue2_session_
 use crate::tokenizer::Tokenizer;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs::File, time::Instant};
-
-const ARTIFACT: &str =
-    "/Volumes/wdblack/weights-archive/underdog-saluki-27b/Underdog-Saluki-27B-1.0-IQ2-mix.gguf";
 const WIDTHS: [usize; 2] = [128, 4096];
 const NEXT: usize = 4;
 const PROSE: &str = include_str!("../../../../../docs/GLM53-FLASH-PLAN.md");
@@ -498,7 +495,9 @@ fn iq2_xs_mma_model_packet() {
         Err(std::env::VarError::NotPresent) => Candidate::Mma,
         Err(e) => panic!("IQ2_XS_MMA_MODEL_CANDIDATE: {e}"),
     };
-    let path = std::env::var_os("IQ2_XS_MMA_GGUF").unwrap_or_else(|| ARTIFACT.into());
+    let path = std::env::var_os("IQ2_XS_MMA_GGUF").unwrap_or_else(|| {
+        crate::test_fixtures::required_filename("Underdog-Saluki-27B-1.0-IQ2-mix.gguf").into()
+    });
     let gguf = GgufFile::open(path).unwrap();
     let bound = Model::from_gguf(&gguf).unwrap();
     assert_eq!(bound.arch.kind, ArchKind::Dense);

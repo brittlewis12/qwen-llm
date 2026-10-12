@@ -1263,11 +1263,11 @@ fn max_capacity_is_the_largest_fitting_context() {
 /// Real artifact census: header-only, no weights read, no GPU. Requires
 /// `GLM53_GGUF` (shard 1 of the UD-IQ3_XXS release).
 #[test]
-#[ignore = "CPU/header-only; requires GLM53_GGUF (GLM-5.3-Flash shard 1)"]
+#[ignore = "model witness: glm-5.3-flash-ud-iq3_xxs"]
 fn release_artifact_census_and_allocation_plan() {
-    let Some(path) = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.path_or_skip() else {
-        return;
-    };
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS
+        .required()
+        .clone();
     let gguf = GgufFile::open(&path).unwrap();
     let model = Glm5NextModel::from_gguf(&gguf).unwrap();
     assert_eq!(gguf.tensors.len(), RELEASE_TENSOR_COUNT);

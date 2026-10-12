@@ -63,7 +63,6 @@ impl GrammarLmHeadProfile {
         match self {
             Self::A3b => ProfileSpec {
                 id: "a3b",
-                expected_path: "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
                 file_bytes: 22_134_528_992,
                 model_sha256: "ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61",
                 arch_kind: ArchKind::Moe,
@@ -78,7 +77,6 @@ impl GrammarLmHeadProfile {
             },
             Self::Dense => ProfileSpec {
                 id: "dense",
-                expected_path: "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
                 file_bytes: 16_817_244_384,
                 model_sha256: "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
                 arch_kind: ArchKind::Dense,
@@ -123,7 +121,6 @@ pub struct GrammarLmHeadRowFloorArgs {
 #[derive(Clone, Copy, Debug)]
 struct ProfileSpec {
     id: &'static str,
-    expected_path: &'static str,
     file_bytes: u64,
     model_sha256: &'static str,
     arch_kind: ArchKind,
@@ -2205,7 +2202,6 @@ fn validate_dense_prerequisite(path: &Path, build_identity: &Value) -> Result<Va
 fn profile_json(profile: ProfileSpec) -> Value {
     json!({
         "id": profile.id,
-        "expected_path": profile.expected_path,
         "file_bytes": profile.file_bytes,
         "model_sha256": profile.model_sha256,
         "architecture": match profile.arch_kind {
@@ -2249,12 +2245,6 @@ pub fn run(
 
     let canonical_model = std::fs::canonicalize(&args.model)
         .with_context(|| format!("canonicalize {}", args.model.display()))?;
-    let canonical_expected = std::fs::canonicalize(profile.expected_path)
-        .with_context(|| format!("canonicalize {}", profile.expected_path))?;
-    ensure!(
-        canonical_model == canonical_expected,
-        "model path does not match the frozen profile"
-    );
     let metadata = std::fs::metadata(&canonical_model)
         .with_context(|| format!("stat {}", canonical_model.display()))?;
     ensure!(
@@ -2826,7 +2816,6 @@ mod tests {
         };
         let profile = ProfileSpec {
             id: "synthetic",
-            expected_path: "",
             file_bytes: 0,
             model_sha256: "",
             arch_kind: ArchKind::Dense,

@@ -20,6 +20,9 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import resolve_model, search_roots
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -29,7 +32,8 @@ DESCRIBE = ROOT / "docs/bench/v0653-a10b-parallel-pread-floor.describe.json"
 BINARY = "./target/release/qwen-bench"
 PACKET = ROOT / "target/profiles/v0653-a10b-parallel-pread-floor-p1"
 WORK = ROOT / "target/profiles/v0653-a10b-parallel-pread-floor-work"
-MODEL_DIR = Path("/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL")
+MODEL_FIRST_SHARD = resolve_model("Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf")
+MODEL_DIR = MODEL_FIRST_SHARD.parent
 MODEL_NAMES = (
     "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
     "Qwen3.5-122B-A10B-UD-Q4_K_XL-00002-of-00003.gguf",

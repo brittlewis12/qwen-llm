@@ -46,6 +46,9 @@ from llama_cpp import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+from model_search import resolve_model
+
 SOURCE_STATE_PREFIX = "git-source-sha256-v2:"
 DEFAULT_QWEN_BENCH = ROOT / "target" / "release" / "qwen-bench"
 DEFAULT_MODELS_TOML = ROOT / "scripts" / "bench" / "models.toml"
@@ -63,6 +66,8 @@ def die(msg: str, code: int = 2) -> NoReturn:
 
 
 def expand(path: str) -> Path:
+    if "/" not in path and path.endswith(".gguf"):
+        return resolve_model(path)
     return Path(os.path.expandvars(os.path.expanduser(path)))
 
 

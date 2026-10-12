@@ -2517,10 +2517,8 @@ mod tests {
         const PASS_K: usize = 16;
         const RESULT_K: usize = 25;
         const PRIME: usize = 1_000_003;
-        let ctx = match MetalContext::new() {
-            Ok(ctx) => ctx,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("initialize Metal: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let mut host = Vec::with_capacity(ROWS * COLUMNS);
         for row in 0..ROWS {
@@ -3017,10 +3015,8 @@ mod tests {
 
     #[test]
     fn elementwise_silu() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let x: Vec<f32> = (-50..50).map(|i| i as f32 * 0.1).collect();
         let n = x.len();
@@ -3045,10 +3041,8 @@ mod tests {
 
     #[test]
     fn elementwise_sigmoid_softplus() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let x: Vec<f32> = (-30..30).map(|i| i as f32 * 0.5).collect();
         let n = x.len();
@@ -3081,10 +3075,8 @@ mod tests {
     /// identical bytes to the two-dispatch sequence.
     #[test]
     fn scatter_kv_fused_matches_unfused() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let kv_dim = 4 * 256; // n_kv_heads * head_dim for 27B
         let cap = 64usize;
@@ -3160,10 +3152,8 @@ mod tests {
 
     #[test]
     fn scatter_kv_q8_matches_ref_quant() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let kv_dim = 4 * 256usize;
         let cap = 8usize;
@@ -3249,10 +3239,8 @@ mod tests {
 
     #[test]
     fn elementwise_add_mul_silu_mul_sigmoid_mul() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let n = 17408usize; // FFN dim — exercise the realistic shape
         let a: Vec<f32> = (0..n).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
@@ -3309,10 +3297,8 @@ mod tests {
 
     #[test]
     fn elementwise_add_inplace() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let n = 5120usize;
         let a: Vec<f32> = (0..n).map(|i| (i as f32) * 1e-3).collect();
@@ -3380,10 +3366,8 @@ mod tests {
 
     #[test]
     fn get_rows_flat_f32_matches_cpu_and_guards_ids() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let vocab = 100usize;
         let n_cols = 64usize;
@@ -3436,7 +3420,7 @@ mod tests {
         const COLS: usize = 512;
         const ROWS: usize = 3;
         let mut bytes = vec![0u8; ROWS * COLS / 256 * 136];
-        for (ordinal, block) in bytes.chunks_exact_mut(136).enumerate() {
+        for (ordinal, block) in bytes.as_chunks_mut::<136>().0.iter_mut().enumerate() {
             let scale = half::f16::from_f32((ordinal as f32 - 2.0) / 1024.0);
             block[..2].copy_from_slice(&scale.to_bits().to_le_bytes());
             for (i, byte) in block[2..].iter_mut().enumerate() {
@@ -3497,8 +3481,13 @@ mod tests {
     #[test]
     #[ignore = "requires local 27B Q4_K fixture"]
     fn get_rows_q4_k_matches_selected_cpu_rows() {
+        let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+
         quantized_get_rows_fixture(
-            crate::test_fixtures::QWEN36_27B_Q4_K_M.path(),
+            crate::test_fixtures::QWEN36_27B_Q4_K_M
+                .required()
+                .to_str()
+                .expect("model fixture path must be UTF-8"),
             GgmlType::Q4_K,
             true,
         );
@@ -3508,7 +3497,7 @@ mod tests {
     #[ignore = "requires local A3B Q8_0 embedding fixture"]
     fn get_rows_q8_0_matches_selected_cpu_rows() {
         quantized_get_rows_fixture(
-            "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            crate::test_fixtures::required_filename("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"),
             GgmlType::Q8_0,
             true,
         );
@@ -3518,7 +3507,7 @@ mod tests {
     #[ignore = "requires local Ridge 27B Q6_K embedding fixture"]
     fn get_rows_q6_k_matches_selected_cpu_rows() {
         quantized_get_rows_fixture(
-            "/Users/tito/models/qwen38-27b-ridge/Qwen3.8-27B-Ridge-3.7bpw.gguf",
+            crate::test_fixtures::required_filename("Qwen3.8-27B-Ridge-3.7bpw.gguf"),
             GgmlType::Q6_K,
             true,
         );
@@ -3530,10 +3519,8 @@ mod tests {
     /// (division vs reciprocal-multiply), so tolerance-based, tight.
     #[test]
     fn sigmoid_mul_gate_strided_matches_split_path() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let (n_heads, head_dim) = (24usize, 256usize);
         let full: Vec<f32> = (0..n_heads * 2 * head_dim)
@@ -3596,10 +3583,8 @@ mod tests {
 
     #[test]
     fn argmax_rejects_f32_output_metadata() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let input = MetalTensor::zeros_f32(&ctx, vec![2]).unwrap();
         let wrong_output = MetalTensor::zeros_f32(&ctx, vec![1]).unwrap();
@@ -3612,10 +3597,8 @@ mod tests {
 
     #[test]
     fn greedy_argmax_matches_sampler_total_order_contract() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
 
         fn run(ctx: &MetalContext, x: &[f32], n_rows: usize, n: usize) -> Vec<i32> {
@@ -3731,10 +3714,8 @@ mod tests {
     ///   but defensive)
     #[test]
     fn argmax_matches_cpu_with_tie_to_lowest_index() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
 
         // Helper: encode-only argmax + readback for tests.
@@ -3895,10 +3876,8 @@ mod tests {
 
     #[test]
     fn argmax_top2_matches_lowest_index_and_reports_exact_gap() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
 
         fn run(ctx: &MetalContext, x: &[f32], n_rows: usize, n: usize) -> (Vec<i32>, Vec<f32>) {

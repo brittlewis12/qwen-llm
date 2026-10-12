@@ -918,10 +918,8 @@ mod tests {
 
     #[test]
     fn rope_neox_matches_cpu() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         // Real shapes from Qwen3.5 family:
         //   0.8B: 8 Q heads, 256 head_dim, 64 rotated dims
@@ -1243,10 +1241,8 @@ mod tests {
 
     #[test]
     fn rope_neox_packed_consecutive_matches_cpu() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let head_dim = 256;
         let n_rot = 64;

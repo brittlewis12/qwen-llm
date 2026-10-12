@@ -32,9 +32,11 @@ fn replace_first_word(ctx: &MetalContext, destination: &MetalTensor, bytes: [u8;
 #[test]
 #[ignore = "serial Metal, real 0.8B runtime snapshot alias witness"]
 fn runtime_snapshot_observes_alias_retained_across_restore() {
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
     let runtime = Runtime::metal().unwrap();
     let model = runtime
-        .load_model(crate::test_fixtures::QWEN35_0_8B_F32.path())
+        .load_model(crate::test_fixtures::QWEN35_0_8B_F32.required())
         .unwrap();
     let mut producer = model.create_sequence(SequenceConfig::new(8)).unwrap();
     let tokens = [1, 2];
@@ -86,9 +88,11 @@ fn assert_same_payload(a: &PreparedCheckpoint, b: &PreparedCheckpoint) {
 #[test]
 #[ignore = "serial Metal, real 0.8B packed capture destination guards"]
 fn runtime_packed_capture_rejects_session_and_scratch_aliases() {
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
     let runtime = Runtime::metal().unwrap();
     let model = runtime
-        .load_model(crate::test_fixtures::QWEN35_0_8B_F32.path())
+        .load_model(crate::test_fixtures::QWEN35_0_8B_F32.required())
         .unwrap();
     let mut sequence = model.create_sequence(SequenceConfig::new(8)).unwrap();
     model.decode_token(&mut sequence, 1).unwrap();
@@ -162,9 +166,11 @@ fn runtime_packed_capture_rejects_session_and_scratch_aliases() {
 #[test]
 #[ignore = "serial Metal, real 0.8B owned serial prompt append equivalence"]
 fn runtime_owned_prompt_token_matches_raw_append_and_fails_closed() {
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
     let runtime = Runtime::metal().unwrap();
     let model = runtime
-        .load_model(crate::test_fixtures::QWEN35_0_8B_F32.path())
+        .load_model(crate::test_fixtures::QWEN35_0_8B_F32.required())
         .unwrap();
     let mut raw = model.create_sequence(SequenceConfig::new(4)).unwrap();
     for token in [1, 2] {

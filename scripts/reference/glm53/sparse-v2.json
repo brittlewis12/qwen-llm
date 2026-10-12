@@ -25,7 +25,7 @@
       "fused_ops": "library defaults"
     }
   },
-  "location": "/Volumes/wdblack/weights-archive/.fetch/analysis/runs/glm53-oracle/sparse-v2",
+  "location": "target/profiles/glm53-oracle/sparse-v2",
   "files": {
     "serial.bin": {
       "bytes": 2537586704,

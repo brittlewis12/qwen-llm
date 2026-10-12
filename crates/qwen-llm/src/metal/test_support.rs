@@ -649,8 +649,10 @@ pub(super) fn run_mxfp4_f32_matrix_tile_k216_bucket_floor(
         Some(ctx) => ctx,
         None => return,
     };
-    let path = "/Users/tito/models/deepseek-v4-flash-0731-reap-k216/DeepSeek-V4-Flash-0731-REAP-K216-UD-IQ3_XXS-00001-of-00003.gguf";
-    if !std::path::Path::new(path).exists() {
+    let path = crate::test_fixtures::required_filename(
+        "DeepSeek-V4-Flash-0731-REAP-K216-UD-IQ3_XXS-00001-of-00003.gguf",
+    );
+    if !std::path::Path::new(&path).exists() {
         eprintln!("[mxfp4-mm-floor] skipped: K216 fixture missing");
         return;
     }
@@ -933,13 +935,11 @@ where
 
 #[allow(non_snake_case)]
 pub(super) fn ffn_swiglu_q4_K_matches_unfused() {
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-    if !std::path::Path::new(path).exists() {
+    let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+    if !std::path::Path::new(&path).exists() {
         return;
     }
     let g = crate::gguf::GgufFile::open(path).expect("open");
@@ -1051,10 +1051,8 @@ pub(super) fn run_attn_v4_q8_kv_compare(
     tile_c: usize,
     group_tile: Option<usize>,
 ) {
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let hd = 256usize;
     let kv_dim = n_kv * hd;
@@ -1215,7 +1213,7 @@ pub(super) fn run_attn_v4_q8_kv_compare(
 
 pub(super) fn quantized_get_rows_fixture(path: &str, expected_dtype: GgmlType, bit_exact: bool) {
     assert!(
-        std::path::Path::new(path).exists(),
+        std::path::Path::new(&path).exists(),
         "required fixture missing: {path}"
     );
     let ctx = MetalContext::new().expect("metal context");

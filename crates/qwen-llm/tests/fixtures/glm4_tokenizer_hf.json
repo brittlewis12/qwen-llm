@@ -1,6 +1,6 @@
 {
  "generator": "tokenizers==0.23.2",
- "source": "/Volumes/wdblack/weights-archive/glm-5.3-flash-fp8",
+ "source": "glm-5.3-flash-fp8",
  "tokenizer_sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
  "tokenizer_config_sha256": "98b1271574f41abf89427ae2dda030d94dc9478f0edc5a8bd240db213c6fd5fc",
  "normalizer": null,

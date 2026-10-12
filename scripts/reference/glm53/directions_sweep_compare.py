@@ -30,7 +30,11 @@ import struct
 import sys
 from pathlib import Path
 
-SHARD1 = "/Volumes/wdblack/weights-archive/glm-5.3-flash-ud-iq3_xxs/glm5-next/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf"
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "scripts"))
+from model_search import resolve_model
+
+SHARD1 = str(resolve_model("GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf"))
 I_TOKEN = 40
 
 # The archived sweep's labeler, verbatim (scripts/sweep.py).

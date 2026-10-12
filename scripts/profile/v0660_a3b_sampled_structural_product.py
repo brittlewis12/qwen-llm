@@ -19,13 +19,16 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import resolve_model, search_roots
 from typing import Any, Callable
 
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/profile/v0660_a3b_sampled_structural_product.py"
 PREREG = ROOT / "docs/bench/v0660-a3b-sampled-structural-product.md"
-MODEL = Path("/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
+MODEL = resolve_model("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
 PROMPT = ROOT / "docs/bench/tokenizer-prompts/current-reva-n8-interactive-qwen36.txt"
 QWEN = ROOT / "target/release/qwen"
 QWEN_BENCH = ROOT / "target/release/qwen-bench"

@@ -643,10 +643,8 @@ mod tests {
 
     #[test]
     fn kernel_encoder_drop_closes_validation_error_pass() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let embed = MetalTensor::zeros_f32(&ctx, vec![8]).unwrap();
         let wrong_ids = MetalTensor::zeros_f32(&ctx, vec![1]).unwrap();
@@ -667,10 +665,8 @@ mod tests {
 
     #[test]
     fn kernel_encoder_drop_closes_panicking_pass() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let cmd = ctx.queue.commandBuffer().expect("command buffer");
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -688,10 +684,8 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn concurrent_hazard_guard_ignores_serial_encoders() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let a = MetalTensor::zeros_f32(&ctx, vec![64]).unwrap();
         let cmd = ctx.queue.commandBuffer().expect("cmd buf");

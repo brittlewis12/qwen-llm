@@ -59,12 +59,6 @@ def ensure_mirror(lock: dict, root: Path) -> Path:
         run(["git", f"--git-dir={mirror}", "fetch", "--tags", "origin"])
     else:
         cmd = ["git", "clone", "--mirror"]
-        reference = Path.home() / "code" / "llama.cpp"
-        if reference.exists():
-            # Borrow objects for speed, then own them: without --dissociate a
-            # later gc in the reference checkout leaves this mirror with refs
-            # to missing objects, and every fetch fails.
-            cmd.extend(["--reference-if-able", reference, "--dissociate"])
         cmd.extend([str(lock["repo"]), mirror])
         run(cmd)
     run(

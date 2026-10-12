@@ -1066,9 +1066,15 @@ mod tests {
     #[test]
     #[ignore = "requires the pinned local Unsloth Muse Glimmer Q8_0 GGUF"]
     fn binds_pinned_q8_target() {
-        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF")
-            .unwrap_or_else(|_| crate::test_fixtures::MUSE_GLIMMER_Q8_0.path().into());
-        let gguf = GgufFile::open(path).expect("open Muse Q8 target");
+        let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
+
+        let path = std::env::var("MUSE_GLIMMER_Q8_GGUF").unwrap_or_else(|_| {
+            crate::test_fixtures::MUSE_GLIMMER_Q8_0
+                .required()
+                .to_string_lossy()
+                .into_owned()
+        });
+        let gguf = GgufFile::open(&path).expect("open Muse Q8 target");
         let model = MuseGlimmerModel::from_gguf(&gguf).expect("bind Muse Q8 target");
         assert_eq!(
             model.artifact_profile,
@@ -1082,9 +1088,10 @@ mod tests {
     #[ignore = "requires the pinned local two-shard Unsloth Muse Glimmer BF16 GGUF"]
     fn binds_pinned_bf16_target() {
         let path = std::env::var("MUSE_GLIMMER_BF16_GGUF").unwrap_or_else(|_| {
-            "/Users/tito/models/muse-glimmer/BF16/Muse-Glimmer-30B-BF16-00001-of-00002.gguf".into()
+            crate::test_fixtures::required_filename("Muse-Glimmer-30B-BF16-00001-of-00002.gguf")
+                .into()
         });
-        let gguf = GgufFile::open(path).expect("open Muse BF16 target");
+        let gguf = GgufFile::open(&path).expect("open Muse BF16 target");
         let model = MuseGlimmerModel::from_gguf(&gguf).expect("bind Muse BF16 target");
         assert_eq!(
             model.artifact_profile,

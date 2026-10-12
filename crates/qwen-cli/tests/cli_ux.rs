@@ -3,7 +3,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const QWEN: &str = env!("CARGO_BIN_EXE_qwen");
-const MISSING_MODEL: &str = "/qwen-cli-ux-missing-model.gguf";
 
 fn run_with_stdin_held_open(args: &[&str]) -> Output {
     let mut child = Command::new(QWEN)
@@ -46,7 +45,7 @@ fn cheap_validation_precedes_modern_stdin_acquisition() {
         let output = run_with_stdin_held_open(&[
             "run",
             "-m",
-            MISSING_MODEL,
+            "qwen-cli-ux-missing-model.gguf",
             input,
             "-",
             "--max-tokens",
@@ -61,7 +60,8 @@ fn cheap_validation_precedes_modern_stdin_acquisition() {
 
 #[test]
 fn model_detection_precedes_modern_stdin_acquisition() {
-    let output = run_with_stdin_held_open(&["run", "-m", MISSING_MODEL, "--user", "-"]);
+    let output =
+        run_with_stdin_held_open(&["run", "-m", "qwen-cli-ux-missing-model.gguf", "--user", "-"]);
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("open model"), "{stderr}");
@@ -70,7 +70,8 @@ fn model_detection_precedes_modern_stdin_acquisition() {
 
 #[test]
 fn legacy_messages_dash_does_not_gain_modern_stdin_behavior() {
-    let output = run_with_stdin_held_open(&["-m", MISSING_MODEL, "--messages", "-"]);
+    let output =
+        run_with_stdin_held_open(&["-m", "qwen-cli-ux-missing-model.gguf", "--messages", "-"]);
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("open model"), "{stderr}");
@@ -133,7 +134,6 @@ impl Drop for HeaderOnlyGguf {
 /// message, and the drafter path is never opened (it does not exist here).
 #[test]
 fn every_family_without_speculation_refuses_drafter_before_dispatch() {
-    const DRAFTER: &str = "/qwen-cli-ux-missing-drafter.gguf";
     for (architecture, display) in [
         ("muse-glimmer", "Muse Glimmer"),
         ("k2-horizon", "K2 Horizon"),
@@ -146,7 +146,15 @@ fn every_family_without_speculation_refuses_drafter_before_dispatch() {
         for (lane, args) in [
             (
                 "run",
-                vec!["run", "-m", path, "--user", "hi", "--drafter", DRAFTER],
+                vec![
+                    "run",
+                    "-m",
+                    path,
+                    "--user",
+                    "hi",
+                    "--drafter",
+                    "qwen-cli-ux-missing-drafter.gguf",
+                ],
             ),
             (
                 "serve",
@@ -155,7 +163,7 @@ fn every_family_without_speculation_refuses_drafter_before_dispatch() {
                     "-m",
                     path,
                     "--drafter",
-                    DRAFTER,
+                    "qwen-cli-ux-missing-drafter.gguf",
                     "--max-context-tokens",
                     "64",
                     "--max-tokens",

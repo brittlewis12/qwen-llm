@@ -1567,10 +1567,8 @@ mod tests {
 
     #[test]
     fn metal_memory_probes_are_available_on_product_host() {
-        let ctx = match MetalContext::new() {
-            Ok(ctx) => ctx,
-            Err(MetalError::NoDevice | MetalError::EmptyLibrary) => return,
-            Err(error) => panic!("Metal context: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let signals = ctx.memory_signals();
         assert!(signals.recommended_max_bytes > 0);
@@ -1588,10 +1586,8 @@ mod tests {
 
     #[test]
     fn metal_context_initializes() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("unexpected error: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         eprintln!("[metal] {}", ctx.describe());
     }

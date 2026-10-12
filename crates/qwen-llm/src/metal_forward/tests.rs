@@ -716,7 +716,7 @@ fn automatic_retained_single_pass_is_general_and_override_safe() {
 #[test]
 #[ignore = "requires local Qwen3.6-27B BF16 fixture"]
 fn automatic_retained_single_pass_plans_qwen36_bf16_without_realizing_weights() {
-    let path = "/Volumes/wdblack/weights-archive/qwen3.6-27b-bf16/Qwen3.6-27B-BF16.gguf";
+    let path = crate::test_fixtures::required_filename("Qwen3.6-27B-BF16.gguf");
     let ctx = MetalContext::new().expect("Metal context");
     let gguf = GgufFile::open(path).expect("open Qwen3.6 BF16 fixture");
     let model = Model::from_gguf(&gguf).expect("bind Qwen3.6 BF16 fixture");
@@ -1542,7 +1542,7 @@ fn assert_generic_retained_model_exact(
         "native embedding environment does not match the fixture contract"
     );
     assert!(
-        std::path::Path::new(model_path).is_file(),
+        std::path::Path::new(&model_path).is_file(),
         "missing generic retained fixture {model_path}"
     );
     let ctx = MetalContext::new().expect("Metal context");
@@ -1611,7 +1611,7 @@ fn assert_generic_retained_model_exact(
 #[ignore = "requires local tied 0.8B Q8_0 fixture and explicit native embedding"]
 fn gguf_no_copy_generic_tied_q8_is_bit_exact() {
     assert_generic_retained_model_exact(
-        "/Users/tito/models/Qwen3.5-0.8B-Q8_0.gguf",
+        crate::test_fixtures::required_filename("Qwen3.5-0.8B-Q8_0.gguf"),
         true,
         NativeQuantEmbeddingMode::Forced,
         true,
@@ -1633,7 +1633,7 @@ fn gguf_no_copy_generic_tied_q8_is_bit_exact() {
 #[ignore = "requires local tied 0.8B Q8_0 fixture and no native embedding override"]
 fn gguf_no_copy_generic_tied_q8_converted_embedding_is_bit_exact() {
     assert_generic_retained_model_exact(
-        "/Users/tito/models/Qwen3.5-0.8B-Q8_0.gguf",
+        crate::test_fixtures::required_filename("Qwen3.5-0.8B-Q8_0.gguf"),
         true,
         NativeQuantEmbeddingMode::Auto,
         false,
@@ -1654,8 +1654,13 @@ fn gguf_no_copy_generic_tied_q8_converted_embedding_is_bit_exact() {
 #[test]
 #[ignore = "requires local Qwen3.6 A3B Q4 fixture and explicit native embedding"]
 fn gguf_no_copy_generic_a3b_q4_is_bit_exact() {
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
+
     assert_generic_retained_model_exact(
-        crate::test_fixtures::A3B_Q4_K_M.path(),
+        crate::test_fixtures::A3B_Q4_K_M
+            .required()
+            .to_str()
+            .expect("model fixture path must be UTF-8"),
         false,
         NativeQuantEmbeddingMode::Forced,
         true,
@@ -1676,7 +1681,12 @@ fn gguf_no_copy_generic_a3b_q4_is_bit_exact() {
 #[test]
 #[ignore = "requires local Qwen3.6 A3B Q4 fixture"]
 fn gguf_owned_arena_a3b_q4_is_bit_exact() {
-    let model_path = crate::test_fixtures::A3B_Q4_K_M.path();
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
+
+    let model_path = crate::test_fixtures::A3B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
     assert_eq!(
         native_quant_embedding_mode(),
         NativeQuantEmbeddingMode::Auto,
@@ -1799,7 +1809,10 @@ fn assert_gguf_parallel_a3b_q4_is_bit_exact(
     destination_length: ParallelDestinationLength,
     marker: &str,
 ) {
-    let model_path = crate::test_fixtures::A3B_Q4_K_M.path();
+    let model_path = crate::test_fixtures::A3B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
     assert_eq!(
         native_quant_embedding_mode(),
         NativeQuantEmbeddingMode::Auto,
@@ -2117,7 +2130,10 @@ fn assert_gguf_parallel_dense27b_q4_is_bit_exact(
     population: ParallelPopulationMethod,
     marker: &str,
 ) {
-    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
     assert_eq!(
         native_quant_embedding_mode(),
         NativeQuantEmbeddingMode::Auto,
@@ -2426,11 +2442,11 @@ fn gguf_parallel_pread_dense27b_q4_is_bit_exact() {
 #[test]
 #[ignore = "requires local split A10B fixture and substantial virtual Metal residency"]
 fn gguf_no_copy_split_a10b_resources_outlive_loader() {
-    let model_path = concat!(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/",
-        "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"
-    );
-    assert!(std::path::Path::new(model_path).is_file());
+    let model_path = crate::test_fixtures::A10B_Q4_K_XL
+        .required()
+        .to_str()
+        .expect("UTF-8 fixture path");
+    assert!(std::path::Path::new(&model_path).is_file());
     let ctx = MetalContext::new().expect("Metal context");
     let weak_mmaps = objc2::rc::autoreleasepool(|_| {
         let gguf = GgufFile::open(model_path).expect("open split A10B fixture");
@@ -2607,6 +2623,9 @@ fn gguf_no_copy_layout_digest_probe() {
 #[test]
 #[ignore = "requires local exact 27B model and frozen Reva prompt"]
 fn gguf_no_copy_27b_prefill_and_continuation_are_bit_exact() {
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+    let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+
     use crate::metal_dflash::{
         MetalDFlashLayerMajorScratch, PrefillScratchConfig,
         plan_prefill_scratch_with_matrix_max_pos_configured, prefill_tokens_with_multi_hidden,
@@ -2712,11 +2731,14 @@ fn gguf_no_copy_27b_prefill_and_continuation_are_bit_exact() {
         }
     }
 
-    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
     let prompt_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/bench/tokenizer-prompts/current-reva-n8-interactive-qwen36.txt");
     assert!(
-        std::path::Path::new(model_path).is_file(),
+        std::path::Path::new(&model_path).is_file(),
         "missing exact 27B fixture {model_path}"
     );
     assert!(
@@ -3215,7 +3237,7 @@ fn argmax_i32_local(xs: &[f32]) -> i32 {
 }
 
 fn run_argmax_chain_equivalence(model_path: &str, label: &str, cos_floor: f64) {
-    if !std::path::Path::new(model_path).exists() {
+    if !std::path::Path::new(&model_path).exists() {
         eprintln!("[argmax-chain-{label}] skipped — fixture missing");
         return;
     }
@@ -3287,14 +3309,12 @@ fn run_argmax_chain_equivalence(model_path: &str, label: &str, cos_floor: f64) {
 }
 
 fn run_exact_greedy_chain_equivalence(model_path: &str, label: &str) {
-    if !std::path::Path::new(model_path).exists() {
+    if !std::path::Path::new(&model_path).exists() {
         eprintln!("[greedy-chain-{label}] skipped - fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
@@ -3398,14 +3418,12 @@ fn run_concurrent_gdn_moe_equivalence(
     max_prompt_tokens: usize,
     cos_floor: f64,
 ) {
-    if !std::path::Path::new(model_path).exists() {
+    if !std::path::Path::new(&model_path).exists() {
         eprintln!("[moe-concurrent-gdn-{label}] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
@@ -3474,12 +3492,15 @@ fn run_concurrent_gdn_moe_equivalence(
 /// Compares the residual stream (s.x) after the block against what
 /// the CPU forward produces after running just block 0.
 #[test]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn metal_gdn_block_matches_cpu() {
-    let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
-    if !std::path::Path::new(path).exists() {
-        eprintln!("[metal-gdn] skipped — model missing");
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
+    let path = crate::test_fixtures::QWEN35_0_8B_F32
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -3543,17 +3564,18 @@ fn metal_gdn_block_matches_cpu() {
 /// the CPU oracle is also validated against). One token, one
 /// command buffer, all 24 blocks of Qwen3.5-0.8B-F32 chained.
 #[test]
+#[ignore = "needs reference logits from the external llm tool"]
 fn metal_single_token_matches_cpu_oracle() {
-    let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
-    let oracle_path = "/tmp/qwen-oracle/hello_t0.f32";
-    if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists() {
-        eprintln!("[metal-e2e] skipped — fixtures missing");
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
+    let model_path = crate::test_fixtures::QWEN35_0_8B_F32
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    let oracle_path = crate::test_fixtures::required_filename("hello_t0.f32");
+
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
-    }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
     };
 
     let oracle_bytes = std::fs::read(oracle_path).expect("read oracle");
@@ -3613,16 +3635,17 @@ fn metal_single_token_matches_cpu_oracle() {
 }
 
 #[test]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn metal_single_token_concurrent_gdn_matches_serial() {
-    let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
-    if !std::path::Path::new(model_path).exists() {
-        eprintln!("[metal-concurrent-gdn] skipped — fixture missing");
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
+    let model_path = crate::test_fixtures::QWEN35_0_8B_F32
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
-    }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
     };
 
     let g = GgufFile::open(model_path).expect("open");
@@ -3692,16 +3715,17 @@ fn metal_single_token_concurrent_gdn_matches_serial() {
 }
 
 #[test]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn metal_single_token_concurrent_gdn_attn_matches_serial() {
-    let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
-    if !std::path::Path::new(model_path).exists() {
-        eprintln!("[metal-concurrent-gdn-attn] skipped — fixture missing");
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
+    let model_path = crate::test_fixtures::QWEN35_0_8B_F32
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
-    }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
     };
 
     let g = GgufFile::open(model_path).expect("open");
@@ -3756,23 +3780,35 @@ fn metal_single_token_concurrent_gdn_attn_matches_serial() {
 }
 
 #[test]
+#[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m"]
 fn metal_single_token_concurrent_gdn_moe_matches_serial_a3b() {
-    run_concurrent_gdn_moe_equivalence(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b", 4, 0.995);
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
+
+    run_concurrent_gdn_moe_equivalence(
+        crate::test_fixtures::A3B_Q4_K_M
+            .required()
+            .to_str()
+            .expect("model fixture path must be UTF-8"),
+        "a3b",
+        4,
+        0.995,
+    );
 }
 
 /// A discarded decode command must fail the call and poison the session on
 /// the default MoE decode path, which once read partial logits unchecked.
 #[test]
+#[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m"]
 fn moe_decode_rejects_a_discarded_command_and_poisons_the_session() {
-    let model_path = crate::test_fixtures::A3B_Q4_K_M.path();
-    if !std::path::Path::new(model_path).exists() {
-        eprintln!("[moe-discarded-command] skipped — fixture missing");
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
+
+    let model_path = crate::test_fixtures::A3B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
-    }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
     };
     let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
@@ -3807,7 +3843,12 @@ fn moe_decode_rejects_a_discarded_command_and_poisons_the_session() {
 #[test]
 #[ignore = "requires the 22 GB A3B fixture and Metal GPU"]
 fn metal_sampled_attribution_matches_production_a3b() {
-    let model_path = crate::test_fixtures::A3B_Q4_K_M.path();
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
+
+    let model_path = crate::test_fixtures::A3B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
     let metadata = std::fs::metadata(model_path).expect("required A3B fixture is missing");
     assert_eq!(metadata.len(), 22_134_528_992, "A3B fixture size changed");
     let mut file = std::fs::File::open(model_path).expect("open A3B for authentication");
@@ -3916,12 +3957,17 @@ fn metal_sampled_attribution_matches_production_a3b() {
 #[test]
 #[ignore = "requires the 22 GB A3B fixture, frozen prompt, and Metal GPU"]
 fn metal_sampled_structural_matches_copied_a3b() {
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
+
     use crate::metal_dflash::{
         MetalDFlashLayerMajorScratch, PrefillScratchConfig,
         plan_prefill_scratch_with_matrix_max_pos_configured, prefill_tokens_with_multi_hidden,
     };
 
-    let model_path = crate::test_fixtures::A3B_Q4_K_M.path();
+    let model_path = crate::test_fixtures::A3B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
     let metadata = std::fs::metadata(model_path).expect("required A3B fixture is missing");
     assert_eq!(metadata.len(), 22_134_528_992, "A3B fixture size changed");
     let mut file = std::fs::File::open(model_path).expect("open A3B for authentication");
@@ -4183,9 +4229,10 @@ fn metal_sampled_structural_matches_copied_a3b() {
 }
 
 #[test]
+#[ignore = "model witness: qwen3.5-122b-a10b-ud-q4_k_xl"]
 fn metal_single_token_concurrent_gdn_moe_matches_serial_a10b_smoke() {
     run_concurrent_gdn_moe_equivalence(
-        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
+        crate::test_fixtures::required_filename("Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"),
         "a10b",
         2,
         0.995,
@@ -4193,16 +4240,17 @@ fn metal_single_token_concurrent_gdn_moe_matches_serial_a10b_smoke() {
 }
 
 #[test]
+#[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m"]
 fn metal_35b_a3b_moe_matches_cpu_smoke() {
-    let model_path = crate::test_fixtures::A3B_Q4_K_M.path();
-    if !std::path::Path::new(model_path).exists() {
-        eprintln!("[metal-moe-a3b] skipped — fixture missing");
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
+
+    let model_path = crate::test_fixtures::A3B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
-    }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
     };
     let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
@@ -4258,27 +4306,61 @@ fn metal_35b_a3b_moe_matches_cpu_smoke() {
 }
 
 #[test]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn metal_argmax_chain_matches_full_logits_dense() {
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
     run_argmax_chain_equivalence(
-        crate::test_fixtures::QWEN35_0_8B_F32.path(),
+        crate::test_fixtures::QWEN35_0_8B_F32
+            .required()
+            .to_str()
+            .expect("model fixture path must be UTF-8"),
         "dense-0p8b",
         0.9999,
     );
 }
 
 #[test]
+#[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m"]
 fn metal_argmax_chain_matches_full_logits_moe() {
-    run_argmax_chain_equivalence(crate::test_fixtures::A3B_Q4_K_M.path(), "moe-a3b", 0.995);
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
+
+    run_argmax_chain_equivalence(
+        crate::test_fixtures::A3B_Q4_K_M
+            .required()
+            .to_str()
+            .expect("model fixture path must be UTF-8"),
+        "moe-a3b",
+        0.995,
+    );
 }
 
 #[test]
+#[ignore = "model witness: qwen3.6-27b-q4_k_m"]
 fn metal_exact_greedy_chain_matches_full_logits_dense() {
-    run_exact_greedy_chain_equivalence(crate::test_fixtures::QWEN36_27B_Q4_K_M.path(), "dense-27b");
+    let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+
+    run_exact_greedy_chain_equivalence(
+        crate::test_fixtures::QWEN36_27B_Q4_K_M
+            .required()
+            .to_str()
+            .expect("model fixture path must be UTF-8"),
+        "dense-27b",
+    );
 }
 
 #[test]
+#[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m"]
 fn metal_exact_greedy_chain_matches_full_logits_moe() {
-    run_exact_greedy_chain_equivalence(crate::test_fixtures::A3B_Q4_K_M.path(), "moe-a3b");
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
+
+    run_exact_greedy_chain_equivalence(
+        crate::test_fixtures::A3B_Q4_K_M
+            .required()
+            .to_str()
+            .expect("model fixture path must be UTF-8"),
+        "moe-a3b",
+    );
 }
 
 /// **H5.2** — Metal multi-layer hidden capture matches CPU oracle.
@@ -4294,16 +4376,17 @@ fn metal_exact_greedy_chain_matches_full_logits_moe() {
 /// list. We use [1, 5, 10, 15, 23] for the 0.8B variant — different
 /// indices, same shape K=5.
 #[test]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn metal_multi_hidden_matches_cpu() {
-    let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
-    if !std::path::Path::new(model_path).exists() {
-        eprintln!("[metal-multi-hidden] skipped — fixture missing");
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
+    let model_path = crate::test_fixtures::QWEN35_0_8B_F32
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
-    }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
     };
 
     let g = GgufFile::open(model_path).expect("open");
@@ -4393,12 +4476,15 @@ fn metal_multi_hidden_matches_cpu() {
 }
 
 #[test]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dense_ffn_capture_brackets_the_residual_update() {
-    let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
-    if !std::path::Path::new(model_path).exists() {
-        eprintln!("[dense-ffn-capture] skipped - fixture missing");
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
+    let model_path = crate::test_fixtures::QWEN35_0_8B_F32
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+
     let Some(context) = metal_test_context() else {
         return;
     };
@@ -4533,12 +4619,15 @@ fn dense_ffn_capture_brackets_the_residual_update() {
 }
 
 #[test]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dense_fixed_add_seam_is_bounded_and_ordered() {
-    let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
-    if !std::path::Path::new(model_path).exists() {
-        eprintln!("[dense-fixed-add] skipped - fixture missing");
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
+    let model_path = crate::test_fixtures::QWEN35_0_8B_F32
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+
     let Some(context) = metal_test_context() else {
         return;
     };
@@ -4769,12 +4858,15 @@ fn dense_fixed_add_seam_is_bounded_and_ordered() {
 }
 
 #[test]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dense_intervention_no_tail_matches_full_tail() {
-    let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
-    if !std::path::Path::new(model_path).exists() {
-        eprintln!("[dense-intervention-no-tail] skipped - fixture missing");
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
+    let model_path = crate::test_fixtures::QWEN35_0_8B_F32
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+
     let Some(context) = metal_test_context() else {
         return;
     };
@@ -5008,12 +5100,15 @@ fn dense_intervention_no_tail_matches_full_tail() {
 }
 
 #[test]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dense_module_sites_are_placed_and_validated() {
-    let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
-    if !std::path::Path::new(model_path).exists() {
-        eprintln!("[dense-module-sites] skipped - fixture missing");
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
+    let model_path = crate::test_fixtures::QWEN35_0_8B_F32
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+
     let Some(context) = metal_test_context() else {
         return;
     };
@@ -5154,12 +5249,15 @@ fn dense_module_sites_are_placed_and_validated() {
 }
 
 #[test]
+#[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m"]
 fn ordinary_moe_serial_post_block_fixed_add_seam() {
-    let model_path = crate::test_fixtures::A3B_Q4_K_M.path();
-    if !std::path::Path::new(model_path).exists() {
-        eprintln!("[moe-fixed-add] skipped - fixture missing");
-        return;
-    }
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
+
+    let model_path = crate::test_fixtures::A3B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+
     let Some(context) = metal_test_context() else {
         return;
     };
@@ -5403,13 +5501,17 @@ fn ordinary_moe_serial_post_block_fixed_add_seam() {
 #[test]
 #[ignore]
 fn metal_27b_gdn_block0_matches_cpu() {
-    let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-    if !std::path::Path::new(path).exists() {
+    let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+
+    let path = crate::test_fixtures::QWEN36_27B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    if !std::path::Path::new(&path).exists() {
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let g = GgufFile::open(path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
@@ -5488,17 +5590,18 @@ fn metal_27b_gdn_block0_matches_cpu() {
 /// for unsupported quants (Q5_K, etc.) might dequant some tensors,
 /// and we want to flag that explicitly when run.
 #[test]
-#[ignore]
+#[ignore = "needs reference logits from the external llm tool"]
 fn metal_27b_q4_k_m_matches_oracle() {
-    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-    let oracle_path = "/tmp/qwen-oracle/hello_27b_q4km.f32";
-    if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists() {
-        eprintln!("[metal-27b] skipped — fixtures missing");
+    let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    let oracle_path = crate::test_fixtures::required_filename("hello_27b_q4km.f32");
+
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
-    }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(e) => panic!("init failed: {e}"),
     };
 
     let oracle_bytes = std::fs::read(oracle_path).expect("read oracle");
@@ -5570,13 +5673,17 @@ fn metal_27b_q4_k_m_matches_oracle() {
 #[test]
 #[ignore]
 fn metal_27b_q5_fallback_bench() {
-    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-    if !std::path::Path::new(model_path).exists() {
+    let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    if !std::path::Path::new(&model_path).exists() {
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let g = GgufFile::open(model_path).expect("open");
 
@@ -5702,8 +5809,15 @@ fn metal_27b_q5_fallback_bench() {
 #[test]
 #[ignore]
 fn metal_27b_byte_ledger() {
-    let model_path = std::env::var("IQ_CAPACITY_MODEL")
-        .unwrap_or_else(|_| crate::test_fixtures::QWEN36_27B_Q4_K_M.path().to_owned());
+    let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+
+    let model_path = std::env::var("IQ_CAPACITY_MODEL").unwrap_or_else(|_| {
+        crate::test_fixtures::QWEN36_27B_Q4_K_M
+            .required()
+            .to_str()
+            .expect("model fixture path must be UTF-8")
+            .to_owned()
+    });
     assert!(
         std::path::Path::new(&model_path).is_file(),
         "missing {model_path}"
@@ -5773,8 +5887,13 @@ fn metal_27b_byte_ledger() {
 #[test]
 #[ignore]
 fn mtp_tensor_inventory() {
-    let path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-    if !std::path::Path::new(path).exists() {
+    let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+
+    let path = crate::test_fixtures::QWEN36_27B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    if !std::path::Path::new(&path).exists() {
         return;
     }
     let g = GgufFile::open(path).expect("open");
@@ -7086,13 +7205,17 @@ fn moe_intra_profile_single_block(
 #[test]
 #[ignore]
 fn metal_27b_phase_profile() {
-    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-    if !std::path::Path::new(model_path).exists() {
+    let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    if !std::path::Path::new(&model_path).exists() {
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
@@ -7142,13 +7265,17 @@ fn metal_27b_phase_profile() {
 #[test]
 #[ignore]
 fn metal_27b_attn_intra_profile() {
-    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-    if !std::path::Path::new(model_path).exists() {
+    let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    if !std::path::Path::new(&model_path).exists() {
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
@@ -7211,13 +7338,17 @@ fn metal_27b_attn_intra_profile() {
 #[test]
 #[ignore]
 fn metal_27b_gdn_intra_profile() {
-    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-    if !std::path::Path::new(model_path).exists() {
+    let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    if !std::path::Path::new(&model_path).exists() {
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
@@ -7266,13 +7397,17 @@ fn metal_27b_gdn_intra_profile() {
 #[test]
 #[ignore]
 fn metal_35b_a3b_gdn_intra_profile() {
-    let model_path = crate::test_fixtures::A3B_Q4_K_M.path();
-    if !std::path::Path::new(model_path).exists() {
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
+
+    let model_path = crate::test_fixtures::A3B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    if !std::path::Path::new(&model_path).exists() {
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
@@ -7314,12 +7449,11 @@ fn metal_35b_a3b_gdn_intra_profile() {
 }
 
 fn run_moe_intra_profile(model_path: &str, label: &str, n_runs: usize) {
-    if !std::path::Path::new(model_path).exists() {
+    if !std::path::Path::new(&model_path).exists() {
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
@@ -7368,13 +7502,31 @@ fn run_moe_intra_profile(model_path: &str, label: &str, n_runs: usize) {
 #[test]
 #[ignore]
 fn metal_35b_a3b_moe_intra_profile() {
-    run_moe_intra_profile(crate::test_fixtures::A3B_Q4_K_M.path(), "a3b", 6);
+    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
+
+    run_moe_intra_profile(
+        crate::test_fixtures::A3B_Q4_K_M
+            .required()
+            .to_str()
+            .expect("model fixture path must be UTF-8"),
+        "a3b",
+        6,
+    );
 }
 
 #[test]
 #[ignore]
 fn metal_122b_a10b_moe_intra_profile() {
-    run_moe_intra_profile(crate::test_fixtures::A10B_Q4_K_XL.path(), "122b", 4);
+    let _ = crate::test_fixtures::A10B_Q4_K_XL.required();
+
+    run_moe_intra_profile(
+        crate::test_fixtures::A10B_Q4_K_XL
+            .required()
+            .to_str()
+            .expect("model fixture path must be UTF-8"),
+        "122b",
+        4,
+    );
 }
 
 /// **Context-length sweep**: how does decode throughput scale as the
@@ -7389,13 +7541,17 @@ fn metal_122b_a10b_moe_intra_profile() {
 #[test]
 #[ignore]
 fn metal_27b_context_sweep() {
-    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-    if !std::path::Path::new(model_path).exists() {
+    let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    if !std::path::Path::new(&model_path).exists() {
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
@@ -7461,13 +7617,17 @@ fn metal_27b_context_sweep() {
 #[test]
 #[ignore]
 fn metal_27b_perf_profile() {
-    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-    if !std::path::Path::new(model_path).exists() {
+    let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    if !std::path::Path::new(&model_path).exists() {
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let g = GgufFile::open(model_path).expect("open");
     let m = Model::from_gguf(&g).expect("load");
@@ -7578,17 +7738,18 @@ fn metal_27b_perf_profile() {
 /// **27B Q4_K_M, multi-token**: validates position > 0 + steady-state
 /// throughput. The headline number we've been working toward.
 #[test]
-#[ignore]
+#[ignore = "needs reference logits from the external llm tool"]
 fn metal_27b_multi_token_perf() {
-    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-    let oracle_path = "/tmp/qwen-oracle/longprompt_27b.f32";
-    if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists() {
-        eprintln!("[metal-27b-multi] skipped — fixtures missing");
+    let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    let oracle_path = crate::test_fixtures::required_filename("longprompt_27b.f32");
+
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
-    }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(e) => panic!("init failed: {e}"),
     };
 
     let oracle_bytes = std::fs::read(oracle_path).expect("read oracle");
@@ -7671,17 +7832,18 @@ fn metal_27b_multi_token_perf() {
 /// Oracle: llm/llama_core's snapshot dump for "The quick brown fox
 /// jumps over the lazy dog" (9 tokens), Qwen3.5-0.8B-F32.
 #[test]
+#[ignore = "needs reference logits from the external llm tool"]
 fn metal_multi_token_matches_cpu_oracle() {
-    let model_path = crate::test_fixtures::QWEN35_0_8B_F32.path();
-    let oracle_path = "/tmp/qwen-oracle/longprompt_t0.f32";
-    if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists() {
-        eprintln!("[metal-e2e-multi] skipped — fixtures missing");
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
+    let model_path = crate::test_fixtures::QWEN35_0_8B_F32
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    let oracle_path = crate::test_fixtures::required_filename("longprompt_t0.f32");
+
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
-    }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
     };
 
     let oracle_bytes = std::fs::read(oracle_path).expect("read oracle");
@@ -7758,23 +7920,20 @@ fn metal_multi_token_matches_cpu_oracle() {
 /// bit-identical hidden_dst on every prefill step. We accumulate
 /// the per-token captures across the prompt and compare.
 #[test]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn no_tail_prefill_matches_full_tail() {
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
     let override_path = std::env::var("QWEN_NO_TAIL_TEST_MODEL").ok();
-    let model_path = override_path
-        .as_deref()
-        .unwrap_or(crate::test_fixtures::QWEN35_0_8B_F32.path());
-    if !std::path::Path::new(model_path).exists() {
-        assert!(
-            override_path.is_none(),
-            "explicit no-tail fixture is missing"
-        );
-        eprintln!("[no-tail-prefill] skipped — fixture missing");
+    let model_path = override_path.as_deref().unwrap_or(
+        crate::test_fixtures::QWEN35_0_8B_F32
+            .required()
+            .to_str()
+            .expect("model fixture path must be UTF-8"),
+    );
+
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
-    }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
     };
 
     let g = GgufFile::open(model_path).expect("open");
@@ -7955,12 +8114,15 @@ fn no_tail_prefill_matches_full_tail() {
 /// CPU oracle. Uses block 3 of Qwen3.5-0.8B-F32 (the first attn block,
 /// n_q=8, n_kv=2, head_dim=256, 4:1 GQA).
 #[test]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn metal_attn_block_matches_cpu() {
-    let path = crate::test_fixtures::QWEN35_0_8B_F32.path();
-    if !std::path::Path::new(path).exists() {
-        eprintln!("[metal-attn] skipped — model missing");
-        return;
-    }
+    let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
+
+    let path = crate::test_fixtures::QWEN35_0_8B_F32
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -8427,14 +8589,18 @@ fn call_gdn_step_directly(
 #[test]
 #[ignore]
 fn h2_prefix_cache_correctness_spike() {
-    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-    if !std::path::Path::new(model_path).exists() {
+    let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    if !std::path::Path::new(&model_path).exists() {
         eprintln!("[h2-spike] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
     let g = GgufFile::open(model_path).expect("open");
@@ -8599,14 +8765,18 @@ fn h2_prefix_cache_correctness_spike() {
 #[test]
 #[ignore]
 fn h2_packed_arena_snapshot_matches_cold() {
-    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M.path();
-    if !std::path::Path::new(model_path).exists() {
+    let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+
+    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    if !std::path::Path::new(&model_path).exists() {
         eprintln!("[h2-arena] skipped — fixture missing");
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
 
     let g = GgufFile::open(model_path).expect("open");

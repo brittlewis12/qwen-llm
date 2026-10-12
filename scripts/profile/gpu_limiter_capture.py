@@ -53,16 +53,17 @@ import subprocess
 import sys
 import time
 from collections import Counter, defaultdict
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import resolve_model
 
 from lxml import etree as ET  # ~4x faster than stdlib on iterparse
 
 MODELS = {
-    "a3b": "~/models/Qwen3.5-35B-A3B-Q4_K_M.gguf",
-    "27b": "~/models/Qwen3.5-27B-Q4_K_M.gguf",
-    "a10b": (
-        "~/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/"
-        "Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf"
-    ),
+    "a3b": "Qwen3.5-35B-A3B-Q4_K_M.gguf",
+    "27b": "Qwen3.5-27B-Q4_K_M.gguf",
+    "a10b": "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
 }
 TEMPLATE = "metal-counters"
 TEMPLATE_PATH = os.path.expanduser(
@@ -418,7 +419,7 @@ def ramp(model_key, ctx, window, streams=1, env=None):
     # aliases resolve via MODELS; anything else is treated as a GGUF path so
     # captures can pin the EXACT scoreboard model (alias drift burned one
     # 131k capture against the old 3.5 A3B in Program C)
-    model = os.path.expanduser(MODELS.get(model_key, model_key))
+    model = str(resolve_model(MODELS[model_key])) if model_key in MODELS else model_key
     if model_key not in MODELS and not os.path.exists(model):
         raise SystemExit(f"--model {model_key!r}: not an alias and not a file")
     for p in (READY, GO):

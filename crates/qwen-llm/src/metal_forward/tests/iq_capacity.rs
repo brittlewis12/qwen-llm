@@ -20,9 +20,6 @@ use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{fs::File, io::Write, mem::MaybeUninit, time::Instant};
-
-const ARTIFACT: &str =
-    "/Volumes/wdblack/weights-archive/underdog-saluki-27b/Underdog-Saluki-27B-1.0-IQ2-mix.gguf";
 const READ: usize = 256 * 1024; // F32 readback chunk, one MiB.
 const DECODE_ROWS: usize = 16;
 const META_CPU: u64 = 16 << 20; // Future diagnostic/codec/census bookkeeping.
@@ -809,7 +806,9 @@ fn iq_capacity_packet() {
         .create_new(true)
         .open(std::env::var_os("IQ_CAPACITY_OUT").expect("IQ_CAPACITY_OUT required"))
         .expect("new output file required");
-    let path = std::env::var_os("IQ_CAPACITY_GGUF").unwrap_or_else(|| ARTIFACT.into());
+    let path = std::env::var_os("IQ_CAPACITY_GGUF").unwrap_or_else(|| {
+        crate::test_fixtures::required_filename("Underdog-Saluki-27B-1.0-IQ2-mix.gguf").into()
+    });
     let gguf = GgufFile::open(path).unwrap();
     // Same metadata-only vocabulary initialization as the whole packet, before
     // Metal context/admission. The helper drops the tokenizer and full streams.

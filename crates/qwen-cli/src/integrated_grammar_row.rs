@@ -38,7 +38,6 @@ const PROMPT_SCHEMA: &str = "qwen-integrated-grammar-prompt/v1";
 const PROMPT_FILE_SHA256: &str = "c668685d855eea9270ab18a5f64a479b25c5efe85e17dc51391b92dfe98a59d9";
 const PREREQUISITE_SHA256: &str =
     "1e37f4882be856fc8043a98a00bfeaa3a7ff8a726ab0f73a99a9e98d707c689c";
-const MODEL_PATH: &str = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
 const MODEL_BYTES: u64 = 22_134_528_992;
 const MODEL_SHA256: &str = "ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61";
 const OUTPUT_WEIGHT_SHA256: &str =
@@ -750,19 +749,21 @@ fn parse_prompt_fixture(path: &Path) -> Result<PromptFixture> {
     ensure!(fixture.fixture_id == "response-shape-self-pred-rb005-a3b-v1");
     ensure!(fixture.source.item_id == "0.5-rb-005");
     ensure!(fixture.source.branch == "Q-self-pred");
-    ensure!(fixture.source.prompt_builder_path == "/Users/tito/code/llm/self_traj_spike_rf.py");
+    ensure!(
+        fixture
+            .source
+            .prompt_builder_path
+            .ends_with("self_traj_spike_rf.py")
+    );
     ensure!(
         fixture.source.prompt_builder_sha256
             == "1c7e3595a938aeb13676e85f4e7ff02431e667b3db466c8ced766f9c371a4740"
     );
     ensure!(
-        fixture.source.item_file_path
-            == "/Users/tito/code/llm/self_trajectory/spike_rf/prompts/spike_items.json"
-    );
-    ensure!(
         fixture.source.item_file_sha256
             == "16f0d08867198a00a1935fb58275552e40282e1197aca168626c4018a2fc6ed4"
     );
+    ensure!(fixture.source.item_file_path.ends_with("spike_items.json"));
     ensure!(fixture.messages.len() == 2);
     ensure!(fixture.messages[0].role == "system");
     ensure!(fixture.messages[0].content == "You are a helpful assistant.");
@@ -772,7 +773,12 @@ fn parse_prompt_fixture(path: &Path) -> Result<PromptFixture> {
     ensure!(fixture.render.append_generation_prompt);
     ensure!(fixture.render.bytes == 684);
     ensure!(fixture.render.sha256 == RENDERED_SHA256);
-    ensure!(fixture.tokenizer.model_path == MODEL_PATH);
+    ensure!(
+        fixture
+            .tokenizer
+            .model_path
+            .ends_with("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
+    );
     ensure!(!fixture.tokenizer.add_special);
     ensure!(fixture.tokenizer.token_count == PROMPT_TOKENS);
     ensure!(fixture.tokenizer.token_ids.len() == PROMPT_TOKENS);
@@ -821,12 +827,6 @@ fn parse_prompt(path: &Path, tokenizer: &NativeTokenizer) -> Result<ParsedPrompt
 fn authenticate_model_path(path: &Path) -> Result<(PathBuf, String)> {
     let actual =
         std::fs::canonicalize(path).with_context(|| format!("canonicalize {}", path.display()))?;
-    let expected =
-        std::fs::canonicalize(MODEL_PATH).with_context(|| format!("canonicalize {MODEL_PATH}"))?;
-    ensure!(
-        actual == expected,
-        "model path does not match frozen A3B asset"
-    );
     let metadata =
         std::fs::metadata(&actual).with_context(|| format!("stat {}", actual.display()))?;
     ensure!(metadata.len() == MODEL_BYTES, "model byte length mismatch");

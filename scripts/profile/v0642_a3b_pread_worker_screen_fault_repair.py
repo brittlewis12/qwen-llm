@@ -17,6 +17,9 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import resolve_model, search_roots
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -25,7 +28,7 @@ WORK = ROOT / "target/profiles/v0642-a3b-pread-worker-screen-fault-repair-work"
 PREREG = ROOT / "docs/bench/v0642-a3b-pread-worker-screen-fault-repair.md"
 RUNNER = Path(__file__).resolve()
 BINARY = ROOT / "target/release/qwen-bench"
-MODEL = Path("/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
+MODEL = resolve_model("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
 IMPLEMENTATION_PARENT = "1b8dd176fe8647f276ed8f50c7714ae89dbf62ef"
 V0641_SOURCE = "18fd67aff6bcc990e51b1f45fa488b7cad6c671b"
 AUTHORITY_PARENT = "dfde5e04b381a641537d91f616b7b8fba5560f9d"

@@ -19,9 +19,6 @@ use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{fs::File, io::Write, time::Instant};
-
-const ARTIFACT: &str =
-    "/Volumes/wdblack/weights-archive/underdog-saluki-27b/Underdog-Saluki-27B-1.0-IQ2-mix.gguf";
 const WIDTHS: [usize; 11] = [1, 2, 8, 31, 32, 33, 127, 128, 129, 512, 1024];
 const MAX_N: usize = 1024;
 const READ_BYTES: usize = 1 << 20;
@@ -529,7 +526,9 @@ fn iq2_xs_mma_packet() {
         Ok("auto") => Iq2XsMatMatVariant::Auto,
         _ => panic!("IQ2_XS_MMA_CANDIDATE must be mma or auto"),
     };
-    let path = std::env::var_os("IQ2_XS_MMA_GGUF").unwrap_or_else(|| ARTIFACT.into());
+    let path = std::env::var_os("IQ2_XS_MMA_GGUF").unwrap_or_else(|| {
+        crate::test_fixtures::required_filename("Underdog-Saluki-27B-1.0-IQ2-mix.gguf").into()
+    });
     let gguf = GgufFile::open(path).unwrap();
     let stamps = gguf.revalidate_retained_shard_stamps().unwrap();
     let shapes = [

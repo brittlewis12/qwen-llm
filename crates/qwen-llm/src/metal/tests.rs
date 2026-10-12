@@ -202,10 +202,8 @@ fn mxfp4_f32_matrix_tile_k216_n2048_bucket_floor() {
 
 #[test]
 fn owned_weight_view_is_read_only_and_bounds_checked() {
-    let ctx = match MetalContext::new() {
-        Ok(ctx) => ctx,
-        Err(MetalError::NoDevice | MetalError::EmptyLibrary) => return,
-        Err(error) => panic!("Metal context: {error}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let buffer = ctx.buffer_uninit(96).expect("owned backing");
     let view = MetalTensor::owned_weight_view(buffer.clone(), 32, vec![16], GgmlType::F32, 32)
@@ -278,10 +276,8 @@ fn checked_ggml_shape_bytes_rejects_bad_q8_block() {
 
 #[test]
 fn i32_subrange_preserves_type_and_byte_offset() {
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let ids = MetalTensor::zeros_i32(&ctx, vec![8]).unwrap();
     let view = ids.view_subrange(3, vec![2]);
@@ -297,10 +293,8 @@ fn i32_subrange_preserves_type_and_byte_offset() {
 #[cfg(debug_assertions)]
 #[test]
 fn concurrent_hazard_guard_allows_disjoint_and_shared_reads() {
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let shared_in = MetalTensor::zeros_f32(&ctx, vec![64]).unwrap();
     let out_a = MetalTensor::zeros_f32(&ctx, vec![64]).unwrap();
@@ -319,10 +313,8 @@ fn concurrent_hazard_guard_allows_disjoint_and_shared_reads() {
 #[cfg(debug_assertions)]
 #[test]
 fn concurrent_hazard_guard_panics_on_read_after_write() {
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let a = MetalTensor::zeros_f32(&ctx, vec![64]).unwrap();
     let cmd = ctx.queue.commandBuffer().expect("cmd buf");
@@ -341,10 +333,8 @@ fn concurrent_hazard_guard_panics_on_read_after_write() {
 #[cfg(debug_assertions)]
 #[test]
 fn concurrent_hazard_guard_allows_disjoint_views_of_one_buffer() {
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let arena = MetalTensor::zeros_f32(&ctx, vec![128]).unwrap();
     let lo = arena.view_subrange(0, vec![64]);
@@ -370,10 +360,8 @@ fn concurrent_hazard_guard_allows_disjoint_views_of_one_buffer() {
 /// reading non-deterministic state — a bug.)
 #[test]
 fn chained_encoding_is_correct() {
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let n_in = 1024;
     let n_out = 4096;
@@ -434,10 +422,8 @@ fn chained_encoding_is_correct() {
 #[test]
 #[ignore = "slow GPU oracle; run explicitly"]
 fn packed_q2_attention_matches_per_row_at_high_nwg() {
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     const N_ROWS: usize = 8;
     const N_Q: usize = 24;
@@ -591,8 +577,9 @@ fn packed_q2_attention_matches_per_row_at_high_nwg() {
 #[test]
 #[ignore = "slow real-model GPU audit; run explicitly"]
 fn packed_q2_attention_perf_audit_130k() {
-    let model_path = std::env::var("QWEN_ATTN_AUDIT_MODEL")
-        .unwrap_or_else(|_| "/Users/tito/models/Qwen3.8-27B-Q8_0.gguf".into());
+    let model_path = std::env::var("QWEN_ATTN_AUDIT_MODEL").unwrap_or_else(|_| {
+        crate::test_fixtures::required_filename("Qwen3.8-27B-Q8_0.gguf").into()
+    });
     if !std::path::Path::new(&model_path).exists() {
         eprintln!("[packed-audit] skipped — model missing");
         return;
@@ -601,10 +588,8 @@ fn packed_q2_attention_perf_audit_130k() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(131_072);
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-        Err(e) => panic!("init failed: {e}"),
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     let g = crate::gguf::GgufFile::open(&model_path).expect("open model");
     let m = crate::loader::Model::from_gguf(&g).expect("load model");

@@ -95,7 +95,7 @@ length configuration. Do not stop at the end-thinking marker.
 
 ## Progress And Evidence
 
-- Isolated worktree: `/Users/tito/code/qwen-llm-trajectory-observatory`.
+- Isolated worktree: `$HOME/code/qwen-llm-trajectory-observatory`.
 - Source revision: `f9d16cf6bc2d5cf3da8d9c57430eadcd9a070f58`.
 - Private artifact root: `target/trajectory-observatory/` in that worktree.
 - Frozen clean generator SHA256:

@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
 
+import argparse
 import json
-from pathlib import Path
 import statistics
 import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import models_matching, resolve_model
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MODELS = Path("/Users/tito/models")
 BINARY = ROOT / "target/release/qwen-bench"
 ARTIFACT = ROOT / "target/profiles/v0594-retained-storage-coverage"
-EXTRA_MODELS = (
-    MODELS / "BF16" / "Qwen3.5-35B-A3B-BF16-00001-of-00002.gguf",
-    MODELS
-    / "unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL"
-    / "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
-    MODELS / "unsloth-Qwen3.6-35B-A3B-MTP-GGUF" / "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+EXTRA_MODEL_FILENAMES = (
+    "Qwen3.5-35B-A3B-BF16-00001-of-00002.gguf",
+    "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
 )
+def is_first_shard(filename: str) -> bool:
+    if "-of-" not in filename:
+        return True
+    before_count, _ = filename.rsplit("-of-", 1)
+    shard = before_count.rsplit("-", 1)
+    return len(shard) == 2 and shard[1] == "00001"
 
 
 def command_text(command: list[str]) -> str:
@@ -51,14 +58,18 @@ def source_and_build_identity() -> tuple[str, dict[str, object]]:
     return commit, build
 
 
-def discover_models() -> list[Path]:
-    models = sorted(MODELS.glob("Qwen3.[56]-*.gguf"))
-    models.extend(EXTRA_MODELS)
+def discover_models(mtp_model: Path) -> list[Path]:
+    candidates = [
+        path
+        for path in models_matching("Qwen3.[56]-*.gguf")
+        if is_first_shard(path.name)
+    ]
+    candidates.extend(resolve_model(filename) for filename in EXTRA_MODEL_FILENAMES)
+    candidates.append(mtp_model.resolve())
+    models = list(dict.fromkeys(path.resolve() for path in candidates))
     missing = [path for path in models if not path.is_file()]
     if missing:
         raise RuntimeError(f"missing model assets: {missing}")
-    if len(models) != len(set(models)):
-        raise RuntimeError("model discovery produced duplicate paths")
     return models
 
 
@@ -116,10 +127,21 @@ def run_model(path: Path, build: dict[str, object]) -> dict[str, object]:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--mtp-model",
+        type=Path,
+        required=True,
+        help="separately located MTP artifact, identified by its supplied full path",
+    )
+    args = parser.parse_args()
     if not BINARY.is_file():
         raise SystemExit(f"missing release binary {BINARY}")
     commit, build = source_and_build_identity()
-    models = discover_models()
+    mtp_model = args.mtp_model.expanduser().resolve()
+    if not is_first_shard(mtp_model.name):
+        raise SystemExit(f"MTP model must be an unsplit artifact or its first shard: {mtp_model}")
+    models = discover_models(mtp_model)
     if ARTIFACT.exists():
         raise SystemExit(f"refusing to reuse artifact directory {ARTIFACT}")
     if not ARTIFACT.parent.is_dir():
@@ -130,6 +152,8 @@ def main() -> None:
     rows_path = ARTIFACT / "rows.jsonl"
     for index, model in enumerate(models, 1):
         row = run_model(model, build)
+        if model == mtp_model and not row["mtp_present"]:
+            raise RuntimeError(f"explicit MTP artifact lacks an MTP head: {model}")
         rows.append(row)
         with rows_path.open("a", encoding="utf-8") as output:
             output.write(json.dumps(row, sort_keys=True) + "\n")

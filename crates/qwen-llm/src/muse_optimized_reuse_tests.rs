@@ -1,7 +1,12 @@
 #[test]
 #[ignore = "serial Metal, optimized warm/reset numerical and KV composition through split-visible context"]
 fn optimized_live_prefix_math_composition() {
-    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
+    let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
+
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
     let gguf = GgufFile::open(path).unwrap();
     let config = MuseGlimmerConfig::from_gguf(&gguf).unwrap();
     let root = long_context_tokens(path, &config)[..1169].to_vec();

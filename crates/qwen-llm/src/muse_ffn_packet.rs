@@ -213,6 +213,8 @@ fn muse_ffn_packet_cpu_contracts() {
 #[test]
 #[ignore = "M4 Max characterization; coordinated GPU only, production lease, all-layer Muse FFN capture and frozen fusion screen"]
 fn muse_ffn_capture_and_fusion_screen() {
+    let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
+
     let _lease = crate::metal::acquire_metal_benchmark_lease()
         .expect("production lease and wired gate required");
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
@@ -258,7 +260,10 @@ fn muse_ffn_capture_and_fusion_screen() {
         manifest["identity"]["extension_math"],
         "current_online_matrix"
     );
-    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0.path();
+    let path = crate::test_fixtures::MUSE_GLIMMER_Q8_0
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
     let metadata = std::fs::metadata(path).unwrap();
     let seed = &manifest["identity"]["seed_identity"];
     assert_eq!(seed["model"], path);

@@ -4,6 +4,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import resolve_model, search_roots
 import statistics
 import subprocess
 import time
@@ -15,7 +18,7 @@ import v0595_a3b_generic_retained_cold as prior
 ROOT = Path(__file__).resolve().parents[2]
 ARTIFACT = ROOT / "target/profiles/v0597-a3b-owned-arena-floor-p1"
 PREREG = ROOT / "docs/bench/v0597-a3b-owned-arena-floor.md"
-MODEL = Path("/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
+MODEL = resolve_model("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
 BINARY = ROOT / "target/release/qwen-bench"
 COMMON_RUNNER = ROOT / "scripts/profile/v0593_demand_paged_no_copy.py"
 PRIOR_RUNNER = ROOT / "scripts/profile/v0595_a3b_generic_retained_cold.py"

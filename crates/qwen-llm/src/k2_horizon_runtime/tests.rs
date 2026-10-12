@@ -272,9 +272,9 @@ fn session_permit_rejects_concurrency_and_releases_on_drop() {
 }
 
 #[test]
-#[ignore = "CPU/header only, requires K2_GGUF; no Metal context or weight execution"]
+#[ignore = "model witness: k2-horizon-7b-q8-0"]
 fn inspect_downloaded_runtime_plan_without_metal() {
-    let path = std::env::var("K2_GGUF").expect("K2_GGUF");
+    let path = crate::test_fixtures::catalog::K2_HORIZON_7B_Q8_0.required();
     let source = GgufFile::open(path).unwrap();
     let plan = K2RuntimePlan::inspect(&source, 32, 16384, 8 * 1024 * 1024 * 1024).unwrap();
     assert_eq!(plan.weight_payload_bytes(), 9_562_505_216);
@@ -295,7 +295,7 @@ fn inspect_downloaded_runtime_plan_without_metal() {
 #[ignore = "UNQUALIFIED full checkpoint GPU execution; requires separate explicit authorization and K2_GGUF"]
 fn gpu_checkpoint_forward_and_split_prefill_smoke() {
     let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
-    let path = std::env::var("K2_GGUF").expect("K2_GGUF");
+    let path = crate::test_fixtures::catalog::K2_HORIZON_7B_Q8_0.required();
     let source = GgufFile::open(path).unwrap();
     let ctx = MetalContext::new().unwrap();
     let mut model = K2LoadedModel::load_unqualified(&ctx, &source, 4).unwrap();
@@ -329,7 +329,8 @@ fn gpu_checkpoint_forward_and_split_prefill_smoke() {
 #[ignore = "full checkpoint GPU lens correctness; requires production lease and K2_GGUF"]
 fn gpu_checkpoint_captures_and_readout_preserve_continuation() {
     let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
-    let source = GgufFile::open(std::env::var("K2_GGUF").expect("K2_GGUF")).unwrap();
+    let source =
+        GgufFile::open(crate::test_fixtures::catalog::K2_HORIZON_7B_Q8_0.required()).unwrap();
     let ctx = MetalContext::new().unwrap();
     let mut model = K2LoadedModel::load_unqualified(&ctx, &source, 4).unwrap();
     // Bitwise split/plain identity below is pinned to the Q8 lcpp/serial lineage.

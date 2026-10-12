@@ -17,13 +17,11 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::{
-    MetalContext, MetalTensor, Trellis3Variant, bench_q4_k_chained, bench_q4_k_mat_mat_chained,
+    MetalTensor, Trellis3Variant, bench_q4_k_chained, bench_q4_k_mat_mat_chained,
     bench_q6_k_chained, bench_trellis3_chained, trellis3_compressed_bytes, trellis3_synthetic,
     trellis3_upload,
 };
 use qwen_llm::tensor::{GgmlType, TensorDesc};
-
-const MODEL_27B: &str = qwen_llm::test_fixtures::QWEN36_27B_Q4_K_M.path();
 
 fn pick_q4k_shapes(g: &GgufFile) -> Vec<(&'static str, &TensorDesc)> {
     let names = [
@@ -60,18 +58,13 @@ fn pick_q6k_shapes(g: &GgufFile) -> Vec<(&'static str, &TensorDesc)> {
 }
 
 fn bench_q4k_mat_vec(c: &mut Criterion) {
-    if !std::path::Path::new(MODEL_27B).exists() {
-        eprintln!("[bench] skipping q4_k — {MODEL_27B} not present");
+    let Some(ctx) = qwen_llm::test_fixtures::metal_context_or_skip() else {
         return;
-    }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[bench] no metal context: {e}");
-            return;
-        }
     };
-    let g = GgufFile::open(MODEL_27B).expect("open 27B");
+    let g = GgufFile::open(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .expect("open 27B");
     let shapes = pick_q4k_shapes(&g);
 
     let mut group = c.benchmark_group("q4_k mat_vec");
@@ -120,14 +113,20 @@ fn bench_q4k_mat_vec(c: &mut Criterion) {
 }
 
 fn bench_q6k_mat_vec(c: &mut Criterion) {
-    if !std::path::Path::new(MODEL_27B).exists() {
+    if !std::path::Path::new(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .exists()
+    {
         return;
     }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(_) => return,
+    let Some(ctx) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        return;
     };
-    let g = GgufFile::open(MODEL_27B).expect("open");
+    let g = GgufFile::open(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .expect("open");
     let shapes = pick_q6k_shapes(&g);
 
     let mut group = c.benchmark_group("q6_k mat_vec");
@@ -199,18 +198,13 @@ fn bench_q6k_mat_vec(c: &mut Criterion) {
 /// Anything < 4× at N_QUERY=16 means the lifted tile underdelivers and
 /// we need to revisit (smaller tile, partial-tile path overhead, etc).
 fn bench_q4k_mat_mat(c: &mut Criterion) {
-    if !std::path::Path::new(MODEL_27B).exists() {
-        eprintln!("[bench] skipping q4_k mat_mat — {MODEL_27B} not present");
+    let Some(ctx) = qwen_llm::test_fixtures::metal_context_or_skip() else {
         return;
-    }
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[bench] no metal context: {e}");
-            return;
-        }
     };
-    let g = GgufFile::open(MODEL_27B).expect("open 27B");
+    let g = GgufFile::open(qwen_llm::test_fixtures::required_filename(
+        "Qwen3.6-27B-Q4_K_M.gguf",
+    ))
+    .expect("open 27B");
     let shapes = pick_q4k_shapes(&g);
 
     const N_QUERY: usize = 16; // matches DFlash block_size
@@ -317,12 +311,8 @@ fn bench_q4k_mat_mat(c: &mut Criterion) {
 /// LUT (1 KB) is deliberately uncharged and shows up as reduced achieved
 /// GB/s instead.
 fn bench_trellis3_mat_vec(c: &mut Criterion) {
-    let ctx = match MetalContext::new() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[bench] no metal context: {e}");
-            return;
-        }
+    let Some(ctx) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        return;
     };
     // Primary cell: ffn_gate class (5120 x 17408). Diagnostic: transpose
     // class (17408 x 5120, ffn_down-like).

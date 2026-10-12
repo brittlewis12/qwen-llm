@@ -291,9 +291,9 @@ fn storage_checks_rows_and_overflow_independently() {
 }
 
 #[test]
-#[ignore = "CPU/header-only inspection; requires a downloaded K2 GGUF, never executes the model"]
+#[ignore = "model witness: k2-horizon-7b-q8-0"]
 fn inspect_local_q8_header() {
-    let path = std::env::var("K2_GGUF").expect("set K2_GGUF explicitly");
+    let path = crate::test_fixtures::catalog::K2_HORIZON_7B_Q8_0.required();
     let gguf = GgufFile::open(path).unwrap();
     let model = K2HorizonModel::from_gguf(&gguf).unwrap();
     assert_eq!(model.layers.len(), 36);

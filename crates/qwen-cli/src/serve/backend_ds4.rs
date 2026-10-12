@@ -1394,7 +1394,10 @@ mod tests {
     /// with the 32K forward budget serve probes use.
     fn gpu_backend(model_id: &str) -> DeepSeekV4Backend {
         let path = std::env::var("DSV4_GGUF").unwrap_or_else(|_| {
-            "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf".into()
+            qwen_llm::test_fixtures::required_filename(
+                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+            )
+            .into()
         });
         let ctx = MetalContext::new().unwrap();
         let gguf = GgufFile::open(&path).unwrap();

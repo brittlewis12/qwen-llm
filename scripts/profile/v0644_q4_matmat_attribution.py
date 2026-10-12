@@ -17,11 +17,14 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from model_search import resolve_model, search_roots
 from typing import Any, Callable
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MODEL = Path("/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf")
+MODEL = resolve_model("Qwen3.6-27B-Q4_K_M.gguf")
 BINARY = ROOT / "target/release/qwen-bench"
 PREREG = ROOT / "docs/bench/v0644-q4-matmat-attribution.md"
 SCRIPT = Path(__file__).resolve()

@@ -6507,14 +6507,12 @@ mod tests {
         let Some(path) = crate::test_fixtures::A3B_Q3_K_M.path_or_skip() else {
             eprintln!(
                 "[moe-iq3-oracle] skipped missing fixture {}",
-                crate::test_fixtures::A3B_Q3_K_M.path()
+                crate::test_fixtures::A3B_Q3_K_M.required().display()
             );
             return;
         };
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
         let t = g
@@ -6583,14 +6581,12 @@ mod tests {
         let Some(path) = crate::test_fixtures::A3B_Q3_K_M.path_or_skip() else {
             eprintln!(
                 "[moe-iq3-direct-swiglu-oracle] skipped missing fixture {}",
-                crate::test_fixtures::A3B_Q3_K_M.path()
+                crate::test_fixtures::A3B_Q3_K_M.required().display()
             );
             return;
         };
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
         let gate_t = g
@@ -6722,14 +6718,12 @@ mod tests {
         let Some(path) = crate::test_fixtures::A3B_Q3_K_M.path_or_skip() else {
             eprintln!(
                 "[moe-iq3-swiglu-oracle] skipped missing fixture {}",
-                crate::test_fixtures::A3B_Q3_K_M.path()
+                crate::test_fixtures::A3B_Q3_K_M.required().display()
             );
             return;
         };
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
         let gate_t = g
@@ -6855,14 +6849,12 @@ mod tests {
         let Some(path) = crate::test_fixtures::A3B_IQ4_XS.path_or_skip() else {
             eprintln!(
                 "[moe-iq3s-oracle] skipped missing fixture {}",
-                crate::test_fixtures::A3B_IQ4_XS.path()
+                crate::test_fixtures::A3B_IQ4_XS.required().display()
             );
             return;
         };
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
         let t = g
@@ -6931,14 +6923,12 @@ mod tests {
         let Some(path) = crate::test_fixtures::A3B_IQ4_XS.path_or_skip() else {
             eprintln!(
                 "[moe-iq3s-direct-swiglu-oracle] skipped missing fixture {}",
-                crate::test_fixtures::A3B_IQ4_XS.path()
+                crate::test_fixtures::A3B_IQ4_XS.required().display()
             );
             return;
         };
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
         let gate_t = g
@@ -7070,14 +7060,12 @@ mod tests {
         let Some(path) = crate::test_fixtures::A3B_IQ4_XS.path_or_skip() else {
             eprintln!(
                 "[moe-iq3s-swiglu-oracle] skipped missing fixture {}",
-                crate::test_fixtures::A3B_IQ4_XS.path()
+                crate::test_fixtures::A3B_IQ4_XS.required().display()
             );
             return;
         };
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
         let gate_t = g
@@ -7203,14 +7191,12 @@ mod tests {
         let Some(path) = crate::test_fixtures::A3B_IQ4_XS.path_or_skip() else {
             eprintln!(
                 "[moe-iq4xs-down-oracle] skipped missing fixture {}",
-                crate::test_fixtures::A3B_IQ4_XS.path()
+                crate::test_fixtures::A3B_IQ4_XS.required().display()
             );
             return;
         };
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
         let down_t = g
@@ -7359,16 +7345,15 @@ mod tests {
     #[test]
     #[ignore]
     fn moe_swiglu_q6_k_matches_f32_dequant_fixture() {
-        let path = std::env::var("QWEN_A3B_Q6_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q6_K.gguf".into());
+        let path = std::env::var("QWEN_A3B_Q6_MODEL").unwrap_or_else(|_| {
+            crate::test_fixtures::required_filename("Qwen3.5-35B-A3B-Q6_K.gguf").into()
+        });
         if !std::path::Path::new(&path).exists() {
             eprintln!("[moe-q6-direct-swiglu-oracle] skipped missing fixture {path}");
             return;
         }
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
         let gate_t = g
@@ -7467,16 +7452,15 @@ mod tests {
     #[test]
     #[ignore]
     fn moe_grouped_swiglu_q6_k_matches_f32_dequant_fixture() {
-        let path = std::env::var("QWEN_A3B_Q6_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q6_K.gguf".into());
+        let path = std::env::var("QWEN_A3B_Q6_MODEL").unwrap_or_else(|_| {
+            crate::test_fixtures::required_filename("Qwen3.5-35B-A3B-Q6_K.gguf").into()
+        });
         if !std::path::Path::new(&path).exists() {
             eprintln!("[moe-q6-swiglu-oracle] skipped missing fixture {path}");
             return;
         }
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
         let gate_t = g
@@ -7599,16 +7583,15 @@ mod tests {
     #[test]
     #[ignore]
     fn moe_q8_0_swiglu_down_weighted_matches_f32_dequant_fixture() {
-        let path = std::env::var("QWEN_A3B_Q8_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q8_0.gguf".into());
+        let path = std::env::var("QWEN_A3B_Q8_MODEL").unwrap_or_else(|_| {
+            crate::test_fixtures::required_filename("Qwen3.5-35B-A3B-Q8_0.gguf").into()
+        });
         if !std::path::Path::new(&path).exists() {
             eprintln!("[moe-q8-direct-oracle] skipped missing fixture {path}");
             return;
         }
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
         let gate_t = g
@@ -7783,16 +7766,15 @@ mod tests {
     #[test]
     #[ignore]
     fn moe_grouped_q8_0_swiglu_down_matches_f32_dequant_fixture() {
-        let path = std::env::var("QWEN_A3B_Q8_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q8_0.gguf".into());
+        let path = std::env::var("QWEN_A3B_Q8_MODEL").unwrap_or_else(|_| {
+            crate::test_fixtures::required_filename("Qwen3.5-35B-A3B-Q8_0.gguf").into()
+        });
         if !std::path::Path::new(&path).exists() {
             eprintln!("[moe-q8-oracle] skipped missing fixture {path}");
             return;
         }
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
         let gate_t = g
@@ -7993,10 +7975,8 @@ mod tests {
     #[test]
     #[ignore]
     fn attn_v4_nwg_sweep_moe_shapes() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         eprintln!("[v4-moe-nwg] {}", ctx.describe());
 
@@ -8095,10 +8075,8 @@ mod tests {
     #[test]
     #[ignore]
     fn attn_v4_tile_c_sweep_moe_shapes() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         eprintln!("[v4-moe-c] {}", ctx.describe());
 
@@ -8211,10 +8189,8 @@ mod tests {
     #[ignore]
     fn attn_v4_main_reduce_breakdown_moe_shapes() {
         use std::time::Instant;
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         eprintln!("[v4-main-reduce] {}", ctx.describe());
 
@@ -8368,10 +8344,8 @@ mod tests {
     #[ignore]
     fn attn_v4_head_major_main_reduce_breakdown_moe_shapes() {
         use std::time::Instant;
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         eprintln!("[v4-hm-main-reduce] {}", ctx.describe());
 
@@ -8565,10 +8539,8 @@ mod tests {
     #[test]
     #[ignore]
     fn attn_prefill_v4_main_reduce_breakdown_moe_shapes() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         eprintln!("[prefill-v4-main-reduce] {}", ctx.describe());
 

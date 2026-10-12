@@ -32,7 +32,7 @@ must not be the oracle.
 ## Run
 
 ```sh
-MODEL=/Volumes/wdblack/weights-archive/glm-5.3-flash-ud-iq3_xxs/glm5-next/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf
+MODEL=models/glm-5.3-flash-ud-iq3_xxs/glm5-next/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf
 target/glm53-oracle/bin/glm53_oracle --capture-default "$MODEL" target/profiles/glm53/ref.bin ID...
 ```
 

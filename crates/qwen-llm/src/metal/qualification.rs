@@ -24,7 +24,8 @@ pub struct Qualification {
     pub max_buffer_length_bytes: Option<usize>,
     pub required_headroom_bytes: Option<u64>,
     pub evidence: &'static str,
-    pub witness: &'static str,
+    pub correctness: &'static str,
+    pub performance: &'static str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -57,7 +58,8 @@ pub struct QualificationStatus {
     pub max_buffer_length_bytes: Option<usize>,
     pub required_headroom_bytes: Option<u64>,
     pub evidence: &'static str,
-    pub witness: &'static str,
+    pub correctness: &'static str,
+    pub performance: &'static str,
     pub holds_for_device: bool,
     pub decline_reason: Option<QualificationDeclineReason>,
 }
@@ -114,9 +116,6 @@ impl Qualification {
 /// Admission floor measured for the force-only A10B destination-pread path.
 pub const A10B_PARALLEL_PREAD_REQUIRED_HEADROOM_BYTES: u64 = 85_608_931_328;
 
-const NO_RUNNABLE_WITNESS: &str =
-    "none: cited evidence is a historical benchmark or code commit; no replay command is recorded";
-
 /// Return the first decline for a qualification once per process.
 pub fn declined_reason_once(
     qualification: &Qualification,
@@ -138,7 +137,8 @@ pub static DEEPSEEK_V4_MULTIGROUP_SELECTOR: Qualification = Qualification {
     max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     evidence: "d52815a3",
-    witness: NO_RUNNABLE_WITNESS,
+    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::multigroup_selector_full_matches_current_and_fails_closed -- --exact",
+    performance: "cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::current_asset_multigroup_selector_whole_token_gate -- --ignored --exact --nocapture --test-threads=1",
 };
 pub static DEEPSEEK_V4_F16_MATRIX_SCORER: Qualification = Qualification {
     path: "deepseek_v4.singleton_f16_matrix_scorer",
@@ -148,7 +148,8 @@ pub static DEEPSEEK_V4_F16_MATRIX_SCORER: Qualification = Qualification {
     max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     evidence: "PERF-LOG 2026-08-08: Far Lightning F16 Matrix Candidate HOLD; Real-History F16 Lightning KILL",
-    witness: NO_RUNNABLE_WITNESS,
+    correctness: "cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::current_weight_boundary_optimization_differentials -- --ignored --exact --nocapture --test-threads=1",
+    performance: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_lightning_matrix_ceiling_at_far_context -- --ignored --exact --nocapture",
 };
 pub static DEEPSEEK_V4_GROUPED_LONG_HCA: Qualification = Qualification {
     path: "deepseek_v4.grouped_long_hca",
@@ -158,7 +159,8 @@ pub static DEEPSEEK_V4_GROUPED_LONG_HCA: Qualification = Qualification {
     max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     evidence: "PERF-LOG 2026-08-07: Grouped Long-HCA Default GO",
-    witness: NO_RUNNABLE_WITNESS,
+    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::tiled_hca_matches_cpu_through_the_full_model_context -- --exact",
+    performance: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_tiled_hca_at_far_context -- --ignored --exact --nocapture",
 };
 pub static DEEPSEEK_V4_SPLITK_HCA: Qualification = Qualification {
     path: "deepseek_v4.splitk_hca",
@@ -168,7 +170,8 @@ pub static DEEPSEEK_V4_SPLITK_HCA: Qualification = Qualification {
     max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     evidence: "PERF-LOG 2026-08-07: Eight-Way Split-K HCA Default GO",
-    witness: NO_RUNNABLE_WITNESS,
+    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::online_hca_matches_legacy_envelope_at_structural_boundaries -- --exact",
+    performance: "cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::splitk_hca_profiles_current_synthetic_terminal_tokens -- --ignored --exact --nocapture",
 };
 pub static DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY: Qualification = Qualification {
     path: "deepseek_v4.packed_q8_matrix_family",
@@ -178,7 +181,8 @@ pub static DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY: Qualification = Qualification {
     max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     evidence: "4d3ed878, c9e6b729, c74d791d, 673830e4, 85a0ca34",
-    witness: NO_RUNNABLE_WITNESS,
+    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_scope_helpers_use_their_named_device_qualifications -- --exact; cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::q8_f32_mma_r2c4k64_reduces_operand_rounding_and_preserves_guards -- --exact",
+    performance: "cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::prefill::tests::profile_q8_f32_mma_r2c4k64_attention_output_packet -- --ignored --exact --nocapture",
 };
 pub static DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION: Qualification = Qualification {
     path: "deepseek_v4.packed_gpu_route_compaction",
@@ -188,7 +192,8 @@ pub static DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION: Qualification = Qualificatio
     max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     evidence: "878d0d49",
-    witness: NO_RUNNABLE_WITNESS,
+    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_gpu_route_compaction_matches_cpu_at_capacity_boundaries -- --exact",
+    performance: "cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::current_asset_packed_gpu_route_kill_packet -- --ignored --exact --nocapture",
 };
 pub static DEEPSEEK_V4_PACKED_MXFP4_MATRIX: Qualification = Qualification {
     path: "deepseek_v4.packed_mxfp4_matrix",
@@ -198,7 +203,8 @@ pub static DEEPSEEK_V4_PACKED_MXFP4_MATRIX: Qualification = Qualification {
     max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     evidence: "56a10b85, b1a534e8, f75f1eb1",
-    witness: NO_RUNNABLE_WITNESS,
+    correctness: "cargo test --release -p qwen-llm --lib metal::tests::mxfp4_f32_matrix_tile_matches_scalar_envelope_and_guards -- --exact; cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_mxfp4_matrix_scope_covers_both_fresh_and_k216_full_widths -- --exact",
+    performance: "cargo test --release -p qwen-llm --lib metal::tests::mxfp4_f32_matrix_tile_k216_n2048_bucket_floor -- --ignored --exact --nocapture; cargo test --release -p qwen-llm --lib metal::moe::tests::mxfp4_f32_matrix_tile_k216_n4096_all_expert_floor -- --ignored --exact --nocapture",
 };
 pub static DEEPSEEK_V4_PACKED_E8P32_ROUTER: Qualification = Qualification {
     path: "deepseek_v4.packed_e8p32_router",
@@ -208,7 +214,8 @@ pub static DEEPSEEK_V4_PACKED_E8P32_ROUTER: Qualification = Qualification {
     max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     evidence: "6ea94010",
-    witness: NO_RUNNABLE_WITNESS,
+    correctness: "cargo test --release -p qwen-llm --lib metal::moe::tests::mat_mat_f32_router_e8p32_strict_matches_generic_bits -- --exact; cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_router_e8p32_scope_is_exactly_k160_m4 -- --exact",
+    performance: "none: the cited PERF-LOG entry records sampled E8 router intervals and a noisy bracket but no executable replay command; the available post-route packet does not isolate this router",
 };
 pub static DEEPSEEK_V4_PACKED_QA_RAW_KV_MATRIX: Qualification = Qualification {
     path: "deepseek_v4.packed_q_a_raw_kv_matrix",
@@ -218,7 +225,8 @@ pub static DEEPSEEK_V4_PACKED_QA_RAW_KV_MATRIX: Qualification = Qualification {
     max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     evidence: "6ea94010",
-    witness: NO_RUNNABLE_WITNESS,
+    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_q8_qa_kv_matrix_policy_is_scoped_and_fail_closed -- --exact; cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::q8_f32_mma_r2c4k64_reduces_operand_rounding_and_preserves_guards -- --exact",
+    performance: "none: the 2026-08-08 PERF-LOG entry gives Q-A/raw-KV A/B results but no exact command or packet runner for that measurement",
 };
 pub static DEEPSEEK_V4_PACKED_INDEXER_Q_MATRIX: Qualification = Qualification {
     path: "deepseek_v4.packed_indexer_q_matrix",
@@ -228,7 +236,8 @@ pub static DEEPSEEK_V4_PACKED_INDEXER_Q_MATRIX: Qualification = Qualification {
     max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     evidence: "30c8ef59, 85a0ca34",
-    witness: NO_RUNNABLE_WITNESS,
+    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_indexer_q_matrix_scope_is_4096_only -- --exact; cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::q8_f32_mma_r2c4k64_reduces_operand_rounding_and_preserves_guards -- --exact",
+    performance: "none: the cited PERF-LOG sections record the indexed-Q measurements and rollback but contain no replay command or packet path for that schedule",
 };
 pub static DEEPSEEK_V4_PACKED_GROUPED_Q3Q4: Qualification = Qualification {
     path: "deepseek_v4.packed_grouped_q3q4",
@@ -238,7 +247,8 @@ pub static DEEPSEEK_V4_PACKED_GROUPED_Q3Q4: Qualification = Qualification {
     max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     evidence: "c035668e, 795ee2e7",
-    witness: NO_RUNNABLE_WITNESS,
+    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_grouped_mapped_q3_q4_match_static_expert_views -- --exact",
+    performance: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::k160_n128_floor::k160_n128_grouped_q3q4_representative_layer_floor -- --ignored --exact --nocapture",
 };
 pub static DEEPSEEK_V4_PACKED_SHARED_ROUTE_OVERLAP: Qualification = Qualification {
     path: "deepseek_v4.packed_shared_route_overlap",
@@ -248,7 +258,8 @@ pub static DEEPSEEK_V4_PACKED_SHARED_ROUTE_OVERLAP: Qualification = Qualificatio
     max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     evidence: "PERF-LOG 2026-08-07: K160 Shared/Route Overlap Default GO (K216 overlap was killed in b788bbac)",
-    witness: NO_RUNNABLE_WITNESS,
+    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_scope_helpers_use_their_named_device_qualifications -- --exact",
+    performance: "none: the PERF-LOG records the serial/default wall pair, but no exact command or dedicated shared-route overlap runner is recorded",
 };
 pub static DEEPSEEK_V4_PACKED_GROUPED_EXPERT: Qualification = Qualification {
     path: "deepseek_v4.packed_grouped_expert",
@@ -258,7 +269,8 @@ pub static DEEPSEEK_V4_PACKED_GROUPED_EXPERT: Qualification = Qualification {
     max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     evidence: "da9e5d02",
-    witness: NO_RUNNABLE_WITNESS,
+    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_grouped_iq2_xs_iq3_xxs_matches_bucket_path -- --exact",
+    performance: "QWEN_DSV4_PACKED_GROUPED_EXPERTS=auto QWEN_MATMAT_IQ3_XXS_MM=1 cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::current_asset_packed_grouped_expert_integration_packet -- --ignored --exact --nocapture; QWEN_DSV4_PACKED_GROUPED_EXPERTS=1 QWEN_DSV4_PACKED_GROUPED_SAMPLES=5 QWEN_DSV4_PACKED_GROUPED_ONLY_N=128 QWEN_MATMAT_IQ3_XXS_MM=1 cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::current_asset_packed_grouped_expert_integration_packet -- --ignored --exact --nocapture",
 };
 pub static DEEPSEEK_V4_ALL_SLOTS_Q3Q4: Qualification = Qualification {
     path: "deepseek_v4.all_slots_q3q4_decode",
@@ -268,7 +280,8 @@ pub static DEEPSEEK_V4_ALL_SLOTS_Q3Q4: Qualification = Qualification {
     max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     evidence: "PERF-LOG 2026-08-07: K160 All-Slot Decode Default GO",
-    witness: NO_RUNNABLE_WITNESS,
+    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::all_slot_routed_experts_match_serial_indexed_path_and_zero_failures -- --exact",
+    performance: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_all_slot_routed_experts_against_serial_indexed -- --ignored --exact --nocapture",
 };
 pub static DEEPSEEK_V4_RESIDENCY_SET: Qualification = Qualification {
     path: "deepseek_v4.residency_set",
@@ -278,7 +291,8 @@ pub static DEEPSEEK_V4_RESIDENCY_SET: Qualification = Qualification {
     max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     evidence: "PERF-LOG 2026-08-09: FRESH, K216, K160 Residency-Set Default GO; 2026-08-10 safety rollback",
-    witness: NO_RUNNABLE_WITNESS,
+    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::model_residency_set_scope_is_exact -- --exact",
+    performance: "none: PERF-LOG records product load/prefill runs and the safety rollback, but no replay command or packet runner for those pairs is recorded",
 };
 pub static A3B_PARALLEL_COPY_AUTO: Qualification = Qualification {
     path: "metal_forward.a3b_parallel_copy_auto",
@@ -288,7 +302,8 @@ pub static A3B_PARALLEL_COPY_AUTO: Qualification = Qualification {
     max_buffer_length_bytes: Some(77_309_411_328),
     required_headroom_bytes: None,
     evidence: "0a3cef59",
-    witness: "none: cited evidence is a historical benchmark; 0a3cef59 records no replay command",
+    correctness: "cargo test --release -p qwen-llm --lib metal_forward::tests::gguf_parallel_pread_a3b_q4_is_bit_exact -- --ignored --exact",
+    performance: "none: the v0.608 PERF-LOG reports inherited v0.602 timing and Auto smoke results but records no executable benchmark command",
 };
 pub static PARALLEL_COPY_EXACT_UNIFIED: Qualification = Qualification {
     path: "metal_forward.exact_unified_parallel_copy_profiles",
@@ -298,7 +313,8 @@ pub static PARALLEL_COPY_EXACT_UNIFIED: Qualification = Qualification {
     max_buffer_length_bytes: Some(77_309_411_328),
     required_headroom_bytes: Some(A10B_PARALLEL_PREAD_REQUIRED_HEADROOM_BYTES),
     evidence: "8c223624, fba3b97a",
-    witness: "none: cited evidence is a historical benchmark; commits 8c223624 and fba3b97a record no replay command",
+    correctness: "cargo test --release -p qwen-llm --lib metal_forward::tests::gguf_parallel_pread_dense27b_q4_is_bit_exact -- --ignored --exact; cargo test --release -p qwen-llm --lib metal_forward::tests::gguf_parallel_pread_a10b_profile_is_exact_and_force_only -- --exact",
+    performance: "none: commits 8c223624 and fba3b97a plus their PERF-LOG entries report measurements but record no executable A/B replay command",
 };
 
 pub static QUALIFICATIONS: &[&Qualification] = &[
@@ -332,7 +348,8 @@ pub fn qualification_statuses(facts: &DeviceFacts) -> Vec<QualificationStatus> {
             max_buffer_length_bytes: qualification.max_buffer_length_bytes,
             required_headroom_bytes: qualification.required_headroom_bytes,
             evidence: qualification.evidence,
-            witness: qualification.witness,
+            correctness: qualification.correctness,
+            performance: qualification.performance,
             holds_for_device: qualification.holds_for(facts),
             decline_reason: qualification.decline_reason(facts),
         })

@@ -237,7 +237,7 @@ pub(super) fn log_expired_snapshots(family: &str, expired: &Evicted) {
     if !expired.is_empty() {
         tracing::info!(
             target: "qwen_diag",
-            "serve: {family} snapshot cache expired entries={} freed_bytes={}",
+            "serve: {family} snapshot cache expired entries={} released_bytes={} (indexed; payload memory returns when the last holder drops)",
             expired.ids.len(),
             expired.bytes,
         );
@@ -277,7 +277,7 @@ pub(super) fn admit_snapshot_capture(
     }
     tracing::info!(
         target: "qwen_diag",
-        "serve: snapshot cache evicted for process headroom; entries={} freed_bytes={} deficit_bytes={deficit_bytes}",
+        "serve: snapshot cache evicted for process headroom; entries={} released_bytes={} (indexed; payload memory returns when the last holder drops) deficit_bytes={deficit_bytes}",
         evicted.ids.len(),
         evicted.bytes,
     );

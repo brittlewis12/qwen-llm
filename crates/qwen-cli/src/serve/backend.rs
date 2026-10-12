@@ -1191,7 +1191,7 @@ impl EngineBackend {
                 } else {
                     tracing::info!(
                         target: "qwen_diag",
-                        "serve: snapshot cache evicted for request admission; entries={} freed_bytes={} deficit_bytes={deficit}",
+                        "serve: snapshot cache evicted for request admission; entries={} released_bytes={} (indexed; payload memory returns when the last holder drops) deficit_bytes={deficit}",
                         evicted.ids.len(),
                         evicted.bytes,
                     );

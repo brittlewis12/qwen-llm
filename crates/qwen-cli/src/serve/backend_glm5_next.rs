@@ -470,7 +470,7 @@ fn release_snapshots<V>(
     if !released.is_empty() {
         tracing::info!(
             target: "qwen_diag",
-            "serve: glm5_next snapshot cache released for memory pressure; entries={} freed_bytes={}",
+            "serve: glm5_next snapshot cache released for memory pressure; entries={} released_bytes={} (indexed; payload memory returns when the last holder drops)",
             released.ids.len(),
             released.bytes,
         );

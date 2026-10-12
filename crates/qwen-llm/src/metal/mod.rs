@@ -383,6 +383,13 @@ pub enum MetalError {
     NoBlitEncoder,
     #[error("kernels.metallib is empty (no .metal sources compiled yet)")]
     EmptyLibrary,
+    #[error(
+        "macOS {actual} is older than macOS {required}, the minimum the embedded Metal kernels were built for"
+    )]
+    UnsupportedOs {
+        required: &'static str,
+        actual: String,
+    },
     #[error("could not load embedded library: {0}")]
     LoadLibrary(String),
     #[error("kernel function not found: {0}")]

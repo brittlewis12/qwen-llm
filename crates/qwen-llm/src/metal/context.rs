@@ -694,6 +694,12 @@ impl MetalContext {
         let process_lease = acquire_metal_process_lease()?;
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::NoDevice)?;
         let device_facts = Arc::new(super::DeviceFacts::from_device(&device));
+        if device_facts.os_supports_metallib() == Some(false) {
+            return Err(MetalError::UnsupportedOs {
+                required: device_facts.product_metallib_deployment_target,
+                actual: device_facts.os_version.clone().unwrap_or_default(),
+            });
+        }
         let queue = device.newCommandQueue().ok_or(MetalError::NoQueue)?;
 
         let metallib_bytes = crate::KERNELS_METALLIB;

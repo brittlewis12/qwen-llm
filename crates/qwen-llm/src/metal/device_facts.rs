@@ -75,6 +75,15 @@ impl DeviceFacts {
         }
     }
 
+    /// Whether the running macOS can load the embedded product library;
+    /// `None` when either version cannot be read.
+    pub fn os_supports_metallib(&self) -> Option<bool> {
+        version_at_least(
+            self.os_version.as_deref()?,
+            self.product_metallib_deployment_target,
+        )
+    }
+
     /// Query static device and host properties without creating a context,
     /// acquiring the inference lease, loading a library, or creating a queue.
     pub fn probe() -> Option<Self> {
@@ -84,7 +93,7 @@ impl DeviceFacts {
 
     pub fn format_report(&self) -> String {
         let mut report = format!(
-            "device: {}\narchitecture: {}\nregistry_id: {}\ngpu_families: Apple7={} Apple8={} Apple9={} Apple10={} Metal3={} Metal4={}\nmax_threadgroup_memory: {} bytes\nmax_buffer_length: {} bytes\nrecommended_max_working_set: {} bytes\nunified_memory: {}\nhost_page_size: {}\nphysical_memory: {}\nos_version: {}\nproduct_metallib_deployment_target: {}\nresearch_metallib_deployment_target: {}",
+            "device: {}\narchitecture: {}\nregistry_id: {}\ngpu_families: Apple7={} Apple8={} Apple9={} Apple10={} Metal3={} Metal4={}\nmax_threadgroup_memory: {} bytes\nmax_buffer_length: {} bytes\nrecommended_max_working_set: {} bytes\nunified_memory: {}\nhost_page_size: {}\nphysical_memory: {}\nos_version: {}\nproduct_metallib_deployment_target: {}\nresearch_metallib_deployment_target: {}\nos_supports_metallib: {}",
             self.name,
             self.architecture,
             self.registry_id,
@@ -107,6 +116,11 @@ impl DeviceFacts {
             optional_value(self.os_version.as_deref()),
             self.product_metallib_deployment_target,
             self.research_metallib_deployment_target,
+            match self.os_supports_metallib() {
+                Some(true) => "yes",
+                Some(false) => "no",
+                None => "unavailable",
+            },
         );
         report.push_str("\nqualifications:");
         for status in super::qualification::qualification_statuses(self) {
@@ -146,6 +160,26 @@ impl fmt::Display for DeviceFacts {
 
 fn optional_value(value: Option<&str>) -> &str {
     value.unwrap_or("unavailable")
+}
+
+/// Dotted numeric version comparison; missing components count as zero.
+fn version_at_least(actual: &str, required: &str) -> Option<bool> {
+    let parse = |version: &str| {
+        version
+            .split('.')
+            .map(|part| part.parse::<u32>().ok())
+            .collect::<Option<Vec<_>>>()
+    };
+    let (actual, required) = (parse(actual)?, parse(required)?);
+    let length = actual.len().max(required.len());
+    let component = |parts: &[u32], index: usize| parts.get(index).copied().unwrap_or(0);
+    for index in 0..length {
+        let (have, need) = (component(&actual, index), component(&required, index));
+        if have != need {
+            return Some(have > need);
+        }
+    }
+    Some(true)
 }
 
 fn query_sysctl_value(name: &str) -> Option<u64> {
@@ -247,6 +281,7 @@ mod tests {
         assert!(report.contains("host_page_size: 16384"));
         assert!(report.contains("physical_memory: unavailable"));
         assert!(report.contains("product_metallib_deployment_target: 15.0"));
+        assert!(report.contains("os_supports_metallib: yes"));
         assert!(report.contains("deepseek_v4.multigroup_selector: device=Apple M4 Max"));
         assert!(report.contains("holds_for_device=false"));
         assert!(
@@ -280,5 +315,37 @@ mod tests {
         assert!(exact["performance"].as_str().unwrap().starts_with("none:"));
         assert_eq!(exact["performance_kind"], "none");
         assert_eq!(exact["decline_reason"]["facet"], "device_model");
+    }
+
+    #[test]
+    fn os_support_compares_dotted_versions_numerically() {
+        let facts = |os: Option<&str>, target| DeviceFacts {
+            os_version: os.map(Into::into),
+            product_metallib_deployment_target: target,
+            ..sample()
+        };
+        assert_eq!(
+            facts(Some("14.7.1"), "14.0").os_supports_metallib(),
+            Some(true)
+        );
+        assert_eq!(facts(Some("14"), "14.0").os_supports_metallib(), Some(true));
+        assert_eq!(
+            facts(Some("14.7.1"), "15.0").os_supports_metallib(),
+            Some(false)
+        );
+        assert_eq!(
+            facts(Some("13.6"), "14.0").os_supports_metallib(),
+            Some(false)
+        );
+        assert_eq!(
+            facts(Some("26.0"), "14.0").os_supports_metallib(),
+            Some(true)
+        );
+        assert_eq!(
+            facts(Some("14.10"), "14.9").os_supports_metallib(),
+            Some(true)
+        );
+        assert_eq!(facts(None, "14.0").os_supports_metallib(), None);
+        assert_eq!(facts(Some("beta"), "14.0").os_supports_metallib(), None);
     }
 }

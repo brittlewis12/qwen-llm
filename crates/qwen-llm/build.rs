@@ -7,8 +7,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const DEFAULT_METALLIB_TARGET: &str = "15.0";
-const METAL_LANGUAGE: &str = "metal3.2";
+// The oldest language every product and research kernel compiles under, so
+// the libraries load on macOS 14. Raise it only for a kernel that needs a
+// newer language feature.
+const DEFAULT_METALLIB_TARGET: &str = "14.0";
+const METAL_LANGUAGE: &str = "metal3.1";
 
 fn main() -> anyhow::Result<()> {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
@@ -35,7 +38,7 @@ fn main() -> anyhow::Result<()> {
 
     // Pin the language and deployment target: without them the compiler
     // derives the target from the build host, so a library built on a newer
-    // macOS may not load on macOS 15. MSL 4 raises the target to macOS 26
+    // macOS may not load on an older one. MSL 4 raises the target to macOS 26
     // even with -mmacosx-version-min, so MSL 4 kernels need their own library
     // built for macOS 26 rather than living in this one.
     let target = match std::env::var("MACOSX_DEPLOYMENT_TARGET") {

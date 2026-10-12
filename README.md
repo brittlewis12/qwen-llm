@@ -57,8 +57,9 @@ file has been run on a 128 GB Mac with the wired limit raised to 118 GiB.
 
 ## Build
 
-Requirements: an Apple Silicon Mac, Rust 1.88 or newer, and Xcode with its
-Metal toolchain, so that `xcrun metal` and `xcrun metallib` work. Since Xcode
+Requirements: an Apple Silicon Mac running macOS 14 or later, Rust 1.88 or
+newer, and Xcode with its Metal toolchain, so that `xcrun metal` and
+`xcrun metallib` work. Since Xcode
 26 the toolchain is a separate download:
 `xcodebuild -downloadComponent MetalToolchain`.
 

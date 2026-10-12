@@ -262,7 +262,6 @@ fn session_refusal_is_process_releasable(
     matches!(
         reason,
         qwen_llm::metal::MetalMemoryAdmissionReason::ProcessInsufficient
-            | qwen_llm::metal::MetalMemoryAdmissionReason::BothInsufficient
     )
 }
 
@@ -1255,7 +1254,7 @@ mod tests {
         assert!(super::session_refusal_is_process_releasable(
             Reason::ProcessInsufficient
         ));
-        assert!(super::session_refusal_is_process_releasable(
+        assert!(!super::session_refusal_is_process_releasable(
             Reason::BothInsufficient
         ));
         assert!(!super::session_refusal_is_process_releasable(
@@ -1264,6 +1263,38 @@ mod tests {
         assert!(!super::session_refusal_is_process_releasable(
             Reason::ProcessSignalUnavailable
         ));
+    }
+
+    #[test]
+    fn both_insufficient_session_refusal_preserves_snapshot_cache() {
+        use qwen_llm::metal::MetalMemoryAdmissionReason as Reason;
+
+        let mut cache = super::SnapshotCache::new(1024, Default::default());
+        assert!(cache.insert_strict_in((), vec![1, 2], 7_u8, 32));
+        let result: Result<(), super::ServeError> =
+            crate::serve::transport_memory::with_pressure_release_retry(
+                || {
+                    Err(super::ServeError {
+                        status: 503,
+                        error_type: "server_busy",
+                        code: Some("memory_admission_denied"),
+                        param: None,
+                        message: "both working set and process budget are insufficient".into(),
+                    })
+                },
+                || {
+                    if super::session_refusal_is_process_releasable(Reason::BothInsufficient) {
+                        cache.evict_for(u64::MAX);
+                        true
+                    } else {
+                        false
+                    }
+                },
+            );
+
+        assert!(result.is_err());
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.indexed_bytes(), 32);
     }
 
     #[test]

@@ -595,53 +595,25 @@ pub(crate) fn run_qwen4exp_single_turn(
     }
     let load_t0 = Instant::now();
     let ctx = MetalContext::new().context("initialize Metal for Qwen3.8-Flash-Next")?;
-    let (mut loaded, packed_fallback) = if packed_prefill_requested {
-        match Qwen4ExpLoadedModel::load_with_decode_options(
+    let mut loaded = if packed_prefill_requested && !packed_profile_enabled {
+        Qwen4ExpLoadedModel::load_with_adaptive_prefill(
             &ctx,
             gguf,
             capacity,
-            Some(prompt_tokens.len()),
+            prompt_tokens.len(),
             decode_options,
-        ) {
-            Ok(loaded) => (loaded, false),
-            Err(packed_error) => {
-                if packed_profile_enabled {
-                    return Err(anyhow!(
-                        "load Qwen3.8-Flash-Next packed profile session failed ({packed_error})"
-                    ));
-                }
-                eprintln!(
-                    "qwen4exp: packed prefill unavailable ({packed_error}); retrying scalar admission"
-                );
-                match Qwen4ExpLoadedModel::load_with_decode_options(
-                    &ctx,
-                    gguf,
-                    capacity,
-                    None,
-                    decode_options,
-                ) {
-                    Ok(loaded) => (loaded, true),
-                    Err(scalar_error) => {
-                        return Err(anyhow!(
-                            "load Qwen3.8-Flash-Next packed session failed ({packed_error}); scalar fallback also failed ({scalar_error})"
-                        ));
-                    }
-                }
-            }
-        }
-    } else {
-        (
-            Qwen4ExpLoadedModel::load_with_decode_options(
-                &ctx,
-                gguf,
-                capacity,
-                None,
-                decode_options,
-            )
-            .context("load admitted Qwen3.8-Flash-Next weights and text session")?,
-            false,
         )
-    };
+    } else {
+        Qwen4ExpLoadedModel::load_with_decode_options(
+            &ctx,
+            gguf,
+            capacity,
+            packed_prefill_requested.then_some(prompt_tokens.len()),
+            decode_options,
+        )
+    }
+    .context("load admitted Qwen3.8-Flash-Next weights and text session")?;
+    let packed_fallback = packed_prefill_requested && loaded.packed_prefill_capacity().is_none();
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     eprintln!(
         "qwen4exp: hc_up_mix={} eligible=Q8_0/4x2560/K320 rollback={QWEN4EXP_HC_UP_MIX_ENV}=0",

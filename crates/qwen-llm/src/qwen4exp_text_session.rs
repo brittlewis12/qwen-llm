@@ -106,6 +106,8 @@ pub const QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Qwen4ExpTextSessionError {
+    #[error("Qwen3.8-Flash-Next text-session memory admission denied: {0}")]
+    MemoryAdmission(#[from] crate::metal::MemoryAdmissionDenied),
     #[error(transparent)]
     Config(#[from] Qwen4ExpError),
     #[error(transparent)]
@@ -679,6 +681,7 @@ impl fmt::Display for Qwen4ExpTextSessionMemoryPlan {
     }
 }
 
+#[derive(Clone)]
 pub struct Qwen4ExpTextSessionPlan {
     geometry: Qwen4ExpTextSessionMetalGeometry,
     memory: Qwen4ExpTextSessionMemoryPlan,
@@ -835,6 +838,34 @@ impl Qwen4ExpTextSessionPlan {
         &self.memory
     }
 
+    /// Narrow reusable scratch without changing the context or dropping the
+    /// selected-QSA scratch required by the original prompt extent.
+    pub(crate) fn with_prefill_rows(
+        &self,
+        ctx: &MetalContext,
+        rows: Option<usize>,
+    ) -> Result<Self, Qwen4ExpTextSessionError> {
+        if rows.is_some_and(|rows| {
+            rows < 2 || self.memory.packed_capacity.is_none_or(|old| rows > old)
+        }) {
+            return invalid("prefill workspace narrowing cannot expand packed capacity");
+        }
+        let plan = Self {
+            memory: Qwen4ExpTextSessionMemoryPlan::for_geometry_with_options(
+                ctx,
+                &self.geometry,
+                self.memory.residency_priced_upper_bytes,
+                rows,
+                rows.is_some() && self.memory.packed_selected_capable,
+            )?,
+            geometry: self.geometry.clone(),
+            device_registry_id: self.device_registry_id,
+        };
+        #[cfg(test)]
+        let plan = plan.with_split_decode(ctx, self.memory.split_decode_enabled())?;
+        Ok(plan)
+    }
+
     pub fn admit_after_residency(
         self,
         weights: &Qwen4ExpMetalWeights,
@@ -856,14 +887,8 @@ impl Qwen4ExpTextSessionPlan {
             return invalid("resident weights differ from the session residency memory plan");
         }
         let admission = self.memory.admission_after_residency(signals);
-        if !admission.admitted {
-            return invalid(format!(
-                "text-session memory admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
-                admission.reason.as_str(),
-                admission.required_bytes,
-                admission.working_set_headroom_bytes,
-                admission.signals.process_limit_remaining_bytes
-            ));
+        if let Some(denied) = admission.refusal() {
+            return Err(denied.into());
         }
         Ok(Qwen4ExpAdmittedTextSessionPlan {
             plan: self,
@@ -1112,12 +1137,8 @@ impl Qwen4ExpTextSessionMetalWorkspace {
             .plan
             .memory
             .admission_after_residency(ctx.memory_signals());
-        if !refreshed.admitted {
-            return invalid(format!(
-                "text-session memory admission changed before allocation: reason={} required={:?}",
-                refreshed.reason.as_str(),
-                refreshed.required_bytes
-            ));
+        if let Some(denied) = refreshed.refusal() {
+            return Err(denied.into());
         }
         Self::allocate(ctx, admitted.plan.geometry, admitted.plan.memory, refreshed)
     }

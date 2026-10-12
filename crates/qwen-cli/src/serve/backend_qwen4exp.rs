@@ -170,39 +170,23 @@ impl FlashNextBackend {
         snapshot_policy: SnapshotPolicyConfig,
     ) -> anyhow::Result<Self> {
         let vocab_size = prepared.tokenizer.n_vocab();
-        // Packed prefill sized to the whole context; when that allocation
-        // is refused, prompts prefill token by token as on the run lane.
-        let (loaded, packed_fallback) = match Qwen4ExpLoadedModel::load_with_decode_options(
+        // The context determines selected-QSA needs, not packed row count.
+        // Narrow reusable scratch under pressure before scalarizing prefill.
+        let loaded = Qwen4ExpLoadedModel::load_with_adaptive_prefill(
             &ctx,
             gguf,
             prepared.capacity,
-            Some(prepared.context_limit),
+            prepared.context_limit,
             prepared.decode_options,
-        ) {
-            Ok(loaded) => (loaded, None),
-            Err(packed_error) => (
-                Qwen4ExpLoadedModel::load_with_decode_options(
-                    &ctx,
-                    gguf,
-                    prepared.capacity,
-                    None,
-                    prepared.decode_options,
-                )
-                .with_context(|| {
-                    format!(
-                        "load Qwen3.8-Flash-Next serve session (packed prefill refused: {packed_error})"
-                    )
-                })?,
-                Some(packed_error.to_string()),
-            ),
-        };
+        )
+        .context("load Qwen3.8-Flash-Next serve session")?;
         tracing::info!(
             target: "qwen_diag",
             "serve: qwen4exp resident forward_limit={} qsa_physical_capacity={} packed_prefill_capacity={:?} packed_fallback={:?} guarded_topk={} hc_up_mix={}",
             prepared.capacity.forward_limit(),
             prepared.capacity.qsa_physical_capacity(),
             loaded.packed_prefill_capacity(),
-            packed_fallback,
+            loaded.packed_prefill_capacity().is_none(),
             loaded.guarded_topk_enabled(),
             loaded.hc_up_mix_enabled(),
         );

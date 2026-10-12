@@ -32,6 +32,10 @@ use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLDevice};
 use std::ops::Range;
 use std::time::Instant;
 
+#[cfg(test)]
+#[path = "qwen4exp_prefill_admission_tests.rs"]
+mod prefill_admission_tests;
+
 // Selected-range packed QSA prefill. Default-on since 2026-09-03: the
 // 08-28 N=4,099 trace showed its distance from the scalar-selected path is the
 // same packed-HC arithmetic distance the already-default dense packed path
@@ -84,6 +88,8 @@ impl Drop for Qwen4ExpPackedSelectedQsaOverride {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Qwen4ExpRuntimeError {
+    #[error("Qwen3.8-Flash-Next prefill memory admission denied: {0}")]
+    MemoryAdmission(#[from] crate::metal::MemoryAdmissionDenied),
     #[error(transparent)]
     Config(#[from] Qwen4ExpError),
     #[error(transparent)]
@@ -650,6 +656,40 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         packed_prefill_tokens: Option<usize>,
         decode: Qwen4ExpDecodeOptions,
     ) -> Result<Self, Qwen4ExpRuntimeError> {
+        Self::load_with_prefill_policy(ctx, gguf, capacity, packed_prefill_tokens, decode, false)
+    }
+
+    /// Preserve packed execution under memory pressure by narrowing reusable
+    /// rows before falling back to scalar. Context and selected-QSA capability
+    /// remain fixed; explicit profiling should use `load_with_decode_options`.
+    pub fn load_with_adaptive_prefill(
+        ctx: &MetalContext,
+        gguf: &'gguf GgufFile,
+        capacity: Qwen4ExpSessionCapacity,
+        prompt_extent: usize,
+        decode: Qwen4ExpDecodeOptions,
+    ) -> Result<Self, Qwen4ExpRuntimeError> {
+        if prompt_extent == 0 || prompt_extent > capacity.forward_limit {
+            return invalid("prompt extent is outside the admitted forward limit");
+        }
+        Self::load_with_prefill_policy(
+            ctx,
+            gguf,
+            capacity,
+            (prompt_extent > 1).then_some(prompt_extent),
+            decode,
+            true,
+        )
+    }
+
+    fn load_with_prefill_policy(
+        ctx: &MetalContext,
+        gguf: &'gguf GgufFile,
+        capacity: Qwen4ExpSessionCapacity,
+        packed_prefill_tokens: Option<usize>,
+        decode: Qwen4ExpDecodeOptions,
+        adaptive: bool,
+    ) -> Result<Self, Qwen4ExpRuntimeError> {
         if let Some(tokens) = packed_prefill_tokens
             && !(2..=capacity.forward_limit).contains(&tokens)
         {
@@ -691,26 +731,45 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         let _allocation_transaction = ctx.begin_allocation_transaction();
         #[cfg(test)]
         let session_plan = session_plan.with_split_decode(ctx, decode.split_qsa)?;
-        let aggregate = session_plan
-            .memory_plan()
-            .admission_before_residency(ctx.memory_signals(), 1)?;
-        if !aggregate.admitted {
-            return invalid(format!(
-                "combined weight and session admission denied: reason={} required={:?}",
-                aggregate.reason.as_str(),
-                aggregate.required_bytes
-            ));
-        }
+        let (mut session_plan, aggregate) =
+            select_prefill_plan(ctx, session_plan, ctx.memory_signals(), true, adaptive)?;
         let admitted_weights = weight_plan.admit(ctx.memory_signals())?;
         let realized = Qwen4ExpMetalWeights::realize(ctx, gguf, admitted_weights)?;
         let weight_admission = realized.admission();
         let observed_weight_bytes = realized.observed_allocation_delta();
         let weights = realized.into_weights();
         let ple_table = weights.ple_source().bind(gguf)?;
-        let admitted_session =
-            session_plan.admit_after_residency(&weights, ctx.memory_signals())?;
-        let mut workspace =
-            Qwen4ExpTextSessionMetalWorkspace::from_admitted(ctx, admitted_session)?;
+        let mut workspace = loop {
+            (session_plan, _) =
+                select_prefill_plan(ctx, session_plan, ctx.memory_signals(), false, adaptive)?;
+            let result = (|| {
+                #[cfg(test)]
+                prefill_admission_tests::allocation_checkpoint()?;
+                let admitted = session_plan
+                    .clone()
+                    .admit_after_residency(&weights, ctx.memory_signals())?;
+                Qwen4ExpTextSessionMetalWorkspace::from_admitted(ctx, admitted)
+            })();
+            match result {
+                Ok(workspace) => break workspace,
+                Err(error)
+                    if adaptive
+                        && session_allocation_can_narrow(&error)
+                        && session_plan
+                            .memory_plan()
+                            .packed_prefill_capacity()
+                            .is_some() =>
+                {
+                    let rows =
+                        smaller_prefill_rows(session_plan.memory_plan().packed_prefill_capacity());
+                    tracing::info!(
+                        "qwen4exp: workspace allocation refused ({error}); retrying packed rows={rows:?}"
+                    );
+                    session_plan = session_plan.with_prefill_rows(ctx, rows)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
         if decode.guarded_topk {
             workspace.configure_guarded_topk(ctx, true)?;
         }
@@ -718,6 +777,9 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
             workspace.configure_hc_up_mix(ctx, true)?;
         }
         let session_admission = workspace.admission();
+        let aggregate = session_plan
+            .memory_plan()
+            .admission_before_residency(aggregate.signals, 1)?;
 
         Ok(Self {
             weights,
@@ -1994,6 +2056,47 @@ fn gcd(mut left: usize, mut right: usize) -> usize {
 
 fn invalid<T>(detail: impl Into<String>) -> Result<T, Qwen4ExpRuntimeError> {
     Err(Qwen4ExpRuntimeError::Invalid(detail.into()))
+}
+
+fn smaller_prefill_rows(rows: Option<usize>) -> Option<usize> {
+    rows.filter(|&n| n > 2)
+        .map(|n| 1 << (usize::BITS - 1 - (n - 1).leading_zeros()))
+}
+
+fn session_allocation_can_narrow(error: &Qwen4ExpTextSessionError) -> bool {
+    matches!(error, Qwen4ExpTextSessionError::MemoryAdmission(denied) if denied.reason.is_pressure())
+        || matches!(
+            error,
+            Qwen4ExpTextSessionError::Metal(MetalError::NoBuffer(_))
+        )
+}
+
+fn select_prefill_plan(
+    ctx: &MetalContext,
+    mut plan: Qwen4ExpTextSessionPlan,
+    signals: crate::metal::MetalMemorySignals,
+    before_residency: bool,
+    adaptive: bool,
+) -> Result<(Qwen4ExpTextSessionPlan, MetalMemoryAdmission), Qwen4ExpRuntimeError> {
+    loop {
+        let admission = if before_residency {
+            plan.memory_plan().admission_before_residency(signals, 1)?
+        } else {
+            plan.memory_plan().admission_after_residency(signals)
+        };
+        let Some(denied) = admission.refusal() else {
+            return Ok((plan, admission));
+        };
+        let rows = plan.memory_plan().packed_prefill_capacity();
+        if !adaptive || !denied.reason.is_pressure() || rows.is_none() {
+            return Err(denied.into());
+        }
+        let smaller = smaller_prefill_rows(rows);
+        tracing::info!(
+            "qwen4exp: prefill admission refused ({denied}); narrowing packed rows={rows:?} to {smaller:?}"
+        );
+        plan = plan.with_prefill_rows(ctx, smaller)?;
+    }
 }
 
 #[cfg(test)]

@@ -233,13 +233,11 @@ mod tests {
 
         let attempts = std::cell::Cell::new(0);
         let releases = std::cell::Cell::new(0);
+        let expected = memory_refusal("DS4 session", &denied(Reason::ProcessSignalUnavailable));
         let result: Result<(), ServeError> = with_pressure_release_retry(
             || {
                 attempts.set(attempts.get() + 1);
-                Err(memory_refusal(
-                    "DS4 session",
-                    &denied(Reason::ProcessSignalUnavailable),
-                ))
+                Err(expected.clone())
             },
             || {
                 releases.set(releases.get() + 1);
@@ -247,8 +245,7 @@ mod tests {
             },
         );
         let error = result.unwrap_err();
-        assert_eq!(error.status, 500);
-        assert_eq!(error.code, Some("memory_signal_unavailable"));
+        assert_eq!(error, expected);
         assert_eq!(attempts.get(), 1);
         assert_eq!(releases.get(), 0);
     }

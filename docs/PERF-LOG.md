@@ -44,6 +44,10 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 - Read-only verification of the old quality packet passed its 52 adapter and
   25 operator CPU tests. This is historical evidence review, not renewed GPU
   qualification or a claim that the entire dirty tree is ready to land.
+- Retired the `qwen-llm-quant-compat` worktree. Selector candidate and standalone
+  correctness tests remain at `3b21b899` on `perf/glm-flash-next-prefill`, not
+  merged to main; three selector CPU tests pass. Discarded the superseded
+  experiment machinery rather than creating another archive.
 
 ## 2026-10-11 - Gate/Up and KDA Falsifiers; Retire Live Experiment Debt
 

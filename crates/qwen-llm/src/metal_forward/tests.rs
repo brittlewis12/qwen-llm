@@ -2851,6 +2851,60 @@ fn routed_moe_gate_up_support_requires_matching_native_formats() {
 }
 
 #[test]
+fn routed_moe_admission_matches_decode_selectors_for_every_ggml_type() {
+    let dtypes = [
+        GgmlType::F32,
+        GgmlType::F16,
+        GgmlType::Q4_0,
+        GgmlType::Q4_1,
+        GgmlType::Q5_0,
+        GgmlType::Q5_1,
+        GgmlType::Q8_0,
+        GgmlType::Q8_1,
+        GgmlType::Q2_K,
+        GgmlType::Q3_K,
+        GgmlType::Q4_K,
+        GgmlType::Q5_K,
+        GgmlType::Q6_K,
+        GgmlType::Q8_K,
+        GgmlType::IQ2_XXS,
+        GgmlType::IQ2_XS,
+        GgmlType::IQ3_XXS,
+        GgmlType::IQ1_S,
+        GgmlType::IQ4_NL,
+        GgmlType::IQ3_S,
+        GgmlType::IQ2_S,
+        GgmlType::IQ4_XS,
+        GgmlType::I8,
+        GgmlType::I16,
+        GgmlType::I32,
+        GgmlType::I64,
+        GgmlType::F64,
+        GgmlType::IQ1_M,
+        GgmlType::BF16,
+        GgmlType::TQ1_0,
+        GgmlType::TQ2_0,
+        GgmlType::MXFP4,
+        GgmlType::NVFP4,
+        GgmlType::Q1_0,
+        GgmlType::Q2_0,
+        GgmlType::Unknown,
+    ];
+    for dtype in dtypes {
+        assert_eq!(
+            moe_routed_gate_up_decode_supported(dtype, dtype),
+            moe_routed_gate_up_decode_selector(dtype, dtype).is_some(),
+            "gate/up {dtype:?}"
+        );
+        assert_eq!(
+            moe_routed_down_decode_supported(dtype),
+            moe_routed_down_decode_selector(dtype).is_some(),
+            "down {dtype:?}"
+        );
+    }
+}
+
+#[test]
 fn native_quant_embedding_mode_is_strict_and_tri_state() {
     assert_eq!(
         parse_native_quant_embedding_mode(None),

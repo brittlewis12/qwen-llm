@@ -4233,32 +4233,7 @@ kernel void kernel_deepseek_v4_select_top_k_multigroup_publish_f32(
     }
 }
 
-// Returns the exclusive lane prefix and total for exactly eight 32-lane groups.
-static inline uint2 ds4_selector_parallel_scan_256(
-        uint value, threadgroup uint * lane_scratch, threadgroup uint * shared,
-        ushort simdgroup, ushort simd_lane) {
-    uint inclusive = value;
-    for (ushort distance = 1u; distance < 32u; distance <<= 1u) {
-        const uint prior = simd_shuffle_up(inclusive, distance);
-        if (simd_lane >= distance) inclusive += prior;
-    }
-    if (simd_lane == 31u) lane_scratch[uint(simdgroup)] = inclusive;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (simdgroup == 0u && simd_lane == 0u) {
-        uint total = 0u;
-        for (uint group = 0u; group < 8u; ++group) {
-            shared[32u + group] = total;
-            total += lane_scratch[group];
-        }
-        shared[0] = total;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    // Separate arrays matter: the next scan may write lane_scratch immediately,
-    // but its first barrier precedes any overwrite of these shared prefixes.
-    return uint2(shared[32u + uint(simdgroup)] + inclusive - value, shared[0]);
-}
-
-template <bool Radix4, bool EmitMask, bool ParallelScan = false>
+template <bool Radix4, bool EmitMask>
 __attribute__((always_inline)) inline void ds4_select_top_k_parallel_impl(
         constant ds4_indexer_select_args & args,
         device const float * scores,
@@ -4450,25 +4425,19 @@ __attribute__((always_inline)) inline void ds4_select_top_k_parallel_impl(
         const uint key = ds4_selector_order_key(scores[query * args.row_capacity + row]);
         if (key == threshold_key) ++local_equal;
     }
-    uint equal_before;
-    if (ParallelScan) {
-        equal_before = ds4_selector_parallel_scan_256(
-            local_equal, lane_scratch, shared, simdgroup, simd_lane).x;
-    } else {
-        lane_scratch[lane] = local_equal;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (lane == 0u) {
-            uint equal_total = 0u;
-            for (uint index = 0u; index < width; ++index) {
-                const uint count = lane_scratch[index];
-                lane_scratch[index] = equal_total;
-                equal_total += count;
-            }
-            shared[0] = equal_total;
+    lane_scratch[lane] = local_equal;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0u) {
+        uint equal_total = 0u;
+        for (uint index = 0u; index < width; ++index) {
+            const uint count = lane_scratch[index];
+            lane_scratch[index] = equal_total;
+            equal_total += count;
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        equal_before = lane_scratch[lane];
+        shared[0] = equal_total;
     }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint equal_before = lane_scratch[lane];
 
     uint local_equal_seen = 0u;
     uint local_selected = 0u;
@@ -4480,29 +4449,20 @@ __attribute__((always_inline)) inline void ds4_select_top_k_parallel_impl(
         if (at_threshold) ++local_equal_seen;
         if (selected) ++local_selected;
     }
-    uint output_slot;
-    if (ParallelScan) {
-        const uint2 scan = ds4_selector_parallel_scan_256(
-            local_selected, lane_scratch, shared, simdgroup, simd_lane);
-        output_slot = scan.x;
-        error = scan.y == selected_count ? 0 : 3;
-    } else {
-        lane_scratch[lane] = local_selected;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (lane == 0u) {
-            uint selected_total = 0u;
-            for (uint index = 0u; index < width; ++index) {
-                const uint count = lane_scratch[index];
-                lane_scratch[index] = selected_total;
-                selected_total += count;
-            }
-            shared[0] = selected_total;
-            shared[1] = selected_total == selected_count ? 0u : 3u;
+    lane_scratch[lane] = local_selected;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0u) {
+        uint selected_total = 0u;
+        for (uint index = 0u; index < width; ++index) {
+            const uint count = lane_scratch[index];
+            lane_scratch[index] = selected_total;
+            selected_total += count;
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        error = int(shared[1]);
+        shared[0] = selected_total;
+        shared[1] = selected_total == selected_count ? 0u : 3u;
     }
-
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    error = int(shared[1]);
     if (error != 0) {
         if (EmitMask) {
             for (uint row = lane; row < args.row_capacity; row += width) {
@@ -4522,7 +4482,7 @@ __attribute__((always_inline)) inline void ds4_select_top_k_parallel_impl(
         return;
     }
 
-    if (!ParallelScan) output_slot = lane_scratch[lane];
+    uint output_slot = lane_scratch[lane];
     local_equal_seen = 0u;
     for (uint row = chunk_start; row < chunk_end; ++row) {
         const uint key = ds4_selector_order_key(scores[query * args.row_capacity + row]);
@@ -4630,27 +4590,6 @@ kernel void kernel_deepseek_v4_select_top_k_radix4_ids_f32(
         ushort simdgroup [[simdgroup_index_in_threadgroup]],
         ushort simd_lane [[thread_index_in_simdgroup]]) {
     ds4_select_top_k_parallel_impl<true, false>(
-        args, scores, visible_counts, cache_order_ids, cache_order_ids,
-        cache_order_ids, selected_counts, status, lane_scratch, shared,
-        lane, query, width, simdgroup, simd_lane);
-}
-
-kernel void kernel_qwen4exp_qsa_select_top_k_radix4_ids_parallel_scan_f32(
-        constant ds4_indexer_select_args & args [[buffer(0)]],
-        device const float * scores [[buffer(1)]],
-        device const int * visible_counts [[buffer(2)]],
-        device int * cache_order_ids [[buffer(3)]],
-        device int * selected_counts [[buffer(4)]],
-        device int * status [[buffer(5)]],
-        threadgroup uint * lane_scratch [[threadgroup(0)]],
-        threadgroup uint * shared [[threadgroup(1)]],
-        uint lane [[thread_index_in_threadgroup]],
-        uint query [[threadgroup_position_in_grid]],
-        uint width [[threads_per_threadgroup]],
-        ushort simdgroup [[simdgroup_index_in_threadgroup]],
-        ushort simd_lane [[thread_index_in_simdgroup]]) {
-    if (width != 256u) return;
-    ds4_select_top_k_parallel_impl<true, false, true>(
         args, scores, visible_counts, cache_order_ids, cache_order_ids,
         cache_order_ids, selected_counts, status, lane_scratch, shared,
         lane, query, width, simdgroup, simd_lane);

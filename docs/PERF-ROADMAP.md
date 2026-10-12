@@ -73,14 +73,18 @@ retry; no cause was established for its stall. Complete source is archived at
    dense projections from latent absorption/expansion. Collect census outside
    ordinary timing. A representative leaf times the layer count is not actual
    aggregate attribution. No new general tracing framework or depth grid.
-2. **Coordinate the next Flash selected-QSA step if GLM lacks a useful lever.**
+2. **Coordinate Flash work; the retained integer selector is now falsified.**
    Existing Flash work now retains packed prefill under workspace pressure
    (`e7b48483`). The quant-compatibility worktree has been retired; its parallel
-   integer selector and correctness tests remain at `3b21b899`. A bounded
-   ordinary selected-prefill A/B, changing only that selector, is the next useful
-   test. Do not resurrect its perturbing parent observer or encoder-splitting
-   campaign, duplicate another owner, or force another GLM tweak merely because
-   it is locally available.
+   integer selector was tested in ordinary 8K-prefix/2048-suffix execution:
+   actual launches have 32 queries, not the microbenchmark's 2048. Both packets
+   preserve full logits/state exactly, but mean wall ratios are 0.965x and
+   0.924x; the repeat favors the incumbent in both pairs. Do not promote or
+   widen query bands to recover the leaf win. Source and harness are archived
+   at `7628319e`, not in the active build. Evidence:
+   `docs/bench/2026-10-12-flash-selector/`. Do not resurrect its perturbing parent
+   observer or encoder-splitting campaign, duplicate another owner, or force
+   another GLM tweak merely because it is locally available.
 
 GLM selected-attention work is deferred behind those prefill opportunities;
 the measured leaf is only about 1 ms. Keep Flash selected-QSA work coordinated

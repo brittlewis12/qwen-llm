@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-12 - Flash Integer Selector: Ordinary Execution Does Not Convert
+
+- Reused retained `3b21b899` without old parent observers or encoder splitting.
+  One ordinary context32768 cell: prefix8192/suffix2048, native UD, same
+  checkpoint restored outside every warm/ABBA arm. Actual selector launches
+  have 32 queries, compressor capacity8192 and visible blocks2048-2560.
+- 768 substitutions (12 layers x64 bands), unchanged surrounding dispatch
+  order/geometry. Full logits and persistent state hashes remain exact through
+  three common continuation tokens in both packets. Independent GPU oracle
+  passes ties, nonfinite values, offsets and immutability checks.
+- First wall/GPU mean A/B ratios0.9647/0.9484 with opposite-signed pairs;
+  repeat0.9241/0.9034, both pairs favor incumbent. Retain all samples and drift;
+  no precise regression estimate or performance promotion. Large-query leaf
+  gains did not establish improvement for actual serving launches.
+- Source/harness checkpoint `7628319e`; remove live candidate/one-off harness
+  rather than widen bands or revive the attribution campaign. Production and
+  decode unchanged. Evidence: `docs/bench/2026-10-12-flash-selector/`.
+
 ## 2026-10-12 - Enable Half Q6 Latent MMA On Task Evidence
 
 - Refreshed lane from `8d50ec11` through `73d13835`, then `f9abbf19` before

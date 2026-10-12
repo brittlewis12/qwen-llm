@@ -28,9 +28,6 @@ mod router_2045;
 #[path = "prefill_map/frontier_schedule.rs"]
 mod frontier_schedule;
 
-#[path = "prefill_map/selected_scan_ab.rs"]
-mod selected_scan_ab;
-
 use super::*;
 use serde_json::{Value, json};
 use std::io::Write;

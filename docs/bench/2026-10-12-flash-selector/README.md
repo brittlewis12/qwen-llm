@@ -42,7 +42,7 @@ campaign. Production selector and decode remain unchanged. The retained source
 checkpoint and complete raw evidence suffice for reproducibility; remove the
 candidate and one-off model packet from the active build after recording them.
 
-Reproduction at the experimental revision:
+Reproduction at experimental revision `7628319e` in a separate worktree:
 
 ```sh
 env -u MTL_DEBUG_LAYER QWEN_METAL_LEASE_WAIT=1 \

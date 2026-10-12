@@ -1748,7 +1748,7 @@ fn deepseek_v4_cli_accepts_only_bounded_single_turn_surfaces() {
 #[ignore = "requires the local DeepSeek V4 Flash-0731 IQ3 fixture"]
 fn deepseek_v4_0731_message_prompts_match_flash_vocab() {
     const MODEL: &str = concat!(
-        "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/",
+        "models/deepseek-v4-flash-0731/UD-IQ3_XXS/",
         "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf"
     );
     fn message(role: &str, content: &str) -> messages::ChatMessage {

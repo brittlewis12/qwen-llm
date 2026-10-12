@@ -1,8 +1,15 @@
 #[test]
 #[ignore = "serial Metal, optimized resident Muse math/reuse/cancellation composition"]
 fn muse_served_math_prefix_composition() {
-    let path = Path::new(qwen_llm::test_fixtures::MUSE_GLIMMER_Q8_0.path());
-    let gguf = GgufFile::open(path).unwrap();
+    if qwen_llm::test_fixtures::MUSE_GLIMMER_Q8_0
+        .path_or_skip()
+        .is_none()
+    {
+        return;
+    }
+
+    let path = Path::new(qwen_llm::test_fixtures::MUSE_GLIMMER_Q8_0.required());
+    let gguf = GgufFile::open(&path).unwrap();
     let ctx = MetalContext::new().unwrap();
     let mut backend = MuseGlimmerBackend::new_with_options(
         ctx,

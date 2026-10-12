@@ -72,8 +72,15 @@ fn run(
 #[test]
 #[ignore = "serial Metal, real Muse repeated-turn correctness and full-backend wall"]
 fn muse_live_prefix_reuse_backend_packet() {
-    let path = std::path::Path::new(qwen_llm::test_fixtures::MUSE_GLIMMER_Q8_0.path());
-    let gguf = GgufFile::open(path).unwrap();
+    if qwen_llm::test_fixtures::MUSE_GLIMMER_Q8_0
+        .path_or_skip()
+        .is_none()
+    {
+        return;
+    }
+
+    let path = std::path::Path::new(qwen_llm::test_fixtures::MUSE_GLIMMER_Q8_0.required());
+    let gguf = GgufFile::open(&path).unwrap();
     let ctx = MetalContext::new().unwrap();
     let mut backend =
         MuseGlimmerBackend::new(ctx, gguf, path, "muse-prefix-pilot".into(), 16, 8192).unwrap();
@@ -193,8 +200,15 @@ fn muse_live_prefix_reuse_backend_packet() {
 #[test]
 #[ignore = "serial Metal, Muse sampled exact-hit reuse versus reset"]
 fn muse_live_prefix_sampled_retries_match_reset() {
-    let path = std::path::Path::new(qwen_llm::test_fixtures::MUSE_GLIMMER_Q8_0.path());
-    let gguf = GgufFile::open(path).unwrap();
+    if qwen_llm::test_fixtures::MUSE_GLIMMER_Q8_0
+        .path_or_skip()
+        .is_none()
+    {
+        return;
+    }
+
+    let path = std::path::Path::new(qwen_llm::test_fixtures::MUSE_GLIMMER_Q8_0.required());
+    let gguf = GgufFile::open(&path).unwrap();
     let ctx = MetalContext::new().unwrap();
     let mut backend =
         MuseGlimmerBackend::new(ctx, gguf, path, "muse-prefix-pilot".into(), 16, 512).unwrap();

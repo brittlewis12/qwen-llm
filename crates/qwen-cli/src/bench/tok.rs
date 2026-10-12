@@ -161,13 +161,13 @@ mod tok_tests {
     #[test]
     fn auto_preserves_thinking_only_for_qwen36() {
         assert!(messages_auto_preserve_thinking(
-            &json!({ "model": "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf" })
+            &json!({ "model": "models/Qwen3.6-27B-Q4_K_M.gguf" })
         ));
         assert!(messages_auto_preserve_thinking(
             &json!({ "preserve_thinking": true, "model": "anything" })
         ));
         assert!(!messages_auto_preserve_thinking(
-            &json!({ "model": "/Users/tito/models/Qwen3.5-27B-Q4_K_M.gguf" })
+            &json!({ "model": "models/Qwen3.5-27B-Q4_K_M.gguf" })
         ));
         assert!(!messages_auto_preserve_thinking(&serde_json::Value::Null));
     }
@@ -208,7 +208,7 @@ mod tok_tests {
     #[test]
     fn parse_messages_input_accepts_top_level_metadata() {
         let value = json!({
-            "model": "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+            "model": "models/Qwen3.6-27B-Q4_K_M.gguf",
             "preserve_thinking": true,
             "messages": [
                 {"role": "user", "content": "hi"}
@@ -218,7 +218,7 @@ mod tok_tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             meta.get("model").and_then(|v| v.as_str()),
-            Some("/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf")
+            Some("models/Qwen3.6-27B-Q4_K_M.gguf")
         );
         assert_eq!(
             meta.get("preserve_thinking").and_then(|v| v.as_bool()),

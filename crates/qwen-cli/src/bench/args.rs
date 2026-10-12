@@ -1433,11 +1433,7 @@ pub(crate) struct TokArgs {
 #[derive(Parser, Debug)]
 pub(crate) struct AttnPrefillMicroArgs {
     /// Path to a GGUF file.
-    #[arg(
-        short = 'm',
-        long,
-        default_value = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
-    )]
+    #[arg(short = 'm', long)]
     pub(crate) model: PathBuf,
     /// Absolute position of the first packed query row.
     #[arg(long, default_value = "16384")]

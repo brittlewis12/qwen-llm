@@ -238,9 +238,9 @@ mod tests {
         .collect();
         paths.extend(
             [
-                "/Users/tito/models/Qwen3.5-27B-Q4_K_M.gguf",
-                "/Users/tito/models/Qwen3.8-27B-Q4_K_M.gguf",
-                "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
+                "models/Qwen3.5-27B-Q4_K_M.gguf",
+                "models/Qwen3.8-27B-Q4_K_M.gguf",
+                "models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
             ]
             .map(std::path::PathBuf::from)
             .into_iter()

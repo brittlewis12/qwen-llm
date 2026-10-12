@@ -2884,7 +2884,7 @@ mod tests {
     #[ignore = "loads a local model and prices real Metal request allocations"]
     fn serial_tail_scratch_allocation_inventory() {
         let model = std::env::var("QWEN_NO_TAIL_TEST_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf".into());
+            .unwrap_or_else(|_| "models/Qwen3.5-0.8B-Q4_K_M.gguf".into());
         let runtime = qwen_llm::runtime::Runtime::metal().expect("Metal runtime");
         let loaded = runtime.load_model(&model).expect("explicit local fixture");
         for prompt_tokens in [32, 8192 + 16, 32768 + 16] {
@@ -2931,7 +2931,7 @@ mod tests {
             }
         }
         let model = std::env::var("QWEN_NO_TAIL_TEST_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf".into());
+            .unwrap_or_else(|_| "models/Qwen3.5-0.8B-Q4_K_M.gguf".into());
         let runtime = qwen_llm::runtime::Runtime::metal().unwrap();
         let loaded = runtime.load_model(&model).unwrap();
         let tokens = loaded
@@ -3033,7 +3033,7 @@ mod tests {
             }
         }
         let model = std::env::var("QWEN_NO_TAIL_TEST_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf".into());
+            .unwrap_or_else(|_| "models/Qwen3.5-0.8B-Q4_K_M.gguf".into());
         let runtime = qwen_llm::runtime::Runtime::metal().expect("Metal runtime");
         let loaded = runtime.load_model(&model).expect("explicit local fixture");
         let tokens = loaded
@@ -3192,7 +3192,7 @@ mod tests {
         }
 
         let model = std::env::var("QWEN_NO_TAIL_TEST_MODEL")
-            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf".into());
+            .unwrap_or_else(|_| "models/Qwen3.5-0.8B-Q4_K_M.gguf".into());
         let runtime = qwen_llm::runtime::Runtime::metal().unwrap();
         let loaded = runtime.load_model(&model).unwrap();
         let family = qwen_llm::model_family::ModelFamily::detect(loaded.gguf()).unwrap();
@@ -3274,7 +3274,7 @@ mod tests {
         }
         let runtime = qwen_llm::runtime::Runtime::metal().unwrap();
         let loaded = runtime
-            .load_model("/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf")
+            .load_model("models/Qwen3.5-0.8B-Q4_K_M.gguf")
             .unwrap();
         let family = qwen_llm::model_family::ModelFamily::detect(loaded.gguf()).unwrap();
         let template = crate::prompt_template::serve_qwen_template(family, loaded.gguf()).unwrap();
@@ -3415,7 +3415,7 @@ mod tests {
         }
         let runtime = qwen_llm::runtime::Runtime::metal().unwrap();
         let loaded = runtime
-            .load_model("/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf")
+            .load_model("models/Qwen3.5-0.8B-Q4_K_M.gguf")
             .unwrap();
         let family = qwen_llm::model_family::ModelFamily::detect(loaded.gguf()).unwrap();
         let template = crate::prompt_template::serve_qwen_template(family, loaded.gguf()).unwrap();

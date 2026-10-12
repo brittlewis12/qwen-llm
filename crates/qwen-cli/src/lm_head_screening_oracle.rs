@@ -32,7 +32,7 @@ use std::time::Instant;
 use crate::host_validity::HostSnapshot;
 
 const SCHEMA: &str = "qwen-lm-head-screening-oracle/v0664";
-const MODEL_PATH: &str = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+const MODEL_FILENAME: &str = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
 const MODEL_BYTES: u64 = 22_134_528_992;
 const MODEL_SHA256: &str = "ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61";
 const PROMPT_PATH: &str = "docs/bench/tokenizer-prompts/current-reva-n8-interactive-qwen36.txt";
@@ -644,10 +644,6 @@ fn tensor_copy(tensor: &MetalTensor, expected: usize) -> Result<Vec<f32>> {
 
 fn validate_args(args: &LmHeadScreeningOracleArgs) -> Result<()> {
     ensure!(
-        args.model == Path::new(MODEL_PATH),
-        "model argument differs from preregistration"
-    );
-    ensure!(
         args.prompt_file == Path::new(PROMPT_PATH),
         "prompt argument differs from preregistration"
     );
@@ -773,7 +769,7 @@ fn validate_readiness_constants(readiness: &ReadinessArtifact) -> Result<()> {
     ensure!(
         readiness.command_arguments
             == ReadinessCommandArguments {
-                model: MODEL_PATH.to_string(),
+                model: MODEL_FILENAME.to_string(),
                 prompt_file: PROMPT_PATH.to_string(),
                 tokens: TOKENS,
                 capture_calls: CALLS.to_vec(),
@@ -1276,7 +1272,10 @@ fn validate_capture_manifest_constants(manifest: &CaptureManifestArtifact) -> Re
     validate_sha256(&model.sha256, "model SHA-256")?;
     validate_sha256(&model.output_weight.sha256, "output head SHA-256")?;
     ensure!(
-        model.path == MODEL_PATH
+        Path::new(&model.path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some(MODEL_FILENAME)
             && model.bytes == MODEL_BYTES
             && model.sha256 == MODEL_SHA256
             && model.architecture == "qwen35moe"
@@ -2135,7 +2134,7 @@ fn validate_raw_gguf(
     let output = gguf.try_slice(desc)?;
     ensure!(sha256(output) == OUTPUT_SHA256);
     Ok(ModelIdentityRecord {
-        path: MODEL_PATH.to_string(),
+        path: MODEL_FILENAME.to_string(),
         bytes: MODEL_BYTES,
         sha256: MODEL_SHA256.to_string(),
         architecture: "qwen35moe".to_string(),
@@ -3909,7 +3908,6 @@ fn sha256_file_handle(file: &File) -> Result<String> {
 
 fn authenticate_raw_model(path: &Path) -> Result<AuthenticatedModel> {
     let total_start = Instant::now();
-    ensure!(path == Path::new(MODEL_PATH));
     check_absolute_nofollow_parents(path)?;
     let path_metadata = std::fs::symlink_metadata(path)?;
     ensure!(path_metadata.file_type().is_file() && !path_metadata.file_type().is_symlink());
@@ -5441,7 +5439,7 @@ mod tests {
             executable_identity,
             operator_attestation: true,
             command_arguments: ReadinessCommandArguments {
-                model: MODEL_PATH.to_string(),
+                model: MODEL_FILENAME.to_string(),
                 prompt_file: PROMPT_PATH.to_string(),
                 tokens: TOKENS,
                 capture_calls: CALLS.to_vec(),

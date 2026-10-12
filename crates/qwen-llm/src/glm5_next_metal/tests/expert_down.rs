@@ -42,6 +42,9 @@ use std::time::Instant;
 #[path = "expert_down_wide.rs"]
 mod wide;
 
+#[path = "expert_gate_up.rs"]
+mod gate_up;
+
 const H: usize = 4096;
 const K: usize = 2048;
 const E: usize = 288;
@@ -137,6 +140,18 @@ pub(super) fn after_grouped(
     });
     if let Some(c) = capture {
         assert_eq!((rows, dtype), (c.rows, c.dtype));
+        // The grouped call only reads p.normed. Capture it before SharedExpert
+        // and the next block can reuse this scratch, only when gate/up asks.
+        if let Some(input) = &c.normalized_input {
+            crate::metal::encode_copy_offset_f32(
+                ctx,
+                enc,
+                &flat(&p.normed, H * rows),
+                0,
+                input,
+                H * rows,
+            )?;
+        }
         crate::metal::encode_copy_offset_f32(
             ctx,
             enc,
@@ -163,6 +178,7 @@ struct Capture {
     block: usize,
     rows: usize,
     inner: MetalTensor,
+    normalized_input: Option<MetalTensor>,
     counts: MetalTensor,
     slots: MetalTensor,
 }
@@ -186,8 +202,22 @@ impl Capture {
         cpu_bytes: u64,
         out: &mut File,
     ) -> Rc<Self> {
+        Self::allocate_with_input(ctx, block, rows, dtype, cpu_bytes, false, out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn allocate_with_input(
+        ctx: &MetalContext,
+        block: usize,
+        rows: usize,
+        dtype: GgmlType,
+        cpu_bytes: u64,
+        capture_input: bool,
+        out: &mut File,
+    ) -> Rc<Self> {
         assert!(matches!(dtype, GgmlType::IQ3_S | GgmlType::IQ3_XXS));
-        let lengths = [K * TOP * rows * 4, E * 4, E * rows * 4];
+        let lengths = [K * TOP * rows * 4, E * 4, E * rows * 4, H * rows * 4];
+        let lengths = &lengths[..if capture_input { 4 } else { 3 }];
         let priced: Vec<u64> = lengths
             .iter()
             .map(|&n| {
@@ -208,6 +238,7 @@ impl Capture {
             out,
             json!({"event":"capture_admission", "block":block, "rows":rows,
             "logical_bytes":lengths, "priced_gpu_bytes":priced, "cpu_reserve_bytes":cpu_bytes,
+            "normalized_input_captured":capture_input,
             "admitted":admission.admitted, "reason":admission.reason.as_str(),
             "current_gpu_bytes":admission.signals.current_allocated_bytes,
             "working_set_headroom_bytes":admission.working_set_headroom_bytes}),
@@ -218,6 +249,8 @@ impl Capture {
             block,
             rows,
             inner: MetalTensor::zeros_f32(ctx, vec![(K * TOP * rows) as u64]).unwrap(),
+            normalized_input: capture_input
+                .then(|| MetalTensor::zeros_f32(ctx, vec![(H * rows) as u64]).unwrap()),
             counts: MetalTensor::zeros_i32(ctx, vec![E as u64]).unwrap(),
             slots: MetalTensor::zeros_i32(ctx, vec![(E * rows) as u64]).unwrap(),
         })

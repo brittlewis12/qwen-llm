@@ -1610,6 +1610,229 @@ fn clamped_swiglu_n32_pipeline_name(dtype: GgmlType) -> Option<&'static str> {
     }
 }
 
+/// Research-only Half gate/up M32/N32/K32 entry point. Same dtype capability
+/// as the incumbent fused fast path; this does not advertise F32 operands.
+#[cfg(test)]
+pub fn moe_swiglu_m32n32_pipeline_name(dtype: GgmlType) -> Option<&'static str> {
+    match dtype {
+        GgmlType::IQ2_S => Some("kernel_moe_swiglu_clamped_iq2_s_f32_grouped_slots_m32n32"),
+        GgmlType::IQ3_S => Some("kernel_moe_swiglu_clamped_iq3_s_f32_grouped_slots_m32n32"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static GROUPED_GATE_UP_M32: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // Faults exercise preflight without changing the context or cached PSOs.
+    static GATE_UP_M32_PREFLIGHT_FAULT: std::cell::Cell<Option<GateUpM32Fault>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum GateUpM32Fault {
+    MissingPipeline,
+    Capacity,
+    Device,
+}
+
+/// Thread-local, nestable, unwind-safe experiment in the existing Half split
+/// encoder. False retains the caller's actual production policy. True uses
+/// N16 for counts <=16 and research M32/N32 for counts >=17, independently of
+/// `wide_min_count`. Other dtype recipes and exact F32 encoders are unaffected.
+/// No expert orchestrator change or persistent allocation is required.
+#[cfg(test)]
+pub fn with_grouped_gate_up_m32_override<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            GROUPED_GATE_UP_M32.with(|v| v.set(self.0));
+        }
+    }
+    let _restore = Restore(GROUPED_GATE_UP_M32.with(|v| v.replace(enabled)));
+    f()
+}
+
+#[cfg(test)]
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GateUpM32Args {
+    ffn: u32,
+    hidden: u32,
+    n_expert: u32,
+    topk: u32,
+    n_tokens: u32,
+    nb01: u32,
+    stride_b: u32,
+    min_count: u32,
+    max_count: u32,
+}
+
+// All validation and both retained PSOs precede the first dispatch. Keep this
+// separate from dispatch_fused_swiglu so production geometry/code is untouched.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn encode_moe_swiglu_m32_split(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+    clamp: f32,
+) -> Result<(), MetalError> {
+    use super::checks::{bad_shape, check_disjoint, require_serial};
+    use super::moe::{checked_moe_product, validate_moe_decode_tensor};
+    const K: &str = "moe_swiglu_m32n32_split";
+    require_serial(K, enc)?;
+    for (label, dim) in [
+        ("hidden", n_hidden),
+        ("ffn", n_ffn),
+        ("experts", n_expert),
+        ("topk", topk),
+        ("tokens", n_tokens),
+    ] {
+        if dim == 0 || dim > i32::MAX as usize {
+            return Err(bad_shape(K, format!("{label} must fit positive i32")));
+        }
+    }
+    if !clamp.is_finite() || clamp <= 0.0 || w_gate.dtype != w_up.dtype {
+        return Err(bad_shape(
+            K,
+            "requires positive finite clamp and matching gate/up dtype",
+        ));
+    }
+    let wide = moe_swiglu_m32n32_pipeline_name(w_gate.dtype)
+        .ok_or_else(|| bad_shape(K, "requires IQ2_S or IQ3_S"))?;
+    let layout = generic_layout_for(K, w_gate, n_hidden, n_ffn, n_expert)?;
+    generic_layout_for(K, w_up, n_hidden, n_ffn, n_expert)?;
+    let slots = checked_moe_product(K, "slots", &[n_tokens, topk])?;
+    let id_elements = checked_moe_product(K, "ids", &[n_expert, n_tokens])?;
+    if slots > i32::MAX as usize || id_elements > i32::MAX as usize {
+        return Err(bad_shape(K, "slots and ids element counts must fit i32"));
+    }
+    let bank_elements = checked_moe_product(K, "bank", &[n_hidden, n_ffn, n_expert])?;
+    let input_elements = checked_moe_product(K, "input", &[n_hidden, n_tokens])?;
+    let output_elements = checked_moe_product(K, "output", &[n_ffn, slots])?;
+    for (label, tensor, elements, dtype, writable, alignment) in [
+        ("gate", w_gate, bank_elements, w_gate.dtype, false, 2),
+        ("up", w_up, bank_elements, w_up.dtype, false, 2),
+        ("input", x_pack, input_elements, GgmlType::F32, false, 16),
+        ("counts", counts, n_expert, GgmlType::I32, false, 4),
+        ("ids", ids, id_elements, GgmlType::I32, false, 4),
+        ("inner", inner, output_elements, GgmlType::F32, true, 4),
+    ] {
+        validate_moe_decode_tensor(K, label, tensor, elements, &[dtype], writable, alignment)?;
+    }
+    check_disjoint(
+        K,
+        inner,
+        &[
+            (w_gate, "gate"),
+            (w_up, "up"),
+            (x_pack, "input"),
+            (counts, "counts"),
+            (ids, "ids"),
+        ],
+    )?;
+    let bindings = [w_gate, w_up, x_pack, counts, ids, inner];
+    let fault = GATE_UP_M32_PREFLIGHT_FAULT.with(std::cell::Cell::get);
+    let device = if matches!(fault, Some(GateUpM32Fault::Device)) {
+        // Simulate a foreign context on single-GPU test hosts; exercise the
+        // same registry comparison used for real encoder/buffer ownership.
+        ctx.device.registryID() ^ u64::MAX
+    } else {
+        ctx.device.registryID()
+    };
+    if enc.parent_command_buffer().device().registryID() != device
+        || bindings
+            .iter()
+            .any(|t| t.buffer.device().registryID() != device)
+    {
+        return Err(bad_shape(
+            K,
+            "encoder and bindings must belong to the context device",
+        ));
+    }
+    let narrow = clamped_swiglu_pipeline_name(w_gate.dtype).expect("capability checked");
+    let mut panels = Vec::with_capacity(2);
+    for (name, rows, tokens, bytes, min_count, max_count) in [
+        (narrow.as_str(), 64, 16, 16384, 0, n_tokens.min(16) as u32),
+        (wide, 32, 32, 8192, 17, n_tokens as u32),
+    ] {
+        if min_count as usize > n_tokens {
+            continue;
+        }
+        let lookup = if rows == 32 && matches!(fault, Some(GateUpM32Fault::MissingPipeline)) {
+            "__missing_gate_up_m32_pipeline"
+        } else {
+            name
+        };
+        let pso = ctx.pipeline(lookup)?;
+        let limit = if rows == 32 && matches!(fault, Some(GateUpM32Fault::Capacity)) {
+            0
+        } else {
+            ctx.device.maxThreadgroupMemoryLength()
+        };
+        if pso.threadExecutionWidth() != 32
+            || pso.maxTotalThreadsPerThreadgroup() < 128
+            || pso
+                .staticThreadgroupMemoryLength()
+                .checked_add(bytes)
+                .is_none_or(|n| n > limit)
+        {
+            return Err(bad_shape(
+                K,
+                format!("{name} requires SIMD32, TG128 and {bytes} dynamic TGM bytes"),
+            ));
+        }
+        panels.push((name, pso, rows, tokens, bytes, min_count, max_count));
+    }
+    for (name, pso, rows, tokens, bytes, min_count, max_count) in panels {
+        census_record_pso(name);
+        enc.set_pipeline(&pso);
+        enc.set_bytes(
+            0,
+            &GateUpM32Args {
+                ffn: n_ffn as u32,
+                hidden: n_hidden as u32,
+                n_expert: n_expert as u32,
+                topk: topk as u32,
+                n_tokens: n_tokens as u32,
+                nb01: ((n_hidden / layout.block_elems) * layout.block_bytes) as u32,
+                stride_b: n_hidden as u32,
+                min_count,
+                max_count,
+            },
+        );
+        for (index, tensor) in bindings.into_iter().enumerate() {
+            enc.set_tensor(index + 1, tensor);
+        }
+        enc.set_bytes(7, &clamp);
+        enc.set_threadgroup_memory(0, bytes);
+        enc.dispatch(
+            MTLSize {
+                width: n_tokens.div_ceil(tokens),
+                height: n_ffn.div_ceil(rows),
+                depth: n_expert,
+            },
+            MTLSize {
+                width: 128,
+                height: 1,
+                depth: 1,
+            },
+        );
+    }
+    Ok(())
+}
+
 /// [`encode_moe_swiglu_clamped_f32_grouped_slots_generic`] with buckets of at
 /// least `wide_min_count` slots on the 32-token tile and the rest on the
 /// 16-token tile: two dispatches over disjoint, exhaustive count ranges.
@@ -1638,6 +1861,16 @@ pub fn encode_moe_swiglu_clamped_f32_grouped_slots_split(
     clamp: f32,
     wide_min_count: u32,
 ) -> Result<(), MetalError> {
+    #[cfg(test)]
+    if GROUPED_GATE_UP_M32.with(std::cell::Cell::get)
+        && w_gate.dtype == w_up.dtype
+        && moe_swiglu_m32n32_pipeline_name(w_gate.dtype).is_some()
+    {
+        return encode_moe_swiglu_m32_split(
+            ctx, enc, w_gate, w_up, x_pack, counts, ids, inner, n_hidden, n_ffn, n_expert, topk,
+            n_tokens, clamp,
+        );
+    }
     const KERNEL: &str = "moe_swiglu_clamped_grouped_slots_split";
     // A span shorter than the wide threshold has no bucket that large (a
     // bucket holds at most `n_tokens` slots): the incumbent alone.
@@ -2074,3 +2307,6 @@ mod clamped_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod gate_up_m32_tests;

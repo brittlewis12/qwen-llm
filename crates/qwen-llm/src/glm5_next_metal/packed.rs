@@ -60,6 +60,10 @@ mod hc_decode_ab;
 mod latent_mma_ab;
 
 #[cfg(test)]
+#[path = "tests/kda_prepare_ab.rs"]
+mod kda_prepare_ab;
+
+#[cfg(test)]
 thread_local! {
     static ABSORB_TAIL: std::cell::Cell<(Option<bool>, usize)> = const { std::cell::Cell::new((None, 0)) };
 }
@@ -1923,6 +1927,8 @@ impl Glm5NextSession<'_> {
             width,
             rows,
         )?;
+        #[cfg(test)]
+        kda_prepare_ab::before_prepare(ctx, enc, rows, conv, p)?;
         encode_kda_prefill(
             ctx,
             enc,

@@ -43,6 +43,24 @@ pub(crate) fn memory_refusal(what: &str, denied: &MemoryAdmissionDenied) -> Serv
     }
 }
 
+/// Retry a memory-pressure refusal once after releasing optional cached
+/// state. Telemetry, size and unrelated errors pass through unchanged.
+pub(super) fn with_pressure_release_retry<T>(
+    mut attempt: impl FnMut() -> Result<T, ServeError>,
+    mut release: impl FnMut() -> bool,
+) -> Result<T, ServeError> {
+    match attempt() {
+        Err(error) if error.status == 503 && error.code == Some("memory_admission_denied") => {
+            if release() {
+                attempt()
+            } else {
+                Err(error)
+            }
+        }
+        other => other,
+    }
+}
+
 pub(super) fn combined_reserve(durable: u64, transport: u64) -> Result<u64, ServeError> {
     durable
         .checked_add(transport)
@@ -169,5 +187,69 @@ mod tests {
         assert!(admit_resident_transport(reserve, Some(reserve)).is_ok());
         assert!(admit_resident_transport(reserve, None).is_err());
         assert_eq!(combined_reserve(0, 128).unwrap(), 128);
+    }
+
+    #[test]
+    fn pressure_release_retries_once_but_telemetry_refusal_does_not_release() {
+        use qwen_llm::metal::{
+            MemoryAdmissionDenied, MetalMemoryAdmissionReason as Reason, MetalMemorySignals,
+        };
+
+        let signals = MetalMemorySignals {
+            recommended_max_bytes: 1 << 30,
+            current_allocated_bytes: 0,
+            process_limit_remaining_bytes: Some(0),
+        };
+        let denied = |reason| MemoryAdmissionDenied {
+            reason,
+            required_bytes: Some(512),
+            signals,
+            working_set_headroom_bytes: Some(1 << 30),
+        };
+
+        let attempts = std::cell::Cell::new(0);
+        let releases = std::cell::Cell::new(0);
+        let result = with_pressure_release_retry(
+            || {
+                let attempt = attempts.get() + 1;
+                attempts.set(attempt);
+                if attempt == 1 {
+                    Err(memory_refusal(
+                        "DS4 session",
+                        &denied(Reason::ProcessInsufficient),
+                    ))
+                } else {
+                    Ok("admitted")
+                }
+            },
+            || {
+                releases.set(releases.get() + 1);
+                true
+            },
+        );
+        assert_eq!(result.unwrap(), "admitted");
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(releases.get(), 1);
+
+        let attempts = std::cell::Cell::new(0);
+        let releases = std::cell::Cell::new(0);
+        let result: Result<(), ServeError> = with_pressure_release_retry(
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(memory_refusal(
+                    "DS4 session",
+                    &denied(Reason::ProcessSignalUnavailable),
+                ))
+            },
+            || {
+                releases.set(releases.get() + 1);
+                true
+            },
+        );
+        let error = result.unwrap_err();
+        assert_eq!(error.status, 500);
+        assert_eq!(error.code, Some("memory_signal_unavailable"));
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(releases.get(), 0);
     }
 }

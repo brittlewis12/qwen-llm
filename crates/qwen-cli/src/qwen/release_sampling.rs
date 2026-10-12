@@ -222,21 +222,22 @@ mod tests {
     /// but where a local release GGUF restates its generation_config in
     /// `general.sampling.*`, the two must agree (absent keys mean "off").
     #[test]
-    #[ignore = "model witness: qwen3-5-27b-q4-k-m"]
+    #[ignore = "model witness: qwen3.6-27b-q4_k_m"]
     fn decisions_agree_with_release_ggufs_that_restate_their_generation_config() {
         use qwen_llm::test_fixtures as fx;
-        let mut paths: Vec<std::path::PathBuf> = [
-            fx::A3B_Q4_K_M,
-            fx::QWEN36_27B_Q4_K_M,
-            fx::A3B_IQ4_XS,
-            fx::A10B_Q4_K_XL,
-            fx::DEEPSEEK_V4_IQ3_XXS,
-            fx::QWEN4EXP_Q3_K_XL,
-            fx::GLM53_FLASH_UD_IQ3_XXS,
-        ]
-        .iter()
-        .filter_map(|fixture| fixture.path_or_skip())
-        .collect();
+        let mut paths = vec![fx::QWEN36_27B_Q4_K_M.required().clone()];
+        paths.extend(
+            [
+                fx::A3B_Q4_K_M,
+                fx::A3B_IQ4_XS,
+                fx::A10B_Q4_K_XL,
+                fx::DEEPSEEK_V4_IQ3_XXS,
+                fx::QWEN4EXP_Q3_K_XL,
+                fx::GLM53_FLASH_UD_IQ3_XXS,
+            ]
+            .iter()
+            .filter_map(|fixture| fixture.path_or_skip()),
+        );
         paths.extend(
             [
                 qwen_llm::test_fixtures::required_filename("Qwen3.5-27B-Q4_K_M.gguf"),
@@ -273,6 +274,10 @@ mod tests {
             assert!((decided.min_p - declared_min_p).abs() < 1e-6, "{context}");
             checked += 1;
         }
+        assert!(
+            checked > 0,
+            "required model witness checked no sampling metadata"
+        );
         eprintln!("release sampling cross-checked against {checked} local GGUF header(s)");
     }
 }

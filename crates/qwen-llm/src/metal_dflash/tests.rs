@@ -11985,7 +11985,7 @@ fn metal_27b_packed_gdn_tail_profile() {
 /// (24 layers, all GDN — so n_gdn = n_layer = 24, smaller than
 /// 27B's 48). Loads in <1 s.
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dflash_verify_scratch_slots_and_offsets() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -11993,10 +11993,7 @@ fn dflash_verify_scratch_slots_and_offsets() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&path).exists() {
-        eprintln!("[dflash-scratch] skipped — fixture missing");
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -12185,7 +12182,7 @@ fn dflash_verify_scratch_slots_and_offsets() {
 ///
 /// 0.8B-F32, N=4. Loads in ~500 ms; total runtime ≤ 2 s on M4 Max.
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dflash_packed_verify_argmax_matches_n_single_tokens() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -12193,10 +12190,7 @@ fn dflash_packed_verify_argmax_matches_n_single_tokens() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&path).exists() {
-        eprintln!("[dflash-packed-verify] skipped — fixture missing");
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -12359,7 +12353,7 @@ fn dflash_packed_verify_argmax_matches_n_single_tokens() {
 ///
 /// 0.8B-F32, M=2 prime + N=4 verify. ≤ 2 s.
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dflash_packed_verify_layer_major_matches_token_major() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -12367,9 +12361,7 @@ fn dflash_packed_verify_layer_major_matches_token_major() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&path).exists() {
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -12576,7 +12568,7 @@ fn dflash_packed_verify_layer_major_matches_token_major() {
 /// Uses 0.8B-F32 (lib loop, fast). 27B integration test follows in
 /// dflash_correctness.rs.
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dflash_packed_verify_n_eff_override_equiv() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -12584,10 +12576,7 @@ fn dflash_packed_verify_n_eff_override_equiv() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&path).exists() {
-        eprintln!("[n_eff-equiv] skipped — fixture missing");
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -12751,7 +12740,7 @@ fn dflash_packed_verify_n_eff_override_equiv() {
 /// Catches the scratch/model/session dimensional drift class
 /// codex flagged.
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dflash_packed_verify_dim_guard_wall() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -12759,9 +12748,7 @@ fn dflash_packed_verify_dim_guard_wall() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&path).exists() {
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -12869,7 +12856,7 @@ fn dflash_packed_verify_dim_guard_wall() {
 ///   (b) Stale session (kv_n_pos=K from prior decode) called with
 ///       start_position != K — should fail.
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dflash_packed_verify_kv_n_pos_guard() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -12877,9 +12864,7 @@ fn dflash_packed_verify_kv_n_pos_guard() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&path).exists() {
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -12939,7 +12924,7 @@ fn dflash_packed_verify_kv_n_pos_guard() {
 /// This is the test codex specifically called out as more
 /// important than the cosine gate before writing restore.
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dflash_packed_verify_with_primed_session() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -12947,9 +12932,7 @@ fn dflash_packed_verify_with_primed_session() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&path).exists() {
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -13064,7 +13047,7 @@ fn dflash_packed_verify_with_primed_session() {
 ///
 /// 0.8B-F32, M=2 prime + N=4 verify. ≤ 5 s on M4 Max.
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dflash_restore_after_partial_accept_replay_equivalence() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -13072,9 +13055,7 @@ fn dflash_restore_after_partial_accept_replay_equivalence() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&path).exists() {
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -13230,7 +13211,7 @@ fn dflash_restore_after_partial_accept_replay_equivalence() {
 }
 
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dflash_layer_major_packed_gdn_checkpoint_replay_equivalence() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -13242,9 +13223,7 @@ fn dflash_layer_major_packed_gdn_checkpoint_replay_equivalence() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&path).exists() {
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -13411,7 +13390,7 @@ fn dflash_layer_major_packed_gdn_checkpoint_replay_equivalence() {
 /// MetalDFlashDebugScratch (allocates the [N, V] buffer; debug-
 /// only path).
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dflash_packed_verify_with_logits_cosine_match() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -13419,9 +13398,7 @@ fn dflash_packed_verify_with_logits_cosine_match() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&path).exists() {
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -13551,7 +13528,7 @@ fn dflash_packed_verify_with_logits_cosine_match() {
 // for `reference[n][...]`, `(n * K + k) * H + i` stride math, and
 // failure-message position. Iterator rewrite would lose all three.
 #[allow(clippy::needless_range_loop)]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dflash_packed_verify_hidden_capture_layout() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -13559,9 +13536,7 @@ fn dflash_packed_verify_hidden_capture_layout() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&path).exists() {
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -13694,7 +13669,7 @@ fn dflash_packed_verify_hidden_capture_layout() {
 /// mitigation): n_keep=0 must fail loudly; n_keep > N must fail;
 /// stale kv_n_pos must fail.
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dflash_restore_after_partial_accept_guard_wall() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -13702,9 +13677,7 @@ fn dflash_restore_after_partial_accept_guard_wall() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&path).exists() {
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -13775,7 +13748,7 @@ fn dflash_restore_after_partial_accept_guard_wall() {
 /// Verify `MetalDFlashDebugScratch` builds correctly and `logits_slot`
 /// returns properly-aligned views into the [N, V] buffer.
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dflash_debug_scratch_logits_slots() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -13783,10 +13756,7 @@ fn dflash_debug_scratch_logits_slots() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&path).exists() {
-        eprintln!("[dflash-debug-scratch] skipped — fixture missing");
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -13828,7 +13798,7 @@ fn dflash_debug_scratch_logits_slots() {
 ///
 /// Edge cases tested via subroutine: T<P, T==P, T==P+r, T==2P.
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn prefill_tokens_matches_single_token_loop_0_8b() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -13836,10 +13806,7 @@ fn prefill_tokens_matches_single_token_loop_0_8b() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&path).exists() {
-        eprintln!("[prefill-tokens-vs-single-token] skipped — fixture missing");
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };

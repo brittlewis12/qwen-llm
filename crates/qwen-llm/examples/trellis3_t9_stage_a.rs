@@ -64,16 +64,20 @@ fn read_f64_file(path: &str, n: usize) -> Vec<f64> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     assert_eq!(bytes.len(), n * 8, "{path} size");
     bytes
-        .chunks_exact(8)
-        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| f64::from_le_bytes(*c))
         .collect()
 }
 
 fn read_f32_file(path: &str) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect()
 }
 
@@ -216,8 +220,9 @@ fn rotate_cols_output(w: &mut [f32], n_out: usize, d: usize, signs: &[f32]) {
 
 fn main() {
     let data = std::env::var("T9_DATA").expect("T9_DATA (capture dir)");
-    let model = std::env::var("T9_MODEL")
-        .unwrap_or_else(|_| qwen_llm::test_fixtures::QWEN35_0_8B_F32.required().into());
+    let model = std::env::var_os("T9_MODEL")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| qwen_llm::test_fixtures::QWEN35_0_8B_F32.required().clone());
     let out_dir = std::env::var("T9_OUT").expect("T9_OUT");
     let seeds: Vec<u64> = std::env::var("T9_SEEDS")
         .unwrap_or_else(|_| "11,22,33".into())

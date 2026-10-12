@@ -18,7 +18,9 @@ CPU-only and offline.
     uv run --offline scripts/reference/glm53/directions_prompt_check.py RUNS_DIR
 """
 
+import argparse
 import json
+import os
 import struct
 import subprocess
 import sys
@@ -32,7 +34,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from model_search import resolve_model
 
 SHARD1 = str(resolve_model("GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf"))
-TOKENIZE = Path.home() / "code/llama.cpp/build-glm5/bin/llama-tokenize"
+
 
 
 def gguf_string(path, wanted):
@@ -72,7 +74,14 @@ def gguf_string(path, wanted):
 
 
 def main():
-    runs = Path(sys.argv[1])
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("runs_dir", type=Path)
+    parser.add_argument("--llama-tokenize", type=Path, default=os.environ.get("LLAMA_TOKENIZE"))
+    args = parser.parse_args()
+    if args.llama_tokenize is None:
+        parser.error("provide --llama-tokenize or set LLAMA_TOKENIZE")
+    tokenize = Path(args.llama_tokenize).expanduser()
+    runs = args.runs_dir
     template = gguf_string(SHARD1, "tokenizer.chat_template")
     # As transformers (and llama.cpp's --jinja) compile chat templates, and as
     # scripts/reference/generate_glm53_chat_fixtures.py does.
@@ -97,7 +106,7 @@ def main():
             + "</think>"
         )
         out = subprocess.run(
-            [str(TOKENIZE), "-m", SHARD1, "--ids", "--log-disable", "--stdin"],
+            [str(tokenize), "-m", SHARD1, "--ids", "--log-disable", "--stdin"],
             input=text,
             capture_output=True,
             text=True,

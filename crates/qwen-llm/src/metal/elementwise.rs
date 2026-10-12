@@ -2883,10 +2883,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen36-27b-q4-k-m"]
     fn post_block_interventions_match_f32_cpu_oracles_at_realistic_hidden_size() {
-        let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
-
         let Some(ctx) = metal_test_context() else {
             return;
         };
@@ -3423,7 +3420,7 @@ mod tests {
         const COLS: usize = 512;
         const ROWS: usize = 3;
         let mut bytes = vec![0u8; ROWS * COLS / 256 * 136];
-        for (ordinal, block) in bytes.chunks_exact_mut(136).enumerate() {
+        for (ordinal, block) in bytes.as_chunks_mut::<136>().0.iter_mut().enumerate() {
             let scale = half::f16::from_f32((ordinal as f32 - 2.0) / 1024.0);
             block[..2].copy_from_slice(&scale.to_bits().to_le_bytes());
             for (i, byte) in block[2..].iter_mut().enumerate() {

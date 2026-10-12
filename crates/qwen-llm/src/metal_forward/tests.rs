@@ -1035,11 +1035,7 @@ fn gguf_parallel_pread_dense_advice_preserves_configured_policy() {
 }
 
 #[test]
-#[ignore = "model witness: a3b-q4-k-m"]
 fn prepared_auto_prefetch_advice_selector_table_is_fail_closed() {
-    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
-    let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
-
     #[derive(Clone, Copy)]
     enum Selection {
         A3bPread,
@@ -3496,7 +3492,7 @@ fn run_concurrent_gdn_moe_equivalence(
 /// Compares the residual stream (s.x) after the block against what
 /// the CPU forward produces after running just block 0.
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn metal_gdn_block_matches_cpu() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -3504,10 +3500,7 @@ fn metal_gdn_block_matches_cpu() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&path).exists() {
-        eprintln!("[metal-gdn] skipped — model missing");
-        return;
-    }
+
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -3580,10 +3573,7 @@ fn metal_single_token_matches_cpu_oracle() {
         .to_str()
         .expect("model fixture path must be UTF-8");
     let oracle_path = crate::test_fixtures::required_filename("hello_t0.f32");
-    if !std::path::Path::new(&model_path).exists() || !std::path::Path::new(oracle_path).exists() {
-        eprintln!("[metal-e2e] skipped — fixtures missing");
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -3645,7 +3635,7 @@ fn metal_single_token_matches_cpu_oracle() {
 }
 
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn metal_single_token_concurrent_gdn_matches_serial() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -3653,10 +3643,7 @@ fn metal_single_token_concurrent_gdn_matches_serial() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&model_path).exists() {
-        eprintln!("[metal-concurrent-gdn] skipped — fixture missing");
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -3728,7 +3715,7 @@ fn metal_single_token_concurrent_gdn_matches_serial() {
 }
 
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn metal_single_token_concurrent_gdn_attn_matches_serial() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -3736,10 +3723,7 @@ fn metal_single_token_concurrent_gdn_attn_matches_serial() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&model_path).exists() {
-        eprintln!("[metal-concurrent-gdn-attn] skipped — fixture missing");
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -3796,7 +3780,7 @@ fn metal_single_token_concurrent_gdn_attn_matches_serial() {
 }
 
 #[test]
-#[ignore = "model witness: a3b-q4-k-m"]
+#[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m"]
 fn metal_single_token_concurrent_gdn_moe_matches_serial_a3b() {
     let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
@@ -3814,7 +3798,7 @@ fn metal_single_token_concurrent_gdn_moe_matches_serial_a3b() {
 /// A discarded decode command must fail the call and poison the session on
 /// the default MoE decode path, which once read partial logits unchecked.
 #[test]
-#[ignore = "model witness: a3b-q4-k-m"]
+#[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m"]
 fn moe_decode_rejects_a_discarded_command_and_poisons_the_session() {
     let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
@@ -3822,10 +3806,7 @@ fn moe_decode_rejects_a_discarded_command_and_poisons_the_session() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&model_path).exists() {
-        eprintln!("[moe-discarded-command] skipped — fixture missing");
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -4248,7 +4229,7 @@ fn metal_sampled_structural_matches_copied_a3b() {
 }
 
 #[test]
-#[ignore = "model witness: qwen3-5-122b-a10b-ud-q4-k-xl-00001-of-00003"]
+#[ignore = "model witness: qwen3.5-122b-a10b-ud-q4_k_xl"]
 fn metal_single_token_concurrent_gdn_moe_matches_serial_a10b_smoke() {
     run_concurrent_gdn_moe_equivalence(
         crate::test_fixtures::required_filename("Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"),
@@ -4259,7 +4240,7 @@ fn metal_single_token_concurrent_gdn_moe_matches_serial_a10b_smoke() {
 }
 
 #[test]
-#[ignore = "model witness: a3b-q4-k-m"]
+#[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m"]
 fn metal_35b_a3b_moe_matches_cpu_smoke() {
     let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
@@ -4267,10 +4248,7 @@ fn metal_35b_a3b_moe_matches_cpu_smoke() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&model_path).exists() {
-        eprintln!("[metal-moe-a3b] skipped — fixture missing");
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -4328,7 +4306,7 @@ fn metal_35b_a3b_moe_matches_cpu_smoke() {
 }
 
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn metal_argmax_chain_matches_full_logits_dense() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -4343,7 +4321,7 @@ fn metal_argmax_chain_matches_full_logits_dense() {
 }
 
 #[test]
-#[ignore = "model witness: a3b-q4-k-m"]
+#[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m"]
 fn metal_argmax_chain_matches_full_logits_moe() {
     let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
@@ -4358,7 +4336,7 @@ fn metal_argmax_chain_matches_full_logits_moe() {
 }
 
 #[test]
-#[ignore = "model witness: qwen36-27b-q4-k-m"]
+#[ignore = "model witness: qwen3.6-27b-q4_k_m"]
 fn metal_exact_greedy_chain_matches_full_logits_dense() {
     let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
 
@@ -4372,7 +4350,7 @@ fn metal_exact_greedy_chain_matches_full_logits_dense() {
 }
 
 #[test]
-#[ignore = "model witness: a3b-q4-k-m"]
+#[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m"]
 fn metal_exact_greedy_chain_matches_full_logits_moe() {
     let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
@@ -4398,7 +4376,7 @@ fn metal_exact_greedy_chain_matches_full_logits_moe() {
 /// list. We use [1, 5, 10, 15, 23] for the 0.8B variant — different
 /// indices, same shape K=5.
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn metal_multi_hidden_matches_cpu() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -4406,10 +4384,7 @@ fn metal_multi_hidden_matches_cpu() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&model_path).exists() {
-        eprintln!("[metal-multi-hidden] skipped — fixture missing");
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -4501,7 +4476,7 @@ fn metal_multi_hidden_matches_cpu() {
 }
 
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dense_ffn_capture_brackets_the_residual_update() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -4509,10 +4484,7 @@ fn dense_ffn_capture_brackets_the_residual_update() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&model_path).exists() {
-        eprintln!("[dense-ffn-capture] skipped - fixture missing");
-        return;
-    }
+
     let Some(context) = metal_test_context() else {
         return;
     };
@@ -4647,7 +4619,7 @@ fn dense_ffn_capture_brackets_the_residual_update() {
 }
 
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dense_fixed_add_seam_is_bounded_and_ordered() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -4655,10 +4627,7 @@ fn dense_fixed_add_seam_is_bounded_and_ordered() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&model_path).exists() {
-        eprintln!("[dense-fixed-add] skipped - fixture missing");
-        return;
-    }
+
     let Some(context) = metal_test_context() else {
         return;
     };
@@ -4889,7 +4858,7 @@ fn dense_fixed_add_seam_is_bounded_and_ordered() {
 }
 
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dense_intervention_no_tail_matches_full_tail() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -4897,10 +4866,7 @@ fn dense_intervention_no_tail_matches_full_tail() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&model_path).exists() {
-        eprintln!("[dense-intervention-no-tail] skipped - fixture missing");
-        return;
-    }
+
     let Some(context) = metal_test_context() else {
         return;
     };
@@ -5134,7 +5100,7 @@ fn dense_intervention_no_tail_matches_full_tail() {
 }
 
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn dense_module_sites_are_placed_and_validated() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -5142,10 +5108,7 @@ fn dense_module_sites_are_placed_and_validated() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&model_path).exists() {
-        eprintln!("[dense-module-sites] skipped - fixture missing");
-        return;
-    }
+
     let Some(context) = metal_test_context() else {
         return;
     };
@@ -5286,7 +5249,7 @@ fn dense_module_sites_are_placed_and_validated() {
 }
 
 #[test]
-#[ignore = "model witness: a3b-q4-k-m"]
+#[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m"]
 fn ordinary_moe_serial_post_block_fixed_add_seam() {
     let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
@@ -5294,10 +5257,7 @@ fn ordinary_moe_serial_post_block_fixed_add_seam() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&model_path).exists() {
-        eprintln!("[moe-fixed-add] skipped - fixture missing");
-        return;
-    }
+
     let Some(context) = metal_test_context() else {
         return;
     };
@@ -5639,10 +5599,7 @@ fn metal_27b_q4_k_m_matches_oracle() {
         .to_str()
         .expect("model fixture path must be UTF-8");
     let oracle_path = crate::test_fixtures::required_filename("hello_27b_q4km.f32");
-    if !std::path::Path::new(&model_path).exists() || !std::path::Path::new(oracle_path).exists() {
-        eprintln!("[metal-27b] skipped — fixtures missing");
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -7790,10 +7747,7 @@ fn metal_27b_multi_token_perf() {
         .to_str()
         .expect("model fixture path must be UTF-8");
     let oracle_path = crate::test_fixtures::required_filename("longprompt_27b.f32");
-    if !std::path::Path::new(&model_path).exists() || !std::path::Path::new(oracle_path).exists() {
-        eprintln!("[metal-27b-multi] skipped — fixtures missing");
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -7887,10 +7841,7 @@ fn metal_multi_token_matches_cpu_oracle() {
         .to_str()
         .expect("model fixture path must be UTF-8");
     let oracle_path = crate::test_fixtures::required_filename("longprompt_t0.f32");
-    if !std::path::Path::new(&model_path).exists() || !std::path::Path::new(oracle_path).exists() {
-        eprintln!("[metal-e2e-multi] skipped — fixtures missing");
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -7969,7 +7920,7 @@ fn metal_multi_token_matches_cpu_oracle() {
 /// bit-identical hidden_dst on every prefill step. We accumulate
 /// the per-token captures across the prompt and compare.
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn no_tail_prefill_matches_full_tail() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -7980,14 +7931,7 @@ fn no_tail_prefill_matches_full_tail() {
             .to_str()
             .expect("model fixture path must be UTF-8"),
     );
-    if !std::path::Path::new(&model_path).exists() {
-        assert!(
-            override_path.is_none(),
-            "explicit no-tail fixture is missing"
-        );
-        eprintln!("[no-tail-prefill] skipped — fixture missing");
-        return;
-    }
+
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -8170,7 +8114,7 @@ fn no_tail_prefill_matches_full_tail() {
 /// CPU oracle. Uses block 3 of Qwen3.5-0.8B-F32 (the first attn block,
 /// n_q=8, n_kv=2, head_dim=256, 4:1 GQA).
 #[test]
-#[ignore = "model witness: qwen35-0-8b-f32"]
+#[ignore = "model witness: qwen3.5-0.8b-f32"]
 fn metal_attn_block_matches_cpu() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
@@ -8178,10 +8122,7 @@ fn metal_attn_block_matches_cpu() {
         .required()
         .to_str()
         .expect("model fixture path must be UTF-8");
-    if !std::path::Path::new(&path).exists() {
-        eprintln!("[metal-attn] skipped — model missing");
-        return;
-    }
+
     let Some(ctx) = metal_test_context() else {
         return;
     };

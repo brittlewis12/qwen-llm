@@ -84,7 +84,7 @@ fn client_shape(item: &Value) -> Value {
 }
 
 #[test]
-#[ignore = "model witness: glm53-flash-ud-iq3-xxs"]
+#[ignore = "model witness: glm-5.3-flash-ud-iq3_xxs"]
 fn natural_fixture_replays_through_serve() {
     let fixture_path = std::env::var_os("GLM53_REUSE_NATURAL")
         .map(std::path::PathBuf::from)
@@ -94,10 +94,12 @@ fn natural_fixture_replays_through_serve() {
                 "/../../scripts/reference/glm53/reuse-natural-v1.json"
             ))
         });
-    let Ok(bytes) = std::fs::read(&fixture_path) else {
-        eprintln!("skipped: no fixture at {}", fixture_path.display());
-        return;
-    };
+    let bytes = std::fs::read(&fixture_path).unwrap_or_else(|error| {
+        panic!(
+            "model witness glm53-flash-ud-iq3-xxs cannot read {}: {error}",
+            fixture_path.display()
+        )
+    });
     let path = qwen_llm::test_fixtures::GLM53_FLASH_UD_IQ3_XXS
         .required()
         .clone();

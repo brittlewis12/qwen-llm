@@ -1506,7 +1506,6 @@ pub(crate) fn flash_0731_config_fixture() -> DeepSeekV4Config {
 mod tests {
     use super::*;
     use crate::deepseek_v4_census::DeepSeekV4CensusV1;
-    use std::path::Path;
 
     #[test]
     fn compression_ratios_are_closed() {
@@ -1614,15 +1613,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the current local DeepSeek V4 Flash-0731 fixture"]
+    #[ignore = "model witness: deepseek-v4-flash-0731-ud-iq3_xxs"]
     fn live_0731_iq3_schema_binds_every_tensor() {
-        assert!(
-            Path::new(crate::test_fixtures::required_filename(
-                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf"
-            ))
-            .exists(),
-            "missing DS4 fixture"
-        );
         let gguf = GgufFile::open(crate::test_fixtures::required_filename(
             "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
         ))
@@ -1650,15 +1642,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the local DeepSeek V4 Flash-0731 REAP K160 fixture"]
+    #[ignore = "model witness: deepseek-v4-flash-0731-reap-k160-q3-k-q4-k-00001-of-00004"]
     fn live_0731_reap_k160_schema_binds_every_tensor() {
-        assert!(
-            Path::new(crate::test_fixtures::required_filename(
-                "DeepSeek-V4-Flash-0731-REAP-K160-Q3_K_Q4_K-00001-of-00004.gguf"
-            ))
-            .exists(),
-            "missing K160 REAP fixture"
-        );
         let gguf = GgufFile::open(crate::test_fixtures::required_filename(
             "DeepSeek-V4-Flash-0731-REAP-K160-Q3_K_Q4_K-00001-of-00004.gguf",
         ))
@@ -1675,15 +1660,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the local DeepSeek V4 Flash-0731 REAP K216 fixture"]
+    #[ignore = "model witness: deepseek-v4-flash-0731-reap-k216-ud-iq3-xxs-00001-of-00003"]
     fn live_0731_reap_k216_schema_binds_every_tensor() {
-        assert!(
-            Path::new(crate::test_fixtures::required_filename(
-                "DeepSeek-V4-Flash-0731-REAP-K216-UD-IQ3_XXS-00001-of-00003.gguf"
-            ))
-            .exists(),
-            "missing K216 REAP fixture"
-        );
         let gguf = GgufFile::open(crate::test_fixtures::required_filename(
             "DeepSeek-V4-Flash-0731-REAP-K216-UD-IQ3_XXS-00001-of-00003.gguf",
         ))

@@ -700,7 +700,7 @@ impl JsonlRequestFailure {
 pub(crate) enum JsonlRowOutcome {
     /// Blank or `#` comment line.
     Skipped,
-    Prepared(PreparedJsonlRequest),
+    Prepared(Box<PreparedJsonlRequest>),
     Failed(JsonlRequestFailure),
 }
 
@@ -723,6 +723,20 @@ pub(crate) fn prepare_jsonl_row(
     tokenizer: &Tokenizer,
     args: &Args,
     protocol: &JsonlRowProtocol,
+) -> JsonlRowOutcome {
+    prepare_jsonl_row_with_encoder(line_no, line, args, protocol, |prompt, specials| {
+        tokenizer
+            .encode(prompt, specials)
+            .map_err(anyhow::Error::new)
+    })
+}
+
+pub(crate) fn prepare_jsonl_row_with_encoder(
+    line_no: usize,
+    line: &str,
+    args: &Args,
+    protocol: &JsonlRowProtocol,
+    encode: impl Fn(&str, bool) -> anyhow::Result<Vec<i32>>,
 ) -> JsonlRowOutcome {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -749,18 +763,12 @@ pub(crate) fn prepare_jsonl_row(
             Ok(resolved) => resolved,
             Err(error) => return fail("input", error),
         };
-    let prompt_ids = match tokenizer.encode(&prompt, tokenizer_specials && !args.no_special_tokens)
-    {
+    let prompt_ids = match encode(&prompt, tokenizer_specials && !args.no_special_tokens) {
         Ok(ids) if ids.is_empty() => {
             return fail("tokenize", anyhow!("request {id} tokenized to zero tokens"));
         }
         Ok(ids) => ids,
-        Err(error) => {
-            return fail(
-                "tokenize",
-                anyhow::Error::new(error).context("tokenize prompt"),
-            );
-        }
+        Err(error) => return fail("tokenize", error.context("tokenize prompt")),
     };
     let sampling = match request_sampling_config(&request, args) {
         Ok(sampling) => sampling,
@@ -818,7 +826,7 @@ pub(crate) fn prepare_jsonl_row(
             );
         }
     }
-    JsonlRowOutcome::Prepared(prepared)
+    JsonlRowOutcome::Prepared(Box::new(prepared))
 }
 
 /// Prepared file requests split into the rows that can run and the rows
@@ -849,7 +857,7 @@ pub(crate) fn prepare_jsonl_file(
         let line = line.with_context(|| format!("read requests line {line_no}"))?;
         match prepare_jsonl_row(line_no, &line, tokenizer, args, &protocol) {
             JsonlRowOutcome::Skipped => {}
-            JsonlRowOutcome::Prepared(request) => prepared.push(request),
+            JsonlRowOutcome::Prepared(request) => prepared.push(*request),
             JsonlRowOutcome::Failed(failure) => {
                 failures.push(failure);
                 if policy == RequestErrorPolicy::Stop {

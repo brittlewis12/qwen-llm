@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from model_search import resolve_directory, resolve_model, search_roots
+from model_search import resolve_model, search_roots
 import re
 import statistics
 import subprocess
@@ -26,7 +26,8 @@ BENCH_BINARY = ROOT / "target/release/qwen-bench"
 COMMON_RUNNER = ROOT / "scripts/profile/v0593_demand_paged_no_copy.py"
 
 A3B_MODEL = resolve_model("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
-A10B_DIR = resolve_directory("UD-Q4_K_XL")
+A10B_FIRST_SHARD = resolve_model("Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf")
+A10B_DIR = A10B_FIRST_SHARD.parent
 A10B_SHARDS = tuple(
     A10B_DIR / f"Qwen3.5-122B-A10B-UD-Q4_K_XL-{index:05d}-of-00003.gguf"
     for index in range(1, 4)

@@ -3368,7 +3368,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen36-27b-q4-k-m"]
+    #[ignore = "model witness: qwen3.6-27b-q4_k_m"]
     fn mat_vec_q4_k_matches_cpu() {
         let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
 
@@ -3379,9 +3379,7 @@ mod tests {
             .required()
             .to_str()
             .expect("model fixture path must be UTF-8");
-        if !std::path::Path::new(&path).exists() {
-            return;
-        }
+
         let g = crate::gguf::GgufFile::open(path).expect("open");
         let q4k = g
             .tensors
@@ -3604,7 +3602,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires local Ridge IQ2_S/IQ3_S fixtures"]
+    #[ignore = "separate Ridge correctness qualification; requires the IQ2_S/IQ3_S artifact"]
     fn mat_vec_lowbit_nc2_matches_two_singleton_rows_bit_exact() {
         type Encoder = fn(
             &MetalContext,
@@ -3727,7 +3725,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen36-27b-q4-k-m"]
+    #[ignore = "model witness: qwen3.6-27b-q4_k_m"]
     fn mat_vec_q5_k_matches_cpu() {
         let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
 
@@ -3738,9 +3736,7 @@ mod tests {
             .required()
             .to_str()
             .expect("model fixture path must be UTF-8");
-        if !std::path::Path::new(&path).exists() {
-            return;
-        }
+
         let g = crate::gguf::GgufFile::open(path).expect("open");
         let q5k = g
             .tensors
@@ -3775,7 +3771,7 @@ mod tests {
     /// shape `[5120, 4096]`). Same threshold as Q4_K/Q5_K/Q6_K mat-vec
     /// (`max|Δ| < 1e-2`).
     #[test]
-    #[ignore = "model witness: dflash-draft-36-q8-0"]
+    #[ignore = "model witness: dflash-draft-3.6-q8_0"]
     fn mat_vec_q8_0_matches_cpu() {
         let _ = crate::test_fixtures::DFLASH_DRAFT_36_Q8_0.required();
 
@@ -3786,10 +3782,7 @@ mod tests {
             .required()
             .to_str()
             .expect("model fixture path must be UTF-8");
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("[q8_0-test] skipped — drafter GGUF missing");
-            return;
-        }
+
         let g = crate::gguf::GgufFile::open(path).expect("open");
         let q8 = g
             .tensors
@@ -3820,7 +3813,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen36-27b-q4-k-m"]
+    #[ignore = "model witness: qwen3.6-27b-q4_k_m"]
     fn mat_vec_q6_k_matches_cpu() {
         let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
 
@@ -3831,9 +3824,7 @@ mod tests {
             .required()
             .to_str()
             .expect("model fixture path must be UTF-8");
-        if !std::path::Path::new(&path).exists() {
-            return;
-        }
+
         let g = crate::gguf::GgufFile::open(path).expect("open");
         let q6k = g
             .tensors
@@ -4050,7 +4041,7 @@ mod tests {
     /// Uses real `blk.0.ffn_gate.weight` + `ffn_up.weight` from 27B Q4_K_M.
     #[test]
     #[allow(non_snake_case)]
-    #[ignore = "model witness: qwen36-27b-q4-k-m"]
+    #[ignore = "model witness: qwen3.6-27b-q4_k_m"]
     fn ffn_fused_swiglu_q4_K_mm_n16_matches_unfused() {
         let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
 
@@ -4061,10 +4052,7 @@ mod tests {
             .required()
             .to_str()
             .expect("model fixture path must be UTF-8");
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("[ffn-fused-mm-n16] skipped — fixture missing");
-            return;
-        }
+
         let g = crate::gguf::GgufFile::open(path).expect("open");
 
         let gate = g

@@ -8,7 +8,7 @@
 //! Performance is **explicitly not a concern here**. Naive triple-loop
 //! matmul, allocate-on-every-step. The point is correctness.
 //!
-//! Reference: `~/code/llama.cpp/src/models/qwen35.cpp`. The structure of
+//! Reference: `$LLAMA_CPP/src/models/qwen35.cpp`. The structure of
 //! [`Forward::single_token`] mirrors `llm_build_qwen35::llm_build_qwen35`
 //! exactly.
 
@@ -1420,14 +1420,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn forward_runs_one_token_0_8b() {
         let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
         let path = crate::test_fixtures::QWEN35_0_8B_F32.required();
-        if !std::path::Path::new(&path).exists() {
-            return;
-        }
+
         let g = GgufFile::open(path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
         let f = Forward::new(&g, &m);
@@ -1453,14 +1451,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: a3b-q4-k-m"]
+    #[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m"]
     fn forward_runs_one_token_35b_a3b_moe() {
         let _ = crate::test_fixtures::A3B_Q4_K_M.required();
 
         let path = crate::test_fixtures::A3B_Q4_K_M.required();
-        if !std::path::Path::new(&path).exists() {
-            return;
-        }
+
         let g = GgufFile::open(path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
         assert_eq!(m.arch.kind, crate::model::ArchKind::Moe);
@@ -1494,14 +1490,12 @@ mod tests {
     /// even without a real model — just confirms our embedding lookup,
     /// RMSNorm, and mat_vec orientations are coherent.
     #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn forward_bypass_blocks_smoke() {
         let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
 
         let path = crate::test_fixtures::QWEN35_0_8B_F32.required();
-        if !std::path::Path::new(&path).exists() {
-            return;
-        }
+
         let g = GgufFile::open(path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
         let f = Forward::new(&g, &m);
@@ -1553,7 +1547,7 @@ mod tests {
     ///
     /// To regenerate the oracle:
     /// ```sh
-    /// external reference tool/target/release/llm --model "$MODELS/Qwen3.5-0.8B.F32.gguf" \
+    /// "$LLM" --model "$MODELS/Qwen3.5-0.8B.F32.gguf" \
     ///   --snapshot $ORACLE_DIR --snapshot-id hello_t0 --raw "Hello"
     /// ```
     /// Produces $ORACLE_DIR/hello_t0.{f32,json}.
@@ -1729,7 +1723,7 @@ mod tests {
     ///
     /// Codex review (fc6f43e) flagged the test gap. Oracle generated via:
     /// ```sh
-    /// external reference tool/target/release/llm --model "$MODELS/Qwen3.6-27B-Q4_K_M.gguf" \
+    /// "$LLM" --model "$MODELS/Qwen3.6-27B-Q4_K_M.gguf" \
     ///   --snapshot $ORACLE_DIR --snapshot-id longprompt_27b \
     ///   --raw "The quick brown fox jumps over the lazy dog"
     /// ```
@@ -1824,7 +1818,7 @@ mod tests {
     ///
     /// Oracle generated via:
     /// ```sh
-    /// external reference tool/target/release/llm --model "$MODELS/Qwen3.5-0.8B.F32.gguf" \
+    /// "$LLM" --model "$MODELS/Qwen3.5-0.8B.F32.gguf" \
     ///   --snapshot $ORACLE_DIR --snapshot-id longprompt_t0 \
     ///   --raw "The quick brown fox jumps over the lazy dog"
     /// ```
@@ -1909,13 +1903,10 @@ mod tests {
     /// through the eh_proj concat path, RoPE position bugs at the
     /// boundary slot.
     #[test]
-    #[ignore = "model witness: qwen3-5-0-8b-q4-k-m"]
+    #[ignore = "model witness: qwen3.5-0.8b-q4-k-m"]
     fn mtp_step_runs_0_8b() {
         let path = crate::test_fixtures::required_filename("qwen3.5-0.8b.Q4_K_M.gguf");
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("[mtp-smoke] skipped — fixture missing");
-            return;
-        }
+
         let g = GgufFile::open(path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
         assert!(m.mtp.is_some(), "MTP head should be bound on 0.8B-MTP");

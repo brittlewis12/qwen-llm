@@ -44,8 +44,8 @@
 //!       - `gguf_file_exposes_stop_token_ids_contract`
 //!         (locks the contract the new API must satisfy on 0.8B)
 //!
-//! All tests gracefully skip when their fixtures aren't present so the
-//! suite stays green on machines without the models directory.
+//! On-disk family evidence tests are ignored witnesses and require their
+//! published model fixtures through `QWEN_MODEL_SEARCH_PATH`.
 
 use qwen_llm::gguf::GgufFile;
 
@@ -250,7 +250,7 @@ fn gguf_file_exposes_stop_token_ids_method() {
 /// call below with the real method invocation; the assertion should
 /// remain unchanged.
 #[test]
-#[ignore = "model witness: qwen3-5-0-8b-bf16"]
+#[ignore = "model witness: qwen3.5-0.8b-bf16"]
 fn gguf_file_exposes_stop_token_ids_contract() {
     let path = Path::new(qwen_llm::test_fixtures::required_filename(
         "Qwen3.5-0.8B-BF16.gguf",
@@ -271,7 +271,7 @@ fn gguf_file_exposes_stop_token_ids_contract() {
 //    provably wrong rather than just-conventionally-suspect.
 // =========================================================================
 
-/// Walks every Qwen 3.5/3.6 GGUF in the first configured model search root and asserts the set of
+/// Walks every Qwen 3.5/3.6 GGUF under all configured model search roots and asserts the set of
 /// declared `tokenizer.ggml.eos_token_id` values contains more than
 /// one distinct value.
 ///
@@ -279,30 +279,27 @@ fn gguf_file_exposes_stop_token_ids_contract() {
 ///   * `Qwen3.5-4B-Base-BF16.gguf` → 248044  (`<|endoftext|>`)
 ///   * all other `Qwen3.{5,6}-*.gguf`       → 248046  (`<|im_end|>`)
 ///
-/// If the dataset on disk ever drifts to a single value across all
+/// If the configured datasets ever drift to a single value across all
 /// files this test goes red — at which point the right move is *not*
 /// to delete the test but to re-establish the heterogeneity (e.g. by
 /// pulling a fresh base GGUF) and confirm the engine still respects
 /// what the producer declared.
 #[test]
-#[ignore = "model witness: qwen-model-family-eos"]
+#[ignore = "model witness: qwen3.5-4b-base-bf16"]
 fn family_declared_eos_is_heterogeneous() {
+    let _ = qwen_llm::test_fixtures::catalog::QWEN3_5_4B_BASE_BF16.required();
     let files = family_ggufs();
-    if files.is_empty() {
-        eprintln!("[eos-gap] no Qwen3.5/3.6 GGUFs found under QWEN_MODEL_SEARCH_PATH");
-        return;
-    }
+    assert!(
+        !files.is_empty(),
+        "model witness qwen-model-family-eos requires Qwen3.5/3.6 GGUFs under QWEN_MODEL_SEARCH_PATH"
+    );
 
     let mut per_file: BTreeMap<String, i32> = BTreeMap::new();
     for path in &files {
         let name = path.file_name().unwrap().to_str().unwrap().to_string();
-        let g = match GgufFile::open(path) {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("[eos-gap]   skip {name}: {e}");
-                continue;
-            }
-        };
+        let g = GgufFile::open(path).unwrap_or_else(|error| {
+            panic!("model witness qwen-model-family-eos cannot open {name}: {error}")
+        });
         let eos = g
             .get_u64("tokenizer.ggml.eos_token_id")
             .unwrap_or_else(|| panic!("{name}: missing tokenizer.ggml.eos_token_id"))
@@ -345,26 +342,21 @@ fn family_declared_eos_is_heterogeneous() {
 /// safe fallback — silently picking 248046 (as today) hides corrupt
 /// or partially-converted GGUFs.
 #[test]
-#[ignore = "model witness: qwen-model-family-eos"]
+#[ignore = "model witness: qwen3.5-4b-base-bf16"]
 fn every_family_file_declares_eos() {
+    let _ = qwen_llm::test_fixtures::catalog::QWEN3_5_4B_BASE_BF16.required();
     let files = family_ggufs();
-    if files.is_empty() {
-        eprintln!(
-            "[eos-gap] skipped — no Qwen3.5/3.6 GGUFs in the first QWEN_MODEL_SEARCH_PATH directory"
-        );
-        return;
-    }
+    assert!(
+        !files.is_empty(),
+        "model witness qwen-model-family-eos requires Qwen3.5/3.6 GGUFs under QWEN_MODEL_SEARCH_PATH"
+    );
 
     let mut missing: Vec<String> = Vec::new();
     for path in &files {
         let name = path.file_name().unwrap().to_str().unwrap().to_string();
-        let g = match GgufFile::open(path) {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("[eos-gap]   skip {name}: open failed: {e}");
-                continue;
-            }
-        };
+        let g = GgufFile::open(path).unwrap_or_else(|error| {
+            panic!("model witness qwen-model-family-eos cannot open {name}: {error}")
+        });
         if g.get_u64("tokenizer.ggml.eos_token_id").is_none() {
             missing.push(name);
         }

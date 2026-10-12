@@ -183,8 +183,11 @@ def packed_scores(
     return scores
 
 
-def checkout(env_name: str, default: str) -> Path:
-    repo = Path(os.environ.get(env_name, os.path.expanduser(default))).resolve()
+def checkout(env_name: str) -> Path:
+    value = os.environ.get(env_name)
+    if not value:
+        raise SystemExit(f"set {env_name} to the external checkout directory")
+    repo = Path(value).expanduser().resolve()
     if not repo.is_dir():
         raise SystemExit(f"{env_name} checkout missing: {repo}")
     return repo
@@ -276,9 +279,9 @@ def invalid_row_fixture(
 
 
 def build_fixture() -> dict[str, object]:
-    official = checkout("DSV4_OFFICIAL_DIR", "~/code/DeepSeek-V4-Flash-0731")
-    vllm = checkout("DSV4_VLLM_DIR", "~/code/vllm")
-    dwarfstar = checkout("DSV4_DWARFSTAR_DIR", "~/code/ds4")
+    official = checkout("DSV4_OFFICIAL_DIR")
+    vllm = checkout("DSV4_VLLM_DIR")
+    dwarfstar = checkout("DSV4_DWARFSTAR_DIR")
     verify_revision(official, OFFICIAL_REVISION, OFFICIAL_HASHES)
     verify_revision(vllm, VLLM_REVISION, VLLM_HASHES)
     verify_revision(dwarfstar, DWARFSTAR_REVISION, DWARFSTAR_HASHES)

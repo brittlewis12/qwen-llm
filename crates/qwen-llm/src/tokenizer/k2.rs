@@ -297,9 +297,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "CPU/header-only; requires K2_GGUF, no inference or GPU"]
+    #[ignore = "model witness: k2-horizon-7b-q8-0"]
     fn downloaded_q8_tokenizer_matches_hf_ids() {
-        let path = std::env::var("K2_GGUF").expect("set K2_GGUF explicitly");
+        let path = crate::test_fixtures::catalog::K2_HORIZON_7B_Q8_0.required();
         let tokenizer = NativeTokenizer::open(path).unwrap();
         let fixtures = fixtures();
         let profile = fixtures["profiles"]

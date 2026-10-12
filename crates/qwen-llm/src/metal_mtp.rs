@@ -3753,13 +3753,10 @@ mod tests {
     /// * step 1: 1-entry KV (first-position drift through encode_mtp_attn)
     /// * step 2: 2-entry KV (KV reads + RoPE position increment)
     #[test]
-    #[ignore = "model witness: qwen3-5-0-8b-q4-k-m"]
+    #[ignore = "model witness: qwen3.5-0.8b-q4-k-m"]
     fn metal_mtp_draft_matches_cpu() {
         let path = crate::test_fixtures::required_filename("qwen3.5-0.8b.Q4_K_M.gguf");
-        if !std::path::Path::new(path).exists() {
-            eprintln!("[mtp-metal-cosine] skipped — fixture missing");
-            return;
-        }
+
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
@@ -3894,13 +3891,10 @@ mod tests {
     /// smoke test we just assert α > 0 to confirm the MTP forward
     /// produces SOMETHING reasonable.
     #[test]
-    #[ignore = "model witness: qwen3-5-0-8b-q4-k-m"]
+    #[ignore = "model witness: qwen3.5-0.8b-q4-k-m"]
     fn greedy_equivalence_0_8b_mtp() {
         let path = crate::test_fixtures::required_filename("qwen3.5-0.8b.Q4_K_M.gguf");
-        if !std::path::Path::new(path).exists() {
-            eprintln!("[mtp-equiv] skipped — fixture missing");
-            return;
-        }
+
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };

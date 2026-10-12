@@ -63,8 +63,9 @@ fn split_documents(text: &str) -> Vec<String> {
 }
 
 fn main() {
-    let model_path = std::env::var("T9_MODEL")
-        .unwrap_or_else(|_| qwen_llm::test_fixtures::QWEN35_0_8B_F32.required().into());
+    let model_path = std::env::var_os("T9_MODEL")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| qwen_llm::test_fixtures::QWEN35_0_8B_F32.required().clone());
     let corpus_path = std::env::var("T9_CORPUS").expect("T9_CORPUS required");
     let out_dir = std::env::var("T9_OUT").expect("T9_OUT required");
     let train_budget = env_or("T9_TRAIN_TOKENS", 32_768);
@@ -93,7 +94,8 @@ fn main() {
     let mf = MetalForward::new(&ctx, &mm);
     eprintln!(
         "[t9-capture] model {} h={h_dim} f={f_dim} layers={:?}",
-        model_path, layers
+        model_path.display(),
+        layers
     );
 
     // Capture buffers + install.

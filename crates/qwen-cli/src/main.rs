@@ -33,7 +33,7 @@ mod fixed_cohort_jsonl;
 #[path = "qwen/glm5_next.rs"]
 mod glm5_next;
 #[path = "qwen/jsonl.rs"]
-mod jsonl;
+pub(crate) mod jsonl;
 #[path = "qwen/k2_horizon.rs"]
 mod k2_horizon;
 #[path = "qwen/lane_timing.rs"]

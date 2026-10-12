@@ -24,7 +24,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-FLA = Path(os.environ.get("FLA_DIR", Path.home() / "code/flash-linear-attention"))
+FLA_VALUE = os.environ.get("FLA_DIR")
+if not FLA_VALUE:
+    raise SystemExit("set FLA_DIR to the external flash-linear-attention checkout")
+FLA = Path(FLA_VALUE).expanduser().resolve()
 # Load naive.py by path: the `fla` package imports triton, unavailable on macOS.
 _spec = importlib.util.spec_from_file_location(
     "fla_kda_naive", FLA / "fla/ops/kda/naive.py"

@@ -4126,7 +4126,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen3-5-0-8b-f16"]
+    #[ignore = "model witness: qwen3.5-0.8b.f16"]
     fn mat_vec_and_mat_mat_half_weights_match_cpu() {
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
@@ -4141,10 +4141,6 @@ mod tests {
                 GgmlType::BF16,
             ),
         ] {
-            if !std::path::Path::new(&path).exists() {
-                eprintln!("[half-weight] skipped missing fixture {path}");
-                continue;
-            }
             let g = crate::gguf::GgufFile::open(path).expect("open");
             let w = g
                 .tensors
@@ -4231,9 +4227,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-bf16"]
     fn mat_mat_bf16_bfloat_act_matches_rounded_cpu() {
-        #[ignore = "model witness: qwen3-5-0-8b-bf16"]
         fn round_to_bf16_f32(x: f32) -> f32 {
             let bits = x.to_bits();
             let lsb = (bits >> 16) & 1;
@@ -4244,10 +4239,7 @@ mod tests {
             return;
         };
         let path = crate::test_fixtures::required_filename("Qwen3.5-0.8B-BF16.gguf");
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("[bf16-bfloat-act] skipped missing fixture {path}");
-            return;
-        }
+
         let g = crate::gguf::GgufFile::open(path).expect("open");
         let w = g
             .tensors
@@ -4320,7 +4312,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen3-5-0-8b-q4-0"]
+    #[ignore = "model witness: qwen3.5-0.8b-q4-0"]
     fn mat_vec_and_mat_mat_q4_legacy_match_cpu() {
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
@@ -4335,10 +4327,6 @@ mod tests {
                 GgmlType::Q4_1,
             ),
         ] {
-            if !std::path::Path::new(&path).exists() {
-                eprintln!("[q4-legacy] skipped missing fixture {path}");
-                continue;
-            }
             let g = crate::gguf::GgufFile::open(path).expect("open");
             let w = g
                 .tensors
@@ -4428,16 +4416,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen3-5-0-8b-q3-k-m"]
+    #[ignore = "model witness: qwen3.5-0.8b-q3-k-m"]
     fn mat_vec_and_mat_mat_q3_k_match_cpu() {
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
         let path = crate::test_fixtures::required_filename("Qwen3.5-0.8B-Q3_K_M.gguf");
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("[q3_k] skipped missing fixture {path}");
-            return;
-        }
+
         let g = crate::gguf::GgufFile::open(path).expect("open");
         let w = g
             .tensors
@@ -4520,16 +4505,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen3-5-4b-ud-iq2-m"]
+    #[ignore = "model witness: qwen3.5-4b-ud-iq2-m"]
     fn mat_vec_and_mat_mat_dense_iq2_s_match_cpu() {
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
         let path = crate::test_fixtures::required_filename("Qwen3.5-4B-UD-IQ2_M.gguf");
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("[dense-iq2_s] skipped missing fixture {path}");
-            return;
-        }
+
         let g = crate::gguf::GgufFile::open(path).expect("open");
         let w = match g.tensors.iter().find(|t| {
             t.name.starts_with("blk.")
@@ -4617,7 +4599,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen3-5-4b-ud-q2-k-xl"]
+    #[ignore = "model witness: qwen3.5-4b-ud-q2-k-xl"]
     fn mat_vec_and_mat_mat_dense_iq3_match_cpu() {
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
@@ -4633,10 +4615,6 @@ mod tests {
             ),
         ];
         for &(path, dtype) in &fixtures {
-            if !std::path::Path::new(&path).exists() {
-                eprintln!("[dense-iq3 {dtype:?}] skipped missing fixture {path}");
-                continue;
-            }
             let g = crate::gguf::GgufFile::open(path).expect("open");
             let w = match g.tensors.iter().find(|t| {
                 t.name.starts_with("blk.")
@@ -4733,16 +4711,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen3-5-0-8b-q2-k"]
+    #[ignore = "model witness: qwen3.5-0.8b.q2-k"]
     fn mat_vec_and_mat_mat_q2_k_match_cpu() {
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
         let path = crate::test_fixtures::required_filename("Qwen3.5-0.8B.Q2_K.gguf");
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("[q2_k] skipped missing fixture {path}");
-            return;
-        }
+
         let g = crate::gguf::GgufFile::open(path).expect("open");
         let w = g
             .tensors
@@ -4825,7 +4800,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen3-5-0-8b-iq4-nl"]
+    #[ignore = "model witness: qwen3.5-0.8b-iq4-nl"]
     fn mat_vec_and_mat_mat_iq4_match_cpu() {
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
@@ -4840,10 +4815,6 @@ mod tests {
                 GgmlType::IQ4_XS,
             ),
         ] {
-            if !std::path::Path::new(&path).exists() {
-                eprintln!("[iq4] skipped missing fixture {path}");
-                continue;
-            }
             let g = crate::gguf::GgufFile::open(path).expect("open");
             let align = if dtype == GgmlType::IQ4_NL { 32 } else { 256 };
             let w = g
@@ -4952,7 +4923,7 @@ mod tests {
     /// to exercise both partial-tile path (N=1, N=16) and full-tile
     /// path (N=32).
     #[test]
-    #[ignore = "model witness: qwen36-27b-q4-k-m"]
+    #[ignore = "model witness: qwen3.6-27b-q4_k_m"]
     fn mat_mat_q4_k_matches_cpu_and_mat_vec() {
         let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
 
@@ -4963,10 +4934,7 @@ mod tests {
             .required()
             .to_str()
             .expect("model fixture path must be UTF-8");
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("[mat_mat_q4_k] skipped — fixture missing");
-            return;
-        }
+
         let g = crate::gguf::GgufFile::open(path).expect("open");
         // Pick a Q4_K tensor with shape compatible with mat-mat tiling
         // (n_in % 32 == 0, n_out % 64 == 0 for the lifted tile).
@@ -5117,16 +5085,13 @@ mod tests {
     /// H5.3b.6 gate: Q6_K mat-mat parity vs N successive mat-vec.
     /// Includes N_QUERY=64/128 so the large-N N64 prompt tile is exercised.
     #[test]
-    #[ignore = "model witness: qwen3-5-0-8b-q4-k-m"]
+    #[ignore = "model witness: qwen3.5-0.8b-q4-k-m"]
     fn mat_mat_q6_k_matches_cpu_and_mat_vec() {
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
         let path = crate::test_fixtures::required_filename("Qwen3.5-0.8B-Q4_K_M.gguf");
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("[mat_mat_q6_k] skipped — fixture missing");
-            return;
-        }
+
         let g = crate::gguf::GgufFile::open(path).expect("open");
         let q6k = g
             .tensors
@@ -5237,16 +5202,13 @@ mod tests {
     /// v0.73a.0 gate: Q5_K mat-mat parity vs N successive Q5_K mat-vec.
     /// Includes N_QUERY=64/128 so the large-N N64 prompt tile is exercised.
     #[test]
-    #[ignore = "model witness: qwen3-5-0-8b-q4-k-m"]
+    #[ignore = "model witness: qwen3.5-0.8b-q4-k-m"]
     fn mat_mat_q5_k_matches_cpu_and_mat_vec() {
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
         let path = crate::test_fixtures::required_filename("Qwen3.5-0.8B-Q4_K_M.gguf");
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("[mat_mat_q5_k] skipped — fixture missing");
-            return;
-        }
+
         let g = crate::gguf::GgufFile::open(path).expect("open");
         let q5k = g
             .tensors
@@ -5386,7 +5348,7 @@ mod tests {
     /// precision in nibble packing + scale folding). Expect cos very
     /// close to 1.000000.
     #[test]
-    #[ignore = "model witness: dflash-draft-36-q8-0"]
+    #[ignore = "model witness: dflash-draft-3.6-q8_0"]
     fn mat_mat_q8_0_matches_cpu_and_mat_vec() {
         let _ = crate::test_fixtures::DFLASH_DRAFT_36_Q8_0.required();
 
@@ -5397,10 +5359,7 @@ mod tests {
             .required()
             .to_str()
             .expect("model fixture path must be UTF-8");
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("[mat_mat_q8_0] skipped — drafter GGUF missing");
-            return;
-        }
+
         let g = crate::gguf::GgufFile::open(path).expect("open");
         let q8 = g
             .tensors
@@ -6246,15 +6205,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen3-8-27b-q4-k-m"]
+    #[ignore = "model witness: qwen3.8-27b-q4-k-m"]
     fn ffn_fused_swiglu_q4_k_mma8_matches_unfused_n8() {
         let Some(ctx) = metal_test_context() else {
             return;
         };
         let path = crate::test_fixtures::required_filename("Qwen3.8-27B-Q4_K_M.gguf");
-        if !std::path::Path::new(&path).exists() {
-            return;
-        }
+
         let g = crate::gguf::GgufFile::open(path).expect("open");
         let gate = g
             .tensors

@@ -1,22 +1,36 @@
-"""Resolve published model filenames from QWEN_MODEL_SEARCH_PATH."""
+"""Resolve readable regular files by published filename in search-path order.
+
+Filename is the artifact's lookup identity, not a content identity. Consumers
+that authenticate an artifact must verify its content after resolving it.
+"""
 
 from __future__ import annotations
 
-import os
 import fnmatch
+import os
+import stat
 from pathlib import Path
 
 MAX_DEPTH = 3
 
 
 def search_roots() -> tuple[Path, ...]:
-    """Return search roots in the order configured by the caller."""
+    """Return expanded search roots in the order configured by the caller."""
     value = os.environ.get("QWEN_MODEL_SEARCH_PATH", "")
-    return tuple(Path(item).expanduser() for item in value.split(os.pathsep) if item)
+    return tuple(_expand_home(item) for item in value.split(os.pathsep) if item)
+
+
+def _expand_home(value: str) -> Path:
+    home = os.environ.get("HOME")
+    if home and value == "~":
+        return Path(home)
+    if home and value.startswith("~/"):
+        return Path(home) / value[2:]
+    return Path(value)
 
 
 def resolve_model(filename: str) -> Path:
-    """Find a published model filename below the configured search roots."""
+    """Find the first readable regular file with this published filename."""
     for root in search_roots():
         path = _find(root, filename, MAX_DEPTH)
         if path is not None:
@@ -26,25 +40,25 @@ def resolve_model(filename: str) -> Path:
     )
 
 
-def resolve_directory(dirname: str) -> Path:
-    """Find a named model directory below the configured search roots."""
-    for root in search_roots():
-        path = _find(root, dirname, MAX_DEPTH)
-        if path is not None and path.is_dir():
-            return path
-    raise FileNotFoundError(
-        f"model directory {dirname} not found; set QWEN_MODEL_SEARCH_PATH"
-    )
-
-
 def models_matching(pattern: str) -> tuple[Path, ...]:
-    """List matching GGUF files below configured roots without duplicates."""
-    matches: dict[str, Path] = {}
+    """List matching readable GGUF files, preserving same-name distinct paths."""
+    matches: dict[Path, Path] = {}
     for root in search_roots():
         for path in _walk(root, MAX_DEPTH):
-            if path.is_file() and fnmatch.fnmatch(path.name, pattern):
-                matches.setdefault(path.name, path)
-    return tuple(matches[name] for name in sorted(matches))
+            if fnmatch.fnmatch(path.name, pattern) and _readable_regular_file(path):
+                resolved = path.resolve()
+                matches.setdefault(resolved, resolved)
+    return tuple(matches[path] for path in sorted(matches))
+
+
+def _readable_regular_file(path: Path) -> bool:
+    try:
+        if not stat.S_ISREG(path.stat().st_mode):
+            return False
+        with path.open("rb"):
+            return True
+    except OSError:
+        return False
 
 
 def _find(root: Path, filename: str, depth: int) -> Path | None:
@@ -53,12 +67,16 @@ def _find(root: Path, filename: str, depth: int) -> Path | None:
     except OSError:
         return None
     for path in entries:
-        if path.name == filename:
+        if path.name == filename and _readable_regular_file(path):
             return path
     if depth == 0:
         return None
     for path in entries:
-        if path.is_dir():
+        try:
+            is_dir = path.is_dir()
+        except OSError:
+            continue
+        if is_dir:
             match = _find(path, filename, depth - 1)
             if match is not None:
                 return match
@@ -70,10 +88,15 @@ def _walk(root: Path, depth: int):
         entries = sorted(root.iterdir(), key=lambda path: path.name)
     except OSError:
         return
-    yield from entries
-    if depth:
-        for path in entries:
-            if path.is_dir():
+    for path in entries:
+        if _readable_regular_file(path):
+            yield path
+        elif depth:
+            try:
+                is_dir = path.is_dir()
+            except OSError:
+                continue
+            if is_dir:
                 yield from _walk(path, depth - 1)
 
 

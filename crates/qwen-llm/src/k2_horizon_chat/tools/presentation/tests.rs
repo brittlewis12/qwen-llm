@@ -89,7 +89,7 @@ fn excessive_schema_nesting_returns_error_without_truncation() {
         ToolPresentationFormat::Json,
     ] {
         assert!(
-            render_tool_definitions(&[tool.clone()], format)
+            render_tool_definitions(std::slice::from_ref(&tool), format)
                 .unwrap_err()
                 .to_string()
                 .contains("nesting safety")
@@ -109,13 +109,15 @@ fn flat_reference_chains_have_a_separate_expansion_guard() {
         );
     }
     let tool = serde_json::json!({"name":"chain","parameters":{"$defs":defs,"properties":{"root":{"$ref":"#/$defs/Node0"}}}});
-    assert!(render_tool_definitions(&[tool.clone()], ToolPresentationFormat::Json).is_ok());
+    assert!(
+        render_tool_definitions(std::slice::from_ref(&tool), ToolPresentationFormat::Json).is_ok()
+    );
     for format in [
         ToolPresentationFormat::Markdown,
         ToolPresentationFormat::Xml,
     ] {
         assert!(
-            render_tool_definitions(&[tool.clone()], format)
+            render_tool_definitions(std::slice::from_ref(&tool), format)
                 .unwrap_err()
                 .to_string()
                 .contains("reference expansion")
@@ -124,9 +126,11 @@ fn flat_reference_chains_have_a_separate_expansion_guard() {
 }
 
 #[test]
-#[ignore = "CPU only: K2_GGUF verified final artifact and native tool-template token fixtures"]
+#[ignore = "model witness: k2-horizon-7b-q8-0"]
 fn cpu_native_tool_template_token_ids() {
-    let source = crate::gguf::GgufFile::open(std::env::var("K2_GGUF").unwrap()).unwrap();
+    let source =
+        crate::gguf::GgufFile::open(crate::test_fixtures::catalog::K2_HORIZON_7B_Q8_0.required())
+            .unwrap();
     crate::k2_horizon_chat::verify_profile(&source).unwrap();
     let tokenizer = crate::tokenizer::NativeTokenizer::from_gguf(&source).unwrap();
     let f = fixture();

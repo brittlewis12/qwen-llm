@@ -2170,52 +2170,43 @@ mod tests {
         native: NativeTokenizer,
     }
 
-    fn oracle_pair() -> Option<&'static OraclePair> {
-        static ORACLE: std::sync::OnceLock<Option<OraclePair>> = std::sync::OnceLock::new();
-        ORACLE
-            .get_or_init(|| {
-                let path = fixture()?;
-                Some(OraclePair {
-                    path,
-                    ffi: LlamaCppTokenizer::open(path).expect("open ffi tokenizer"),
-                    native: NativeTokenizer::open(path).expect("open native tokenizer"),
-                })
-            })
-            .as_ref()
+    fn oracle_pair() -> &'static OraclePair {
+        static ORACLE: std::sync::OnceLock<OraclePair> = std::sync::OnceLock::new();
+        ORACLE.get_or_init(|| {
+            let path = fixture();
+            OraclePair {
+                path,
+                ffi: LlamaCppTokenizer::open(path).expect("open ffi tokenizer"),
+                native: NativeTokenizer::open(path).expect("open native tokenizer"),
+            }
+        })
     }
 
     fn fixtures() -> Vec<&'static str> {
-        let candidates = [
-            crate::test_fixtures::QWEN35_0_8B_F32
-                .required()
-                .to_str()
-                .unwrap(),
+        let qwen35_f32 = crate::test_fixtures::QWEN35_0_8B_F32.required();
+        let qwen36_27b = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
+        let a3b_q4 = crate::test_fixtures::A3B_Q4_K_M.required();
+        [
+            qwen35_f32.to_str().expect("fixture path must be UTF-8"),
             crate::test_fixtures::required_filename("Qwen3.5-0.8B-BF16.gguf"),
             crate::test_fixtures::required_filename("Qwen3.5-4B-BF16.gguf"),
             crate::test_fixtures::required_filename("Qwen3.5-27B-Q4_K_M.gguf"),
-            crate::test_fixtures::QWEN36_27B_Q4_K_M
-                .required()
-                .to_str()
-                .unwrap(),
+            qwen36_27b.to_str().expect("fixture path must be UTF-8"),
             crate::test_fixtures::required_filename("Qwen3.6-27B-MTP-Q4_K_M.gguf"),
-            crate::test_fixtures::A3B_Q4_K_M
-                .required()
-                .to_str()
-                .unwrap(),
-        ];
-        candidates
-            .iter()
-            .copied()
-            .filter(|p| Path::new(p).exists())
-            .collect()
+            a3b_q4.to_str().expect("fixture path must be UTF-8"),
+        ]
+        .to_vec()
     }
 
-    fn fixture() -> Option<&'static str> {
-        fixtures().into_iter().next()
+    fn fixture() -> &'static str {
+        crate::test_fixtures::QWEN35_0_8B_F32
+            .required()
+            .to_str()
+            .expect("fixture path must be UTF-8")
     }
 
     #[test]
-    #[ignore = "set QWEN4EXP_TOKENIZER_GGUF to the pinned Flash-Next release"]
+    #[ignore = "separate release qualification: pinned Flash-Next tokenizer identity, outside routine model witnesses"]
     fn released_qwen4exp_tokenizer_preserves_specials_and_exact_bytes() {
         let _ = crate::test_fixtures::QWEN4EXP_Q3_K_XL.required();
 
@@ -2466,9 +2457,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn opens_and_encodes() {
-        let Some(path) = fixture() else { return };
+        let path = fixture();
         let tok = Tokenizer::open(path).expect("open tokenizer");
         assert!(tok.n_vocab() >= 248_000, "n_vocab={}", tok.n_vocab());
 
@@ -2500,9 +2491,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn special_tokens_round_trip() {
-        let Some(path) = fixture() else { return };
+        let path = fixture();
         let tok = Tokenizer::open(path).expect("open");
         // <|im_start|> is one of the chat template specials.
         let ids = tok.encode("<|im_start|>user\nhi<|im_end|>", false).unwrap();
@@ -2553,9 +2544,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn rejects_invalid_decode_token() {
-        let Some(path) = fixture() else { return };
+        let path = fixture();
         let tok = Tokenizer::open(path).expect("open tokenizer");
         let err = tok
             .try_decode_piece(-1)
@@ -2568,9 +2559,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn native_matches_llama_cpp_oracle_on_edge_prompts() {
-        let Some(path) = fixture() else { return };
+        let path = fixture();
         let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
         let native = NativeTokenizer::open(path).expect("open native tokenizer");
         for prompt in adversarial_prompts() {
@@ -2581,9 +2572,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn native_matches_llama_cpp_on_generated_unicode_prompts() {
-        let Some(path) = fixture() else { return };
+        let path = fixture();
         let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
         let native = NativeTokenizer::open(path).expect("open native tokenizer");
         for prompt in generated_unicode_prompts() {
@@ -2601,20 +2592,19 @@ mod tests {
         })]
 
         #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
         fn native_matches_llama_cpp_property_fuzz(
             prompt in fuzz_prompt_strategy(),
             add_special in any::<bool>(),
         ) {
-            if let Some(oracle) = oracle_pair() {
-                assert_tokenizers_match(
-                    &oracle.ffi,
-                    &oracle.native,
-                    oracle.path,
-                    &prompt,
-                    add_special,
-                );
-            }
+            let oracle = oracle_pair();
+            assert_tokenizers_match(
+                &oracle.ffi,
+                &oracle.native,
+                oracle.path,
+                &prompt,
+                add_special,
+            );
         }
 
         #[test]
@@ -2628,12 +2618,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "exhaustive cross-model oracle sweep"]
+    #[ignore = "separate correctness sweep: exhaustive cross-model oracle comparison requires all seven published model fixtures"]
     fn native_matches_llama_cpp_across_model_matrix() {
         let fixtures = fixtures();
-        if fixtures.is_empty() {
-            return;
-        }
         let prompts = [
             "Hello, world!",
             "<|im_start|>user\nhi<|im_end|>",
@@ -2654,12 +2641,14 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn native_rejects_invalid_decode_token() {
-        let Some(path) = fixture() else { return };
+        let path = fixture();
         let native = match NativeTokenizer::open(path) {
             Ok(native) => native,
-            Err(TokError::UnsupportedNativeTokenizer { .. }) => return,
+            Err(TokError::UnsupportedNativeTokenizer { .. }) => {
+                panic!("Qwen 3.5 fixture must support the native tokenizer")
+            }
             Err(err) => panic!("open native tokenizer: {err}"),
         };
         assert!(matches!(
@@ -2681,9 +2670,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn native_exact_piece_bytes_preserve_utf8_boundaries() {
-        let Some(path) = fixture() else { return };
+        let path = fixture();
         let native = NativeTokenizer::open(path).expect("open native tokenizer");
         let text = "JSON: {\"emoji\":\"🙂\",\"city\":\"上海\"}";
         let ids = native
@@ -2706,9 +2695,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn native_exact_piece_bytes_do_not_replace_invalid_utf8() {
-        let Some(path) = fixture() else { return };
+        let path = fixture();
         let native = NativeTokenizer::open(path).expect("open native tokenizer");
         let token = native.byte_token_ids[0xff];
         assert_eq!(
@@ -2726,9 +2715,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn native_content_policy_excludes_chat_control_tokens() {
-        let Some(path) = fixture() else { return };
+        let path = fixture();
         let native = NativeTokenizer::open(path).expect("open native tokenizer");
         let control = native
             .encode("<|im_start|>", false)
@@ -2750,13 +2739,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn native_decode_piece_matches_llama_cpp_for_full_vocab() {
-        let Some(path) = fixture() else { return };
+        let path = fixture();
         let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
         let native = match NativeTokenizer::open(path) {
             Ok(native) => native,
-            Err(TokError::UnsupportedNativeTokenizer { .. }) => return,
+            Err(TokError::UnsupportedNativeTokenizer { .. }) => {
+                panic!("Qwen 3.5 fixture must support the native tokenizer")
+            }
             Err(err) => panic!("open native tokenizer: {err}"),
         };
         assert_eq!(native.n_vocab(), ffi.n_vocab());
@@ -2778,9 +2769,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn native_random_token_sequences_match_llama_cpp() {
-        let Some(path) = fixture() else { return };
+        let path = fixture();
         let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
         let native = NativeTokenizer::open(path).expect("open native tokenizer");
         let mut rng = Lcg::new(0x5eed_fade_dead_beef);
@@ -2799,9 +2790,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn native_lazy_decode_cache_is_thread_safe() {
-        let Some(pair) = oracle_pair() else { return };
+        let pair = oracle_pair();
         let native = &pair.native;
         let ids = [0, native.n_vocab() as i32 / 2, native.n_vocab() as i32 - 1];
 
@@ -2817,9 +2808,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn native_special_token_literals_match_llama_cpp() {
-        let Some(path) = fixture() else { return };
+        let path = fixture();
         let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
         let native = NativeTokenizer::open(path).expect("open native tokenizer");
         let specials = special_token_texts(&native);
@@ -2834,7 +2825,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "exhaustive cross-model special-token oracle sweep"]
+    #[ignore = "separate correctness sweep: exhaustive cross-model special-token comparison requires all seven published model fixtures"]
     fn native_special_token_literals_match_llama_cpp_across_model_matrix() {
         for path in fixtures() {
             let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
@@ -2894,15 +2885,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
+    #[ignore = "model witness: deepseek-v4-flash-0731-ud-iq3_xxs"]
     fn deepseek_v4_0731_native_tokenizer_smoke() {
-        assert!(
-            Path::new(crate::test_fixtures::required_filename(
-                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf"
-            ))
-            .exists(),
-            "missing DS4 fixture"
-        );
         let tokenizer = NativeTokenizer::open(crate::test_fixtures::required_filename(
             "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
         ))
@@ -3033,19 +3017,14 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires local DeepSeek V4 fixture and current llama.cpp tokenizer binary"]
+    #[ignore = "separate external-tool correctness check: requires LLAMA_TOKENIZE; not a routine model witness"]
     fn deepseek_v4_native_matches_current_llama_cpp_cli() {
-        const LLAMA_TOKENIZE: &str = "$LLAMA_TOKENIZE";
+        let llama_tokenize = std::env::var_os("LLAMA_TOKENIZE")
+            .expect("set LLAMA_TOKENIZE to the llama-tokenize executable");
         assert!(
-            Path::new(crate::test_fixtures::required_filename(
-                "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf"
-            ))
-            .exists(),
-            "missing DS4 fixture"
-        );
-        assert!(
-            Path::new(LLAMA_TOKENIZE).exists(),
-            "missing llama-tokenize oracle"
+            Path::new(&llama_tokenize).is_file(),
+            "missing llama-tokenize: {}",
+            Path::new(&llama_tokenize).display()
         );
         let tokenizer = NativeTokenizer::open(crate::test_fixtures::required_filename(
             "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
@@ -3061,7 +3040,7 @@ mod tests {
             "<｜User｜>hello<｜Assistant｜>",
         ];
         for prompt in prompts {
-            let output = std::process::Command::new(LLAMA_TOKENIZE)
+            let output = std::process::Command::new(&llama_tokenize)
                 .args([
                     "-m",
                     crate::test_fixtures::required_filename(

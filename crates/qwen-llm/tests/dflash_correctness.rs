@@ -66,7 +66,7 @@ fn fixtures_present() -> bool {
 /// Catches the cross-GGUF dequant bug class and any layer-output layout
 /// regression (target hiddens stacked in the wrong K order, etc.).
 #[test]
-#[ignore = "model witness: qwen3-6-27b-q4-k-m"]
+#[ignore = "model witness: qwen3.6-27b-q4_k_m"]
 fn dflash_draft_cpu_smoke() {
     if !fixtures_present() {
         eprintln!("[dflash-cpu-smoke] skipped — fixtures missing");
@@ -176,7 +176,7 @@ fn dflash_draft_cpu_smoke() {
 /// It does NOT validate the SWA mask algorithm or the actual drafter
 /// distribution — H5.2.5 (measured α) is that gate.
 #[test]
-#[ignore = "model witness: qwen3-6-27b-q4-k-m"]
+#[ignore = "model witness: qwen3.6-27b-q4_k_m"]
 fn metal_drafter_cosine_vs_cpu() {
     if !fixtures_present() {
         eprintln!("[h5.1.5] skipped — fixtures missing");
@@ -357,16 +357,8 @@ fn metal_drafter_cosine_vs_cpu() {
 ///
 /// ~3-5 min runtime: 27B-Q4_K_M load + prime + two N=16 forwards.
 #[test]
-#[ignore = "model witness: qwen3-6-27b-q4-k-m"]
+#[ignore = "model witness: qwen3.6-27b-q4_k_m"]
 fn dflash_packed_verify_layer_major_vs_token_major_27b() {
-    if !std::path::Path::new(qwen_llm::test_fixtures::required_filename(
-        "Qwen3.6-27B-Q4_K_M.gguf",
-    ))
-    .exists()
-    {
-        eprintln!("[h5.3b-27b] skipped — target GGUF missing");
-        return;
-    }
     let Some(ctx) = qwen_llm::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -3027,16 +3019,8 @@ fn smalln_selection_sweep_27b() {
 /// Wall: ~3-5 min on M4 Max (oracle is 24 single_token forwards =
 /// ~24 * 50 ms = 1.2 s GPU + load ~10 s; experimental is ~0.4 s).
 #[test]
-#[ignore = "model witness: qwen3-6-27b-q4-k-m"]
+#[ignore = "model witness: qwen3.6-27b-q4_k_m"]
 fn prefill_tokens_matches_single_token_loop_27b() {
-    if !std::path::Path::new(qwen_llm::test_fixtures::required_filename(
-        "Qwen3.6-27B-Q4_K_M.gguf",
-    ))
-    .exists()
-    {
-        eprintln!("[prefill-vs-single-27b] skipped — target GGUF missing");
-        return;
-    }
     let Some(ctx) = qwen_llm::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -3362,12 +3346,9 @@ fn prefill_tokens_matches_single_token_loop_27b_matrix_g6_prefix_gate() {
 }
 
 #[test]
-#[ignore = "model witness: a3b-q4-k-m"]
+#[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m"]
 fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
-    let Some(model_path) = qwen_llm::test_fixtures::A3B_Q4_K_M.path_or_skip() else {
-        eprintln!("[prefill-vs-single-a3b] skipped — target GGUF missing");
-        return;
-    };
+    let model_path = qwen_llm::test_fixtures::A3B_Q4_K_M.required().clone();
     let Some(ctx) = qwen_llm::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -3640,16 +3621,13 @@ fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
 }
 
 #[test]
-#[ignore = "model witness: qwen3-5-122b-a10b-ud-q4-k-xl"]
+#[ignore = "model witness: qwen3.5-122b-a10b-ud-q4_k_xl"]
 fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke() {
     let model_path = qwen_llm::test_fixtures::A10B_Q4_K_XL
         .required()
         .to_str()
         .expect("UTF-8 fixture path");
-    if !std::path::Path::new(&model_path).exists() {
-        eprintln!("[prefill-vs-single-a10b] skipped — target GGUF missing");
-        return;
-    }
+
     let Some(ctx) = qwen_llm::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -4031,15 +4009,12 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_packed_attn_active_sha
 }
 
 #[test]
-#[ignore = "model witness: a3b-q4-k-m"]
+#[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m"]
 fn prefill_tokens_moe_hidden_capture_matches_p1_oracle_35b_a3b() {
     let _ = qwen_llm::test_fixtures::A3B_Q4_K_M.required();
 
     let model_path = qwen_llm::test_fixtures::A3B_Q4_K_M.required();
-    if !std::path::Path::new(&model_path).exists() {
-        eprintln!("[prefill-hidden-a3b] skipped — target GGUF missing");
-        return;
-    }
+
     let Some(ctx) = qwen_llm::test_fixtures::metal_context_or_skip() else {
         return;
     };

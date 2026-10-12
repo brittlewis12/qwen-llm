@@ -1,6 +1,6 @@
 //! GGUF v3 mmap-only loader.
 //!
-//! Parsing is delegated to `gguf-rs` (source in `~/code/gguf`)
+//! Parsing is delegated to `gguf-rs` (source in `$GGUF_RS`)
 //! for metadata + tensor-table semantics. We layer:
 //!
 //! 1. Independent `Mmap`s of the GGUF file(s) so kernels read tensor bytes
@@ -1253,7 +1253,7 @@ fn read_u32_at(mmap: &[u8], offset: usize) -> Result<u32, GgufError> {
 }
 
 // POLICY caps. The proper home for these is `gguf-validator` (see
-// `~/code/gguf-validator/SPEC.md`); this is a defensive subset of its
+// `$GGUF_VALIDATOR/SPEC.md`); this is a defensive subset of its
 // SPEC + POLICY ERROR-severity invariants applied at load time.
 //
 // Real-world bounds: Qwen3.6-27B has ~640 tensors, 80B-A3B has ~1500;
@@ -1559,7 +1559,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn parses_real_gguf() {
         let path = fixture();
         let g = GgufFile::open(&path).expect("open");
@@ -2680,7 +2680,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn finds_token_embedding() {
         let path = fixture();
         let g = GgufFile::open(&path).expect("open");
@@ -2697,7 +2697,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "model witness: qwen35-0-8b-f32"]
+    #[ignore = "model witness: qwen3.5-0.8b-f32"]
     fn stop_token_ids_on_real_gguf() {
         let path = fixture();
         let g = GgufFile::open(&path).expect("open");

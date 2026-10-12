@@ -22,7 +22,7 @@
 //! * [`tokenizer`] — Qwen2 byte-level BPE, vocab 248,320, embedded tokens
 //!                   read from GGUF metadata.
 //!
-//! The numerical oracle is `~/code/llama.cpp/build/bin/llama-cli` running
+//! The numerical oracle is `$LLAMA_CPP/build/bin/llama-cli` running
 //! against `$MODELS/Qwen3.5-0.8B.F32.gguf`. Logits-byte-equivalence on this
 //! pair is the v1 correctness bar.
 

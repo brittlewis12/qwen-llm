@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Iterator, NoReturn
 
 from family import source_identity, validate_qwen_identity
+from model_search import resolve_model
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -64,7 +65,7 @@ MODEL_SPECS: dict[str, dict[str, Any]] = {
     "qwen36-q4": {
         "family": "qwen36",
         "display": "Qwen3.6 27B Q4_K_M",
-        "path": Path.home() / "models" / "Qwen3.6-27B-Q4_K_M.gguf",
+        "filename": "Qwen3.6-27B-Q4_K_M.gguf",
         "bytes": 16_817_244_384,
         "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
         "producer": "local pinned regression anchor",
@@ -72,7 +73,7 @@ MODEL_SPECS: dict[str, dict[str, Any]] = {
     "qwen38-q4": {
         "family": "qwen38",
         "display": "Qwen3.8 27B Q4_K_M",
-        "path": Path.home() / "models" / "Qwen3.8-27B-Q4_K_M.gguf",
+        "filename": "Qwen3.8-27B-Q4_K_M.gguf",
         "bytes": 17_106_773_984,
         "sha256": "7b2aec3b9ababdfd75aa17552ee95607d866e44decf547f6f12fcef85cc89f1b",
         "producer": "unsloth/Qwen3.8-27B-GGUF",
@@ -80,10 +81,7 @@ MODEL_SPECS: dict[str, dict[str, Any]] = {
     "ridge": {
         "family": "qwen38",
         "display": "Qwen3.8 27B Ridge 3.7bpw",
-        "path": Path.home()
-        / "models"
-        / "qwen38-27b-ridge"
-        / "Qwen3.8-27B-Ridge-3.7bpw.gguf",
+        "filename": "Qwen3.8-27B-Ridge-3.7bpw.gguf",
         "bytes": 12_599_187_008,
         "sha256": "95580dbdaad579582ee898257116abc18d7f3625a00c16a15735d41444a09f5e",
         "producer": "empero-ai/Qwen3.8-27B-Ridge-GGUF@578362007e830185e1a03ff3454309c8590bad5f",
@@ -1100,7 +1098,7 @@ def model_locator(path: Path) -> dict[str, Any]:
 
 def verified_model_identity(output: Path, model_key: str) -> dict[str, Any]:
     spec = MODEL_SPECS[model_key]
-    path = Path(spec["path"]).expanduser().resolve()
+    path = resolve_model(spec["filename"]).resolve()
     if not path.is_file():
         die(f"model is missing: {path}")
     locator = model_locator(path)
@@ -1436,7 +1434,7 @@ def verify_run_artifacts(
         or model.get("producer") != spec["producer"]
         or model.get("sha256") != spec["sha256"]
         or not isinstance(locator, dict)
-        or locator.get("path") != str(Path(spec["path"]).expanduser().resolve())
+        or locator.get("path") != str(resolve_model(spec["filename"]).resolve())
         or locator.get("bytes") != spec["bytes"]
     ):
         die(f"arm {arm} model provenance differs from the frozen model specification")

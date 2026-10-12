@@ -1949,6 +1949,39 @@ fn i32_slice(
     Ok(view)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum BatchProjectionKernel {
+    Q8Batch,
+    IQ2XsScalar,
+    MatMat,
+}
+
+pub(super) fn batch_projection_selector(dtype: GgmlType) -> Option<BatchProjectionKernel> {
+    match dtype {
+        GgmlType::Q8_0 => Some(BatchProjectionKernel::Q8Batch),
+        GgmlType::IQ2_XS => Some(BatchProjectionKernel::IQ2XsScalar),
+        _ if crate::metal_forward::mat_mat_dispatch_supported(dtype) => {
+            Some(BatchProjectionKernel::MatMat)
+        }
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RoutedDownPrefillKernel {
+    Batch(BatchProjectionKernel),
+    Mxfp4MatrixOrGemv,
+}
+
+pub(super) fn routed_down_prefill_selector(dtype: GgmlType) -> Option<RoutedDownPrefillKernel> {
+    if dtype == GgmlType::MXFP4 {
+        crate::metal_forward::mat_vec_dispatch_supported(dtype)
+            .then_some(RoutedDownPrefillKernel::Mxfp4MatrixOrGemv)
+    } else {
+        batch_projection_selector(dtype).map(RoutedDownPrefillKernel::Batch)
+    }
+}
+
 fn encode_batch_projection(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1962,11 +1995,17 @@ fn encode_batch_projection(
 ) -> Result<(), DeepSeekV4MetalError> {
     checked_token_count(n_tokens)?;
     validate_matvec_weight(weight, n_in, n_out, name)?;
-    if weight.dtype == GgmlType::MXFP4 {
+    let Some(kernel) = batch_projection_selector(weight.dtype) else {
+        if weight.dtype == GgmlType::MXFP4 {
+            return invalid(format!(
+                "{name} requires MXFP4 matmat, which is not implemented"
+            ));
+        }
         return invalid(format!(
-            "{name} requires MXFP4 matmat, which is not implemented"
+            "{name} has no packed batch projection selector for {:?}",
+            weight.dtype
         ));
-    }
+    };
     if input.dtype != GgmlType::F32
         || output.dtype != GgmlType::F32
         || input.n_elements() != checked_mul(n_tokens, n_in, name)? as u64
@@ -1977,31 +2016,31 @@ fn encode_batch_projection(
             "{name} packed projection requires F32 [{n_tokens},{n_in}] -> [{n_tokens},{n_out}]"
         ));
     }
-    if weight.dtype == GgmlType::Q8_0 {
-        return crate::metal::encode_mat_vec_q8_0_batch_f32(
+    match kernel {
+        BatchProjectionKernel::Q8Batch => crate::metal::encode_mat_vec_q8_0_batch_f32(
             ctx, enc, weight, input, output, n_in, n_out, n_tokens,
         )
-        .map_err(DeepSeekV4MetalError::Metal);
-    }
-    // This helper also owns the production expert-bucket fallback and its
-    // grouped-kernel scalar references. Dense MMA changes that arithmetic.
-    if weight.dtype == GgmlType::IQ2_XS {
-        return crate::metal::encode_mat_mat_iq2_xs_f32_scalar(
+        .map_err(DeepSeekV4MetalError::Metal),
+        // This helper also owns the production expert-bucket fallback and its
+        // grouped-kernel scalar references. Dense MMA changes that arithmetic.
+        BatchProjectionKernel::IQ2XsScalar => crate::metal::encode_mat_mat_iq2_xs_f32_scalar(
             ctx, enc, weight, input, output, n_in, n_out, n_tokens,
         )
-        .map_err(DeepSeekV4MetalError::Metal);
+        .map_err(DeepSeekV4MetalError::Metal),
+        // DeepSeek's packed projections pin a bitwise matrix-tile lineage at
+        // every N (the N=1 scalar-lineage gates); do not inherit the Qwen-tuned
+        // N=1 mat-vec shortcut, which changed the accumulation order in
+        // 940516a8 and turned those gates red.
+        BatchProjectionKernel::MatMat => crate::metal_forward::encode_mat_mat_dispatch_with_policy(
+            ctx, enc, weight, input, output, n_in, n_out, n_tokens, false,
+        )
+        .map_err(|error| match error {
+            crate::metal_forward::MfError::Metal(error) => DeepSeekV4MetalError::Metal(error),
+            other => {
+                DeepSeekV4MetalError::Invalid(format!("{name} packed projection failed: {other}"))
+            }
+        }),
     }
-    // DeepSeek's packed projections pin a bitwise matrix-tile lineage at
-    // every N (the N=1 scalar-lineage gates); do not inherit the Qwen-tuned
-    // N=1 mat-vec shortcut, which changed the accumulation order in
-    // 940516a8 and turned those gates red.
-    crate::metal_forward::encode_mat_mat_dispatch_with_policy(
-        ctx, enc, weight, input, output, n_in, n_out, n_tokens, false,
-    )
-    .map_err(|error| match error {
-        crate::metal_forward::MfError::Metal(error) => DeepSeekV4MetalError::Metal(error),
-        other => DeepSeekV4MetalError::Invalid(format!("{name} packed projection failed: {other}")),
-    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9136,61 +9175,73 @@ impl PrefillMoeScratch {
                         &inner_flat,
                         expert_clamp,
                     )?;
-                    if down_weight.dtype == GgmlType::MXFP4 && mxfp4_matrix && chunk_len >= 16 {
-                        crate::metal::encode_mat_mat_mxfp4_f32_mm64x32(
-                            ctx,
-                            enc,
-                            &down_weight,
-                            &inner,
-                            &bucket_output,
-                            MOE_FFN_SIZE,
-                            DEEPSEEK_V4_HIDDEN_SIZE,
-                            chunk_len,
-                        )?;
-                        mxfp4_matrix_dispatches += 1;
-                        mxfp4_matrix_columns =
-                            mxfp4_matrix_columns.checked_add(chunk_len).ok_or_else(|| {
-                                DeepSeekV4MetalError::Invalid(
-                                    "packed MXFP4 matrix column count overflow".into(),
-                                )
-                            })?;
-                    } else if down_weight.dtype == GgmlType::MXFP4 {
-                        if mxfp4_matrix {
-                            mxfp4_scalar_columns =
-                                mxfp4_scalar_columns.checked_add(chunk_len).ok_or_else(|| {
-                                    DeepSeekV4MetalError::Invalid(
-                                        "packed MXFP4 scalar column count overflow".into(),
-                                    )
-                                })?;
-                        }
-                        for row in 0..chunk_len {
-                            let inner_row = f32_row(
-                                &inner,
-                                row,
-                                MOE_FFN_SIZE,
-                                vec![MOE_FFN_SIZE as u64],
-                                "packed MXFP4 routed inner row",
-                            )?;
-                            let output_row = f32_row(
-                                &bucket_output,
-                                row,
-                                DEEPSEEK_V4_HIDDEN_SIZE,
-                                vec![DEEPSEEK_V4_HIDDEN_SIZE as u64],
-                                "packed MXFP4 routed output row",
-                            )?;
-                            encode_projection(
+                    let down_path =
+                        routed_down_prefill_selector(down_weight.dtype).ok_or_else(|| {
+                            DeepSeekV4MetalError::Invalid(format!(
+                                "packed routed down has no prefill selector for {:?}",
+                                down_weight.dtype
+                            ))
+                        })?;
+                    match down_path {
+                        RoutedDownPrefillKernel::Mxfp4MatrixOrGemv
+                            if mxfp4_matrix && chunk_len >= 16 =>
+                        {
+                            crate::metal::encode_mat_mat_mxfp4_f32_mm64x32(
                                 ctx,
                                 enc,
                                 &down_weight,
-                                &inner_row,
-                                &output_row,
+                                &inner,
+                                &bucket_output,
                                 MOE_FFN_SIZE,
                                 DEEPSEEK_V4_HIDDEN_SIZE,
-                                "packed MXFP4 routed down",
+                                chunk_len,
                             )?;
+                            mxfp4_matrix_dispatches += 1;
+                            mxfp4_matrix_columns =
+                                mxfp4_matrix_columns.checked_add(chunk_len).ok_or_else(|| {
+                                    DeepSeekV4MetalError::Invalid(
+                                        "packed MXFP4 matrix column count overflow".into(),
+                                    )
+                                })?;
                         }
-                    } else {
-                        encode_batch_projection(
+                        RoutedDownPrefillKernel::Mxfp4MatrixOrGemv => {
+                            if mxfp4_matrix {
+                                mxfp4_scalar_columns = mxfp4_scalar_columns
+                                    .checked_add(chunk_len)
+                                    .ok_or_else(|| {
+                                        DeepSeekV4MetalError::Invalid(
+                                            "packed MXFP4 scalar column count overflow".into(),
+                                        )
+                                    })?;
+                            }
+                            for row in 0..chunk_len {
+                                let inner_row = f32_row(
+                                    &inner,
+                                    row,
+                                    MOE_FFN_SIZE,
+                                    vec![MOE_FFN_SIZE as u64],
+                                    "packed MXFP4 routed inner row",
+                                )?;
+                                let output_row = f32_row(
+                                    &bucket_output,
+                                    row,
+                                    DEEPSEEK_V4_HIDDEN_SIZE,
+                                    vec![DEEPSEEK_V4_HIDDEN_SIZE as u64],
+                                    "packed MXFP4 routed output row",
+                                )?;
+                                encode_projection(
+                                    ctx,
+                                    enc,
+                                    &down_weight,
+                                    &inner_row,
+                                    &output_row,
+                                    MOE_FFN_SIZE,
+                                    DEEPSEEK_V4_HIDDEN_SIZE,
+                                    "packed MXFP4 routed down",
+                                )?;
+                            }
+                        }
+                        RoutedDownPrefillKernel::Batch(_) => encode_batch_projection(
                             ctx,
                             enc,
                             &down_weight,
@@ -9200,7 +9251,7 @@ impl PrefillMoeScratch {
                             DEEPSEEK_V4_HIDDEN_SIZE,
                             chunk_len,
                             "packed routed down",
-                        )?;
+                        )?,
                     }
                     crate::metal::encode_scatter_rows_f32_unique(
                         ctx,

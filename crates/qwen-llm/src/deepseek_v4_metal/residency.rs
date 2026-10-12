@@ -13,6 +13,26 @@ fn unsupported_operation_dtype(
     }
 }
 
+fn packed_prefill_role(name: &str) -> &'static str {
+    if name.ends_with(".ffn_gate_shexp.weight") {
+        "shared gate packed prefill"
+    } else if name.ends_with(".ffn_up_shexp.weight") {
+        "shared up packed prefill"
+    } else if name.ends_with(".ffn_down_shexp.weight") {
+        "shared down packed prefill"
+    } else if name.ends_with(".ffn_gate_inp.weight") {
+        "MoE router packed prefill"
+    } else if name.contains(".indexer.") {
+        "indexer packed prefill projection"
+    } else if name.contains(".attn_") {
+        "attention packed prefill projection"
+    } else if name.contains("hc_") {
+        "hyper-connection packed prefill projection"
+    } else {
+        "dense packed prefill projection"
+    }
+}
+
 pub(super) fn validate_operation_dtypes(
     tensors: &[crate::tensor::TensorDesc],
 ) -> Result<(), DeepSeekV4MetalError> {
@@ -60,11 +80,34 @@ pub(super) fn validate_operation_dtypes(
                             tensor.dtype,
                         );
                     }
-                    selector.is_some() && indexed.is_some()
+                    if selector.is_none() || indexed.is_none() {
+                        false
+                    } else if super::prefill::batch_projection_selector(tensor.dtype).is_none() {
+                        return Err(unsupported_operation_dtype(
+                            tensor,
+                            if role == "routed gate" {
+                                "routed gate packed prefill"
+                            } else {
+                                "routed up packed prefill"
+                            },
+                        ));
+                    } else {
+                        true
+                    }
                 }
                 "routed down" => {
-                    super::moe::routed_all_slots_down_selector(tensor.dtype).is_some()
-                        && super::moe::indexed_expert_selector(tensor.dtype).is_some()
+                    if super::moe::routed_all_slots_down_selector(tensor.dtype).is_none()
+                        || super::moe::indexed_expert_selector(tensor.dtype).is_none()
+                    {
+                        false
+                    } else if super::prefill::routed_down_prefill_selector(tensor.dtype).is_none() {
+                        return Err(unsupported_operation_dtype(
+                            tensor,
+                            "routed down packed prefill",
+                        ));
+                    } else {
+                        true
+                    }
                 }
                 _ => false,
             };
@@ -76,11 +119,16 @@ pub(super) fn validate_operation_dtypes(
         if name.ends_with(".ffn_gate_tid2eid.weight") {
             continue;
         }
-        if tensor.shape.len() == 2
-            && name.ends_with(".weight")
-            && !crate::metal_forward::mat_vec_dispatch_supported(tensor.dtype)
-        {
-            return Err(unsupported_operation_dtype(tensor, "dense GEMV"));
+        if tensor.shape.len() == 2 && name.ends_with(".weight") {
+            if !crate::metal_forward::mat_vec_dispatch_supported(tensor.dtype) {
+                return Err(unsupported_operation_dtype(tensor, "dense GEMV"));
+            }
+            if super::prefill::batch_projection_selector(tensor.dtype).is_none() {
+                return Err(unsupported_operation_dtype(
+                    tensor,
+                    packed_prefill_role(name),
+                ));
+            }
         }
     }
     for (layer, gate_dtype) in gate_dtypes {

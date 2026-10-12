@@ -105,6 +105,11 @@ fn routed_selector_predicates_match_their_operation_tables() {
     ];
     for dtype in dtypes {
         assert_eq!(
+            super::prefill::batch_projection_selector(dtype).is_some(),
+            crate::metal_forward::mat_mat_dispatch_supported(dtype),
+            "packed batch projection {dtype:?}"
+        );
+        assert_eq!(
             super::moe::routed_all_slots_gate_up_selector(dtype).is_some(),
             matches!(
                 dtype,
@@ -178,6 +183,49 @@ fn operation_preflight_reports_typed_routed_and_dense_refusals() {
             dtype: GgmlType::Q5_0,
         }) if tensor == "blk.0.attn_q_a.weight"
     ));
+}
+
+#[test]
+fn operation_preflight_accounts_for_packed_prefill_projection_roles() {
+    let shared = [
+        operation_descriptor("blk.0.ffn_gate_shexp.weight", GgmlType::MXFP4, &[1, 1]),
+        operation_descriptor("blk.0.ffn_up_shexp.weight", GgmlType::MXFP4, &[1, 1]),
+    ];
+    assert!(matches!(
+        validate_operation_dtypes(&shared),
+        Err(DeepSeekV4MetalError::UnsupportedOperationDtype {
+            tensor,
+            role: "shared gate packed prefill",
+            dtype: GgmlType::MXFP4,
+        }) if tensor == "blk.0.ffn_gate_shexp.weight"
+    ));
+
+    for (name, role) in [
+        ("blk.0.ffn_gate_inp.weight", "MoE router packed prefill"),
+        (
+            "blk.0.attn_q_a.weight",
+            "attention packed prefill projection",
+        ),
+    ] {
+        let descriptors = [operation_descriptor(name, GgmlType::MXFP4, &[1, 1])];
+        assert!(matches!(
+            validate_operation_dtypes(&descriptors),
+            Err(DeepSeekV4MetalError::UnsupportedOperationDtype {
+                tensor,
+                role: actual_role,
+                dtype: GgmlType::MXFP4,
+            }) if tensor == name && actual_role == role
+        ));
+    }
+}
+
+#[test]
+fn operation_preflight_preserves_mxfp4_routed_down_and_output_logits() {
+    let descriptors = [
+        operation_descriptor("blk.0.ffn_down_exps.weight", GgmlType::MXFP4, &[1, 1, 1]),
+        operation_descriptor("output.weight", GgmlType::MXFP4, &[1, 1]),
+    ];
+    validate_operation_dtypes(&descriptors).unwrap();
 }
 
 #[test]

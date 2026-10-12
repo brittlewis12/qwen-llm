@@ -60,6 +60,10 @@ mod hc_decode_ab;
 mod latent_mma_ab;
 
 #[cfg(test)]
+#[path = "tests/prefill_cost.rs"]
+mod prefill_cost;
+
+#[cfg(test)]
 thread_local! {
     static ABSORB_TAIL: std::cell::Cell<(Option<bool>, usize)> = const { std::cell::Cell::new((None, 0)) };
 }

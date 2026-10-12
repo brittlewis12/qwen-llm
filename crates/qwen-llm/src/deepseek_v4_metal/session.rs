@@ -2126,14 +2126,14 @@ pub(super) fn validate_session_lookup_dtypes(
     embedding_dtype: GgmlType,
     output_dtype: GgmlType,
 ) -> Result<(), DeepSeekV4MetalError> {
-    if !matches!(embedding_dtype, GgmlType::Q6_K | GgmlType::Q8_0) {
+    if crate::metal::get_rows_pipeline_name(embedding_dtype).is_none() {
         return invalid(format!(
-            "token_embd.weight must be Q6_K or Q8_0 for the native session get_rows path, got {embedding_dtype:?}"
+            "token_embd.weight has no native session get_rows selector for dtype {embedding_dtype:?}"
         ));
     }
-    if !matches!(output_dtype, GgmlType::Q6_K | GgmlType::Q8_0) {
+    if !crate::metal_forward::mat_vec_dispatch_supported(output_dtype) {
         return invalid(format!(
-            "output.weight must be Q6_K or Q8_0 for the native session logits path, got {output_dtype:?}"
+            "output.weight has no native session logits GEMV selector for dtype {output_dtype:?}"
         ));
     }
     Ok(())

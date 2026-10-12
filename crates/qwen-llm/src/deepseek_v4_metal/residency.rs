@@ -2,6 +2,101 @@
 
 use super::*;
 
+fn unsupported_operation_dtype(
+    tensor: &crate::tensor::TensorDesc,
+    role: &'static str,
+) -> DeepSeekV4MetalError {
+    DeepSeekV4MetalError::UnsupportedOperationDtype {
+        tensor: tensor.name.clone(),
+        role,
+        dtype: tensor.dtype,
+    }
+}
+
+pub(super) fn validate_operation_dtypes(
+    tensors: &[crate::tensor::TensorDesc],
+) -> Result<(), DeepSeekV4MetalError> {
+    let mut gate_dtypes = BTreeMap::new();
+    let mut up_dtypes = BTreeMap::new();
+    for tensor in tensors {
+        let name = tensor.name.as_str();
+        if name == "token_embd.weight" {
+            if crate::metal::get_rows_pipeline_name(tensor.dtype).is_none() {
+                return Err(unsupported_operation_dtype(
+                    tensor,
+                    "token embedding lookup",
+                ));
+            }
+            continue;
+        }
+        if name == "output.weight" {
+            if !crate::metal_forward::mat_vec_dispatch_supported(tensor.dtype) {
+                return Err(unsupported_operation_dtype(tensor, "output logits lookup"));
+            }
+            continue;
+        }
+        let expert_role = if name.ends_with(".ffn_gate_exps.weight") {
+            Some("routed gate")
+        } else if name.ends_with(".ffn_up_exps.weight") {
+            Some("routed up")
+        } else if name.ends_with(".ffn_down_exps.weight") {
+            Some("routed down")
+        } else {
+            None
+        };
+        if let Some(role) = expert_role {
+            let supported = match role {
+                "routed gate" | "routed up" => {
+                    let selector = super::moe::routed_all_slots_gate_up_selector(tensor.dtype);
+                    let indexed = super::moe::indexed_expert_selector(tensor.dtype);
+                    if role == "routed gate" {
+                        gate_dtypes.insert(
+                            name.trim_end_matches(".ffn_gate_exps.weight").to_owned(),
+                            tensor.dtype,
+                        );
+                    } else {
+                        up_dtypes.insert(
+                            name.trim_end_matches(".ffn_up_exps.weight").to_owned(),
+                            tensor.dtype,
+                        );
+                    }
+                    selector.is_some() && indexed.is_some()
+                }
+                "routed down" => {
+                    super::moe::routed_all_slots_down_selector(tensor.dtype).is_some()
+                        && super::moe::indexed_expert_selector(tensor.dtype).is_some()
+                }
+                _ => false,
+            };
+            if !supported {
+                return Err(unsupported_operation_dtype(tensor, role));
+            }
+            continue;
+        }
+        if name.ends_with(".ffn_gate_tid2eid.weight") {
+            continue;
+        }
+        if tensor.shape.len() == 2
+            && name.ends_with(".weight")
+            && !crate::metal_forward::mat_vec_dispatch_supported(tensor.dtype)
+        {
+            return Err(unsupported_operation_dtype(tensor, "dense GEMV"));
+        }
+    }
+    for (layer, gate_dtype) in gate_dtypes {
+        if let Some(up_dtype) = up_dtypes.get(&layer)
+            && *up_dtype != gate_dtype
+        {
+            let tensor = tensors
+                .iter()
+                .find(|tensor| tensor.name == format!("{layer}.ffn_up_exps.weight"))
+                .expect("up dtype came from this descriptor list");
+            return Err(unsupported_operation_dtype(tensor, "routed gate/up pair"));
+        }
+    }
+    Ok(())
+}
+
 /// Engine-owned evidence ceiling through the model's exact context length.
 /// A request may allocate less, but allocation never authorizes execution past
 /// this independently promoted boundary.
@@ -665,6 +760,7 @@ impl DeepSeekV4MetalResidency {
     ) -> Result<DeepSeekV4MetalLoadPlan, DeepSeekV4MetalError> {
         let model = DeepSeekV4Model::from_gguf_flash_0731(gguf)?;
         validate_strict_binding(gguf, &model)?;
+        validate_operation_dtypes(&gguf.tensors)?;
         validate_session_config(&model.config)?;
         validate_session_lookup_storage(gguf)?;
         let session_capacity = DeepSeekV4SessionCapacity::for_forward_limit(
@@ -715,6 +811,7 @@ impl DeepSeekV4MetalResidency {
         }
         let model = DeepSeekV4Model::from_gguf_flash_0731(gguf)?;
         validate_strict_binding(gguf, &model)?;
+        validate_operation_dtypes(&gguf.tensors)?;
         if model.config != plan.config {
             return invalid("DeepSeek V4 load-plan configuration differs from the GGUF binding");
         }

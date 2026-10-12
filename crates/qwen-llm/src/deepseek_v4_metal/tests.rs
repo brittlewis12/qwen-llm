@@ -138,6 +138,88 @@ fn routed_selector_predicates_match_their_operation_tables() {
     }
 }
 
+fn operation_descriptor(name: &str, dtype: GgmlType, shape: &[u64]) -> TensorDesc {
+    TensorDesc {
+        name: name.to_owned(),
+        shape: shape.to_vec(),
+        dtype,
+        shard_idx: 0,
+        data_offset: 0,
+        n_bytes: 0,
+    }
+}
+
+#[test]
+fn operation_preflight_reports_typed_routed_and_dense_refusals() {
+    let routed = [operation_descriptor(
+        "blk.0.ffn_gate_exps.weight",
+        GgmlType::Q5_0,
+        &[1, 1, 1],
+    )];
+    assert!(matches!(
+        validate_operation_dtypes(&routed),
+        Err(DeepSeekV4MetalError::UnsupportedOperationDtype {
+            tensor,
+            role: "routed gate",
+            dtype: GgmlType::Q5_0,
+        }) if tensor == "blk.0.ffn_gate_exps.weight"
+    ));
+
+    let dense = [operation_descriptor(
+        "blk.0.attn_q_a.weight",
+        GgmlType::Q5_0,
+        &[1, 1],
+    )];
+    assert!(matches!(
+        validate_operation_dtypes(&dense),
+        Err(DeepSeekV4MetalError::UnsupportedOperationDtype {
+            tensor,
+            role: "dense GEMV",
+            dtype: GgmlType::Q5_0,
+        }) if tensor == "blk.0.attn_q_a.weight"
+    ));
+}
+
+#[test]
+fn operation_preflight_accepts_current_qualified_artifact_storage() {
+    const CURRENT_CENSUS: &str = include_str!(
+        "../../tests/fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_current_2026_08_04_census_v1.json"
+    );
+    let fixture = PinnedDeepSeekV4AssetV1::parse(CURRENT_CENSUS)
+        .expect("current qualified DS4 descriptor census");
+    let mut descriptors = vec![
+        operation_descriptor("token_embd.weight", GgmlType::Q6_K, &[1, 1]),
+        operation_descriptor("output.weight", GgmlType::Q6_K, &[1, 1]),
+    ];
+    for (role, suffix) in [
+        ("routed_gate", "ffn_gate_exps"),
+        ("routed_up", "ffn_up_exps"),
+        ("routed_down", "ffn_down_exps"),
+    ] {
+        let census = fixture
+            .census
+            .roles
+            .iter()
+            .find(|entry| entry.role == role)
+            .expect("role in pinned DS4 census");
+        for storage in &census.storage {
+            descriptors.push(operation_descriptor(
+                &format!("blk.0.{suffix}.weight"),
+                GgmlType::from_raw(storage.dtype_tag as u32),
+                &[1, 1, 1],
+            ));
+        }
+    }
+    for dtype in [GgmlType::Q8_0, GgmlType::Q6_K, GgmlType::BF16] {
+        descriptors.push(operation_descriptor(
+            "blk.0.ffn_gate_shexp.weight",
+            dtype,
+            &[1, 1],
+        ));
+    }
+    validate_operation_dtypes(&descriptors).unwrap();
+}
+
 fn max_finite_metric(values: impl IntoIterator<Item = f64>) -> f64 {
     let mut maximum = 0.0f64;
     let mut count = 0usize;
@@ -6666,9 +6748,10 @@ fn session_lookup_storage_rejects_unsupported_dtypes_before_residency() {
     validate_session_lookup_dtypes(GgmlType::Q8_0, GgmlType::Q8_0).unwrap();
     validate_session_lookup_dtypes(GgmlType::Q6_K, GgmlType::Q8_0).unwrap();
     validate_session_lookup_dtypes(GgmlType::Q8_0, GgmlType::Q6_K).unwrap();
-    let embedding = validate_session_lookup_dtypes(GgmlType::F32, GgmlType::Q6_K).unwrap_err();
+    validate_session_lookup_dtypes(GgmlType::F32, GgmlType::F32).unwrap();
+    let embedding = validate_session_lookup_dtypes(GgmlType::Q5_0, GgmlType::Q6_K).unwrap_err();
     assert!(embedding.to_string().contains("token_embd.weight"));
-    let output = validate_session_lookup_dtypes(GgmlType::Q6_K, GgmlType::F32).unwrap_err();
+    let output = validate_session_lookup_dtypes(GgmlType::Q6_K, GgmlType::Q5_0).unwrap_err();
     assert!(output.to_string().contains("output.weight"));
 }
 

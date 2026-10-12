@@ -362,7 +362,7 @@ fn run() -> Result<()> {
         let model = qwen_llm::loader::Model::from_gguf(&gguf)
             .context("parse target arch for the prompt-lookup gate")?;
         qwen_llm::metal_dflash::ensure_prompt_lookup_n8_supported_for_gguf(&model)
-            .map_err(anyhow::Error::msg)?;
+            .map_err(anyhow::Error::from)?;
     }
     // DS4 is the only consumer of its snapshot and reasoning flags, which
     // the remaining lanes refuse.
@@ -1195,10 +1195,10 @@ fn project_info(model: &Path, gguf: &GgufFile) -> Result<serde_json::Value> {
                             "experimental": true,
                             "message": "packed arithmetic may change tokens relative to ordinary decoding",
                         }),
-                        Err(message) => serde_json::json!({
+                        Err(reason) => serde_json::json!({
                             "status": "unsupported",
-                            "code": "layout_not_qualified",
-                            "message": message,
+                            "code": reason.code(),
+                            "message": reason.to_string(),
                         }),
                     }
                 }

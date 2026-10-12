@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) fn moe_iq3_expert_native_enabled(desc: &TensorDesc) -> bool {
+pub(crate) fn moe_iq3_expert_native_enabled(desc: &TensorDesc) -> bool {
     let truthy = |v: &str| matches!(v, "1" | "true" | "TRUE" | "yes" | "YES");
     let falsey = |v: &str| matches!(v, "0" | "false" | "FALSE" | "no" | "NO");
     if let Ok(v) = std::env::var("QWEN_MOE_IQ3_EXPERT_NATIVE") {

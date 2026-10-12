@@ -30,6 +30,11 @@ pub(crate) fn generate_prompt_lookup<OnToken>(
 where
     OnToken: FnMut(i32) -> Result<()>,
 {
+    qwen_llm::metal_dflash::ensure_prompt_lookup_n8_supported(loaded.metal_model()).map_err(
+        |error| {
+            anyhow::anyhow!("internal prompt-lookup admission mismatch after model load: {error}")
+        },
+    )?;
     ensure!(max_tokens > 0, "max_tokens must be >= 1");
     let wall_t0 = Instant::now();
     let selection_t0 = Instant::now();

@@ -14686,7 +14686,80 @@ fn windowed_split_capture_equals_full_capture() {
 
 mod prompt_lookup_layout_gate {
     use super::*;
+    use crate::metal_forward::WeightRole;
     use crate::model::{QWEN3_0_8B, QWEN3_27B};
+    use crate::tensor::TensorDesc;
+
+    fn desc(dtype: GgmlType, shape: &[u64]) -> TensorDesc {
+        TensorDesc {
+            name: "test.weight".into(),
+            shape: shape.to_vec(),
+            dtype,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn header_admission_uses_the_loader_materialized_dtype_per_role() {
+        let dense_q5 = prompt_lookup_planned_dtype(
+            &desc(GgmlType::Q5_0, &[32, 32]),
+            WeightRole::DenseProjection,
+        )
+        .unwrap();
+        assert_eq!(dense_q5, GgmlType::F32);
+        assert!(mat_vec_dispatch_supported(dense_q5));
+
+        let expert_iq2 = prompt_lookup_planned_dtype(
+            &desc(GgmlType::IQ2_XS, &[32, 32, 4]),
+            WeightRole::ExpertBank,
+        )
+        .unwrap();
+        assert_eq!(expert_iq2, GgmlType::F32);
+        let moe_arch = crate::model::Arch {
+            kind: crate::model::ArchKind::Moe,
+            ..QWEN3_27B
+        };
+        assert_eq!(
+            check_prompt_lookup_n8_layout(
+                &moe_arch,
+                GgmlType::Q8_0,
+                [PromptLookupBlockLayout {
+                    routed: Some([expert_iq2; 3]),
+                    ..q4km_block()
+                }],
+            ),
+            Ok(())
+        );
+
+        let native_q2 = prompt_lookup_planned_dtype(
+            &desc(GgmlType::Q2_K, &[32, 32, 4]),
+            WeightRole::ExpertBank,
+        )
+        .unwrap();
+        assert_eq!(native_q2, GgmlType::Q2_K);
+        let refused = check_prompt_lookup_n8_layout(
+            &moe_arch,
+            GgmlType::Q8_0,
+            [PromptLookupBlockLayout {
+                routed: Some([native_q2; 3]),
+                ..q4km_block()
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(refused.code(), "operation_unsupported");
+    }
+
+    #[test]
+    fn header_plan_rejects_invalid_native_iq_geometry() {
+        let error = prompt_lookup_planned_dtype(
+            &desc(GgmlType::IQ2_XS, &[17, 32]),
+            WeightRole::DenseProjection,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "invalid_storage_geometry");
+    }
 
     fn q4km_block() -> PromptLookupBlockLayout {
         PromptLookupBlockLayout {
@@ -14754,7 +14827,11 @@ mod prompt_lookup_layout_gate {
     fn missing_lm_head_dispatch_is_refused() {
         let err = check_prompt_lookup_n8_layout(&QWEN3_27B, GgmlType::I32, std::iter::empty())
             .unwrap_err();
-        assert!(err.contains("no target lm_head dispatch for I32"), "{err}");
+        assert_eq!(err.code(), "operation_unsupported");
+        assert!(
+            err.to_string().contains("target lm_head dispatch for I32"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -14763,7 +14840,8 @@ mod prompt_lookup_layout_gate {
         blocks[17].gate = GgmlType::I32;
         let err = check_prompt_lookup_n8_layout(&QWEN3_27B, GgmlType::Q6_K, blocks).unwrap_err();
         assert!(
-            err.contains("block 17 has gate/up/down=I32/Q4_K/Q6_K"),
+            err.to_string()
+                .contains("dense/shared FFN dispatch for I32"),
             "{err}"
         );
     }
@@ -14815,10 +14893,7 @@ mod prompt_lookup_layout_gate {
                 ..q4km_block()
             };
             let err = check_prompt_lookup_n8_layout(&arch, GgmlType::Q8_0, [block]).unwrap_err();
-            assert!(
-                err.contains("no routed expert dispatch for block 0"),
-                "{err}"
-            );
+            assert!(err.code() == "operation_unsupported", "{err}");
         }
     }
 
@@ -14829,12 +14904,12 @@ mod prompt_lookup_layout_gate {
             ..QWEN3_27B
         };
         let err = check_prompt_lookup_n8_layout(&arch, GgmlType::Q8_0, [q4km_block()]).unwrap_err();
-        assert!(err.contains("routed expert presence"), "{err}");
+        assert!(err.to_string().contains("routed expert presence"), "{err}");
         let block = PromptLookupBlockLayout {
             routed: Some([GgmlType::Q4_K; 3]),
             ..q4km_block()
         };
         let err = check_prompt_lookup_n8_layout(&QWEN3_27B, GgmlType::Q8_0, [block]).unwrap_err();
-        assert!(err.contains("routed expert presence"), "{err}");
+        assert!(err.to_string().contains("routed expert presence"), "{err}");
     }
 }

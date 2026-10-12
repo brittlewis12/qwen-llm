@@ -1807,6 +1807,12 @@ fn assert_gguf_parallel_a3b_q4_is_bit_exact(
     );
     assert!(!moe_router_f16_enabled());
     let ctx = MetalContext::new().expect("Metal context");
+    if let Some(reason) = crate::metal::A3B_PARALLEL_COPY_AUTO.decline_reason(ctx.device_facts()) {
+        eprintln!(
+            "[metal-parallel-copy-a3b] skipped: M4 Max qualification does not hold: {reason:?}"
+        );
+        return;
+    }
     let gguf = GgufFile::open(model_path).expect("open parallel-copy A3B fixture");
     let model = Model::from_gguf(&gguf).expect("bind parallel-copy A3B fixture");
     let tokens = [

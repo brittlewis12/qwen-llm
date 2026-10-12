@@ -3442,10 +3442,14 @@ fn profile_q8_f32_mma_r2c4k64_attention_output_packet() {
     let Ok(ctx) = MetalContext::new() else {
         return;
     };
-    assert_eq!(
-        ctx.device.name().to_string(),
-        crate::metal::DEEPSEEK_V4_PACKED_GROUPED_EXPERT.device_model
-    );
+    if let Some(reason) =
+        crate::metal::DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY.decline_reason(ctx.device_facts())
+    {
+        eprintln!(
+            "skipped: M4 Max packed Q8 matrix characterization qualification does not hold: {reason:?}"
+        );
+        return;
+    }
     const N: usize = 128;
     const SAMPLES: usize = 24;
 

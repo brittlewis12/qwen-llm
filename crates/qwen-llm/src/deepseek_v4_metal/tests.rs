@@ -2693,6 +2693,14 @@ fn current_asset_packed_gpu_route_kill_packet() {
         .unwrap_or_else(|| PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path()));
     assert!(model_path.exists(), "missing current DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
+    if let Some(reason) =
+        crate::metal::DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION.decline_reason(ctx.device_facts())
+    {
+        eprintln!(
+            "skipped: M4 Max packed GPU route characterization qualification does not hold: {reason:?}"
+        );
+        return;
+    }
     let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
     let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, FORWARD_LIMIT)
         .expect("plan packed GPU route session");
@@ -3078,6 +3086,14 @@ fn current_asset_packed_grouped_expert_integration_packet() {
         .unwrap_or_else(|| PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path()));
     assert!(model_path.exists(), "missing current DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
+    if let Some(reason) =
+        crate::metal::DEEPSEEK_V4_PACKED_GROUPED_EXPERT.decline_reason(ctx.device_facts())
+    {
+        eprintln!(
+            "skipped: M4 Max grouped expert characterization qualification does not hold: {reason:?}"
+        );
+        return;
+    }
     let grouped_enabled = prefill::packed_grouped_expert_enabled_for_test(&ctx);
     let iq3_experiment = std::env::var_os("QWEN_DSV4_PACKED_GROUPED_IQ3_EXPERIMENT").is_some();
     let (control_arm, candidate_arm) = if iq3_experiment {
@@ -5576,6 +5592,12 @@ fn splitk_hca_profiles_current_synthetic_terminal_tokens() {
         });
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
+    if let Some(reason) = crate::metal::DEEPSEEK_V4_SPLITK_HCA.decline_reason(ctx.device_facts()) {
+        eprintln!(
+            "skipped: M4 Max split-K HCA characterization qualification does not hold: {reason:?}"
+        );
+        return;
+    }
     let (gguf, _) = open_pinned_current_gguf(&model_path);
     let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, FORWARD_LIMIT)
         .expect("plan terminal synthetic session");
@@ -6440,6 +6462,14 @@ fn current_weight_boundary_optimization_differentials() {
         });
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
+    if let Some(reason) =
+        crate::metal::DEEPSEEK_V4_F16_MATRIX_SCORER.decline_reason(ctx.device_facts())
+    {
+        eprintln!(
+            "skipped: M4 Max F16 scorer characterization qualification does not hold: {reason:?}"
+        );
+        return;
+    }
     let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
     let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, FORWARD_LIMIT)
         .expect("plan online HCA boundary session");
@@ -12685,6 +12715,14 @@ fn current_asset_multigroup_selector_whole_token_gate() {
         .unwrap_or_else(|| PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.path()));
     assert!(model_path.exists(), "missing current DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
+    if let Some(reason) =
+        crate::metal::DEEPSEEK_V4_MULTIGROUP_SELECTOR.decline_reason(ctx.device_facts())
+    {
+        eprintln!(
+            "skipped: M4 Max multigroup selector characterization qualification does not hold: {reason:?}"
+        );
+        return;
+    }
     let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
     let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, FORWARD_LIMIT)
         .expect("plan full-context current-asset session");

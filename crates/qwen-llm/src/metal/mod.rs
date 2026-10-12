@@ -361,8 +361,9 @@ pub use qualification::{
     DEEPSEEK_V4_PACKED_GROUPED_Q3Q4, DEEPSEEK_V4_PACKED_INDEXER_Q_MATRIX,
     DEEPSEEK_V4_PACKED_MXFP4_MATRIX, DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY,
     DEEPSEEK_V4_PACKED_QA_RAW_KV_MATRIX, DEEPSEEK_V4_PACKED_SHARED_ROUTE_OVERLAP,
-    DEEPSEEK_V4_RESIDENCY_SET, DEEPSEEK_V4_SPLITK_HCA, PARALLEL_COPY_EXACT_UNIFIED, QUALIFICATIONS,
-    Qualification, QualificationDeclineReason, QualifiedMemory, declined_reason_once,
+    DEEPSEEK_V4_QUALIFICATIONS, DEEPSEEK_V4_RESIDENCY_SET, DEEPSEEK_V4_SPLITK_HCA,
+    HeadroomRequirementScope, PARALLEL_COPY_EXACT_UNIFIED, QUALIFICATIONS, Qualification,
+    QualificationDeclineReason, QualificationWitnessKind, QualifiedMemory, declined_reason_once,
 };
 pub use research::*;
 pub use rope::*;

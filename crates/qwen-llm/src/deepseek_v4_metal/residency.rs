@@ -709,6 +709,14 @@ fn log_deepseek_v4_artifact_qualification(
     report: &DeepSeekV4ResidencyReport,
 ) {
     let facts = ctx.device_facts();
+    for qualification in crate::metal::DEEPSEEK_V4_QUALIFICATIONS {
+        if let Some(reason) = crate::metal::declined_reason_once(qualification, facts) {
+            eprintln!(
+                "deepseek_v4: qualification declined path={} reason={reason:?}",
+                qualification.path
+            );
+        }
+    }
     let profile = match (
         report.tensor_count,
         config.expert_count,
@@ -725,14 +733,6 @@ fn log_deepseek_v4_artifact_qualification(
     };
     let qualified = profile != "none" && crate::metal::DEEPSEEK_V4_RESIDENCY_SET.holds_for(facts);
     if profile != "none" && !qualified {
-        if let Some(reason) =
-            crate::metal::declined_reason_once(&crate::metal::DEEPSEEK_V4_RESIDENCY_SET, facts)
-        {
-            eprintln!(
-                "deepseek_v4: residency qualification declined path={} reason={reason:?}",
-                crate::metal::DEEPSEEK_V4_RESIDENCY_SET.path
-            );
-        }
         return;
     }
     eprintln!(

@@ -117,17 +117,20 @@ impl DeviceFacts {
                 }
             };
             report.push_str(&format!(
-                "\n  {}: device={} memory={} host_page_size_bytes={:?} max_buffer_length_bytes={:?} required_headroom_bytes={:?} holds_for_device={} decline_reason={:?} evidence={} correctness={} performance={}",
+                "\n  {}: device={} memory={} host_page_size_bytes={:?} max_buffer_length_bytes={:?} required_headroom_bytes={:?} required_headroom_scope={:?} holds_for_device={} decline_reason={:?} evidence={} correctness_kind={:?} correctness={} performance_kind={:?} performance={}",
                 status.path,
                 status.device_model,
                 memory,
                 status.host_page_size_bytes,
                 status.max_buffer_length_bytes,
                 status.required_headroom_bytes,
+                status.required_headroom_scope,
                 status.holds_for_device,
                 status.decline_reason,
                 status.evidence,
+                status.correctness_kind,
                 status.correctness,
+                status.performance_kind,
                 status.performance,
             ));
         }
@@ -246,7 +249,10 @@ mod tests {
         assert!(report.contains("product_metallib_deployment_target: 15.0"));
         assert!(report.contains("deepseek_v4.multigroup_selector: device=Apple M4 Max"));
         assert!(report.contains("holds_for_device=false"));
-        assert!(report.contains("evidence=d52815a3 correctness=cargo test"));
+        assert!(
+            report.contains("evidence=d52815a3 correctness_kind=Replay correctness=cargo test")
+        );
+        assert!(report.contains("performance_kind=M4CharacterizationSkip"));
         assert!(report.contains("performance=cargo test"));
         assert!(report.contains("decline_reason=Some(DeviceModel"));
     }
@@ -263,13 +269,16 @@ mod tests {
         assert_eq!(exact["host_page_size_bytes"], 16_384);
         assert_eq!(exact["max_buffer_length_bytes"], 77_309_411_328_usize);
         assert_eq!(exact["required_headroom_bytes"], 85_608_931_328_u64);
+        assert_eq!(exact["required_headroom_scope"], "a10b_q4xl_forced_pread");
         assert!(
             exact["correctness"]
                 .as_str()
                 .unwrap()
                 .starts_with("cargo test")
         );
+        assert_eq!(exact["correctness_kind"], "m4_characterization_skip");
         assert!(exact["performance"].as_str().unwrap().starts_with("none:"));
+        assert_eq!(exact["performance_kind"], "none");
         assert_eq!(exact["decline_reason"]["facet"], "device_model");
     }
 }

@@ -30,14 +30,7 @@ pub(crate) fn moe_iq3_expert_native_enabled(desc: &TensorDesc) -> bool {
 /// gate and up products then SiLU*mul) stay on the serial encoder, which
 /// orders them.
 pub(super) fn routed_gate_up_single_dispatch(gate: GgmlType, up: GgmlType) -> bool {
-    gate == up
-        && match gate {
-            GgmlType::Q4_K | GgmlType::Q6_K | GgmlType::Q8_0 | GgmlType::IQ4_XS => true,
-            GgmlType::IQ3_XXS | GgmlType::IQ3_S => {
-                decode_moe_iq3_fast_swiglu_enabled() || decode_moe_iq3_fused_swiglu_enabled()
-            }
-            _ => false,
-        }
+    moe_routed_gate_up_decode_selector(gate, up).is_some_and(RoutedGateUpRecipe::is_single_dispatch)
 }
 
 pub(super) fn phase_moe_ffn_split_enabled() -> bool {
@@ -87,48 +80,138 @@ pub(super) fn phase_moe_route_deep_split_enabled() -> bool {
     })
 }
 
-pub(crate) fn moe_routed_gate_up_decode_selector(gate: GgmlType, up: GgmlType) -> Option<GgmlType> {
-    matches!(
-        (gate, up),
-        (GgmlType::Q4_K, GgmlType::Q4_K)
-            | (GgmlType::Q5_K, GgmlType::Q5_K)
-            | (GgmlType::Q6_K, GgmlType::Q6_K)
-            | (GgmlType::Q8_0, GgmlType::Q8_0)
-            | (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS)
-            | (GgmlType::IQ3_S, GgmlType::IQ3_S)
-            | (GgmlType::IQ4_XS, GgmlType::IQ4_XS)
-            | (GgmlType::BF16, GgmlType::BF16)
-            | (GgmlType::F32, GgmlType::F32)
-    )
-    .then_some(gate)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RoutedGateUpRecipe {
+    Q4K,
+    Q5K,
+    Q6K,
+    Q8_0,
+    Iq3Xxs,
+    Iq3S,
+    Iq4Xs,
+    F32,
+    Bf16,
 }
 
-pub(crate) fn moe_routed_down_decode_selector(down: GgmlType) -> Option<GgmlType> {
-    matches!(
-        down,
-        GgmlType::Q4_K
-            | GgmlType::Q5_K
-            | GgmlType::Q6_K
-            | GgmlType::Q8_0
-            | GgmlType::IQ4_NL
-            | GgmlType::IQ4_XS
-            | GgmlType::BF16
-            | GgmlType::F32
-    )
-    .then_some(down)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RoutedDownRecipe {
+    Q4K,
+    Q5K,
+    Q6K,
+    Q8_0,
+    Iq4Nl,
+    Iq4Xs,
+    F32,
+    Bf16,
 }
 
-pub(crate) fn moe_routed_down_deep_split_selector(down: GgmlType) -> Option<GgmlType> {
-    matches!(
-        down,
-        GgmlType::Q5_K
-            | GgmlType::Q6_K
-            | GgmlType::Q8_0
-            | GgmlType::IQ4_NL
-            | GgmlType::IQ4_XS
-            | GgmlType::BF16
-    )
-    .then_some(down)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RoutedDownDeepSplitRecipe {
+    Q5K,
+    Q6K,
+    Q8_0,
+    Iq4Nl,
+    Iq4Xs,
+    Bf16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RoutedMoeDecodeRecipes {
+    pub(crate) gate_up: RoutedGateUpRecipe,
+    pub(crate) down: RoutedDownRecipe,
+    pub(crate) deep_split_down: Option<RoutedDownDeepSplitRecipe>,
+}
+
+impl RoutedGateUpRecipe {
+    fn is_single_dispatch(self) -> bool {
+        match self {
+            Self::Q4K | Self::Q6K | Self::Q8_0 | Self::Iq4Xs => true,
+            Self::Iq3Xxs | Self::Iq3S => {
+                decode_moe_iq3_fast_swiglu_enabled() || decode_moe_iq3_fused_swiglu_enabled()
+            }
+            Self::Q5K | Self::F32 | Self::Bf16 => false,
+        }
+    }
+}
+
+pub(crate) fn resolve_routed_moe_decode_recipes(
+    gate: GgmlType,
+    up: GgmlType,
+    down: GgmlType,
+) -> Result<RoutedMoeDecodeRecipes, MfError> {
+    let gate_up =
+        moe_routed_gate_up_decode_selector(gate, up).ok_or_else(|| MfError::UnsupportedDtype {
+            name: "MoE routed gate/up expert banks".into(),
+            dtype: gate,
+        })?;
+    let down_recipe =
+        moe_routed_down_decode_selector(down).ok_or_else(|| MfError::UnsupportedDtype {
+            name: "MoE routed down expert bank".into(),
+            dtype: down,
+        })?;
+    Ok(RoutedMoeDecodeRecipes {
+        gate_up,
+        down: down_recipe,
+        deep_split_down: moe_routed_down_deep_split_selector(down),
+    })
+}
+
+pub(crate) fn resolve_all_routed_moe_decode_recipes(
+    layers: impl IntoIterator<Item = Result<(GgmlType, GgmlType, GgmlType), MfError>>,
+) -> Result<Vec<RoutedMoeDecodeRecipes>, MfError> {
+    layers
+        .into_iter()
+        .map(|layer| {
+            let (gate, up, down) = layer?;
+            resolve_routed_moe_decode_recipes(gate, up, down)
+        })
+        .collect()
+}
+
+pub(crate) fn moe_routed_gate_up_decode_selector(
+    gate: GgmlType,
+    up: GgmlType,
+) -> Option<RoutedGateUpRecipe> {
+    Some(match (gate, up) {
+        (GgmlType::Q4_K, GgmlType::Q4_K) => RoutedGateUpRecipe::Q4K,
+        (GgmlType::Q5_K, GgmlType::Q5_K) => RoutedGateUpRecipe::Q5K,
+        (GgmlType::Q6_K, GgmlType::Q6_K) => RoutedGateUpRecipe::Q6K,
+        (GgmlType::Q8_0, GgmlType::Q8_0) => RoutedGateUpRecipe::Q8_0,
+        (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS) => RoutedGateUpRecipe::Iq3Xxs,
+        (GgmlType::IQ3_S, GgmlType::IQ3_S) => RoutedGateUpRecipe::Iq3S,
+        (GgmlType::IQ4_XS, GgmlType::IQ4_XS) => RoutedGateUpRecipe::Iq4Xs,
+        (GgmlType::BF16, GgmlType::BF16) => RoutedGateUpRecipe::Bf16,
+        (GgmlType::F32, GgmlType::F32) => RoutedGateUpRecipe::F32,
+        _ => return None,
+    })
+}
+
+pub(crate) fn moe_routed_down_decode_selector(down: GgmlType) -> Option<RoutedDownRecipe> {
+    Some(match down {
+        GgmlType::Q4_K => RoutedDownRecipe::Q4K,
+        GgmlType::Q5_K => RoutedDownRecipe::Q5K,
+        GgmlType::Q6_K => RoutedDownRecipe::Q6K,
+        GgmlType::Q8_0 => RoutedDownRecipe::Q8_0,
+        GgmlType::IQ4_NL => RoutedDownRecipe::Iq4Nl,
+        GgmlType::IQ4_XS => RoutedDownRecipe::Iq4Xs,
+        GgmlType::BF16 => RoutedDownRecipe::Bf16,
+        GgmlType::F32 => RoutedDownRecipe::F32,
+        _ => return None,
+    })
+}
+
+pub(crate) fn moe_routed_down_deep_split_selector(
+    down: GgmlType,
+) -> Option<RoutedDownDeepSplitRecipe> {
+    Some(match down {
+        GgmlType::Q5_K => RoutedDownDeepSplitRecipe::Q5K,
+        GgmlType::Q6_K => RoutedDownDeepSplitRecipe::Q6K,
+        GgmlType::Q8_0 => RoutedDownDeepSplitRecipe::Q8_0,
+        GgmlType::IQ4_NL => RoutedDownDeepSplitRecipe::Iq4Nl,
+        GgmlType::IQ4_XS => RoutedDownDeepSplitRecipe::Iq4Xs,
+        GgmlType::BF16 => RoutedDownDeepSplitRecipe::Bf16,
+        _ => return None,
+    })
 }
 
 pub(crate) fn moe_routed_gate_up_decode_supported(gate: GgmlType, up: GgmlType) -> bool {
@@ -460,14 +543,15 @@ impl<'a> MetalForward<'a> {
             encode_fill_f32(self.ctx, enc, &session.mixer_out, 0.0)?;
             return Ok(());
         }
-        let down_dtype = moe_routed_down_decode_selector(moe.down_exps.dtype).ok_or(
-            MfError::UnsupportedDtype {
-                name: "MoE routed down expert bank".into(),
-                dtype: moe.down_exps.dtype,
-            },
-        )?;
-        match down_dtype {
-            GgmlType::Q4_K => {
+        let down_recipe =
+            moe_routed_down_decode_selector(moe.down_exps.dtype).ok_or_else(|| {
+                MfError::UnsupportedDtype {
+                    name: "MoE routed down expert bank".into(),
+                    dtype: moe.down_exps.dtype,
+                }
+            })?;
+        match down_recipe {
+            RoutedDownRecipe::Q4K => {
                 encode_moe_down_q4_K_f32(
                     self.ctx,
                     enc,
@@ -490,7 +574,7 @@ impl<'a> MetalForward<'a> {
                     topk,
                 )?;
             }
-            GgmlType::Q5_K => {
+            RoutedDownRecipe::Q5K => {
                 if decode_moe_q5_down_fused_enabled() {
                     encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
                         self.ctx,
@@ -530,7 +614,7 @@ impl<'a> MetalForward<'a> {
                     )?;
                 }
             }
-            GgmlType::Q6_K => encode_moe_down_weighted_sum_q6_K_f32(
+            RoutedDownRecipe::Q6K => encode_moe_down_weighted_sum_q6_K_f32(
                 self.ctx,
                 enc,
                 &moe.down_exps,
@@ -543,7 +627,7 @@ impl<'a> MetalForward<'a> {
                 n_expert,
                 topk,
             )?,
-            GgmlType::Q8_0 => encode_moe_down_weighted_sum_q8_0_f32(
+            RoutedDownRecipe::Q8_0 => encode_moe_down_weighted_sum_q8_0_f32(
                 self.ctx,
                 enc,
                 &moe.down_exps,
@@ -556,7 +640,7 @@ impl<'a> MetalForward<'a> {
                 n_expert,
                 topk,
             )?,
-            GgmlType::IQ4_XS => {
+            RoutedDownRecipe::Iq4Xs => {
                 if decode_moe_iq4_down_fast_enabled() {
                     encode_moe_down_iq4_xs_f32_fast(
                         self.ctx,
@@ -594,7 +678,7 @@ impl<'a> MetalForward<'a> {
                     topk,
                 )?;
             }
-            GgmlType::IQ4_NL => {
+            RoutedDownRecipe::Iq4Nl => {
                 encode_moe_down_iq4_nl_f32(
                     self.ctx,
                     enc,
@@ -617,7 +701,7 @@ impl<'a> MetalForward<'a> {
                     topk,
                 )?;
             }
-            GgmlType::F32 => {
+            RoutedDownRecipe::F32 => {
                 encode_moe_down_f32_f32(
                     self.ctx,
                     enc,
@@ -640,7 +724,7 @@ impl<'a> MetalForward<'a> {
                     topk,
                 )?;
             }
-            GgmlType::BF16 => {
+            RoutedDownRecipe::Bf16 => {
                 encode_moe_down_bf16_f32(
                     self.ctx,
                     enc,
@@ -662,12 +746,6 @@ impl<'a> MetalForward<'a> {
                     h,
                     topk,
                 )?;
-            }
-            _ => {
-                return Err(MfError::UnsupportedDtype {
-                    name: "MoE routed down expert bank".into(),
-                    dtype: down_dtype,
-                });
             }
         }
         Ok(())
@@ -866,13 +944,15 @@ impl<'a> MetalForward<'a> {
             return Ok(());
         }
 
-        let gate_dtype = moe_routed_gate_up_decode_selector(moe.gate_exps.dtype, moe.up_exps.dtype)
-            .ok_or(MfError::UnsupportedDtype {
-                name: "MoE routed gate/up expert banks".into(),
-                dtype: moe.gate_exps.dtype,
-            })?;
-        match gate_dtype {
-            GgmlType::Q4_K => encode_moe_swiglu_q4_K_f32(
+        let gate_recipe =
+            moe_routed_gate_up_decode_selector(moe.gate_exps.dtype, moe.up_exps.dtype).ok_or_else(
+                || MfError::UnsupportedDtype {
+                    name: "MoE routed gate/up expert banks".into(),
+                    dtype: moe.gate_exps.dtype,
+                },
+            )?;
+        match gate_recipe {
+            RoutedGateUpRecipe::Q4K => encode_moe_swiglu_q4_K_f32(
                 self.ctx,
                 enc,
                 &moe.gate_exps,
@@ -885,7 +965,7 @@ impl<'a> MetalForward<'a> {
                 n_expert,
                 topk,
             )?,
-            GgmlType::Q5_K => {
+            RoutedGateUpRecipe::Q5K => {
                 let gate_pack = session
                     .moe_expert_out
                     .view_subrange(0, vec![(topk * f_exp) as u64]);
@@ -918,7 +998,7 @@ impl<'a> MetalForward<'a> {
                 )?;
                 encode_silu_mul_f32(self.ctx, enc, &gate_pack, &up_pack, &moe_inner)?;
             }
-            GgmlType::Q6_K => encode_moe_swiglu_q6_K_f32(
+            RoutedGateUpRecipe::Q6K => encode_moe_swiglu_q6_K_f32(
                 self.ctx,
                 enc,
                 &moe.gate_exps,
@@ -931,7 +1011,7 @@ impl<'a> MetalForward<'a> {
                 n_expert,
                 topk,
             )?,
-            GgmlType::Q8_0 => encode_moe_swiglu_q8_0_f32(
+            RoutedGateUpRecipe::Q8_0 => encode_moe_swiglu_q8_0_f32(
                 self.ctx,
                 enc,
                 &moe.gate_exps,
@@ -944,7 +1024,7 @@ impl<'a> MetalForward<'a> {
                 n_expert,
                 topk,
             )?,
-            GgmlType::IQ3_XXS => {
+            RoutedGateUpRecipe::Iq3Xxs => {
                 if decode_moe_iq3_fast_swiglu_enabled() {
                     encode_moe_swiglu_iq3_xxs_f32_fast(
                         self.ctx,
@@ -1007,7 +1087,7 @@ impl<'a> MetalForward<'a> {
                     encode_silu_mul_f32(self.ctx, enc, &gate_pack, &up_pack, &moe_inner)?;
                 }
             }
-            GgmlType::IQ3_S => {
+            RoutedGateUpRecipe::Iq3S => {
                 if decode_moe_iq3_fast_swiglu_enabled() {
                     encode_moe_swiglu_iq3_s_f32_fast(
                         self.ctx,
@@ -1070,7 +1150,7 @@ impl<'a> MetalForward<'a> {
                     encode_silu_mul_f32(self.ctx, enc, &gate_pack, &up_pack, &moe_inner)?;
                 }
             }
-            GgmlType::IQ4_XS => encode_moe_swiglu_iq4_xs_f32(
+            RoutedGateUpRecipe::Iq4Xs => encode_moe_swiglu_iq4_xs_f32(
                 self.ctx,
                 enc,
                 &moe.gate_exps,
@@ -1083,7 +1163,7 @@ impl<'a> MetalForward<'a> {
                 n_expert,
                 topk,
             )?,
-            GgmlType::F32 => {
+            RoutedGateUpRecipe::F32 => {
                 let gate_pack = session
                     .moe_expert_out
                     .view_subrange(0, vec![(topk * f_exp) as u64]);
@@ -1116,7 +1196,7 @@ impl<'a> MetalForward<'a> {
                 )?;
                 encode_silu_mul_f32(self.ctx, enc, &gate_pack, &up_pack, &moe_inner)?;
             }
-            GgmlType::BF16 => {
+            RoutedGateUpRecipe::Bf16 => {
                 let gate_pack = session
                     .moe_expert_out
                     .view_subrange(0, vec![(topk * f_exp) as u64]);
@@ -1148,12 +1228,6 @@ impl<'a> MetalForward<'a> {
                     topk,
                 )?;
                 encode_silu_mul_f32(self.ctx, enc, &gate_pack, &up_pack, &moe_inner)?;
-            }
-            _ => {
-                return Err(MfError::UnsupportedDtype {
-                    name: "MoE routed gate/up expert banks".into(),
-                    dtype: gate_dtype,
-                });
             }
         }
         Ok(())
@@ -1164,6 +1238,7 @@ impl<'a> MetalForward<'a> {
         enc: &KernelEncoder,
         session: &mut MetalSession,
         moe: &MetalMoeFfn,
+        down_recipe: RoutedDownRecipe,
     ) -> Result<bool, MfError> {
         let arch = &self.model.arch;
         let h = arch.hidden_size as usize;
@@ -1184,14 +1259,8 @@ impl<'a> MetalForward<'a> {
             return Ok(false);
         }
 
-        let down_dtype = moe_routed_down_decode_selector(moe.down_exps.dtype).ok_or(
-            MfError::UnsupportedDtype {
-                name: "MoE routed down expert bank".into(),
-                dtype: moe.down_exps.dtype,
-            },
-        )?;
-        let pending = match down_dtype {
-            GgmlType::Q4_K => {
+        let pending = match down_recipe {
+            RoutedDownRecipe::Q4K => {
                 encode_moe_down_q4_K_f32(
                     self.ctx,
                     enc,
@@ -1206,7 +1275,7 @@ impl<'a> MetalForward<'a> {
                 )?;
                 true
             }
-            GgmlType::Q5_K => {
+            RoutedDownRecipe::Q5K => {
                 if decode_moe_q5_down_fused_enabled() {
                     if f_exp == 512 && decode_moe_q5_down_k512_r2_enabled() {
                         encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2(
@@ -1256,7 +1325,7 @@ impl<'a> MetalForward<'a> {
                     true
                 }
             }
-            GgmlType::Q6_K => {
+            RoutedDownRecipe::Q6K => {
                 encode_moe_down_weighted_sum_q6_K_f32(
                     self.ctx,
                     enc,
@@ -1272,7 +1341,7 @@ impl<'a> MetalForward<'a> {
                 )?;
                 false
             }
-            GgmlType::Q8_0 => {
+            RoutedDownRecipe::Q8_0 => {
                 encode_moe_down_weighted_sum_q8_0_f32(
                     self.ctx,
                     enc,
@@ -1288,7 +1357,7 @@ impl<'a> MetalForward<'a> {
                 )?;
                 false
             }
-            GgmlType::IQ4_XS => {
+            RoutedDownRecipe::Iq4Xs => {
                 if decode_moe_iq4_down_fast_enabled() {
                     encode_moe_down_iq4_xs_f32_fast(
                         self.ctx,
@@ -1318,7 +1387,7 @@ impl<'a> MetalForward<'a> {
                 }
                 true
             }
-            GgmlType::IQ4_NL => {
+            RoutedDownRecipe::Iq4Nl => {
                 encode_moe_down_iq4_nl_f32(
                     self.ctx,
                     enc,
@@ -1333,7 +1402,7 @@ impl<'a> MetalForward<'a> {
                 )?;
                 true
             }
-            GgmlType::F32 => {
+            RoutedDownRecipe::F32 => {
                 encode_moe_down_f32_f32(
                     self.ctx,
                     enc,
@@ -1348,7 +1417,7 @@ impl<'a> MetalForward<'a> {
                 )?;
                 true
             }
-            GgmlType::BF16 => {
+            RoutedDownRecipe::Bf16 => {
                 encode_moe_down_bf16_f32(
                     self.ctx,
                     enc,
@@ -1362,12 +1431,6 @@ impl<'a> MetalForward<'a> {
                     topk,
                 )?;
                 true
-            }
-            _ => {
-                return Err(MfError::UnsupportedDtype {
-                    name: "MoE routed down expert bank".into(),
-                    dtype: down_dtype,
-                });
             }
         };
         Ok(pending)
@@ -1429,14 +1492,15 @@ impl<'a> MetalForward<'a> {
             return Ok(false);
         }
 
-        let down_dtype = moe_routed_down_decode_selector(moe.down_exps.dtype).ok_or(
-            MfError::UnsupportedDtype {
-                name: "MoE routed down expert bank".into(),
-                dtype: moe.down_exps.dtype,
-            },
-        )?;
-        let pending = match down_dtype {
-            GgmlType::Q4_K => {
+        let down_recipe =
+            moe_routed_down_decode_selector(moe.down_exps.dtype).ok_or_else(|| {
+                MfError::UnsupportedDtype {
+                    name: "MoE routed down expert bank".into(),
+                    dtype: moe.down_exps.dtype,
+                }
+            })?;
+        let pending = match down_recipe {
+            RoutedDownRecipe::Q4K => {
                 let enc =
                     begin_decode_stage(cmd_buf, stage_recorder.as_deref_mut(), stage_meta, true)?;
                 encode_moe_down_q4_K_f32(
@@ -1455,7 +1519,7 @@ impl<'a> MetalForward<'a> {
                 enc.end();
                 true
             }
-            GgmlType::Q5_K => {
+            RoutedDownRecipe::Q5K => {
                 let enc =
                     begin_decode_stage(cmd_buf, stage_recorder.as_deref_mut(), stage_meta, true)?;
                 let pending = if decode_moe_q5_down_fused_enabled() {
@@ -1510,7 +1574,7 @@ impl<'a> MetalForward<'a> {
                 enc.end();
                 pending
             }
-            GgmlType::Q6_K => {
+            RoutedDownRecipe::Q6K => {
                 let enc =
                     begin_decode_stage(cmd_buf, stage_recorder.as_deref_mut(), stage_meta, true)?;
                 encode_moe_down_weighted_sum_q6_K_f32(
@@ -1530,7 +1594,7 @@ impl<'a> MetalForward<'a> {
                 enc.end();
                 false
             }
-            GgmlType::Q8_0 => {
+            RoutedDownRecipe::Q8_0 => {
                 let enc =
                     begin_decode_stage(cmd_buf, stage_recorder.as_deref_mut(), stage_meta, true)?;
                 encode_moe_down_weighted_sum_q8_0_f32(
@@ -1550,7 +1614,7 @@ impl<'a> MetalForward<'a> {
                 enc.end();
                 false
             }
-            GgmlType::IQ4_XS => {
+            RoutedDownRecipe::Iq4Xs => {
                 let enc =
                     begin_decode_stage(cmd_buf, stage_recorder.as_deref_mut(), stage_meta, true)?;
                 if decode_moe_iq4_down_fast_enabled() {
@@ -1584,7 +1648,7 @@ impl<'a> MetalForward<'a> {
                 enc.end();
                 true
             }
-            GgmlType::IQ4_NL => {
+            RoutedDownRecipe::Iq4Nl => {
                 let enc =
                     begin_decode_stage(cmd_buf, stage_recorder.as_deref_mut(), stage_meta, true)?;
                 encode_moe_down_iq4_nl_f32(
@@ -1603,7 +1667,7 @@ impl<'a> MetalForward<'a> {
                 enc.end();
                 true
             }
-            GgmlType::F32 => {
+            RoutedDownRecipe::F32 => {
                 let enc =
                     begin_decode_stage(cmd_buf, stage_recorder.as_deref_mut(), stage_meta, true)?;
                 encode_moe_down_f32_f32(
@@ -1622,7 +1686,7 @@ impl<'a> MetalForward<'a> {
                 enc.end();
                 true
             }
-            GgmlType::BF16 => {
+            RoutedDownRecipe::Bf16 => {
                 let enc = begin_decode_stage(cmd_buf, stage_recorder, stage_meta, true)?;
                 encode_moe_down_bf16_f32(
                     self.ctx,
@@ -1639,12 +1703,6 @@ impl<'a> MetalForward<'a> {
                 self.encode_moe_shared_ffn_down_gpu(&enc, session, ffn_down)?;
                 enc.end();
                 true
-            }
-            _ => {
-                return Err(MfError::UnsupportedDtype {
-                    name: "MoE routed down expert bank".into(),
-                    dtype: down_dtype,
-                });
             }
         };
         Ok(pending)
@@ -3433,6 +3491,16 @@ impl<'a> MetalForward<'a> {
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
             return Err(MfError::BadToken(token_id, arch.vocab_size));
         }
+        // Resolve every routed operation before the first phase command is submitted.
+        let routed_recipes =
+            resolve_all_routed_moe_decode_recipes(self.model.blocks.iter().map(|block| {
+                let moe = match block {
+                    MetalBlock::Gdn(block) => block.ffn_moe.as_ref(),
+                    MetalBlock::Attn(block) => block.ffn_moe.as_ref(),
+                }
+                .ok_or(MfError::UnsupportedMoe)?;
+                Ok((moe.gate_exps.dtype, moe.up_exps.dtype, moe.down_exps.dtype))
+            }))?;
         let h = arch.hidden_size as usize;
         let t_total = std::time::Instant::now();
         unsafe {
@@ -3504,7 +3572,7 @@ impl<'a> MetalForward<'a> {
         let cpu_route = phase_moe_cpu_route_enabled();
         let split_ffn_apply = phase_moe_ffn_split_enabled();
         let deep_split_ffn_apply = phase_moe_ffn_deep_split_enabled();
-        for block in &self.model.blocks {
+        for (block, routed_recipes) in self.model.blocks.iter().zip(&routed_recipes) {
             let slot = match block {
                 MetalBlock::Gdn(_) => {
                     let s = MixerSlot::Gdn(gdn_idx);
@@ -3910,10 +3978,7 @@ impl<'a> MetalForward<'a> {
             }
 
             if split_ffn_apply {
-                if deep_split_ffn_apply
-                    && moe_routed_gate_up_decode_supported(moe.gate_exps.dtype, moe.up_exps.dtype)
-                    && moe_routed_down_deep_split_selector(moe.down_exps.dtype).is_some()
-                {
+                if deep_split_ffn_apply && routed_recipes.deep_split_down.is_some() {
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
                     let enc = KernelEncoder::begin(&cmd);
                     self.encode_moe_routed_gate_up_gpu(&enc, session, moe)?;
@@ -3924,8 +3989,12 @@ impl<'a> MetalForward<'a> {
 
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
                     let enc = KernelEncoder::begin(&cmd);
-                    let routed_weighted_sum_is_pending =
-                        self.encode_moe_routed_down_only_gpu(&enc, session, moe)?;
+                    let routed_weighted_sum_is_pending = self.encode_moe_routed_down_only_gpu(
+                        &enc,
+                        session,
+                        moe,
+                        routed_recipes.down,
+                    )?;
                     enc.end();
                     cmd.commit();
                     crate::metal::wait_completed(&cmd)?;
@@ -3970,7 +4039,7 @@ impl<'a> MetalForward<'a> {
                     crate::metal::wait_completed(&cmd)?;
                     ffn_finalizer_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                 } else if concurrent_shared_moe_decode_enabled()
-                    && routed_gate_up_single_dispatch(moe.gate_exps.dtype, moe.up_exps.dtype)
+                    && routed_recipes.gate_up.is_single_dispatch()
                 {
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
                     let shared_inner_fused = self.encode_moe_ffn_gate_up_wave_gpu(

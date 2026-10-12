@@ -2905,6 +2905,71 @@ fn routed_moe_admission_matches_decode_selectors_for_every_ggml_type() {
 }
 
 #[test]
+fn routed_moe_selectors_return_kernel_recipes_and_keep_deep_split_narrow() {
+    let gate_up = [
+        (GgmlType::Q4_K, RoutedGateUpRecipe::Q4K),
+        (GgmlType::Q5_K, RoutedGateUpRecipe::Q5K),
+        (GgmlType::Q6_K, RoutedGateUpRecipe::Q6K),
+        (GgmlType::Q8_0, RoutedGateUpRecipe::Q8_0),
+        (GgmlType::IQ3_XXS, RoutedGateUpRecipe::Iq3Xxs),
+        (GgmlType::IQ3_S, RoutedGateUpRecipe::Iq3S),
+        (GgmlType::IQ4_XS, RoutedGateUpRecipe::Iq4Xs),
+        (GgmlType::F32, RoutedGateUpRecipe::F32),
+        (GgmlType::BF16, RoutedGateUpRecipe::Bf16),
+    ];
+    for (dtype, recipe) in gate_up {
+        assert_eq!(
+            moe_routed_gate_up_decode_selector(dtype, dtype),
+            Some(recipe)
+        );
+    }
+    assert_eq!(
+        moe_routed_gate_up_decode_selector(GgmlType::Q4_K, GgmlType::Q5_K),
+        None
+    );
+
+    let down = [
+        (GgmlType::Q4_K, RoutedDownRecipe::Q4K),
+        (GgmlType::Q5_K, RoutedDownRecipe::Q5K),
+        (GgmlType::Q6_K, RoutedDownRecipe::Q6K),
+        (GgmlType::Q8_0, RoutedDownRecipe::Q8_0),
+        (GgmlType::IQ4_NL, RoutedDownRecipe::Iq4Nl),
+        (GgmlType::IQ4_XS, RoutedDownRecipe::Iq4Xs),
+        (GgmlType::F32, RoutedDownRecipe::F32),
+        (GgmlType::BF16, RoutedDownRecipe::Bf16),
+    ];
+    for (dtype, recipe) in down {
+        assert_eq!(moe_routed_down_decode_selector(dtype), Some(recipe));
+    }
+
+    for (dtype, recipe) in [
+        (GgmlType::Q5_K, RoutedDownDeepSplitRecipe::Q5K),
+        (GgmlType::Q6_K, RoutedDownDeepSplitRecipe::Q6K),
+        (GgmlType::Q8_0, RoutedDownDeepSplitRecipe::Q8_0),
+        (GgmlType::IQ4_NL, RoutedDownDeepSplitRecipe::Iq4Nl),
+        (GgmlType::IQ4_XS, RoutedDownDeepSplitRecipe::Iq4Xs),
+        (GgmlType::BF16, RoutedDownDeepSplitRecipe::Bf16),
+    ] {
+        assert_eq!(moe_routed_down_deep_split_selector(dtype), Some(recipe));
+    }
+    assert_eq!(moe_routed_down_deep_split_selector(GgmlType::Q4_K), None);
+    assert_eq!(moe_routed_down_deep_split_selector(GgmlType::F32), None);
+}
+
+#[test]
+fn phase_profile_preflight_rejects_later_routed_layer_before_returning_recipes() {
+    let result = resolve_all_routed_moe_decode_recipes([
+        Ok((GgmlType::Q4_K, GgmlType::Q4_K, GgmlType::Q5_K)),
+        Ok((GgmlType::Q4_K, GgmlType::Q4_K, GgmlType::Q2_K)),
+    ]);
+    assert!(matches!(
+        result,
+        Err(MfError::UnsupportedDtype { name, dtype: GgmlType::Q2_K })
+            if name == "MoE routed down expert bank"
+    ));
+}
+
+#[test]
 fn native_quant_embedding_mode_is_strict_and_tri_state() {
     assert_eq!(
         parse_native_quant_embedding_mode(None),

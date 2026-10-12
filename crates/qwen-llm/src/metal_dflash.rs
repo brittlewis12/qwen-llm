@@ -744,8 +744,19 @@ pub(crate) fn prefill_mat_mat_dispatch_eligible(dtype: GgmlType) -> bool {
     crate::metal_forward::mat_mat_dispatch_supported(dtype)
 }
 
-fn router_mat_mat_eligible(dtype: GgmlType) -> bool {
-    crate::metal_forward::mat_mat_dispatch_supported(dtype)
+const MOE_ROUTER_SHARED_FFN_BATCHING_DTYPES: [GgmlType; 7] = [
+    GgmlType::F32,
+    GgmlType::F16,
+    GgmlType::BF16,
+    GgmlType::Q4_K,
+    GgmlType::Q5_K,
+    GgmlType::Q6_K,
+    GgmlType::Q8_0,
+];
+
+fn moe_router_shared_ffn_batching_eligible(dtype: GgmlType) -> bool {
+    MOE_ROUTER_SHARED_FFN_BATCHING_DTYPES.contains(&dtype)
+        && crate::metal_forward::mat_mat_dispatch_supported(dtype)
 }
 
 crate::env_flag!(
@@ -8827,16 +8838,16 @@ fn encode_packed_verify_moe_grouped_ffn_after_mixer(
         return Ok(false);
     }
     if !(prefill_moe_packed_route_enabled()
-        && router_mat_mat_eligible(moe.gate_inp.dtype)
+        && moe_router_shared_ffn_batching_eligible(moe.gate_inp.dtype)
         && moe.gate_inp_shexp.dtype == GgmlType::F32)
     {
         return Ok(false);
     }
     let packed_shared_path = f_shared == 0
         || (prefill_moe_packed_shared_enabled()
-            && router_mat_mat_eligible(ffn_gate.dtype)
-            && router_mat_mat_eligible(ffn_up.dtype)
-            && router_mat_mat_eligible(ffn_down.dtype));
+            && moe_router_shared_ffn_batching_eligible(ffn_gate.dtype)
+            && moe_router_shared_ffn_batching_eligible(ffn_up.dtype)
+            && moe_router_shared_ffn_batching_eligible(ffn_down.dtype));
     if !packed_shared_path {
         return Ok(false);
     }
@@ -10410,14 +10421,15 @@ pub fn encode_packed_verify_layer_major_inner(
                 && moe.up_exps.dtype == GgmlType::Q4_K;
             let topk = arch.expert_used_count.min(arch.expert_count) as usize;
             let n_expert = arch.expert_count as usize;
-            let router_mat_mat_eligible = router_mat_mat_eligible(moe.gate_inp.dtype);
+            let router_batching_eligible =
+                moe_router_shared_ffn_batching_eligible(moe.gate_inp.dtype);
             let use_batched_route = mtp_moe_verify_batched_route_enabled()
                 && mtp_moe_verify_row_views_enabled()
                 && topk > 0
                 && topk <= 16
                 && n_expert > 0
                 && n_expert <= 256
-                && router_mat_mat_eligible
+                && router_batching_eligible
                 && moe.gate_inp_shexp.dtype == GgmlType::F32;
             let ffn_batched = if mtp_moe_verify_grouped_ffn_enabled() {
                 let enc = KernelEncoder::begin(&cmd_buf);
@@ -13825,15 +13837,15 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                     let noop_grouped_reduce = prefill_noop_moe_grouped_reduce_enabled();
                     let hot_expert_min_slots = prefill_moe_hot_expert_min_slots();
                     let packed_route_path = prefill_moe_packed_route_enabled()
-                        && router_mat_mat_eligible(moe.gate_inp.dtype)
+                        && moe_router_shared_ffn_batching_eligible(moe.gate_inp.dtype)
                         && moe.gate_inp_shexp.dtype == GgmlType::F32
                         && n_expert <= 256
                         && (1..=16).contains(&topk);
                     let packed_shared_path = prefill_moe_packed_shared_enabled()
                         && f_shared > 0
-                        && router_mat_mat_eligible(g_w.dtype)
-                        && router_mat_mat_eligible(u_w.dtype)
-                        && router_mat_mat_eligible(d_w.dtype);
+                        && moe_router_shared_ffn_batching_eligible(g_w.dtype)
+                        && moe_router_shared_ffn_batching_eligible(u_w.dtype)
+                        && moe_router_shared_ffn_batching_eligible(d_w.dtype);
                     let fused_grouped_finalizer = grouped_routed_path
                         && prefill_moe_fused_finalizer_enabled()
                         && (skip_moe_shared || packed_shared_path);

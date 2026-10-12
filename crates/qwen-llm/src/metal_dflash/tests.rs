@@ -14690,6 +14690,29 @@ mod prompt_lookup_layout_gate {
     use crate::model::{QWEN3_0_8B, QWEN3_27B};
     use crate::tensor::TensorDesc;
 
+    #[test]
+    fn moe_router_shared_ffn_batching_keeps_its_seven_dtype_policy() {
+        for dtype in [
+            GgmlType::F32,
+            GgmlType::F16,
+            GgmlType::BF16,
+            GgmlType::Q4_K,
+            GgmlType::Q5_K,
+            GgmlType::Q6_K,
+            GgmlType::Q8_0,
+        ] {
+            assert!(crate::metal_forward::mat_mat_dispatch_supported(dtype));
+            assert!(moe_router_shared_ffn_batching_eligible(dtype), "{dtype:?}");
+        }
+        for dtype in [GgmlType::Q3_K, GgmlType::Q4_1] {
+            assert!(crate::metal_forward::mat_mat_dispatch_supported(dtype));
+            assert!(
+                !moe_router_shared_ffn_batching_eligible(dtype),
+                "{dtype:?} must not enable router/shared FFN batching"
+            );
+        }
+    }
+
     fn desc(dtype: GgmlType, shape: &[u64]) -> TensorDesc {
         TensorDesc {
             name: "test.weight".into(),

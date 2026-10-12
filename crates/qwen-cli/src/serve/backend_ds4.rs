@@ -52,14 +52,50 @@ use qwen_llm::model_family::ModelFamily;
 use qwen_llm::sampling::Sampler;
 use qwen_llm::snapshot_policy::SnapshotPolicyConfig;
 use qwen_llm::tokenizer::Tokenizer;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::Instant;
+
+struct Ds4DurableWrite {
+    ticket: u64,
+    snapshot: Arc<DeepSeekV4CausalSnapshot>,
+}
+
+struct Ds4DurableWriteAck {
+    sender: mpsc::Sender<u64>,
+    ticket: u64,
+}
+
+impl Drop for Ds4DurableWriteAck {
+    fn drop(&mut self) {
+        let _ = self.sender.send(self.ticket);
+    }
+}
 
 struct Ds4Durable {
     plan: DurablePlan,
     store: DeepSeekV4CheckpointStore,
-    worker: DurableWorker<Arc<DeepSeekV4CausalSnapshot>>,
+    worker: DurableWorker<Ds4DurableWrite>,
+    acknowledgements: mpsc::Receiver<u64>,
+    pending: RefCell<Vec<(u64, u64)>>,
+    next_ticket: Cell<u64>,
+}
+
+fn writer_additional_bytes(payload_bytes: u64) -> Option<u64> {
+    // Staged integrity reads the encoded sections before parsing a second,
+    // typed snapshot, so its peak is two payloads beyond the shared source.
+    payload_bytes.checked_mul(2)
+}
+
+fn pending_writer_bytes(pending: &[(u64, u64)]) -> u64 {
+    pending
+        .iter()
+        .fold(0_u64, |total, (_, bytes)| total.saturating_add(*bytes))
+}
+
+fn settle_writer_reservations(pending: &mut Vec<(u64, u64)>, completed: &[u64]) {
+    pending.retain(|(ticket, _)| !completed.contains(ticket));
 }
 
 /// A chosen warm start: matched prefix length, the snapshot (bound to the
@@ -382,6 +418,7 @@ impl DeepSeekV4Backend {
         let config = self.config.clone();
         let capacity = self.session_capacity;
         let max_record_bytes = plan.max_record_bytes;
+        let (acknowledgement_sender, acknowledgements) = mpsc::channel();
         let worker = DurableWorker::spawn(
             "deepseek_v4",
             queue_cap_bytes(self.snapshot_cache_plan.bytes),
@@ -396,14 +433,18 @@ impl DeepSeekV4Backend {
                 Ok(Resolved {
                     content_id: *content_id.as_bytes(),
                     detail,
-                    writer: move |snapshot: Arc<DeepSeekV4CausalSnapshot>| {
+                    writer: move |job: Ds4DurableWrite| {
+                        let _acknowledgement = Ds4DurableWriteAck {
+                            sender: acknowledgement_sender.clone(),
+                            ticket: job.ticket,
+                        };
                         let report = worker_store.publish(
                             store_context(content_id, &config, capacity, max_record_bytes),
-                            &snapshot,
+                            &job.snapshot,
                         )?;
                         Ok(format!(
                             "tokens={} blob_bytes={} outcome={:?} managed_bytes={} evicted_entries={}",
-                            snapshot.next_position(),
+                            job.snapshot.next_position(),
                             report.blob_bytes,
                             report.outcome,
                             report.managed_bytes_after,
@@ -422,6 +463,9 @@ impl DeepSeekV4Backend {
             plan,
             store,
             worker,
+            acknowledgements,
+            pending: RefCell::new(Vec::new()),
+            next_ticket: Cell::new(0),
         });
         Ok(())
     }
@@ -456,13 +500,16 @@ impl DeepSeekV4Backend {
         }
         // A RAM hit captured under the stand-in before the strong identity
         // resolved: same resident weights, so re-attribute a copy.
-        if self.control_cpu_reserve > 0 {
+        let cpu_reserved = self
+            .control_cpu_reserve
+            .saturating_add(self.durable_reserved_bytes());
+        if cpu_reserved > 0 {
             let bytes = SnapshotCache::<DeepSeekV4CausalSnapshot>::entry_bytes(
                 snapshot.prefix_tokens().len(),
                 snapshot.payload_bytes(),
             )?;
             if super::admit_snapshot_capture(
-                bytes.saturating_add(self.control_cpu_reserve),
+                bytes.saturating_add(cpu_reserved),
                 || self.ctx.memory_signals(),
                 |bytes| self.cache.evict_for(bytes),
             )
@@ -492,6 +539,9 @@ impl DeepSeekV4Backend {
         floor: usize,
     ) -> Option<(usize, Arc<DeepSeekV4CausalSnapshot>)> {
         let strong = self.strong_content_id()?;
+        let reserve = self
+            .control_cpu_reserve
+            .saturating_add(self.durable_reserved_bytes());
         let Self {
             durable,
             cache,
@@ -500,7 +550,6 @@ impl DeepSeekV4Backend {
             session_capacity,
             ..
         } = self;
-        let reserve = self.control_cpu_reserve;
         let durable = durable.as_ref()?;
         let min_tokens = durable.plan.min_tokens;
         // Strict prefixes only: a snapshot carries no logits.
@@ -784,7 +833,10 @@ impl DeepSeekV4Backend {
         let cpu_reserved = match super::transport_memory::combined_reserve(
             self.control_cpu_reserve,
             sink.transport_reserve_bytes(),
-        ) {
+        )
+        .and_then(|reserve| {
+            super::transport_memory::combined_reserve(reserve, self.durable_reserved_bytes())
+        }) {
             Ok(reserved) => reserved,
             Err(error) => {
                 self.residency = Some(residency);
@@ -866,6 +918,25 @@ impl DeepSeekV4Backend {
                 std::process::abort();
             }
         }
+    }
+
+    fn settle_durable_acks(&self) {
+        let Some(durable) = self.durable.as_ref() else {
+            return;
+        };
+        if durable.worker.failed() {
+            durable.pending.borrow_mut().clear();
+            return;
+        }
+        let completed = durable.acknowledgements.try_iter().collect::<Vec<_>>();
+        settle_writer_reservations(&mut durable.pending.borrow_mut(), &completed);
+    }
+
+    fn durable_reserved_bytes(&self) -> u64 {
+        self.settle_durable_acks();
+        self.durable
+            .as_ref()
+            .map_or(0, |durable| pending_writer_bytes(&durable.pending.borrow()))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1010,6 +1081,7 @@ impl DeepSeekV4Backend {
     /// Queue a freshly captured boundary for disk when it is long enough and
     /// bound to the strong identity (stand-in captures are never published).
     fn write_behind(&self, snapshot: Arc<DeepSeekV4CausalSnapshot>, payload_bytes: u64) {
+        self.settle_durable_acks();
         let Some(durable) = self.durable.as_ref() else {
             return;
         };
@@ -1021,7 +1093,54 @@ impl DeepSeekV4Backend {
         ) {
             return;
         }
-        durable.worker.try_enqueue(snapshot, payload_bytes);
+        let Some(reserved_bytes) = writer_additional_bytes(payload_bytes) else {
+            tracing::warn!(
+                "serve: deepseek_v4 durable writer reservation overflow; snapshot not queued"
+            );
+            return;
+        };
+        let ticket = durable.next_ticket.get();
+        let Some(next_ticket) = ticket.checked_add(1) else {
+            tracing::warn!(
+                "serve: deepseek_v4 durable writer ticket overflow; snapshot not queued"
+            );
+            return;
+        };
+        durable.next_ticket.set(next_ticket);
+        durable.pending.borrow_mut().push((ticket, reserved_bytes));
+        let queued = durable
+            .worker
+            .try_enqueue(Ds4DurableWrite { ticket, snapshot }, payload_bytes);
+        if !queued {
+            durable
+                .pending
+                .borrow_mut()
+                .retain(|(pending, _)| *pending != ticket);
+        }
+    }
+
+    fn capture_writer_reserve(
+        &self,
+        session: &DeepSeekV4Session,
+        prefix_len: usize,
+        payload_bytes: u64,
+    ) -> Option<u64> {
+        let Some(durable) = self.durable.as_ref() else {
+            return Some(0);
+        };
+        let Some(bound) = session.bound_model_content_id() else {
+            return Some(0);
+        };
+        if persistable(
+            prefix_len,
+            durable.plan.min_tokens,
+            bound,
+            self.strong_content_id(),
+        ) {
+            writer_additional_bytes(payload_bytes)
+        } else {
+            Some(0)
+        }
     }
 
     fn capture_snapshot(
@@ -1039,10 +1158,37 @@ impl DeepSeekV4Backend {
             );
             return;
         };
+        let Some(new_writer_reserve) =
+            self.capture_writer_reserve(session, tokens.len(), payload_bytes)
+        else {
+            tracing::warn!(
+                "serve: deepseek_v4 {boundary} snapshot denied by memory headroom; durable writer reservation overflow"
+            );
+            return;
+        };
+        let reserve = match super::transport_memory::combined_reserve(
+            self.control_cpu_reserve,
+            self.durable_reserved_bytes(),
+        )
+        .and_then(|reserve| super::transport_memory::combined_reserve(reserve, new_writer_reserve))
+        {
+            Ok(reserve) => reserve,
+            Err(error) => {
+                tracing::warn!(
+                    "serve: {boundary} snapshot denied by memory headroom: {}",
+                    error.message
+                );
+                return;
+            }
+        };
+        let Some(required_bytes) = entry_bytes.checked_add(reserve) else {
+            tracing::warn!("serve: {boundary} snapshot admission byte count overflow");
+            return;
+        };
         let ctx = &self.ctx;
         let cache = &mut self.cache;
         if let Err((reason, signals)) = super::admit_snapshot_capture(
-            entry_bytes.saturating_add(self.control_cpu_reserve),
+            required_bytes,
             || ctx.memory_signals(),
             |bytes| cache.evict_for(bytes),
         ) {
@@ -1079,6 +1225,24 @@ impl DeepSeekV4Backend {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn durable_writer_reserves_only_extra_decode_storage_until_ack() {
+        let payload_bytes = 256;
+        let writer_copy = super::writer_additional_bytes(payload_bytes).unwrap();
+        assert_eq!(writer_copy, 2 * payload_bytes);
+
+        let mut pending = vec![(11, writer_copy), (12, writer_copy)];
+        assert_eq!(super::pending_writer_bytes(&pending), 4 * payload_bytes);
+
+        super::settle_writer_reservations(&mut pending, &[11]);
+        assert_eq!(super::pending_writer_bytes(&pending), 2 * payload_bytes);
+        assert_eq!(pending, [(12, writer_copy)]);
+
+        super::settle_writer_reservations(&mut pending, &[12]);
+        assert_eq!(super::pending_writer_bytes(&pending), 0);
+        assert!(pending.is_empty());
+    }
+
     #[test]
     fn session_memory_refusals_use_the_shared_transport_mapping() {
         use qwen_llm::metal::{

@@ -358,7 +358,8 @@ impl DeepSeekV4Session {
         self.capacity
     }
 
-    pub(crate) fn bound_model_content_id(&self) -> Option<DeepSeekV4ModelContentId> {
+    /// The identity bound to snapshots captured from this session, if any.
+    pub fn bound_model_content_id(&self) -> Option<DeepSeekV4ModelContentId> {
         self.snapshot_model_content_id
     }
 

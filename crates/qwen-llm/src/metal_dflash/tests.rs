@@ -14709,7 +14709,7 @@ mod prompt_lookup_layout_gate {
         )
         .unwrap();
         assert_eq!(dense_q5, GgmlType::F32);
-        assert!(mat_vec_dispatch_supported(dense_q5));
+        assert!(crate::metal_forward::mat_vec_dispatch_supported(dense_q5));
 
         let expert_iq2 = prompt_lookup_planned_dtype(
             &desc(GgmlType::IQ2_XS, &[32, 32, 4]),

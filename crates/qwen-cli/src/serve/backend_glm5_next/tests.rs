@@ -1045,11 +1045,10 @@ fn serve_render_reports_the_shared_prefix_and_header() {
     assert_eq!(other_prompt[..shared], prompt[..shared]);
 }
 
-/// Only a typed pressure refusal releases cached snapshots, at most once,
-/// and never the entry being kept; other refusals and successes leave the
-/// cache alone.
+/// Session snapshot relief is reserved for process-only memory refusals.
 #[test]
-fn pressure_refusals_release_snapshots_once_and_keep_the_hit() {
+fn process_only_session_refusals_release_snapshots_and_keep_the_hit() {
+    use qwen_llm::metal::MetalMemoryAdmissionReason as R;
     use qwen_llm::snapshot_policy::SnapshotPolicyConfig;
     let ns = CacheNamespace {
         lineage: PackedLineage::Exact,
@@ -1063,60 +1062,90 @@ fn pressure_refusals_release_snapshots_once_and_keep_the_hit() {
         assert!(cache.insert_strict_in(ns, vec![2], "drop", 10));
         cache
     };
-    let pressure = || {
-        let mut error = ServeError::server_error("refused");
-        error.status = 503;
-        error.code = Some("memory_admission_denied");
-        error
+    let admission = |reason| Glm5NextMetalError::MemoryAdmission {
+        denied: refusal(reason),
+        budget_bytes: 1 << 30,
+        advice: qwen_llm::glm5_next_metal::CapacityAdvice::NotEvaluated,
     };
-    assert!(is_pressure_refusal(&pressure()));
-    assert!(!is_pressure_refusal(&ServeError::server_error("telemetry")));
 
-    // Pressure, then success: the retry runs after releasing all but `keep`.
+    // Working-set-only and mixed denials are not relieved by dropping CPU
+    // snapshots, and their typed reasons and denial details are preserved.
+    for reason in [R::WorkingSetInsufficient, R::BothInsufficient] {
+        let mut cache = filled();
+        let mut attempts = 0;
+        let result: Result<(), Glm5NextMetalError> =
+            with_snapshot_release(&mut cache, None, || {
+                attempts += 1;
+                Err(admission(reason))
+            });
+        assert_eq!(attempts, 1);
+        assert!(cache.entry_for_in(&ns, &[1]).is_some());
+        assert!(cache.entry_for_in(&ns, &[2]).is_some());
+        match result.unwrap_err() {
+            Glm5NextMetalError::MemoryAdmission { denied, .. } => {
+                assert_eq!(denied, refusal(reason));
+            }
+            error => panic!("unexpected refusal: {error}"),
+        }
+    }
+
+    // A process-only refusal releases unpinned snapshots except `keep` and
+    // retries exactly once.
     let mut cache = filled();
     let keep = cache.entry_for_in(&ns, &[1]);
     let mut attempts = 0;
     let result = with_snapshot_release(&mut cache, keep, || {
         attempts += 1;
         if attempts == 1 {
-            Err(pressure())
+            Err(admission(R::ProcessInsufficient))
         } else {
             Ok(attempts)
         }
     });
     assert_eq!(result.unwrap(), 2);
+    assert_eq!(attempts, 2);
     assert!(cache.entry_for_in(&ns, &[1]).is_some());
     assert!(cache.entry_for_in(&ns, &[2]).is_none());
 
-    // Persistent pressure: exactly one retry, then the refusal.
+    // Persistent process pressure retries once and returns the second typed
+    // refusal.
     let mut cache = filled();
     let mut attempts = 0;
-    let result: Result<(), ServeError> = with_snapshot_release(&mut cache, None, || {
+    let result: Result<(), Glm5NextMetalError> = with_snapshot_release(&mut cache, None, || {
         attempts += 1;
-        Err(pressure())
+        Err(admission(R::ProcessInsufficient))
     });
-    assert_eq!((result.unwrap_err().status, attempts), (503, 2));
+    assert!(matches!(
+        result.unwrap_err(),
+        Glm5NextMetalError::MemoryAdmission { denied, .. }
+            if denied.reason == R::ProcessInsufficient
+    ));
+    assert_eq!(attempts, 2);
     assert_eq!(cache.len(), 0);
 
-    // Nothing to release: no retry.
+    // An empty cache returns the original process refusal without retry.
     let mut attempts = 0;
-    let result: Result<(), ServeError> = with_snapshot_release(&mut cache, None, || {
+    let result: Result<(), Glm5NextMetalError> = with_snapshot_release(&mut cache, None, || {
         attempts += 1;
-        Err(pressure())
+        Err(admission(R::ProcessInsufficient))
     });
-    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        Glm5NextMetalError::MemoryAdmission { denied, .. }
+            if denied.reason == R::ProcessInsufficient
+    ));
     assert_eq!(attempts, 1);
 
-    // Other refusals and successes leave the cache alone.
+    // Invalid memory telemetry also preserves every cache entry.
     let mut cache = filled();
-    let result: Result<(), ServeError> = with_snapshot_release(&mut cache, None, || {
-        Err(ServeError::server_error("telemetry"))
+    let result: Result<(), Glm5NextMetalError> = with_snapshot_release(&mut cache, None, || {
+        Err(admission(R::InvalidWorkingSetSignal))
     });
-    assert_eq!(result.unwrap_err().status, 500);
-    assert_eq!(
-        with_snapshot_release(&mut cache, None, || Ok(7)).unwrap(),
-        7
-    );
+    assert!(matches!(
+        result.unwrap_err(),
+        Glm5NextMetalError::MemoryAdmission { denied, .. }
+            if denied.reason == R::InvalidWorkingSetSignal
+    ));
     assert_eq!(cache.len(), 2);
 }
 

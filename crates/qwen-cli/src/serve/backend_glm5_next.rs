@@ -484,10 +484,29 @@ fn release_snapshots<V>(
 fn with_snapshot_release<T, V>(
     cache: &mut SnapshotCache<V, CacheNamespace>,
     keep: Option<EntryId>,
-    mut attempt: impl FnMut() -> Result<T, ServeError>,
+    attempt: impl FnMut() -> Result<T, Glm5NextMetalError>,
+) -> Result<T, Glm5NextMetalError> {
+    with_snapshot_release_when(cache, keep, attempt, is_process_only_session_refusal)
+}
+
+/// Transport admission prices process CPU only; a transport refusal is
+/// therefore process-only and may use the same cached-snapshot relief.
+fn with_transport_snapshot_release<T, V>(
+    cache: &mut SnapshotCache<V, CacheNamespace>,
+    keep: Option<EntryId>,
+    attempt: impl FnMut() -> Result<T, ServeError>,
 ) -> Result<T, ServeError> {
+    with_snapshot_release_when(cache, keep, attempt, is_pressure_refusal)
+}
+
+fn with_snapshot_release_when<T, V, E>(
+    cache: &mut SnapshotCache<V, CacheNamespace>,
+    keep: Option<EntryId>,
+    mut attempt: impl FnMut() -> Result<T, E>,
+    release_for: impl Fn(&E) -> bool,
+) -> Result<T, E> {
     match attempt() {
-        Err(error) if is_pressure_refusal(&error) => {
+        Err(error) if release_for(&error) => {
             if release_snapshots(cache, keep).is_empty() {
                 return Err(error);
             }
@@ -495,6 +514,14 @@ fn with_snapshot_release<T, V>(
         }
         other => other,
     }
+}
+
+fn is_process_only_session_refusal(error: &Glm5NextMetalError) -> bool {
+    matches!(
+        error,
+        Glm5NextMetalError::MemoryAdmission { denied, .. }
+            if denied.reason == qwen_llm::metal::MetalMemoryAdmissionReason::ProcessInsufficient
+    )
 }
 
 /// A session of the serve geometry reading prompts with `lineage`.
@@ -505,19 +532,16 @@ fn new_session<'w>(
     cpu_reserve: u64,
     lineage: PackedLineage,
     rows: usize,
-) -> Result<Glm5NextSession<'w>, ServeError> {
+) -> Result<Glm5NextSession<'w>, Glm5NextMetalError> {
     let mut session = Glm5NextSession::with_prefill_rows_and_cpu_reserve(
         ctx,
         weights,
         prepared.capacity,
         rows,
         cpu_reserve,
-    )
-    .map_err(session_error)?;
-    session.set_packed_lineage(lineage).map_err(session_error)?;
-    session
-        .set_fast_precision(prepared.fast_precision)
-        .map_err(session_error)?;
+    )?;
+    session.set_packed_lineage(lineage)?;
+    session.set_fast_precision(prepared.fast_precision)?;
     Ok(session)
 }
 
@@ -643,6 +667,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             lineage,
             self.frozen_rows.unwrap_or(self.prepared.prefill_rows),
         )
+        .map_err(session_error)
     }
 
     /// One short prefill on a throwaway session before the listener accepts,
@@ -668,6 +693,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 self.lineage,
                 rows,
             )
+            .map_err(session_error)
         })
         .map_err(|e| anyhow::anyhow!(e.message))?;
         session
@@ -708,7 +734,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         // not reserved here at its rarely approached worst case.
         let reserve = sink.transport_reserve_bytes();
         // Cached snapshots are optional: released before a pressure refusal.
-        with_snapshot_release(&mut self.cache, None, || {
+        with_transport_snapshot_release(&mut self.cache, None, || {
             super::transport_memory::admit_resident_transport(
                 reserve,
                 MetalContext::process_limit_bytes_remaining(),
@@ -815,10 +841,8 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             Some(hit) => {
                 if live_lineage != Some(lineage) {
                     self.session = None;
-                    self.session = Some(with_snapshot_release(
-                        &mut self.cache,
-                        Some(hit.id),
-                        || {
+                    self.session = Some(
+                        with_snapshot_release(&mut self.cache, Some(hit.id), || {
                             new_session(
                                 self.ctx,
                                 self.weights,
@@ -827,8 +851,9 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                                 lineage,
                                 selected_rows,
                             )
-                        },
-                    )?);
+                        })
+                        .map_err(session_error)?,
+                    );
                 }
                 let session = self.session.as_mut().expect("session present");
                 match session.restore_snapshot(&hit.value) {
@@ -850,16 +875,19 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                         // a pressure retry can reclaim it if evicted.
                         drop(hit);
                         self.session = None;
-                        self.session = Some(with_snapshot_release(&mut self.cache, None, || {
-                            new_session(
-                                self.ctx,
-                                self.weights,
-                                &self.prepared,
-                                reserve,
-                                lineage,
-                                selected_rows,
-                            )
-                        })?);
+                        self.session = Some(
+                            with_snapshot_release(&mut self.cache, None, || {
+                                new_session(
+                                    self.ctx,
+                                    self.weights,
+                                    &self.prepared,
+                                    reserve,
+                                    lineage,
+                                    selected_rows,
+                                )
+                            })
+                            .map_err(session_error)?,
+                        );
                         canonical = true;
                         0
                     }
@@ -883,6 +911,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                     with_snapshot_release(&mut self.cache, None, || {
                         new_session(ctx, weights, prepared, reserve, lineage, rows)
                     })
+                    .map_err(session_error)
                 };
                 let created = if let Some(initial) = plan {
                     let (session, actual) = prefill_plan::create_with_pressure_retry(

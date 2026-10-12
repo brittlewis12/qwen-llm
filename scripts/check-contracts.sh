@@ -35,8 +35,11 @@ uv run scripts/reference/env_knobs.py --check
 cargo test -q --release -p qwen-llm --test comparison_tripwire
 if [ "$full" -eq 1 ]; then
   readme_test=family_profile::tests::readme_family_table_matches_profiles
-  output=$(cargo test -q --release -p qwen-cli --bin qwen -- --exact "$readme_test" 2>&1)
+  status=0
+  output=$(cargo test -q --release -p qwen-cli --bin qwen -- --exact "$readme_test" 2>&1) ||
+    status=$?
   printf '%s\n' "$output"
+  [ "$status" -eq 0 ] || exit "$status"
   if ! grep -q 'test result: ok\. 1 passed' <<<"$output"; then
     echo "check-contracts: $readme_test did not run exactly once" >&2
     exit 1

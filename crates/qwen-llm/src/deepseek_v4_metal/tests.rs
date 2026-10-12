@@ -14,6 +14,55 @@ use objc2_metal::{MTLCommandBuffer, MTLCommandQueue};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+#[test]
+fn dense_matvec_admission_matches_metal_forward_dispatch() {
+    let dtypes = [
+        GgmlType::F32,
+        GgmlType::F16,
+        GgmlType::Q4_0,
+        GgmlType::Q4_1,
+        GgmlType::Q5_0,
+        GgmlType::Q5_1,
+        GgmlType::Q8_0,
+        GgmlType::Q8_1,
+        GgmlType::Q2_K,
+        GgmlType::Q3_K,
+        GgmlType::Q4_K,
+        GgmlType::Q5_K,
+        GgmlType::Q6_K,
+        GgmlType::Q8_K,
+        GgmlType::IQ2_XXS,
+        GgmlType::IQ2_XS,
+        GgmlType::IQ3_XXS,
+        GgmlType::IQ1_S,
+        GgmlType::IQ4_NL,
+        GgmlType::IQ3_S,
+        GgmlType::IQ2_S,
+        GgmlType::IQ4_XS,
+        GgmlType::I8,
+        GgmlType::I16,
+        GgmlType::I32,
+        GgmlType::I64,
+        GgmlType::F64,
+        GgmlType::IQ1_M,
+        GgmlType::BF16,
+        GgmlType::TQ1_0,
+        GgmlType::TQ2_0,
+        GgmlType::MXFP4,
+        GgmlType::NVFP4,
+        GgmlType::Q1_0,
+        GgmlType::Q2_0,
+        GgmlType::Unknown,
+    ];
+    for dtype in dtypes {
+        assert_eq!(
+            supported_matvec_dtype(dtype),
+            crate::metal_forward::mat_vec_dispatch_supported(dtype),
+            "{dtype:?}"
+        );
+    }
+}
+
 fn max_finite_metric(values: impl IntoIterator<Item = f64>) -> f64 {
     let mut maximum = 0.0f64;
     let mut count = 0usize;

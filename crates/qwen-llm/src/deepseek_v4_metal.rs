@@ -553,27 +553,7 @@ fn checked_mul(a: usize, b: usize, name: &str) -> Result<usize, DeepSeekV4MetalE
 }
 
 fn supported_matvec_dtype(dtype: GgmlType) -> bool {
-    matches!(
-        dtype,
-        GgmlType::F32
-            | GgmlType::F16
-            | GgmlType::BF16
-            | GgmlType::Q2_K
-            | GgmlType::Q3_K
-            | GgmlType::IQ2_XS
-            | GgmlType::IQ2_S
-            | GgmlType::IQ3_XXS
-            | GgmlType::IQ3_S
-            | GgmlType::Q4_0
-            | GgmlType::Q4_1
-            | GgmlType::Q4_K
-            | GgmlType::Q5_K
-            | GgmlType::Q6_K
-            | GgmlType::MXFP4
-            | GgmlType::Q8_0
-            | GgmlType::IQ4_NL
-            | GgmlType::IQ4_XS
-    )
+    crate::metal_forward::mat_vec_dispatch_supported(dtype)
 }
 
 fn matvec_weight_bytes(
@@ -582,9 +562,6 @@ fn matvec_weight_bytes(
     n_out: usize,
     name: &str,
 ) -> Result<(usize, usize), DeepSeekV4MetalError> {
-    if !supported_matvec_dtype(dtype) {
-        return invalid(format!("{name} dtype {dtype:?} is not supported by matvec"));
-    }
     let (block_elements, block_bytes) = ggml_type_layout(dtype)
         .ok_or_else(|| DeepSeekV4MetalError::Invalid(format!("{name} has unknown dtype layout")))?;
     let block_elements = usize::try_from(block_elements)
@@ -617,6 +594,12 @@ fn validate_matvec_weight(
     n_out: usize,
     name: &str,
 ) -> Result<(), DeepSeekV4MetalError> {
+    if !supported_matvec_dtype(tensor.dtype) {
+        return invalid(format!(
+            "{name} dtype {:?} is not supported by matvec",
+            tensor.dtype
+        ));
+    }
     let expected_shape = [n_in as u64, n_out as u64];
     if tensor.shape != expected_shape {
         return invalid(format!(

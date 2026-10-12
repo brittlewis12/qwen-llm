@@ -7781,7 +7781,7 @@ fn metal_27b_perf_profile() {
 /// **27B Q4_K_M, multi-token**: validates position > 0 + steady-state
 /// throughput. The headline number we've been working toward.
 #[test]
-#[ignore]
+#[ignore = "needs reference logits from the external llm tool"]
 fn metal_27b_multi_token_perf() {
     let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
 

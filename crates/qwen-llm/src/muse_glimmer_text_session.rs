@@ -5817,7 +5817,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the authenticated local Unsloth Muse Glimmer Q8_0 target"]
+    #[ignore = "needs reference logits from the external llm tool"]
     fn runs_pinned_q8_first_token_after_dropping_gguf_owner() {
         let _ = crate::test_fixtures::MUSE_GLIMMER_Q8_0.required();
 

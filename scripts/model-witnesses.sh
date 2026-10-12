@@ -20,7 +20,7 @@ for root in roots:
         if "qwen4exp_" in path.name:
             continue
         source = path.read_text()
-        for match in re.finditer(r'#\[ignore\s*=\s*"model witness: [^"]+"\]\s*fn\s+(\w+)', source):
+        for match in re.finditer(r'#\[ignore\s*=\s*"(?:model witness: [^"]+|needs reference logits from the external llm tool)"\]\s*fn\s+(\w+)', source):
             name = match.group(1)
             if not filter_text or filter_text in name:
                 by_package[package].add(name)

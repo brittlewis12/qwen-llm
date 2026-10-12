@@ -1655,7 +1655,7 @@ mod tests {
     /// Marked `#[ignore]` so default `cargo test` doesn't run it; invoke
     /// explicitly with `cargo test --release -p qwen-llm 27b -- --ignored`.
     #[test]
-    #[ignore]
+    #[ignore = "needs reference logits from the external llm tool"]
     fn oracle_match_27b_q4_k_m() {
         let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
 
@@ -1738,7 +1738,7 @@ mod tests {
     /// Slow (~minutes per token via CPU triple-loop matmul through 27B).
     /// Marked `#[ignore]` so default `cargo test` doesn't run it.
     #[test]
-    #[ignore]
+    #[ignore = "needs reference logits from the external llm tool"]
     fn oracle_match_longprompt_27b_q4_k_m() {
         let _ = crate::test_fixtures::QWEN36_27B_Q4_K_M.required();
 

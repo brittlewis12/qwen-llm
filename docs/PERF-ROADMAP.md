@@ -14,7 +14,7 @@ For append-only checkpoint history and exact current handoff state, see
 
 ## Current Leverage - 2026-10-12
 
-Reoriented through main `f9abbf19` with cx, retaining the requested family/phase
+Reoriented through main `65b09776` with cx, retaining the requested family/phase
 priority: GLM prefill and long-context decode first, then Flash-Next and Qwen.
 This section supersedes stale next-step claims in the dated maps below.
 
@@ -66,13 +66,28 @@ retry; no cause was established for its stall. Complete source is archived at
 `d7a46ba7`; raw packets remain in `docs/bench/2026-10-11-glm-gate-up-state/` and
 `docs/bench/2026-10-11-glm-kda-history/`. No further tile/threshold sweeps.
 
-1. **Reconcile actual N2048 costs before another implementation.** Reuse the
-   existing packed stage profiler and bound-dispatch census for one Maya Half
-   chunk with identical ordinary/profiled inputs. Separate expert gate/up from
-   down/reduction, KDA dense projections from preparation/recurrence, and MLA
-   dense projections from latent absorption/expansion. Collect census outside
-   ordinary timing. A representative leaf times the layer count is not actual
-   aggregate attribution. No new general tracing framework or depth grid.
+**Current N2048 costs reconciled:** identical ordinary/profiled logits; parent
+GPU spans roughly experts4580 ms, KDA2345, MLA1288, router519, shared440.
+Profiled wall is1.051x ordinary mean, but ordinary repeats vary8.7%; these are
+rough ranking budgets, not observer-neutral ordinary-wall fractions. Census
+found42 generic F32 routers because selection admitted only exact N128/N512.
+The strict router now follows primitive geometry for rows>=128: production
+N2048 gains2.12% and N129 gains0.77%, with exact projections/routes/logits and
+no new memory. The forced N2048 comparison gained3.36%; do not combine these
+or extrapolate the entire router parent as recoverable projection time.
+Evidence: `docs/bench/2026-10-12-glm-prefill-cost/` and
+`docs/bench/2026-10-12-glm-router-large/`.
+
+1. **Resolve KDA's actual internal budget.** Use five boundaries in the existing
+   recorder: input projections, preparation, recurrence, output normalization,
+   output projection. Ordinary execution must keep its encoder and kernels.
+   One identical-input N2048 ordinary/profiled comparison, with overhead
+   reported, decides whether the serial-time recurrence is large enough to
+   justify a chunkwise matrix prototype. Per-key-channel decay is not scalar
+   GDN decay; preserve incoming/final state and avoid unstable inverse-decay
+   formulations. If projections dominate or observation is unstable, stop the
+   recurrence redesign rather than expanding an attribution campaign. Generic
+   HC is second: its entire pre-stage parent budget is only about292 ms.
 2. **Coordinate Flash work; the retained integer selector is now falsified.**
    Existing Flash work now retains packed prefill under workspace pressure
    (`e7b48483`). The quant-compatibility worktree has been retired; its parallel

@@ -544,8 +544,9 @@ fn grouped_down_policy(
     }
 }
 
-// Measured release geometry and widths; this is not a broad size threshold.
-const ROUTER_E8P32_ROWS: [usize; 2] = [128, 512];
+// Strict F32 accumulation, with activation reuse across eight expert rows.
+// Smaller batches retain the generic path; geometry follows the primitive.
+const ROUTER_E8P32_MIN_ROWS: usize = 128;
 
 fn router_e8p32_selected(
     lineage: PackedLineage,
@@ -555,16 +556,17 @@ fn router_e8p32_selected(
     rows: usize,
     supported: impl FnOnce() -> bool,
 ) -> bool {
-    let requested = ROUTER_E8P32_ROWS.contains(&rows);
+    let requested = rows >= ROUTER_E8P32_MIN_ROWS;
     // An active A arm must remain generic after production promotion. B may
     // probe other widths, but cannot bypass lineage, geometry or capability.
     #[cfg(test)]
     let requested = router_prefill::requested_override().unwrap_or(requested);
     lineage == PackedLineage::Fast
-        && hidden == 4096
-        && experts == 288
         && dtype == GgmlType::F32
-        && rows > 0
+        && [hidden, experts, rows]
+            .into_iter()
+            .all(|n| n > 0 && u32::try_from(n).is_ok())
+        && experts.is_multiple_of(8)
         && requested
         && supported()
 }

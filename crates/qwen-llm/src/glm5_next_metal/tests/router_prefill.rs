@@ -12,7 +12,8 @@
 //! Each width warms A and B, then records A1/B1/B2/A2 on fresh sessions.
 //! A forces generic even at production-selected widths; B forces the candidate
 //! at diagnostic widths (including N32), subject to the production capability
-//! guard. Outside this scope, Fast uses E8P32 only at N128/N512.
+//! guard. Production Fast uses E8P32 for F32 routers at N>=128 with positive
+//! u32 dimensions and E divisible by eight; the pipeline capability guard remains.
 //! Only prefill is timed; allocation and CPU diagnostics are outside it.
 //! Ordinary command timestamps are read after completion, without splitting
 //! encoders. GPU duration includes execution stalls; wall minus GPU duration
@@ -26,16 +27,20 @@ use super::super::tests::{
     argmax, choice_regret, kl_divergence, long_qualification_text, perf_lease,
 };
 use super::*;
+
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::io::Write;
 use std::time::Instant;
 
+#[path = "router_prefill/large_batch.rs"]
+mod large_batch;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Override {
     active: bool,
-    enabled: bool,
+    enabled: Option<bool>,
     substitutions: usize,
     completed_commands: usize,
     valid_gpu_commands: usize,
@@ -48,6 +53,15 @@ thread_local! {
 
 /// Restores the calling thread's previous state even on error or unwinding.
 fn with_override<T>(enabled: bool, body: impl FnOnce() -> T) -> (T, Override) {
+    with_capture(Some(enabled), body)
+}
+
+/// Observe ordinary production selection (None), even inside a forced scope.
+fn with_production_capture<T>(body: impl FnOnce() -> T) -> (T, Override) {
+    with_capture(None, body)
+}
+
+fn with_capture<T>(enabled: Option<bool>, body: impl FnOnce() -> T) -> (T, Override) {
     struct Restore(Override);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -82,7 +96,7 @@ pub(super) fn record_completed_command_gpu_time(timestamps: impl FnOnce() -> (f6
 
 pub(super) fn requested_override() -> Option<bool> {
     let value = ROUTER_OVERRIDE.get();
-    value.active.then_some(value.enabled)
+    if value.active { value.enabled } else { None }
 }
 
 /// Count successful candidate encodes only while a diagnostic arm is active.
@@ -96,51 +110,99 @@ pub(super) fn record_substitution() {
 }
 
 #[test]
-fn router_cpu_production_selection_is_narrow() {
+fn router_cpu_production_selection_follows_primitive_geometry() {
     assert_eq!(requested_override(), None);
-    for lineage in [PackedLineage::Fast, PackedLineage::Exact] {
-        for rows in [
-            0, 1, 31, 32, 33, 64, 127, 128, 129, 255, 256, 511, 512, 513, 1024,
-        ] {
-            let expected = lineage == PackedLineage::Fast && matches!(rows, 128 | 512);
-            let queried = Cell::new(false);
-            assert_eq!(
-                router_e8p32_selected(lineage, 4096, 288, GgmlType::F32, rows, || {
-                    queried.set(true);
-                    true
-                }),
-                expected,
-                "{lineage:?} N{rows}"
-            );
-            assert_eq!(
-                queried.get(),
-                expected,
-                "ineligible calls must not query Metal"
-            );
-            assert!(!router_e8p32_selected(
-                lineage,
-                4096,
-                288,
-                GgmlType::F32,
-                rows,
-                || false
-            ));
+    for (hidden, experts) in [
+        (7, 8),
+        (257, 24),
+        (2048, 256),
+        (4096, 288),
+        (u32::MAX as usize, 8),
+    ] {
+        for lineage in [PackedLineage::Fast, PackedLineage::Exact] {
+            for rows in [0, 1, 32, 127, 128, 129, 512, 513, 2048, u32::MAX as usize] {
+                let expected = lineage == PackedLineage::Fast && rows >= 128;
+                let queried = Cell::new(false);
+                assert_eq!(
+                    router_e8p32_selected(lineage, hidden, experts, GgmlType::F32, rows, || {
+                        queried.set(true);
+                        true
+                    }),
+                    expected,
+                    "{lineage:?} K{hidden} E{experts} N{rows}"
+                );
+                assert_eq!(
+                    queried.get(),
+                    expected,
+                    "ineligible calls must not query Metal"
+                );
+                assert!(!router_e8p32_selected(
+                    lineage,
+                    hidden,
+                    experts,
+                    GgmlType::F32,
+                    rows,
+                    || false
+                ));
+            }
         }
     }
-    for (hidden, experts, dtype) in [
-        (2048, 288, GgmlType::F32),
-        (4096, 256, GgmlType::F32),
-        (4096, 288, GgmlType::Q8_0),
+    let too_large = usize::try_from(u64::from(u32::MAX) + 1).unwrap();
+    for (hidden, experts, rows) in [
+        (0, 8, 128),
+        (7, 0, 128),
+        (7, 7, 129),
+        (257, 25, 129),
+        (7, 8, 0),
+        (too_large, 8, 128),
+        (7, too_large, 128),
+        (7, 8, too_large),
     ] {
-        for rows in [128, 512] {
-            assert!(!router_e8p32_selected(
-                PackedLineage::Fast,
-                hidden,
-                experts,
-                dtype,
-                rows,
-                || panic!("unqualified geometry must not query Metal")
-            ));
+        assert!(!router_e8p32_selected(
+            PackedLineage::Fast,
+            hidden,
+            experts,
+            GgmlType::F32,
+            rows,
+            || panic!("invalid geometry must not query Metal")
+        ));
+    }
+    for dtype in [
+        GgmlType::F16,
+        GgmlType::BF16,
+        GgmlType::Q8_0,
+        GgmlType::Q6_K,
+    ] {
+        assert!(!router_e8p32_selected(
+            PackedLineage::Fast,
+            257,
+            24,
+            dtype,
+            129,
+            || panic!("non-F32 binding must not query Metal")
+        ));
+    }
+}
+
+#[test]
+fn router_cpu_operand_precision_does_not_change_f32_router_policy() {
+    for precision in FastPrecision::ALL {
+        for lineage in [PackedLineage::Fast, PackedLineage::Exact] {
+            let arith = Arith { lineage, precision };
+            for rows in [127, 128, 129, 2048] {
+                assert_eq!(
+                    router_e8p32_selected(
+                        stage_lineage(arith.lineage, Stage::Router),
+                        257,
+                        24,
+                        GgmlType::F32,
+                        rows,
+                        || true
+                    ),
+                    lineage == PackedLineage::Fast && rows >= 128,
+                    "{arith:?} N{rows}"
+                );
+            }
         }
     }
 }
@@ -162,7 +224,7 @@ fn router_cpu_scoped_arms_override_widths_but_not_guards() {
     for candidate in [false, true] {
         with_override(candidate, || {
             assert_eq!(requested_override(), Some(candidate));
-            for rows in [32, 128, 512] {
+            for rows in [32, 128, 129, 512, 2048] {
                 assert_eq!(
                     router_e8p32_selected(
                         PackedLineage::Fast,
@@ -192,8 +254,8 @@ fn router_cpu_scoped_arms_override_widths_but_not_guards() {
                 ));
             }
             for (hidden, experts, dtype, rows) in [
-                (2048, 288, GgmlType::F32, 128),
-                (4096, 256, GgmlType::F32, 128),
+                (0, 288, GgmlType::F32, 128),
+                (4096, 7, GgmlType::F32, 128),
                 (4096, 288, GgmlType::Q8_0, 128),
                 (4096, 288, GgmlType::F32, 0),
             ] {
@@ -262,6 +324,61 @@ fn router_cpu_override_restores_nested_error_and_unwind() {
 }
 
 #[test]
+fn router_cpu_production_capture_restores_scope_and_observes_normal_selection() {
+    let before = ROUTER_OVERRIDE.get();
+    for outer in [Some(false), Some(true), None] {
+        with_capture(outer, || {
+            let previous = ROUTER_OVERRIDE.get();
+            let (result, report) = with_production_capture(|| {
+                assert_eq!(requested_override(), None);
+                assert!(ROUTER_OVERRIDE.get().active);
+                assert!(router_e8p32_selected(
+                    PackedLineage::Fast,
+                    257,
+                    24,
+                    GgmlType::F32,
+                    129,
+                    || true
+                ));
+                assert!(!router_e8p32_selected(
+                    PackedLineage::Fast,
+                    7,
+                    8,
+                    GgmlType::F32,
+                    127,
+                    || panic!("capture must retain production minimum")
+                ));
+                record_substitution();
+                record_completed_command_gpu_time(|| (1.0, 1.25));
+                let captured = ROUTER_OVERRIDE.get();
+                with_override(false, || assert_eq!(requested_override(), Some(false)));
+                assert_eq!(ROUTER_OVERRIDE.get(), captured);
+                Err::<(), &str>("normal capture error")
+            });
+            assert_eq!(result, Err("normal capture error"));
+            assert_eq!(
+                (
+                    report.enabled,
+                    report.substitutions,
+                    report.valid_gpu_commands
+                ),
+                (None, 1, 1)
+            );
+            assert_eq!(report.gpu_ms, 250.0);
+            assert_eq!(ROUTER_OVERRIDE.get(), previous);
+            assert!(
+                std::panic::catch_unwind(|| with_production_capture(|| panic!(
+                    "restore production capture"
+                )))
+                .is_err()
+            );
+            assert_eq!(ROUTER_OVERRIDE.get(), previous);
+        });
+        assert_eq!(ROUTER_OVERRIDE.get(), before);
+    }
+}
+
+#[test]
 fn router_cpu_inactive_capture_does_not_read_gpu_timestamps() {
     let before = ROUTER_OVERRIDE.get();
     assert!(!before.active);
@@ -271,9 +388,9 @@ fn router_cpu_inactive_capture_does_not_read_gpu_timestamps() {
 }
 
 #[test]
-fn router_cpu_capture_rejects_invalid_timestamps_in_both_arms() {
-    for candidate in [false, true] {
-        let ((), report) = with_override(candidate, || {
+fn router_cpu_capture_rejects_invalid_timestamps_in_forced_and_production_arms() {
+    for selection in [Some(false), Some(true), None] {
+        let ((), report) = with_capture(selection, || {
             record_completed_command_gpu_time(|| (1.0, 1.25));
             for timestamps in [
                 (0.0, 1.0),
@@ -585,9 +702,9 @@ fn router_prefill_abba() {
             "routers": routers, "widths": [32,128,512], "lineage": "Fast",
             "incumbent": "scoped A forces matmat Fast -> generic F32, including production E8P32 widths",
             "candidate": "scoped B requests existing E8P32 strict at all diagnostic widths, including N32; capability fallback retained; 42 substitutions required",
-            "production_scope": {"lineage": "Fast", "rows": ROUTER_E8P32_ROWS,
-                "hidden": 4096, "experts": 288, "dtype": "F32",
-                "fallback": "generic on all other widths/geometry/dtypes or unavailable/incapable pipeline; Exact unchanged"},
+            "production_scope": {"lineage": "Fast", "minimum_rows": ROUTER_E8P32_MIN_ROWS,
+                "dimensions": "positive u32; experts divisible by 8", "dtype": "F32",
+                "fallback": "generic below minimum rows, unsupported geometry/dtype or unavailable/incapable pipeline; Exact unchanged"},
             "router_pipeline_supported": router_e8p32_supported(&ctx),
             "order_per_width": ["warm_A", "warm_B", "A1", "B1", "B2", "A2"],
             "whole_model_metric": "prefill wall including encode, wait, route checks and final logits copy; excludes session allocation and diagnostics",

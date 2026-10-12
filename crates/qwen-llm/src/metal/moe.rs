@@ -6091,76 +6091,82 @@ mod tests {
         let Some(ctx) = metal_test_context() else {
             return;
         };
-        let n_in = 4096usize;
-        let n_out = 160usize;
-        let mut state = 0x8b8b_8b8b_u32;
-        let mut sample = || {
-            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            ((state >> 8) as f32 * (1.0 / 16_777_216.0) - 0.5) * 0.25
-        };
-        let weight = (0..n_in * n_out).map(|_| sample()).collect::<Vec<_>>();
-        let weight_t = MetalTensor::from_bytes(
-            &ctx,
-            bytemuck::cast_slice(&weight),
-            vec![n_in as u64, n_out as u64],
-            GgmlType::F32,
-        )
-        .expect("weight tensor");
-        let short_weight = MetalTensor::zeros_f32(&ctx, vec![(n_in * n_out - 1) as u64])
-            .expect("short weight tensor");
-        let validation_x =
-            MetalTensor::zeros_f32(&ctx, vec![n_in as u64]).expect("validation input");
-        let validation_y =
-            MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).expect("validation output");
-        let command = ctx.queue.commandBuffer().expect("validation command");
-        let encoder = KernelEncoder::begin(&command);
-        assert!(
-            encode_mat_mat_f32_router_e8p32_strict(
+        for (n_in, n_out, queries) in [
+            (4096usize, 160usize, &[1usize, 32, 128, 512, 2048, 4096][..]),
+            (4096, 288, &[2048][..]),
+            (7, 8, &[129][..]),
+            (257, 24, &[129][..]),
+        ] {
+            let mut state = 0x8b8b_8b8b_u32;
+            let mut sample = || {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                ((state >> 8) as f32 * (1.0 / 16_777_216.0) - 0.5) * 0.25
+            };
+            let weight = (0..n_in * n_out).map(|_| sample()).collect::<Vec<_>>();
+            let weight_t = MetalTensor::from_bytes(
                 &ctx,
-                &encoder,
-                &short_weight,
-                &validation_x,
-                &validation_y,
-                n_in,
-                n_out,
-                1,
-            )
-            .is_err()
-        );
-        encoder.end();
-
-        for n_query in [1usize, 32, 128, 512, 2048, 4096] {
-            let x = (0..n_in * n_query).map(|_| sample()).collect::<Vec<_>>();
-            let x_t = MetalTensor::from_bytes(
-                &ctx,
-                bytemuck::cast_slice(&x),
-                vec![n_query as u64, n_in as u64],
+                bytemuck::cast_slice(&weight),
+                vec![n_in as u64, n_out as u64],
                 GgmlType::F32,
             )
-            .expect("input tensor");
-            let generic = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, n_query as u64])
-                .expect("generic output");
-            let strict = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, n_query as u64])
-                .expect("strict output");
-            one_shot(&ctx, |enc| {
-                encode_mat_mat_f32(&ctx, enc, &weight_t, &x_t, &generic, n_in, n_out, n_query)?;
+            .expect("weight tensor");
+            let short_weight = MetalTensor::zeros_f32(&ctx, vec![(n_in * n_out - 1) as u64])
+                .expect("short weight tensor");
+            let validation_x =
+                MetalTensor::zeros_f32(&ctx, vec![n_in as u64]).expect("validation input");
+            let validation_y =
+                MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).expect("validation output");
+            let command = ctx.queue.commandBuffer().expect("validation command");
+            let encoder = KernelEncoder::begin(&command);
+            assert!(
                 encode_mat_mat_f32_router_e8p32_strict(
-                    &ctx, enc, &weight_t, &x_t, &strict, n_in, n_out, n_query,
+                    &ctx,
+                    &encoder,
+                    &short_weight,
+                    &validation_x,
+                    &validation_y,
+                    n_in,
+                    n_out,
+                    1,
                 )
-            })
-            .expect("router differential");
+                .is_err()
+            );
+            encoder.end();
 
-            let generic = read_back_f32(&generic.buffer, n_out * n_query);
-            let strict = read_back_f32(&strict.buffer, n_out * n_query);
-            if let Some((index, (expected, actual))) = generic
-                .iter()
-                .zip(&strict)
-                .enumerate()
-                .find(|(_, (expected, actual))| expected.to_bits() != actual.to_bits())
-            {
-                panic!(
-                    "n_query={n_query} output {index} differs: generic={expected:?} strict={actual:?}"
-                );
+            // Both kernels handle scalar K tails and a partial final query group.
+            for &n_query in queries {
+                let x = (0..n_in * n_query).map(|_| sample()).collect::<Vec<_>>();
+                let x_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&x),
+                    vec![n_query as u64, n_in as u64],
+                    GgmlType::F32,
+                )
+                .expect("input tensor");
+                let generic = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, n_query as u64])
+                    .expect("generic output");
+                let strict = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, n_query as u64])
+                    .expect("strict output");
+                one_shot(&ctx, |enc| {
+                    encode_mat_mat_f32(&ctx, enc, &weight_t, &x_t, &generic, n_in, n_out, n_query)?;
+                    encode_mat_mat_f32_router_e8p32_strict(
+                        &ctx, enc, &weight_t, &x_t, &strict, n_in, n_out, n_query,
+                    )
+                })
+                .expect("router differential");
+
+                let generic = read_back_f32(&generic.buffer, n_out * n_query);
+                let strict = read_back_f32(&strict.buffer, n_out * n_query);
+                if let Some((index, (expected, actual))) = generic
+                    .iter()
+                    .zip(&strict)
+                    .enumerate()
+                    .find(|(_, (expected, actual))| expected.to_bits() != actual.to_bits())
+                {
+                    panic!(
+                        "n_in={n_in} n_out={n_out} n_query={n_query} output {index} differs: generic={expected:?} strict={actual:?}"
+                    );
+                }
             }
         }
     }

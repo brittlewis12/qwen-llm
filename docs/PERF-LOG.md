@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-12 - Strict Router Follows Geometry, Not Sampled Widths
+
+- Current Maya Half N2048 profile (`5d934f4a`) finds42 generic F32 routers,
+  roughly519 ms including selection, because strict routing admitted exactly
+  N128/N512. Those widths and H4096/E288 were historical coverage, not limits
+  of the existing strict-order primitive.
+- Forced strict N2048 gains3.36% mean throughput; unforced production B gains
+  2.12%, with both wall/GPU pairs positive. N129 boundary control gains0.77%.
+  Full projection bits, selected routes/weights and join/three-step logits agree;
+  independent sampled F64 dots satisfy the mathematical accumulation bound.
+- Replace sampled lists with Fast/F32, rows>=128 and primitive geometry:
+  positive u32 dimensions, E divisible by8, plus existing pipeline capability
+  fallback. Keep generic below128 based on prior small-batch results. No new
+  runtime allocation, environment knob, precision weakening or model whitelist.
+- Add actual E288/N2048 and odd-K/E primitive cases;90 GLM tests plus strict
+  primitive pass under leased Metal validation. Initial unleased primitive run
+  timed out during concurrent validation; serialized retry passes in0.23s.
+  Timing packets retain the approximately82.5s warm-only wall gap; warmed gains
+  are not cold-TTFT gains. All-target release checks pass.
+- Incorporate main session reuse/re-admission work through `65b09776` before
+  integration. Next is a bounded KDA internal split tied to one recurrence
+  decision, not another broad profiling campaign. Evidence:
+  `docs/bench/2026-10-12-glm-router-large/`.
+
 ## 2026-10-12 - Re-Admit Qwen's Actual Packed Allocation Fallback
 
 - Short-request investigation found a stale resource assumption: optional

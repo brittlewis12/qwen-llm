@@ -732,7 +732,7 @@ pub enum MfError {
     BadToken(i32, u32),
     #[error("qwen35moe Metal path not implemented yet")]
     UnsupportedMoe,
-    #[error("v1 driver requires F32 weights; tensor {name} is {dtype:?}")]
+    #[error("no executable Metal kernel for tensor {name} with dtype {dtype:?}")]
     UnsupportedDtype { name: String, dtype: GgmlType },
     #[error("metal load policy: {0}")]
     LoadPolicy(String),

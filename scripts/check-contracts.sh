@@ -4,8 +4,10 @@
 # checks the README family table against FamilyProfile, which builds the qwen
 # binary's tests.
 #
-# Checks the committed tree, so a clean worktree is required; on success the
-# checked tree id is printed.
+# Checks the committed tree: the worktree must be clean and must still be
+# clean, at the same commit, when the checks finish. On success the checked
+# tree id is printed. Edits made and reverted while the checks run are not
+# detected.
 set -euo pipefail
 
 full=0
@@ -16,17 +18,33 @@ case "${1:-}" in
 esac
 
 cd "$(git rev-parse --show-toplevel)"
-if ! git diff --quiet HEAD -- || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+
+worktree_clean() {
+  git diff --quiet HEAD -- && [ -z "$(git ls-files --others --exclude-standard)" ]
+}
+
+if ! worktree_clean; then
   echo "check-contracts: worktree has uncommitted changes; commit or stash them first" >&2
   exit 1
 fi
+commit=$(git rev-parse HEAD)
+tree=$(git rev-parse 'HEAD^{tree}')
 
 cargo fmt --all --check
 uv run scripts/reference/env_knobs.py --check
 cargo test -q --release -p qwen-llm --test comparison_tripwire
 if [ "$full" -eq 1 ]; then
-  cargo test -q --release -p qwen-cli --bin qwen -- --exact \
-    family_profile::tests::readme_family_table_matches_profiles
+  readme_test=family_profile::tests::readme_family_table_matches_profiles
+  output=$(cargo test -q --release -p qwen-cli --bin qwen -- --exact "$readme_test" 2>&1)
+  printf '%s\n' "$output"
+  if ! grep -q 'test result: ok\. 1 passed' <<<"$output"; then
+    echo "check-contracts: $readme_test did not run exactly once" >&2
+    exit 1
+  fi
 fi
 
-echo "check-contracts: ok for tree $(git rev-parse 'HEAD^{tree}') (commit $(git rev-parse --short HEAD))"
+if [ "$(git rev-parse HEAD)" != "$commit" ] || ! worktree_clean; then
+  echo "check-contracts: the worktree changed while the checks ran; nothing was certified" >&2
+  exit 1
+fi
+echo "check-contracts: ok for tree $tree (commit ${commit:0:8})"

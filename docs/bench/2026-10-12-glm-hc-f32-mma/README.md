@@ -52,7 +52,7 @@ tokens. Between-arm KL ranges from 0.00000360 to 0.00758116. This is descriptive
 reduction-order sensitivity, not a quality verdict or the reason to reject the
 candidate. The decision is lack of demonstrated end-to-end benefit.
 
-Retain source in the experiment checkpoint's Git history and raw evidence here;
+Retain source at `08ec6267` in Git history and raw evidence here;
 remove the candidate, opt-in API, and harness from active builds. Production
 continues using the existing generic normalized F32 HC projection. Next, exercise
 the complete current Maya cached-conversation path rather than another kernel

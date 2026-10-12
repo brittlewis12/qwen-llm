@@ -1,10 +1,7 @@
 // Native compressed grouped F32 MMA, patterned after the unchanged Q8
 // grouped r2c16k64 kernel. One threadgroup owns [16 outputs, 128 tokens] for
-// one group. The host admits K % 64 and complete 128-token prefixes, with K
-// aligned to the native storage block (256 for Q6_K). Q6_K retains M % 16;
-// explicitly permitted F32 admits M % 8 with ceil(M/16) output tiles. Its
-// guarded specialization zeros invalid weight rows before any read/decode
-// and skips the invalid 8-output fragment. No padded device storage is needed.
+// one group. The host admits complete tiles only: K % 64, M % 16, rows % 128,
+// and K aligned to the native storage block (256 for the Q6_K instantiation).
 // Bindings/ABI match GroupedProjectionArgs in metal/latent.rs. Strides are
 // F32 elements; row_bytes is the compressed weight row stride in bytes.
 //
@@ -35,7 +32,7 @@ struct latent_grouped_mma_args {
 static_assert(sizeof(latent_grouped_mma_args) == 28);
 
 template <ushort BYTES, ushort NL,
-          void (*DEQ)(device const uchar *, short, thread float4x4 &), bool GUARD_M>
+          void (*DEQ)(device const uchar *, short, thread float4x4 &)>
 [[max_total_threads_per_threadgroup(128)]]
 kernel void kernel_latent_grouped_native_f32_r2c16k64(
         constant latent_grouped_mma_args & args [[buffer(0)]],
@@ -67,14 +64,6 @@ kernel void kernel_latent_grouped_native_f32_r2c16k64(
                 const uint row = cell / 4u;
                 const uint kchunk = cell % 4u;
                 const uint kbase = k0 + 16u * kchunk;
-                // Guard before even forming an out-of-range weight pointer.
-                // GUARD_M=false removes this branch for the shipped Q6_K tile.
-                if (GUARD_M && m0 + row >= args.m) {
-                    QT_FOR_UNROLL (short i = 0; i < 16; ++i) {
-                        shmem[row * 64u + kchunk * 16u + uint(i)] = 0.0f;
-                    }
-                    continue;
-                }
                 device const uchar * block = group_weights
                     + ulong(m0 + row) * args.row_bytes
                     + ulong(kbase / (16u * NL)) * BYTES;
@@ -121,8 +110,6 @@ kernel void kernel_latent_grouped_native_f32_r2c16k64(
     }
 
     QT_FOR_UNROLL (short mt = 0; mt < 2; ++mt) {
-        // M is a multiple of eight, so a fragment is either complete or absent.
-        if (GUARD_M && m0 + uint(mt) * 8u >= args.m) continue;
         QT_FOR_UNROLL (short nt = 0; nt < 4; ++nt) {
             simdgroup_store(
                 acc[mt][nt],
@@ -133,8 +120,7 @@ kernel void kernel_latent_grouped_native_f32_r2c16k64(
     }
 }
 
-// Q6_K keeps the unguarded specialization and its original arithmetic. F32 is
-// an explicit-policy candidate; other native formats retain scalar dispatch.
-typedef decltype(kernel_latent_grouped_native_f32_r2c16k64<QT_Q6_K_BYTES, QT_Q6_K_NL, latent_dequantize_q6_K, false>) latent_grouped_mma_t;
-template [[host_name("kernel_latent_grouped_q6_K_f32_r2c16k64")]] kernel latent_grouped_mma_t kernel_latent_grouped_native_f32_r2c16k64<QT_Q6_K_BYTES, QT_Q6_K_NL, latent_dequantize_q6_K, false>;
-template [[host_name("kernel_latent_grouped_f32_f32_r2c16k64")]] kernel latent_grouped_mma_t kernel_latent_grouped_native_f32_r2c16k64<QT_F32_BYTES, QT_F32_NL, latent_dequantize_f32, true>;
+// Reusable storage-block/decode template; Q6_K is the first instantiated target.
+// Other native formats retain their existing scalar dispatches.
+typedef decltype(kernel_latent_grouped_native_f32_r2c16k64<QT_Q6_K_BYTES, QT_Q6_K_NL, latent_dequantize_q6_K>) latent_grouped_mma_t;
+template [[host_name("kernel_latent_grouped_q6_K_f32_r2c16k64")]] kernel latent_grouped_mma_t kernel_latent_grouped_native_f32_r2c16k64<QT_Q6_K_BYTES, QT_Q6_K_NL, latent_dequantize_q6_K>;

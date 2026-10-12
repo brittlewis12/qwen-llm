@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-12 - F32 HC MMA Leaf Win Does Not Convert To Whole Prefill
+
+- Reused the existing F32-operand MMA template with guarded M24 fragments,
+  normalized inputs and no new GPU buffers. Dedicated test-only Fast Half
+  permission leaves production Q6 MMA and Exact unchanged.
+- Actual final-block K16384/M24/N2048 leaf favors MMA in both pairs, with large
+  scalar timing drift. Independent F64 checks cover all 24 channels at ten tokens;
+  scalar replay confirms the captured binding. Primitive guards/oracles pass.
+- Ordinary whole N2048 ABBA: A 8097.769/8430.192 ms, B 8409.403/8436.907 ms;
+  A/B 0.981103x, both pairs favor incumbent (second effectively tied). Non-HC
+  dispatch signatures match. No demonstrated useful end-to-end conversion.
+- Each arm reproduces its logits through three common continuation tokens;
+  between-arm KL up to 0.007581 is descriptive, not the rejection criterion.
+  Park without a tile sweep or repeated timing until favorable. Source/harness
+  archived at `08ec6267`, removed from active builds; raw evidence retained in
+  `docs/bench/2026-10-12-glm-hc-f32-mma/`. 96 grouped and 49 GLM tests pass under
+  leased Metal validation; all-target release checks pass.
+- Next: exercise current Maya cold/live/snapshot conversation reuse and publish
+  usable configuration guidance, rather than another low-ceiling kernel search.
+
 ## 2026-10-12 - KDA Component Budget Does Not Justify Recurrence Redesign
 
 - Split packed KDA into five existing-recorder spans; ordinary execution keeps

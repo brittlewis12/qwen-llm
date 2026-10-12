@@ -14,7 +14,7 @@ For append-only checkpoint history and exact current handoff state, see
 
 ## Current Leverage - 2026-10-12
 
-Reoriented through main `65b09776` with cx, retaining the requested family/phase
+Reoriented through main `29e623e2` with cx, retaining the requested family/phase
 priority: GLM prefill and long-context decode first, then Flash-Next and Qwen.
 This section supersedes stale next-step claims in the dated maps below.
 
@@ -84,16 +84,22 @@ recurrence 340, output normalization 13, output projection 393. Ordinary wall
 Projections dominate this diagnostic. Do not use the old 2345 ms parent to
 justify a large chunkwise per-key-decay recurrence redesign; park it.
 
-1. **Bounded normalized F32 mHC matrix reuse.** Reuse the existing grouped
-   MMA template for F32 weights and complete eight-channel fragments (M24
-   needs guarded invalid loads/stores), K64 alignment. Preserve normalization
-   before projection and existing scratch. Scope only Fast initially; Exact
-   shares the generic HC caller and must not change accidentally. A dedicated
-   HC override must leave shipped Q6 MMA enabled in both arms. Check all 24
-   channels with independent dots, boundary rows and ragged tokens. One actual
-   N2048 leaf then whole ABBA if promising; no tile sweep. The entire pre-stage
-   budget is only 263 ms and M24/N2048 yields 32 MMA groups, so insufficient
-   parallelism is a concrete falsifier. Stop if it does not convert.
+**Normalized F32 mHC MMA reuse also parked:** actual-input leaf favors MMA,
+but ordinary whole N2048 A/B is 0.981103x, with no useful conversion in either
+pair. Numerical oracles and guards pass; no old-Fast KL veto. Complete source
+at `08ec6267`, removed from active builds. Evidence:
+`docs/bench/2026-10-12-glm-hc-f32-mma/`. No tile sweep or favorable-repeat hunt.
+
+1. **Make current Maya conversation reuse usable.** One current Fast Half,
+   automatic-workspace/cache, 32K-capacity owned loopback server: cold request,
+   continued tools, edited branch, independent conversation sharing instructions,
+   then return to the first conversation. Reuse the existing scripted screen,
+   clearly label canned tools, retain useful-answer/truncation outcomes and
+   current first-delta/reused/prefilled/capture/restore/workspace telemetry.
+   Publish a short usable recipe. If reuse misses, fix the first concrete cause;
+   historical pre-snapshot replay costs are not an outstanding measured defect.
+   Coordinate with the serving owner's busy-response and Lens work; do not
+   duplicate it. Larger-context task evidence follows only if this is useful.
 2. **Coordinate Flash work; the retained integer selector is now falsified.**
    Existing Flash work now retains packed prefill under workspace pressure
    (`e7b48483`). The quant-compatibility worktree has been retired; its parallel

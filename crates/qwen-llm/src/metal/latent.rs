@@ -960,7 +960,6 @@ struct GroupedProjectionArgs {
 #[cfg(test)]
 const GROUPED_Q6_SCALAR8_KERNEL: &str = "kernel_latent_grouped_q6_K_f32_scalar8";
 const GROUPED_Q6_MMA_KERNEL: &str = "kernel_latent_grouped_q6_K_f32_r2c16k64";
-const GROUPED_F32_MMA_KERNEL: &str = "kernel_latent_grouped_f32_f32_r2c16k64";
 const GROUPED_MMA_SCRATCH_BYTES: usize = 16 * 64 * std::mem::size_of::<f32>();
 
 // This checks storage/tile geometry, not a model-family or head-count whitelist.
@@ -974,31 +973,6 @@ fn grouped_projection_mma_eligible(dtype: GgmlType, args: &GroupedProjectionArgs
         && args.rows >= 128
 }
 
-// `allow_mma` has already resolved the test baseline policy. The separate F32
-// permission must remain explicit even when that override forces MMA on.
-fn grouped_projection_mma_kernel(
-    dtype: GgmlType,
-    args: &GroupedProjectionArgs,
-    allow_mma: bool,
-    allow_f32_mma: bool,
-) -> Option<&'static str> {
-    if !allow_mma {
-        return None;
-    }
-    if grouped_projection_mma_eligible(dtype, args) {
-        return Some(GROUPED_Q6_MMA_KERNEL);
-    }
-    (allow_f32_mma
-        && dtype == GgmlType::F32
-        && args.k > 0
-        && args.k.is_multiple_of(64)
-        && args.m > 0
-        && args.m.is_multiple_of(8)
-        && args.groups > 0
-        && args.rows >= 128)
-        .then_some(GROUPED_F32_MMA_KERNEL)
-}
-
 #[cfg(test)]
 thread_local! {
     static GROUPED_PROJECTION_SCALAR_BASELINE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
@@ -1009,7 +983,6 @@ thread_local! {
 /// `true` installs `Some(true)`, forcing old scalar4 (disables MMA and scalar8).
 /// `false` installs `Some(false)`, permitting MMA regardless of caller policy,
 /// subject to unchanged geometry/capacity checks and the scalar8 test scope.
-/// It never grants the separate F32-weight MMA permission.
 /// Outside an override (`None`),
 /// caller policy applies and non-MMA work uses scalar4 unless the separate
 /// test-only scalar8 experiment is explicitly enabled.
@@ -1323,42 +1296,6 @@ pub(crate) fn encode_mat_mat_grouped_f32_with_policy(
     rows: usize,
     allow_mma: bool,
 ) -> Result<(), MetalError> {
-    encode_mat_mat_grouped_f32_with_f32_mma_policy(
-        ctx, enc, weight, input, output, n_in, n_out, groups, rows, allow_mma, false,
-    )
-}
-
-/// Explicit opt-in F32-weight MMA candidate with the same bindings/validation
-/// as [`encode_mat_mat_grouped_f32`]. Both effective `allow_mma` and explicit
-/// `allow_f32_mma` are required for F32; existing wrappers pass the latter false.
-/// The baseline test override may change the former, but cannot grant the
-/// latter. A forced scalar baseline (or scalar8 test scope) suppresses MMA.
-/// Q6_K eligibility/arithmetic and Q8 selection are unchanged by the new flag.
-///
-/// F32 tiles require positive K divisible by 64, positive M divisible by 8,
-/// positive groups, and rows >=128. Dispatch covers ceil(M/16) output tiles
-/// and the complete 128-token prefix; a scalar4 dispatch handles any token
-/// remainder. The final tile zeros missing weight rows before decode/read and
-/// skips missing 8-output stores, so M=8,24,40,... need no padding or repacking.
-/// Uses the same 4096-byte transient scratch and fresh F32 partial per K64 as
-/// Q6_K. F32 operands are retained; reduction order can differ from scalar4
-/// within the existing Exact operand-precision contract (no bitwise promise).
-/// Whole bindings and both pipelines are checked before dispatch; unavailable
-/// MMA falls back to whole-call scalar4 without extra views or device scratch.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn encode_mat_mat_grouped_f32_with_f32_mma_policy(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    weight: &MetalTensor,
-    input: &MetalTensor,
-    output: &MetalTensor,
-    n_in: usize,
-    n_out: usize,
-    groups: usize,
-    rows: usize,
-    allow_mma: bool,
-    allow_f32_mma: bool,
-) -> Result<(), MetalError> {
     const K: &str = "grouped_projection";
     require_serial(K, enc)?;
     let args = validate_grouped_projection(weight, input, output, n_in, n_out, groups, rows)?;
@@ -1395,11 +1332,9 @@ pub(crate) fn encode_mat_mat_grouped_f32_with_f32_mma_policy(
     let (allow_mma, _force_scalar4) =
         grouped_projection_policy(allow_mma, grouped_projection_scalar_baseline());
     // Resolve both candidates before creating views or encoding any dispatch.
-    let mma = if let Some(kernel) =
-        grouped_projection_mma_kernel(weight.dtype, &args, allow_mma, allow_f32_mma)
-    {
+    let mma = if allow_mma && grouped_projection_mma_eligible(weight.dtype, &args) {
         grouped_projection_mma_preflight(
-            ctx.pipeline(kernel),
+            ctx.pipeline(GROUPED_Q6_MMA_KERNEL),
             ctx.device.maxThreadgroupMemoryLength(),
         )
     } else {
@@ -1467,7 +1402,7 @@ pub(crate) fn encode_mat_mat_grouped_f32_with_f32_mma_policy(
         enc.dispatch(
             MTLSize {
                 width: prefix_rows / 128,
-                height: n_out.div_ceil(16),
+                height: n_out / 16,
                 depth: groups,
             },
             MTLSize {

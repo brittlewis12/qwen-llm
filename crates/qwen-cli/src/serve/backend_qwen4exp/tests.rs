@@ -97,6 +97,10 @@ fn build_request(backend: &FlashNextBackend, input: &str) -> (ServeRequest, Stri
     (request, prompt)
 }
 
+fn late_abort_tick(restored_request_ticks: usize) -> Option<usize> {
+    (restored_request_ticks >= 2).then_some(restored_request_ticks)
+}
+
 fn execute(
     backend: &mut FlashNextBackend,
     request: &ServeRequest,
@@ -174,6 +178,13 @@ fn transcript_plan_splits_only_when_boundary_is_ahead_of_cache() {
     assert_eq!(transcript_split(Some(8), 4), Some(8));
     assert_eq!(transcript_split(Some(4), 4), None);
     assert_eq!(transcript_split(Some(2), 4), None);
+}
+
+#[test]
+fn late_abort_uses_a_tick_observed_on_the_restored_request_path() {
+    assert_eq!(late_abort_tick(0), None);
+    assert_eq!(late_abort_tick(1), None);
+    assert_eq!(late_abort_tick(8), Some(8));
 }
 
 #[test]
@@ -359,7 +370,8 @@ fn gpu_qwen4exp_resident_abort_retry_and_transcript_cache_parity() {
     assert_eq!(resent_outcome.usage.cached_tokens, boundary);
     assert_eq!(resent.bytes, cold_bytes);
 
-    let late_abort_tick = warm.ticks.saturating_sub(1).max(2);
+    let late_abort_tick = late_abort_tick(resent.ticks)
+        .expect("restored request produced enough checkpoints for a late abort");
     for mut aborted in [
         Sink {
             abort_tick: Some(1),

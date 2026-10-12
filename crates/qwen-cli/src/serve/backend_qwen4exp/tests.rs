@@ -217,6 +217,73 @@ fn failed_snapshot_restore_evicts_the_entry_and_resets_the_runner() {
 }
 
 #[test]
+fn mismatched_snapshot_position_evicts_the_entry_and_resets_the_runner() {
+    let mut cache = SnapshotCache::new(1024, Default::default());
+    assert!(cache.insert_strict(vec![1, 2], "snapshot", 16));
+    let mut runner = 99;
+    let matched = restore_best_prefix(
+        &mut cache,
+        &[1, 2, 3],
+        &mut runner,
+        |_, _| Ok::<_, &str>(1),
+        |runner| {
+            *runner = 0;
+            Ok::<_, &str>(())
+        },
+    )
+    .unwrap();
+    assert_eq!(matched, 0);
+    assert_eq!(runner, 0);
+    assert_eq!(cache.len(), 0);
+    assert_eq!(cache.indexed_bytes(), 0);
+}
+
+#[test]
+fn successful_snapshot_restore_touches_the_entry() {
+    let mut cache = SnapshotCache::new(20, Default::default());
+    assert!(cache.insert_strict(vec![1], "used", 10));
+    assert!(cache.insert_strict(vec![2], "idle", 10));
+    let matched = restore_best_prefix(
+        &mut cache,
+        &[1, 9],
+        &mut (),
+        |_, _| Ok::<_, &str>(1),
+        |_| panic!("successful restore must not reset"),
+    )
+    .unwrap();
+    assert_eq!(matched, 1);
+    cache.evict_for(10);
+    assert!(cache.entry_for(&[1]).is_some());
+    assert!(cache.entry_for(&[2]).is_none());
+}
+
+#[test]
+fn flash_next_capture_admission_retries_after_process_headroom_eviction() {
+    use qwen_llm::metal::MetalMemorySignals;
+    use qwen_llm::snapshot_policy::{SnapshotPolicy, SnapshotPolicyConfig};
+    use std::cell::Cell;
+
+    let process_remaining = Cell::new(1_u64);
+    let signals = || MetalMemorySignals {
+        recommended_max_bytes: u64::MAX,
+        current_allocated_bytes: 0,
+        process_limit_remaining_bytes: Some(process_remaining.get()),
+    };
+    let mut cache = SnapshotPolicy::new(u64::MAX, SnapshotPolicyConfig::default());
+    cache.insert(10, 1);
+    let evictions = Cell::new(0);
+    let result = admit_flash_next_snapshot_capture(1 << 20, signals, |deficit| {
+        evictions.set(evictions.get() + 1);
+        assert!(deficit > 0);
+        process_remaining.set(u64::MAX);
+        cache.evict_for(deficit)
+    });
+    assert!(result.is_ok());
+    assert_eq!(evictions.get(), 1);
+    assert!(cache.is_empty());
+}
+
+#[test]
 fn flash_next_workspace_cleanup_runs_after_transport_abort() {
     let mut reset = false;
     let outcome: Result<(), BackendFailure> = Err(BackendFailure::Aborted(io::Error::new(

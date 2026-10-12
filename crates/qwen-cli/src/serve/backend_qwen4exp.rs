@@ -508,6 +508,20 @@ fn with_request_workspace<T, E, W, R>(
     outcome
 }
 
+fn admit_flash_next_snapshot_capture(
+    bytes: u64,
+    signals: impl Fn() -> qwen_llm::metal::MetalMemorySignals,
+    evict_for: impl FnOnce(u64) -> qwen_llm::snapshot_policy::Evicted,
+) -> Result<
+    (),
+    (
+        super::SnapshotCaptureDenial,
+        qwen_llm::metal::MetalMemorySignals,
+    ),
+> {
+    super::admit_snapshot_capture(bytes, signals, evict_for)
+}
+
 fn restore_best_prefix<V, R, E: std::fmt::Debug>(
     cache: &mut SnapshotCache<V>,
     tokens: &[u32],
@@ -564,7 +578,7 @@ fn capture_snapshot(
         );
         return false;
     };
-    if let Err((reason, signals)) = super::admit_snapshot_capture(
+    if let Err((reason, signals)) = admit_flash_next_snapshot_capture(
         entry_bytes.saturating_add(control_cpu_reserve),
         || ctx.memory_signals(),
         |deficit| cache.evict_for(deficit),

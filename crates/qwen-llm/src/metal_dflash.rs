@@ -351,20 +351,19 @@ pub fn check_prompt_lookup_n8_layout(
                 arch: arch.kind,
             });
         }
-        if let Some([gate, up, down]) = block.routed {
-            if !moe_routed_gate_up_decode_supported(gate, up)
-                || !moe_routed_down_decode_supported(down)
-            {
-                let dtype = if !moe_routed_gate_up_decode_supported(gate, up) {
-                    gate
-                } else {
-                    down
-                };
-                return Err(PromptLookupUnsupported::OperationUnsupported {
-                    operation: "routed expert",
-                    dtype,
-                });
-            }
+        if let Some([gate, up, down]) = block.routed
+            && (!moe_routed_gate_up_decode_supported(gate, up)
+                || !moe_routed_down_decode_supported(down))
+        {
+            let dtype = if !moe_routed_gate_up_decode_supported(gate, up) {
+                gate
+            } else {
+                down
+            };
+            return Err(PromptLookupUnsupported::OperationUnsupported {
+                operation: "routed expert",
+                dtype,
+            });
         }
     }
     Ok(())

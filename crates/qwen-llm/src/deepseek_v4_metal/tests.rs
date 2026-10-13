@@ -14461,47 +14461,65 @@ fn stable_top512_scales_to_the_full_64k_csa_history() {
     );
 }
 
-#[test]
-fn packed_top512_scales_to_the_full_64k_csa_history() {
-    let Some(ctx) = metal_context() else {
-        return;
-    };
+/// Full-history top-512 selection inputs. Even queries score rows in
+/// ascending order and odd queries in descending order, so the selected IDs
+/// are known exactly.
+struct PackedTop512 {
+    scores: MetalTensor,
+    visible_counts: MetalTensor,
+    mask: MetalTensor,
+    cache_order: MetalTensor,
+    counts: MetalTensor,
+    status: MetalTensor,
+}
+
+/// GPU milliseconds, then the mask, IDs, counts and status outputs.
+type PackedTop512Run = (f64, Vec<i32>, Vec<i32>, Vec<i32>, Vec<i32>);
+
+impl PackedTop512 {
     const CAPACITY: usize = 16_384;
     const TOP_K: usize = 512;
     const QUERIES: usize = 128;
-    let mut score_values = Vec::with_capacity(CAPACITY * QUERIES);
-    for query in 0..QUERIES {
-        score_values.extend((0..CAPACITY).map(|row| {
-            if query.is_multiple_of(2) {
-                row as f32
-            } else {
-                -(row as f32)
-            }
-        }));
+
+    fn new(ctx: &MetalContext) -> Self {
+        let (capacity, top_k, queries) = (Self::CAPACITY, Self::TOP_K, Self::QUERIES);
+        let mut score_values = Vec::with_capacity(capacity * queries);
+        for query in 0..queries {
+            score_values.extend((0..capacity).map(|row| {
+                if query.is_multiple_of(2) {
+                    row as f32
+                } else {
+                    -(row as f32)
+                }
+            }));
+        }
+        Self {
+            scores: offset_f32(ctx, &score_values, vec![capacity as u64, queries as u64]),
+            visible_counts: offset_i32(ctx, &vec![capacity as i32; queries], vec![queries as u64]),
+            mask: MetalTensor::zeros_i32(ctx, vec![capacity as u64, queries as u64]).unwrap(),
+            cache_order: MetalTensor::zeros_i32(ctx, vec![top_k as u64, queries as u64]).unwrap(),
+            counts: MetalTensor::zeros_i32(ctx, vec![queries as u64]).unwrap(),
+            status: MetalTensor::zeros_i32(ctx, vec![queries as u64]).unwrap(),
+        }
     }
-    let scores = offset_f32(&ctx, &score_values, vec![CAPACITY as u64, QUERIES as u64]);
-    let visible_counts = offset_i32(&ctx, &vec![CAPACITY as i32; QUERIES], vec![QUERIES as u64]);
-    let mask = MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64, QUERIES as u64]).unwrap();
-    let cache_order = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, QUERIES as u64]).unwrap();
-    let counts = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
-    let status = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
-    let run = |radix4| {
+
+    fn run(&self, ctx: &MetalContext, radix4: bool) -> PackedTop512Run {
         let command = ctx.queue.commandBuffer().unwrap();
         let encoder = KernelEncoder::begin(&command);
         encode_select_top_k_f32_with_policy(
-            &ctx,
+            ctx,
             &encoder,
-            &scores,
-            &visible_counts,
-            &mask,
+            &self.scores,
+            &self.visible_counts,
+            &self.mask,
             None,
-            &cache_order,
-            &counts,
-            &status,
-            CAPACITY,
-            CAPACITY,
-            TOP_K,
-            QUERIES,
+            &self.cache_order,
+            &self.counts,
+            &self.status,
+            Self::CAPACITY,
+            Self::CAPACITY,
+            Self::TOP_K,
+            Self::QUERIES,
             DeepSeekV4SelectorDispatchPolicy::Production,
             radix4,
         )
@@ -14512,17 +14530,28 @@ fn packed_top512_scales_to_the_full_64k_csa_history() {
         assert!(command.error().is_none());
         (
             (command.GPUEndTime() - command.GPUStartTime()) * 1e3,
-            read_i32(&mask),
-            read_i32(&cache_order),
-            read_i32(&counts),
-            read_i32(&status),
+            read_i32(&self.mask),
+            read_i32(&self.cache_order),
+            read_i32(&self.counts),
+            read_i32(&self.status),
         )
+    }
+}
+
+#[test]
+fn packed_top512_scales_to_the_full_64k_csa_history() {
+    let Some(ctx) = metal_context() else {
+        return;
     };
-    run(false);
-    run(true);
-    let bitwise_before = run(false);
-    let radix4 = run(true);
-    let bitwise_after = run(false);
+    const TOP_K: usize = PackedTop512::TOP_K;
+    const QUERIES: usize = PackedTop512::QUERIES;
+    const CAPACITY: usize = PackedTop512::CAPACITY;
+    let top512 = PackedTop512::new(&ctx);
+    top512.run(&ctx, false);
+    top512.run(&ctx, true);
+    let bitwise_before = top512.run(&ctx, false);
+    let radix4 = top512.run(&ctx, true);
+    let bitwise_after = top512.run(&ctx, false);
     for (label, candidate, baseline) in [
         ("mask before", &radix4.1, &bitwise_before.1),
         ("IDs before", &radix4.2, &bitwise_before.2),
@@ -14546,15 +14575,47 @@ fn packed_top512_scales_to_the_full_64k_csa_history() {
         let expected = if query.is_multiple_of(2) { &high } else { &low };
         assert_eq!(&ids[query * TOP_K..(query + 1) * TOP_K], expected);
     }
-    let bitwise_midpoint = (bitwise_before.0 + bitwise_after.0) * 0.5;
-    assert!(
-        radix4.0 <= bitwise_midpoint * 1.1,
-        "packed radix4 regressed from {bitwise_midpoint:.3} to {:.3} ms",
-        radix4.0
-    );
     eprintln!(
         "deepseek_v4 packed_full_64k_top512 bitwise_before_gpu_ms={:.3} radix4_gpu_ms={:.3} bitwise_after_gpu_ms={:.3}",
         bitwise_before.0, radix4.0, bitwise_after.0,
+    );
+}
+
+#[test]
+#[ignore = "GPU timing profile: packed radix4 versus bitwise full-history top-512; run on an otherwise idle GPU"]
+fn profile_packed_top512_radix4_against_bitwise() {
+    let ctx = MetalContext::new().expect("Metal context");
+    let top512 = PackedTop512::new(&ctx);
+    top512.run(&ctx, false);
+    top512.run(&ctx, true);
+    let (mut bitwise, mut radix4) = (Vec::new(), Vec::new());
+    for pair in 0..8 {
+        // Alternate which arm runs first so drift affects both arms alike.
+        let order = if pair % 2 == 0 {
+            [false, true]
+        } else {
+            [true, false]
+        };
+        for use_radix4 in order {
+            let gpu_ms = top512.run(&ctx, use_radix4).0;
+            if use_radix4 {
+                radix4.push(gpu_ms);
+            } else {
+                bitwise.push(gpu_ms);
+            }
+        }
+    }
+    let median = |samples: &mut Vec<f64>| {
+        samples.sort_by(f64::total_cmp);
+        samples[samples.len() / 2]
+    };
+    let (bitwise_ms, radix4_ms) = (median(&mut bitwise), median(&mut radix4));
+    eprintln!(
+        "deepseek_v4 packed_full_64k_top512 profile pairs=8 bitwise_median_gpu_ms={bitwise_ms:.3} radix4_median_gpu_ms={radix4_ms:.3}"
+    );
+    assert!(
+        radix4_ms <= bitwise_ms * 1.1,
+        "packed radix4 median {radix4_ms:.3} ms exceeds the bitwise median {bitwise_ms:.3} ms by more than 10%"
     );
 }
 

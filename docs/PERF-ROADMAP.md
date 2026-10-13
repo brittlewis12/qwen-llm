@@ -12,12 +12,25 @@ confirm a concrete engine hypothesis.
 For append-only checkpoint history and exact current handoff state, see
 `docs/PERF-LOG.md`.
 
-## Current Leverage - 2026-10-12
+## Current Leverage - 2026-10-13
 
 Reoriented through `42b3cdad` and the reviewed default-checkpoint promotion,
 retaining the requested family/phase
 priority: GLM prefill and long-context decode first, then Flash-Next and Qwen.
 This section supersedes stale next-step claims in the dated maps below.
+
+**ReplaySSM investigated on both cost and fidelity:** user-directed exploration
+implemented FP32 replay and physical F16-read/FP32-anchor KDA, not just a paper
+review. Separate precision protects the authoritative recurrence and lowers
+output RMS 5.758x versus shared F16 in a bounded GPU slow-decay fixture; ordinary
+FP32 still has lower output error. Three 64K CPU streams show the dependence on
+decay/update regime. No model-quality improvement is claimed.
+Flush-inclusive batch-one GPU timing gives no convincing separate-precision win;
+it retains 238.07 MiB versus incumbent matrices' 136 MiB. Keep production FP32.
+Complete GPU prototype at `a84d1c57`, removed from active builds; portable CPU
+study/eight tests and [raw evidence](bench/2026-10-12-glm-replayssm/README.md) remain.
+Speculative verification may benefit from avoiding per-draft state snapshots,
+but needs an actual copy/rollback cost before becoming the next implementation.
 
 **Completed, not the next queue:** 32-token expert gate/up tiles; live-budget
 selection of GLM serving workspaces up to 2048 rows; general native quant and

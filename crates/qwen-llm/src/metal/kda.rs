@@ -8,9 +8,6 @@
 use super::checks::{check_alignment, check_disjoint, check_tensor, require_serial, to_u32};
 use super::*;
 
-#[cfg(test)]
-pub(crate) mod replay;
-
 pub const KDA_HEAD_DIM: usize = 128;
 const THREADS: usize = 128;
 /// q, k, decay, v, o rows plus three 4-entry reductions and beta.

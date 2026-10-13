@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-13 - ReplaySSM Precision Separation Works; Keep Production FP32
+
+- Implemented actual Metal KDA replay: FP32 checkpoint plus cached per-key decay,
+  key and correction, followed by physical F16-read/FP32-anchor and shared-F16
+  variants. L8 flushes recompute delta corrections from raw inputs, excluding
+  cached LP corrections. Production state, snapshots and dispatch stay unchanged.
+- FP32 L1/L8 outputs, conv and reconstructed states match incumbent bits across
+  residues/flushes. Eleven KDA tests pass under leased Metal validation, including
+  the independent CPU contract and poisoned-LP-correction flush isolation.
+- Three synthetic 64K CPU streams against persistent F64: separation substantially
+  reduces slow-decay F16 feedback, modestly helps ordinary forgetting, and ties
+  under strong rotating decay. All 24 configurations are finite. Eight portable
+  Python tests pass. This is F16 RTN, not a paper FP8/NVFP4 replication or model KL.
+- Physical Metal 1024-step slow fixture: output RMS shared F16 3.11855e-4,
+  separate 5.41567e-5 (5.758x lower), ordinary FP32 1.81584e-6. Separate anchor
+  matches FP32 bits after completed windows. All errors finite; synthetic
+  lower_bound=-0.001 is explicitly distinct from the release -5.
+- Release-bound synthetic batch-one leaf, 34 distinct 64-head states, complete
+  windows: GPU B/A FP32 replay 1.1878, separate 1.0366, shared 1.1776. Separate
+  pairs disagree; no convincing latency win. Matrices+records use 136/161.5/
+  238.0664/102.0664 MiB for incumbent/replay/separate/shared. These are logical
+  bytes and leaf timings, not model throughput, RSS or measured DRAM traffic.
+- Keep ordinary FP32: separate is less accurate at readout, larger, and has no
+  demonstrated speed advantage over it. Shared saves roughly 25% recurrent
+  storage but pays speed/precision costs. Archive GPU code at `a84d1c57`, remove
+  it from active builds, retain CPU study and evidence. Speculative rollback is
+  a separate hypothesis requiring a concrete copy cost, not a repeat of this one.
+  Evidence: `docs/bench/2026-10-12-glm-replayssm/`.
+
 ## 2026-10-12 - Document Checkpoints Promoted After Default Validation
 
 - Experiment archived at `42b3cdad`; production now enables the existing-chunk

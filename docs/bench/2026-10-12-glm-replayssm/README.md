@@ -139,8 +139,26 @@ Separate precision has no demonstrated latency advantage here and retains about
 102 MiB more state/records across 34 blocks. No runtime/snapshot integration or
 model-quality claim is justified by these results.
 
-Archive the complete GPU prototype in Git and remove it from active builds;
-retain the small portable CPU study, its eight tests and all evidence. A future
+The complete GPU prototype is archived at `a84d1c57` (initial FP32 checkpoint
+`fcf8891b`) and removed from active builds. The small portable CPU study, its eight
+tests and all evidence remain. A future
 speculative-verification experiment would need a concrete per-draft state-copy
 cost and rollback requirement. That is a different hypothesis, not a reason to
 keep sweeping this batch-one kernel or rerunning until a timing looks favorable.
+
+## Reproduction
+
+Current portable numerical study, with a new output path:
+
+```sh
+uv run scripts/reference/glm53/replay_precision.py --out /tmp/replay-precision-new.jsonl
+uv run --with 'numpy>=2,<3' --no-project scripts/reference/glm53/test_replay_precision.py
+```
+
+GPU prototypes and tests can be reproduced from `a84d1c57` in a separate worktree.
+The ignored leaf and precision tests acquire their own production Metal lease;
+ordinary GPU unit tests use `scripts/bench/with-metal-lease`. Do not wrap a test
+that acquires its own lease in a second one. Run correctness with Metal validation
+and timings without it; all timing includes both L8 flushes. Raw reports retain
+source/binary/device identities where emitted, and no archived result is replaced
+by a later run.

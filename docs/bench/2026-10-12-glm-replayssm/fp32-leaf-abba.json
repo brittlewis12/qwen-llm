@@ -1,0 +1,707 @@
+{
+  "experiment": "bounded_fp32_kda_replay_leaf_v1",
+  "qualification_gate": false,
+  "precision": "FP32 checkpoint/records/operands; bitwise agreement is an owner-executed hypothesis",
+  "heads": 64,
+  "head_dim": 128,
+  "states": 34,
+  "steps_per_sample": 16,
+  "window": 8,
+  "schedule": "warm A/B then ABBA, reset from identical initial buffers before each sample",
+  "chain": "q of block n comes from actual output of block n-1; distinct recurrent/conv state per block",
+  "checkpoint_bytes_per_arm": 142606336,
+  "checkpoint_mib_per_arm": 136,
+  "replay_added_record_bytes": 26738688,
+  "conv_bytes_per_arm": 10027008,
+  "capture_bytes": 17825792,
+  "test_resident_checkpoint_copies": 2,
+  "memory_note": "FP32 replay adds records; it does not reduce the 136 MiB checkpoint for 34 blocks",
+  "ordinary_state_read_write_bytes_per_token": 285212672,
+  "replay_recurrent_logical_traffic_by_residue": [
+    {
+      "residue": 0,
+      "flush": false,
+      "checkpoint_read_bytes": 142606336,
+      "checkpoint_write_bytes": 0,
+      "record_read_bytes": 0,
+      "record_write_bytes": 3342336
+    },
+    {
+      "residue": 1,
+      "flush": false,
+      "checkpoint_read_bytes": 142606336,
+      "checkpoint_write_bytes": 0,
+      "record_read_bytes": 3342336,
+      "record_write_bytes": 3342336
+    },
+    {
+      "residue": 2,
+      "flush": false,
+      "checkpoint_read_bytes": 142606336,
+      "checkpoint_write_bytes": 0,
+      "record_read_bytes": 6684672,
+      "record_write_bytes": 3342336
+    },
+    {
+      "residue": 3,
+      "flush": false,
+      "checkpoint_read_bytes": 142606336,
+      "checkpoint_write_bytes": 0,
+      "record_read_bytes": 10027008,
+      "record_write_bytes": 3342336
+    },
+    {
+      "residue": 4,
+      "flush": false,
+      "checkpoint_read_bytes": 142606336,
+      "checkpoint_write_bytes": 0,
+      "record_read_bytes": 13369344,
+      "record_write_bytes": 3342336
+    },
+    {
+      "residue": 5,
+      "flush": false,
+      "checkpoint_read_bytes": 142606336,
+      "checkpoint_write_bytes": 0,
+      "record_read_bytes": 16711680,
+      "record_write_bytes": 3342336
+    },
+    {
+      "residue": 6,
+      "flush": false,
+      "checkpoint_read_bytes": 142606336,
+      "checkpoint_write_bytes": 0,
+      "record_read_bytes": 20054016,
+      "record_write_bytes": 3342336
+    },
+    {
+      "residue": 7,
+      "flush": true,
+      "checkpoint_read_bytes": 142606336,
+      "checkpoint_write_bytes": 142606336,
+      "record_read_bytes": 23396352,
+      "record_write_bytes": 0
+    }
+  ],
+  "traffic_note": "logical recurrent bytes, excluding conv/weights/activations/output and hardware caches",
+  "threadgroup_bytes_decode": 14912,
+  "threadgroup_bytes_materialize": 12288,
+  "shader_sha256": "7b21d16075045cc84772c810480ea7793566c0c476a09822dd1b0474985d7e23",
+  "ordinary_shader_sha256": "572e8881fba62a90a5abc1ee7b9f8a43599804b58dc43650a8528911b76f8b65",
+  "host_sha256": "081834cc8e1d7760a2157cff901973340fe2747e3be5a9e09691fd0220336aaf",
+  "timing_source_sha256": "b7f03b907c5d1291cf7e7069fd7e10ff5c60a66958cea77872b76473bfb450c7",
+  "input_sha256_f32_le": "09c321c364c54be20ea9e2349b270dda83126cf790b6eca888517a0eb87fa750",
+  "initial_hashes": [
+    {
+      "checkpoint": "c466e1ac19ab1eb2f4686a75145745213b6f6429889b2cffe71e2fe9f6dc20e0",
+      "conv": "99f7a7e80fe6cc9cd5c67ce13f36c8a3d947291aa6b500f10cc942e7c23da576"
+    },
+    {
+      "checkpoint": "b81def8e34c3e8bc39ae6bd2dfd3b9a3084c8d2c5adf6c6b612608e67363a277",
+      "conv": "fea0de7da84fbfaacddc3b056f17d0e7160849c173e35e71b100f63bb2f6de05"
+    },
+    {
+      "checkpoint": "9ab941f20eb7862257b8ea4c93c7719535799318a37614d693ce62a3fbf149d3",
+      "conv": "8d483da4706b50fc1de833317fd0b8339d932b5e43bad95b2a10f1b1e352488b"
+    },
+    {
+      "checkpoint": "2ef114aa1f0c7a036b3baafe6287b11b598b4361031a9bd3db7a3b9fcadf2368",
+      "conv": "896a6c393f19ad556096a063c0b0187a2fc29970d8862a0df5a474313c2cf734"
+    },
+    {
+      "checkpoint": "c210a31bfbec95e4a436d303b5331750d8240c3e04c463059283401da4e2e655",
+      "conv": "2455fb8eb1f8025e68aadff3b6906b8534e84c99248987130512ce23d17a1e7e"
+    },
+    {
+      "checkpoint": "7cae3a9be2670854c38bbfceb5d8e58d0a97dd232bbe9a727696ea549660bd62",
+      "conv": "b256dd68a3eb8686ce9df7fc21e39d3d0a0a341039810d31a773fb017339d358"
+    },
+    {
+      "checkpoint": "e8dc5fe31584aa6361fc75a09d8b42c21c74931ab2977e079cfcc93013940e92",
+      "conv": "dbc6637665c2464275a3db15b11fe1f851968a7ea69b576acc5ca9d4429c8ba1"
+    },
+    {
+      "checkpoint": "67ebb7f4729628d3e24b8f13469254bf5c5e385ccfcba69c79a7a2e66f539118",
+      "conv": "c403398608aef343bfff149a88e25c5e4cbdcfbb2c872a3c789a1ea02c2eefb8"
+    },
+    {
+      "checkpoint": "c401a87c376f1cdb9790665a41d7174508fa3ad372da2408b7a6b1a5e2a4f9d7",
+      "conv": "1dfc2d834136b8d3c81556c56d70bff3ab4e2b6578b9d277939d003320f4cd1d"
+    },
+    {
+      "checkpoint": "667a075525299ae8958cf23f0a3bca003ee524cb54169d3330afdb039f1ff91c",
+      "conv": "f53dc22c18374ff64a43f488738d817306337a0b87bc8ae1925e028a7ee203d6"
+    },
+    {
+      "checkpoint": "916f4c88f4d8bfefe6e16b8bc434358fa66ed1663e8e17890fc20bef9d2bcbf7",
+      "conv": "9b961f980d6a0b52ab1ef55af0f90febbf0b52ecc312b32c34973899d08ddd55"
+    },
+    {
+      "checkpoint": "d70d70366292bc91aa84869e04f05edd85679ec31c315ea35b3a6089d57e2320",
+      "conv": "dd7d0c0f0a9d2c1a24e446afd644d8c04e3d7c4b3ee875eca38161a69cf9230e"
+    },
+    {
+      "checkpoint": "2ccce47599cb8d892cdc05bd20f6d7f85558308474c2e7408f3303d1d6ae599c",
+      "conv": "d14e08723d7690f4c079ba018da07df8feb86e2f914c2e11d94f9ab03426e4e3"
+    },
+    {
+      "checkpoint": "67c773b2278dd686e9ce93817f72f80e426ae1d9be6c61f1cc39ed28abba0ca0",
+      "conv": "9805d1242fac71b4e7dc5faae667dddce3708370df7ef835087428c9b0dd1cf6"
+    },
+    {
+      "checkpoint": "5392e189117d1b16cbaad8ef97e8c5f4c4bedc61ea5bf68661e8a21e5171eff8",
+      "conv": "e250a5e43608cea7b7031bee2213fc7c59e96852fd10aed8909b18f4952d6c03"
+    },
+    {
+      "checkpoint": "92e08a2285460bc78b68417c2d7b4d654d46de81dca48991cd06a81891ebe25c",
+      "conv": "f33fc04de0d62fe19cc42542236cd1863be405319f579dda5e613fa3d3e8edb6"
+    },
+    {
+      "checkpoint": "3cad37493d443448479dd896e29f8404886949f2e195f899b25eb59daf395852",
+      "conv": "738466eca3644413f3fc60149f88803a0e3cd1053f40ed51357aafff54768829"
+    },
+    {
+      "checkpoint": "fa75463a43d54284bdbfadf3325e6075fc8efebaf6170a9119fd2ce415195220",
+      "conv": "06930b0caaa7a1154a90dff88edcb6ee7391d6e4e76dc7634a7e08db85387da2"
+    },
+    {
+      "checkpoint": "b87aab8377c2f636dafa002233401ad0bbece629f838761205521a22f99a1822",
+      "conv": "2ff3612e5c381ec77428a35ebbe9ddfe5648b8cb255fc9a97f8351a5e9738f4b"
+    },
+    {
+      "checkpoint": "c4329dbd9520064c70b359de06b9982d324fdbb036ccd5edcb996b0551916362",
+      "conv": "7fd3c1d2f94b3004a729023829fc1c00a0c4139214f3a0532e47f43ce560bfa6"
+    },
+    {
+      "checkpoint": "67517d5b9faf55d0ef550d6ff33af026ca0dde8a5514c6bed47ccc748fafec20",
+      "conv": "0ffc012b0ddb062ee76f6b663f451676d372a22b12075df78d18f40f9285fb81"
+    },
+    {
+      "checkpoint": "3d10613e631bd6721885af4c9716f038058407c5908a2e7df003556cb687995c",
+      "conv": "cda48b0ff2881744d4efccbd291af7462721f48b1a153929f92d0e3d73057bb3"
+    },
+    {
+      "checkpoint": "b77025aed074f39989aa6eb0384b2106c1307e33895b76b07f52abeff07a2f3f",
+      "conv": "4297d42d39da3b89b32140315e81309e008086930d0b0dd5b2e3c28a673b37fd"
+    },
+    {
+      "checkpoint": "0d317e4bb6d0e98ab8aae3ceee86c4e4053043a2bb8d0022f9ac9a13080d9ecc",
+      "conv": "4971458cc97df526772dca5610cbe9fe4b7b9faabd887270cf5fe92e4e5fe782"
+    },
+    {
+      "checkpoint": "927ef762ce991e0aede6f3ab06979bd14397087fa0e782cc4dcef15403b4df09",
+      "conv": "9f7e80431447f78ae6908846dbe63f96156077fd3b2c8431c93917baa22105e9"
+    },
+    {
+      "checkpoint": "f05588b3b7638144e16bd41198611c6cddad5a49af061ea9dc56b33ee3a01d3e",
+      "conv": "4bfbc576943ccadb1b1aca03c8b5da0bb76e958d99bf2c04d1b41d5a0dd5150e"
+    },
+    {
+      "checkpoint": "bc5a5a5c4b605eac26020b6ebf5dc6e8f7f770a098ccef852ac5cca1efcf68be",
+      "conv": "65792cbd619e5a66544a9380c399549f4d87030e20db2e284fe03565a692dbea"
+    },
+    {
+      "checkpoint": "dce30b1c73590791dd9fcb8927bf1c298de55963dcbf810869d80547b985ebaa",
+      "conv": "b61957f9f363f1a283bfdaa586ab7233f1e1f51dfa636366c8e56d52049bd85d"
+    },
+    {
+      "checkpoint": "4ca30ad97f7db772b7c1134a37d4d3fcf84ef0d8c9019a97d8754459a85b8c0f",
+      "conv": "541dae8843f2a2b4ec747dd47831fbb644e08c10940abe40a89ccac77544db7f"
+    },
+    {
+      "checkpoint": "36279ab53bc3172a72f1ed44c07af03083c53cc27d397ce80457e340e2f93f6f",
+      "conv": "d24c606592073ed9d6608da991b49f0c1e99c5cbe3942b13686376d6a22d1677"
+    },
+    {
+      "checkpoint": "0225797e7d29070b550a719f541fcce9f6515268eb38baf83ca0e21568bb3162",
+      "conv": "5983cb45798dc3719555d1f7dfa820a70e35bc80c56551ba61c0f870fd2e00bf"
+    },
+    {
+      "checkpoint": "33edff86cd20d02f0bdf29dc925e8efc822bb72f744a217a87e740b94f03a43b",
+      "conv": "dc9ffe9a7733c64558c0161ef312180ee53b7fdf73b7c015e879a24067a6ad22"
+    },
+    {
+      "checkpoint": "3a9b2a8f918d4abf2e99e6f087a5c52cd0758c7547426045a2aa7b499d928146",
+      "conv": "c0487ca471ff6b11ceaa6ba8037d55af8633341d46a384f7dc183f03ce6b3f08"
+    },
+    {
+      "checkpoint": "387bee21c6825f32c0fddc62a219de8ae16231510695a40b1d4815f1ecb4a06b",
+      "conv": "877f8b95c0a81b8fd614fe965ab674d7539f0235bc039775c9700c7c28bc8273"
+    }
+  ],
+  "device": {
+    "version": "qwen_device_info_v3",
+    "name": "Apple M4 Max",
+    "architecture": "applegpu_g16s",
+    "registry_id": 4294968444,
+    "gpu_families": {
+      "apple7": true,
+      "apple8": true,
+      "apple9": true,
+      "apple10": false,
+      "metal3": true,
+      "metal4": false
+    },
+    "max_threadgroup_memory_bytes": 32768,
+    "max_buffer_length_bytes": 77309411328,
+    "recommended_max_working_set_bytes": 126701535232,
+    "unified_memory": true,
+    "host_page_size_bytes": 16384,
+    "physical_memory_bytes": 137438953472,
+    "os_version": "15.7.9",
+    "product_metallib_deployment_target": "14.0",
+    "research_metallib_deployment_target": "14.0"
+  },
+  "revision": "4d207ec2f703655a81cf83b004771dbb00d0058c",
+  "hash_observations": {
+    "output_hashes_match_A1": true,
+    "state_hashes_match_A1": true,
+    "conv_hashes_match_A1": true
+  },
+  "samples": [
+    {
+      "label": "warm_A",
+      "warmup": true,
+      "arm": "ordinary",
+      "timed_commits": 16,
+      "timed_waits": 16,
+      "reset_commits": 1,
+      "reset_waits": 1,
+      "dispatches": 544,
+      "gpu_ms_by_residue": [
+        2.912124968133867,
+        2.817499975208193,
+        1.5765000134706497,
+        1.3278750120662153,
+        1.2847500038333237,
+        1.2237916816957295,
+        1.2411249917931855,
+        1.2092499528080225,
+        1.2229999992996454,
+        1.269791682716459,
+        1.2381249689497054,
+        1.2745000422000885,
+        1.237125019542873,
+        1.2459999998100102,
+        1.2621249770745635,
+        1.2337083462625742
+      ],
+      "wall_ms_by_residue": [
+        3.358625,
+        3.140458,
+        2.054333,
+        1.566167,
+        1.5013750000000001,
+        1.421666,
+        1.479167,
+        1.4763330000000001,
+        1.4725000000000001,
+        1.540958,
+        1.505167,
+        1.5388330000000001,
+        1.531375,
+        1.5042499999999999,
+        1.5285419999999998,
+        1.47725
+      ],
+      "residues": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "flush_steps": [
+        7,
+        15
+      ],
+      "wall_total_ms": 28.155333000000002,
+      "gpu_total_ms": 23.577291634865105,
+      "output_sha256_f32_le": "93864ea0866ca8158f457f855a3f3bc223993dc7cc998513423fc2c6eee5ba31",
+      "output_nonfinite": 0,
+      "final_state_sha256_f32_le": "996d391e15a42189c5732ff9ad1160b7fc3eb4d6c0c43a12948bb274642ebac3",
+      "final_conv_sha256_f32_le": "00ec2c1eb8f362c989d61dd03e748aba2f9d1501b01b518fb1159fc47f135e5a"
+    },
+    {
+      "label": "warm_B",
+      "warmup": true,
+      "arm": "replay_l8",
+      "timed_commits": 16,
+      "timed_waits": 16,
+      "reset_commits": 1,
+      "reset_waits": 1,
+      "dispatches": 544,
+      "gpu_ms_by_residue": [
+        2.8829166549257934,
+        3.0972500098869205,
+        2.161749987863004,
+        1.600458286702633,
+        1.683166658040136,
+        1.566499995533377,
+        1.587625010870397,
+        1.5530416858382523,
+        0.8579166606068611,
+        0.8559999987483025,
+        0.920041638892144,
+        0.9991666884161532,
+        1.0741250007413328,
+        1.143875007983297,
+        1.2258749920874834,
+        1.5675000031478703
+      ],
+      "wall_ms_by_residue": [
+        3.2052500000000004,
+        3.423083,
+        2.4689590000000003,
+        1.860125,
+        1.966583,
+        1.900334,
+        1.8901670000000002,
+        1.7758749999999999,
+        1.0495,
+        1.1127500000000001,
+        1.148333,
+        1.2530830000000002,
+        1.322708,
+        1.473042,
+        1.441292,
+        1.82325
+      ],
+      "residues": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "flush_steps": [
+        7,
+        15
+      ],
+      "wall_total_ms": 29.149250000000002,
+      "gpu_total_ms": 24.777208280283958,
+      "output_sha256_f32_le": "93864ea0866ca8158f457f855a3f3bc223993dc7cc998513423fc2c6eee5ba31",
+      "output_nonfinite": 0,
+      "final_state_sha256_f32_le": "996d391e15a42189c5732ff9ad1160b7fc3eb4d6c0c43a12948bb274642ebac3",
+      "final_conv_sha256_f32_le": "00ec2c1eb8f362c989d61dd03e748aba2f9d1501b01b518fb1159fc47f135e5a"
+    },
+    {
+      "label": "A1",
+      "warmup": false,
+      "arm": "ordinary",
+      "timed_commits": 16,
+      "timed_waits": 16,
+      "reset_commits": 1,
+      "reset_waits": 1,
+      "dispatches": 544,
+      "gpu_ms_by_residue": [
+        2.911541669163853,
+        2.913791686296463,
+        2.9285416821949184,
+        2.2936667082831264,
+        0.998999981675297,
+        0.996124988887459,
+        0.9889583452604711,
+        1.0059166816063225,
+        0.9919166332110763,
+        0.9728749864734709,
+        1.0103750391863286,
+        1.0130833252333105,
+        1.01125001674518,
+        1.0129582951776683,
+        0.9948333608917892,
+        0.9836250101216137
+      ],
+      "wall_ms_by_residue": [
+        3.276083,
+        3.228416,
+        3.255042,
+        2.555,
+        1.2143329999999999,
+        1.1802080000000001,
+        1.177541,
+        1.2212919999999998,
+        1.200625,
+        1.1895,
+        1.345167,
+        1.23675,
+        1.2147080000000001,
+        1.193583,
+        1.2025,
+        1.1969999999999998
+      ],
+      "residues": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "flush_steps": [
+        7,
+        15
+      ],
+      "wall_total_ms": 26.905834,
+      "gpu_total_ms": 23.028458410408348,
+      "output_sha256_f32_le": "93864ea0866ca8158f457f855a3f3bc223993dc7cc998513423fc2c6eee5ba31",
+      "output_nonfinite": 0,
+      "final_state_sha256_f32_le": "996d391e15a42189c5732ff9ad1160b7fc3eb4d6c0c43a12948bb274642ebac3",
+      "final_conv_sha256_f32_le": "00ec2c1eb8f362c989d61dd03e748aba2f9d1501b01b518fb1159fc47f135e5a"
+    },
+    {
+      "label": "B1",
+      "warmup": false,
+      "arm": "replay_l8",
+      "timed_commits": 16,
+      "timed_waits": 16,
+      "reset_commits": 1,
+      "reset_waits": 1,
+      "dispatches": 544,
+      "gpu_ms_by_residue": [
+        2.225250005722046,
+        2.768208330962807,
+        1.8985416390933096,
+        1.5995416906662285,
+        1.5707499696873128,
+        1.5660416684113443,
+        1.564500038512051,
+        1.5604583313688636,
+        0.8328750263899565,
+        0.8683749474585056,
+        0.9164583752863109,
+        1.0052500292658806,
+        1.0676250094547868,
+        1.1392500018700957,
+        1.2292916653677821,
+        1.5631249989382923
+      ],
+      "wall_ms_by_residue": [
+        2.513541,
+        3.0505419999999996,
+        2.2295409999999998,
+        1.878625,
+        1.792042,
+        1.787709,
+        1.8316249999999998,
+        1.818208,
+        1.080959,
+        1.163583,
+        1.1584169999999998,
+        1.300708,
+        1.419916,
+        1.3672090000000001,
+        1.495167,
+        1.819625
+      ],
+      "residues": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "flush_steps": [
+        7,
+        15
+      ],
+      "wall_total_ms": 27.74425,
+      "gpu_total_ms": 23.375541728455573,
+      "output_sha256_f32_le": "93864ea0866ca8158f457f855a3f3bc223993dc7cc998513423fc2c6eee5ba31",
+      "output_nonfinite": 0,
+      "final_state_sha256_f32_le": "996d391e15a42189c5732ff9ad1160b7fc3eb4d6c0c43a12948bb274642ebac3",
+      "final_conv_sha256_f32_le": "00ec2c1eb8f362c989d61dd03e748aba2f9d1501b01b518fb1159fc47f135e5a"
+    },
+    {
+      "label": "B2",
+      "warmup": false,
+      "arm": "replay_l8",
+      "timed_commits": 16,
+      "timed_waits": 16,
+      "reset_commits": 1,
+      "reset_waits": 1,
+      "dispatches": 544,
+      "gpu_ms_by_residue": [
+        2.9074999620206654,
+        3.011374967172742,
+        3.3926249598152936,
+        2.8592500020749867,
+        1.0218750103376806,
+        1.0962082887999713,
+        1.1878333170898259,
+        1.5102916513569653,
+        0.815916690044105,
+        0.8268750389106572,
+        0.9080000454559922,
+        0.9643750381655991,
+        1.0594583582133055,
+        1.1107500176876783,
+        1.1890416499227285,
+        1.5509999939240515
+      ],
+      "wall_ms_by_residue": [
+        3.265959,
+        3.2781659999999997,
+        3.650625,
+        3.166292,
+        1.269166,
+        1.3306660000000001,
+        1.415917,
+        1.751916,
+        1.047708,
+        1.058125,
+        1.147458,
+        1.198333,
+        1.285125,
+        1.325917,
+        1.4281249999999999,
+        1.800667
+      ],
+      "residues": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "flush_steps": [
+        7,
+        15
+      ],
+      "wall_total_ms": 29.439708,
+      "gpu_total_ms": 25.412374990992248,
+      "output_sha256_f32_le": "93864ea0866ca8158f457f855a3f3bc223993dc7cc998513423fc2c6eee5ba31",
+      "output_nonfinite": 0,
+      "final_state_sha256_f32_le": "996d391e15a42189c5732ff9ad1160b7fc3eb4d6c0c43a12948bb274642ebac3",
+      "final_conv_sha256_f32_le": "00ec2c1eb8f362c989d61dd03e748aba2f9d1501b01b518fb1159fc47f135e5a"
+    },
+    {
+      "label": "A2",
+      "warmup": false,
+      "arm": "ordinary",
+      "timed_commits": 16,
+      "timed_waits": 16,
+      "reset_commits": 1,
+      "reset_waits": 1,
+      "dispatches": 544,
+      "gpu_ms_by_residue": [
+        2.3226666962727904,
+        2.3183749872259796,
+        2.32512503862381,
+        2.3190416395664215,
+        1.9265000009909272,
+        1.144500041846186,
+        1.1443750117905438,
+        1.133666664827615,
+        1.0649999603629112,
+        1.0659166728146374,
+        1.069999998435378,
+        0.9710833546705544,
+        0.9343749843537807,
+        0.9388750186190009,
+        0.9432083461433649,
+        0.937500037252903
+      ],
+      "wall_ms_by_residue": [
+        2.535,
+        2.5165420000000003,
+        2.511958,
+        2.5031250000000003,
+        2.0917499999999998,
+        1.300208,
+        1.301959,
+        1.2899999999999998,
+        1.214583,
+        1.2225840000000001,
+        1.228292,
+        1.1340000000000001,
+        1.094833,
+        1.09825,
+        1.098708,
+        1.096584
+      ],
+      "residues": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "flush_steps": [
+        7,
+        15
+      ],
+      "wall_total_ms": 25.249834,
+      "gpu_total_ms": 22.560208453796804,
+      "output_sha256_f32_le": "93864ea0866ca8158f457f855a3f3bc223993dc7cc998513423fc2c6eee5ba31",
+      "output_nonfinite": 0,
+      "final_state_sha256_f32_le": "996d391e15a42189c5732ff9ad1160b7fc3eb4d6c0c43a12948bb274642ebac3",
+      "final_conv_sha256_f32_le": "00ec2c1eb8f362c989d61dd03e748aba2f9d1501b01b518fb1159fc47f135e5a"
+    }
+  ]
+}

@@ -84,6 +84,13 @@ The reviewed production change enables checkpoints without a test override
 - Primitive observer/state-oracle validation passed in 139 s, covering unchanged
   ordinary execution and restored state. No broader task-quality claim follows.
 
+Integrated with current main's portable-fixture work at `405c16ce`. The expanded
+full structural check compiles every workspace test target and passes for tree
+`9ecc96825cb31e1fe3e8025d68150dea150e5521`; its first build attempt timed out,
+and the completed retry passes. After that merge, the CLI suite passes 805 tests
+with 47 ignored (fixture work reclassified two tests); both client-script suites
+pass all 17 tests. The production release CLI is rebuilt from the merged source.
+
 ## Telemetry and scope
 
 The execution schedule remains `snapshot_schedule=fast_shared_split_v1` with its

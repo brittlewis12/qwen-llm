@@ -32,6 +32,10 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   distinguish the initial private timing packet from default validation.
   The branch lever is complete; no further arbitrary experiment or quality
   rerun is queued. Earlier answer errors and parked kernels remain recorded.
+- Integrated current main's portable-fixture changes at `405c16ce`; expanded
+  full contracts pass after a build-timeout retry. Merged CLI: 805 passed,
+  47 ignored (two fixture tests reclassified); client scripts: 17 passed.
+  Production release CLI rebuilt; no pushes or environment interventions.
 
 ## 2026-10-12 - Maya 41K Repository Context And Live Follow-Up Complete
 

@@ -189,7 +189,13 @@ fn replay_f32_source_and_host_handshake() {
         SOURCE
             .contains("h *= old_d;\n            h = fma(old_k, float4(hist_u[j * D + value]), h);")
     );
-    assert!(!SOURCE.contains("dot(h, old_k)"));
+    assert!(
+        !SOURCE
+            .split("// Physical-F16 read experiments")
+            .next()
+            .unwrap()
+            .contains("dot(h, old_k)")
+    );
     for window in [0, 2, 7, 9, usize::MAX] {
         assert!(geometry(REPLAY_KERNEL, 1, ReplayPosition { window, residue: 0 }).is_err());
     }
@@ -599,3 +605,5 @@ fn replay_f32_rejects_malformed_bindings_before_dispatch() {
 }
 
 mod timing;
+
+mod low_precision;

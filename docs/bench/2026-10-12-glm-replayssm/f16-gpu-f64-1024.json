@@ -1,0 +1,162 @@
+{
+  "experiment": "physical_f16_persistent_f64_slow_stream",
+  "steps": 1024,
+  "heads": 2,
+  "window": 8,
+  "lower_bound": -0.001,
+  "commands": 32,
+  "steps_per_command": 32,
+  "quality_gate": false,
+  "scope": "Synthetic slow-decay precision experiment with lower_bound=-0.001 versus GLM release -5; not a natural GLM trace",
+  "release_lower_bound": -5.0,
+  "fixture_lower_bound": -1.25,
+  "error_metrics": "RMS and max_abs cover finite pairs only (null with none); total and nonfinite counts are reported separately",
+  "device": {
+    "version": "qwen_device_info_v3",
+    "name": "Apple M4 Max",
+    "architecture": "applegpu_g16s",
+    "registry_id": 4294968444,
+    "gpu_families": {
+      "apple7": true,
+      "apple8": true,
+      "apple9": true,
+      "apple10": false,
+      "metal3": true,
+      "metal4": false
+    },
+    "max_threadgroup_memory_bytes": 32768,
+    "max_buffer_length_bytes": 77309411328,
+    "recommended_max_working_set_bytes": 126701535232,
+    "unified_memory": true,
+    "host_page_size_bytes": 16384,
+    "physical_memory_bytes": 137438953472,
+    "os_version": "15.7.9",
+    "product_metallib_deployment_target": "14.0",
+    "research_metallib_deployment_target": "14.0"
+  },
+  "binary_sha256": "40a834b011cf2de202afb3dfb20c852d371750bd1293cd7d4c052f3e56c522ad",
+  "shader_sha256": "a6e8099ea8a5011bfe68feee8b680ceae2c004b8aca71c733e15d9c7fc618834",
+  "ordinary_shader_sha256": "572e8881fba62a90a5abc1ee7b9f8a43599804b58dc43650a8528911b76f8b65",
+  "host_sha256": "c4256d49e1c6b80e8ef4788650039ee8f67838c38aaafc9127fb46fd82167048",
+  "fp32_host_sha256": "9d9098b5be8a66a7489d114ead70f50153be51d100761ae286d50823859c9f9a",
+  "ordinary_host_sha256": "ac02ca1632d61482b06a8c7809146133a1b3a5128adbde9ff2bd378ed9449a03",
+  "base_fixture_sha256": "9dd6ffd4acbc9ec3804e9f4c0d075096d5af995e95f1763d02c162e6786922c7",
+  "fixture_sha256": "5497585a3bb22b76ec22176ed4210f85a1c42bbcf3327e311f7bc7534b58b4ab",
+  "precision_source_sha256": "ee388dc69f47bb494afecd6a59abb10241ecc2b9efad6321025ece8394de2dfc",
+  "oracle": "persistent f64 conv/state and recurrence, F32 inputs widened once per step, no F32 feedback; independent scalar reductions",
+  "anchor_sampling": "authoritative anchors after each 32-step batch (four complete windows)",
+  "logical_state_sampling": "all residues; LP materialization at residue zero is rounded physical read, output still came from F32 work before rounding",
+  "logical_state_error": [
+    {
+      "total": 33554432,
+      "finite_pairs": 33554432,
+      "nonfinite": 0,
+      "rms": 3.575145491107402e-7,
+      "max_abs": 5.455898899886513e-6
+    },
+    {
+      "total": 33554432,
+      "finite_pairs": 33554432,
+      "nonfinite": 0,
+      "rms": 3.575145491107402e-7,
+      "max_abs": 5.455898899886513e-6
+    },
+    {
+      "total": 33554432,
+      "finite_pairs": 33554432,
+      "nonfinite": 0,
+      "rms": 0.000013052269384667008,
+      "max_abs": 0.00024674722487560974
+    },
+    {
+      "total": 33554432,
+      "finite_pairs": 33554432,
+      "nonfinite": 0,
+      "rms": 0.00007670140846555883,
+      "max_abs": 0.0022749815836752285
+    }
+  ],
+  "output_sampling": "every actual recurrent output at all residues including flush",
+  "arms": [
+    "ordinary_f32",
+    "replay_f32",
+    "separate_f32_anchor_f16_read",
+    "shared_f16_anchor_read"
+  ],
+  "state_error": [
+    {
+      "total": 1048576,
+      "finite_pairs": 1048576,
+      "nonfinite": 0,
+      "rms": 3.638596177219574e-7,
+      "max_abs": 5.4496732324604835e-6
+    },
+    {
+      "total": 1048576,
+      "finite_pairs": 1048576,
+      "nonfinite": 0,
+      "rms": 3.638596177219574e-7,
+      "max_abs": 5.4496732324604835e-6
+    },
+    {
+      "total": 1048576,
+      "finite_pairs": 1048576,
+      "nonfinite": 0,
+      "rms": 3.638596177219574e-7,
+      "max_abs": 5.4496732324604835e-6
+    },
+    {
+      "total": 1048576,
+      "finite_pairs": 1048576,
+      "nonfinite": 0,
+      "rms": 0.0000782022635251395,
+      "max_abs": 0.0021573877246022777
+    }
+  ],
+  "output_error": [
+    {
+      "total": 262144,
+      "finite_pairs": 262144,
+      "nonfinite": 0,
+      "rms": 1.8158350506907862e-6,
+      "max_abs": 0.000016726624853191652
+    },
+    {
+      "total": 262144,
+      "finite_pairs": 262144,
+      "nonfinite": 0,
+      "rms": 1.8158350506907862e-6,
+      "max_abs": 0.000016726624853191652
+    },
+    {
+      "total": 262144,
+      "finite_pairs": 262144,
+      "nonfinite": 0,
+      "rms": 0.00005415673274318614,
+      "max_abs": 0.001118286992607298
+    },
+    {
+      "total": 262144,
+      "finite_pairs": 262144,
+      "nonfinite": 0,
+      "rms": 0.0003118547243227726,
+      "max_abs": 0.003973783372977269
+    }
+  ],
+  "physical_read_error": [
+    {
+      "total": 1048576,
+      "finite_pairs": 1048576,
+      "nonfinite": 0,
+      "rms": 0.000013257982957781179,
+      "max_abs": 0.00024674722487560974
+    },
+    {
+      "total": 1048576,
+      "finite_pairs": 1048576,
+      "nonfinite": 0,
+      "rms": 0.0000782022635251395,
+      "max_abs": 0.0021573877246022777
+    }
+  ]
+}

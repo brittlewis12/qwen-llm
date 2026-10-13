@@ -335,3 +335,6 @@ pub(crate) fn encode_kda_replay_materialize_f32(
 
 #[cfg(test)]
 mod tests;
+
+mod lp;
+pub(crate) use lp::*;

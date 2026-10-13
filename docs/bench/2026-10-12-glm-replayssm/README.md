@@ -74,7 +74,73 @@ and F32 replay have identical recorded state/output errors; short metamorphic
 tests additionally verify anchor-bit independence from approximate read precision.
 
 The 256-step smoke packet is retained separately. No result is rescored as a
-model-quality pass. Next is one physical F16-read Metal leaf to measure conversion
-and raw-input flush costs rather than extrapolating CPU emulation into a speed
-claim. Actual-model capture is useful only if the measured precision/cost frontier
-leaves a concrete model-relevance question; production state stays F32 meanwhile.
+model-quality pass. These results motivated the physical F16-read Metal leaf
+below, measuring conversion and raw-input flush costs rather than extrapolating
+CPU emulation into a speed claim. Production state stays F32.
+
+## Physical F16 Results - 2026-10-13
+
+The second prototype uses real F16 read buffers, not just emulated rounding.
+Both low-precision policies cache F32 k/d/u plus raw post-convolution v and beta.
+At flush, cached approximate u is ignored and corrections are recomputed from
+the authoritative anchor. Shared F16 uses the same flush algorithm/cadence but
+starts from its F16 anchor. Separate precision independently writes the F32
+anchor and F16 read copy from the same F32 working state.
+
+Eleven KDA tests pass under leased Metal validation. Tests cover physical formats,
+alias restrictions, all residues, guards, multiple flushes and poisoned cached
+corrections. Injecting NaNs/large values into cached u before a flush leaves the
+separate authoritative anchor and flush output unchanged.
+
+`f16-gpu-f64-1024.json` records a two-head, 1,024-step GPU study against an
+independent persistent F64 oracle including convolution and output normalization.
+This deliberately uses synthetic lower_bound=-0.001, not the release -5 or a
+natural activation trace. Every output and materialized read state is sampled;
+authoritative anchors are sampled after each 32-step batch. All pairs are finite.
+
+| Configuration | Output RMS error | Authoritative anchor RMS error |
+| --- | ---: | ---: |
+| Ordinary F32 | 1.81584e-6 | 3.63860e-7 |
+| F32 replay | 1.81584e-6 | 3.63860e-7 |
+| F16 read / F32 anchor | 5.41567e-5 | 3.63860e-7 |
+| Shared F16 | 3.11855e-4 | 7.82023e-5 |
+
+Separate precision improves output RMS 5.758x versus shared F16 in this fixture,
+but remains 29.825x above ordinary F32. Its authoritative anchor matches ordinary
+F32 bits at every checked completed window. This demonstrates exclusion of local
+low-precision correction feedback, not elimination of all model-level feedback:
+approximate outputs can change later layers' driving inputs in a real model.
+
+`f16-leaf-abba.json` uses the release lower bound -5 for every arm. It repeats
+the same synthetic 34-state geometry, with flush-inclusive ordinary/candidate
+ABBA for each policy. The first FP32 packet used fixture lower_bound=-1.25;
+do not treat these different packets as a paired implementation comparison.
+
+| Candidate | GPU B/A, lower is better | Wall B/A | Recurrent matrices + records |
+| --- | ---: | ---: | ---: |
+| Ordinary F32 reference | 1 | 1 | 136 MiB |
+| F32 replay | 1.1878 | 1.2528 | 161.5 MiB |
+| F16 read / F32 anchor | 1.0366 | 1.0443 | 238.0664 MiB |
+| Shared F16 | 1.1776 | 1.1834 | 102.0664 MiB |
+
+Separate precision's GPU pairs disagree (1.1426 and 0.9521 B/A); there is no
+convincing speed win, not a precise 3.66% regression claim. Expected state/output
+hash relationships hold, all outputs/anchors/read buffers are finite, and all
+timestamps are valid. These are leaf timings and logical retained bytes, not
+whole-model throughput or measured DRAM traffic. Shared F16 saves about 25% of
+these recurrent bytes, but pays measured precision and speed costs.
+
+## Decision
+
+Keep ordinary F32 in production. The user's long-sequence precision hypothesis
+is supported against low-precision feedback, in CPU emulation and physical Metal
+execution; it is not an accuracy upgrade over the existing F32 recurrent state.
+Separate precision has no demonstrated latency advantage here and retains about
+102 MiB more state/records across 34 blocks. No runtime/snapshot integration or
+model-quality claim is justified by these results.
+
+Archive the complete GPU prototype in Git and remove it from active builds;
+retain the small portable CPU study, its eight tests and all evidence. A future
+speculative-verification experiment would need a concrete per-draft state-copy
+cost and rollback requirement. That is a different hypothesis, not a reason to
+keep sweeping this batch-one kernel or rerunning until a timing looks favorable.

@@ -372,10 +372,7 @@ fn gguf_no_copy_mode_is_strict_and_default_off() {
     assert!(parse_gguf_owned_arena_mode(Some("enabled")).is_err());
     assert!(parse_gguf_owned_arena_mode(Some("")).is_err());
 
-    assert_eq!(
-        parse_gguf_no_copy_mode(None).unwrap(),
-        GgufNoCopyMode::Disabled
-    );
+    assert_eq!(parse_gguf_no_copy_mode(None).unwrap(), GgufNoCopyMode::Auto);
     for value in ["1", "true", "TRUE", "yes", "YES"] {
         assert_eq!(
             parse_gguf_no_copy_mode(Some(value)).unwrap(),
@@ -409,6 +406,180 @@ fn gguf_no_copy_mode_is_strict_and_default_off() {
     }
     assert!(parse_gguf_no_copy_prefault(Some("enabled")).is_err());
     assert!(parse_gguf_no_copy_prefault(Some("")).is_err());
+}
+
+#[test]
+fn automatic_no_copy_choice_uses_working_set_headroom_and_margin() {
+    const GB: u64 = 1_000_000_000;
+    let iq4 = choose_gguf_no_copy_mode(17_500_000_000, None, 22_900_000_000, 0);
+    assert!(!iq4.map_weights);
+    assert_eq!(iq4.reason, "copy_fits_with_headroom");
+
+    let q4km = choose_gguf_no_copy_mode(22_100_000_000, None, 22_900_000_000, 0);
+    assert!(q4km.map_weights);
+    assert_eq!(q4km.reason, "copy_exceeds_working_set_headroom");
+
+    let m4 = choose_gguf_no_copy_mode(22_100_000_000, None, 110 * GB, 0);
+    assert!(!m4.map_weights);
+    assert_eq!(m4.working_set_bytes, 110 * GB);
+
+    assert!(
+        choose_gguf_no_copy_mode(2 * GB, Some(128 * 1024 * 1024), 110 * GB, 0).map_weights == false
+    );
+}
+
+#[test]
+fn storage_configuration_resolver_rejects_owned_and_parallel_conflicts() {
+    let conflict = resolve_gguf_storage_load_configuration_from_values(
+        None,
+        Some("1"),
+        Some("1"),
+        None,
+        false,
+        NativeQuantEmbeddingMode::Auto,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(
+        conflict.to_string(),
+        "metal load policy: parallel copy and owned arena are mutually exclusive"
+    );
+
+    let invalid_owned = resolve_gguf_storage_load_configuration_from_values(
+        None,
+        Some("enabled"),
+        None,
+        None,
+        false,
+        NativeQuantEmbeddingMode::Auto,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(
+        invalid_owned.to_string(),
+        "metal load policy: invalid QWEN_GGUF_OWNED_ARENA value \"enabled\""
+    );
+
+    let owned_embedding_rollback = resolve_gguf_storage_load_configuration_from_values(
+        None,
+        Some("1"),
+        None,
+        None,
+        true,
+        NativeQuantEmbeddingMode::Disabled,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(
+        owned_embedding_rollback.to_string(),
+        "metal load policy: forced owned or parallel storage requires production-auto native embedding selection"
+    );
+}
+
+#[test]
+fn automatic_mapping_falls_back_when_retained_storage_is_unsupported() {
+    use super::residency::{GgufStorageRequest, decide_gguf_storage_mode};
+
+    const GB: u64 = 1_000_000_000;
+    let misaligned = TensorDesc {
+        name: "misaligned".into(),
+        shape: vec![1],
+        dtype: GgmlType::F32,
+        shard_idx: 0,
+        data_offset: 4100,
+        n_bytes: 4,
+    };
+    let embedding_rollback =
+        retained_mapping_unsupported_reason(&[8192], &[&misaligned], 4096, 1 << 20, true, false)
+            .unwrap();
+    let unsupported_geometry =
+        retained_mapping_unsupported_reason(&[8192], &[&misaligned], 4096, 1 << 20, false, true)
+            .unwrap();
+    assert_eq!(
+        embedding_rollback,
+        "automatic_mapping_unsupported_exact_27b_embedding_rollback"
+    );
+    assert_eq!(
+        unsupported_geometry,
+        "automatic_mapping_unsupported_binding_misalignment"
+    );
+
+    let small_window = TensorDesc {
+        name: "small-window-in-large-shard".into(),
+        shape: vec![1],
+        dtype: GgmlType::F32,
+        shard_idx: 0,
+        data_offset: 0,
+        n_bytes: 4,
+    };
+    let retained = plan_retained_storage(&[16_384], &[&small_window], 4096, 8192, 32).unwrap();
+    assert!(retained.windows.iter().all(|window| window.length <= 8192));
+    assert_eq!(
+        retained_mapping_unsupported_reason(&[16_384], &[&small_window], 4096, 8192, true, true,),
+        Some("automatic_mapping_unsupported_exact_27b_whole_shard_exceeds_max_buffer")
+    );
+    for reason in [embedding_rollback, unsupported_geometry] {
+        let automatic = decide_gguf_storage_mode(
+            22_100_000_000,
+            0,
+            None,
+            22_900_000_000,
+            0,
+            true,
+            GgufStorageRequest::Automatic,
+            Some(reason),
+        );
+        assert!(automatic.capacity_would_map);
+        assert!(!automatic.map_weights);
+        assert_eq!(automatic.reason, reason);
+        assert!(automatic.tight_copy);
+
+        let explicit_map = decide_gguf_storage_mode(
+            22_100_000_000,
+            0,
+            None,
+            22_900_000_000,
+            0,
+            true,
+            GgufStorageRequest::Map("explicit_environment_override"),
+            Some(reason),
+        );
+        assert!(explicit_map.map_weights);
+        assert_eq!(explicit_map.reason, "explicit_environment_override");
+    }
+    assert!(
+        decide_gguf_storage_mode(
+            17_500_000_000,
+            0,
+            None,
+            22_900_000_000,
+            0,
+            true,
+            GgufStorageRequest::Automatic,
+            Some("automatic_mapping_unsupported_retained_geometry"),
+        )
+        .map_weights
+            == false
+    );
+    let m4 = decide_gguf_storage_mode(
+        22_100_000_000,
+        0,
+        None,
+        110 * GB,
+        0,
+        true,
+        GgufStorageRequest::Automatic,
+        None,
+    );
+    assert!(!m4.map_weights);
+}
+
+#[test]
+fn automatic_no_copy_load_log_reports_decision_inputs() {
+    assert_eq!(
+        gguf_storage_log_line("mapped", 22, 100, "copy_exceeds_working_set_headroom"),
+        "[metal-gguf-storage] mode=mapped copied_bytes=22 working_set_bytes=100 reason=copy_exceeds_working_set_headroom"
+    );
 }
 
 #[test]
@@ -727,6 +898,7 @@ fn automatic_retained_single_pass_plans_qwen36_bf16_without_realizing_weights() 
         MetalModelLoadOptions {
             auto_parallel_copy_a3b: false,
             auto_retained_single_pass: true,
+            auxiliary_weight_bytes: 0,
         },
     )
     .expect("prepare BF16 single-pass load");

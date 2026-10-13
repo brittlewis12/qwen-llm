@@ -366,6 +366,68 @@ pub struct MetalContext {
     pub(crate) _process_lease: Arc<MetalProcessLease>,
 }
 
+/// Device facts, pricing, and allocation signals without a command queue,
+/// metallib, or process lease.
+pub struct MetalDeviceProbe {
+    device: Device,
+    facts: super::DeviceFacts,
+}
+
+impl MetalDeviceProbe {
+    pub fn new() -> Result<Self, MetalError> {
+        let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::NoDevice)?;
+        let facts = super::DeviceFacts::from_device(&device);
+        Ok(Self { device, facts })
+    }
+
+    pub fn device_facts(&self) -> &super::DeviceFacts {
+        &self.facts
+    }
+
+    pub fn max_buffer_length(&self) -> u64 {
+        self.device.maxBufferLength() as u64
+    }
+
+    pub fn memory_signals(&self) -> MetalMemorySignals {
+        MetalMemorySignals {
+            recommended_max_bytes: self.facts.recommended_max_working_set_bytes,
+            current_allocated_bytes: self.device.currentAllocatedSize() as u64,
+            process_limit_remaining_bytes: MetalContext::process_limit_bytes_remaining(),
+        }
+    }
+
+    pub fn shared_buffer_size_and_align(
+        &self,
+        logical_bytes: u64,
+    ) -> Result<MetalBufferSizeAndAlign, MetalError> {
+        let length = usize::try_from(logical_bytes.max(1)).map_err(|_| MetalError::BadShape {
+            kernel: "device_shared_buffer_size_and_align",
+            detail: format!("logical byte request {logical_bytes} does not fit usize"),
+        })?;
+        let priced = self.device.heapBufferSizeAndAlignWithLength_options(
+            length,
+            MTLResourceOptions::StorageModeShared,
+        );
+        Ok(MetalBufferSizeAndAlign {
+            size: u64::try_from(priced.size).map_err(|_| MetalError::BadShape {
+                kernel: "device_shared_buffer_size_and_align",
+                detail: "priced size does not fit u64".into(),
+            })?,
+            alignment: u64::try_from(priced.align).map_err(|_| MetalError::BadShape {
+                kernel: "device_shared_buffer_size_and_align",
+                detail: "priced alignment does not fit u64".into(),
+            })?,
+        })
+    }
+}
+
+/// Host-side projection of the ordinary model load plan from already-bound
+/// GGUF metadata and device facts. Unlike a model load, this prices requests
+/// without creating a context or acquiring its process lease.
+pub fn probe_metal_device() -> Result<MetalDeviceProbe, MetalError> {
+    MetalDeviceProbe::new()
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MetalBufferSizeAndAlign {
     pub size: u64,

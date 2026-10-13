@@ -312,7 +312,7 @@ impl Runtime {
             self.context(),
             &gguf,
             &bound,
-            intent.metal_options(),
+            intent.metal_options(config.additional_metal_weight_bytes),
         )?;
         let prefetch_outcome = apply_prefetch_policy(&gguf, &config, prepared.prefetch_advice());
         let identity_shards = snapshot_shard_identity_inputs(&gguf)?;
@@ -378,10 +378,15 @@ fn apply_prefetch_policy(
     let started = Instant::now();
     let action = effective_prefetch_action(config.prefetch_policy, advice);
 
-    if let PrefetchAction::Suppressed {
-        reason: PrefetchSuppressionReason::AuthenticatedDisposableAutoA3bDirectPread,
-    } = action
-    {
+    if let PrefetchAction::Suppressed { .. } = action {
+        if action
+            == (PrefetchAction::Suppressed {
+                reason: PrefetchSuppressionReason::TightCopiedWeights,
+            })
+        {
+            tracing::info!(target: "qwen_diag", "[runtime-prefetch] schema=1 action=suppressed reason=tight-copied-weights");
+            return PrefetchOutcome::suppressed(config.prefetch_policy, action);
+        }
         // Sole `[runtime-prefetch]` emitter in the tree. Migrated from
         // `eprintln!` to the `qwen_diag` target; the CLI subscriber prints
         // `AUTHENTICATED_DISPOSABLE_AUTO_A3B_PREAD_SUPPRESSION_LINE`
@@ -434,24 +439,11 @@ fn apply_prefetch_policy(
 /// Per-shard prefetch. Uses the shard's retained file description
 /// (no path reopen, no TOCTOU).
 ///
-/// **Fail-open policy on probe failure.** Both the residency probe and
-/// the memory-headroom probe are diagnostic; a failure returns fresh
-/// unknown state, not a veto. Codex jam session 019f8b66 worked
-/// through the expected value: skipping-on-probe-failure trades
-/// certain small waste (a fully warm reread measured at ~170 ms) for potentially
-/// forgoing large wins (~18 s on 27B cold). The failed probe's error
-/// is recorded in `skipped_reason` for diagnosis, and the prefetch
-/// is attempted anyway. If the actual prefetch also fails, that
-/// path records the real I/O error.
-///
-/// **Memory-headroom is telemetry-only in this build.** A hard skip
-/// gate needs a controlled pressure experiment first (A3B under three
-/// admission regimes) to identify the actual regression boundary.
-/// Until then we compute the conservative bound, log if it would fail,
-/// but let the prefetch proceed. On a 128 GiB M4 Max the
-/// naive `missing + shard + margin` formula would silently prevent
-/// the measured 5× first-byte wins because `available_memory` on an
-/// active desktop is often < 30 GiB.
+/// Storage selection suppresses prefetch before this per-shard path for tight
+/// copied weights. For other paths, probe failures remain fail-open: they do
+/// not veto warming, and actual I/O failures are recorded separately.
+/// The independent shard headroom estimate remains diagnostic because it does
+/// not account for Metal's current storage realization.
 fn apply_shard_prefetch(
     shard: &GgufShard,
     config: &LoadedModelConfig,
@@ -546,7 +538,7 @@ fn apply_shard_prefetch(
                     missing_mib = missing_bytes / (1 << 20),
                     shard_mib = shard_size / (1 << 20),
                     margin_mib = margin / (1 << 20),
-                    "prefetch: available memory below conservative bound; proceeding anyway (telemetry-only until validated)"
+                    "prefetch: available memory below conservative bound; prefetch may increase paging pressure"
                 );
             } else {
                 tracing::debug!(
@@ -690,15 +682,15 @@ mod tests {
 
     #[test]
     fn model_load_intent_scopes_automatic_storage_admission() {
-        let reusable = ModelLoadIntent::Reusable.metal_options();
+        let reusable = ModelLoadIntent::Reusable.metal_options(0);
         assert!(!reusable.auto_parallel_copy_a3b);
         assert!(!reusable.auto_retained_single_pass);
 
-        let generation = ModelLoadIntent::DisposableGeneration.metal_options();
+        let generation = ModelLoadIntent::DisposableGeneration.metal_options(0);
         assert!(generation.auto_parallel_copy_a3b);
         assert!(!generation.auto_retained_single_pass);
 
-        let analysis = ModelLoadIntent::SinglePassAnalysis.metal_options();
+        let analysis = ModelLoadIntent::SinglePassAnalysis.metal_options(0);
         assert!(analysis.auto_parallel_copy_a3b);
         assert!(analysis.auto_retained_single_pass);
 
@@ -716,6 +708,9 @@ mod tests {
         let preserve = MetalLoadPrefetchAdvice::PreserveConfiguredPolicy;
         let suppressed = PrefetchAction::Suppressed {
             reason: PrefetchSuppressionReason::AuthenticatedDisposableAutoA3bDirectPread,
+        };
+        let tight_suppressed = PrefetchAction::Suppressed {
+            reason: PrefetchSuppressionReason::TightCopiedWeights,
         };
 
         let cases = [
@@ -737,6 +732,12 @@ mod tests {
                 PrefetchPolicy::Always,
                 suppress,
                 PrefetchAction::ConfiguredPolicy,
+            ),
+            (
+                "always-tight-copy",
+                PrefetchPolicy::Always,
+                MetalLoadPrefetchAdvice::SuppressForTightCopiedWeights,
+                tight_suppressed,
             ),
         ];
         for (name, policy, advice, expected) in cases {
@@ -836,6 +837,8 @@ pub enum PrefetchResidencyProbe {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LoadedModelConfig {
     pub prefix_cache_max_bytes: u64,
+    /// Priced Metal weight bytes known to be loaded beside the base model.
+    pub additional_metal_weight_bytes: u64,
     /// Policy for warming the OS unified buffer cache during model load.
     /// [`LoadedModelConfig::default`] selects residency-gated `ColdOnly`;
     /// [`PrefetchPolicy::default`] itself remains `Off`.
@@ -1004,6 +1007,7 @@ pub struct ShardPrefetch {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrefetchSuppressionReason {
     AuthenticatedDisposableAutoA3bDirectPread,
+    TightCopiedWeights,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1017,6 +1021,9 @@ fn effective_prefetch_action(
     advice: MetalLoadPrefetchAdvice,
 ) -> PrefetchAction {
     match (policy, advice) {
+        (_, MetalLoadPrefetchAdvice::SuppressForTightCopiedWeights) => PrefetchAction::Suppressed {
+            reason: PrefetchSuppressionReason::TightCopiedWeights,
+        },
         (
             PrefetchPolicy::ColdOnly { .. },
             MetalLoadPrefetchAdvice::SuppressColdOnlyAuthenticatedA3bDirectPread,
@@ -1076,13 +1083,14 @@ pub enum ModelLoadIntent {
 }
 
 impl ModelLoadIntent {
-    fn metal_options(self) -> MetalModelLoadOptions {
+    fn metal_options(self, auxiliary_weight_bytes: u64) -> MetalModelLoadOptions {
         MetalModelLoadOptions {
             auto_parallel_copy_a3b: matches!(
                 self,
                 Self::DisposableGeneration | Self::SinglePassAnalysis
             ),
             auto_retained_single_pass: self == Self::SinglePassAnalysis,
+            auxiliary_weight_bytes,
         }
     }
 }
@@ -1101,6 +1109,7 @@ impl Default for LoadedModelConfig {
     fn default() -> Self {
         Self {
             prefix_cache_max_bytes: DEFAULT_MAX_BYTES,
+            additional_metal_weight_bytes: 0,
             prefetch_policy: PrefetchPolicy::cold_only(DEFAULT_COLD_ONLY_THRESHOLD)
                 .expect("DEFAULT_COLD_ONLY_THRESHOLD is a valid fraction"),
             prefetch_workers: 0,
@@ -1559,15 +1568,10 @@ impl LoadedModel {
             config,
         )?;
         let priced_upper_bytes = plan.priced_upper_bound(|logical_bytes| {
-            u64::try_from(
-                self.context()
-                    .shared_buffer_size_and_align(logical_bytes)?
-                    .size,
-            )
-            .map_err(|_| MetalError::BadShape {
-                kernel: "packed_prefill_scratch_plan",
-                detail: "priced Metal allocation does not fit u64".into(),
-            })
+            Ok(self
+                .context()
+                .shared_buffer_size_and_align(logical_bytes)?
+                .size)
         })?;
         Ok(PackedPrefillScratchPlan {
             inner: plan,

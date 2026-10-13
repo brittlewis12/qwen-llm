@@ -195,16 +195,6 @@ pub(super) fn parse_gguf_owned_arena_mode(
     }
 }
 
-pub(super) fn gguf_owned_arena_mode() -> Result<GgufOwnedArenaMode, MfError> {
-    match std::env::var("QWEN_GGUF_OWNED_ARENA") {
-        Ok(value) => parse_gguf_owned_arena_mode(Some(&value)),
-        Err(std::env::VarError::NotPresent) => parse_gguf_owned_arena_mode(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(MfError::LoadPolicy(
-            "QWEN_GGUF_OWNED_ARENA is not valid Unicode".to_string(),
-        )),
-    }
-}
-
 pub(super) fn parse_gguf_parallel_copy_mode(
     value: Option<&str>,
 ) -> Result<GgufParallelCopyMode, MfError> {
@@ -227,6 +217,7 @@ pub(super) fn parse_gguf_parallel_copy_mode(
 }
 
 pub(super) fn gguf_parallel_copy_mode() -> Result<GgufParallelCopyMode, MfError> {
+    // Forced parallel population profiles realize copied weight buffers.
     match std::env::var("QWEN_GGUF_PARALLEL_COPY") {
         Ok(value) => parse_gguf_parallel_copy_mode(Some(&value)),
         Err(std::env::VarError::NotPresent) => parse_gguf_parallel_copy_mode(None),
@@ -247,7 +238,10 @@ pub(super) fn auto_retained_single_pass_enabled(
 ) -> bool {
     admission_enabled
         && unified_memory
-        && no_copy_mode == GgufNoCopyMode::Disabled
+        && matches!(
+            no_copy_mode,
+            GgufNoCopyMode::Disabled | GgufNoCopyMode::Auto
+        )
         && owned_mode == GgufOwnedArenaMode::Disabled
         && parallel_mode == GgufParallelCopyMode::Auto
         && prefault_mode == GgufNoCopyPrefaultMode::Default
@@ -256,7 +250,7 @@ pub(super) fn auto_retained_single_pass_enabled(
 
 pub(super) fn parse_gguf_no_copy_mode(value: Option<&str>) -> Result<GgufNoCopyMode, MfError> {
     match value {
-        None => Ok(GgufNoCopyMode::Disabled),
+        None => Ok(GgufNoCopyMode::Auto),
         Some(value) if crate::env_flag::env_value_truthy(value) => Ok(GgufNoCopyMode::Forced),
         Some(value) if crate::env_flag::env_value_falsy(value) => Ok(GgufNoCopyMode::Disabled),
         Some(value) => Err(MfError::LoadPolicy(format!(
@@ -265,14 +259,161 @@ pub(super) fn parse_gguf_no_copy_mode(value: Option<&str>) -> Result<GgufNoCopyM
     }
 }
 
-pub(super) fn gguf_no_copy_mode() -> Result<GgufNoCopyMode, MfError> {
-    match std::env::var("QWEN_GGUF_NO_COPY") {
-        Ok(value) => parse_gguf_no_copy_mode(Some(&value)),
-        Err(std::env::VarError::NotPresent) => parse_gguf_no_copy_mode(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(MfError::LoadPolicy(
-            "QWEN_GGUF_NO_COPY is not valid Unicode".to_string(),
-        )),
+pub const GGUF_COPY_HEADROOM_MARGIN_PERCENT: u64 = 15;
+pub const GGUF_COPY_SESSION_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GgufNoCopyDecision {
+    pub map_weights: bool,
+    pub capacity_would_map: bool,
+    pub tight_copy: bool,
+    pub copied_bytes: u64,
+    pub auxiliary_weight_bytes: u64,
+    pub working_set_bytes: u64,
+    pub reason: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GgufStorageRequest {
+    Automatic,
+    Copy(&'static str),
+    Map(&'static str),
+}
+
+pub fn choose_gguf_no_copy_mode(
+    copied_bytes: u64,
+    session_reserve_bytes: Option<u64>,
+    recommended_working_set_bytes: u64,
+    current_allocated_bytes: u64,
+) -> GgufNoCopyDecision {
+    decide_gguf_storage_mode(
+        copied_bytes,
+        0,
+        session_reserve_bytes,
+        recommended_working_set_bytes,
+        current_allocated_bytes,
+        true,
+        GgufStorageRequest::Automatic,
+        None,
+    )
+}
+
+pub fn decide_gguf_storage_mode(
+    copied_bytes: u64,
+    auxiliary_weight_bytes: u64,
+    session_reserve_bytes: Option<u64>,
+    recommended_working_set_bytes: u64,
+    current_allocated_bytes: u64,
+    unified_memory: bool,
+    request: GgufStorageRequest,
+    mapping_unsupported_reason: Option<&'static str>,
+) -> GgufNoCopyDecision {
+    let reserve = session_reserve_bytes.unwrap_or(GGUF_COPY_SESSION_RESERVE_BYTES);
+    // Performance heuristic fitted to measurements: 76% copied decodes faster; 97% copied loads 4–6x slower with heavy paging, not an admission guarantee.
+    let margin =
+        recommended_working_set_bytes.saturating_mul(GGUF_COPY_HEADROOM_MARGIN_PERCENT) / 100;
+    let signals = crate::metal::MetalMemorySignals {
+        recommended_max_bytes: recommended_working_set_bytes,
+        current_allocated_bytes,
+        process_limit_remaining_bytes: Some(u64::MAX),
+    };
+    let admission = crate::metal::evaluate_metal_memory_admission_with_cpu_bytes(
+        copied_bytes,
+        auxiliary_weight_bytes,
+        reserve.saturating_add(margin),
+        signals,
+        true,
+    );
+    let capacity_would_map = !admission
+        .required_bytes
+        .zip(admission.working_set_headroom_bytes)
+        .is_some_and(|(required, headroom)| required <= headroom);
+    let (map_weights, reason) = match request {
+        GgufStorageRequest::Map(reason) => (true, reason),
+        GgufStorageRequest::Copy(reason) => (false, reason),
+        GgufStorageRequest::Automatic if !unified_memory => {
+            (false, "device_does_not_support_unified_mapping")
+        }
+        GgufStorageRequest::Automatic
+            if capacity_would_map && mapping_unsupported_reason.is_some() =>
+        {
+            (false, mapping_unsupported_reason.unwrap())
+        }
+        GgufStorageRequest::Automatic if capacity_would_map => {
+            (true, "copy_exceeds_working_set_headroom")
+        }
+        GgufStorageRequest::Automatic => (false, "copy_fits_with_headroom"),
+    };
+    GgufNoCopyDecision {
+        map_weights,
+        capacity_would_map,
+        tight_copy: !map_weights && capacity_would_map,
+        copied_bytes,
+        auxiliary_weight_bytes,
+        working_set_bytes: recommended_working_set_bytes,
+        reason: if !capacity_would_map
+            && (recommended_working_set_bytes == 0
+                || admission.working_set_headroom_bytes.is_none())
+            && request == GgufStorageRequest::Automatic
+        {
+            "working_set_signal_invalid"
+        } else {
+            reason
+        },
     }
+}
+
+pub fn retained_mapping_unsupported_reason(
+    shard_mapped_lengths: &[usize],
+    direct_requests: &[&TensorDesc],
+    page_size: usize,
+    max_buffer_length: usize,
+    exact_27b: bool,
+    exact_embedding_is_direct: bool,
+) -> Option<&'static str> {
+    if exact_27b && !exact_embedding_is_direct {
+        return Some("automatic_mapping_unsupported_exact_27b_embedding_rollback");
+    }
+    if direct_requests.is_empty() {
+        return Some("automatic_mapping_unsupported_no_direct_weights");
+    }
+    if exact_27b {
+        let Some(shard_bytes) = shard_mapped_lengths.first().copied() else {
+            return Some("automatic_mapping_unsupported_retained_geometry");
+        };
+        if page_size == 0 {
+            return Some("automatic_mapping_unsupported_retained_geometry");
+        }
+        let whole_shard_buffer_bytes = shard_bytes / page_size * page_size;
+        if whole_shard_buffer_bytes > max_buffer_length {
+            return Some("automatic_mapping_unsupported_exact_27b_whole_shard_exceeds_max_buffer");
+        }
+    }
+    let plan = match plan_retained_storage(
+        shard_mapped_lengths,
+        direct_requests,
+        page_size,
+        max_buffer_length,
+        GGUF_NO_COPY_ALIGNMENT,
+    ) {
+        Ok(plan) => plan,
+        Err(_) => return Some("automatic_mapping_unsupported_retained_geometry"),
+    };
+    plan.entries
+        .iter()
+        .find_map(|entry| match entry.disposition {
+            RetainedStorageDisposition::CopyFallback {
+                reason: RetainedStorageFallback::FinalPartialPage,
+            }
+            | RetainedStorageDisposition::View { .. }
+            | RetainedStorageDisposition::Alias { .. } => None,
+            RetainedStorageDisposition::CopyFallback {
+                reason: RetainedStorageFallback::BindingMisalignment,
+            } => Some("automatic_mapping_unsupported_binding_misalignment"),
+            RetainedStorageDisposition::CopyFallback { .. } => {
+                Some("automatic_mapping_unsupported_retained_geometry")
+            }
+        })
 }
 
 pub(super) fn parse_gguf_no_copy_prefault(
@@ -289,16 +430,6 @@ pub(super) fn parse_gguf_no_copy_prefault(
         Some(value) => Err(MfError::LoadPolicy(format!(
             "invalid QWEN_GGUF_NO_COPY_PREFAULT value {value:?}"
         ))),
-    }
-}
-
-pub(super) fn gguf_no_copy_prefault_mode() -> Result<GgufNoCopyPrefaultMode, MfError> {
-    match std::env::var("QWEN_GGUF_NO_COPY_PREFAULT") {
-        Ok(value) => parse_gguf_no_copy_prefault(Some(&value)),
-        Err(std::env::VarError::NotPresent) => parse_gguf_no_copy_prefault(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(MfError::LoadPolicy(
-            "QWEN_GGUF_NO_COPY_PREFAULT is not valid Unicode".to_string(),
-        )),
     }
 }
 
@@ -352,6 +483,17 @@ pub(super) fn emit_metal_load_line(arguments: std::fmt::Arguments<'_>) {
             }
         });
     }
+}
+
+pub(super) fn gguf_storage_log_line(
+    mode: &str,
+    copied_bytes: u64,
+    working_set_bytes: u64,
+    reason: &str,
+) -> String {
+    format!(
+        "[metal-gguf-storage] mode={mode} copied_bytes={copied_bytes} working_set_bytes={working_set_bytes} reason={reason}"
+    )
 }
 
 pub(super) fn prepare_auto_retained_selection(

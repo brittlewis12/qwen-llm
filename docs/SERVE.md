@@ -231,15 +231,15 @@ is not a residency set.
     (`docs/bench/2026-10-05-residency-kill-check/`).
 - **Eligible families.** Every family whose serve weights are no-copy GGUF
   windows: GLM-5.3-Flash, K2 Horizon, DeepSeek V4, Muse Glimmer and
-  Qwen3.8-Flash-Next. Each backend names its buffers (`retained_buffers()`).
+  Qwen3.8-Flash-Next. Ordinary Qwen is also eligible when its selected storage
+  mode maps the GGUF weights. Each backend names its buffers (`retained_buffers()`).
   - Flash-Next's CPU-read PLE table stays in the page cache, outside the
     pulse.
   - DeepSeek V4 turns the keep-alive off when its opt-in
     `QWEN_DSV4_RESIDENCY_SET` already holds the weights.
-- **Refused.** Qwen's serve backend does not name its weight buffers yet,
-  and refuses a nonzero value. Its default weights are Metal-allocated
-  copies, which stay wired anyway. The opt-in `QWEN_GGUF_NO_COPY` storage
-  would need the hooks on both its request and native-inference paths.
+- **Refused.** Ordinary Qwen with copied weights still refuses a nonzero
+  value because its Metal allocations stay wired anyway. With mapped weights,
+  the backend pulses the retained GGUF buffers through the same idle lifecycle.
 
 ### Durable snapshots (cross-restart warmth)
 

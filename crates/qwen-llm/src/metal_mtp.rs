@@ -527,6 +527,72 @@ pub fn quantize_lm_head_to_affine_q4_gs64(
 }
 
 impl MetalMtpHead {
+    pub fn priced_metal_weight_bytes(
+        ctx: &MetalContext,
+        mtp: &MtpHead<'_>,
+    ) -> Result<u64, MtpError> {
+        let policy = MtpMoeBankPolicy::from_env()?;
+        let mut f32_weights = vec![
+            mtp.attn.attn_norm,
+            mtp.attn.q_norm,
+            mtp.attn.k_norm,
+            mtp.attn.post_attention_norm,
+            mtp.enorm,
+            mtp.hnorm,
+            mtp.shared_head_norm,
+        ];
+        let mut native_weights = vec![
+            mtp.attn.q,
+            mtp.attn.k,
+            mtp.attn.v,
+            mtp.attn.o,
+            mtp.attn.ffn_gate,
+            mtp.attn.ffn_up,
+            mtp.attn.ffn_down,
+            mtp.eh_proj,
+        ];
+        if let Some(moe) = &mtp.attn.ffn_moe {
+            f32_weights.extend([moe.gate_inp, moe.gate_inp_shexp]);
+            if policy.native_gate_up() {
+                native_weights.extend([moe.gate_exps, moe.up_exps]);
+            } else {
+                f32_weights.extend([moe.gate_exps, moe.up_exps]);
+            }
+            if policy.native_down() {
+                native_weights.push(moe.down_exps);
+            } else {
+                f32_weights.push(moe.down_exps);
+            }
+        }
+        f32_weights
+            .into_iter()
+            .map(|desc| (desc, true))
+            .chain(
+                native_weights
+                    .into_iter()
+                    .map(|desc| (desc, !weight_dtype_kept_native(desc.dtype))),
+            )
+            .try_fold(0u64, |total, (desc, f32)| {
+                let logical = if f32 && desc.dtype != GgmlType::F32 {
+                    desc.n_elements()
+                        .checked_mul(4)
+                        .ok_or_else(|| MetalError::BadShape {
+                            kernel: "mtp_weight_estimate",
+                            detail: "MTP F32 byte estimate overflow".into(),
+                        })?
+                } else {
+                    desc.n_bytes
+                };
+                let priced = ctx.shared_buffer_size_and_align(logical)?.size;
+                total.checked_add(priced).ok_or_else(|| {
+                    MtpError::Metal(MetalError::BadShape {
+                        kernel: "mtp_weight_estimate",
+                        detail: "MTP priced byte estimate overflow".into(),
+                    })
+                })
+            })
+    }
+
     /// Load the MTP head's weights from the bound `MtpHead` view. Mirrors
     /// `MetalModel::load`'s native-quant policy: kernel-supported quants
     /// (Q4_K, Q5_K, Q6_K, F32) stay in their on-disk dtype; norms +

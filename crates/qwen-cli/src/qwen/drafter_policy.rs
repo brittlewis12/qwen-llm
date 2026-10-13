@@ -203,6 +203,15 @@ impl PreparedDrafter {
         &self.path
     }
 
+    pub(crate) fn priced_metal_bytes(&self, ctx: &MetalContext, target: &GgufFile) -> Result<u64> {
+        let target_model =
+            Model::from_gguf(target).context("parse target arch for drafter pricing")?;
+        let head = open_dflash_drafter(&self.gguf, &target_model)
+            .with_context(|| format!("bind drafter {}", self.path.display()))?;
+        MetalDFlashHead::priced_metal_weight_bytes(ctx, &head)
+            .context("price drafter Metal weights")
+    }
+
     /// Bind again (header-only, cheap) and copy the drafter to the GPU. The
     /// target `GgufFile` must be the same asset `prepare` bound against.
     pub(crate) fn load(&self, ctx: &MetalContext, target: &GgufFile) -> Result<MetalDFlashHead> {

@@ -1245,9 +1245,118 @@ fn project_info(model: &Path, gguf: &GgufFile) -> Result<serde_json::Value> {
         },
         "prompt_lookup": { "run": prompt_lookup },
         "sampling": sampling,
+        "weight_storage": qwen_weight_storage_projection(family, gguf),
         "capabilities": capabilities,
     });
     Ok(projection)
+}
+
+fn qwen_weight_storage_projection(
+    family: Option<ModelFamily>,
+    gguf: &GgufFile,
+) -> serde_json::Value {
+    if !matches!(family, Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe)) {
+        return serde_json::Value::Null;
+    }
+    let bound = match qwen_llm::loader::Model::from_gguf(gguf) {
+        Ok(model) => model,
+        Err(error) => {
+            return serde_json::json!({ "status": "unavailable", "reason": error.to_string() });
+        }
+    };
+    let storage_configuration =
+        match qwen_llm::metal_forward::resolve_gguf_storage_load_configuration() {
+            Ok(configuration) => configuration,
+            Err(error) => {
+                return serde_json::json!({ "status": "unavailable", "reason": error.to_string() });
+            }
+        };
+    let requests =
+        match qwen_llm::metal_forward::model_weight_storage_requests_for_runtime(gguf, &bound) {
+            Ok(requests) => requests,
+            Err(error) => {
+                return serde_json::json!({ "status": "unavailable", "reason": error.to_string() });
+            }
+        };
+    let device = match qwen_llm::metal::probe_metal_device() {
+        Ok(device) => device,
+        Err(error) => {
+            return serde_json::json!({ "status": "unavailable", "reason": error.to_string() });
+        }
+    };
+    let copied = requests.iter().try_fold(0u64, |sum, request| {
+        device
+            .shared_buffer_size_and_align(request.resident_bytes)
+            .map(|price| sum.saturating_add(price.size))
+    });
+    let mut copied = match copied {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return serde_json::json!({ "status": "unavailable", "reason": error.to_string() });
+        }
+    };
+    let derived = qwen_llm::metal_forward::fused_qkv_derived_weight_sizes(
+        &bound,
+        qwen_llm::metal_forward::fused_qkv_g8_enabled_for_runtime(),
+    )
+    .and_then(|sizes| {
+        sizes.into_iter().try_fold(0u64, |sum, bytes| {
+            device
+                .shared_buffer_size_and_align(bytes)
+                .map(|price| sum.saturating_add(price.size))
+                .map_err(qwen_llm::metal_forward::MfError::Metal)
+        })
+    });
+    match derived {
+        Ok(bytes) => copied = copied.saturating_add(bytes),
+        Err(error) => {
+            return serde_json::json!({ "status": "unavailable", "reason": error.to_string() });
+        }
+    }
+    let request = storage_configuration.storage_request();
+    let signals = device.memory_signals();
+    let mapping_unsupported = qwen_llm::metal_forward::runtime_retained_mapping_unsupported_reason(
+        gguf,
+        &bound,
+        usize::try_from(device.max_buffer_length()).unwrap_or(usize::MAX),
+    );
+    let decision = qwen_llm::metal_forward::decide_gguf_storage_mode(
+        copied,
+        0,
+        None,
+        signals.recommended_max_bytes,
+        signals.current_allocated_bytes,
+        device.device_facts().unified_memory,
+        request,
+        mapping_unsupported,
+    );
+    qwen_weight_storage_report(
+        if decision.map_weights {
+            "mapped"
+        } else {
+            "copied"
+        },
+        copied,
+        signals.recommended_max_bytes,
+        decision.reason,
+    )
+}
+
+fn qwen_weight_storage_report(
+    mode: &str,
+    copied_bytes: u64,
+    working_set_bytes: u64,
+    reason: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": if mode == "unavailable" { "unavailable" } else { "available" },
+        "mode": mode,
+        "load_intent": "reusable",
+        "copied_bytes_estimate": copied_bytes,
+        "recommended_working_set_bytes": working_set_bytes,
+        "reason": reason,
+        "margin_policy": "storage-performance heuristic fitted to measurements; not a memory-admission guarantee (76% copied decoded faster, 97% copied loaded 4-6x slower with heavy paging)",
+    })
 }
 
 /// One line per capability: its status (and code when unsupported), so the

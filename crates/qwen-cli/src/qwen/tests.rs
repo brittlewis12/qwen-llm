@@ -8,6 +8,23 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::os::unix::fs::PermissionsExt;
 
+#[test]
+fn qwen_info_storage_policy_report_projects_mode_and_capacity() {
+    let report =
+        crate::qwen_weight_storage_report("mapped", 22, 100, "copy_exceeds_working_set_headroom");
+    assert_eq!(report["mode"], "mapped");
+    assert_eq!(report["copied_bytes_estimate"], 22);
+    assert_eq!(report["recommended_working_set_bytes"], 100);
+    assert_eq!(report["reason"], "copy_exceeds_working_set_headroom");
+    assert_eq!(report["load_intent"], "reusable");
+    assert!(
+        report["margin_policy"]
+            .as_str()
+            .unwrap()
+            .contains("not a memory-admission guarantee")
+    );
+}
+
 fn selector_device_facts(name: &str) -> qwen_llm::metal::DeviceFacts {
     qwen_llm::metal::DeviceFacts {
         version: "qwen_device_info_v3",

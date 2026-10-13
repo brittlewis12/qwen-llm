@@ -48,6 +48,10 @@ pub(crate) mod snapshot_cache;
 mod trace;
 mod transport;
 mod transport_memory;
+
+fn idle_residency_storage_eligible(family_default: bool, selected_mode: Option<&str>) -> bool {
+    family_default || selected_mode == Some("mapped")
+}
 pub(crate) mod utf8;
 
 pub(crate) use crate::open_responses::{items, render, tool_parse};
@@ -526,10 +530,13 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         invocation.snapshot_cache_mib,
         &invocation.snapshot_policy,
     )?;
-    // Idle residency needs a backend whose weights are no-copy GGUF windows.
+    // Ordinary Qwen storage is selected during load; the backend checks the realized buffers.
+    let ordinary_qwen = matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe);
     ensure!(
-        invocation.idle_residency_secs.unwrap_or(0) == 0 || profile(family).idle_residency_eligible,
-        "--idle-residency-secs is not implemented for {} serve: its backend does not name its weight buffers (its default weights are Metal-allocated copies, which stay wired; QWEN_GGUF_NO_COPY storage is not yet covered)",
+        ordinary_qwen
+            || invocation.idle_residency_secs.unwrap_or(0) == 0
+            || idle_residency_storage_eligible(profile(family).idle_residency_eligible, None),
+        "--idle-residency-secs requires retained GGUF weight buffers; {} serve does not retain mapped weights",
         family.architecture_name()
     );
     let idle_window = idle_residency::configured_window(
@@ -609,8 +616,24 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             let prepared = backend::Prepared::new(family, &gguf, &invocation)?;
             let workbench = open_workbench(&invocation)?;
             let listening = Listening::open(&invocation, workbench)?;
-            backend::start(prepared, gguf, &invocation, listening)
+            backend::start(prepared, gguf, &invocation, listening, idle_window)
         }
+    }
+}
+
+#[cfg(test)]
+mod storage_policy_tests {
+    #[test]
+    fn idle_keep_alive_follows_selected_weight_storage() {
+        assert!(!super::idle_residency_storage_eligible(
+            false,
+            Some("copied")
+        ));
+        assert!(super::idle_residency_storage_eligible(
+            false,
+            Some("mapped")
+        ));
+        assert!(super::idle_residency_storage_eligible(true, Some("copied")));
     }
 }
 

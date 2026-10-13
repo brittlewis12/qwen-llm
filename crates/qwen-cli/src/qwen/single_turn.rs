@@ -410,11 +410,17 @@ pub(crate) fn run_single_turn(
     let arrival_ms = unix_epoch_ms()?;
     let load_t0 = Instant::now();
     let runtime = Runtime::metal().context("init Metal runtime")?;
+    let additional_metal_weight_bytes = drafter
+        .as_ref()
+        .map(|prepared| prepared.priced_metal_bytes(runtime.context(), &gguf))
+        .transpose()?
+        .unwrap_or(0);
     let loaded = runtime
         .load_open_model_for_disposable_single_turn_with_config(
             gguf,
             LoadedModelConfig {
                 prefix_cache_max_bytes: prefix_cache_max_bytes(args)?,
+                additional_metal_weight_bytes,
                 ..LoadedModelConfig::default()
             },
         )

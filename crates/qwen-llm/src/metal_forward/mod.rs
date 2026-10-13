@@ -618,6 +618,7 @@ static PARALLEL_COPY_PROFILES: [&ParallelCopyProfile; 3] = [
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GgufNoCopyMode {
+    Auto,
     Disabled,
     Forced,
 }
@@ -669,6 +670,147 @@ enum GgufNoCopyPrefaultMode {
     Default,
     Enabled,
     Disabled,
+}
+
+#[derive(Debug)]
+pub struct GgufStorageLoadConfiguration {
+    no_copy_mode: GgufNoCopyMode,
+    owned_mode: GgufOwnedArenaMode,
+    parallel_mode: GgufParallelCopyMode,
+    prefault_mode: GgufNoCopyPrefaultMode,
+}
+
+impl GgufStorageLoadConfiguration {
+    pub fn storage_request(&self) -> GgufStorageRequest {
+        match self.no_copy_mode {
+            GgufNoCopyMode::Forced => GgufStorageRequest::Map("explicit_environment_override"),
+            GgufNoCopyMode::Disabled => GgufStorageRequest::Copy("explicit_environment_override"),
+            GgufNoCopyMode::Auto if self.parallel_mode.is_forced() => {
+                GgufStorageRequest::Copy("explicit_parallel_copy_precedence")
+            }
+            GgufNoCopyMode::Auto if self.owned_mode == GgufOwnedArenaMode::Forced => {
+                GgufStorageRequest::Copy("explicit_owned_arena_precedence")
+            }
+            GgufNoCopyMode::Auto => GgufStorageRequest::Automatic,
+        }
+    }
+}
+
+fn validate_forced_storage_embedding_policy(
+    owned_mode: GgufOwnedArenaMode,
+    parallel_mode: GgufParallelCopyMode,
+    embedding_mode: NativeQuantEmbeddingMode,
+) -> Result<(), MfError> {
+    if (owned_mode == GgufOwnedArenaMode::Forced || parallel_mode.is_forced())
+        && embedding_mode != NativeQuantEmbeddingMode::Auto
+    {
+        return Err(MfError::LoadPolicy(
+            "forced owned or parallel storage requires production-auto native embedding selection"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn storage_environment_value(name: &str) -> Result<Option<String>, MfError> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(MfError::LoadPolicy(format!("{name} is not valid Unicode")))
+        }
+    }
+}
+
+fn resolve_gguf_storage_load_configuration_from_values(
+    no_copy: Option<&str>,
+    owned_arena: Option<&str>,
+    parallel_copy: Option<&str>,
+    prefault: Option<&str>,
+    native_embedding_present: bool,
+    native_embedding_mode: NativeQuantEmbeddingMode,
+    router_f16: Option<&str>,
+) -> Result<GgufStorageLoadConfiguration, MfError> {
+    let no_copy_mode = parse_gguf_no_copy_mode(no_copy)?;
+    let owned_mode = parse_gguf_owned_arena_mode(owned_arena)?;
+    let parallel_mode = parse_gguf_parallel_copy_mode(parallel_copy)?;
+    let prefault_mode = parse_gguf_no_copy_prefault(prefault)?;
+    validate_parallel_copy_policy(
+        parallel_mode,
+        no_copy_mode,
+        owned_mode,
+        prefault.is_some(),
+        native_embedding_present,
+        router_f16,
+    )?;
+    if owned_mode == GgufOwnedArenaMode::Forced && no_copy_mode == GgufNoCopyMode::Forced {
+        return Err(MfError::LoadPolicy(
+            "QWEN_GGUF_OWNED_ARENA and QWEN_GGUF_NO_COPY are mutually exclusive".to_string(),
+        ));
+    }
+    validate_forced_storage_embedding_policy(owned_mode, parallel_mode, native_embedding_mode)?;
+    if owned_mode == GgufOwnedArenaMode::Forced && prefault_mode != GgufNoCopyPrefaultMode::Default
+    {
+        return Err(MfError::LoadPolicy(
+            "QWEN_GGUF_NO_COPY_PREFAULT is invalid with owned arena".to_string(),
+        ));
+    }
+    if owned_mode == GgufOwnedArenaMode::Disabled
+        && matches!(
+            no_copy_mode,
+            GgufNoCopyMode::Disabled | GgufNoCopyMode::Auto
+        )
+        && prefault_mode != GgufNoCopyPrefaultMode::Default
+    {
+        return Err(MfError::LoadPolicy(
+            "QWEN_GGUF_NO_COPY_PREFAULT requires QWEN_GGUF_NO_COPY=1".to_string(),
+        ));
+    }
+    Ok(GgufStorageLoadConfiguration {
+        no_copy_mode,
+        owned_mode,
+        parallel_mode,
+        prefault_mode,
+    })
+}
+
+pub fn resolve_gguf_storage_load_configuration() -> Result<GgufStorageLoadConfiguration, MfError> {
+    // Unset uses a storage-performance heuristic fitted to measurements, not a memory-admission guarantee: copy needs 15% working-set headroom plus a 256 MiB session reserve; 76% copied decoded faster, while 97% copied loaded 4–6x slower with heavy paging. 1 maps weights and 0 forces copies.
+    let no_copy = storage_environment_value("QWEN_GGUF_NO_COPY")?;
+    // Owned arena selects copied weight storage for ordinary Qwen.
+    let owned_arena = storage_environment_value("QWEN_GGUF_OWNED_ARENA")?;
+    // Forced parallel population profiles realize copied weight buffers.
+    let parallel_copy = storage_environment_value("QWEN_GGUF_PARALLEL_COPY")?;
+    let prefault = storage_environment_value("QWEN_GGUF_NO_COPY_PREFAULT")?;
+    let native_embedding_present = std::env::var_os("QWEN_NATIVE_QUANT_EMBED").is_some();
+    let native_embedding_mode = match std::env::var("QWEN_NATIVE_QUANT_EMBED") {
+        Ok(value) => parse_native_quant_embedding_mode(Some(&value)),
+        Err(std::env::VarError::NotPresent) => NativeQuantEmbeddingMode::Auto,
+        Err(std::env::VarError::NotUnicode(_)) => NativeQuantEmbeddingMode::Invalid,
+    };
+    let router_f16 = match storage_environment_value("QWEN_MOE_ROUTER_F16") {
+        Ok(value) => value,
+        Err(_)
+            if parallel_copy.as_deref().is_some_and(|value| {
+                parse_gguf_parallel_copy_mode(Some(value))
+                    .is_ok_and(GgufParallelCopyMode::is_forced)
+            }) =>
+        {
+            return Err(MfError::LoadPolicy(
+                "QWEN_MOE_ROUTER_F16 is not valid Unicode with parallel copy".to_string(),
+            ));
+        }
+        Err(_) => None,
+    };
+    resolve_gguf_storage_load_configuration_from_values(
+        no_copy.as_deref(),
+        owned_arena.as_deref(),
+        parallel_copy.as_deref(),
+        prefault.as_deref(),
+        native_embedding_present,
+        native_embedding_mode,
+        router_f16.as_deref(),
+    )
 }
 
 crate::env_flag!(default_off decode_gdn_noop_qkv_flag, "QWEN_DECODE_GDN_NOOP_QKV");
@@ -812,6 +954,82 @@ pub struct MetalModel {
 }
 
 impl MetalModel {
+    pub fn retained_gguf_weight_buffers(&self) -> Vec<&Buffer> {
+        fn add<'a>(tensor: &'a MetalTensor, buffers: &mut Vec<&'a Buffer>) {
+            if tensor.provenance() == MetalTensorProvenance::RetainedGgufReadOnly {
+                let pointer = objc2::rc::Retained::as_ptr(&tensor.buffer);
+                if !buffers
+                    .iter()
+                    .any(|buffer| objc2::rc::Retained::as_ptr(*buffer) == pointer)
+                {
+                    buffers.push(&tensor.buffer);
+                }
+            }
+        }
+        fn add_moe<'a>(moe: &'a MetalMoeFfn, buffers: &mut Vec<&'a Buffer>) {
+            add(&moe.gate_inp, buffers);
+            add(&moe.gate_exps, buffers);
+            add(&moe.up_exps, buffers);
+            add(&moe.down_exps, buffers);
+            add(&moe.gate_inp_shexp, buffers);
+        }
+        let mut buffers = Vec::new();
+        add(&self.token_embd, &mut buffers);
+        add(&self.output_norm, &mut buffers);
+        add(&self.lm_head, &mut buffers);
+        for block in &self.blocks {
+            match block {
+                MetalBlock::Gdn(block) => {
+                    for tensor in [
+                        &block.attn_norm,
+                        &block.post_attn_norm,
+                        &block.ffn_gate,
+                        &block.ffn_up,
+                        &block.ffn_down,
+                        &block.in_proj_qkv,
+                        &block.in_proj_z,
+                        &block.beta_proj,
+                        &block.alpha_proj,
+                        &block.a_log,
+                        &block.dt_bias,
+                        &block.conv1d,
+                        &block.norm,
+                        &block.out_proj,
+                    ] {
+                        add(tensor, &mut buffers);
+                    }
+                    if let Some(moe) = &block.ffn_moe {
+                        add_moe(moe, &mut buffers);
+                    }
+                }
+                MetalBlock::Attn(block) => {
+                    for tensor in [
+                        &block.attn_norm,
+                        &block.post_attn_norm,
+                        &block.ffn_gate,
+                        &block.ffn_up,
+                        &block.ffn_down,
+                        &block.q,
+                        &block.k,
+                        &block.v,
+                        &block.o,
+                        &block.q_norm,
+                        &block.k_norm,
+                    ] {
+                        add(tensor, &mut buffers);
+                    }
+                    if let Some(tensor) = &block.qkv_fused {
+                        add(tensor, &mut buffers);
+                    }
+                    if let Some(moe) = &block.ffn_moe {
+                        add_moe(moe, &mut buffers);
+                    }
+                }
+            }
+        }
+        buffers
+    }
+
     pub fn snapshot_abi(&self) -> SnapshotAbi {
         let n_attn_layers = self
             .blocks
@@ -926,12 +1144,14 @@ impl Drop for MetalModelResidencySetGuard {
 pub(crate) struct MetalModelLoadOptions {
     pub auto_parallel_copy_a3b: bool,
     pub auto_retained_single_pass: bool,
+    pub auxiliary_weight_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MetalLoadPrefetchAdvice {
     PreserveConfiguredPolicy,
     SuppressColdOnlyAuthenticatedA3bDirectPread,
+    SuppressForTightCopiedWeights,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -971,6 +1191,118 @@ impl ResolvedWeightLoadChoices {
             self.dense_iq_native,
         )
     }
+
+    fn fused_qkv_priced_bytes(
+        &self,
+        ctx: &MetalContext,
+        model: &Model<'_>,
+    ) -> Result<u64, MfError> {
+        if !self.fused_qkv_g8 {
+            return Ok(0);
+        }
+        let logical_sizes = fused_qkv_derived_weight_sizes(model, self.fused_qkv_g8)?;
+        logical_sizes
+            .into_iter()
+            .try_fold(0u64, |total, logical_bytes| {
+                let priced = ctx
+                    .shared_buffer_size_and_align(logical_bytes)
+                    .map_err(MfError::Metal)?
+                    .size;
+                total.checked_add(priced).ok_or_else(|| {
+                    MfError::LoadPolicy("fused QKV derived byte estimate overflow".into())
+                })
+            })
+    }
+}
+
+pub fn fused_qkv_derived_weight_sizes(
+    model: &Model<'_>,
+    enabled: bool,
+) -> Result<Vec<u64>, MfError> {
+    let mut sizes = Vec::new();
+    if !enabled {
+        return Ok(sizes);
+    }
+    for block in &model.blocks {
+        let Block::Attn(attn) = block else {
+            continue;
+        };
+        if attn.q.dtype != GgmlType::Q8_0
+            || attn.k.dtype != GgmlType::Q8_0
+            || attn.v.dtype != GgmlType::Q8_0
+            || attn.q.shape.len() != 2
+            || attn.k.shape.len() != 2
+            || attn.v.shape.len() != 2
+            || attn.q.shape[0] != attn.k.shape[0]
+            || attn.q.shape[0] != attn.v.shape[0]
+        {
+            continue;
+        }
+        let logical_bytes = attn
+            .q
+            .n_bytes
+            .checked_add(attn.k.n_bytes)
+            .and_then(|bytes| bytes.checked_add(attn.v.n_bytes))
+            .ok_or_else(|| {
+                MfError::LoadPolicy("fused QKV derived byte estimate overflow".into())
+            })?;
+        sizes.push(logical_bytes);
+    }
+    Ok(sizes)
+}
+
+pub fn fused_qkv_g8_enabled_for_runtime() -> bool {
+    prefill_attn_fused_qkv_g8_enabled()
+}
+
+pub fn model_weight_storage_requests_for_runtime<'a>(
+    gguf: &GgufFile,
+    model: &Model<'a>,
+) -> Result<Vec<ModelWeightStorageRequest<'a>>, MfError> {
+    let parallel_mode = gguf_parallel_copy_mode()?;
+    let embedding_mode = native_quant_embedding_mode();
+    let forced_a10b_embedding = embedding_mode == NativeQuantEmbeddingMode::Auto
+        && forced_a10b_parallel_pread_embedding_qualified(parallel_mode, gguf, model);
+    let embedding_selection = if forced_a10b_embedding {
+        NativeQuantEmbeddingSelection::Forced
+    } else {
+        resolve_native_quant_embedding(
+            embedding_mode,
+            native_quant_embedding_supported(model.token_embd.dtype, &model.token_embd.shape),
+            native_quant_embedding_default_promoted(
+                &model.arch,
+                model.tied_embeddings,
+                model.token_embd.dtype,
+                &model.token_embd.shape,
+            ),
+        )
+    };
+    ResolvedWeightLoadChoices::resolve(embedding_selection, moe_router_f16_enabled())
+        .storage_requests(model)
+}
+
+pub fn runtime_retained_mapping_unsupported_reason(
+    gguf: &GgufFile,
+    model: &Model<'_>,
+    max_buffer_length: usize,
+) -> Option<&'static str> {
+    let requests = model_weight_storage_requests_for_runtime(gguf, model).ok()?;
+    let direct = requests
+        .iter()
+        .filter(|request| request.kind == ModelWeightStorageKind::Direct)
+        .map(|request| request.desc)
+        .collect::<Vec<_>>();
+    let page_size = host_page_size_bytes().ok()?;
+    retained_mapping_unsupported_reason(
+        &gguf.shard_mapped_lengths(),
+        &direct,
+        page_size,
+        max_buffer_length,
+        matches_no_copy_27b_sentinel(gguf, model),
+        requests
+            .first()
+            .is_some_and(|request| request.kind == ModelWeightStorageKind::Direct),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -1028,11 +1360,16 @@ pub(crate) struct PreparedMetalModelLoad<'ctx, 'gguf, 'model> {
     expected: Vec<ModelWeightStorageRequest<'gguf>>,
     auto: PreparedAutoSelection,
     auto_retained: PreparedAutoRetainedSelection,
+    tight_copy: bool,
 }
 
 impl PreparedMetalModelLoad<'_, '_, '_> {
     pub(crate) fn prefetch_advice(&self) -> MetalLoadPrefetchAdvice {
-        self.auto.prefetch_advice()
+        if self.tight_copy {
+            MetalLoadPrefetchAdvice::SuppressForTightCopiedWeights
+        } else {
+            self.auto.prefetch_advice()
+        }
     }
 }
 
@@ -2245,6 +2582,23 @@ impl MetalModel {
         Self::load_with_options(ctx, gguf, model, MetalModelLoadOptions::default())
     }
 
+    pub fn load_with_additional_metal_weight_bytes(
+        ctx: &MetalContext,
+        gguf: &GgufFile,
+        model: &Model<'_>,
+        auxiliary_weight_bytes: u64,
+    ) -> Result<Self, MfError> {
+        Self::load_with_options(
+            ctx,
+            gguf,
+            model,
+            MetalModelLoadOptions {
+                auxiliary_weight_bytes,
+                ..MetalModelLoadOptions::default()
+            },
+        )
+    }
+
     pub(crate) fn load_with_options(
         ctx: &MetalContext,
         gguf: &GgufFile,
@@ -2260,50 +2614,11 @@ impl MetalModel {
         model: &'model Model<'gguf>,
         options: MetalModelLoadOptions,
     ) -> Result<PreparedMetalModelLoad<'ctx, 'gguf, 'model>, MfError> {
-        let no_copy_mode = gguf_no_copy_mode()?;
-        let owned_mode = gguf_owned_arena_mode()?;
-        let parallel_mode = gguf_parallel_copy_mode()?;
-        let prefault_mode = gguf_no_copy_prefault_mode()?;
-        let prefault_present = std::env::var_os("QWEN_GGUF_NO_COPY_PREFAULT").is_some();
-        let native_embedding_present = std::env::var_os("QWEN_NATIVE_QUANT_EMBED").is_some();
-        let router_f16_value = match std::env::var("QWEN_MOE_ROUTER_F16") {
-            Ok(value) => Some(value),
-            Err(std::env::VarError::NotPresent) => None,
-            Err(std::env::VarError::NotUnicode(_)) if parallel_mode.is_forced() => {
-                return Err(MfError::LoadPolicy(
-                    "QWEN_MOE_ROUTER_F16 is not valid Unicode with parallel copy".to_string(),
-                ));
-            }
-            Err(std::env::VarError::NotUnicode(_)) => None,
-        };
-        validate_parallel_copy_policy(
-            parallel_mode,
-            no_copy_mode,
-            owned_mode,
-            prefault_present,
-            native_embedding_present,
-            router_f16_value.as_deref(),
-        )?;
-        if owned_mode == GgufOwnedArenaMode::Forced && no_copy_mode == GgufNoCopyMode::Forced {
-            return Err(MfError::LoadPolicy(
-                "QWEN_GGUF_OWNED_ARENA and QWEN_GGUF_NO_COPY are mutually exclusive".to_string(),
-            ));
-        }
-        if owned_mode == GgufOwnedArenaMode::Forced
-            && prefault_mode != GgufNoCopyPrefaultMode::Default
-        {
-            return Err(MfError::LoadPolicy(
-                "QWEN_GGUF_NO_COPY_PREFAULT is invalid with owned arena".to_string(),
-            ));
-        }
-        if owned_mode == GgufOwnedArenaMode::Disabled
-            && no_copy_mode == GgufNoCopyMode::Disabled
-            && prefault_mode != GgufNoCopyPrefaultMode::Default
-        {
-            return Err(MfError::LoadPolicy(
-                "QWEN_GGUF_NO_COPY_PREFAULT requires QWEN_GGUF_NO_COPY=1".to_string(),
-            ));
-        }
+        let storage_configuration = resolve_gguf_storage_load_configuration()?;
+        let no_copy_mode = storage_configuration.no_copy_mode;
+        let owned_mode = storage_configuration.owned_mode;
+        let parallel_mode = storage_configuration.parallel_mode;
+        let prefault_mode = storage_configuration.prefault_mode;
         let prefault_enabled = prefault_mode != GgufNoCopyPrefaultMode::Disabled;
         let explicit_override_present =
             auto_parallel_copy_a3b_override_present(|name| std::env::var_os(name).is_some());
@@ -2313,14 +2628,6 @@ impl MetalModel {
             explicit_override_present,
         );
         let embedding_mode = native_quant_embedding_mode();
-        if (owned_mode == GgufOwnedArenaMode::Forced || parallel_mode.is_forced())
-            && embedding_mode != NativeQuantEmbeddingMode::Auto
-        {
-            return Err(MfError::LoadPolicy(
-                "forced owned or parallel storage requires production-auto native embedding selection"
-                    .to_string(),
-            ));
-        }
         let forced_a10b_embedding = embedding_mode == NativeQuantEmbeddingMode::Auto
             && forced_a10b_parallel_pread_embedding_qualified(parallel_mode, gguf, model);
         let embedding_selection = if forced_a10b_embedding {
@@ -2341,6 +2648,29 @@ impl MetalModel {
         let router_f16 = moe_router_f16_enabled();
         let choices = ResolvedWeightLoadChoices::resolve(embedding_selection, router_f16);
         let expected = choices.storage_requests(model)?;
+        let exact_sentinel = matches_no_copy_27b_sentinel(gguf, model);
+        let direct_descriptors = expected
+            .iter()
+            .filter(|request| request.kind == ModelWeightStorageKind::Direct)
+            .map(|request| request.desc)
+            .collect::<Vec<_>>();
+        let mapping_unsupported_reason = if !ctx.device.hasUnifiedMemory() {
+            Some("automatic_mapping_unsupported_unified_memory_required")
+        } else {
+            match host_page_size_bytes() {
+                Ok(page_size) => retained_mapping_unsupported_reason(
+                    &gguf.shard_mapped_lengths(),
+                    &direct_descriptors,
+                    page_size,
+                    ctx.device.maxBufferLength(),
+                    exact_sentinel,
+                    expected
+                        .first()
+                        .is_some_and(|request| request.kind == ModelWeightStorageKind::Direct),
+                ),
+                Err(_) => Some("automatic_mapping_unsupported_host_page_geometry"),
+            }
+        };
         let auto = if auto_parallel_copy_a3b {
             match select_auto_parallel_copy_profile(
                 ctx,
@@ -2374,6 +2704,22 @@ impl MetalModel {
         } else {
             PreparedAutoSelection::NotEligible
         };
+        let copied_bytes_estimate =
+            expected
+                .iter()
+                .try_fold(0u64, |total, request| -> Result<u64, MfError> {
+                    let priced = ctx
+                        .shared_buffer_size_and_align(request.resident_bytes)
+                        .map_err(MfError::Metal)?
+                        .size;
+                    total.checked_add(priced).ok_or_else(|| {
+                        MfError::LoadPolicy("copied weight byte estimate overflow".into())
+                    })
+                })?;
+        let derived_bytes = choices.fused_qkv_priced_bytes(ctx, model)?;
+        let copied_bytes_estimate = copied_bytes_estimate
+            .checked_add(derived_bytes)
+            .ok_or_else(|| MfError::LoadPolicy("copied weight byte estimate overflow".into()))?;
         let auto_retained_eligible = auto_retained_single_pass_enabled(
             options.auto_retained_single_pass,
             ctx.device.hasUnifiedMemory(),
@@ -2388,6 +2734,56 @@ impl MetalModel {
             auto_retained_eligible,
             || retained_storage_plan_for_load(ctx, gguf, &expected),
         );
+        let copy_reason = if parallel_mode.is_forced() {
+            Some("explicit_parallel_copy_precedence")
+        } else if owned_mode == GgufOwnedArenaMode::Forced {
+            Some("explicit_owned_arena_precedence")
+        } else if matches!(&auto, PreparedAutoSelection::Selected(_)) {
+            Some("authenticated_parallel_copy_precedence")
+        } else {
+            None
+        };
+        let request = match no_copy_mode {
+            GgufNoCopyMode::Forced => GgufStorageRequest::Map("explicit_environment_override"),
+            GgufNoCopyMode::Disabled => GgufStorageRequest::Copy("explicit_environment_override"),
+            GgufNoCopyMode::Auto => {
+                if let Some(reason) = copy_reason {
+                    GgufStorageRequest::Copy(reason)
+                } else if matches!(&auto_retained, PreparedAutoRetainedSelection::Selected(_)) {
+                    GgufStorageRequest::Map("automatic_retained_storage_precedence")
+                } else {
+                    GgufStorageRequest::Automatic
+                }
+            }
+        };
+        let signals = ctx.memory_signals();
+        let decision = decide_gguf_storage_mode(
+            copied_bytes_estimate,
+            options.auxiliary_weight_bytes,
+            None,
+            signals.recommended_max_bytes,
+            signals.current_allocated_bytes,
+            ctx.device.hasUnifiedMemory(),
+            request,
+            mapping_unsupported_reason,
+        );
+        let maps_weights = decision.map_weights;
+        let resolved_no_copy_mode = if maps_weights {
+            GgufNoCopyMode::Forced
+        } else {
+            GgufNoCopyMode::Disabled
+        };
+        emit_metal_load_line(format_args!(
+            "{}",
+            gguf_storage_log_line(
+                if maps_weights { "mapped" } else { "copied" },
+                decision
+                    .copied_bytes
+                    .saturating_add(decision.auxiliary_weight_bytes),
+                signals.recommended_max_bytes,
+                decision.reason,
+            )
+        ));
         match &auto_retained {
             PreparedAutoRetainedSelection::Selected(plan) => emit_metal_load_line(format_args!(
                 concat!(
@@ -2408,7 +2804,7 @@ impl MetalModel {
             gguf,
             model,
             storage: ResolvedStoragePolicy {
-                no_copy_mode,
+                no_copy_mode: resolved_no_copy_mode,
                 prefault_enabled,
                 owned_mode,
                 parallel_mode,
@@ -2417,6 +2813,7 @@ impl MetalModel {
             expected,
             auto,
             auto_retained,
+            tight_copy: decision.tight_copy,
         })
     }
 
@@ -2432,6 +2829,7 @@ impl MetalModel {
             expected,
             auto,
             auto_retained,
+            ..
         } = prepared;
         let (direct_storage, exact_sentinel) = direct_storage_for_load(
             ctx,
@@ -2494,14 +2892,7 @@ impl MetalModel {
             ));
         }
         let embedding_mode = native_quant_embedding_mode();
-        if (owned_mode == GgufOwnedArenaMode::Forced || parallel_mode.is_forced())
-            && embedding_mode != NativeQuantEmbeddingMode::Auto
-        {
-            return Err(MfError::LoadPolicy(
-                "forced owned or parallel storage requires production-auto native embedding selection"
-                    .to_string(),
-            ));
-        }
+        validate_forced_storage_embedding_policy(owned_mode, parallel_mode, embedding_mode)?;
         let embedding_selection = resolve_native_quant_embedding(
             embedding_mode,
             native_quant_embedding_supported(model.token_embd.dtype, &model.token_embd.shape),

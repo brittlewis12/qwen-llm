@@ -419,7 +419,10 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
         )
     })?;
 
-    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load weights")?;
+    let mtp_weight_bytes = MetalMtpHead::priced_metal_weight_bytes(&ctx, mtp_view)
+        .context("price MTP head weights")?;
+    let mm = MetalModel::load_with_additional_metal_weight_bytes(&ctx, &g, &m, mtp_weight_bytes)
+        .context("metal-load weights")?;
     let mtp_load_start = Instant::now();
     let mtp_head = MetalMtpHead::load(&ctx, &g, mtp_view).context("metal-load MTP head")?;
     let mtp_load_ms = mtp_load_start.elapsed().as_secs_f64() * 1e3;

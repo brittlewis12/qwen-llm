@@ -27,6 +27,7 @@ use qwen_llm::metal_dflash::{
     dflash_capture_window_span, plan_prefill_scratch_with_matrix_max_pos_configured,
 };
 use qwen_llm::metal_forward::MetalForward;
+use qwen_llm::model_family::ModelFamily;
 use qwen_llm::runtime::Runtime;
 use qwen_llm::runtime::{LoadedModel, Sequence, SequenceConfig};
 use qwen_llm::sampling::{SAMPLER_ALGORITHM_VERSION, Sampler, SamplingConfig};
@@ -38,6 +39,10 @@ use std::time::Instant;
 
 const DFLASH_FIXED_SCRATCH_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 const RESTORED_TAIL_SCRATCH_LIMIT: u64 = 128 * 1024 * 1024;
+
+fn idle_keep_alive_storage_eligible(requested: bool, mapped_weights: bool) -> bool {
+    !requested || mapped_weights
+}
 /// Longest generation header (`<|im_start|>assistant\n` plus a preopened or
 /// preclosed think block) separating a rendered transcript from its
 /// generation suffix.
@@ -259,6 +264,7 @@ pub(crate) struct EngineBackend {
     /// The identified release's defaults for omitted sampling fields
     /// (`release_sampling`); `None` keeps [`request_sampler`]'s fallbacks.
     pub(super) release_sampling: Option<SamplingConfig>,
+    idle_residency: super::idle_residency::IdleResidency,
 }
 
 pub(super) struct Prepared {
@@ -338,6 +344,7 @@ pub(super) fn start(
     gguf: GgufFile,
     invocation: &crate::cli::ServeInvocation,
     listening: super::Listening,
+    idle_window: std::time::Duration,
 ) -> anyhow::Result<()> {
     crate::shutdown::checkpoint()?;
     let registry = invocation
@@ -350,12 +357,30 @@ pub(super) fn start(
         .transpose()
         .context("open fitted Lens assets before Metal")?;
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
+    let additional_metal_weight_bytes = invocation
+        .drafter
+        .as_deref()
+        .map(|path| {
+            let family = ModelFamily::detect(&gguf);
+            crate::drafter_policy::PreparedDrafter::prepare(
+                Some(path),
+                &gguf,
+                family,
+                crate::drafter_policy::Lane::Serve,
+            )?
+            .expect("drafter path was present")
+            .priced_metal_bytes(runtime.context(), &gguf)
+        })
+        .transpose()?;
     let load_started = Instant::now();
     let loaded = runtime
         .load_opened_gguf_with_config(
             gguf,
             invocation.model.clone(),
-            qwen_llm::runtime::LoadedModelConfig::default(),
+            qwen_llm::runtime::LoadedModelConfig {
+                additional_metal_weight_bytes: additional_metal_weight_bytes.unwrap_or(0),
+                ..qwen_llm::runtime::LoadedModelConfig::default()
+            },
         )
         .with_context(|| format!("load model {}", invocation.model.display()))?;
     let load_ms = load_started.elapsed().as_secs_f64() * 1e3;
@@ -366,6 +391,17 @@ pub(super) fn start(
     )?;
     loaded.set_prefix_cache_max_bytes(snapshot_cache_plan.bytes);
     loaded.set_prefix_cache_policy(snapshot_cache_plan.policy);
+    let mapped_weights = !loaded
+        .metal_model()
+        .retained_gguf_weight_buffers()
+        .is_empty();
+    anyhow::ensure!(
+        idle_keep_alive_storage_eligible(
+            invocation.idle_residency_secs.unwrap_or(0) != 0,
+            mapped_weights,
+        ),
+        "--idle-residency-secs requires retained GGUF weight buffers; the loaded model selected copied storage"
+    );
     let (context_ceiling, context_source) =
         match (invocation.max_context_tokens, prepared.declared_context) {
             (Some(explicit), _) => (explicit, "explicit"),
@@ -389,6 +425,9 @@ pub(super) fn start(
         prepared.template,
         prepared.no_thinking_supported,
     )?;
+    if mapped_weights && !idle_window.is_zero() {
+        backend.set_idle_residency(idle_window);
+    }
     backend.template_style = invocation.template_style;
     backend.release_sampling = Some(prepared.release_sampling);
     tracing::info!(target: "qwen_diag", "serve limits: family=qwen max_context_tokens={context_ceiling} context_source={context_source} {snapshot_cache_plan}");
@@ -486,6 +525,10 @@ impl EngineBackend {
             restore_source: "none",
             template_style: super::items::TemplateStyle::House,
             release_sampling: None,
+            idle_residency: super::idle_residency::IdleResidency::new(
+                "qwen",
+                std::time::Duration::ZERO,
+            ),
         })
     }
 }
@@ -1056,6 +1099,10 @@ fn prefill_remaining(
 }
 
 impl EngineBackend {
+    pub(super) fn set_idle_residency(&mut self, window: std::time::Duration) {
+        self.idle_residency = super::idle_residency::IdleResidency::new("qwen", window);
+    }
+
     fn prepare_request_front(
         &mut self,
         prompt_ids: &[i32],
@@ -1356,6 +1403,7 @@ impl GenerationBackend for EngineBackend {
         prepared: &super::native::Prepared,
         sink: &super::native::Sink,
     ) -> super::native::Outcome {
+        self.idle_residency.before_request();
         let result = (|| -> anyhow::Result<super::native::Outcome> {
             super::native::checkpoint(sink)?;
             let capacity = prepared.capacity()?;
@@ -1411,14 +1459,23 @@ impl GenerationBackend for EngineBackend {
     fn idle(&mut self) {
         super::log_expired_snapshots("qwen", &self.loaded.sweep_prefix_cache());
         self.durable_idle();
+        let buffers = self.loaded.metal_model().retained_gguf_weight_buffers();
+        self.idle_residency
+            .on_idle(self.loaded.context(), || buffers);
     }
 
     fn shutdown(&mut self) {
+        self.idle_residency.shutdown();
         self.durable_shutdown();
     }
 
     fn request_finished(&mut self) {
+        self.idle_residency.request_finished();
         self.durable_note_request_unwind();
+    }
+
+    fn request_failed_on_server(&mut self) {
+        self.idle_residency.request_failed_on_server();
     }
 
     fn request_profile(&self) -> super::request_profile::RequestProfile {
@@ -1437,6 +1494,7 @@ impl GenerationBackend for EngineBackend {
         prompt: &str,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
+        self.idle_residency.before_request();
         // One resolution, shared with the output ceiling.
         let max_tokens = self.output_limits().max_tokens(request);
         if max_tokens == 0 {
@@ -2483,6 +2541,13 @@ impl EngineBackend {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn qwen_idle_keep_alive_uses_the_loaded_storage_result() {
+        assert!(super::idle_keep_alive_storage_eligible(false, false));
+        assert!(!super::idle_keep_alive_storage_eligible(true, false));
+        assert!(super::idle_keep_alive_storage_eligible(true, true));
+    }
+
     #[test]
     fn generic_qwen_template_refuses_upstream_style() {
         let error = super::ensure_upstream_template_identified(

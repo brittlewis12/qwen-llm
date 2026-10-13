@@ -1824,7 +1824,7 @@ fn flush_prefill_phase(
         return Ok(());
     }
     cmd_buf.commit();
-    crate::metal::wait_unchecked(&cmd_buf);
+    crate::metal::wait_unchecked(cmd_buf);
     require_prefill_command_completed(cmd_buf)?;
     let gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
     *prefill_gpu_total_ms += gpu_ms;
@@ -1915,7 +1915,7 @@ fn flush_prefill_layer_phase(
         return Ok(());
     }
     cmd_buf.commit();
-    crate::metal::wait_unchecked(&cmd_buf);
+    crate::metal::wait_unchecked(cmd_buf);
     require_prefill_command_completed(cmd_buf)?;
     let gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
     *prefill_gpu_total_ms += gpu_ms;
@@ -1933,7 +1933,7 @@ fn flush_prefill_layer_phase_accum(
     prefill_gpu_total_ms: &mut f64,
 ) -> Result<f64, DFlashError> {
     cmd_buf.commit();
-    crate::metal::wait_unchecked(&cmd_buf);
+    crate::metal::wait_unchecked(cmd_buf);
     require_prefill_command_completed(cmd_buf)?;
     let gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
     *prefill_gpu_total_ms += gpu_ms;
@@ -4757,14 +4757,123 @@ pub fn dflash_k0s_scalar_contract_fixture() -> DFlashK0sScalarContractFixture {
     }
 }
 
+#[derive(Clone, Copy)]
+enum DFlashWeightRole {
+    F32,
+    Weight,
+}
+
+fn dflash_materialized_dtype(desc: &TensorDesc, role: DFlashWeightRole) -> GgmlType {
+    match role {
+        DFlashWeightRole::F32 => GgmlType::F32,
+        DFlashWeightRole::Weight if weight_dtype_kept_native(desc.dtype) => desc.dtype,
+        DFlashWeightRole::Weight => GgmlType::F32,
+    }
+}
+
+fn dflash_weight_inventory<'data>(
+    head: &DFlashHead<'data>,
+) -> Vec<(&'data TensorDesc, DFlashWeightRole)> {
+    let mut inventory = vec![
+        (head.fc, DFlashWeightRole::Weight),
+        (head.hidden_norm, DFlashWeightRole::F32),
+        (head.output_norm, DFlashWeightRole::F32),
+    ];
+    for layer in &head.layers {
+        inventory.extend([
+            (layer.attn_norm, DFlashWeightRole::F32),
+            (layer.q, DFlashWeightRole::Weight),
+            (layer.k, DFlashWeightRole::Weight),
+            (layer.v, DFlashWeightRole::Weight),
+            (layer.o, DFlashWeightRole::Weight),
+            (layer.q_norm, DFlashWeightRole::F32),
+            (layer.k_norm, DFlashWeightRole::F32),
+            (layer.post_attention_norm, DFlashWeightRole::F32),
+            (layer.ffn_gate, DFlashWeightRole::Weight),
+            (layer.ffn_up, DFlashWeightRole::Weight),
+            (layer.ffn_down, DFlashWeightRole::Weight),
+        ]);
+        if let Some(conv) = &layer.conv {
+            inventory.extend([
+                (conv.attn_base, DFlashWeightRole::F32),
+                (conv.attn_proj, DFlashWeightRole::Weight),
+                (conv.ffn_base, DFlashWeightRole::F32),
+                (conv.ffn_proj, DFlashWeightRole::Weight),
+            ]);
+        }
+    }
+    if let Some(selector) = &head.selector {
+        inventory.push((selector.hidden, DFlashWeightRole::Weight));
+    }
+    inventory
+}
+
+#[cfg(test)]
+mod dflash_weight_pricing_tests {
+    use super::{DFlashWeightRole, dflash_materialized_dtype};
+    use crate::tensor::{GgmlType, TensorDesc};
+
+    #[test]
+    fn f16_and_bf16_norm_and_conv_base_roles_price_as_f32() {
+        for dtype in [GgmlType::F16, GgmlType::BF16] {
+            let norm = TensorDesc {
+                name: "norm".into(),
+                shape: vec![8],
+                dtype,
+                shard_idx: 0,
+                data_offset: 0,
+                n_bytes: 16,
+            };
+            let conv_base = TensorDesc {
+                name: "conv_base".into(),
+                ..norm.clone()
+            };
+            assert_eq!(
+                dflash_materialized_dtype(&norm, DFlashWeightRole::F32),
+                GgmlType::F32
+            );
+            assert_eq!(
+                dflash_materialized_dtype(&conv_base, DFlashWeightRole::F32),
+                GgmlType::F32
+            );
+            assert_eq!(
+                dflash_materialized_dtype(&norm, DFlashWeightRole::Weight),
+                dtype
+            );
+        }
+    }
+}
+
 impl MetalDFlashHead {
+    pub fn priced_metal_weight_bytes(
+        ctx: &MetalContext,
+        head: &DFlashHead<'_>,
+    ) -> Result<u64, DFlashError> {
+        dflash_weight_inventory(head)
+            .into_iter()
+            .try_fold(0u64, |total, (desc, role)| {
+                let loaded_dtype = dflash_materialized_dtype(desc, role);
+                let logical = if loaded_dtype == desc.dtype {
+                    desc.n_bytes
+                } else {
+                    desc.n_elements()
+                        .checked_mul(4)
+                        .ok_or(DFlashError::BadDrafter("DFlash F32 estimate overflow"))?
+                };
+                let priced = ctx.shared_buffer_size_and_align(logical)?.size;
+                total
+                    .checked_add(priced)
+                    .ok_or(DFlashError::BadDrafter("DFlash priced estimate overflow"))
+            })
+    }
+
     pub fn load(
         ctx: &MetalContext,
         drafter_gguf: &GgufFile,
         head: &DFlashHead<'_>,
     ) -> Result<Self, DFlashError> {
         let load_f32 = |desc: &TensorDesc| -> Result<MetalTensor, DFlashError> {
-            if desc.dtype == GgmlType::F32 {
+            if dflash_materialized_dtype(desc, DFlashWeightRole::F32) == desc.dtype {
                 Ok(MetalTensor::from_gguf_tensor(
                     ctx,
                     desc,
@@ -4781,7 +4890,7 @@ impl MetalDFlashHead {
             }
         };
         let load_weight = |desc: &TensorDesc| -> Result<MetalTensor, DFlashError> {
-            if weight_dtype_kept_native(desc.dtype) {
+            if dflash_materialized_dtype(desc, DFlashWeightRole::Weight) == desc.dtype {
                 Ok(MetalTensor::from_gguf_tensor(
                     ctx,
                     desc,

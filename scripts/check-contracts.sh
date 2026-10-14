@@ -98,6 +98,7 @@ check_tree_has_no_match "relative model-directory literal found in Rust or scrip
 cargo fmt --all --check
 uv run scripts/reference/env_knobs.py --check
 uv run scripts/model-witnesses.py --self-test
+uv run scripts/qualification-witnesses.py --self-test
 uv run scripts/reference/normalize_paths.py --self-test
 uv run scripts/reference/normalize_paths.py --check
 if [ "$full" -eq 1 ]; then

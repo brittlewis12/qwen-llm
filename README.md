@@ -279,6 +279,8 @@ configuration is in `[workspace.lints]` in `Cargo.toml` and in `clippy.toml`.
 are ignored by default; `scripts/model-witnesses.py [NAME_FILTER]` runs them,
 finding models by file name in the directories listed in
 `QWEN_MODEL_SEARCH_PATH` (colon-separated), and fails if one is missing.
+`scripts/qualification-witnesses.py --out PATH` runs the device qualification
+witnesses reported by `qwen info --json` and writes an evidence report.
 `scripts/check-contracts.sh` checks formatting, the generated knob reference,
 the numeric comparison rules and machine-specific paths without a GPU.
 

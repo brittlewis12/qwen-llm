@@ -127,10 +127,17 @@ def witness_entry(record: dict, facet: str, args: argparse.Namespace, facts: dic
     if kind == "m4_characterization_skip" and not record.get("holds_for_device", False):
         entry["status"] = "not applicable on this device"
         entry["decline_reason"] = record.get("decline_reason")
+        entry["reason"] = "qualification does not hold for this device; skipped to avoid a vacuous pass"
         return entry, False
     environment, command = parse_command(value, kind)
     entry["argv"] = command
     entry["environment"] = environment
+    if kind == "scope_only":
+        entry["reason"] = "scope-only check; its result is not execution evidence"
+    elif kind == "m4_characterization_skip":
+        entry["reason"] = "qualification holds for this device; run the M4 characterization"
+    else:
+        entry["reason"] = "replay witness"
     if args.dry_run:
         entry["status"] = "would run" if kind != "scope_only" else "would run (scope-only)"
         return entry, False
@@ -210,13 +217,13 @@ def main() -> int:
         }
         args.out.expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
         args.out.expanduser().resolve().write_text(json.dumps(report, indent=2) + "\n")
-        print(f"{'PATH':52} {'WITNESS':13} STATUS")
+        print(f"{'PATH':52} {'WITNESS':13} {'STATUS':30} WHY")
         for record in report_records:
             for witness in record["witnesses"]:
                 status = witness["status"]
                 if witness.get("execution_status") == "failed":
                     status += " (execution failed)"
-                print(f"{record['path']:52} {witness['facet']:13} {status}")
+                print(f"{record['path']:52} {witness['facet']:13} {status:30} {witness.get('reason', '')}")
         print(f"Report: {args.out}")
         return 1 if any_failed else 0
     except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:

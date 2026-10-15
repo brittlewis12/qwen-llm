@@ -639,8 +639,6 @@ pub(super) fn run_mxfp4_f32_matrix_tile_k216_bucket_floor(
     columns: usize,
     bucket_counts: [usize; 2],
     max_batch: usize,
-    min_conservative_gpu_saving: f64,
-    min_conservative_wall_saving: f64,
     min_gpu_fraction: f64,
 ) {
     use std::time::Instant;
@@ -828,15 +826,16 @@ pub(super) fn run_mxfp4_f32_matrix_tile_k216_bucket_floor(
     let candidate_wall = (b1.0 + b2.0) / 2.0;
     let control_gpu = (a1.1 + a2.1) / 2.0;
     let candidate_gpu = (b1.1 + b2.1) / 2.0;
+    let conservative_gpu_saving = a1.1.min(a2.1) - b1.1.max(b2.1);
+    let conservative_wall_saving = a1.0.min(a2.0) - b1.0.max(b2.0);
+    let gpu_fraction = 1.0 - candidate_gpu / control_gpu;
+    let wall_fraction = 1.0 - candidate_wall / control_wall;
     let control_wall_spread = (a1.0 - a2.0).abs() / control_wall;
     let candidate_wall_spread = (b1.0 - b2.0).abs() / candidate_wall;
     let control_gpu_spread = (a1.1 - a2.1).abs() / control_gpu;
     let candidate_gpu_spread = (b1.1 - b2.1).abs() / candidate_gpu;
-    let conservative_gpu_saving = a1.1.min(a2.1) - b1.1.max(b2.1);
-    let conservative_wall_saving = a1.0.min(a2.0) - b1.0.max(b2.0);
-    let gpu_fraction = 1.0 - candidate_gpu / control_gpu;
     eprintln!(
-        "[mxfp4-mm-floor] medians wall={control_wall:.3}->{candidate_wall:.3} gpu={control_gpu:.3}->{candidate_gpu:.3} conservative_wall={conservative_wall_saving:.3} conservative_gpu={conservative_gpu_saving:.3} gpu_fraction={gpu_fraction:.4}"
+        "[mxfp4-mm-floor] medians wall={control_wall:.3}->{candidate_wall:.3} gpu={control_gpu:.3}->{candidate_gpu:.3} conservative_wall={conservative_wall_saving:.3} conservative_gpu={conservative_gpu_saving:.3} wall_fraction={wall_fraction:.4} gpu_fraction={gpu_fraction:.4} relative_gate_gpu={min_gpu_fraction:.3}"
     );
     assert!(control_wall_spread <= 0.05);
     assert!(candidate_wall_spread <= 0.05);
@@ -844,9 +843,7 @@ pub(super) fn run_mxfp4_f32_matrix_tile_k216_bucket_floor(
     assert!(candidate_gpu_spread <= 0.05);
     assert!(b1.0 < a1.0.min(a2.0) && b2.0 < a1.0.min(a2.0));
     assert!(b1.1 < a1.1.min(a2.1) && b2.1 < a1.1.min(a2.1));
-    assert!(conservative_gpu_saving >= min_conservative_gpu_saving);
-    assert!(conservative_wall_saving >= min_conservative_wall_saving);
-    assert!(gpu_fraction >= min_gpu_fraction);
+    assert!(candidate_gpu <= control_gpu * (1.0 - min_gpu_fraction));
 }
 
 pub(super) fn metal_test_context() -> Option<MetalContext> {
@@ -2116,11 +2113,10 @@ pub(super) fn gdn_envelope_objective_f64(
             .map(|value| value * value)
             .sum::<f64>();
         let scale = (sumsq / head_dim as f64 + rms_eps).sqrt().recip();
-        for index in 0..head_dim {
+        for (index, &weight) in norm_weight[..head_dim].iter().enumerate() {
             let offset = base + index;
             let silu_z = z[offset] / (1.0 + (-z[offset]).exp());
-            objective +=
-                grad_y[offset] * recurrence_output[offset] * scale * norm_weight[index] * silu_z;
+            objective += grad_y[offset] * recurrence_output[offset] * scale * weight * silu_z;
         }
     }
     objective

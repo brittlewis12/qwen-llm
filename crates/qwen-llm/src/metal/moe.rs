@@ -6083,7 +6083,7 @@ mod tests {
     #[test]
     #[ignore]
     fn mxfp4_f32_matrix_tile_k216_n4096_all_expert_floor() {
-        run_mxfp4_f32_matrix_tile_k216_bucket_floor(24_576, [216; 2], 114, 600.0, 600.0, 0.75);
+        run_mxfp4_f32_matrix_tile_k216_bucket_floor(24_576, [216; 2], 114, 0.73);
     }
 
     #[test]

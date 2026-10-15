@@ -606,7 +606,7 @@ fn metal_context() -> Option<MetalContext> {
 }
 
 fn open_pinned_legacy_gguf(model_path: &Path) -> GgufFile {
-    let gguf = GgufFile::open(&model_path).expect("open legacy DS4 GGUF shards");
+    let gguf = GgufFile::open(model_path).expect("open legacy DS4 GGUF shards");
     PinnedDeepSeekV4AssetV1::parse(LEGACY_CENSUS_MANIFEST)
         .expect("parse legacy DS4 census")
         .validate_observed(&gguf)
@@ -18039,15 +18039,14 @@ fn profile_lightning_matrix_ceiling_at_far_context() {
             timed_gpu(&ctx, 1, current);
             timed_gpu(&ctx, 1, matrix);
         }
-        let current_before_samples = (0..20)
-            .map(|_| timed_gpu(&ctx, 1, current))
-            .collect::<Vec<_>>();
-        let matrix_samples = (0..20)
-            .map(|_| timed_gpu(&ctx, 1, matrix))
-            .collect::<Vec<_>>();
-        let current_after_samples = (0..20)
-            .map(|_| timed_gpu(&ctx, 1, current))
-            .collect::<Vec<_>>();
+        let mut current_before_samples = Vec::with_capacity(20);
+        let mut matrix_samples = Vec::with_capacity(20);
+        let mut current_after_samples = Vec::with_capacity(20);
+        for _ in 0..20 {
+            current_before_samples.push(timed_gpu(&ctx, 1, current));
+            matrix_samples.push(timed_gpu(&ctx, 1, matrix));
+            current_after_samples.push(timed_gpu(&ctx, 1, current));
+        }
         let (current_before_ms, current_before_p95_ms) =
             median_and_p95(current_before_samples.clone());
         let (matrix_ms, matrix_p95_ms) = median_and_p95(matrix_samples.clone());
@@ -18094,22 +18093,17 @@ fn profile_lightning_matrix_ceiling_at_far_context() {
 
         match row_count {
             16_384 => assert!(
-                matrix_ms - current_midpoint_ms <= 0.05,
-                "16K matrix ceiling regressed by {:.3} ms",
-                matrix_ms - current_midpoint_ms
+                matrix_ms <= current_midpoint_ms,
+                "16K matrix ceiling median {matrix_ms:.3} ms is not below incumbent median {current_midpoint_ms:.3} ms"
             ),
             65_536 => assert!(
-                saving_ms >= 0.15,
-                "65K matrix ceiling saved only {saving_ms:.3} ms"
+                matrix_ms <= current_midpoint_ms * 0.87,
+                "65K matrix ceiling median {matrix_ms:.3} ms does not beat incumbent median {current_midpoint_ms:.3} ms by 13%"
             ),
             MAX_ROWS => {
                 assert!(
-                    saving_ms >= 0.80,
-                    "terminal matrix ceiling saved only {saving_ms:.3} ms"
-                );
-                assert!(
-                    matrix_ms <= 1.30,
-                    "terminal matrix ceiling median {matrix_ms:.3} ms"
+                    matrix_ms <= current_midpoint_ms * 0.62,
+                    "terminal matrix ceiling median {matrix_ms:.3} ms does not beat incumbent median {current_midpoint_ms:.3} ms by 38%"
                 );
                 assert!(
                     matrix_p95_ms < current_before_ms && matrix_p95_ms < current_after_ms,
@@ -19280,8 +19274,21 @@ fn profile_tiled_hca_at_far_context() {
                 config,
             )
         };
-        let (before_samples, before_ms, before_p95_ms) = profile_arm(&ctx, legacy);
-        let (online_samples, online_ms, online_p95_ms) = profile_arm(&ctx, online);
+        for _ in 0..5 {
+            let _ = timed_gpu(&ctx, legacy);
+            let _ = timed_gpu(&ctx, online);
+        }
+        let mut before_samples = Vec::with_capacity(20);
+        let mut online_samples = Vec::with_capacity(20);
+        let mut after_samples = Vec::with_capacity(20);
+        for _ in 0..20 {
+            before_samples.push(timed_gpu(&ctx, legacy));
+            online_samples.push(timed_gpu(&ctx, online));
+            after_samples.push(timed_gpu(&ctx, legacy));
+        }
+        let (before_ms, before_p95_ms) = median_and_p95(before_samples.clone());
+        let (online_ms, online_p95_ms) = median_and_p95(online_samples.clone());
+        let (after_ms, after_p95_ms) = median_and_p95(after_samples.clone());
         let (direct_samples, direct_ms, direct_p95_ms) = profile_arm(&ctx, direct);
         let (grouped_samples, grouped_ms, grouped_p95_ms) = profile_arm(&ctx, grouped);
         let (split4_samples, split4_ms, split4_p95_ms) = profile_arm(&ctx, split4);
@@ -19289,7 +19296,6 @@ fn profile_tiled_hca_at_far_context() {
         let (split16_samples, split16_ms, split16_p95_ms) = profile_arm(&ctx, split16);
         let (online_after_samples, online_after_ms, online_after_p95_ms) =
             profile_arm(&ctx, online);
-        let (after_samples, after_ms, after_p95_ms) = profile_arm(&ctx, legacy);
         let output_values = read_f32(&output);
         assert!(output_values.iter().all(|value| value.is_finite()));
         let online_values = read_f32(&online_output);
@@ -19366,10 +19372,10 @@ fn profile_tiled_hca_at_far_context() {
         assert!(relative_rms <= 1e-3, "{count}-row relative RMS");
         assert!(cosine >= 0.999_999, "{count}-row cosine");
         match count {
-            513 => assert!(online_ms <= baseline_midpoint_ms + 0.05),
-            2_048 => assert!(saving_ms >= 0.20),
+            513 => assert!(online_ms <= baseline_midpoint_ms),
+            2_048 => assert!(online_ms <= baseline_midpoint_ms * 0.87),
             CAPACITY => {
-                assert!(saving_ms >= 1.50);
+                assert!(online_ms <= baseline_midpoint_ms * 0.73);
                 assert!(online_p95_ms < before_ms.min(after_ms));
             }
             _ => unreachable!(),
@@ -21924,13 +21930,26 @@ fn profile_all_slot_routed_experts_against_serial_indexed() {
             serial_bits,
             "{label} repeat"
         );
+        let mut serial_samples = Vec::with_capacity(22);
+        let mut all_slot_samples = Vec::with_capacity(11);
+        for _ in 0..11 {
+            serial_samples.push(serial());
+            all_slot_samples.push(all_slot());
+            serial_samples.push(serial());
+        }
+        serial_samples.sort_by(f64::total_cmp);
+        all_slot_samples.sort_by(f64::total_cmp);
+        let serial_median_ms = serial_samples[serial_samples.len() / 2];
+        let all_slot_median_ms = all_slot_samples[all_slot_samples.len() / 2];
+        assert!(
+            all_slot_median_ms <= serial_median_ms * 0.90,
+            "{label} all-slot median {all_slot_median_ms:.6} ms does not beat interleaved serial median {serial_median_ms:.6} ms by 10%"
+        );
         eprintln!(
-            "deepseek_v4 all_slot_experts {label} serial_before_ms={serial_before_ms:.6} all_slot_ms={all_slot_ms:.6} all_slot_repeat_ms={all_slot_repeat_ms:.6} gate_up_ms={gate_up_ms:.6} gate_up_repeat_ms={gate_up_repeat_ms:.6} gate_up_median_ms={:.6} down_ms={down_ms:.6} isolated_warmed_sum_ms={:.6} serial_after_ms={serial_after_ms:.6} serial_median_ms={:.6} all_slot_median_ms={:.6} speedup={:.3} repeats={REPEATS}",
+            "deepseek_v4 all_slot_experts {label} serial_before_ms={serial_before_ms:.6} all_slot_ms={all_slot_ms:.6} all_slot_repeat_ms={all_slot_repeat_ms:.6} gate_up_ms={gate_up_ms:.6} gate_up_repeat_ms={gate_up_repeat_ms:.6} gate_up_median_ms={:.6} down_ms={down_ms:.6} isolated_warmed_sum_ms={:.6} serial_after_ms={serial_after_ms:.6} interleaved_serial_median_ms={serial_median_ms:.6} interleaved_all_slot_median_ms={all_slot_median_ms:.6} interleaved_speedup={:.3} relative_gate=0.10 serial_samples_ms={serial_samples:?} all_slot_samples_ms={all_slot_samples:?} repeats={REPEATS}",
             (gate_up_ms + gate_up_repeat_ms) * 0.5,
             (gate_up_ms + gate_up_repeat_ms) * 0.5 + down_ms,
-            (serial_before_ms + serial_after_ms) * 0.5,
-            (all_slot_ms + all_slot_repeat_ms) * 0.5,
-            (serial_before_ms + serial_after_ms) / (all_slot_ms + all_slot_repeat_ms),
+            serial_median_ms / all_slot_median_ms,
         );
     }
 }

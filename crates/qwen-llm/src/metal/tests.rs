@@ -197,7 +197,7 @@ fn mxfp4_f32_matrix_tile_matches_scalar_envelope_and_guards() {
 #[test]
 #[ignore]
 fn mxfp4_f32_matrix_tile_k216_n2048_bucket_floor() {
-    run_mxfp4_f32_matrix_tile_k216_bucket_floor(12_288, [160, 166], 77, 250.0, 200.0, 0.50);
+    run_mxfp4_f32_matrix_tile_k216_bucket_floor(12_288, [160, 166], 77, 0.60);
 }
 
 #[test]

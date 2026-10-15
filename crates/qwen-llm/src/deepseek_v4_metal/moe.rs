@@ -1252,6 +1252,35 @@ impl DeepSeekV4MoeScratch {
         )
     }
 
+    #[cfg(test)]
+    pub(super) fn encode_routed_experts_all_slots_q3q4_fast_test_path(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        gate_bank: &MetalTensor,
+        up_bank: &MetalTensor,
+        down_bank: &MetalTensor,
+        expert_clamp: f32,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        if !deepseek_v4_all_slots_q3q4_artifact_scope_matches(
+            self.config,
+            gate_bank.dtype,
+            up_bank.dtype,
+            down_bank.dtype,
+        ) {
+            return invalid("test fast all-slot Q3_K/Q4_K path requires the K160 artifact scope");
+        }
+        self.encode_routed_experts_all_slots_q3q4_fast_from_record(
+            ctx,
+            enc,
+            gate_bank,
+            up_bank,
+            down_bank,
+            expert_clamp,
+            &self.default_route_record(),
+        )
+    }
+
     pub(super) fn encode_shared_expert(
         &self,
         ctx: &MetalContext,
@@ -1523,7 +1552,18 @@ pub(super) fn deepseek_v4_all_slots_q3q4_scope_qualified(
     down_dtype: GgmlType,
 ) -> bool {
     deepseek_v4_all_slots_q3q4_qualification().holds_for(facts)
-        && config.hidden_size == DEEPSEEK_V4_HIDDEN_SIZE
+        && deepseek_v4_all_slots_q3q4_artifact_scope_matches(
+            config, gate_dtype, up_dtype, down_dtype,
+        )
+}
+
+pub(super) fn deepseek_v4_all_slots_q3q4_artifact_scope_matches(
+    config: DeepSeekV4MoeConfig,
+    gate_dtype: GgmlType,
+    up_dtype: GgmlType,
+    down_dtype: GgmlType,
+) -> bool {
+    config.hidden_size == DEEPSEEK_V4_HIDDEN_SIZE
         && config.ffn_size == DEEPSEEK_V4_ALL_SLOTS_Q3Q4_FFN_SIZE
         && config.expert_count == DEEPSEEK_V4_ALL_SLOTS_Q3Q4_EXPERT_COUNT
         && config.top_k == DEEPSEEK_V4_ROUTE_MAX_TOP_K

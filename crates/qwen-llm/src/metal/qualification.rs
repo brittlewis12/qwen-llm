@@ -411,9 +411,9 @@ pub static DEEPSEEK_V4_ALL_SLOTS_Q3Q4: Qualification = Qualification {
     required_headroom_bytes: None,
     required_headroom_scope: None,
     evidence: "PERF-LOG 2026-08-07: K160 All-Slot Decode Default GO",
-    correctness: "QWEN_METAL_LEASE_WAIT=1 QWEN_DSV4_ALL_SLOTS_Q3Q4=1 QWEN_DSV4_ALL_SLOTS_Q3Q4_FAST=1 cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::all_slot_q3q4_fast_k160_matches_generic_and_serial_with_dispatch_evidence -- --exact --nocapture",
+    correctness: "QWEN_METAL_LEASE_WAIT=1 cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::all_slot_q3q4_fast_k160_matches_generic_and_serial_with_dispatch_evidence -- --exact --nocapture",
     correctness_kind: QualificationWitnessKind::Replay,
-    performance: "QWEN_METAL_LEASE_WAIT=1 QWEN_DSV4_ALL_SLOTS_Q3Q4=1 QWEN_DSV4_ALL_SLOTS_Q3Q4_FAST=1 cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_all_slot_routed_experts_against_serial_indexed -- --ignored --exact --nocapture",
+    performance: "QWEN_METAL_LEASE_WAIT=1 cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_all_slot_routed_experts_against_serial_indexed -- --ignored --exact --nocapture",
     performance_kind: QualificationWitnessKind::Replay,
 };
 pub static DEEPSEEK_V4_RESIDENCY_SET: Qualification = Qualification {

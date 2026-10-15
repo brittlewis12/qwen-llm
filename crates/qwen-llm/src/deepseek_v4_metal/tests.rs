@@ -19910,6 +19910,12 @@ fn all_slot_q3q4_fast_scope_is_exactly_k160_m4() {
         top_k: DEEPSEEK_V4_ROUTE_MAX_TOP_K,
         routed_scale: 1.0,
     };
+    assert!(deepseek_v4_all_slots_q3q4_artifact_scope_matches(
+        qualified,
+        GgmlType::Q3_K,
+        GgmlType::Q3_K,
+        GgmlType::Q4_K,
+    ));
     assert!(deepseek_v4_all_slots_q3q4_scope_qualified(
         &m4,
         qualified,
@@ -21227,13 +21233,14 @@ fn all_slot_q3q4_fast_k160_matches_generic_and_serial_with_dispatch_evidence() {
         routed_scale: 1.0,
     };
     let scratch = DeepSeekV4MoeScratch::new(&ctx, config).unwrap();
-    assert!(deepseek_v4_all_slots_q3q4_scope_qualified(
-        ctx.device_facts(),
+    assert!(deepseek_v4_all_slots_q3q4_artifact_scope_matches(
         config,
         GgmlType::Q3_K,
         GgmlType::Q3_K,
         GgmlType::Q4_K,
     ));
+    let live_qualification_holds =
+        deepseek_v4_all_slots_q3q4_qualification().holds_for(ctx.device_facts());
     let ids = [159, 0, 158, 1, 157, 2];
     host_write_f32(
         &scratch.normalized_input,
@@ -21339,7 +21346,9 @@ fn all_slot_q3q4_fast_k160_matches_generic_and_serial_with_dispatch_evidence() {
 
     let fast_census = dispatch(&|encoder| {
         scratch
-            .encode_routed_experts_all_slots(&ctx, encoder, &gate_bank, &up_bank, &down_bank, CLAMP)
+            .encode_routed_experts_all_slots_q3q4_fast_test_path(
+                &ctx, encoder, &gate_bank, &up_bank, &down_bank, CLAMP,
+            )
             .unwrap();
     });
     let fast_q3 = "kernel_deepseek_v4_all_slots_mat_vec_q3_K_f32_fast";
@@ -21381,6 +21390,38 @@ fn all_slot_q3q4_fast_k160_matches_generic_and_serial_with_dispatch_evidence() {
         &generic_output,
         1e-3,
     );
+    if live_qualification_holds {
+        let production_census = dispatch(&|encoder| {
+            scratch
+                .encode_routed_experts_all_slots(
+                    &ctx, encoder, &gate_bank, &up_bank, &down_bank, CLAMP,
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            production_census
+                .iter()
+                .filter(|row| row.kernel == fast_q3)
+                .count(),
+            2,
+            "qualified production selection Q3_K census"
+        );
+        assert_eq!(
+            production_census
+                .iter()
+                .filter(|row| row.kernel == fast_q4)
+                .count(),
+            1,
+            "qualified production selection Q4_K census"
+        );
+        eprintln!(
+            "all_slot_q3q4_production_selection qualified=true dispatches={:?}",
+            production_census
+                .iter()
+                .map(|row| row.kernel.as_str())
+                .collect::<Vec<_>>(),
+        );
+    }
     let serial_census = dispatch(&|encoder| {
         scratch
             .encode_routed_experts_indexed(&ctx, encoder, &gate_bank, &up_bank, &down_bank, CLAMP)
@@ -22102,6 +22143,13 @@ fn profile_all_slot_routed_experts_against_serial_indexed() {
         };
         let fast = || {
             measure_attributed(&|encoder| {
+                scratch.encode_routed_experts_all_slots_q3q4_fast_test_path(
+                    &ctx, encoder, &gate_bank, &up_bank, &down_bank, 10.0,
+                )
+            })
+        };
+        let production_selection = || {
+            measure_attributed(&|encoder| {
                 scratch.encode_routed_experts_all_slots(
                     &ctx, encoder, &gate_bank, &up_bank, &down_bank, 10.0,
                 )
@@ -22155,13 +22203,39 @@ fn profile_all_slot_routed_experts_against_serial_indexed() {
             })
         };
         if gate_dtype == GgmlType::Q3_K {
-            assert!(deepseek_v4_all_slots_q3q4_scope_qualified(
-                ctx.device_facts(),
-                config,
-                gate_dtype,
-                gate_dtype,
-                down_dtype,
+            assert!(deepseek_v4_all_slots_q3q4_artifact_scope_matches(
+                config, gate_dtype, gate_dtype, down_dtype,
             ));
+            if deepseek_v4_all_slots_q3q4_qualification().holds_for(ctx.device_facts()) {
+                let (_, production_census) = production_selection();
+                assert_eq!(
+                    production_census
+                        .iter()
+                        .filter(|row| {
+                            row.kernel == "kernel_deepseek_v4_all_slots_mat_vec_q3_K_f32_fast"
+                        })
+                        .count(),
+                    2 * REPEATS,
+                    "qualified production selection Q3_K census"
+                );
+                assert_eq!(
+                    production_census
+                        .iter()
+                        .filter(|row| {
+                            row.kernel == "kernel_deepseek_v4_all_slots_mat_vec_q4_K_f32_fast"
+                        })
+                        .count(),
+                    REPEATS,
+                    "qualified production selection Q4_K census"
+                );
+                eprintln!(
+                    "all_slot_q3q4_production_selection qualified=true dispatches={:?}",
+                    production_census
+                        .iter()
+                        .map(|row| row.kernel.as_str())
+                        .collect::<Vec<_>>(),
+                );
+            }
         }
         let serial_before_ms = serial();
         let serial_values = read_f32(scratch.expert_outputs());

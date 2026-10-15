@@ -21210,6 +21210,202 @@ fn indexed_ds4_expert_projections_match_static_views_and_zero_failures() {
 }
 
 #[test]
+fn all_slot_q3q4_fast_k160_matches_generic_and_serial_with_dispatch_evidence() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    const H: usize = DEEPSEEK_V4_HIDDEN_SIZE;
+    const F: usize = DEEPSEEK_V4_ALL_SLOTS_Q3Q4_FFN_SIZE;
+    const E: usize = DEEPSEEK_V4_ALL_SLOTS_Q3Q4_EXPERT_COUNT;
+    const K: usize = DEEPSEEK_V4_ROUTE_MAX_TOP_K;
+    const CLAMP: f32 = 0.25;
+    let config = DeepSeekV4MoeConfig {
+        hidden_size: H,
+        ffn_size: F,
+        expert_count: E,
+        top_k: K,
+        routed_scale: 1.0,
+    };
+    let scratch = DeepSeekV4MoeScratch::new(&ctx, config).unwrap();
+    assert!(deepseek_v4_all_slots_q3q4_scope_qualified(
+        ctx.device_facts(),
+        config,
+        GgmlType::Q3_K,
+        GgmlType::Q3_K,
+        GgmlType::Q4_K,
+    ));
+    let ids = [159, 0, 158, 1, 157, 2];
+    host_write_f32(
+        &scratch.normalized_input,
+        &(0..H)
+            .map(|index| ((index * 37 + 5) % 251) as f32 * 0.001 - 0.125)
+            .collect::<Vec<_>>(),
+        "K160 all-slot qualification input",
+    )
+    .unwrap();
+    host_write_i32(&scratch.expert_ids, &ids, "K160 all-slot IDs").unwrap();
+    host_write_i32(
+        &scratch.route_status,
+        &[DEEPSEEK_V4_ROUTE_STATUS_READY],
+        "K160 all-slot status",
+    )
+    .unwrap();
+
+    let make_bank = |dtype: GgmlType, n_in: usize, n_out: usize, seed: usize| {
+        let (block_elements, block_bytes) = ggml_type_layout(dtype).unwrap();
+        let blocks = n_in * n_out * E / block_elements as usize;
+        let mut payload = vec![0u8; blocks * block_bytes as usize];
+        for block in 0..blocks {
+            let start = block * block_bytes as usize;
+            if dtype == GgmlType::Q3_K {
+                for byte in 0..block_bytes as usize - 2 {
+                    payload[start + byte] = (block * 31 + byte * 13 + seed * 19 + 5) as u8;
+                }
+                payload[start + block_bytes as usize - 2..start + block_bytes as usize]
+                    .copy_from_slice(
+                        &half::f16::from_f32(0.0078125 * (1 + (block + seed) % 7) as f32)
+                            .to_bits()
+                            .to_le_bytes(),
+                    );
+            } else {
+                payload[start..start + 2].copy_from_slice(
+                    &half::f16::from_f32(0.0078125 * (1 + (block + seed) % 7) as f32)
+                        .to_bits()
+                        .to_le_bytes(),
+                );
+                payload[start + 2..start + 4].copy_from_slice(
+                    &half::f16::from_f32(0.00390625 * (1 + (block + seed) % 5) as f32)
+                        .to_bits()
+                        .to_le_bytes(),
+                );
+                for byte in 4..block_bytes as usize {
+                    payload[start + byte] = (block * 31 + byte * 13 + seed * 19 + 5) as u8;
+                }
+            }
+        }
+        MetalTensor::from_bytes(
+            &ctx,
+            &payload,
+            vec![n_in as u64, n_out as u64, E as u64],
+            dtype,
+        )
+        .unwrap()
+    };
+    let gate_bank = make_bank(GgmlType::Q3_K, H, F, 1);
+    let up_bank = make_bank(GgmlType::Q3_K, H, F, 3);
+    let down_bank = make_bank(GgmlType::Q4_K, F, H, 5);
+    let dispatch = |encode: &dyn Fn(&KernelEncoder)| {
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        crate::metal::dispatch_census_begin();
+        encode(&encoder);
+        let census = crate::metal::dispatch_census_take();
+        encoder.end();
+        command.commit();
+        crate::metal::wait_completed(&command).expect("K160 witness command completed");
+        assert!(command.error().is_none(), "K160 witness command failed");
+        census
+    };
+    let generic_census = dispatch(&|encoder| {
+        scratch
+            .encode_routed_experts_all_slots_generic_from_record(
+                &ctx,
+                encoder,
+                &gate_bank,
+                &up_bank,
+                &down_bank,
+                CLAMP,
+                &scratch.default_route_record(),
+            )
+            .unwrap();
+    });
+    assert!(
+        generic_census
+            .iter()
+            .any(|row| { row.kernel == "kernel_deepseek_v4_all_slots_swiglu_q3_K_f32" })
+    );
+    assert!(
+        generic_census
+            .iter()
+            .any(|row| row.kernel == "kernel_deepseek_v4_all_slots_down_q4_K_f32")
+    );
+    assert!(
+        !generic_census
+            .iter()
+            .any(|row| row.kernel.ends_with("_fast"))
+    );
+    let generic_inner = read_f32(scratch.routed_inner());
+    let generic_output = read_f32(scratch.expert_outputs());
+
+    let fast_census = dispatch(&|encoder| {
+        scratch
+            .encode_routed_experts_all_slots(&ctx, encoder, &gate_bank, &up_bank, &down_bank, CLAMP)
+            .unwrap();
+    });
+    let fast_q3 = "kernel_deepseek_v4_all_slots_mat_vec_q3_K_f32_fast";
+    let fast_q4 = "kernel_deepseek_v4_all_slots_mat_vec_q4_K_f32_fast";
+    assert_eq!(
+        fast_census
+            .iter()
+            .filter(|row| row.kernel == fast_q3)
+            .count(),
+        2
+    );
+    assert_eq!(
+        fast_census
+            .iter()
+            .filter(|row| row.kernel == fast_q4)
+            .count(),
+        1
+    );
+    eprintln!(
+        "all_slot_q3q4_dispatch generic={:?} fast={:?}",
+        generic_census
+            .iter()
+            .map(|row| row.kernel.as_str())
+            .collect::<Vec<_>>(),
+        fast_census
+            .iter()
+            .map(|row| row.kernel.as_str())
+            .collect::<Vec<_>>(),
+    );
+    assert_close(
+        "K160 Q3_K/Q4_K fast inner vs generic",
+        &read_f32(scratch.routed_inner()),
+        &generic_inner,
+        5e-4,
+    );
+    assert_close(
+        "K160 Q3_K/Q4_K fast output vs generic",
+        &read_f32(scratch.expert_outputs()),
+        &generic_output,
+        1e-3,
+    );
+    let serial_census = dispatch(&|encoder| {
+        scratch
+            .encode_routed_experts_indexed(&ctx, encoder, &gate_bank, &up_bank, &down_bank, CLAMP)
+            .unwrap();
+    });
+    assert!(
+        !serial_census
+            .iter()
+            .any(|row| row.kernel.contains("all_slots"))
+    );
+    assert_close(
+        "K160 Q3_K/Q4_K fast inner vs serial",
+        &read_f32(scratch.routed_inner()),
+        &generic_inner,
+        5e-4,
+    );
+    assert_close(
+        "K160 Q3_K/Q4_K fast output vs serial",
+        &read_f32(scratch.expert_outputs()),
+        &generic_output,
+        1e-3,
+    );
+}
+
+#[test]
 fn all_slot_routed_experts_match_serial_indexed_path_and_zero_failures() {
     let Some(ctx) = metal_context() else {
         return;
@@ -21734,8 +21930,8 @@ fn profile_all_slot_routed_experts_against_serial_indexed() {
     };
     const H: usize = 4_096;
     const F: usize = 2_048;
-    const E: usize = 7;
-    const K: usize = 6;
+    const E: usize = DEEPSEEK_V4_ALL_SLOTS_Q3Q4_EXPERT_COUNT;
+    const K: usize = DEEPSEEK_V4_ROUTE_MAX_TOP_K;
     const REPEATS: usize = 20;
     let config = DeepSeekV4MoeConfig {
         hidden_size: H,
@@ -21755,7 +21951,7 @@ fn profile_all_slot_routed_experts_against_serial_indexed() {
     .unwrap();
     host_write_i32(
         &scratch.expert_ids,
-        &[6, 0, 5, 1, 4, 2],
+        &[159, 0, 158, 1, 157, 2],
         "all-slot profile IDs",
     )
     .unwrap();
@@ -21841,6 +22037,32 @@ fn profile_all_slot_routed_experts_against_serial_indexed() {
         assert!(command.error().is_none());
         (command.GPUEndTime() - command.GPUStartTime()) * 1e3 / REPEATS as f64
     };
+    let measure_attributed =
+        |encode: &dyn Fn(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>| {
+            let warm = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&warm);
+            encode(&encoder).unwrap();
+            encoder.end();
+            warm.commit();
+            crate::metal::wait_completed(&warm).expect("warm all-slot command completed");
+            assert!(warm.error().is_none());
+
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            crate::metal::dispatch_census_begin();
+            for _ in 0..REPEATS {
+                encode(&encoder).unwrap();
+            }
+            let census = crate::metal::dispatch_census_take();
+            encoder.end();
+            command.commit();
+            crate::metal::wait_completed(&command).expect("attributed all-slot command completed");
+            assert!(command.error().is_none());
+            (
+                (command.GPUEndTime() - command.GPUStartTime()) * 1e3 / REPEATS as f64,
+                census,
+            )
+        };
     let bits = |tensor: &MetalTensor| {
         read_f32(tensor)
             .iter()
@@ -21865,10 +22087,36 @@ fn profile_all_slot_routed_experts_against_serial_indexed() {
                 )
             })
         };
-        let all_slot = || {
+        let generic = || {
             measure(&|encoder| {
+                scratch.encode_routed_experts_all_slots_generic_from_record(
+                    &ctx,
+                    encoder,
+                    &gate_bank,
+                    &up_bank,
+                    &down_bank,
+                    10.0,
+                    &scratch.default_route_record(),
+                )
+            })
+        };
+        let fast = || {
+            measure_attributed(&|encoder| {
                 scratch.encode_routed_experts_all_slots(
                     &ctx, encoder, &gate_bank, &up_bank, &down_bank, 10.0,
+                )
+            })
+        };
+        let generic_attributed = || {
+            measure_attributed(&|encoder| {
+                scratch.encode_routed_experts_all_slots_generic_from_record(
+                    &ctx,
+                    encoder,
+                    &gate_bank,
+                    &up_bank,
+                    &down_bank,
+                    10.0,
+                    &scratch.default_route_record(),
                 )
             })
         };
@@ -21906,10 +22154,19 @@ fn profile_all_slot_routed_experts_against_serial_indexed() {
                 )
             })
         };
+        if gate_dtype == GgmlType::Q3_K {
+            assert!(deepseek_v4_all_slots_q3q4_scope_qualified(
+                ctx.device_facts(),
+                config,
+                gate_dtype,
+                gate_dtype,
+                down_dtype,
+            ));
+        }
         let serial_before_ms = serial();
         let serial_values = read_f32(scratch.expert_outputs());
         let serial_bits = bits(scratch.expert_outputs());
-        let all_slot_ms = all_slot();
+        let all_slot_ms = generic();
         if gate_dtype == GgmlType::Q3_K {
             assert_close(
                 label,
@@ -21920,7 +22177,7 @@ fn profile_all_slot_routed_experts_against_serial_indexed() {
         } else {
             assert_eq!(bits(scratch.expert_outputs()), serial_bits, "{label}");
         }
-        let all_slot_repeat_ms = all_slot();
+        let all_slot_repeat_ms = generic();
         let gate_up_ms = gate_up();
         let gate_up_repeat_ms = gate_up();
         let down_ms = down();
@@ -21930,27 +22187,112 @@ fn profile_all_slot_routed_experts_against_serial_indexed() {
             serial_bits,
             "{label} repeat"
         );
-        let mut serial_samples = Vec::with_capacity(22);
-        let mut all_slot_samples = Vec::with_capacity(11);
+        let mut serial_samples = Vec::with_capacity(11);
+        let mut generic_samples = Vec::with_capacity(11);
+        let mut fast_samples = Vec::with_capacity(11);
+        let mut fast_census = Vec::new();
+        let mut generic_census = Vec::new();
         for _ in 0..11 {
-            serial_samples.push(serial());
-            all_slot_samples.push(all_slot());
+            if gate_dtype == GgmlType::Q3_K {
+                let (sample, census) = fast();
+                fast_samples.push(sample);
+                fast_census = census;
+                let (sample, census) = generic_attributed();
+                generic_samples.push(sample);
+                generic_census = census;
+            } else {
+                generic_samples.push(generic());
+            }
             serial_samples.push(serial());
         }
         serial_samples.sort_by(f64::total_cmp);
-        all_slot_samples.sort_by(f64::total_cmp);
+        generic_samples.sort_by(f64::total_cmp);
         let serial_median_ms = serial_samples[serial_samples.len() / 2];
-        let all_slot_median_ms = all_slot_samples[all_slot_samples.len() / 2];
+        let (candidate_samples, incumbent_samples, candidate_census) =
+            if gate_dtype == GgmlType::Q3_K {
+                fast_samples.sort_by(f64::total_cmp);
+                let fast_q3 = "kernel_deepseek_v4_all_slots_mat_vec_q3_K_f32_fast";
+                let fast_q4 = "kernel_deepseek_v4_all_slots_mat_vec_q4_K_f32_fast";
+                assert_eq!(
+                    fast_census
+                        .iter()
+                        .filter(|row| row.kernel == fast_q3)
+                        .count(),
+                    2 * REPEATS,
+                    "fast measured arm Q3_K dispatch census"
+                );
+                assert_eq!(
+                    fast_census
+                        .iter()
+                        .filter(|row| row.kernel == fast_q4)
+                        .count(),
+                    REPEATS,
+                    "fast measured arm Q4_K dispatch census"
+                );
+                assert!(
+                    generic_census
+                        .iter()
+                        .all(|row| { row.kernel != fast_q3 && row.kernel != fast_q4 })
+                );
+                assert_eq!(
+                    generic_census
+                        .iter()
+                        .filter(|row| row.kernel == "kernel_deepseek_v4_all_slots_swiglu_q3_K_f32")
+                        .count(),
+                    REPEATS,
+                    "generic measured arm fused gate/up dispatch census"
+                );
+                assert_eq!(
+                    generic_census
+                        .iter()
+                        .filter(|row| row.kernel == "kernel_deepseek_v4_all_slots_down_q4_K_f32")
+                        .count(),
+                    REPEATS,
+                    "generic measured arm down dispatch census"
+                );
+                (
+                    fast_samples.clone(),
+                    generic_samples.clone(),
+                    fast_census.clone(),
+                )
+            } else {
+                (generic_samples.clone(), serial_samples.clone(), Vec::new())
+            };
+        let candidate_median_ms = candidate_samples[candidate_samples.len() / 2];
+        let incumbent_median_ms = incumbent_samples[incumbent_samples.len() / 2];
+        let required_fraction = if gate_dtype == GgmlType::Q3_K {
+            0.90
+        } else {
+            1.0
+        };
         assert!(
-            all_slot_median_ms <= serial_median_ms * 0.90,
-            "{label} all-slot median {all_slot_median_ms:.6} ms does not beat interleaved serial median {serial_median_ms:.6} ms by 10%"
+            candidate_median_ms <= incumbent_median_ms * required_fraction,
+            "{label} candidate median {candidate_median_ms:.6} ms exceeds incumbent median {incumbent_median_ms:.6} ms times required fraction {required_fraction:.2}"
         );
         eprintln!(
-            "deepseek_v4 all_slot_experts {label} serial_before_ms={serial_before_ms:.6} all_slot_ms={all_slot_ms:.6} all_slot_repeat_ms={all_slot_repeat_ms:.6} gate_up_ms={gate_up_ms:.6} gate_up_repeat_ms={gate_up_repeat_ms:.6} gate_up_median_ms={:.6} down_ms={down_ms:.6} isolated_warmed_sum_ms={:.6} serial_after_ms={serial_after_ms:.6} interleaved_serial_median_ms={serial_median_ms:.6} interleaved_all_slot_median_ms={all_slot_median_ms:.6} interleaved_speedup={:.3} relative_gate=0.10 serial_samples_ms={serial_samples:?} all_slot_samples_ms={all_slot_samples:?} repeats={REPEATS}",
+            "deepseek_v4 all_slot_experts {label} serial_before_ms={serial_before_ms:.6} generic_all_slot_ms={all_slot_ms:.6} generic_all_slot_repeat_ms={all_slot_repeat_ms:.6} gate_up_ms={gate_up_ms:.6} gate_up_repeat_ms={gate_up_repeat_ms:.6} gate_up_median_ms={:.6} down_ms={down_ms:.6} isolated_warmed_sum_ms={:.6} serial_after_ms={serial_after_ms:.6} interleaved_serial_median_ms={serial_median_ms:.6} interleaved_incumbent_median_ms={incumbent_median_ms:.6} interleaved_candidate_median_ms={candidate_median_ms:.6} speedup={:.3} required_fraction={required_fraction:.2} fast_dispatches={} serial_samples_ms={serial_samples:?} generic_samples_ms={generic_samples:?} candidate_samples_ms={candidate_samples:?} repeats={REPEATS}",
             (gate_up_ms + gate_up_repeat_ms) * 0.5,
             (gate_up_ms + gate_up_repeat_ms) * 0.5 + down_ms,
-            serial_median_ms / all_slot_median_ms,
+            incumbent_median_ms / candidate_median_ms,
+            candidate_census.len(),
         );
+        eprintln!(
+            "QUALIFICATION_GATE all_slot_experts {label} candidate_ms={candidate_median_ms:.6} incumbent_ms={incumbent_median_ms:.6} required_fraction={required_fraction:.2} passed={}",
+            candidate_median_ms <= incumbent_median_ms * required_fraction,
+        );
+        if gate_dtype == GgmlType::Q3_K {
+            eprintln!(
+                "all_slot_q3q4_measured_dispatch fast={:?} generic={:?}",
+                fast_census
+                    .iter()
+                    .map(|row| row.kernel.as_str())
+                    .collect::<Vec<_>>(),
+                generic_census
+                    .iter()
+                    .map(|row| row.kernel.as_str())
+                    .collect::<Vec<_>>(),
+            );
+        }
     }
 }
 

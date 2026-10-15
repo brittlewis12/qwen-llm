@@ -1081,6 +1081,62 @@ impl DeepSeekV4MoeScratch {
                 );
             });
         }
+        self.encode_routed_experts_all_slots_generic_from_record(
+            ctx,
+            enc,
+            gate_bank,
+            up_bank,
+            down_bank,
+            expert_clamp,
+            record,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn encode_routed_experts_all_slots_generic_from_record(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        gate_bank: &MetalTensor,
+        up_bank: &MetalTensor,
+        down_bank: &MetalTensor,
+        expert_clamp: f32,
+        record: &DeepSeekV4RouteRecord,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        require_serial(enc, "deepseek_v4_moe_routed_experts_all_slots_generic")?;
+        let c = self.config;
+        if c.top_k != DEEPSEEK_V4_ROUTE_MAX_TOP_K {
+            return invalid(format!(
+                "all-slot routed experts require top-k {DEEPSEEK_V4_ROUTE_MAX_TOP_K}, got {}",
+                c.top_k
+            ));
+        }
+        if !expert_clamp.is_finite() || expert_clamp <= 0.0 {
+            return invalid("all-slot routed expert clamp must be finite and positive");
+        }
+        self.validate_scratch()?;
+        record.validate(c)?;
+        validate_expert_bank(
+            gate_bank,
+            c.hidden_size,
+            c.ffn_size,
+            c.expert_count,
+            "all-slot routed gate bank",
+        )?;
+        validate_expert_bank(
+            up_bank,
+            c.hidden_size,
+            c.ffn_size,
+            c.expert_count,
+            "all-slot routed up bank",
+        )?;
+        validate_expert_bank(
+            down_bank,
+            c.ffn_size,
+            c.hidden_size,
+            c.expert_count,
+            "all-slot routed down bank",
+        )?;
         let gate_kernel = routed_all_slots_gate_up_selector(gate_bank.dtype)
             .filter(|_| gate_bank.dtype == up_bank.dtype);
         let Some(gate_kernel) = gate_kernel else {

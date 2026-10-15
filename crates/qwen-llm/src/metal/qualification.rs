@@ -404,13 +404,16 @@ pub static DEEPSEEK_V4_PACKED_GROUPED_EXPERT: Qualification = Qualification {
 };
 pub static DEEPSEEK_V4_ALL_SLOTS_Q3Q4: Qualification = Qualification {
     path: "deepseek_v4.all_slots_q3q4_decode",
-    qualified_devices: QualifiedDevices::Model(DEVICE),
+    qualified_devices: QualifiedDevices::AppleFamily7 {
+        oldest_measured: "Apple M1 Pro",
+        newest_measured: "Apple M4 Max",
+    },
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     required_headroom_scope: None,
-    evidence: "PERF-LOG 2026-08-07: K160 All-Slot Decode Default GO",
+    evidence: "PERF-LOG 2026-08-07: K160 All-Slot Decode Default GO; 2026-10-14 forced K160 fast vs generic all-slot (the off-M4 incumbent), dispatch-census verified, interleaved medians: M1 Pro 0.62 vs 2.58 ms, M4 Max 0.24 vs 0.67 ms; correctness witness passing on both",
     correctness: "QWEN_METAL_LEASE_WAIT=1 cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::all_slot_q3q4_fast_k160_matches_generic_and_serial_with_dispatch_evidence -- --exact --nocapture",
     correctness_kind: QualificationWitnessKind::Replay,
     performance: "QWEN_METAL_LEASE_WAIT=1 cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_all_slot_routed_experts_against_serial_indexed -- --ignored --exact --nocapture",
@@ -702,17 +705,19 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_m4_holds_all_and_m5_holds_family_scoped_hca() {
+    fn synthetic_m4_holds_all_and_m5_holds_family_scoped_records() {
         const GIB: u64 = 1024 * 1024 * 1024;
         let m4 = facts(DEVICE, Some(128 * GIB));
         assert!(QUALIFICATIONS.iter().all(|record| record.holds_for(&m4)));
 
         let m5 = facts("Apple M5 Ultra", Some(128 * GIB));
-        for status in qualification_statuses(&m5) {
-            let hca = status.path == DEEPSEEK_V4_GROUPED_LONG_HCA.path
-                || status.path == DEEPSEEK_V4_SPLITK_HCA.path;
-            assert_eq!(status.holds_for_device, hca, "{}", status.path);
-            if !hca {
+        for (record, status) in QUALIFICATIONS.iter().zip(qualification_statuses(&m5)) {
+            let family = matches!(
+                record.qualified_devices,
+                QualifiedDevices::AppleFamily7 { .. }
+            );
+            assert_eq!(status.holds_for_device, family, "{}", status.path);
+            if !family {
                 assert!(matches!(
                     status.decline_reason,
                     Some(QualificationDeclineReason::DeviceModel { .. })
@@ -722,14 +727,16 @@ mod tests {
     }
 
     #[test]
-    fn apple7_hca_scope_holds_only_for_the_two_measured_paths() {
+    fn apple7_scope_holds_only_for_family_scoped_records() {
         let m1 = facts("Apple M1 Pro", None);
         assert!(DEEPSEEK_V4_GROUPED_LONG_HCA.holds_for(&m1));
         assert!(DEEPSEEK_V4_SPLITK_HCA.holds_for(&m1));
-        for status in qualification_statuses(&m1) {
-            if status.path == DEEPSEEK_V4_GROUPED_LONG_HCA.path
-                || status.path == DEEPSEEK_V4_SPLITK_HCA.path
-            {
+        assert!(DEEPSEEK_V4_ALL_SLOTS_Q3Q4.holds_for(&m1));
+        for (record, status) in QUALIFICATIONS.iter().zip(qualification_statuses(&m1)) {
+            if matches!(
+                record.qualified_devices,
+                QualifiedDevices::AppleFamily7 { .. }
+            ) {
                 assert!(status.holds_for_device, "{}", status.path);
             } else {
                 assert!(!status.holds_for_device, "{}", status.path);

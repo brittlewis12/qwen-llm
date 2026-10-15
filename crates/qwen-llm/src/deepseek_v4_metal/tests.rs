@@ -19896,13 +19896,15 @@ fn oracle_expert(
 }
 
 #[test]
-fn all_slot_q3q4_fast_scope_is_exactly_k160_m4() {
+fn all_slot_q3q4_fast_scope_is_exactly_k160_on_apple7() {
     assert_eq!(
         deepseek_v4_all_slots_q3q4_qualification().path,
         "deepseek_v4.all_slots_q3q4_decode"
     );
     let m4 = synthetic_device_facts("Apple M4 Max", None, true);
     let m3 = synthetic_device_facts("Apple M3 Max", None, true);
+    let mut pre_apple7 = synthetic_device_facts("Pre-Apple7 GPU", None, true);
+    pre_apple7.gpu_families.apple7 = false;
     let qualified = DeepSeekV4MoeConfig {
         hidden_size: DEEPSEEK_V4_HIDDEN_SIZE,
         ffn_size: DEEPSEEK_V4_ALL_SLOTS_Q3Q4_FFN_SIZE,
@@ -19945,8 +19947,15 @@ fn all_slot_q3q4_fast_scope_is_exactly_k160_m4() {
             GgmlType::Q4_K,
         ));
     }
-    assert!(!deepseek_v4_all_slots_q3q4_scope_qualified(
+    assert!(deepseek_v4_all_slots_q3q4_scope_qualified(
         &m3,
+        qualified,
+        GgmlType::Q3_K,
+        GgmlType::Q3_K,
+        GgmlType::Q4_K,
+    ));
+    assert!(!deepseek_v4_all_slots_q3q4_scope_qualified(
+        &pre_apple7,
         qualified,
         GgmlType::Q3_K,
         GgmlType::Q3_K,

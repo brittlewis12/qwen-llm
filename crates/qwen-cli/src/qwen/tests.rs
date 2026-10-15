@@ -658,6 +658,7 @@ fn test_auto_profile() -> AutoPrefillProfile {
         outer_chunk: 2048,
         query_heads: 16,
         gdn_overlay_bytes: Some(235_405_312),
+        declined_by: None,
     }
 }
 
@@ -2780,22 +2781,46 @@ fn auto_prefill_profiles_require_complete_allowlisted_topology() {
     let a10b = test_a10b_arch();
 
     assert_eq!(
-        auto_prefill_profile(a3b, Some("Qwen3.6 35B A3B"), Some(15)),
+        auto_prefill_profile(a3b, None, Some(15)),
         Some(AutoPrefillProfile {
             name: "qwen3.6-35b-a3b-filetype15",
             outer_chunk: 2048,
             query_heads: 16,
             gdn_overlay_bytes: Some(235_405_312),
+            declined_by: None,
         })
     );
     assert_eq!(
-        auto_prefill_profile(a10b, Some("Qwen3.5 122B A10B"), Some(15)),
+        auto_prefill_profile(a10b, Some("re-uploaded base metadata"), Some(15)),
         Some(AutoPrefillProfile {
             name: "qwen3.5-122b-a10b-filetype15",
             outer_chunk: 4096,
             query_heads: 32,
             gdn_overlay_bytes: Some(807_403_520),
+            declined_by: None,
         })
+    );
+    assert_eq!(
+        auto_prefill_profile(a10b, None, Some(15)).unwrap().name,
+        "qwen3.5-122b-a10b-filetype15"
+    );
+    assert_eq!(
+        auto_prefill_profile(a10b, None, Some(15))
+            .unwrap()
+            .declined_by,
+        None
+    );
+    assert_eq!(
+        auto_prefill_profile(a10b, Some("renamed base metadata"), Some(15)),
+        auto_prefill_profile(a10b, None, Some(15))
+    );
+    let mut changed_a10b = a10b;
+    changed_a10b.hidden_size += 1;
+    assert_eq!(
+        auto_prefill_profile(changed_a10b, Some("Qwen3.5 122B A10B"), Some(15))
+            .unwrap()
+            .name,
+        "qwen-moe-general"
     );
 
     // Any geometry drift from a pinned profile falls back to the MoE
@@ -2807,10 +2832,11 @@ fn auto_prefill_profiles_require_complete_allowlisted_topology() {
             outer_chunk: 2048,
             query_heads: u64::from(arch.n_q_heads),
             gdn_overlay_bytes: None,
+            declined_by: None,
         })
     };
     macro_rules! reject_field {
-        ($arch:expr, $name:expr, $field:ident, $value:expr) => {{
+        ($arch:expr, $field:ident, $value:expr) => {{
             let mut invalid = $arch;
             invalid.$field = $value;
             let expected = if invalid.kind == ArchKind::Moe {
@@ -2819,7 +2845,7 @@ fn auto_prefill_profiles_require_complete_allowlisted_topology() {
                 None
             };
             assert_eq!(
-                auto_prefill_profile(invalid, Some($name), Some(15)),
+                auto_prefill_profile(invalid, None, Some(15)),
                 expected,
                 "{}",
                 stringify!($field)
@@ -2827,52 +2853,45 @@ fn auto_prefill_profiles_require_complete_allowlisted_topology() {
         }};
     }
 
-    for (arch, name) in [(a3b, "Qwen3.6 35B A3B"), (a10b, "Qwen3.5 122B A10B")] {
-        reject_field!(arch, name, kind, ArchKind::Dense);
-        reject_field!(arch, name, expert_count, 255);
-        reject_field!(arch, name, expert_used_count, 7);
-        reject_field!(arch, name, full_attention_interval, 3);
-        reject_field!(arch, name, attn_head_dim, 128);
-        reject_field!(arch, name, partial_rotary_factor, 0.5);
-        reject_field!(arch, name, gdn_n_k_heads, 8);
-        reject_field!(arch, name, gdn_head_dim, 64);
-        reject_field!(arch, name, gdn_conv_kernel, 3);
-        reject_field!(arch, name, mtp_n_hidden_layers, 1);
+    for arch in [a3b, a10b] {
+        reject_field!(arch, kind, ArchKind::Dense);
+        reject_field!(arch, expert_count, 255);
+        reject_field!(arch, expert_used_count, 7);
+        reject_field!(arch, full_attention_interval, 3);
+        reject_field!(arch, attn_head_dim, 128);
+        reject_field!(arch, partial_rotary_factor, 0.5);
+        reject_field!(arch, gdn_n_k_heads, 8);
+        reject_field!(arch, gdn_head_dim, 64);
+        reject_field!(arch, gdn_conv_kernel, 3);
+        reject_field!(arch, mtp_n_hidden_layers, 1);
+        let declined = auto_prefill_profile(arch, None, Some(14)).unwrap();
+        let general_profile = derived(arch).unwrap();
+        assert_eq!(declined.name, general_profile.name);
+        assert_eq!(declined.outer_chunk, general_profile.outer_chunk);
+        assert_eq!(declined.query_heads, general_profile.query_heads);
         assert_eq!(
-            auto_prefill_profile(arch, Some(name), Some(14)),
-            derived(arch)
+            declined.gdn_overlay_bytes,
+            general_profile.gdn_overlay_bytes
         );
-        assert_eq!(
-            auto_prefill_profile(arch, Some("wrong model"), Some(15)),
-            derived(arch)
-        );
-        assert_eq!(auto_prefill_profile(arch, None, Some(15)), derived(arch));
+        assert_eq!(declined.declined_by, Some("file_type!=15"));
+        let decision = auto_prefill_chunk_decision(Some(declined), 10_000, false, true);
+        assert_eq!(decision.profile_declined_by, Some("file_type!=15"));
     }
 
-    reject_field!(a3b, "Qwen3.6 35B A3B", n_layer, 39);
-    reject_field!(a3b, "Qwen3.6 35B A3B", hidden_size, 2049);
-    reject_field!(a3b, "Qwen3.6 35B A3B", n_q_heads, 15);
-    reject_field!(a3b, "Qwen3.6 35B A3B", n_kv_heads, 1);
-    reject_field!(a3b, "Qwen3.6 35B A3B", gdn_n_v_heads, 31);
-    reject_field!(a3b, "Qwen3.6 35B A3B", expert_feed_forward_length, 513);
-    reject_field!(
-        a3b,
-        "Qwen3.6 35B A3B",
-        expert_shared_feed_forward_length,
-        513
-    );
-    reject_field!(a10b, "Qwen3.5 122B A10B", n_layer, 47);
-    reject_field!(a10b, "Qwen3.5 122B A10B", hidden_size, 3071);
-    reject_field!(a10b, "Qwen3.5 122B A10B", n_q_heads, 31);
-    reject_field!(a10b, "Qwen3.5 122B A10B", n_kv_heads, 1);
-    reject_field!(a10b, "Qwen3.5 122B A10B", gdn_n_v_heads, 63);
-    reject_field!(a10b, "Qwen3.5 122B A10B", expert_feed_forward_length, 1023);
-    reject_field!(
-        a10b,
-        "Qwen3.5 122B A10B",
-        expert_shared_feed_forward_length,
-        1023
-    );
+    reject_field!(a3b, n_layer, 39);
+    reject_field!(a3b, hidden_size, 2049);
+    reject_field!(a3b, n_q_heads, 15);
+    reject_field!(a3b, n_kv_heads, 1);
+    reject_field!(a3b, gdn_n_v_heads, 31);
+    reject_field!(a3b, expert_feed_forward_length, 513);
+    reject_field!(a3b, expert_shared_feed_forward_length, 513);
+    reject_field!(a10b, n_layer, 47);
+    reject_field!(a10b, hidden_size, 3071);
+    reject_field!(a10b, n_q_heads, 31);
+    reject_field!(a10b, n_kv_heads, 1);
+    reject_field!(a10b, gdn_n_v_heads, 63);
+    reject_field!(a10b, expert_feed_forward_length, 1023);
+    reject_field!(a10b, expert_shared_feed_forward_length, 1023);
 }
 
 #[test]
@@ -2882,6 +2901,7 @@ fn auto_prefill_chunk_decision_starts_at_the_second_baseline_chunk_without_a_cei
         outer_chunk: 2048,
         query_heads: 16,
         gdn_overlay_bytes: Some(235_405_312),
+        declined_by: None,
     };
     let general = AutoPrefillProfile {
         gdn_overlay_bytes: None,
@@ -2925,12 +2945,14 @@ fn auto_prefill_overlay_equations_cover_range_boundaries() {
         outer_chunk: 2048,
         query_heads: 16,
         gdn_overlay_bytes: Some(235_405_312),
+        declined_by: None,
     };
     let a10b = AutoPrefillProfile {
         name: "a10b",
         outer_chunk: 4096,
         query_heads: 32,
         gdn_overlay_bytes: Some(807_403_520),
+        declined_by: None,
     };
     assert_eq!(
         expected_auto_prefill_overlay(a3b, 8192, 235_405_312).unwrap(),

@@ -75,6 +75,8 @@ pub(crate) struct PrefillChunkDecision {
     pub(crate) profile: Option<&'static str>,
     pub(crate) classification: &'static str,
     pub(crate) reason: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) profile_declined_by: Option<&'static str>,
     pub(crate) candidate: Option<usize>,
     pub(crate) selected: usize,
     pub(crate) min_prompt_tokens: Option<usize>,
@@ -106,6 +108,7 @@ pub(crate) struct AutoPrefillProfile {
     /// Pinned GDN overlay size for a validated profile, checked against the
     /// planner as a regression sentinel; `None` trusts the planner's value.
     pub(crate) gdn_overlay_bytes: Option<u64>,
+    pub(crate) declined_by: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -224,30 +227,34 @@ pub(crate) fn cache_prefix_needs_extension(
 /// otherwise the general 2048-token MoE profile sized by the planner. Larger
 /// chunks help MoE (fewer passes over the expert weights, more rows per expert
 /// per grouped matmul) and not dense (27B: 230.5/228.4/227.9 tok/s at
-/// 1024/2048/4096 on pp8192), so dense keeps the baseline.
+/// 1024/2048/4096 on pp8192), so dense keeps the baseline. The metadata name is
+/// intentionally ignored; exact architecture fields select the pinned profile.
 pub(crate) fn auto_prefill_profile(
     arch: Arch,
-    base_model_name: Option<&str>,
+    _base_model_name: Option<&str>,
     file_type: Option<u64>,
 ) -> Option<AutoPrefillProfile> {
     if arch.kind != ArchKind::Moe {
         return None;
     }
-    pinned_auto_prefill_profile(arch, base_model_name, file_type).or(Some(AutoPrefillProfile {
+    let pinned = pinned_auto_prefill_geometry(arch);
+    if let Some(profile) = pinned
+        && file_type == Some(15)
+    {
+        return Some(profile);
+    }
+    Some(AutoPrefillProfile {
         name: "qwen-moe-general",
         outer_chunk: 2048,
         query_heads: u64::from(arch.n_q_heads),
         gdn_overlay_bytes: None,
-    }))
+        declined_by: pinned.map(|_| "file_type!=15"),
+    })
 }
 
 /// Profiles validated end to end (PERF-LOG v0.567/v0.601), with their overlay
 /// sizes pinned so planner drift on these models is caught.
-fn pinned_auto_prefill_profile(
-    arch: Arch,
-    base_model_name: Option<&str>,
-    file_type: Option<u64>,
-) -> Option<AutoPrefillProfile> {
+fn pinned_auto_prefill_geometry(arch: Arch) -> Option<AutoPrefillProfile> {
     if arch.expert_count != 256
         || arch.expert_used_count != 8
         || arch.full_attention_interval != 4
@@ -257,45 +264,42 @@ fn pinned_auto_prefill_profile(
         || arch.gdn_head_dim != 128
         || arch.gdn_conv_kernel != 4
         || arch.mtp_n_hidden_layers != 0
-        || file_type != Some(15)
     {
         return None;
     }
-    match base_model_name {
-        Some("Qwen3.6 35B A3B")
-            if arch.n_layer == 40
-                && arch.hidden_size == 2048
-                && arch.n_q_heads == 16
-                && arch.n_kv_heads == 2
-                && arch.gdn_n_v_heads == 32
-                && arch.expert_feed_forward_length == 512
-                && arch.expert_shared_feed_forward_length == 512 =>
-        {
-            Some(AutoPrefillProfile {
-                name: "qwen3.6-35b-a3b-filetype15",
-                outer_chunk: 2048,
-                query_heads: 16,
-                gdn_overlay_bytes: Some(235_405_312),
-            })
-        }
-        Some("Qwen3.5 122B A10B")
-            if arch.n_layer == 48
-                && arch.hidden_size == 3072
-                && arch.n_q_heads == 32
-                && arch.n_kv_heads == 2
-                && arch.gdn_n_v_heads == 64
-                && arch.expert_feed_forward_length == 1024
-                && arch.expert_shared_feed_forward_length == 1024 =>
-        {
-            Some(AutoPrefillProfile {
-                name: "qwen3.5-122b-a10b-filetype15",
-                outer_chunk: 4096,
-                query_heads: 32,
-                gdn_overlay_bytes: Some(807_403_520),
-            })
-        }
-        _ => None,
+    if arch.n_layer == 40
+        && arch.hidden_size == 2048
+        && arch.n_q_heads == 16
+        && arch.n_kv_heads == 2
+        && arch.gdn_n_v_heads == 32
+        && arch.expert_feed_forward_length == 512
+        && arch.expert_shared_feed_forward_length == 512
+    {
+        return Some(AutoPrefillProfile {
+            name: "qwen3.6-35b-a3b-filetype15",
+            outer_chunk: 2048,
+            query_heads: 16,
+            gdn_overlay_bytes: Some(235_405_312),
+            declined_by: None,
+        });
     }
+    if arch.n_layer == 48
+        && arch.hidden_size == 3072
+        && arch.n_q_heads == 32
+        && arch.n_kv_heads == 2
+        && arch.gdn_n_v_heads == 64
+        && arch.expert_feed_forward_length == 1024
+        && arch.expert_shared_feed_forward_length == 1024
+    {
+        return Some(AutoPrefillProfile {
+            name: "qwen3.5-122b-a10b-filetype15",
+            outer_chunk: 4096,
+            query_heads: 32,
+            gdn_overlay_bytes: Some(807_403_520),
+            declined_by: None,
+        });
+    }
+    None
 }
 
 /// Scratch geometry of an auto candidate plan, `(block_size, matrix_max_pos)`:
@@ -362,6 +366,7 @@ pub(crate) fn auto_prefill_chunk_decision(
         reason,
         candidate,
         selected,
+        profile_declined_by: profile.and_then(|profile| profile.declined_by),
         min_prompt_tokens: profile_name.map(|_| AUTO_CHUNK_PROMPT_MIN),
         evidence_baseline_chunk: profile_name.map(|_| 1024),
         baseline: AUTO_CHUNK_BASELINE,
@@ -930,11 +935,12 @@ pub(crate) fn report_prefill_chunk_decision(
         return;
     };
     eprintln!(
-        "prefill_chunk: policy={} profile={} prompt_tokens={} selected={} reason={}",
+        "prefill_chunk: policy={} profile={} prompt_tokens={} selected={} reason={} profile_declined_by={}",
         decision.policy,
         decision.profile.unwrap_or("none"),
         prompt_tokens,
         decision.selected,
         decision.reason,
+        decision.profile_declined_by.unwrap_or("none"),
     );
 }

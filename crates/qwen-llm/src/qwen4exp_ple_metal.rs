@@ -2020,11 +2020,7 @@ mod tests {
     }
 
     fn metal_context() -> Option<MetalContext> {
-        match MetalContext::new() {
-            Ok(ctx) => Some(ctx),
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => None,
-            Err(error) => panic!("Metal initialization failed: {error}"),
-        }
+        crate::test_fixtures::metal_context_or_skip()
     }
 
     fn geometry() -> Qwen4ExpPleMetalGeometry {

@@ -602,11 +602,7 @@ fn split_fp4_rows(rows: &[Vec<u8>]) -> (Vec<u8>, Vec<u8>) {
 }
 
 fn metal_context() -> Option<MetalContext> {
-    match MetalContext::new() {
-        Ok(ctx) => Some(ctx),
-        Err(MetalError::NoDevice) => None,
-        Err(error) => panic!("Metal context: {error}"),
-    }
+    crate::test_fixtures::metal_context_or_skip()
 }
 
 fn open_pinned_legacy_gguf(model_path: &Path) -> GgufFile {

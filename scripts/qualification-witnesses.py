@@ -16,6 +16,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 
 KINDS = ("replay", "m4_characterization_skip", "scope_only", "none")
@@ -85,11 +86,103 @@ def self_test() -> None:
     assert not libtest_passes("running 1 test\ntest result: ok. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n")
     assert not libtest_passes("running 2 tests\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out\n")
 
+    root = pathlib.Path("/repo/root")
+    record = {
+        "path": "sample.path",
+        "holds_for_device": True,
+        "correctness": "cargo test --release -p qwen-llm --lib sample -- --exact",
+        "correctness_kind": "replay",
+    }
+    args = argparse.Namespace(dry_run=False)
+    successful = subprocess.CompletedProcess(
+        args=record["correctness"], returncode=0,
+        stdout="running 1 test\ntest sample ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+        stderr="measurement gpu_ms=1.25\n",
+    )
+    calls = []
 
-def run_info(binary: pathlib.Path) -> dict:
+    def mocked_run(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[:2] == ["git", "rev-parse"]:
+            return subprocess.CompletedProcess(command, 0, "revision-before-run\n", "")
+        return successful
+
+    from unittest.mock import patch
+
+    with patch("subprocess.run", side_effect=mocked_run):
+        revision = git_revision(root)
+        witness, failed = witness_entry(record, "correctness", args, {}, root)
+    assert revision == "revision-before-run"
+    assert [call[0][0] for call in calls] == ["git", record["correctness"].split()[0]]
+    assert calls[1][1]["cwd"] == root
+    assert witness["status"] == "passed" and not failed
+    assert witness["measurement_lines"] == ["measurement gpu_ms=1.25"]
+
+    for code, expected_status in ((0, "passed"), (1, "failed")):
+        characterization = {
+            **record,
+            "correctness": "cargo test --release -p qwen-llm --lib characterization -- --exact",
+            "correctness_kind": "m4_characterization_skip",
+        }
+        completed = subprocess.CompletedProcess(
+            args=characterization["correctness"],
+            returncode=code,
+            stdout="running 1 test\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n" if code == 0 else "running 1 test\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\nstdout failure tail\n",
+            stderr="stderr failure tail\n" if code else "",
+        )
+        with patch("subprocess.run", return_value=completed):
+            witness, failed = witness_entry(characterization, "correctness", args, {}, root)
+        assert witness["status"] == expected_status
+        assert failed is (code != 0)
+        if code:
+            assert witness["stdout_tail"].endswith("stdout failure tail")
+            assert witness["stderr_tail"].endswith("stderr failure tail")
+
+    scope_record = {
+        **record,
+        "correctness": "scope-only: cargo test --release -p qwen-llm --lib scope -- --exact",
+        "correctness_kind": "scope_only",
+    }
+    with patch("subprocess.run", return_value=successful):
+        witness, failed = witness_entry(scope_record, "correctness", args, {}, root)
+    assert witness["status"] == "scope-only" and witness["execution_status"] == "passed" and not failed
+    failed_scope = subprocess.CompletedProcess(
+        args=scope_record["correctness"], returncode=1,
+        stdout="running 1 test\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n",
+        stderr="scope failure\n",
+    )
+    with patch("subprocess.run", return_value=failed_scope):
+        witness, failed = witness_entry(scope_record, "correctness", args, {}, root)
+    assert witness["status"] == "failed" and witness["execution_status"] == "failed" and failed
+
+    with tempfile.TemporaryDirectory() as directory:
+        report_path = pathlib.Path(directory) / "report.json"
+        report = {"schema_version": 1, "git_commit": "revision-before-run", "records": []}
+        report_record = {"path": "sample.path", "witnesses": []}
+        report["records"].append(report_record)
+        with patch("subprocess.run", side_effect=[successful, OSError("launch failed")]):
+            first_failed = record_witness(report, report_record, record, "correctness", args, {}, root, report_path)
+            saved_after_first = json.loads(report_path.read_text())
+            failed_record = {
+                **record,
+                "performance": "cargo test --release -p qwen-llm --lib launch -- --exact",
+                "performance_kind": "replay",
+            }
+            second_failed = record_witness(report, report_record, failed_record, "performance", args, {}, root, report_path)
+        saved_after_second = json.loads(report_path.read_text())
+        assert not first_failed and second_failed
+        assert len(saved_after_first["records"][0]["witnesses"]) == 1
+        assert len(saved_after_second["records"][0]["witnesses"]) == 2
+        launch_failure = saved_after_second["records"][0]["witnesses"][1]
+        assert launch_failure["status"] == "failed"
+        assert launch_failure["launch_error"] == "launch failed"
+        assert launch_failure["stdout_tail"] == "" and launch_failure["stderr_tail"] == ""
+
+
+def run_info(binary: pathlib.Path, root: pathlib.Path) -> dict:
     if not binary.is_file():
         raise RuntimeError(f"qwen binary not found: {binary} (build it explicitly; this script does not build)")
-    result = subprocess.run([str(binary), "info", "--json"], capture_output=True, text=True)
+    result = subprocess.run([str(binary), "info", "--json"], cwd=root, capture_output=True, text=True)
     if result.returncode:
         raise RuntimeError(f"{binary} info --json failed with exit code {result.returncode}:\n{tail(result.stdout + result.stderr)}")
     try:
@@ -105,7 +198,13 @@ def tail(output: str, lines: int = 40) -> str:
     return "\n".join(output.rstrip().splitlines()[-lines:])
 
 
-def witness_entry(record: dict, facet: str, args: argparse.Namespace, facts: dict) -> tuple[dict, bool]:
+def witness_entry(
+    record: dict,
+    facet: str,
+    args: argparse.Namespace,
+    facts: dict,
+    root: pathlib.Path,
+) -> tuple[dict, bool]:
     kind = record[f"{facet}_kind"]
     value = record[facet]
     entry = {
@@ -147,7 +246,16 @@ def witness_entry(record: dict, facet: str, args: argparse.Namespace, facts: dic
     child_env["QWEN_METAL_LEASE_WAIT"] = "1"
     child_env["QWEN_REQUIRE_METAL_TESTS"] = "1"
     started = time.monotonic()
-    result = subprocess.run(command, env=child_env, capture_output=True, text=True)
+    try:
+        result = subprocess.run(command, cwd=root, env=child_env, capture_output=True, text=True)
+    except OSError as error:
+        entry["seconds"] = round(time.monotonic() - started, 3)
+        entry["status"] = "failed"
+        entry["exit_code"] = None
+        entry["launch_error"] = str(error)
+        entry["stdout_tail"] = ""
+        entry["stderr_tail"] = ""
+        return entry, True
     entry["seconds"] = round(time.monotonic() - started, 3)
     output = result.stdout + result.stderr
     entry["measurement_lines"] = [
@@ -155,15 +263,58 @@ def witness_entry(record: dict, facet: str, args: argparse.Namespace, facts: dic
     ]
     passed = result.returncode == 0 and libtest_passes(output)
     if passed:
-        entry["status"] = "passed" if kind == "replay" else "scope-only"
+        entry["status"] = "scope-only" if kind == "scope_only" else "passed"
         if kind == "scope_only":
             entry["execution_status"] = "passed"
         return entry, False
-    entry["status"] = "failed" if kind == "replay" else "scope-only"
-    entry["execution_status"] = "failed" if kind == "scope_only" else None
+    entry["status"] = "failed"
+    if kind == "scope_only":
+        entry["execution_status"] = "failed"
     entry["exit_code"] = result.returncode
-    entry["output_tail"] = tail(output)
+    entry["stdout_tail"] = tail(result.stdout)
+    entry["stderr_tail"] = tail(result.stderr)
     return entry, True
+
+
+def git_revision(root: pathlib.Path) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
+    )
+    return result.stdout.strip()
+
+
+def write_report(report: dict, output_path: pathlib.Path) -> None:
+    output_path = output_path.expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    serialized = json.dumps(report, indent=2) + "\n"
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=output_path.parent,
+            prefix=f".{output_path.name}.", delete=False,
+        ) as temporary:
+            temporary.write(serialized)
+            temporary_path = pathlib.Path(temporary.name)
+        temporary_path.replace(output_path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def record_witness(
+    report: dict,
+    report_record: dict,
+    record: dict,
+    facet: str,
+    args: argparse.Namespace,
+    facts: dict,
+    root: pathlib.Path,
+    output_path: pathlib.Path,
+) -> bool:
+    witness, failed = witness_entry(record, facet, args, facts, root)
+    report_record["witnesses"].append(witness)
+    write_report(report, output_path)
+    return failed
 
 
 def main() -> int:
@@ -183,30 +334,15 @@ def main() -> int:
     root = pathlib.Path(__file__).resolve().parents[1]
     binary = (args.qwen or root / "target/release/qwen").expanduser().resolve()
     try:
-        facts = run_info(binary)
+        facts = run_info(binary, root)
         records = facts["qualifications"]
         if args.filter:
             records = [record for record in records if args.filter in record.get("path", "")]
         if not records:
             raise RuntimeError("no qualification records matched the requested filter")
+        commit = git_revision(root)
         report_records = []
         any_failed = False
-        for record in records:
-            witnesses = []
-            for facet in ("correctness", "performance"):
-                witness, failed = witness_entry(record, facet, args, facts)
-                witnesses.append(witness)
-                any_failed |= failed
-            report_records.append({
-                "path": record["path"],
-                "holds_for_device": record["holds_for_device"],
-                "decline_reason": record.get("decline_reason"),
-                "witnesses": witnesses,
-            })
-        try:
-            commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            commit = None
         report = {
             "schema_version": 1,
             "git_commit": commit,
@@ -215,8 +351,19 @@ def main() -> int:
             "dry_run": args.dry_run,
             "records": report_records,
         }
-        args.out.expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
-        args.out.expanduser().resolve().write_text(json.dumps(report, indent=2) + "\n")
+        write_report(report, args.out)
+        for record in records:
+            report_record = {
+                "path": record["path"],
+                "holds_for_device": record["holds_for_device"],
+                "decline_reason": record.get("decline_reason"),
+                "witnesses": [],
+            }
+            report_records.append(report_record)
+            for facet in ("correctness", "performance"):
+                any_failed |= record_witness(
+                    report, report_record, record, facet, args, facts, root, args.out
+                )
         print(f"{'PATH':52} {'WITNESS':13} {'STATUS':30} WHY")
         for record in report_records:
             for witness in record["witnesses"]:

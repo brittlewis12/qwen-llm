@@ -2427,10 +2427,8 @@ mod tests {
 
     #[test]
     fn gated_residual_metal_matches_nonzero_cpu_golden() {
-        let ctx = match MetalContext::new() {
-            Ok(ctx) => ctx,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("Metal initialization failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let input = [1.0, -2.0, 0.5, 3.0];
         let norm = [1.1, 0.9, 1.2, 0.8];
@@ -2529,10 +2527,8 @@ mod tests {
 
     #[test]
     fn nonzero_q8_projections_and_offset_views_match_cpu() {
-        let ctx = match MetalContext::new() {
-            Ok(ctx) => ctx,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("Metal initialization failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         const BRANCHES: usize = 4;
         const HIDDEN: usize = 32;
@@ -2709,10 +2705,8 @@ mod tests {
 
     #[test]
     fn released_geometry_q8_zero_gates_preserves_exact_branch_contract() {
-        let ctx = match MetalContext::new() {
-            Ok(ctx) => ctx,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("Metal initialization failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         const BRANCHES: usize = 4;
         const HIDDEN: usize = 2_560;
@@ -3341,10 +3335,8 @@ mod tests {
 
     #[test]
     fn scratch_cannot_cross_command_buffers_before_completion() {
-        let ctx = match MetalContext::new() {
-            Ok(ctx) => ctx,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("Metal initialization failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let input = tensor(&ctx, &[1.0, 2.0, 3.0, 4.0], vec![4]);
         let norm = tensor(&ctx, &[1.0; 4], vec![4]);
@@ -3451,10 +3443,8 @@ mod tests {
 
     #[test]
     fn gated_residual_rejects_aliases_and_read_only_residuals() {
-        let ctx = match MetalContext::new() {
-            Ok(ctx) => ctx,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("Metal initialization failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let input = tensor(&ctx, &[1.0, 2.0, 3.0, 4.0], vec![4]);
         let norm = tensor(&ctx, &[1.0; 4], vec![4]);

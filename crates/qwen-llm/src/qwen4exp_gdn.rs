@@ -2489,10 +2489,8 @@ mod tests {
 
     #[test]
     fn packed_gdn_prep_matches_serial_released_geometry_bit_exact() {
-        let ctx = match MetalContext::new() {
-            Ok(ctx) => ctx,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("Metal initialization failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         const KEY_HEADS: usize = 16;
         const VALUE_HEADS: usize = 48;
@@ -2594,10 +2592,8 @@ mod tests {
 
     #[test]
     fn packed_gdn_recurrence_matches_serial_released_geometry_bit_exact() {
-        let ctx = match MetalContext::new() {
-            Ok(ctx) => ctx,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("Metal initialization failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         const KEY_HEADS: usize = 16;
         const VALUE_HEADS: usize = 48;
@@ -2702,10 +2698,8 @@ mod tests {
 
     #[test]
     fn packed_gdn_l2_pair_matches_serial_released_geometry_bit_exact() {
-        let ctx = match MetalContext::new() {
-            Ok(ctx) => ctx,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("Metal initialization failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         const KEY_HEADS: usize = 16;
         const HEAD_DIM: usize = 128;
@@ -2774,10 +2768,8 @@ mod tests {
 
     #[test]
     fn packed_gdn_decay_matches_serial_released_geometry_bit_exact() {
-        let ctx = match MetalContext::new() {
-            Ok(ctx) => ctx,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("Metal initialization failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         const VALUE_HEADS: usize = 48;
         let boundary_values = [
@@ -3313,10 +3305,8 @@ mod tests {
 
     #[test]
     fn sigmoid_gated_rmsnorm_matches_cpu_and_differs_from_silu() {
-        let ctx = match MetalContext::new() {
-            Ok(ctx) => ctx,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("Metal initialization failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let geometry = GatedDeltaNetMetalGeometry::new(32, 1, 2, 128, 4, 1e-6).unwrap();
         let input = values(256, 1, 0.02);
@@ -3377,10 +3367,8 @@ mod tests {
 
     #[test]
     fn two_token_gdn_composition_matches_cpu_state_and_output() {
-        let ctx = match MetalContext::new() {
-            Ok(ctx) => ctx,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("Metal initialization failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let geometry = GatedDeltaNetMetalGeometry::new(32, 1, 1, 128, 4, 1e-6).unwrap();
         let cpu_weights = CpuWeights {
@@ -3552,10 +3540,8 @@ mod tests {
 
     #[test]
     fn grouped_checkpoint_oracle_matches_tiled_multi_head_decode() {
-        let ctx = match MetalContext::new() {
-            Ok(ctx) => ctx,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(error) => panic!("Metal initialization failed: {error}"),
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
         };
         let fixture: GroupedTiledOracle = serde_json::from_str(GROUPED_TILED_ORACLE_JSON).unwrap();
         assert_eq!(fixture.schema_version, 1);

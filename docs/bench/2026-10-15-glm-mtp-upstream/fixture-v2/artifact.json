@@ -1,0 +1,28 @@
+{
+  "vocab_size": 154880,
+  "header_bytes": 24,
+  "modelshards": [
+    {
+      "path": "/Volumes/wdblack/weights-archive/glm-5.3-flash-maya-m/Maya-M/GLM-5.3-Flash-Maya-M-IQ2_S-00001-of-00003.gguf",
+      "size": 47678327584,
+      "mtime_ns": 1791687008348485755,
+      "header_bytes": 9469216,
+      "header_sha256": "74883a5aa4adbadc76875324f37bc4987767479fe4fe2415db9bec39be285a55"
+    },
+    {
+      "path": "/Volumes/wdblack/weights-archive/glm-5.3-flash-maya-m/Maya-M/GLM-5.3-Flash-Maya-M-IQ2_S-00002-of-00003.gguf",
+      "size": 47820244896,
+      "mtime_ns": 1791689925794612742,
+      "header_bytes": 35475,
+      "header_sha256": "6ecf3c8e689550cd0a6fe8414bad6bb9fcc10c21c913b6599b14a05719d78b5e"
+    },
+    {
+      "path": "/Volumes/wdblack/weights-archive/glm-5.3-flash-maya-m/Maya-M/GLM-5.3-Flash-Maya-M-IQ2_S-00003-of-00003.gguf",
+      "size": 20504990688,
+      "mtime_ns": 1791689791667470230,
+      "header_bytes": 14922,
+      "header_sha256": "49f243895d43af4ff1446f80c0084d82cb148411422d15b5ca21397eba74e4e9"
+    }
+  ],
+  "identity_scope": "Full GGUF headers, shard sizes and mtimes; payloads not rehashed"
+}

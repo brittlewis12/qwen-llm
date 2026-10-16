@@ -1,0 +1,3 @@
+0.00.167.033 W load: special_eot_id is not in special_eog_ids - the tokenizer config may be incorrect
+0.00.167.036 W load: special_eom_id is not in special_eog_ids - the tokenizer config may be incorrect
+0.00.190.429 W llama_context: n_ctx_seq (512) > n_ctx_train (0) -- possible training context overflow

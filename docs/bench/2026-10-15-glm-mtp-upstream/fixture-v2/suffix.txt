@@ -1,0 +1,3 @@
+
+[End of excerpt; final file may be truncated.]
+Explain why truncating the token position alone cannot restore GLM's state after a rejected speculative token. Identify which state must be preserved or rebuilt, and distinguish the current full-prefix snapshot from an efficient hypothetical speculative checkpoint. Give a concrete review of 200-300 words.<|assistant|><think>

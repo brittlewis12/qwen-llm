@@ -1,0 +1,32 @@
+{
+  "source_revision": "28e45c3a",
+  "source_files": [
+    {
+      "path": "crates/qwen-llm/src/glm5_next_metal/snapshot.rs",
+      "sha256": "2e1e2ac1cea51c2a627697ac6abc1ce408d82344a25edd35b0d31d7f0c8347aa"
+    },
+    {
+      "path": "crates/qwen-llm/src/glm5_next_metal/packed.rs",
+      "sha256": "2111d24ea03eeaa5949bbad22a914299226da91cab060dd33c06342c52fa962d"
+    },
+    {
+      "path": "crates/qwen-llm/src/glm5_next_metal.rs",
+      "sha256": "9179a43c91752cce440fadec10cedbbccb010d2391c5f8a1b154897330adc5fa"
+    },
+    {
+      "path": "crates/qwen-llm/src/glm5_next/memory.rs",
+      "sha256": "b4846f6808f994b46558c06030ab0caf10115cb380776bc63edf69546864e118"
+    }
+  ],
+  "tokenizer": "/Users/tito/code/llama.cpp/build/bin/llama-tokenize",
+  "tokenizer_sha256": "6c073c3e030cceaed0207cc5d3d764a8281fb554ea29440d77b0078374b2ca15",
+  "part_lengths": {
+    "prefix": 31,
+    "body": 52446,
+    "suffix": 70
+  },
+  "body_tokens_used": 32667,
+  "prompt_sha256": "08828a9b69ee06da2b4f18f2ca9577048d530f34d2efa8e06768ce6888d6b25c",
+  "construction": "Parts tokenized separately; body token-prefix truncated to fill 32768; no BOS insertion",
+  "purpose": "Fixed greedy latency and stream agreement, not a task-quality benchmark"
+}

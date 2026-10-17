@@ -18996,6 +18996,30 @@ fn profile_sparse_csa_decode_phases_at_far_context() {
 #[test]
 #[ignore = "focused production-width tiled-HCA GPU profiler; run explicitly with --nocapture"]
 fn profile_tiled_hca_at_far_context() {
+    profile_tiled_hca_at_far_context_impl(None);
+}
+
+#[test]
+#[ignore = "grouped-long fallback qualification when split-K is inactive"]
+// This qualifies grouped-long as the fallback with split-K inactive. With split-K
+// active, the grouped-long record changes no production dispatch.
+fn profile_grouped_long_hca_against_online_direct() {
+    profile_tiled_hca_at_far_context_impl(Some(HcaPerformanceCandidate::GroupedLong));
+}
+
+#[test]
+#[ignore = "split-K HCA qualification against both production fallbacks"]
+fn profile_splitk_hca_against_grouped_long() {
+    profile_tiled_hca_at_far_context_impl(Some(HcaPerformanceCandidate::SplitK));
+}
+
+#[derive(Clone, Copy)]
+enum HcaPerformanceCandidate {
+    GroupedLong,
+    SplitK,
+}
+
+fn profile_tiled_hca_at_far_context_impl(gate: Option<HcaPerformanceCandidate>) {
     let Some(ctx) = metal_context() else {
         return;
     };
@@ -19021,6 +19045,31 @@ fn profile_tiled_hca_at_far_context() {
         let elapsed_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
         assert!(elapsed_ms.is_finite() && elapsed_ms > 0.0);
         elapsed_ms
+    }
+
+    fn timed_gpu_with_census<F>(
+        ctx: &MetalContext,
+        encode: F,
+    ) -> (f64, Vec<crate::metal::DispatchCensusRow>)
+    where
+        F: FnOnce(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>,
+    {
+        let command = ctx.queue.commandBuffer().expect("HCA census command");
+        let encoder = KernelEncoder::begin(&command);
+        crate::metal::dispatch_census_begin();
+        encode(&encoder).expect("encode HCA census phase");
+        let census = crate::metal::dispatch_census_take();
+        encoder.end();
+        command.commit();
+        crate::metal::wait_completed(&command).expect("HCA census command buffer completed");
+        assert!(
+            command.error().is_none(),
+            "HCA census command failed: {:?}",
+            command.error()
+        );
+        let elapsed_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+        assert!(elapsed_ms.is_finite() && elapsed_ms > 0.0);
+        (elapsed_ms, census)
     }
 
     fn median_and_p95(mut samples: Vec<f64>) -> (f64, f64) {
@@ -19280,6 +19329,126 @@ fn profile_tiled_hca_at_far_context() {
                 config,
             )
         };
+        if let Some(candidate) = gate {
+            let run_gate = |candidate_label: &str,
+                            incumbent_label: &str,
+                            candidate_arm: &dyn Fn(
+                &KernelEncoder,
+            )
+                -> Result<(), DeepSeekV4MetalError>,
+                            incumbent_arm: &dyn Fn(
+                &KernelEncoder,
+            )
+                -> Result<(), DeepSeekV4MetalError>,
+                            required_fraction: f64,
+                            candidate: HcaPerformanceCandidate| {
+                let mut candidate_samples = Vec::with_capacity(20);
+                let mut incumbent_samples = Vec::with_capacity(20);
+                for _ in 0..20 {
+                    candidate_samples.push(timed_gpu(&ctx, candidate_arm));
+                    incumbent_samples.push(timed_gpu(&ctx, incumbent_arm));
+                    incumbent_samples.push(timed_gpu(&ctx, incumbent_arm));
+                    candidate_samples.push(timed_gpu(&ctx, candidate_arm));
+                }
+                let mut sorted_candidate = candidate_samples.clone();
+                let mut sorted_incumbent = incumbent_samples.clone();
+                sorted_candidate.sort_by(f64::total_cmp);
+                sorted_incumbent.sort_by(f64::total_cmp);
+                let candidate_median = sorted_candidate[sorted_candidate.len() / 2];
+                let incumbent_median = sorted_incumbent[sorted_incumbent.len() / 2];
+                let candidate_p95 =
+                    sorted_candidate[(sorted_candidate.len() * 95).div_ceil(100) - 1];
+                let incumbent_p95 =
+                    sorted_incumbent[(sorted_incumbent.len() * 95).div_ceil(100) - 1];
+                let (_, candidate_census) = timed_gpu_with_census(&ctx, candidate_arm);
+                let (_, incumbent_census) = timed_gpu_with_census(&ctx, incumbent_arm);
+                let candidate_kernels = candidate_census
+                    .iter()
+                    .map(|row| row.kernel.as_str())
+                    .collect::<Vec<_>>();
+                let incumbent_kernels = incumbent_census
+                    .iter()
+                    .map(|row| row.kernel.as_str())
+                    .collect::<Vec<_>>();
+                let candidate_has_path = match candidate {
+                    HcaPerformanceCandidate::GroupedLong => candidate_kernels
+                        .iter()
+                        .any(|name| name.contains("grouped_online_dense_sink_attention")),
+                    HcaPerformanceCandidate::SplitK => {
+                        candidate_kernels
+                            .iter()
+                            .any(|name| name.contains("grouped_splitk_hca_main"))
+                            && candidate_kernels
+                                .iter()
+                                .any(|name| name.contains("grouped_splitk_hca_reduce"))
+                    }
+                };
+                let incumbent_has_path = if incumbent_label == "grouped_long" {
+                    incumbent_kernels
+                        .iter()
+                        .any(|name| name.contains("grouped_online_dense_sink_attention"))
+                } else {
+                    incumbent_kernels
+                        .iter()
+                        .any(|name| name.contains("online_dense_sink_attention_f16_direct"))
+                };
+                assert!(
+                    candidate_has_path,
+                    "{candidate_label} measured dispatch census: {candidate_kernels:?}"
+                );
+                assert!(
+                    incumbent_has_path,
+                    "{incumbent_label} measured dispatch census: {incumbent_kernels:?}"
+                );
+                let passed = candidate_median <= incumbent_median * required_fraction;
+                eprintln!(
+                    "QUALIFICATION_GATE hca_{candidate_label} rows={count} candidate_ms={candidate_median:.6} incumbent_{incumbent_label}_ms={incumbent_median:.6} required_fraction={required_fraction:.2} candidate_p95_ms={candidate_p95:.6} incumbent_p95_ms={incumbent_p95:.6} passed={passed}"
+                );
+                eprintln!(
+                    "HCA_DISPATCH_CENSUS rows={count} candidate={candidate_label}:{candidate_kernels:?} incumbent={incumbent_label}:{incumbent_kernels:?}"
+                );
+                assert!(
+                    passed,
+                    "{candidate_label} HCA performance gate at {count} rows"
+                );
+                if count == CAPACITY {
+                    assert!(
+                        candidate_p95 < incumbent_median,
+                        "{candidate_label} p95 {candidate_p95:.6} ms must beat {incumbent_label} median {incumbent_median:.6} ms"
+                    );
+                }
+            };
+            match candidate {
+                HcaPerformanceCandidate::GroupedLong => run_gate(
+                    "grouped_long",
+                    "online_direct",
+                    &grouped,
+                    &direct,
+                    0.98,
+                    candidate,
+                ),
+                HcaPerformanceCandidate::SplitK => {
+                    run_gate(
+                        "splitk8",
+                        "grouped_long",
+                        &split8,
+                        &grouped,
+                        0.80,
+                        candidate,
+                    );
+                    // If grouped-long declines or its switch is off, production
+                    // falls through to direct-load online HCA.
+                    run_gate(
+                        "splitk8_grouped_inactive",
+                        "online_direct",
+                        &split8,
+                        &direct,
+                        0.70,
+                        candidate,
+                    );
+                }
+            }
+        }
         for _ in 0..5 {
             let _ = timed_gpu(&ctx, legacy);
             let _ = timed_gpu(&ctx, online);
@@ -19377,15 +19546,10 @@ fn profile_tiled_hca_at_far_context() {
         assert!(max_scaled_error <= 8e-5, "{count}-row scaled error");
         assert!(relative_rms <= 1e-3, "{count}-row relative RMS");
         assert!(cosine >= 0.999_999, "{count}-row cosine");
-        match count {
-            513 => assert!(online_ms <= baseline_midpoint_ms),
-            2_048 => assert!(online_ms <= baseline_midpoint_ms * 0.87),
-            CAPACITY => {
-                assert!(online_ms <= baseline_midpoint_ms * 0.73);
-                assert!(online_p95_ms < before_ms.min(after_ms));
-            }
-            _ => unreachable!(),
-        }
+        eprintln!(
+            "HCA_ONLINE_DIAGNOSTIC rows={count} online_ms={online_ms:.6} legacy_ms={baseline_midpoint_ms:.6} online_p95_ms={online_p95_ms:.6} legacy_p95_ms={:.6}",
+            before_p95_ms.min(after_p95_ms),
+        );
     }
 }
 

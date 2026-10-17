@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-16 - M5 Ultra GLM Maya First Light Complete
+
+- The same three-shard Maya-M IQ2_S artifact passed full SHA-256 verification
+  on the 256 GiB M5 Ultra. Clean `d7b2a05b` native binaries and runtime source
+  match; no kernel changes, device overrides, or wired-limit adjustments.
+- Three warmed repetitions: tg128/tg256 at depth zero are 56.10/55.23 tok/s;
+  tg128 after an untimed 8192-token prefix is 51.80 tok/s. Synthetic pp128,
+  pp512, and pp2048 are 256.98, 466.90, and 448.83 tok/s respectively.
+- The real low-reasoning Rust smoke is correct and stops at EOS: 54 prompt
+  tokens, 86 generated, 1014.7 ms prefill, 50.83 decode tok/s, 2791.7 ms total.
+  Filesystem cache was warmed by checksums; mapped loader setup is not cold-load
+  latency. Simple semantic review is not independent numerical qualification.
+- Runner and queue exit zero; swap/compressor usage remain zero before/after.
+  No fresh matched M4 GLM suite or upstream MTP result is claimed. The worker
+  is left idle with binaries and weights ready, not running a persistent server.
+- Evidence: `docs/bench/2026-10-16-m5-ultra-first-light/m5-glm/` and its parent
+  README. Completes the GLM transfer/run marked pending in the preceding entry.
+
 ## 2026-10-16 - M5 Ultra First Light: Native Qwen Runs Without Kernel Changes
 
 - M5 Ultra, 80 GPU cores, 256 GiB, macOS 27.0.1. Native binaries

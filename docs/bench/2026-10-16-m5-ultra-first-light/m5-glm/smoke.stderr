@@ -1,0 +1,2 @@
+glm5_next prefetch: windows=3 cold_windows=0 bytes_read=0 wall_ms=3.3
+glm5_next stats: prompt_tokens=54 generated_tokens=86 transitions=85 stop_reason=eos tokenizer_ms=0.0 load_ms=14.3 prefill_mode=packed_fast prefill_ms=1014.7 prefill_tps=53.22 generation_ms=1691.9 decode_tps=50.83 total_ms=2791.7 weights_first_use=true input=chat effort=low capacity=1077 prefill_rows=54 setup_prefetch_ms=3.3 loaded_request_ms=2706.7

@@ -1,0 +1,15 @@
+</think>```rust
+fn sum_even(xs: &[i64]) -> i64 {
+    xs.iter().filter(|&&x| x % 2 == 0).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sum_even() {
+        assert_eq!(sum_even(&[1, 2, 3, 4]), 6);
+    }
+}
+```

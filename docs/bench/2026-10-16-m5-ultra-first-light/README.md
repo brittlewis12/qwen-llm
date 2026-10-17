@@ -4,8 +4,9 @@
 
 Native qwen-llm runs successfully on an Apple M5 Ultra with 256 GiB
 unified memory and 80 GPU cores. Qwen3.5-0.8B-Q8_0 and Qwen3.6-35B-A3B smoke and
-warmed suite results are complete. GLM Maya is transferring, not yet measured.
-This is native engine bring-up, not the separate upstream MTP experiment.
+warmed suite results are complete, as are GLM Maya's verified transfer, smoke,
+and suites. The queue exited successfully. This is native engine bring-up, not
+the separate upstream MTP experiment, which remains unmeasured.
 
 ## Installation and identity
 
@@ -104,14 +105,60 @@ The runner exited zero. Raw smoke, hashes, before/after memory, and suite files
 are under `m5-qwen35b/`; M4 rows are `m4-qwen35b-suite.json` and
 `m4-qwen35b-depth8192.json` with their stderr logs.
 
+## Completed GLM Maya screen
+
+All three Maya-M IQ2_S shards passed full SHA-256 verification against
+`glm.sha256` (116003563168 bytes total). This is the same mixed-format artifact
+used in the earlier M4 investigations; the filename does not describe every
+tensor's quantization. Native execution used the unchanged pinned binary,
+matching clean source identity, and default device qualification.
+
+| Shape | M5 Ultra tok/s | Sample standard deviation |
+| --- | ---: | ---: |
+| pp128, depth 0 | 256.98 | 0.39 |
+| pp512, depth 0 | 466.90 | 0.52 |
+| pp2048, depth 0 | 448.83 | 0.53 |
+| tg128, depth 0 | 56.10 | 0.02 |
+| tg256, depth 0 | 55.23 | 0.07 |
+| tg128, depth 8192 | 51.80 | 0.01 |
+
+Each row has three timed repetitions after warmup. There is no fresh paired M4
+GLM suite here, so this packet does not claim a GLM hardware speedup ratio.
+
+The low-reasoning smoke produced a correct iterator-based `sum_even` function
+and a Rust test asserting that `[1, 2, 3, 4]` sums to 6 after filtering evens.
+Manual review confirms the requested behavior. It reached EOS after 86 generated
+tokens: 50.83 decode tok/s, 1014.7 ms prefill for 54 prompt tokens, and 2791.7 ms
+reported total. The 14.3 ms loader figure is mapped setup, not a claim that a
+108 GiB cold model loads in milliseconds; full checksum reads had warmed the
+filesystem cache and first-use work remains in the request.
+
+The runner and queue exited zero. Swap and compressor usage were both zero
+before and after. Evidence, including full checksum outcomes and raw JSON, is
+under `m5-glm/`. This is a successful execution and simple semantic smoke,
+not independent numerical/reference qualification or a speculative-decoding test.
+
+The worker is idle after the runs; no persistent inference server was started.
+The installed binary can run GLM directly:
+
+```sh
+qwen run \
+  -m ~/models/glm-5.3-flash-maya-m/GLM-5.3-Flash-Maya-M-IQ2_S-00001-of-00003.gguf \
+  --reasoning-effort low --temp 0 -n 1024 --user 'Explain this Rust function.'
+```
+
 ## Larger-model protocol
 
 Transfers use resumable rsync over independent SSH connections. At roughly
 14 MB/s initially, transferring weights dominates bring-up time. The user added
 Ethernet to a wirelessly connected eero during Qwen's copy; instantaneous rate
 rose to about 17 MB/s. Qwen35B ran before resuming all three GLM Maya shards.
-Transfers and remote inference are
-serialized; no benchmark runs concurrently with this queue's file transfer.
+Later direct-download probes reached 27.6 MB/s alone and 30.7 MB/s aggregate
+with four streams; the existing copy was retained rather than restarted. The
+final resumed copy sent about 74.85 GB at 20.05 MB/s overall. Transfer progress
+rates that include the already-present prefix are not network throughput.
+Transfers and remote inference are serialized; no benchmark runs concurrently
+with this queue's file transfer.
 
 Copy `run-model.sh`, `deadline.py`, and the three checksum manifests to
 `~/qwen-runs/2026-10-16-first-light/`. The runner requires the pinned checkout

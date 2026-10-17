@@ -1,0 +1,45 @@
+Sat Oct 17 01:38:49 UTC 2026
+ProductName:		macOS
+ProductVersion:		27.0.1
+BuildVersion:		26A434
+machdep.cpu.brand_string: Apple M5 Ultra
+hw.memsize: 274877906944
+iogpu.wired_limit_mb: 0
+vm.swapusage: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                  4709117.
+Pages active:                                1499486.
+Pages inactive:                             10065869.
+Pages speculative:                            127361.
+Pages throttled:                                   0.
+Pages wired down:                             299474.
+Pages purgeable:                              127212.
+"Translation faults":                       57509091.
+Pages copy-on-write:                         1745886.
+Pages zero filled:                          70143440.
+Pages reactivated:                             37106.
+Pages purged:                                 453994.
+File-backed pages:                          10264916.
+Anonymous pages:                             1427800.
+Pages stored in compressor:                        0.
+Pages occupied by compressor:                      0.
+Decompressions:                                    0.
+Compressions:                                      0.
+Pageins:                                    10696859.
+Pageouts:                                          0.
+Swapins:                                           0.
+Swapouts:                                          0.
+Pages tagged:                                 235850.
+Pages tagged resident:                        235850.
+Pages tagged compressed:                           0.
+Pages tag-storage:                            524288.
+Pages tag-storage holding tags:                 7505.
+Pages tag-storage free:                        25122.
+Pages tag-storage non-tag pageable:           431427.
+Pages tag-storage non-tag wired:                 130.
+Bytes of compressed tags:                          0.
+Tagged compressions:                               0.
+Tagged decompressions:                             0.
+d7b2a05b5ad1b9706486c69718a1e11dbbc58937
+5bf0b34c9470ed9bab2bd4447de5f547fb1a9e6a13f18d2534442bead36e9c55  /Users/tito/qwen-runs/2026-10-16-first-light/bin/qwen
+80f9f9f78e754940818d87f125d5f933f33e1fd4c7fbb7686eed3467c65295bf  /Users/tito/qwen-runs/2026-10-16-first-light/bin/qwen-bench

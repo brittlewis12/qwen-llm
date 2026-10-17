@@ -1,0 +1,7 @@
+[metal-load] native quantized token embedding policy: auto-unpromoted (Q8_0 [1024, 248320])
+[metal-gguf-parallel-qualification] path=metal_forward.a3b_parallel_copy_auto declined reason=DeviceModel { expected: "Apple M4 Max", actual: "Apple M5 Ultra" }
+[metal-gguf-storage] mode=copied copied_bytes=1818000640 working_set_bytes=239143780352 reason=copy_fits_with_headroom
+2026-10-16T23:30:40.586831Z  INFO qwen_llm::runtime: prefetch: skipped (already warm) shard=/Users/tito/models/Qwen3.5-0.8B-Q8_0.gguf resident_pct=100.0
+[metal-load-ledger] source=321/1071054080 direct_copy=320/800881920 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=1/270172160/1017118720 derived=0/0
+prefill_chunk: policy=moe_general_v3 profile=none prompt_tokens=27 selected=27 reason=dense_baseline profile_declined_by=none
+stats: prompt_tokens=27 generated_tokens=13 transitions=12 stop_reason=eos load_ms=184.6 prefill_ms=177.3 ttft_ms=203.7 decode_tps=176.75 transition_tps=190.11 cache_entries=0 cache_mib=0.0/16384.0

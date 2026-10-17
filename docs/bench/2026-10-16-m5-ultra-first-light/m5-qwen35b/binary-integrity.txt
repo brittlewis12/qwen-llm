@@ -1,0 +1,2 @@
+bin/qwen: OK
+bin/qwen-bench: OK

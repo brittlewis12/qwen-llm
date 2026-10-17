@@ -1,0 +1,8 @@
+[metal-load] native quantized token embedding policy: auto-unpromoted (Q8_0 [1024, 248320])
+[metal-gguf-storage] mode=copied copied_bytes=1818000640 working_set_bytes=239143780352 reason=copy_fits_with_headroom
+2026-10-16T23:31:18.989726Z  INFO qwen_llm::runtime: prefetch: skipped (already warm) shard=/Users/tito/models/Qwen3.5-0.8B-Q8_0.gguf resident_pct=100.0
+[metal-load-ledger] source=321/1071054080 direct_copy=320/800881920 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=1/270172160/1017118720 derived=0/0
+[suite] pp128 prefill_chunk=128 decision=dense_baseline
+[suite] pp128 prefill_chunk=128 decision=dense_baseline
+[suite] pp512 prefill_chunk=512 decision=dense_baseline
+[suite] pp4096 prefill_chunk=1024 decision=dense_baseline

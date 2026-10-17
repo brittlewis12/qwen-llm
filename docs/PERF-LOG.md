@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-16 - M5 Ultra First Light: Native Qwen Runs Without Kernel Changes
+
+- M5 Ultra, 80 GPU cores, 256 GiB, macOS 27.0.1. Native binaries
+  built at clean `d7b2a05b` on M4 Max, with embedded Metal libraries, run against
+  a matching source checkout. No device overrides or wired-limit changes.
+- Qwen3.5-0.8B Q8_0, same binary/artifact, three warmed repetitions: M5 decode
+  435-439 versus M4 261-263 tok/s (~1.67x); pp4096 16174 versus 8700 (~1.86x).
+- Qwen3.6-35B-A3B UD-Q4_K_M: M5 tg128/256 169.94/168.62 versus M4
+  112.64/111.96 tok/s (~1.51x); pp2048 3695.20 versus 1829.43 (~2.02x).
+  At depth 8192, tg128 is 138.96 versus 99.86 tok/s (~1.39x).
+- These are synthetic compute suites, not sampled streaming rates. The real
+  Qwen35B Rust smoke is correct and ends at EOS: 79 generated tokens,
+  133.47 decode tok/s, 339.1 ms TTFT excluding 2708.0 ms model load.
+- M5 runs between transfers with zero swap/compressor before and after. M4
+  remains an active desktop; its Qwen35B repeat overlaps the outgoing network
+  copy, not checksum work. Ratios are provisional, not broad M5 qualification.
+- GLM Maya is still transferring; no GLM or MTP result is implied. Evidence:
+  `docs/bench/2026-10-16-m5-ultra-first-light/`. No kernel changes or promotions.
+
 ## 2026-10-13 - ReplaySSM Precision Separation Works; Keep Production FP32
 
 - Implemented actual Metal KDA replay: FP32 checkpoint plus cached per-key decay,

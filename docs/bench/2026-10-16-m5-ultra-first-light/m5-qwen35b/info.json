@@ -1,0 +1,71 @@
+{
+  "version": "qwen_info_v1",
+  "model": "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+  "architecture": "qwen35moe",
+  "family": "qwen",
+  "drafter": {
+    "run": {
+      "status": "permitted",
+      "target": "moe_cli_serial"
+    },
+    "serve": {
+      "status": "unsupported",
+      "code": "serve_moe_target",
+      "message": "serve DFlash speculation currently supports dense targets only; this MoE model would run serially, so omit --drafter"
+    }
+  },
+  "prompt_lookup": {
+    "run": {
+      "status": "permitted",
+      "experimental": true,
+      "message": "packed arithmetic may change tokens relative to ordinary decoding"
+    }
+  },
+  "sampling": {
+    "identity": "qwen3.6/moe_35b_a3b",
+    "temperature": 1.0,
+    "top_k": 20,
+    "top_p": 0.95,
+    "min_p": 0.0
+  },
+  "weight_storage": {
+    "status": "available",
+    "mode": "copied",
+    "load_intent": "reusable",
+    "copied_bytes_estimate": 22123538944,
+    "recommended_working_set_bytes": 239143780352,
+    "reason": "copy_fits_with_headroom",
+    "margin_policy": "storage-performance heuristic fitted to measurements; not a memory-admission guarantee (76% copied decoded faster, 97% copied loaded 4-6x slower with heavy paging)"
+  },
+  "capabilities": {
+    "reasoning": {
+      "levels": [],
+      "no_thinking": {
+        "status": "supported"
+      },
+      "thinking": {
+        "status": "supported"
+      }
+    },
+    "input": {
+      "raw": {
+        "status": "supported"
+      },
+      "user": {
+        "status": "supported"
+      },
+      "messages": {
+        "status": "supported"
+      },
+      "tools": {
+        "status": "supported"
+      }
+    },
+    "template": {
+      "status": "identified",
+      "version": "qwen3.6",
+      "source": "general.name",
+      "rendered_as": "qwen3.6_messages_v1"
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "repo": "unsloth/GLM-5.3-Flash-GGUF",
+  "revision": "621d456e93e926e4b52f85cff5f634358c1828f9",
+  "binary_sha256": "5bf0b34c9470ed9bab2bd4447de5f547fb1a9e6a13f18d2534442bead36e9c55",
+  "shards": [
+    {
+      "name": "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+      "source_path": "Shard_Rewrite/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf_file",
+      "size": 9429984,
+      "sha256": "632f4fabe03ea73d20c299c8ef00c4a16e47dd9ab3f1750a8585b92eb70dfa74"
+    },
+    {
+      "name": "GLM-5.3-Flash-UD-IQ3_XXS-00002-of-00004.gguf",
+      "source_path": "UD-IQ3_XXS/GLM-5.3-Flash-UD-IQ3_XXS-00002-of-00004.gguf",
+      "size": 49261511584,
+      "sha256": "a4dba331fe92ffbd71317839cc1452c57f0b5b3f971a9e96ee5107f9a615cdac"
+    },
+    {
+      "name": "GLM-5.3-Flash-UD-IQ3_XXS-00003-of-00004.gguf",
+      "source_path": "UD-IQ3_XXS/GLM-5.3-Flash-UD-IQ3_XXS-00003-of-00004.gguf",
+      "size": 49075832480,
+      "sha256": "5b728b5b263c662201ef4a4a2b12fb509fe230d012418d0ed37c220a8a5aa230"
+    },
+    {
+      "name": "GLM-5.3-Flash-UD-IQ3_XXS-00004-of-00004.gguf",
+      "source_path": "UD-IQ3_XXS/GLM-5.3-Flash-UD-IQ3_XXS-00004-of-00004.gguf",
+      "size": 22020797792,
+      "sha256": "4b6d16e0d1381e1b4b7eeb6c9799671bf98153a995be12e75e3da93cd97981d2"
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "repo": "peasantsmith/GLM-5.3-Flash-Maya-GGUF",
+  "revision": "f16ee4ba50d8fd2bb726ea1862ca6ca14ba188da",
+  "binary_sha256": "5bf0b34c9470ed9bab2bd4447de5f547fb1a9e6a13f18d2534442bead36e9c55",
+  "shards": [
+    {
+      "name": "GLM-5.3-Flash-Maya-M-IQ2_S-00001-of-00003.gguf",
+      "source_path": "Maya-M/GLM-5.3-Flash-Maya-M-IQ2_S-00001-of-00003.gguf",
+      "size": 47678327584,
+      "sha256": "3f740d1b1022b4a0ddad50cd861bb071dd415bde94afa1292d0476641186c638"
+    },
+    {
+      "name": "GLM-5.3-Flash-Maya-M-IQ2_S-00002-of-00003.gguf",
+      "source_path": "Maya-M/GLM-5.3-Flash-Maya-M-IQ2_S-00002-of-00003.gguf",
+      "size": 47820244896,
+      "sha256": "285951d2afa0cd98285b03d0dc4aa68d83daf1a6f4a2594fe40b0cdd27ade485"
+    },
+    {
+      "name": "GLM-5.3-Flash-Maya-M-IQ2_S-00003-of-00003.gguf",
+      "source_path": "Maya-M/GLM-5.3-Flash-Maya-M-IQ2_S-00003-of-00003.gguf",
+      "size": 20504990688,
+      "sha256": "ebf1ce713f71207747e10eeebed87597969d8b5e1d9dd817420d2c2f7ca51e0e"
+    }
+  ]
+}

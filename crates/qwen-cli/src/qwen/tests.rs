@@ -25,14 +25,39 @@ fn qwen_info_storage_policy_report_projects_mode_and_capacity() {
     );
 }
 
+#[test]
+fn qwen_info_storage_decision_matches_load_with_short_process_headroom() {
+    let signals = MetalMemorySignals {
+        recommended_max_bytes: 1_000,
+        current_allocated_bytes: 100,
+        process_limit_remaining_bytes: Some(349),
+    };
+    let request = qwen_llm::metal_forward::GgufStorageRequest::Automatic;
+    let info = qwen_info_storage_decision(100, 0, Some(100), signals, true, request, None);
+    let load = qwen_llm::metal_forward::decide_gguf_storage_mode_with_signals(
+        100,
+        0,
+        Some(100),
+        signals,
+        true,
+        request,
+        None,
+    );
+
+    assert_eq!(info, load);
+    assert!(info.map_weights);
+    assert!(info.capacity_would_map);
+    assert_eq!(info.reason, "copy_exceeds_process_headroom");
+}
+
 fn selector_device_facts(name: &str) -> qwen_llm::metal::DeviceFacts {
     qwen_llm::metal::DeviceFacts {
-        version: "qwen_device_info_v3",
+        version: "qwen_device_info_v5",
         name: name.into(),
         architecture: "test".into(),
         registry_id: 0,
         gpu_families: qwen_llm::metal::GpuFamilySupport {
-            apple7: false,
+            apple7: true,
             apple8: false,
             apple9: false,
             apple10: false,
@@ -1186,15 +1211,17 @@ fn deepseek_v4_multigroup_selector_cli_contract_is_explicit_and_bounded() {
         auto.completion_record_from_values("single_turn", false, 21, 3)
             .is_ok()
     );
+    let mut unsupported_gpu = selector_device_facts("Generic GPU");
+    unsupported_gpu.gpu_families.apple7 = false;
     assert!(
         DeepSeekV4MultigroupSelectorPlan::new(
             DeepSeekV4MultigroupSelectorArg::QualifiedExperimental,
-            &selector_device_facts("Apple M4 Pro"),
+            &unsupported_gpu,
             DeepSeekV4SessionCapacity::for_forward_limit(786_432, 1_048_576).unwrap(),
         )
         .unwrap_err()
         .to_string()
-        .contains("requires Apple M4 Max")
+        .contains("requires Apple7 GPU-family support")
     );
     let unreachable_error = DeepSeekV4MultigroupSelectorPlan::new(
         DeepSeekV4MultigroupSelectorArg::QualifiedExperimental,

@@ -14,6 +14,9 @@ const DEFAULT_METALLIB_TARGET: &str = "14.0";
 const METAL_LANGUAGE: &str = "metal3.1";
 
 fn main() -> anyhow::Result<()> {
+    // MTLResidencySetDescriptor is available on macOS 15 and newer. Keep the
+    // framework reference weak so release binaries start on the macOS 14 floor.
+    println!("cargo:rustc-link-arg=-Wl,-weak_framework,Metal");
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
     let workspace_root = manifest_dir
         .parent()

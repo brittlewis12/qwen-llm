@@ -58,12 +58,12 @@ fn qualification_facts(
     unified_memory: bool,
 ) -> crate::metal::DeviceFacts {
     crate::metal::DeviceFacts {
-        version: "qwen_device_info_v3",
+        version: "qwen_device_info_v5",
         name: name.into(),
         architecture: "test".into(),
         registry_id: 0,
         gpu_families: crate::metal::GpuFamilySupport {
-            apple7: false,
+            apple7: true,
             apple8: false,
             apple9: false,
             apple10: false,
@@ -423,9 +423,7 @@ fn automatic_no_copy_choice_uses_working_set_headroom_and_margin() {
     assert!(!m4.map_weights);
     assert_eq!(m4.working_set_bytes, 110 * GB);
 
-    assert!(
-        choose_gguf_no_copy_mode(2 * GB, Some(128 * 1024 * 1024), 110 * GB, 0).map_weights == false
-    );
+    assert!(!choose_gguf_no_copy_mode(2 * GB, Some(128 * 1024 * 1024), 110 * GB, 0).map_weights);
 }
 
 #[test]
@@ -548,7 +546,7 @@ fn automatic_mapping_falls_back_when_retained_storage_is_unsupported() {
         assert_eq!(explicit_map.reason, "explicit_environment_override");
     }
     assert!(
-        decide_gguf_storage_mode(
+        !decide_gguf_storage_mode(
             17_500_000_000,
             0,
             None,
@@ -559,7 +557,6 @@ fn automatic_mapping_falls_back_when_retained_storage_is_unsupported() {
             Some("automatic_mapping_unsupported_retained_geometry"),
         )
         .map_weights
-            == false
     );
     let m4 = decide_gguf_storage_mode(
         22_100_000_000,
@@ -1367,24 +1364,114 @@ fn prepared_auto_prefetch_advice_selector_table_is_fail_closed() {
 
 #[test]
 fn parallel_copy_auto_host_gate_is_exact() {
-    const GIB: u64 = 1024 * 1024 * 1024;
     assert_eq!(
         crate::metal::A3B_PARALLEL_COPY_AUTO.path,
         "metal_forward.a3b_parallel_copy_auto"
     );
-    for (memory, expected) in [
-        (None, false),
-        (Some(128 * GIB - 1), false),
-        (Some(128 * GIB), true),
-        (Some(192 * GIB), true),
+    for memory in [
+        None,
+        Some(32 * 1024 * 1024 * 1024),
+        Some(128 * 1024 * 1024 * 1024),
     ] {
         let facts = qualification_facts("Apple M4 Max", memory, true);
-        assert_eq!(a3b_parallel_copy_auto_host_supported(&facts), expected);
+        assert!(a3b_parallel_copy_auto_host_supported(&facts));
     }
-    let variant = qualification_facts("Apple M4 Pro", Some(192 * GIB), true);
-    assert!(!a3b_parallel_copy_auto_host_supported(&variant));
-    let non_unified = qualification_facts("Apple M4 Max", Some(192 * GIB), false);
+    let variant = qualification_facts("Apple M5 Ultra", None, true);
+    assert!(a3b_parallel_copy_auto_host_supported(&variant));
+    let non_unified = qualification_facts("Apple M4 Max", Some(192 * 1024 * 1024 * 1024), false);
     assert!(!a3b_parallel_copy_auto_host_supported(&non_unified));
+}
+
+#[test]
+fn a3b_auto_plan_accepts_sufficient_buffer_changes_and_falls_back_when_short() {
+    let required = usize::try_from(GGUF_OWNED_A3B_WINDOW_BYTES).unwrap();
+    assert!(residency::a3b_required_window_fits(required + 16_384));
+    assert!(!residency::a3b_required_window_fits(required - 1));
+
+    assert!(automatic_a3b_profile_capacity_admitted(
+        GgufNoCopyMode::Auto,
+        GgufParallelCopyMode::Auto,
+        GgufOwnedArenaMode::Disabled,
+        false,
+    ));
+    assert!(!automatic_a3b_profile_capacity_admitted(
+        GgufNoCopyMode::Auto,
+        GgufParallelCopyMode::Auto,
+        GgufOwnedArenaMode::Disabled,
+        true,
+    ));
+    assert!(automatic_a3b_profile_capacity_admitted(
+        GgufNoCopyMode::Disabled,
+        GgufParallelCopyMode::Auto,
+        GgufOwnedArenaMode::Disabled,
+        true,
+    ));
+}
+
+#[test]
+fn automatic_copy_admission_checks_working_set_and_process_headroom() {
+    let signals = |process_limit_remaining_bytes| crate::metal::MetalMemorySignals {
+        recommended_max_bytes: 1_000,
+        current_allocated_bytes: 100,
+        process_limit_remaining_bytes,
+    };
+    let fits = decide_gguf_storage_mode_with_signals(
+        100,
+        50,
+        Some(100),
+        signals(Some(400)),
+        true,
+        GgufStorageRequest::Automatic,
+        None,
+    );
+    assert!(!fits.capacity_would_map);
+    assert!(!fits.map_weights);
+    assert_eq!(fits.reason, "copy_fits_with_headroom");
+
+    let process_short = decide_gguf_storage_mode_with_signals(
+        100,
+        50,
+        Some(100),
+        signals(Some(349)),
+        true,
+        GgufStorageRequest::Automatic,
+        None,
+    );
+    assert!(process_short.capacity_would_map);
+    assert!(process_short.map_weights);
+    assert_eq!(process_short.reason, "copy_exceeds_process_headroom");
+
+    let working_set_short = decide_gguf_storage_mode_with_signals(
+        100,
+        50,
+        Some(100),
+        crate::metal::MetalMemorySignals {
+            recommended_max_bytes: 250,
+            current_allocated_bytes: 100,
+            process_limit_remaining_bytes: Some(400),
+        },
+        true,
+        GgufStorageRequest::Automatic,
+        None,
+    );
+    assert!(working_set_short.capacity_would_map);
+    assert!(working_set_short.map_weights);
+    assert_eq!(
+        working_set_short.reason,
+        "copy_exceeds_working_set_headroom"
+    );
+
+    let forced_copy = decide_gguf_storage_mode_with_signals(
+        100,
+        50,
+        Some(100),
+        signals(Some(1)),
+        true,
+        GgufStorageRequest::Copy("explicit_environment_override"),
+        None,
+    );
+    assert!(!forced_copy.map_weights);
+    assert_eq!(forced_copy.reason, "explicit_environment_override");
 }
 
 #[test]
@@ -2218,10 +2305,9 @@ fn assert_gguf_parallel_a3b_q4_is_bit_exact(
             "first_offsets=10990048,5543736288,11006052064,16601574368 ",
             "last_offsets=5392741344,11004937952,16450579424,22134520800 ",
             "create=shared,default_cache,default observed=shared,default_cache,tracked ",
-            "page=16384 alignment=32 max_buffer=77309411328 mapped=22134528992 ",
+            "device=Apple M4 Max page=Some(16384) alignment=32 max_buffer=77309411328 mapped=22134528992 ",
             "layout=0x5ae645df5cf7d568 ",
             "inventory=f57153febec22463c7789b892d4d084041d722483a93191c81c40ab86be7d9e5 ",
-            "plan=fa2685e223ad8ea6271c6061041fe8d996b4e6cc70e060588b750732577c92af "
         ),
         ParallelDestinationLength::PageRounded16K => concat!(
             " schema=2 resources=733 logical_bytes=22123538944 ",
@@ -2232,10 +2318,9 @@ fn assert_gguf_parallel_a3b_q4_is_bit_exact(
             "first_offsets=10990048,5543736288,11006052064,16601574368 ",
             "last_offsets=5392741344,11004937952,16450579424,22134520800 ",
             "create=shared,default_cache,default observed=shared,default_cache,tracked ",
-            "page=16384 alignment=32 max_buffer=77309411328 mapped=22134528992 ",
+            "device=Apple M4 Max page=Some(16384) alignment=32 max_buffer=77309411328 mapped=22134528992 ",
             "layout=0x5ae645df5cf7d568 ",
             "inventory=f57153febec22463c7789b892d4d084041d722483a93191c81c40ab86be7d9e5 ",
-            "plan=fa2685e223ad8ea6271c6061041fe8d996b4e6cc70e060588b750732577c92af "
         ),
     };
     let marker_prefix = format!("{marker}{marker_contract}");
@@ -2532,7 +2617,7 @@ fn assert_gguf_parallel_dense27b_q4_is_bit_exact(
             "w3_last=844,blk.63.post_attention_norm.weight,0,16817223904,20480 ",
             "create=shared,default_cache,default ",
             "observed=shared,default_cache,tracked ",
-            "page=16384 alignment=32 max_buffer=77309411328 ",
+            "device=Apple M4 Max page=Some(16384) alignment=32 max_buffer=77309411328 ",
             "mapped=16817244384 layout=0xd116405fd99f54d9 ",
             "inventory=50e9af4e4f590fc85687a71f5602ce035e7fdf0e2a31e928b2c7a2be10458a07 "
         )

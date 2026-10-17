@@ -308,15 +308,35 @@ pub fn decide_gguf_storage_mode(
     request: GgufStorageRequest,
     mapping_unsupported_reason: Option<&'static str>,
 ) -> GgufNoCopyDecision {
+    decide_gguf_storage_mode_with_signals(
+        copied_bytes,
+        auxiliary_weight_bytes,
+        session_reserve_bytes,
+        crate::metal::MetalMemorySignals {
+            recommended_max_bytes: recommended_working_set_bytes,
+            current_allocated_bytes,
+            process_limit_remaining_bytes: Some(u64::MAX),
+        },
+        unified_memory,
+        request,
+        mapping_unsupported_reason,
+    )
+}
+
+pub fn decide_gguf_storage_mode_with_signals(
+    copied_bytes: u64,
+    auxiliary_weight_bytes: u64,
+    session_reserve_bytes: Option<u64>,
+    signals: crate::metal::MetalMemorySignals,
+    unified_memory: bool,
+    request: GgufStorageRequest,
+    mapping_unsupported_reason: Option<&'static str>,
+) -> GgufNoCopyDecision {
     let reserve = session_reserve_bytes.unwrap_or(GGUF_COPY_SESSION_RESERVE_BYTES);
     // Performance heuristic fitted to measurements: 76% copied decodes faster; 97% copied loads 4–6x slower with heavy paging, not an admission guarantee.
+    let recommended_working_set_bytes = signals.recommended_max_bytes;
     let margin =
         recommended_working_set_bytes.saturating_mul(GGUF_COPY_HEADROOM_MARGIN_PERCENT) / 100;
-    let signals = crate::metal::MetalMemorySignals {
-        recommended_max_bytes: recommended_working_set_bytes,
-        current_allocated_bytes,
-        process_limit_remaining_bytes: Some(u64::MAX),
-    };
     let admission = crate::metal::evaluate_metal_memory_admission_with_cpu_bytes(
         copied_bytes,
         auxiliary_weight_bytes,
@@ -324,10 +344,7 @@ pub fn decide_gguf_storage_mode(
         signals,
         true,
     );
-    let capacity_would_map = !admission
-        .required_bytes
-        .zip(admission.working_set_headroom_bytes)
-        .is_some_and(|(required, headroom)| required <= headroom);
+    let capacity_would_map = !admission.admitted;
     let (map_weights, reason) = match request {
         GgufStorageRequest::Map(reason) => (true, reason),
         GgufStorageRequest::Copy(reason) => (false, reason),
@@ -339,9 +356,15 @@ pub fn decide_gguf_storage_mode(
         {
             (false, mapping_unsupported_reason.unwrap())
         }
-        GgufStorageRequest::Automatic if capacity_would_map => {
-            (true, "copy_exceeds_working_set_headroom")
-        }
+        GgufStorageRequest::Automatic if capacity_would_map => match admission.reason {
+            crate::metal::MetalMemoryAdmissionReason::ProcessInsufficient => {
+                (true, "copy_exceeds_process_headroom")
+            }
+            crate::metal::MetalMemoryAdmissionReason::BothInsufficient => {
+                (true, "copy_exceeds_working_set_and_process_headroom")
+            }
+            _ => (true, "copy_exceeds_working_set_headroom"),
+        },
         GgufStorageRequest::Automatic => (false, "copy_fits_with_headroom"),
     };
     GgufNoCopyDecision {
@@ -539,7 +562,9 @@ pub fn model_weight_storage_inventory_digest(requests: &[ModelWeightStorageReque
     }))
 }
 
-pub fn retained_storage_plan_digest(plan: &RetainedStoragePlan) -> String {
+/// Digest the complete host-specific plan for benchmark report validation.
+/// Runtime qualification uses artifact and inventory digests instead.
+pub fn retained_storage_host_report_digest(plan: &RetainedStoragePlan) -> String {
     let mut records = vec![format!(
         "header\0{}\0{}\0{}\0{}",
         plan.page_size, plan.max_buffer_length, plan.usable_window_length, plan.required_alignment
@@ -562,6 +587,17 @@ pub fn retained_storage_plan_digest(plan: &RetainedStoragePlan) -> String {
         )
     }));
     storage_digest_records(records)
+}
+
+pub(super) fn a3b_required_window_fits(max_buffer_length: usize) -> bool {
+    u64::try_from(max_buffer_length)
+        .is_ok_and(|max_buffer_length| max_buffer_length >= GGUF_OWNED_A3B_WINDOW_BYTES)
+}
+
+fn a3b_retained_plan_windows_fit(plan: &RetainedStoragePlan) -> bool {
+    plan.windows
+        .iter()
+        .all(|window| window.length <= plan.max_buffer_length)
 }
 
 pub(super) fn expected_model_weight_identity(
@@ -965,6 +1001,13 @@ pub(super) fn authenticated_a3b_storage_plan(
             "forced A3B storage requires unified memory".to_string(),
         ));
     }
+    if !a3b_required_window_fits(ctx.max_buffer_length()) {
+        return Err(MfError::LoadPolicy(format!(
+            "A3B retained plan requires a {}-byte window, device max buffer is {} bytes",
+            GGUF_OWNED_A3B_WINDOW_BYTES,
+            ctx.max_buffer_length()
+        )));
+    }
     let expected_source_bytes = expected.iter().try_fold(0u64, |total, request| {
         total
             .checked_add(request.desc.n_bytes)
@@ -1026,7 +1069,7 @@ pub(super) fn authenticated_a3b_storage_plan(
             )
         })
         .collect::<Vec<_>>();
-    if retained_storage_plan_digest(&plan) != GGUF_OWNED_A3B_PLAN_DIGEST
+    if !a3b_retained_plan_windows_fit(&plan)
         || plan.windows.len() != 1
         || window_bytes != GGUF_OWNED_A3B_WINDOW_BYTES
         || view_count != GGUF_OWNED_A3B_VIEWS
@@ -1045,7 +1088,7 @@ pub(super) fn authenticated_a3b_storage_plan(
         )
     {
         return Err(MfError::LoadPolicy(
-            "forced A3B storage planner geometry drifted".to_string(),
+            "A3B retained plan is incompatible with current host page or buffer facts".to_string(),
         ));
     }
     Ok(plan)
@@ -1173,6 +1216,13 @@ pub(super) fn validate_a10b_parallel_memory_admission(
 ) -> Result<(), MfError> {
     if profile.id != ParallelCopyProfileId::A10bQ4xlV1 {
         return Ok(());
+    }
+    if !ctx.device_facts().supports_metal_residency_sets() && phase == "prepare" {
+        emit_metal_load_line(format_args!(
+            "[metal-gguf-parallel-residency] profile={} status=declined reason=macos_15_or_newer_required os_version={:?}; continuing without residency set",
+            profile.id.label(),
+            ctx.device_facts().os_version,
+        ));
     }
     let admission = evaluate_metal_memory_admission(
         A10B_PARALLEL_PREAD_REQUIRED_HEADROOM_BYTES,
@@ -1608,6 +1658,7 @@ pub(super) fn realize_parallel_copied_profile(
         }
     };
     emit_parallel_copy_marker(
+        ctx,
         profile,
         population,
         destination_length,

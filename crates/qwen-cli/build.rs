@@ -80,6 +80,8 @@ fn watch_source_files(manifest_dir: &Path) {
 }
 
 fn main() {
+    // Keep Metal's macOS 15 residency-set symbols weak in every CLI binary.
+    println!("cargo:rustc-link-arg=-Wl,-weak_framework,Metal");
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=QWEN_BUILD_COMMIT");

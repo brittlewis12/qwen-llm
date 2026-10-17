@@ -167,8 +167,6 @@ const GGUF_OWNED_A3B_MAPPED_BYTES: usize = 22_134_528_992;
 const GGUF_OWNED_A3B_LAYOUT_DIGEST: u64 = 0x5ae6_45df_5cf7_d568;
 const GGUF_OWNED_A3B_INVENTORY_DIGEST: &str =
     "f57153febec22463c7789b892d4d084041d722483a93191c81c40ab86be7d9e5";
-const GGUF_OWNED_A3B_PLAN_DIGEST: &str =
-    "fa2685e223ad8ea6271c6061041fe8d996b4e6cc70e060588b750732577c92af";
 const GGUF_OWNED_A3B_REQUESTS: usize = 733;
 const GGUF_OWNED_A3B_SOURCE_BYTES: u64 = 22_123_538_944;
 const GGUF_OWNED_A3B_VIEWS: usize = 732;
@@ -2671,39 +2669,6 @@ impl MetalModel {
                 Err(_) => Some("automatic_mapping_unsupported_host_page_geometry"),
             }
         };
-        let auto = if auto_parallel_copy_a3b {
-            match select_auto_parallel_copy_profile(
-                ctx,
-                gguf,
-                model,
-                &expected,
-                embedding_selection,
-            )? {
-                Some(profile) => match auto_parallel_copy_population(profile.id) {
-                    Some(population) => {
-                        let prepared = prepare_parallel_copied_profile(
-                            ctx,
-                            gguf,
-                            model,
-                            &expected,
-                            embedding_selection,
-                            profile,
-                            population,
-                            ParallelDestinationLength::LogicalExact,
-                        )?;
-                        emit_metal_load_line(format_args!(
-                            "[metal-gguf-parallel-policy] mode=auto profile={}",
-                            profile.id.label()
-                        ));
-                        PreparedAutoSelection::Selected(prepared)
-                    }
-                    None => PreparedAutoSelection::NoMatch,
-                },
-                None => PreparedAutoSelection::NoMatch,
-            }
-        } else {
-            PreparedAutoSelection::NotEligible
-        };
         let copied_bytes_estimate =
             expected
                 .iter()
@@ -2720,6 +2685,89 @@ impl MetalModel {
         let copied_bytes_estimate = copied_bytes_estimate
             .checked_add(derived_bytes)
             .ok_or_else(|| MfError::LoadPolicy("copied weight byte estimate overflow".into()))?;
+        let signals = ctx.memory_signals();
+        let automatic_copy_decision = decide_gguf_storage_mode_with_signals(
+            copied_bytes_estimate,
+            options.auxiliary_weight_bytes,
+            None,
+            signals,
+            ctx.device.hasUnifiedMemory(),
+            GgufStorageRequest::Automatic,
+            mapping_unsupported_reason,
+        );
+        let auto_copy_capacity_admitted = automatic_a3b_profile_capacity_admitted(
+            no_copy_mode,
+            parallel_mode,
+            owned_mode,
+            automatic_copy_decision.capacity_would_map,
+        );
+        let mut auto_plan_host_facts_declined = false;
+        let auto = if auto_parallel_copy_a3b && auto_copy_capacity_admitted {
+            match select_auto_parallel_copy_profile(
+                ctx,
+                gguf,
+                model,
+                &expected,
+                embedding_selection,
+            )? {
+                AutoParallelCopyProfileSelection::Selected(profile) => {
+                    match auto_parallel_copy_population(profile.id) {
+                        Some(population) => match prepare_parallel_copied_profile(
+                            ctx,
+                            gguf,
+                            model,
+                            &expected,
+                            embedding_selection,
+                            profile,
+                            population,
+                            ParallelDestinationLength::LogicalExact,
+                        ) {
+                            Ok(prepared) => {
+                                emit_metal_load_line(format_args!(
+                                    "[metal-gguf-parallel-policy] mode=auto profile={}",
+                                    profile.id.label()
+                                ));
+                                PreparedAutoSelection::Selected(prepared)
+                            }
+                            Err(error) => {
+                                auto_plan_host_facts_declined = true;
+                                emit_metal_load_line(format_args!(
+                                    "[metal-gguf-parallel-policy] mode=auto profile={} declined reason=host_plan_facts details={error}",
+                                    profile.id.label()
+                                ));
+                                PreparedAutoSelection::NoMatch
+                            }
+                        },
+                        None => PreparedAutoSelection::NoMatch,
+                    }
+                }
+                AutoParallelCopyProfileSelection::HostPlanUnsupported => {
+                    auto_plan_host_facts_declined = true;
+                    emit_metal_load_line(format_args!(
+                        "[metal-gguf-parallel-policy] mode=auto profile={} declined reason=host_plan_facts max_buffer_length={} host_page_size={:?}",
+                        A3B_PARALLEL_COPY_PROFILE.id.label(),
+                        ctx.max_buffer_length(),
+                        host_page_size_bytes().ok(),
+                    ));
+                    PreparedAutoSelection::NoMatch
+                }
+                AutoParallelCopyProfileSelection::NoMatch => PreparedAutoSelection::NoMatch,
+            }
+        } else if auto_parallel_copy_a3b {
+            emit_metal_load_line(format_args!(
+                "[metal-gguf-parallel-policy] mode=auto profile={} declined reason={} admission={}",
+                A3B_PARALLEL_COPY_PROFILE.id.label(),
+                automatic_copy_decision.reason,
+                if automatic_copy_decision.capacity_would_map {
+                    "insufficient"
+                } else {
+                    "admitted"
+                },
+            ));
+            PreparedAutoSelection::NoMatch
+        } else {
+            PreparedAutoSelection::NotEligible
+        };
         let auto_retained_eligible = auto_retained_single_pass_enabled(
             options.auto_retained_single_pass,
             ctx.device.hasUnifiedMemory(),
@@ -2749,6 +2797,8 @@ impl MetalModel {
             GgufNoCopyMode::Auto => {
                 if let Some(reason) = copy_reason {
                     GgufStorageRequest::Copy(reason)
+                } else if auto_plan_host_facts_declined && mapping_unsupported_reason.is_none() {
+                    GgufStorageRequest::Map("automatic_parallel_copy_host_plan_unsupported")
                 } else if matches!(&auto_retained, PreparedAutoRetainedSelection::Selected(_)) {
                     GgufStorageRequest::Map("automatic_retained_storage_precedence")
                 } else {
@@ -2756,13 +2806,11 @@ impl MetalModel {
                 }
             }
         };
-        let signals = ctx.memory_signals();
-        let decision = decide_gguf_storage_mode(
+        let decision = decide_gguf_storage_mode_with_signals(
             copied_bytes_estimate,
             options.auxiliary_weight_bytes,
             None,
-            signals.recommended_max_bytes,
-            signals.current_allocated_bytes,
+            signals,
             ctx.device.hasUnifiedMemory(),
             request,
             mapping_unsupported_reason,
@@ -3496,6 +3544,18 @@ pub use support::*;
 pub use token::*;
 
 pub const RMS_EPS: f32 = 1e-6;
+
+fn automatic_a3b_profile_capacity_admitted(
+    no_copy_mode: GgufNoCopyMode,
+    parallel_mode: GgufParallelCopyMode,
+    owned_mode: GgufOwnedArenaMode,
+    capacity_would_map: bool,
+) -> bool {
+    let automatic = no_copy_mode == GgufNoCopyMode::Auto
+        && parallel_mode == GgufParallelCopyMode::Auto
+        && owned_mode != GgufOwnedArenaMode::Forced;
+    !automatic || !capacity_would_map
+}
 
 crate::env_flag!(default_on matmat_smalln_table_enabled, "QWEN_MATMAT_SMALLN_TABLE");
 

@@ -452,6 +452,7 @@ pub(super) fn parallel_copy_marker_label(
 }
 
 pub(super) fn emit_parallel_copy_marker(
+    ctx: &MetalContext,
     profile: &ParallelCopyProfile,
     population: ParallelPopulationMethod,
     destination_length: ParallelDestinationLength,
@@ -459,6 +460,9 @@ pub(super) fn emit_parallel_copy_marker(
     accounting: Option<ParallelCopyEndpointAccounting>,
 ) -> Result<(), MfError> {
     let marker = parallel_copy_marker_label(profile, population, destination_length)?;
+    let device_name = ctx.device_facts().name.as_str();
+    let page_size = crate::metal::host_page_size_bytes().ok();
+    let max_buffer_length = ctx.max_buffer_length();
     match profile.marker_contract {
         ParallelCopyMarkerContract::A3b => {
             if accounting.is_some() {
@@ -476,13 +480,16 @@ pub(super) fn emit_parallel_copy_marker(
                             "first_offsets=10990048,5543736288,11006052064,16601574368 ",
                             "last_offsets=5392741344,11004937952,16450579424,22134520800 ",
                             "create=shared,default_cache,default observed=shared,default_cache,tracked ",
-                            "page=16384 alignment=32 max_buffer=77309411328 mapped=22134528992 ",
+                            "device={} page={:?} alignment={} max_buffer={} mapped=22134528992 ",
                             "layout=0x5ae645df5cf7d568 ",
                             "inventory=f57153febec22463c7789b892d4d084041d722483a93191c81c40ab86be7d9e5 ",
-                            "plan=fa2685e223ad8ea6271c6061041fe8d996b4e6cc70e060588b750732577c92af ",
                             "allocation_us={} source_us={} copy_us={} binding_us={} ready_us={}"
                         ),
                         marker,
+                        device_name,
+                        page_size,
+                        GGUF_NO_COPY_ALIGNMENT,
+                        max_buffer_length,
                         timing.allocation_us,
                         timing.source_us,
                         timing.copy_us,
@@ -501,13 +508,16 @@ pub(super) fn emit_parallel_copy_marker(
                             "first_offsets=10990048,5543736288,11006052064,16601574368 ",
                             "last_offsets=5392741344,11004937952,16450579424,22134520800 ",
                             "create=shared,default_cache,default observed=shared,default_cache,tracked ",
-                            "page=16384 alignment=32 max_buffer=77309411328 mapped=22134528992 ",
+                            "device={} page={:?} alignment={} max_buffer={} mapped=22134528992 ",
                             "layout=0x5ae645df5cf7d568 ",
                             "inventory=f57153febec22463c7789b892d4d084041d722483a93191c81c40ab86be7d9e5 ",
-                            "plan=fa2685e223ad8ea6271c6061041fe8d996b4e6cc70e060588b750732577c92af ",
                             "allocation_us={} source_us={} copy_us={} binding_us={} ready_us={}"
                         ),
                         marker,
+                        device_name,
+                        page_size,
+                        GGUF_NO_COPY_ALIGNMENT,
+                        max_buffer_length,
                         timing.allocation_us,
                         timing.source_us,
                         timing.copy_us,
@@ -544,7 +554,7 @@ pub(super) fn emit_parallel_copy_marker(
                     "w3_first={},{},{},{},{} w3_last={},{},{},{},{} ",
                     "create=shared,default_cache,default ",
                     "observed=shared,default_cache,tracked ",
-                    "page=16384 alignment=32 max_buffer=77309411328 ",
+                    "device={} page={:?} alignment={} max_buffer={} ",
                     "mapped={} layout={:#018x} ",
                     "inventory={} allocation_us={} source_us={} copy_us={} ",
                     "binding_us={} ready_us={} user_cpu_us={} system_cpu_us={} ",
@@ -606,6 +616,10 @@ pub(super) fn emit_parallel_copy_marker(
                 boundary[3].last.shard_idx,
                 boundary[3].last.source_offset,
                 boundary[3].last.source_bytes,
+                device_name,
+                page_size,
+                GGUF_NO_COPY_ALIGNMENT,
+                max_buffer_length,
                 mapped_bytes,
                 profile.descriptor_layout_digest,
                 profile.inventory_digest,
@@ -834,6 +848,9 @@ pub(super) fn create_a10b_parallel_residency_set(
             storage.profile.request_count
         )));
     }
+    if !ctx.device_facts().supports_metal_residency_sets() {
+        return Ok(None);
+    }
 
     let descriptor = MTLResidencySetDescriptor::new();
     descriptor.setLabel(Some(&NSString::from_str("qwen-a10b-parallel-pread")));
@@ -972,13 +989,14 @@ where
     })
 }
 
-pub(super) fn parallel_copy_profile_matches(
+fn parallel_copy_profile_matches_with_buffer_limit(
     ctx: &MetalContext,
     gguf: &GgufFile,
     model: &Model<'_>,
     expected: &[ModelWeightStorageRequest<'_>],
     embedding_selection: NativeQuantEmbeddingSelection,
     profile: &ParallelCopyProfile,
+    check_buffer_limit: bool,
 ) -> Result<bool, MfError> {
     if !ctx.device_facts().unified_memory {
         return Ok(false);
@@ -1042,7 +1060,7 @@ pub(super) fn parallel_copy_profile_matches(
             || request.desc.n_bytes == 0
             || request.resident_bytes != request.desc.n_bytes
             || source_end > *shard_len as u64
-            || request.desc.n_bytes > ctx.max_buffer_length() as u64
+            || (check_buffer_limit && request.desc.n_bytes > ctx.max_buffer_length() as u64)
             || usize::try_from(request.desc.n_bytes).is_err()
         {
             return Ok(false);
@@ -1054,6 +1072,25 @@ pub(super) fn parallel_copy_profile_matches(
             })?;
     }
     Ok(source_bytes == profile.source_bytes)
+}
+
+pub(super) fn parallel_copy_profile_matches(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    model: &Model<'_>,
+    expected: &[ModelWeightStorageRequest<'_>],
+    embedding_selection: NativeQuantEmbeddingSelection,
+    profile: &ParallelCopyProfile,
+) -> Result<bool, MfError> {
+    parallel_copy_profile_matches_with_buffer_limit(
+        ctx,
+        gguf,
+        model,
+        expected,
+        embedding_selection,
+        profile,
+        true,
+    )
 }
 
 pub(super) fn select_parallel_copy_profile(
@@ -1080,25 +1117,51 @@ pub(super) fn a3b_parallel_copy_auto_host_supported(facts: &crate::metal::Device
     facts.unified_memory && holds
 }
 
+pub(super) enum AutoParallelCopyProfileSelection {
+    NoMatch,
+    HostPlanUnsupported,
+    Selected(&'static ParallelCopyProfile),
+}
+
 pub(super) fn select_auto_parallel_copy_profile(
     ctx: &MetalContext,
     gguf: &GgufFile,
     model: &Model<'_>,
     expected: &[ModelWeightStorageRequest<'_>],
     embedding_selection: NativeQuantEmbeddingSelection,
-) -> Result<Option<&'static ParallelCopyProfile>, MfError> {
+) -> Result<AutoParallelCopyProfileSelection, MfError> {
     if !a3b_parallel_copy_auto_host_supported(ctx.device_facts()) {
-        return Ok(None);
+        return Ok(AutoParallelCopyProfileSelection::NoMatch);
     }
-    parallel_copy_profile_matches(
+    let artifact_matches = parallel_copy_profile_matches_with_buffer_limit(
         ctx,
         gguf,
         model,
         expected,
         embedding_selection,
         &A3B_PARALLEL_COPY_PROFILE,
-    )
-    .map(|matched| matched.then_some(&A3B_PARALLEL_COPY_PROFILE))
+        false,
+    )?;
+    if !artifact_matches {
+        return Ok(AutoParallelCopyProfileSelection::NoMatch);
+    }
+    if !super::a3b_required_window_fits(ctx.max_buffer_length())
+        || crate::metal::host_page_size_bytes().is_err()
+        || authenticated_a3b_storage_plan(ctx, gguf, model, expected, embedding_selection).is_err()
+        || !parallel_copy_profile_matches(
+            ctx,
+            gguf,
+            model,
+            expected,
+            embedding_selection,
+            &A3B_PARALLEL_COPY_PROFILE,
+        )?
+    {
+        return Ok(AutoParallelCopyProfileSelection::HostPlanUnsupported);
+    }
+    Ok(AutoParallelCopyProfileSelection::Selected(
+        &A3B_PARALLEL_COPY_PROFILE,
+    ))
 }
 
 pub(super) fn auto_parallel_copy_population(

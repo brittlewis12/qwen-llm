@@ -89,6 +89,7 @@ def self_test() -> None:
     root = pathlib.Path("/repo/root")
     record = {
         "path": "sample.path",
+        "performance_characterized_device": "Apple M4 Max",
         "holds_for_device": True,
         "correctness": "cargo test --release -p qwen-llm --lib sample -- --exact",
         "correctness_kind": "replay",
@@ -123,6 +124,7 @@ def self_test() -> None:
             **record,
             "correctness": "cargo test --release -p qwen-llm --lib characterization -- --exact",
             "correctness_kind": "m4_characterization_skip",
+            "correctness_characterized_device": "Apple M4 Max",
         }
         completed = subprocess.CompletedProcess(
             args=characterization["correctness"],
@@ -131,12 +133,26 @@ def self_test() -> None:
             stderr="stderr failure tail\n" if code else "",
         )
         with patch("subprocess.run", return_value=completed):
-            witness, failed = witness_entry(characterization, "correctness", args, {}, root)
+            witness, failed = witness_entry(characterization, "correctness", args, {"name": "Apple M4 Max"}, root)
         assert witness["status"] == expected_status
         assert failed is (code != 0)
         if code:
             assert witness["stdout_tail"].endswith("stdout failure tail")
             assert witness["stderr_tail"].endswith("stderr failure tail")
+
+    characterization = {
+        **record,
+        "correctness": "cargo test --release -p qwen-llm --lib characterization -- --exact",
+        "correctness_kind": "m4_characterization_skip",
+        "correctness_characterized_device": "Apple M4 Max",
+    }
+    with patch("subprocess.run") as unexpected_run:
+        witness, failed = witness_entry(
+            characterization, "correctness", args, {"name": "Apple M5 Ultra"}, root
+        )
+    assert witness["status"] == "not applicable" and not failed
+    assert witness["reason"] == "characterizes Apple M4 Max values; not applicable"
+    unexpected_run.assert_not_called()
 
     scope_record = {
         **record,
@@ -223,10 +239,14 @@ def witness_entry(
         entry["status"] = "none"
         entry["reason"] = reason
         return entry, False
-    if kind == "m4_characterization_skip" and not record.get("holds_for_device", False):
-        entry["status"] = "not applicable on this device"
-        entry["decline_reason"] = record.get("decline_reason")
-        entry["reason"] = "qualification does not hold for this device; skipped to avoid a vacuous pass"
+    characterized_device = record.get(f"{facet}_characterized_device")
+    if kind == "m4_characterization_skip" and not characterized_device:
+        raise RuntimeError(
+            f"{record.get('path')} {facet} is missing its characterized device"
+        )
+    if kind == "m4_characterization_skip" and facts.get("name") != characterized_device:
+        entry["status"] = "not applicable"
+        entry["reason"] = f"characterizes {characterized_device} values; not applicable"
         return entry, False
     environment, command = parse_command(value, kind)
     entry["argv"] = command
@@ -234,7 +254,7 @@ def witness_entry(
     if kind == "scope_only":
         entry["reason"] = "scope-only check; its result is not execution evidence"
     elif kind == "m4_characterization_skip":
-        entry["reason"] = "qualification holds for this device; run the M4 characterization"
+        entry["reason"] = f"characterizes {characterized_device} values"
     else:
         entry["reason"] = "replay witness"
     if args.dry_run:

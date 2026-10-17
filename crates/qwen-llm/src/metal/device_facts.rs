@@ -23,7 +23,7 @@ pub struct GpuFamilySupport {
 
 /// Stable identifier of the serialized report; bump it when a field's
 /// name or meaning changes.
-pub const DEVICE_FACTS_VERSION: &str = "qwen_device_info_v3";
+pub const DEVICE_FACTS_VERSION: &str = "qwen_device_info_v5";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DeviceFacts {
@@ -84,6 +84,16 @@ impl DeviceFacts {
         )
     }
 
+    /// Whether the running OS provides the Metal residency-set API.
+    pub fn supports_metal_residency_sets(&self) -> bool {
+        self.os_is_at_least("15.0") == Some(true)
+    }
+
+    /// Compare the reported macOS version with a minimum dotted version.
+    pub fn os_is_at_least(&self, minimum: &str) -> Option<bool> {
+        version_at_least(self.os_version.as_deref()?, minimum)
+    }
+
     /// Query static device and host properties without creating a context,
     /// acquiring the inference lease, loading a library, or creating a queue.
     pub fn probe() -> Option<Self> {
@@ -131,9 +141,11 @@ impl DeviceFacts {
                 }
             };
             report.push_str(&format!(
-                "\n  {}: qualified_devices={:?} memory={} host_page_size_bytes={:?} max_buffer_length_bytes={:?} required_headroom_bytes={:?} required_headroom_scope={:?} holds_for_device={} decline_reason={:?} evidence={} correctness_kind={:?} correctness={} performance_kind={:?} performance={}",
+                "\n  {}: capability_gate={:?} requires_unified_memory={} minimum_os_version={:?} memory={} host_page_size_bytes={:?} max_buffer_length_bytes={:?} required_headroom_bytes={:?} required_headroom_scope={:?} holds_for_device={} decline_reason={:?} measurements={:?} excluded={:?} evidence={} correctness_kind={:?} correctness_characterized_device={:?} correctness={} performance_kind={:?} performance_characterized_device={:?} performance={}",
                 status.path,
-                status.qualified_devices,
+                status.capability_gate,
+                status.requires_unified_memory,
+                status.minimum_os_version,
                 memory,
                 status.host_page_size_bytes,
                 status.max_buffer_length_bytes,
@@ -141,10 +153,14 @@ impl DeviceFacts {
                 status.required_headroom_scope,
                 status.holds_for_device,
                 status.decline_reason,
+                status.measurements,
+                status.excluded,
                 status.evidence,
                 status.correctness_kind,
+                status.correctness_characterized_device,
                 status.correctness,
                 status.performance_kind,
+                status.performance_characterized_device,
                 status.performance,
             ));
         }
@@ -262,7 +278,7 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&sample()).unwrap(),
             concat!(
-                r#"{"version":"qwen_device_info_v3","name":"Test GPU","architecture":"test-arch","#,
+                r#"{"version":"qwen_device_info_v5","name":"Test GPU","architecture":"test-arch","#,
                 r#""registry_id":42,"gpu_families":{"apple7":true,"apple8":false,"apple9":false,"#,
                 r#""apple10":false,"metal3":true,"metal4":false},"max_threadgroup_memory_bytes":32,"#,
                 r#""max_buffer_length_bytes":4096,"recommended_max_working_set_bytes":8192,"#,
@@ -275,38 +291,40 @@ mod tests {
 
     #[test]
     fn device_facts_report_formats_values_and_unavailable_host_signals() {
-        let report = sample().format_report();
+        let mut unsupported = sample();
+        unsupported.gpu_families.apple7 = false;
+        let report = unsupported.format_report();
         assert!(report.contains("device: Test GPU"));
-        assert!(report.contains("gpu_families: Apple7=true Apple8=false"));
+        assert!(report.contains("gpu_families: Apple7=false Apple8=false"));
         assert!(report.contains("host_page_size: 16384"));
         assert!(report.contains("physical_memory: unavailable"));
         assert!(report.contains("product_metallib_deployment_target: 15.0"));
         assert!(report.contains("os_supports_metallib: yes"));
-        assert!(report.contains(
-            "deepseek_v4.multigroup_selector: qualified_devices=Model(\"Apple M4 Max\")"
-        ));
+        assert!(report.contains("deepseek_v4.multigroup_selector: capability_gate=AppleFamily7"));
         assert!(report.contains("holds_for_device=false"));
         assert!(
-            report.contains("evidence=d52815a3 correctness_kind=Replay correctness=cargo test")
+            report.contains(
+                "evidence=d52815a3 correctness_kind=Replay correctness_characterized_device=None correctness=cargo test"
+            )
         );
         assert!(report.contains("performance_kind=M4CharacterizationSkip"));
         assert!(report.contains("performance=cargo test"));
-        assert!(report.contains("decline_reason=Some(DeviceModel"));
-        assert!(report.contains("oldest_measured: \"Apple M1 Pro\""));
-        assert!(report.contains("newest_measured: \"Apple M4 Max\""));
+        assert!(report.contains("decline_reason=Some(GpuFamily"));
     }
 
     #[test]
     fn device_facts_json_report_lists_qualification_results() {
-        let actual = serde_json::to_value(sample().report()).unwrap();
+        let mut unsupported = sample();
+        unsupported.gpu_families.apple7 = false;
+        let actual = serde_json::to_value(unsupported.report()).unwrap();
         assert_eq!(actual["version"], DEVICE_FACTS_VERSION);
         let qualifications = actual["qualifications"].as_array().unwrap();
         let exact = qualifications
             .iter()
             .find(|record| record["path"] == "metal_forward.exact_unified_parallel_copy_profiles")
             .unwrap();
-        assert_eq!(exact["host_page_size_bytes"], 16_384);
-        assert_eq!(exact["max_buffer_length_bytes"], 77_309_411_328_usize);
+        assert_eq!(exact["host_page_size_bytes"], serde_json::Value::Null);
+        assert_eq!(exact["max_buffer_length_bytes"], serde_json::Value::Null);
         assert_eq!(exact["required_headroom_bytes"], 85_608_931_328_u64);
         assert_eq!(exact["required_headroom_scope"], "a10b_q4xl_forced_pread");
         assert!(
@@ -318,19 +336,55 @@ mod tests {
         assert_eq!(exact["correctness_kind"], "scope_only");
         assert!(exact["performance"].as_str().unwrap().starts_with("none:"));
         assert_eq!(exact["performance_kind"], "none");
-        assert_eq!(exact["decline_reason"]["facet"], "device_model");
+        assert_eq!(exact["capability_gate"], "apple_family7");
+        assert_eq!(exact["requires_unified_memory"], true);
+        assert_eq!(exact["decline_reason"]["facet"], "gpu_family");
+        assert_eq!(exact["measurements"][0]["device"], "Apple M4 Max");
+        assert_eq!(exact["measurements"][0]["date"], "2026-10-14");
+        assert_eq!(exact["measurements"][0]["correctness"], "not_run");
+        assert_eq!(exact["measurements"][0]["performance"], "not_recorded");
+        assert!(
+            exact["measurements"][0]["evidence"]
+                .as_str()
+                .unwrap()
+                .contains("sha256=")
+        );
+        assert!(exact["excluded"].as_array().unwrap().is_empty());
+        let residency = qualifications
+            .iter()
+            .find(|record| record["path"] == "deepseek_v4.residency_set")
+            .unwrap();
+        assert_eq!(residency["minimum_os_version"], "15.0");
+        assert_eq!(residency["decline_reason"]["facet"], "gpu_family");
+        let old_os = DeviceFacts {
+            os_version: Some("14.7.1".into()),
+            ..sample()
+        };
+        let old_os_qualifications = serde_json::to_value(old_os.report()).unwrap();
+        let residency = old_os_qualifications["qualifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|record| record["path"] == "deepseek_v4.residency_set")
+            .unwrap();
+        assert_eq!(residency["decline_reason"]["facet"], "os_version");
         let hca = qualifications
             .iter()
             .find(|record| record["path"] == "deepseek_v4.grouped_long_hca")
             .unwrap();
-        assert_eq!(hca["qualified_devices"]["scope"], "apple_family7");
-        assert_eq!(
-            hca["qualified_devices"]["details"]["oldest_measured"],
-            "Apple M1 Pro"
-        );
-        assert_eq!(
-            hca["qualified_devices"]["details"]["newest_measured"],
-            "Apple M4 Max"
+        assert_eq!(hca["capability_gate"], "apple_family7");
+        let m5_measurement = hca["measurements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|measurement| measurement["device"] == "Apple M5 Ultra")
+            .unwrap();
+        assert_eq!(m5_measurement["performance"], "failed");
+        assert!(
+            m5_measurement["note"]
+                .as_str()
+                .unwrap()
+                .contains("ungrouped-online comparison arm")
         );
     }
 
@@ -364,5 +418,17 @@ mod tests {
         );
         assert_eq!(facts(None, "14.0").os_supports_metallib(), None);
         assert_eq!(facts(Some("beta"), "14.0").os_supports_metallib(), None);
+    }
+
+    #[test]
+    fn metal_residency_sets_require_macos_15_or_newer() {
+        let facts = |os: Option<&str>| DeviceFacts {
+            os_version: os.map(Into::into),
+            ..sample()
+        };
+        assert!(!facts(Some("14.7.1")).supports_metal_residency_sets());
+        assert!(facts(Some("15.0")).supports_metal_residency_sets());
+        assert!(facts(Some("27.0.1")).supports_metal_residency_sets());
+        assert!(!facts(None).supports_metal_residency_sets());
     }
 }

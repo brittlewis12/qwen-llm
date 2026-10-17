@@ -1,8 +1,8 @@
-//! Device models on which specific optimized paths were qualified.
+//! Capability requirements and evidence for optimized device paths.
 //!
 //! Pipeline probes remain responsible for checking whether a path is legal;
-//! these records only describe where its performance or numerical behavior
-//! was checked.
+//! the Apple GPU-family gate checks only the minimum capability. Measurements
+//! describe tested devices and never enable or decline a path.
 
 use super::DeviceFacts;
 use serde::Serialize;
@@ -34,19 +34,45 @@ pub enum HeadroomRequirementScope {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "scope", content = "details", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum QualifiedDevices {
-    Model(&'static str),
-    AppleFamily7 {
-        oldest_measured: &'static str,
-        newest_measured: &'static str,
-    },
+    AppleFamily7,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeasurementResult {
+    Passed,
+    Failed,
+    NotRun,
+    NotRecorded,
+    NotApplicable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct DeviceMeasurement {
+    pub device: &'static str,
+    pub correctness: MeasurementResult,
+    pub performance: MeasurementResult,
+    pub date: &'static str,
+    pub evidence: &'static str,
+    pub note: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct DeviceExclusion {
+    pub device: &'static str,
+    pub evidence: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Qualification {
     pub path: &'static str,
-    pub qualified_devices: QualifiedDevices,
+    pub capability_gate: QualifiedDevices,
+    pub requires_unified_memory: bool,
+    pub minimum_os_version: Option<&'static str>,
+    pub measurements: &'static [DeviceMeasurement],
+    pub excluded: &'static [DeviceExclusion],
     pub memory: QualifiedMemory,
     pub host_page_size_bytes: Option<usize>,
     pub max_buffer_length_bytes: Option<usize>,
@@ -57,18 +83,27 @@ pub struct Qualification {
     pub correctness_kind: QualificationWitnessKind,
     pub performance: &'static str,
     pub performance_kind: QualificationWitnessKind,
+    pub correctness_characterized_device: Option<&'static str>,
+    pub performance_characterized_device: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "facet", rename_all = "snake_case")]
 pub enum QualificationDeclineReason {
-    DeviceModel {
-        expected: &'static str,
-        actual: String,
-    },
     GpuFamily {
         family: &'static str,
         supported: bool,
+    },
+    UnifiedMemory {
+        supported: bool,
+    },
+    OsVersion {
+        minimum_version: &'static str,
+        actual_version: Option<String>,
+    },
+    Excluded {
+        device: &'static str,
+        evidence: &'static str,
     },
     Memory {
         minimum_gib: u16,
@@ -87,7 +122,11 @@ pub enum QualificationDeclineReason {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct QualificationStatus {
     pub path: &'static str,
-    pub qualified_devices: QualifiedDevices,
+    pub capability_gate: QualifiedDevices,
+    pub requires_unified_memory: bool,
+    pub minimum_os_version: Option<&'static str>,
+    pub measurements: &'static [DeviceMeasurement],
+    pub excluded: &'static [DeviceExclusion],
     pub memory: QualifiedMemory,
     pub host_page_size_bytes: Option<usize>,
     pub max_buffer_length_bytes: Option<usize>,
@@ -98,6 +137,8 @@ pub struct QualificationStatus {
     pub correctness_kind: QualificationWitnessKind,
     pub performance: &'static str,
     pub performance_kind: QualificationWitnessKind,
+    pub correctness_characterized_device: Option<&'static str>,
+    pub performance_characterized_device: Option<&'static str>,
     pub holds_for_device: bool,
     pub decline_reason: Option<QualificationDeclineReason>,
 }
@@ -116,19 +157,22 @@ impl Qualification {
 
     pub fn decline_reason(&self, facts: &DeviceFacts) -> Option<QualificationDeclineReason> {
         match self.first_failing_facet(facts)? {
-            QualificationFacet::DeviceModel => {
-                let QualifiedDevices::Model(expected) = self.qualified_devices else {
-                    unreachable!("model facet only applies to model-scoped record")
-                };
-                Some(QualificationDeclineReason::DeviceModel {
-                    expected,
-                    actual: facts.name.clone(),
-                })
+            QualificationFacet::Excluded(device, evidence) => {
+                Some(QualificationDeclineReason::Excluded { device, evidence })
             }
             QualificationFacet::GpuFamily => Some(QualificationDeclineReason::GpuFamily {
                 family: "Apple7",
                 supported: facts.gpu_families.apple7,
             }),
+            QualificationFacet::UnifiedMemory => Some(QualificationDeclineReason::UnifiedMemory {
+                supported: facts.unified_memory,
+            }),
+            QualificationFacet::OsVersion(minimum_version) => {
+                Some(QualificationDeclineReason::OsVersion {
+                    minimum_version,
+                    actual_version: facts.os_version.clone(),
+                })
+            }
             QualificationFacet::Memory => {
                 let QualifiedMemory::AtLeastGiB(minimum_gib) = self.memory else {
                     unreachable!("memory facet only applies to a memory-gated record")
@@ -154,14 +198,28 @@ impl Qualification {
     fn first_failing_facet(&self, facts: &DeviceFacts) -> Option<QualificationFacet> {
         // Runtime gates use this allocation-free check; owned detail is built
         // only when a caller requests a diagnostic or report.
-        match self.qualified_devices {
-            QualifiedDevices::Model(model) if facts.name != model => {
-                return Some(QualificationFacet::DeviceModel);
-            }
-            QualifiedDevices::AppleFamily7 { .. } if !facts.gpu_families.apple7 => {
-                return Some(QualificationFacet::GpuFamily);
-            }
-            _ => {}
+        if matches!(self.capability_gate, QualifiedDevices::AppleFamily7)
+            && !facts.gpu_families.apple7
+        {
+            return Some(QualificationFacet::GpuFamily);
+        }
+        if self.requires_unified_memory && !facts.unified_memory {
+            return Some(QualificationFacet::UnifiedMemory);
+        }
+        if let Some(minimum) = self.minimum_os_version
+            && facts.os_is_at_least(minimum) != Some(true)
+        {
+            return Some(QualificationFacet::OsVersion(minimum));
+        }
+        if let Some(exclusion) = self
+            .excluded
+            .iter()
+            .find(|entry| entry.device == facts.name)
+        {
+            return Some(QualificationFacet::Excluded(
+                exclusion.device,
+                exclusion.evidence,
+            ));
         }
         if let QualifiedMemory::AtLeastGiB(gib) = self.memory
             && !facts
@@ -188,8 +246,10 @@ impl Qualification {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum QualificationFacet {
-    DeviceModel,
     GpuFamily,
+    UnifiedMemory,
+    OsVersion(&'static str),
+    Excluded(&'static str, &'static str),
     Memory,
     HostPageSize,
     MaxBufferLength,
@@ -212,11 +272,496 @@ pub fn declined_reason_once(
     qualification.decline_reason(facts)
 }
 
-const DEVICE: &str = "Apple M4 Max";
+const fn device_measurement(
+    device: &'static str,
+    correctness: MeasurementResult,
+    performance: MeasurementResult,
+    date: &'static str,
+    evidence: &'static str,
+    note: Option<&'static str>,
+) -> DeviceMeasurement {
+    DeviceMeasurement {
+        device,
+        correctness,
+        performance,
+        date,
+        evidence,
+        note,
+    }
+}
+
+const MEASUREMENTS_DEEPSEEK_V4_MULTIGROUP_SELECTOR: &[DeviceMeasurement] = &[
+    device_measurement(
+        "Apple M4 Max",
+        MeasurementResult::Passed,
+        MeasurementResult::Failed,
+        "2026-10-14",
+        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
+        None,
+    ),
+    device_measurement(
+        "Apple M1 Pro",
+        MeasurementResult::Passed,
+        MeasurementResult::NotApplicable,
+        "2026-10-14",
+        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
+        None,
+    ),
+    device_measurement(
+        "Apple M5 Ultra",
+        MeasurementResult::Passed,
+        MeasurementResult::NotApplicable,
+        "2026-10-17",
+        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
+        None,
+    ),
+];
+
+const MEASUREMENTS_DEEPSEEK_V4_F16_MATRIX_SCORER: &[DeviceMeasurement] = &[
+    device_measurement(
+        "Apple M4 Max",
+        MeasurementResult::Passed,
+        MeasurementResult::Passed,
+        "2026-10-14",
+        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
+        None,
+    ),
+    device_measurement(
+        "Apple M1 Pro",
+        MeasurementResult::NotApplicable,
+        MeasurementResult::Passed,
+        "2026-10-14",
+        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
+        None,
+    ),
+    device_measurement(
+        "Apple M5 Ultra",
+        MeasurementResult::NotApplicable,
+        MeasurementResult::Passed,
+        "2026-10-17",
+        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
+        None,
+    ),
+];
+
+const MEASUREMENTS_DEEPSEEK_V4_GROUPED_LONG_HCA: &[DeviceMeasurement] = &[
+    device_measurement(
+        "Apple M4 Max",
+        MeasurementResult::Passed,
+        MeasurementResult::Passed,
+        "2026-10-14",
+        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
+        None,
+    ),
+    device_measurement(
+        "Apple M1 Pro",
+        MeasurementResult::Passed,
+        MeasurementResult::Passed,
+        "2026-10-14",
+        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
+        None,
+    ),
+    device_measurement(
+        "Apple M5 Ultra",
+        MeasurementResult::Passed,
+        MeasurementResult::Failed,
+        "2026-10-17",
+        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
+        Some(
+            "M5 speed failure is in the witness ungrouped-online comparison arm; this path governs the grouped/split arm. Record as failed witness, not device exclusion.",
+        ),
+    ),
+];
+
+const MEASUREMENTS_DEEPSEEK_V4_SPLITK_HCA: &[DeviceMeasurement] = &[
+    device_measurement(
+        "Apple M4 Max",
+        MeasurementResult::Passed,
+        MeasurementResult::Passed,
+        "2026-10-14",
+        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
+        None,
+    ),
+    device_measurement(
+        "Apple M1 Pro",
+        MeasurementResult::Passed,
+        MeasurementResult::Passed,
+        "2026-10-14",
+        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
+        None,
+    ),
+    device_measurement(
+        "Apple M5 Ultra",
+        MeasurementResult::Passed,
+        MeasurementResult::Failed,
+        "2026-10-17",
+        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
+        Some(
+            "M5 speed failure is in the witness ungrouped-online comparison arm; this path governs the grouped/split arm. Record as failed witness, not device exclusion.",
+        ),
+    ),
+];
+
+const MEASUREMENTS_DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY: &[DeviceMeasurement] = &[
+    device_measurement(
+        "Apple M4 Max",
+        MeasurementResult::Passed,
+        MeasurementResult::Passed,
+        "2026-10-14",
+        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
+        None,
+    ),
+    device_measurement(
+        "Apple M1 Pro",
+        MeasurementResult::Passed,
+        MeasurementResult::NotApplicable,
+        "2026-10-14",
+        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
+        None,
+    ),
+    device_measurement(
+        "Apple M5 Ultra",
+        MeasurementResult::Passed,
+        MeasurementResult::NotApplicable,
+        "2026-10-17",
+        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
+        None,
+    ),
+];
+
+const MEASUREMENTS_DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION: &[DeviceMeasurement] = &[
+    device_measurement(
+        "Apple M4 Max",
+        MeasurementResult::Passed,
+        MeasurementResult::Failed,
+        "2026-10-14",
+        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
+        None,
+    ),
+    device_measurement(
+        "Apple M1 Pro",
+        MeasurementResult::Passed,
+        MeasurementResult::NotApplicable,
+        "2026-10-14",
+        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
+        None,
+    ),
+    device_measurement(
+        "Apple M5 Ultra",
+        MeasurementResult::Passed,
+        MeasurementResult::NotApplicable,
+        "2026-10-17",
+        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
+        None,
+    ),
+];
+
+const MEASUREMENTS_DEEPSEEK_V4_PACKED_MXFP4_MATRIX: &[DeviceMeasurement] = &[
+    device_measurement(
+        "Apple M4 Max",
+        MeasurementResult::Passed,
+        MeasurementResult::Passed,
+        "2026-10-14",
+        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
+        None,
+    ),
+    device_measurement(
+        "Apple M1 Pro",
+        MeasurementResult::Passed,
+        MeasurementResult::Failed,
+        "2026-10-14",
+        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
+        None,
+    ),
+    device_measurement(
+        "Apple M5 Ultra",
+        MeasurementResult::Passed,
+        MeasurementResult::Failed,
+        "2026-10-17",
+        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
+        None,
+    ),
+];
+
+const MEASUREMENTS_DEEPSEEK_V4_PACKED_E8P32_ROUTER: &[DeviceMeasurement] = &[
+    device_measurement(
+        "Apple M4 Max",
+        MeasurementResult::Passed,
+        MeasurementResult::NotRecorded,
+        "2026-10-14",
+        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
+        None,
+    ),
+    device_measurement(
+        "Apple M1 Pro",
+        MeasurementResult::Passed,
+        MeasurementResult::NotRecorded,
+        "2026-10-14",
+        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
+        None,
+    ),
+    device_measurement(
+        "Apple M5 Ultra",
+        MeasurementResult::Passed,
+        MeasurementResult::NotRecorded,
+        "2026-10-17",
+        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
+        None,
+    ),
+];
+
+const MEASUREMENTS_DEEPSEEK_V4_PACKED_QA_RAW_KV_MATRIX: &[DeviceMeasurement] = &[
+    device_measurement(
+        "Apple M4 Max",
+        MeasurementResult::NotRun,
+        MeasurementResult::NotRecorded,
+        "2026-10-14",
+        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
+        None,
+    ),
+    device_measurement(
+        "Apple M1 Pro",
+        MeasurementResult::NotRun,
+        MeasurementResult::NotRecorded,
+        "2026-10-14",
+        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
+        None,
+    ),
+    device_measurement(
+        "Apple M5 Ultra",
+        MeasurementResult::NotRun,
+        MeasurementResult::NotRecorded,
+        "2026-10-17",
+        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
+        None,
+    ),
+];
+
+const MEASUREMENTS_DEEPSEEK_V4_PACKED_INDEXER_Q_MATRIX: &[DeviceMeasurement] = &[
+    device_measurement(
+        "Apple M4 Max",
+        MeasurementResult::NotRun,
+        MeasurementResult::NotRecorded,
+        "2026-10-14",
+        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
+        None,
+    ),
+    device_measurement(
+        "Apple M1 Pro",
+        MeasurementResult::NotRun,
+        MeasurementResult::NotRecorded,
+        "2026-10-14",
+        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
+        None,
+    ),
+    device_measurement(
+        "Apple M5 Ultra",
+        MeasurementResult::NotRun,
+        MeasurementResult::NotRecorded,
+        "2026-10-17",
+        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
+        None,
+    ),
+];
+
+const MEASUREMENTS_DEEPSEEK_V4_PACKED_GROUPED_Q3Q4: &[DeviceMeasurement] = &[
+    device_measurement(
+        "Apple M4 Max",
+        MeasurementResult::Passed,
+        MeasurementResult::Passed,
+        "2026-10-14",
+        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
+        None,
+    ),
+    device_measurement(
+        "Apple M1 Pro",
+        MeasurementResult::Passed,
+        MeasurementResult::NotApplicable,
+        "2026-10-14",
+        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
+        None,
+    ),
+    device_measurement(
+        "Apple M5 Ultra",
+        MeasurementResult::Passed,
+        MeasurementResult::NotApplicable,
+        "2026-10-17",
+        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
+        None,
+    ),
+];
+
+const MEASUREMENTS_DEEPSEEK_V4_PACKED_SHARED_ROUTE_OVERLAP: &[DeviceMeasurement] = &[
+    device_measurement(
+        "Apple M4 Max",
+        MeasurementResult::NotRun,
+        MeasurementResult::NotRecorded,
+        "2026-10-14",
+        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
+        None,
+    ),
+    device_measurement(
+        "Apple M1 Pro",
+        MeasurementResult::NotRun,
+        MeasurementResult::NotRecorded,
+        "2026-10-14",
+        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
+        None,
+    ),
+    device_measurement(
+        "Apple M5 Ultra",
+        MeasurementResult::NotRun,
+        MeasurementResult::NotRecorded,
+        "2026-10-17",
+        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
+        None,
+    ),
+];
+
+const MEASUREMENTS_DEEPSEEK_V4_PACKED_GROUPED_EXPERT: &[DeviceMeasurement] = &[
+    device_measurement(
+        "Apple M4 Max",
+        MeasurementResult::Passed,
+        MeasurementResult::Failed,
+        "2026-10-14",
+        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
+        None,
+    ),
+    device_measurement(
+        "Apple M1 Pro",
+        MeasurementResult::Passed,
+        MeasurementResult::NotApplicable,
+        "2026-10-14",
+        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
+        None,
+    ),
+    device_measurement(
+        "Apple M5 Ultra",
+        MeasurementResult::Passed,
+        MeasurementResult::NotApplicable,
+        "2026-10-17",
+        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
+        None,
+    ),
+];
+
+const MEASUREMENTS_DEEPSEEK_V4_ALL_SLOTS_Q3Q4: &[DeviceMeasurement] = &[
+    device_measurement(
+        "Apple M4 Max",
+        MeasurementResult::Passed,
+        MeasurementResult::Passed,
+        "2026-10-14",
+        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
+        None,
+    ),
+    device_measurement(
+        "Apple M1 Pro",
+        MeasurementResult::Passed,
+        MeasurementResult::Passed,
+        "2026-10-14",
+        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
+        None,
+    ),
+    device_measurement(
+        "Apple M5 Ultra",
+        MeasurementResult::Passed,
+        MeasurementResult::Passed,
+        "2026-10-17",
+        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
+        None,
+    ),
+];
+
+const MEASUREMENTS_DEEPSEEK_V4_RESIDENCY_SET: &[DeviceMeasurement] = &[
+    device_measurement(
+        "Apple M4 Max",
+        MeasurementResult::NotRun,
+        MeasurementResult::NotRecorded,
+        "2026-10-14",
+        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
+        None,
+    ),
+    device_measurement(
+        "Apple M1 Pro",
+        MeasurementResult::NotRun,
+        MeasurementResult::NotRecorded,
+        "2026-10-14",
+        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
+        None,
+    ),
+    device_measurement(
+        "Apple M5 Ultra",
+        MeasurementResult::NotRun,
+        MeasurementResult::NotRecorded,
+        "2026-10-17",
+        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
+        None,
+    ),
+];
+
+const MEASUREMENTS_A3B_PARALLEL_COPY_AUTO: &[DeviceMeasurement] = &[
+    device_measurement(
+        "Apple M4 Max",
+        MeasurementResult::Passed,
+        MeasurementResult::NotRecorded,
+        "2026-10-14",
+        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
+        None,
+    ),
+    device_measurement(
+        "Apple M1 Pro",
+        MeasurementResult::NotApplicable,
+        MeasurementResult::NotRecorded,
+        "2026-10-14",
+        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
+        None,
+    ),
+    device_measurement(
+        "Apple M5 Ultra",
+        MeasurementResult::NotApplicable,
+        MeasurementResult::NotRecorded,
+        "2026-10-17",
+        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
+        None,
+    ),
+];
+
+const MEASUREMENTS_PARALLEL_COPY_EXACT_UNIFIED: &[DeviceMeasurement] = &[
+    device_measurement(
+        "Apple M4 Max",
+        MeasurementResult::NotRun,
+        MeasurementResult::NotRecorded,
+        "2026-10-14",
+        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
+        None,
+    ),
+    device_measurement(
+        "Apple M1 Pro",
+        MeasurementResult::NotRun,
+        MeasurementResult::NotRecorded,
+        "2026-10-14",
+        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
+        None,
+    ),
+    device_measurement(
+        "Apple M5 Ultra",
+        MeasurementResult::NotRun,
+        MeasurementResult::NotRecorded,
+        "2026-10-17",
+        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
+        None,
+    ),
+];
+
+const NO_EXCLUSIONS: &[DeviceExclusion] = &[];
 
 pub static DEEPSEEK_V4_MULTIGROUP_SELECTOR: Qualification = Qualification {
     path: "deepseek_v4.multigroup_selector",
-    qualified_devices: QualifiedDevices::Model(DEVICE),
+    measurements: MEASUREMENTS_DEEPSEEK_V4_MULTIGROUP_SELECTOR,
+    excluded: NO_EXCLUSIONS,
+    capability_gate: QualifiedDevices::AppleFamily7,
+    requires_unified_memory: false,
+    minimum_os_version: None,
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -227,10 +772,16 @@ pub static DEEPSEEK_V4_MULTIGROUP_SELECTOR: Qualification = Qualification {
     correctness_kind: QualificationWitnessKind::Replay,
     performance: "cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::current_asset_multigroup_selector_whole_token_gate -- --ignored --exact --nocapture --test-threads=1",
     performance_kind: QualificationWitnessKind::M4CharacterizationSkip,
+    correctness_characterized_device: None,
+    performance_characterized_device: Some("Apple M4 Max"),
 };
 pub static DEEPSEEK_V4_F16_MATRIX_SCORER: Qualification = Qualification {
     path: "deepseek_v4.singleton_f16_matrix_scorer",
-    qualified_devices: QualifiedDevices::Model(DEVICE),
+    measurements: MEASUREMENTS_DEEPSEEK_V4_F16_MATRIX_SCORER,
+    excluded: NO_EXCLUSIONS,
+    capability_gate: QualifiedDevices::AppleFamily7,
+    requires_unified_memory: false,
+    minimum_os_version: None,
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -241,13 +792,16 @@ pub static DEEPSEEK_V4_F16_MATRIX_SCORER: Qualification = Qualification {
     correctness_kind: QualificationWitnessKind::M4CharacterizationSkip,
     performance: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_lightning_matrix_ceiling_at_far_context -- --ignored --exact --nocapture",
     performance_kind: QualificationWitnessKind::Replay,
+    correctness_characterized_device: Some("Apple M4 Max"),
+    performance_characterized_device: None,
 };
 pub static DEEPSEEK_V4_GROUPED_LONG_HCA: Qualification = Qualification {
     path: "deepseek_v4.grouped_long_hca",
-    qualified_devices: QualifiedDevices::AppleFamily7 {
-        oldest_measured: "Apple M1 Pro",
-        newest_measured: "Apple M4 Max",
-    },
+    measurements: MEASUREMENTS_DEEPSEEK_V4_GROUPED_LONG_HCA,
+    excluded: NO_EXCLUSIONS,
+    capability_gate: QualifiedDevices::AppleFamily7,
+    requires_unified_memory: false,
+    minimum_os_version: None,
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -258,13 +812,16 @@ pub static DEEPSEEK_V4_GROUPED_LONG_HCA: Qualification = Qualification {
     correctness_kind: QualificationWitnessKind::Replay,
     performance: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_tiled_hca_at_far_context -- --ignored --exact --nocapture",
     performance_kind: QualificationWitnessKind::Replay,
+    correctness_characterized_device: None,
+    performance_characterized_device: None,
 };
 pub static DEEPSEEK_V4_SPLITK_HCA: Qualification = Qualification {
     path: "deepseek_v4.splitk_hca",
-    qualified_devices: QualifiedDevices::AppleFamily7 {
-        oldest_measured: "Apple M1 Pro",
-        newest_measured: "Apple M4 Max",
-    },
+    measurements: MEASUREMENTS_DEEPSEEK_V4_SPLITK_HCA,
+    excluded: NO_EXCLUSIONS,
+    capability_gate: QualifiedDevices::AppleFamily7,
+    requires_unified_memory: false,
+    minimum_os_version: None,
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -275,10 +832,16 @@ pub static DEEPSEEK_V4_SPLITK_HCA: Qualification = Qualification {
     correctness_kind: QualificationWitnessKind::Replay,
     performance: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_tiled_hca_at_far_context -- --ignored --exact --nocapture",
     performance_kind: QualificationWitnessKind::Replay,
+    correctness_characterized_device: None,
+    performance_characterized_device: None,
 };
 pub static DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY: Qualification = Qualification {
     path: "deepseek_v4.packed_q8_matrix_family",
-    qualified_devices: QualifiedDevices::Model(DEVICE),
+    measurements: MEASUREMENTS_DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY,
+    excluded: NO_EXCLUSIONS,
+    capability_gate: QualifiedDevices::AppleFamily7,
+    requires_unified_memory: false,
+    minimum_os_version: None,
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -289,10 +852,16 @@ pub static DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY: Qualification = Qualification {
     correctness_kind: QualificationWitnessKind::Replay,
     performance: "cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::prefill::tests::profile_q8_f32_mma_r2c4k64_attention_output_packet -- --ignored --exact --nocapture",
     performance_kind: QualificationWitnessKind::M4CharacterizationSkip,
+    correctness_characterized_device: None,
+    performance_characterized_device: Some("Apple M4 Max"),
 };
 pub static DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION: Qualification = Qualification {
     path: "deepseek_v4.packed_gpu_route_compaction",
-    qualified_devices: QualifiedDevices::Model(DEVICE),
+    measurements: MEASUREMENTS_DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION,
+    excluded: NO_EXCLUSIONS,
+    capability_gate: QualifiedDevices::AppleFamily7,
+    requires_unified_memory: false,
+    minimum_os_version: None,
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -303,10 +872,16 @@ pub static DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION: Qualification = Qualificatio
     correctness_kind: QualificationWitnessKind::Replay,
     performance: "cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::current_asset_packed_gpu_route_kill_packet -- --ignored --exact --nocapture",
     performance_kind: QualificationWitnessKind::M4CharacterizationSkip,
+    correctness_characterized_device: None,
+    performance_characterized_device: Some("Apple M4 Max"),
 };
 pub static DEEPSEEK_V4_PACKED_MXFP4_MATRIX: Qualification = Qualification {
     path: "deepseek_v4.packed_mxfp4_matrix",
-    qualified_devices: QualifiedDevices::Model(DEVICE),
+    measurements: MEASUREMENTS_DEEPSEEK_V4_PACKED_MXFP4_MATRIX,
+    excluded: NO_EXCLUSIONS,
+    capability_gate: QualifiedDevices::AppleFamily7,
+    requires_unified_memory: false,
+    minimum_os_version: None,
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -317,10 +892,16 @@ pub static DEEPSEEK_V4_PACKED_MXFP4_MATRIX: Qualification = Qualification {
     correctness_kind: QualificationWitnessKind::Replay,
     performance: "cargo test --release -p qwen-llm --lib metal::tests::mxfp4_f32_matrix_tile_k216_n2048_bucket_floor -- --ignored --exact --nocapture",
     performance_kind: QualificationWitnessKind::Replay,
+    correctness_characterized_device: None,
+    performance_characterized_device: None,
 };
 pub static DEEPSEEK_V4_PACKED_E8P32_ROUTER: Qualification = Qualification {
     path: "deepseek_v4.packed_e8p32_router",
-    qualified_devices: QualifiedDevices::Model(DEVICE),
+    measurements: MEASUREMENTS_DEEPSEEK_V4_PACKED_E8P32_ROUTER,
+    excluded: NO_EXCLUSIONS,
+    capability_gate: QualifiedDevices::AppleFamily7,
+    requires_unified_memory: false,
+    minimum_os_version: None,
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -331,10 +912,16 @@ pub static DEEPSEEK_V4_PACKED_E8P32_ROUTER: Qualification = Qualification {
     correctness_kind: QualificationWitnessKind::Replay,
     performance: "none: the cited PERF-LOG entry records sampled E8 router intervals and a noisy bracket but no executable replay command; the available post-route packet does not isolate this router",
     performance_kind: QualificationWitnessKind::None,
+    correctness_characterized_device: None,
+    performance_characterized_device: None,
 };
 pub static DEEPSEEK_V4_PACKED_QA_RAW_KV_MATRIX: Qualification = Qualification {
     path: "deepseek_v4.packed_q_a_raw_kv_matrix",
-    qualified_devices: QualifiedDevices::Model(DEVICE),
+    measurements: MEASUREMENTS_DEEPSEEK_V4_PACKED_QA_RAW_KV_MATRIX,
+    excluded: NO_EXCLUSIONS,
+    capability_gate: QualifiedDevices::AppleFamily7,
+    requires_unified_memory: false,
+    minimum_os_version: None,
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -345,10 +932,16 @@ pub static DEEPSEEK_V4_PACKED_QA_RAW_KV_MATRIX: Qualification = Qualification {
     correctness_kind: QualificationWitnessKind::ScopeOnly,
     performance: "none: the 2026-08-08 PERF-LOG entry gives Q-A/raw-KV A/B results but no exact command or packet runner for that measurement",
     performance_kind: QualificationWitnessKind::None,
+    correctness_characterized_device: None,
+    performance_characterized_device: None,
 };
 pub static DEEPSEEK_V4_PACKED_INDEXER_Q_MATRIX: Qualification = Qualification {
     path: "deepseek_v4.packed_indexer_q_matrix",
-    qualified_devices: QualifiedDevices::Model(DEVICE),
+    measurements: MEASUREMENTS_DEEPSEEK_V4_PACKED_INDEXER_Q_MATRIX,
+    excluded: NO_EXCLUSIONS,
+    capability_gate: QualifiedDevices::AppleFamily7,
+    requires_unified_memory: false,
+    minimum_os_version: None,
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -359,10 +952,16 @@ pub static DEEPSEEK_V4_PACKED_INDEXER_Q_MATRIX: Qualification = Qualification {
     correctness_kind: QualificationWitnessKind::ScopeOnly,
     performance: "none: the cited PERF-LOG sections record the indexed-Q measurements and rollback but contain no replay command or packet path for that schedule",
     performance_kind: QualificationWitnessKind::None,
+    correctness_characterized_device: None,
+    performance_characterized_device: None,
 };
 pub static DEEPSEEK_V4_PACKED_GROUPED_Q3Q4: Qualification = Qualification {
     path: "deepseek_v4.packed_grouped_q3q4",
-    qualified_devices: QualifiedDevices::Model(DEVICE),
+    measurements: MEASUREMENTS_DEEPSEEK_V4_PACKED_GROUPED_Q3Q4,
+    excluded: NO_EXCLUSIONS,
+    capability_gate: QualifiedDevices::AppleFamily7,
+    requires_unified_memory: false,
+    minimum_os_version: None,
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -373,10 +972,16 @@ pub static DEEPSEEK_V4_PACKED_GROUPED_Q3Q4: Qualification = Qualification {
     correctness_kind: QualificationWitnessKind::Replay,
     performance: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::k160_n128_floor::k160_n128_grouped_q3q4_representative_layer_floor -- --ignored --exact --nocapture",
     performance_kind: QualificationWitnessKind::M4CharacterizationSkip,
+    correctness_characterized_device: None,
+    performance_characterized_device: Some("Apple M4 Max"),
 };
 pub static DEEPSEEK_V4_PACKED_SHARED_ROUTE_OVERLAP: Qualification = Qualification {
     path: "deepseek_v4.packed_shared_route_overlap",
-    qualified_devices: QualifiedDevices::Model(DEVICE),
+    measurements: MEASUREMENTS_DEEPSEEK_V4_PACKED_SHARED_ROUTE_OVERLAP,
+    excluded: NO_EXCLUSIONS,
+    capability_gate: QualifiedDevices::AppleFamily7,
+    requires_unified_memory: false,
+    minimum_os_version: None,
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -387,10 +992,16 @@ pub static DEEPSEEK_V4_PACKED_SHARED_ROUTE_OVERLAP: Qualification = Qualificatio
     correctness_kind: QualificationWitnessKind::ScopeOnly,
     performance: "none: the PERF-LOG records the serial/default wall pair, but no exact command or dedicated shared-route overlap runner is recorded",
     performance_kind: QualificationWitnessKind::None,
+    correctness_characterized_device: None,
+    performance_characterized_device: None,
 };
 pub static DEEPSEEK_V4_PACKED_GROUPED_EXPERT: Qualification = Qualification {
     path: "deepseek_v4.packed_grouped_expert",
-    qualified_devices: QualifiedDevices::Model(DEVICE),
+    measurements: MEASUREMENTS_DEEPSEEK_V4_PACKED_GROUPED_EXPERT,
+    excluded: NO_EXCLUSIONS,
+    capability_gate: QualifiedDevices::AppleFamily7,
+    requires_unified_memory: false,
+    minimum_os_version: None,
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -401,13 +1012,16 @@ pub static DEEPSEEK_V4_PACKED_GROUPED_EXPERT: Qualification = Qualification {
     correctness_kind: QualificationWitnessKind::Replay,
     performance: "QWEN_DSV4_PACKED_GROUPED_EXPERTS=1 QWEN_DSV4_PACKED_GROUPED_SAMPLES=5 QWEN_DSV4_PACKED_GROUPED_ONLY_N=128 QWEN_MATMAT_IQ3_XXS_MM=1 cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::current_asset_packed_grouped_expert_integration_packet -- --ignored --exact --nocapture",
     performance_kind: QualificationWitnessKind::M4CharacterizationSkip,
+    correctness_characterized_device: None,
+    performance_characterized_device: Some("Apple M4 Max"),
 };
 pub static DEEPSEEK_V4_ALL_SLOTS_Q3Q4: Qualification = Qualification {
     path: "deepseek_v4.all_slots_q3q4_decode",
-    qualified_devices: QualifiedDevices::AppleFamily7 {
-        oldest_measured: "Apple M1 Pro",
-        newest_measured: "Apple M4 Max",
-    },
+    measurements: MEASUREMENTS_DEEPSEEK_V4_ALL_SLOTS_Q3Q4,
+    excluded: NO_EXCLUSIONS,
+    capability_gate: QualifiedDevices::AppleFamily7,
+    requires_unified_memory: false,
+    minimum_os_version: None,
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -418,10 +1032,16 @@ pub static DEEPSEEK_V4_ALL_SLOTS_Q3Q4: Qualification = Qualification {
     correctness_kind: QualificationWitnessKind::Replay,
     performance: "QWEN_METAL_LEASE_WAIT=1 cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_all_slot_routed_experts_against_serial_indexed -- --ignored --exact --nocapture",
     performance_kind: QualificationWitnessKind::Replay,
+    correctness_characterized_device: None,
+    performance_characterized_device: None,
 };
 pub static DEEPSEEK_V4_RESIDENCY_SET: Qualification = Qualification {
     path: "deepseek_v4.residency_set",
-    qualified_devices: QualifiedDevices::Model(DEVICE),
+    measurements: MEASUREMENTS_DEEPSEEK_V4_RESIDENCY_SET,
+    excluded: NO_EXCLUSIONS,
+    capability_gate: QualifiedDevices::AppleFamily7,
+    requires_unified_memory: false,
+    minimum_os_version: Some("15.0"),
     memory: QualifiedMemory::Any,
     host_page_size_bytes: None,
     max_buffer_length_bytes: None,
@@ -432,13 +1052,19 @@ pub static DEEPSEEK_V4_RESIDENCY_SET: Qualification = Qualification {
     correctness_kind: QualificationWitnessKind::ScopeOnly,
     performance: "none: PERF-LOG records product load/prefill runs and the safety rollback, but no replay command or packet runner for those pairs is recorded",
     performance_kind: QualificationWitnessKind::None,
+    correctness_characterized_device: None,
+    performance_characterized_device: None,
 };
 pub static A3B_PARALLEL_COPY_AUTO: Qualification = Qualification {
     path: "metal_forward.a3b_parallel_copy_auto",
-    qualified_devices: QualifiedDevices::Model(DEVICE),
-    memory: QualifiedMemory::AtLeastGiB(128),
-    host_page_size_bytes: Some(16_384),
-    max_buffer_length_bytes: Some(77_309_411_328),
+    measurements: MEASUREMENTS_A3B_PARALLEL_COPY_AUTO,
+    excluded: NO_EXCLUSIONS,
+    capability_gate: QualifiedDevices::AppleFamily7,
+    requires_unified_memory: true,
+    minimum_os_version: None,
+    memory: QualifiedMemory::Any,
+    host_page_size_bytes: None,
+    max_buffer_length_bytes: None,
     required_headroom_bytes: None,
     required_headroom_scope: None,
     evidence: "0a3cef59",
@@ -446,13 +1072,19 @@ pub static A3B_PARALLEL_COPY_AUTO: Qualification = Qualification {
     correctness_kind: QualificationWitnessKind::M4CharacterizationSkip,
     performance: "none: the v0.608 PERF-LOG reports inherited v0.602 timing and Auto smoke results but records no executable benchmark command",
     performance_kind: QualificationWitnessKind::None,
+    correctness_characterized_device: Some("Apple M4 Max"),
+    performance_characterized_device: None,
 };
 pub static PARALLEL_COPY_EXACT_UNIFIED: Qualification = Qualification {
     path: "metal_forward.exact_unified_parallel_copy_profiles",
-    qualified_devices: QualifiedDevices::Model(DEVICE),
+    measurements: MEASUREMENTS_PARALLEL_COPY_EXACT_UNIFIED,
+    excluded: NO_EXCLUSIONS,
+    capability_gate: QualifiedDevices::AppleFamily7,
+    requires_unified_memory: true,
+    minimum_os_version: None,
     memory: QualifiedMemory::Any,
-    host_page_size_bytes: Some(16_384),
-    max_buffer_length_bytes: Some(77_309_411_328),
+    host_page_size_bytes: None,
+    max_buffer_length_bytes: None,
     required_headroom_bytes: Some(A10B_PARALLEL_PREAD_REQUIRED_HEADROOM_BYTES),
     required_headroom_scope: Some(HeadroomRequirementScope::A10bQ4xlForcedPread),
     evidence: "8c223624, fba3b97a",
@@ -460,6 +1092,8 @@ pub static PARALLEL_COPY_EXACT_UNIFIED: Qualification = Qualification {
     correctness_kind: QualificationWitnessKind::ScopeOnly,
     performance: "none: commits 8c223624 and fba3b97a plus their PERF-LOG entries report measurements but record no executable A/B replay command",
     performance_kind: QualificationWitnessKind::None,
+    correctness_characterized_device: None,
+    performance_characterized_device: None,
 };
 
 pub static QUALIFICATIONS: &[&Qualification] = &[
@@ -505,7 +1139,11 @@ pub fn qualification_statuses(facts: &DeviceFacts) -> Vec<QualificationStatus> {
         .iter()
         .map(|qualification| QualificationStatus {
             path: qualification.path,
-            qualified_devices: qualification.qualified_devices,
+            capability_gate: qualification.capability_gate,
+            requires_unified_memory: qualification.requires_unified_memory,
+            minimum_os_version: qualification.minimum_os_version,
+            measurements: qualification.measurements,
+            excluded: qualification.excluded,
             memory: qualification.memory,
             host_page_size_bytes: qualification.host_page_size_bytes,
             max_buffer_length_bytes: qualification.max_buffer_length_bytes,
@@ -516,6 +1154,8 @@ pub fn qualification_statuses(facts: &DeviceFacts) -> Vec<QualificationStatus> {
             correctness_kind: qualification.correctness_kind,
             performance: qualification.performance,
             performance_kind: qualification.performance_kind,
+            correctness_characterized_device: qualification.correctness_characterized_device,
+            performance_characterized_device: qualification.performance_characterized_device,
             holds_for_device: qualification.holds_for(facts),
             decline_reason: qualification.decline_reason(facts),
         })
@@ -556,257 +1196,139 @@ mod tests {
             unified_memory: true,
             host_page_size_bytes: Some(16_384),
             physical_memory_bytes: memory,
-            os_version: None,
+            os_version: Some("15.0".into()),
             product_metallib_deployment_target: "",
             research_metallib_deployment_target: "",
         }
     }
 
-    fn is_single_cargo_test_command(value: &str) -> bool {
-        if value.contains(';') || value.contains('\n') || value.matches("cargo test").count() != 1 {
-            return false;
-        }
-        let Some((environment, arguments)) = value.split_once("cargo test") else {
-            return false;
-        };
-        let environment_is_valid = environment.is_empty()
-            || environment
-                .split_whitespace()
-                .all(|assignment| assignment.contains('='));
-        let arguments_are_command_tokens = arguments.split_whitespace().all(|token| {
-            token
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || "_./:=+-".contains(character))
-        });
-        environment_is_valid && arguments.starts_with(' ') && arguments_are_command_tokens
-    }
-
-    fn has_valid_witness_shape(value: &str) -> bool {
-        if let Some(explanation) = value.strip_prefix("none: ") {
-            return !explanation.trim().is_empty();
-        }
-        let command = value.strip_prefix("scope-only: ").unwrap_or(value);
-        is_single_cargo_test_command(command)
-    }
-
     #[test]
-    fn qualification_matches_model_and_memory() {
-        assert!(DEEPSEEK_V4_GROUPED_LONG_HCA.holds_for(&facts(DEVICE, None)));
-        assert!(DEEPSEEK_V4_SPLITK_HCA.holds_for(&facts(DEVICE, None)));
-        assert!(DEEPSEEK_V4_GROUPED_LONG_HCA.holds_for(&facts("Apple M5 Ultra", None)));
-        assert!(DEEPSEEK_V4_SPLITK_HCA.holds_for(&facts("Apple M5 Ultra", None)));
-        let large = 128_u64 * 1024 * 1024 * 1024;
-        assert!(A3B_PARALLEL_COPY_AUTO.holds_for(&facts(DEVICE, Some(large))));
-        assert!(!A3B_PARALLEL_COPY_AUTO.holds_for(&facts(DEVICE, Some(large - 1))));
-        assert!(!A3B_PARALLEL_COPY_AUTO.holds_for(&facts(DEVICE, None)));
-    }
-
-    #[test]
-    fn every_record_keeps_its_scope_and_memory_gate() {
-        const GIB: u64 = 1024 * 1024 * 1024;
-        let expected = [
-            ("deepseek_v4.multigroup_selector", QualifiedMemory::Any),
-            (
-                "deepseek_v4.singleton_f16_matrix_scorer",
-                QualifiedMemory::Any,
-            ),
-            ("deepseek_v4.grouped_long_hca", QualifiedMemory::Any),
-            ("deepseek_v4.splitk_hca", QualifiedMemory::Any),
-            ("deepseek_v4.packed_q8_matrix_family", QualifiedMemory::Any),
-            (
-                "deepseek_v4.packed_gpu_route_compaction",
-                QualifiedMemory::Any,
-            ),
-            ("deepseek_v4.packed_mxfp4_matrix", QualifiedMemory::Any),
-            ("deepseek_v4.packed_e8p32_router", QualifiedMemory::Any),
-            ("deepseek_v4.packed_q_a_raw_kv_matrix", QualifiedMemory::Any),
-            ("deepseek_v4.packed_indexer_q_matrix", QualifiedMemory::Any),
-            ("deepseek_v4.packed_grouped_q3q4", QualifiedMemory::Any),
-            (
-                "deepseek_v4.packed_shared_route_overlap",
-                QualifiedMemory::Any,
-            ),
-            ("deepseek_v4.packed_grouped_expert", QualifiedMemory::Any),
-            ("deepseek_v4.all_slots_q3q4_decode", QualifiedMemory::Any),
-            ("deepseek_v4.residency_set", QualifiedMemory::Any),
-            (
-                "metal_forward.a3b_parallel_copy_auto",
-                QualifiedMemory::AtLeastGiB(128),
-            ),
-            (
-                "metal_forward.exact_unified_parallel_copy_profiles",
-                QualifiedMemory::Any,
-            ),
+    fn all_records_use_only_apple7_capability_and_hold_for_three_generations() {
+        fn capability_gate(gate: QualifiedDevices) {
+            match gate {
+                QualifiedDevices::AppleFamily7 => {}
+            }
+        }
+        let devices = [
+            facts("Apple M4 Max", Some(128 * 1024 * 1024 * 1024)),
+            facts("Apple M1 Pro", Some(32 * 1024 * 1024 * 1024)),
+            facts("Apple M5 Ultra", Some(512 * 1024 * 1024 * 1024)),
         ];
-        assert_eq!(QUALIFICATIONS.len(), expected.len());
-        for (qualification, (path, memory_requirement)) in QUALIFICATIONS.iter().zip(expected) {
-            assert_eq!(qualification.path, path);
-            if matches!(qualification.qualified_devices, QualifiedDevices::Model(_)) {
-                assert_eq!(
-                    qualification.qualified_devices,
-                    QualifiedDevices::Model("Apple M4 Max")
-                );
-            }
-            assert_eq!(qualification.memory, memory_requirement);
-            for (memory, expected_hold) in [
-                (None, memory_requirement == QualifiedMemory::Any),
-                (
-                    Some(128 * GIB - 1),
-                    memory_requirement == QualifiedMemory::Any,
-                ),
-                (Some(128 * GIB), true),
-                (Some(192 * GIB), true),
-            ] {
-                let matching = facts("Apple M4 Max", memory);
-                assert_eq!(qualification.holds_for(&matching), expected_hold, "{path}");
-            }
-            if matches!(qualification.qualified_devices, QualifiedDevices::Model(_)) {
-                assert!(!qualification.holds_for(&facts("Apple M4 Pro", Some(192 * GIB))));
-            }
-        }
-    }
-
-    #[test]
-    fn family_scopes_name_distinct_measurements_at_both_supported_ends() {
-        let family_records = QUALIFICATIONS
-            .iter()
-            .filter_map(|record| match record.qualified_devices {
-                QualifiedDevices::AppleFamily7 {
-                    oldest_measured,
-                    newest_measured,
-                } => Some((record.path, oldest_measured, newest_measured)),
-                QualifiedDevices::Model(_) => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(!family_records.is_empty());
-        for (path, oldest, newest) in family_records {
-            assert!(!oldest.trim().is_empty(), "{path}");
-            assert!(!newest.trim().is_empty(), "{path}");
-            assert_ne!(oldest, newest, "{path}");
-        }
-    }
-
-    #[test]
-    fn every_qualification_witness_is_one_command_or_an_explicit_non_replay() {
         for record in QUALIFICATIONS {
-            assert!(
-                has_valid_witness_shape(record.correctness),
-                "{} correctness witness: {}",
-                record.path,
-                record.correctness
+            capability_gate(record.capability_gate);
+            assert_eq!(
+                record.capability_gate,
+                QualifiedDevices::AppleFamily7,
+                "{}",
+                record.path
             );
-            assert!(
-                has_valid_witness_shape(record.performance),
-                "{} performance witness: {}",
-                record.path,
-                record.performance
-            );
-        }
-    }
-
-    #[test]
-    fn synthetic_m4_holds_all_and_m5_holds_family_scoped_records() {
-        const GIB: u64 = 1024 * 1024 * 1024;
-        let m4 = facts(DEVICE, Some(128 * GIB));
-        assert!(QUALIFICATIONS.iter().all(|record| record.holds_for(&m4)));
-
-        let m5 = facts("Apple M5 Ultra", Some(128 * GIB));
-        for (record, status) in QUALIFICATIONS.iter().zip(qualification_statuses(&m5)) {
-            let family = matches!(
-                record.qualified_devices,
-                QualifiedDevices::AppleFamily7 { .. }
-            );
-            assert_eq!(status.holds_for_device, family, "{}", status.path);
-            if !family {
-                assert!(matches!(
-                    status.decline_reason,
-                    Some(QualificationDeclineReason::DeviceModel { .. })
-                ));
-            }
-        }
-    }
-
-    #[test]
-    fn apple7_scope_holds_only_for_family_scoped_records() {
-        let m1 = facts("Apple M1 Pro", None);
-        assert!(DEEPSEEK_V4_GROUPED_LONG_HCA.holds_for(&m1));
-        assert!(DEEPSEEK_V4_SPLITK_HCA.holds_for(&m1));
-        assert!(DEEPSEEK_V4_ALL_SLOTS_Q3Q4.holds_for(&m1));
-        for (record, status) in QUALIFICATIONS.iter().zip(qualification_statuses(&m1)) {
-            if matches!(
-                record.qualified_devices,
-                QualifiedDevices::AppleFamily7 { .. }
-            ) {
-                assert!(status.holds_for_device, "{}", status.path);
-            } else {
-                assert!(!status.holds_for_device, "{}", status.path);
+            assert!(record.excluded.is_empty(), "{}", record.path);
+            for device in &devices {
                 assert!(
-                    matches!(
-                        status.decline_reason,
-                        Some(QualificationDeclineReason::DeviceModel { .. })
-                    ),
-                    "{}",
-                    status.path
+                    record.holds_for(device),
+                    "{} on {}: {:?}",
+                    record.path,
+                    device.name,
+                    record.decline_reason(device)
                 );
             }
         }
+    }
 
-        let mut no_apple7 = facts("Apple GPU without Apple7", None);
-        no_apple7.gpu_families.apple7 = false;
-        for qualification in [&DEEPSEEK_V4_GROUPED_LONG_HCA, &DEEPSEEK_V4_SPLITK_HCA] {
+    #[test]
+    fn measurement_reports_preserve_outcomes_dates_and_hca_witness_scope() {
+        for record in QUALIFICATIONS {
+            assert_eq!(record.measurements.len(), 3, "{}", record.path);
+            assert_eq!(record.measurements[0].device, "Apple M4 Max");
+            assert_eq!(record.measurements[1].device, "Apple M1 Pro");
+            assert_eq!(record.measurements[2].device, "Apple M5 Ultra");
+            assert!(
+                record.measurements.iter().all(|measurement| {
+                    !measurement.date.is_empty() && measurement.evidence.contains("sha256=")
+                }),
+                "{}",
+                record.path
+            );
+            assert!(record.excluded.is_empty(), "{}", record.path);
+        }
+        assert_ne!(MeasurementResult::NotRun, MeasurementResult::NotRecorded);
+        assert_ne!(MeasurementResult::NotApplicable, MeasurementResult::Failed);
+
+        for record in [&DEEPSEEK_V4_GROUPED_LONG_HCA, &DEEPSEEK_V4_SPLITK_HCA] {
+            let m5 = record
+                .measurements
+                .iter()
+                .find(|measurement| measurement.device == "Apple M5 Ultra")
+                .unwrap();
+            assert_eq!(m5.performance, MeasurementResult::Failed, "{}", record.path);
+            assert!(m5.note.unwrap().contains("ungrouped-online comparison arm"));
+        }
+    }
+
+    #[test]
+    fn capability_decline_and_evidence_backed_exclusion_are_distinct() {
+        let mut unsupported = facts("Generic Mac", None);
+        unsupported.gpu_families.apple7 = false;
+        for record in QUALIFICATIONS {
             assert_eq!(
-                qualification.decline_reason(&no_apple7),
+                record.decline_reason(&unsupported),
                 Some(QualificationDeclineReason::GpuFamily {
                     family: "Apple7",
-                    supported: false,
-                })
+                    supported: false
+                }),
+                "{}",
+                record.path
             );
         }
+
+        let mut non_unified = facts("Apple M4 Max", None);
+        non_unified.unified_memory = false;
+        assert_eq!(
+            A3B_PARALLEL_COPY_AUTO.decline_reason(&non_unified),
+            Some(QualificationDeclineReason::UnifiedMemory { supported: false })
+        );
+        assert!(DEEPSEEK_V4_MULTIGROUP_SELECTOR.holds_for(&non_unified));
+
+        let mut old_os = facts("Apple M4 Max", None);
+        old_os.os_version = Some("14.7.1".into());
+        assert_eq!(
+            DEEPSEEK_V4_RESIDENCY_SET.decline_reason(&old_os),
+            Some(QualificationDeclineReason::OsVersion {
+                minimum_version: "15.0",
+                actual_version: Some("14.7.1".into()),
+            })
+        );
+        assert!(DEEPSEEK_V4_ALL_SLOTS_Q3Q4.holds_for(&old_os));
+
+        static TEST_EXCLUSIONS: &[DeviceExclusion] = &[DeviceExclusion {
+            device: "Regression Mac",
+            evidence: "PERF-LOG test fixture: explicit regression reproduction",
+        }];
+        let excluded = Qualification {
+            excluded: TEST_EXCLUSIONS,
+            ..A3B_PARALLEL_COPY_AUTO
+        };
+        assert_eq!(
+            excluded.decline_reason(&facts("Regression Mac", None)),
+            Some(QualificationDeclineReason::Excluded {
+                device: "Regression Mac",
+                evidence: "PERF-LOG test fixture: explicit regression reproduction",
+            })
+        );
     }
 
     #[test]
-    fn changed_m4_max_buffer_declines_copy_qualifications_on_that_facet() {
-        const GIB: u64 = 1024 * 1024 * 1024;
-        let mut changed = facts(DEVICE, Some(128 * GIB));
-        changed.max_buffer_length_bytes -= 1;
-        for qualification in [&A3B_PARALLEL_COPY_AUTO, &PARALLEL_COPY_EXACT_UNIFIED] {
-            assert_eq!(
-                qualification.decline_reason(&changed),
-                Some(QualificationDeclineReason::MaxBufferLength {
-                    expected_bytes: 77_309_411_328,
-                    actual_bytes: 77_309_411_327,
-                })
-            );
-        }
-        for status in qualification_statuses(&changed)
-            .into_iter()
-            .filter(|status| {
-                status.path == A3B_PARALLEL_COPY_AUTO.path
-                    || status.path == PARALLEL_COPY_EXACT_UNIFIED.path
-            })
-        {
-            assert_eq!(
-                status.decline_reason,
-                Some(QualificationDeclineReason::MaxBufferLength {
-                    expected_bytes: 77_309_411_328,
-                    actual_bytes: 77_309_411_327,
-                })
-            );
-        }
-        let mut changed_page = facts(DEVICE, Some(128 * GIB));
-        changed_page.host_page_size_bytes = Some(16_000);
+    fn copy_plan_constraints_are_dynamic_and_residency_headroom_stays_explicit() {
+        assert!(A3B_PARALLEL_COPY_AUTO.requires_unified_memory);
+        assert!(PARALLEL_COPY_EXACT_UNIFIED.requires_unified_memory);
+        assert_eq!(A3B_PARALLEL_COPY_AUTO.memory, QualifiedMemory::Any);
+        assert_eq!(A3B_PARALLEL_COPY_AUTO.host_page_size_bytes, None);
+        assert_eq!(A3B_PARALLEL_COPY_AUTO.max_buffer_length_bytes, None);
+        assert_eq!(PARALLEL_COPY_EXACT_UNIFIED.host_page_size_bytes, None);
+        assert_eq!(PARALLEL_COPY_EXACT_UNIFIED.max_buffer_length_bytes, None);
         assert_eq!(
-            PARALLEL_COPY_EXACT_UNIFIED.decline_reason(&changed_page),
-            Some(QualificationDeclineReason::HostPageSize {
-                expected_bytes: 16_384,
-                actual_bytes: Some(16_000),
-            })
+            PARALLEL_COPY_EXACT_UNIFIED.required_headroom_bytes,
+            Some(A10B_PARALLEL_PREAD_REQUIRED_HEADROOM_BYTES)
         );
-        for qualification in QUALIFICATIONS.iter().filter(|record| {
-            !std::ptr::eq(**record, &A3B_PARALLEL_COPY_AUTO)
-                && !std::ptr::eq(**record, &PARALLEL_COPY_EXACT_UNIFIED)
-        }) {
-            assert!(qualification.holds_for(&changed), "{}", qualification.path);
-        }
     }
 }

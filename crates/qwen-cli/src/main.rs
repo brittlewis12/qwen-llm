@@ -1322,12 +1322,11 @@ fn qwen_weight_storage_projection(
         &bound,
         usize::try_from(device.max_buffer_length()).unwrap_or(usize::MAX),
     );
-    let decision = qwen_llm::metal_forward::decide_gguf_storage_mode(
+    let decision = qwen_info_storage_decision(
         copied,
         0,
         None,
-        signals.recommended_max_bytes,
-        signals.current_allocated_bytes,
+        signals,
         device.device_facts().unified_memory,
         request,
         mapping_unsupported,
@@ -1341,6 +1340,26 @@ fn qwen_weight_storage_projection(
         copied,
         signals.recommended_max_bytes,
         decision.reason,
+    )
+}
+
+fn qwen_info_storage_decision(
+    copied_bytes: u64,
+    auxiliary_weight_bytes: u64,
+    session_reserve_bytes: Option<u64>,
+    signals: qwen_llm::metal::MetalMemorySignals,
+    unified_memory: bool,
+    request: qwen_llm::metal_forward::GgufStorageRequest,
+    mapping_unsupported_reason: Option<&'static str>,
+) -> qwen_llm::metal_forward::GgufNoCopyDecision {
+    qwen_llm::metal_forward::decide_gguf_storage_mode_with_signals(
+        copied_bytes,
+        auxiliary_weight_bytes,
+        session_reserve_bytes,
+        signals,
+        unified_memory,
+        request,
+        mapping_unsupported_reason,
     )
 }
 

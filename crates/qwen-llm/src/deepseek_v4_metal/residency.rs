@@ -687,6 +687,7 @@ pub(super) fn deepseek_v4_residency_set_scope_qualified(
     report: &DeepSeekV4ResidencyReport,
 ) -> bool {
     enabled
+        && facts.supports_metal_residency_sets()
         && deepseek_v4_residency_set_qualification().holds_for(facts)
         && layer_count as usize == DEEPSEEK_V4_LAYER_COUNT
         && report.tensor_count == DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT
@@ -755,6 +756,9 @@ pub(super) fn create_deepseek_v4_residency_set(
     config: &DeepSeekV4Config,
     report: &DeepSeekV4ResidencyReport,
 ) -> Option<DeepSeekV4ResidencySetGuard> {
+    if !ctx.device_facts().supports_metal_residency_sets() {
+        return None;
+    }
     if !deepseek_v4_residency_set_scope_qualified(
         deepseek_v4_residency_set_enabled(),
         ctx.device_facts(),
@@ -915,6 +919,14 @@ impl DeepSeekV4MetalResidency {
         )? != plan.memory
         {
             return invalid("DeepSeek V4 memory plan changed before realization");
+        }
+        if deepseek_v4_residency_set_enabled()
+            && !ctx.device_facts().supports_metal_residency_sets()
+        {
+            eprintln!(
+                "deepseek_v4: residency set declined reason=macos_15_or_newer_required os_version={:?}; continuing without residency set",
+                ctx.device_facts().os_version,
+            );
         }
         let _allocation_transaction = ctx.begin_allocation_transaction();
         let refreshed_admission = plan

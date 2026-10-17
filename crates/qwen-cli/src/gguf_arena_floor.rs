@@ -23,7 +23,7 @@ use qwen_llm::{
         ModelWeightStorageKind, gguf_descriptor_layout_digest,
         model_weight_storage_inventory_digest, model_weight_storage_requests,
         native_quant_embedding_storage_supported,
-        production_native_quant_embedding_storage_enabled, retained_storage_plan_digest,
+        production_native_quant_embedding_storage_enabled, retained_storage_host_report_digest,
     },
     model::{Arch, ArchKind},
     tensor::TensorDesc,
@@ -2047,7 +2047,7 @@ fn validate_transient_mmap_blit_plan(
     plan: &RetainedStoragePlan,
 ) -> Result<()> {
     if profile.id != FloorProfileId::A3bQ4kmV1
-        || retained_storage_plan_digest(plan) != A3B_BLIT_PLAN_DIGEST
+        || retained_storage_host_report_digest(plan) != A3B_BLIT_PLAN_DIGEST
         || plan.page_size != EXPECTED_PAGE_SIZE
         || plan.max_buffer_length != EXPECTED_MAX_BUFFER_LENGTH
         || plan.required_alignment != REQUIRED_ALIGNMENT
@@ -2595,7 +2595,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
                 .count();
             Ok(json!({
                 "status": "ok",
-                "planner_digest": retained_storage_plan_digest(&plan),
+                "planner_digest": retained_storage_host_report_digest(&plan),
                 "view_count": view_count,
                 "window_count": plan.windows.len(),
                 "fallback_count": fallback_count,

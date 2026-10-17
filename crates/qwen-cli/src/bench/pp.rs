@@ -283,7 +283,14 @@ impl Drop for PpResidencySetGuard {
 pub(crate) fn pp_register_moe_residency_set(
     ctx: &MetalContext,
     mf: &MetalForward<'_>,
-) -> Result<(PpResidencySetGuard, usize, u64)> {
+) -> Result<Option<(PpResidencySetGuard, usize, u64)>> {
+    if !ctx.device_facts().supports_metal_residency_sets() {
+        eprintln!(
+            "qwen-bench pp: MoE residency set declined reason=macos_15_or_newer_required os_version={:?}; continuing without residency set",
+            ctx.device_facts().os_version,
+        );
+        return Ok(None);
+    }
     let mut seen = HashSet::new();
     let mut buffers = Vec::new();
     for block in &mf.model.blocks {
@@ -325,7 +332,7 @@ pub(crate) fn pp_register_moe_residency_set(
         queue: ctx.queue.clone(),
         set,
     };
-    Ok((guard, buffers.len(), bytes))
+    Ok(Some((guard, buffers.len(), bytes)))
 }
 
 pub(crate) fn print_prefill_lowering_summary(mm: &MetalModel) {
@@ -579,14 +586,17 @@ pub(crate) fn run_pp(args: PpArgs) -> Result<()> {
     let residency_guard = if env_flag_enabled("QWEN_PP_RESIDENCY_SET")
         && arch.kind == qwen_llm::model::ArchKind::Moe
     {
-        let (guard, allocations, bytes) =
-            pp_register_moe_residency_set(ctx, &mf).context("register MoE residency set")?;
-        crate::text_log!(
-            json_mode,
-            "[pp] residency: registered {allocations} MoE expert-bank allocations ({:.2} GiB tracked)",
-            bytes as f64 / (1024.0 * 1024.0 * 1024.0)
-        );
-        Some(guard)
+        match pp_register_moe_residency_set(ctx, &mf).context("register MoE residency set")? {
+            Some((guard, allocations, bytes)) => {
+                crate::text_log!(
+                    json_mode,
+                    "[pp] residency: registered {allocations} MoE expert-bank allocations ({:.2} GiB tracked)",
+                    bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+                );
+                Some(guard)
+            }
+            None => None,
+        }
     } else {
         None
     };

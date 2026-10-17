@@ -104,6 +104,58 @@ uv run scripts/reference/normalize_paths.py --check
 uv run --no-project python scripts/reference/deepseek_v41/check.py
 if [ "$full" -eq 1 ]; then
   cargo test --release --workspace --no-run
+  release_qwen=$(
+    cargo build --release -p qwen-cli --bin qwen --message-format=json |
+      python3 -c '
+import json
+import sys
+
+executables = []
+for line in sys.stdin:
+    try:
+        message = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    target = message.get("target", {})
+    executable = message.get("executable")
+    if (
+        message.get("reason") == "compiler-artifact"
+        and target.get("name") == "qwen"
+        and "bin" in target.get("kind", [])
+        and executable
+    ):
+        executables.append(executable)
+
+if not executables:
+    sys.exit("check-contracts: cargo build reported no qwen executable")
+if len(set(executables)) != 1:
+    sys.exit("check-contracts: cargo build reported multiple qwen executables")
+print(executables[0])
+'
+  )
+  if [ ! -x "$release_qwen" ]; then
+    echo "check-contracts: cargo-reported qwen executable is missing or not executable: $release_qwen" >&2
+    exit 1
+  fi
+  metal_undefined=$(nm -m -u "$release_qwen" | awk '/\(from Metal\)$/')
+  if [ -z "$metal_undefined" ]; then
+    echo "check-contracts: release qwen has no undefined Metal symbols to inspect" >&2
+    exit 1
+  fi
+  strong_metal_undefined=$(awk '/\(from Metal\)$/ && $0 !~ /\(undefined\) weak external /' <<<"$metal_undefined")
+  if [ -n "$strong_metal_undefined" ]; then
+    printf '%s\n' "$strong_metal_undefined" >&2
+    echo "check-contracts: release qwen has strong undefined Metal symbols" >&2
+    exit 1
+  fi
+  if ! grep -Fq '_OBJC_CLASS_$_MTLResidencySetDescriptor' <<<"$metal_undefined"; then
+    echo "check-contracts: release qwen does not contain the residency-set class reference" >&2
+    exit 1
+  fi
+  if ! grep -F '_OBJC_CLASS_$_MTLResidencySetDescriptor' <<<"$metal_undefined" | grep -Fq 'weak external'; then
+    echo "check-contracts: residency-set class reference is not weak" >&2
+    exit 1
+  fi
 fi
 
 cargo test --release -p qwen-llm --test comparison_tripwire

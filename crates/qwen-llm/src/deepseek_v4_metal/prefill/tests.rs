@@ -9,12 +9,12 @@ fn scope_facts(
     unified_memory: bool,
 ) -> crate::metal::DeviceFacts {
     crate::metal::DeviceFacts {
-        version: "qwen_device_info_v3",
+        version: "qwen_device_info_v5",
         name: model.into(),
         architecture: "test".into(),
         registry_id: 0,
         gpu_families: crate::metal::GpuFamilySupport {
-            apple7: false,
+            apple7: true,
             apple8: false,
             apple9: false,
             apple10: false,
@@ -33,16 +33,18 @@ fn scope_facts(
     }
 }
 
-fn scope_facts_for_legacy_name_gate(qualified: bool) -> crate::metal::DeviceFacts {
-    scope_facts(
+fn scope_facts_for_apple7(qualified: bool) -> crate::metal::DeviceFacts {
+    let mut facts = scope_facts(
         if qualified {
-            "Apple M4 Max"
+            "Generic Apple GPU"
         } else {
-            "Apple M4 Pro"
+            "Generic GPU"
         },
         None,
         true,
-    )
+    );
+    facts.gpu_families.apple7 = qualified;
+    facts
 }
 
 const PACKED_ROUTE_AGGREGATE_WIDTH: usize = 4;
@@ -1040,7 +1042,7 @@ fn packed_grouped_expert_mode_has_an_isolated_fail_closed_rollback() {
             (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216),
         ] {
             assert!(packed_grouped_iq2_matrix_scope_qualified(
-                &scope_facts_for_legacy_name_gate(true),
+                &scope_facts_for_apple7(true),
                 1_328,
                 bytes,
                 experts,
@@ -1062,7 +1064,7 @@ fn packed_grouped_expert_mode_has_an_isolated_fail_closed_rollback() {
         ),
     ] {
         assert!(!packed_grouped_iq2_matrix_scope_qualified(
-            &scope_facts_for_legacy_name_gate(device),
+            &scope_facts_for_apple7(device),
             tensors,
             bytes,
             experts,
@@ -1070,14 +1072,14 @@ fn packed_grouped_expert_mode_has_an_isolated_fail_closed_rollback() {
         ));
     }
     assert!(!packed_grouped_iq2_matrix_scope_qualified(
-        &scope_facts_for_legacy_name_gate(true),
+        &scope_facts_for_apple7(true),
         1_328,
         PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
         216,
         255,
     ));
     assert!(!packed_grouped_iq2_matrix_scope_qualified(
-        &scope_facts_for_legacy_name_gate(true),
+        &scope_facts_for_apple7(true),
         1_328,
         PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
         MOE_EXPERT_COUNT,
@@ -1254,7 +1256,7 @@ fn packed_q8_output_matrix_policy_is_explicit_and_qualified_width_only() {
 fn packed_q8_compressor_matrix_scope_is_exact() {
     let qualified = |device, tensors, bytes, experts, tokens| {
         packed_q8_compressor_matrix_scope_qualified(
-            &scope_facts_for_legacy_name_gate(device),
+            &scope_facts_for_apple7(device),
             tensors,
             bytes,
             experts,
@@ -1333,14 +1335,14 @@ fn packed_q8_compressor_matrix_scope_is_exact() {
         DEEPSEEK_V4_PREFILL_MAX_TOKENS,
     ));
     assert!(!packed_gpu_route_compact_scope_qualified(
-        &scope_facts_for_legacy_name_gate(true),
+        &scope_facts_for_apple7(true),
         1_328,
         PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
         MOE_EXPERT_COUNT,
         337,
     ));
     assert!(packed_gpu_route_compact_scope_qualified(
-        &scope_facts_for_legacy_name_gate(true),
+        &scope_facts_for_apple7(true),
         1_328,
         PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
         MOE_EXPERT_COUNT,
@@ -1393,7 +1395,7 @@ fn packed_scope_helpers_use_their_named_device_qualifications() {
     assert!(packed_q8_compressor_matrix_scope_qualified(
         &m4, 1_328, source, 160, 337,
     ));
-    assert!(!packed_q8_compressor_matrix_scope_qualified(
+    assert!(packed_q8_compressor_matrix_scope_qualified(
         &m4_pro, 1_328, source, 160, 337,
     ));
     assert!(packed_router_e8p32_scope_qualified(
@@ -1443,20 +1445,20 @@ fn packed_scope_helpers_use_their_named_device_qualifications() {
         MOE_EXPERT_COUNT,
         PACKED_MATRIX_MIN_TOKENS,
     ));
-    assert!(!packed_router_e8p32_scope_qualified(
+    assert!(packed_router_e8p32_scope_qualified(
         &m4_pro, 1_328, source, 160, 337
     ));
-    assert!(!packed_q8_qa_kv_matrix_scope_qualified(
+    assert!(packed_q8_qa_kv_matrix_scope_qualified(
         &m4_pro, 1_328, source, 160, 337
     ));
-    assert!(!packed_mxfp4_matrix_scope_qualified(
+    assert!(packed_mxfp4_matrix_scope_qualified(
         &m4_pro,
         1_328,
         PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
         216,
         PACKED_MATRIX_MIN_TOKENS,
     ));
-    assert!(!packed_indexer_q_matrix_scope_qualified(
+    assert!(packed_indexer_q_matrix_scope_qualified(
         &m4_pro,
         1_328,
         source,
@@ -1465,7 +1467,7 @@ fn packed_scope_helpers_use_their_named_device_qualifications() {
     ));
 
     let force_off_device = scope_facts("Apple M4 Pro", None, false);
-    assert!(!packed_grouped_expert_device_enabled(
+    assert!(packed_grouped_expert_device_enabled(
         PackedGroupedExpertMode::Auto,
         &force_off_device,
     ));
@@ -1511,7 +1513,7 @@ fn packed_router_e8p32_scope_is_exactly_k160_m4() {
     }
     let qualified = |device, tensors, bytes, experts, tokens| {
         packed_router_e8p32_scope_qualified(
-            &scope_facts_for_legacy_name_gate(device),
+            &scope_facts_for_apple7(device),
             tensors,
             bytes,
             experts,
@@ -1590,7 +1592,7 @@ fn packed_q8_qa_kv_matrix_policy_is_scoped_and_fail_closed() {
 
     let qualified = |device, tensors, bytes, experts, tokens| {
         packed_q8_qa_kv_matrix_scope_qualified(
-            &scope_facts_for_legacy_name_gate(device),
+            &scope_facts_for_apple7(device),
             tensors,
             bytes,
             experts,
@@ -1640,7 +1642,7 @@ fn packed_q8_qa_kv_matrix_policy_is_scoped_and_fail_closed() {
 fn packed_mxfp4_matrix_scope_covers_both_fresh_and_k216_full_widths() {
     let qualified = |device, tensors, bytes, experts, tokens| {
         packed_mxfp4_matrix_scope_qualified(
-            &scope_facts_for_legacy_name_gate(device),
+            &scope_facts_for_apple7(device),
             tensors,
             bytes,
             experts,
@@ -1727,7 +1729,7 @@ fn packed_mxfp4_matrix_scope_covers_both_fresh_and_k216_full_widths() {
 fn packed_grouped_q3q4_scope_is_exact() {
     let qualified = |device, tensors, bytes, experts, tokens, gate, up, down| {
         packed_grouped_q3q4_scope_qualified(
-            &scope_facts_for_legacy_name_gate(device),
+            &scope_facts_for_apple7(device),
             tensors,
             bytes,
             experts,
@@ -1852,7 +1854,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
         ));
     }
     assert!(!packed_shared_route_overlap_scope_qualified(
-        &scope_facts_for_legacy_name_gate(true),
+        &scope_facts_for_apple7(true),
         1_328,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
         160,
@@ -1862,7 +1864,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
         GgmlType::Q4_K,
     ));
     assert!(packed_shared_route_overlap_scope_qualified(
-        &scope_facts_for_legacy_name_gate(true),
+        &scope_facts_for_apple7(true),
         1_328,
         PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
         160,
@@ -1967,7 +1969,7 @@ fn packed_grouped_q3q4_scope_is_exact() {
 fn packed_indexer_q_matrix_scope_is_4096_only() {
     let qualified = |device, tensors, bytes, experts, tokens| {
         packed_indexer_q_matrix_scope_qualified(
-            &scope_facts_for_legacy_name_gate(device),
+            &scope_facts_for_apple7(device),
             tensors,
             bytes,
             experts,
@@ -5813,12 +5815,7 @@ fn profile_packed_grouped_fused_all_iq3_production_shape() {
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
-    let crate::metal::QualifiedDevices::Model(qualified_model) =
-        crate::metal::DEEPSEEK_V4_PACKED_GROUPED_EXPERT.qualified_devices
-    else {
-        panic!("packed grouped expert is model-scoped");
-    };
-    assert_eq!(ctx.device.name().to_string(), qualified_model);
+    assert!(ctx.device_facts().gpu_families.apple7);
     assert!(
         packed_grouped_iq3_fused_candidate_supported(&ctx),
         "fused all-IQ3 pipeline is not qualified"

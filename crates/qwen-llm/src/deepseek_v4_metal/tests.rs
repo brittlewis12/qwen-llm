@@ -372,7 +372,7 @@ fn synthetic_device_facts(
     unified: bool,
 ) -> crate::metal::DeviceFacts {
     crate::metal::DeviceFacts {
-        version: "qwen_device_info_v3",
+        version: "qwen_device_info_v5",
         name: name.into(),
         architecture: "test".into(),
         registry_id: 0,
@@ -390,7 +390,7 @@ fn synthetic_device_facts(
         unified_memory: unified,
         host_page_size_bytes: None,
         physical_memory_bytes: memory,
-        os_version: None,
+        os_version: Some("15.0".into()),
         product_metallib_deployment_target: "",
         research_metallib_deployment_target: "",
     }
@@ -416,7 +416,8 @@ fn model_residency_set_scope_is_exact() {
         "deepseek_v4.residency_set"
     );
     let m4 = synthetic_device_facts("Apple M4 Max", None, true);
-    let m3 = synthetic_device_facts("Apple M3 Max", None, true);
+    let mut m3 = synthetic_device_facts("Other Apple GPU", None, true);
+    m3.gpu_families.apple7 = false;
     let mut report = DeepSeekV4ResidencyReport {
         tensor_count: DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT,
         source_bytes: DEEPSEEK_V4_REAP_K160_SOURCE_BYTES,
@@ -436,6 +437,11 @@ fn model_residency_set_scope_is_exact() {
     };
     assert!(deepseek_v4_residency_set_scope_qualified(
         true, &m4, 43, 160, &report,
+    ));
+    let mut old_os = m4.clone();
+    old_os.os_version = Some("14.7.1".into());
+    assert!(!deepseek_v4_residency_set_scope_qualified(
+        true, &old_os, 43, 160, &report,
     ));
     for (enabled, device, layers, experts) in [
         (false, &m4, 43, 160),
@@ -507,10 +513,10 @@ fn singleton_indexer_and_hca_device_decisions_use_their_named_records() {
     ] {
         assert!(decision);
     }
-    assert!(!super::indexer::deepseek_v4_multigroup_selector_qualified(
+    assert!(super::indexer::deepseek_v4_multigroup_selector_qualified(
         &variant
     ));
-    assert!(!super::indexer::deepseek_v4_f16_matrix_scorer_qualified(
+    assert!(super::indexer::deepseek_v4_f16_matrix_scorer_qualified(
         &variant
     ));
     assert!(super::attention::deepseek_v4_singleton_splitk_hca_qualified(&variant));
@@ -19902,7 +19908,8 @@ fn all_slot_q3q4_fast_scope_is_exactly_k160_on_apple7() {
         "deepseek_v4.all_slots_q3q4_decode"
     );
     let m4 = synthetic_device_facts("Apple M4 Max", None, true);
-    let m3 = synthetic_device_facts("Apple M3 Max", None, true);
+    let mut m3 = synthetic_device_facts("Other Apple GPU", None, true);
+    m3.gpu_families.apple7 = false;
     let mut pre_apple7 = synthetic_device_facts("Pre-Apple7 GPU", None, true);
     pre_apple7.gpu_families.apple7 = false;
     let qualified = DeepSeekV4MoeConfig {
@@ -19947,7 +19954,7 @@ fn all_slot_q3q4_fast_scope_is_exactly_k160_on_apple7() {
             GgmlType::Q4_K,
         ));
     }
-    assert!(deepseek_v4_all_slots_q3q4_scope_qualified(
+    assert!(!deepseek_v4_all_slots_q3q4_scope_qualified(
         &m3,
         qualified,
         GgmlType::Q3_K,

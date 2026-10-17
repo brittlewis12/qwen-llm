@@ -97,6 +97,8 @@ pub(crate) struct ServeStats {
     /// The request's effective seed (a fresh draw when it chose none), so a
     /// client can reproduce the response; attached by the HTTP layer.
     pub(crate) seed: Option<u64>,
+    /// Optional native phase facts, carried in the existing opt-in stats echo.
+    pub(crate) phases: Option<Value>,
 }
 
 impl ServeStats {
@@ -109,6 +111,9 @@ impl ServeStats {
         });
         if let Some(seed) = self.seed {
             stats["seed"] = json!(seed);
+        }
+        if let Some(phases) = &self.phases {
+            stats["phases"] = phases.clone();
         }
         stats
     }

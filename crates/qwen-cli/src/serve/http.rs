@@ -1236,6 +1236,7 @@ mod tests {
                     restore_ms: 1.25,
                     prompt_tokens: 7,
                     seed: None,
+                    phases: None,
                 }),
             })
         }

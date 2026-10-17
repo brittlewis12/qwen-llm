@@ -97,6 +97,7 @@ impl GenerationBackend for Stub {
         let steps = self.steps.clone();
         let drop_after = self.drop_after;
         let headroom = self.settings.headroom;
+        let epoch = Instant::now();
         self.settings.execute(
             request,
             prompt,
@@ -154,6 +155,7 @@ impl GenerationBackend for Stub {
                 }
                 .forward(&normalized)
             },
+            || epoch.elapsed(),
         )
     }
 }
@@ -486,4 +488,104 @@ fn v41_request_memory_splits_metal_cpu_and_preserves_typed_refusals() {
         qwen_llm::metal::MetalMemoryAdmissionReason::RequiredBytesOverflow
     );
     assert!(caller_cpu_reserve(u64::MAX, 1, 129280).is_none());
+}
+
+#[test]
+fn v41_native_phase_clock_excludes_preparation_and_counts_eos_and_max_one() {
+    use std::cell::Cell;
+    struct TimedSink<'a>(&'a Cell<u64>);
+    impl GenerationSink for TimedSink<'_> {
+        fn tick(&mut self) -> io::Result<()> {
+            self.0.set(self.0.get() + 2);
+            Ok(())
+        }
+        fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+            self.0.set(self.0.get() + 5);
+            Ok(())
+        }
+    }
+    for (maximum, eos_first, generated, transitions, decode_ms) in [
+        (3, false, 2, 1, 27.),
+        (1, false, 1, 0, 13.),
+        (3, true, 1, 0, 6.),
+    ] {
+        let backend = stub("answer");
+        let request = backend
+            .settings
+            .profile()
+            .parse(&json!({"model":"test","input":"hi","max_output_tokens":maximum}))
+            .unwrap();
+        let clock = Cell::new(0);
+        let outcome = backend
+            .settings
+            .execute(
+                &request,
+                "prompt",
+                &mut TimedSink(&clock),
+                |_, _| {
+                    clock.set(clock.get() + 3);
+                    Ok(())
+                },
+                |_| {
+                    clock.set(clock.get() + 2000);
+                    Ok(0)
+                },
+                |state, _, _| {
+                    clock.set(clock.get() + 7);
+                    *state += 1;
+                    Ok(if eos_first || *state > 1 {
+                        vec![0., 10., 0.]
+                    } else {
+                        vec![0., 0., 10.]
+                    })
+                },
+                || Duration::from_millis(clock.get()),
+            )
+            .unwrap();
+        let stats = outcome.stats.unwrap();
+        assert_eq!(
+            (stats.prompt_tokens, stats.matched_tokens, stats.restore_ms),
+            (1, 0, 0.)
+        );
+        assert_eq!(outcome.usage.output_tokens, generated);
+        assert_eq!(
+            outcome.end,
+            if maximum == 1 && !eos_first {
+                GenerationEnd::TokenLimit
+            } else {
+                GenerationEnd::StopToken(1)
+            }
+        );
+        let phases = stats.phases.unwrap();
+        assert_eq!(phases["prefill_ms"], 14.);
+        assert_eq!(phases["decode_ms"], decode_ms);
+        assert_eq!(phases["transitions"], transitions);
+        assert_eq!(
+            phases["transition_ms"],
+            if transitions == 1 { 12. } else { 0. }
+        );
+        assert_eq!(phases["generated_tokens"], generated);
+        assert_eq!(phases["prefill_mode"], "single_token_forward");
+        assert_eq!(phases["ced"], false);
+    }
+}
+
+#[test]
+fn v41_native_phase_stats_are_opt_in_on_existing_http_echo() {
+    let mut backend = stub("answer");
+    for (echo, stream) in [(false, false), (true, false), (false, true), (true, true)] {
+        let wire = exchange(
+            &mut backend,
+            post(&json!({"model":"test","input":"hi","stream":stream,"x_qwen":{"stats":echo}})),
+        );
+        let reply = response(&wire, stream);
+        if echo {
+            assert_eq!(reply["x_qwen"]["version"], "serve_stats_v1");
+            assert_eq!(reply["x_qwen"]["matched_tokens"], 0);
+            assert_eq!(reply["x_qwen"]["phases"]["family"], "deepseek_v41");
+            assert_eq!(reply["x_qwen"]["phases"]["transitions"], 1);
+        } else {
+            assert!(reply.get("x_qwen").is_none());
+        }
+    }
 }

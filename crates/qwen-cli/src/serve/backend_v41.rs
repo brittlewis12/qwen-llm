@@ -1,6 +1,5 @@
 //! Stateless safetensors HTTP backend. Forward borrows the caller's resident
 //! weights/context; neither they nor the backend move to an HTTP worker.
-use super::events::Usage;
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink, Headroom};
 use super::items::{ServeError, ServeRequest};
 use super::output_partition::GenerationEnd;
@@ -11,6 +10,7 @@ use qwen_llm::metal::{MetalContext, MetalMemorySignals};
 use qwen_llm::sampling::{Sampler, SamplingConfig};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
 
 pub(crate) struct Backend<'a> {
@@ -131,6 +131,7 @@ impl Settings {
         mut admit: impl FnMut(usize, u64) -> std::result::Result<(), ServeError>,
         new_state: impl FnOnce(usize) -> std::result::Result<S, String>,
         mut step: impl FnMut(&mut S, u32, &AtomicBool) -> std::result::Result<Vec<f32>, String>,
+        mut now: impl FnMut() -> Duration,
     ) -> std::result::Result<GenerationOutcome, BackendFailure> {
         let maximum = self.limits.max_tokens(request);
         // Check the output-only lower bound before tokenization or state allocation.
@@ -196,6 +197,7 @@ impl Settings {
         };
         check(sink)?;
         let mut state = new_state(self.context).map_err(&forward_error)?;
+        let prefill_start = now();
         let mut logits = Vec::new();
         for &token in &ids {
             check(sink)?;
@@ -205,27 +207,38 @@ impl Settings {
             admit(required, reserve)?;
             logits = step(&mut state, token, cancel).map_err(&forward_error)?;
         }
+        check(sink)?;
+        let prefill_ms = (now() - prefill_start).as_secs_f64() * 1e3;
+        let decode_start = now();
         let mut generated = Vec::new();
         let mut emitted = String::new();
         let mut decoder = self.tokenizer.decode_stream(false);
         let mut end = GenerationEnd::TokenLimit;
-        let mut count = 0;
+        let mut transitions = 0;
+        let mut transition_ms = 0.0;
+        let mut first_transition_ms = None;
+        let mut first_token_selection_ms = None;
+        let mut first_token_ready_ms = None;
+        let mut first_token_callback_ms = None;
         for index in 0..maximum {
             check(sink)?;
             super::output_memory::admit_growth(reserve, emitted.len() as u64, (self.headroom)())?;
             if logits.len() != vocab || !logits.iter().all(|v| v.is_finite()) {
                 return Err(ServeError::server_error("V4.1 returned malformed logits").into());
             }
+            let selection_start = now();
             let token = sampler
                 .sample(&logits)
                 .map_err(|e| ServeError::server_error(format!("V4.1 sampling: {e}")))?
                 .token;
-            count += 1;
+            first_token_selection_ms
+                .get_or_insert_with(|| (now() - selection_start).as_secs_f64() * 1e3);
+            first_token_ready_ms.get_or_insert_with(|| (now() - decode_start).as_secs_f64() * 1e3);
+            generated.push(token);
             if token == self.eos as i32 {
                 end = GenerationEnd::StopToken(token);
                 break;
             }
-            generated.push(token as u32);
             if let Some(piece) = decoder
                 .step(token as u32)
                 .map_err(|e| ServeError::server_error(format!("V4.1 decode: {e}")))?
@@ -247,16 +260,29 @@ impl Settings {
                 emitted.push_str(&piece);
             }
             check(sink)?;
+            first_token_callback_ms
+                .get_or_insert_with(|| (now() - decode_start).as_secs_f64() * 1e3);
             if index + 1 < maximum {
+                let transition_start = now();
                 admit(required, reserve)?;
                 logits = step(&mut state, token as u32, cancel).map_err(&forward_error)?;
+                check(sink)?;
+                let elapsed = (now() - transition_start).as_secs_f64() * 1e3;
+                transitions += 1;
+                transition_ms += elapsed;
+                first_transition_ms.get_or_insert(elapsed);
             }
         }
         check(sink)?;
         super::output_memory::admit_growth(reserve, emitted.len() as u64, (self.headroom)())?;
+        let text_tokens: Vec<u32> = generated
+            [..generated.len() - usize::from(matches!(end, GenerationEnd::StopToken(_)))]
+            .iter()
+            .map(|&id| id as u32)
+            .collect();
         let complete = self
             .tokenizer
-            .decode(&generated, false)
+            .decode(&text_tokens, false)
             .map_err(|e| ServeError::server_error(format!("V4.1 decode tail: {e}")))?;
         if complete.len() > ceiling || !complete.starts_with(&emitted) {
             return Err(ServeError::server_error(
@@ -269,15 +295,34 @@ impl Settings {
                 .map_err(BackendFailure::Aborted)?;
         }
         check(sink)?;
-        Ok(GenerationOutcome {
-            end,
-            usage: Usage {
-                input_tokens: ids.len(),
-                output_tokens: count,
-                cached_tokens: 0,
+        let generation = crate::GenerationResult {
+            tokens: generated,
+            wall_ms: (now() - decode_start).as_secs_f64() * 1e3,
+            first_token_selection_ms: first_token_selection_ms.unwrap_or(0.),
+            first_token_ready_ms,
+            first_token_callback_ms,
+            transitions,
+            transition_ms,
+            first_transition_ms,
+            stop_reason: if matches!(end, GenerationEnd::StopToken(_)) {
+                crate::StopReason::Eos
+            } else {
+                crate::StopReason::TokenLimit
             },
-            stats: None,
-        })
+        };
+        tracing::info!(target: "qwen_diag",
+            "serve phases: family=deepseek_v41 prefill_ms={prefill_ms:.3} reused_tokens=0 reuse_source=none restore_ms=0.0 prefill_tokens={} prefill_mode=single_token_forward prefill_rows=1 decode_ms={:.3} required_forwards={required} capacity={} transitions={transitions} transition_ms={transition_ms:.3} ced=false",
+            ids.len(), generation.wall_ms, self.context);
+        let phases = serde_json::json!({
+            "family":"deepseek_v41", "prefill_ms":prefill_ms, "prefill_tokens":ids.len(),
+            "prefill_mode":"single_token_forward", "prefill_rows":1,
+            "decode_ms":generation.wall_ms, "generated_tokens":generation.tokens.len(),
+            "transitions":transitions, "transition_ms":transition_ms,
+            "required_forwards":required, "capacity":self.context, "reused_tokens":0, "ced":false,
+        });
+        let mut outcome = super::outcome::finish_generation(ids.len(), &generation, 0, 0.);
+        outcome.stats.as_mut().expect("shared stats").phases = Some(phases);
+        Ok(outcome)
     }
 }
 
@@ -304,6 +349,7 @@ impl GenerationBackend for Backend<'_> {
         prompt: &str,
         sink: &mut dyn GenerationSink,
     ) -> std::result::Result<GenerationOutcome, BackendFailure> {
+        let epoch = Instant::now();
         self.settings.execute(
             request,
             prompt,
@@ -318,6 +364,7 @@ impl GenerationBackend for Backend<'_> {
             },
             |capacity| self.forward.new_state(capacity),
             |state, token, cancel| self.forward.step(state, token, Some(cancel)),
+            || epoch.elapsed(),
         )
     }
 }

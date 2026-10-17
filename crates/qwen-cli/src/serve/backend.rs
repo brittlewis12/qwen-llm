@@ -2534,6 +2534,7 @@ impl EngineBackend {
                 restore_ms,
                 prompt_tokens: prompt_ids.len(),
                 seed: None,
+                phases: None,
             }),
         })
     }

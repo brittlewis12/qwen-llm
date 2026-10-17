@@ -69,6 +69,7 @@ pub(crate) fn finish_generation(
             restore_ms,
             prompt_tokens,
             seed: None,
+            phases: None,
         }),
     }
 }

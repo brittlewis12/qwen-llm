@@ -889,7 +889,6 @@ fn binding_rejects_unimplemented_codecs_not_independently_typed_experts() {
         ("blk.3.ffn_gate_inp.weight", Q8_1),
         ("blk.3.indexer.proj.weight", Q1_0),
         ("blk.3.ffn_gate_exps.weight", IQ1_M), // dense support, no all-slot gate/up
-        ("blk.3.ffn_gate_exps.weight", MXFP4), // down support, no all-slot gate/up
         ("blk.3.ffn_down_exps.weight", IQ1_M), // dense support, no all-slot down
         ("output_norm.weight", F16),
     ] {
@@ -972,7 +971,8 @@ fn native_expert_binding_covers_independent_gate_up_and_down_types() {
         .map(GgmlType::from_raw)
         .filter(|&t| crate::metal::all_slots_gate_up_native_supported(t, t))
         .collect();
-    assert_eq!(native.len(), 18);
+    assert_eq!(native.len(), 19);
+    assert!(native.contains(&GgmlType::MXFP4));
     for (i, &gate) in native.iter().enumerate() {
         let up = native[(i + 1) % native.len()];
         let down = native[(i + 2) % native.len()];

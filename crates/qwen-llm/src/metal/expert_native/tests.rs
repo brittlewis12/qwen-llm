@@ -8,11 +8,196 @@ const SOURCE: &str = include_str!("../../../../../kernels/expert_native.metal");
 const EXPERTS: usize = 3;
 const IDS: [i32; 7] = [2, 0, 2, -1, EXPERTS as i32, i32::MIN, i32::MAX];
 
+#[test]
+fn native_mxfp4_top6_large_banks_real_widths_and_dispatch() {
+    let Some(ctx) = metal_test_context() else {
+        return;
+    };
+    for experts in [272usize, 384] {
+        for k in [32usize, 2304, 5120] {
+            let m = 5;
+            let dtype = GgmlType::MXFP4;
+            let seed = bank_bytes(dtype, k, m, 3);
+            let bytes: Vec<u8> = seed
+                .iter()
+                .copied()
+                .cycle()
+                .take(k / 32 * 17 * m * experts)
+                .collect();
+            let weights = offset_tensor(
+                &ctx,
+                32,
+                &bytes,
+                16,
+                vec![k as u64, m as u64, experts as u64],
+                dtype,
+            );
+            let routes = [
+                experts as i32 - 1,
+                0,
+                experts as i32 - 1,
+                271,
+                -1,
+                experts as i32,
+            ];
+            let ids = i32_view(&ctx, &routes);
+            let mut x = values(k * 6, 7);
+            x[k..2 * k].fill(0.0);
+            let down_input = f32_view(&ctx, &x, &[k, 6], 16);
+            let gate_input = f32_view(&ctx, &x[..k], &[k], 16);
+            for ready in [ROUTE_STATUS_READY, ROUTE_STATUS_PENDING, -7, 2] {
+                let status = i32_view(&ctx, &[ready]);
+                for down in [false, true] {
+                    let output = f32_view(&ctx, &[f32::NAN; 30], &[m, 6], 28);
+                    let input = if down { &down_input } else { &gate_input };
+                    let inputs = [&weights, input, &ids, &status];
+                    let before: Vec<_> = inputs.iter().map(|t| tensor_backing_bytes(t)).collect();
+                    dispatch_census_begin();
+                    one_shot(&ctx, |enc| {
+                        if down {
+                            encode_all_slots_down_native(
+                                &ctx, enc, &weights, input, &ids, &status, &output, k, m, experts,
+                                6,
+                            )
+                        } else {
+                            encode_all_slots_gate_up_swiglu_native(
+                                &ctx, enc, &weights, &weights, input, &ids, &status, &output, k, m,
+                                experts, 6, 0.37,
+                            )
+                        }
+                    })
+                    .unwrap();
+                    let census = dispatch_census_take();
+                    assert_eq!(census.len(), if down { 1 } else { 2 });
+                    assert!(
+                        census
+                            .iter()
+                            .all(|r| r.kernel == "kernel_expert_native_mxfp4_f32")
+                    );
+                    let mut expected = vec![0.0; 30];
+                    for (slot, &id) in routes.iter().enumerate() {
+                        if ready != ROUTE_STATUS_READY || id < 0 || id as usize >= experts {
+                            continue;
+                        }
+                        let w = dequant_expert(&bytes, dtype, k, m, id as usize);
+                        for row in 0..m {
+                            let v = dot(
+                                &w[row * k..][..k],
+                                if down { &x[slot * k..][..k] } else { &x[..k] },
+                            );
+                            let g = v.min(0.37);
+                            expected[slot * m + row] = if down {
+                                v
+                            } else {
+                                g / (1.0 + (-g).exp()) * v.clamp(-0.37, 0.37)
+                            };
+                        }
+                    }
+                    close("MXFP4 top6", &tensor_f32_at_offset(&output), &expected);
+                    assert_offset_guards(&output, 20, 28);
+                    for (t, b) in inputs.iter().zip(before) {
+                        assert_eq!(tensor_backing_bytes(t), b);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn native_mxfp4_ggml_scale_edges_f32_precision_and_clamp_asymmetry() {
+    let Some(ctx) = metal_test_context() else {
+        return;
+    };
+    let k = 32;
+    // Basis probes cover both nibble planes and every code. High exponents
+    // use only finite GGML codes; 255 is not the source converter's contract.
+    for scale in [0u8, 1, 127, 145, 252, 254, 255] {
+        let codes = if scale >= 254 { 2 } else { 16 };
+        let m = codes;
+        let mut bytes = vec![0u8; 17 * m * EXPERTS];
+        for row in 0..m * EXPERTS {
+            let b = &mut bytes[row * 17..][..17];
+            b[0] = scale;
+            b[1] = (row % codes) as u8;
+            b[16] = ((row % codes) as u8) << 4;
+        }
+        let weights = bank(&ctx, &bytes, GgmlType::MXFP4, k, m);
+        let ids = i32_view(&ctx, &[0, 0]);
+        let status = i32_view(&ctx, &[ROUTE_STATUS_READY]);
+        let mut x = vec![0.0; 64];
+        let activation = if scale < 2 {
+            2.0f32.powi(126)
+        } else if scale >= 252 {
+            0.125
+        } else {
+            70000.125
+        };
+        x[0] = activation;
+        x[63] = -activation;
+        let input = f32_view(&ctx, &x, &[k, 2], 0);
+        let output = f32_view(&ctx, &vec![f32::NAN; m * 2], &[m, 2], 28);
+        dispatch_census_begin();
+        one_shot(&ctx, |enc| {
+            encode_all_slots_down_native(
+                &ctx, enc, &weights, &input, &ids, &status, &output, k, m, EXPERTS, 2,
+            )
+        })
+        .unwrap();
+        let census = dispatch_census_take();
+        assert_eq!(census.len(), 1);
+        assert_eq!(census[0].kernel, "kernel_expert_native_mxfp4_f32");
+        let w = dequant_expert(&bytes, GgmlType::MXFP4, k, m, 0);
+        let expected: Vec<_> = (0..2)
+            .flat_map(|slot| {
+                let w = &w;
+                let x = &x;
+                (0..m).map(move |row| dot(&w[row * k..][..k], &x[slot * k..][..k]))
+            })
+            .collect();
+        close(
+            "GGML scale edges",
+            &tensor_f32_at_offset(&output),
+            &expected,
+        );
+        assert_offset_guards(&output, 20, 28);
+    }
+
+    // g=-4 must remain -4 (not -1), while u=-4 must become -1.
+    let mut bytes = vec![0u8; 17 * EXPERTS];
+    for b in bytes.chunks_exact_mut(17) {
+        b[0] = 127;
+        b[1] = 14;
+    }
+    let weights = bank(&ctx, &bytes, GgmlType::MXFP4, 32, 1);
+    let mut x = vec![0.0; 32];
+    x[0] = 1.0;
+    let input = f32_view(&ctx, &x, &[32], 0);
+    let ids = i32_view(&ctx, &[0]);
+    let status = i32_view(&ctx, &[ROUTE_STATUS_READY]);
+    let output = f32_view(&ctx, &[f32::NAN], &[1, 1], 28);
+    one_shot(&ctx, |enc| {
+        encode_all_slots_gate_up_swiglu_native(
+            &ctx, enc, &weights, &weights, &input, &ids, &status, &output, 32, 1, EXPERTS, 1, 1.0,
+        )
+    })
+    .unwrap();
+    let w = dequant_expert(&bytes, GgmlType::MXFP4, 32, 1, 0);
+    let g = dot(&w, &x);
+    assert_eq!(g, -4.0);
+    close(
+        "upper-only gate clamp",
+        &tensor_f32_at_offset(&output),
+        &[-g / (1.0 + (-g).exp())],
+    );
+    assert_offset_guards(&output, 20, 28);
+}
+
 fn formats() -> Vec<GgmlType> {
     GROUPED_PROJECTION_DTYPES
         .iter()
         .copied()
-        .chain([GgmlType::IQ2_XS])
+        .chain([GgmlType::IQ2_XS, GgmlType::MXFP4])
         .collect()
 }
 
@@ -83,6 +268,11 @@ fn bank_bytes(dtype: GgmlType, k: usize, m: usize, seed: usize) -> Vec<u8> {
         let mut b: Vec<u8> = (0..bytes as usize)
             .map(|i| (ordinal * 73 + i * 29 + seed * 11 + ordinal / 7) as u8)
             .collect();
+        if dtype == GgmlType::MXFP4 {
+            b[0] = 120 + ((ordinal + seed) % 5) as u8;
+            result.extend(b);
+            continue;
+        }
         let scales: &[usize] = match dtype {
             GgmlType::Q2_K => &[80, 82],
             GgmlType::Q3_K => &[108],
@@ -244,6 +434,8 @@ fn native_mixed_gate_up_cpu_oracles_and_route_rejection() {
         (GgmlType::IQ2_S, GgmlType::IQ3_S),
         (GgmlType::F32, GgmlType::BF16),
         (GgmlType::IQ2_XS, GgmlType::Q4_K),
+        (GgmlType::MXFP4, GgmlType::F32),
+        (GgmlType::MXFP4, GgmlType::Q2_K),
     ] {
         for k in [256, 768, 1280] {
             for (g, u) in [(g, u), (u, g)] {

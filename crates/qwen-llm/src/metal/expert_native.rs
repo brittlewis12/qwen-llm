@@ -37,6 +37,7 @@ fn native_pipeline_name(dtype: GgmlType) -> Option<String> {
         GgmlType::F16 => "f16",
         GgmlType::BF16 => "bf16",
         GgmlType::IQ2_XS => "iq2_xs",
+        GgmlType::MXFP4 => "mxfp4",
         _ => return None,
     };
     Some(format!("kernel_expert_native_{suffix}_f32"))
@@ -47,7 +48,7 @@ pub fn all_slots_gate_up_native_supported(gate: GgmlType, up: GgmlType) -> bool 
     native_pipeline_name(gate).is_some() && native_pipeline_name(up).is_some()
 }
 
-/// Native down capability (the same 18 storage formats as each gate/up bank).
+/// Native down capability (the same storage formats as each gate/up bank).
 pub fn all_slots_down_native_supported(dtype: GgmlType) -> bool {
     native_pipeline_name(dtype).is_some()
 }

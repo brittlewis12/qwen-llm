@@ -24,6 +24,22 @@ inline void expert_dequantize_iq2_xs(device const uchar * blk, short il,
     }
 }
 
+// GGML's half-scale convention keeps exponent 255 finite for small codes.
+// This is F32 throughout, including the subnormal scales at exponents 0/1.
+constant float expert_mxfp4_values[16] = {
+    0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12
+};
+inline void expert_dequantize_mxfp4(device const uchar * blk, short il,
+                                   thread float4x4 & reg) {
+    const uint e = uint(blk[0]);
+    const float scale = as_type<float>(e == 0u ? 0x00200000u
+        : (e == 1u ? 0x00400000u : (e - 1u) << 23u));
+    QT_FOR_UNROLL (uint i = 0; i < 16; ++i) {
+        const uint code = (uint(blk[1 + i]) >> (4u * uint(il))) & 15u;
+        reg[i / 4][i % 4] = expert_mxfp4_values[code] * scale;
+    }
+}
+
 struct expert_native_args {
     ulong row_bytes;
     uint n_in;
@@ -38,7 +54,7 @@ struct expert_native_args {
 // quantized K is an integral number of storage blocks, checked by the host.
 template <ushort BYTES, ushort NL,
           void (*DEQ)(device const uchar *, short, thread float4x4 &),
-          ushort DENSE = 0>
+          ushort DENSE = 0, bool MXFP4 = false>
 [[max_total_threads_per_threadgroup(128)]]
 kernel void kernel_expert_native_f32(
         constant expert_native_args & args [[buffer(0)]],
@@ -81,7 +97,21 @@ kernel void kernel_expert_native_f32(
                 sum = fma(w, x[k + i], sum);
             }
         } else {
-            DEQ(row + (k / (16u * NL)) * BYTES, short((k / 16u) % NL), decoded);
+            device const uchar * block = row + (k / (16u * NL)) * BYTES;
+            const short il = short((k / 16u) % NL);
+            if (MXFP4 && block[0] <= 1u) {
+                // Metal flushes subnormal operands. Move an exact power of two
+                // from x to the decoded weight so GGML's subnormal F32 weights
+                // still produce normal products with large F32 activations.
+                const float scale = as_type<float>((uint(block[0]) + 23u) << 23u);
+                QT_FOR_UNROLL (uint i = 0; i < 16; ++i) {
+                    const uint code = (uint(block[1 + i]) >> (4u * uint(il))) & 15u;
+                    const float w = expert_mxfp4_values[code] * scale;
+                    sum = fma(w, ldexp(x[k + i], -24), sum);
+                }
+                continue;
+            }
+            DEQ(block, il, decoded);
             QT_FOR_UNROLL (uint i = 0; i < 16; ++i) {
                 sum = fma(decoded[i / 4][i % 4], x[k + i], sum);
             }
@@ -118,3 +148,4 @@ template [[host_name("kernel_expert_native_f32_f32")]] kernel expert_native_t ke
 template [[host_name("kernel_expert_native_f16_f32")]] kernel expert_native_t kernel_expert_native_f32<QT_F16_BYTES, QT_F16_NL, latent_dequantize_f16, 2>;
 template [[host_name("kernel_expert_native_bf16_f32")]] kernel expert_native_t kernel_expert_native_f32<QT_BF16_BYTES, QT_BF16_NL, latent_dequantize_bf16, 3>;
 template [[host_name("kernel_expert_native_iq2_xs_f32")]] kernel expert_native_t kernel_expert_native_f32<74, 16, expert_dequantize_iq2_xs>;
+template [[host_name("kernel_expert_native_mxfp4_f32")]] kernel expert_native_t kernel_expert_native_f32<17, 2, expert_dequantize_mxfp4, 0, true>;

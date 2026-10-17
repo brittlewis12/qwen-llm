@@ -1,13 +1,18 @@
 //! DeepSeek V4.1 Flash 1017 metadata/schedule contract, separate from V4.
 //!
-//! Not a runnable model registration, GGUF admission, tensor binding, or memory
-//! admission. Validation covers the complete text_config, architecture/model
+//! Not a runnable model registration, GGUF admission, full-model binding, or
+//! memory admission. `source` binds individual expert pairs without payload reads.
+//! Validation covers the complete text_config, architecture/model
 //! tags, text special-token IDs and quantization_config. Other top-level metadata
 //! and vision_config are deliberately outside this text-only scope. NextN
 //! metadata is validated but no NextN execution plan is provided.
 
 use serde_json::{Value, json};
 use std::ops::Range;
+
+pub mod engram;
+pub mod mxfp4;
+pub mod source;
 
 const KV_OWNERS: [usize; 4] = [2, 8, 14, 20];
 const SELECTION_PRODUCERS: [usize; 8] = [2, 8, 14, 20, 24, 28, 32, 36];

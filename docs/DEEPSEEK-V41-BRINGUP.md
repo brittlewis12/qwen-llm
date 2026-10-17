@@ -1,5 +1,9 @@
 # V4.1 Flash 1017 bring-up
 
+Current scope: pinned metadata, individual source expert-pair binding, a
+lossless CPU MXFP4 repacker/oracle and bounded Engram integer addressing.
+No V4.1 runtime or Metal execution is admitted.
+
 ## Target and checkpoint boundary
 
 Target: useful text sessions on a 256 GiB Apple Silicon worker with a resident
@@ -21,8 +25,8 @@ Implemented in this checkpoint:
 - Fixture-identity selection in the existing model-witness runner, so completion
   gates do not depend on someone remembering relevant test-name substrings.
 
-Not implemented: checkpoint tensor binding, converter admission, Engram hashing
-or gathers, numerical kernels, protocol adapter, session execution, serving,
+Not implemented by the first checkpoint: full-model tensor binding, converter
+admission, Engram hashing or gathers, numerical kernels, protocol adapter, session execution, serving,
 vision or NextN. No family registration or runtime support claim is added.
 Potential REAP geometry is not pruned-artifact provenance or qualification.
 
@@ -81,7 +85,8 @@ Source expert matrices, with logical dimensions [output, input]:
 | up | w3 | 2304 x 5120 | 2304 x 2560 | 2304 x 160 |
 | down | w2 | 5120 x 2304 | 5120 x 1152 | 5120 x 72 |
 
-These are source-derived expectations, not verified safetensors headers. HF's
+The source-layout checkpoint below verifies these expectations against selected
+pinned safetensors headers, not every tensor in the checkpoint. HF's
 separate scale tensors are not GGML's interleaved 17-byte MXFP4 blocks. Pin nibble
 ordering, scale exponents (including edge values), signed zero, row/expert strides
 and any repacking before admitting a converter. Equal payload sizes are not byte
@@ -195,3 +200,114 @@ zero ignored tests, and Python names its required module and rejects empty
 suites. Empty selection and missing-module controls are retained. Follow-up
 review found no remaining blocker for this model-free checkpoint. The 99-witness
 catalog was enumerated only, not executed. No model weights were downloaded.
+
+## Source-layout and MXFP4 checkpoint
+
+`deepseek_v41::source` now binds main-model expert gate/up/down weight-scale
+pairs from bounded safetensors headers. It rejects duplicate keys, unsupported
+storage types, mismatched shapes/extents, overlapping or out-of-file offsets,
+invalid main-layer/expert indices and incomplete scale pairs. File labels and
+declared lengths are caller inputs, not content authentication. This is not a
+complete model binder or an accepted GGUF conversion contract.
+
+`scripts/reference/deepseek_v41/tensor-headers.json` records 18 descriptors in
+four pinned headers (shards 3, 44, 47 and 48). The captured files total 344,416
+bytes including header-length prefixes; the source index is 7,470,294 bytes and
+is not vendored. Only metadata was fetched, not weight payloads. Capture requires
+206 responses with exact Content-Range/Content-Length, rejects oversized inputs
+before reading, and is bounded to 16 MiB of response bodies total. Redirects are
+limited to five HTTPS hops and closed without reading their bodies. Repeat
+capture must match the
+committed manifest rather than silently replace its trust anchors.
+
+Observed routed main and MTP values are `I8` packed bytes with `F8_E8M0` scales;
+the dense Q projection uses `F8_E4M3` with 32x32 weight scales. Engram uses
+`F8_E4M3` rows of 256 values and eight `F8_E8M0` scales per row. The MTP headers
+are inventory evidence only; the Rust expert binder accepts main-model names.
+Headers establish neither numeric values nor nibble ordering.
+
+`deepseek_v41::mxfp4` provides a caller-buffer row repacker and independent
+mathematical E2M1/E8M0 decoding. HF adjacent low-even/high-odd codes are permuted
+into GGML's low-first-16/high-second-16 layout, retaining all codes and scales
+without requantization. Layout evidence also comes from DwarfStar's
+`gguf-tools/deepseek41_quantize.py` at
+`bd66c402070042bf0a79ad6ece8242de4c93680c`. Synthetic repacking is checked
+against the separately linked GGML CPU decoder, not a new Metal implementation.
+
+All 16 codes and 256 scale bytes are covered, including subnormal scales,
+overflow, scale-255 refusal, unique nibble positions, multiple rows/blocks and
+late-error output preservation. The source decoder preserves negative zero;
+GGML canonicalizes code 8 to positive zero on decode. Packed bytes remain
+lossless, but decoded zero bits are explicitly not claimed identical. A tiny
+NativeF32 dot oracle uses sequential F32 multiply/add, not FP8 activation
+quantization, BF16 outputs or a claim of parallel-GPU bit identity.
+
+These are bounded correctness tools, not a whole-checkpoint converter or a
+conversion-throughput result. The ordinary required contract runner executes
+the source-control, header and Engram address suites, and the Rust V4.1 filter
+includes the binder, arithmetic and bounded address-state tests.
+
+```sh
+uv run --no-project python scripts/reference/deepseek_v41/tensor_headers.py
+uv run --no-project python scripts/reference/deepseek_v41/tensor_headers.py --capture
+uv run --no-project python scripts/reference/deepseek_v41/check.py
+cargo test --release -p qwen-llm --lib deepseek_v41::
+```
+
+### Regression prerequisite audit
+
+Retained GLM checkpoint, qualification and sparse-v1/v2 captures were located.
+Their sizes/record framing match the manifests under `scripts/reference/glm53`;
+the execution tests still must check complete hashes before use. Bind
+`GLM53_ORACLE_DIR`, `GLM53_QUAL_ORACLE_DIR`, `GLM53_SPARSE_ORACLE_DIR` and
+`GLM53_SPARSE_V2_DIR` explicitly to those retained captures; do not regenerate
+references merely because the current worktree lacks its own copy. Stock IQ3
+is the oracle artifact; Maya/Q4 are not interchangeable oracle inputs.
+
+Current DS4 and REAP K216/K160 assets were located. The current 0731 artifact
+has 104,207,848,032 file bytes; the historical oracle artifact has
+102,999,888,416 bytes and is not present locally. Their filenames coincide.
+Use explicit current-artifact identity, not the existing legacy-named fixture
+alias. Historical b10222 comparisons remain historical; they must not be run
+against current weights or counted as current-model passes. Repo policy does
+not require reprovisioning the historical archive for ordinary development.
+
+The coverage repair must retain active correctness packets and their prerequisites,
+not indiscriminately tag every ignored test. GLM has maintained oracle, sparse,
+snapshot/reset, observational-capture and serving packets. Current DS4 has live
+same-model differential and snapshot-continuation controls; mixed diagnostic
+packets require correctness-only extraction. Some DS4 tests require the
+`dsv4-diagnostics` feature, and a GLM observer uses a `#[path]` module whose
+Rust test name differs from its filename. The existing name-derived runner
+cannot discover those by changing ignore prose alone. Archived, sealed, timing
+and acquisition packets must remain explicitly classified rather than quietly
+added to the correctness set.
+
+That catalog/identity repair is still pending before shared-kernel completion,
+including Qwen's external-oracle and unannotated execution tests. It overlaps
+files owned by the ongoing maintainability lane; the source-layout checkpoint
+does not edit those files or claim full-family GPU regression coverage.
+
+### Bounded Engram addressing
+
+`deepseek_v41::engram::AddressState` maps already-compressed IDs to 24 rows per
+Engram layer (48 total). It retains only the last three IDs plus absolute position
+and compressed pad ID. Each step returns addresses and a staged next state without
+mutating the committed state. Restore validates history length, ID ranges and
+context position; this is a bounded hash-state component, not a session snapshot
+or proof of prefix/content identity.
+
+`engram-addresses.json` pins eight multipliers, 48 prime bucket moduli and 1,008
+row IDs across 21 positions. Generation executes the SHA-verified upstream AST
+using a NumPy int64 tensor facade, not real PyTorch. NumPy `2.2.6` generates the
+reference RNG parameters; offline verification uses only the standard library.
+The prime-search substitute is checked independently against a sieve. The Rust
+implementation compares every captured address and covers all dead-token phases,
+chunking, bounded restoration, context limits and discarded staged steps.
+
+Inputs are compressed IDs, not raw tokenizer IDs. Pad ID 17 in these fixtures is
+deliberately synthetic. Tokenizer normalization/mapping, the actual compressed
+pad ID, disk-row reads and floating-point Engram injection remain unimplemented.
+Do not use this component on raw token IDs or infer model execution from integer
+address agreement. Generator/verification commands are documented in
+`scripts/reference/deepseek_v41/engram_oracle.py`.

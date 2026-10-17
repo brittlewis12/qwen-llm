@@ -10,6 +10,9 @@ def require_tests(suite):
 
 
 if __name__ == "__main__":
-    suite = require_tests(unittest.defaultTestLoader.loadTestsFromName("test_sources"))
+    suite = unittest.TestSuite(
+        require_tests(unittest.defaultTestLoader.loadTestsFromName(name))
+        for name in ("test_sources", "test_tensor_headers", "test_engram_oracle")
+    )
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     raise SystemExit(0 if result.wasSuccessful() else 1)
